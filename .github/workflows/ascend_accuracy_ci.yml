@@ -39,6 +39,8 @@ jobs:
         run: |
           export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
           pip install -U pip setuptools wheel build
+          echo pip list |grep triton
+          pip install byted-triton-x --index-url https://bytedpypi.byted.org/simple --force-reinstall
           pip install -e .
           python3 -m build .
           pip install dist/*.whl --force-reinstall --no-deps
