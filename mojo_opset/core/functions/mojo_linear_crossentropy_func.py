@@ -86,8 +86,6 @@ class MojoFusedLinearCrossEntropyFunction(MojoFuncBase):
         return_z_loss=False,
         lse_square_scale=0.0,
     ):
-        print("MojoFusedLinearCrossEntropyFunction forward dispatch")
-
         if MojoFusedLinearCrossEntropyFunction._registry:
             impl_func = MojoFusedLinearCrossEntropyFunction._registry[0][1].forward
         else:
@@ -186,8 +184,6 @@ class MojoFusedLinearCrossEntropyFunction(MojoFuncBase):
 
     @staticmethod
     def backward(ctx, grad_loss, grad_z_loss=None):
-        print("MojoFusedLinearCrossEntropyFunction backward dispatch")
-
         if MojoFusedLinearCrossEntropyFunction._registry:
             impl_func = MojoFusedLinearCrossEntropyFunction._registry[0][1].backward
         else:
