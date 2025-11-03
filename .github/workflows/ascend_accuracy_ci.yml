@@ -1,0 +1,56 @@
+name: Run test case on npu
+on:
+  pull_request:
+    branches:
+    - master
+    types: [ opened, synchronize, reopened ]
+    paths-ignore:
+    - 'CHANGELOG.md'
+    - 'README.md'
+  push:
+    branches:
+    - master
+    paths-ignore:
+    - 'CHANGELOG.md'
+    - 'README.md'
+  workflow_dispatch:
+env:
+  MOJO_OPSET_PROXY: ${{ secrets.MOJO_OPSET_PROXY }}
+defaults:
+  run:
+    shell: bash
+jobs:
+  run-tests:
+    name: Run npu tests
+    runs-on: NPU
+    container:
+      image: hub.byted.org/aicompiler/npu.ci.debian12:cann8.2.rc1_py3.11_th26_ly
+      volumes:
+      - /etc/localtime:/etc/localtime
+      - /usr/local/Ascend/driver:/usr/local/Ascend/driver
+      - /usr/local/dcmi:/usr/local/dcmi
+      - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
+      options: --privileged=true --ipc=host --pid=host --user root --shm-size=300g -e ASCEND_VISIBLE_DEIVCES=6 -e ASCEND_RT_VISIBLE_DEVICES=6
+    steps:
+      - uses: actions/checkout@v4
+    
+      - name: Build And Install Wheel Artifact
+        shell: bash
+        run: |
+          export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
+          pip install byted-triton-x --index-url https://bytedpypi.byted.org/simple --force-reinstall
+          pip install -U pip setuptools wheel build
+          pip install -e .
+          python3 -m build .
+          pip install dist/*.whl --force-reinstall --no-deps
+    
+      - name: test-TTX_KERNELS
+        shell: bash
+        run: |
+          echo "Running ttx kernels tests..."
+          MOJO_BACKEND="+TTX_KERNELS" python3 -m pytest tests/
+      - name: test-XPU_OPS
+        shell: bash
+        run: |
+          echo "Running xpu_ops tests..."
+          MOJO_BACKEND="+TTX_KERNELS" python3 -m pytest tests/ --ignore=tests/test_qwen3_dense_patching.py --ignore=tests/functions
