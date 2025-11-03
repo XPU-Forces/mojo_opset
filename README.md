@@ -13,8 +13,6 @@ source code: mojo_opset/backends/ttx_kernels/src
 ### 2.2. xpu_ops
 xpu_ops 提供了 Moho Opset 的 C-like 版本实现。
 
-更多内容请参考：https://code.byted.org/data/xpu_ops
-
 ## 3. Support matrix
 
 | OpName | ttx_kernels | xpu_ops |
