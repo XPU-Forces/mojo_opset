@@ -38,6 +38,7 @@ jobs:
         shell: bash
         run: |
           export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
+          pip install -U pip setuptools wheel build
           pip install -e .
           python3 -m build .
           pip install dist/*.whl --force-reinstall --no-deps
