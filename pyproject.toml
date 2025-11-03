@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=42", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+version = "0.0.1"
+name = "byted-mojo-opset"
+description = "LLM opset with effecient implementents"
+urls = { "Homepage" = "https://code.byted.org/data/mojo_opset" }
+readme = { file = "README.md", content-type = "text/markdown" }
+authors = [{name="SeedXPU", email='yuminghui.exp@bytedance.com'}]
+dependencies = [
+    "bytedxpu-ops @ https://luban-source.byted.org/repository/scm/data.aml.xpu_ops_th25_npu_1.0.0.53.tar.gz",
+    "byted-ttx-kernel"
+]
+requires-python = ">=3.9"
+
+[tool.setuptools.packages.find]
+include = ["mojo_opset*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+respect-gitignore = true
+src = ["mojo_opset"]
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "F",  # pyflakes
+    "I",  # isort
+]
+ignore = ["B006", "E731", "A002", "E203"]
+
+exclude = [
+    ".git",
+    "__pycache__",
+    ".venv",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.ruff.lint.isort]
+known-first-party = ["mojo_opset"]
+force-single-line = true
+lines-between-types = 1
