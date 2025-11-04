@@ -6,6 +6,9 @@ from typing import Literal
 
 import pytest
 import torch
+from mojo_opset.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 @functools.lru_cache
@@ -15,15 +18,15 @@ def get_platform() -> Literal["npu", "mlu", "cpu"]:
     """
     try:
         subprocess.run(["npu-smi", "info"], check=True)
-        print("Ascend NPU detected")
+        logger.info("Ascend NPU detected")
         return "npu"
     except (subprocess.SubprocessError, FileNotFoundError):
         try:
             subprocess.run(["cnmon"], check=True)
-            print("Cambricon MLU detected")
+            logger.info("Cambricon MLU detected")
             return "mlu"
         except (subprocess.SubprocessError, FileNotFoundError):
-            print("No accelerator detected")
+            logger.info("No accelerator detected")
             return "cpu"
 
 

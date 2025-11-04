@@ -3,6 +3,9 @@ import os
 import torch
 from ..mojo_function import MojoFuncBase
 from ...mojo_utils import get_mojo_exec_mode
+from mojo_opset.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class MojoSiluFunction(MojoFuncBase):
@@ -25,7 +28,7 @@ class MojoSiluFunction(MojoFuncBase):
         if MojoSiluFunction._registry:
             impl_func = MojoSiluFunction._registry[0][1].forward
         else:
-            print("MojoSiluFunction has NO any registered implementation")
+            logger.warning("MojoSiluFunction has NO any registered implementation")
 
         layer_idx = ctx.layer_idx if hasattr(ctx, "layer_idx") else -1
         mode_str = get_mojo_exec_mode(MojoSiluFunction.__name__, "FWD", layer_idx)
@@ -63,7 +66,7 @@ class MojoSiluFunction(MojoFuncBase):
         if MojoSiluFunction._registry:
             impl_func = MojoSiluFunction._registry[0][1].backward
         else:
-            print("MojoSiluFunction has NO any registered implementation")
+            logger.warning("MojoSiluFunction has NO any registered implementation")
         mode_str = os.environ.get(f"{MojoSiluFunction.__name__.upper()}_BWD_MODE", "STD")
 
         if mode_str == "STD":

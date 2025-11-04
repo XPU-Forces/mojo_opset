@@ -3,6 +3,9 @@ import torch
 from ..mojo_function import MojoFuncBase
 from ...mojo_utils import get_mojo_exec_mode
 import torch.nn.functional as F
+from mojo_opset.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class MojoFusedLinearCrossEntropyFunction(MojoFuncBase):
@@ -89,7 +92,7 @@ class MojoFusedLinearCrossEntropyFunction(MojoFuncBase):
         if MojoFusedLinearCrossEntropyFunction._registry:
             impl_func = MojoFusedLinearCrossEntropyFunction._registry[0][1].forward
         else:
-            print("MojoFusedLinearCrossEntropyFunction has NO any registered implementation")
+            logger.warning("MojoFusedLinearCrossEntropyFunction has NO any registered implementation")
             impl_func = MojoFusedLinearCrossEntropyFunction.forward_ref
 
         layer_idx = ctx.layer_idx if hasattr(ctx, "layer_idx") else -1
@@ -187,7 +190,7 @@ class MojoFusedLinearCrossEntropyFunction(MojoFuncBase):
         if MojoFusedLinearCrossEntropyFunction._registry:
             impl_func = MojoFusedLinearCrossEntropyFunction._registry[0][1].backward
         else:
-            print("MojoFusedLinearCrossEntropyFunction has NO any registered implementation")
+            logger.warning("MojoFusedLinearCrossEntropyFunction has NO any registered implementation")
             impl_func = MojoFusedLinearCrossEntropyFunction.backward_ref
 
         mode_str = os.environ.get(f"{MojoFusedLinearCrossEntropyFunction.__name__.upper()}_BWD_MODE", "STD")
@@ -206,7 +209,7 @@ class MojoFusedLinearCrossEntropyFunction(MojoFuncBase):
         elif mode_str == "REF":
             return MojoFusedLinearCrossEntropyFunction.backward_ref(*args)
         elif mode_str == "DIFF":
-            print("MojoFusedLinearCrossEntropyFunction: comparing REF and STD backward...")
+            logger.warning("MojoFusedLinearCrossEntropyFunction: comparing REF and STD backward...")
             ref_results = MojoFusedLinearCrossEntropyFunction.backward_ref(*args)
             impl_results = impl_func(*args)
 

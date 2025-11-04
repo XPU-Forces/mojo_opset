@@ -8,6 +8,9 @@ from typing import Tuple
 import torch
 
 from mojo_opset.mojo_utils import get_forward_mode
+from mojo_opset.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class MojoOperator(ABC, torch.nn.Module):
@@ -32,7 +35,9 @@ class MojoOperator(ABC, torch.nn.Module):
                 env_priority = os.getenv(env_var_name)
                 priority = int(env_priority) if env_priority is not None else default_priority
 
-                print(f"Register {cls.__name__} as {family_head.__name__} implementation with priority {priority}")
+                logger.info(
+                    f"Register {cls.__name__} as {family_head.__name__} implementation with priority {priority}"
+                )
 
                 if priority in [x[0] for x in family_head._registry]:
                     raise ValueError(f"Operator {cls.__name__} priority {priority} has been registered")

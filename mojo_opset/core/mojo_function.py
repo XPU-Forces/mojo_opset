@@ -1,11 +1,12 @@
 import os
 
 from torch.autograd import Function
+from mojo_opset.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class MojoFuncBase(Function):
-
-
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
 
@@ -24,7 +25,7 @@ class MojoFuncBase(Function):
 
             if family_head:
                 # get default_priority defined in registered class
-                default_priority = cls.default_priority if hasattr(cls, 'default_priority') else 0
+                default_priority = cls.default_priority if hasattr(cls, "default_priority") else 0
 
                 # get priority from env var, if not set, use default_priority
                 env_var_name = f"{cls.__name__}_PRIORITY".upper()
@@ -32,7 +33,9 @@ class MojoFuncBase(Function):
 
                 priority = int(env_priority) if env_priority is not None else default_priority
 
-                print(f"Register {cls.__name__} as {family_head.__name__} implementation with priority {priority}")
+                logger.info(
+                    f"Register {cls.__name__} as {family_head.__name__} implementation with priority {priority}"
+                )
 
                 if priority in [x[0] for x in family_head._registry]:
                     raise ValueError(f"Operator {cls.__name__} priority {priority} has been registered")

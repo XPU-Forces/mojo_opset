@@ -3,6 +3,9 @@ import torch
 from ..mojo_function import MojoFuncBase
 from ...mojo_utils import get_mojo_exec_mode
 import torch.nn.functional as F
+from mojo_opset.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class MojoRMSNormFunction(MojoFuncBase):
@@ -26,7 +29,7 @@ class MojoRMSNormFunction(MojoFuncBase):
         if MojoRMSNormFunction._registry:
             impl_func = MojoRMSNormFunction._registry[0][1].forward
         else:
-            print("MojoRMSNormFunction has NO any registered implementation")
+            logger.warning("MojoRMSNormFunction has NO any registered implementation")
 
             impl_func = MojoRMSNormFunction.forward_ref
 
@@ -78,7 +81,7 @@ class MojoRMSNormFunction(MojoFuncBase):
         if MojoRMSNormFunction._registry:
             impl_func = MojoRMSNormFunction._registry[0][1].backward
         else:
-            print("MojoRMSNormFunction has NO any registered implementation")
+            logger.warning("MojoRMSNormFunction has NO any registered implementation")
             impl_func = MojoRMSNormFunction.backward_ref
 
         mode_str = os.environ.get(f"{MojoRMSNormFunction.__name__.upper()}_BWD_MODE", "STD")
@@ -94,7 +97,7 @@ class MojoRMSNormFunction(MojoFuncBase):
         elif mode_str == "REF":
             return MojoRMSNormFunction.backward_ref(ctx, grad_output)
         elif mode_str == "DIFF":
-            print("MojoRMSNormFunction: comparing REF and STD backward...")
+            logger.warning("MojoRMSNormFunction: comparing REF and STD backward...")
             ref_result = MojoRMSNormFunction.backward_ref(ctx, grad_output)
             impl_result = impl_func(ctx, grad_output)
 
