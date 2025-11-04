@@ -43,14 +43,31 @@ def mojo_func_dispatcher(cls):
 
                 @functools.wraps(impl_func)
                 def diff_wrapper(diff_ctx, *diff_args, **diff_kwargs):
-                    ref_result = ref_func(diff_ctx, *diff_args, **diff_kwargs)
-                    impl_result = impl_func(diff_ctx, *diff_args, **diff_kwargs)
-                    torch.testing.assert_close(ref_result, impl_result)
-                    return impl_result
+                    ref_outputs = ref_func(diff_ctx, *diff_args, **diff_kwargs)
+                    impl_outputs = impl_func(diff_ctx, *diff_args, **diff_kwargs)
+
+                    ref_outputs_tuple = ref_outputs if isinstance(ref_outputs, tuple) else (ref_outputs,)
+                    impl_outputs_tuple = impl_outputs if isinstance(impl_outputs, tuple) else (impl_outputs,)
+
+                    if len(ref_outputs_tuple) != len(impl_outputs_tuple):
+                        raise RuntimeError(
+                            f"Forward DIFF failed for {op_name}: Implementation and reference have different number of outputs."
+                        )
+
+                    for i, (ref_out, impl_out) in enumerate(zip(ref_outputs_tuple, impl_outputs_tuple)):
+                        try:
+                            torch.testing.assert_close(
+                                ref_out, impl_out, msg=f"Forward output {i} mismatch for {op_name}"
+                            )
+                        except AssertionError as e:
+                            print(f"DIFF check failed for {op_name}, output index {i}.")
+                            raise e
+
+                    return impl_outputs
 
                 chosen_func = diff_wrapper
             else:
-                raise ValueError(f"Invalid forward mode {mode_str} for {op_name}")
+                raise ValueError(f"Invalid forward mode '{mode_str}' for {op_name}")
 
             _EXEC_FUNC_CACHE[cache_key] = chosen_func
 
