@@ -290,14 +290,6 @@ def _cross_entropy_prime_kernel(
 
         y = tl.load(current_Y_ptr)
 
-        # if y == ignore_index:
-        #     for i in range(0, n_cols, BLOCK_SIZE):
-        #         X_offsets = i + tl.arange(0, BLOCK_SIZE)
-        #         tl.store(current_X_ptr + X_offsets, 0.0, mask=X_offsets < n_cols)
-        #     continue
-
-        # === The core logic from here is nearly identical, but applied to current_X_ptr ===
-
         m = float("-inf")
         d = 0.0
         ori_X_y = tl.load(current_X_ptr + y).cast(tl.float32)
@@ -480,9 +472,9 @@ def fused_linear_cross_entropy_forward(
     target_mask = target != ignore_index
     total_n_non_ignore = target_mask.sum().item()
 
-    assert total_n_non_ignore == len(target), (
-        "TritonX limits the maximum number of programs to 65535. To support more rows, TTX kernels cap the grid launch count to the number of vector cores and introduce a loop. As a result, ignore_index is temporarily unsupported because Triton does not allow control-flow statements like 'continue'."
-    )
+    # assert total_n_non_ignore == len(target), (
+    #     "TritonX limits the maximum number of programs to 65535. To support more rows, TTX kernels cap the grid launch count to the number of vector cores and introduce a loop. As a result, ignore_index is temporarily unsupported because Triton does not allow control-flow statements like 'continue'."
+    # )
     total_sum_non_ignore_ce_weight = total_n_non_ignore
     ce_weight_sum = 0.0
     if ce_weight is not None:
@@ -510,6 +502,8 @@ def fused_linear_cross_entropy_forward(
 
         n_rows = logits_chunk.shape[0]
 
+        target_chunk_mask = target_chunk != ignore_index
+
         loss_1d_slice = loss_1d[start_idx:end_idx]  # chunk_size,
         z_loss_1d_slice = z_loss_1d[start_idx:end_idx] if return_z_loss else None
 
@@ -534,25 +528,24 @@ def fused_linear_cross_entropy_forward(
                 label_smoothing=label_smoothing,
                 reduction=reduction,
             )
+            loss_1d_slice.masked_fill_(~target_chunk_mask, 0.0)
+
             grad_logits_incorrect_chunk = logits_chunk
 
             row_indices = torch.arange(0, n_rows, device=device)
-
-            target_chunk_mask = target_chunk != ignore_index
             valid_rows = row_indices[target_chunk_mask]
             valid_targets = target_chunk[target_chunk_mask]
 
             if valid_rows.numel() > 0:
                 g_y_incorrect = grad_logits_incorrect_chunk[valid_rows, valid_targets]
-
                 correction_term = 1 - label_smoothing
                 if reduction == "mean":
                     correction_term /= total_n_non_ignore
-
                 g_y_correct = g_y_incorrect - correction_term
                 grad_logits_incorrect_chunk[valid_rows, valid_targets] = g_y_correct
 
-            grad_logits_chunk = grad_logits_incorrect_chunk
+            grad_logits_chunk = grad_logits_incorrect_chunk.masked_fill_(~target_chunk_mask.unsqueeze(1), 0.0)
+
         else:
             # Here we calculate the gradient of logits_chunk in place so we can save memory.
             _cross_entropy_kernel[(n_rows,)](

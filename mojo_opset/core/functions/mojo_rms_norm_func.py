@@ -23,8 +23,6 @@ class MojoRMSNormFunction(MojoFuncBase):
 
     @staticmethod
     def forward(ctx, input, weight, eps=1e-6):
-        print("MojoRMSNormFunction forward dispatch")
-
         if MojoRMSNormFunction._registry:
             impl_func = MojoRMSNormFunction._registry[0][1].forward
         else:
@@ -77,8 +75,6 @@ class MojoRMSNormFunction(MojoFuncBase):
 
     @staticmethod
     def backward(ctx, grad_output):
-        print("MojoRMSNormFunction backward dispatch")
-
         if MojoRMSNormFunction._registry:
             impl_func = MojoRMSNormFunction._registry[0][1].backward
         else:

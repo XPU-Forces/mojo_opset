@@ -22,13 +22,6 @@ class MojoSiluFunction(MojoFuncBase):
 
     @staticmethod
     def forward(ctx, input):
-        """
-        suppose layer idx should stored in ctx
-        """
-
-        # for debug, will remove later
-        print("MojoSiluFunction forward dispatch")
-
         if MojoSiluFunction._registry:
             impl_func = MojoSiluFunction._registry[0][1].forward
         else:
@@ -67,9 +60,6 @@ class MojoSiluFunction(MojoFuncBase):
 
     @staticmethod
     def backward(ctx, grad_output):
-        # for debug, will remove later
-        print("MojoSiluFunction backward dispatch")
-
         if MojoSiluFunction._registry:
             impl_func = MojoSiluFunction._registry[0][1].backward
         else:

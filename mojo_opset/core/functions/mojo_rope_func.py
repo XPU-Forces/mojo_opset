@@ -28,8 +28,6 @@ class MojoRoPEFunction(MojoFuncBase):
 
     @staticmethod
     def forward(ctx, q, k, cos, sin):
-        print("MojoRoPEFunction forward dispatch")
-
         if MojoRoPEFunction._registry:
             impl_func = MojoRoPEFunction._registry[0][1].forward
         else:
@@ -83,8 +81,6 @@ class MojoRoPEFunction(MojoFuncBase):
 
     @staticmethod
     def backward(ctx, grad_output_q, grad_output_k):
-        print("MojoRoPEFunction backward dispatch")
-
         if MojoRoPEFunction._registry:
             impl_func = MojoRoPEFunction._registry[0][1].backward
         else:
