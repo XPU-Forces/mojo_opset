@@ -5,6 +5,9 @@ from typing import Tuple
 
 from ..mojo_function import MojoFuncBase
 from ...mojo_utils import get_mojo_exec_mode
+from mojo_opset.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class MojoRoPEFunction(MojoFuncBase):
@@ -31,7 +34,7 @@ class MojoRoPEFunction(MojoFuncBase):
         if MojoRoPEFunction._registry:
             impl_func = MojoRoPEFunction._registry[0][1].forward
         else:
-            print("MojoRoPEFunction has NO any registered implementation")
+            logger.warning("MojoRoPEFunction has NO any registered implementation")
             impl_func = MojoRoPEFunction.forward_ref
 
         layer_idx = ctx.layer_idx if hasattr(ctx, "layer_idx") else -1
@@ -84,7 +87,7 @@ class MojoRoPEFunction(MojoFuncBase):
         if MojoRoPEFunction._registry:
             impl_func = MojoRoPEFunction._registry[0][1].backward
         else:
-            print("MojoRoPEFunction has NO any registered implementation")
+            logger.warning("MojoRoPEFunction has NO any registered implementation")
             impl_func = MojoRoPEFunction.backward_ref
 
         mode_str = os.environ.get(f"{MojoRoPEFunction.__name__.upper()}_BWD_MODE", "STD")
@@ -99,7 +102,7 @@ class MojoRoPEFunction(MojoFuncBase):
         elif mode_str == "REF":
             return MojoRoPEFunction.backward_ref(ctx, grad_output_q, grad_output_k)
         elif mode_str == "DIFF":
-            print("MojoRoPEFunction: comparing REF and STD backward...")
+            logger.warning("MojoRoPEFunction: comparing REF and STD backward...")
             ref_grad_q, ref_grad_k, _, _ = MojoRoPEFunction.backward_ref(ctx, grad_output_q, grad_output_k)
             impl_grad_q, impl_grad_k, _, _ = impl_func(ctx, grad_output_q, grad_output_k)
 

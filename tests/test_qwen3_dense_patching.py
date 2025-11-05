@@ -5,6 +5,9 @@ import pytest
 
 
 from example_models import mojo_qwen3_dense
+from mojo_opset.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def run_single_pass(config, device: str, dtype: torch.dtype, model_data: tuple) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -104,11 +107,11 @@ def test_qwen3_dense_patch():
     decode_match = torch.allclose(native_decode_out, patched_decode_out, atol=1e-2, rtol=1e-2)
 
     if not prefill_match:
-        print("Prefill outputs differ!")
-        print("Max diff:", (native_prefill_out - patched_prefill_out).abs().max())
+        logger.warning("Prefill outputs differ!")
+        logger.warning("Max diff:", (native_prefill_out - patched_prefill_out).abs().max())
     if not decode_match:
-        print("Decode outputs differ!")
-        print("Max diff:", (native_decode_out - patched_decode_out).abs().max())
+        logger.warning("Decode outputs differ!")
+        logger.warning("Max diff:", (native_decode_out - patched_decode_out).abs().max())
 
     assert prefill_match, "Paged prefill outputs do not match post-patching!"
     assert decode_match, "Paged decode outputs do not match post-patching!"
