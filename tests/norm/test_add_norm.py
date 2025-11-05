@@ -8,7 +8,7 @@ from mojo_opset import MojoResidualAddNorm
 
 
 @pytest.mark.parametrize(
-    "x, residual, weight, bias",
+    "x, residual, gamma, beta",
     [
         (
             torch.randn(size=(128, 128), dtype=dtype),
@@ -19,18 +19,18 @@ from mojo_opset import MojoResidualAddNorm
         for dtype in [torch.float32, torch.float16, torch.bfloat16]
     ],
 )
-@pytest.mark.parametrize("eps", [1e-5])
+@pytest.mark.parametrize("epsilon", [1e-5])
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
 @pytest.mark.parametrize("norm_type", ["rmsnorm", "layernorm"])
 @auto_switch_platform()
 @bypass_not_implemented
-def test_residual_add_norm(x, residual, weight, bias, norm_type, norm_pos, eps):
-    bias = bias if norm_type == "layernorm" else None
+def test_residual_add_norm(x, residual, gamma, beta, norm_type, norm_pos, epsilon):
+    beta = beta if norm_type == "layernorm" else None
 
     add_norm = MojoResidualAddNorm(
-        weight=weight,
-        bias=bias,
-        eps=eps,
+        gamma=gamma,
+        beta=beta,
+        epsilon=epsilon,
         norm_pos=norm_pos,
         norm_type=norm_type,
     )

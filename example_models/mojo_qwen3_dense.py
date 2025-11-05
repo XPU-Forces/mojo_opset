@@ -166,17 +166,25 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 class Qwen3RMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps: float = 1e-6):
+    def __init__(self, eps: float = 1e-6,norm_type: str = "rmsnorm", gamma: Optional[torch.Tensor] = None):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
+        # epsilon: float = 1e-05,
+        # norm_type: str = "rmsnorm",
+        # gamma: Optional[torch.Tensor] = None,
+        # beta: Optional[torch.Tensor] = None,
+        # is_varlen: bool = True,
+        # op_name: str = "",
+        # layer_idx: int = 0,
+        # self.variance_epsilon = eps
+        self.epsilon = float(eps)
+        self.gamma = gamma
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.epsilon)
+        return self.gamma * hidden_states.to(input_dtype)
 
 
 class Qwen3MLP(nn.Module):
@@ -370,12 +378,13 @@ class Qwen3Attention(nn.Module):
         self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias)
+        self.gamma = nn.Parameter(torch.ones(self.head_dim))
 
         self.q_norm = (
-            Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps) if hasattr(config, "q_norm") else nn.Identity()
+            Qwen3RMSNorm(eps=config.rms_norm_eps, gamma=self.gamma) if hasattr(config, "q_norm") else nn.Identity()
         )
         self.k_norm = (
-            Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps) if hasattr(config, "k_norm") else nn.Identity()
+            Qwen3RMSNorm(eps=config.rms_norm_eps, gamma=self.gamma) if hasattr(config, "k_norm") else nn.Identity()
         )
 
     def forward(self, hidden_states, position_embeddings, attention_mask, past_key_values, use_cache, **kwargs):
@@ -419,8 +428,9 @@ class Qwen3DecoderLayer(DummyGradientCheckpointingLayer):
         self.hidden_size = config.hidden_size
         self.self_attn = Qwen3Attention(config, layer_idx)
         self.mlp = Qwen3MLP(config)
-        self.input_layernorm = Qwen3RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.post_attention_layernorm = Qwen3RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.gamma = nn.Parameter(torch.ones(config.hidden_size))
+        self.input_layernorm = Qwen3RMSNorm(config.rms_norm_eps, gamma=self.gamma)
+        self.post_attention_layernorm = Qwen3RMSNorm(config.rms_norm_eps, gamma=self.gamma)
         self.attention_type = config.layer_types[layer_idx]
 
     def forward(

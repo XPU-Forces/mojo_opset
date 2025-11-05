@@ -1,6 +1,5 @@
 from abc import abstractmethod
-from typing import Any
-from typing import Tuple
+from typing import Any, Tuple, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -11,41 +10,105 @@ from ..mojo_operator import MojoOperator
 
 
 class MojoNorm(MojoOperator):
+    """
+    归一化算子（LayerNorm/RMSNorm）的通用参数定义。
+
+    Init 参数：
+    - epsilon (float)：数值稳定项，默认 1e-5，需 > 0。
+    - norm_type (str)：归一化类型，枚举 {"rmsnorm", "layernorm"}，默认 "rmsnorm"。
+    - gamma (torch.Tensor|None)：仿射参数 gamma，可选，1-D，dtype 为浮点。
+    - beta (torch.Tensor|None)：仿射参数 beta（仅 LayerNorm 支持），可选，1-D，dtype 为浮点。
+    - is_varlen (bool)：为 True 时优先按 TND（连续 token 视角）归一化；为 False 时按 BSND；默认 True。
+    - op_name (str)：算子名称占位。
+    - layer_idx (int)：层索引占位。
+
+    说明：仅覆盖通用参数与轻量校验；forward 计算体占位，不包含后端或量化实现。
+    """
+
     def __init__(
         self,
-        hidden_size,
-        eps: float = 1e-05,
+        epsilon: float = 1e-05,
         norm_type: str = "rmsnorm",
+        gamma: Optional[torch.Tensor] = None,
+        beta: Optional[torch.Tensor] = None,
+        is_varlen: bool = True,
         op_name: str = "",
         layer_idx: int = 0,
     ):
         super().__init__(op_name, layer_idx)
-        self.variance_epsilon = eps
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.bias = nn.Parameter(torch.zeros(hidden_size))
 
+        if not isinstance(epsilon, (float, int)) or float(epsilon) <= 0:
+            raise ValueError("epsilon 需为正数，实际为 {}".format(epsilon))
+        if norm_type not in ["rmsnorm", "layernorm"]:
+            raise ValueError('norm_type 取值需为 "rmsnorm","layernorm"，实际为 {}'.format(norm_type))
+
+        # 类型与形状的轻量校验（无法在此处校验与输入末维完全匹配，留给 forward 校验）
+        for name, t in ("gamma", gamma), ("beta", beta):
+            if t is None:
+                continue
+            if not isinstance(t, torch.Tensor):
+                raise TypeError(f"{name} 需为 torch.Tensor 或 None")
+            if t.ndim != 1:
+                raise ValueError(f"{name} 需为 1-D 张量，实际为 {tuple(t.shape)}")
+            if t.dtype not in (torch.float16, torch.float32, torch.bfloat16):
+                raise TypeError(f"{name} 的 dtype 需为浮点类型，实际为 {t.dtype}")
+
+        # RMSNorm 不支持 bias
+        if norm_type == "rmsnorm" and beta is not None:
+            raise ValueError("RMSNorm 不支持 beta 参数")
+        if not isinstance(is_varlen, bool):
+            raise TypeError("is_varlen 必须为 bool 类型")
+
+        self.epsilon = float(epsilon)
+        self.gamma = gamma
+        self.beta = beta
         self.norm_type = norm_type
-        assert self.norm_type in ["rmsnorm", "layernorm"]
-
-        if self.norm_type == "rmsnorm":
-            self.bias = None
+        self.affine = gamma is not None and beta is not None
+        self.is_varlen = is_varlen
 
         mode_str = get_mojo_exec_mode(MojoNorm.__name__, "FWD", self.layer_idx)
         self._set_forward_mode(mode_str)
+
 
     @abstractmethod
     def forward_std(self, hidden_state: torch.Tensor) -> Tuple[Any]:
         raise NotImplementedError
 
-    def forward_ref(self, hidden_state: torch.Tensor) -> Tuple[Any]:
+    def forward_ref(self, hidden_state: torch.Tensor) -> torch.Tensor:
+        """
+        参考实现（golden）：LayerNorm / RMSNorm，严格区分 TND/BNSD 输入。
+        输入布局契约：
+        - 当 is_varlen=True（TND）：仅接受 [T,D] 或 [T,*,D]
+        - 当 is_varlen=False（BNSD）：仅接受 [B,S,*,D]
+        公式：
+        - LayerNorm：y = (x-μ)/sqrt(σ^2+ε) · γ + β（μ/σ^2 按最后一维）
+        - RMSNorm：y = x / (r + ε) · γ（r = sqrt(mean(x^2))）
+        返回：与输入形状一致，dtype 与输入一致。
+        """
+        x = hidden_state
+        eps = float(self.epsilon)
+        if self.is_varlen:
+            if x.ndim not in (2, 3):
+                raise ValueError(f"Expected TND when is_varlen=True; got shape {tuple(x.shape)}")
+        else:
+            if x.ndim < 3:
+                raise ValueError(f"Expected BNSD when is_varlen=False; got shape {tuple(x.shape)}")
         if self.norm_type == "layernorm":
-            return F.layer_norm(
-                hidden_state, hidden_state.shape[-1:], weight=self.weight, bias=self.bias, eps=self.variance_epsilon
-            ).to(hidden_state.dtype)
+            mu = x.mean(dim=-1, keepdim=True)
+            var = ((x - mu) ** 2).mean(dim=-1, keepdim=True)
+            y = (x - mu) / torch.sqrt(var + eps)
+            if self.gamma is not None:
+                y = y * self.gamma
+            if self.beta is not None:
+                y = y + self.beta
         elif self.norm_type == "rmsnorm":
-            return F.rms_norm(hidden_state, hidden_state.shape[-1:], weight=self.weight, eps=self.variance_epsilon).to(
-                hidden_state.dtype
-            )
+            rms = torch.sqrt((x.float() ** 2).mean(dim=-1, keepdim=True) + eps)
+            y = (x / rms.to(x.dtype))
+            if self.gamma is not None:
+                y = y * self.gamma
+        else:
+            raise ValueError("norm_type 需为 'layernorm' 或 'rmsnorm'")
+        return y
 
     def forward_analysis(self, hidden_state) -> Tuple[int, int, int]:
         """ignore weight and bias"""
