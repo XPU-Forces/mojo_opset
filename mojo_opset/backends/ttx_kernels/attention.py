@@ -10,20 +10,6 @@ from mojo_opset.core import MojoPagedDecodeGQA, MojoPagedPrefillGQA
 
 
 class TTXPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=2):
-    def __init__(
-        self,
-        is_causal: bool = True,
-        is_prefill: bool = True,
-        gqa_layout: str = "ABAB",
-        window_size: int = -1,
-        op_name: str = "",
-    ):
-        super().__init__(op_name)
-
-        self.is_causal = is_causal
-        self.gqa_layout = gqa_layout
-        self.window_size = window_size
-
     def forward_std(
         self,
         query: torch.Tensor,
@@ -31,7 +17,7 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=2):
         v_cache: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
         block_tables: torch.Tensor,
-        sm_scale: Optional[float] = None,
+        softmax_scale: Optional[float] = None,
     ):
         assert self.window_size == -1, (
             f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
@@ -49,27 +35,13 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=2):
             v_cache=v_cache,
             cu_seqlens_q=cu_seqlens_q,
             block_tables=block_tables,
-            sm_scale=sm_scale,
+            sm_scale=softmax_scale,
         )
 
         return output
 
 
 class TTXPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=2):
-    def __init__(
-        self,
-        is_causal: bool = True,
-        is_prefill: bool = False,
-        gqa_layout: str = "ABAB",
-        window_size: int = -1,
-        op_name: str = "",
-    ):
-        super().__init__(op_name)
-
-        self.is_causal = is_causal
-        self.gqa_layout = gqa_layout
-        self.window_size = window_size
-
     def forward_std(
         self,
         query: torch.Tensor,
@@ -77,7 +49,7 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=2):
         v_cache: torch.Tensor,
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
-        sm_scale: Optional[float] = None,
+        softmax_scale: Optional[float] = None,
     ):
         assert self.window_size == -1, (
             f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
@@ -95,7 +67,7 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=2):
             v_cache=v_cache,
             seqlens=seqlens,
             block_tables=block_tables,
-            sm_scale=sm_scale,
+            sm_scale=softmax_scale,
         )
 
         return output

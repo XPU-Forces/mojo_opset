@@ -94,20 +94,57 @@ class MojoPrefillGQA(MojoOperator):
 class MojoPagedPrefillGQA(MojoOperator):
     def __init__(
         self,
-        page_size: int,
         is_causal: bool = True,
-        is_prefill: bool = True,
+        q_scale_factor: int = 1,
         gqa_layout: str = "ABAB",
         window_size: int = -1,
+        kv_layout: str = "ND",
+        tp_size: int = 1,
+        is_varlen: bool = True,
         op_name: str = "",
         layer_idx: int = 0,
     ):
+        """
+        初始化通用参数层面的 Paged Prefill GQA 注意力算子。
+        参数说明：
+        - q_scale_factor (int)：q head 的倍数（整数，默认 1），不对 query 进行缩放。
+        - gqa_layout (str)：GQA 头分组布局，取值 {"ABAB","AABB"}，默认 "ABAB"。
+        - is_causal (bool)：是否启用因果掩码，默认 True。
+        - window_size (int)：注意力窗口长度；-1 表示全窗口，或 >=1 表示滑窗长度，默认 -1。
+        - kv_layout (str)：KV 存储布局指示，取值 {"ND","NZ","CB"}，默认 "ND"。
+        - tp_size (int)：张量并行大小，默认 1。
+        - is_varlen (bool)：为 True 时走 TND（变长）优先路径；为 False 时走 BSND；默认 True。
+        - op_name (str)：算子名称占位，用于注册与诊断。
+        """
         super().__init__(op_name, layer_idx)
 
-        self.page_size = page_size
+        # 输入参数校验
+        if not isinstance(q_scale_factor, int) or q_scale_factor <= 0:
+            raise ValueError(f"q_scale_factor must be a positive integer, got {q_scale_factor}")
+        
+        if gqa_layout not in ["ABAB", "AABB"]:
+            raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
+        
+        if not isinstance(window_size, int) or (window_size != -1 and window_size < 1):
+            raise ValueError(f"window_size must be -1 or >= 1, got {window_size}")
+        
+        if kv_layout not in ["ND", "NZ", "CB"]:
+            raise ValueError(f"kv_layout must be one of ['ND', 'NZ', 'CB'], got {kv_layout}")
+        
+        if not isinstance(tp_size, int) or tp_size <= 0:
+            raise ValueError(f"tp_size must be a positive integer, got {tp_size}")
+        
+        if not isinstance(is_varlen, bool):
+            raise ValueError(f"is_varlen must be a boolean, got {is_varlen}")
+
+        # 成员变量赋值
         self.is_causal = is_causal
+        self.q_scale_factor = q_scale_factor
         self.gqa_layout = gqa_layout
         self.window_size = window_size
+        self.kv_layout = kv_layout
+        self.tp_size = tp_size
+        self.is_varlen = is_varlen
 
     def forward_std(
         self,
@@ -116,7 +153,7 @@ class MojoPagedPrefillGQA(MojoOperator):
         v_cache: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
         block_tables: torch.Tensor,
-        sm_scale: Optional[float] = None,
+        softmax_scale: Optional[float] = None,
     ) -> Tuple[Any]:
         raise NotImplementedError
 
@@ -127,13 +164,12 @@ class MojoPagedPrefillGQA(MojoOperator):
         v_cache: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
         block_tables: torch.Tensor,
-        sm_scale: Optional[float] = None,
+        softmax_scale: Optional[float] = None,
     ) -> torch.Tensor:
         total_q_tokens, num_q_heads, head_dim = query.shape
         num_total_blocks, num_kv_heads, block_size, _ = k_cache.shape
-
-        if sm_scale is None:
-            sm_scale = 1.0 / math.sqrt(head_dim)
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(head_dim)
 
         total_kv_tokens = total_q_tokens
 
@@ -180,7 +216,7 @@ class MojoPagedPrefillGQA(MojoOperator):
         seq_mask = tok_to_seq[:, None] == tok_to_seq[None, :]
         final_mask = attn_mask & seq_mask
 
-        attn_scores = torch.einsum("thd,khd->thk", query, k_expanded) * sm_scale
+        attn_scores = torch.einsum("thd,khd->thk", query, k_expanded) * softmax_scale
         attn_scores.masked_fill_(~final_mask.unsqueeze(1), -torch.inf)
 
         attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
@@ -195,6 +231,6 @@ class MojoPagedPrefillGQA(MojoOperator):
         v_cache: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
         block_tables: torch.Tensor,
-        sm_scale: Optional[float] = None,
+        softmax_scale: Optional[float] = None,
     ) -> Tuple[int, int, int]:
         pass

@@ -168,14 +168,6 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 class Qwen3RMSNorm(nn.Module):
     def __init__(self, eps: float = 1e-6,norm_type: str = "rmsnorm", gamma: Optional[torch.Tensor] = None):
         super().__init__()
-        # epsilon: float = 1e-05,
-        # norm_type: str = "rmsnorm",
-        # gamma: Optional[torch.Tensor] = None,
-        # beta: Optional[torch.Tensor] = None,
-        # is_varlen: bool = True,
-        # op_name: str = "",
-        # layer_idx: int = 0,
-        # self.variance_epsilon = eps
         self.epsilon = float(eps)
         self.gamma = gamma
 
@@ -206,13 +198,13 @@ def paged_attention_prefill(
     v_cache: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     block_tables: torch.Tensor,
-    sm_scale: Optional[float] = None,
+    softmax_scale: Optional[float] = None,
 ):
     total_q_tokens, num_q_heads, head_dim = q.shape
     num_total_blocks, num_kv_heads, block_size, _ = k_cache.shape
 
-    if sm_scale is None:
-        sm_scale = 1.0 / math.sqrt(head_dim)
+    if softmax_scale is None:
+        softmax_scale = 1.0 / math.sqrt(head_dim)
 
     total_kv_tokens = total_q_tokens
 
@@ -259,7 +251,7 @@ def paged_attention_prefill(
     seq_mask = tok_to_seq[:, None] == tok_to_seq[None, :]
     final_mask = attn_mask & seq_mask
 
-    attn_scores = torch.einsum("thd,khd->thk", q, k_expanded) * sm_scale
+    attn_scores = torch.einsum("thd,khd->thk", q, k_expanded) * softmax_scale
     attn_scores.masked_fill_(~final_mask.unsqueeze(1), -torch.inf)
 
     attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(q.dtype)
@@ -268,7 +260,7 @@ def paged_attention_prefill(
     return output
 
 
-def paged_attention_decode(q, k_cache, v_cache, seqlens, block_tables, sm_scale):
+def paged_attention_decode(q, k_cache, v_cache, seqlens, block_tables, softmax_scale):
     batch_size, num_q_heads, head_dim = q.shape
     num_kv_heads, block_size, head_dim = k_cache.shape[1], k_cache.shape[2], k_cache.shape[3]
     max_len_in_batch = seqlens.max().item()
@@ -294,14 +286,14 @@ def paged_attention_decode(q, k_cache, v_cache, seqlens, block_tables, sm_scale)
 
     _, k_len, num_k_heads, _ = k_ref.shape
     num_share_q_heads = num_q_heads // num_k_heads
-    if sm_scale is None:
-        sm_scale = 1 / math.sqrt(head_dim)
+    if softmax_scale is None:
+        softmax_scale = 1 / math.sqrt(head_dim)
 
     if num_share_q_heads > 1:
         k_ref = k_ref.repeat_interleave(num_share_q_heads, dim=2)
         v_ref = v_ref.repeat_interleave(num_share_q_heads, dim=2)
 
-    attn = torch.einsum("bhd,bkhd->bhk", q, k_ref) * sm_scale
+    attn = torch.einsum("bhd,bkhd->bhk", q, k_ref) * softmax_scale
 
     mask = torch.arange(k_len, device=q.device)[None, :] >= seqlens[:, None]
     attn.masked_fill_(mask[:, None, :], -torch.inf)
@@ -347,7 +339,7 @@ def paged_attention_forward(
             v_cache,
             cu_seqlens_q,
             block_tables,
-            sm_scale=module.scaling,
+            softmax_scale=module.scaling,
         )
 
         attn_output = attn_output_tnd.reshape(bsz, q_len, num_q_heads, head_dim)
