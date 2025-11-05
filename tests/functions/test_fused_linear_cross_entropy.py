@@ -17,9 +17,9 @@ from mojo_opset import MojoFusedLinearCrossEntropyFunction
     ],
 )
 @pytest.mark.parametrize(
-    "has_bias, has_ce_weight, label_smoothing, reduction, return_z_loss",
+    "has_bias, has_ce_weight, ignore_index, label_smoothing, lse_square_scale, reduction, return_z_loss",
     [
-        (False, False, 0.0, "mean", False),
+        (False, False, -100, 0.0, 0.0, "mean", False),
     ],
 )
 @auto_switch_platform()
@@ -32,6 +32,8 @@ def test_fused_ce_forward_backward_diff(
     bias,
     has_bias,
     has_ce_weight,
+    ignore_index,
+    lse_square_scale,
     label_smoothing,
     reduction,
     return_z_loss,
@@ -49,17 +51,20 @@ def test_fused_ce_forward_backward_diff(
         target,
         bias,
         ce_weight,
-        -100,
+        ignore_index,
+        lse_square_scale,
         label_smoothing,
         reduction,
+        None,
         return_z_loss,
-        0.01 if return_z_loss else 0.0,
+        None,
     )
 
     if return_z_loss:
         loss, z_loss = output
     else:
         loss = output
+        z_loss = None
 
     grad_output = torch.rand_like(loss)
 

@@ -44,29 +44,89 @@ def mojo_func_dispatcher(cls):
                     f"{op_name_in} needs both an implementation and a ref for DIFF mode in {direction} pass."
                 )
 
-            def diff_wrapper(diff_ctx, *diff_args, **diff_kwargs):
-                ref_outputs = ref_func(diff_ctx, *diff_args, **diff_kwargs)
-                impl_outputs = impl_func(diff_ctx, *diff_args, **diff_kwargs)
+            if direction == "FWD":
 
-                ref_tuple = ref_outputs if isinstance(ref_outputs, tuple) else (ref_outputs,)
-                impl_tuple = impl_outputs if isinstance(impl_outputs, tuple) else (impl_outputs,)
+                @functools.wraps(impl_func)
+                def fwd_diff_wrapper(diff_ctx, *diff_args, **diff_kwargs):
+                    # NOTE(wenshuo.zhao): In DIFF mode, the 'ref' and 'std' implementations share the same 'ctx' object,
+                    # which can lead to unexpected errors if their `save_for_backward` calls differ.
+                    # We introduce a CtxProxy to hack the context's behavior for the ref impl.
+                    class FwdRefCtxProxy:
+                        def __init__(self, original_ctx):
+                            object.__setattr__(self, "_original_ctx", original_ctx)
 
-                if len(ref_tuple) != len(impl_tuple):
-                    raise RuntimeError(f"{direction} DIFF failed for {op_name_in}: Number of outputs mismatch.")
+                        def save_for_backward(self, *tensors):
+                            self._original_ctx._ref_saved_for_bwd = tensors
 
-                for i, (ref_o, impl_o) in enumerate(zip(ref_tuple, impl_tuple)):
-                    if direction == "BWD" and (ref_o is None or impl_o is None):
-                        if ref_o is not impl_o:
-                            raise AssertionError(
-                                f"Backward gradient {i} mismatch for {op_name_in}: one is None and the other is not."
+                        def __getattr__(self, name):
+                            return getattr(self._original_ctx, name)
+
+                        # NOTE(wenshuo.zhao): # During the forward pass, we need `__setattr__` to delegate the writing of non-tensor attributes.
+                        def __setattr__(self, name, value):
+                            setattr(self._original_ctx, name, value)
+
+                    ref_ctx = FwdRefCtxProxy(diff_ctx)
+                    ref_outputs = ref_func(ref_ctx, *diff_args, **diff_kwargs)
+
+                    impl_outputs = impl_func(diff_ctx, *diff_args, **diff_kwargs)
+
+                    ref_tuple = ref_outputs if isinstance(ref_outputs, tuple) else (ref_outputs,)
+                    impl_tuple = impl_outputs if isinstance(impl_outputs, tuple) else (impl_outputs,)
+
+                    if len(ref_tuple) != len(impl_tuple):
+                        raise RuntimeError(f"Forward DIFF for {op_name_in}: Number of outputs mismatch.")
+
+                    for i, (ref_o, impl_o) in enumerate(zip(ref_tuple, impl_tuple)):
+                        torch.testing.assert_close(ref_o, impl_o, msg=f"Forward output {i} mismatch for {op_name_in}")
+
+                    return impl_outputs
+
+                return fwd_diff_wrapper
+
+            else:
+
+                @functools.wraps(impl_func)
+                def bwd_diff_wrapper(diff_ctx, *diff_args, **diff_kwargs):
+                    class BwdRefCtxProxy:
+                        def __init__(self, original_ctx):
+                            object.__setattr__(self, "_original_ctx", original_ctx)
+
+                        @property
+                        def saved_tensors(self):
+                            return getattr(self._original_ctx, "_ref_saved_for_bwd", ())
+
+                        def __getattr__(self, name):
+                            return getattr(self._original_ctx, name)
+
+                        # NOTE(wenshuo.zhao): # The backward pass proxy theoretically doesn't require `__setattr__` as it's primarily for reading state.
+                        # However, we've kept it for robustness.
+                        def __setattr__(self, name, value):
+                            setattr(self._original_ctx, name, value)
+
+                    ref_ctx = BwdRefCtxProxy(diff_ctx)
+                    ref_grads = ref_func(ref_ctx, *diff_args, **diff_kwargs)
+
+                    impl_grads = impl_func(diff_ctx, *diff_args, **diff_kwargs)
+
+                    ref_tuple = ref_grads if isinstance(ref_grads, tuple) else (ref_grads,)
+                    impl_tuple = impl_grads if isinstance(impl_grads, tuple) else (impl_grads,)
+
+                    if len(ref_tuple) != len(impl_tuple):
+                        raise RuntimeError(f"Backward DIFF for {op_name_in}: Number of gradients mismatch.")
+
+                    for i, (ref_g, impl_g) in enumerate(zip(ref_tuple, impl_tuple)):
+                        if ref_g is not None and impl_g is not None:
+                            torch.testing.assert_close(
+                                ref_g, impl_g, msg=f"Backward gradient {i} mismatch for {op_name_in}"
                             )
-                        continue
+                        elif ref_g is not None or impl_g is not None:
+                            raise AssertionError(
+                                f"Backward gradient {i} for {op_name_in}: one is None, the other is not."
+                            )
 
-                    torch.testing.assert_close(ref_o, impl_o, msg=f"{direction} output {i} mismatch for {op_name_in}")
+                    return impl_grads
 
-                return impl_outputs
-
-            return diff_wrapper
+                return bwd_diff_wrapper
 
         raise ValueError(f"Invalid mode '{mode_str}' for {op_name_in} in {direction} pass.")
 
