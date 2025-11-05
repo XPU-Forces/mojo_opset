@@ -7,7 +7,7 @@ from mojo_opset import MojoNorm
 
 
 @pytest.mark.parametrize(
-    "x, weight",
+    "x, gamma",
     [
         (
             torch.randn(size=(256, 128), dtype=dtype),
@@ -16,18 +16,18 @@ from mojo_opset import MojoNorm
         for dtype in [torch.float32, torch.float16, torch.bfloat16]
     ],
 )
-@pytest.mark.parametrize("eps", [1e-5])
+@pytest.mark.parametrize("epsilon", [1e-5])
 @auto_switch_platform()
 @bypass_not_implemented
-def test_rmsnorm(x, weight, eps):
+def test_rmsnorm(x, gamma, epsilon):
     rmsnorm = MojoNorm(
-        hidden_size=x.shape[-1],
-        eps=eps,
+        epsilon=epsilon,
         norm_type="rmsnorm",
+        gamma=gamma,
     ).to(x.device)
 
     with torch.no_grad():
-        rmsnorm.weight.copy_(weight.to(torch.float32))
+        rmsnorm.gamma.copy_(gamma.to(torch.float32))
 
     if x.dtype == torch.float32:
         atol, rtol = 1e-5, 1e-6
@@ -37,7 +37,7 @@ def test_rmsnorm(x, weight, eps):
 
 
 @pytest.mark.parametrize(
-    "x, weight, bias",
+    "x, gamma, beta",
     [
         (
             torch.randn(size=(256, 128), dtype=dtype),
@@ -47,19 +47,20 @@ def test_rmsnorm(x, weight, eps):
         for dtype in [torch.float32, torch.float16, torch.bfloat16]
     ],
 )
-@pytest.mark.parametrize("eps", [1e-5])
+@pytest.mark.parametrize("epsilon", [1e-5])
 @auto_switch_platform()
 @bypass_not_implemented
-def test_layernorm(x, weight, bias, eps):
+def test_layernorm(x, gamma, beta, epsilon):
     layernorm = MojoNorm(
-        hidden_size=x.shape[-1],
-        eps=eps,
+        epsilon=epsilon,
         norm_type="layernorm",
+        gamma=gamma,
+        beta=beta,
     ).to(x.device)
 
     with torch.no_grad():
-        layernorm.weight.copy_(weight)
-        layernorm.bias.copy_(bias)
+        layernorm.gamma.copy_(gamma.to(torch.float32))
+        layernorm.beta.copy_(beta.to(torch.float32))
 
     if x.dtype == torch.float32:
         atol, rtol = 1e-5, 1e-6

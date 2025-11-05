@@ -1,6 +1,5 @@
 from abc import abstractmethod
-from typing import Any
-from typing import Tuple
+from typing import Any, Tuple, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -9,44 +8,93 @@ from ..mojo_operator import MojoOperator
 
 
 class MojoResidualAddNorm(MojoOperator):
+    """
+    融合算子（Residual+LayerNorm/RMSNorm）的通用参数定义。
+
+    Init 参数：
+    - epsilon (float)：数值稳定项，默认 1e-5，需 > 0。
+    - norm_type (str)：归一化类型，枚举 {"rmsnorm", "layernorm"}，默认 "rmsnorm"。
+    - gamma (torch.Tensor|None)：仿射参数 gamma，可选，1-D，dtype 为浮点。
+    - beta (torch.Tensor|None)：仿射参数 beta（仅 LayerNorm 支持），可选，1-D，dtype 为浮点。
+    - is_varlen (bool)：为 True 时优先按 TND（连续 token 视角）归一化；为 False 时按 BSND；默认 True。
+    - op_name (str)：算子名称占位。
+    - layer_idx (int)：层索引占位。
+
+    说明：仅覆盖通用参数与轻量校验；forward 计算体占位，不包含后端或量化实现。
+    """
+
     def __init__(
         self,
-        weight: torch.Tensor = None,
-        bias: torch.Tensor = None,
-        eps: float = 1e-05,
-        norm_pos: str = "post",
+        epsilon: float = 1e-05,
         norm_type: str = "rmsnorm",
+        gamma: Optional[torch.Tensor] = None,
+        beta: Optional[torch.Tensor] = None,
+        norm_pos: str = "pre",
+        is_varlen: bool = True,
         op_name: str = "",
         layer_idx: int = 0,
     ):
         super().__init__(op_name, layer_idx)
-        self.eps = eps
 
-        self.norm_pos = norm_pos
-        assert self.norm_pos in ["pre", "post"]
+        if not isinstance(epsilon, (float, int)) or float(epsilon) <= 0:
+            raise ValueError("epsilon 需为正数")
+        if norm_type not in ["rmsnorm", "layernorm"]:
+            raise ValueError('norm_type 取值需为 {"rmsnorm","layernorm"}')
 
+        # 类型与形状的轻量校验（无法在此处校验与输入末维完全匹配，留给 forward 校验）
+        for name, t in ("gamma", gamma), ("beta", beta):
+            if t is None:
+                continue
+            if not isinstance(t, torch.Tensor):
+                raise TypeError(f"{name} 需为 torch.Tensor 或 None")
+            if t.ndim != 1:
+                raise ValueError(f"{name} 需为 1-D 张量，实际为 {tuple(t.shape)}")
+            if t.dtype not in (torch.float16, torch.float32, torch.bfloat16):
+                raise TypeError(f"{name} 的 dtype 需为浮点类型，实际为 {t.dtype}")
+
+        # RMSNorm 不支持 bias
+        if norm_type == "rmsnorm" and beta is not None:
+            raise ValueError("RMSNorm 不支持 beta 参数")
+        if not isinstance(is_varlen, bool):
+            raise TypeError("is_varlen 必须为 bool 类型")
+        if norm_pos not in ["pre", "post"]:
+            raise ValueError("norm_pos 需为 'pre' 或 'post'")
+
+        self.epsilon = float(epsilon)
+        self.gamma = gamma
+        self.beta = beta
         self.norm_type = norm_type
-        assert self.norm_type in ["rmsnorm", "layernorm"]
+        self.norm_pos = norm_pos
+        self.affine = gamma is not None and beta is not None
+        self.is_varlen = is_varlen
 
-        self.weight = weight
-        self.bias = bias
+    def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor = None) -> torch.Tensor:
+        """
+        输入：
+        - hidden_state：张量，4-D 或更高维，最后一维为特征维；dtype∈{float16,float32,bfloat16}
+        - residual：张量，与 hidden_state 形状一致，可选，默认 None。
+
+        输出：与输入形状一致，dtype 与输入相同。
+        """
+
+        raise NotImplementedError("MojoNorm forward 当前仅进行通用参数校验，不包含具体实现")
 
     @abstractmethod
     def forward_std(self, hidden_state: torch.Tensor, residual: torch.Tensor = None) -> Tuple[Any]:
         raise NotImplementedError
 
-    def forward_ref(self, hidden_state: torch.Tensor, residual: torch.Tensor = None) -> Tuple[Any]:
+    def forward_ref(self, hidden_state: torch.Tensor, residual: torch.Tensor = None) -> torch.Tensor:
         def norm_func(hidden_state: torch.Tensor) -> Tuple[Any]:
             if self.norm_type == "layernorm":
                 return F.layer_norm(
                     hidden_state,
                     [hidden_state.shape[-1]],
-                    weight=self.weight,
-                    bias=self.bias,
-                    eps=self.eps,
+                    weight=self.gamma,
+                    bias=self.beta,
+                    eps=self.epsilon,
                 )
             elif self.norm_type == "rmsnorm":
-                return F.rms_norm(hidden_state, (hidden_state.size(-1),), weight=self.weight, eps=self.eps)
+                return F.rms_norm(hidden_state, (hidden_state.size(-1),), weight=self.gamma, eps=self.epsilon)
 
         if self.norm_pos == "pre":
             if residual is not None:
