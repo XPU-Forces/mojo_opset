@@ -1,9 +1,9 @@
-from .norm import TTXNorm
+from .norm import TTXNorm, TTXRMSNormFunction
 from .add_norm import TTXResidualAddNorm
-from .pos_emb import TTXRoPE
-from .activation import TTXGelu, TTXSilu, TTXSiluMul
+from .pos_emb import TTXRoPE, TTXRoPEFunction
+from .activation import TTXGelu, TTXSilu, TTXSiluMul, TTXSiluFunction
 from .attention import TTXPagedPrefillGQA, TTXPagedDecodeGQA
-
+from .loss import TTXFusedLinearCrossEntropyFunction
 
 __all__ = [
     "TTXNorm",
@@ -14,4 +14,8 @@ __all__ = [
     "TTXResidualAddNorm",
     "TTXPagedPrefillGQA",
     "TTXPagedDecodeGQA",
+    "TTXRMSNormFunction",
+    "TTXRoPEFunction",
+    "TTXSiluFunction",
+    "TTXFusedLinearCrossEntropyFunction",
 ]

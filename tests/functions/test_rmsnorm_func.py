@@ -15,7 +15,7 @@ def test_rmsnorm_forward_backward_diff(monkeypatch, x, w):
     monkeypatch.setenv("MOJORMSNORMFUNCTION_FWD_MODE", "DIFF")
     monkeypatch.setenv("MOJORMSNORMFUNCTION_BACKWARD_MODE", "DIFF")
 
-    y = MojoRMSNormFunction.apply(x, w)
+    y = MojoRMSNormFunction.apply(x, w, 1e-6)
 
     grad_output = torch.rand_like(y)
     y.backward(grad_output)

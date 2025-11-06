@@ -1,13 +1,10 @@
 import os
 import torch
-from ..mojo_function import MojoFuncBase
-from ...mojo_utils import get_mojo_exec_mode
+from ..mojo_function import MojoFuncBase, mojo_func_dispatcher
 import torch.nn.functional as F
-from mojo_opset.utils.logging import get_logger
-
-logger = get_logger(__name__)
 
 
+@mojo_func_dispatcher
 class MojoRMSNormFunction(MojoFuncBase):
     @staticmethod
     def forward_dump(ctx, input, weight, eps):
@@ -23,35 +20,6 @@ class MojoRMSNormFunction(MojoFuncBase):
         ctx.eps = eps
 
         return y
-
-    @staticmethod
-    def forward(ctx, input, weight, eps=1e-6):
-        if MojoRMSNormFunction._registry:
-            impl_func = MojoRMSNormFunction._registry[0][1].forward
-        else:
-            logger.warning("MojoRMSNormFunction has NO any registered implementation")
-
-            impl_func = MojoRMSNormFunction.forward_ref
-
-        layer_idx = ctx.layer_idx if hasattr(ctx, "layer_idx") else -1
-        mode_str = get_mojo_exec_mode(MojoRMSNormFunction.__name__, "FWD", layer_idx)
-
-        if mode_str == "STD":
-            return impl_func(ctx, input, weight, eps)
-        elif mode_str == "DUMP":
-            MojoRMSNormFunction.forward_dump(ctx, input, weight, eps)
-
-            return torch.zeros_like(input)
-        elif mode_str == "REF":
-            return MojoRMSNormFunction.forward_ref(ctx, input, weight, eps)
-        elif mode_str == "DIFF":
-            ref_result = MojoRMSNormFunction.forward_ref(ctx, input, weight, eps)
-            impl_result = impl_func(ctx, input, weight, eps)
-
-            torch.testing.assert_close(ref_result, impl_result)
-            return impl_result
-        else:
-            raise ValueError(f"Invalid forward mode {mode_str} for RMSNorm, please check.")
 
     @staticmethod
     def backward_dump(ctx, grad_output):
@@ -75,35 +43,3 @@ class MojoRMSNormFunction(MojoFuncBase):
         grad_weight = weight_with_grad.grad
 
         return grad_input, grad_weight, None
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        if MojoRMSNormFunction._registry:
-            impl_func = MojoRMSNormFunction._registry[0][1].backward
-        else:
-            logger.warning("MojoRMSNormFunction has NO any registered implementation")
-            impl_func = MojoRMSNormFunction.backward_ref
-
-        mode_str = os.environ.get(f"{MojoRMSNormFunction.__name__.upper()}_BWD_MODE", "STD")
-
-        if mode_str == "STD":
-            return impl_func(ctx, grad_output)
-        elif mode_str == "DUMP":
-            MojoRMSNormFunction.backward_dump(ctx, grad_output)
-
-            input_grad = torch.zeros_like(ctx.saved_tensors[0])
-            weight_grad = torch.zeros_like(ctx.saved_tensors[1])
-            return input_grad, weight_grad, None
-        elif mode_str == "REF":
-            return MojoRMSNormFunction.backward_ref(ctx, grad_output)
-        elif mode_str == "DIFF":
-            logger.warning("MojoRMSNormFunction: comparing REF and STD backward...")
-            ref_result = MojoRMSNormFunction.backward_ref(ctx, grad_output)
-            impl_result = impl_func(ctx, grad_output)
-
-            torch.testing.assert_close(ref_result[0], impl_result[0])
-            torch.testing.assert_close(ref_result[1], impl_result[1])
-
-            return impl_result
-        else:
-            raise ValueError(f"Invalid backward mode {mode_str} for RMSNorm, please check.")
