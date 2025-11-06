@@ -5,7 +5,9 @@ from datetime import timedelta
 import torch
 import torch.distributed as dist
 
-import logger
+from mojo_opset.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 DEFAULT_TIMEOUT = timedelta(minutes=30)
 

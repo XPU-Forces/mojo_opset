@@ -1,13 +1,10 @@
 import os
 import torch
-from ..mojo_function import MojoFuncBase
-from ...mojo_utils import get_mojo_exec_mode
+from ..mojo_function import MojoFuncBase, mojo_func_dispatcher
 import torch.nn.functional as F
-from mojo_opset.utils.logging import get_logger
-
-logger = get_logger(__name__)
 
 
+@mojo_func_dispatcher
 class MojoFusedLinearCrossEntropyFunction(MojoFuncBase):
     @staticmethod
     def forward_dump(
@@ -18,10 +15,12 @@ class MojoFusedLinearCrossEntropyFunction(MojoFuncBase):
         bias,
         ce_weight,
         ignore_index,
+        lse_square_scale,
         label_smoothing,
         reduction,
+        softcap,
         return_z_loss,
-        lse_square_scale,
+        accum_dtype,
     ):
         pass
 
@@ -34,10 +33,12 @@ class MojoFusedLinearCrossEntropyFunction(MojoFuncBase):
         bias,
         ce_weight,
         ignore_index,
+        lse_square_scale,
         label_smoothing,
         reduction,
+        softcap,
         return_z_loss,
-        lse_square_scale,
+        accum_dtype,
     ):
         logits_ref = F.linear(input_tensor, weight, bias).float()
 
@@ -76,74 +77,13 @@ class MojoFusedLinearCrossEntropyFunction(MojoFuncBase):
             return loss_ref
 
     @staticmethod
-    def forward(
-        ctx,
-        input_tensor,
-        weight,
-        target,
-        bias=None,
-        ce_weight=None,
-        ignore_index=-100,
-        label_smoothing=0.0,
-        reduction="mean",
-        return_z_loss=False,
-        lse_square_scale=0.0,
-    ):
-        if MojoFusedLinearCrossEntropyFunction._registry:
-            impl_func = MojoFusedLinearCrossEntropyFunction._registry[0][1].forward
-        else:
-            logger.warning("MojoFusedLinearCrossEntropyFunction has NO any registered implementation")
-            impl_func = MojoFusedLinearCrossEntropyFunction.forward_ref
-
-        layer_idx = ctx.layer_idx if hasattr(ctx, "layer_idx") else -1
-        mode_str = get_mojo_exec_mode(MojoFusedLinearCrossEntropyFunction.__name__, "FWD", layer_idx)
-
-        args = (
-            ctx,
-            input_tensor,
-            weight,
-            target,
-            bias,
-            ce_weight,
-            ignore_index,
-            label_smoothing,
-            reduction,
-            return_z_loss,
-            lse_square_scale,
-        )
-
-        if mode_str == "STD":
-            return impl_func(*args)
-        elif mode_str == "DUMP":
-            MojoFusedLinearCrossEntropyFunction.forward_dump(*args)
-
-            dummy_loss = torch.tensor(0.0, device=input_tensor.device, dtype=torch.float32)
-            if return_z_loss:
-                dummy_z_loss = torch.tensor(0.0, device=input_tensor.device, dtype=torch.float32)
-                return dummy_loss, dummy_z_loss
-            return dummy_loss
-        elif mode_str == "REF":
-            return MojoFusedLinearCrossEntropyFunction.forward_ref(*args)
-        elif mode_str == "DIFF":
-            ref_result = MojoFusedLinearCrossEntropyFunction.forward_ref(*args)
-            impl_result = impl_func(*args)
-
-            if return_z_loss:
-                torch.testing.assert_close(ref_result[0], impl_result[0])
-                torch.testing.assert_close(ref_result[1], impl_result[1])
-            else:
-                torch.testing.assert_close(ref_result, impl_result)
-            return impl_result
-        else:
-            raise ValueError(f"Invalid forward mode {mode_str} for FusedLinearCrossEntropy, please check.")
-
-    @staticmethod
     def backward_dump(ctx, grad_loss, grad_z_loss):
         pass
 
     @staticmethod
-    def backward_ref(ctx, grad_loss, grad_z_loss):
+    def backward_ref(ctx, grad_loss, grad_z_loss=None):
         input_tensor, weight, target, bias, ce_weight = ctx.saved_tensors
+
         ignore_index = ctx.ignore_index
         label_smoothing = ctx.label_smoothing
         reduction = ctx.reduction
@@ -183,41 +123,4 @@ class MojoFusedLinearCrossEntropyFunction(MojoFuncBase):
         grad_weight = weight_with_grad.grad
         grad_bias = bias_with_grad.grad if bias_with_grad is not None else None
 
-        return grad_input, grad_weight, None, grad_bias, None, None, None, None, None, None
-
-    @staticmethod
-    def backward(ctx, grad_loss, grad_z_loss=None):
-        if MojoFusedLinearCrossEntropyFunction._registry:
-            impl_func = MojoFusedLinearCrossEntropyFunction._registry[0][1].backward
-        else:
-            logger.warning("MojoFusedLinearCrossEntropyFunction has NO any registered implementation")
-            impl_func = MojoFusedLinearCrossEntropyFunction.backward_ref
-
-        mode_str = os.environ.get(f"{MojoFusedLinearCrossEntropyFunction.__name__.upper()}_BWD_MODE", "STD")
-
-        args = (ctx, grad_loss, grad_z_loss)
-
-        if mode_str == "STD":
-            return impl_func(*args)
-        elif mode_str == "DUMP":
-            MojoFusedLinearCrossEntropyFunction.backward_dump(*args)
-
-            grad_input = torch.zeros_like(ctx.saved_tensors[0])
-            grad_weight = torch.zeros_like(ctx.saved_tensors[1])
-            grad_bias = torch.zeros_like(ctx.saved_tensors[3]) if ctx.saved_tensors[3] is not None else None
-            return grad_input, grad_weight, None, grad_bias, None, None, None, None, None, None
-        elif mode_str == "REF":
-            return MojoFusedLinearCrossEntropyFunction.backward_ref(*args)
-        elif mode_str == "DIFF":
-            logger.warning("MojoFusedLinearCrossEntropyFunction: comparing REF and STD backward...")
-            ref_results = MojoFusedLinearCrossEntropyFunction.backward_ref(*args)
-            impl_results = impl_func(*args)
-
-            torch.testing.assert_close(ref_results[0], impl_results[0])
-            torch.testing.assert_close(ref_results[1], impl_results[1])
-            if ref_results[3] is not None:
-                torch.testing.assert_close(ref_results[3], impl_results[3])
-
-            return impl_results
-        else:
-            raise ValueError(f"Invalid backward mode {mode_str} for FusedLinearCrossEntropy, please check.")
+        return grad_input, grad_weight, None, grad_bias, None, None, None, None, None, None, None, None

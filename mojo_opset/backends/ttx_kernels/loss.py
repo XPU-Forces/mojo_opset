@@ -1,6 +1,6 @@
 import torch
 import triton
-from mojo_opset.backends.ttx_kernels.src.ascend.loss import (
+from mojo_opset.backends.ttx_kernels.src.ascend.fused_linear_cross_entropy import (
     amp_custom_fwd,
     amp_custom_bwd,
     fused_linear_cross_entropy_forward,
@@ -70,11 +70,14 @@ class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
             grad_bias.detach() if bias is not None else None,
         )
         ctx.return_z_loss = return_z_loss
-        return loss, z_loss
+        if return_z_loss:
+            return loss, z_loss
+        else:
+            return loss
 
     @staticmethod
     @amp_custom_bwd
-    def backward(ctx, grad_output, grad_output2):
+    def backward(ctx, grad_output, grad_output2=None):
         if ctx.return_z_loss:
             del grad_output2  # z_loss is only for logging
         (grad_input, grad_weight, grad_bias) = ctx.saved_tensors
