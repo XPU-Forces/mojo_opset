@@ -4,6 +4,9 @@ import torch_npu
 
 
 class TorchRoPE(MojoRoPE, default_priority=0):
+    def __init__(self, op_name: str = "", layer_idx: int = 0):
+        super().__init__(op_name, layer_idx)
+
     def forward_std(self, q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
         if cos.dim() == 3:
             cos = cos.unsqueeze(1)
