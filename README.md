@@ -11,7 +11,7 @@ ttx-kernels 提供了 Mojo Opset 的 triton 版本实现。
 source code: mojo_opset/backends/ttx_kernels/src
 
 ### 2.2. xpu_ops
-xpu_ops 提供了 Moho Opset 的 C-like 版本实现。
+xpu_ops 提供了 Mojo Opset 的 C-like 版本实现。
 
 ## 3. Support matrix
 
