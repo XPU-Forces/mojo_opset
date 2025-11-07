@@ -95,6 +95,9 @@ class MojoPagedPrefillGQA(MojoOperator):
     def __init__(
         self,
         page_size: int,
+        num_q_heads: int,
+        num_kv_heads: int, 
+        head_dim: int,
         is_causal: bool = True,
         is_prefill: bool = True,
         gqa_layout: str = "ABAB",
