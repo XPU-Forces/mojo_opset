@@ -1,14 +1,14 @@
-from .attention import NativeMojoPagedPrefillGQA, NativeMojoPagedDecodeGQA
-from .norm import NativeMojoNorm
-from .activation import NativeMojoSilu, NativeMojoSiluMul, NativeMojoGelu
-from .pos_emb import NativeRoPE
+from .attention import TorchPagedPrefillGQA, TorchPagedDecodeGQA
+from .norm import TorchNorm
+from .activation import TorchSilu, TorchSiluMul, TorchGelu
+from .pos_emb import TorchRoPE
 
 __all__ = [
-    "NativeMojoPagedPrefillGQA",
-    "NativeMojoPagedDecodeGQA",
-    "NativeMojoNorm",
-    "NativeMojoSilu",
-    "NativeMojoSiluMul",
-    "NativeMojoGelu",
-    "NativeRoPE",
+    "TorchPagedPrefillGQA",
+    "TorchPagedDecodeGQA",
+    "TorchNorm",
+    "TorchSilu",
+    "TorchSiluMul",
+    "TorchGelu",
+    "TorchRoPE",
 ]

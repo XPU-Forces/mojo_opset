@@ -3,7 +3,7 @@ from mojo_opset.core import MojoNorm
 import torch_npu
 
 
-class NativeMojoNorm(MojoNorm, default_priority=0):
+class TorchNorm(MojoNorm, default_priority=0):
     def __init__(
         self,
         hidden_size,

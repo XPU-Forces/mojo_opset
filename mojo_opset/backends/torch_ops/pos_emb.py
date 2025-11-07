@@ -3,7 +3,7 @@ from mojo_opset.core import MojoRoPE
 import torch_npu
 
 
-class NativeRoPE(MojoRoPE, default_priority=0):
+class TorchRoPE(MojoRoPE, default_priority=0):
     def forward_std(self, q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
         if cos.dim() == 3:
             cos = cos.unsqueeze(1)

@@ -5,7 +5,7 @@ import torch_npu
 import numpy as np
 
 
-class NativeMojoPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
+class TorchPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
     def __init__(self,
                  is_causal: bool = True,
                  is_prefill: bool = True,
@@ -46,7 +46,7 @@ class NativeMojoPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
         return out
 
 
-class NativeMojoPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
+class TorchPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
     def __init__(self,
                  is_causal: bool = True,
                  is_prefill: bool = True,
