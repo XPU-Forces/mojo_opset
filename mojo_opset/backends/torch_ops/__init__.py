@@ -1,6 +1,6 @@
-from .npu.attention import TorchOpsMojoPagedPrefillGQA
+from .npu.attention import TorchMojoPagedPrefillGQA
 
 
 __all__ = [
-    "TorchOpsMojoPagedPrefillGQA",
+    "TorchMojoPagedPrefillGQA",
 ]

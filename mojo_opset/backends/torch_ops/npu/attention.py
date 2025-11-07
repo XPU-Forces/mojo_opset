@@ -8,18 +8,20 @@ from .attention_mask import (
 from mojo_opset.core.attn.mojo_prefill_gqa import (
     MojoPagedPrefillGQA,
 )
-class TorchOpsMojoPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
-    def __init__(self, 
-                page_size, 
-                num_q_heads,
-                num_kv_heads, 
-                head_dim,
-                is_causal = True, 
-                is_prefill = True, 
-                gqa_layout = "ABAB", 
-                window_size = -1,
-                op_name = "", 
-                layer_idx = 0):
+class TorchMojoPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
+    def __init__(
+        self, 
+        page_size, 
+        num_q_heads,
+        num_kv_heads, 
+        head_dim,
+        is_causal = True, 
+        is_prefill = True, 
+        gqa_layout = "ABAB", 
+        window_size = -1,
+        op_name = "", 
+        layer_idx = 0
+    ):
         super().__init__(page_size, is_causal, is_prefill, gqa_layout, window_size, op_name, layer_idx)
         assert page_size >= 128 and page_size <= 512, f"Currently only support block size between 128 and 512."
         assert page_size % 128 == 0, f"Currently only support block size in multiples of 128."
@@ -31,7 +33,15 @@ class TorchOpsMojoPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
         # npu require generating a mask, when there is a model config, its best to pass in max_seq_len
         init_ascend_attention_mask_builder(65536, torch.bfloat16, "npu")
         
-    def forward_std(self, query, k_cache, v_cache, cu_seqlens_q, block_tables, sm_scale = None):
+    def forward_std(
+        self, 
+        query, 
+        k_cache, 
+        v_cache, 
+        cu_seqlens_q, 
+        block_tables, 
+        sm_scale = None
+    ):
         if sm_scale is None:
             sm_scale = self.head_dim ** -0.5
         
