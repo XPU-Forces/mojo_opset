@@ -6,18 +6,18 @@ from ..mojo_operator import MojoOperator
 
 class MojoRoPE(MojoOperator):
     """
-    旋转位置编码（RoPE）算子的通用参数定义。
+    Common parameter definitions for Rotary Position Embedding (RoPE) operator.
 
-    Init 参数：
-    - rotary_offset (int)：旋转位置偏移量，默认 0。
-    - interleaved (bool)：是否使用交错模式，默认 False。
-    - dynamic_ntk (bool)：是否使用动态 NTK 缩放，默认 False。
-    - max_seq_len (int|None)：最大序列长度，可选。
-    - is_varlen (bool)：为 True 时优先按 TND（连续 token 视角）处理；为 False 时按 BSND；默认 True。
-    - op_name (str)：算子名称占位。
-    - layer_idx (int)：层索引占位。
+    Init parameters:
+    - rotary_offset (int): Rotary position offset, default 0.
+    - interleaved (bool): Whether to use interleaved mode, default False.
+    - dynamic_ntk (bool): Whether to use dynamic NTK scaling, default False.
+    - max_seq_len (int|None): Maximum sequence length, optional.
+    - is_varlen (bool): When True, prioritize TND (continuous token perspective) processing; when False, use BSND; default True.
+    - op_name (str): Operator name placeholder.
+    - layer_idx (int): Layer index placeholder.
 
-    说明：仅覆盖通用参数与轻量校验；forward 计算体占位，不包含后端或量化实现。
+    Description: Only covers common parameters and lightweight validation; forward computation body is placeholder, does not include backend or quantization implementation.
     """
     def __init__(
         self, 

@@ -14,16 +14,16 @@ class MojoMoEGate(MojoOperator):
         op_name: str = "",
     ):
         """
-        MoEGating 的通用参数定义。
+        Common parameter definitions for MoE Gating operator.
 
-        Init 参数：
-        - gate_weight (torch.Tensor)：门控权重，常见形状 [hidden_dim, num_experts]。
-        - top_k (int)：选择的专家数量，正整数。
-        - select_method (str)：选择方法枚举，{"TOPKSoftmax", "AuxTC"}；默认 "TOPKSoftmax"。
-        - is_varlen (bool)：为 True 时优先按 TND（逐 token）计算；为 False 时按 BSND；默认 True。
-        - op_name (str)：算子名称占位。
+        Init parameters:
+        - gate_weight (torch.Tensor): Gating weight, common shape [hidden_dim, num_experts].
+        - top_k (int): Number of experts to select, positive integer.
+        - select_method (str): Selection method enumeration, {"TOPKSoftmax", "AuxTC"}; default "TOPKSoftmax".
+        - is_varlen (bool): When True, prioritize TND (per token) computation; when False, use BSND; default True.
+        - op_name (str): Operator name placeholder.
 
-        范围：仅覆盖通用参数，不涉及后端细分与量化实现。
+        Scope: Only covers common parameters, does not involve backend specialization or quantization implementation.
         """
         super().__init__(op_name)
         if not isinstance(gate_weight, torch.Tensor):
