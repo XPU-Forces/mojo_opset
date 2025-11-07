@@ -15,14 +15,14 @@ class MojoLinear(MojoOperator):
         op_name: str = "",
     ):
         """
-        Linear 的通用参数定义。
+        Common parameter definitions for Linear operator.
 
-        Init 参数：
-        - input_layout (str)：输入布局枚举，取值 {"KN","NZ"}，默认 "NZ"。
-        - weight (torch.Tensor)：权重张量，形状 [in_dim, out_dim]。
-        - bias (Optional[torch.Tensor])：偏置张量，形状与输出维度对齐；可选。
-        - is_varlen (bool)：为 True 时优先按 TND（逐 token）计算；为 False 时按 BSND；默认 True。
-        - op_name (str)：算子名称占位。
+        Init parameters:
+        - input_layout (str): Input layout enumeration, values {"KN","NZ"}, default "NZ".
+        - weight (torch.Tensor): Weight tensor, shape [in_dim, out_dim].
+        - bias (Optional[torch.Tensor]): Bias tensor, shape aligned with output dimension; optional.
+        - is_varlen (bool): When True, prioritize TND (per token) computation; when False, use BSND; default True.
+        - op_name (str): Operator name placeholder.
         """
         super().__init__(op_name)
 
@@ -101,17 +101,17 @@ class MojoGroupLinear(MojoOperator):
         op_name: str = "",
     ):
         """
-        Group Linear 的通用参数定义。
+        Common parameter definitions for Group Linear operator.
 
-        Init 参数：
-        - input_layout (str)：输入布局枚举，取值 {"KN","NZ"}，默认 "NZ"。
-        - weight (torch.Tensor)：权重张量，形状 [G, in_dim_g, out_dim_g] 或 [in_dim, out_dim]。
-        - bias (Optional[torch.Tensor])：偏置张量，形状与输出维度对齐；可选。
-        - is_varlen (bool)：为 True 时优先按 TND（逐 token/逐组）计算；为 False 时按 BSND；默认 True。
-        - op_name (str)：算子名称占位。
+        Init parameters:
+        - input_layout (str): Input layout enumeration, values {"KN","NZ"}, default "NZ".
+        - weight (torch.Tensor): Weight tensor, shape [G, in_dim_g, out_dim_g] or [in_dim, out_dim].
+        - bias (Optional[torch.Tensor]): Bias tensor, shape aligned with output dimension; optional.
+        - is_varlen (bool): When True, prioritize TND (per token/per group) computation; when False, use BSND; default True.
+        - op_name (str): Operator name placeholder.
 
-        语义与校验：
-        - forward 的 group_list 需与 weight 对齐。
+        Semantics and validation:
+        - forward's group_list must align with weight.
         """
         super().__init__(op_name)
 

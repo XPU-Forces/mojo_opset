@@ -9,18 +9,18 @@ from ..mojo_operator import MojoOperator
 
 class MojoResidualAddNorm(MojoOperator):
     """
-    融合算子（Residual+LayerNorm/RMSNorm）的通用参数定义。
+    Common parameter definitions for fusion operator (Residual+LayerNorm/RMSNorm).
 
-    Init 参数：
-    - epsilon (float)：数值稳定项，默认 1e-5，需 > 0。
-    - norm_type (str)：归一化类型，枚举 {"rmsnorm", "layernorm"}，默认 "rmsnorm"。
-    - gamma (torch.Tensor|None)：仿射参数 gamma，可选，1-D，dtype 为浮点。
-    - beta (torch.Tensor|None)：仿射参数 beta（仅 LayerNorm 支持），可选，1-D，dtype 为浮点。
-    - is_varlen (bool)：为 True 时优先按 TND（连续 token 视角）归一化；为 False 时按 BSND；默认 True。
-    - op_name (str)：算子名称占位。
-    - layer_idx (int)：层索引占位。
+    Init parameters:
+    - epsilon (float): Numerical stability term, default 1e-5, must be > 0.
+    - norm_type (str): Normalization type, enumeration {"rmsnorm", "layernorm"}, default "rmsnorm".
+    - gamma (torch.Tensor|None): Affine parameter gamma, optional, 1-D, dtype floating point.
+    - beta (torch.Tensor|None): Affine parameter beta (only supported for LayerNorm), optional, 1-D, dtype floating point.
+    - is_varlen (bool): When True, prioritize TND (continuous token perspective) normalization; when False, use BSND; default True.
+    - op_name (str): Operator name placeholder.
+    - layer_idx (int): Layer index placeholder.
 
-    说明：仅覆盖通用参数与轻量校验；forward 计算体占位，不包含后端或量化实现。
+    Description: Only covers common parameters and lightweight validation; forward computation body is placeholder, does not include backend or quantization implementation.
     """
 
     def __init__(

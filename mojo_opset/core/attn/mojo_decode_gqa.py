@@ -41,17 +41,17 @@ class MojoPagedDecodeGQA(MojoOperator):
         layer_idx: int = 0,
     ):
         """
-        初始化通用参数层面的 Paged Decode GQA 注意力算子。
-        参数说明：
-        - q_scale_factor (int)：q head 的倍数（整数，默认 1），不对 query 进行缩放。
-        - gqa_layout (str)：GQA 头分组布局，取值 {"ABAB","AABB"}，默认 "ABAB"。
-        - is_causal (bool)：是否启用因果掩码，默认 True。
-        - window_size (int)：注意力窗口长度；-1 表示全窗口，或 >=1 表示滑窗长度，默认 -1。
-        - softmax_scale (Optional[float])：注意力 score 的缩放系数，需 >0；默认 None。
-        - kv_layout (str)：KV 存储布局指示，取值 {"ND","NZ","CB"}，默认 "ND"。
-        - tp_size (int)：张量并行大小，默认 1。
-        - is_varlen (bool)：为 True 时走 TND（变长）优先路径；为 False 时走 BSND；默认 True。
-        - op_name (str)：算子名称占位，用于注册与诊断。
+        Initialize the Paged Decode GQA attention operator with common parameters.
+        Parameter descriptions:
+        - q_scale_factor (int): Multiplier for q heads (integer, default 1), no scaling applied to query.
+        - gqa_layout (str): GQA head grouping layout, values {"ABAB","AABB"}, default "ABAB".
+        - is_causal (bool): Whether to enable causal masking, default True.
+        - window_size (int): Attention window length; -1 means full window, or >=1 means sliding window length, default -1.
+        - softmax_scale (Optional[float]): Scaling factor for attention scores, must be >0; default None.
+        - kv_layout (str): KV storage layout indicator, values {"ND","NZ","CB"}, default "ND".
+        - tp_size (int): Tensor parallel size, default 1.
+        - is_varlen (bool): When True, use TND (variable length) priority path; when False, use BSND; default True.
+        - op_name (str): Operator name placeholder for registration and diagnostics.
         """
         super().__init__(op_name, layer_idx)
 

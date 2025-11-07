@@ -13,15 +13,15 @@ class MojoMoECombine(MojoOperator):
         op_name: str = "",
     ):
         """
-        MoECombine 的通用参数定义。
+        Common parameter definitions for MoE Combine operator.
 
-        Init 参数：
-        - ep_group：专家并行进程组（torch.distributed.ProcessGroup 占位），可选。
-        - tp_group：张量并行进程组（torch.distributed.ProcessGroup 占位），可选。
-        - is_varlen (bool)：为 True 时优先按 TND（逐 token）聚合；为 False 时按 BSND；默认 True。
-        - op_name：算子名称占位。
+        Init parameters:
+        - ep_group: Expert parallel process group (torch.distributed.ProcessGroup placeholder), optional.
+        - tp_group: Tensor parallel process group (torch.distributed.ProcessGroup placeholder), optional.
+        - is_varlen (bool): When True, prioritize TND (per token) aggregation; when False, use BSND; default True.
+        - op_name: Operator name placeholder.
 
-        范围：仅覆盖通用语义，不涉及后端通信与分核细节。
+        Scope: Only covers common semantics, does not involve backend communication or core partitioning details.
         """
         super().__init__(op_name)
         self.ep_group = ep_group
@@ -115,15 +115,15 @@ class MojoBigEPCombine(MojoOperator):
         op_name: str = "",
     ):
         """
-        MoECombine 的通用参数定义。
+        Common parameter definitions for MoE Combine operator.
 
-        Init 参数：
-        - ep_group：专家并行进程组（torch.distributed.ProcessGroup 占位），可选。
-        - tp_group：张量并行进程组（torch.distributed.ProcessGroup 占位），可选。
-        - is_varlen (bool)：为 True 时优先按 TND（逐 token）聚合；为 False 时按 BSND；默认 True。
-        - op_name：算子名称占位。
+        Init parameters:
+        - ep_group: Expert parallel process group (torch.distributed.ProcessGroup placeholder), optional.
+        - tp_group: Tensor parallel process group (torch.distributed.ProcessGroup placeholder), optional.
+        - is_varlen (bool): When True, prioritize TND (per token) aggregation; when False, use BSND; default True.
+        - op_name: Operator name placeholder.
 
-        范围：仅覆盖通用语义，不涉及后端通信与分核细节。
+        Scope: Only covers common semantics, does not involve backend communication or core partitioning details.
         """
         super().__init__(op_name)
         self.ep_group = ep_group
