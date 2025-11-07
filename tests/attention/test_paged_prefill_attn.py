@@ -67,7 +67,10 @@ def generate_paged_prefill_data(
 
 
 test_configs = [
-    (2, 16, 4, 128, 1024, 32, torch.bfloat16, "M_BF16"),
+    (2, 16, 4, 128, 1024, 128, torch.bfloat16, "M_BF16"),
+    (2, 16, 4, 128, 1024, 256, torch.bfloat16, "M_BF16"),
+    (2, 32, 8, 128, 1024, 512, torch.bfloat16, "M_BF16"),
+
 ]
 
 
@@ -104,7 +107,13 @@ def test_paged_prefill_gqa(
     rtol: float,
     gqa_layout: str,
 ):
+    _, num_kv_heads, block_size, _ = k_cache.shape
+    _, num_q_heads, head_dim = query.shape
     op = MojoPagedPrefillGQA(
+        block_size,
+        num_q_heads,
+        num_kv_heads,
+        head_dim,
         is_causal=True,
         is_prefill=True,
         gqa_layout=gqa_layout,
