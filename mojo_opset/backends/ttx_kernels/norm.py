@@ -9,9 +9,9 @@ from mojo_opset.backends.ttx_kernels.src.ascend.utils import torch_to_triton_dty
 class TTXNorm(MojoNorm, default_priority=0):
     def forward_std(self, hidden_state: torch.Tensor):
         if self.norm_type == "rmsnorm":
-            return rms_norm_fwd(hidden_state, self.weight, self.variance_epsilon, offset=0.0, casting_mode="llama")[0]
+            return rms_norm_fwd(hidden_state, self.gamma, self.epsilon, offset=0.0, casting_mode="llama")[0]
         elif self.norm_type == "layernorm":
-            return ttx_layer_norm(hidden_state, self.weight, self.bias, self.variance_epsilon)
+            return ttx_layer_norm(hidden_state, self.gamma, self.beta, self.epsilon)
         else:
             raise NotImplementedError(f"[TTXNorm] Only support rmsnorm/layernorm, but got {self.norm_type}")
 

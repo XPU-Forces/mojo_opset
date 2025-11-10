@@ -101,7 +101,7 @@ def test_paged_decode_gqa(
         v_cache,
         seqlens,
         block_tables,
-        sm_scale=sm_scale,
+        softmax_scale=sm_scale,
         atol=atol,
         rtol=rtol,
     )

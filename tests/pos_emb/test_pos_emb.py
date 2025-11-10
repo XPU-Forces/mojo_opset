@@ -18,7 +18,7 @@ from mojo_opset import MojoRoPE
 @auto_switch_platform()
 @bypass_not_implemented
 def test_pos_emb(q, k):
-    rope = MojoRoPE()
+    rope = MojoRoPE(is_varlen=False)
 
     # Transpose q and k to mock the memory layout transformation used in the real inference framework.
     q, k = q.transpose(1, 2), k.transpose(1, 2)

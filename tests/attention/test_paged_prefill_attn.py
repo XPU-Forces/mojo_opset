@@ -106,9 +106,11 @@ def test_paged_prefill_gqa(
 ):
     op = MojoPagedPrefillGQA(
         is_causal=True,
-        is_prefill=True,
         gqa_layout=gqa_layout,
     )
+
+    head_dim = query.shape[-1]
+    sm_scale = 1.0 / math.sqrt(head_dim)
 
     op.forward_diff(
         query,
@@ -116,6 +118,7 @@ def test_paged_prefill_gqa(
         v_cache,
         cu_seqlens_q,
         block_tables,
+        softmax_scale=sm_scale,
         atol=atol,
         rtol=rtol,
     )

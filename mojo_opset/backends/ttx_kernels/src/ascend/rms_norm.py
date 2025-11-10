@@ -627,7 +627,7 @@ class TTXRMSNorm(nn.Module):
             "zeros",
         ], f"init_fn must be either 'ones' or 'zeros', got {init_fn}"
         self.weight = nn.Parameter(torch.ones(hidden_size) if init_fn == "ones" else torch.zeros(hidden_size))
-        self.variance_epsilon, self.offset, self.casting_mode, self.in_place = (
+        self.epsilon, self.offset, self.casting_mode, self.in_place = (
             eps,
             offset,
             casting_mode,
@@ -638,7 +638,7 @@ class TTXRMSNorm(nn.Module):
         return TTXRMSNormFunction.apply(
             hidden_states,
             self.weight,
-            self.variance_epsilon,
+            self.epsilon,
             self.offset,
             self.casting_mode,
             self.in_place,
@@ -646,5 +646,5 @@ class TTXRMSNorm(nn.Module):
 
     def extra_repr(self):
         return (
-            f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}, offset={self.offset}, in_place={self.in_place}"
+            f"{tuple(self.weight.shape)}, eps={self.epsilon}, offset={self.offset}, in_place={self.in_place}"
         )

@@ -114,11 +114,14 @@ class MojoOperator(ABC, torch.nn.Module):
         kwargs_for_ref = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in kwargs.items()}
         refs_result = self.forward_ref(*args_for_ref, **kwargs_for_ref)
 
+        assert norm_result is not None, "forward_std should return a non-None value."
+        assert refs_result is not None, "forward_ref should return a non-None value."
+
         if isinstance(norm_result, tuple) or isinstance(norm_result, list):
             for norm, ref in zip(norm_result, refs_result):
-                torch.testing.assert_close(norm, ref, atol=atol, rtol=rtol)
+                torch.testing.assert_close(norm.to(torch.float32), ref.to(torch.float32), atol=atol, rtol=rtol)
         else:
-            torch.testing.assert_close(norm_result, refs_result, atol=atol, rtol=rtol)
+            torch.testing.assert_close(norm_result.to(torch.float32), refs_result.to(torch.float32), atol=atol, rtol=rtol)
 
         return norm_result
 
