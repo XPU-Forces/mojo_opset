@@ -5,6 +5,7 @@ import math
 from typing import Optional, Tuple, Any
 
 from ..mojo_operator import MojoOperator
+from .. import VALID_KV_LAYOUTS
 
 
 class MojoDecodeGQA(MojoOperator):
@@ -34,7 +35,7 @@ class MojoPagedDecodeGQA(MojoOperator):
         q_scale_factor: int = 1,
         gqa_layout: str = "ABAB",
         window_size: int = -1,
-        kv_layout: str = "ND",
+        kv_layout: str = VALID_KV_LAYOUTS[0],
         tp_size: int = 1,
         is_varlen: bool = True,
         op_name: str = "",
@@ -48,7 +49,7 @@ class MojoPagedDecodeGQA(MojoOperator):
         - is_causal (bool): Whether to enable causal masking, default True.
         - window_size (int): Attention window length; -1 means full window, or >=1 means sliding window length, default -1.
         - softmax_scale (Optional[float]): Scaling factor for attention scores, must be >0; default None.
-        - kv_layout (str): KV storage layout indicator, values {"ND","NZ","CB"}, default "ND".
+        - kv_layout (str): KV storage layout indicator, values defined by VALID_KV_LAYOUTS, default VALID_KV_LAYOUTS[0].
         - tp_size (int): Tensor parallel size, default 1.
         - is_varlen (bool): When True, use TND (variable length) priority path; when False, use BSND; default True.
         - op_name (str): Operator name placeholder for registration and diagnostics.
@@ -65,8 +66,8 @@ class MojoPagedDecodeGQA(MojoOperator):
         if not isinstance(window_size, int) or (window_size != -1 and window_size < 1):
             raise ValueError(f"window_size must be -1 or >= 1, got {window_size}")
         
-        if kv_layout not in ["ND", "NZ", "CB"]:
-            raise ValueError(f"kv_layout must be one of ['ND', 'NZ', 'CB'], got {kv_layout}")
+        if kv_layout not in VALID_KV_LAYOUTS:
+            raise ValueError(f"kv_layout must be one of {VALID_KV_LAYOUTS}, got {kv_layout}")
         
         if not isinstance(tp_size, int) or tp_size <= 0:
             raise ValueError(f"tp_size must be a positive integer, got {tp_size}")
