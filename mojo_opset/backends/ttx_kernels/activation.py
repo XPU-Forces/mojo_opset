@@ -4,7 +4,7 @@ from mojo_opset.backends.ttx_kernels.src.ascend.silu import ttx_silu, silu_fwd, 
 from mojo_opset.backends.ttx_kernels.src.ascend.swiglu import ttx_silu_mul
 
 
-from mojo_opset.core import MojoGelu, MojoSilu, MojoSiluFunction, MojoSiluMul
+from mojo_opset.core import MojoGelu, MojoSilu, MojoSiluFunction, MojoSwiGLU
 
 
 class TTXGelu(MojoGelu, default_priority=0):
@@ -17,7 +17,7 @@ class TTXSilu(MojoSilu, default_priority=0):
         return ttx_silu(hidden_state)
 
 
-class TTXSiluMul(MojoSiluMul, default_priority=0):
+class TTXSwiGLU(MojoSwiGLU, default_priority=0):
     def forward_std(self, gate_out: torch.Tensor, up_out: torch.Tensor):
         return ttx_silu_mul(gate_out, up_out)
 
