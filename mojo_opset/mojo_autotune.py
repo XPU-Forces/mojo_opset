@@ -1,7 +1,6 @@
-
-
 import time
 import torch
+from functools import lru_cache
 
 from mojo_opset.core.mojo_operator import MojoOperator
 from mojo_opset.utils.logging import get_logger
@@ -9,14 +8,15 @@ from mojo_opset.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-_tuning_cache = {}  
+_tuning_cache = {}
+# _autotuned_instances = {}
 
 
+# NOTE: just as example.
 def benchmark_op(func_to_run, *args, **kwargs) -> float:
     warmup = 3
-    repeat = 10
+    repeat = 5
 
-    
     device = None
     for arg in args:
         if isinstance(arg, torch.Tensor):
@@ -24,16 +24,13 @@ def benchmark_op(func_to_run, *args, **kwargs) -> float:
             break
 
     sync_func = lambda: None
-    if device and device.type == "cuda":
-        sync_func = torch.cuda.synchronize
-    elif device and device.type == "npu":
-        sync_func = torch.npu.synchronize
+    assert device and device.type == "npu", "Only NPU is supported for auto-tuning now."
+    sync_func = torch.npu.synchronize
 
     for _ in range(warmup):
         func_to_run(*args, **kwargs)
     sync_func()
 
-    
     start_time = time.time()
     for _ in range(repeat):
         func_to_run(*args, **kwargs)
@@ -43,15 +40,12 @@ def benchmark_op(func_to_run, *args, **kwargs) -> float:
     return (end_time - start_time) / repeat * 1000
 
 
-_autotuned_instances = {}  
-
-
+@lru_cache(maxsize=128)
 def create_autotuned_op(cls_to_tune, default_key_func: callable, *init_args, **init_kwargs):
-    instance_key = (cls_to_tune, str(init_args), str(init_kwargs.items()))
+    # instance_key = (cls_to_tune, str(init_args), str(init_kwargs.items()))
+    # if instance_key in _autotuned_instances:
+    #     return _autotuned_instances[instance_key]
 
-    if instance_key in _autotuned_instances:
-        return _autotuned_instances[instance_key]
-    
     class AutoTunerWrapper(cls_to_tune):
         _is_autotuner_wrapper = True
 
@@ -68,8 +62,8 @@ def create_autotuned_op(cls_to_tune, default_key_func: callable, *init_args, **i
             return None
 
         def _tune_for_key(self, current_key, *args, **kwargs):
-            logger.info(f"--- Running Auto-tuner for {self._family_head.__name__} with key={current_key} ---")
-            
+            logger.info(f"Running Auto-tuner for {self._family_head.__name__} with key={current_key}")
+
             best_time = float("inf")
             best_performer_forward_std = None
 
@@ -127,10 +121,10 @@ def create_autotuned_op(cls_to_tune, default_key_func: callable, *init_args, **i
                 return best_func(*args, **kwargs)
             else:
                 return super().forward(*args, **kwargs)
-    
+
     instance = AutoTunerWrapper(*init_args, **init_kwargs)
     instance._init_args = init_args
     instance._init_kwargs = init_kwargs
 
-    _autotuned_instances[instance_key] = instance
+    # _autotuned_instances[instance_key] = instance
     return instance
