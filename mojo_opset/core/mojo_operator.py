@@ -15,6 +15,8 @@ logger = get_logger(__name__)
 
 class MojoOperator(ABC, torch.nn.Module):
     def __init_subclass__(cls, default_priority=0, **kwargs):
+        if getattr(cls, '_is_autotuner_wrapper', False):
+            return
         super().__init_subclass__(**kwargs)
 
         is_direct_child = MojoOperator in cls.__bases__
