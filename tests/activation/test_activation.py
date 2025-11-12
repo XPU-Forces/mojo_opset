@@ -3,7 +3,7 @@ import torch
 
 from tests.utils import auto_switch_platform, bypass_not_implemented
 
-from mojo_opset import MojoGelu, MojoSilu, MojoSiluMul
+from mojo_opset import MojoGelu, MojoSilu, MojoSwiGLU
 
 
 @pytest.mark.parametrize(
@@ -39,6 +39,6 @@ def test_silu(x):
 )
 @auto_switch_platform()
 @bypass_not_implemented
-def test_silu_mul(gate_out, up_out):
-    silu = MojoSiluMul()
-    silu.forward_diff(gate_out, up_out)
+def test_swiglu(gate_out, up_out):
+    swiglu = MojoSwiGLU()
+    swiglu.forward_diff(gate_out, up_out)

@@ -9,7 +9,8 @@ VALID_KV_LAYOUTS = sorted({"NPU_ND", "NPU_NZ", "AMD_CB"})
 
 """ mojo activation """
 from .activation.mojo_gelu import MojoGelu, MojoGeluQuant
-from .activation.mojo_silu import MojoSilu, MojoSiluQuant, MojoSiluMul
+from .activation.mojo_silu import MojoSilu, MojoSiluQuant
+from .activation.mojo_swiglu import MojoSwiGLU
 
 """ mojo attn """
 from .attn.mojo_prefill_gqa import MojoPrefillGQA, MojoPagedPrefillGQA
@@ -85,7 +86,7 @@ __all__ = [
     "MojoGeluQuant",
     "MojoSilu",
     "MojoSiluQuant",
-    "MojoSiluMul",
+    "MojoSwiGLU",
 
     "MojoPrefillGQA",
     "MojoPagedPrefillGQA",
