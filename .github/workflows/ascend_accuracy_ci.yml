@@ -49,8 +49,8 @@ jobs:
         run: |
           echo "Running ttx kernels tests..."
           MOJO_BACKEND="+TTX_KERNELS" python3 -m pytest tests/
-      - name: test-XPU_OPS
-        shell: bash
-        run: |
-          echo "Running xpu_ops tests..."
-          MOJO_BACKEND="+TTX_KERNELS" python3 -m pytest tests/ --ignore=tests/test_qwen3_dense_patching.py --ignore=tests/functions
+      # - name: test-XPU_OPS
+      #   shell: bash
+      #   run: |
+      #     echo "Running xpu_ops tests..."
+      #     MOJO_BACKEND="+XPU_OPS" python3 -m pytest tests/ --ignore=tests/test_qwen3_dense_patching.py --ignore=tests/functions

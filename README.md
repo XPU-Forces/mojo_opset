@@ -134,12 +134,15 @@ export MOJO_BACKEND="+TTX_KERNELS, XPU_OPS"
 ```
 
 ### 5.3 modeling reference
-Mojo Opset 提供了一份 qwen3 dense modeling 实现（example_models/mojo_qwen3_dense.py，modify from：https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py），
-并实现了相应的 monkey-patch 替换机制（mojo_opset/mojo_monkey_patch.py），仅需一行代码即可将 native modeling 中若干组件替换为 Mojo op，并进一步 dispatch 到高性能后端实现。您可以运行：
+以 qwen3 dense 为例（modify from：https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py），您可以通过以下任意一种方式使用 Mojo Opset 构建模型：
+1. monkey patch
+example_models/torch_qwen3_dense.py 中提供了原生 torch 实现的 modeling，我们实现了相应的 monkey-patch 替换机制（mojo_opset/mojo_monkey_patch.py），仅需一行代码即可将 native modeling 中若干组件替换为 Mojo op，并进一步 dispatch 到高性能后端实现。您可以运行：
 ```bash
 MOJO_BACKEND="+TTX_KERNELS" pytest -s tests/test_qwen3_dense_patching.py
 ```
 跑通一个 decoder layer 的 prefill/decode 流程。
+2. 即插即用
+example_models/mojo_qwen3_dense.py 中提供了直接基于 Mojo Opset 实现的 modeling，效果等同于(1)中 monkey-patch 替换后的模型。
 
 
 

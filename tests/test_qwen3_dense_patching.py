@@ -4,7 +4,7 @@ from typing import Tuple
 import pytest
 
 
-from example_models import mojo_qwen3_dense
+from example_models import torch_qwen3_dense
 from mojo_opset.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -16,7 +16,7 @@ def run_single_pass(config, device: str, dtype: torch.dtype, model_data: tuple) 
     hidden_states_prefill, attention_mask_prefill, position_ids_prefill = prefill_data
     hidden_states_decode, position_ids_decode_template = decode_data
 
-    past_key_values = mojo_qwen3_dense.PagedDummyCache(
+    past_key_values = torch_qwen3_dense.PagedDummyCache(
         config=config,
         batch_size=batch_size,
         device=device,
@@ -58,7 +58,7 @@ def test_qwen3_dense_patch():
     dtype = torch.bfloat16
     torch.manual_seed(42)
 
-    config = mojo_qwen3_dense.Qwen3Config()
+    config = torch_qwen3_dense.Qwen3Config()
     config.num_key_value_heads = 2
 
     batch_size, prefill_len, decode_len = 8, 128, 1
@@ -72,16 +72,16 @@ def test_qwen3_dense_patch():
         None,
     )
 
-    native_decoder_layer = mojo_qwen3_dense.Qwen3DecoderLayer(config, 0).to(device).to(dtype).eval()
-    native_rotary_emb = mojo_qwen3_dense.Qwen3RotaryEmbedding(config, device=device)
+    native_decoder_layer = torch_qwen3_dense.Qwen3DecoderLayer(config, 0).to(device).to(dtype).eval()
+    native_rotary_emb = torch_qwen3_dense.Qwen3RotaryEmbedding(config, device=device)
 
     native_model_data = (native_decoder_layer, native_rotary_emb, prefill_data, decode_data, batch_size)
 
-    original_rmsnorm_class = mojo_qwen3_dense.Qwen3RMSNorm
-    original_mlp_class = mojo_qwen3_dense.Qwen3MLP
-    original_apply_rotary_pos_emb = mojo_qwen3_dense.apply_rotary_pos_emb
-    original_attn_prefill = mojo_qwen3_dense.paged_attention_prefill
-    original_attn_decode = mojo_qwen3_dense.paged_attention_decode
+    original_rmsnorm_class = torch_qwen3_dense.Qwen3RMSNorm
+    original_mlp_class = torch_qwen3_dense.Qwen3MLP
+    original_apply_rotary_pos_emb = torch_qwen3_dense.apply_rotary_pos_emb
+    original_attn_prefill = torch_qwen3_dense.paged_attention_prefill
+    original_attn_decode = torch_qwen3_dense.paged_attention_decode
 
     native_prefill_out, native_decode_out = run_single_pass(config, device, dtype, native_model_data)
 
@@ -89,17 +89,17 @@ def test_qwen3_dense_patch():
 
     apply_mojo_op_to_qwen3()
 
-    patched_decoder_layer = mojo_qwen3_dense.Qwen3DecoderLayer(config, 0).to(device).to(dtype).eval()
+    patched_decoder_layer = torch_qwen3_dense.Qwen3DecoderLayer(config, 0).to(device).to(dtype).eval()
     patched_decoder_layer.load_state_dict(native_decoder_layer.state_dict())
-    patched_rotary_emb = mojo_qwen3_dense.Qwen3RotaryEmbedding(config, device=device)
+    patched_rotary_emb = torch_qwen3_dense.Qwen3RotaryEmbedding(config, device=device)
 
     patched_model_data = (patched_decoder_layer, patched_rotary_emb, prefill_data, decode_data, batch_size)
 
-    patched_rmsnorm_class = mojo_qwen3_dense.Qwen3RMSNorm
-    patched_mlp_class = mojo_qwen3_dense.Qwen3MLP
-    patched_apply_rotary_pos_emb = mojo_qwen3_dense.apply_rotary_pos_emb
-    patched_attn_prefill = mojo_qwen3_dense.paged_attention_prefill
-    patched_attn_decode = mojo_qwen3_dense.paged_attention_decode
+    patched_rmsnorm_class = torch_qwen3_dense.Qwen3RMSNorm
+    patched_mlp_class = torch_qwen3_dense.Qwen3MLP
+    patched_apply_rotary_pos_emb = torch_qwen3_dense.apply_rotary_pos_emb
+    patched_attn_prefill = torch_qwen3_dense.paged_attention_prefill
+    patched_attn_decode = torch_qwen3_dense.paged_attention_decode
 
     patched_prefill_out, patched_decode_out = run_single_pass(config, device, dtype, patched_model_data)
 
