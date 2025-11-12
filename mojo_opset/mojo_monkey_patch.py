@@ -26,13 +26,13 @@ def apply_mojo_op_to_qwen3(
         "cross_entropy and fused_linear_cross_entropy cannot both be True."
     )
 
-    from example_models import mojo_qwen3_dense
+    from example_models import torch_qwen3_dense
 
     if rope:
-        mojo_qwen3_dense.apply_rotary_pos_emb = MojoRoPE()
+        torch_qwen3_dense.apply_rotary_pos_emb = MojoRoPE()
 
     if rms_norm:
-        mojo_qwen3_dense.Qwen3RMSNorm = MojoNorm
+        torch_qwen3_dense.Qwen3RMSNorm = MojoNorm
 
     if swiglu:
 
@@ -60,11 +60,11 @@ def apply_mojo_op_to_qwen3(
 
                 return self.down_proj(fused_output)
 
-        mojo_qwen3_dense.Qwen3MLP = MojoSwiGLUMLP
+        torch_qwen3_dense.Qwen3MLP = MojoSwiGLUMLP
 
     if attn:
-        mojo_qwen3_dense.paged_attention_prefill = MojoPagedPrefillGQA()
-        mojo_qwen3_dense.paged_attention_decode = MojoPagedDecodeGQA()
+        torch_qwen3_dense.paged_attention_prefill = MojoPagedPrefillGQA()
+        torch_qwen3_dense.paged_attention_decode = MojoPagedDecodeGQA()
 
     # NOTE: Currently, only a native decoder layer is implemented as a patch example; the
     # full model is not defined yet, so only static replacement before model instantiation is supported.
