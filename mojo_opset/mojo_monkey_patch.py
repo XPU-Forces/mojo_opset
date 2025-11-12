@@ -1,5 +1,5 @@
 import os
-from mojo_opset import MojoRoPE, MojoNorm, MojoSiluMul, MojoPagedPrefillGQA, MojoPagedDecodeGQA
+from mojo_opset import MojoRoPE, MojoNorm, MojoSwiGLU, MojoPagedPrefillGQA, MojoPagedDecodeGQA
 
 
 import torch
@@ -55,7 +55,7 @@ def apply_mojo_op_to_qwen3(
                 gate_output = self.gate_proj(x)
                 up_output = self.up_proj(x)
 
-                silu = MojoSiluMul()
+                silu = MojoSwiGLU()
                 fused_output = silu(gate_output, up_output)
 
                 return self.down_proj(fused_output)
