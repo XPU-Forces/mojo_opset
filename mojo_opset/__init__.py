@@ -2,7 +2,7 @@ import os
 from mojo_opset.core import *
 from mojo_opset.backends import init_mojo_backend
 
-_SUPPORT_BACKEND_LIST = ["TTX_KERNELS", "XPU_OPS"]
+_SUPPORT_BACKEND_LIST = ["TTX_KERNELS", "XPU_OPS", "TORCH_OPS"]
 
 """
 NOTICE: init_mojo_backend should be called before importing any mojo operator.
