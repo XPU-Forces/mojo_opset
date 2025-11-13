@@ -78,6 +78,7 @@ from .functions.mojo_silu_func import MojoSiluFunction
 from .functions.mojo_rms_norm_func import MojoRMSNormFunction
 from .functions.mojo_rope_func import MojoRoPEFunction
 from .functions.mojo_linear_crossentropy_func import MojoFusedLinearCrossEntropyFunction
+from .functions.mojo_flashattn_func import MojoFlashAttnFunction
 
 
 # fmt: off
@@ -148,5 +149,6 @@ __all__ = [
     "MojoRMSNormFunction",
     "MojoRoPEFunction",
     "MojoFusedLinearCrossEntropyFunction",
+    "MojoFlashAttnFunction",
 ]
 # fmt: on
