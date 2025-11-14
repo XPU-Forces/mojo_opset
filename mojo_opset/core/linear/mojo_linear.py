@@ -1,9 +1,9 @@
 import os
 import torch
-from typing import Optional
+from typing import Any, Tuple, Optional, Union
 
 from ..mojo_operator import MojoOperator
-
+from ...mojo_utils import get_mojo_exec_mode
 
 class MojoLinear(MojoOperator):
     def __init__(
@@ -39,7 +39,7 @@ class MojoLinear(MojoOperator):
         if bias is not None:
             if not isinstance(bias, torch.Tensor):
                 raise TypeError("bias 必须为 torch.Tensor 或 None")
-            # 对齐输出维度（仅做轻量检查，不做广播/重排）
+            
             if weight.ndim == 2:
                 out_dim = weight.shape[1]
                 if bias.ndim != 1 or bias.shape[0] != out_dim:
@@ -94,159 +94,55 @@ class MojoBatchLinear(MojoOperator):
 class MojoGroupLinear(MojoOperator):
     def __init__(
         self,
-        input_layout: str = "NZ",
-        weight: torch.Tensor = None,
-        bias: Optional[torch.Tensor] = None,
-        is_varlen: bool = True,
+        weight: Optional[torch.Tensor] = None,
+        trans_weight = False,
         op_name: str = "",
+        layer_idx: int = 0,
     ):
-        """
-        Common parameter definitions for Group Linear operator.
-
-        Init parameters:
-        - input_layout (str): Input layout enumeration, values {"KN","NZ"}, default "NZ".
-        - weight (torch.Tensor): Weight tensor, shape [G, in_dim_g, out_dim_g] or [in_dim, out_dim].
-        - bias (Optional[torch.Tensor]): Bias tensor, shape aligned with output dimension; optional.
-        - is_varlen (bool): When True, prioritize TND (per token/per group) computation; when False, use BSND; default True.
-        - op_name (str): Operator name placeholder.
-
-        Semantics and validation:
-        - forward's group_list must align with weight.
-        """
-        super().__init__(op_name)
-
-        if input_layout not in {"KN", "NZ"}:
-            raise ValueError('input_layout 需为 {"KN","NZ"}')
-        self.input_layout = input_layout
-
-        if weight is None or not isinstance(weight, torch.Tensor):
-            raise TypeError("weight 必须为 torch.Tensor 且不可为 None")
-        if weight.ndim not in (2, 3):
-            raise ValueError(f"weight 需为 2-D 或 3-D，实际为 {tuple(weight.shape)}")
+        super().__init__(op_name, layer_idx)
+        
+        if not isinstance(trans_weight, bool):
+            raise TypeError("trans_weight must be bool.")
+        self.trans_weight = trans_weight
         self.weight = weight
 
-        if bias is not None:
-            if not isinstance(bias, torch.Tensor):
-                raise TypeError("bias 必须为 torch.Tensor 或 None")
-            # 对齐输出维度（仅做轻量检查，不做广播/重排）
-            if weight.ndim == 2:
-                out_dim = weight.shape[1]
-                if bias.ndim != 1 or bias.shape[0] != out_dim:
-                    raise ValueError("bias 形状需为 [out_dim]，并与 weight 的输出维一致")
-            else:
-                out_dim_g = weight.shape[-1]
-                if bias.ndim not in (1, 2):
-                    raise ValueError("分组 bias 需为 1-D 或 2-D")
-                if bias.ndim == 1 and bias.shape[0] != out_dim_g:
-                    raise ValueError("分组 bias 形状需与每组 out_dim 对齐")
-                if bias.ndim == 2 and bias.shape[1] != out_dim_g:
-                    raise ValueError("分组 bias 的第二维需与 out_dim 对齐")
-        self.bias = bias
-        if not isinstance(is_varlen, bool):
-            raise TypeError("is_varlen 必须为 bool 类型")
-        self.is_varlen = is_varlen
+        mode_str = get_mojo_exec_mode(MojoGroupLinear.__name__, "FWD", self.layer_idx)
+        self._set_forward_mode(mode_str)
 
-    def forward(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:
-        """
-        输入：
-        - input：输入张量。
-        - group_list：分组列表，形状 [G] 或 [B, S, G]，dtype=int32；用于指示分组映射。
-
-        输出：
-        - output: 输出张量，形状需遵循矩阵乘法规则。
-
-        """
-        
-        raise NotImplementedError("MojoGroupLinear forward 仅做通用参数校验，不包含具体计算")
 
     def forward_ref(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:
         """
-        参考实现（golden）：分组线性变换，严格区分 TND/BNSD 输入。
-        输入布局契约：
-        - 当 is_varlen=True（TND）：
-          · weight 2-D：[in_dim,out_dim] → 仅接受 [T,in_dim] 或 [T,G,in_dim]
-          · weight 3-D：[G,in_dim_g,out_dim_g] → 仅接受 [T,G,in_dim_g] 或 [T,in_dim_g]（需提供 group_list[T]）
-        - 当 is_varlen=False（BNSD）：
-          · weight 2-D → 仅接受 [B,S,in_dim] 或 [B,S,G,in_dim]
-          · weight 3-D → 仅接受 [B,S,G,in_dim_g] 或 [B,S,in_dim_g]（需提供 group_list[B,S]）
-        公式：Y = concat_g (X_g · W_g + b_g)
-        否则报错（Expected TND/BNSD ...）。
+        Args:
+            input: Tensor of shape [sum(group_list), M]
+            group_list: 1D tensor, num_tokens per expert
+
+        Returns:
+            Tensor of shape [sum(group_list), N]
         """
-        if self.weight.ndim == 2:
-            if input.shape[-1] != self.weight.shape[0]:
-                raise ValueError("input 的最后一维需与 weight 的 in_dim 对齐")
-            if self.is_varlen:
-                if input.ndim not in (2, 3):
-                    raise ValueError(f"Expected TND when is_varlen=True; got shape {tuple(input.shape)}")
-                return torch.nn.functional.linear(input, self.weight.t(), self.bias)
-            else:
-                if input.ndim not in (3, 4):
-                    raise ValueError(f"Expected BNSD when is_varlen=False; got shape {tuple(input.shape)}")
-                return torch.nn.functional.linear(input, self.weight.t(), self.bias)
-        else:
-            G, in_g, out_g = self.weight.shape
-            if self.is_varlen:
-                # TND 仅接受 [T,G,in_g] 或 [T,in_g] + group_list[T]
-                if input.ndim == 3 and input.shape[-2] == G and input.shape[-1] == in_g:
-                    T = input.shape[0]
-                    y = torch.empty((T, G, out_g), dtype=input.dtype, device=input.device)
-                    for g in range(G):
-                        xg = input[:, g, :]  # [T,in_g]
-                        yg = torch.matmul(xg, self.weight[g])  # [T,out_g]
-                        if self.bias is not None:
-                            if self.bias.ndim == 2:
-                                yg = yg + self.bias[g]
-                            else:
-                                yg = yg + self.bias
-                        y[:, g, :] = yg
-                    return y
-                elif input.ndim == 2 and input.shape[-1] == in_g:
-                    if group_list is None or group_list.ndim != 1 or group_list.shape[0] != input.shape[0]:
-                        raise ValueError("TND 模式下需提供 group_list[T] 与输入对齐")
-                    T = input.shape[0]
-                    y = torch.empty((T, out_g), dtype=input.dtype, device=input.device)
-                    for t in range(T):
-                        g = int(group_list[t].item())
-                        ys = torch.matmul(input[t], self.weight[g])
-                        if self.bias is not None:
-                            if self.bias.ndim == 2:
-                                ys = ys + self.bias[g]
-                            else:
-                                ys = ys + self.bias
-                        y[t] = ys
-                    return y
-                else:
-                    raise ValueError(f"Expected TND when is_varlen=True; got shape {tuple(input.shape)}")
-            else:
-                # BNSD 仅接受 [B,S,G,in_g] 或 [B,S,in_g] + group_list[B,S]
-                if input.ndim == 4 and input.shape[-2] == G and input.shape[-1] == in_g:
-                    B, S = input.shape[0], input.shape[1]
-                    y = torch.empty((B, S, G, out_g), dtype=input.dtype, device=input.device)
-                    for g in range(G):
-                        xg = input[:, :, g, :]  # [B,S,in_g]
-                        yg = torch.matmul(xg, self.weight[g])  # [B,S,out_g]
-                        if self.bias is not None:
-                            if self.bias.ndim == 2:
-                                yg = yg + self.bias[g]
-                            else:
-                                yg = yg + self.bias
-                        y[:, :, g, :] = yg
-                    return y
-                elif input.ndim == 3 and input.shape[-1] == in_g:
-                    if group_list is None or group_list.ndim != 2 or group_list.shape[:2] != input.shape[:2]:
-                        raise ValueError("BNSD 模式下需提供 group_list[B,S] 与输入对齐")
-                    B, S = input.shape[0], input.shape[1]
-                    y = torch.empty((B, S, out_g), dtype=input.dtype, device=input.device)
-                    for b in range(B):
-                        for s in range(S):
-                            g = int(group_list[b, s].item())
-                            ys = torch.matmul(input[b, s], self.weight[g])
-                            if self.bias is not None:
-                                if self.bias.ndim == 2:
-                                    ys = ys + self.bias[g]
-                                else:
-                                    ys = ys + self.bias
-                            y[b, s] = ys
-                    return y
-                else:
-                    raise ValueError(f"Expected BNSD when is_varlen=False; got shape {tuple(input.shape)}")
+        assert input.dim() == 2, "input must be 2D"
+        assert self.weight.dim() == 3, "weight must be 3D"
+        num_groups = group_list.numel()
+        assert self.weight.size(0) == num_groups, "self.weight must have same group count as group_list"
+
+        if self.trans_weight:
+            self.weight = self.weight.transpose(1, 2).contiguous()
+
+        group_start = group_list.cumsum(0) - group_list
+        group_end = group_list.cumsum(0)
+
+        out_list = []
+        for g, (start, end) in enumerate(zip(group_start.tolist(), group_end.tolist())):
+            a_g = input[start:end, :]
+            b_g = self.weight[g, :, :]
+            out_g = a_g @ b_g
+            out_list.append(out_g)
+
+        return torch.cat(out_list, dim=0)
+
+
+    def forward_std(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+
+    def forward_analysis(self, input: torch.Tensor, group_list: torch.Tensor) -> Tuple[int, int, int]:
+        pass
