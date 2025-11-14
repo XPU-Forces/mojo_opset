@@ -11,6 +11,7 @@ class MojoFlashAttnFunction(MojoFuncBase):
         q, 
         k, 
         v,
+        causal=False,
         softmax_scale=1.0,
         block_q_len=128,
         block_k_len=512,
@@ -23,6 +24,7 @@ class MojoFlashAttnFunction(MojoFuncBase):
         q, 
         k, 
         v,
+        causal=False,
         softmax_scale=1.0,
         block_q_len=128,
         block_k_len=512,
@@ -39,13 +41,13 @@ class MojoFlashAttnFunction(MojoFuncBase):
 
         y = q.new_zeros((B, Sq, Nq, Dv))
 
-        group_q = q.permute(0, 2, 1, 3).reshape(B, G, Nk, Sq, D) # [B, S, N, D] -> [B, G, Nk, S, D]
+        q = q.permute(0, 2, 1, 3).reshape(B, G, Nk, Sq, D) # [B, S, N, D] -> [B, G, Nk, S, D]
         k = k.permute(0, 2, 1, 3) # [B, S, Nk, D] -> [B, Nk, S, D]
         v = v.permute(0, 2, 1, 3) # [B, S, Nk, D] -> [B, Nk, S, D]
 
         for q0 in range(0, Sq, block_q_len):
             ql = min(block_q_len, Sq - q0)
-            q_block = group_q[:, :, :, q0:q0+ql, :].contiguous() # [B, G, Nk, ql, D]
+            q_block = q[:, :, :, q0:q0+ql, :].contiguous() # [B, G, Nk, ql, D]
 
             # safe softmax
             m = torch.full((B, G, Nk, ql), float("-inf"), dtype=q.dtype, device=q.device)
@@ -60,6 +62,13 @@ class MojoFlashAttnFunction(MojoFuncBase):
                 # q @ k.T: [B, G, Nk, ql, D] @ [B, Nk, kl, D] -> [B, G, Nk, ql, kl]
                 scores = torch.einsum("b g h q d, b h k d -> b g h q k", q_block, k_block) * softmax_scale
 
+                # attention mask
+                if causal and Sq == Sk:
+                    q_idx = torch.arange(q0, q0+ql, device=q.device)[:, None] # [ql, 1]
+                    k_idx = torch.arange(k0, k0+kl, device=q.device)[None, :] # [1, kl]
+                    mask = k_idx > q_idx # [ql, kl]
+                    scores = scores.masked_fill(mask[None, None, None, :, :], float('-inf'))
+                
                 # safe softmax
                 m_curr = scores.amax(dim=-1) # [B, G, Nk, ql, kl] -> [B, G, Nk, ql]
                 m_new = torch.maximum(m, m_curr) # [B, G, Nk, ql]
@@ -80,6 +89,7 @@ class MojoFlashAttnFunction(MojoFuncBase):
             # [B, G, Nk, ql, D] -> [B, ql, G, Nk, D] -> [B, ql, Nq, D]
             y[:, q0:q0+ql, :, :] = y_block.permute(0, 3, 1, 2, 4).reshape(B, ql, Nq, Dv)
 
+            ctx.causal = causal
             ctx.softmax_scale = softmax_scale
             ctx.block_q_len = block_q_len
             ctx.block_k_len = block_k_len
@@ -93,13 +103,14 @@ class MojoFlashAttnFunction(MojoFuncBase):
 
     @staticmethod
     def backward_ref(ctx, grad_y):
+        causal = ctx.causal
         softmax_scale = ctx.softmax_scale
         block_q_len = ctx.block_q_len
         block_k_len = ctx.block_k_len
         q, k, v = ctx.saved_tensors
         B, G, _, Sq, D = q.shape
-        Bk, Sk, Nk, Dk = k.shape
-        Bv, Sv, Nv, Dv = v.shape
+        Bk, Nk, Sk, Dk = k.shape
+        Bv, Nv, Sv, Dv = v.shape
         Nq = G * Nk
 
         grad_q = torch.zeros_like(q) # [B, G, Nk, S, D]
@@ -126,6 +137,13 @@ class MojoFlashAttnFunction(MojoFuncBase):
                 # q @ k.T: [B, G, Nk, ql, D] @ [B, Nk, kl, D] -> [B, G, Nk, ql, kl]
                 scores = torch.einsum("b g h q d, b h k d -> b g h q k", q_block, k_block) * softmax_scale
 
+                # attention mask
+                if causal and Sq == Sk:
+                    q_idx = torch.arange(q0, q0+ql, device=q.device)[:, None] # [ql, 1]
+                    k_idx = torch.arange(k0, k0+kl, device=q.device)[None, :] # [1, kl]
+                    mask = k_idx > q_idx # [ql, kl]
+                    scores = scores.masked_fill(mask[None, None, None, :, :], float('-inf'))
+
                 # safe softmax
                 m_curr = scores.amax(dim=-1) # [B, G, Nk, ql, kl] -> [B, G, Nk, ql]
                 m_new = torch.maximum(m, m_curr) # [B, G, Nk, ql]
@@ -139,6 +157,7 @@ class MojoFlashAttnFunction(MojoFuncBase):
             eps = torch.finfo(q.dtype).eps
 
             # grad compute
+            r = torch.zeros((B, G, Nk, ql), dtype=q.dtype, device=q.device)
             for (k0, kl, m_new) in cache_scores_blocks:
                 k_block = k[:, :, k0:k0+kl, :].contiguous() # [B, Nk, kl, D]
                 v_block = v[:, :, k0:k0+kl, :].contiguous() # [B, Nk, kl, D]
@@ -146,13 +165,42 @@ class MojoFlashAttnFunction(MojoFuncBase):
                 # recompute q @ k.T: [B, G, Nk, ql, D] @ [B, Nk, kl, D] -> [B, G, Nk, ql, kl]
                 scores = torch.einsum("b g h q d, b h k d -> b g h q k", q_block, k_block) * softmax_scale
 
-                P = torch.exp(scores - m[..., None]) / (l[..., None] + eps)
+                # attention mask
+                if causal and Sq == Sk:
+                    q_idx = torch.arange(q0, q0+ql, device=q.device)[:, None] # [ql, 1]
+                    k_idx = torch.arange(k0, k0+kl, device=q.device)[None, :] # [1, kl]
+                    mask = k_idx > q_idx # [ql, kl]
+                    scores = scores.masked_fill(mask[None, None, None, :, :], float('-inf'))
 
-                A = torch.einsum("b g h q d, b h k d -> b g h q k", grad_y_block, v_block)  # [B, G, Nk, ql, kl]
-                r = (P * A).sum(dim=-1)
-                dS = P * (A - r[..., None])
+                P = torch.exp(scores - m[..., None]) / (l[..., None] + eps) # [B, G, Nk, ql, kl]
 
+                # A = dY * V.T, [B, G, Nk, ql, D] @ [B, Nk, kl, D] -> [B, G, Nk, ql, kl]
+                A = torch.einsum("b g h q d, b h k d -> b g h q k", grad_y_block, v_block)
+                r += (P * A).sum(dim=-1) # [B, G, Nk, ql]
+
+                # dV += P.T @ dY, [B, G, Nk, ql, kl] @ [B, G, Nk, ql, D] -> [B, G, Nk, kl, D]
                 grad_v[:, :, k0:k0+kl, :] += torch.einsum("b g h q k, b g h q d -> b h k d", P, grad_y_block)
+
+            for (k0, kl, m_new) in cache_scores_blocks:
+                k_block = k[:, :, k0:k0+kl, :].contiguous() # [B, Nk, kl, D]
+                v_block = v[:, :, k0:k0+kl, :].contiguous() # [B, Nk, kl, D]
+
+                # recompute q @ k.T: [B, G, Nk, ql, D] @ [B, Nk, kl, D] -> [B, G, Nk, ql, kl]
+                scores = torch.einsum("b g h q d, b h k d -> b g h q k", q_block, k_block) * softmax_scale
+
+                # attention mask
+                if causal and Sq == Sk:
+                    q_idx = torch.arange(q0, q0+ql, device=q.device)[:, None] # [ql, 1]
+                    k_idx = torch.arange(k0, k0+kl, device=q.device)[None, :] # [1, kl]
+                    mask = k_idx > q_idx # [ql, kl]
+                    scores = scores.masked_fill(mask[None, None, None, :, :], float('-inf'))
+
+                P = torch.exp(scores - m[..., None]) / (l[..., None] + eps) # [B, G, Nk, ql, kl]
+
+                # A = dY * V.T, [B, G, Nk, ql, D] @ [B, Nk, kl, D] -> [B, G, Nk, ql, kl]
+                A = torch.einsum("b g h q d, b h k d -> b g h q k", grad_y_block, v_block)
+                dS = P * (A - r[..., None]) # [B, G, Nk, ql, kl]
+
                 grad_q[:, :, :, q0:q0+ql, :] += torch.einsum("b g h q k, b h k d -> b g h q d", dS, k_block) * softmax_scale
                 grad_k[:, :, k0:k0+kl, :] += torch.einsum("b g h q k, b g h q d -> b h k d", dS, q_block) * softmax_scale
 
@@ -160,4 +208,4 @@ class MojoFlashAttnFunction(MojoFuncBase):
         grad_k = grad_k.permute(0, 2, 1, 3)
         grad_v = grad_v.permute(0, 2, 1, 3)
 
-        return grad_q, grad_k, grad_v, None, None, None
+        return grad_q, grad_k, grad_v, None, None, None, None
