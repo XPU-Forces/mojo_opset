@@ -1,5 +1,6 @@
 import torch
 from mojo_opset.backends.ttx_kernels.src.ascend.rms_norm import ttx_rms_norm, rms_norm_fwd, rms_norm_bwd
+from mojo_opset.backends.ttx_kernels.src.ascend.knorm import ttx_k_rms_norm
 from mojo_opset.backends.ttx_kernels.src.ascend.layer_norm import ttx_layer_norm
 
 from mojo_opset.core import MojoNorm, MojoRMSNormFunction
@@ -9,9 +10,15 @@ from mojo_opset.backends.ttx_kernels.src.ascend.utils import torch_to_triton_dty
 class TTXNorm(MojoNorm, default_priority=0):
     def forward_std(self, hidden_state: torch.Tensor):
         if self.norm_type == "rmsnorm":
-            return rms_norm_fwd(hidden_state, self.gamma, self.epsilon, offset=0.0, casting_mode="llama")[0]
+            if self.only_k_norm:
+                return ttx_k_rms_norm(hidden_state, self.gamma, self.epsilon, self.q_head_num, self.kv_head_num)
+            else:
+                return rms_norm_fwd(hidden_state, self.gamma, self.epsilon, offset=0.0, casting_mode="llama")[0]
         elif self.norm_type == "layernorm":
-            return ttx_layer_norm(hidden_state, self.gamma, self.beta, self.epsilon)
+            if self.only_k_norm:
+                raise NotImplementedError(f"[TTXNorm] don't support k layernorm.")
+            else:
+                return ttx_layer_norm(hidden_state, self.gamma, self.beta, self.epsilon)
         else:
             raise NotImplementedError(f"[TTXNorm] Only support rmsnorm/layernorm, but got {self.norm_type}")
 
