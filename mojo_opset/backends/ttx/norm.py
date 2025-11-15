@@ -1,9 +1,9 @@
 import torch
-from mojo_opset.backends.ttx_kernels.src.ascend.rms_norm import ttx_rms_norm, rms_norm_fwd, rms_norm_bwd
-from mojo_opset.backends.ttx_kernels.src.ascend.layer_norm import ttx_layer_norm
+from mojo_opset.backends.ttx.kernels.ascend.rms_norm import ttx_rms_norm, rms_norm_fwd, rms_norm_bwd
+from mojo_opset.backends.ttx.kernels.ascend.layer_norm import ttx_layer_norm
 
 from mojo_opset.core import MojoNorm, MojoRMSNormFunction
-from mojo_opset.backends.ttx_kernels.src.ascend.utils import torch_to_triton_dtype
+from mojo_opset.backends.ttx.kernels.ascend.utils import torch_to_triton_dtype
 
 
 class TTXNorm(MojoNorm, default_priority=0):

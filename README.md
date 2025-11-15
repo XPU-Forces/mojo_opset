@@ -126,11 +126,11 @@ silu(torch.randn(128, 128).npu())
 ```
 
 ### 5.2 backend selection
-您可以通过环境变量`MOJO_BACKEND`来控制您想要选用的后端，当前支持的后端包括`TTX_KERNELS`, `XPU_OPS`；当您添加多个后端后，
+您可以通过环境变量`MOJO_BACKEND`来控制您想要选用的后端，当前支持的后端包括`TTX`, `XPU_OPS`；当您添加多个后端后，
 Mojo Opset 会按照内部的优先级顺序来选用后端实现（后续我们将添加一个 tuner 功能，自动选取当前场景下的最优实现）。
 默认会开启所有后端，即`+ALL`。
 ```bash
-export MOJO_BACKEND="+TTX_KERNELS, XPU_OPS"
+export MOJO_BACKEND="+TTX, XPU_OPS"
 ```
 
 ### 5.3 modeling reference
@@ -140,7 +140,7 @@ export MOJO_BACKEND="+TTX_KERNELS, XPU_OPS"
 
 example_models/torch_qwen3_dense.py 中提供了原生 torch 实现的 modeling，我们实现了相应的 monkey-patch 替换机制（mojo_opset/mojo_monkey_patch.py），仅需一行代码即可将 native modeling 中若干组件替换为 Mojo op，并进一步 dispatch 到高性能后端实现。您可以运行：
 ```bash
-MOJO_BACKEND="+TTX_KERNELS" pytest -s tests/test_qwen3_dense_patching.py
+MOJO_BACKEND="+TTX" pytest -s tests/test_qwen3_dense_patching.py
 ```
 跑通一个 decoder layer 的 prefill/decode 流程。
 
