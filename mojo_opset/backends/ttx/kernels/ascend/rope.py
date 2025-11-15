@@ -294,7 +294,21 @@ class TTXRopeFunction(torch.autograd.Function):
         return dq_t.transpose(1, 2), dk_t.transpose(1, 2), None, None, None, None
 
 
-def rope_infer(q, k, cos, sin):
+from typing import Tuple
+
+from torch.library import triton_op
+from torch.library import wrap_triton
+
+
+@triton_op("ttx::rope", mutates_args={"q", "k"})
+def rope_infer(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    # q_t = q.clone().transpose(1, 2).contiguous()
+    # k_t = k.clone().transpose(1, 2).contiguous()
     q_t = q.transpose(1, 2).contiguous()
     k_t = k.transpose(1, 2).contiguous()
 
@@ -309,7 +323,7 @@ def rope_infer(q, k, cos, sin):
     cos = cos.contiguous()
     sin = sin.contiguous()
 
-    _rope_forward_kernel[grid](
+    wrap_triton(_rope_forward_kernel)[grid](
         q_t,
         q_t.stride(0),
         q_t.stride(1),
@@ -330,6 +344,16 @@ def rope_infer(q, k, cos, sin):
     )
 
     return q_t.transpose(1, 2), k_t.transpose(1, 2)
+
+
+@rope_infer.register_fake
+def rope_faker(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(q), torch.empty_like(k)
 
 
 def ttx_rope(q, k, sin, cos):
