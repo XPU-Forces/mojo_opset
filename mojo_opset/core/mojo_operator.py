@@ -121,7 +121,9 @@ class MojoOperator(ABC, torch.nn.Module):
             for norm, ref in zip(norm_result, refs_result):
                 torch.testing.assert_close(norm.to(torch.float32), ref.to(torch.float32), atol=atol, rtol=rtol)
         else:
-            torch.testing.assert_close(norm_result.to(torch.float32), refs_result.to(torch.float32), atol=atol, rtol=rtol)
+            torch.testing.assert_close(
+                norm_result.to(torch.float32), refs_result.to(torch.float32), atol=atol, rtol=rtol
+            )
 
         return norm_result
 

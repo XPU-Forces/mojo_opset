@@ -1,6 +1,6 @@
 import torch
 import triton
-from mojo_opset.backends.ttx_kernels.src.ascend.rope import ttx_rope, _rope_forward_kernel, _rope_backward_kernel
+from mojo_opset.backends.ttx.kernels.ascend.rope import ttx_rope, _rope_forward_kernel, _rope_backward_kernel
 
 from mojo_opset.core import MojoRoPE, MojoRoPEFunction
 

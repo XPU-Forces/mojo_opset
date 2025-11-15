@@ -1,25 +1,24 @@
 import torch
-from mojo_opset.backends.ttx_kernels.src.ascend.gelu import ttx_gelu
-from mojo_opset.backends.ttx_kernels.src.ascend.silu import ttx_silu, silu_fwd, silu_bwd
-from mojo_opset.backends.ttx_kernels.src.ascend.swiglu import ttx_silu_mul
 
-
-from mojo_opset.core import MojoGelu, MojoSilu, MojoSiluFunction, MojoSwiGLU
+from mojo_opset.core import MojoGelu
+from mojo_opset.core import MojoSilu
+from mojo_opset.core import MojoSiluFunction
+from mojo_opset.core import MojoSwiGLU
 
 
 class TTXGelu(MojoGelu, default_priority=0):
     def forward_std(self, hidden_state: torch.Tensor):
-        return ttx_gelu(hidden_state)
+        return torch.ops.ttx.gelu(hidden_state)
 
 
 class TTXSilu(MojoSilu, default_priority=0):
     def forward_std(self, hidden_state: torch.Tensor):
-        return ttx_silu(hidden_state)
+        return torch.ops.ttx.silu(hidden_state)
 
 
 class TTXSwiGLU(MojoSwiGLU, default_priority=0):
     def forward_std(self, gate_out: torch.Tensor, up_out: torch.Tensor):
-        return ttx_silu_mul(gate_out, up_out)
+        return torch.ops.ttx.swiglu(gate_out, up_out)
 
 
 class TTXSiluFunction(MojoSiluFunction):
@@ -34,7 +33,7 @@ class TTXSiluFunction(MojoSiluFunction):
         Returns:
             y: Output tensor y = silu(input) = input * sigmoid(input)
         """
-        y = silu_fwd(input)
+        y = torch.ops.ttx.silu(input)
         ctx.save_for_backward(input)
         return y
 
@@ -50,5 +49,5 @@ class TTXSiluFunction(MojoSiluFunction):
             dx: Gradient w.r.t. input
         """
         (input,) = ctx.saved_tensors
-        dx = silu_bwd(dy, input)
+        dx = torch.ops.ttx.silu_bwd(dy, input)
         return dx

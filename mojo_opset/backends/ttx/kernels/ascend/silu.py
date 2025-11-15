@@ -8,12 +8,11 @@ from .utils import VEC_ALIGN_BYTES
 from .utils import align
 
 """
-This file contains the implementation of GELU (Gaussian Error Linear Unit) for NPU.
+This file contains the implementation of SiLU (Sigmoid Linear Unit) for NPU.
 
-GELU formula: gelu(x) = 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
+SiLU formula: silu(x) = x * sigmoid(x) = x / (1 + exp(-x))
 
-Based on Liger Kernel implementation:
-https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/geglu.py
+Based on SwiGLU implementation pattern and Liger Kernel style.
 
 Modifications for NPU architecture by triton-x team, 2025.
 """
@@ -23,12 +22,9 @@ COL_BLOCKING_THRESHOLD = 4096
 
 
 @triton.jit
-def gelu_tanh_approx(x):
-    """GELU activation using tanh approximation"""
-    sqrt_2_over_pi = 0.7978845608028654  # sqrt(2 / π)
-    x_cubed = x * x * x
-    tanh_arg = sqrt_2_over_pi * (x + 0.044715 * x_cubed)
-    return 0.5 * x * (1 + tl.tanh(tanh_arg))
+def silu_activation(x):
+    """SiLU activation function: x * sigmoid(x)"""
+    return x * tl.sigmoid(x)
 
 
 @triton.autotune(
@@ -47,7 +43,7 @@ def gelu_tanh_approx(x):
 )
 @libentry()
 @triton.jit
-def _gelu_fwd_kernel(
+def _silu_fwd_kernel(
     X_ptr,
     Y_ptr,
     stride_x_row,
@@ -78,7 +74,7 @@ def _gelu_fwd_kernel(
             x_chunk = tl.load(x_ptrs, mask=block_mask, other=0.0)
 
             x_f32 = x_chunk.to(tl.float32)
-            y_f32 = gelu_tanh_approx(x_f32)
+            y_f32 = silu_activation(x_f32)
 
             y_chunk = y_f32.to(x_chunk.dtype)
 
@@ -102,7 +98,7 @@ def _gelu_fwd_kernel(
 )
 @libentry()
 @triton.jit
-def _gelu_bwd_kernel(
+def _silu_bwd_kernel(
     dY_ptr,
     X_ptr,
     dX_ptr,
@@ -137,30 +133,27 @@ def _gelu_bwd_kernel(
             x_chunk = tl.load(x_ptrs, mask=block_mask, other=0.0)
 
             x_f32 = x_chunk.to(tl.float32)
-            sqrt_2_over_pi = 0.7978845608028654
-            x_cubed = x_f32 * x_f32 * x_f32
-            tanh_arg = sqrt_2_over_pi * (x_f32 + 0.044715 * x_cubed)
-            tanh_result = tl.tanh(tanh_arg)
+            sigmoid_x = tl.sigmoid(x_f32)
 
-            term1 = 0.5 * (1 + tanh_result)
-            tanh_sq = tanh_result * tanh_result
-            term2 = 0.5 * x_f32 * (1 - tanh_sq) * (sqrt_2_over_pi * (1 + 3 * 0.044715 * x_f32 * x_f32))
-            dgelu_dx = term1 + term2
+            dsilu_dx = sigmoid_x * (1 + x_f32 * (1 - sigmoid_x))
 
-            dx_chunk = dy_chunk * dgelu_dx.to(dy_chunk.dtype)
+            dx_chunk = dy_chunk * dsilu_dx.to(dy_chunk.dtype)
 
             tl.store(dx_ptrs, dx_chunk, mask=block_mask)
 
 
-def gelu_fwd(x):
+@torch.library.custom_op("ttx::silu", mutates_args={})
+def silu_fwd(
+    x: torch.Tensor,
+) -> torch.Tensor:
     """
-    Forward pass for GELU.
+    Forward pass for SiLU.
 
     Args:
         x: Input tensor
 
     Returns:
-        y: Output tensor y = gelu(x)
+        y: Output tensor y = silu(x) = x * sigmoid(x)
     """
     ori_shape = x.shape
     n_cols = ori_shape[-1]
@@ -178,7 +171,7 @@ def gelu_fwd(x):
     num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
     grid = (num_programs,)
 
-    _gelu_fwd_kernel[grid](
+    _silu_fwd_kernel[grid](
         x_2d,
         y,
         x_2d.stride(0),
@@ -191,9 +184,20 @@ def gelu_fwd(x):
     return y.view(*ori_shape)
 
 
-def gelu_bwd(dy, x):
+@silu_fwd.register_fake
+def silu_fwd_fake(
+    x: torch.Tensor,
+) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+@torch.library.custom_op("ttx::silu_bwd", mutates_args={})
+def silu_bwd(
+    dy: torch.Tensor,
+    x: torch.Tensor,
+) -> torch.Tensor:
     """
-    Backward pass for GELU.
+    Backward pass for SiLU.
 
     Args:
         dy: Gradient w.r.t. output
@@ -219,7 +223,7 @@ def gelu_bwd(dy, x):
     num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
     grid = (num_programs,)
 
-    _gelu_bwd_kernel[grid](
+    _silu_bwd_kernel[grid](
         dy_2d,
         x_2d,
         dx,
@@ -234,53 +238,9 @@ def gelu_bwd(dy, x):
     return dx.view(*ori_shape)
 
 
-class TTXGELUFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x):
-        """
-        Forward pass of GELU function.
-
-        Args:
-            x: Input tensor
-
-        Returns:
-            y: Output tensor y = gelu(x)
-        """
-        y = gelu_fwd(x)
-        ctx.save_for_backward(x)
-        return y
-
-    @staticmethod
-    def backward(ctx, dy):
-        """
-        Backward pass of GELU function.
-
-        Args:
-            dy: Gradient w.r.t. output
-
-        Returns:
-            dx: Gradient w.r.t. input
-        """
-        (x,) = ctx.saved_tensors
-        dx = gelu_bwd(dy, x)
-        return dx
-
-
-def ttx_gelu(x):
-    """
-    TTX GELU activation function for inference.
-
-    Implements: output = gelu(x), where gelu uses tanh approximation:
-    gelu(x) = 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
-
-    Args:
-        x: Input tensor of any shape
-
-    Returns:
-        Output tensor with same shape as input
-
-    Example:
-        >>> x = torch.randn(32, 128, 1024)
-        >>> output = ttx_gelu(x)  # Shape: (32, 128, 1024)
-    """
-    return TTXGELUFunction.apply(x)
+@silu_bwd.register_fake
+def silu_bwd_fake(
+    dy: torch.Tensor,
+    x: torch.Tensor,
+) -> torch.Tensor:
+    return torch.empty_like(dy)

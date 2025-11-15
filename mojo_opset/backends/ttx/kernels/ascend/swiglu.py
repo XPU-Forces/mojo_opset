@@ -1,8 +1,8 @@
+from typing import Tuple
+
 import torch
 import triton
 import triton.language as tl
-import torch.nn.functional as F
-import torch.nn as nn
 
 from triton.runtime.libentry import libentry
 
@@ -159,7 +159,11 @@ def _swiglu_bwd_kernel(
             tl.store(db_ptrs, db_chunk, mask=block_mask)
 
 
-def swiglu_fwd(a, b):
+@torch.library.custom_op("ttx::swiglu", mutates_args={})
+def swiglu_fwd(
+    a: torch.Tensor,
+    b: torch.Tensor,
+) -> torch.Tensor:
     """
     Forward pass for SwiGLU.
 
@@ -202,7 +206,20 @@ def swiglu_fwd(a, b):
     return c.view(*ori_shape)
 
 
-def swiglu_bwd(dc, a, b):
+@swiglu_fwd.register_fake
+def swiglu_fwd(
+    a: torch.Tensor,
+    b: torch.Tensor,
+) -> torch.Tensor:
+    return torch.empty_like(a)
+
+
+@torch.library.custom_op("ttx::swiglu_bwd", mutates_args={})
+def swiglu_bwd(
+    dc: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Backward pass for SwiGLU.
 
@@ -253,56 +270,10 @@ def swiglu_bwd(dc, a, b):
     return da.view(*ori_shape), db.view(*ori_shape)
 
 
-class TTXSwiGLUFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, a, b):
-        """
-        Forward pass of SwiGLU function.
-
-        Args:
-            a: Input tensor A
-            b: Input tensor B
-
-        Returns:
-            c: Output tensor C = silu(a) * b
-        """
-        c = swiglu_fwd(a, b)
-        ctx.save_for_backward(a, b)
-        return c
-
-    @staticmethod
-    def backward(ctx, dc):
-        """
-        Backward pass of SwiGLU function.
-
-        Args:
-            dc: Gradient w.r.t. output
-
-        Returns:
-            da: Gradient w.r.t. input A
-            db: Gradient w.r.t. input B
-        """
-        a, b = ctx.saved_tensors
-        da, db = swiglu_bwd(dc, a, b)
-        return da, db
-
-
-def ttx_silu_mul(a, b):
-    """
-    TTX SwiGLU activation function for inference (low-level interface).
-
-    Implements: output = silu(a) * b, where silu(x) = x * sigmoid(x)
-
-    Args:
-        a: Gate tensor of any shape
-        b: Up tensor of same shape as a
-
-    Returns:
-        Output tensor with same shape as inputs
-
-    Example:
-        >>> gate = torch.randn(32, 128, 1024)
-        >>> up = torch.randn(32, 128, 1024)
-        >>> output = ttx_silu_mul(gate, up)  # Shape: (32, 128, 1024)
-    """
-    return TTXSwiGLUFunction.apply(a, b)
+@swiglu_bwd.register_fake
+def swiglu_bwd(
+    dc: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(dc), torch.empty_like(dc)
