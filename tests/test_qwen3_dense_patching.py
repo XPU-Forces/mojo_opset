@@ -1,10 +1,9 @@
-import torch
-import torch.nn as nn
 from typing import Tuple
-import pytest
 
+import torch
 
 from example_models import torch_qwen3_dense
+
 from mojo_opset.utils.logging import get_logger
 
 logger = get_logger(__name__)

@@ -1,13 +1,11 @@
-import os
-from mojo_opset import MojoRoPE, MojoNorm, MojoSwiGLU, MojoPagedPrefillGQA, MojoPagedDecodeGQA
-
-
 import torch
-import triton
-import math
-from typing import Optional
-import triton.language as tl
 import torch.nn as nn
+
+from mojo_opset import MojoNorm
+from mojo_opset import MojoPagedDecodeGQA
+from mojo_opset import MojoPagedPrefillGQA
+from mojo_opset import MojoRoPE
+from mojo_opset import MojoSwiGLU
 
 
 def apply_mojo_op_to_qwen3(

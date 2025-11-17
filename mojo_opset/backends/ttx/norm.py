@@ -1,15 +1,14 @@
 import torch
-from mojo_opset.backends.ttx.kernels.ascend.rms_norm import ttx_rms_norm, rms_norm_fwd, rms_norm_bwd
-from mojo_opset.backends.ttx.kernels.ascend.layer_norm import ttx_layer_norm
 
-from mojo_opset.core import MojoNorm, MojoRMSNormFunction
-from mojo_opset.backends.ttx.kernels.ascend.utils import torch_to_triton_dtype
+from mojo_opset.backends.ttx.kernels.ascend.layer_norm import ttx_layer_norm
+from mojo_opset.core import MojoNorm
+from mojo_opset.core import MojoRMSNormFunction
 
 
 class TTXNorm(MojoNorm, default_priority=0):
     def forward_std(self, hidden_state: torch.Tensor):
         if self.norm_type == "rmsnorm":
-            return rms_norm_fwd(hidden_state, self.gamma, self.epsilon, offset=0.0, casting_mode="llama")[0]
+            return torch.ops.ttx.rmsnorm_infer(hidden_state, self.gamma, self.epsilon)
         elif self.norm_type == "layernorm":
             return ttx_layer_norm(hidden_state, self.gamma, self.beta, self.epsilon)
         else:
@@ -17,6 +16,14 @@ class TTXNorm(MojoNorm, default_priority=0):
 
 
 class TTXRMSNormFunction(MojoRMSNormFunction):
+    """
+    TODO(zhangjihang, zhaowenshuo):
+    Liger's rms_norm bwd support inplace modifying dy in order to reduce memory usage.
+    By now, we just implement out-place function.
+    We can support this soon when we start to think about functionalize.
+    Ref: https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/rms_norm.py#L527
+    """
+
     @staticmethod
     def forward(ctx, X, W, eps):
         """
@@ -26,18 +33,17 @@ class TTXRMSNormFunction(MojoRMSNormFunction):
         # FIXME: Currently, MojoNormFunction base class does not define fields like 'offset', so they are hardcoded here temporarily.
         offset = 0.0
         casting_mode = "llama"
-        in_place = True
+        str_to_casting_mode = {"llama": 0, "gemma": 1, "none": -1}
+        casting_mode_int = str_to_casting_mode[casting_mode]
 
-        Y, X_2d, RSTD = rms_norm_fwd(X, W, eps, offset, casting_mode)
+        Y, RSTD = torch.ops.ttx.rmsnorm_fwd(X, W, eps, offset, casting_mode_int)
 
-        ctx.save_for_backward(X_2d, W, RSTD)
+        ctx.save_for_backward(X, W, RSTD)
 
         ctx.offset = offset
-        ctx.in_place = in_place
 
-        str_to_casting_mode = {"llama": 0, "gemma": 1, "none": -1}
-        ctx.casting_mode_int = str_to_casting_mode[casting_mode]
-        ctx.X_dtype_triton = torch_to_triton_dtype.get(X.dtype)
+        ctx.casting_mode_int = casting_mode_int
+        ctx.X_dtype = X.dtype
 
         return Y
 
@@ -46,17 +52,16 @@ class TTXRMSNormFunction(MojoRMSNormFunction):
         """
         Y: (B, T, H) or (BxT, H)
         """
-        X_2d, W, RSTD = ctx.saved_tensors
+        X, W, RSTD = ctx.saved_tensors
 
-        dX, dW = rms_norm_bwd(
+        dX, dW = torch.ops.ttx.rmsnorm_bwd(
             dY=dY,
-            X_2d=X_2d,
+            X=X,
             W=W,
             RSTD=RSTD,
             offset=ctx.offset,
             casting_mode_int=ctx.casting_mode_int,
-            in_place=ctx.in_place,
-            X_dtype_triton=ctx.X_dtype_triton,
+            X_dtype=ctx.X_dtype,
         )
 
         return dX, dW, None, None, None, None

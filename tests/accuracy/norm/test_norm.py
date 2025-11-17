@@ -1,7 +1,8 @@
 import pytest
 import torch
 
-from tests.utils import auto_switch_platform, bypass_not_implemented
+from tests.utils import auto_switch_platform
+from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoNorm
 
@@ -10,8 +11,8 @@ from mojo_opset import MojoNorm
     "x, gamma",
     [
         (
-            torch.randn(size=(256, 128), dtype=dtype),
-            torch.randn(size=(128,), dtype=torch.float32),
+            torch.randn(size=(1, 32, 2048), dtype=dtype),
+            torch.randn(size=(2048,), dtype=torch.float32),
         )
         for dtype in [torch.float32, torch.float16, torch.bfloat16]
     ],

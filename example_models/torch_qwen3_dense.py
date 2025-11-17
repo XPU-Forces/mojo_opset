@@ -1,8 +1,10 @@
-import torch
-from torch import nn
-from typing import Optional, Tuple, Callable
-import torch_npu
 import math
+
+from typing import Optional
+
+import torch
+
+from torch import nn
 
 
 def silu(x):
@@ -166,7 +168,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 class Qwen3RMSNorm(nn.Module):
-    def __init__(self, eps: float = 1e-6,norm_type: str = "rmsnorm", gamma: Optional[torch.Tensor] = None):
+    def __init__(self, eps: float = 1e-6, norm_type: str = "rmsnorm", gamma: Optional[torch.Tensor] = None):
         super().__init__()
         self.epsilon = float(eps)
         self.gamma = gamma
@@ -305,9 +307,9 @@ def paged_attention_decode(q, k_cache, v_cache, seqlens, block_tables, softmax_s
 
 def paged_attention_forward(
     module: "Qwen3Attention",
-    query_states: torch.Tensor,
-    key_states: torch.Tensor,
-    value_states: torch.Tensor,
+    query_states: torch.Tensor,  # [BNSD]
+    key_states: torch.Tensor,  # [BNSD]
+    value_states: torch.Tensor,  # [BNSD]
     past_key_values: PagedDummyCache,
     context_lens: torch.Tensor,
     **kwargs,
@@ -388,13 +390,13 @@ class Qwen3Attention(nn.Module):
             else torch.zeros(bsz, dtype=torch.long, device=hidden_states.device)
         )
 
-        query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim)
-        key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim)
-        value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim)
+        query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim)  # [BSND]
+        key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim)  # [BSND]
+        value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim)  # [BSND]
 
-        query_states = self.q_norm(query_states).transpose(1, 2)
-        key_states = self.k_norm(key_states).transpose(1, 2)
-        value_states = value_states.transpose(1, 2)
+        query_states = self.q_norm(query_states).transpose(1, 2)  # [BNSD]
+        key_states = self.k_norm(key_states).transpose(1, 2)  # [BNSD]
+        value_states = value_states.transpose(1, 2)  # [BNSD]
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
