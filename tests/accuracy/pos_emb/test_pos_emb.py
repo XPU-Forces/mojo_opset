@@ -1,7 +1,8 @@
 import pytest
 import torch
 
-from tests.utils import auto_switch_platform, bypass_not_implemented
+from tests.utils import auto_switch_platform
+from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoRoPE
 
@@ -10,8 +11,8 @@ from mojo_opset import MojoRoPE
     "q, k",
     [
         (
-            torch.randn(1, 4096, 32, 32),
-            torch.randn(1, 4096, 8, 32),
+            torch.randn(1, 1024, 32, 32),  # [BSND]
+            torch.randn(1, 1024, 8, 32),  # [BSND]
         )
     ],
 )
@@ -21,7 +22,9 @@ def test_pos_emb(q, k):
     rope = MojoRoPE(is_varlen=False)
 
     # Transpose q and k to mock the memory layout transformation used in the real inference framework.
-    q, k = q.transpose(1, 2), k.transpose(1, 2)
+
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
 
     inv_freq = 1.0 / (10000.0 ** (torch.arange(0, q.size(-1), 2).float().to(q.device) / q.size(-1)))
     t = torch.arange(q.size(-2), device=q.device, dtype=inv_freq.dtype)
