@@ -1,5 +1,8 @@
+from typing import Any
+from typing import Optional
+from typing import Tuple
+
 import torch
-from typing import Any, Tuple, Optional
 
 from ..mojo_operator import MojoOperator
 
@@ -19,18 +22,19 @@ class MojoRoPE(MojoOperator):
 
     Description: Only covers common parameters and lightweight validation; forward computation body is placeholder, does not include backend or quantization implementation.
     """
+
     def __init__(
-        self, 
+        self,
         rotary_offset: int = 0,
         interleaved: bool = False,
         dynamic_ntk: bool = False,
         max_seq_len: Optional[int] = None,
-        is_varlen: bool = True, 
-        op_name: str = "", 
-        layer_idx: int = 0
+        is_varlen: bool = True,
+        op_name: str = "",
+        layer_idx: int = 0,
     ):
         super().__init__(op_name, layer_idx)
-        
+
         # 类型与数值的轻量校验
         if not isinstance(rotary_offset, int) or rotary_offset < 0:
             raise ValueError("rotary_offset 需为非负整数")
@@ -50,23 +54,23 @@ class MojoRoPE(MojoOperator):
         self.is_varlen = is_varlen
 
     def forward_std(
-        self, 
-        q: torch.Tensor, 
-        k: torch.Tensor, 
-        cos: torch.Tensor, 
+        self,
+        q: torch.Tensor,  # [BNSD]
+        k: torch.Tensor,  # [BNSD]
+        cos: torch.Tensor,
         sin: torch.Tensor,
-        position_ids: Optional[torch.Tensor] = None, 
+        position_ids: Optional[torch.Tensor] = None,
         cum_sum_query_len: Optional[torch.Tensor] = None,
     ) -> Tuple[Any]:
         raise NotImplementedError
 
     def forward_ref(
-        self, 
-        q: torch.Tensor, 
-        k: torch.Tensor, 
-        cos: torch.Tensor, 
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        cos: torch.Tensor,
         sin: torch.Tensor,
-        position_ids: Optional[torch.Tensor] = None, 
+        position_ids: Optional[torch.Tensor] = None,
         cum_sum_query_len: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         def rotate_half(x):
@@ -76,6 +80,7 @@ class MojoRoPE(MojoOperator):
 
         q_rot = q * cos + rotate_half(q) * sin
         k_rot = k * cos + rotate_half(k) * sin
+        print(q_rot.stride(), k_rot.stride())
         return q_rot, k_rot
 
     def forward_analysis(

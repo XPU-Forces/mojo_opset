@@ -1,6 +1,7 @@
 import torch
 
-from ..mojo_function import MojoFuncBase, mojo_func_dispatcher
+from ..mojo_function import MojoFuncBase
+from ..mojo_function import mojo_func_dispatcher
 
 
 @mojo_func_dispatcher
@@ -19,7 +20,7 @@ class MojoRoPEFunction(MojoFuncBase):
         q_rot = q * cos + rotate_half(q) * sin
         k_rot = k * cos + rotate_half(k) * sin
 
-        ctx.save_for_backward(q, k, cos, sin)
+        ctx.save_for_backward(cos, sin)
 
         return q_rot, k_rot
 
@@ -29,7 +30,7 @@ class MojoRoPEFunction(MojoFuncBase):
 
     @staticmethod
     def backward_ref(ctx, grad_output_q, grad_output_k):
-        q, k, cos, sin = ctx.saved_tensors
+        cos, sin = ctx.saved_tensors
 
         def inverse_rotate_half(x):
             x1 = x[..., : x.shape[-1] // 2]
