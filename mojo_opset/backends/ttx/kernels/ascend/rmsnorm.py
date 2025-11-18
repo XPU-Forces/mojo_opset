@@ -16,7 +16,7 @@ This file incorporates code from Unsloth licensed under the Apache License, Vers
 See the original Unsloth repository at https://github.com/unslothai/unsloth.
 
 Portions of this file are adapted from:
-https://github.com/linkedin/Liger-Kernel/blob/7382a8761f9af679482b968f9348013d933947c7/src/liger_kernel/ops/rms_norm.py#L30
+https://github.com/linkedin/Liger-Kernel/blob/7382a8761f9af679482b968f9348013d933947c7/src/liger_kernel/ops/rmsnorm.py#L30
 which in turn is based on Unsloth code at:
 https://github.com/unslothai/unsloth/blob/fd753fed99ed5f10ef8a9b7139588d9de9ddecfb/unsloth/kernels/rms_layernorm.py#L22
 
@@ -47,7 +47,7 @@ _CASTING_MODE_GEMMA: tl.constexpr = tl.constexpr(1)
 )
 @libentry()
 @triton.jit
-def _rms_norm_infer_kernel(
+def _rmsnorm_infer_kernel(
     X_ptr,
     Y_ptr,
     W_ptr,
@@ -120,10 +120,6 @@ def rmsnorm_infer(
     w: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
-    print("========== zhangjihang")
-    print(f"x shape: {x.shape}")
-    print(f"w shape: {w.shape}")
-    print(f"eps: {eps}")
     shape = x.shape
     dim = shape[-1]
     X_2d = x.view(-1, dim)
@@ -140,7 +136,7 @@ def rmsnorm_infer(
 
     grid = (num_programs,)
 
-    _rms_norm_infer_kernel[grid](
+    _rmsnorm_infer_kernel[grid](
         x,
         y,
         w,
@@ -156,7 +152,7 @@ def rmsnorm_infer(
 
 
 @rmsnorm_infer.register_fake
-def rms_norm_infer_fake(
+def rmsnorm_infer_fake(
     x: torch.Tensor,
     w: torch.Tensor,
     eps: float,
@@ -180,7 +176,7 @@ def rms_norm_infer_fake(
 )
 @libentry()
 @triton.jit
-def _rms_norm_fwd_kernel(
+def _rmsnorm_fwd_kernel(
     Y_ptr,
     Y_row_stride,
     X_ptr,
@@ -266,7 +262,7 @@ def _rms_norm_fwd_kernel(
 )
 @libentry()
 @triton.jit
-def _rms_norm_bwd_kernel(
+def _rmsnorm_bwd_kernel(
     dY_ptr,
     dY_row_stride,
     dX_ptr,
@@ -356,7 +352,7 @@ def _rms_norm_bwd_kernel(
 )
 @libentry()
 @triton.jit
-def _rms_norm_bwd_large_cols_kernel(
+def _rmsnorm_bwd_large_cols_kernel(
     dY_ptr,
     dY_row_stride,
     dX_ptr,
@@ -474,7 +470,7 @@ def rmsnorm_fwd(
     rstd_dtype = torch.float32 if casting_mode_int in (0, 1) else X.dtype
     RSTD = torch.empty(n_rows, dtype=rstd_dtype, device=X.device)
 
-    _rms_norm_fwd_kernel[grid](
+    _rmsnorm_fwd_kernel[grid](
         Y,
         Y.stride(0),
         X_2d,
@@ -496,7 +492,7 @@ def rmsnorm_fwd(
 
 
 @rmsnorm_fwd.register_fake
-def rms_norm_fwd_fake(
+def rmsnorm_fwd_fake(
     X: torch.Tensor,
     W: torch.Tensor,
     eps: float,
@@ -544,7 +540,7 @@ def rmsnorm_bwd(
     dX_2d = torch.empty_like(dY_2d)
 
     if n_cols <= COL_BLOCKING_THRESHOLD:
-        _rms_norm_bwd_kernel[grid](
+        _rmsnorm_bwd_kernel[grid](
             dY_2d,
             dY_2d.stride(0),
             dX_2d,
@@ -566,7 +562,7 @@ def rmsnorm_bwd(
         dW = _dW.sum(dim=0).to(W.dtype)
     else:
         _dW.zero_()
-        _rms_norm_bwd_large_cols_kernel[grid](
+        _rmsnorm_bwd_large_cols_kernel[grid](
             dY_2d,
             dY_2d.stride(0),
             dX_2d,
@@ -593,7 +589,7 @@ def rmsnorm_bwd(
 
 
 @rmsnorm_bwd.register_fake
-def rms_norm_bwd_fake(
+def rmsnorm_bwd_fake(
     dY: torch.Tensor,
     X: torch.Tensor,
     W: torch.Tensor,

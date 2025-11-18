@@ -77,8 +77,3 @@ def test_swiglu(gate_out, up_out):
 @auto_switch_platform()
 def test_swiglu_bwd(dc, a, b):
     torch.library.opcheck(torch.ops.ttx.swiglu_bwd, (dc, a, b))
-
-
-if __name__ == "__main__":
-    print(torch.library.opcheck(torch.ops.ttx.gelu, (torch.rand(128, 128).npu(),)))
-    print(torch.library.opcheck(torch.ops.ttx.gelu_bwd, (torch.rand(128, 128).npu(), torch.rand(128, 128).npu())))

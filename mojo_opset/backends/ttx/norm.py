@@ -1,6 +1,6 @@
 import torch
 
-from mojo_opset.backends.ttx.kernels.ascend.layer_norm import ttx_layer_norm
+from mojo_opset.backends.ttx.kernels.ascend.layernorm import ttx_layer_norm
 from mojo_opset.core import MojoNorm
 from mojo_opset.core import MojoRMSNormFunction
 

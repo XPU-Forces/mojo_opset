@@ -80,7 +80,6 @@ class MojoRoPE(MojoOperator):
 
         q_rot = q * cos + rotate_half(q) * sin
         k_rot = k * cos + rotate_half(k) * sin
-        print(q_rot.stride(), k_rot.stride())
         return q_rot, k_rot
 
     def forward_analysis(
