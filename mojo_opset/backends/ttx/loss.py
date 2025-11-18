@@ -1,6 +1,6 @@
 import torch
 import triton
-from mojo_opset.backends.ttx_kernels.src.ascend.fused_linear_cross_entropy import (
+from mojo_opset.backends.ttx.kernels.ascend.fused_linear_cross_entropy import (
     amp_custom_fwd,
     amp_custom_bwd,
     fused_linear_cross_entropy_forward,

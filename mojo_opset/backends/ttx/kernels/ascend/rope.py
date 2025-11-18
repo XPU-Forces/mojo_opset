@@ -1,3 +1,5 @@
+from typing import Tuple
+
 import torch
 import triton
 import triton.language as tl
@@ -33,6 +35,8 @@ def _rope_forward_kernel(
     sin_ptr,
     sin_row_stride,
     seq_len,
+    q_rope_ptr,
+    k_rope_ptr,
     bs: tl.constexpr,
     cos_bs: tl.constexpr,
     n_qh: tl.constexpr,
@@ -68,9 +72,10 @@ def _rope_forward_kernel(
             head_q_offsets = tl.arange(0, n_qh)
             head_k_offsets = tl.arange(0, n_kh)
 
-            q_base_ptr = q_ptr + batch_idx * q_batch_stride
+            # q_base_ptr = q_ptr + batch_idx * q_batch_stride
             q_offsets_half1 = (
-                q_base_ptr
+                # q_base_ptr
+                batch_idx * q_batch_stride
                 + seq_offsets[:, None, None] * q_seq_stride
                 + head_q_offsets[None, :, None] * hd
                 + dim_offsets[None, None, :]
@@ -78,8 +83,8 @@ def _rope_forward_kernel(
             q_offsets_half2 = q_offsets_half1 + (half_hd)
             q_mask = seq_mask[:, None, None] & (head_q_offsets[None, :, None] < n_qh) & dim_mask[None, None, :]
 
-            q_tile_1 = tl.load(q_offsets_half1, mask=q_mask, other=0).to(sin_block_2d.dtype)
-            q_tile_2 = tl.load(q_offsets_half2, mask=q_mask, other=0).to(sin_block_2d.dtype)
+            q_tile_1 = tl.load(q_ptr + q_offsets_half1, mask=q_mask, other=0).to(sin_block_2d.dtype)
+            q_tile_2 = tl.load(q_ptr + q_offsets_half2, mask=q_mask, other=0).to(sin_block_2d.dtype)
 
             cos_row = tl.reshape(cos_block_2d, (TOKEN_BLOCK_SIZE, 1, half_hd), can_reorder=True)
             sin_row = tl.reshape(sin_block_2d, (TOKEN_BLOCK_SIZE, 1, half_hd), can_reorder=True)
@@ -87,12 +92,20 @@ def _rope_forward_kernel(
             new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row
             new_q_tile_2 = q_tile_2 * cos_row + q_tile_1 * sin_row
 
-            tl.store(q_offsets_half1, new_q_tile_1, mask=q_mask)
-            tl.store(q_offsets_half2, new_q_tile_2, mask=q_mask)
+            # q_base_ptr = q_rope_ptr + batch_idx * q_batch_stride
+            # q_offsets_half1 = (
+            #     q_base_ptr
+            #     + seq_offsets[:, None, None] * q_seq_stride
+            #     + head_q_offsets[None, :, None] * hd
+            #     + dim_offsets[None, None, :]
+            # )
+            # q_offsets_half2 = q_offsets_half1 + (half_hd)
+            tl.store(q_rope_ptr + q_offsets_half1, new_q_tile_1, mask=q_mask)
+            tl.store(q_rope_ptr + q_offsets_half2, new_q_tile_2, mask=q_mask)
 
-            k_base_ptr = k_ptr + batch_idx * k_batch_stride
+            # k_base_ptr = k_ptr + batch_idx * k_batch_stride
             k_offsets_half1 = (
-                k_base_ptr
+                batch_idx * k_batch_stride
                 + seq_offsets[:, None, None] * k_seq_stride
                 + head_k_offsets[None, :, None] * hd
                 + dim_offsets[None, None, :]
@@ -100,14 +113,14 @@ def _rope_forward_kernel(
             k_offsets_half2 = k_offsets_half1 + (half_hd)
             k_mask = seq_mask[:, None, None] & (head_k_offsets[None, :, None] < n_kh) & dim_mask[None, None, :]
 
-            k_tile_1 = tl.load(k_offsets_half1, mask=k_mask, other=0).to(sin_block_2d.dtype)
-            k_tile_2 = tl.load(k_offsets_half2, mask=k_mask, other=0).to(sin_block_2d.dtype)
+            k_tile_1 = tl.load(k_ptr + k_offsets_half1, mask=k_mask, other=0).to(sin_block_2d.dtype)
+            k_tile_2 = tl.load(k_ptr + k_offsets_half2, mask=k_mask, other=0).to(sin_block_2d.dtype)
 
             new_k_tile_1 = k_tile_1 * cos_row - k_tile_2 * sin_row
             new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
 
-            tl.store(k_offsets_half1, new_k_tile_1, mask=k_mask)
-            tl.store(k_offsets_half2, new_k_tile_2, mask=k_mask)
+            tl.store(k_rope_ptr + k_offsets_half1, new_k_tile_1, mask=k_mask)
+            tl.store(k_rope_ptr + k_offsets_half2, new_k_tile_2, mask=k_mask)
 
 
 @triton.autotune(
@@ -138,6 +151,8 @@ def _rope_backward_kernel(
     sin_ptr,
     sin_row_stride,
     seq_len,
+    grad_q_ptr,
+    grad_k_ptr,
     bs: tl.constexpr,
     cos_bs: tl.constexpr,
     n_qh: tl.constexpr,
@@ -173,9 +188,10 @@ def _rope_backward_kernel(
             head_q_offsets = tl.arange(0, n_qh)
             head_k_offsets = tl.arange(0, n_kh)
 
-            dq_base_ptr = dq_ptr + batch_idx * dq_batch_stride
+            # dq_base_ptr = dq_ptr + batch_idx * dq_batch_stride
             dq_offsets_half1 = (
-                dq_base_ptr
+                # dq_base_ptr
+                batch_idx * dq_batch_stride
                 + seq_offsets[:, None, None] * dq_seq_stride
                 + head_q_offsets[None, :, None] * hd
                 + dim_offsets[None, None, :]
@@ -183,8 +199,8 @@ def _rope_backward_kernel(
             dq_offsets_half2 = dq_offsets_half1 + (half_hd)
             q_mask = seq_mask[:, None, None] & (head_q_offsets[None, :, None] < n_qh) & dim_mask[None, None, :]
 
-            dq_tile_1 = tl.load(dq_offsets_half1, mask=q_mask, other=0).to(sin_block_2d.dtype)
-            dq_tile_2 = tl.load(dq_offsets_half2, mask=q_mask, other=0).to(sin_block_2d.dtype)
+            dq_tile_1 = tl.load(dq_ptr + dq_offsets_half1, mask=q_mask, other=0).to(sin_block_2d.dtype)
+            dq_tile_2 = tl.load(dq_ptr + dq_offsets_half2, mask=q_mask, other=0).to(sin_block_2d.dtype)
 
             cos_row = tl.reshape(cos_block_2d, (TOKEN_BLOCK_SIZE, 1, half_hd), can_reorder=True)
             sin_row = tl.reshape(sin_block_2d, (TOKEN_BLOCK_SIZE, 1, half_hd), can_reorder=True)
@@ -192,12 +208,12 @@ def _rope_backward_kernel(
             new_dq_tile_1 = dq_tile_1 * cos_row + dq_tile_2 * sin_row
             new_dq_tile_2 = dq_tile_2 * cos_row - dq_tile_1 * sin_row
 
-            tl.store(dq_offsets_half1, new_dq_tile_1, mask=q_mask)
-            tl.store(dq_offsets_half2, new_dq_tile_2, mask=q_mask)
+            tl.store(grad_q_ptr + dq_offsets_half1, new_dq_tile_1, mask=q_mask)
+            tl.store(grad_q_ptr + dq_offsets_half2, new_dq_tile_2, mask=q_mask)
 
-            dk_base_ptr = dk_ptr + batch_idx * dk_batch_stride
+            # dk_base_ptr = dk_ptr + batch_idx * dk_batch_stride
             dk_offsets_half1 = (
-                dk_base_ptr
+                batch_idx * dk_batch_stride
                 + seq_offsets[:, None, None] * dk_seq_stride
                 + head_k_offsets[None, :, None] * hd
                 + dim_offsets[None, None, :]
@@ -205,104 +221,32 @@ def _rope_backward_kernel(
             dk_offsets_half2 = dk_offsets_half1 + (half_hd)
             k_mask = seq_mask[:, None, None] & (head_k_offsets[None, :, None] < n_kh) & dim_mask[None, None, :]
 
-            dk_tile_1 = tl.load(dk_offsets_half1, mask=k_mask, other=0).to(sin_block_2d.dtype)
-            dk_tile_2 = tl.load(dk_offsets_half2, mask=k_mask, other=0).to(sin_block_2d.dtype)
+            dk_tile_1 = tl.load(dk_ptr + dk_offsets_half1, mask=k_mask, other=0).to(sin_block_2d.dtype)
+            dk_tile_2 = tl.load(dk_ptr + dk_offsets_half2, mask=k_mask, other=0).to(sin_block_2d.dtype)
 
             new_dk_tile_1 = dk_tile_1 * cos_row + dk_tile_2 * sin_row
             new_dk_tile_2 = dk_tile_2 * cos_row - dk_tile_1 * sin_row
 
-            tl.store(dk_offsets_half1, new_dk_tile_1, mask=k_mask)
-            tl.store(dk_offsets_half2, new_dk_tile_2, mask=k_mask)
+            tl.store(grad_k_ptr + dk_offsets_half1, new_dk_tile_1, mask=k_mask)
+            tl.store(grad_k_ptr + dk_offsets_half2, new_dk_tile_2, mask=k_mask)
 
 
-class TTXRopeFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
-        q_t = q.transpose(1, 2).contiguous()
-        k_t = k.transpose(1, 2).contiguous()
-
-        batch_size, seq_len, n_q_head, head_dim = q_t.shape
-        n_kv_head = k_t.shape[2]
-
-        num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
-
-        grid = (num_programs,)
-
-        cos_batch_size = cos.shape[0]
-        cos = cos.contiguous()
-        sin = sin.contiguous()
-
-        _rope_forward_kernel[grid](
-            q_t,
-            q_t.stride(0),
-            q_t.stride(1),
-            k_t,
-            k_t.stride(0),
-            k_t.stride(1),
-            cos,
-            cos.stride(-2),
-            sin,
-            sin.stride(-2),
-            seq_len,
-            batch_size,
-            cos_batch_size,
-            n_q_head,
-            n_kv_head,
-            head_dim,
-            head_dim // 2,
-        )
-
-        ctx.save_for_backward(cos, sin)
-        ctx.seq_len = seq_len
-        return q_t.transpose(1, 2), k_t.transpose(1, 2)
-
-    @staticmethod
-    def backward(ctx, dq, dk):
-        cos, sin = ctx.saved_tensors
-        seq_len = ctx.seq_len
-
-        dq_t = dq.transpose(1, 2).contiguous()
-        dk_t = dk.transpose(1, 2).contiguous()
-
-        batch_size, _, n_q_head, head_dim = dq_t.shape
-        n_kv_head = dk_t.shape[2]
-        cos_batch_size = cos.shape[0]
-
-        NUM_PROGRAMS = 48
-        grid = (NUM_PROGRAMS,)
-
-        _rope_backward_kernel[grid](
-            dq_t,
-            dq_t.stride(0),
-            dq_t.stride(1),
-            dk_t,
-            dk_t.stride(0),
-            dk_t.stride(1),
-            cos,
-            cos.stride(-2),
-            sin,
-            sin.stride(-2),
-            seq_len,
-            batch_size,
-            cos_batch_size,
-            n_q_head,
-            n_kv_head,
-            head_dim,
-            head_dim // 2,
-        )
-
-        return dq_t.transpose(1, 2), dk_t.transpose(1, 2), None, None, None, None
-
-
-def rope_infer(q, k, cos, sin):
+@torch.library.custom_op("ttx::rope", mutates_args={})
+def rome_fwd(
+    q: torch.Tensor,  # [BNSD]
+    k: torch.Tensor,  # [BNSD]
+    cos: torch.Tensor,  # [BSD]
+    sin: torch.Tensor,  # [BSD]
+) -> Tuple[torch.Tensor, torch.Tensor]:  # [BNSD]
     q_t = q.transpose(1, 2).contiguous()
     k_t = k.transpose(1, 2).contiguous()
+    q_rope = torch.empty_like(q_t)
+    k_rope = torch.empty_like(k_t)
 
     batch_size, seq_len, n_q_head, head_dim = q_t.shape
     n_kv_head = k_t.shape[2]
 
     num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
-
     grid = (num_programs,)
 
     cos_batch_size = cos.shape[0]
@@ -321,6 +265,8 @@ def rope_infer(q, k, cos, sin):
         sin,
         sin.stride(-2),
         seq_len,
+        q_rope,
+        k_rope,
         batch_size,
         cos_batch_size,
         n_q_head,
@@ -329,21 +275,72 @@ def rope_infer(q, k, cos, sin):
         head_dim // 2,
     )
 
-    return q_t.transpose(1, 2), k_t.transpose(1, 2)
+    # return q_rope.transpose(1, 2).contiguous(), k_rope.transpose(1, 2).contiguous()
+    return q_rope.transpose(1, 2), k_rope.transpose(1, 2)
 
 
-def ttx_rope(q, k, sin, cos):
-    """
-    Applies Rotary Positional Embedding (RoPE) operation to query and key states.
+@rome_fwd.register_fake
+def rope_fwd_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(q), torch.empty_like(k)
 
-    Args:
-        q (torch.Tensor): The query tensor of shape (bsz, n_q_head, seq_len, head_dim).
-        k (torch.Tensor): The key tensor of shape (bsz, n_kv_head, seq_len, head_dim).
-        cos (torch.Tensor): The cosine tensor of shape (1, seq_len, head_dim) or (bsz, seq_len, head_dim).
-        sin (torch.Tensor): The sine tensor of shape (1, seq_len, head_dim) or (bsz, seq_len, head_dim).
 
-    Returns:
-        Tuple[torch.Tensor, torch.Tensor]: The query and key tensors after applying the RoPE operation.
-    """
+@torch.library.custom_op("ttx::rope_bwd", mutates_args={})
+def rope_bwd(
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    sin: torch.Tensor,
+    cos: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    dq_t = dq.transpose(1, 2).contiguous()
+    dk_t = dk.transpose(1, 2).contiguous()
 
-    return rope_infer(q, k, sin, cos)
+    grad_q = torch.empty_like(dq_t)
+    grad_k = torch.empty_like(dk_t)
+
+    batch_size, seq_len, n_q_head, head_dim = dq_t.shape
+    n_kv_head = dk_t.shape[2]
+    cos_batch_size = cos.shape[0]
+    cos = cos.contiguous()
+    sin = sin.contiguous()
+
+    num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
+    grid = (num_programs,)
+
+    _rope_backward_kernel[grid](
+        dq_t,
+        dq_t.stride(0),
+        dq_t.stride(1),
+        dk_t,
+        dk_t.stride(0),
+        dk_t.stride(1),
+        cos,
+        cos.stride(-2),
+        sin,
+        sin.stride(-2),
+        seq_len,
+        grad_q,
+        grad_k,
+        batch_size,
+        cos_batch_size,
+        n_q_head,
+        n_kv_head,
+        head_dim,
+        head_dim // 2,
+    )
+
+    return grad_q.transpose(1, 2).contiguous(), grad_k.transpose(1, 2).contiguous()
+
+
+@rope_bwd.register_fake
+def rope_bwd_fake(
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    sin: torch.Tensor,
+    cos: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(dq), torch.empty_like(dk)

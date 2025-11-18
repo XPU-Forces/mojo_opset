@@ -75,7 +75,7 @@ from .sampling.mojo_sampling import (
 )
 
 from .functions.mojo_silu_func import MojoSiluFunction
-from .functions.mojo_rms_norm_func import MojoRMSNormFunction
+from .functions.mojo_rmsnorm_func import MojoRMSNormFunction
 from .functions.mojo_rope_func import MojoRoPEFunction
 from .functions.mojo_linear_crossentropy_func import MojoFusedLinearCrossEntropyFunction
 

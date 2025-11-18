@@ -1,20 +1,22 @@
+from typing import Tuple
+
 import torch
 import triton
 import triton.language as tl
-import torch.nn as nn
 
 from triton.runtime.libentry import libentry
 
+from mojo_opset.backends.ttx.kernels.ascend.utils import torch_to_triton_dtype
+
 from .utils import VEC_ALIGN_BYTES
 from .utils import align
-from .utils import torch_to_triton_dtype
 
 """
 This file incorporates code from Unsloth licensed under the Apache License, Version 2.0.
 See the original Unsloth repository at https://github.com/unslothai/unsloth.
 
 Portions of this file are adapted from:
-https://github.com/linkedin/Liger-Kernel/blob/7382a8761f9af679482b968f9348013d933947c7/src/liger_kernel/ops/rms_norm.py#L30
+https://github.com/linkedin/Liger-Kernel/blob/7382a8761f9af679482b968f9348013d933947c7/src/liger_kernel/ops/rmsnorm.py#L30
 which in turn is based on Unsloth code at:
 https://github.com/unslothai/unsloth/blob/fd753fed99ed5f10ef8a9b7139588d9de9ddecfb/unsloth/kernels/rms_layernorm.py#L22
 
@@ -45,7 +47,7 @@ _CASTING_MODE_GEMMA: tl.constexpr = tl.constexpr(1)
 )
 @libentry()
 @triton.jit
-def _rms_norm_infer_kernel(
+def _rmsnorm_infer_kernel(
     X_ptr,
     Y_ptr,
     W_ptr,
@@ -112,7 +114,12 @@ def _rms_norm_infer_kernel(
             )
 
 
-def ttx_rms_norm(x, w, eps):
+@torch.library.custom_op("ttx::rmsnorm_infer", mutates_args={})
+def rmsnorm_infer(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
     shape = x.shape
     dim = shape[-1]
     X_2d = x.view(-1, dim)
@@ -129,11 +136,11 @@ def ttx_rms_norm(x, w, eps):
 
     grid = (num_programs,)
 
-    _rms_norm_infer_kernel[grid](
+    _rmsnorm_infer_kernel[grid](
         x,
         y,
         w,
-        x.stride(0),
+        X_2d.stride(0),
         y.stride(0),
         N_ROWS=n_rows,
         N_COLS=n_cols,
@@ -141,7 +148,16 @@ def ttx_rms_norm(x, w, eps):
         BLOCK_SIZE_N=BLOCK_SIZE_N,
     )
 
-    return y.view(shape)
+    return y.view(*shape)
+
+
+@rmsnorm_infer.register_fake
+def rmsnorm_infer_fake(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    return torch.empty_like(x)
 
 
 @triton.autotune(
@@ -160,7 +176,7 @@ def ttx_rms_norm(x, w, eps):
 )
 @libentry()
 @triton.jit
-def _rms_norm_fwd_kernel(
+def _rmsnorm_fwd_kernel(
     Y_ptr,
     Y_row_stride,
     X_ptr,
@@ -172,7 +188,7 @@ def _rms_norm_fwd_kernel(
     n_cols,
     eps,
     offset,
-    casting_mode: tl.constexpr,
+    casting_mode_int: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
 ):
@@ -211,19 +227,19 @@ def _rms_norm_fwd_kernel(
             X_chunk = tl.load(X_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
             W_chunk = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0)
 
-            if casting_mode == _CASTING_MODE_GEMMA:
+            if casting_mode_int == _CASTING_MODE_GEMMA:
                 X_chunk = X_chunk.to(tl.float32)
                 W_chunk = W_chunk.to(tl.float32)
-            elif casting_mode == _CASTING_MODE_LLAMA:
+            elif casting_mode_int == _CASTING_MODE_LLAMA:
                 X_chunk = X_chunk.to(tl.float32)
 
-            if casting_mode == _CASTING_MODE_LLAMA:
+            if casting_mode_int == _CASTING_MODE_LLAMA:
                 normed_X_chunk = (X_chunk * rstd_vec[:, None]).to(X_dtype)
             else:
                 normed_X_chunk = X_chunk * rstd_vec[:, None]
 
             Y_chunk = normed_X_chunk * (W_chunk[None, :] + offset)
-            if casting_mode == _CASTING_MODE_GEMMA:
+            if casting_mode_int == _CASTING_MODE_GEMMA:
                 Y_chunk = Y_chunk.to(X_dtype)
 
             tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk, mask=block_mask)
@@ -246,7 +262,7 @@ def _rms_norm_fwd_kernel(
 )
 @libentry()
 @triton.jit
-def _rms_norm_bwd_kernel(
+def _rmsnorm_bwd_kernel(
     dY_ptr,
     dY_row_stride,
     dX_ptr,
@@ -261,7 +277,7 @@ def _rms_norm_bwd_kernel(
     n_rows,
     n_cols,
     offset,
-    casting_mode: tl.constexpr,
+    casting_mode_int: tl.constexpr,
     X_dtype: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -292,10 +308,10 @@ def _rms_norm_bwd_kernel(
         X_block_f32 = X_block.to(tl.float32)
         normed_X_block = X_block_f32 * rstd_vec[:, None]
 
-        if casting_mode == _CASTING_MODE_LLAMA:
+        if casting_mode_int == _CASTING_MODE_LLAMA:
             m_block = (dY_block * W_row_offset[None, :]).to(tl.float32)
             dW_acc += tl.sum(dY_block * normed_X_block.to(X_dtype), axis=0)
-        elif casting_mode == _CASTING_MODE_GEMMA:
+        elif casting_mode_int == _CASTING_MODE_GEMMA:
             dY_block_f32 = dY_block.to(tl.float32)
             W_row_offset = W_row_offset.to(tl.float32)
 
@@ -336,7 +352,7 @@ def _rms_norm_bwd_kernel(
 )
 @libentry()
 @triton.jit
-def _rms_norm_bwd_large_cols_kernel(
+def _rmsnorm_bwd_large_cols_kernel(
     dY_ptr,
     dY_row_stride,
     dX_ptr,
@@ -351,7 +367,7 @@ def _rms_norm_bwd_large_cols_kernel(
     n_rows,
     n_cols,
     offset,
-    casting_mode: tl.constexpr,
+    casting_mode_int: tl.constexpr,
     X_dtype: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -384,7 +400,7 @@ def _rms_norm_bwd_large_cols_kernel(
 
             W_chunk_offset = W_chunk + offset
             m_chunk = dY_chunk * W_chunk_offset[None, :]
-            if casting_mode != _CASTING_MODE_NONE:
+            if casting_mode_int != _CASTING_MODE_NONE:
                 m_chunk = m_chunk.to(tl.float32)
 
             dot_product_acc += tl.sum(m_chunk * X_chunk, axis=1)
@@ -405,10 +421,10 @@ def _rms_norm_bwd_large_cols_kernel(
             X_chunk_f32 = X_chunk.to(tl.float32)
             normed_X_chunk = X_chunk_f32 * rstd_vec[:, None]
 
-            if casting_mode == _CASTING_MODE_LLAMA:
+            if casting_mode_int == _CASTING_MODE_LLAMA:
                 m_chunk = (dY_chunk * W_chunk_offset[None, :]).to(tl.float32)
                 dW_chunk_sum = tl.sum(dY_chunk * normed_X_chunk.to(X_dtype), axis=0)
-            elif casting_mode == _CASTING_MODE_GEMMA:
+            elif casting_mode_int == _CASTING_MODE_GEMMA:
                 dY_chunk_f32 = dY_chunk.to(tl.float32)
                 W_chunk_offset = W_chunk_offset.to(tl.float32)
                 m_chunk = dY_chunk_f32 * W_chunk_offset[None, :]
@@ -428,7 +444,14 @@ def _rms_norm_bwd_large_cols_kernel(
             tl.atomic_add(dW_ptr + cols_off, dW_chunk_sum, mask=cols_mask)
 
 
-def rms_norm_fwd(X, W, eps, offset, casting_mode):
+@torch.library.custom_op("ttx::rmsnorm_fwd", mutates_args={})
+def rmsnorm_fwd(
+    X: torch.Tensor,
+    W: torch.Tensor,
+    eps: float,
+    offset: float,
+    casting_mode_int: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     shape = X.shape
     dim = shape[-1]
     X_2d = X.view(-1, dim)
@@ -444,13 +467,10 @@ def rms_norm_fwd(X, W, eps, offset, casting_mode):
     grid = (num_programs,)
     Y = torch.empty_like(X_2d)
 
-    str_to_casting_mode = {"llama": 0, "gemma": 1, "none": -1}
-    _casting_mode = str_to_casting_mode[casting_mode]
-
-    rstd_dtype = torch.float32 if _casting_mode in (0, 1) else X.dtype
+    rstd_dtype = torch.float32 if casting_mode_int in (0, 1) else X.dtype
     RSTD = torch.empty(n_rows, dtype=rstd_dtype, device=X.device)
 
-    _rms_norm_fwd_kernel[grid](
+    _rmsnorm_fwd_kernel[grid](
         Y,
         Y.stride(0),
         X_2d,
@@ -462,31 +482,49 @@ def rms_norm_fwd(X, W, eps, offset, casting_mode):
         n_cols,
         eps,
         offset,
-        casting_mode=_casting_mode,
+        casting_mode_int=casting_mode_int,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
     )
 
     Y = Y.view(*shape)
 
-    return Y, X_2d, RSTD
+    return Y, RSTD
 
 
-def rms_norm_bwd(
-    dY,
-    X_2d,
-    W,
-    RSTD,
-    offset,
-    casting_mode_int,
-    in_place,
-    X_dtype_triton,
-):
+@rmsnorm_fwd.register_fake
+def rmsnorm_fwd_fake(
+    X: torch.Tensor,
+    W: torch.Tensor,
+    eps: float,
+    offset: float,
+    casting_mode_int: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    Y = torch.empty_like(X)
+    X_2d = X.view(-1, X.shape[-1])
+
+    rstd_dtype = torch.float32 if casting_mode_int in (0, 1) else X.dtype  # fp32 @llama or @gemma
+    RSTD = torch.empty(X_2d.shape[0], dtype=rstd_dtype, device=X.device)
+    return Y, RSTD
+
+
+@torch.library.custom_op("ttx::rmsnorm_bwd", mutates_args={})
+def rmsnorm_bwd(
+    dY: torch.Tensor,
+    X: torch.Tensor,
+    W: torch.Tensor,
+    RSTD: torch.Tensor,
+    offset: float,
+    casting_mode_int: int,
+    X_dtype: torch.dtype,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     shape = dY.shape
     dim = shape[-1]
     dY_2d = dY.view(-1, dim)
+    X_2d = X.view(-1, dim)
     n_rows, n_cols = dY_2d.shape
 
     num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
+    X_dtype_triton = torch_to_triton_dtype[X_dtype]
 
     grid = (num_programs,)
 
@@ -495,13 +533,14 @@ def rms_norm_bwd(
     else:
         _dW = torch.zeros((1, n_cols), dtype=torch.float32, device=W.device)
 
-    if in_place:
-        dX_2d = dY_2d
-    else:
-        dX_2d = torch.empty_like(dY_2d)
+    # if in_place:
+    #     dX_2d = dY_2d
+    # else:
+    #     dX_2d = torch.empty_like(dY_2d)
+    dX_2d = torch.empty_like(dY_2d)
 
     if n_cols <= COL_BLOCKING_THRESHOLD:
-        _rms_norm_bwd_kernel[grid](
+        _rmsnorm_bwd_kernel[grid](
             dY_2d,
             dY_2d.stride(0),
             dX_2d,
@@ -523,7 +562,7 @@ def rms_norm_bwd(
         dW = _dW.sum(dim=0).to(W.dtype)
     else:
         _dW.zero_()
-        _rms_norm_bwd_large_cols_kernel[grid](
+        _rmsnorm_bwd_large_cols_kernel[grid](
             dY_2d,
             dY_2d.stride(0),
             dX_2d,
@@ -549,102 +588,16 @@ def rms_norm_bwd(
     return dX, dW
 
 
-class TTXRMSNormFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, X, W, eps, offset=0.0, casting_mode="llama", in_place=True):
-        """
-        X: (B, T, H) or (BxT, H)
-        W: (H,)
-        """
-        Y, X_2d, RSTD = rms_norm_fwd(X, W, eps, offset, casting_mode)
-
-        ctx.save_for_backward(X_2d, W, RSTD)
-
-        ctx.offset = offset
-        ctx.in_place = in_place
-
-        str_to_casting_mode = {"llama": 0, "gemma": 1, "none": -1}
-        ctx.casting_mode_int = str_to_casting_mode[casting_mode]
-        ctx.X_dtype_triton = torch_to_triton_dtype.get(X.dtype)
-
-        return Y
-
-    @staticmethod
-    def backward(ctx, dY):
-        """
-        Y: (B, T, H) or (BxT, H)
-        """
-        X_2d, W, RSTD = ctx.saved_tensors
-
-        dX, dW = rms_norm_bwd(
-            dY=dY,
-            X_2d=X_2d,
-            W=W,
-            RSTD=RSTD,
-            offset=ctx.offset,
-            casting_mode_int=ctx.casting_mode_int,
-            in_place=ctx.in_place,
-            X_dtype_triton=ctx.X_dtype_triton,
-        )
-
-        return dX, dW, None, None, None, None
-
-
-class TTXRMSNorm(nn.Module):
-    """
-    Performs RMSNorm (Root Mean Square Normalization), which normalizes the input tensor `X` using the
-    weight tensor `W`, with an optional offset and casting mode.
-
-    Some models use an 'offset' to shift the weight tensor `W` by a constant value. For example, Gemma
-    uses an offset of 1.0, so the computation becomes `(X / RMS(X)) * (W + 1.0)` instead of the usual
-    `(X / RMS(X)) * W`. You can ... the offset value as an argument to the forward function.
-
-    In addition, different models cast their inputs at different places during RMSNorm computation. For
-    example, Gemma casts everything to fp32 nefore starting the computation, while Llama casts only the
-    inverse RMS to fp32. You can specify the casting mode using the `casting_mode` argument. We currently
-    support the following casting modes (they match HuggingFace Transformers' implementations):
-    - 'llama': matches the Llama implementation, where only the inverse RMS is computed on fp32.
-    - 'gemma': matches the Gemma implementation, where everything is cast to fp32, then computed, then cast back to the original dtype.
-    - 'none': no casting is done. The computation is done in the original dtype. This saves memory and is slightly faster, but has more error w.r.t. the original implementation.
-
-    `in_place` option means whether to in_place modify dY to store dX. This is default to `True` to save memory. However, under certain cases, it can produce incorrect inputs.
-        For example, gemma2 uses two rmsnorm sequentially with residual in between. The resesidual part needs dY so it cannot be modified in-place.
-        Therefore, for the patching of RMSNorm in gemma2, we set `in_place` to `False`
-    """
-
-    def __init__(
-        self,
-        hidden_size,
-        eps=1e-6,
-        offset=0.0,
-        casting_mode="llama",
-        init_fn="ones",
-        in_place=True,
-    ):
-        super().__init__()
-        assert init_fn in [
-            "ones",
-            "zeros",
-        ], f"init_fn must be either 'ones' or 'zeros', got {init_fn}"
-        self.weight = nn.Parameter(torch.ones(hidden_size) if init_fn == "ones" else torch.zeros(hidden_size))
-        self.epsilon, self.offset, self.casting_mode, self.in_place = (
-            eps,
-            offset,
-            casting_mode,
-            in_place,
-        )
-
-    def forward(self, hidden_states):
-        return TTXRMSNormFunction.apply(
-            hidden_states,
-            self.weight,
-            self.epsilon,
-            self.offset,
-            self.casting_mode,
-            self.in_place,
-        )
-
-    def extra_repr(self):
-        return (
-            f"{tuple(self.weight.shape)}, eps={self.epsilon}, offset={self.offset}, in_place={self.in_place}"
-        )
+@rmsnorm_bwd.register_fake
+def rmsnorm_bwd_fake(
+    dY: torch.Tensor,
+    X: torch.Tensor,
+    W: torch.Tensor,
+    RSTD: torch.Tensor,
+    offset: float,
+    casting_mode_int: int,
+    X_dtype: torch.dtype,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    dX = torch.empty_like(X)
+    dW = torch.empty(dY.shape[-1], dtype=W.dtype, device=W.device)
+    return dX, dW
