@@ -1,7 +1,9 @@
+import math
+
+from typing import Optional
+
 import torch
 import triton
-import math
-from typing import Optional
 import triton.language as tl
 
 
@@ -130,14 +132,15 @@ def paged_prefill_kernel(
     tl.store(o_ptrs, acc_o, mask=q_mask[:, None])
 
 
-def ttx_paged_attention_prefill(
+@torch.library.custom_op("ttx::paged_attention_prefill", mutates_args={})
+def paged_attention_prefill(
     q: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     block_tables: torch.Tensor,
     sm_scale: Optional[float] = None,
-):
+) -> torch.Tensor:
     total_tokens, num_q_heads, head_dim = q.shape
     batch_size = cu_seqlens_q.shape[0] - 1
     num_total_blocks, num_kv_heads, block_size, _ = k_cache.shape
@@ -188,6 +191,18 @@ def ttx_paged_attention_prefill(
         BLOCK_SIZE_D=BLOCK_SIZE_D,
     )
     return o
+
+
+@paged_attention_prefill.register_fake
+def paged_attention_prefill_fake(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    block_tables: torch.Tensor,
+    sm_scale: Optional[float] = None,
+) -> torch.Tensor:
+    return torch.empty_like(q)
 
 
 @triton.jit
@@ -306,7 +321,8 @@ def paged_decode_kernel(
     tl.store(o_ptrs, acc_o.to(o_ptr.dtype.element_ty))
 
 
-def ttx_paged_attention_decode(
+@torch.library.custom_op("ttx::paged_attention_decode", mutates_args={})
+def paged_attention_decode(
     q: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
@@ -360,3 +376,15 @@ def ttx_paged_attention_decode(
         BLOCK_SIZE_N=block_size,
     )
     return o
+
+
+@paged_attention_decode.register_fake
+def paged_attention_decode_fake(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    seqlens: torch.Tensor,
+    block_tables: torch.Tensor,
+    sm_scale: Optional[float] = None,
+) -> torch.Tensor:
+    return torch.empty_like(q)

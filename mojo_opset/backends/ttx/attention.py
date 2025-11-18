@@ -1,12 +1,9 @@
+from typing import Optional
+
 import torch
-from typing import Optional, Tuple, Any
 
-from mojo_opset.backends.ttx.kernels.ascend.flash_attention import (
-    ttx_paged_attention_prefill,
-    ttx_paged_attention_decode,
-)
-
-from mojo_opset.core import MojoPagedDecodeGQA, MojoPagedPrefillGQA
+from mojo_opset.core import MojoPagedDecodeGQA
+from mojo_opset.core import MojoPagedPrefillGQA
 
 
 class TTXPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=2):
@@ -29,7 +26,7 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=2):
             f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
 
-        output = ttx_paged_attention_prefill(
+        output = torch.ops.ttx.paged_attention_prefill(
             q=query,
             k_cache=k_cache,
             v_cache=v_cache,
@@ -61,7 +58,7 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=2):
             f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
 
-        output = ttx_paged_attention_decode(
+        output = torch.ops.ttx.paged_attention_decode(
             q=query,
             k_cache=k_cache,
             v_cache=v_cache,
