@@ -13,6 +13,7 @@ class MojoFlashAttnFunction(MojoFuncBase):
         v,
         cu_seqlens_q,
         cu_seqlens_k,
+        dropout_p=0.0,
         causal=False,
         softmax_scale=1.0,
         block_q_len=128,
@@ -28,6 +29,7 @@ class MojoFlashAttnFunction(MojoFuncBase):
         v,
         cu_seqlens_q,
         cu_seqlens_k,
+        dropout_p=0.0,
         causal=False,
         softmax_scale=1.0,
         block_q_len=128,
@@ -55,6 +57,9 @@ class MojoFlashAttnFunction(MojoFuncBase):
         k = k.permute(1, 0, 2) # [Sk, Nk, D] -> [Nk, Sk, D]
         v = v.permute(1, 0, 2) # [Sk, Nk, D] -> [Nk, Sk, D]
 
+        dropout_scale = 1 / (1 - dropout_p) if dropout_p > 0.0 else None
+        dropout_masks = [] if dropout_p > 0.0 else None
+
         for b in range(B):
             cur_q_len = cu_seqlens_q[b+1] - cu_seqlens_q[b]
             cur_k_len = cu_seqlens_k[b+1] - cu_seqlens_k[b]
@@ -64,6 +69,12 @@ class MojoFlashAttnFunction(MojoFuncBase):
 
             cur_O = torch.zeros((cur_q_len, Nq, Dv), device=q.device, dtype=q.dtype)
             cur_L = torch.zeros((cur_k_len, Nq), device=q.device, dtype=q.dtype)
+
+            if dropout_p > 0.0:
+                dropout_mask = torch.empty(G, Nk, cur_q_len, cur_k_len, dtype=torch.bool, device=q.device).bernoulli_(1 - dropout_p)
+                dropout_masks.append(dropout_mask)
+            else:
+                dropout_mask = None
 
             for q0 in range(0, cur_q_len, block_q_len):
                 ql = min(block_q_len, cur_q_len - q0)
@@ -95,6 +106,9 @@ class MojoFlashAttnFunction(MojoFuncBase):
                     exp_s_mnew = torch.exp(scores - m_new[..., None]) # [G, Nk, ql] -> [G, Nk, ql, kl]
                     l_new = exp_m_mnew * l + exp_s_mnew.sum(dim=-1) # [G, Nk, ql, kl] -> [G, Nk, ql]
 
+                    if dropout_mask is not None:
+                        exp_s_mnew = exp_s_mnew * dropout_mask[:, :, q0:q0+ql, k0:k0+kl] * dropout_scale
+
                     # p @ v: [G, Nk, ql, kl] @ [Nk, kl, D] -> [G, Nk, ql, D]
                     n_new = (exp_m_mnew[..., None] * n) + torch.einsum(
                         "g h q k, h k d -> g h q d", exp_s_mnew, v_block
@@ -115,6 +129,8 @@ class MojoFlashAttnFunction(MojoFuncBase):
 
         ctx.cu_seqlens_q = cu_seqlens_q
         ctx.cu_seqlens_k = cu_seqlens_k
+        ctx.dropout_p = dropout_p
+        ctx.dropout_masks = dropout_masks
         ctx.causal = causal
         ctx.softmax_scale = softmax_scale
         ctx.block_q_len = block_q_len
@@ -131,6 +147,8 @@ class MojoFlashAttnFunction(MojoFuncBase):
     def backward_ref(ctx, grad_o):
         cu_seqlens_q = ctx.cu_seqlens_q
         cu_seqlens_k = ctx.cu_seqlens_k
+        dropout_p = ctx.dropout_p
+        dropout_masks = ctx.dropout_masks
         causal = ctx.causal
         softmax_scale = ctx.softmax_scale
         block_q_len = ctx.block_q_len
@@ -151,6 +169,8 @@ class MojoFlashAttnFunction(MojoFuncBase):
 
         B = len(cu_seqlens_q) - 1
 
+        dropout_scale = 1 / (1 - dropout_p) if dropout_p > 0.0 else None
+
         for b in range(B):
             cur_q_len = cu_seqlens_q[b+1] - cu_seqlens_q[b]
             cur_k_len = cu_seqlens_k[b+1] - cu_seqlens_k[b]
@@ -165,6 +185,8 @@ class MojoFlashAttnFunction(MojoFuncBase):
             cur_dq = torch.zeros_like(cur_q) # [G, Nk, cu_seqlens_k, D]
             cur_dk = torch.zeros_like(cur_k) # [Nk, cu_seqlens_k, D]
             cur_dv = torch.zeros_like(cur_v) # [Nk, cu_seqlens_k, D]
+
+            dropout_mask = dropout_masks[b] if dropout_masks is not None else None
 
             for k0 in range(0, cur_k_len, block_k_len):
                 kl = min(block_k_len, cur_k_len - k0)
@@ -190,11 +212,18 @@ class MojoFlashAttnFunction(MojoFuncBase):
 
                     exp_s_mnew = torch.exp(scores - L_block[..., None]) # [G, Nk, ql] -> [G, Nk, ql, kl]
 
+                    # dropout mask
+                    if dropout_mask is not None:
+                        exp_s_mnew = exp_s_mnew * dropout_mask[:, :, q0:q0+ql, k0:k0+kl] * dropout_scale
+
                     # dV += P.T @ dY, [G, Nk, ql, kl] @ [G, Nk, ql, D] -> [Nk, kl, D]
                     cur_dv[:, k0:k0+kl, :] += torch.einsum("g h q k, g h q d -> h k d", exp_s_mnew, grad_o_block)
 
                     # [G, Nk, ql, D] @ [Nk, kl, D] ->  [G, Nk, ql, kl]
                     grad_exp_s_mnew = torch.einsum("g h q d, h k d -> g h q k", grad_o_block, v_block)
+
+                    if dropout_mask is not None:
+                        grad_exp_s_mnew = grad_exp_s_mnew * dropout_mask[:, :, q0:q0+ql, k0:k0+kl] * dropout_scale
 
                     grad_score = exp_s_mnew * (grad_exp_s_mnew - D_block[..., None]) # [G, Nk, ql] -> [G, Nk, ql, kl]
 
@@ -211,4 +240,4 @@ class MojoFlashAttnFunction(MojoFuncBase):
             grad_k[cu_seqlens_k[b]:cu_seqlens_k[b+1], :, :] = cur_dk.permute(1, 0, 2)
             grad_v[cu_seqlens_k[b]:cu_seqlens_k[b+1], :, :] = cur_dv.permute(1, 0, 2)
 
-        return grad_q, grad_k, grad_v, None, None, None, None, None, None
+        return grad_q, grad_k, grad_v, None, None, None, None, None, None, None
