@@ -165,10 +165,6 @@ class P6DenseConfig(PretrainedConfig):
         mlp_bias=False,
         resid_pdrop=0.0,
         use_qk_rmsnorm=False,
-        _flash_attn_kernel_implementation="default",
-        _rms_norm_implementation="torch",
-        _rope_implementation="torch",
-        _swiglu_kernel_implementation="torch",
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -210,15 +206,6 @@ class P6DenseConfig(PretrainedConfig):
         # BC: if there is a 'type' field, move it to 'rope_type'.
         if self.rope_scaling is not None and "type" in self.rope_scaling:
             self.rope_scaling["rope_type"] = self.rope_scaling["type"]
-
-        # flash attention kernel implementation
-        self._flash_attn_kernel_implementation = _flash_attn_kernel_implementation
-        # rmsnorm kernel implementation
-        self._rms_norm_implementation = _rms_norm_implementation
-        # rope kernel implementation
-        self._rope_implementation = _rope_implementation
-        # swiglu kernel implementation
-        self._swiglu_kernel_implementation = _swiglu_kernel_implementation
 
         super().__init__(
             pad_token_id=pad_token_id,
@@ -377,7 +364,6 @@ class P6DenseMLP(nn.Module):
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
-        self._swiglu_kernel_implementation = config._swiglu_kernel_implementation
         self.act_fn = mojo_silu_function
         self.dropout = nn.Dropout(config.resid_pdrop)
 
@@ -438,8 +424,6 @@ class P6DenseAttention(nn.Module):
         self.num_key_value_groups = self.num_query_heads // self.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_theta = config.rope_theta
-        self._flash_attn_kernel_implementation = config._flash_attn_kernel_implementation
-        self._rope_implementation = config._rope_implementation
         self.is_causal = True
         self.attention_dropout = config.attention_dropout
         self.q_proj = nn.Linear(self.hidden_size, self.num_query_heads * self.head_dim, bias=config.attention_bias)
