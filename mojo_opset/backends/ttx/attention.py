@@ -1,13 +1,18 @@
+import math
+
 from typing import Optional
 
 import torch
 
+from mojo_opset.backends.ttx.kernels.ascend.flash_attention import ttx_flash_attention_bwd
+from mojo_opset.backends.ttx.kernels.ascend.flash_attention import ttx_flash_attention_fwd
 from mojo_opset.backends.ttx.kernels.ascend.linear_attn.modules.l2norm import l2norm_bwd
 from mojo_opset.backends.ttx.kernels.ascend.linear_attn.modules.l2norm import l2norm_fwd
 from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.gated_delta_rule.chunk import chunk_gated_delta_rule
 from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.gated_delta_rule.chunk import chunk_gated_delta_rule_bwd
 from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.gated_delta_rule.chunk import chunk_gated_delta_rule_fwd
 from mojo_opset.backends.ttx.kernels.ascend.utils import input_guard
+from mojo_opset.core import MojoFlashAttnFunction
 from mojo_opset.core import MojoGatedDeltaRule
 from mojo_opset.core import MojoGatedDeltaRuleFunction
 from mojo_opset.core import MojoPagedDecodeGQA
@@ -40,7 +45,7 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=2):
             v_cache=v_cache,
             cu_seqlens_q=cu_seqlens_q,
             block_tables=block_tables,
-            sm_scale=softmax_scale,
+            softmax_scale=softmax_scale,
         )
 
         return output
@@ -72,10 +77,78 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=2):
             v_cache=v_cache,
             seqlens=seqlens,
             block_tables=block_tables,
-            sm_scale=softmax_scale,
+            softmax_scale=softmax_scale,
         )
 
         return output
+
+
+class TTXFlashAttnFunction(MojoFlashAttnFunction):
+    @staticmethod
+    def forward(
+        ctx,
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        dropout_p=0.0,
+        causal=False,
+        softmax_scale=None,
+    ):
+        gqa_interleave = False  # FIXME: temporary hard code.
+        assert dropout_p == 0.0, f"[TTXFlashAttnFunction] TTX does not support dropout, but got dropout_p={dropout_p}"
+
+        if softmax_scale is None:
+            softmax_scale = 1 / math.sqrt(q.shape[-1])
+
+        max_seqlen_q = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max()
+        max_seqlen_k = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).max()
+
+        o, lse = ttx_flash_attention_fwd(
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            causal,
+            softmax_scale,
+            gqa_interleave,
+        )
+        ctx.save_for_backward(q, k, v, o, lse, cu_seqlens_q, cu_seqlens_k)
+        ctx.softmax_scale = softmax_scale
+        ctx.max_seqlen_q = max_seqlen_q
+        ctx.max_seqlen_k = max_seqlen_k
+        ctx.causal = causal
+        ctx.gqa_interleave = gqa_interleave
+        return o
+
+    @staticmethod
+    def backward(ctx, grad_o):
+        q, k, v, o, lse, cu_seqlens_q, cu_seqlens_k = ctx.saved_tensors
+        max_seqlen_q = ctx.max_seqlen_q
+        max_seqlen_k = ctx.max_seqlen_k
+        softmax_scale = ctx.softmax_scale
+        causal = ctx.causal
+        gqa_interleave = ctx.gqa_interleave
+        dq, dk, dv = ttx_flash_attention_bwd(
+            o,
+            grad_o,
+            lse,
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            causal,
+            softmax_scale,
+            gqa_interleave,
+        )
+        return dq, dk, dv, None, None, None, None, None, None, None
 
 
 class TTXGatedDeltaRule(MojoGatedDeltaRule, default_priority=2):
