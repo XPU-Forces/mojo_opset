@@ -1,4 +1,5 @@
 import torch
+import math
 
 from ..mojo_function import MojoFuncBase, mojo_func_dispatcher
 
@@ -7,135 +8,147 @@ from ..mojo_function import MojoFuncBase, mojo_func_dispatcher
 class MojoFlashAttnFunction(MojoFuncBase):
     @staticmethod
     def forward_dump(
-        ctx, 
-        q, 
-        k, 
+        ctx,
+        q,
+        k,
         v,
         cu_seqlens_q,
         cu_seqlens_k,
         dropout_p=0.0,
         causal=False,
-        softmax_scale=1.0,
-        block_q_len=128,
-        block_k_len=512,
+        softmax_scale=None,
     ):
         pass
 
     @staticmethod
     def forward_ref(
-        ctx, 
-        q, 
-        k, 
+        ctx,
+        q,
+        k,
         v,
         cu_seqlens_q,
         cu_seqlens_k,
         dropout_p=0.0,
         causal=False,
-        softmax_scale=1.0,
-        block_q_len=128,
-        block_k_len=512,
+        softmax_scale=None,
     ):
-        assert q.ndim == k.ndim == v.ndim == 3, f"Input shape should be [total_S, H, D], but get q{q.shape}, k{k.shape}, v{v.shape}"
+        block_q_len = 128
+        block_k_len = 128
+        assert q.ndim == k.ndim == v.ndim == 3
         Sq, Nq, D = q.shape
         Sk, Nk, Dk = k.shape
         Sv, Nv, Dv = v.shape
-        assert Sk == Sv and Nk == Nv, f"Seq length and head number of k, v should be same, but get k{k.shape}, v{v.shape}"
-        assert D == Dk, f"Head dim of q,k should be same, but get q{q.shape}, k{k.shape}"
-        assert Nq % Nk == 0, f"Head number of q should be divisible by k and v, but get q{q.shape}, k{k.shape}, v{v.shape}"
+        assert Sk == Sv and Nk == Nv
+        assert D == Dk
+        assert Nq % Nk == 0
         G = Nq // Nk
 
-        cu_seqlens_q = cu_seqlens_q.to("cpu").tolist()
-        cu_seqlens_k = cu_seqlens_k.to("cpu").tolist()
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(D)
 
-        B = len(cu_seqlens_q) - 1
-        assert len(cu_seqlens_k) == B + 1
+        cu_seqlens_q_cpu = cu_seqlens_q.to("cpu").tolist()
+        cu_seqlens_k_cpu = cu_seqlens_k.to("cpu").tolist()
+        B = len(cu_seqlens_q_cpu) - 1
 
-        O = q.new_zeros((Sq, Nq, Dv))
-        L = torch.zeros((Sq, Nq), device=q.device, dtype=q.dtype)
+        O = torch.zeros((Sq, Nq, Dv), device=q.device, dtype=q.dtype)
 
-        q = q.permute(1, 0, 2).reshape(G, Nk, Sq, D) # [Sq, Nq, D] -> [G, Nk, Sq, D]
-        k = k.permute(1, 0, 2) # [Sk, Nk, D] -> [Nk, Sk, D]
-        v = v.permute(1, 0, 2) # [Sk, Nk, D] -> [Nk, Sk, D]
+        L = torch.zeros((Sq, Nq), device=q.device, dtype=torch.float32)
+
+        q_ref = q.permute(1, 0, 2).reshape(Nk, G, Sq, D).permute(1, 0, 2, 3)
+        k_ref = k.permute(1, 0, 2)
+        v_ref = v.permute(1, 0, 2)
 
         dropout_scale = 1 / (1 - dropout_p) if dropout_p > 0.0 else None
         dropout_masks = [] if dropout_p > 0.0 else None
 
         for b in range(B):
-            cur_q_len = cu_seqlens_q[b+1] - cu_seqlens_q[b]
-            cur_k_len = cu_seqlens_k[b+1] - cu_seqlens_k[b]
-            cur_q = q[:, :, cu_seqlens_q[b]:cu_seqlens_q[b+1], :] # [G, Nk, cu_seqlens_k, D]
-            cur_k = k[:, cu_seqlens_k[b]:cu_seqlens_k[b+1], :] # [Nk, cu_seqlens_k, D]
-            cur_v = v[:, cu_seqlens_k[b]:cu_seqlens_k[b+1], :] # [Nk, cu_seqlens_k, D]
+            seq_q_start, seq_q_end = cu_seqlens_q_cpu[b], cu_seqlens_q_cpu[b + 1]
+            seq_k_start, seq_k_end = cu_seqlens_k_cpu[b], cu_seqlens_k_cpu[b + 1]
 
-            cur_O = torch.zeros((cur_q_len, Nq, Dv), device=q.device, dtype=q.dtype)
-            cur_L = torch.zeros((cur_k_len, Nq), device=q.device, dtype=q.dtype)
+            cur_q_len = seq_q_end - seq_q_start
+            cur_k_len = seq_k_end - seq_k_start
+
+            cur_q = q_ref[:, :, seq_q_start:seq_q_end, :]
+            cur_k = k_ref[:, seq_k_start:seq_k_end, :]
+            cur_v = v_ref[:, seq_k_start:seq_k_end, :]
+
+            cur_O = torch.zeros((cur_q_len, Nq, Dv), device=q.device, dtype=torch.float32)
+
+            m_prev = torch.full((G, Nk, cur_q_len), float("-inf"), device=q.device, dtype=torch.float32)
+            l_prev = torch.zeros((G, Nk, cur_q_len), device=q.device, dtype=torch.float32)
+            acc_o = torch.zeros((G, Nk, cur_q_len, Dv), device=q.device, dtype=torch.float32)
 
             if dropout_p > 0.0:
-                dropout_mask = torch.empty(G, Nk, cur_q_len, cur_k_len, dtype=torch.bool, device=q.device).bernoulli_(1 - dropout_p)
-                dropout_masks.append(dropout_mask)
+                mask_shape = (G, Nk, cur_q_len, cur_k_len)
+                d_mask = torch.empty(mask_shape, dtype=torch.bool, device=q.device).bernoulli_(1 - dropout_p)
+                dropout_masks.append(d_mask)
             else:
-                dropout_mask = None
+                d_mask = None
 
             for q0 in range(0, cur_q_len, block_q_len):
                 ql = min(block_q_len, cur_q_len - q0)
-                q_block = cur_q[:, :, q0:q0+ql, :].contiguous() # [G, Nk, ql, D]
+                q_block = cur_q[:, :, q0 : q0 + ql, :]
 
-                m = torch.full((G, Nk, ql), float("-inf"), dtype=q.dtype, device=q.device)
-                l = torch.zeros((G, Nk, ql), dtype=q.dtype, device=q.device)
-                n = torch.zeros((G, Nk, ql, Dv), dtype=q.dtype, device=q.device)
+                m_i = m_prev[:, :, q0 : q0 + ql]
+                l_i = l_prev[:, :, q0 : q0 + ql]
+                acc_i = acc_o[:, :, q0 : q0 + ql, :]
 
                 for k0 in range(0, cur_k_len, block_k_len):
                     kl = min(block_k_len, cur_k_len - k0)
-                    k_block = cur_k[:, k0:k0+kl, :].contiguous() # [Nk, kl, D]
-                    v_block = cur_v[:, k0:k0+kl, :].contiguous() # [Nk, kl, D]
+                    k_block = cur_k[:, k0 : k0 + kl, :]
+                    v_block = cur_v[:, k0 : k0 + kl, :]
 
-                    # q @ k.T: [G, Nk, ql, D] @ [Nk, kl, D] -> [G, Nk, ql, kl]
-                    scores = torch.einsum("g h q d, h k d -> g h q k", q_block, k_block) * softmax_scale
+                    s_block = torch.einsum("g h q d, h k d -> g h q k", q_block, k_block) * softmax_scale
 
-                    # attention mask
-                    if causal and Sq == Sk:
-                        q_idx = torch.arange(q0, q0+ql, device=q.device)[:, None] # [ql, 1]
-                        k_idx = torch.arange(k0, k0+kl, device=q.device)[None, :] # [1, kl]
-                        mask = k_idx > q_idx # [ql, kl]
-                        scores = scores.masked_fill(mask[None, None, :, :], float('-inf'))
-                    
-                    # softmax
-                    m_curr = scores.amax(dim=-1) # [G, Nk, ql, kl] -> [G, Nk, ql]
-                    m_new = torch.maximum(m, m_curr) # [G, Nk, ql]
-                    exp_m_mnew = torch.exp(m - m_new) # [G, Nk, ql]
-                    exp_s_mnew = torch.exp(scores - m_new[..., None]) # [G, Nk, ql] -> [G, Nk, ql, kl]
-                    l_new = exp_m_mnew * l + exp_s_mnew.sum(dim=-1) # [G, Nk, ql, kl] -> [G, Nk, ql]
+                    if causal:
+                        q_idx = torch.arange(q0, q0 + ql, device=q.device)[:, None] + seq_q_start
+                        k_idx = torch.arange(k0, k0 + kl, device=q.device)[None, :] + seq_k_start
+                        mask = k_idx > q_idx
+                        s_block = s_block.masked_fill(mask[None, None, :, :], float("-inf"))
 
-                    if dropout_mask is not None:
-                        exp_s_mnew = exp_s_mnew * dropout_mask[:, :, q0:q0+ql, k0:k0+kl] * dropout_scale
+                    m_curr = s_block.amax(dim=-1)
+                    m_new = torch.maximum(m_i, m_curr)
 
-                    # p @ v: [G, Nk, ql, kl] @ [Nk, kl, D] -> [G, Nk, ql, D]
-                    n_new = (exp_m_mnew[..., None] * n) + torch.einsum(
-                        "g h q k, h k d -> g h q d", exp_s_mnew, v_block
-                    )
+                    alpha = torch.exp(m_i - m_new)
 
-                    m, l, n = m_new, l_new, n_new
-                
-                y_block = n / l[..., None] # [G, Nk, ql, D]
+                    p = torch.exp(s_block - m_new[..., None])
 
-                # [G, Nk, ql, D] -> [ql, Nq, D]
-                cur_O[q0:q0+ql, :, :] = y_block.reshape(Nq, ql, Dv).permute(1, 0, 2)
+                    if d_mask is not None:
+                        p = p * d_mask[:, :, q0 : q0 + ql, k0 : k0 + kl] * dropout_scale
 
-                # [G, Nk, ql] + log([G, Nk, ql]) -> [ql, Nq]
-                cur_L[q0:q0+ql, :] =(m + torch.log(l)).reshape(Nq, ql).permute(1, 0)
+                    row_sum = p.sum(dim=-1)
+                    l_new = alpha * l_i + row_sum
 
-            O[cu_seqlens_q[b]:cu_seqlens_q[b+1], :, :] = cur_O
-            L[cu_seqlens_q[b]:cu_seqlens_q[b+1], :] = cur_L
+                    pv = torch.einsum("g h q k, h k d -> g h q d", p.to(v.dtype), v_block)
+                    acc_new = alpha[..., None] * acc_i + pv
 
-        ctx.cu_seqlens_q = cu_seqlens_q
-        ctx.cu_seqlens_k = cu_seqlens_k
+                    m_i = m_new
+                    l_i = l_new
+                    acc_i = acc_new
+
+                m_prev[:, :, q0 : q0 + ql] = m_i
+                l_prev[:, :, q0 : q0 + ql] = l_i
+                acc_o[:, :, q0 : q0 + ql, :] = acc_i
+
+            block_out = acc_o / l_prev[..., None]
+
+            cur_O_final = block_out.permute(1, 0, 2, 3).reshape(Nq, cur_q_len, Dv).permute(1, 0, 2)
+
+            O[seq_q_start:seq_q_end] = cur_O_final.to(q.dtype)
+
+            cur_L_final = (m_prev + torch.log(l_prev)).permute(1, 0, 2).reshape(Nq, cur_q_len).t()
+            L[seq_q_start:seq_q_end] = cur_L_final
+
+        ctx.cu_seqlens_q = cu_seqlens_q_cpu
+        ctx.cu_seqlens_k = cu_seqlens_k_cpu
         ctx.dropout_p = dropout_p
         ctx.dropout_masks = dropout_masks
         ctx.causal = causal
         ctx.softmax_scale = softmax_scale
         ctx.block_q_len = block_q_len
         ctx.block_k_len = block_k_len
-        ctx.save_for_backward(q, k, v, O, L)
+
+        ctx.save_for_backward(q_ref, k_ref, v_ref, O, L)
 
         return O
 
@@ -153,91 +166,87 @@ class MojoFlashAttnFunction(MojoFuncBase):
         softmax_scale = ctx.softmax_scale
         block_q_len = ctx.block_q_len
         block_k_len = ctx.block_k_len
+
         q, k, v, O, L = ctx.saved_tensors
-        G, _, Sq, Dq = q.shape
-        Nk, Sk, Dk = k.shape
-        Nv, Sv, Dv = v.shape
+
+        G, Nk, Sq, Dq = q.shape
+        Nk_k, Sk, Dk = k.shape
         Nq = G * Nk
 
-        grad_q = torch.zeros((Sq, Nq, Dq), device=q.device, dtype=q.dtype) # [Sq, Nq, D]
-        grad_k = torch.zeros((Sk, Nk, Dk), device=q.device, dtype=q.dtype) # [Sk, Nk, D]
-        grad_v = torch.zeros((Sv, Nv, Dv), device=q.device, dtype=q.dtype) # [Sv, Nv, D]
+        grad_q_accum = torch.zeros_like(q)
+        grad_k_accum = torch.zeros_like(k)
+        grad_v_accum = torch.zeros_like(v)
 
-        O = O.permute(1, 0, 2).reshape(G, Nk, Sq, Dv) # [Sq, Nq, D]-> [G, Nk, Sq, D]
-        L = L.permute(1, 0).reshape(G, Nk, Sq) # [Sq, Nq] -> [G, Nk, Sq]
-        grad_o = grad_o.permute(1, 0, 2).reshape(G, Nk, Sq, Dv) # [Sq, Nq, D] -> [G, Nk, Sq, D]
+        grad_o = grad_o.permute(1, 0, 2).reshape(Nk, G, Sq, Dq).permute(1, 0, 2, 3)
+
+        O = O.permute(1, 0, 2).reshape(Nk, G, Sq, Dq).permute(1, 0, 2, 3)
+
+        L = L.t().reshape(Nk, G, Sq).permute(1, 0, 2)
 
         B = len(cu_seqlens_q) - 1
-
         dropout_scale = 1 / (1 - dropout_p) if dropout_p > 0.0 else None
 
         for b in range(B):
-            cur_q_len = cu_seqlens_q[b+1] - cu_seqlens_q[b]
-            cur_k_len = cu_seqlens_k[b+1] - cu_seqlens_k[b]
-            cur_q = q[:, :, cu_seqlens_q[b]:cu_seqlens_q[b+1], :] # [G, Nk, cu_seqlens_k, D]
-            cur_k = k[:, cu_seqlens_k[b]:cu_seqlens_k[b+1], :] # [Nk, cu_seqlens_k, D]
-            cur_v = v[:, cu_seqlens_k[b]:cu_seqlens_k[b+1], :] # [Nk, cu_seqlens_k, D]
-            cur_o = O[:, :, cu_seqlens_q[b]:cu_seqlens_q[b+1], :] # [G, Nk, cu_seqlens_q, D]
-            cur_do = grad_o[:, :, cu_seqlens_q[b]:cu_seqlens_q[b+1], :] # [G, Nk, cu_seqlens_q, D]
-            cur_l = L[:, :, cu_seqlens_q[b]:cu_seqlens_q[b+1]] # [G, Nk, cu_seqlens_q]
+            seq_q_start, seq_q_end = cu_seqlens_q[b], cu_seqlens_q[b + 1]
+            seq_k_start, seq_k_end = cu_seqlens_k[b], cu_seqlens_k[b + 1]
 
-            D = (cur_do * cur_o).sum(dim=-1) # [G, Nk, cu_seqlens_q, D] -> [G, Nk, cu_seqlens_q]
-            cur_dq = torch.zeros_like(cur_q) # [G, Nk, cu_seqlens_k, D]
-            cur_dk = torch.zeros_like(cur_k) # [Nk, cu_seqlens_k, D]
-            cur_dv = torch.zeros_like(cur_v) # [Nk, cu_seqlens_k, D]
+            cur_q_len = seq_q_end - seq_q_start
+            cur_k_len = seq_k_end - seq_k_start
 
-            dropout_mask = dropout_masks[b] if dropout_masks is not None else None
+            cur_q = q[:, :, seq_q_start:seq_q_end, :]
+            cur_k = k[:, seq_k_start:seq_k_end, :]
+            cur_v = v[:, seq_k_start:seq_k_end, :]
+            cur_o = O[:, :, seq_q_start:seq_q_end, :]
+            cur_do = grad_o[:, :, seq_q_start:seq_q_end, :]
+            cur_l = L[:, :, seq_q_start:seq_q_end]
 
-            for k0 in range(0, cur_k_len, block_k_len):
-                kl = min(block_k_len, cur_k_len - k0)
-                k_block = cur_k[:, k0:k0+kl, :].contiguous() # [Nk, kl, D]
-                v_block = cur_v[:, k0:k0+kl, :].contiguous() # [Nk, kl, D]
+            D_vec = (cur_do * cur_o).sum(dim=-1)
 
-                for q0 in range(0, cur_q_len, block_q_len):
-                    ql = min(block_q_len, cur_q_len - q0)
-                    q_block = cur_q[:, :, q0:q0+ql, :] # [G, Nk, ql, D]
-                    grad_o_block = cur_do[:, :, q0:q0+ql, :] # [G, Nk, ql, D]
-                    L_block = cur_l[:, :, q0:q0+ql] # [G, Nk, ql]
-                    D_block = D[:, :, q0:q0+ql] # [G, Nk, ql]
+            d_mask = dropout_masks[b] if dropout_masks else None
 
-                    # q @ k.T: [G, Nk, ql, D] @ [Nk, kl, D] -> [G, Nk, ql, kl]
-                    scores = torch.einsum("g h q d, h k d -> g h q k", q_block, k_block) * softmax_scale
+            for q0 in range(0, cur_q_len, block_q_len):
+                ql = min(block_q_len, cur_q_len - q0)
+                q_blk = cur_q[:, :, q0 : q0 + ql, :]
+                do_blk = cur_do[:, :, q0 : q0 + ql, :]
+                l_blk = cur_l[:, :, q0 : q0 + ql]
+                d_blk = D_vec[:, :, q0 : q0 + ql]
 
-                    # attention mask
-                    if causal and Sq == Sk:
-                        q_idx = torch.arange(q0, q0+ql, device=q.device)[:, None] # [ql, 1]
-                        k_idx = torch.arange(k0, k0+kl, device=q.device)[None, :] # [1, kl]
-                        mask = k_idx > q_idx # [ql, kl]
-                        scores = scores.masked_fill(mask[None, None, :, :], float('-inf'))
+                for k0 in range(0, cur_k_len, block_k_len):
+                    kl = min(block_k_len, cur_k_len - k0)
+                    k_blk = cur_k[:, k0 : k0 + kl, :]
+                    v_blk = cur_v[:, k0 : k0 + kl, :]
 
-                    exp_s_mnew = torch.exp(scores - L_block[..., None]) # [G, Nk, ql] -> [G, Nk, ql, kl]
+                    s_blk = torch.einsum("g h q d, h k d -> g h q k", q_blk, k_blk) * softmax_scale
 
-                    # dropout mask
-                    if dropout_mask is not None:
-                        exp_s_mnew = exp_s_mnew * dropout_mask[:, :, q0:q0+ql, k0:k0+kl] * dropout_scale
+                    if causal:
+                        q_idx = torch.arange(q0, q0 + ql, device=q.device)[:, None] + seq_q_start
+                        k_idx = torch.arange(k0, k0 + kl, device=q.device)[None, :] + seq_k_start
+                        mask = k_idx > q_idx
+                        s_blk = s_blk.masked_fill(mask[None, None, :, :], float("-inf"))
 
-                    # dV += P.T @ dY, [G, Nk, ql, kl] @ [G, Nk, ql, D] -> [Nk, kl, D]
-                    cur_dv[:, k0:k0+kl, :] += torch.einsum("g h q k, g h q d -> h k d", exp_s_mnew, grad_o_block)
+                    p_blk = torch.exp(s_blk - l_blk[..., None])
 
-                    # [G, Nk, ql, D] @ [Nk, kl, D] ->  [G, Nk, ql, kl]
-                    grad_exp_s_mnew = torch.einsum("g h q d, h k d -> g h q k", grad_o_block, v_block)
+                    if d_mask is not None:
+                        p_blk = p_blk * d_mask[:, :, q0 : q0 + ql, k0 : k0 + kl] * dropout_scale
 
-                    if dropout_mask is not None:
-                        grad_exp_s_mnew = grad_exp_s_mnew * dropout_mask[:, :, q0:q0+ql, k0:k0+kl] * dropout_scale
+                    dv_contribution = torch.einsum("g h q k, g h q d -> h k d", p_blk, do_blk)
+                    grad_v_accum[:, seq_k_start + k0 : seq_k_start + k0 + kl, :] += dv_contribution
 
-                    grad_score = exp_s_mnew * (grad_exp_s_mnew - D_block[..., None]) # [G, Nk, ql] -> [G, Nk, ql, kl]
+                    dp_blk = torch.einsum("g h q d, h k d -> g h q k", do_blk, v_blk)
+                    if d_mask is not None:
+                        dp_blk = dp_blk * d_mask[:, :, q0 : q0 + ql, k0 : k0 + kl] * dropout_scale
 
-                    # [G, Nk, ql, kl] @ [Nk, kl, D] -> [G, Nk, ql, D]
-                    cur_dq[:, :, q0:q0+ql, :] += torch.einsum("g h q k, h k d -> g h q d", grad_score, k_block) * softmax_scale
+                    ds_blk = p_blk * (dp_blk - d_blk[..., None])
+                    ds_blk = ds_blk * softmax_scale
 
-                    #  [G, Nk, ql, kl] @ [G, Nk, ql, D] -> [Nk, kl, D]
-                    cur_dk[:, k0:k0+kl, :] += torch.einsum("g h q k, g h q d -> h k d", grad_score, q_block) * softmax_scale
+                    dq_contribution = torch.einsum("g h q k, h k d -> g h q d", ds_blk, k_blk)
+                    grad_q_accum[:, :, seq_q_start + q0 : seq_q_start + q0 + ql, :] += dq_contribution
 
-            # [G, Nk, cu_seqlens_q, D] -> [cu_seqlens_q, Nq, D]
-            grad_q[cu_seqlens_q[b]:cu_seqlens_q[b+1], :, :] = cur_dq.reshape(Nq, cur_q_len, Dq).permute(1, 0, 2)
-            
-            # [Nk, cu_seqlens_k, D] -> [cu_seqlens_k, Nk, D]
-            grad_k[cu_seqlens_k[b]:cu_seqlens_k[b+1], :, :] = cur_dk.permute(1, 0, 2)
-            grad_v[cu_seqlens_k[b]:cu_seqlens_k[b+1], :, :] = cur_dv.permute(1, 0, 2)
+                    dk_contribution = torch.einsum("g h q k, g h q d -> h k d", ds_blk, q_blk)
+                    grad_k_accum[:, seq_k_start + k0 : seq_k_start + k0 + kl, :] += dk_contribution
+
+        grad_q = grad_q_accum.permute(1, 0, 2, 3).reshape(Nq, Sq, Dq).permute(1, 0, 2)
+        grad_k = grad_k_accum.permute(1, 0, 2)
+        grad_v = grad_v_accum.permute(1, 0, 2)
 
         return grad_q, grad_k, grad_v, None, None, None, None, None, None, None
