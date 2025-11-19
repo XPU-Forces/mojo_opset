@@ -1,7 +1,7 @@
 import torch
 from typing import Optional, Tuple, Any
 
-from mojo_opset.backends.ttx_kernels.src.ascend.flash_attention import (
+from mojo_opset.backends.ttx_kernels.src.ascend.paged_attention import (
     ttx_paged_attention_prefill,
     ttx_paged_attention_decode,
 )
