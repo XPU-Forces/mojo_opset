@@ -122,7 +122,7 @@ def rmsnorm_infer(
 ) -> torch.Tensor:
     shape = x.shape
     dim = shape[-1]
-    X_2d = x.view(-1, dim)
+    X_2d = x.reshape(-1, dim)
     n_rows, n_cols = X_2d.shape
 
     y = torch.empty_like(X_2d)
@@ -148,7 +148,7 @@ def rmsnorm_infer(
         BLOCK_SIZE_N=BLOCK_SIZE_N,
     )
 
-    return y.view(*shape)
+    return y.reshape(*shape)
 
 
 @rmsnorm_infer.register_fake
@@ -454,7 +454,7 @@ def rmsnorm_fwd(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     shape = X.shape
     dim = shape[-1]
-    X_2d = X.view(-1, dim)
+    X_2d = X.reshape(-1, dim)
     n_rows, n_cols = X_2d.shape
 
     if n_cols > COL_BLOCKING_THRESHOLD:
@@ -486,7 +486,7 @@ def rmsnorm_fwd(
         BLOCK_SIZE_N=BLOCK_SIZE_N,
     )
 
-    Y = Y.view(*shape)
+    Y = Y.reshape(*shape)
 
     return Y, RSTD
 
@@ -500,7 +500,7 @@ def rmsnorm_fwd_fake(
     casting_mode_int: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     Y = torch.empty_like(X)
-    X_2d = X.view(-1, X.shape[-1])
+    X_2d = X.reshape(-1, X.shape[-1])
 
     rstd_dtype = torch.float32 if casting_mode_int in (0, 1) else X.dtype  # fp32 @llama or @gemma
     RSTD = torch.empty(X_2d.shape[0], dtype=rstd_dtype, device=X.device)
@@ -519,8 +519,8 @@ def rmsnorm_bwd(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     shape = dY.shape
     dim = shape[-1]
-    dY_2d = dY.view(-1, dim)
-    X_2d = X.view(-1, dim)
+    dY_2d = dY.reshape(-1, dim)
+    X_2d = X.reshape(-1, dim)
     n_rows, n_cols = dY_2d.shape
 
     num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
@@ -583,7 +583,7 @@ def rmsnorm_bwd(
         )
         dW = _dW.squeeze(0).to(W.dtype)
 
-    dX = dX_2d.view(*shape)
+    dX = dX_2d.reshape(*shape)
 
     return dX, dW
 

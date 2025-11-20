@@ -349,7 +349,7 @@ def _layer_norm_bwd_large_cols_kernel(
 def layer_norm_fwd(x, w, b, eps):
     shape = x.shape
     dim = shape[-1]
-    x_2d = x.view(-1, dim)
+    x_2d = x.reshape(-1, dim)
     n_rows, n_cols = x_2d.shape
 
     # Determine block size using the standard pattern
@@ -383,13 +383,13 @@ def layer_norm_fwd(x, w, b, eps):
         BLOCK_SIZE_N=BLOCK_SIZE_N,
     )
 
-    return y.view(*shape), x_2d, mean, rstd
+    return y.reshape(*shape), x_2d, mean, rstd
 
 
 def layer_norm_bwd(dy, x_2d, w, b, mean, rstd):
     shape = dy.shape
     dim = shape[-1]
-    dy_2d = dy.view(-1, dim)
+    dy_2d = dy.reshape(-1, dim)
     n_rows, n_cols = dy_2d.shape
 
     # Determine block size using the standard pattern
@@ -456,7 +456,7 @@ def layer_norm_bwd(dy, x_2d, w, b, mean, rstd):
     dw = dw.to(w.dtype)
     db = db.to(b.dtype)
 
-    return dx.view(*shape), dw, db
+    return dx.reshape(*shape), dw, db
 
 
 class TTXLayerNormFunction(torch.autograd.Function):
