@@ -384,7 +384,7 @@ class P6DenseMojoFlashAttention(nn.Module):
         self.causal = causal
         self.dropout_p = attention_dropout
 
-    def forward(self, q, k, v, cu_seqlens, block_q_len=128, block_k_len=512):
+    def forward(self, q, k, v, cu_seqlens):
         scale = 1.0 / q.shape[-1] ** (-0.5)
         cu_seqlens_q = cu_seqlens_k = cu_seqlens
         q = q.transpose(1, 2).squeeze(0)
@@ -399,8 +399,6 @@ class P6DenseMojoFlashAttention(nn.Module):
             self.dropout_p,
             self.causal,
             scale,
-            block_q_len,
-            block_k_len,
         )
 
         return attn_output
@@ -478,8 +476,6 @@ class P6DenseAttention(nn.Module):
             v=value_states,
             cu_seqlens=cu_seqlens,
         )
-
-        attn_output = attn_output.transpose(1, 2).contiguous()
 
         attn_output = attn_output.reshape(bsz, q_len, -1)
 
