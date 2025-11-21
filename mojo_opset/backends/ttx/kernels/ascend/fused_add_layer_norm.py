@@ -215,8 +215,8 @@ class TTXFusedAddLayerNormFunction(torch.autograd.Function):
     def forward(ctx, X, R, W, B, add_mode, eps, in_place):
         shape = X.shape
         dim = shape[-1]
-        X_2d = X.view(-1, dim)
-        R_2d = R.view(-1, dim)
+        X_2d = X.reshape(-1, dim)
+        R_2d = R.reshape(-1, dim)
         n_rows, n_cols = X_2d.shape
 
         BLOCK_SIZE_N = align(X_2d, n_cols, VEC_ALIGN_BYTES)
@@ -253,12 +253,12 @@ class TTXFusedAddLayerNormFunction(torch.autograd.Function):
             BLOCK_SIZE_N=BLOCK_SIZE_N,
         )
 
-        ctx.save_for_backward(S.view(-1, dim), W, B, Mean, RSTD)
+        ctx.save_for_backward(S.reshape(-1, dim), W, B, Mean, RSTD)
 
         if add_mode == "pre":
-            return Y.view(*shape), S.view(*shape)
+            return Y.reshape(*shape), S.reshape(*shape)
         elif add_mode == "post":
-            return Y.view(*shape), Y.view(*shape)
+            return Y.reshape(*shape), Y.reshape(*shape)
         else:
             raise ValueError(f"Invalid add_mode: '{add_mode}'. Must be 'pre' or 'post'.")
 
@@ -276,11 +276,11 @@ class TTXFusedAddLayerNormFunction(torch.autograd.Function):
 
         shape = dY.shape
         dim = shape[-1]
-        dY_2d = dY.view(-1, dim)
+        dY_2d = dY.reshape(-1, dim)
         n_rows, n_cols = dY_2d.shape
 
         has_dS_out = dS_out is not None
-        dS_out_2d = dS_out.view(-1, dim) if has_dS_out else torch.empty((0, 0), device=dY.device)
+        dS_out_2d = dS_out.reshape(-1, dim) if has_dS_out else torch.empty((0, 0), device=dY.device)
 
         num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
         grid = (num_programs,)
@@ -316,7 +316,7 @@ class TTXFusedAddLayerNormFunction(torch.autograd.Function):
         dW = _dW.sum(0).to(W.dtype)
         dB = _dB.sum(0).to(B.dtype)
 
-        dX = dX_2d.view(*shape)
+        dX = dX_2d.reshape(*shape)
         dR = dX.clone()
 
         return dX, dR, dW, dB, None, None, None
