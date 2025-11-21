@@ -158,7 +158,7 @@ def silu_fwd(
     ori_shape = x.shape
     n_cols = ori_shape[-1]
 
-    x_2d = x.view(-1, n_cols)
+    x_2d = x.reshape(-1, n_cols)
     n_rows = x_2d.shape[0]
 
     y = torch.empty_like(x_2d)
@@ -181,7 +181,7 @@ def silu_fwd(
         BLOCK_SIZE_N=BLOCK_SIZE_N,
     )
 
-    return y.view(*ori_shape)
+    return y.reshape(*ori_shape)
 
 
 @silu_fwd.register_fake
@@ -209,8 +209,8 @@ def silu_bwd(
     ori_shape = dy.shape
     n_cols = ori_shape[-1]
 
-    dy_2d = dy.view(-1, n_cols)
-    x_2d = x.view(-1, n_cols)
+    dy_2d = dy.reshape(-1, n_cols)
+    x_2d = x.reshape(-1, n_cols)
     n_rows = dy_2d.shape[0]
 
     dx = torch.empty_like(x_2d)
@@ -235,7 +235,7 @@ def silu_bwd(
         BLOCK_SIZE_N=BLOCK_SIZE_N,
     )
 
-    return dx.view(*ori_shape)
+    return dx.reshape(*ori_shape)
 
 
 @silu_bwd.register_fake

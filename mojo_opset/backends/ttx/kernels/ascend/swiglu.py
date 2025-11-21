@@ -177,8 +177,8 @@ def swiglu_fwd(
     ori_shape = a.shape
     n_cols = ori_shape[-1]
 
-    a_2d = a.view(-1, n_cols)
-    b_2d = b.view(-1, n_cols)
+    a_2d = a.reshape(-1, n_cols)
+    b_2d = b.reshape(-1, n_cols)
     n_rows = a_2d.shape[0]
 
     c = torch.empty_like(a_2d)
@@ -203,7 +203,7 @@ def swiglu_fwd(
         BLOCK_SIZE_N=BLOCK_SIZE_N,
     )
 
-    return c.view(*ori_shape)
+    return c.reshape(*ori_shape)
 
 
 @swiglu_fwd.register_fake
@@ -235,9 +235,9 @@ def swiglu_bwd(
     ori_shape = dc.shape
     n_cols = ori_shape[-1]
 
-    dc_2d = dc.view(-1, n_cols)
-    a_2d = a.view(-1, n_cols)
-    b_2d = b.view(-1, n_cols)
+    dc_2d = dc.reshape(-1, n_cols)
+    a_2d = a.reshape(-1, n_cols)
+    b_2d = b.reshape(-1, n_cols)
     n_rows = dc_2d.shape[0]
 
     da = torch.empty_like(a_2d)
@@ -267,7 +267,7 @@ def swiglu_bwd(
         BLOCK_SIZE_N=BLOCK_SIZE_N,
     )
 
-    return da.view(*ori_shape), db.view(*ori_shape)
+    return da.reshape(*ori_shape), db.reshape(*ori_shape)
 
 
 @swiglu_bwd.register_fake
