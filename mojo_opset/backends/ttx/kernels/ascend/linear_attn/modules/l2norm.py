@@ -10,7 +10,7 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.utils import input_guard
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.utils import input_guard
 
 BT_LIST = [8, 16, 32, 64, 128]
 

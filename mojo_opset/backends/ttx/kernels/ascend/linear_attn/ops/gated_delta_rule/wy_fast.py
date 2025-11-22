@@ -9,7 +9,7 @@ import torch_npu
 import triton
 import triton.language as tl
 
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.ops.utils.op import exp
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.utils.op import exp
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -223,80 +223,105 @@ def recompute_w_u_fwd_kernel(
     USE_G: tl.constexpr,
     USE_GK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    NT: tl.int32,
+    B: tl.int32,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
-    i_b, i_h = i_bh // H, i_bh % H
-    if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
-    else:
-        bos, eos = i_b * T, i_b * T + T
-    p_beta = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    b_beta = tl.load(p_beta, boundary_check=(0,))
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
 
-    p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    b_A = tl.load(p_A, boundary_check=(0, 1))
+    num_bh = B * H
+    total_tasks = NT * num_bh
 
-    for i_v in range(tl.cdiv(V, BV)):
-        p_v = tl.make_block_ptr(
-            v + (bos * H + i_h) * V,
-            (T, V),
-            (H * V, 1),
-            (i_t * BT, i_v * BV),
-            (BT, BV),
-            (1, 0),
-        )
-        p_u = tl.make_block_ptr(
-            u + (bos * H + i_h) * V,
-            (T, V),
-            (H * V, 1),
-            (i_t * BT, i_v * BV),
-            (BT, BV),
-            (1, 0),
-        )
-        b_v = tl.load(p_v, boundary_check=(0, 1))
-        b_vb = (b_v * b_beta[:, None]).to(b_v.dtype)
-        b_u = tl.dot(b_A, b_vb, allow_tf32=False)
-        tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
+    for task_id in range(pid, total_tasks, num_programs):
+        i_t = task_id % NT
+        i_bh = task_id // NT
 
-    if USE_G:
-        p_g = tl.make_block_ptr(g + (bos * H + i_h), (T,), (H,), (i_t * BT,), (BT,), (0,))
-        b_g = exp(tl.load(p_g, boundary_check=(0,)))
+        i_b, i_h = i_bh // H, i_bh % H
 
-    for i_k in range(tl.cdiv(K, BK)):
-        p_k = tl.make_block_ptr(
-            k + (bos * H + i_h) * K,
-            (T, K),
-            (H * K, 1),
-            (i_t * BT, i_k * BK),
-            (BT, BK),
-            (1, 0),
+        if IS_VARLEN:
+            i_n, i_t_real = (
+                tl.load(chunk_indices + i_t * 2).to(tl.int32),
+                tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
+            )
+            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+            T_len = eos - bos
+        else:
+            bos, eos = i_b * T, i_b * T + T
+            T_len = T
+            i_t_real = i_t
+
+        p_beta = tl.make_block_ptr(beta + bos * H + i_h, (T_len,), (H,), (i_t_real * BT,), (BT,), (0,))
+        b_beta = tl.load(p_beta, boundary_check=(0,))
+
+        p_A = tl.make_block_ptr(
+            A + (bos * H + i_h) * BT, (T_len, BT), (H * BT, 1), (i_t_real * BT, 0), (BT, BT), (1, 0)
         )
-        p_w = tl.make_block_ptr(
-            w + (bos * H + i_h) * K,
-            (T, K),
-            (H * K, 1),
-            (i_t * BT, i_k * BK),
-            (BT, BK),
-            (1, 0),
-        )
-        b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_kb = b_k * b_beta[:, None]
+        b_A = tl.load(p_A, boundary_check=(0, 1))
+
+        for i_v in range(tl.cdiv(V, BV)):
+            p_v = tl.make_block_ptr(
+                v + (bos * H + i_h) * V,
+                (T_len, V),
+                (H * V, 1),
+                (i_t_real * BT, i_v * BV),
+                (BT, BV),
+                (1, 0),
+            )
+            p_u = tl.make_block_ptr(
+                u + (bos * H + i_h) * V,
+                (T_len, V),
+                (H * V, 1),
+                (i_t_real * BT, i_v * BV),
+                (BT, BV),
+                (1, 0),
+            )
+            b_v = tl.load(p_v, boundary_check=(0, 1))
+
+            b_vb = (b_v * b_beta[:, None]).to(b_v.dtype)
+
+            b_u = tl.dot(b_A, b_vb, allow_tf32=False)
+            tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
+
         if USE_G:
-            b_kb *= b_g[:, None]
-        if USE_GK:
-            p_gk = tl.make_block_ptr(
-                gk + (bos * H + i_h) * K,
-                (T, K),
+            p_g = tl.make_block_ptr(g + (bos * H + i_h), (T_len,), (H,), (i_t_real * BT,), (BT,), (0,))
+            b_g = tl.exp(tl.load(p_g, boundary_check=(0,)))
+
+        for i_k in range(tl.cdiv(K, BK)):
+            p_k = tl.make_block_ptr(
+                k + (bos * H + i_h) * K,
+                (T_len, K),
                 (H * K, 1),
-                (i_t * BT, i_k * BK),
+                (i_t_real * BT, i_k * BK),
                 (BT, BK),
                 (1, 0),
             )
-            b_kb *= exp(tl.load(p_gk, boundary_check=(0, 1)))
-        b_w = tl.dot(b_A, b_kb.to(b_k.dtype))
-        tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
+            p_w = tl.make_block_ptr(
+                w + (bos * H + i_h) * K,
+                (T_len, K),
+                (H * K, 1),
+                (i_t_real * BT, i_k * BK),
+                (BT, BK),
+                (1, 0),
+            )
+            b_k = tl.load(p_k, boundary_check=(0, 1))
+
+            b_kb = b_k * b_beta[:, None]
+
+            if USE_G:
+                b_kb *= b_g[:, None]
+            if USE_GK:
+                p_gk = tl.make_block_ptr(
+                    gk + (bos * H + i_h) * K,
+                    (T_len, K),
+                    (H * K, 1),
+                    (i_t_real * BT, i_k * BK),
+                    (BT, BK),
+                    (1, 0),
+                )
+                b_kb *= tl.exp(tl.load(p_gk, boundary_check=(0, 1)))
+
+            b_w = tl.dot(b_A, b_kb.to(b_k.dtype))
+            tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
 
 
 def recompute_w_u_fwd(
@@ -314,11 +339,15 @@ def recompute_w_u_fwd(
     BK = 64
     BV = 64
 
+    #
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     w = torch.zeros_like(k)
     u = torch.zeros_like(v)
-    recompute_w_u_fwd_kernel[(NT, B * H)](
+
+    grid = (48, 1, 1)
+
+    recompute_w_u_fwd_kernel[grid](
         k=k,
         v=v,
         beta=beta,
@@ -336,6 +365,11 @@ def recompute_w_u_fwd(
         BT=BT,
         BK=BK,
         BV=BV,
+        USE_G=g is not None,
+        USE_GK=gk is not None,
+        IS_VARLEN=cu_seqlens is not None,
+        NT=NT,
+        B=B,
     )
     return w, u
 

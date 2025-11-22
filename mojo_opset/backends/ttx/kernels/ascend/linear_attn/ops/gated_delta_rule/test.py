@@ -4,9 +4,10 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.ops.gated_delta_rule.chunk import chunk_gated_delta_rule
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.ops.gated_delta_rule.torch_impl import (
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.gated_delta_rule.chunk import chunk_gated_delta_rule
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.gated_delta_rule.torch_impl import (
     torch_chunk_gated_delta_rule,
+    torch_sequential_gated_delta_rule,
 )
 import time
 
@@ -177,6 +178,8 @@ def main(seed=42):
     g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32, device="npu", requires_grad=True))
     g.retain_grad()
 
+    # torch.save({"q": q.cpu(), "k": k.cpu(), "v": v.cpu(), "beta": beta.cpu(), "g": g.cpu()}, "tensors.pt")
+
     # Create copies for the PyTorch implementation to have separate grad attributes
     q_torch, k_torch, v_torch = (
         q.clone().detach(),
@@ -199,6 +202,7 @@ def main(seed=42):
 
     # 3. Run Triton implementation (forward and backward)
     o_triton, _ = chunk_gated_delta_rule(q, k, v, g, beta, **common_kwargs)
+    # o_triton, _ = torch_sequential_gated_delta_rule(q, k, v, g, beta, use_qk_l2norm_in_kernel=True)
     # Use a simple sum for a dummy loss to trigger backward pass
     loss_triton = o_triton.sum()
     loss_triton.backward()

@@ -9,7 +9,7 @@ import torch_npu
 import triton
 import triton.language as tl
 
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.utils import input_guard
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.utils import input_guard
 
 BS_LIST = [16, 32]
 
@@ -58,9 +58,13 @@ def chunk_local_cumsum_scalar_kernel(
     # [BT]
     b_s = tl.load(p_s, boundary_check=(0,)).to(tl.float32)
     b_o = tl.cumsum(b_s, axis=0)
+    # if REVERSE:
+    #     b_z = tl.sum(b_s, axis=0)
+    #     b_o = -b_o + b_z[None] + b_s
     if REVERSE:
-        b_z = tl.sum(b_s, axis=0)
-        b_o = -b_o + b_z[None] + b_s
+        offs = tl.arange(0, BT)
+        mask = offs[:, None] <= offs[None, :]
+        b_o = tl.sum(tl.where(mask, b_s[None, :], 0.0), axis=1)
     if HAS_SCALE:
         b_o *= scale
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))

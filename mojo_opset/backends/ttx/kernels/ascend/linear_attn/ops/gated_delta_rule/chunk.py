@@ -8,31 +8,31 @@ from typing import Optional
 import torch
 import torch_npu
 import torch_npu
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.modules.l2norm import l2norm_bwd, l2norm_fwd
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.ops.common.chunk_delta_h import (
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.modules.l2norm import l2norm_bwd, l2norm_fwd
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.common.chunk_delta_h import (
     chunk_gated_delta_rule_bwd_dhu,
     chunk_gated_delta_rule_fwd_h,
 )
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.ops.common.chunk_o import (
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.common.chunk_o import (
     chunk_bwd_dqkwg,
     chunk_bwd_dv_local,
     chunk_fwd_o,
 )
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.ops.common.chunk_scaled_dot_kkt import (
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.common.chunk_scaled_dot_kkt import (
     chunk_scaled_dot_kkt_fwd,
 )
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.ops.gated_delta_rule.wy_fast import (
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.gated_delta_rule.wy_fast import (
     prepare_wy_repr_bwd,
     recompute_w_u_fwd,
 )
 
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.ops.utils import (
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.utils import (
     chunk_local_cumsum,
     solve_tril,
     prepare_chunk_indices,
     prepare_chunk_offsets,
 )
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.utils import (
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.utils import (
     autocast_custom_bwd,
     autocast_custom_fwd,
     input_guard,
@@ -386,7 +386,7 @@ def chunk_gated_delta_rule(
             >>> import torch
     import torch.nn.functional as F
             >>> from einops import rearrange
-            >>> from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.ops.gated_delta_rule import chunk_gated_delta_rule
+            >>> from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.gated_delta_rule import chunk_gated_delta_rule
             # inputs with equal lengths
             >>> B, T, H, K, V = 4, 2048, 4, 512, 512
             >>> q = torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda')
