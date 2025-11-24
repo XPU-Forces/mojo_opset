@@ -1,12 +1,7 @@
 import torch
-import triton
-from mojo_opset.backends.ttx.kernels.ascend.fused_linear_cross_entropy import (
-    amp_custom_fwd,
-    amp_custom_bwd,
-    fused_linear_cross_entropy_forward,
-    fused_linear_cross_entropy_backward,
-)
 
+from mojo_opset.backends.ttx.kernels.ascend.fused_linear_cross_entropy import amp_custom_bwd
+from mojo_opset.backends.ttx.kernels.ascend.fused_linear_cross_entropy import amp_custom_fwd
 from mojo_opset.core import MojoFusedLinearCrossEntropyFunction
 
 
@@ -49,7 +44,7 @@ class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
             Recommended to set `accum_dtype` to higher precision, e.g. `torch.float32`, if the training is unstable with original dtype. Default: `None`, performing accumulations in original dtype
         """
 
-        loss, z_loss, grad_input, grad_weight, grad_bias = fused_linear_cross_entropy_forward(
+        loss, z_loss, grad_input, grad_weight, grad_bias = torch.ops.ttx.fused_linear_cross_entropy(
             _input=_input,
             weight=weight,
             target=target,
@@ -81,7 +76,7 @@ class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
         if ctx.return_z_loss:
             del grad_output2  # z_loss is only for logging
         (grad_input, grad_weight, grad_bias) = ctx.saved_tensors
-        grad_input, grad_weight, grad_bias = fused_linear_cross_entropy_backward(
+        grad_input, grad_weight, grad_bias = torch.ops.ttx.fused_linear_cross_entropy_backward(
             grad_output, grad_input, grad_weight, grad_bias
         )
         return (

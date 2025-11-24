@@ -209,10 +209,7 @@ def test_paged_attention_decode(
     ],
 )
 @auto_switch_platform()
-def test_flash_attention_forward_backward_diff(monkeypatch, q, k, v, cu_seqlens_q, cu_seqlens_k, o, grad_o, lse):
-    monkeypatch.setenv("MOJOFLASHATTNFUNCTION_FWD_MODE", "DIFF")
-    monkeypatch.setenv("MOJOFLASHATTNFUNCTION_BWD_MODE", "DIFF")
-
+def test_flash_attention(q, k, v, cu_seqlens_q, cu_seqlens_k, o, grad_o, lse):
     dropout_p = 0.0
     causal = True
 
