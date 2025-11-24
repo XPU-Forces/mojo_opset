@@ -1,4 +1,5 @@
 import mojo_opset.backends.ttx.kernels.ascend.flash_attention
+import mojo_opset.backends.ttx.kernels.ascend.fused_linear_cross_entropy
 import mojo_opset.backends.ttx.kernels.ascend.gelu
 import mojo_opset.backends.ttx.kernels.ascend.paged_attention
 import mojo_opset.backends.ttx.kernels.ascend.rmsnorm
