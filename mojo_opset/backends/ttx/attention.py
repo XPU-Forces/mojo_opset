@@ -4,8 +4,6 @@ from typing import Optional
 
 import torch
 
-from mojo_opset.backends.ttx.kernels.ascend.flash_attention import ttx_flash_attention_bwd
-from mojo_opset.backends.ttx.kernels.ascend.flash_attention import ttx_flash_attention_fwd
 from mojo_opset.backends.ttx.kernels.ascend.linear_attn.modules.l2norm import l2norm_bwd
 from mojo_opset.backends.ttx.kernels.ascend.linear_attn.modules.l2norm import l2norm_fwd
 from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.gated_delta_rule.chunk import chunk_gated_delta_rule
@@ -45,7 +43,7 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=2):
             v_cache=v_cache,
             cu_seqlens_q=cu_seqlens_q,
             block_tables=block_tables,
-            softmax_scale=softmax_scale,
+            sm_scale=softmax_scale,
         )
 
         return output
@@ -77,7 +75,7 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=2):
             v_cache=v_cache,
             seqlens=seqlens,
             block_tables=block_tables,
-            softmax_scale=softmax_scale,
+            sm_scale=softmax_scale,
         )
 
         return output
@@ -105,7 +103,7 @@ class TTXFlashAttnFunction(MojoFlashAttnFunction):
         max_seqlen_q = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max()
         max_seqlen_k = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).max()
 
-        o, lse = ttx_flash_attention_fwd(
+        o, lse = torch.ops.ttx.flash_attention(
             q,
             k,
             v,
@@ -133,7 +131,7 @@ class TTXFlashAttnFunction(MojoFlashAttnFunction):
         softmax_scale = ctx.softmax_scale
         causal = ctx.causal
         gqa_interleave = ctx.gqa_interleave
-        dq, dk, dv = ttx_flash_attention_bwd(
+        dq, dk, dv = torch.ops.ttx.flash_attention_bwd(
             o,
             grad_o,
             lse,

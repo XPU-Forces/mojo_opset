@@ -13,6 +13,8 @@
 # limitations under the License.
 
 
+from typing import Tuple
+
 import torch
 import triton
 import triton.language as tl
@@ -599,6 +601,7 @@ def backward_dq(
     tl.store(ptr1, dq.to(dq_ptr.dtype.element_ty), mask=mask1)
 
 
+@torch.library.custom_op("ttx::flash_attention", mutates_args={})
 def ttx_flash_attention_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -610,7 +613,7 @@ def ttx_flash_attention_fwd(
     causal: bool,
     sm_scale: float,
     gqa_interleave: bool = False,
-):
+) -> Tuple[torch.Tensor, torch.Tensor]:
     # dtype check
     assert q.dtype == torch.bfloat16 or q.dtype == torch.float16
     assert k.dtype == q.dtype and v.dtype == q.dtype
@@ -676,6 +679,28 @@ def ttx_flash_attention_fwd(
     return o, lse
 
 
+@ttx_flash_attention_fwd.register_fake
+def ttx_flash_attention_fwd_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    causal: bool,
+    sm_scale: float,
+    gqa_interleave: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    q_len, num_q_heads, _ = q.shape
+
+    o = torch.empty(q.shape[0], q.shape[1], v.shape[-1], dtype=q.dtype, device=q.device)
+    lse = torch.empty(num_q_heads, q_len, dtype=torch.float32, device=q.device)
+
+    return o, lse
+
+
+@torch.library.custom_op("ttx::flash_attention_bwd", mutates_args={})
 def ttx_flash_attention_bwd(
     o: torch.Tensor,
     do: torch.Tensor,
@@ -690,7 +715,7 @@ def ttx_flash_attention_bwd(
     causal: bool,
     sm_scale: float,
     gqa_interleave: bool = False,
-):
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     q_len, num_q_heads, qk_head_dim = q.shape
     k_len, num_k_heads, qk_head_dim = k.shape
     v_len, num_v_heads, v_head_dim = v.shape
@@ -845,3 +870,22 @@ def ttx_flash_attention_bwd(
         BLOCK_SIZE_VD=BLOCK_SIZE_VD,
     )
     return dq, dk, dv
+
+
+@ttx_flash_attention_bwd.register_fake
+def ttx_flash_attention_bwd_fake(
+    o: torch.Tensor,
+    do: torch.Tensor,
+    lse: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    causal: bool,
+    sm_scale: float,
+    gqa_interleave: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)

@@ -1,21 +1,20 @@
-from typing import Optional, Tuple
+from typing import Optional
+from typing import Tuple
 
 import torch
-from torch import nn
 import torch.nn.functional as F
 
-from transformers.modeling_utils import PreTrainedModel
-from transformers.configuration_utils import PretrainedConfig
+from torch import nn
 from transformers.cache_utils import StaticCache
-from transformers.modeling_outputs import CausalLMOutputWithPast, BaseModelOutputWithPast
+from transformers.configuration_utils import PretrainedConfig
+from transformers.modeling_utils import PreTrainedModel
 
-from mojo_opset import (
-    MojoRMSNormFunction,
-    MojoFlashAttnFunction,
-    MojoRoPEFunction,
-    MojoSiluFunction,
-    MojoFusedLinearCrossEntropyFunction,
-)
+from mojo_opset import MojoFlashAttnFunction
+from mojo_opset import MojoFusedLinearCrossEntropyFunction
+from mojo_opset import MojoRMSNormFunction
+from mojo_opset import MojoRoPEFunction
+from mojo_opset import MojoSiluFunction
+
 
 class P6DenseConfig(PretrainedConfig):
     """
@@ -214,7 +213,7 @@ class P6DenseConfig(PretrainedConfig):
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
-    
+
 
 class P6DenseMojoRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
@@ -444,7 +443,9 @@ class P6DenseAttention(nn.Module):
 
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
 
-        self.apply_flash_attn = P6DenseMojoFlashAttention(causal=self.is_causal, attention_dropout=self.attention_dropout)
+        self.apply_flash_attn = P6DenseMojoFlashAttention(
+            causal=self.is_causal, attention_dropout=self.attention_dropout
+        )
 
     def forward(
         self,
@@ -470,7 +471,7 @@ class P6DenseAttention(nn.Module):
         cos, sin = position_embeddings
         query_states, key_states = MojoRoPEFunction.apply(query_states, key_states, cos, sin)
 
-        attn_output =self.apply_flash_attn(
+        attn_output = self.apply_flash_attn(
             q=query_states,
             k=key_states,
             v=value_states,
@@ -533,7 +534,7 @@ class P6DensePreTrainedModel(PreTrainedModel):
     def post_init(self):
         for name, module in self.named_modules():
             if isinstance(module, nn.Linear) and any(substring in name for substring in ["o_proj", "down_proj"]):
-                module.std = self.config.initializer_range / ((2 * self.config.num_hidden_layers)**(-0.5))
+                module.std = self.config.initializer_range / ((2 * self.config.num_hidden_layers) ** (-0.5))
 
         super().post_init()
 
@@ -547,7 +548,7 @@ class P6DensePreTrainedModel(PreTrainedModel):
             if module.bias is not None:
                 module.bias.data.zero_()
         elif isinstance(module, nn.Embedding):
-            std = (1 / (2 * self.config.hidden_size))**(-0.5)
+            std = (1 / (2 * self.config.hidden_size)) ** (-0.5)
             module.weight.data.normal_(mean=0.0, std=std)
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
@@ -628,19 +629,19 @@ class P6DenseModel(P6DensePreTrainedModel):
 
 
 def mojo_fused_linear_cross_entropy(
-        input_tensor, 
-        weight, 
-        target, 
-        bias=None, 
-        ce_weight=None, 
-        ignore_index=-100, 
-        lse_square_scale=0.0,
-        label_smoothing=0.0,
-        reduction='mean',
-        softcap=None,
-        return_z_loss=False,
-        accum_dtype=None,
-    ):
+    input_tensor,
+    weight,
+    target,
+    bias=None,
+    ce_weight=None,
+    ignore_index=-100,
+    lse_square_scale=0.0,
+    label_smoothing=0.0,
+    reduction="mean",
+    softcap=None,
+    return_z_loss=False,
+    accum_dtype=None,
+):
     output = MojoFusedLinearCrossEntropyFunction.apply(
         input_tensor,
         weight,
@@ -802,7 +803,7 @@ class P6DenseForCausalLM(P6DensePreTrainedModel):
                 loss = token_level_loss
 
         return (loss, logits)
-    
+
     def prepare_inputs_for_generation(
         self,
         input_ids,
