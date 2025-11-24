@@ -1,14 +1,14 @@
-import torch
-import torch_npu
-import torch.nn.functional as F
-import triton
-import triton.language as tl
+import time
 
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.ops.gated_delta_rule.chunk import chunk_gated_delta_rule
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.ops.gated_delta_rule.torch_impl import (
+import torch
+import torch.nn.functional as F
+import torch_npu
+import triton
+
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.gated_delta_rule.chunk import chunk_gated_delta_rule
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.gated_delta_rule.torch_impl import (
     torch_chunk_gated_delta_rule,
 )
-import time
 
 
 def measure_time(func, warmup=3, repeat=10):
@@ -177,6 +177,8 @@ def main(seed=42):
     g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32, device="npu", requires_grad=True))
     g.retain_grad()
 
+    # torch.save({"q": q.cpu(), "k": k.cpu(), "v": v.cpu(), "beta": beta.cpu(), "g": g.cpu()}, "tensors.pt")
+
     # Create copies for the PyTorch implementation to have separate grad attributes
     q_torch, k_torch, v_torch = (
         q.clone().detach(),
@@ -199,6 +201,7 @@ def main(seed=42):
 
     # 3. Run Triton implementation (forward and backward)
     o_triton, _ = chunk_gated_delta_rule(q, k, v, g, beta, **common_kwargs)
+    # o_triton, _ = torch_sequential_gated_delta_rule(q, k, v, g, beta, use_qk_l2norm_in_kernel=True)
     # Use a simple sum for a dummy loss to trigger backward pass
     loss_triton = o_triton.sum()
     loss_triton.backward()
@@ -224,11 +227,11 @@ def main(seed=42):
     print("✅ Gradients for 'beta' match.")
     torch.testing.assert_close(g.grad, g_torch.grad, rtol=1e-1, atol=1e-1)
     print("✅ Gradients for 'g' match.")
-    print("✅ Gradients for 'q'", q.grad)
-    print("✅ Gradients for 'k", k.grad)
-    print("✅ Gradients for 'v", v.grad)
-    print("✅ Gradients for 'g", g.grad)
-    print("✅ Gradients for 'beta", beta.grad)
+    # print("✅ Gradients for 'q'", q.grad)
+    # print("✅ Gradients for 'k", k.grad)
+    # print("✅ Gradients for 'v", v.grad)
+    # print("✅ Gradients for 'g", g.grad)
+    # print("✅ Gradients for 'beta", beta.grad)
     return o_triton, q.grad, k.grad, v.grad, g.grad, beta.grad
 
 

@@ -167,3 +167,55 @@ def torch_chunk_gated_delta_rule(
         final_states[batch] = prev_state
 
     return o, final_states
+
+
+def torch_sequential_gated_delta_rule(q, k, v, g, beta, scale=None, use_qk_l2norm_in_kernel=True):
+    """
+    Math:
+        u_t = beta_t * (v_t - g_t * k_t @ S_{t-1})
+        S_t = g_t * S_{t-1} + k_t^T @ u_t
+        o_t = q_t @ S_t
+
+    Args:
+        q, k: (B, T, H, K)
+        v:    (B, T, H, V)
+        g:    (B, T, H)  <- Log space decay rate (log alpha)
+        beta: (B, T, H)
+    """
+    if use_qk_l2norm_in_kernel:
+        q = q / q.norm(dim=-1, keepdim=True)
+        k = k / k.norm(dim=-1, keepdim=True)
+
+    B, T, H, K = q.shape
+    _, _, _, V = v.shape
+
+    if scale is None:
+        scale = K**-0.5
+
+    state = torch.zeros(B, H, K, V, device=q.device, dtype=torch.float32)
+
+    outputs = []
+
+    for t in range(T):
+        q_t = q[:, t, :, :].unsqueeze(2)  # (B, H, 1, K)
+        k_t = k[:, t, :, :].unsqueeze(2)  # (B, H, 1, K)
+        v_t = v[:, t, :, :].unsqueeze(2)  # (B, H, 1, V)
+
+        g_val = g[:, t, :].exp().view(B, H, 1, 1)
+        beta_val = beta[:, t, :].view(B, H, 1, 1)
+
+        state_decayed = g_val * state
+
+        v_pred = torch.matmul(k_t, state_decayed)
+
+        residual = v_t - v_pred
+
+        update = torch.matmul(k_t.transpose(-1, -2), beta_val * residual)
+        state = state_decayed + update
+
+        o_t = torch.matmul(q_t * scale, state)
+
+        outputs.append(o_t.squeeze(2))
+
+    o = torch.stack(outputs, dim=1)
+    return o, state

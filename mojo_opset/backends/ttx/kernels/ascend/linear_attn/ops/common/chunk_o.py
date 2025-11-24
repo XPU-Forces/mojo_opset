@@ -9,7 +9,7 @@ import torch_npu
 import triton
 import triton.language as tl
 
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.ops.utils.op import exp
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.utils.op import exp
 
 
 @triton.heuristics(
@@ -50,74 +50,104 @@ def chunk_fwd_kernel_o(
     USE_G: tl.constexpr,
     USE_G_GAMMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    NT_dim: tl.int32,
+    B: tl.int32,
+    NV: tl.int32,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    i_b, i_h = i_bh // H, i_bh % H
-    i_hk = i_h // (H // HK)
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
 
-    if IS_VARLEN:
-        i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
-        NT = tl.cdiv(T, BT)
-    else:
-        NT = tl.cdiv(T, BT)
-        i_tg = i_b * NT + i_t
-        bos, eos = i_b * T, i_b * T + T
+    num_bh = B * H
+    total_tasks = NV * NT_dim * num_bh
 
-    # offset calculation
-    q += (bos * H + i_h) * K
-    k += (bos * HK + i_hk) * K
-    v += (bos * HK + i_hk) * V
-    o += (bos * H + i_h) * V
-    h += (i_tg * HK + i_hk).to(tl.int64) * K * V
+    for task_id in range(pid, total_tasks, num_programs):
+        i_bh = task_id // (NV * NT_dim)
+        remaining = task_id % (NV * NT_dim)
+        i_t = remaining // NV
+        i_v = remaining % NV
 
-    b_o = tl.zeros([BT, BV], dtype=tl.float32)
-    b_A = tl.zeros([BT, BT], dtype=tl.float32)
+        i_b, i_h = i_bh // H, i_bh % H
 
-    for i_k in range(tl.cdiv(K, BK)):
-        p_q = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_k = tl.make_block_ptr(k, (K, T), (1, HK * K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
-        p_h = tl.make_block_ptr(h, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        # [BT, BK]
-        b_q = tl.load(p_q, boundary_check=(0, 1))
-        # [BK, BT]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
-        # [BK, BV]
-        b_h = tl.load(p_h, boundary_check=(0, 1))
+        i_hk = i_h // (H // HK)
 
-        # [BT, BK] @ [BK, BV] -> [BT, BV]
-        b_o += tl.dot(b_q, b_h)
-        # [BT, BK] @ [BK, BT] -> [BT, BT]
-        b_A += tl.dot(b_q, b_k)
+        if IS_VARLEN:
+            i_tg = i_t
 
-    if USE_G:
-        g += bos * HK + i_hk
-        p_g = tl.make_block_ptr(g, (T,), (HK,), (i_t * BT,), (BT,), (0,))
-        b_g = tl.load(p_g, boundary_check=(0,))
-        b_o = b_o * exp(b_g)[:, None]
-        b_A = b_A * exp(b_g[:, None] - b_g[None, :])
+            i_n, i_t_real = (
+                tl.load(chunk_indices + i_t * 2).to(tl.int32),
+                tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
+            )
+            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+            T_len = eos - bos
 
-    if USE_G_GAMMA:
-        b_gamma = tl.load(g_gamma + i_hk)
-        b_g = b_gamma * (tl.arange(0, BT) + 1)
-        b_o = b_o * exp(b_g)[:, None]
-        b_A = b_A * exp(b_g[:, None] - b_g[None, :])
+            NT = tl.cdiv(T_len, BT)
+        else:
+            T_len = T
+            NT = tl.cdiv(T_len, BT)
+            i_tg = i_b * NT + i_t
+            bos, eos = i_b * T, i_b * T + T
+            i_t_real = i_t
 
-    o_t = i_t * BT + tl.arange(0, BT)
-    m_t = o_t < T
-    m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
-    b_A = tl.where(m_A, b_A, 0)
+        if i_t < NT:
+            q_base = q + (bos * H + i_h) * K
+            k_base = k + (bos * HK + i_hk) * K
+            v_base = v + (bos * HK + i_hk) * V
+            o_base = o + (bos * H + i_h) * V
 
-    p_v = tl.make_block_ptr(v, (T, V), (HK * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    p_o = tl.make_block_ptr(o, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            h_base = h + (i_tg * HK + i_hk).to(tl.int64) * K * V
 
-    b_v = tl.load(p_v, boundary_check=(0, 1))
-    # to fix mma -> mma layout conversion
-    # already solved by triton v3.2 or higher
-    b_o = b_o * scale + tl.dot(b_A.to(b_v.dtype), b_v) * scale
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+            b_o = tl.zeros([BT, BV], dtype=tl.float32)
+            b_A = tl.zeros([BT, BT], dtype=tl.float32)
+
+            for i_k in range(tl.cdiv(K, BK)):
+                p_q = tl.make_block_ptr(q_base, (T_len, K), (H * K, 1), (i_t_real * BT, i_k * BK), (BT, BK), (1, 0))
+
+                p_k = tl.make_block_ptr(k_base, (K, T_len), (1, HK * K), (i_k * BK, i_t_real * BT), (BK, BT), (0, 1))
+
+                p_h = tl.make_block_ptr(h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+
+                b_q = tl.load(p_q, boundary_check=(0, 1))
+                b_k = tl.load(p_k, boundary_check=(0, 1))
+                b_h = tl.load(p_h, boundary_check=(0, 1))
+
+                b_o += tl.dot(b_q, b_h)
+
+                b_A += tl.dot(b_q, b_k)
+
+            if USE_G:
+                g_base = g + bos * HK + i_hk
+                p_g = tl.make_block_ptr(g_base, (T_len,), (HK,), (i_t_real * BT,), (BT,), (0,))
+                b_g = tl.load(p_g, boundary_check=(0,))
+
+                b_o = b_o * tl.exp(b_g)[:, None]
+
+                b_A = b_A * tl.exp(b_g[:, None] - b_g[None, :])
+
+            if USE_G_GAMMA:
+                b_gamma = tl.load(g_gamma + i_hk)
+                b_g_pos = b_gamma * (tl.arange(0, BT) + i_t_real * BT + 1)
+
+                mask_pos = (i_t_real * BT + tl.arange(0, BT)) < T_len
+                b_g_pos = tl.where(mask_pos, b_g_pos, 0)
+
+                b_o = b_o * tl.exp(b_g_pos)[:, None]
+
+                b_A = b_A * tl.exp(b_g_pos[:, None] - b_g_pos[None, :])
+
+            o_t = i_t_real * BT + tl.arange(0, BT)
+            m_t = o_t < T_len
+
+            m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
+            b_A = tl.where(m_A, b_A, 0)
+
+            p_v = tl.make_block_ptr(v_base, (T_len, V), (HK * V, 1), (i_t_real * BT, i_v * BV), (BT, BV), (1, 0))
+            p_o = tl.make_block_ptr(o_base, (T_len, V), (H * V, 1), (i_t_real * BT, i_v * BV), (BT, BV), (1, 0))
+
+            b_v = tl.load(p_v, boundary_check=(0, 1))
+
+            b_o = b_o * scale + tl.dot(b_A.to(b_v.dtype), b_v) * scale
+
+            tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics(
@@ -509,25 +539,23 @@ def chunk_fwd_o(
     chunk_size: int = 64,
 ) -> torch.Tensor:
     B, T, H, K, V, HK = *q.shape, v.shape[-1], k.shape[2]
-    # if H > k.shape[2]:
-    #     Hk = k.shape[2]
-    #     repeat_num = H // Hk
-    #     k = k.unsqueeze(3).repeat(1, 1, 1, repeat_num, 1).reshape(B, T, H, K)
-    #     v = v.unsqueeze(3).repeat(1, 1, 1, repeat_num, 1).reshape(B, T, H, V)
-    #     h = h.unsqueeze(3).repeat(1, 1, 1, repeat_num, 1, 1).reshape(B, h.shape[1], H, K, V)
-    #     g = g.unsqueeze(3).repeat(1, 1, 1, repeat_num).reshape(B, T, H)
-    #     if g_gamma:
-    #         g_gamma = g_gamma.unsqueeze(3).repeat(1, 1, 1, repeat_num).reshape(B, T, H)
 
+    #
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+
+    NT_dim = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     if scale is None:
-        scale = k.shape[-1] ** -0.5
+        scale = K**-0.5
 
     o = torch.empty([B, T, H, V], device=v.device, dtype=v.dtype)
 
-    def grid(meta):
-        return (triton.cdiv(V, meta["BV"]), NT, B * H)
+    BV = 64
+    NV = triton.cdiv(V, BV)
+    num_bh = B * H
+
+    total_tasks = NV * NT_dim * num_bh
+
+    grid = (48, 1, 1)
 
     chunk_fwd_kernel_o[grid](
         q=q,
@@ -547,7 +575,13 @@ def chunk_fwd_o(
         V=V,
         BT=BT,
         BK=64,
-        BV=64,
+        BV=BV,
+        USE_G=g is not None,
+        USE_G_GAMMA=g_gamma is not None,
+        IS_VARLEN=cu_seqlens is not None,
+        NT_dim=NT_dim,
+        B=B,
+        NV=NV,
     )
     return o
 

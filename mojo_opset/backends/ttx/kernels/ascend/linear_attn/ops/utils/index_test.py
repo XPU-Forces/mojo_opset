@@ -1,6 +1,6 @@
 import torch
 import torch_npu
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.ops.utils.index import (
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.utils.index import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
     prepare_chunk_indices_and_offsets,

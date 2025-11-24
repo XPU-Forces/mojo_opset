@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.utils import tensor_cache
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.utils import tensor_cache
 
 
 @triton.autotune(

@@ -2,6 +2,8 @@ from typing import Optional
 
 import torch
 
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.gated_delta_rule.chunk import chunk_gated_delta_rule
+from mojo_opset.core import MojoGatedDeltaRule
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
 
@@ -68,3 +70,19 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=2):
         )
 
         return output
+class TTXGatedDeltaRule(MojoGatedDeltaRule, default_priority=2):
+    def forward_std(self, q, k, v, g, beta, cu_seqlens=None, scale=None):
+        o_var, ht_var = chunk_gated_delta_rule(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state=None,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens,
+            head_first=False,
+            use_qk_l2norm_in_kernel=self.use_qk_l2norm_in_kernel,
+        )
+
+        return o_var
