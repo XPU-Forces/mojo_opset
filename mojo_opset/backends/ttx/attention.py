@@ -32,7 +32,7 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=2):
             v_cache=v_cache,
             cu_seqlens_q=cu_seqlens_q,
             block_tables=block_tables,
-            softmax_scale=softmax_scale,
+            sm_scale=softmax_scale,
         )
 
         return output
@@ -64,7 +64,7 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=2):
             v_cache=v_cache,
             seqlens=seqlens,
             block_tables=block_tables,
-            softmax_scale=softmax_scale,
+            sm_scale=softmax_scale,
         )
 
         return output

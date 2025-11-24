@@ -191,3 +191,68 @@ def test_paged_attention_decode(
             sm_scale,
         ),
     )
+
+
+@pytest.mark.parametrize(
+    "q, k, v, cu_seqlens_q, cu_seqlens_k, o, grad_o, lse",
+    [
+        (
+            torch.randn(1000, 32, 128, dtype=torch.float16),
+            torch.randn(1000, 16, 128, dtype=torch.float16),
+            torch.randn(1000, 16, 128, dtype=torch.float16),
+            torch.Tensor([0, 100, 384, 1000]).to(torch.int32),
+            torch.Tensor([0, 100, 384, 1000]).to(torch.int32),
+            torch.randn(1000, 32, 128, dtype=torch.float16),
+            torch.randn(1000, 32, 128, dtype=torch.float16),
+            torch.randn(32, 1000, dtype=torch.float32),
+        )
+    ],
+)
+@auto_switch_platform()
+def test_flash_attention_forward_backward_diff(monkeypatch, q, k, v, cu_seqlens_q, cu_seqlens_k, o, grad_o, lse):
+    monkeypatch.setenv("MOJOFLASHATTNFUNCTION_FWD_MODE", "DIFF")
+    monkeypatch.setenv("MOJOFLASHATTNFUNCTION_BWD_MODE", "DIFF")
+
+    dropout_p = 0.0
+    causal = True
+
+    # FIXME: delete me.
+    sm_scale = 1.0 / math.sqrt(q.shape[-1])
+
+    max_seqlen_q = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item()
+    max_seqlen_k = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).max().item()
+
+    torch.library.opcheck(
+        torch.ops.ttx.flash_attention,
+        (
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            causal,
+            sm_scale,
+            False,
+        ),
+    )
+
+    torch.library.opcheck(
+        torch.ops.ttx.flash_attention_bwd,
+        (
+            o,
+            grad_o,
+            lse,
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            causal,
+            sm_scale,
+            False,
+        ),
+    )
