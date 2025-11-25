@@ -158,28 +158,24 @@ def main(seed=42):
     Runs a test case to compare the forward and backward pass of Triton
     and PyTorch implementations.
     """
-    # Set seed for reproducibility
 
     torch.set_deterministic_debug_mode(True)
     torch.manual_seed(seed)
     torch.npu.manual_seed(seed)
 
     # 1. Define tensor dimensions
-    B, T, H, K, V = 1, 128, 32, 128, 256
-    Hk = 32
+    B, T, H, K, V = 1, 16384, 32, 128, 256
+    Hk = 4
 
     # 2. Create identical input tensors for both functions
     q = torch.randn(B, T, H, K, dtype=torch.float16, device="npu", requires_grad=True)
     k = torch.randn(B, T, Hk, K, dtype=torch.float16, device="npu", requires_grad=True)
     v = torch.randn(B, T, Hk, V, dtype=torch.float16, device="npu", requires_grad=True)
-    beta = torch.rand(B, T, H, dtype=torch.float32, device="npu", requires_grad=True).sigmoid()
+    beta = torch.rand(B, T, Hk, dtype=torch.float32, device="npu", requires_grad=True).sigmoid()
     beta.retain_grad()
-    g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32, device="npu", requires_grad=True))
+    g = F.logsigmoid(torch.rand(B, T, Hk, dtype=torch.float32, device="npu", requires_grad=True))
     g.retain_grad()
 
-    # torch.save({"q": q.cpu(), "k": k.cpu(), "v": v.cpu(), "beta": beta.cpu(), "g": g.cpu()}, "tensors.pt")
-
-    # Create copies for the PyTorch implementation to have separate grad attributes
     q_torch, k_torch, v_torch = (
         q.clone().detach(),
         k.clone().detach(),

@@ -3,14 +3,15 @@
 # Copyright (c) 2025, Jianqiao Lu, Hongmin Chen
 
 import os
+
 from typing import Optional
 
 import torch
-import torch_npu
 import triton
 import triton.language as tl
 
 from mojo_opset.backends.ttx.kernels.ascend.linear_attn.utils import input_guard
+from mojo_opset.backends.ttx.kernels.ascend.utils import get_num_cores
 
 FLA_TRIL_PRECISION = os.environ.get("FLA_TRIL_PRECISION", "ieee")
 ALLOWED_TRIL_PRECISIONS = ["ieee", "tf32", "tf32x3"]
@@ -377,7 +378,8 @@ def solve_tril(
 
     Ai = torch.zeros_like(A, dtype=output_dtype)
 
-    grid = (48, 1, 1)
+    num_cores = get_num_cores()
+    grid = (num_cores,)
 
     if BT == 16:
         merge_fn = solve_tril_16x16_kernel

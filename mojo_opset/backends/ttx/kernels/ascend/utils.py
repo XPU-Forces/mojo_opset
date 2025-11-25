@@ -1,6 +1,8 @@
+from functools import lru_cache
+
 import torch
-import triton.language as tl
 import triton
+import triton.language as tl
 
 VEC_ALIGN_BYTES = 256
 
@@ -35,3 +37,8 @@ def store_with_pred_1d(ptr, value, skip_boundary_check: tl.constexpr, mask: tl.t
         tl.store(ptr, value, mask)
     else:
         tl.store(ptr, value)
+
+
+@lru_cache(maxsize=1)
+def get_num_cores():
+    return triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
