@@ -2,10 +2,10 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # Copyright (c) 2025, Jianqiao Lu, Hongmin Chen
 
-from typing import Optional, Tuple
+from typing import Optional
+from typing import Tuple
 
 import torch
-import torch_npu
 import triton
 import triton.language as tl
 
@@ -388,7 +388,7 @@ def prepare_wy_repr_bwd(
     B, T, H, K, V, HK = *dw.shape, v.shape[-1], k.shape[2]
     BT = 16
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    CONST_TILING = 32
+    CONST_TILING = 64
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
 

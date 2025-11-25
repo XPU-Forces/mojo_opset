@@ -5,7 +5,6 @@
 from typing import Optional
 
 import torch
-import torch_npu
 import triton
 import triton.language as tl
 
@@ -40,69 +39,72 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
-    NT: tl.int32,
+    NT_dim: tl.int32,
     B: tl.int32,
 ):
-    pid = tl.program_id(axis=0)
-    num_programs = tl.num_programs(axis=0)
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
 
     num_bh = B * H
-    total_tasks = NT * num_bh
+    total_tasks = NT_dim * num_bh
 
     for task_id in range(pid, total_tasks, num_programs):
-        i_t = task_id % NT
-        i_bh = task_id // NT
+        i_t_idx = task_id % NT_dim
+        i_bh = task_id // NT_dim
 
         i_b, i_h = i_bh // H, i_bh % H
 
         if IS_VARLEN:
-            idx_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
-            idx_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-
-            i_n, i_t_real = idx_n, idx_t
-
+            i_n, i_t = (
+                tl.load(chunk_indices + i_t_idx * 2).to(tl.int32),
+                tl.load(chunk_indices + i_t_idx * 2 + 1).to(tl.int32),
+            )
             bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
             T_len = eos - bos
-        else:
-            bos, eos = i_b * T, i_b * T + T
-            T_len = T
-
+            NT = tl.cdiv(T_len, BT)
             i_t_real = i_t
+        else:
+            T_len = T
+            NT = tl.cdiv(T_len, BT)
+            bos, eos = i_b * T, i_b * T + T
+            i_t_real = i_t_idx
 
-        o_t = i_t_real * BT + tl.arange(0, BT)
-        m_t = o_t < T_len
+        if i_t_real < NT:
+            o_t = i_t_real * BT + tl.arange(0, BT)
+            m_t = o_t < T_len
 
-        p_beta = tl.make_block_ptr(beta + bos * H + i_h, (T_len,), (H,), (i_t_real * BT,), (BT,), (0,))
-        b_beta = tl.load(p_beta, boundary_check=(0,))
+            p_beta = tl.make_block_ptr(beta + bos * H + i_h, (T_len,), (H,), (i_t_real * BT,), (BT,), (0,))
+            b_beta = tl.load(p_beta, boundary_check=(0,))
 
-        b_A = tl.zeros([BT, BT], dtype=tl.float32)
-        for i_k in range(tl.cdiv(K, BK)):
-            p_k = tl.make_block_ptr(
-                k + (bos * H + i_h) * K,
-                (T_len, K),
-                (H * K, 1),
-                (i_t_real * BT, i_k * BK),
-                (BT, BK),
-                (1, 0),
+            b_A = tl.zeros([BT, BT], dtype=tl.float32)
+            for i_k in range(tl.cdiv(K, BK)):
+                p_k = tl.make_block_ptr(
+                    k + (bos * H + i_h) * K,
+                    (T_len, K),
+                    (H * K, 1),
+                    (i_t_real * BT, i_k * BK),
+                    (BT, BK),
+                    (1, 0),
+                )
+                b_k = tl.load(p_k, boundary_check=(0, 1))
+
+                b_A += tl.dot(b_k, tl.trans(b_k))
+
+            if USE_G:
+                p_g = tl.make_block_ptr(g + bos * H + i_h, (T_len,), (H,), (i_t_real * BT,), (BT,), (0,))
+                b_g = tl.load(p_g, boundary_check=(0,))
+                b_g_diff = b_g[:, None] - b_g[None, :]
+                b_A *= tl.exp(b_g_diff)
+
+            b_A *= b_beta[:, None]
+
+            m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
+            b_A = tl.where(m_A, b_A, 0)
+
+            p_A = tl.make_block_ptr(
+                A + (bos * H + i_h) * BT, (T_len, BT), (BT * H, 1), (i_t_real * BT, 0), (BT, BT), (1, 0)
             )
-            b_k = tl.load(p_k, boundary_check=(0, 1))
-            b_A += tl.dot(b_k, tl.trans(b_k))
-
-        if USE_G:
-            p_g = tl.make_block_ptr(g + bos * H + i_h, (T_len,), (H,), (i_t_real * BT,), (BT,), (0,))
-            b_g = tl.load(p_g, boundary_check=(0,))
-            b_g_diff = b_g[:, None] - b_g[None, :]
-            b_A *= tl.exp(b_g_diff)
-
-        b_A *= b_beta[:, None]
-
-        m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
-        b_A = tl.where(m_A, b_A, 0)
-
-        p_A = tl.make_block_ptr(
-            A + (bos * H + i_h) * BT, (T_len, BT), (BT * H, 1), (i_t_real * BT, 0), (BT, BT), (1, 0)
-        )
-        tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
+            tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -255,7 +257,11 @@ def chunk_scaled_dot_kkt_fwd(
 ) -> torch.Tensor:
     B, T, H, K = k.shape
     BT = chunk_size
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+
+    NT_dim = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+
+    num_bh = B * H
+
     if gk is None:
         A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
 
@@ -273,46 +279,47 @@ def chunk_scaled_dot_kkt_fwd(
             K=K,
             BT=BT,
             BK=16,
-            IS_VARLEN=(cu_seqlens is not None),
-            USE_G=(g is not None),
-            NT=NT,
+            IS_VARLEN=cu_seqlens is not None,
+            USE_G=g is not None,
+            NT_dim=NT_dim,
             B=B,
         )
         return A
+    raise NotImplementedError("gk is not None dont't support persistent mode now, please report a issue.")
+    BC = min(16, BT)
+    NC = triton.cdiv(BT, BC)
+    BK = max(triton.next_power_of_2(K), 16)
+    A = torch.zeros(B, T, H, BT, device=k.device, dtype=output_dtype)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    grid = (NT, NC * NC, B * H)
+    chunk_scaled_dot_kkt_fwd_kernel_intra_sub_inter[grid](
+        k=k,
+        g=gk,
+        beta=beta,
+        A=A,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        H=H,
+        K=K,
+        BT=BT,
+        BC=BC,
+        NC=NC,
+    )
 
-    # BC = min(16, BT)
-    # NC = triton.cdiv(BT, BC)
-    # BK = max(triton.next_power_of_2(K), 16)
-    # A = torch.zeros(B, T, H, BT, device=k.device, dtype=output_dtype)
-    # grid = (NT, NC * NC, B * H)
-    # chunk_scaled_dot_kkt_fwd_kernel_intra_sub_inter[grid](
-    #     k=k,
-    #     g=gk,
-    #     beta=beta,
-    #     A=A,
-    #     cu_seqlens=cu_seqlens,
-    #     chunk_indices=chunk_indices,
-    #     T=T,
-    #     H=H,
-    #     K=K,
-    #     BT=BT,
-    #     BC=BC,
-    #     NC=NC,
-    # )
-
-    # grid = (NT, NC, B * H)
-    # chunk_scaled_dot_kkt_fwd_kernel_intra_sub_intra[grid](
-    #     k=k,
-    #     g=gk,
-    #     beta=beta,
-    #     A=A,
-    #     cu_seqlens=cu_seqlens,
-    #     chunk_indices=chunk_indices,
-    #     T=T,
-    #     H=H,
-    #     K=K,
-    #     BT=BT,
-    #     BC=BC,
-    #     BK=BK,
-    # )
-    # return A
+    grid = (NT, NC, B * H)
+    chunk_scaled_dot_kkt_fwd_kernel_intra_sub_intra[grid](
+        k=k,
+        g=gk,
+        beta=beta,
+        A=A,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        H=H,
+        K=K,
+        BT=BT,
+        BC=BC,
+        BK=BK,
+    )
+    return A

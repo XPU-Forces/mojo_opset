@@ -2,10 +2,10 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # Copyright (c) 2025, Jianqiao Lu, Hongmin Chen
 
-from typing import Optional, Tuple
+from typing import Optional
+from typing import Tuple
 
 import torch
-import torch_npu
 import triton
 import triton.language as tl
 
@@ -580,7 +580,7 @@ def chunk_gated_delta_rule_bwd_dhu(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V, HK = *q.shape, do.shape[-1], k.shape[2]
     # N: the actual number of sequences in the batch with either equal or variable lengths
-    BT = 64
+    BT = 16
     assert K <= 256, "current kernel does not support head dimension being larger than 256."
 
     if cu_seqlens is None:
