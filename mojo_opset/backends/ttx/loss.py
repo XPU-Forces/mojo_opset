@@ -76,7 +76,7 @@ class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
         if ctx.return_z_loss:
             del grad_output2  # z_loss is only for logging
         (grad_input, grad_weight, grad_bias) = ctx.saved_tensors
-        grad_input, grad_weight, grad_bias = torch.ops.ttx.fused_linear_cross_entropy_backward(
+        grad_input, grad_weight, grad_bias = torch.ops.ttx.fused_linear_cross_entropy_backward_(
             grad_output, grad_input, grad_weight, grad_bias
         )
         return (

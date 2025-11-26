@@ -60,11 +60,14 @@ def test_fused_ce(
     )
 
     torch.library.opcheck(
-        torch.ops.ttx.fused_linear_cross_entropy_backward,
+        torch.ops.ttx.fused_linear_cross_entropy_backward_,
         (
             torch.tensor(1.0, device=grad_input.device),
             grad_input,
             None,
             None,
         ),
+        # NOTE: Since we directly register the backward operator itself, the
+        # test_aot_dispatch_dynamic check is unnecessary.
+        test_utils=("test_schema", "test_autograd_registration", "test_faketensor"),
     )
