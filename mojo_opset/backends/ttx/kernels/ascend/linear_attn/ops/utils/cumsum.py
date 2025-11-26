@@ -5,25 +5,15 @@
 from typing import Optional
 
 import torch
-import torch_npu
 import triton
 import triton.language as tl
 
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.utils import input_guard
+from mojo_opset.backends.ttx.kernels.ascend.utils import get_num_cores
+from mojo_opset.backends.ttx.kernels.ascend.utils import input_guard
 
 BS_LIST = [16, 32]
 
 
-@triton.heuristics(
-    {
-        "HAS_SCALE": lambda args: args["scale"] is not None,
-        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
-)
-# @triton.autotune(
-#     configs=[triton.Config({})],
-#     key=["B", "H", "BT", "IS_VARLEN", "REVERSE"],
-# )
 @triton.jit(do_not_specialize=["T"])
 def chunk_local_cumsum_scalar_kernel(
     s,
@@ -32,38 +22,70 @@ def chunk_local_cumsum_scalar_kernel(
     cu_seqlens,
     chunk_indices,
     T,
-    B: tl.constexpr,
-    H: tl.constexpr,
+    B: tl.int32,
+    H_dim: tl.constexpr,
     BT: tl.constexpr,
     REVERSE: tl.constexpr,
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
+    NT_dim: tl.int32,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
-    i_b, i_h = i_bh // H, i_bh % H
-    if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
-    else:
-        bos, eos = i_b * T, i_b * T + T
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
 
-    if HEAD_FIRST:
-        p_s = tl.make_block_ptr(s + bos * H + i_h * T, (T,), (1,), (i_t * BT,), (BT,), (0,))
-        p_o = tl.make_block_ptr(o + bos * H + i_h * T, (T,), (1,), (i_t * BT,), (BT,), (0,))
-    else:
-        p_s = tl.make_block_ptr(s + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        p_o = tl.make_block_ptr(o + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    # [BT]
-    b_s = tl.load(p_s, boundary_check=(0,)).to(tl.float32)
-    b_o = tl.cumsum(b_s, axis=0)
-    if REVERSE:
-        b_z = tl.sum(b_s, axis=0)
-        b_o = -b_o + b_z[None] + b_s
-    if HAS_SCALE:
-        b_o *= scale
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
+    num_bh = B * H_dim
+    total_tasks = NT_dim * num_bh
+
+    for task_id in range(pid, total_tasks, num_programs):
+        i_bh = task_id // NT_dim
+        i_t_idx = task_id % NT_dim
+
+        i_b, i_h = i_bh // H_dim, i_bh % H_dim
+
+        if IS_VARLEN:
+            i_n, i_t_real = (
+                tl.load(chunk_indices + i_t_idx * 2).to(tl.int32),
+                tl.load(chunk_indices + i_t_idx * 2 + 1).to(tl.int32),
+            )
+            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+            T_len = eos - bos
+            NT = tl.cdiv(T_len, BT)
+        else:
+            T_len = T
+            bos, eos = i_b * T, i_b * T + T
+            i_t_real = i_t_idx
+            NT = tl.cdiv(T_len, BT)
+
+        if i_t_real < NT:
+            if HEAD_FIRST:
+                s_base = s + bos * H_dim + i_h * T
+                o_base = o + bos * H_dim + i_h * T
+
+                p_s = tl.make_block_ptr(s_base, (T_len,), (1,), (i_t_real * BT,), (BT,), (0,))
+                p_o = tl.make_block_ptr(o_base, (T_len,), (1,), (i_t_real * BT,), (BT,), (0,))
+            else:
+                s_base = s + bos * H_dim + i_h
+                o_base = o + bos * H_dim + i_h
+
+                p_s = tl.make_block_ptr(s_base, (T_len,), (H_dim,), (i_t_real * BT,), (BT,), (0,))
+                p_o = tl.make_block_ptr(o_base, (T_len,), (H_dim,), (i_t_real * BT,), (BT,), (0,))
+
+            b_s = tl.load(p_s, boundary_check=(0,)).to(tl.float32)
+
+            if REVERSE:
+                offs = tl.arange(0, BT)
+
+                mask = offs[:, None] <= offs[None, :]
+
+                b_o = tl.sum(tl.where(mask, b_s[None, :], 0.0), axis=1)
+            else:
+                b_o = tl.cumsum(b_s, axis=0)
+
+            if HAS_SCALE:
+                b_o *= scale
+
+            tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
 
 
 @triton.heuristics(
@@ -309,25 +331,38 @@ def chunk_local_cumsum_scalar(
         B, H, T = g.shape
     else:
         B, T, H = g.shape
+
     assert chunk_size == 2 ** (chunk_size.bit_length() - 1), "chunk_size must be a power of 2"
     BT = chunk_size
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    g_org, g = g, torch.zeros_like(g, dtype=output_dtype or g.dtype)
-    grid = (NT, B * H)
+
+    NT_dim = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+
+    g_org = g
+    g_out = torch.zeros_like(g, dtype=output_dtype or g.dtype)
+
+    num_bh = B * H
+    total_tasks = NT_dim * num_bh
+
+    num_cores = get_num_cores()
+    grid = (num_cores,)
+
     chunk_local_cumsum_scalar_kernel[grid](
         s=g_org,
-        o=g,
+        o=g_out,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,
         B=B,
-        H=H,
+        H_dim=H,
         BT=BT,
         HEAD_FIRST=head_first,
         REVERSE=reverse,
+        HAS_SCALE=scale is not None,
+        IS_VARLEN=cu_seqlens is not None,
+        NT_dim=NT_dim,
     )
-    return g
+    return g_out
 
 
 def chunk_local_cumsum_vector(

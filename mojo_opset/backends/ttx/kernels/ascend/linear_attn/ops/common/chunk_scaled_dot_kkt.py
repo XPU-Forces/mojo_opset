@@ -5,11 +5,11 @@
 from typing import Optional
 
 import torch
-import torch_npu
 import triton
 import triton.language as tl
 
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.ops.utils.op import exp
+from mojo_opset.backends.ttx.kernels.ascend.utils import exp
+from mojo_opset.backends.ttx.kernels.ascend.utils import get_num_cores
 
 
 @triton.heuristics(
@@ -40,45 +40,72 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
+    NT_dim: tl.int32,
+    B: tl.int32,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
-    i_b, i_h = i_bh // H, i_bh % H
-    if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
-    else:
-        bos, eos = i_b * T, i_b * T + T
-    o_t = i_t * BT + tl.arange(0, BT)
-    m_t = o_t < T
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
 
-    p_beta = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    b_beta = tl.load(p_beta, boundary_check=(0,))
+    num_bh = B * H
+    total_tasks = NT_dim * num_bh
 
-    b_A = tl.zeros([BT, BT], dtype=tl.float32)
-    for i_k in range(tl.cdiv(K, BK)):
-        p_k = tl.make_block_ptr(
-            k + (bos * H + i_h) * K,
-            (T, K),
-            (H * K, 1),
-            (i_t * BT, i_k * BK),
-            (BT, BK),
-            (1, 0),
-        )
-        b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_A += tl.dot(b_k, tl.trans(b_k))
+    for task_id in range(pid, total_tasks, num_programs):
+        i_t_idx = task_id % NT_dim
+        i_bh = task_id // NT_dim
 
-    if USE_G:
-        p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        b_g = tl.load(p_g, boundary_check=(0,))
-        b_g_diff = b_g[:, None] - b_g[None, :]
-        b_A *= exp(b_g_diff)
-    b_A *= b_beta[:, None]
+        i_b, i_h = i_bh // H, i_bh % H
 
-    m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
-    b_A = tl.where(m_A, b_A, 0)
-    p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (T, BT), (BT * H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
+        if IS_VARLEN:
+            i_n, i_t = (
+                tl.load(chunk_indices + i_t_idx * 2).to(tl.int32),
+                tl.load(chunk_indices + i_t_idx * 2 + 1).to(tl.int32),
+            )
+            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+            T_len = eos - bos
+            NT = tl.cdiv(T_len, BT)
+            i_t_real = i_t
+        else:
+            T_len = T
+            NT = tl.cdiv(T_len, BT)
+            bos, eos = i_b * T, i_b * T + T
+            i_t_real = i_t_idx
+
+        if i_t_real < NT:
+            o_t = i_t_real * BT + tl.arange(0, BT)
+            m_t = o_t < T_len
+
+            p_beta = tl.make_block_ptr(beta + bos * H + i_h, (T_len,), (H,), (i_t_real * BT,), (BT,), (0,))
+            b_beta = tl.load(p_beta, boundary_check=(0,))
+
+            b_A = tl.zeros([BT, BT], dtype=tl.float32)
+            for i_k in range(tl.cdiv(K, BK)):
+                p_k = tl.make_block_ptr(
+                    k + (bos * H + i_h) * K,
+                    (T_len, K),
+                    (H * K, 1),
+                    (i_t_real * BT, i_k * BK),
+                    (BT, BK),
+                    (1, 0),
+                )
+                b_k = tl.load(p_k, boundary_check=(0, 1))
+
+                b_A += tl.dot(b_k, tl.trans(b_k))
+
+            if USE_G:
+                p_g = tl.make_block_ptr(g + bos * H + i_h, (T_len,), (H,), (i_t_real * BT,), (BT,), (0,))
+                b_g = tl.load(p_g, boundary_check=(0,))
+                b_g_diff = b_g[:, None] - b_g[None, :]
+                b_A *= tl.exp(b_g_diff)
+
+            b_A *= b_beta[:, None]
+
+            m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
+            b_A = tl.where(m_A, b_A, 0)
+
+            p_A = tl.make_block_ptr(
+                A + (bos * H + i_h) * BT, (T_len, BT), (BT * H, 1), (i_t_real * BT, 0), (BT, BT), (1, 0)
+            )
+            tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -229,35 +256,20 @@ def chunk_scaled_dot_kkt_fwd(
     chunk_size: int = 32,
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    r"""
-    Compute beta * K * K^T.
-
-    Args:
-        k (torch.Tensor):
-            The key tensor of shape `[B, T, H, K]`.
-        beta (torch.Tensor):
-            The beta tensor of shape `[B, T, H]`.
-        g (torch.Tensor):
-            The cumulative sum of the gate tensor of shape `[B, T, H]`. Default: `None`.
-        gk (torch.Tensor):
-            The cumulative sum of the gate tensor of shape `[B, T, H, K]` applied to the key tensor. Default: `None`.
-        cu_seqlens (torch.LongTensor):
-            The cumulative sequence lengths of the input tensor.
-            Default: None
-        chunk_size (int):
-            The chunk size. Default: 64.
-        output_dtype (torch.dtype):
-            The dtype of the output tensor. Default: `torch.float32`
-
-    Returns:
-        beta * K * K^T of shape `[B, T, H, BT]` where `BT` is the chunk size.
-    """
     B, T, H, K = k.shape
     BT = chunk_size
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+
+    NT_dim = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+
+    num_bh = B * H
+
     if gk is None:
         A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
-        chunk_scaled_dot_kkt_fwd_kernel[(NT, B * H)](
+
+        num_cores = get_num_cores()
+        grid = (num_cores,)
+
+        chunk_scaled_dot_kkt_fwd_kernel[grid](
             k=k,
             g=g,
             beta=beta,
@@ -269,13 +281,18 @@ def chunk_scaled_dot_kkt_fwd(
             K=K,
             BT=BT,
             BK=16,
+            IS_VARLEN=cu_seqlens is not None,
+            USE_G=g is not None,
+            NT_dim=NT_dim,
+            B=B,
         )
         return A
-
+    raise NotImplementedError("gk is not None dont't support persistent mode now, please report a issue.")
     BC = min(16, BT)
     NC = triton.cdiv(BT, BC)
     BK = max(triton.next_power_of_2(K), 16)
     A = torch.zeros(B, T, H, BT, device=k.device, dtype=output_dtype)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     grid = (NT, NC * NC, B * H)
     chunk_scaled_dot_kkt_fwd_kernel_intra_sub_inter[grid](
         k=k,

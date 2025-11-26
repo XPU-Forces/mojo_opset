@@ -3,14 +3,15 @@
 # Copyright (c) 2025, Jianqiao Lu, Hongmin Chen
 
 import os
+
 from typing import Optional
 
 import torch
-import torch_npu
 import triton
 import triton.language as tl
 
-from mojo_opset.backends.ttx_kernels.src.ascend.linear_attn.utils import input_guard
+from mojo_opset.backends.ttx.kernels.ascend.utils import get_num_cores
+from mojo_opset.backends.ttx.kernels.ascend.utils import input_guard
 
 FLA_TRIL_PRECISION = os.environ.get("FLA_TRIL_PRECISION", "ieee")
 ALLOWED_TRIL_PRECISIONS = ["ieee", "tf32", "tf32x3"]
@@ -20,10 +21,6 @@ assert FLA_TRIL_PRECISION in ALLOWED_TRIL_PRECISIONS, (
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.autotune(
-    configs=[triton.Config({})],
-    key=["BT"],
-)
 @triton.jit(do_not_specialize=["T"])
 def solve_tril_16x16_kernel(
     A,
@@ -35,43 +32,70 @@ def solve_tril_16x16_kernel(
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     DOT_PRECISION: tl.constexpr,
+    NT: tl.int32,
+    B: tl.int32,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
-    i_b, i_h = i_bh // H, i_bh % H
-    if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
-    else:
-        bos, eos = i_b * T, i_b * T + T
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+
+    num_bh = B * H
+    total_tasks = NT * num_bh
+
     o_i = tl.arange(0, 16)
     m_A = o_i[:, None] > o_i[None, :]
     m_I = o_i[:, None] == o_i[None, :]
 
-    A = A + (bos * H + i_h) * BT
-    Ai = Ai + (bos * H + i_h) * 16
+    for task_id in range(pid, total_tasks, num_programs):
+        i_t = task_id % NT
+        i_bh = task_id // NT
 
-    offset = (i_t * 16) % BT
+        i_b = i_bh // H
+        i_h = i_bh % H
 
-    p_A = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * 16, offset), (16, 16), (1, 0))
-    # [16, 16]
-    b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
+        if IS_VARLEN:
+            idx_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
+            idx_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
 
-    b_A = -tl.where(m_A, b_A, 0)
+            i_n, i_t_real = idx_n, idx_t
 
-    for i in range(2, min(16, T - i_t * 16)):
-        # [16]
-        b_a = -tl.load(A + (i_t * 16 + i) * H * BT + o_i + offset)
-        b_a = b_a + tl.sum(b_a[:, None] * b_A, 0)
-        b_A = tl.where((o_i == i)[:, None], b_a, b_A)
-    b_A += m_I
+            bos = tl.load(cu_seqlens + i_n).to(tl.int32)
+            eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+            T_len = eos - bos
+        else:
+            bos = i_b * T
 
-    p_Ai = tl.make_block_ptr(Ai, (T, 16), (H * 16, 1), (i_t * 16, 0), (16, 16), (1, 0))
-    tl.store(
-        p_Ai,
-        b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
-    )
+            T_len = T
+            i_t_real = i_t
+
+        offset = (i_t_real * 16) % BT
+
+        p_A_base = A + (bos * H + i_h) * BT
+        p_Ai_base = Ai + (bos * H + i_h) * 16
+
+        p_A = tl.make_block_ptr(p_A_base, (T_len, BT), (H * BT, 1), (i_t_real * 16, offset), (16, 16), (1, 0))
+
+        b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
+        b_A = -tl.where(m_A, b_A, 0)
+
+        limit = min(16, T_len - i_t_real * 16)
+
+        for i in range(2, 16):
+            if i < limit:
+                ptr_row = p_A_base + (i_t_real * 16 + i) * H * BT + o_i + offset
+                b_a = -tl.load(ptr_row)
+
+                b_a = b_a + tl.sum(b_a[:, None] * b_A, 0)
+
+                b_A = tl.where((o_i == i)[:, None], b_a, b_A)
+
+        b_A += m_I
+
+        p_Ai = tl.make_block_ptr(p_Ai_base, (T_len, 16), (H * 16, 1), (i_t_real * 16, 0), (16, 16), (1, 0))
+        tl.store(
+            p_Ai,
+            b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding="rtne"),
+            boundary_check=(0, 1),
+        )
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -342,29 +366,21 @@ def solve_tril(
     chunk_indices: Optional[torch.Tensor] = None,
     output_dtype: torch.dtype = torch.float,
 ) -> torch.Tensor:
-    """
-    Compute the inverse of the matrix I + A
-    A should be strictly lower triangular, i.e., A.triu() == 0.
-
-    Args:
-        A (torch.Tensor):
-            [B, T, H, BT], where BT should only be 16, 32, or 64.
-        cu_seqlens (torch.Tensor):
-            The cumulative sequence lengths of the input tensor. Default: `None`.
-        output_dtype (torch.dtype):
-            The dtype of the output tensor. Default: `torch.float`.
-            If `None`, the output dtype will be the same as the input dtype.
-
-    Returns:
-        (I + A)^-1 with the same shape as A
-    """
     assert A.shape[-1] in [16, 32, 64]
     output_dtype = A.dtype if output_dtype is None else output_dtype
 
     B, T, H, BT = A.shape
-    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
+
+    if cu_seqlens is not None:
+        NT = len(chunk_indices)
+    else:
+        NT = triton.cdiv(T, 16)
 
     Ai = torch.zeros_like(A, dtype=output_dtype)
+
+    num_cores = get_num_cores()
+    grid = (num_cores,)
+
     if BT == 16:
         merge_fn = solve_tril_16x16_kernel
     elif BT == 32:
@@ -372,7 +388,7 @@ def solve_tril(
     elif BT == 64:
         merge_fn = merge_16x16_to_64x64_inverse_kernel
 
-    merge_fn[NT, B * H](
+    solve_tril_16x16_kernel[grid](
         A=A,
         Ai=Ai,
         cu_seqlens=cu_seqlens,
@@ -380,6 +396,10 @@ def solve_tril(
         T=T,
         H=H,
         BT=BT,
-        DOT_PRECISION=FLA_TRIL_PRECISION,
+        IS_VARLEN=(cu_seqlens is not None),
+        DOT_PRECISION="tf32",
+        NT=NT,
+        B=B,
     )
+
     return Ai
