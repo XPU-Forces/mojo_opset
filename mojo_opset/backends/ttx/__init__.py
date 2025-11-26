@@ -3,7 +3,7 @@ from .activation import TTXSilu
 from .activation import TTXSiluFunction
 from .activation import TTXSwiGLU
 from .add_norm import TTXResidualAddNorm
-from .attention import MojoGatedDeltaRule
+from .attention import TTXGatedDeltaRuleFunction
 from .attention import TTXPagedDecodeGQA
 from .attention import TTXPagedPrefillGQA
 from .loss import TTXFusedLinearCrossEntropyFunction
@@ -21,9 +21,9 @@ __all__ = [
     "TTXResidualAddNorm",
     "TTXPagedPrefillGQA",
     "TTXPagedDecodeGQA",
-    "MojoGatedDeltaRule",
     "TTXRMSNormFunction",
     "TTXRoPEFunction",
     "TTXSiluFunction",
     "TTXFusedLinearCrossEntropyFunction",
+    "TTXGatedDeltaRuleFunction",
 ]

@@ -10,8 +10,8 @@ import torch
 import triton
 import triton.language as tl
 
-from mojo_opset.backends.ttx.kernels.ascend.linear_attn.utils import input_guard
 from mojo_opset.backends.ttx.kernels.ascend.utils import get_num_cores
+from mojo_opset.backends.ttx.kernels.ascend.utils import input_guard
 
 FLA_TRIL_PRECISION = os.environ.get("FLA_TRIL_PRECISION", "ieee")
 ALLOWED_TRIL_PRECISIONS = ["ieee", "tf32", "tf32x3"]

@@ -11,10 +11,10 @@ import triton.language as tl
 from triton.language.math import rsqrt
 from triton.runtime.libentry import libentry
 
-from mojo_opset.backends.ttx.kernels.ascend.linear_attn.utils import input_guard
 from mojo_opset.backends.ttx.kernels.ascend.utils import VEC_ALIGN_BYTES
 from mojo_opset.backends.ttx.kernels.ascend.utils import align
 from mojo_opset.backends.ttx.kernels.ascend.utils import get_num_cores
+from mojo_opset.backends.ttx.kernels.ascend.utils import input_guard
 from mojo_opset.backends.ttx.kernels.ascend.utils import torch_to_triton_dtype
 
 

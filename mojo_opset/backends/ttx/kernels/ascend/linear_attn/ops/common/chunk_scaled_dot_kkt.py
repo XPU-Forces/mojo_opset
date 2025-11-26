@@ -8,7 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
-from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.utils.op import exp
+from mojo_opset.backends.ttx.kernels.ascend.utils import exp
 from mojo_opset.backends.ttx.kernels.ascend.utils import get_num_cores
 
 
@@ -265,7 +265,7 @@ def chunk_scaled_dot_kkt_fwd(
 
     if gk is None:
         A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
-        
+
         num_cores = get_num_cores()
         grid = (num_cores,)
 

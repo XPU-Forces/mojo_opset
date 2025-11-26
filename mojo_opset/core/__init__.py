@@ -73,13 +73,16 @@ from .pos_emb.mojo_rope import MojoRoPE
 from .pos_emb.mojo_rope import MojoRoPEStoreKV
 
 """ mojo sampling """
+from .sampling.mojo_sampling import MojoRejectSampling
+from .sampling.mojo_sampling import MojoTopKSampling
+from .sampling.mojo_sampling import MojoTopPSampling
+
+""" mojo func """
+from .functions.mojo_gated_delta_rule_func import MojoGatedDeltaRuleFunction
 from .functions.mojo_linear_crossentropy_func import MojoFusedLinearCrossEntropyFunction
 from .functions.mojo_rmsnorm_func import MojoRMSNormFunction
 from .functions.mojo_rope_func import MojoRoPEFunction
 from .functions.mojo_silu_func import MojoSiluFunction
-from .sampling.mojo_sampling import MojoRejectSampling
-from .sampling.mojo_sampling import MojoTopKSampling
-from .sampling.mojo_sampling import MojoTopPSampling
 
 # fmt: off
 __all__ = [
@@ -150,5 +153,6 @@ __all__ = [
     "MojoRMSNormFunction",
     "MojoRoPEFunction",
     "MojoFusedLinearCrossEntropyFunction",
+    "MojoGatedDeltaRuleFunction",
 ]
 # fmt: on

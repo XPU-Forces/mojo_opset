@@ -9,7 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.utils.op import exp
+from mojo_opset.backends.ttx.kernels.ascend.utils import exp
 from mojo_opset.backends.ttx.kernels.ascend.utils import get_num_cores
 
 
@@ -760,6 +760,18 @@ def chunk_bwd_dv_local(
         NT_dim=NT_dim,
         B=B,
     )
+
+    torch.save(
+        {
+            "q": q.detach().cpu(),
+            "k": k.detach().cpu(),
+            "g": g.detach().cpu() if g is not None else None,
+            "do": do.detach().cpu(),
+            "dv": dv.detach().cpu(),
+        },
+        "mojo_chunk_bwd_inputs.pt",
+    )
+
     return dv
 
 
