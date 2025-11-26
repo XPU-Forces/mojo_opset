@@ -11,7 +11,8 @@ readme = { file = "README.md", content-type = "text/markdown" }
 authors = [{name="SeedXPU", email='yuminghui.exp@bytedance.com'}]
 dependencies = [
     "bytedxpu-ops @ https://luban-source.byted.org/repository/scm/data.aml.xpu_ops_th25_npu_1.0.0.53.tar.gz",
-    "byted-triton-x >= 3.2.0.post17"
+    "byted-triton-x >= 3.2.0.post17",
+    "transformers==4.51.3",
 ]
 requires-python = ">=3.9"
 
