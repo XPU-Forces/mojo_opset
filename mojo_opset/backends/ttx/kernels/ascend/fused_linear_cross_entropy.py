@@ -292,7 +292,10 @@ def _cross_entropy_prime_kernel(
 
         m = float("-inf")
         d = 0.0
-        ori_X_y = tl.load(current_X_ptr + y).cast(tl.float32)
+        ori_X_y = 0.0
+        
+        if y != ignore_index:
+            ori_X_y = tl.load(current_X_ptr + y).cast(tl.float32)
 
         scaled_x_sum = 0.0
         eps = label_smoothing / n_cols
