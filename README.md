@@ -76,7 +76,7 @@ Mojo Operator方式提供，训练部分则以 Mojo Function部分提供。
 ### 3.1 ttx-kernels
 ttx-kernels 提供了 Mojo Opset 的 triton 版本实现。
 
-source code: mojo_opset/backends/ttx_kernels/src
+source code: mojo_opset/backends/ttx/kernels
 
 ### 3.2 xpu_ops
 xpu_ops 提供了 Mojo Opset 的 C-like 版本实现。请注意xpu_ops是in-house的实现，不对外提供。
@@ -110,6 +110,7 @@ xpu_ops 提供了 Mojo Opset 的 C-like 版本实现。请注意xpu_ops是in-hou
 | Norm        | MojoRMSNormFunc             | ✅            | TBD        |
 | PositionEmb | MojoRotaryEmbFunc           | ✅            | TBD        |
 | Loss        | MojoLinearCrossEntropyFunc  | ✅            | TBD        |
+| Attn        | MojoGatedDeltaRuleFunction  | ✅            | TBD        |
 
 
 ## 5. Usage
@@ -134,7 +135,7 @@ export MOJO_BACKEND="+TTX, XPU_OPS"
 ```
 
 ### 5.3 modeling reference
-以 qwen3 dense 为例（modify from：https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py），您可以通过以下任意一种方式使用 Mojo Opset 构建模型：
+以 qwen3 dense 为例 [modify from here](https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py)，您可以通过以下任意一种方式使用 Mojo Opset 构建模型：
 
 (1) monkey patch
 
