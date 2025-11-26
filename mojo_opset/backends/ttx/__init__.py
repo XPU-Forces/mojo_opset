@@ -3,6 +3,7 @@ from .activation import TTXSilu
 from .activation import TTXSiluFunction
 from .activation import TTXSwiGLU
 from .add_norm import TTXResidualAddNorm
+from .attention import TTXFlashAttnFunction
 from .attention import TTXGatedDeltaRuleFunction
 from .attention import TTXPagedDecodeGQA
 from .attention import TTXPagedPrefillGQA
@@ -21,6 +22,7 @@ __all__ = [
     "TTXResidualAddNorm",
     "TTXPagedPrefillGQA",
     "TTXPagedDecodeGQA",
+    "TTXFlashAttnFunction",
     "TTXRMSNormFunction",
     "TTXRoPEFunction",
     "TTXSiluFunction",
