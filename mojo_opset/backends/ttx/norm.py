@@ -64,4 +64,4 @@ class TTXRMSNormFunction(MojoRMSNormFunction):
             X_dtype=ctx.X_dtype,
         )
 
-        return dX, dW, None, None, None, None
+        return dX, dW, None

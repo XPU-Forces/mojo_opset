@@ -10,6 +10,7 @@ from mojo_opset.backends.ttx.kernels.ascend.utils import torch_to_triton_dtype
 
 from .utils import VEC_ALIGN_BYTES
 from .utils import align
+from .utils import ceil_div
 
 """
 This file incorporates code from Unsloth licensed under the Apache License, Version 2.0.
@@ -24,27 +25,14 @@ Modifications in this repository by triton-x team, 2025.
 """
 
 
-COL_BLOCKING_THRESHOLD = 4096
+COL_BLOCKING_THRESHOLD = 2048
 
 _CASTING_MODE_NONE: tl.constexpr = tl.constexpr(-1)
 _CASTING_MODE_LLAMA: tl.constexpr = tl.constexpr(0)
 _CASTING_MODE_GEMMA: tl.constexpr = tl.constexpr(1)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE_M": 1, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 2, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 4, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 8, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 12, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 16, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 20, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 24, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 32, "multibuffer": True}),
-    ],
-    key=["N_ROWS", "N_COLS"],
-)
+@triton.heuristics({"BLOCK_SIZE_M": lambda args: ceil_div(8192, args["n_cols"])})
 @libentry()
 @triton.jit
 def _rmsnorm_infer_kernel(
@@ -128,7 +116,7 @@ def rmsnorm_infer(
     y = torch.empty_like(X_2d)
 
     if n_cols > COL_BLOCKING_THRESHOLD:
-        BLOCK_SIZE_N = 2048
+        BLOCK_SIZE_N = COL_BLOCKING_THRESHOLD
     else:
         BLOCK_SIZE_N = align(x, n_cols, VEC_ALIGN_BYTES)
 
@@ -160,20 +148,15 @@ def rmsnorm_infer_fake(
     return torch.empty_like(x)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE_M": 1, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 2, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 4, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 8, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 12, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 16, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 20, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 24, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 32, "multibuffer": True}),
-    ],
-    key=["n_rows", "n_cols"],
-)
+def rms_norm_fwd_heuristics(args):
+    # Empirical value; hard-coded.
+    if args["n_cols"] <= COL_BLOCKING_THRESHOLD:
+        return ceil_div(8192, args["n_cols"])
+    else:
+        return 4
+
+
+@triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
 @libentry()
 @triton.jit
 def _rmsnorm_fwd_kernel(
@@ -245,21 +228,7 @@ def _rmsnorm_fwd_kernel(
             tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk, mask=block_mask)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE_M": 1, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 2, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 4, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 8, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 12, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 16, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 20, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 24, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 32, "multibuffer": True}),
-    ],
-    key=["n_rows", "n_cols"],
-    restore_value=["dY_ptr", "dX_ptr", "dW_ptr"],
-)
+@triton.heuristics({"BLOCK_SIZE_M": lambda args: ceil_div(4096, args["n_cols"])})
 @libentry()
 @triton.jit
 def _rmsnorm_bwd_kernel(
@@ -335,21 +304,6 @@ def _rmsnorm_bwd_kernel(
     tl.store(dW_ptr_prog, dW_acc, mask=cols_mask)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE_M": 1, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 2, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 4, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 8, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 12, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 16, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 20, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 24, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 32, "multibuffer": True}),
-    ],
-    key=["n_rows", "n_cols"],
-    restore_value=["dY_ptr", "dX_ptr", "dW_ptr"],
-)
 @libentry()
 @triton.jit
 def _rmsnorm_bwd_large_cols_kernel(
@@ -458,7 +412,7 @@ def rmsnorm_fwd(
     n_rows, n_cols = X_2d.shape
 
     if n_cols > COL_BLOCKING_THRESHOLD:
-        BLOCK_SIZE_N = 2048
+        BLOCK_SIZE_N = COL_BLOCKING_THRESHOLD
     else:
         BLOCK_SIZE_N = align(X, n_cols, VEC_ALIGN_BYTES)
 
@@ -484,6 +438,7 @@ def rmsnorm_fwd(
         offset,
         casting_mode_int=casting_mode_int,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
+        multibuffer=True,
     )
 
     Y = Y.reshape(*shape)
@@ -558,6 +513,7 @@ def rmsnorm_bwd(
             casting_mode_int,
             X_dtype_triton,
             BLOCK_SIZE_N=align(X_2d, n_cols, VEC_ALIGN_BYTES),
+            multibuffer=True,
         )
         dW = _dW.sum(dim=0).to(W.dtype)
     else:
@@ -579,7 +535,9 @@ def rmsnorm_bwd(
             offset,
             casting_mode_int,
             X_dtype_triton,
-            BLOCK_SIZE_N=2048,
+            BLOCK_SIZE_N=COL_BLOCKING_THRESHOLD,
+            BLOCK_SIZE_M=2,  # Empirical value
+            multibuffer=True,
         )
         dW = _dW.squeeze(0).to(W.dtype)
 
