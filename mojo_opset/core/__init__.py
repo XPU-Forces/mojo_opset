@@ -78,6 +78,7 @@ from .sampling.mojo_sampling import MojoTopKSampling
 from .sampling.mojo_sampling import MojoTopPSampling
 
 """ mojo func """
+from .functions.mojo_flashattn_func import MojoFlashAttnFunction
 from .functions.mojo_gated_delta_rule_func import MojoGatedDeltaRuleFunction
 from .functions.mojo_linear_crossentropy_func import MojoFusedLinearCrossEntropyFunction
 from .functions.mojo_rmsnorm_func import MojoRMSNormFunction
@@ -154,5 +155,6 @@ __all__ = [
     "MojoRoPEFunction",
     "MojoFusedLinearCrossEntropyFunction",
     "MojoGatedDeltaRuleFunction",
+    "MojoFlashAttnFunction",
 ]
 # fmt: on

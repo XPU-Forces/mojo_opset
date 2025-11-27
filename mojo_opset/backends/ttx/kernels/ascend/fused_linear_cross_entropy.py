@@ -1,3 +1,6 @@
+from typing import Optional
+from typing import Tuple
+
 import torch
 import torch_npu
 import triton
@@ -429,20 +432,21 @@ def _element_mul_kernel(
             tl.store(X_ptr_tile, result_tile, mask=mask_2d)
 
 
+@torch.library.custom_op("ttx::fused_linear_cross_entropy", mutates_args={})
 def fused_linear_cross_entropy_forward(
-    _input,
-    weight,
-    target,
-    ce_weight=None,
-    bias=None,
-    ignore_index=-100,
-    lse_square_scale=0.0,
-    label_smoothing=0.0,
-    reduction="mean",
-    softcap=None,
-    return_z_loss=False,
-    accum_dtype=None,
-):
+    _input: torch.Tensor,
+    weight: torch.Tensor,
+    target: torch.Tensor,
+    ce_weight: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    ignore_index: int = -100,
+    lse_square_scale: float = 0.0,
+    label_smoothing: float = 0.0,
+    reduction: str = "mean",
+    softcap: Optional[float] = None,
+    return_z_loss: bool = False,
+    accum_dtype: Optional[torch.dtype] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     assert isinstance(return_z_loss, bool), f"return_z_loss must be True or False. Got: {return_z_loss}"
     device = _input.device
 
@@ -607,7 +611,59 @@ def fused_linear_cross_entropy_forward(
     return loss, z_loss, grad_input, grad_weight, grad_bias
 
 
-def fused_linear_cross_entropy_backward(grad_output, grad_input, grad_weight, grad_bias):
+@fused_linear_cross_entropy_forward.register_fake
+def fused_linear_cross_entropy_forward_fake(
+    _input: torch.Tensor,
+    weight: torch.Tensor,
+    target: torch.Tensor,
+    ce_weight: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    ignore_index: int = -100,
+    lse_square_scale: float = 0.0,
+    label_smoothing: float = 0.0,
+    reduction: str = "mean",
+    softcap: Optional[float] = None,
+    return_z_loss: bool = False,
+    accum_dtype: Optional[torch.dtype] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    #
+    loss = torch.empty((), dtype=torch.float32, device=_input.device)
+
+    z_loss = None
+    if return_z_loss:
+        z_loss = torch.empty((), dtype=_input.dtype, device=_input.device)
+
+    grad_input = torch.empty_like(_input)
+
+    grad_weight = None
+    if weight.requires_grad:
+        grad_weight = torch.empty_like(weight)
+
+    grad_bias = None
+    if bias is not None:
+        grad_bias = torch.empty_like(bias)
+
+    return loss, z_loss, grad_input, grad_weight, grad_bias
+
+
+# NOTE: Since custom_op does not support input/output aliasing, we register the
+# operator manually using torch.library.impl.
+fused_linear_cross_entropy_backward_schema = (
+    "(Tensor grad_output, Tensor(a!) grad_input, "
+    "Tensor(a!)? grad_weight=None, Tensor(a!)? grad_bias=None) -> "
+    "(Tensor(a) grad_input, Tensor(a)? grad_weight, Tensor(a)? grad_bias)"
+)
+
+torch.library.define("ttx::fused_linear_cross_entropy_backward_", fused_linear_cross_entropy_backward_schema)
+
+
+@torch.library.impl("ttx::fused_linear_cross_entropy_backward_", "default")
+def fused_linear_cross_entropy_backward_(
+    grad_output: torch.Tensor,
+    grad_input: torch.Tensor,
+    grad_weight: Optional[torch.Tensor] = None,
+    grad_bias: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # If cross entropy is the last layer, grad_output is 1.0. Skip the mul to save time
     if not torch.equal(grad_output, torch.tensor(1.0, device=grad_output.device)):
         # We use a Triton kernel instead of a PyTorch operation because modifying inputs in-place
@@ -649,6 +705,16 @@ def fused_linear_cross_entropy_backward(grad_output, grad_input, grad_weight, gr
                 1,
                 grad_bias.stride(-1),
             )
+    return grad_input, grad_weight, grad_bias
+
+
+@torch.library.register_fake("ttx::fused_linear_cross_entropy_backward_")
+def fused_linear_cross_entropy_backward_meta(
+    grad_output: torch.Tensor,
+    grad_input: torch.Tensor,
+    grad_weight: Optional[torch.Tensor] = None,
+    grad_bias: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return grad_input, grad_weight, grad_bias
 
 
@@ -720,7 +786,7 @@ class TTXFusedLinearCrossEntropyFunction(torch.autograd.Function):
         if ctx.return_z_loss:
             del grad_output2  # z_loss is only for logging
         (grad_input, grad_weight, grad_bias) = ctx.saved_tensors
-        grad_input, grad_weight, grad_bias = fused_linear_cross_entropy_backward(
+        grad_input, grad_weight, grad_bias = fused_linear_cross_entropy_backward_(
             grad_output, grad_input, grad_weight, grad_bias
         )
         return (
