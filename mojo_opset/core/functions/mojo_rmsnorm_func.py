@@ -1,7 +1,8 @@
-import os
 import torch
-from ..mojo_function import MojoFuncBase, mojo_func_dispatcher
 import torch.nn.functional as F
+
+from ..mojo_function import MojoFuncBase
+from ..mojo_function import mojo_func_dispatcher
 
 
 @mojo_func_dispatcher
@@ -27,7 +28,7 @@ class MojoRMSNormFunction(MojoFuncBase):
 
     @staticmethod
     def backward_ref(ctx, grad_output):
-        input, weight, _ = ctx.saved_tensors
+        input, weight = ctx.saved_tensors
         normalized_shape = ctx.normalized_shape
         eps = ctx.eps
 
