@@ -1,6 +1,11 @@
-import os
+from abc import abstractmethod
+from typing import Any
+from typing import Optional
+from typing import Tuple
+
 import torch
 
+from ...mojo_utils import get_mojo_exec_mode
 from ..mojo_operator import MojoOperator
 
 
@@ -9,7 +14,56 @@ class MojoTopKSampling(MojoOperator):
 
 
 class MojoTopPSampling(MojoOperator):
-    pass
+    def __init__(
+        self,
+        top_p: float = 0.75,
+        filter_value: float = -float("Inf"),
+        min_tokens_to_keep: int = 1,
+        rand_top_k: int = 1000,
+        thresholds: Optional[torch.Tensor] = None,
+        op_name: str = "",
+        layer_idx: int = 0,
+    ):
+        super().__init__(op_name, layer_idx)
+
+        self.top_p = top_p
+        self.filter_value = filter_value
+        self.min_tokens_to_keep = min_tokens_to_keep
+        self.rand_top_k = rand_top_k
+        self.thresholds = thresholds
+
+        mode_str = get_mojo_exec_mode(MojoTopPSampling.__name__, "FWD", self.layer_idx)
+        self._set_forward_mode(mode_str)
+
+    @abstractmethod
+    def forward_std(self, logits: torch.Tensor) -> Tuple[Any]:
+        raise NotImplementedError
+
+    def forward_ref(self, logits: torch.Tensor) -> torch.Tensor:
+        logits = logits.to(torch.float32)
+        top_k = min(self.rand_top_k, logits.size(-1))
+        sorted_topk_logits, sorted_topk_indices = torch.topk(logits, top_k)
+
+        cumulative_probs = sorted_topk_logits.softmax(dim=-1).cumsum(dim=-1)
+        sorted_indices_to_remove = cumulative_probs > self.top_p
+
+        if self.min_tokens_to_keep > 1:
+            sorted_indices_to_remove[..., : self.min_tokens_to_keep - 1] = 0
+
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
+
+        filtered_logits = sorted_topk_logits.masked_fill(sorted_indices_to_remove, self.filter_value)
+
+        probs = torch.nn.functional.softmax(filtered_logits, dim=-1)
+        select_index = torch.multinomial(probs, num_samples=1)
+
+        next_tokens = torch.gather(sorted_topk_indices, dim=-1, index=select_index)
+        next_probs = torch.gather(probs, dim=-1, index=select_index)
+        return next_probs, next_tokens
+
+    def forward_analysis(self, logits) -> Tuple[int, int, int]:
+        raise NotImplementedError
 
 
 class MojoRejectSampling(MojoOperator):
