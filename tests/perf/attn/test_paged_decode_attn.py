@@ -69,8 +69,6 @@ test_configs_decode = [
                 block_size=BLK_S,
                 dtype=dtype,
             ),
-            3e-2 if dtype != torch.float32 else 1e-5,
-            1e-3 if dtype != torch.float32 else 1e-6,
             id=ID,
         )
         for B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, ID in test_configs_decode
@@ -85,8 +83,6 @@ def test_paged_decode_gqa(
     v_cache: torch.Tensor,
     seqlens: torch.Tensor,
     block_tables: torch.Tensor,
-    atol: float,
-    rtol: float,
     gqa_layout: str,
 ):
     head_dim = query.shape[-1]
@@ -98,14 +94,12 @@ def test_paged_decode_gqa(
     )
 
     perf(  # noqa: F821
-        op(
+        lambda: op(
             query,
             k_cache,
             v_cache,
             seqlens,
             block_tables,
             softmax_scale=sm_scale,
-            atol=atol,
-            rtol=rtol,
         )
     )

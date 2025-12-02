@@ -86,8 +86,6 @@ test_configs = [
                 block_size=BLK_S,
                 dtype=dtype,
             ),
-            2e-2 if dtype != torch.float32 else 1e-5,
-            2e-3 if dtype != torch.float32 else 1e-6,
             id=ID,
         )
         for B, Q_H, KV_H, D, Q_LEN, BLK_S, dtype, ID in test_configs
@@ -102,8 +100,6 @@ def test_paged_prefill_gqa(
     v_cache: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     block_tables: torch.Tensor,
-    atol: float,
-    rtol: float,
     gqa_layout: str,
 ):
     op = MojoPagedPrefillGQA(
@@ -115,14 +111,12 @@ def test_paged_prefill_gqa(
     sm_scale = 1.0 / math.sqrt(head_dim)
 
     perf(  # noqa: F821
-        op(
+        lambda: op(
             query,
             k_cache,
             v_cache,
             cu_seqlens_q,
             block_tables,
             softmax_scale=sm_scale,
-            atol=atol,
-            rtol=rtol,
         )
     )

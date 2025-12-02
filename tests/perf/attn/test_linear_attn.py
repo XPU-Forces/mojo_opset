@@ -26,4 +26,4 @@ from mojo_opset import MojoGatedDeltaRule
 def test_linear_attn(q, k, v, beta, g, cu_seqlens):
     op = MojoGatedDeltaRule()
 
-    perf(op(q, k, v, g, beta, cu_seqlens, atol=1e-1, rtol=1e-1))  # noqa: F821
+    perf(lambda: op(q, k, v, g, beta, cu_seqlens, atol=1e-1, rtol=1e-1))  # noqa: F821

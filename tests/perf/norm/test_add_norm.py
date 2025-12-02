@@ -35,9 +35,4 @@ def test_residual_add_norm(x, residual, gamma, beta, norm_type, norm_pos, epsilo
         norm_type=norm_type,
     )
 
-    if x.dtype == torch.float32:
-        atol, rtol = 1e-5, 1e-6
-    else:
-        atol, rtol = 3e-2, 6e-3
-
-    perf(add_norm(x, residual, atol=atol, rtol=rtol))  # noqa: F821
+    perf(lambda: add_norm(x, residual))  # noqa: F821

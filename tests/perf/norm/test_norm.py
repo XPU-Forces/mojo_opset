@@ -30,11 +30,7 @@ def test_rmsnorm(x, gamma, epsilon):
     with torch.no_grad():
         rmsnorm.gamma.copy_(gamma.to(torch.float32))
 
-    if x.dtype == torch.float32:
-        atol, rtol = 1e-5, 1e-6
-    else:
-        atol, rtol = 3e-2, 6e-3
-    perf(rmsnorm(x, atol=atol, rtol=rtol))  # noqa: F821
+    perf(lambda: rmsnorm(x))  # noqa: F821
 
 
 @pytest.mark.parametrize(
@@ -63,8 +59,4 @@ def test_layernorm(x, gamma, beta, epsilon):
         layernorm.gamma.copy_(gamma.to(torch.float32))
         layernorm.beta.copy_(beta.to(torch.float32))
 
-    if x.dtype == torch.float32:
-        atol, rtol = 1e-5, 1e-6
-    else:
-        atol, rtol = 3e-2, 6e-3
-    perf(layernorm(x, atol=atol, rtol=rtol))  # noqa: F821
+    perf(lambda: layernorm(x))  # noqa: F821
