@@ -16,8 +16,6 @@ on:
   workflow_dispatch:
 env:
   MOJO_OPSET_PROXY: ${{ secrets.MOJO_OPSET_PROXY }}
-  MOJO_OPSET_DOCKER: ${{ secrets.MOJO_DOCKER }}
-  MOJO_OPSET_DEPENDENCY_1: ${{ secrets.MOJO_DEPENDENCY_1 }}
 defaults:
   run:
     shell: bash
@@ -25,8 +23,10 @@ jobs:
   run-tests:
     name: Run npu tests
     runs-on: NPU
+    env:
+      DOCKER_IMAGE: ${{ secrets.MOJO_DOCKER }}
     container:
-      image: ${{ secrets.MOJO_DOCKER }}
+      image: ${{ env.DOCKER_IMAGE }}
       volumes:
       - /etc/localtime:/etc/localtime
       - /usr/local/Ascend/driver:/usr/local/Ascend/driver
@@ -40,7 +40,7 @@ jobs:
         shell: bash
         run: |
           export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
-          pip install ${MOJO_OPSET_DEPENDENCY_1} --force-reinstall
+          pip install byted-triton-x --index-url https://bytedpypi.byted.org/simple --force-reinstall
           pip install -U pip setuptools wheel build
           pip install -e .
           python3 -m build .
