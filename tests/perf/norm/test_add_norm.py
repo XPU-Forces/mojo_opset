@@ -1,7 +1,6 @@
 import pytest
 import torch
 
-from tests.utils import auto_switch_perf_fun
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
@@ -23,8 +22,7 @@ from mojo_opset import MojoResidualAddNorm
 @pytest.mark.parametrize("epsilon", [1e-5])
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
 @pytest.mark.parametrize("norm_type", ["rmsnorm", "layernorm"])
-@auto_switch_platform()
-@auto_switch_perf_fun()
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_residual_add_norm(x, residual, gamma, beta, norm_type, norm_pos, epsilon):
     beta = beta if norm_type == "layernorm" else None

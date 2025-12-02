@@ -1,7 +1,6 @@
 import pytest
 import torch
 
-from tests.utils import auto_switch_perf_fun
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
@@ -17,8 +16,7 @@ from mojo_opset import MojoRoPE
         )
     ],
 )
-@auto_switch_platform()
-@auto_switch_perf_fun()
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_pos_emb(q, k):
     rope = MojoRoPE(is_varlen=False)

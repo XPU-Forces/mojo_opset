@@ -1,7 +1,6 @@
 import pytest
 import torch
 
-from tests.utils import auto_switch_perf_fun
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
@@ -19,8 +18,7 @@ from mojo_opset import MojoNorm
     ],
 )
 @pytest.mark.parametrize("epsilon", [1e-5])
-@auto_switch_platform()
-@auto_switch_perf_fun()
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_rmsnorm(x, gamma, epsilon):
     rmsnorm = MojoNorm(
@@ -51,8 +49,7 @@ def test_rmsnorm(x, gamma, epsilon):
     ],
 )
 @pytest.mark.parametrize("epsilon", [1e-5])
-@auto_switch_platform()
-@auto_switch_perf_fun()
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_layernorm(x, gamma, beta, epsilon):
     layernorm = MojoNorm(

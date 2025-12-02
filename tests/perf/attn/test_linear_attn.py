@@ -2,7 +2,6 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from tests.utils import auto_switch_perf_fun
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
@@ -22,8 +21,7 @@ from mojo_opset import MojoGatedDeltaRule
         )
     ],
 )
-@auto_switch_platform()
-@auto_switch_perf_fun()
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_linear_attn(q, k, v, beta, g, cu_seqlens):
     op = MojoGatedDeltaRule()

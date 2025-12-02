@@ -1,7 +1,6 @@
 import pytest
 import torch
 
-from tests.utils import auto_switch_perf_fun
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
@@ -14,8 +13,7 @@ from mojo_opset import MojoSwiGLU
     "x",
     [(torch.rand(128, 128))],
 )
-@auto_switch_perf_fun()
-@auto_switch_platform()
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_gelu(x):
     gelu = MojoGelu()
@@ -26,8 +24,7 @@ def test_gelu(x):
     "x",
     [(torch.rand(128, 128))],
 )
-@auto_switch_perf_fun()
-@auto_switch_platform()
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_silu(x):
     silu = MojoSilu()
@@ -43,8 +40,7 @@ def test_silu(x):
         )
     ],
 )
-@auto_switch_perf_fun()
-@auto_switch_platform()
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_swiglu(gate_out, up_out):
     swiglu = MojoSwiGLU()

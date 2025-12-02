@@ -3,7 +3,6 @@ import math
 import pytest
 import torch
 
-from tests.utils import auto_switch_perf_fun
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
@@ -95,8 +94,7 @@ test_configs = [
     ],
 )
 @pytest.mark.parametrize("gqa_layout", ["ABAB"])
-@auto_switch_perf_fun()
-@auto_switch_platform()
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_paged_prefill_gqa(
     query: torch.Tensor,

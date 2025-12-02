@@ -36,48 +36,26 @@ def get_platform() -> Literal["npu", "mlu", "cpu"]:
             return "cpu"
 
 
-def auto_switch_platform():
+def auto_switch_platform(set_perf: bool = False):
     device = get_platform()
+
+    if set_perf:
+        if device == "npu":
+            perf_fn = perf_npu
+        else:
+            raise NotImplementedError(f"Performance test is not implemented on {device}")
 
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            new_args = []
-            for arg in args:
-                if isinstance(arg, torch.Tensor):
-                    new_args.append(arg.to(device=device))
-                else:
-                    new_args.append(arg)
+            new_args = [arg.to(device=device) if isinstance(arg, torch.Tensor) else arg for arg in args]
+            new_kwargs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in kwargs.items()}
 
-            new_kwargs = {}
-            for key, value in kwargs.items():
-                if isinstance(value, torch.Tensor):
-                    new_kwargs[key] = value.to(device)
-                else:
-                    new_kwargs[key] = value
+            if set_perf:
+                module = sys.modules[func.__module__]
+                setattr(module, "perf", perf_fn)
 
             return func(*new_args, **new_kwargs)
-
-        return wrapper
-
-    return decorator
-
-
-def auto_switch_perf_fun():
-    device = get_platform()
-
-    if device == "npu":
-        perf_fn = perf_npu
-    else:
-        raise NotImplementedError(f"Performance test is not implemented on {device}")
-
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            module = sys.modules[func.__module__]
-            setattr(module, "perf", perf_fn)
-
-            return func(*args, **kwargs)
 
         return wrapper
 
