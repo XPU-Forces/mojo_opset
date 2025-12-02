@@ -35,7 +35,6 @@ jobs:
           # 使用这种特殊的语法将值写入 GITHUB_OUTPUT，使其成为 job 的输出
           echo "docker_image=${{ secrets.MOJO_DOCKER }}" >> $GITHUB_OUTPUT
 
-jobs:
   run-tests:
     name: Run npu tests
     runs-on: NPU
