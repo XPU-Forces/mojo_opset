@@ -26,7 +26,7 @@ jobs:
     name: Run npu tests
     runs-on: NPU
     container:
-      image: ${{ env.MOJO_OPSET_DOCKER }}
+      image: ${{ secrets.MOJO_DOCKER }}
       volumes:
       - /etc/localtime:/etc/localtime
       - /usr/local/Ascend/driver:/usr/local/Ascend/driver
