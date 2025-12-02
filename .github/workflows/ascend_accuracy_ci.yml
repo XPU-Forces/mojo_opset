@@ -20,13 +20,28 @@ defaults:
   run:
     shell: bash
 jobs:
+  # --- 新增的 Job 1: 准备环境变量 ---
+  prepare-env:
+    name: Prepare Environment
+    runs-on: ubuntu-latest # 使用一个轻量的通用 runner 即可
+    outputs:
+      # 定义这个 job 将会产生的输出
+      docker_image: ${{ steps.set_vars.outputs.docker_image }}
+
+    steps:
+      - name: Set environment variables as outputs
+        id: set_vars  # 给这个 step 一个 ID，方便引用其输出
+        run: |
+          # 使用这种特殊的语法将值写入 GITHUB_OUTPUT，使其成为 job 的输出
+          echo "docker_image=${{ secrets.MOJO_DOCKER }}" >> $GITHUB_OUTPUT
+
+jobs:
   run-tests:
     name: Run npu tests
     runs-on: NPU
-    env:
-      DOCKER_IMAGE: ${{ secrets.MOJO_DOCKER }}
+    needs: prepare-env
     container:
-      image: ${{ env.DOCKER_IMAGE }}
+      image: ${{ needs.prepare-env.outputs.docker_image }}
       volumes:
       - /etc/localtime:/etc/localtime
       - /usr/local/Ascend/driver:/usr/local/Ascend/driver
