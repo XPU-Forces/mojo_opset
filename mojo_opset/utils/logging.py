@@ -22,9 +22,9 @@ import logging
 import os
 import sys
 import threading
+
 from functools import lru_cache
 from typing import Optional
-
 
 _thread_lock = threading.RLock()
 _default_handler: Optional["logging.Handler"] = None
@@ -81,7 +81,7 @@ def _configure_library_root_logger() -> None:
             return
 
         formatter = logging.Formatter(
-            fmt="[%(levelname)s][%(name)s:%(lineno)s] %(asctime)s >> %(message)s",
+            fmt="[%(levelname)s] %(asctime)s >> %(message)s",
             datefmt="%m/%d/%Y %H:%M:%S",
         )
         _default_handler = logging.StreamHandler(sys.stdout)
