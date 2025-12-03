@@ -165,3 +165,158 @@ def ttx_top_p_sampling(
         output_probs = torch.gather(output_final_probs, -1, sampled_index_in_topk)
 
     return output_probs, output_tokens
+
+
+@triton.jit
+def _fused_penalty_kernel(
+    Logits_ptr,
+    Freqs_ptr,
+    Is_present_ptr,
+    Freq_pen_ptr,
+    Pres_pen_ptr,
+    Rep_pen_ptr,
+    Temp_ptr,
+    stride_logits_b,
+    stride_logits_v,
+    stride_freqs_b,
+    stride_freqs_v,
+    stride_is_present,
+    stride_freq_pen,
+    stride_pres_pen,
+    stride_rep_pen,
+    stride_temp,
+    n_batch,
+    n_vocab,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    grid_size = tl.num_programs(axis=0)
+
+    num_vocab_blocks = tl.cdiv(n_vocab, BLOCK_SIZE)
+
+    total_tasks = n_batch * num_vocab_blocks
+
+    for task_id in range(pid, total_tasks, grid_size):
+        pid_b = task_id // num_vocab_blocks
+        pid_v = task_id % num_vocab_blocks
+
+        is_present_float = tl.load(Is_present_ptr + pid_b * stride_is_present)
+
+        freq_pen = tl.load(Freq_pen_ptr + pid_b * stride_freq_pen)
+        pres_pen = tl.load(Pres_pen_ptr + pid_b * stride_pres_pen)
+        rep_pen = tl.load(Rep_pen_ptr + pid_b * stride_rep_pen)
+
+        temperature = 1.0
+        if Temp_ptr is not None:
+            temperature = tl.load(Temp_ptr + pid_b * stride_temp)
+
+        offs_v = pid_v * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs_v < n_vocab
+
+        logit_ptrs = Logits_ptr + (pid_b * stride_logits_b) + (offs_v * stride_logits_v)
+        freq_ptrs = Freqs_ptr + (pid_b * stride_freqs_b) + (offs_v * stride_freqs_v)
+
+        logits = tl.load(logit_ptrs, mask=mask, other=0.0).to(tl.float32)
+
+        token_freqs = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        if is_present_float != 0.0:
+            token_freqs = tl.load(freq_ptrs, mask=mask, other=0.0).to(tl.float32)
+
+            if freq_pen != 0.0:
+                logits = logits - (freq_pen * token_freqs)
+
+            if pres_pen != 0.0:
+                is_present = token_freqs > 0
+                logits = logits - (pres_pen * is_present.to(tl.float32))
+
+            if rep_pen != 1.0:
+                has_freq = token_freqs > 0
+
+                logits = tl.where(has_freq & (logits > 0), logits / rep_pen, logits)
+
+                logits = tl.where(has_freq & (logits < 0), logits * rep_pen, logits)
+
+        if Temp_ptr is not None:
+            logits = logits / temperature
+
+        tl.store(logit_ptrs, logits, mask=mask)
+
+
+def ttx_apply_penalties(
+    logits: torch.Tensor,
+    token_freqs,
+    frequency_penalties: torch.Tensor,
+    presence_penalties: torch.Tensor,
+    repetition_penalties: torch.Tensor,
+    temperatures: torch.Tensor = None,
+):
+    assert logits.dim() == 2, "Logits must be [Batch, Vocab]"
+
+    batch_size, n_vocab = logits.shape
+
+    def prepare_scalar_tensor(t, name):
+        if isinstance(t, list):
+            t = torch.tensor(t, device=logits.device, dtype=torch.float32)
+        if t.dim() == 0:
+            t = t.unsqueeze(0).expand(batch_size)
+        if t.dim() > 1:
+            t = t.view(-1)
+        assert t.size(0) == batch_size, f"{name} batch size mismatch"
+        return t.contiguous()
+
+    f_pen = prepare_scalar_tensor(frequency_penalties, "freq_pen")
+    p_pen = prepare_scalar_tensor(presence_penalties, "pres_pen")
+    r_pen = prepare_scalar_tensor(repetition_penalties, "rep_pen")
+
+    t_ptr = None
+    stride_temp = 0
+    if temperatures is not None:
+        t_vals = prepare_scalar_tensor(temperatures, "temperature")
+        t_ptr = t_vals
+        stride_temp = t_vals.stride(0)
+
+    is_present_list = [1.0 if t is not None else 0.0 for t in token_freqs]
+
+    is_present_mask = torch.tensor(is_present_list, device=logits.device, dtype=torch.float32).contiguous()
+    stride_is_present = is_present_mask.stride(0)
+
+    first_non_none = next((t for t in token_freqs if t is not None), None)
+    freq_dtype = first_non_none.dtype if first_non_none is not None else torch.int64
+
+    dense_token_freqs = torch.zeros((batch_size, n_vocab), dtype=freq_dtype, device=logits.device)
+
+    for i, freq_tensor in enumerate(token_freqs):
+        if freq_tensor is not None:
+            dense_token_freqs[i, :] = freq_tensor.to(dense_token_freqs.device, non_blocking=True).view(-1)
+
+    logits = logits.contiguous()
+    dense_token_freqs = dense_token_freqs.contiguous()
+
+    BLOCK_SIZE = 1024
+
+    num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
+    grid = (num_programs,)
+
+    _fused_penalty_kernel[grid](
+        logits,
+        dense_token_freqs,
+        is_present_mask,
+        f_pen,
+        p_pen,
+        r_pen,
+        t_ptr,
+        logits.stride(0),
+        logits.stride(1),
+        dense_token_freqs.stride(0),
+        dense_token_freqs.stride(1),
+        stride_is_present,
+        f_pen.stride(0),
+        p_pen.stride(0),
+        r_pen.stride(0),
+        stride_temp,
+        batch_size,
+        n_vocab,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+    return logits

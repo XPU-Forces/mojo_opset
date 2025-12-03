@@ -1,6 +1,9 @@
 from abc import abstractmethod
 from typing import Any
+from typing import List
+from typing import Optional
 from typing import Tuple
+from typing import Union
 
 import torch
 
@@ -64,3 +67,68 @@ class MojoTopPSampling(MojoOperator):
 
 class MojoRejectSampling(MojoOperator):
     pass
+
+
+class MojoApplyPenalties(MojoOperator):
+    def __init__(
+        self,
+        op_name: str = "",
+        layer_idx: int = 0,
+    ):
+        super().__init__(op_name, layer_idx)
+
+        mode_str = get_mojo_exec_mode(MojoTopPSampling.__name__, "FWD", self.layer_idx)
+        self._set_forward_mode(mode_str)
+
+    @abstractmethod
+    def forward_std(
+        self,
+        logits: torch.Tensor,
+        token_freqs: List[Union[None, torch.Tensor]],
+        presence_penalties: List[float],
+        frequency_penalties: List[float],
+        repetition_penalties: List[float],
+        temps: Optional[List[Optional[float]]] = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+    def forward_ref(
+        self,
+        logits: torch.Tensor,
+        token_freqs: List[Union[None, torch.Tensor]],
+        presence_penalties: List[float],
+        frequency_penalties: List[float],
+        repetition_penalties: List[float],
+        temps: Optional[List[Optional[float]]] = None,
+    ) -> torch.Tensor:
+        dtype = logits.dtype
+        logits = logits.to(torch.float32)
+
+        for i, freq_token in enumerate(token_freqs):
+            if freq_token is not None:
+                device_freq_token = freq_token.to(logits.device, non_blocking=True)
+                if frequency_penalties[i] != 0.0:
+                    logits[i] -= frequency_penalties[i] * device_freq_token
+                if presence_penalties[i] != 0.0:
+                    logits[i] -= presence_penalties[i] * (device_freq_token > 0)
+                if repetition_penalties[i] != 1.0:
+                    conds = logits[i] * device_freq_token
+                    logits[i] = torch.where(
+                        conds < 0,
+                        logits[i] * repetition_penalties[i],
+                        torch.where(conds > 0, logits[i] / repetition_penalties[i], logits[i]),
+                    )
+            if temps is not None and temps[i] is not None:
+                logits[i] /= temps[i]
+        return logits.to(dtype)
+
+    def forward_analysis(
+        self,
+        logits: torch.Tensor,
+        token_freqs: List[Union[None, torch.Tensor]],
+        presence_penalties: List[float],
+        frequency_penalties: List[float],
+        repetition_penalties: List[float],
+        temps: Optional[List[Optional[float]]] = None,
+    ) -> Tuple[int, int, int]:
+        raise NotImplementedError
