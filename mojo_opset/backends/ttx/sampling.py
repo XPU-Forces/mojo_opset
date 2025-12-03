@@ -33,6 +33,8 @@ class TTXApplyPenalties(MojoApplyPenalties, default_priority=0):
         repetition_penalties: List[float],
         temps: Optional[List[Optional[float]]] = None,
     ) -> torch.Tensor:
+        if len(temps) == 0:
+            temps = None
         return ttx_apply_penalties(
             logits, token_freqs, frequency_penalties, presence_penalties, repetition_penalties, temps
         )
