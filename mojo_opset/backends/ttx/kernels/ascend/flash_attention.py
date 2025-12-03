@@ -374,6 +374,7 @@ def paged_attention_decode(
         sm_scale,
         BLOCK_SIZE_D=BLOCK_SIZE_D,
         BLOCK_SIZE_N=block_size,
+        multibuffer=False,
     )
     return o
 
