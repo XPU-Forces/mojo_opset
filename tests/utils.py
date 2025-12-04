@@ -1,6 +1,8 @@
 import csv
 import functools
+import inspect
 import os
+import re
 import subprocess
 import sys
 import time
@@ -15,6 +17,56 @@ import torch_npu
 from mojo_opset.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def get_executor_info(executor):
+    def format_arg(arg):
+        if isinstance(arg, torch.Tensor):
+            return f"Tensor(shape={tuple(arg.shape)}, dtype={arg.dtype}, device={arg.device})"
+        elif isinstance(arg, (int, float, str, bool)):
+            return str(arg)
+        elif isinstance(arg, (list, tuple)):
+            return "[" + ", ".join(format_arg(a) for a in arg) + "]"
+        elif arg is None:
+            return "None"
+        else:
+            return f"<{type(arg).__name__}>"
+
+    try:
+        sig = inspect.signature(executor)
+    except (TypeError, ValueError):
+        logger.error("<Unknown callable>")
+        return None
+
+    if len(sig.parameters) > 0:
+        logger.error("<Inputs unknown: executor takes parameters>")
+        return None
+
+    closure = executor.__closure__
+    freevars = executor.__code__.co_freevars
+
+    if not closure:
+        logger.error("<No inputs (no closure)>")
+        return None
+
+    result = []
+    for name, cell in zip(freevars, closure):
+        value = cell.cell_contents
+        result.append(f"{name}: {format_arg(value)}")
+
+    matches = [re.search(r"<(.*?)>", r).group(1) for r in result if re.search(r"<(.*?)>", r) is not None]
+
+    # Currently extracting class names from __closure__ using angle brackets.
+    # TODO: Evaluate a more robust approach.
+    assert len(matches) == 1
+    func_name = matches[0]
+
+    if "forward_ref" in inspect.getsource(executor).strip():
+        result[0] = func_name + "_TORCH_REF"
+    else:
+        result[0] = func_name
+
+    return result
 
 
 @functools.lru_cache
@@ -178,8 +230,23 @@ def perf_npu(executor, profiling_dir="./npu_profiling", active=5):
     device_latency = total_avg_time_us / active
     host_latency = host_perf(executor, "npu")
 
-    logger.info(
+    plain_log_full = (
+        f"{', '.join(get_executor_info(executor))} | "
         f"Device latency = {device_latency:.4f} us | "
         f"Host latency = {host_latency:.4f} ms | "
         f"Profile dir = {kernel_profiling_path}"
     )
+
+    logger.info(plain_log_full)
+
+    plain_log_file = (
+        f"{', '.join(get_executor_info(executor))} | "
+        f"Device latency = {device_latency:.4f} us | "
+        f"Host latency = {host_latency:.4f} ms"
+    )
+
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf/benchmark_record")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(plain_log_file + "\n")

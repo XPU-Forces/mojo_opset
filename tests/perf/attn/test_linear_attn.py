@@ -24,6 +24,7 @@ from mojo_opset import MojoGatedDeltaRule
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_linear_attn(q, k, v, beta, g, cu_seqlens):
-    op = MojoGatedDeltaRule()
+    gated_delta_rule = MojoGatedDeltaRule()
 
-    perf(lambda: op(q, k, v, g, beta, cu_seqlens, atol=1e-1, rtol=1e-1))  # noqa: F821
+    perf(lambda: gated_delta_rule.forward_ref(q, k, v, g, beta, cu_seqlens))  # noqa: F821
+    perf(lambda: gated_delta_rule(q, k, v, g, beta, cu_seqlens))  # noqa: F821
