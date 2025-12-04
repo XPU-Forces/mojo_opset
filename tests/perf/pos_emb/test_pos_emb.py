@@ -34,4 +34,5 @@ def test_pos_emb(q, k):
     cos = emb.cos()[None, None, :, :]
     sin = emb.sin()[None, None, :, :]
 
+    perf(lambda: rope.forward_ref(q, k, cos, sin))  # noqa: F821
     perf(lambda: rope(q, k, cos, sin))  # noqa: F821
