@@ -60,13 +60,21 @@ def get_executor_info(executor):
     # TODO: Evaluate a more robust approach.
     assert len(matches) == 1
     func_name = matches[0]
+    result = [r for r in result if f"<{func_name}>" not in r]
 
     if "forward_ref" in inspect.getsource(executor).strip():
-        result[0] = func_name + "_TORCH_REF"
-    else:
-        result[0] = func_name
+        func_name += "_TORCH_REF"
 
-    return result
+    return func_name, result
+
+
+def format_executor_info(info_list):
+    func = info_list[0]
+    args = info_list[1:]
+
+    arg_lines = "<br>  " + "<br>  ".join(args) if args else ""
+
+    return f"{func}{arg_lines}"
 
 
 @functools.lru_cache
@@ -230,8 +238,11 @@ def perf_npu(executor, profiling_dir="./npu_profiling", active=5):
     device_latency = total_avg_time_us / active
     host_latency = host_perf(executor, "npu")
 
+    func_name, para_list = get_executor_info(executor)
+
     plain_log_full = (
-        f"{', '.join(get_executor_info(executor))} | "
+        f"[{func_name}] | "
+        f"{', '.join(para_list)} | "
         f"Device latency = {device_latency:.4f} us | "
         f"Host latency = {host_latency:.4f} ms | "
         f"Profile dir = {kernel_profiling_path}"
@@ -240,13 +251,13 @@ def perf_npu(executor, profiling_dir="./npu_profiling", active=5):
     logger.info(plain_log_full)
 
     plain_log_file = (
-        f"{', '.join(get_executor_info(executor))} | "
-        f"Device latency = {device_latency:.4f} us | "
-        f"Host latency = {host_latency:.4f} ms"
+        f"| {func_name} | {format_executor_info(para_list)} | {device_latency:.4f} us | {host_latency:.4f} ms |"
     )
-
-    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf/benchmark_record")
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf/benchmark.md")
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
     with open(log_path, "a", encoding="utf-8") as f:
+        if not os.path.exists(log_path) or os.path.getsize(log_path) == 0:
+            f.write("| Name | Parameters | Device Latency (us) | Host Latency (ms) |\n")
+            f.write("|------|------------|---------------------|-------------------|\n")
         f.write(plain_log_file + "\n")
