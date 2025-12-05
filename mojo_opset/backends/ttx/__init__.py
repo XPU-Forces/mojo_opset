@@ -11,6 +11,7 @@ from .norm import TTXNorm
 from .norm import TTXRMSNormFunction
 from .pos_emb import TTXRoPE
 from .pos_emb import TTXRoPEFunction
+from .lightning_index import TTXLightningIndex
 
 __all__ = [
     "TTXNorm",
@@ -26,4 +27,5 @@ __all__ = [
     "TTXSiluFunction",
     "TTXFusedLinearCrossEntropyFunction",
     "TTXGatedDeltaRuleFunction",
+    "TTXLightningIndex",
 ]

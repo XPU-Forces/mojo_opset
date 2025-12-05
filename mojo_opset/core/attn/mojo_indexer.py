@@ -10,7 +10,7 @@ from ..mojo_operator import MojoOperator
 class MojoLightningIndexer(MojoOperator):
     def __init__(
         self,
-        top_k: int = 2048,
+        top_k: int = 10,
         op_name: str = "",
         layer_idx: int = 0,
     ):
@@ -45,7 +45,7 @@ class MojoLightningIndexer(MojoOperator):
             index_score += mask
         topk_indices = index_score.topk(self.top_k, dim=-1)[1]
 
-        return topk_indices
+        return topk_indices,index_score
 
     def forward_analysis(
         self, query, query_scale, key, key_scale: Optional[torch.Tensor] = None, mask: Optional[torch.Tensor] = None
