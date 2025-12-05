@@ -56,8 +56,7 @@ def lightning_index_kernel(
 
     for block_idx in range(pid, NUM_BLOCKS, NUM_CORE):
         batch_idx = block_idx // (M * NUM_BLOCKS_N)
-        bm_idx = block_idx // NUM_BLOCKS_N
-        
+        bm_idx = tl.cast(block_idx // NUM_BLOCKS_N,tl.int64)
         n_idx = block_idx % NUM_BLOCKS_N
 
         offs_h = tl.arange(0, H)
