@@ -73,6 +73,7 @@ from .pos_emb.mojo_rope import MojoRoPE
 from .pos_emb.mojo_rope import MojoRoPEStoreKV
 
 """ mojo sampling """
+from .sampling.mojo_sampling import MojoApplyPenalties
 from .sampling.mojo_sampling import MojoRejectSampling
 from .sampling.mojo_sampling import MojoTopKSampling
 from .sampling.mojo_sampling import MojoTopPSampling
@@ -148,6 +149,7 @@ __all__ = [
     "MojoTopPSampling",
     "MojoTopKSampling",
     "MojoRejectSampling",
+    "MojoApplyPenalties",
 
     "MojoSiluFunction",
     "MojoRMSNormFunction",
