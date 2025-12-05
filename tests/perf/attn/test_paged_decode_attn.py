@@ -57,7 +57,7 @@ test_configs_decode = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, seqlens, block_tables, atol, rtol",
+    "query, k_cache, v_cache, seqlens, block_tables",
     [
         pytest.param(
             *generate_paged_decode_data(
@@ -88,13 +88,23 @@ def test_paged_decode_gqa(
     head_dim = query.shape[-1]
     sm_scale = 1.0 / math.sqrt(head_dim)
 
-    op = MojoPagedDecodeGQA(
+    paged_attn_decode = MojoPagedDecodeGQA(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
 
     perf(  # noqa: F821
-        lambda: op(
+        lambda: paged_attn_decode.forward_ref(
+            query,
+            k_cache,
+            v_cache,
+            seqlens,
+            block_tables,
+            softmax_scale=sm_scale,
+        )
+    )
+    perf(  # noqa: F821
+        lambda: paged_attn_decode(
             query,
             k_cache,
             v_cache,
