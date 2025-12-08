@@ -5,9 +5,6 @@ All Mojo Operators contained in Mojo Opsets listed here.
 # Set of all valid KV layouts for parameter validation (sorted for consistent ordering)
 VALID_KV_LAYOUTS = sorted({"NPU_ND", "NPU_NZ", "AMD_CB"})
 
-"""mojo bigop"""
-from .bigop.m8_bigop import MojoM8BigOp
-
 """ mojo activation """
 from .activation.mojo_gelu import MojoGelu, MojoGeluQuant
 from .activation.mojo_silu import MojoSilu, MojoSiluQuant
@@ -82,8 +79,6 @@ from .functions.mojo_linear_crossentropy_func import MojoFusedLinearCrossEntropy
 
 # fmt: off
 __all__ = [
-    "MojoM8BigOp",
-
     "MojoGelu",
     "MojoGeluQuant",
     "MojoSilu",
