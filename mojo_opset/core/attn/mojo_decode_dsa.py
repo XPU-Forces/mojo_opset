@@ -11,9 +11,11 @@ class MojoDecodeDSA(MojoOperator):
 
     def forward_std(
         self,
-        q: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        wkv_b: torch.Tensor,  # [kv_lora_rank, n_head * (qk_nope_head_dim + v_head_dim)] e.g. --> [512, 16 * (128 + 128)]
+        kv_cache: torch.Tensor,
+        pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         start_pos: int,
     ) -> torch.Tensor:
@@ -21,46 +23,40 @@ class MojoDecodeDSA(MojoOperator):
 
     def forward_ref(
         self,
-        q: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        wkv_b: torch.Tensor,  # [kv_lora_rank, n_head * (qk_nope_head_dim + v_head_dim)] e.g. --> [512, 16 * (128 + 128)]
+        kv_cache: torch.Tensor,
+        pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         start_pos: int,
     ) -> torch.Tensor:
-        bsz, n_heads, _, head_dim = q.shape
-        max_seq_len = k_cache.shape[2]
+        bsz, _, _, qk_nope_head_dim = q_nope.shape
+        _, _, _, qk_rope_head_dim = q_pe.shape
+        kv_lora_rank = kv_cache.shape[2]
         end_pos = start_pos + 1
 
-        q = q.permute(0, 2, 1, 3)  # [bs, head_num, seq, dim]
-        k_cache = k_cache.permute(0, 2, 1, 3)  # [bs, head_num, seq, dim]
-        v_cache = v_cache.permute(0, 2, 1, 3)  # [bs, head_num, seq, dim]
+        wkv_b = wkv_b.view(self.n_local_heads, -1, kv_lora_rank)
+        q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :qk_nope_head_dim])
+        scores = (
+            torch.einsum("bshc,btc->bsht", q_nope, kv_cache[:bsz, :end_pos])
+            + torch.einsum("bshr,btr->bsht", q_pe, pe_cache[:bsz, :end_pos])
+        ) * self.softmax_scale
 
-        if self.softmax_scale is None:
-            self.softmax_scale = 1.0 / (head_dim**0.5)
+        index_mask = torch.full((bsz, 1, end_pos), float("-inf"), device=scores.device).scatter_(-1, topk_indices, 0)
+        scores += index_mask.unsqueeze(2)
 
-        scores = torch.full((bsz, n_heads, 1, max_seq_len), float("-inf"), device=q.device, dtype=torch.float32)
-        k_causal = k_cache[:, :, :end_pos, :]
-        q_float = q.float()
-        scores_causal = torch.matmul(q_float, k_causal.float().transpose(-1, -2)) * self.softmax_scale
-        scores[:, :, :, :end_pos] = scores_causal
-        squeezed_indices = topk_indices.squeeze(1)
-        for i in range(bsz):
-            for h in range(n_heads):
-                k_sparse = k_cache[i, h, squeezed_indices[i], :]
-                q_vec = q[i, h, :, :].float()
-                scores_sparse = torch.matmul(q_vec, k_sparse.float().transpose(0, 1)) * self.softmax_scale
-                scores[i, h, 0, squeezed_indices[i]] = torch.max(
-                    scores[i, h, 0, squeezed_indices[i]], scores_sparse.squeeze(0)
-                )
-        attn_weights = torch.softmax(scores, dim=-1).to(q.dtype)
-        output = torch.matmul(attn_weights, v_cache)
-        return output.permute(0, 2, 1, 3)
+        scores = scores.softmax(dim=-1)
+        o = torch.einsum("bsht,btc->bshc", scores, kv_cache[:bsz, :end_pos])
+        o = torch.einsum("bshc,hdc->bshd", o, wkv_b[:, -self.v_head_dim :])
 
     def forward_analysis(
         self,
-        q: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        wkv_b: torch.Tensor,  # [kv_lora_rank, n_head * (qk_nope_head_dim + v_head_dim)] e.g. --> [512, 16 * (128 + 128)]
+        kv_cache: torch.Tensor,
+        pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         start_pos: int,
     ) -> Tuple[int, int, int]:
