@@ -36,3 +36,4 @@ def test_residual_add_norm(x, residual, gamma, beta, norm_type, norm_pos, epsilo
     )
 
     perf(lambda: add_norm(x, residual))  # noqa: F821
+    perf(lambda: add_norm.forward_ref(x, residual))  # noqa: F821
