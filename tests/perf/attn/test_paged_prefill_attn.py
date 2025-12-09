@@ -74,7 +74,7 @@ test_configs = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_seqlens_q, block_tables, atol, rtol",
+    "query, k_cache, v_cache, cu_seqlens_q, block_tables",
     [
         pytest.param(
             *generate_paged_prefill_data(
@@ -102,7 +102,7 @@ def test_paged_prefill_gqa(
     block_tables: torch.Tensor,
     gqa_layout: str,
 ):
-    op = MojoPagedPrefillGQA(
+    paged_attn_prefill = MojoPagedPrefillGQA(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
@@ -111,7 +111,17 @@ def test_paged_prefill_gqa(
     sm_scale = 1.0 / math.sqrt(head_dim)
 
     perf(  # noqa: F821
-        lambda: op(
+        lambda: paged_attn_prefill.forward_ref(
+            query,
+            k_cache,
+            v_cache,
+            cu_seqlens_q,
+            block_tables,
+            softmax_scale=sm_scale,
+        )
+    )
+    perf(  # noqa: F821
+        lambda: paged_attn_prefill(
             query,
             k_cache,
             v_cache,

@@ -30,6 +30,7 @@ def test_rmsnorm(x, gamma, epsilon):
     with torch.no_grad():
         rmsnorm.gamma.copy_(gamma.to(torch.float32))
 
+    perf(lambda: rmsnorm.forward_ref(x))  # noqa: F821
     perf(lambda: rmsnorm(x))  # noqa: F821
 
 
@@ -59,4 +60,5 @@ def test_layernorm(x, gamma, beta, epsilon):
         layernorm.gamma.copy_(gamma.to(torch.float32))
         layernorm.beta.copy_(beta.to(torch.float32))
 
+    perf(lambda: layernorm.forward_ref(x))  # noqa: F821
     perf(lambda: layernorm(x))  # noqa: F821

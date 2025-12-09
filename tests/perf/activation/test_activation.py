@@ -17,6 +17,7 @@ from mojo_opset import MojoSwiGLU
 @bypass_not_implemented
 def test_gelu(x):
     gelu = MojoGelu()
+    perf(lambda: gelu.forward_ref(x))  # noqa: F821
     perf(lambda: gelu(x))  # noqa: F821
 
 
@@ -28,6 +29,7 @@ def test_gelu(x):
 @bypass_not_implemented
 def test_silu(x):
     silu = MojoSilu()
+    perf(lambda: silu.forward_ref(x))  # noqa: F821
     perf(lambda: silu(x))  # noqa: F821
 
 
@@ -44,4 +46,5 @@ def test_silu(x):
 @bypass_not_implemented
 def test_swiglu(gate_out, up_out):
     swiglu = MojoSwiGLU()
+    perf(lambda: swiglu.forward_ref(gate_out, up_out))  # noqa: F821
     perf(lambda: swiglu(gate_out, up_out))  # noqa: F821
