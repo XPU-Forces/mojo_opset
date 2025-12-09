@@ -7,11 +7,15 @@ from mojo_opset.backends.ttx.kernels.ascend.linear_attn.modules.l2norm import l2
 from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.gated_delta_rule.chunk import chunk_gated_delta_rule
 from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.gated_delta_rule.chunk import chunk_gated_delta_rule_bwd
 from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.gated_delta_rule.chunk import chunk_gated_delta_rule_fwd
+from mojo_opset.backends.ttx.kernels.ascend.linear_attn.ops.gated_delta_rule.fused_rnn_gdn import (
+    fused_recurrent_gated_delta_rule,
+)
 from mojo_opset.backends.ttx.kernels.ascend.utils import input_guard
-from mojo_opset.core import MojoGatedDeltaRule
+from mojo_opset.core import MojoDecodeGDN
 from mojo_opset.core import MojoGatedDeltaRuleFunction
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
+from mojo_opset.core import MojoPrefillGDN
 
 
 class TTXPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=2):
@@ -78,8 +82,10 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=2):
         return output
 
 
-class TTXGatedDeltaRule(MojoGatedDeltaRule, default_priority=2):
+class TTXPrefillGDN(MojoPrefillGDN, default_priority=2):
     def forward_std(self, q, k, v, g, beta, cu_seqlens=None, scale=None):
+        assert cu_seqlens is not None, "[TTXPrefillGDN] for now, cu_seqlens must be provided."
+
         o_var, ht_var = chunk_gated_delta_rule(
             q,
             k,
@@ -87,13 +93,30 @@ class TTXGatedDeltaRule(MojoGatedDeltaRule, default_priority=2):
             g,
             beta,
             initial_state=None,
-            output_final_state=True,
+            output_final_state=self.output_final_state,
             cu_seqlens=cu_seqlens,
             head_first=False,
             use_qk_l2norm_in_kernel=self.use_qk_l2norm_in_kernel,
         )
 
-        return o_var
+        return o_var, ht_var
+
+
+class TTXDecodeGDN(MojoDecodeGDN, default_priority=2):
+    def forward_std(self, q, k, v, g, beta, initial_state, cu_seqlens, scale=None):
+        o_var, ht_var = fused_recurrent_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            scale=scale,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+            use_qk_l2norm_in_kernel=self.use_qk_l2norm_in_kernel,
+        )
+
+        return o_var, ht_var
 
 
 class TTXGatedDeltaRuleFunction(MojoGatedDeltaRuleFunction):

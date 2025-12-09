@@ -5,17 +5,18 @@ import torch
 from ..mojo_operator import MojoOperator
 
 
-class MojoGatedDeltaRule(MojoOperator):
+class MojoPrefillGDN(MojoOperator):
     def __init__(
         self,
         use_qk_l2norm_in_kernel: bool = True,
-        is_varlen: bool = True,
+        output_final_state: bool = True,
         op_name: str = "",
         layer_idx: int = 0,
     ):
         super().__init__(op_name, layer_idx)
 
         self.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
+        self.output_final_state = output_final_state
 
     def forward_std(self, q, k, v, g, beta, cu_seqlens=None, scale=None):
         raise NotImplementedError
@@ -111,7 +112,10 @@ class MojoGatedDeltaRule(MojoOperator):
 
             final_states[batch] = prev_state
 
-        return o
+        if not self.output_final_state:
+            final_states = None
+
+        return o, final_states
 
     def forward_analysis(self, q, k, v, g, beta, cu_seqlens=None, scale=None) -> Tuple[int, int, int]:
         pass

@@ -13,13 +13,14 @@ from .activation.mojo_silu import MojoSiluQuant
 from .activation.mojo_swiglu import MojoSwiGLU
 
 """ mojo attn """
+from .attn.mojo_decode_gdn import MojoDecodeGDN
 from .attn.mojo_decode_gqa import MojoDecodeGQA
 from .attn.mojo_decode_gqa import MojoPagedDecodeGQA
 from .attn.mojo_decode_mla import MojoDecodeMLA
 from .attn.mojo_decode_mla import MojoPagedDecodeMLA
 from .attn.mojo_decode_nsa import MojoDecodeNSA
 from .attn.mojo_decode_nsa import MojoPagedDecodeNSA
-from .attn.mojo_linear_attn import MojoGatedDeltaRule
+from .attn.mojo_prefill_gdn import MojoPrefillGDN
 from .attn.mojo_prefill_gqa import MojoPagedPrefillGQA
 from .attn.mojo_prefill_gqa import MojoPrefillGQA
 from .attn.mojo_prefill_mla import MojoPagedPrefillMLA
@@ -101,7 +102,8 @@ __all__ = [
     "MojoPagedDecodeMLA",
     "MojoDecodeNSA",
     "MojoPagedDecodeNSA",
-    "MojoGatedDeltaRule",
+    "MojoPrefillGDN",
+    "MojoDecodeGDN",
 
     "MojoStoreKVCache",
     "MojoStorePagedKVCache",
