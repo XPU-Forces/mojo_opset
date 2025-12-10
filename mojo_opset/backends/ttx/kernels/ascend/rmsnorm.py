@@ -114,8 +114,7 @@ def _rmsnorm_infer_kernel(
             )
 
 
-@torch.library.custom_op("ttx::rmsnorm_infer", mutates_args={})
-def rmsnorm_infer(
+def rmsnorm_infer_impl(
     x: torch.Tensor,
     w: torch.Tensor,
     eps: float,
@@ -149,15 +148,6 @@ def rmsnorm_infer(
     )
 
     return y.reshape(*shape)
-
-
-@rmsnorm_infer.register_fake
-def rmsnorm_infer_fake(
-    x: torch.Tensor,
-    w: torch.Tensor,
-    eps: float,
-) -> torch.Tensor:
-    return torch.empty_like(x)
 
 
 @triton.autotune(
@@ -444,8 +434,7 @@ def _rmsnorm_bwd_large_cols_kernel(
             tl.atomic_add(dW_ptr + cols_off, dW_chunk_sum, mask=cols_mask)
 
 
-@torch.library.custom_op("ttx::rmsnorm_fwd", mutates_args={})
-def rmsnorm_fwd(
+def rmsnorm_fwd_impl(
     X: torch.Tensor,
     W: torch.Tensor,
     eps: float,
@@ -491,24 +480,7 @@ def rmsnorm_fwd(
     return Y, RSTD
 
 
-@rmsnorm_fwd.register_fake
-def rmsnorm_fwd_fake(
-    X: torch.Tensor,
-    W: torch.Tensor,
-    eps: float,
-    offset: float,
-    casting_mode_int: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    Y = torch.empty_like(X)
-    X_2d = X.reshape(-1, X.shape[-1])
-
-    rstd_dtype = torch.float32 if casting_mode_int in (0, 1) else X.dtype  # fp32 @llama or @gemma
-    RSTD = torch.empty(X_2d.shape[0], dtype=rstd_dtype, device=X.device)
-    return Y, RSTD
-
-
-@torch.library.custom_op("ttx::rmsnorm_bwd", mutates_args={})
-def rmsnorm_bwd(
+def rmsnorm_bwd_impl(
     dY: torch.Tensor,
     X: torch.Tensor,
     W: torch.Tensor,
@@ -585,19 +557,4 @@ def rmsnorm_bwd(
 
     dX = dX_2d.reshape(*shape)
 
-    return dX, dW
-
-
-@rmsnorm_bwd.register_fake
-def rmsnorm_bwd_fake(
-    dY: torch.Tensor,
-    X: torch.Tensor,
-    W: torch.Tensor,
-    RSTD: torch.Tensor,
-    offset: float,
-    casting_mode_int: int,
-    X_dtype: torch.dtype,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    dX = torch.empty_like(X)
-    dW = torch.empty(dY.shape[-1], dtype=W.dtype, device=W.device)
     return dX, dW

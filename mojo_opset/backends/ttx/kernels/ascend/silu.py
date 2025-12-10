@@ -142,8 +142,7 @@ def _silu_bwd_kernel(
             tl.store(dx_ptrs, dx_chunk, mask=block_mask)
 
 
-@torch.library.custom_op("ttx::silu", mutates_args={})
-def silu_fwd(
+def silu_fwd_impl(
     x: torch.Tensor,
 ) -> torch.Tensor:
     """
@@ -184,15 +183,7 @@ def silu_fwd(
     return y.reshape(*ori_shape)
 
 
-@silu_fwd.register_fake
-def silu_fwd_fake(
-    x: torch.Tensor,
-) -> torch.Tensor:
-    return torch.empty_like(x)
-
-
-@torch.library.custom_op("ttx::silu_bwd", mutates_args={})
-def silu_bwd(
+def silu_bwd_impl(
     dy: torch.Tensor,
     x: torch.Tensor,
 ) -> torch.Tensor:
@@ -236,11 +227,3 @@ def silu_bwd(
     )
 
     return dx.reshape(*ori_shape)
-
-
-@silu_bwd.register_fake
-def silu_bwd_fake(
-    dy: torch.Tensor,
-    x: torch.Tensor,
-) -> torch.Tensor:
-    return torch.empty_like(dy)

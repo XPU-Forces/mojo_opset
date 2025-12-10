@@ -152,8 +152,7 @@ def _gelu_bwd_kernel(
             tl.store(dx_ptrs, dx_chunk, mask=block_mask)
 
 
-@torch.library.custom_op("ttx::gelu", mutates_args={})
-def gelu_fwd(x: torch.Tensor) -> torch.Tensor:
+def gelu_fwd_impl(x: torch.Tensor) -> torch.Tensor:
     """
     Forward pass for GELU.
 
@@ -192,13 +191,7 @@ def gelu_fwd(x: torch.Tensor) -> torch.Tensor:
     return y.reshape(*ori_shape)
 
 
-@gelu_fwd.register_fake
-def gelu_fwd_fake(x: torch.tensor) -> torch.Tensor:
-    return torch.empty_like(x)
-
-
-@torch.library.custom_op("ttx::gelu_bwd", mutates_args={})
-def gelu_bwd(
+def gelu_bwd_impl(
     dy: torch.Tensor,
     x: torch.Tensor,
 ) -> torch.Tensor:
@@ -242,11 +235,3 @@ def gelu_bwd(
     )
 
     return dx.reshape(*ori_shape)
-
-
-@gelu_bwd.register_fake
-def gelu_bwd_fake(
-    dy: torch.Tensor,
-    x: torch.Tensor,
-) -> torch.Tensor:
-    return torch.empty_like(dy)

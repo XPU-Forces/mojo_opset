@@ -159,8 +159,7 @@ def _swiglu_bwd_kernel(
             tl.store(db_ptrs, db_chunk, mask=block_mask)
 
 
-@torch.library.custom_op("ttx::swiglu", mutates_args={})
-def swiglu_fwd(
+def swiglu_fwd_impl(
     a: torch.Tensor,
     b: torch.Tensor,
 ) -> torch.Tensor:
@@ -198,6 +197,7 @@ def swiglu_fwd(
         a_2d.stride(0),
         b_2d.stride(0),
         c.stride(0),
+        
         n_rows,
         n_cols,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
@@ -206,16 +206,7 @@ def swiglu_fwd(
     return c.reshape(*ori_shape)
 
 
-@swiglu_fwd.register_fake
-def swiglu_fwd(
-    a: torch.Tensor,
-    b: torch.Tensor,
-) -> torch.Tensor:
-    return torch.empty_like(a)
-
-
-@torch.library.custom_op("ttx::swiglu_bwd", mutates_args={})
-def swiglu_bwd(
+def swiglu_bwd_impl(
     dc: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
@@ -269,11 +260,3 @@ def swiglu_bwd(
 
     return da.reshape(*ori_shape), db.reshape(*ori_shape)
 
-
-@swiglu_bwd.register_fake
-def swiglu_bwd(
-    dc: torch.Tensor,
-    a: torch.Tensor,
-    b: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(dc), torch.empty_like(dc)

@@ -2,6 +2,8 @@ from typing import Optional
 
 import torch
 
+from mojo_opset.backends.ttx.kernels import paged_attention_decode
+from mojo_opset.backends.ttx.kernels import paged_attention_prefill
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
 
@@ -26,7 +28,7 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=2):
             f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
 
-        output = torch.ops.ttx.paged_attention_prefill(
+        output = paged_attention_prefill(
             q=query,
             k_cache=k_cache,
             v_cache=v_cache,
@@ -58,7 +60,7 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=2):
             f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
 
-        output = torch.ops.ttx.paged_attention_decode(
+        output = paged_attention_decode(
             q=query,
             k_cache=k_cache,
             v_cache=v_cache,
