@@ -1,6 +1,8 @@
 import os
 
 from mojo_opset.backends import init_mojo_backend
+
+# from mojo_opset.backends.ttx.kernels import register_ttx_to_torch_ops
 from mojo_opset.core import *
 
 _SUPPORT_BACKEND_LIST = ["TTX", "XPU_OPS"]

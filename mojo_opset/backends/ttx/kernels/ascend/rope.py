@@ -231,8 +231,7 @@ def _rope_backward_kernel(
             tl.store(grad_k_ptr + dk_offsets_half2, new_dk_tile_2, mask=k_mask)
 
 
-@torch.library.custom_op("ttx::rope", mutates_args={})
-def rome_fwd(
+def rope_fwd_impl(
     q: torch.Tensor,  # [BNSD]
     k: torch.Tensor,  # [BNSD]
     cos: torch.Tensor,  # [BSD]
@@ -275,22 +274,10 @@ def rome_fwd(
         head_dim // 2,
     )
 
-    # return q_rope.transpose(1, 2).contiguous(), k_rope.transpose(1, 2).contiguous()
     return q_rope.transpose(1, 2), k_rope.transpose(1, 2)
 
 
-@rome_fwd.register_fake
-def rope_fwd_fake(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(q), torch.empty_like(k)
-
-
-@torch.library.custom_op("ttx::rope_bwd", mutates_args={})
-def rope_bwd(
+def rope_bwd_impl(
     dq: torch.Tensor,
     dk: torch.Tensor,
     sin: torch.Tensor,
@@ -334,13 +321,3 @@ def rope_bwd(
     )
 
     return grad_q.transpose(1, 2).contiguous(), grad_k.transpose(1, 2).contiguous()
-
-
-@rope_bwd.register_fake
-def rope_bwd_fake(
-    dq: torch.Tensor,
-    dk: torch.Tensor,
-    sin: torch.Tensor,
-    cos: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(dq), torch.empty_like(dk)
