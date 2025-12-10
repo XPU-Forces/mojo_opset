@@ -1,3 +1,6 @@
+from typing import Optional
+from typing import Tuple
+
 import torch
 import torch_npu
 import triton
@@ -293,7 +296,7 @@ def _cross_entropy_prime_kernel(
         m = float("-inf")
         d = 0.0
         ori_X_y = 0.0
-        
+
         if y != ignore_index:
             ori_X_y = tl.load(current_X_ptr + y).cast(tl.float32)
 
@@ -429,20 +432,20 @@ def _element_mul_kernel(
             tl.store(X_ptr_tile, result_tile, mask=mask_2d)
 
 
-def fused_linear_cross_entropy_forward(
-    _input,
-    weight,
-    target,
-    ce_weight=None,
-    bias=None,
-    ignore_index=-100,
-    lse_square_scale=0.0,
-    label_smoothing=0.0,
-    reduction="mean",
-    softcap=None,
-    return_z_loss=False,
-    accum_dtype=None,
-):
+def fused_linear_cross_entropy_fwd_impl(
+    _input: torch.Tensor,
+    weight: torch.Tensor,
+    target: torch.Tensor,
+    ce_weight: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    ignore_index: int = -100,
+    lse_square_scale: float = 0.0,
+    label_smoothing: float = 0.0,
+    reduction: str = "mean",
+    softcap: Optional[float] = None,
+    return_z_loss: bool = False,
+    accum_dtype: Optional[torch.dtype] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     assert isinstance(return_z_loss, bool), f"return_z_loss must be True or False. Got: {return_z_loss}"
     device = _input.device
 
@@ -607,7 +610,12 @@ def fused_linear_cross_entropy_forward(
     return loss, z_loss, grad_input, grad_weight, grad_bias
 
 
-def fused_linear_cross_entropy_backward(grad_output, grad_input, grad_weight, grad_bias):
+def fused_linear_cross_entropy_bwd_impl(
+    grad_output: torch.Tensor,
+    grad_input: torch.Tensor,
+    grad_weight: Optional[torch.Tensor] = None,
+    grad_bias: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # If cross entropy is the last layer, grad_output is 1.0. Skip the mul to save time
     if not torch.equal(grad_output, torch.tensor(1.0, device=grad_output.device)):
         # We use a Triton kernel instead of a PyTorch operation because modifying inputs in-place
@@ -650,90 +658,3 @@ def fused_linear_cross_entropy_backward(grad_output, grad_input, grad_weight, gr
                 grad_bias.stride(-1),
             )
     return grad_input, grad_weight, grad_bias
-
-
-class TTXFusedLinearCrossEntropyFunction(torch.autograd.Function):
-    @staticmethod
-    @amp_custom_fwd
-    def forward(
-        ctx,
-        _input,
-        weight,
-        target,
-        bias=None,
-        ce_weight=None,
-        ignore_index=-100,
-        lse_square_scale=0.0,
-        label_smoothing=0.0,
-        reduction="mean",
-        softcap=None,
-        return_z_loss: bool = False,
-        accum_dtype=None,
-    ):
-        """
-        Fusing the last linear layer with cross-entropy loss
-            Reference: https://github.com/mgmalek/efficient_cross_entropy
-
-        Handle the forward and backward pass of the final linear layer via cross-entropy loss by avoiding
-        the materialization of the large logits tensor. Since Cross Entropy Loss is the last layer, we can
-        compute the gradient at the forward pass. By doing so, we don't have to store the _input and target
-        for the backward pass.
-
-        _input: (B*T, H) where B is batch size, T is sequence length, H is hidden dimension.
-        target: (B*T) where each value is in [0, V-1]
-        weight: (V, H) where V is the number of classes
-        bias: (V) where V is the number of classes
-        ce_weight: a manual rescaling weight given to each class. If given, has to be a Tensor of size V and floating point dtype
-        ignore_index: the index to ignore in the target
-        label_smoothing (float): The amount of smoothing when computing the loss, where 0.0 means no smoothing.
-        reduction: reduction to apply
-        accum_dtype (torch.dtype): the dtype of intermediate result buffers for weight and bias gradient accumulations.
-            Recommended to set `accum_dtype` to higher precision, e.g. `torch.float32`, if the training is unstable with original dtype. Default: `None`, performing accumulations in original dtype
-        """
-
-        loss, z_loss, grad_input, grad_weight, grad_bias = fused_linear_cross_entropy_forward(
-            _input=_input,
-            weight=weight,
-            target=target,
-            bias=bias,
-            ce_weight=ce_weight,
-            ignore_index=ignore_index,
-            lse_square_scale=lse_square_scale,
-            label_smoothing=label_smoothing,
-            reduction=reduction,
-            softcap=softcap,
-            return_z_loss=return_z_loss,
-            accum_dtype=accum_dtype,
-        )
-        # downcast to dtype and store for backward
-        ctx.save_for_backward(
-            grad_input.detach(),
-            grad_weight.detach() if grad_weight is not None else None,
-            grad_bias.detach() if bias is not None else None,
-        )
-        ctx.return_z_loss = return_z_loss
-        return loss, z_loss
-
-    @staticmethod
-    @amp_custom_bwd
-    def backward(ctx, grad_output, grad_output2):
-        if ctx.return_z_loss:
-            del grad_output2  # z_loss is only for logging
-        (grad_input, grad_weight, grad_bias) = ctx.saved_tensors
-        grad_input, grad_weight, grad_bias = fused_linear_cross_entropy_backward(
-            grad_output, grad_input, grad_weight, grad_bias
-        )
-        return (
-            grad_input,
-            grad_weight,
-            None,
-            grad_bias,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
