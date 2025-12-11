@@ -73,7 +73,7 @@ from .functions.mojo_linear_crossentropy_func import MojoFusedLinearCrossEntropy
 from .functions.mojo_rmsnorm_func import MojoRMSNormFunction
 from .functions.mojo_rope_func import MojoRoPEFunction
 from .functions.mojo_silu_func import MojoSiluFunction
-from .sampling.mojo_sampling import MojoApplyPenaltiesTemp
+from .sampling.mojo_sampling import MojoApplyPenaltiesTempurate
 from .sampling.mojo_sampling import MojoRejectSampling
 from .sampling.mojo_sampling import MojoTopKSampling
 from .sampling.mojo_sampling import MojoTopPFilter
@@ -140,7 +140,7 @@ __all__ = [
     "MojoTopPSampling",
     "MojoTopKSampling",
     "MojoRejectSampling",
-    "MojoApplyPenaltiesTemp",
+    "MojoApplyPenaltiesTempurate",
     "MojoTopPFilter",
 
     "MojoSiluFunction",

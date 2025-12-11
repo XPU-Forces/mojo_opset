@@ -9,7 +9,7 @@ import torch
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
-from mojo_opset import MojoApplyPenaltiesTemp
+from mojo_opset import MojoApplyPenaltiesTempurate
 
 
 def split_batch_to_list(x: torch.Tensor) -> List[Union[None, torch.Tensor]]:
@@ -46,6 +46,6 @@ def test_apply_penalties_temp(logits):
     rep_pens = [random.uniform(0.5, 3.0) for _ in range(BATCH_SIZE)]
     temps = [random.uniform(0.1, 2.0) for _ in range(BATCH_SIZE)]
 
-    op = MojoApplyPenaltiesTemp()
+    op = MojoApplyPenaltiesTempurate()
 
     op.forward_diff(logits, token_freqs, pres_pens, freq_pens, rep_pens, temps)

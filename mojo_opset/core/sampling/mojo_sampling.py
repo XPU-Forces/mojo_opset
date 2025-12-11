@@ -114,7 +114,7 @@ class MojoRejectSampling(MojoOperator):
     pass
 
 
-class MojoApplyPenaltiesTemp(MojoOperator):
+class MojoApplyPenaltiesTempurate(MojoOperator):
     def __init__(
         self,
         op_name: str = "",
