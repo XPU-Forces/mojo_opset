@@ -47,4 +47,5 @@ def test_apply_penalties_temp(logits):
     temps = [random.uniform(0.1, 2.0) for _ in range(BATCH_SIZE)]
 
     op = MojoApplyPenaltiesTempurate()
+
     op.forward_diff(logits, token_freqs, pres_pens, freq_pens, rep_pens, temps)
