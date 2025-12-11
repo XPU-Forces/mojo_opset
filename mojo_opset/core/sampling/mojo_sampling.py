@@ -7,7 +7,8 @@ from typing import Union
 
 import torch
 
-from ...mojo_utils import get_mojo_exec_mode
+from mojo_opset.utils.mode import get_mojo_exec_mode
+
 from ..mojo_operator import MojoOperator
 
 

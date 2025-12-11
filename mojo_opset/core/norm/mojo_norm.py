@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 
-from ...mojo_utils import get_mojo_exec_mode
+from ...utils.mode import get_mojo_exec_mode
 from ..mojo_operator import MojoOperator
 
 

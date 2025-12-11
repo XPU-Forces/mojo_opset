@@ -2,8 +2,7 @@ from typing import Tuple
 
 import torch
 
-from modeling import torch_qwen3_dense
-
+from mojo_opset.modeling import torch_qwen3_dense
 from mojo_opset.utils.logging import get_logger
 
 logger = get_logger(__name__)
