@@ -78,39 +78,34 @@ ttx-kernels 提供了 Mojo Opset 的 triton 版本实现。
 
 source code: mojo_opset/backends/ttx/kernels
 
-### 3.2 xpu_ops
-xpu_ops 提供了 Mojo Opset 的 C-like 版本实现。请注意xpu_ops是in-house的实现，不对外提供。
-
-
-### 3.3 akg
-【规划中】auto-kernel generation。
-
+### 3.2 torch_npu(ongoing)
+Ascend NPU官方支持。
 
 ## 4. Support matrix
 
 ### 4.1 Mojo Operator
 
-| Op Category | Op Name              | ttx_kernels   | xpu_ops    |
-| :---------- | :------------------- | :------------ | :--------- |
-| Attention   | MojoPagedPrefillGQA  | ✅            | TBD        |
-| Attention   | MojoPagedDecodeGQA   | ✅            | TBD        |
-| Norm        | MojoNorm             | ✅            | ✅         |
-| Norm        | MojoResidualAddNorm  | ✅            | ✅         |
-| PositionEmb | MojoRotaryEmb        | ✅            | TBD        |
-| Activation  | MojoGelu             | ✅            | TBD        |
-| Activation  | MojoSilu             | ✅            | TBD        |
-| Activation  | MojoSwiGlu           | ✅            | TBD        |
+| Op Category | Op Name              | torch reference | triton implement |
+| :---------- | :------------------- | :---------------| :----------------|
+| Attention   | MojoPagedPrefillGQA  | ✅              | ✅                |
+| Attention   | MojoPagedDecodeGQA   | ✅              | ✅                |
+| Norm        | MojoNorm             | ✅              | ✅                |
+| Norm        | MojoResidualAddNorm  | ✅              | ✅                |
+| PositionEmb | MojoRotaryEmb        | ✅              | ✅                |
+| Activation  | MojoGelu             | ✅              | ✅                |
+| Activation  | MojoSilu             | ✅              | ✅                |
+| Activation  | MojoSwiGlu           | ✅              | ✅                |
 
 
 ### 4.2 Mojo Function
 
-| Op Category | Op Name                     | ttx_kernels   | xpu_ops    |
-| :---------- | :-------------------------- | :------------ | :--------- |
-| Activation  | MojoSiluFunc                | ✅            | TBD        |
-| Norm        | MojoRMSNormFunc             | ✅            | TBD        |
-| PositionEmb | MojoRotaryEmbFunc           | ✅            | TBD        |
-| Loss        | MojoLinearCrossEntropyFunc  | ✅            | TBD        |
-| Attn        | MojoGatedDeltaRuleFunction  | ✅            | TBD        |
+| Op Category | Op Name                     | torch reference | triton implement |
+| :---------- | :-------------------------- | :---------------| :----------------|
+| Activation  | MojoSiluFunc                | ✅              | ✅                |
+| Norm        | MojoRMSNormFunc             | ✅              | ✅                |
+| PositionEmb | MojoRotaryEmbFunc           | ✅              | ✅                |
+| Loss        | MojoLinearCrossEntropyFunc  | ✅              | ✅                |
+| Attn        | MojoGatedDeltaRuleFunction  | ✅              | ✅                |
 
 
 ## 5. Usage
@@ -127,11 +122,11 @@ silu(torch.randn(128, 128).npu())
 ```
 
 ### 5.2 backend selection
-您可以通过环境变量`MOJO_BACKEND`来控制您想要选用的后端，当前支持的后端包括`TTX`, `XPU_OPS`；当您添加多个后端后，
+您可以通过环境变量`MOJO_BACKEND`来控制您想要选用的后端，当前支持的后端主要为`TTX`；当您添加多个后端后，
 Mojo Opset 会按照内部的优先级顺序来选用后端实现（后续我们将添加一个 tuner 功能，自动选取当前场景下的最优实现）。
 默认会开启所有后端，即`+ALL`。
 ```bash
-export MOJO_BACKEND="+TTX, XPU_OPS"
+export MOJO_BACKEND="+TTX"
 ```
 
 ### 5.3 modeling reference
@@ -139,7 +134,7 @@ export MOJO_BACKEND="+TTX, XPU_OPS"
 
 (1) monkey patch
 
-example_models/torch_qwen3_dense.py 中提供了原生 torch 实现的 modeling，我们实现了相应的 monkey-patch 替换机制（mojo_opset/mojo_monkey_patch.py），仅需一行代码即可将 native modeling 中若干组件替换为 Mojo op，并进一步 dispatch 到高性能后端实现。您可以运行：
+modeling/torch_qwen3_dense.py 中提供了原生 torch 实现的 modeling，我们实现了相应的 monkey-patch 替换机制（mojo_opset/mojo_monkey_patch.py），仅需一行代码即可将 native modeling 中若干组件替换为 Mojo op，并进一步 dispatch 到高性能后端实现。您可以运行：
 ```bash
 MOJO_BACKEND="+TTX" pytest -s tests/test_qwen3_dense_patching.py
 ```
@@ -147,7 +142,7 @@ MOJO_BACKEND="+TTX" pytest -s tests/test_qwen3_dense_patching.py
 
 (2) 即插即用
 
-example_models/mojo_qwen3_dense.py 中提供了直接基于 Mojo Opset 实现的 modeling，效果等同于(1)中 monkey-patch 替换后的模型。
+modeling/mojo_qwen3_dense.py 中提供了直接基于 Mojo Opset 实现的 modeling，效果等同于(1)中 monkey-patch 替换后的模型。
 
 ### 5.4 run mode
 您可以通过环境变量`MOJO_RUN_MODE`来控制您想要选用的运行模式，当前支持的运行模式包括`EAGER`, `COMPILE`；默认会开启`COMPILE`模式。

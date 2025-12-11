@@ -5,7 +5,7 @@ from mojo_opset.backends import init_mojo_backend
 # from mojo_opset.backends.ttx.kernels import register_ttx_to_torch_ops
 from mojo_opset.core import *
 
-_SUPPORT_BACKEND_LIST = ["TTX", "XPU_OPS"]
+_SUPPORT_BACKEND_LIST = ["TTX"]
 
 """
 NOTICE: init_mojo_backend should be called before importing any mojo operator.
