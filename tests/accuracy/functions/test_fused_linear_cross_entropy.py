@@ -20,6 +20,8 @@ from mojo_opset import MojoFusedLinearCrossEntropyFunction
     "has_bias, has_ce_weight, ignore_index, label_smoothing, lse_square_scale, reduction, return_z_loss",
     [
         (False, False, -100, 0.0, 0.0, "mean", False),
+        (False, False, -100, 0.0, 0.0, "sum", False),
+        (False, False, -100, 0.0, 0.0, "none", False),
     ],
 )
 @auto_switch_platform()

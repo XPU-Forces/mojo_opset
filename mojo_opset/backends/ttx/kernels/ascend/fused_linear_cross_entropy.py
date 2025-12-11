@@ -432,6 +432,78 @@ def _element_mul_kernel(
             tl.store(X_ptr_tile, result_tile, mask=mask_2d)
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 1024}),
+        triton.Config({"BLOCK_SIZE_M": 12, "BLOCK_SIZE_N": 1024}),
+        triton.Config({"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 1024}),
+        triton.Config({"BLOCK_SIZE_M": 24, "BLOCK_SIZE_N": 1024}),
+        triton.Config({"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 1024}),
+        triton.Config({"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 2048}),
+        triton.Config({"BLOCK_SIZE_M": 12, "BLOCK_SIZE_N": 2048}),
+        triton.Config({"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 2048}),
+        triton.Config({"BLOCK_SIZE_M": 24, "BLOCK_SIZE_N": 2048}),
+        triton.Config({"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 2048}),
+        triton.Config({"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 4096}),
+        triton.Config({"BLOCK_SIZE_M": 12, "BLOCK_SIZE_N": 4096}),
+        triton.Config({"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 4096}),
+        triton.Config({"BLOCK_SIZE_M": 24, "BLOCK_SIZE_N": 4096}),
+        triton.Config({"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 4096}),
+    ],
+    key=["n_rows", "n_cols"],
+    restore_value=["X_ptr"],
+)
+@libentry()
+@triton.jit
+def _element_mul_pertoken_kernel(
+    X_ptr,
+    grad_output_ptr,
+    n_rows,
+    n_cols,
+    X_stride_row,  # Stride for moving between rows
+    # X_stride_col is assumed to be 1 for contiguous rows
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+):
+    """
+    Multiplies each element of a 2D tensor X with a scalar grad_output.
+    This kernel is adapted for NPU-style parallelism with a fixed grid size.
+
+    Parameters:
+    X_ptr: Pointer to the input 2D tensor.
+    grad_output_ptr: Pointer to the scalar gradient output value.
+    n_rows (int): The number of rows in the input tensor.
+    n_cols (int): The number of columns in the input tensor.
+    X_stride_row (int): The stride to move from one row to the next.
+    BLOCK_SIZE_M (int): The number of rows to process in one tile.
+    BLOCK_SIZE_N (int): The number of columns to process in one tile.
+    """
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+
+    for row_block_start in range(pid * BLOCK_SIZE_M, n_rows, num_programs * BLOCK_SIZE_M):
+        row_offsets = row_block_start + tl.arange(0, BLOCK_SIZE_M)
+        row_mask = row_offsets < n_rows
+
+        grad_output_ptr_tile = grad_output_ptr + row_offsets
+        grad_output_tile = tl.load(grad_output_ptr_tile, mask=row_mask, other=0.0)
+        grad_output_tile = grad_output_tile[:, None]
+
+        for col_block_start in range(0, n_cols, BLOCK_SIZE_N):
+            col_offsets = col_block_start + tl.arange(0, BLOCK_SIZE_N)
+            col_mask = col_offsets < n_cols
+
+            X_ptr_tile = X_ptr + row_offsets[:, None] * X_stride_row + col_offsets[None, :]
+
+            mask_2d = row_mask[:, None] & col_mask[None, :]
+
+            X_tile = tl.load(X_ptr_tile, mask=mask_2d, other=0.0)
+
+            result_tile = X_tile * grad_output_tile
+
+            tl.store(X_ptr_tile, result_tile, mask=mask_2d)
+
+
 def fused_linear_cross_entropy_fwd_impl(
     _input: torch.Tensor,
     weight: torch.Tensor,
@@ -485,9 +557,9 @@ def fused_linear_cross_entropy_fwd_impl(
     ce_weight_sum = 0.0
     if ce_weight is not None:
         assert ce_weight.shape[0] == V, f"If given, weight has to be a Tensor of size V. Got: {ce_weight.shape}"
-        assert torch.is_floating_point(ce_weight), (
-            f"If given, weight has to be a Tensor of floating point dtype. Got: {ce_weight.dtype}"
-        )
+        assert torch.is_floating_point(
+            ce_weight
+        ), f"If given, weight has to be a Tensor of floating point dtype. Got: {ce_weight.dtype}"
         total_sum_non_ignore_ce_weight = (
             torch.gather(ce_weight, dim=0, index=target.masked_select(target_mask)).sum().item()
         )
@@ -595,10 +667,9 @@ def fused_linear_cross_entropy_fwd_impl(
             )
 
     # Need extra calculations for backward if reduction=='none'. Not supporting reduction='none' now.
-    # if reduction == "none":
-    #     loss = loss_1d
-    #     z_loss = z_loss_1d if return_z_loss else None
-
+    if reduction == "none":
+        loss = loss_1d
+        z_loss = z_loss_1d if return_z_loss else None
     else:
         loss = torch.sum(loss_1d)
         z_loss = torch.sum(z_loss_1d) if return_z_loss else None
@@ -615,23 +686,35 @@ def fused_linear_cross_entropy_bwd_impl(
     grad_input: torch.Tensor,
     grad_weight: Optional[torch.Tensor] = None,
     grad_bias: Optional[torch.Tensor] = None,
+    reduction: str = "mean",
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # If cross entropy is the last layer, grad_output is 1.0. Skip the mul to save time
-    if not torch.equal(grad_output, torch.tensor(1.0, device=grad_output.device)):
+    if reduction == "none" or not torch.equal(grad_output, torch.tensor(1.0, device=grad_output.device)):
         # We use a Triton kernel instead of a PyTorch operation because modifying inputs in-place
         # for gradient storage and backward multiple times causes anomalies with PyTorch but not with Triton.
         BT, H = grad_input.shape
         n_rows = BT
 
         num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
-
-        _element_mul_kernel[(num_programs,)](
-            grad_input,
-            grad_output,
-            n_rows,
-            H,
-            grad_input.stride(-2),
-        )
+        if reduction == "none":
+            grad_output = grad_output.contiguous()
+            _element_mul_pertoken_kernel[(num_programs,)](
+                grad_input,
+                grad_output,
+                n_rows,
+                H,
+                grad_input.stride(-2),
+            )
+            if grad_weight is not None or grad_bias is not None:
+                grad_output = grad_output.sum()
+        else:
+            _element_mul_kernel[(num_programs,)](
+                grad_input,
+                grad_output,
+                n_rows,
+                H,
+                grad_input.stride(-2),
+            )
 
         # handle grad_weight
         if grad_weight is not None:
