@@ -2,7 +2,7 @@ from typing import Tuple
 
 import torch
 
-from example_models import torch_qwen3_dense
+from modeling import torch_qwen3_dense
 
 from mojo_opset.utils.logging import get_logger
 
