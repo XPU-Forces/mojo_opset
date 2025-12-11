@@ -318,11 +318,17 @@ if os.getenv("MOJO_RUN_MODE", "compile") == "compile":
         return_z_loss: bool = False,
         accum_dtype: Optional[torch.dtype] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        loss = torch.empty((), dtype=torch.float32, device=_input.device)
+        if reduction == "none":
+            loss = torch.empty_like(target, dtype=torch.float32)
+        else:
+            loss = torch.empty((), dtype=torch.float32, device=_input.device)
 
         z_loss = None
         if return_z_loss:
-            z_loss = torch.empty((), dtype=_input.dtype, device=_input.device)
+            if reduction == "none":
+                z_loss = torch.empty_like(target, dtype=_input.dtype)
+            else:
+                z_loss = torch.empty((), dtype=_input.dtype, device=_input.device)
 
         grad_input = torch.empty_like(_input)
 
@@ -340,7 +346,7 @@ if os.getenv("MOJO_RUN_MODE", "compile") == "compile":
     # operator manually using torch.library.impl.
     fused_linear_cross_entropy_bwd_schema = (
         "(Tensor grad_output, Tensor(a!) grad_input, "
-        "Tensor(a!)? grad_weight=None, Tensor(a!)? grad_bias=None) -> "
+        "Tensor(a!)? grad_weight=None, Tensor(a!)? grad_bias=None, str reduction='mean') -> "
         "(Tensor(a) grad_input, Tensor(a)? grad_weight, Tensor(a)? grad_bias)"
     )
     torch.library.define("ttx::fused_linear_cross_entropy_bwd", fused_linear_cross_entropy_bwd_schema)
@@ -351,6 +357,7 @@ if os.getenv("MOJO_RUN_MODE", "compile") == "compile":
         grad_input: torch.Tensor,
         grad_weight: Optional[torch.Tensor] = None,
         grad_bias: Optional[torch.Tensor] = None,
+        reduction: str = "mean",
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return fused_linear_cross_entropy_bwd_impl(grad_output, grad_input, grad_weight, grad_bias)
 
@@ -360,6 +367,7 @@ if os.getenv("MOJO_RUN_MODE", "compile") == "compile":
         grad_input: torch.Tensor,
         grad_weight: Optional[torch.Tensor] = None,
         grad_bias: Optional[torch.Tensor] = None,
+        reduction: str = "mean",
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return grad_input, grad_weight, grad_bias
 

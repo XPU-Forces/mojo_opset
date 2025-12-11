@@ -69,6 +69,7 @@ class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
             grad_bias.detach() if bias is not None else None,
         )
         ctx.return_z_loss = return_z_loss
+        ctx.reduction = reduction
         if return_z_loss:
             return loss, z_loss
         else:
@@ -82,7 +83,7 @@ class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
         (grad_input, grad_weight, grad_bias) = ctx.saved_tensors
 
         grad_input, grad_weight, grad_bias = fused_linear_cross_entropy_bwd(
-            grad_output, grad_input, grad_weight, grad_bias
+            grad_output, grad_input, grad_weight, grad_bias, ctx.reduction
         )
 
         return (
