@@ -10,7 +10,6 @@ urls = { "Homepage" = "https://code.byted.org/data/mojo_opset" }
 readme = { file = "README.md", content-type = "text/markdown" }
 authors = [{name="SeedXPU", email='yuminghui.exp@bytedance.com'}]
 dependencies = [
-    "bytedxpu-ops @ https://luban-source.byted.org/repository/scm/data.aml.xpu_ops_th25_npu_1.0.0.53.tar.gz",
     "byted-triton-x == 3.2.0.post17"
 ]
 requires-python = ">=3.9"
