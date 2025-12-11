@@ -3,7 +3,7 @@ import torch
 import functools
 from torch.autograd import Function
 
-from ..mojo_utils import get_mojo_exec_mode
+from ..utils.mode import get_mojo_exec_mode
 from mojo_opset.utils.logging import get_logger
 
 logger = get_logger(__name__)

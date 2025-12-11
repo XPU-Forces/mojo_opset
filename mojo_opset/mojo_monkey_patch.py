@@ -24,7 +24,7 @@ def apply_mojo_op_to_qwen3(
         "cross_entropy and fused_linear_cross_entropy cannot both be True."
     )
 
-    from modeling import torch_qwen3_dense
+    from mojo_opset.modeling import torch_qwen3_dense
 
     if rope:
         torch_qwen3_dense.apply_rotary_pos_emb = MojoRoPE()

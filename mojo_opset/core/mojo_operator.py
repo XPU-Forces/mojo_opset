@@ -7,8 +7,8 @@ from typing import Tuple
 
 import torch
 
-from mojo_opset.mojo_utils import get_forward_mode
 from mojo_opset.utils.logging import get_logger
+from mojo_opset.utils.mode import get_forward_mode
 
 logger = get_logger(__name__)
 
