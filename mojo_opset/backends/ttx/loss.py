@@ -1,3 +1,7 @@
+import os
+
+import torch
+
 from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_bwd
 from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_fwd
 from mojo_opset.backends.ttx.kernels.ascend.fused_linear_cross_entropy import amp_custom_bwd
@@ -76,10 +80,11 @@ class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
         if ctx.return_z_loss:
             del grad_output2  # z_loss is only for logging
         (grad_input, grad_weight, grad_bias) = ctx.saved_tensors
-        breakpoint()
+
         grad_input, grad_weight, grad_bias = fused_linear_cross_entropy_bwd(
             grad_output, grad_input, grad_weight, grad_bias
         )
+
         return (
             grad_input,
             grad_weight,

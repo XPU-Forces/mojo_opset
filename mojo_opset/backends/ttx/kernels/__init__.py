@@ -23,7 +23,7 @@ from .ascend.swiglu import swiglu_bwd_impl
 from .ascend.swiglu import swiglu_fwd_impl
 
 if os.getenv("MOJO_RUN_MODE", "compile") == "compile":
-    assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
+    # assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
 
     # =====================================
     # Register GELU
@@ -345,8 +345,9 @@ if os.getenv("MOJO_RUN_MODE", "compile") == "compile":
     )
     torch.library.define("ttx::fused_linear_cross_entropy_bwd", fused_linear_cross_entropy_bwd_schema)
 
+
     @torch.library.impl("ttx::fused_linear_cross_entropy_bwd", "default")
-    def fused_linear_cross_entropy_bwd(
+    def _fused_linear_cross_entropy_bwd(
         grad_output: torch.Tensor,
         grad_input: torch.Tensor,
         grad_weight: Optional[torch.Tensor] = None,
@@ -362,6 +363,8 @@ if os.getenv("MOJO_RUN_MODE", "compile") == "compile":
         grad_bias: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return grad_input, grad_weight, grad_bias
+
+    fused_linear_cross_entropy_bwd = torch.ops.ttx.fused_linear_cross_entropy_bwd
 
 else:
     gelu_fwd = gelu_fwd_impl
