@@ -6,15 +6,25 @@ from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoNorm
 
+shapes = [
+    (32, 1024),
+    (64, 8192),
+    (57, 7338),
+    (2, 256),
+    (7762, 18778),
+]
+dtypes = [torch.float32, torch.float16, torch.bfloat16]
+
 
 @pytest.mark.parametrize(
     "x, gamma",
     [
         (
-            torch.randn(size=(1, 32, 2048), dtype=dtype),
-            torch.randn(size=(2048,), dtype=torch.float32),
+            torch.randn(size=shape, dtype=dtype),
+            torch.randn(size=(shape[-1],), dtype=torch.float32),
         )
-        for dtype in [torch.float32, torch.float16, torch.bfloat16]
+        for dtype in dtypes
+        for shape in shapes
     ],
 )
 @pytest.mark.parametrize("epsilon", [1e-5])
