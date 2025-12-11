@@ -97,7 +97,9 @@ class MojoOperator(ABC, torch.nn.Module):
     def forward(self, *args, **kwargs) -> Tuple[Any]:
         return self._inner_forward(*args, **kwargs)
 
-    def forward_diff(self, *args, atol: float = None, rtol: float = None, **kwargs) -> Tuple[Any]:
+    def forward_diff(
+        self, *args, atol: float = None, rtol: float = None, random_seed: int = 42, **kwargs
+    ) -> Tuple[Any]:
         """
         This function is used to check diff between forward_ref and forward_std which implemented by backend.
 
@@ -105,11 +107,14 @@ class MojoOperator(ABC, torch.nn.Module):
             Tuple[Any]: The result of the operator.
         """
 
+        # for some cases, we expect std & ref impl share the same random seed init state, i.e. sampling.
+        torch.manual_seed(random_seed)
         # maybe inplace, deep copy is needed.
         args_for_std = tuple(arg.clone() if isinstance(arg, torch.Tensor) else arg for arg in args)
         kwargs_for_std = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in kwargs.items()}
         norm_result = self.forward_std(*args_for_std, **kwargs_for_std)
 
+        torch.manual_seed(random_seed)
         args_for_ref = tuple(arg.clone() if isinstance(arg, torch.Tensor) else arg for arg in args)
         kwargs_for_ref = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in kwargs.items()}
         refs_result = self.forward_ref(*args_for_ref, **kwargs_for_ref)
