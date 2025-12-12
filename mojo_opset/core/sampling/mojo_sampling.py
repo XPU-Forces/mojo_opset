@@ -82,17 +82,21 @@ class MojoTopPFilter(MojoOperator):
 
     @abstractmethod
     def forward_std(self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int) -> Tuple[Any]:
+    def forward_std(self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int) -> Tuple[Any]:
         raise NotImplementedError
 
     def forward_ref(
         self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        dtype = logits.dtype
         logits = logits.to(torch.float32)
+        dtype = logits.dtype
         top_k = min(rand_top_k, logits.size(-1))
         sorted_topk_logits, sorted_topk_indices = torch.topk(logits, top_k)
 
         cumulative_probs = sorted_topk_logits.softmax(dim=-1).cumsum(dim=-1)
+        sorted_indices_to_remove = cumulative_probs > top_p
+        if min_tokens_to_keep > 1:
+            sorted_indices_to_remove[..., : min_tokens_to_keep - 1] = 0
         sorted_indices_to_remove = cumulative_probs > top_p
         if min_tokens_to_keep > 1:
             sorted_indices_to_remove[..., : min_tokens_to_keep - 1] = 0
@@ -101,9 +105,13 @@ class MojoTopPFilter(MojoOperator):
         filtered_logits = sorted_topk_logits.masked_fill(sorted_indices_to_remove, self.filter_value)
 
         final_probs_dist = torch.nn.functional.softmax(filtered_logits, dim=-1).to(dtype)
+        final_probs_dist = torch.nn.functional.softmax(filtered_logits, dim=-1).to(dtype)
 
         return final_probs_dist, sorted_topk_indices
 
+    def forward_analysis(
+        self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int
+    ) -> Tuple[int, int, int]:
     def forward_analysis(
         self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int
     ) -> Tuple[int, int, int]:

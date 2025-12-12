@@ -22,7 +22,7 @@ def test_topp_sampling(logits, topk, topp, min_tokens_to_keep):
 
 @pytest.mark.parametrize(
     "logits, topk, topp, min_tokens_to_keep",
-    [(torch.randn(20, 151936), 1000, 0.75, 1)],
+    [(torch.randn(20, 151936, dtype=torch.bfloat16), 1000, 0.75, 1)],
 )
 @auto_switch_platform()
 @bypass_not_implemented

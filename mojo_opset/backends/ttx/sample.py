@@ -26,13 +26,13 @@ class TTXTopPSampling(MojoTopPSampling, default_priority=0):
 
 
 class TTXTopPFilter(MojoTopPFilter, default_priority=0):
-    def forward_std(self, logits: torch.Tensor) -> Tuple[Any]:
+    def forward_std(self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int) -> Tuple[Any]:
         return top_p_filter_impl(
             logits=logits,
-            top_p=self.top_p,
+            top_p=top_p,
             filter_value=self.filter_value,
-            min_tokens_to_keep=self.min_tokens_to_keep,
-            rand_top_k=self.rand_top_k,
+            min_tokens_to_keep=min_tokens_to_keep,
+            rand_top_k=rand_top_k,
         )
 
 

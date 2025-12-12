@@ -203,20 +203,23 @@ def _top_p_filter_kernel(
 
 
 def top_p_filter_impl(
-    logits: torch.FloatTensor,
+    logits: torch.Tensor,
     top_p: float = 0.75,
     filter_value: float = -float("Inf"),
     min_tokens_to_keep: int = 1,
     rand_top_k: int = 1000,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    assert type(top_p) is float, "top_p must be a float value."
+    assert type(rand_top_k) is int, "rand_top_k must be an int value."
     device = logits.device
+    dtype = logits.dtype
     logits = logits.to(torch.float32)
     batch_size, _ = logits.shape
     top_k = min(rand_top_k, logits.size(-1))
 
     sorted_logits, sorted_topk_indices = torch.topk(logits, top_k)
 
-    output_probs = torch.empty((batch_size, top_k), dtype=torch.float32, device=device)
+    output_probs = torch.empty((batch_size, top_k), dtype=dtype, device=device)
 
     grid = (batch_size,)
 
