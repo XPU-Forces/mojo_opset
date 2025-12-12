@@ -10,7 +10,7 @@ from .norm import TTXNorm
 from .norm import TTXRMSNormFunction
 from .pos_emb import TTXRoPE
 from .pos_emb import TTXRoPEFunction
-from .sample import TTXApplyPenalties
+from .sample import TTXApplyPenaltiesTempurate
 from .sample import TTXTopPFilter
 from .sample import TTXTopPSampling
 
@@ -27,7 +27,7 @@ __all__ = [
     "TTXRoPEFunction",
     "TTXSiluFunction",
     "TTXFusedLinearCrossEntropyFunction",
-    "TTXApplyPenalties",
+    "TTXApplyPenaltiesTempurate",
     "TTXTopPFilter",
     "TTXTopPSampling",
 ]
