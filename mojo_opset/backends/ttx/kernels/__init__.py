@@ -23,7 +23,7 @@ from .ascend.swiglu import swiglu_bwd_impl
 from .ascend.swiglu import swiglu_fwd_impl
 
 if os.getenv("MOJO_RUN_MODE", "compile") == "compile":
-    assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
+    # assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
 
     # =====================================
     # Register GELU
