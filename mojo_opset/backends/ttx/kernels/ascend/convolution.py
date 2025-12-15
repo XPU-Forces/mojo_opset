@@ -7,8 +7,8 @@ import triton.language as tl
 
 from einops import rearrange
 
-from .utils import input_guard
-from .utils import prepare_chunk_indices
+from mojo_opset.backends.ttx.kernels.utils import input_guard
+from mojo_opset.backends.ttx.kernels.utils import prepare_chunk_indices
 
 
 def get_multiprocessor_count(tensor_idx: int = 0) -> int:

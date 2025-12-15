@@ -6,11 +6,10 @@ import triton.language as tl
 
 from triton.runtime.libentry import libentry
 
-from mojo_opset.backends.ttx.kernels.ascend.utils import torch_to_triton_dtype
-
-from .utils import VEC_ALIGN_BYTES
-from .utils import align
-from .utils import ceil_div
+from mojo_opset.backends.ttx.kernels.ascend.utils import VEC_ALIGN_BYTES
+from mojo_opset.backends.ttx.kernels.utils import align
+from mojo_opset.backends.ttx.kernels.utils import ceil_div
+from mojo_opset.backends.ttx.kernels.utils import torch_to_triton_dtype
 
 """
 This file incorporates code from Unsloth licensed under the Apache License, Version 2.0.

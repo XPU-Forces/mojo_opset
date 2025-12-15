@@ -7,7 +7,7 @@ from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoCausalConv1dFunction
-from mojo_opset.backends.ttx.kernels.ascend.utils import input_guard
+from mojo_opset.backends.ttx.kernels.utils import input_guard
 
 
 @input_guard(make_contiguous=True, auto_to_device=True)
