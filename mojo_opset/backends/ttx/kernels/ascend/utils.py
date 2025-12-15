@@ -92,39 +92,52 @@ def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]
     return wrapper
 
 
-def auto_contiguous_and_set_device(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
+def input_guard(
+    *,
+    make_contiguous: bool = True,
+    auto_to_device: bool = True,
+) -> Callable[[Callable[..., torch.Tensor]], Callable[..., torch.Tensor]]:
     """
-    A decorator to make sure all input tensors are contiguous and set the device based on input tensors.
+    A decorator to optionally:
+      1. make all input tensors contiguous
+      2. set device context based on input tensors
     """
 
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        contiguous_args = (i if not isinstance(i, torch.Tensor) else i.contiguous() for i in args)
-        contiguous_kwargs = {k: (v if not isinstance(v, torch.Tensor) else v.contiguous()) for k, v in kwargs.items()}
+    def decorator(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            if make_contiguous:
+                new_args = tuple(a.contiguous() if isinstance(a, torch.Tensor) else a for a in args)
+                new_kwargs = {k: (v.contiguous() if isinstance(v, torch.Tensor) else v) for k, v in kwargs.items()}
+            else:
+                new_args = args
+                new_kwargs = kwargs
 
-        tensor = None
-        for arg in args:
-            if isinstance(arg, torch.Tensor):
-                tensor = arg
-                break
-        if tensor is None:
-            for value in kwargs.values():
-                if isinstance(value, torch.Tensor):
-                    tensor = value
+            tensor = None
+            for a in new_args:
+                if isinstance(a, torch.Tensor):
+                    tensor = a
                     break
+            if tensor is None:
+                for v in new_kwargs.values():
+                    if isinstance(v, torch.Tensor):
+                        tensor = v
+                        break
 
-        if tensor is not None:
-            ctx = custom_device_ctx(tensor.device.index)
-        else:
-            ctx = contextlib.nullcontext()
+            if auto_to_device and tensor is not None:
+                ctx = custom_device_ctx(tensor.device.index)
+            else:
+                ctx = contextlib.nullcontext()
 
-        with ctx:
-            return fn(*contiguous_args, **contiguous_kwargs)
+            with ctx:
+                return fn(*new_args, **new_kwargs)
 
-    return wrapper
+        return wrapper
+
+    return decorator
 
 
-contiguous = auto_contiguous_and_set_device
+contiguous = input_guard
 
 
 @lru_cache(maxsize=None)

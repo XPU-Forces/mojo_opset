@@ -2,13 +2,13 @@ import torch
 
 from mojo_opset.backends.ttx.kernels.ascend.convolution import causal_conv1d_bwd
 from mojo_opset.backends.ttx.kernels.ascend.convolution import causal_conv1d_fwd
-from mojo_opset.backends.ttx.kernels.ascend.utils import auto_contiguous_and_set_device
+from mojo_opset.backends.ttx.kernels.ascend.utils import input_guard
 from mojo_opset.core import MojoCausalConv1dFunction
 
 
 class TTXCausalConv1dFunction(MojoCausalConv1dFunction):
     @staticmethod
-    @auto_contiguous_and_set_device
+    @input_guard(make_contiguous=True, auto_to_device=True)
     def forward(
         ctx,
         x: torch.Tensor,
@@ -36,7 +36,7 @@ class TTXCausalConv1dFunction(MojoCausalConv1dFunction):
         return y, final_state
 
     @staticmethod
-    @auto_contiguous_and_set_device
+    @input_guard(make_contiguous=True, auto_to_device=True)
     def backward(ctx, dy: torch.Tensor, dht: torch.Tensor | None = None):
         x, weight, bias, residual, initial_state = ctx.saved_tensors
         dx, dw, db, dr, dh0 = causal_conv1d_bwd(

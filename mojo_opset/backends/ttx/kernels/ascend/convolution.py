@@ -7,7 +7,7 @@ import triton.language as tl
 
 from einops import rearrange
 
-from .utils import auto_contiguous_and_set_device
+from .utils import input_guard
 from .utils import prepare_chunk_indices
 
 
@@ -404,7 +404,7 @@ def causal_conv1d_update_kernel(
         tl.store(p_cache, b_cache, boundary_check=(0, 1))
 
 
-@auto_contiguous_and_set_device
+@input_guard(make_contiguous=True, auto_to_device=True)
 def causal_conv1d_fwd(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -584,7 +584,7 @@ def causal_conv1d_states_fwd_kernel(
     tl.store(final_state + i_n * D * W + o_d[:, None] * W + o_w, b_x, mask=m_d[:, None] & m_w)
 
 
-@auto_contiguous_and_set_device
+@input_guard(make_contiguous=True, auto_to_device=True)
 def causal_conv1d_update_states(
     x: torch.Tensor,
     state_len: int,
@@ -614,7 +614,7 @@ def causal_conv1d_update_states(
 
 class CausalConv1dFunction(torch.autograd.Function):
     @staticmethod
-    @auto_contiguous_and_set_device
+    @input_guard(make_contiguous=True, auto_to_device=True)
     def forward(
         ctx,
         x: torch.Tensor,
@@ -642,7 +642,7 @@ class CausalConv1dFunction(torch.autograd.Function):
         return y, final_state
 
     @staticmethod
-    @auto_contiguous_and_set_device
+    @input_guard(make_contiguous=True, auto_to_device=True)
     def backward(ctx, dy: torch.Tensor, dht: torch.Tensor | None = None):
         x, weight, bias, residual, initial_state = ctx.saved_tensors
         dx, dw, db, dr, dh0 = causal_conv1d_bwd(
@@ -659,7 +659,7 @@ class CausalConv1dFunction(torch.autograd.Function):
         return dx, dw, db, dr, dh0, None, None, None
 
 
-@auto_contiguous_and_set_device
+@input_guard(make_contiguous=True, auto_to_device=True)
 def causal_conv1d(
     x: torch.Tensor,
     weight: torch.Tensor | None = None,

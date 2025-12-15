@@ -7,10 +7,10 @@ from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoCausalConv1dFunction
-from mojo_opset.backends.ttx.kernels.ascend.utils import auto_contiguous_and_set_device
+from mojo_opset.backends.ttx.kernels.ascend.utils import input_guard
 
 
-@auto_contiguous_and_set_device
+@input_guard(make_contiguous=True, auto_to_device=True)
 def mojo_causal_conv1d(
     x: torch.Tensor,
     weight: torch.Tensor | None = None,
