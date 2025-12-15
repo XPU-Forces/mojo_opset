@@ -1,6 +1,6 @@
 import os
 
-from abc import ABC
+from abc import ABC, ABCMeta
 from abc import abstractmethod
 from typing import Any
 from typing import Tuple
@@ -12,9 +12,15 @@ from mojo_opset.utils.mode import get_forward_mode
 
 logger = get_logger(__name__)
 
+class MojoOpMeta(ABCMeta):
+    def __call__(cls, *args, **kwargs):
+        obj = cls.__new__(cls, *args, **kwargs)
+        kwargs.pop("backend", None)
+        cls.__init__(obj, *args, **kwargs)
+        return obj
 
-class MojoOperator(ABC, torch.nn.Module):
-    def __init_subclass__(cls, default_priority=0, **kwargs):
+class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
+    def __init_subclass__(cls, default_priority=0, backend="ttx", **kwargs):
         super().__init_subclass__(**kwargs)
 
         is_direct_child = MojoOperator in cls.__bases__
@@ -42,18 +48,31 @@ class MojoOperator(ABC, torch.nn.Module):
                 if priority in [x[0] for x in family_head._registry]:
                     raise ValueError(f"Operator {cls.__name__} priority {priority} has been registered")
 
-                family_head._registry.append((priority, cls))
+                family_head._registry.append((priority, backend, cls))
                 family_head._registry.sort(reverse=False, key=lambda x: x[0])
 
     def __new__(cls, *args, **kwargs):
         is_direct_child = MojoOperator in cls.__bases__
+        target_backend = kwargs.pop("backend", None)
 
         if is_direct_child:
             if not hasattr(cls, "_registry") or not cls._registry:
                 raise NotImplementedError(f"No {cls.__name__} implementation found, please register at least one.")
 
-            highest_priority_class = cls._registry[0][1]
-            instance = highest_priority_class.__new__(highest_priority_class)
+            if target_backend is None:
+                target_class = cls._registry[0][2]
+            else:
+                target_class = None
+
+                for op_reg_info in cls._registry:
+                    if target_backend == op_reg_info[1]:
+                        target_class = op_reg_info[2]
+                        break
+                
+                if target_class is None:
+                    raise NotImplementedError(f" {cls.__name__} does not implement the target priority {target_backend}.")
+
+            instance = target_class.__new__(target_class, *args, **kwargs)
             return instance
         else:
             return super().__new__(cls)
@@ -118,6 +137,32 @@ class MojoOperator(ABC, torch.nn.Module):
         args_for_ref = tuple(arg.clone() if isinstance(arg, torch.Tensor) else arg for arg in args)
         kwargs_for_ref = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in kwargs.items()}
         refs_result = self.forward_ref(*args_for_ref, **kwargs_for_ref)
+
+        assert norm_result is not None, "forward_std should return a non-None value."
+        assert refs_result is not None, "forward_ref should return a non-None value."
+
+        if isinstance(norm_result, tuple) or isinstance(norm_result, list):
+            for norm, ref in zip(norm_result, refs_result):
+                torch.testing.assert_close(norm.to(torch.float32), ref.to(torch.float32), atol=atol, rtol=rtol)
+        else:
+            torch.testing.assert_close(
+                norm_result.to(torch.float32), refs_result.to(torch.float32), atol=atol, rtol=rtol
+            )
+
+        return norm_result
+    
+    def forward_diff_with_op(self, *args, other_op, atol: float = None, rtol: float = None, random_seed: int = 42, **kwargs):
+        # for some cases, we expect std & ref impl share the same random seed init state, i.e. sampling.
+        torch.manual_seed(random_seed)
+        # maybe inplace, deep copy is needed.
+        args_for_std = tuple(arg.clone() if isinstance(arg, torch.Tensor) else arg for arg in args)
+        kwargs_for_std = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in kwargs.items()}
+        norm_result = self.forward_std(*args_for_std, **kwargs_for_std)
+
+        torch.manual_seed(random_seed)
+        args_for_ref = tuple(arg.clone() if isinstance(arg, torch.Tensor) else arg for arg in args)
+        kwargs_for_ref = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in kwargs.items()}
+        refs_result = other_op.forward_std(*args_for_ref, **kwargs_for_ref)
 
         assert norm_result is not None, "forward_std should return a non-None value."
         assert refs_result is not None, "forward_ref should return a non-None value."
