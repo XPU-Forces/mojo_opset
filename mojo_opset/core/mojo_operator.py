@@ -70,7 +70,7 @@ class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
                         break
                 
                 if target_class is None:
-                    raise NotImplementedError(f" {cls.__name__} does not implement the target priority {target_backend}.")
+                    raise NotImplementedError(f" {cls.__name__} does not implement the target backend {target_backend}.")
 
             instance = target_class.__new__(target_class, *args, **kwargs)
             return instance
@@ -151,7 +151,7 @@ class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
 
         return norm_result
     
-    def forward_diff_with_op(self, *args, other_op, atol: float = None, rtol: float = None, random_seed: int = 42, **kwargs):
+    def forward_diff_with_op(self, other_op, *args, atol: float = None, rtol: float = None, random_seed: int = 42, **kwargs):
         # for some cases, we expect std & ref impl share the same random seed init state, i.e. sampling.
         torch.manual_seed(random_seed)
         # maybe inplace, deep copy is needed.

@@ -24,9 +24,4 @@ class RefTopPFilter(MojoTopPFilter, default_priority=999, backend="reference"):
 
         final_probs_dist = torch.nn.functional.softmax(filtered_logits, dim=-1)
 
-        select_index = torch.multinomial(final_probs_dist, num_samples=1)
-
-        next_tokens = torch.gather(sorted_topk_indices, dim=-1, index=select_index)
-        next_probs = torch.gather(final_probs_dist, dim=-1, index=select_index)
-        
-        return next_probs, next_tokens
+        return final_probs_dist, sorted_topk_indices
