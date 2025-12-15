@@ -8,6 +8,7 @@ __all__ = [
     "TorchPagedDecodeGQA",
     "TorchNorm",
     "TorchSilu",
+    "TorchSwiglu",
     "TorchSiluMul",
     "TorchGelu",
     "TorchRoPE",

@@ -1,6 +1,6 @@
 import torch
 import torch_npu
-from mojo_opset.core import MojoSilu, MojoSiluMul, MojoGelu
+from mojo_opset.core import MojoSilu, MojoSiluMul, MojoGelu, MojoSwiglu
 
 
 class TorchSilu(MojoSilu, default_priority=0):
@@ -25,3 +25,10 @@ class TorchGelu(MojoGelu, default_priority=0):
 
     def forward_std(self, hidden_state: torch.Tensor):
         return torch_npu.npu_gelu(hidden_state, approximate="tanh")
+
+class TorchSwiglu(MojoSwiglu, default_priority=0):
+    def __init__(self, op_name: str = "", layer_idx: int = 0):
+        super().__init__(op_name, layer_idx)
+
+    def forward_std(self, hidden_state: torch.Tensor):
+        return torch_npu.npu_swiglu(hidden_state)

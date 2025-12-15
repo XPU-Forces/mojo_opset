@@ -7,7 +7,7 @@ from .bigop.m8_bigop import MojoM8BigOp
 
 """ mojo activation """
 from .activation.mojo_gelu import MojoGelu, MojoGeluQuant
-from .activation.mojo_silu import MojoSilu, MojoSiluQuant, MojoSiluMul
+from .activation.mojo_silu import MojoSilu, MojoSiluQuant, MojoSiluMul, MojoSwiglu
 
 """ mojo attn """
 from .attn.mojo_prefill_gqa import MojoPrefillGQA, MojoPagedPrefillGQA
@@ -85,6 +85,7 @@ __all__ = [
     "MojoSilu",
     "MojoSiluQuant",
     "MojoSiluMul",
+    "MojoSwiglu",
 
     "MojoPrefillGQA",
     "MojoPagedPrefillGQA",

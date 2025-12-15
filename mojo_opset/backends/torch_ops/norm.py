@@ -1,5 +1,5 @@
 import torch
-from mojo_opset.core import MojoNorm
+from mojo_opset.core import MojoNorm, MojoResidualAddNorm
 import torch_npu
 
 
@@ -24,3 +24,34 @@ class TorchNorm(MojoNorm, default_priority=0):
         else:
             raise NotImplementedError(
                 f"[NativeNorm] Only support rmsnorm or layernorm, but got {self.norm_type}")
+
+
+class TorchResidualAddNorm(MojoResidualAddNorm, default_priority=0):
+    def __init__(
+        self,
+        weight: torch.Tensor = None,
+        bias: torch.Tensor = None,
+        eps: float = 1e-05,
+        norm_pos: str = "post",
+        norm_type: str = "rmsnorm",
+        op_name: str = "",
+        layer_idx: int = 0,
+    ):
+        super().__init__(weight, bias, eps, norm_pos, norm_type, op_name, layer_idx)
+
+    def forward_std(self, hidden_state: torch.Tensor, residual: torch.Tensor = None):
+        if self.norm_type != "rmsnorm" or residual is None:
+            # Fallback to reference implementation if not rmsnorm or no residual is provided
+            return self.forward_ref(hidden_state, residual)
+
+        # Use the NPU fused kernel for the main computation
+        hidden_state_out, _, residual_before_norm = torch_npu.npu_add_rms_norm(
+            hidden_state, residual, self.weight, self.eps
+        )
+
+        if self.norm_pos == "pre":
+            # For pre-norm, ref returns (norm_out, pre_norm_residual), which matches the kernel's output pattern.
+            return hidden_state_out, residual_before_norm
+        else:  # self.norm_pos == "post"
+            # For post-norm, ref returns (norm_out, norm_out). We must match this contract.
+            return hidden_state_out, hidden_state_out

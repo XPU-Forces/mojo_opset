@@ -39,8 +39,20 @@ class MojoOperator(ABC, torch.nn.Module):
                     f"Register {cls.__name__} as {family_head.__name__} implementation with priority {priority}"
                 )
 
+                # Check if the same class with the same priority is already registered.
+                for p, registered_cls in family_head._registry:
+                    if p == priority:
+                        if registered_cls.__name__ == cls.__name__:
+                            logger.debug(f"Operator {cls.__name__} with priority {priority} is already registered. Skipping.")
+                            return
+                        else:
+                            raise ValueError(
+                                f"Priority {priority} for {cls.__name__} is already taken by {registered_cls.__name__}"
+                            )
+
+                # Check if the priority is already taken by another class.
                 if priority in [x[0] for x in family_head._registry]:
-                    raise ValueError(f"Operator {cls.__name__} priority {priority} has been registered")
+                    raise ValueError(f"Operator priority {priority} for {cls.__name__} is already taken.")
 
                 family_head._registry.append((priority, cls))
                 family_head._registry.sort(reverse=False, key=lambda x: x[0])
