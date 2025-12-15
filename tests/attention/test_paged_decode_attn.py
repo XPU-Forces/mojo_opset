@@ -46,7 +46,9 @@ def generate_paged_decode_data(
         block_tables[i, :num_blocks_for_seq] = assigned_blocks
         current_block_offset += num_blocks_for_seq
 
-    return query, k_cache, v_cache, seqlens, block_tables
+    input_layout = "TND"
+
+    return query, k_cache, v_cache, seqlens, block_tables, input_layout
 
 
 test_configs_decode = [
@@ -55,7 +57,7 @@ test_configs_decode = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, seqlens, block_tables, atol, rtol",
+    "query, k_cache, v_cache, seqlens, block_tables, input_layout, atol, rtol",
     [
         pytest.param(
             *generate_paged_decode_data(
@@ -83,6 +85,7 @@ def test_paged_decode_gqa(
     v_cache: torch.Tensor,
     seqlens: torch.Tensor,
     block_tables: torch.Tensor,
+    input_layout: str,
     atol: float,
     rtol: float,
     gqa_layout: str,
@@ -101,6 +104,7 @@ def test_paged_decode_gqa(
         v_cache,
         seqlens,
         block_tables,
+        input_layout,
         sm_scale=sm_scale,
         atol=atol,
         rtol=rtol,

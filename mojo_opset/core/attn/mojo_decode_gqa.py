@@ -55,10 +55,10 @@ class MojoPagedDecodeGQA(MojoOperator):
         self.gqa_layout = gqa_layout
         self.window_size = window_size
 
-    def forward_std(self, q, k_cache, v_cache, seqlens, block_tables, sm_scale) -> Tuple[Any]:
+    def forward_std(self, q, k_cache, v_cache, seqlens, block_tables, input_layout, sm_scale) -> Tuple[Any]:
         raise NotImplementedError
 
-    def forward_ref(self, q, k_cache, v_cache, seqlens, block_tables, sm_scale):
+    def forward_ref(self, q, k_cache, v_cache, seqlens, block_tables, input_layout, sm_scale):
         batch_size, num_q_heads, head_dim = q.shape
         num_kv_heads, block_size, head_dim = k_cache.shape[1], k_cache.shape[2], k_cache.shape[3]
         max_len_in_batch = seqlens.max().item()
