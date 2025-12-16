@@ -48,7 +48,7 @@ jobs:
         shell: bash
         run: |
           echo "Running ttx kernels tests..."
-          MOJO_BACKEND="+TTX" python3 -m pytest tests/accuracy/
+          MOJO_BACKEND="+TTX,REFERENCE" python3 -m pytest tests/accuracy/
       - name: test-TTX-graph
         shell: bash
         run: |

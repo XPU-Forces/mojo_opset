@@ -27,6 +27,7 @@ def test_topp_sampling(logits, topk, topp, min_tokens_to_keep):
 @auto_switch_platform()
 @bypass_not_implemented
 def test_topp_filter(logits, topk, topp, min_tokens_to_keep):
-    op = MojoTopPFilter(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk)
+    ref_op = MojoTopPFilter(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk, backend="reference")
+    ttx_op = MojoTopPFilter(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk)
 
-    op.forward_diff(logits)
+    ttx_op.forward_diff_with_op(ref_op, logits)
