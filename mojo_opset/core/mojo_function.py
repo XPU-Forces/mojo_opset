@@ -1,10 +1,13 @@
-import os
-import torch
 import functools
+import os
+
+import torch
+
 from torch.autograd import Function
 
-from ..utils.mode import get_mojo_exec_mode
 from mojo_opset.utils.logging import get_logger
+
+from ..utils.mode import get_mojo_exec_mode
 
 logger = get_logger(__name__)
 
@@ -115,7 +118,7 @@ def mojo_func_dispatcher(cls):
 
                     if len(ref_tuple) != len(impl_tuple):
                         raise RuntimeError(f"Backward DIFF for {op_name_in}: Number of gradients mismatch.")
-
+                    breakpoint()
                     for i, (ref_g, impl_g) in enumerate(zip(ref_tuple, impl_tuple)):
                         if ref_g is not None and impl_g is not None:
                             torch.testing.assert_close(

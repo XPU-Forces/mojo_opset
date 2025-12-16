@@ -91,8 +91,8 @@ class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
 
         self._forward_map = {
             "STD": self.forward_std,
-            "REFERENCE": self.forward_ref,
-            "DIFF": self.forward_diff,
+            # "REFERENCE": self.forward_ref,
+            # "DIFF": self.forward_diff,
             "ANALYZE": self.forward_analysis,
         }
 
@@ -120,40 +120,40 @@ class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
     def forward(self, *args, **kwargs) -> Tuple[Any]:
         return self._inner_forward(*args, **kwargs)
 
-    def forward_diff(
-        self, *args, atol: float = None, rtol: float = None, random_seed: int = 42, **kwargs
-    ) -> Tuple[Any]:
-        """
-        This function is used to check diff between forward_ref and forward_std which implemented by backend.
+    # def forward_diff(
+    #     self, *args, atol: float = None, rtol: float = None, random_seed: int = 42, **kwargs
+    # ) -> Tuple[Any]:
+    #     """
+    #     This function is used to check diff between forward_ref and forward_std which implemented by backend.
 
-        Returns:
-            Tuple[Any]: The result of the operator.
-        """
+    #     Returns:
+    #         Tuple[Any]: The result of the operator.
+    #     """
 
-        # for some cases, we expect std & ref impl share the same random seed init state, i.e. sampling.
-        torch.manual_seed(random_seed)
-        # maybe inplace, deep copy is needed.
-        args_for_std = tuple(arg.clone() if isinstance(arg, torch.Tensor) else arg for arg in args)
-        kwargs_for_std = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in kwargs.items()}
-        norm_result = self.forward_std(*args_for_std, **kwargs_for_std)
+    #     # for some cases, we expect std & ref impl share the same random seed init state, i.e. sampling.
+    #     torch.manual_seed(random_seed)
+    #     # maybe inplace, deep copy is needed.
+    #     args_for_std = tuple(arg.clone() if isinstance(arg, torch.Tensor) else arg for arg in args)
+    #     kwargs_for_std = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in kwargs.items()}
+    #     norm_result = self.forward_std(*args_for_std, **kwargs_for_std)
 
-        torch.manual_seed(random_seed)
-        args_for_ref = tuple(arg.clone() if isinstance(arg, torch.Tensor) else arg for arg in args)
-        kwargs_for_ref = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in kwargs.items()}
-        refs_result = self.forward_ref(*args_for_ref, **kwargs_for_ref)
+    #     torch.manual_seed(random_seed)
+    #     args_for_ref = tuple(arg.clone() if isinstance(arg, torch.Tensor) else arg for arg in args)
+    #     kwargs_for_ref = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in kwargs.items()}
+    #     refs_result = self.forward_ref(*args_for_ref, **kwargs_for_ref)
 
-        assert norm_result is not None, "forward_std should return a non-None value."
-        assert refs_result is not None, "forward_ref should return a non-None value."
+    #     assert norm_result is not None, "forward_std should return a non-None value."
+    #     assert refs_result is not None, "forward_ref should return a non-None value."
 
-        if isinstance(norm_result, tuple) or isinstance(norm_result, list):
-            for norm, ref in zip(norm_result, refs_result):
-                torch.testing.assert_close(norm.to(torch.float32), ref.to(torch.float32), atol=atol, rtol=rtol)
-        else:
-            torch.testing.assert_close(
-                norm_result.to(torch.float32), refs_result.to(torch.float32), atol=atol, rtol=rtol
-            )
+    #     if isinstance(norm_result, tuple) or isinstance(norm_result, list):
+    #         for norm, ref in zip(norm_result, refs_result):
+    #             torch.testing.assert_close(norm.to(torch.float32), ref.to(torch.float32), atol=atol, rtol=rtol)
+    #     else:
+    #         torch.testing.assert_close(
+    #             norm_result.to(torch.float32), refs_result.to(torch.float32), atol=atol, rtol=rtol
+    #         )
 
-        return norm_result
+    #     return norm_result
 
     def forward_diff_with(
         self, other_op, *args, atol: float = None, rtol: float = None, random_seed: int = 42, **kwargs
@@ -171,7 +171,7 @@ class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
         refs_result = other_op.forward_std(*args_for_ref, **kwargs_for_ref)
 
         assert norm_result is not None, "forward_std should return a non-None value."
-        assert refs_result is not None, "forward_ref should return a non-None value."
+        assert refs_result is not None, "comparison operator should return a non-None value."
 
         if isinstance(norm_result, tuple) or isinstance(norm_result, list):
             for norm, ref in zip(norm_result, refs_result):
@@ -183,14 +183,14 @@ class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
 
         return norm_result
 
-    # TODO(zhangjihang): this method should be move to backend and implemented by a Ref class.
-    @abstractmethod
-    def forward_ref(self, *args, **kwargs) -> Tuple[Any]:
-        """
-        Reference forward function, this function supposed to be implemented by Op designer.
-        """
+    # # TODO(zhangjihang): this method should be move to backend and implemented by a Ref class.
+    # @abstractmethod
+    # def forward_ref(self, *args, **kwargs) -> Tuple[Any]:
+    #     """
+    #     Reference forward function, this function supposed to be implemented by Op designer.
+    #     """
 
-        raise NotImplementedError
+    #     raise NotImplementedError
 
     @abstractmethod
     def forward_std(self, *args, **kwargs) -> Tuple[Any]:

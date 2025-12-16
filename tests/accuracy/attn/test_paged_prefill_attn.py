@@ -1,10 +1,13 @@
-import pytest
-import torch
 import math
 
-from tests.utils import auto_switch_platform, bypass_not_implemented
+import pytest
+import torch
+
+from tests.utils import auto_switch_platform
+from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoPagedPrefillGQA
+from mojo_opset.backends.reference.attention import RefPagedPrefillGQA
 
 
 def generate_paged_prefill_data(
@@ -104,7 +107,11 @@ def test_paged_prefill_gqa(
     rtol: float,
     gqa_layout: str,
 ):
-    op = MojoPagedPrefillGQA(
+    paged_prefill_attn = MojoPagedPrefillGQA(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+    )
+    paged_prefill_attn_ref = RefPagedPrefillGQA(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
@@ -112,7 +119,8 @@ def test_paged_prefill_gqa(
     head_dim = query.shape[-1]
     sm_scale = 1.0 / math.sqrt(head_dim)
 
-    op.forward_diff(
+    paged_prefill_attn_ref.forward_diff_with(
+        paged_prefill_attn,
         query,
         k_cache,
         v_cache,
