@@ -1,6 +1,7 @@
 import os
 
-from abc import ABC, ABCMeta
+from abc import ABC
+from abc import ABCMeta
 from abc import abstractmethod
 from typing import Any
 from typing import Tuple
@@ -12,12 +13,14 @@ from mojo_opset.utils.mode import get_forward_mode
 
 logger = get_logger(__name__)
 
+
 class MojoOpMeta(ABCMeta):
     def __call__(cls, *args, **kwargs):
         obj = cls.__new__(cls, *args, **kwargs)
         kwargs.pop("backend", None)
         cls.__init__(obj, *args, **kwargs)
         return obj
+
 
 class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
     def __init_subclass__(cls, default_priority=0, backend="ttx", **kwargs):
@@ -68,9 +71,11 @@ class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
                     if target_backend == op_reg_info[1]:
                         target_class = op_reg_info[2]
                         break
-                
+
                 if target_class is None:
-                    raise NotImplementedError(f" {cls.__name__} does not implement the target backend {target_backend}.")
+                    raise NotImplementedError(
+                        f" {cls.__name__} does not implement the target backend {target_backend}."
+                    )
 
             instance = target_class.__new__(target_class, *args, **kwargs)
             return instance
@@ -87,7 +92,6 @@ class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
         self._forward_map = {
             "STD": self.forward_std,
             "REFERENCE": self.forward_ref,
-            "DUMP": self.forward_dump,
             "DIFF": self.forward_diff,
             "ANALYZE": self.forward_analysis,
         }
@@ -150,8 +154,10 @@ class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
             )
 
         return norm_result
-    
-    def forward_diff_with_op(self, other_op, *args, atol: float = None, rtol: float = None, random_seed: int = 42, **kwargs):
+
+    def forward_diff_with(
+        self, other_op, *args, atol: float = None, rtol: float = None, random_seed: int = 42, **kwargs
+    ):
         # for some cases, we expect std & ref impl share the same random seed init state, i.e. sampling.
         torch.manual_seed(random_seed)
         # maybe inplace, deep copy is needed.
@@ -177,25 +183,7 @@ class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
 
         return norm_result
 
-    def forward_dump(self, *args, **kwargs) -> Tuple[Any]:
-        """
-        This function is used to dump the result of forward_std.
-
-        Returns:
-            Tuple[Any]: The result of the operator.
-        """
-
-        norm_result = self.forward_std(*args, **kwargs)
-        if isinstance(norm_result, tuple):
-            for res in norm_result:
-                if isinstance(res, torch.Tensor):
-                    torch.save(res, f"{self.layer_idx}_{self.op_name}.pt")
-        else:
-            if isinstance(res, torch.Tensor):
-                torch.save(res, f"{self.layer_idx}_{self.op_name}.pt")
-
-        return norm_result
-
+    # TODO(zhangjihang): this method should be move to backend and implemented by a Ref class.
     @abstractmethod
     def forward_ref(self, *args, **kwargs) -> Tuple[Any]:
         """
@@ -212,6 +200,7 @@ class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
 
         raise NotImplementedError
 
+    # TODO(zhangjihang): this method should be move to backend and implemented by a Ref class.
     @abstractmethod
     def forward_analysis(self, *args, **kwargs) -> Tuple[Any]:
         """

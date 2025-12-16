@@ -30,4 +30,4 @@ def test_topp_filter(logits, topk, topp, min_tokens_to_keep):
     ref_op = MojoTopPFilter(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk, backend="reference")
     ttx_op = MojoTopPFilter(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk)
 
-    ttx_op.forward_diff_with_op(ref_op, logits)
+    ttx_op.forward_diff_with(ref_op, logits)

@@ -1,29 +1,12 @@
-import os
 import torch
-from ..mojo_function import MojoFuncBase, mojo_func_dispatcher
 import torch.nn.functional as F
+
+from ..mojo_function import MojoFuncBase
+from ..mojo_function import mojo_func_dispatcher
 
 
 @mojo_func_dispatcher
 class MojoFusedLinearCrossEntropyFunction(MojoFuncBase):
-    @staticmethod
-    def forward_dump(
-        ctx,
-        input_tensor,
-        weight,
-        target,
-        bias,
-        ce_weight,
-        ignore_index,
-        lse_square_scale,
-        label_smoothing,
-        reduction,
-        softcap,
-        return_z_loss,
-        accum_dtype,
-    ):
-        pass
-
     @staticmethod
     def forward_ref(
         ctx,
@@ -75,10 +58,6 @@ class MojoFusedLinearCrossEntropyFunction(MojoFuncBase):
             return loss_ref, z_loss_ref
         else:
             return loss_ref
-
-    @staticmethod
-    def backward_dump(ctx, grad_loss, grad_z_loss):
-        pass
 
     @staticmethod
     def backward_ref(ctx, grad_loss, grad_z_loss=None):
