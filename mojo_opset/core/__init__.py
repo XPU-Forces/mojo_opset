@@ -68,6 +68,10 @@ from .matmul.mojo_group_quant_matmul_reduce_sum import (
     MojoGroupQuantMatmulReduceSum,
 )
 
+from .matmul.mojo_grouped_matmul import (
+    MojoGroupedMatmul,
+)
+
 """ mojo sampling """
 from .sampling.mojo_sampling import (
     MojoTopPSampling,
@@ -143,6 +147,7 @@ __all__ = [
     "MojoNormRoPEStoreKV",
 
     "MojoGroupQuantMatmulReduceSum",
+    "MojoGroupedMatmul",
 
     "MojoTopPSampling",
     "MojoTopKSampling",

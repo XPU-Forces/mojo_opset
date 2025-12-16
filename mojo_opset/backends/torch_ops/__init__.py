@@ -3,6 +3,7 @@ from .norm import TorchNorm
 from .activation import TorchSilu, TorchSiluMul, TorchGelu
 from .pos_emb import TorchRoPE
 from .group_quant_matmul_reduce_sum import TorchGroupQuantMatmulReduceSum
+from .matmul import TorchGroupedMatmul
 
 __all__ = [
     "TorchPagedPrefillGQA",
@@ -14,4 +15,5 @@ __all__ = [
     "TorchGelu",
     "TorchRoPE",
     "TorchGroupQuantMatmulReduceSum",
+    "TorchGroupedMatmul",
 ]
