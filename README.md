@@ -118,7 +118,7 @@ MOJO_BACKEND="+TTX" pytest -s tests/test_qwen3_dense_patching.py
 modeling/mojo_qwen3_dense.py 中提供了直接基于 Mojo Opset 实现的 modeling，效果等同于(1)中 monkey-patch 替换后的模型。
 
 ### 4.4 compatibility with torch.compile
-您可以通过环境变量`MOJO_RUN_MODE`来控制您想要选用的运行模式，当前支持的运行模式包括`EAGER`, `COMPILE`；默认会开启`COMPILE`模式。
+您可以通过环境变量`MOJO_RUN_MODE`来控制您想要选用的运行模式，当前支持的运行模式包括`EAGER`, `COMPILE`；默认会开启`EAGER`模式。
 其中`COMPILE`模式要求当前torch版本>=2.7.0，否则会报错。
 ```bash
 # 如果你希望当前triton kernel被注册到torch.library中，并支持被torch.dynamo捕获，以支持更长远的优化（默认模式）。

@@ -10,6 +10,7 @@ import torch
 
 from mojo_opset.utils.logging import get_logger
 from mojo_opset.utils.mode import get_forward_mode
+from mojo_opset.utils.platform import get_platform
 
 logger = get_logger(__name__)
 
@@ -23,6 +24,8 @@ class MojoOpMeta(ABCMeta):
 
 
 class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
+    supported_platforms_list = ["npu", "mlu"]
+
     def __init_subclass__(cls, default_priority=0, backend="ttx", **kwargs):
         super().__init_subclass__(**kwargs)
 
@@ -39,7 +42,7 @@ class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
                     family_head = base
                     break
 
-            if family_head:
+            if family_head and get_platform() in cls.supported_platforms_list:
                 env_var_name = f"{cls.__name__}_PRIORITY".upper()
                 env_priority = os.getenv(env_var_name)
                 priority = int(env_priority) if env_priority is not None else default_priority
@@ -51,6 +54,7 @@ class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
                 if priority in [x[0] for x in family_head._registry]:
                     raise ValueError(f"Operator {cls.__name__} priority {priority} has been registered")
 
+                # NOTE(zhangjihang): use a Enum to replace the string backend.
                 family_head._registry.append((priority, backend, cls))
                 family_head._registry.sort(reverse=False, key=lambda x: x[0])
 
@@ -118,7 +122,6 @@ class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
 
     def forward(self, *args, **kwargs) -> Tuple[Any]:
         return self._inner_forward(*args, **kwargs)
-
 
     def forward_diff_with(
         self, other_op, *args, atol: float = None, rtol: float = None, random_seed: int = 42, **kwargs

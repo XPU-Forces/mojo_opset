@@ -15,6 +15,8 @@ from mojo_opset.core import MojoTopPSampling
 
 
 class TTXTopPSampling(MojoTopPSampling, default_priority=0):
+    supported_platforms_list = ["npu"]
+
     def forward_std(self, logits: torch.Tensor) -> Tuple[Any]:
         return top_p_sampling_impl(
             logits=logits,

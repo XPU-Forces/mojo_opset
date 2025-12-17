@@ -9,6 +9,8 @@ from mojo_opset.core import MojoRMSNormFunction
 
 
 class TTXNorm(MojoNorm, default_priority=0):
+    supported_platforms_list = ["npu"]
+
     def forward_std(self, hidden_state: torch.Tensor):
         if self.norm_type == "rmsnorm":
             return rmsnorm_infer(hidden_state, self.gamma, self.epsilon)
