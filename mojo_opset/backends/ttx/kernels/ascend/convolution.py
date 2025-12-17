@@ -7,12 +7,9 @@ import triton.language as tl
 
 from einops import rearrange
 
+from mojo_opset.backends.ttx.kernels.ascend.utils import get_num_cores
 from mojo_opset.backends.ttx.kernels.utils import input_guard
 from mojo_opset.backends.ttx.kernels.utils import prepare_chunk_indices
-
-
-def get_multiprocessor_count(tensor_idx: int = 0) -> int:
-    return 48
 
 
 @triton.heuristics(
@@ -419,7 +416,7 @@ def causal_conv1d_fwd(
     if x.shape[-1] != weight.shape[0]:
         x = rearrange(x, "b t ... -> b t (...)")
     B, T, D, W = *x.shape, weight.shape[1]
-    BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B * T), get_multiprocessor_count(x.device.index))))
+    BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B * T), get_num_cores())))
     BW = triton.next_power_of_2(W)
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
@@ -475,7 +472,7 @@ def causal_conv1d_bwd(
         x = rearrange(x, "b t ... -> b t (...)")
     B, T, D = x.shape
     W = weight.shape[1] if weight is not None else None
-    BT = min(32, triton.next_power_of_2(triton.cdiv(max(16, B * T), get_multiprocessor_count(x.device.index))))
+    BT = min(32, triton.next_power_of_2(triton.cdiv(max(16, B * T), get_num_cores())))
     print(f"causal_conv1d_bwd BT {BT} x.shape {x.shape}")
     BW = triton.next_power_of_2(W)
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None

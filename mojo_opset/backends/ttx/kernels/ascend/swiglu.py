@@ -6,8 +6,8 @@ import triton.language as tl
 
 from triton.runtime.libentry import libentry
 
-from .utils import VEC_ALIGN_BYTES
-from .utils import align
+from mojo_opset.backends.ttx.kernels.ascend.utils import VEC_ALIGN_BYTES
+from mojo_opset.backends.ttx.kernels.utils import align
 
 """
 This file contains the implementation of SwiGLU (Swish-Gated Linear Unit) for NPU.
@@ -197,7 +197,6 @@ def swiglu_fwd_impl(
         a_2d.stride(0),
         b_2d.stride(0),
         c.stride(0),
-        
         n_rows,
         n_cols,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
@@ -259,4 +258,3 @@ def swiglu_bwd_impl(
     )
 
     return da.reshape(*ori_shape), db.reshape(*ori_shape)
-
