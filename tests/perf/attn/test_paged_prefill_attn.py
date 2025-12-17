@@ -7,6 +7,7 @@ from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoPagedPrefillGQA
+from mojo_opset.backends.reference.attention import RefPagedPrefillGQA
 
 
 def generate_paged_prefill_data(
@@ -106,12 +107,16 @@ def test_paged_prefill_gqa(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
+    paged_attn_prefill_ref = RefPagedPrefillGQA(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+    )
 
     head_dim = query.shape[-1]
     sm_scale = 1.0 / math.sqrt(head_dim)
 
     perf(  # noqa: F821
-        lambda: paged_attn_prefill.forward_ref(
+        lambda: paged_attn_prefill_ref(
             query,
             k_cache,
             v_cache,

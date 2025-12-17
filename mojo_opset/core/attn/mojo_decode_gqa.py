@@ -1,11 +1,9 @@
-import os
-import torch
-from torch.nn import functional as F
-import math
-from typing import Optional, Tuple, Any
+from typing import Any
+from typing import Optional
+from typing import Tuple
 
-from ..mojo_operator import MojoOperator
 from .. import VALID_KV_LAYOUTS
+from ..mojo_operator import MojoOperator
 
 
 class MojoDecodeGQA(MojoOperator):
@@ -59,19 +57,19 @@ class MojoPagedDecodeGQA(MojoOperator):
         # 输入参数校验
         if not isinstance(q_scale_factor, int) or q_scale_factor <= 0:
             raise ValueError(f"q_scale_factor must be a positive integer, got {q_scale_factor}")
-        
+
         if gqa_layout not in ["ABAB", "AABB"]:
             raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
-        
+
         if not isinstance(window_size, int) or (window_size != -1 and window_size < 1):
             raise ValueError(f"window_size must be -1 or >= 1, got {window_size}")
-        
+
         if kv_layout not in VALID_KV_LAYOUTS:
             raise ValueError(f"kv_layout must be one of {VALID_KV_LAYOUTS}, got {kv_layout}")
-        
+
         if not isinstance(tp_size, int) or tp_size <= 0:
             raise ValueError(f"tp_size must be a positive integer, got {tp_size}")
-        
+
         if not isinstance(is_varlen, bool):
             raise ValueError(f"is_varlen must be a boolean, got {is_varlen}")
 
@@ -84,50 +82,12 @@ class MojoPagedDecodeGQA(MojoOperator):
         self.tp_size = tp_size
         self.is_varlen = is_varlen
 
-    def forward_std(self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None) -> Tuple[Any]:
+    def forward_std(
+        self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None
+    ) -> Tuple[Any]:
         raise NotImplementedError
 
-    def forward_ref(self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None):
-        batch_size, num_q_heads, head_dim = q.shape
-        num_kv_heads, block_size, head_dim = k_cache.shape[1], k_cache.shape[2], k_cache.shape[3]
-        max_len_in_batch = seqlens.max().item()
-
-        k_ref = torch.zeros(batch_size, max_len_in_batch, num_kv_heads, head_dim, device=q.device, dtype=q.dtype)
-        v_ref = torch.zeros(batch_size, max_len_in_batch, num_kv_heads, head_dim, device=q.device, dtype=q.dtype)
-
-        for i in range(batch_size):
-            seq_len = seqlens[i].item()
-            num_blocks_for_seq = (seq_len + block_size - 1) // block_size
-
-            for j in range(num_blocks_for_seq):
-                physical_block_id = block_tables[i, j].item()
-
-                start_pos = j * block_size
-                tokens_in_block = min(block_size, seq_len - start_pos)
-
-                k_slice = k_cache[physical_block_id, :, :tokens_in_block, :]
-                v_slice = v_cache[physical_block_id, :, :tokens_in_block, :]
-
-                k_ref[i, start_pos : start_pos + tokens_in_block, :, :] = k_slice.permute(1, 0, 2)
-                v_ref[i, start_pos : start_pos + tokens_in_block, :, :] = v_slice.permute(1, 0, 2)
-
-        _, k_len, num_k_heads, _ = k_ref.shape
-        num_share_q_heads = num_q_heads // num_k_heads
-        if softmax_scale is None:
-            softmax_scale = 1.0 / math.sqrt(head_dim)
-
-        if num_share_q_heads > 1:
-            k_ref = k_ref.repeat_interleave(num_share_q_heads, dim=2)
-            v_ref = v_ref.repeat_interleave(num_share_q_heads, dim=2)
-
-        attn = torch.einsum("bhd,bkhd->bhk", q, k_ref) * softmax_scale
-
-        mask = torch.arange(k_len, device=q.device)[None, :] >= seqlens[:, None]
-        attn.masked_fill_(mask[:, None, :], -torch.inf)
-
-        attn = torch.softmax(attn, dim=-1, dtype=torch.float32).to(q.dtype)
-        out = torch.einsum("bhk,bkhd->bhd", attn, v_ref)
-        return out
-
-    def forward_analysis(self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None) -> Tuple[int, int, int]:
+    def forward_analysis(
+        self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None
+    ) -> Tuple[int, int, int]:
         pass

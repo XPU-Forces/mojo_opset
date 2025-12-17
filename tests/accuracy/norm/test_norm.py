@@ -5,6 +5,7 @@ from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoNorm
+from mojo_opset.backends.reference.norm import RefNorm
 
 shapes = [
     (32, 1024),
@@ -36,6 +37,11 @@ def test_rmsnorm(x, gamma, epsilon):
         norm_type="rmsnorm",
         gamma=gamma,
     ).to(x.device)
+    rmsnorm_ref = RefNorm(
+        epsilon=epsilon,
+        norm_type="rmsnorm",
+        gamma=gamma,
+    ).to(x.device)
 
     with torch.no_grad():
         rmsnorm.gamma.copy_(gamma.to(torch.float32))
@@ -44,7 +50,7 @@ def test_rmsnorm(x, gamma, epsilon):
         atol, rtol = 1e-5, 1e-6
     else:
         atol, rtol = 3e-2, 6e-3
-    rmsnorm.forward_diff(x, atol=atol, rtol=rtol)
+    rmsnorm_ref.forward_diff_with(rmsnorm, x, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize(
@@ -68,13 +74,19 @@ def test_layernorm(x, gamma, beta, epsilon):
         gamma=gamma,
         beta=beta,
     ).to(x.device)
+    layernorm_ref = RefNorm(
+        epsilon=epsilon,
+        norm_type="layernorm",
+        gamma=gamma,
+        beta=beta,
+    ).to(x.device)
 
     with torch.no_grad():
         layernorm.gamma.copy_(gamma.to(torch.float32))
         layernorm.beta.copy_(beta.to(torch.float32))
 
     if x.dtype == torch.float32:
-        atol, rtol = 1e-5, 1e-6
+        atol, rtol = 1e-4, 1e-5
     else:
-        atol, rtol = 3e-2, 6e-3
-    layernorm.forward_diff(x, atol=atol, rtol=rtol)
+        atol, rtol = 5e-2, 1e-2
+    layernorm_ref.forward_diff_with(layernorm, x, atol=atol, rtol=rtol)

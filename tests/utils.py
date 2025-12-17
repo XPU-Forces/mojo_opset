@@ -62,8 +62,8 @@ def get_executor_info(executor):
     func_name = matches[0]
     result = [r for r in result if f"<{func_name}>" not in r]
 
-    if "forward_ref" in inspect.getsource(executor).strip():
-        func_name += "_TORCH_REF"
+    # if "forward_ref" in inspect.getsource(executor).strip():
+    #     func_name += "_TORCH_REF"
 
     return func_name, result
 

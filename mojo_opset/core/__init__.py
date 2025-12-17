@@ -79,6 +79,8 @@ from .sampling.mojo_sampling import MojoTopKSampling
 from .sampling.mojo_sampling import MojoTopPFilter
 from .sampling.mojo_sampling import MojoTopPSampling
 
+LAST_PRIORITY = 999
+
 # fmt: off
 __all__ = [
     "MojoGelu",
@@ -147,5 +149,6 @@ __all__ = [
     "MojoRMSNormFunction",
     "MojoRoPEFunction",
     "MojoFusedLinearCrossEntropyFunction",
+    "LAST_PRIORITY"
 ]
 # fmt: on

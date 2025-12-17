@@ -26,3 +26,9 @@
 | TTXNorm | x: Tensor(shape=(256, 128), dtype=torch.bfloat16, device=npu:0) | 5.8482 us | 0.2748 ms |
 | TTXRoPE_TORCH_REF | cos: Tensor(shape=(1, 1, 1024, 32), dtype=torch.float32, device=npu:0)<br>  k: Tensor(shape=(1, 8, 1024, 32), dtype=torch.float32, device=npu:0)<br>  q: Tensor(shape=(1, 32, 1024, 32), dtype=torch.float32, device=npu:0)<br>  sin: Tensor(shape=(1, 1, 1024, 32), dtype=torch.float32, device=npu:0) | 337.5382 us | 0.2701 ms |
 | TTXRoPE | cos: Tensor(shape=(1, 1, 1024, 32), dtype=torch.float32, device=npu:0)<br>  k: Tensor(shape=(1, 8, 1024, 32), dtype=torch.float32, device=npu:0)<br>  q: Tensor(shape=(1, 32, 1024, 32), dtype=torch.float32, device=npu:0)<br>  sin: Tensor(shape=(1, 1, 1024, 32), dtype=torch.float32, device=npu:0) | 26.0166 us | 0.3366 ms |
+| RefGelu | x: Tensor(shape=(128, 128), dtype=torch.float32, device=npu:0) | 2.0440 us | 0.0336 ms |
+| TTXGelu | x: Tensor(shape=(128, 128), dtype=torch.float32, device=npu:0) | 4.7880 us | 0.2819 ms |
+| RefSilu | x: Tensor(shape=(128, 128), dtype=torch.float32, device=npu:0) | 1.8120 us | 0.0318 ms |
+| TTXSilu | x: Tensor(shape=(128, 128), dtype=torch.float32, device=npu:0) | 4.2442 us | 0.3295 ms |
+| RefSwiGLU | gate_out: Tensor(shape=(256, 128), dtype=torch.float32, device=npu:0)<br>  up_out: Tensor(shape=(256, 128), dtype=torch.float32, device=npu:0) | 4.9524 us | 0.1121 ms |
+| TTXSwiGLU | gate_out: Tensor(shape=(256, 128), dtype=torch.float32, device=npu:0)<br>  up_out: Tensor(shape=(256, 128), dtype=torch.float32, device=npu:0) | 4.9322 us | 0.2801 ms |

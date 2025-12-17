@@ -5,6 +5,7 @@ from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoNorm
+from mojo_opset.backends.reference.norm import RefNorm
 
 
 @pytest.mark.parametrize(
@@ -26,11 +27,16 @@ def test_rmsnorm(x, gamma, epsilon):
         norm_type="rmsnorm",
         gamma=gamma,
     ).to(x.device)
+    rmsnorm_ref = RefNorm(
+        epsilon=epsilon,
+        norm_type="rmsnorm",
+        gamma=gamma,
+    ).to(x.device)
 
     with torch.no_grad():
         rmsnorm.gamma.copy_(gamma.to(torch.float32))
 
-    perf(lambda: rmsnorm.forward_ref(x))  # noqa: F821
+    perf(lambda: rmsnorm_ref(x))  # noqa: F821
     perf(lambda: rmsnorm(x))  # noqa: F821
 
 
@@ -55,10 +61,16 @@ def test_layernorm(x, gamma, beta, epsilon):
         gamma=gamma,
         beta=beta,
     ).to(x.device)
+    layernorm_ref = RefNorm(
+        epsilon=epsilon,
+        norm_type="layernorm",
+        gamma=gamma,
+        beta=beta,
+    ).to(x.device)
 
     with torch.no_grad():
         layernorm.gamma.copy_(gamma.to(torch.float32))
         layernorm.beta.copy_(beta.to(torch.float32))
 
-    perf(lambda: layernorm.forward_ref(x))  # noqa: F821
+    perf(lambda: layernorm_ref(x))  # noqa: F821
     perf(lambda: layernorm(x))  # noqa: F821

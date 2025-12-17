@@ -1,10 +1,13 @@
-import os
-import torch
 import functools
+import os
+
+import torch
+
 from torch.autograd import Function
 
-from ..utils.mode import get_mojo_exec_mode
 from mojo_opset.utils.logging import get_logger
+
+from ..utils.mode import get_mojo_exec_mode
 
 logger = get_logger(__name__)
 

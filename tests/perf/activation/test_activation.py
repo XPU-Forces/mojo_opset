@@ -7,6 +7,9 @@ from tests.utils import bypass_not_implemented
 from mojo_opset import MojoGelu
 from mojo_opset import MojoSilu
 from mojo_opset import MojoSwiGLU
+from mojo_opset.backends.reference.activation import RefGelu
+from mojo_opset.backends.reference.activation import RefSilu
+from mojo_opset.backends.reference.activation import RefSwiGLU
 
 
 @pytest.mark.parametrize(
@@ -17,7 +20,8 @@ from mojo_opset import MojoSwiGLU
 @bypass_not_implemented
 def test_gelu(x):
     gelu = MojoGelu()
-    perf(lambda: gelu.forward_ref(x))  # noqa: F821
+    gelu_ref = RefGelu()
+    perf(lambda: gelu_ref(x))  # noqa: F821
     perf(lambda: gelu(x))  # noqa: F821
 
 
@@ -29,7 +33,8 @@ def test_gelu(x):
 @bypass_not_implemented
 def test_silu(x):
     silu = MojoSilu()
-    perf(lambda: silu.forward_ref(x))  # noqa: F821
+    silu_ref = RefSilu()
+    perf(lambda: silu_ref(x))  # noqa: F821
     perf(lambda: silu(x))  # noqa: F821
 
 
@@ -46,5 +51,6 @@ def test_silu(x):
 @bypass_not_implemented
 def test_swiglu(gate_out, up_out):
     swiglu = MojoSwiGLU()
-    perf(lambda: swiglu.forward_ref(gate_out, up_out))  # noqa: F821
+    swiglu_ref = RefSwiGLU()
+    perf(lambda: swiglu_ref(gate_out, up_out))  # noqa: F821
     perf(lambda: swiglu(gate_out, up_out))  # noqa: F821

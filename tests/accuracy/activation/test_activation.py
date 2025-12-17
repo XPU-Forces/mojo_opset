@@ -1,9 +1,15 @@
 import pytest
 import torch
 
-from tests.utils import auto_switch_platform, bypass_not_implemented
+from tests.utils import auto_switch_platform
+from tests.utils import bypass_not_implemented
 
-from mojo_opset import MojoGelu, MojoSilu, MojoSwiGLU
+from mojo_opset import MojoGelu
+from mojo_opset import MojoSilu
+from mojo_opset import MojoSwiGLU
+from mojo_opset.backends.reference.activation import RefGelu
+from mojo_opset.backends.reference.activation import RefSilu
+from mojo_opset.backends.reference.activation import RefSwiGLU
 
 
 @pytest.mark.parametrize(
@@ -13,8 +19,9 @@ from mojo_opset import MojoGelu, MojoSilu, MojoSwiGLU
 @auto_switch_platform()
 @bypass_not_implemented
 def test_gelu(x):
+    gelu_ref = RefGelu()
     gelu = MojoGelu()
-    gelu.forward_diff(x)
+    gelu_ref.forward_diff_with(gelu, x)
 
 
 @pytest.mark.parametrize(
@@ -24,8 +31,9 @@ def test_gelu(x):
 @auto_switch_platform()
 @bypass_not_implemented
 def test_silu(x):
+    silu_ref = RefSilu()
     silu = MojoSilu()
-    silu.forward_diff(x)
+    silu_ref.forward_diff_with(silu, x)
 
 
 @pytest.mark.parametrize(
@@ -40,5 +48,6 @@ def test_silu(x):
 @auto_switch_platform()
 @bypass_not_implemented
 def test_swiglu(gate_out, up_out):
+    swiglu_ref = RefSwiGLU()
     swiglu = MojoSwiGLU()
-    swiglu.forward_diff(gate_out, up_out)
+    swiglu_ref.forward_diff_with(swiglu, gate_out, up_out)

@@ -7,6 +7,7 @@ from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoPagedDecodeGQA
+from mojo_opset.backends.reference.attention import RefPagedDecodeGQA
 
 
 def generate_paged_decode_data(
@@ -92,9 +93,13 @@ def test_paged_decode_gqa(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
+    paged_attn_decode_ref = RefPagedDecodeGQA(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+    )
 
     perf(  # noqa: F821
-        lambda: paged_attn_decode.forward_ref(
+        lambda: paged_attn_decode_ref(
             query,
             k_cache,
             v_cache,

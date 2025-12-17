@@ -35,17 +35,16 @@ class MojoRoPE(MojoOperator):
     ):
         super().__init__(op_name, layer_idx)
 
-        # 类型与数值的轻量校验
         if not isinstance(rotary_offset, int) or rotary_offset < 0:
-            raise ValueError("rotary_offset 需为非负整数")
+            raise ValueError("rotary_offset should be non-negative integer.")
         if not isinstance(interleaved, bool):
-            raise TypeError("interleaved 必须为 bool 类型")
+            raise TypeError("interleaved should be bool.")
         if not isinstance(dynamic_ntk, bool):
-            raise TypeError("dynamic_ntk 必须为 bool 类型")
+            raise TypeError("dynamic_ntk should be bool.")
         if max_seq_len is not None and (not isinstance(max_seq_len, int) or max_seq_len <= 0):
-            raise ValueError("max_seq_len 需为正整数或 None")
+            raise ValueError("max_seq_len should be positive integer or None.")
         if not isinstance(is_varlen, bool):
-            raise TypeError("is_varlen 必须为 bool 类型")
+            raise TypeError("is_varlen should be bool.")
 
         self.rotary_offset = rotary_offset
         self.interleaved = interleaved
@@ -63,24 +62,6 @@ class MojoRoPE(MojoOperator):
         cum_sum_query_len: Optional[torch.Tensor] = None,
     ) -> Tuple[Any]:
         raise NotImplementedError
-
-    def forward_ref(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        position_ids: Optional[torch.Tensor] = None,
-        cum_sum_query_len: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        def rotate_half(x):
-            x1 = x[..., : x.shape[-1] // 2]
-            x2 = x[..., x.shape[-1] // 2 :]
-            return torch.cat((-x2, x1), dim=-1)
-
-        q_rot = q * cos + rotate_half(q) * sin
-        k_rot = k * cos + rotate_half(k) * sin
-        return q_rot, k_rot
 
     def forward_analysis(
         self, q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor

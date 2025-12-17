@@ -18,6 +18,9 @@ if "ALL" in backend_list:
     for backend in _SUPPORT_BACKEND_LIST:
         init_mojo_backend(backend.lower())
 else:
+    # Always init reference backend.
+    init_mojo_backend("reference")
+
     for backend in backend_list:
         if backend not in _SUPPORT_BACKEND_LIST:
             raise RuntimeError(f"Unsupport backend[{backend}]!")

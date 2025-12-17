@@ -1,10 +1,13 @@
-import pytest
-import torch
 import math
 
-from tests.utils import auto_switch_platform, bypass_not_implemented
+import pytest
+import torch
+
+from tests.utils import auto_switch_platform
+from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoPagedDecodeGQA
+from mojo_opset.backends.reference.attention import RefPagedDecodeGQA
 
 
 def generate_paged_decode_data(
@@ -90,12 +93,17 @@ def test_paged_decode_gqa(
     head_dim = query.shape[-1]
     sm_scale = 1.0 / math.sqrt(head_dim)
 
-    op = MojoPagedDecodeGQA(
+    paged_decode_attn = MojoPagedDecodeGQA(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+    )
+    paged_decode_attn_ref = RefPagedDecodeGQA(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
 
-    op.forward_diff(
+    paged_decode_attn_ref.forward_diff_with(
+        paged_decode_attn,
         query,
         k_cache,
         v_cache,
