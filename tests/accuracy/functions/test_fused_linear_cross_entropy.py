@@ -68,7 +68,10 @@ def test_fused_ce_forward_backward_diff(
         loss = output
         z_loss = None
 
-    grad_output = torch.rand_like(loss)
+    if reduction == "mean":
+        grad_output = torch.rand_like(loss)
+    else:
+        grad_output = torch.rand_like(loss) / input_tensor.shape[0]
 
     if return_z_loss:
         grad_z_loss = torch.rand_like(z_loss)

@@ -359,7 +359,7 @@ if os.getenv("MOJO_RUN_MODE", "compile") == "compile":
         grad_bias: Optional[torch.Tensor] = None,
         reduction: str = "mean",
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return fused_linear_cross_entropy_bwd_impl(grad_output, grad_input, grad_weight, grad_bias)
+        return fused_linear_cross_entropy_bwd_impl(grad_output, grad_input, grad_weight, grad_bias, reduction)
 
     @torch.library.register_fake("ttx::fused_linear_cross_entropy_bwd")
     def fused_linear_cross_entropy_bwd_meta(
