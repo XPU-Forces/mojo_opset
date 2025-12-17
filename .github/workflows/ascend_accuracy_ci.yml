@@ -53,7 +53,7 @@ jobs:
         shell: bash
         run: |
           echo "Running ttx graph tests..."
-          python3 -m pytest tests/test_ttx_graph/
+          MOJO_RUN_MODE="COMPILE" python3 -m pytest tests/test_ttx_graph/
       - name: test-ttx-model-inference
         shell: bash
         run: |

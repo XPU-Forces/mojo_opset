@@ -3,18 +3,17 @@ import functools
 import inspect
 import os
 import re
-import subprocess
 import sys
 import time
 
 from typing import Callable
-from typing import Literal
 
 import pytest
 import torch
 import torch_npu
 
 from mojo_opset.utils.logging import get_logger
+from mojo_opset.utils.platform import get_platform
 
 logger = get_logger(__name__)
 
@@ -75,25 +74,6 @@ def format_executor_info(info_list):
     arg_lines = "<br>  " + "<br>  ".join(args) if args else ""
 
     return f"{func}{arg_lines}"
-
-
-@functools.lru_cache
-def get_platform() -> Literal["npu", "mlu", "cpu"]:
-    """
-    Detect whether the system has NPU or MLU.
-    """
-    try:
-        subprocess.run(["npu-smi", "info"], check=True)
-        logger.info("Ascend NPU detected")
-        return "npu"
-    except (subprocess.SubprocessError, FileNotFoundError):
-        try:
-            subprocess.run(["cnmon"], check=True)
-            logger.info("Cambricon MLU detected")
-            return "mlu"
-        except (subprocess.SubprocessError, FileNotFoundError):
-            logger.info("No accelerator detected")
-            return "cpu"
 
 
 def auto_switch_platform(set_perf: bool = False):
