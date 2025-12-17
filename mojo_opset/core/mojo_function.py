@@ -118,7 +118,7 @@ def mojo_func_dispatcher(cls):
 
                     if len(ref_tuple) != len(impl_tuple):
                         raise RuntimeError(f"Backward DIFF for {op_name_in}: Number of gradients mismatch.")
-                    breakpoint()
+
                     for i, (ref_g, impl_g) in enumerate(zip(ref_tuple, impl_tuple)):
                         if ref_g is not None and impl_g is not None:
                             torch.testing.assert_close(
