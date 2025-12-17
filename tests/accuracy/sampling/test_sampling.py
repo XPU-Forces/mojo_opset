@@ -30,7 +30,9 @@ def test_topp_sampling(logits, topk, topp, min_tokens_to_keep):
 @auto_switch_platform()
 @bypass_not_implemented
 def test_topp_filter(logits, topk, topp, min_tokens_to_keep):
-    top_p_filter = MojoTopPFilter(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk)
-    top_p_filter_ref = RefTopPFilter(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk)
+    top_p_filter = MojoTopPFilter()
+    top_p_filter_ref = RefTopPFilter()
 
-    top_p_filter_ref.forward_diff_with(top_p_filter, logits)
+    top_p_filter_ref.forward_diff_with(
+        top_p_filter, logits=logits, top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk
+    )

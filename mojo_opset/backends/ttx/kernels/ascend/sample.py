@@ -209,6 +209,7 @@ def top_p_filter_impl(
     min_tokens_to_keep: int = 1,
     rand_top_k: int = 1000,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    dtype = logits.dtype
     device = logits.device
     logits = logits.to(torch.float32)
     batch_size, _ = logits.shape
@@ -216,7 +217,7 @@ def top_p_filter_impl(
 
     sorted_logits, sorted_topk_indices = torch.topk(logits, top_k)
 
-    output_probs = torch.empty((batch_size, top_k), dtype=torch.float32, device=device)
+    output_probs = torch.empty((batch_size, top_k), dtype=dtype, device=device)
 
     grid = (batch_size,)
 

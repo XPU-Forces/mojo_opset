@@ -37,20 +37,23 @@ class RefTopPSampling(MojoTopPSampling, default_priority=LAST_PRIORITY):
 
 
 class RefTopPFilter(MojoTopPFilter, default_priority=LAST_PRIORITY):
-    def forward_std(self, logits: torch.Tensor) -> Tuple[Any]:
+    def forward_std(
+        self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        dtype = logits.dtype
         logits = logits.to(torch.float32)
-        top_k = min(self.rand_top_k, logits.size(-1))
+        top_k = min(rand_top_k, logits.size(-1))
         sorted_topk_logits, sorted_topk_indices = torch.topk(logits, top_k)
 
         cumulative_probs = sorted_topk_logits.softmax(dim=-1).cumsum(dim=-1)
-        sorted_indices_to_remove = cumulative_probs > self.top_p
-        if self.min_tokens_to_keep > 1:
-            sorted_indices_to_remove[..., : self.min_tokens_to_keep - 1] = 0
+        sorted_indices_to_remove = cumulative_probs > top_p
+        if min_tokens_to_keep > 1:
+            sorted_indices_to_remove[..., : min_tokens_to_keep - 1] = 0
         sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
         sorted_indices_to_remove[..., 0] = 0
         filtered_logits = sorted_topk_logits.masked_fill(sorted_indices_to_remove, self.filter_value)
 
-        final_probs_dist = torch.nn.functional.softmax(filtered_logits, dim=-1)
+        final_probs_dist = torch.nn.functional.softmax(filtered_logits, dim=-1).to(dtype)
 
         return final_probs_dist, sorted_topk_indices
 

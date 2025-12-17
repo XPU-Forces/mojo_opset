@@ -47,28 +47,24 @@ class MojoTopPSampling(MojoOperator):
 class MojoTopPFilter(MojoOperator):
     def __init__(
         self,
-        top_p: float = 0.75,
         filter_value: float = -float("Inf"),
-        min_tokens_to_keep: int = 1,
-        rand_top_k: int = 1000,
         op_name: str = "",
         layer_idx: int = 0,
     ):
         super().__init__(op_name, layer_idx)
 
-        self.top_p = top_p
         self.filter_value = filter_value
-        self.min_tokens_to_keep = min_tokens_to_keep
-        self.rand_top_k = rand_top_k
 
         mode_str = get_mojo_exec_mode(MojoTopPSampling.__name__, "FWD", self.layer_idx)
         self._set_forward_mode(mode_str)
 
     @abstractmethod
-    def forward_std(self, logits: torch.Tensor) -> Tuple[Any]:
+    def forward_std(self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int) -> Tuple[Any]:
         raise NotImplementedError
 
-    def forward_analysis(self, logits) -> Tuple[int, int, int]:
+    def forward_analysis(
+        self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int
+    ) -> Tuple[int, int, int]:
         raise NotImplementedError
 
 
