@@ -4,8 +4,8 @@ import triton.language as tl
 
 from triton.runtime.libentry import libentry
 
-from .utils import VEC_ALIGN_BYTES
-from .utils import align
+from mojo_opset.backends.ttx.kernels.ascend.utils import VEC_ALIGN_BYTES
+from mojo_opset.backends.ttx.kernels.utils import align
 
 """
 This file contains the implementation of GELU (Gaussian Error Linear Unit) for NPU.

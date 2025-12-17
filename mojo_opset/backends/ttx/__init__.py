@@ -5,6 +5,7 @@ from .activation import TTXSwiGLU
 from .add_norm import TTXResidualAddNorm
 from .attention import TTXPagedDecodeGQA
 from .attention import TTXPagedPrefillGQA
+from .conv import TTXCausalConv1dFunction
 from .loss import TTXFusedLinearCrossEntropyFunction
 from .norm import TTXNorm
 from .norm import TTXRMSNormFunction
@@ -30,4 +31,5 @@ __all__ = [
     "TTXApplyPenaltiesTempurate",
     "TTXTopPFilter",
     "TTXTopPSampling",
+    "TTXCausalConv1dFunction",
 ]

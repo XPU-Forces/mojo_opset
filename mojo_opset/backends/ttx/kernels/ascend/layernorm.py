@@ -5,9 +5,9 @@ import triton.language as tl
 from triton.language.math import rsqrt
 from triton.runtime.libentry import libentry
 
-from .utils import VEC_ALIGN_BYTES
-from .utils import align
-from .utils import torch_to_triton_dtype
+from mojo_opset.backends.ttx.kernels.ascend.utils import VEC_ALIGN_BYTES
+from mojo_opset.backends.ttx.kernels.utils import align
+from mojo_opset.backends.ttx.kernels.utils import torch_to_triton_dtype
 
 """
 This file incorporates code from Liger Kernel licensed under the Apache License, Version 2.0.
