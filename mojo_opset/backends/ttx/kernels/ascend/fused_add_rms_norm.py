@@ -1,10 +1,14 @@
+from typing import Tuple
+
 import torch
 import triton
 import triton.language as tl
-from typing import Tuple
+
 from triton.runtime.libentry import libentry
 
-from .utils import VEC_ALIGN_BYTES, align, torch_to_triton_dtype
+from mojo_opset.backends.ttx.kernels.ascend.utils import VEC_ALIGN_BYTES
+from mojo_opset.backends.ttx.kernels.utils import align
+from mojo_opset.backends.ttx.kernels.utils import torch_to_triton_dtype
 
 """
 This file contains the implementation of Fused Add RMS Norm for NPU.
