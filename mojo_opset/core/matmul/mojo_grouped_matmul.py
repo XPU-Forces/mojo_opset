@@ -1,18 +1,13 @@
 from abc import abstractmethod
+from typing import Any, List, Optional, Tuple
 import torch
 from mojo_opset.core.mojo_operator import MojoOperator
 
 
 class MojoGroupedMatmul(MojoOperator):
     """
-    Performs the standard (non-quantized) grouped matrix multiplication.
-
-    Args:
-    - input_tensor (torch.Tensor): The first input tensor.
-    - other_tensor (torch.Tensor): The second input tensor.
-    - group_info (list): Grouping information for the matmul operation.
-    - trans_input (bool): Whether to transpose the first input.
-    - trans_other (bool): Whether to transpose the second input.
+    Performs the standard grouped matrix multiplication.
+    This operator is designed to handle a list of matrices for batch processing.
     """
 
     def __init__(self, op_name: str = "", layer_idx: int = 0):
@@ -21,36 +16,60 @@ class MojoGroupedMatmul(MojoOperator):
     @abstractmethod
     def forward_std(
         self,
-        input_tensor: torch.Tensor,
-        other_tensor: torch.Tensor,
-        group_info: list,
-        trans_input: bool = False,
-        trans_other: bool = False,
-    ):
+        input_tensors: List[torch.Tensor],
+        weight: List[torch.Tensor],
+        group_list: Optional[list] = None,
+        bias: Optional[List[torch.Tensor]] = None,
+        scale: Optional[List[torch.Tensor]] = None,
+        offset: Optional[List[torch.Tensor]] = None,
+        antiquant_scale: Optional[List[torch.Tensor]] = None,
+        antiquant_offset: Optional[List[torch.Tensor]] = None,
+        per_token_scale: Optional[List[torch.Tensor]] = None,
+        activation_input: Optional[List[torch.Tensor]] = None,
+        activation_quant_scale: Optional[List[torch.Tensor]] = None,
+        activation_quant_offset: Optional[List[torch.Tensor]] = None,
+        split_item: int = 0,
+        group_type: Optional[int] = None,
+        group_list_type: int = 0,
+        act_type: int = 0,
+        output_dtype: Optional[torch.dtype] = None,
+        tuning_config: Optional[Any] = None,
+    ) -> List[torch.Tensor]:
 
         raise NotImplementedError
 
     def forward_ref(
         self,
-        input_tensor: torch.Tensor,
-        other_tensor: torch.Tensor,
-        group_info: list,
-        trans_input: bool = False,
-        trans_other: bool = False,
-    ):
-        """
-        A reference implementation for grouped matrix multiplication.
-        This can be used for verification.
-        """
-        if trans_input:
-            input_tensor = input_tensor.transpose(-1, -2)
-        if trans_other:
-            other_tensor = other_tensor.transpose(-1, -2)
+        input_tensors: List[torch.Tensor],
+        other_tensors: List[torch.Tensor],
+        group_list: Optional[list] = None, 
+        bias: Optional[List[torch.Tensor]] = None,
+        scale: Optional[List[torch.Tensor]] = None,
+        offset: Optional[List[torch.Tensor]] = None,
+        antiquant_scale: Optional[List[torch.Tensor]] = None,
+        antiquant_offset: Optional[List[torch.Tensor]] = None,
+        per_token_scale: Optional[List[torch.Tensor]] = None,
+        activation_input: Optional[List[torch.Tensor]] = None,
+        activation_quant_scale: Optional[List[torch.Tensor]] = None,
+        activation_quant_offset: Optional[List[torch.Tensor]] = None,
+        split_item: int = 0,
+        group_type: Optional[int] = None,  # group_type is ignored in ref impl
+        group_list_type: int = 0,
+        act_type: int = 0,
+        output_dtype: Optional[torch.dtype] = None,
+        tuning_config: Optional[Any] = None,
+    ) -> List[torch.Tensor]:
 
         outputs = []
-        for i_group in group_info:
-            # Assuming group_info contains slices for each group
-            input_slice = input_tensor[i_group[0]]
-            other_slice = other_tensor[i_group[1]]
-            outputs.append(torch.matmul(input_slice, other_slice))
-        return torch.cat(outputs, dim=0)
+        for i, (input_tensor, other_tensor) in enumerate(zip(input_tensors, other_tensors)):
+            output = torch.matmul(input_tensor, other_tensor)
+
+            if bias and i < len(bias) and bias[i] is not None:
+                output += bias[i]
+
+            outputs.append(output)
+        return outputs
+
+    @abstractmethod
+    def forward_analysis(self, *args, **kwargs) -> Tuple[Any]:
+        raise NotImplementedError
