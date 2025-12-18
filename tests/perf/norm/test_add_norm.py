@@ -5,6 +5,7 @@ from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoResidualAddNorm
+from mojo_opset.backends.reference.add_norm import RefResidualAddNorm
 
 
 @pytest.mark.parametrize(
@@ -34,6 +35,13 @@ def test_residual_add_norm(x, residual, gamma, beta, norm_type, norm_pos, epsilo
         norm_pos=norm_pos,
         norm_type=norm_type,
     )
+    add_norm_ref = RefResidualAddNorm(
+        gamma=gamma,
+        beta=beta,
+        epsilon=epsilon,
+        norm_pos=norm_pos,
+        norm_type=norm_type,
+    )
 
+    perf(lambda: add_norm_ref(x, residual))  # noqa: F821
     perf(lambda: add_norm(x, residual))  # noqa: F821
-    perf(lambda: add_norm.forward_ref(x, residual))  # noqa: F821

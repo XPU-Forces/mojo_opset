@@ -69,15 +69,20 @@ from .pos_emb.mojo_rope import MojoRoPE
 from .pos_emb.mojo_rope import MojoRoPEStoreKV
 
 """ mojo sampling """
-from .functions.mojo_linear_crossentropy_func import MojoFusedLinearCrossEntropyFunction
-from .functions.mojo_rmsnorm_func import MojoRMSNormFunction
-from .functions.mojo_rope_func import MojoRoPEFunction
-from .functions.mojo_silu_func import MojoSiluFunction
 from .sampling.mojo_sampling import MojoApplyPenaltiesTempurate
 from .sampling.mojo_sampling import MojoRejectSampling
 from .sampling.mojo_sampling import MojoTopKSampling
 from .sampling.mojo_sampling import MojoTopPFilter
 from .sampling.mojo_sampling import MojoTopPSampling
+
+""" mojo functions """
+from .functions.mojo_causal_conv1d import MojoCausalConv1dFunction
+from .functions.mojo_linear_crossentropy_func import MojoFusedLinearCrossEntropyFunction
+from .functions.mojo_rmsnorm_func import MojoRMSNormFunction
+from .functions.mojo_rope_func import MojoRoPEFunction
+from .functions.mojo_silu_func import MojoSiluFunction
+
+LAST_PRIORITY = 999
 
 # fmt: off
 __all__ = [
@@ -147,5 +152,7 @@ __all__ = [
     "MojoRMSNormFunction",
     "MojoRoPEFunction",
     "MojoFusedLinearCrossEntropyFunction",
+    "MojoCausalConv1dFunction",
+    "LAST_PRIORITY",
 ]
 # fmt: on

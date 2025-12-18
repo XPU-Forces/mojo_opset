@@ -7,10 +7,6 @@ from ..mojo_function import mojo_func_dispatcher
 @mojo_func_dispatcher
 class MojoRoPEFunction(MojoFuncBase):
     @staticmethod
-    def forward_dump(ctx, q, k, cos, sin):
-        pass
-
-    @staticmethod
     def forward_ref(ctx, q, k, cos, sin):
         def rotate_half(x):
             x1 = x[..., : x.shape[-1] // 2]
@@ -23,10 +19,6 @@ class MojoRoPEFunction(MojoFuncBase):
         ctx.save_for_backward(cos, sin)
 
         return q_rot, k_rot
-
-    @staticmethod
-    def backward_dump(ctx, grad_output_q, grad_output_k):
-        pass
 
     @staticmethod
     def backward_ref(ctx, grad_output_q, grad_output_k):

@@ -5,6 +5,7 @@ from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoResidualAddNorm
+from mojo_opset.backends.reference.add_norm import RefResidualAddNorm
 
 
 @pytest.mark.parametrize(
@@ -34,10 +35,17 @@ def test_residual_add_norm(x, residual, gamma, beta, norm_type, norm_pos, epsilo
         norm_pos=norm_pos,
         norm_type=norm_type,
     )
+    add_norm_ref = RefResidualAddNorm(
+        gamma=gamma,
+        beta=beta,
+        epsilon=epsilon,
+        norm_pos=norm_pos,
+        norm_type=norm_type,
+    )
 
     if x.dtype == torch.float32:
         atol, rtol = 1e-5, 1e-6
     else:
         atol, rtol = 3e-2, 6e-3
 
-    add_norm.forward_diff(x, residual, atol=atol, rtol=rtol)
+    add_norm_ref.forward_diff_with(add_norm, x, residual, atol=atol, rtol=rtol)

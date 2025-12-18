@@ -1,15 +1,12 @@
-import os
 import torch
-from ..mojo_function import MojoFuncBase, mojo_func_dispatcher
 import torch.nn.functional as F
+
+from ..mojo_function import MojoFuncBase
+from ..mojo_function import mojo_func_dispatcher
 
 
 @mojo_func_dispatcher
 class MojoRMSNormFunction(MojoFuncBase):
-    @staticmethod
-    def forward_dump(ctx, input, weight, eps):
-        pass
-
     @staticmethod
     def forward_ref(ctx, input, weight, eps):
         normalized_shape = (input.shape[-1],)
@@ -20,10 +17,6 @@ class MojoRMSNormFunction(MojoFuncBase):
         ctx.eps = eps
 
         return y
-
-    @staticmethod
-    def backward_dump(ctx, grad_output):
-        pass
 
     @staticmethod
     def backward_ref(ctx, grad_output):
