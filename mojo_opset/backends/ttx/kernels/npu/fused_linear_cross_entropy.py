@@ -2,14 +2,27 @@ from typing import Optional
 from typing import Tuple
 
 import torch
-import torch_npu
 import triton
 import triton.language as tl
 
 from triton.runtime.libentry import libentry
 
-amp_custom_fwd = torch_npu.npu.amp.custom_fwd
-amp_custom_bwd = torch_npu.npu.amp.custom_bwd
+
+def _noop_decorator(*args, **kwargs):
+    def decorator(fn):
+        return fn
+
+    return decorator
+
+
+try:
+    import torch_npu
+
+    amp_custom_fwd = torch_npu.npu.amp.custom_fwd
+    amp_custom_bwd = torch_npu.npu.amp.custom_bwd
+except Exception:
+    amp_custom_fwd = _noop_decorator
+    amp_custom_bwd = _noop_decorator
 
 
 @triton.autotune(

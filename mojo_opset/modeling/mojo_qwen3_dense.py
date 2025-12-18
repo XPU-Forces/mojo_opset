@@ -1,7 +1,12 @@
 import torch
+
 from torch import nn
-import torch_npu
-from mojo_opset import MojoRoPE, MojoNorm, MojoSwiGLU, MojoPagedPrefillGQA, MojoPagedDecodeGQA
+
+from mojo_opset import MojoNorm
+from mojo_opset import MojoPagedDecodeGQA
+from mojo_opset import MojoPagedPrefillGQA
+from mojo_opset import MojoRoPE
+from mojo_opset import MojoSwiGLU
 
 # Example: Use Mojo ops APIs directly for modeling — simply import the required modules and plug them in as needed.
 mojo_apply_rope = MojoRoPE()

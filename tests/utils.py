@@ -10,7 +10,11 @@ from typing import Callable
 
 import pytest
 import torch
-import torch_npu
+
+try:
+    import torch_npu
+except Exception:
+    torch_npu = None
 
 from mojo_opset.utils.logging import get_logger
 from mojo_opset.utils.platform import get_platform

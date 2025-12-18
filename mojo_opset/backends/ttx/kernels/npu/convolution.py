@@ -8,7 +8,7 @@ import triton.language as tl
 
 from einops import rearrange
 
-from mojo_opset.backends.ttx.kernels.ascend.utils import get_num_cores
+from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 from mojo_opset.backends.ttx.kernels.utils import input_guard
 from mojo_opset.backends.ttx.kernels.utils import prepare_chunk_indices
 

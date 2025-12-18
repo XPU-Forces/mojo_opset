@@ -1,5 +1,5 @@
-import os
 import importlib
+import os
 
 from typing import Optional
 from typing import Tuple
@@ -8,18 +8,14 @@ import torch
 
 from mojo_opset.utils.platform import get_platform
 
-_PLATFROM_MAP = {
-    "npu" : "ascend",
-}
-
 platform = get_platform()
 
-if platform in _PLATFROM_MAP:
-    backend = _PLATFROM_MAP[platform]
-else:
-    raise ImportError(f"Unsupported Triton Platform {platform}")
 
-ttx_backend_module = importlib.import_module(f".{backend}", package=__name__)
+try:
+    ttx_backend_module = importlib.import_module(f".{platform}", package=__name__)
+except ImportError:
+    raise RuntimeError(f"Unsupported Triton Platform '{platform}'.")
+
 
 gelu_fwd_impl = getattr(ttx_backend_module, "gelu_fwd_impl")
 gelu_bwd_impl = getattr(ttx_backend_module, "gelu_bwd_impl")
@@ -33,12 +29,12 @@ rope_bwd_impl = getattr(ttx_backend_module, "rope_bwd_impl")
 swiglu_fwd_impl = getattr(ttx_backend_module, "swiglu_fwd_impl")
 swiglu_bwd_impl = getattr(ttx_backend_module, "swiglu_bwd_impl")
 
-rmsnorm_fwd_impl   = getattr(ttx_backend_module, "rmsnorm_fwd_impl")
-rmsnorm_bwd_impl   = getattr(ttx_backend_module, "rmsnorm_bwd_impl")
+rmsnorm_fwd_impl = getattr(ttx_backend_module, "rmsnorm_fwd_impl")
+rmsnorm_bwd_impl = getattr(ttx_backend_module, "rmsnorm_bwd_impl")
 rmsnorm_infer_impl = getattr(ttx_backend_module, "rmsnorm_infer_impl")
 
 paged_attention_prefill_impl = getattr(ttx_backend_module, "paged_attention_prefill_impl")
-paged_attention_decode_impl  = getattr(ttx_backend_module, "paged_attention_decode_impl" )
+paged_attention_decode_impl = getattr(ttx_backend_module, "paged_attention_decode_impl")
 
 fused_linear_cross_entropy_fwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_fwd_impl")
 fused_linear_cross_entropy_bwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_bwd_impl")
