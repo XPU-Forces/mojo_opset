@@ -4,7 +4,7 @@ import triton.language as tl
 
 from triton.runtime.libentry import libentry
 
-from mojo_opset.backends.ttx.kernels.ascend.utils import VEC_ALIGN_BYTES
+from mojo_opset.backends.ttx.kernels.npu.utils import VEC_ALIGN_BYTES
 from mojo_opset.backends.ttx.kernels.utils import align
 
 """

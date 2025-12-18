@@ -18,8 +18,11 @@ logger = get_logger(__name__)
 class MojoOpMeta(ABCMeta):
     def __call__(cls, *args, **kwargs):
         obj = cls.__new__(cls, *args, **kwargs)
-        kwargs.pop("backend", None)
-        cls.__init__(obj, *args, **kwargs)
+
+        if isinstance(obj, cls):
+            kwargs.pop("backend", None)
+            obj.__init__(*args, **kwargs)
+
         return obj
 
 

@@ -6,9 +6,9 @@ from typing import Union
 
 import torch
 
-from mojo_opset.backends.ttx.kernels.ascend.sample import fused_penalties_temp_impl
-from mojo_opset.backends.ttx.kernels.ascend.sample import top_p_filter_impl
-from mojo_opset.backends.ttx.kernels.ascend.sample import top_p_sampling_impl
+from mojo_opset.backends.ttx.kernels.npu.sample import fused_penalties_temp_impl
+from mojo_opset.backends.ttx.kernels.npu.sample import top_p_filter_impl
+from mojo_opset.backends.ttx.kernels.npu.sample import top_p_sampling_impl
 from mojo_opset.core import MojoApplyPenaltiesTempurate
 from mojo_opset.core import MojoTopPFilter
 from mojo_opset.core import MojoTopPSampling
@@ -28,6 +28,8 @@ class TTXTopPSampling(MojoTopPSampling, default_priority=0):
 
 
 class TTXTopPFilter(MojoTopPFilter, default_priority=0):
+    supported_platforms_list = ["npu"]
+
     def forward_std(self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int) -> Tuple[Any]:
         return top_p_filter_impl(
             logits=logits,
@@ -39,6 +41,8 @@ class TTXTopPFilter(MojoTopPFilter, default_priority=0):
 
 
 class TTXApplyPenaltiesTempurate(MojoApplyPenaltiesTempurate, default_priority=0):
+    supported_platforms_list = ["npu"]
+
     def forward_std(
         self,
         logits: torch.Tensor,
