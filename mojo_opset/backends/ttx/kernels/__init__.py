@@ -331,17 +331,20 @@ if os.getenv("MOJO_RUN_MODE", "compile") == "compile":
             else:
                 z_loss = torch.empty((), dtype=_input.dtype, device=_input.device)
 
-        grad_input = torch.empty_like(_input)
+        if reduction == "none":
+            return loss, z_loss, None, None, None
+        else:
+            grad_input = torch.empty_like(_input)
 
-        grad_weight = None
-        if weight.requires_grad:
-            grad_weight = torch.empty_like(weight)
+            grad_weight = None
+            if weight.requires_grad:
+                grad_weight = torch.empty_like(weight)
 
-        grad_bias = None
-        if bias is not None:
-            grad_bias = torch.empty_like(bias)
+            grad_bias = None
+            if bias is not None:
+                grad_bias = torch.empty_like(bias)
 
-        return loss, z_loss, grad_input, grad_weight, grad_bias
+            return loss, z_loss, grad_input, grad_weight, grad_bias
 
     @torch.library.custom_op("ttx::fused_linear_cross_entropy_bwd_recompute", mutates_args={})
     def fused_linear_cross_entropy_bwd_recompute(
@@ -371,7 +374,7 @@ if os.getenv("MOJO_RUN_MODE", "compile") == "compile":
             accum_dtype,
         )
 
-    @fused_linear_cross_entropy_fwd.register_fake
+    @fused_linear_cross_entropy_bwd_recompute.register_fake
     def fused_linear_cross_entropy_bwd_recompute_fake(
         grad_output: torch.Tensor,
         _input: torch.Tensor,
@@ -388,7 +391,7 @@ if os.getenv("MOJO_RUN_MODE", "compile") == "compile":
         grad_input = torch.empty_like(_input)
 
         grad_weight = None
-        if weight.requires_grad:
+        if weight is not None:
             grad_weight = torch.empty_like(weight)
 
         grad_bias = None
