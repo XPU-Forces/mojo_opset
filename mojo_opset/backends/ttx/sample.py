@@ -28,6 +28,8 @@ class TTXTopPSampling(MojoTopPSampling, default_priority=0):
 
 
 class TTXTopPFilter(MojoTopPFilter, default_priority=0):
+    supported_platforms_list = ["npu"]
+
     def forward_std(self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int) -> Tuple[Any]:
         return top_p_filter_impl(
             logits=logits,
@@ -39,6 +41,8 @@ class TTXTopPFilter(MojoTopPFilter, default_priority=0):
 
 
 class TTXApplyPenaltiesTempurate(MojoApplyPenaltiesTempurate, default_priority=0):
+    supported_platforms_list = ["npu"]
+
     def forward_std(
         self,
         logits: torch.Tensor,

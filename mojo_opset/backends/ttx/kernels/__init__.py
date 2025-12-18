@@ -1,5 +1,5 @@
-import os
 import importlib
+import os
 
 from typing import Optional
 from typing import Tuple
@@ -9,7 +9,7 @@ import torch
 from mojo_opset.utils.platform import get_platform
 
 _PLATFROM_MAP = {
-    "npu" : "ascend",
+    "npu": "ascend",
 }
 
 platform = get_platform()
@@ -33,12 +33,12 @@ rope_bwd_impl = getattr(ttx_backend_module, "rope_bwd_impl")
 swiglu_fwd_impl = getattr(ttx_backend_module, "swiglu_fwd_impl")
 swiglu_bwd_impl = getattr(ttx_backend_module, "swiglu_bwd_impl")
 
-rmsnorm_fwd_impl   = getattr(ttx_backend_module, "rmsnorm_fwd_impl")
-rmsnorm_bwd_impl   = getattr(ttx_backend_module, "rmsnorm_bwd_impl")
+rmsnorm_fwd_impl = getattr(ttx_backend_module, "rmsnorm_fwd_impl")
+rmsnorm_bwd_impl = getattr(ttx_backend_module, "rmsnorm_bwd_impl")
 rmsnorm_infer_impl = getattr(ttx_backend_module, "rmsnorm_infer_impl")
 
 paged_attention_prefill_impl = getattr(ttx_backend_module, "paged_attention_prefill_impl")
-paged_attention_decode_impl  = getattr(ttx_backend_module, "paged_attention_decode_impl" )
+paged_attention_decode_impl = getattr(ttx_backend_module, "paged_attention_decode_impl")
 
 fused_linear_cross_entropy_fwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_fwd_impl")
 fused_linear_cross_entropy_bwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_bwd_impl")
