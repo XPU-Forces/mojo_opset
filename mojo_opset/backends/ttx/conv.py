@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 
 from mojo_opset.backends.ttx.kernels.ascend.convolution import causal_conv1d_bwd
@@ -12,13 +14,13 @@ class TTXCausalConv1dFunction(MojoCausalConv1dFunction):
     def forward(
         ctx,
         x: torch.Tensor,
-        weight: torch.Tensor | None = None,
-        bias: torch.Tensor | None = None,
-        residual: torch.Tensor | None = None,
-        initial_state: torch.Tensor | None = None,
-        output_final_state: bool | None = False,
-        activation: str | None = None,
-        cu_seqlens: torch.Tensor | None = None,
+        weight: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+        residual: Optional[torch.Tensor] = None,
+        initial_state: Optional[torch.Tensor] = None,
+        output_final_state: bool = False,
+        activation: str = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
     ):
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
@@ -37,7 +39,7 @@ class TTXCausalConv1dFunction(MojoCausalConv1dFunction):
 
     @staticmethod
     @input_guard(make_contiguous=True, auto_to_device=True)
-    def backward(ctx, dy: torch.Tensor, dht: torch.Tensor | None = None):
+    def backward(ctx, dy: torch.Tensor, dht: Optional[torch.Tensor]):
         x, weight, bias, residual, initial_state = ctx.saved_tensors
         dx, dw, db, dr, dh0 = causal_conv1d_bwd(
             x=x,
