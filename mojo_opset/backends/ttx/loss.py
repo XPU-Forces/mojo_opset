@@ -4,7 +4,8 @@ import torch
 
 from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_bwd
 from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_fwd
-from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_bwd_recompute
+from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_1d_bwd
+from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_1d_fwd
 from mojo_opset.backends.ttx.kernels.ascend.fused_linear_cross_entropy import amp_custom_bwd
 from mojo_opset.backends.ttx.kernels.ascend.fused_linear_cross_entropy import amp_custom_fwd
 from mojo_opset.core import MojoFusedLinearCrossEntropyFunction
@@ -48,23 +49,20 @@ class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
         accum_dtype (torch.dtype): the dtype of intermediate result buffers for weight and bias gradient accumulations.
             Recommended to set `accum_dtype` to higher precision, e.g. `torch.float32`, if the training is unstable with original dtype. Default: `None`, performing accumulations in original dtype
         """
-
-        loss, z_loss, grad_input, grad_weight, grad_bias = fused_linear_cross_entropy_fwd(
-            _input=_input,
-            weight=weight,
-            target=target,
-            bias=bias,
-            ce_weight=ce_weight,
-            ignore_index=ignore_index,
-            lse_square_scale=lse_square_scale,
-            label_smoothing=label_smoothing,
-            reduction=reduction,
-            softcap=softcap,
-            return_z_loss=return_z_loss,
-            accum_dtype=accum_dtype,
-        )
         # downcast to dtype and store for backward
         if reduction == "none":
+            loss, z_loss = fused_linear_cross_entropy_1d_fwd(
+                _input=_input,
+                weight=weight,
+                target=target,
+                bias=bias,
+                ce_weight=ce_weight,
+                ignore_index=ignore_index,
+                lse_square_scale=lse_square_scale,
+                label_smoothing=label_smoothing,
+                softcap=softcap,
+                return_z_loss=return_z_loss,
+            )
             ctx.save_for_backward(
                 _input.detach(),
                 weight.detach() if weight is not None else None,
@@ -81,6 +79,20 @@ class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
             ctx.accum_dtype = accum_dtype
 
         else:
+            loss, z_loss, grad_input, grad_weight, grad_bias = fused_linear_cross_entropy_fwd(
+                _input=_input,
+                weight=weight,
+                target=target,
+                bias=bias,
+                ce_weight=ce_weight,
+                ignore_index=ignore_index,
+                lse_square_scale=lse_square_scale,
+                label_smoothing=label_smoothing,
+                reduction=reduction,
+                softcap=softcap,
+                return_z_loss=return_z_loss,
+                accum_dtype=accum_dtype,
+            )
             ctx.save_for_backward(
                 grad_input.detach(),
                 grad_weight.detach() if grad_weight is not None else None,
@@ -102,7 +114,7 @@ class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
 
         if ctx.reduction == "none":
             _input, weight, bias = ctx.saved_tensors
-            grad_input, grad_weight, grad_bias = fused_linear_cross_entropy_bwd_recompute(
+            grad_input, grad_weight, grad_bias = fused_linear_cross_entropy_1d_bwd(
                 grad_output=grad_output,
                 _input=_input,
                 weight=weight,

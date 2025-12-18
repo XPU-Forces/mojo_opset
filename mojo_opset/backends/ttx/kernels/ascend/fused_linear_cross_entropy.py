@@ -41,6 +41,7 @@ def _cross_entropy_kernel(
     label_smoothing: tl.constexpr,
     reduction: tl.constexpr,
     softcap,
+    OVERWRITE_GRAD_LOGITS: tl.constexpr,
     IS_BACKWARD: tl.constexpr,
     RETURN_Z_LOSS: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
@@ -120,81 +121,83 @@ def _cross_entropy_kernel(
     #                    = max(X) + log (sum(e ^ (X_i - max(X)))) = m + log d
     lse = m + tl.log(d)
 
-    # [Online Softmax] Second pass: compute gradients
-    # For 'mean' reduction, gradients are normalized by number of non-ignored elements (N)
-    # dx_y = (softmax(x_y) - 1) / N
-    # dx_i = softmax(x_i) / N, i != y
-    # For label smoothing:
-    # dx_i = (softmax(x_i) - label_smoothing / V) / N, V = n_cols, i != y
-    # dx_y = (softmax(x_y) - label_smoothing / V - (1 - label_smoothing)) / N
-    #      = dx_i - (1 - label_smoothing) / N
-    # With Z loss:
-    # dx_i = ((1 + 2 * lse_square_scale * lse) * softmax(x_i) - label_smoothing / V) / N, i != y
-    # dx_y = dx_i - (1 - label_smoothing) / N
-    # For 'sum' reduction, no normalization is applied:
-    # dx_y = softmax(x_y) - 1
-    # dx_i = softmax(x_i), for i ≠ y
+    if OVERWRITE_GRAD_LOGITS:
 
-    for i in range(0, n_cols, BLOCK_SIZE):
-        X_offsets = i + tl.arange(0, BLOCK_SIZE)
+        # [Online Softmax] Second pass: compute gradients
+        # For 'mean' reduction, gradients are normalized by number of non-ignored elements (N)
+        # dx_y = (softmax(x_y) - 1) / N
+        # dx_i = softmax(x_i) / N, i != y
+        # For label smoothing:
+        # dx_i = (softmax(x_i) - label_smoothing / V) / N, V = n_cols, i != y
+        # dx_y = (softmax(x_y) - label_smoothing / V - (1 - label_smoothing)) / N
+        #      = dx_i - (1 - label_smoothing) / N
+        # With Z loss:
+        # dx_i = ((1 + 2 * lse_square_scale * lse) * softmax(x_i) - label_smoothing / V) / N, i != y
+        # dx_y = dx_i - (1 - label_smoothing) / N
+        # For 'sum' reduction, no normalization is applied:
+        # dx_y = softmax(x_y) - 1
+        # dx_i = softmax(x_i), for i ≠ y
 
-        y_is_in_this_block = (y >= i) and (y < i + BLOCK_SIZE)
+        for i in range(0, n_cols, BLOCK_SIZE):
+            X_offsets = i + tl.arange(0, BLOCK_SIZE)
 
-        X_block = tl.load(
-            X_ptr + X_offsets,
-            mask=X_offsets < n_cols,
-            other=float("-inf"),
-            # Ensure float32 precision for softmax calculation
-        ).cast(tl.float32)
-        if HAS_SOFTCAPPING:
-            intermediate = tl.math.tanh(X_block / softcap)
-            X_block = softcap * intermediate
+            y_is_in_this_block = (y >= i) and (y < i + BLOCK_SIZE)
 
-        if not HAS_WEIGHT:
-            # softmax(x_i)
-            X_block = tl.exp(X_block - m) / d
-            # derivative of z-loss: 2 * lse_square_scale * lse * softmax(x_i)
-            X_block += 2 * lse_square_scale * lse * X_block
-            # smoothing term
-            X_block += -eps
-            # special handle dx_y
-            if y_is_in_this_block:
-                is_target_class_mask = X_offsets == y
-                X_block -= is_target_class_mask * (1 - label_smoothing)
-            # X_block = tl.where(X_offsets != y, X_block, X_block - (1 - label_smoothing))
-            # reduction scale
-            if reduction == "mean":
-                X_block = X_block / n_non_ignore
-        else:
-            weight_block = tl.load(weight_ptr + X_offsets, mask=X_offsets < n_cols)
-            softmax_X = tl.exp(X_block - m) / d
-            # derivative of original_loss
-            dloss_ori = (1 - label_smoothing) * softmax_X
-            # specially handle dx_y
-            # dloss_ori = tl.where(X_offsets != y, dloss_ori, dloss_ori - (1 - label_smoothing))
-            if y_is_in_this_block:
-                is_target_class_mask = X_offsets == y
-                dloss_ori -= is_target_class_mask * (1 - label_smoothing)
-            dloss_ori = dloss_ori * weight_y
-            # derivative of smooth_loss
-            dloss_smooth = eps * (-weight_block + softmax_X * weight_sum)
-            # derivative of z-loss
-            dz_loss = 2 * lse_square_scale * lse * softmax_X
-            # reduction scale
-            if reduction == "mean":
-                dloss_ori = dloss_ori / sum_non_ignore_weight
-                dloss_smooth = dloss_smooth / sum_non_ignore_weight
-                # TODO: Implement weighted z_loss. Currently, z_loss is not scaled by weight.
-                dz_loss = dz_loss / n_non_ignore
-            # derivative of total_loss
-            X_block = dloss_ori + dloss_smooth + dz_loss
+            X_block = tl.load(
+                X_ptr + X_offsets,
+                mask=X_offsets < n_cols,
+                other=float("-inf"),
+                # Ensure float32 precision for softmax calculation
+            ).cast(tl.float32)
+            if HAS_SOFTCAPPING:
+                intermediate = tl.math.tanh(X_block / softcap)
+                X_block = softcap * intermediate
 
-        # chain rule softcapping
-        # d(softcap * tanh(x / softcap)) = (1 - tanh^2(x / softcap))
-        if HAS_SOFTCAPPING:
-            X_block = X_block * (1 - intermediate * intermediate)
+            if not HAS_WEIGHT:
+                # softmax(x_i)
+                X_block = tl.exp(X_block - m) / d
+                # derivative of z-loss: 2 * lse_square_scale * lse * softmax(x_i)
+                X_block += 2 * lse_square_scale * lse * X_block
+                # smoothing term
+                X_block += -eps
+                # special handle dx_y
+                if y_is_in_this_block:
+                    is_target_class_mask = X_offsets == y
+                    X_block -= is_target_class_mask * (1 - label_smoothing)
+                # X_block = tl.where(X_offsets != y, X_block, X_block - (1 - label_smoothing))
+                # reduction scale
+                if reduction == "mean":
+                    X_block = X_block / n_non_ignore
+            else:
+                weight_block = tl.load(weight_ptr + X_offsets, mask=X_offsets < n_cols)
+                softmax_X = tl.exp(X_block - m) / d
+                # derivative of original_loss
+                dloss_ori = (1 - label_smoothing) * softmax_X
+                # specially handle dx_y
+                # dloss_ori = tl.where(X_offsets != y, dloss_ori, dloss_ori - (1 - label_smoothing))
+                if y_is_in_this_block:
+                    is_target_class_mask = X_offsets == y
+                    dloss_ori -= is_target_class_mask * (1 - label_smoothing)
+                dloss_ori = dloss_ori * weight_y
+                # derivative of smooth_loss
+                dloss_smooth = eps * (-weight_block + softmax_X * weight_sum)
+                # derivative of z-loss
+                dz_loss = 2 * lse_square_scale * lse * softmax_X
+                # reduction scale
+                if reduction == "mean":
+                    dloss_ori = dloss_ori / sum_non_ignore_weight
+                    dloss_smooth = dloss_smooth / sum_non_ignore_weight
+                    # TODO: Implement weighted z_loss. Currently, z_loss is not scaled by weight.
+                    dz_loss = dz_loss / n_non_ignore
+                # derivative of total_loss
+                X_block = dloss_ori + dloss_smooth + dz_loss
 
-        tl.store(X_ptr + X_offsets, X_block, mask=X_offsets < n_cols)
+            # chain rule softcapping
+            # d(softcap * tanh(x / softcap)) = (1 - tanh^2(x / softcap))
+            if HAS_SOFTCAPPING:
+                X_block = X_block * (1 - intermediate * intermediate)
+
+            tl.store(X_ptr + X_offsets, X_block, mask=X_offsets < n_cols)
 
     if not IS_BACKWARD:
 
@@ -275,6 +278,7 @@ def _cross_entropy_prime_kernel(
     lse_square_scale: tl.constexpr,
     label_smoothing: tl.constexpr,
     reduction: tl.constexpr,
+    OVERWRITE_GRAD_LOGITS: tl.constexpr,
     IS_BACKWARD: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -330,24 +334,25 @@ def _cross_entropy_prime_kernel(
 
         lse = m + tl.log(d)
 
-        # Second pass: calculate gradient and overwrite X in-place
-        for i in range(0, n_cols, BLOCK_SIZE):
-            X_offsets = i + tl.arange(0, BLOCK_SIZE)
-            X_mask = X_offsets < n_cols
+        if OVERWRITE_GRAD_LOGITS:
+            # Second pass: calculate gradient and overwrite X in-place
+            for i in range(0, n_cols, BLOCK_SIZE):
+                X_offsets = i + tl.arange(0, BLOCK_SIZE)
+                X_mask = X_offsets < n_cols
 
-            X_block = tl.load(
-                current_X_ptr + X_offsets,
-                mask=X_mask,
-                other=float("-inf"),
-            ).cast(tl.float32)
+                X_block = tl.load(
+                    current_X_ptr + X_offsets,
+                    mask=X_mask,
+                    other=float("-inf"),
+                ).cast(tl.float32)
 
-            X_block = tl.exp(X_block - m) / d
-            X_block += 2 * lse_square_scale * lse * X_block
-            X_block += -eps
-            if reduction == "mean":
-                X_block = X_block / n_non_ignore
+                X_block = tl.exp(X_block - m) / d
+                X_block += 2 * lse_square_scale * lse * X_block
+                X_block += -eps
+                if reduction == "mean":
+                    X_block = X_block / n_non_ignore
 
-            tl.store(current_X_ptr + X_offsets, X_block, mask=X_mask)
+                tl.store(current_X_ptr + X_offsets, X_block, mask=X_mask)
 
         if not IS_BACKWARD:
             current_loss_ptr = loss_ptr + row_idx * loss_stride_row
@@ -468,14 +473,13 @@ def fused_linear_cross_entropy_fwd_impl(
     chunk_size = triton.next_power_of_2(triton.cdiv(BT, inc_factor))  # (BT + inc_factor - 1) // inc_factor
     num_chunks = triton.cdiv(BT, chunk_size)  # (BT + chunk_size - 1) // chunk_size
 
-    if reduction != "none":
-        grad_input = torch.zeros_like(_input, device=device)
-        if accum_dtype is None:
-            grad_weight = torch.zeros_like(weight, device=device) if weight.requires_grad else None
-            grad_bias = torch.zeros_like(bias, device=device) if bias is not None else None
-        else:
-            grad_weight = torch.zeros_like(weight, dtype=accum_dtype, device=device) if weight.requires_grad else None
-            grad_bias = torch.zeros_like(bias, dtype=accum_dtype, device=device) if bias is not None else None
+    grad_input = torch.zeros_like(_input, device=device)
+    if accum_dtype is None:
+        grad_weight = torch.zeros_like(weight, device=device) if weight.requires_grad else None
+        grad_bias = torch.zeros_like(bias, device=device) if bias is not None else None
+    else:
+        grad_weight = torch.zeros_like(weight, dtype=accum_dtype, device=device) if weight.requires_grad else None
+        grad_bias = torch.zeros_like(bias, dtype=accum_dtype, device=device) if bias is not None else None
 
     loss_1d = torch.zeros(BT, dtype=torch.float32, device=device)
     z_loss_1d = torch.zeros(BT, dtype=_input.dtype, device=_input.device) if return_z_loss else None
@@ -538,6 +542,7 @@ def fused_linear_cross_entropy_fwd_impl(
                 lse_square_scale=lse_square_scale,
                 label_smoothing=label_smoothing,
                 reduction=reduction,
+                OVERWRITE_GRAD_LOGITS=True,
                 IS_BACKWARD=False,
             )
             loss_1d_slice.masked_fill_(~target_chunk_mask, 0.0)
@@ -577,6 +582,7 @@ def fused_linear_cross_entropy_fwd_impl(
                 lse_square_scale=lse_square_scale,
                 label_smoothing=label_smoothing,
                 reduction=reduction,
+                OVERWRITE_GRAD_LOGITS=True,
                 IS_BACKWARD=False,
                 softcap=softcap,
                 RETURN_Z_LOSS=return_z_loss,
@@ -584,37 +590,206 @@ def fused_linear_cross_entropy_fwd_impl(
                 HAS_SOFTCAPPING=True if softcap is not None else False,
             )
 
-        # if reduction is none, we cannot accumulate grad_weight and grad_bias as they have different grad_out along the BT dim
-        if reduction != "none":
-            grad_logits_chunk = logits_chunk  # chunk_size x V
-            grad_input[start_idx:end_idx] = torch.matmul(grad_logits_chunk, weight)
+        grad_logits_chunk = logits_chunk  # chunk_size x V
+        grad_input[start_idx:end_idx] = torch.matmul(grad_logits_chunk, weight)
 
-            if grad_weight is not None:
-                grad_weight += torch.mm(grad_logits_chunk.t(), _input_chunk).float()
+        if grad_weight is not None:
+            grad_weight += torch.mm(grad_logits_chunk.t(), _input_chunk).float()
 
-            if bias is not None:
-                torch.add(
-                    input=grad_bias,
-                    other=logits_chunk.sum(dim=0),
-                    out=grad_bias,
-                    alpha=1.0,
-                )
+        if bias is not None:
+            torch.add(
+                input=grad_bias,
+                other=logits_chunk.sum(dim=0),
+                out=grad_bias,
+                alpha=1.0,
+            )
 
     # Need extra calculations for backward if reduction=='none'. Not supporting reduction='none' now.
-    if reduction != "none":
-        loss = torch.sum(loss_1d)
-        z_loss = torch.sum(z_loss_1d) if return_z_loss else None
+    loss = torch.sum(loss_1d)
+    z_loss = torch.sum(z_loss_1d) if return_z_loss else None
 
-        # Cast back to original dtype
-        grad_weight = grad_weight.to(weight.dtype) if grad_weight is not None else None
-        grad_bias = grad_bias.to(bias.dtype) if grad_bias is not None else None
+    # Cast back to original dtype
+    grad_weight = grad_weight.to(weight.dtype) if grad_weight is not None else None
+    grad_bias = grad_bias.to(bias.dtype) if grad_bias is not None else None
 
-        return loss, z_loss, grad_input, grad_weight, grad_bias
-    else:
-        return loss_1d, z_loss_1d, None, None, None
+    return loss, z_loss, grad_input, grad_weight, grad_bias
 
 
-def fused_linear_cross_entropy_bwd_recompute_impl(
+def fused_linear_cross_entropy_bwd_impl(
+    grad_output: torch.Tensor,
+    grad_input: torch.Tensor,
+    grad_weight: Optional[torch.Tensor] = None,
+    grad_bias: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # If cross entropy is the last layer, grad_output is 1.0. Skip the mul to save time
+    if not torch.equal(grad_output, torch.tensor(1.0, device=grad_output.device)):
+        # We use a Triton kernel instead of a PyTorch operation because modifying inputs in-place
+        # for gradient storage and backward multiple times causes anomalies with PyTorch but not with Triton.
+        BT, H = grad_input.shape
+        n_rows = BT
+
+        num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
+        _element_mul_kernel[(num_programs,)](
+            grad_input,
+            grad_output,
+            n_rows,
+            H,
+            grad_input.stride(-2),
+        )
+
+        # handle grad_weight
+        if grad_weight is not None:
+            V, H = grad_weight.shape
+            n_rows = V
+
+            _element_mul_kernel[(num_programs,)](
+                grad_weight,
+                grad_output,
+                n_rows,
+                H,
+                grad_weight.stride(-2),
+            )
+
+        if grad_bias is not None:
+            V = grad_bias.shape[0]
+            n_rows = V
+
+            _element_mul_kernel[(num_programs,)](
+                grad_bias,
+                grad_output,
+                n_rows,
+                1,
+                grad_bias.stride(-1),
+            )
+    return grad_input, grad_weight, grad_bias
+
+
+def fused_linear_cross_entropy_1d_fwd_impl(
+    _input: torch.Tensor,
+    weight: torch.Tensor,
+    target: torch.Tensor,
+    ce_weight: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    ignore_index: int = -100,
+    lse_square_scale: float = 0.0,
+    label_smoothing: float = 0.0,
+    softcap: Optional[float] = None,
+    return_z_loss: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    assert isinstance(return_z_loss, bool), f"return_z_loss must be True or False. Got: {return_z_loss}"
+    device = _input.device
+
+    # inputs have shape: BT x H
+    # materialized activations will have shape: BT x V
+    # the increase in memory = BT x V
+    # reduction can be achieved by partitioning the number of tokens BT into smaller chunks.
+    # for ex: if we were to achieve the same memory consumption as BT x H, then the chunk size should be:
+    # inc_factor = (V+H-1)//H, chunk_size = (BT + inc_factor - 1)//inc_factor
+    # for ex: BT = 4096*4, V = 32000, H = 4096 ==> inc_factor = 8, chunk_size = 2048
+    BT, H = _input.shape
+    V = weight.shape[0]
+
+    inc_factor = triton.cdiv(V, H)  # (V + H - 1) // H
+    chunk_size = triton.next_power_of_2(triton.cdiv(BT, inc_factor))  # (BT + inc_factor - 1) // inc_factor
+    num_chunks = triton.cdiv(BT, chunk_size)  # (BT + chunk_size - 1) // chunk_size
+
+    loss_1d = torch.zeros(BT, dtype=torch.float32, device=device)
+    z_loss_1d = torch.zeros(BT, dtype=_input.dtype, device=_input.device) if return_z_loss else None
+
+    target_mask = target != ignore_index
+    total_n_non_ignore = target_mask.sum().item()
+
+    # assert total_n_non_ignore == len(target), (
+    #     "TritonX limits the maximum number of programs to 65535. To support more rows, TTX kernels cap the grid launch count to the number of vector cores and introduce a loop. As a result, ignore_index is temporarily unsupported because Triton does not allow control-flow statements like 'continue'."
+    # )
+    total_sum_non_ignore_ce_weight = total_n_non_ignore
+    ce_weight_sum = 0.0
+    if ce_weight is not None:
+        assert ce_weight.shape[0] == V, f"If given, weight has to be a Tensor of size V. Got: {ce_weight.shape}"
+        assert torch.is_floating_point(
+            ce_weight
+        ), f"If given, weight has to be a Tensor of floating point dtype. Got: {ce_weight.dtype}"
+        total_sum_non_ignore_ce_weight = (
+            torch.gather(ce_weight, dim=0, index=target.masked_select(target_mask)).sum().item()
+        )
+        ce_weight_sum = ce_weight.sum().item()
+        if ce_weight.stride(-1) != 1:
+            ce_weight = ce_weight.contiguous()
+
+    for chunk_id in range(num_chunks):
+        start_idx = chunk_id * chunk_size
+        end_idx = min((chunk_id + 1) * chunk_size, BT)
+        _input_chunk = _input[start_idx:end_idx]  # chunk_size x H
+
+        logits_chunk = _input_chunk @ weight.t()  # chunk_size x V
+        if bias is not None:
+            logits_chunk = logits_chunk + bias
+
+        target_chunk = target[start_idx:end_idx]  # chunk_size,
+
+        n_rows = logits_chunk.shape[0]
+
+        target_chunk_mask = target_chunk != ignore_index
+
+        loss_1d_slice = loss_1d[start_idx:end_idx]  # chunk_size,
+        z_loss_1d_slice = z_loss_1d[start_idx:end_idx] if return_z_loss else None
+
+        logits_chunk = logits_chunk.contiguous()
+        target_chunk = target_chunk.contiguous()
+
+        if (ce_weight is None) and (not return_z_loss) and (softcap is None):
+            num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
+
+            _cross_entropy_prime_kernel[(num_programs,)](
+                X_ptr=logits_chunk,
+                Y_ptr=target_chunk,
+                loss_ptr=loss_1d_slice,
+                n_rows=n_rows,
+                n_cols=V,
+                X_stride_row=logits_chunk.stride(0),
+                Y_stride_row=target_chunk.stride(0),
+                loss_stride_row=loss_1d_slice.stride(0),
+                n_non_ignore=total_n_non_ignore,
+                ignore_index=ignore_index,
+                lse_square_scale=lse_square_scale,
+                label_smoothing=label_smoothing,
+                reduction="none",
+                OVERWRITE_GRAD_LOGITS=False,
+                IS_BACKWARD=False,
+            )
+            loss_1d_slice.masked_fill_(~target_chunk_mask, 0.0)
+
+        else:
+            # Here we calculate the gradient of logits_chunk in place so we can save memory.
+            _cross_entropy_kernel[(n_rows,)](
+                X_ptr=logits_chunk,
+                X_stride=logits_chunk.stride(-2),
+                Y_ptr=target_chunk,
+                Y_stride=target_chunk.stride(-1),  # always 1
+                weight_ptr=ce_weight,
+                loss_ptr=loss_1d_slice,
+                z_loss_ptr=z_loss_1d_slice,
+                loss_stride=loss_1d_slice.stride(-1),  # always 1
+                n_cols=V,
+                n_non_ignore=total_n_non_ignore,
+                sum_non_ignore_weight=total_sum_non_ignore_ce_weight,
+                weight_sum=ce_weight_sum,
+                ignore_index=ignore_index,
+                lse_square_scale=lse_square_scale,
+                label_smoothing=label_smoothing,
+                reduction="none",
+                OVERWRITE_GRAD_LOGITS=False,
+                IS_BACKWARD=False,
+                softcap=softcap,
+                RETURN_Z_LOSS=return_z_loss,
+                HAS_WEIGHT=True if ce_weight is not None else False,
+                HAS_SOFTCAPPING=True if softcap is not None else False,
+            )
+
+    return loss_1d, z_loss_1d
+
+
+def fused_linear_cross_entropy_1d_bwd_impl(
     grad_output: torch.Tensor,
     _input: torch.Tensor,
     weight: torch.Tensor,
@@ -708,6 +883,7 @@ def fused_linear_cross_entropy_bwd_recompute_impl(
                 lse_square_scale=lse_square_scale,
                 label_smoothing=label_smoothing,
                 reduction="none",
+                OVERWRITE_GRAD_LOGITS=True,
                 IS_BACKWARD=True,
             )
 
@@ -744,6 +920,7 @@ def fused_linear_cross_entropy_bwd_recompute_impl(
                 lse_square_scale=lse_square_scale,
                 label_smoothing=label_smoothing,
                 reduction="none",
+                OVERWRITE_GRAD_LOGITS=True,
                 IS_BACKWARD=True,
                 softcap=softcap,
                 RETURN_Z_LOSS=False,
@@ -751,8 +928,7 @@ def fused_linear_cross_entropy_bwd_recompute_impl(
                 HAS_SOFTCAPPING=True if softcap is not None else False,
             )
 
-        grad_logits_chunk = logits_chunk  # chunk_size x V
-        grad_logits_chunk *= grad_output_chunk.unsqueeze(1)
+        grad_logits_chunk = logits_chunk * grad_output_chunk.unsqueeze(1)  # chunk_size x V
         grad_input[start_idx:end_idx] = torch.matmul(grad_logits_chunk, weight)
 
         if grad_weight is not None:
@@ -770,53 +946,4 @@ def fused_linear_cross_entropy_bwd_recompute_impl(
     grad_weight = grad_weight.to(weight.dtype) if grad_weight is not None else None
     grad_bias = grad_bias.to(bias.dtype) if grad_bias is not None else None
 
-    return grad_input, grad_weight, grad_bias
-
-
-def fused_linear_cross_entropy_bwd_impl(
-    grad_output: torch.Tensor,
-    grad_input: torch.Tensor,
-    grad_weight: Optional[torch.Tensor] = None,
-    grad_bias: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    # If cross entropy is the last layer, grad_output is 1.0. Skip the mul to save time
-    if not torch.equal(grad_output, torch.tensor(1.0, device=grad_output.device)):
-        # We use a Triton kernel instead of a PyTorch operation because modifying inputs in-place
-        # for gradient storage and backward multiple times causes anomalies with PyTorch but not with Triton.
-        BT, H = grad_input.shape
-        n_rows = BT
-
-        num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
-        _element_mul_kernel[(num_programs,)](
-            grad_input,
-            grad_output,
-            n_rows,
-            H,
-            grad_input.stride(-2),
-        )
-
-        # handle grad_weight
-        if grad_weight is not None:
-            V, H = grad_weight.shape
-            n_rows = V
-
-            _element_mul_kernel[(num_programs,)](
-                grad_weight,
-                grad_output,
-                n_rows,
-                H,
-                grad_weight.stride(-2),
-            )
-
-        if grad_bias is not None:
-            V = grad_bias.shape[0]
-            n_rows = V
-
-            _element_mul_kernel[(num_programs,)](
-                grad_bias,
-                grad_output,
-                n_rows,
-                1,
-                grad_bias.stride(-1),
-            )
     return grad_input, grad_weight, grad_bias
