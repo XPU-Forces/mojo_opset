@@ -3,7 +3,7 @@ import torch
 from mojo_opset.backends.ttx.kernels import rmsnorm_bwd
 from mojo_opset.backends.ttx.kernels import rmsnorm_fwd
 from mojo_opset.backends.ttx.kernels import rmsnorm_infer
-from mojo_opset.backends.ttx.kernels.ascend.layernorm import ttx_layer_norm
+from mojo_opset.backends.ttx.kernels.npu.layernorm import ttx_layer_norm
 from mojo_opset.core import MojoNorm
 from mojo_opset.core import MojoRMSNormFunction
 

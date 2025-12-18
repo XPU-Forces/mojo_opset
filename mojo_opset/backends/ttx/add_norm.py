@@ -1,7 +1,7 @@
 import torch
 
-from mojo_opset.backends.ttx.kernels.ascend.fused_add_layer_norm import ttx_fused_add_layer_norm
-from mojo_opset.backends.ttx.kernels.ascend.fused_add_rms_norm import ttx_fused_add_rms_norm
+from mojo_opset.backends.ttx.kernels.npu.fused_add_layer_norm import ttx_fused_add_layer_norm
+from mojo_opset.backends.ttx.kernels.npu.fused_add_rms_norm import ttx_fused_add_rms_norm
 from mojo_opset.core import MojoResidualAddNorm
 
 

@@ -6,9 +6,9 @@ from typing import Union
 
 import torch
 
-from mojo_opset.backends.ttx.kernels.ascend.sample import fused_penalties_temp_impl
-from mojo_opset.backends.ttx.kernels.ascend.sample import top_p_filter_impl
-from mojo_opset.backends.ttx.kernels.ascend.sample import top_p_sampling_impl
+from mojo_opset.backends.ttx.kernels.npu.sample import fused_penalties_temp_impl
+from mojo_opset.backends.ttx.kernels.npu.sample import top_p_filter_impl
+from mojo_opset.backends.ttx.kernels.npu.sample import top_p_sampling_impl
 from mojo_opset.core import MojoApplyPenaltiesTempurate
 from mojo_opset.core import MojoTopPFilter
 from mojo_opset.core import MojoTopPSampling

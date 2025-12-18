@@ -8,18 +8,14 @@ import torch
 
 from mojo_opset.utils.platform import get_platform
 
-_PLATFROM_MAP = {
-    "npu": "ascend",
-}
-
 platform = get_platform()
 
-if platform in _PLATFROM_MAP:
-    backend = _PLATFROM_MAP[platform]
-else:
-    raise ImportError(f"Unsupported Triton Platform {platform}")
 
-ttx_backend_module = importlib.import_module(f".{backend}", package=__name__)
+try:
+    ttx_backend_module = importlib.import_module(f".{platform}", package=__name__)
+except ImportError:
+    raise RuntimeError(f"Unsupported Triton Platform '{platform}'.")
+
 
 gelu_fwd_impl = getattr(ttx_backend_module, "gelu_fwd_impl")
 gelu_bwd_impl = getattr(ttx_backend_module, "gelu_bwd_impl")
