@@ -1,5 +1,6 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+from typing import Optional
 
 import torch
 import triton
@@ -407,10 +408,10 @@ def causal_conv1d_fwd(
     weight: torch.Tensor,
     bias: torch.Tensor,
     residual: torch.Tensor,
-    initial_state: torch.Tensor | None = None,
+    initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
-    activation: str | None = None,
-    cu_seqlens: torch.Tensor | None = None,
+    activation: Optional[str] = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
@@ -460,12 +461,12 @@ def causal_conv1d_bwd(
     x: torch.Tensor,
     dy: torch.Tensor,
     dht: torch.Tensor,
-    weight: torch.Tensor | None = None,
-    bias: torch.Tensor | None = None,
-    residual: torch.Tensor | None = None,
-    initial_state: torch.Tensor | None = None,
-    activation: str | None = None,
-    cu_seqlens: torch.Tensor | None = None,
+    weight: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    residual: Optional[torch.Tensor] = None,
+    initial_state: Optional[torch.Tensor] = None,
+    activation: str = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
 ):
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
@@ -585,8 +586,8 @@ def causal_conv1d_states_fwd_kernel(
 def causal_conv1d_update_states(
     x: torch.Tensor,
     state_len: int,
-    initial_state: torch.Tensor | None = None,
-    cu_seqlens: torch.Tensor | None = None,
+    initial_state: Optional[torch.Tensor] = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     B, T, D, W = *x.shape, state_len
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
@@ -615,13 +616,13 @@ class CausalConv1dFunction(torch.autograd.Function):
     def forward(
         ctx,
         x: torch.Tensor,
-        weight: torch.Tensor | None = None,
-        bias: torch.Tensor | None = None,
-        residual: torch.Tensor | None = None,
-        initial_state: torch.Tensor | None = None,
-        output_final_state: bool | None = False,
-        activation: str | None = None,
-        cu_seqlens: torch.Tensor | None = None,
+        weight: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+        residual: Optional[torch.Tensor] = None,
+        initial_state: Optional[torch.Tensor] = None,
+        output_final_state: bool = False,
+        activation: str = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
     ):
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
@@ -640,7 +641,7 @@ class CausalConv1dFunction(torch.autograd.Function):
 
     @staticmethod
     @input_guard(make_contiguous=True, auto_to_device=True)
-    def backward(ctx, dy: torch.Tensor, dht: torch.Tensor | None = None):
+    def backward(ctx, dy: torch.Tensor, dht: Optional[torch.Tensor]):
         x, weight, bias, residual, initial_state = ctx.saved_tensors
         dx, dw, db, dr, dh0 = causal_conv1d_bwd(
             x=x,
@@ -659,14 +660,14 @@ class CausalConv1dFunction(torch.autograd.Function):
 @input_guard(make_contiguous=True, auto_to_device=True)
 def causal_conv1d(
     x: torch.Tensor,
-    weight: torch.Tensor | None = None,
-    bias: torch.Tensor | None = None,
-    residual: torch.Tensor | None = None,
-    initial_state: torch.Tensor | None = None,
-    output_final_state: bool | None = False,
-    activation: str | None = None,
-    backend: str | None = "triton",
-    cu_seqlens: torch.Tensor | None = None,
+    weight: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    residual: Optional[torch.Tensor] = None,
+    initial_state: Optional[torch.Tensor] = None,
+    output_final_state: bool = False,
+    activation: str = None,
+    backend: str = "triton",
+    cu_seqlens: Optional[torch.Tensor] = None,
     **kwargs,
 ):
     """

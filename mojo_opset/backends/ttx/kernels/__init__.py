@@ -1,26 +1,47 @@
 import os
+import importlib
 
 from typing import Optional
 from typing import Tuple
 
 import torch
 
-# Note: now we only support ascend backend
-from .ascend.flash_attention import paged_attention_decode_impl
-from .ascend.flash_attention import paged_attention_prefill_impl
-from .ascend.fused_linear_cross_entropy import fused_linear_cross_entropy_bwd_impl
-from .ascend.fused_linear_cross_entropy import fused_linear_cross_entropy_fwd_impl
-from .ascend.gelu import gelu_bwd_impl
-from .ascend.gelu import gelu_fwd_impl
-from .ascend.rmsnorm import rmsnorm_bwd_impl
-from .ascend.rmsnorm import rmsnorm_fwd_impl
-from .ascend.rmsnorm import rmsnorm_infer_impl
-from .ascend.rope import rope_bwd_impl
-from .ascend.rope import rope_fwd_impl
-from .ascend.silu import silu_bwd_impl
-from .ascend.silu import silu_fwd_impl
-from .ascend.swiglu import swiglu_bwd_impl
-from .ascend.swiglu import swiglu_fwd_impl
+from mojo_opset.utils.platform import get_platform
+
+_PLATFROM_MAP = {
+    "npu" : "ascend",
+}
+
+platform = get_platform()
+
+if platform in _PLATFROM_MAP:
+    backend = _PLATFROM_MAP[platform]
+else:
+    raise ImportError(f"Unsupported Triton Platform {platform}")
+
+ttx_backend_module = importlib.import_module(f".{backend}", package=__name__)
+
+gelu_fwd_impl = getattr(ttx_backend_module, "gelu_fwd_impl")
+gelu_bwd_impl = getattr(ttx_backend_module, "gelu_bwd_impl")
+
+silu_fwd_impl = getattr(ttx_backend_module, "silu_fwd_impl")
+silu_bwd_impl = getattr(ttx_backend_module, "silu_bwd_impl")
+
+rope_fwd_impl = getattr(ttx_backend_module, "rope_fwd_impl")
+rope_bwd_impl = getattr(ttx_backend_module, "rope_bwd_impl")
+
+swiglu_fwd_impl = getattr(ttx_backend_module, "swiglu_fwd_impl")
+swiglu_bwd_impl = getattr(ttx_backend_module, "swiglu_bwd_impl")
+
+rmsnorm_fwd_impl   = getattr(ttx_backend_module, "rmsnorm_fwd_impl")
+rmsnorm_bwd_impl   = getattr(ttx_backend_module, "rmsnorm_bwd_impl")
+rmsnorm_infer_impl = getattr(ttx_backend_module, "rmsnorm_infer_impl")
+
+paged_attention_prefill_impl = getattr(ttx_backend_module, "paged_attention_prefill_impl")
+paged_attention_decode_impl  = getattr(ttx_backend_module, "paged_attention_decode_impl" )
+
+fused_linear_cross_entropy_fwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_fwd_impl")
+fused_linear_cross_entropy_bwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_bwd_impl")
 
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
