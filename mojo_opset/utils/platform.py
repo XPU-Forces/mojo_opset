@@ -13,9 +13,9 @@ logger = get_logger(__name__)
 
 
 @functools.lru_cache
-def get_platform() -> Literal["npu", "mlu", "cpu"]:
+def get_platform() -> Literal["npu", "mlu", "meta_device"]:
     """
-    Detect whether the system has NPU or MLU.
+    Detect whether the system has NPU or MLU, fallback device is meta_device.
     """
     try:
         subprocess.run(["npu-smi", "info"], check=True)
@@ -28,7 +28,7 @@ def get_platform() -> Literal["npu", "mlu", "cpu"]:
             return "mlu"
         except (subprocess.SubprocessError, FileNotFoundError):
             logger.info("No accelerator detected")
-            return "cpu"
+            return "meta_device"
 
 
 def get_impl_by_platform():

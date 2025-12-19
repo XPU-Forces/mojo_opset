@@ -27,7 +27,7 @@ class MojoOpMeta(ABCMeta):
 
 
 class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
-    supported_platforms_list = ["npu", "mlu"]
+    supported_platforms_list = ["npu", "mlu", "meta_device"]
 
     def __init_subclass__(cls, default_priority=0, backend="ttx", **kwargs):
         super().__init_subclass__(**kwargs)
