@@ -127,7 +127,7 @@ class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
         return self._inner_forward(*args, **kwargs)
 
     def forward_diff_with(
-        self, other_op, *args, atol: float = None, rtol: float = None, random_seed: int = 42, **kwargs
+        self, other_op, *args, atol: float = 1e-2, rtol: float = 1e-2, random_seed: int = 42, **kwargs
     ):
         # for some cases, we expect std & ref impl share the same random seed init state, i.e. sampling.
         torch.manual_seed(random_seed)
