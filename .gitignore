@@ -181,3 +181,5 @@ detect_cuda_version.cc
 fusion_result.json
 kernel_meta*
 *.pt
+
+npu_profiling*
