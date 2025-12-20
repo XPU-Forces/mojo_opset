@@ -7,9 +7,9 @@ from tests.utils import bypass_not_implemented
 from mojo_opset import MojoGelu
 from mojo_opset import MojoSilu
 from mojo_opset import MojoSwiGLU
-from zhangjihang.mojo_opset.mojo_opset.backends.reference.operators.activation import RefGelu
-from zhangjihang.mojo_opset.mojo_opset.backends.reference.operators.activation import RefSilu
-from zhangjihang.mojo_opset.mojo_opset.backends.reference.operators.activation import RefSwiGLU
+from mojo_opset.backends.reference.operators.activation import RefGelu
+from mojo_opset.backends.reference.operators.activation import RefSilu
+from mojo_opset.backends.reference.operators.activation import RefSwiGLU
 
 
 @pytest.mark.parametrize(

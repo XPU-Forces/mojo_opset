@@ -5,7 +5,7 @@ from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoRoPE
-from mojo_opset.backends.reference.pos_emb import RefRoPE
+from mojo_opset.backends.reference.operators.position_embedding import RefRoPE
 
 
 @pytest.mark.parametrize(
