@@ -14,11 +14,8 @@ from triton.runtime.libentry import libentry
         triton.Config({"TOKEN_BLOCK_SIZE": 4}),
         triton.Config({"TOKEN_BLOCK_SIZE": 8}),
         triton.Config({"TOKEN_BLOCK_SIZE": 16}),
-        triton.Config({"TOKEN_BLOCK_SIZE": 24}),
-        triton.Config({"TOKEN_BLOCK_SIZE": 32}),
-        triton.Config({"TOKEN_BLOCK_SIZE": 64}),
     ],
-    key=["n_qh", "n_kh", "hd", "seq_len"],
+    key=["n_qh", "n_kh", "hd"],
     restore_value=["q_ptr", "k_ptr"],
 )
 @libentry()
@@ -72,9 +69,7 @@ def _rope_forward_kernel(
             head_q_offsets = tl.arange(0, n_qh)
             head_k_offsets = tl.arange(0, n_kh)
 
-            # q_base_ptr = q_ptr + batch_idx * q_batch_stride
             q_offsets_half1 = (
-                # q_base_ptr
                 batch_idx * q_batch_stride
                 + seq_offsets[:, None, None] * q_seq_stride
                 + head_q_offsets[None, :, None] * hd
@@ -92,18 +87,9 @@ def _rope_forward_kernel(
             new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row
             new_q_tile_2 = q_tile_2 * cos_row + q_tile_1 * sin_row
 
-            # q_base_ptr = q_rope_ptr + batch_idx * q_batch_stride
-            # q_offsets_half1 = (
-            #     q_base_ptr
-            #     + seq_offsets[:, None, None] * q_seq_stride
-            #     + head_q_offsets[None, :, None] * hd
-            #     + dim_offsets[None, None, :]
-            # )
-            # q_offsets_half2 = q_offsets_half1 + (half_hd)
             tl.store(q_rope_ptr + q_offsets_half1, new_q_tile_1, mask=q_mask)
             tl.store(q_rope_ptr + q_offsets_half2, new_q_tile_2, mask=q_mask)
 
-            # k_base_ptr = k_ptr + batch_idx * k_batch_stride
             k_offsets_half1 = (
                 batch_idx * k_batch_stride
                 + seq_offsets[:, None, None] * k_seq_stride
@@ -130,11 +116,8 @@ def _rope_forward_kernel(
         triton.Config({"TOKEN_BLOCK_SIZE": 4}),
         triton.Config({"TOKEN_BLOCK_SIZE": 8}),
         triton.Config({"TOKEN_BLOCK_SIZE": 16}),
-        triton.Config({"TOKEN_BLOCK_SIZE": 24}),
-        triton.Config({"TOKEN_BLOCK_SIZE": 32}),
-        triton.Config({"TOKEN_BLOCK_SIZE": 64}),
     ],
-    key=["n_qh", "n_kh", "hd", "seq_len"],
+    key=["n_qh", "n_kh", "hd"],
     restore_value=["dq_ptr", "dk_ptr"],
 )
 @libentry()
