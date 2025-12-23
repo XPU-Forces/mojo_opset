@@ -84,9 +84,7 @@ class MojoPagedDecodeGQA(MojoOperator):
         self.tp_size = tp_size
         self.is_varlen = is_varlen
 
-    def forward(
-        self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None
-    ) -> Tuple[Any]:
+    def forward(self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None) -> Tuple[Any]:
         raise NotImplementedError
 
 
@@ -224,7 +222,7 @@ class MojoSdpa(MojoOperator):
         enable_gqa=False,
         name: str = "",
         layer_idx: int = 0,
-        scale: Optional[float] = None
+        scale: Optional[float] = None,
     ):
         super().__init__(name, layer_idx)
         self.mask = mask

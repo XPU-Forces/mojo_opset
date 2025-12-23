@@ -39,9 +39,13 @@ paged_attention_decode_impl = getattr(ttx_backend_module, "paged_attention_decod
 fused_linear_cross_entropy_fwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_fwd_impl")
 fused_linear_cross_entropy_bwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_bwd_impl")
 
+<<<<<<< HEAD
 sdpa_infer_impl = getattr(ttx_backend_module, "sdpa_infer_impl")
 sdpa_fwd_impl = getattr(ttx_backend_module, "sdpa_fwd_impl")
 sdpa_bwd_impl = getattr(ttx_backend_module, "sdpa_bwd_impl")
+=======
+sdpa_impl = getattr(ttx_backend_module, "sdpa_impl")
+>>>>>>> 708d912 (support sdpa inference)
 
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
