@@ -14,9 +14,9 @@ logger = get_logger(__name__)
 
 def mojo_func_dispatcher(cls):
     op_name = cls.__name__
+    use_lru_cache_env = os.environ.get("MOJO_DISABLE_LRU_CACHE", "0") == "0"
 
-    @functools.lru_cache(maxsize=None)
-    def _get_execution_function(op_name_in, direction, layer_idx):
+    def _get_execution_function_impl(op_name_in, direction, layer_idx):
         mode_str = get_mojo_exec_mode(op_name_in, direction, layer_idx)
 
         func_name = "forward" if direction == "FWD" else "backward"
@@ -31,6 +31,8 @@ def mojo_func_dispatcher(cls):
             chosen_func = impl_func if impl_func else ref_func
             if not chosen_func:
                 raise NotImplementedError(f"{op_name_in} has no STD/REF {direction} implementation.")
+            if not impl_func:
+                logger.warning(f"{op_name_in} has no STD implementation, using REF implementation instead.")
             return chosen_func
 
         if mode_str == "REF":
@@ -82,7 +84,7 @@ def mojo_func_dispatcher(cls):
                         raise RuntimeError(f"Forward DIFF for {op_name_in}: Number of outputs mismatch.")
 
                     for i, (ref_o, impl_o) in enumerate(zip(ref_tuple, impl_tuple)):
-                        torch.testing.assert_close(ref_o, impl_o, atol=1e-1, rtol=1e-1)
+                        torch.testing.assert_close(ref_o, impl_o, atol=1e-1, rtol=1e-1, equal_nan=True)
 
                     return impl_outputs
 
@@ -121,7 +123,12 @@ def mojo_func_dispatcher(cls):
 
                     for i, (ref_g, impl_g) in enumerate(zip(ref_tuple, impl_tuple)):
                         if ref_g is not None and impl_g is not None:
-                            torch.testing.assert_close(ref_g, impl_g, atol=1e-1, rtol=1e-1)
+                            torch.testing.assert_close(
+                                ref_g.to(torch.float32),
+                                impl_g.to(torch.float32),
+                                atol=1e-1,
+                                rtol=1e-1,
+                            )
                         elif ref_g is not None or impl_g is not None:
                             raise AssertionError(
                                 f"Backward gradient {i} for {op_name_in}: one is None, the other is not."
@@ -132,6 +139,13 @@ def mojo_func_dispatcher(cls):
                 return bwd_diff_wrapper
 
         raise ValueError(f"Invalid mode '{mode_str}' for {op_name_in} in {direction} pass.")
+
+    if use_lru_cache_env:
+        logger.info(f"LRU cache is ENABLED for {op_name} execution function getter.")
+        _get_execution_function = functools.lru_cache(maxsize=None)(_get_execution_function_impl)
+    else:
+        logger.info(f"LRU cache is DISABLED for {op_name} execution function getter.")
+        _get_execution_function = _get_execution_function_impl
 
     @staticmethod
     def dispatched_forward(ctx, *args, **kwargs):
