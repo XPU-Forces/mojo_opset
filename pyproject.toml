@@ -3,7 +3,7 @@ requires = ["setuptools>=42", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
 [project]
-version = "0.0.3.post9"
+version = "0.0.3.post11"
 name = "byted-mojo-opset"
 requires-python = ">=3.9"
 description = "LLM opset with effecient implementents"
@@ -16,7 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 npu = [
-    "byted-triton-x >= 3.2.0.post17"
+    "byted-triton-x >= 3.2.0.post18"
 ]
 mlu = [
 ]
