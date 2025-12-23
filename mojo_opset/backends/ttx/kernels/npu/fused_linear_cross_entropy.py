@@ -393,7 +393,7 @@ def _cross_entropy_prime_kernel(
         triton.Config({"BLOCK_SIZE_M": 24, "BLOCK_SIZE_N": 4096}),
         triton.Config({"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 4096}),
     ],
-    key=["n_rows", "n_cols"],
+    key=["n_cols"],
     restore_value=["X_ptr"],
 )
 @libentry()
