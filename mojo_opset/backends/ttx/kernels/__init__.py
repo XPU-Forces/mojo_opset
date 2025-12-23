@@ -39,6 +39,8 @@ paged_attention_decode_impl = getattr(ttx_backend_module, "paged_attention_decod
 fused_linear_cross_entropy_fwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_fwd_impl")
 fused_linear_cross_entropy_bwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_bwd_impl")
 
+sdpa_impl = getattr(ttx_backend_module, "sdpa_impl")
+
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
 
@@ -398,3 +400,4 @@ else:
     rmsnorm_infer = rmsnorm_infer_impl
     fused_linear_cross_entropy_fwd = fused_linear_cross_entropy_fwd_impl
     fused_linear_cross_entropy_bwd = fused_linear_cross_entropy_bwd_impl
+    spda = sdpa_impl

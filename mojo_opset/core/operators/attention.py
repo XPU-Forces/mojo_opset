@@ -233,25 +233,32 @@ class MojoPagedPrefillNSA(MojoOperator):
         self.softmax_scale = softmax_scale
 
 
-class MojoBlockDiffusionAttention(MojoOperator):
-    def __init__(self, mask: Optional[torch.Tensor] = None, name: str = "", layer_idx: int = 0):
+class MojoSdpa(MojoOperator):
+    def __init__(
+        self,
+        mask: Optional[torch.Tensor] = None,
+        enable_gqa=False,
+        name: str = "",
+        layer_idx: int = 0,
+        scale: Optional[float] = None
+    ):
         super().__init__(name, layer_idx)
         self.mask = mask
+        self.enable_gqa = enable_gqa
+        self.scale = scale
 
     def forward_std(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        softmax_scale: Optional[float] = None,
     ):
-        raise NotImplementedError("MojoBlockDiffusionAttention forward_std not implemented")
+        raise NotImplementedError("MojoSdpa forward_std not implemented")
 
     def forward_analysis(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        softmax_scale: Optional[float] = None,
     ):
-        raise NotImplementedError("MojoBlockDiffusionAttention forward_analysis not implemented")
+        raise NotImplementedError("MojoSdpa forward_analysis not implemented")

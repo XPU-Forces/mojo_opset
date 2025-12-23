@@ -13,7 +13,6 @@ from .operators.activation import MojoSiluQuant
 from .operators.activation import MojoSwiGLU
 
 """ attention """
-from .operators.attention import MojoBlockDiffusionAttention
 from .operators.attention import MojoDecodeGQA
 from .operators.attention import MojoDecodeMLA
 from .operators.attention import MojoDecodeNSA
@@ -26,6 +25,7 @@ from .operators.attention import MojoPagedPrefillNSA
 from .operators.attention import MojoPrefillGQA
 from .operators.attention import MojoPrefillMLA
 from .operators.attention import MojoPrefillNSA
+from .operators.attention import MojoSdpa
 
 """ kvcache """
 from .operators.kvcache import MojoKVCacheCast
@@ -105,7 +105,7 @@ __all__ = [
     "MojoPagedDecodeMLA",
     "MojoDecodeNSA",
     "MojoPagedDecodeNSA",
-    "MojoBlockDiffusionAttention",
+    "MojoSdpa",
 
     "MojoStoreKVCache",
     "MojoStorePagedKVCache",

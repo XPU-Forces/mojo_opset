@@ -5,9 +5,9 @@ from typing import Optional
 import torch
 
 from mojo_opset.core import LAST_PRIORITY
-from mojo_opset.core import MojoBlockDiffusionAttention
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
+from mojo_opset.core import MojoSdpa
 
 
 class RefPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=LAST_PRIORITY):
@@ -131,7 +131,7 @@ class RefPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=LAST_PRIORITY):
         return out
 
 
-class RefBlockDiffusionAttention(MojoBlockDiffusionAttention, default_priority=LAST_PRIORITY):
+class RefSdpa(MojoSdpa, default_priority=LAST_PRIORITY):
     def forward_std(
         self,
         query: torch.Tensor,
@@ -143,9 +143,10 @@ class RefBlockDiffusionAttention(MojoBlockDiffusionAttention, default_priority=L
             query,
             key,
             value,
-            attn_mask=self.mask.to(torch.bool),
+            attn_mask=self.mask,
             dropout_p=0.0,
             is_causal=False,
             scale=softmax_scale,
+            enable_gqa=self.enable_gqa,
         )
         return output
