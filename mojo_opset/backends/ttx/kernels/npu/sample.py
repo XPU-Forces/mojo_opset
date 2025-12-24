@@ -236,6 +236,221 @@ def top_p_filter_impl(
 
     return output_probs, sorted_topk_indices
 
+@triton.jit()
+def _reject_sampler_kernel(
+    output_token_ids_ptr,   # [batch, spec_step + 1]
+    output_accept_lens_ptr, # [batch] 
+    draft_token_ids_ptr,    # [batch, spec_step]
+    draft_probs_ptr,        # [batch, spec_step]
+    target_probs_ptr,       # [batch, spec_step + 1, vocab_size]
+    max_spec_len: tl.constexpr,
+    vocab_size: tl.constexpr,
+):
+    batch_idx = tl.program_id(0)
+
+    # draft
+    batch_draft_token_ids_ptr = draft_token_ids_ptr + batch_idx * max_spec_len
+    batch_draft_probs_ptr     = draft_probs_ptr     + batch_idx * max_spec_len
+    batch_target_probs_ptr    = target_probs_ptr    + batch_idx * (max_spec_len + 1) * vocab_size
+
+    batch_output_token_ids_ptr   = output_token_ids_ptr   + batch_idx * (max_spec_len + 1)
+    batch_output_accept_lens_ptr = output_accept_lens_ptr + batch_idx
+
+    # reject sampler
+    accept_len = 0
+    rejected = False
+    for pos in range(0, max_spec_len):
+        if not rejected:
+            draft_token_id = tl.load(batch_draft_token_ids_ptr + pos)
+            draft_prob     = tl.load(batch_draft_probs_ptr     + pos)
+            target_prob    = tl.load(batch_target_probs_ptr    + pos * vocab_size + draft_token_id)
+
+            if draft_prob > 0 and target_prob / draft_prob >= tl.rand(seed=0, offset=0):
+                # accept
+                accept_len += 1
+                tl.store(batch_output_token_ids_ptr + pos, draft_token_id)
+            else:
+                rejected = True
+
+    tl.store(batch_output_accept_lens_ptr, accept_len)
+
+def reject_sampling_impl(
+    target_logits: torch.Tensor, # [batch, spec_step + 1, vocab_size]
+    draft_tokens: torch.Tensor,  # [batch, spec_step]
+    draft_probs: torch.Tensor,   # [batch, spec_step]
+    spec_step: int,
+    top_p: float,
+    rand_top_k: int,
+    filter_value: float = -float("Inf"),
+    min_tokens_to_keep: int = 1, 
+) -> tuple[torch.Tensor, torch.Tensor]:
+    dtype = target_logits.dtype
+    device = target_logits.device
+    logits = target_logits.to(torch.float32)
+    batch_size, _, vocab_size = target_logits.shape
+    top_k = min(rand_top_k, logits.size(-1))
+    
+    sorted_logits, sorted_topk_indices = torch.topk(logits, top_k)
+
+    output_probs = torch.empty((batch_size * (spec_step + 1), top_k), dtype=dtype, device=device)
+    output_token_ids = torch.empty((batch_size, spec_step + 1), device=device, dtype=torch.int32)
+    output_accept_lens = torch.empty((batch_size), device=device, dtype=torch.int32)
+
+    grid = (batch_size,)
+
+    _top_p_filter_kernel[grid](
+        sorted_logits.view(-1, sorted_logits.shape[-1]),
+        output_probs,
+        top_p,
+        filter_value,
+        min_tokens_to_keep,
+        sorted_logits.stride(0),
+        sorted_logits.stride(1),
+        output_probs.stride(0),
+        output_probs.stride(1),
+        TOP_K=top_k,
+    )
+
+    target_probs = output_probs.view(batch_size, -1, output_probs.shape[-1])
+    target_topk_indices = sorted_topk_indices.view(batch_size, -1, sorted_topk_indices.shape[-1])
+
+    filter_target_probs = torch.zeros_like(target_logits)
+    filter_target_probs.scatter_(-1, target_topk_indices, target_probs)
+
+    _reject_sampler_kernel[grid](
+        output_token_ids_ptr=output_token_ids,
+        output_accept_lens_ptr=output_accept_lens,
+        draft_token_ids_ptr=draft_tokens,
+        draft_probs_ptr=draft_probs,
+        target_probs_ptr=filter_target_probs,
+        max_spec_len=spec_step,
+        vocab_size=vocab_size,
+    )
+
+    last_token_probs = filter_target_probs[range(batch_size), output_accept_lens]
+    last_token = torch.multinomial(last_token_probs, num_samples=1)
+    output_token_ids.scatter_(-1, output_accept_lens.unsqueeze(1), last_token.int())
+
+    return output_token_ids, output_accept_lens
+
+@triton.jit
+def _magic_reject_sampler_kernel(
+    output_token_ids_ptr,   # [batch, max_spec_len + 1]
+    output_accept_lens_ptr, # [batch] 
+    draft_token_ids_ptr,    # [batch, max_spec_len]
+    draft_probs_ptr,        # [batch, max_spec_len]
+    target_probs_ptr,       # [batch, max_spec_len + 1, vocab_size]
+    cum_probs_ptr,          # [batch, max_spec_len]
+    cum_rand_ptr,           # [batch, max_spec_len]
+    max_spec_len: tl.constexpr,
+    vocab_size: tl.constexpr,
+):
+    batch_idx = tl.program_id(0)
+    # draft
+    batch_draft_token_ids_ptr = draft_token_ids_ptr + batch_idx * max_spec_len
+    batch_draft_probs_ptr     = draft_probs_ptr     + batch_idx * max_spec_len
+    batch_target_probs_ptr    = target_probs_ptr    + batch_idx * (max_spec_len + 1) * vocab_size
+
+    # cum probs
+    batch_cum_probs_ptr = cum_probs_ptr + batch_idx * max_spec_len
+    batch_cum_rand_ptr  = cum_rand_ptr  + batch_idx * max_spec_len
+    
+    # output ptr
+    batch_output_token_ids_ptr   = output_token_ids_ptr   + batch_idx * (max_spec_len + 1)
+    batch_output_accept_lens_ptr = output_accept_lens_ptr + batch_idx
+
+    spec_offset = tl.arange(0, max_spec_len)
+
+    draft_token_ids = tl.load(batch_draft_token_ids_ptr + spec_offset)
+    draft_probs     = tl.load(batch_draft_probs_ptr     + spec_offset)
+    target_probs    = tl.load(batch_target_probs_ptr    + spec_offset * vocab_size + draft_token_ids)
+
+    ratio = target_probs / draft_probs
+
+    uniform_rand = tl.rand(seed=42, offset=spec_offset)
+    cum_probs    = tl.cumprod(ratio, axis=0)
+    cum_rands    = tl.cumprod(uniform_rand, axis=0)
+
+    tl.store(batch_cum_probs_ptr + spec_offset, cum_probs)
+    tl.store(batch_cum_rand_ptr  + spec_offset, cum_rands)
+
+    accept_len = 0
+    for pos in range(0, max_spec_len):
+        index = max_spec_len - pos + 1
+        cum_prob = tl.load(batch_cum_probs_ptr + index)
+        cum_rand = tl.load(batch_cum_rand_ptr + index)
+
+        if cum_prob >= cum_rand:
+            accept_len = (index + 1)
+
+    write_mask = spec_offset < accept_len
+
+    tl.store(batch_output_token_ids_ptr+spec_offset, draft_token_ids, mask=write_mask)    
+    tl.store(batch_output_accept_lens_ptr, accept_len)        
+
+def magic_reject_sampling_impl(
+    target_logits: torch.Tensor, # [batch, spec_step + 1, vocab_size]
+    draft_tokens: torch.Tensor,  # [batch, spec_step]
+    draft_probs: torch.Tensor,   # [batch, spec_step]
+    spec_step: int,
+    top_p: float,
+    rand_top_k: int,
+    filter_value: float = -float("Inf"),
+    min_tokens_to_keep: int = 1, 
+) -> tuple[torch.Tensor, torch.Tensor]:
+    dtype = target_logits.dtype
+    device = target_logits.device
+    logits = target_logits.to(torch.float32)
+    batch_size, _, vocab_size = target_logits.shape
+    top_k = min(rand_top_k, logits.size(-1))
+    
+    sorted_logits, sorted_topk_indices = torch.topk(logits, top_k)
+
+    output_probs = torch.empty((batch_size * (spec_step + 1), top_k), dtype=dtype, device=device)
+    output_token_ids = torch.empty((batch_size, spec_step + 1), device=device, dtype=torch.int32)
+    output_accept_lens = torch.empty((batch_size), device=device, dtype=torch.int32)
+
+    grid = (batch_size,)
+
+    _top_p_filter_kernel[grid](
+        sorted_logits.view(-1, sorted_logits.shape[-1]),
+        output_probs,
+        top_p,
+        filter_value,
+        min_tokens_to_keep,
+        sorted_logits.stride(0),
+        sorted_logits.stride(1),
+        output_probs.stride(0),
+        output_probs.stride(1),
+        TOP_K=top_k,
+    )
+
+    target_probs = output_probs.view(batch_size, -1, output_probs.shape[-1])
+    target_topk_indices = sorted_topk_indices.view(batch_size, -1, sorted_topk_indices.shape[-1])
+
+    filter_target_probs = torch.zeros_like(target_logits) # [b, step + 1, v]
+    filter_target_probs.scatter_(-1, target_topk_indices, target_probs)
+
+    cumsum_prob_buffer =  torch.empty((batch_size, spec_step), device=device, dtype=torch.float32)
+    cumsum_rand_buffer =  torch.empty((batch_size, spec_step), device=device, dtype=torch.float32)
+
+    _magic_reject_sampler_kernel[grid](
+        output_token_ids_ptr=output_token_ids,
+        output_accept_lens_ptr=output_accept_lens,
+        draft_token_ids_ptr=draft_tokens,
+        draft_probs_ptr=draft_probs,
+        target_probs_ptr=filter_target_probs,
+        cum_probs_ptr = cumsum_prob_buffer,
+        cum_rand_ptr = cumsum_rand_buffer,
+        max_spec_len=spec_step,
+        vocab_size=vocab_size,
+    )
+
+    last_token_probs = filter_target_probs[range(batch_size), output_accept_lens]
+    last_token = torch.multinomial(last_token_probs, num_samples=1)
+    output_token_ids.scatter_(-1, output_accept_lens.unsqueeze(1), last_token.int())
+
+    return output_token_ids, output_accept_lens
 
 @triton.jit
 def _fused_penalty_temp_kernel(

@@ -12,10 +12,11 @@ from tests.utils import bypass_not_implemented
 from mojo_opset import MojoApplyPenaltiesTempurate
 from mojo_opset import MojoTopPFilter
 from mojo_opset import MojoTopPSampling
+from mojo_opset import MojoRejectSampling
 from mojo_opset.backends.reference.operators.sampling import RefApplyPenaltiesTempurate
 from mojo_opset.backends.reference.operators.sampling import RefTopPFilter
 from mojo_opset.backends.reference.operators.sampling import RefTopPSampling
-
+from mojo_opset.backends.reference.operators.sampling import RefRejectSampling
 
 @pytest.mark.parametrize(
     "logits, topk, topp, min_tokens_to_keep",
@@ -44,6 +45,23 @@ def test_topp_filter(logits, topk, topp, min_tokens_to_keep):
         top_p_filter, logits=logits, top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk
     )
 
+@pytest.mark.parametrize(
+    "target_logits, draft_tokens, draft_probs, spec_step, top_p, rand_top_k",
+    [(torch.rand((15, 4, 155136), dtype=torch.float32), torch.randint(0, 155136, (15, 3)), torch.rand((15, 3), dtype=torch.float32), 3, 0.7, 100)],
+)
+@auto_switch_platform()
+@bypass_not_implemented
+def test_reject_sampler(target_logits, draft_tokens, draft_probs, spec_step, top_p, rand_top_k):
+    torch.manual_seed(42)
+
+    draft_probs = draft_probs / draft_probs.sum(dim=-1, keepdim=True)
+    
+    reject_sampling = MojoRejectSampling()
+    ref_reject_sampling = RefRejectSampling()
+
+    ref_reject_sampling.forward_diff_with(
+        reject_sampling, target_logits, draft_tokens, draft_probs, spec_step, top_p, rand_top_k
+    )
 
 def split_batch_to_list(x: torch.Tensor) -> List[Union[None, torch.Tensor]]:
     result: List[Union[None, torch.Tensor]] = []
