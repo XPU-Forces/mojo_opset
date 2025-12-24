@@ -1,7 +1,5 @@
 import torch
 
-from mojo_opset.backends.ttx.kernels.utils import input_guard
-
 from ..mojo_function import MojoFuncBase
 from ..mojo_function import mojo_func_dispatcher
 
@@ -45,7 +43,6 @@ class MojoCausalConv1dFunction(MojoFuncBase):
         raise NotImplementedError
 
 
-@input_guard(make_contiguous=True, auto_to_device=True)
 def causal_conv1d(
     x: torch.Tensor,
     weight: torch.Tensor | None = None,
