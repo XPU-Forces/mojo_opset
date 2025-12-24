@@ -78,11 +78,7 @@ class MojoRejectSampling(MojoOperator):
         target_logits: torch.Tensor, # [batch, spec_step + 1, vocab_size]
         draft_tokens: torch.Tensor,  # [batch, spec_step]
         draft_probs: torch.Tensor,   # [batch, spec_step]
-        spec_step: int,
-        top_p: float,
-        rand_top_k: int,
-        filter_value: float = -float("Inf"),
-        min_tokens_to_keep: int = 1, 
+        random_seed: int = None,
     )  -> Tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
@@ -91,16 +87,12 @@ class MojoRejectSampling(MojoOperator):
         target_logits: torch.Tensor, # [batch, spec_step + 1, vocab_size]
         draft_tokens: torch.Tensor,  # [batch, spec_step]
         draft_probs: torch.Tensor,   # [batch, spec_step]
-        spec_step: int,
-        top_p: float,
-        rand_top_k: int,
-        filter_value: float = -float("Inf"),
-        min_tokens_to_keep: int = 1, 
+        random_seed: int = None,
     ) -> Tuple[int, int, int]:
         raise NotImplementedError
 
 
-class MojoMagicRejectSampling(MojoOperator):
+class MojoJoinProbRejectSampling(MojoOperator):
     def __init__(self, op_name: str = "", layer_idx: int = 0):
         super().__init__(op_name, layer_idx)
 
@@ -110,11 +102,7 @@ class MojoMagicRejectSampling(MojoOperator):
         target_logits: torch.Tensor, # [batch, spec_step + 1, vocab_size]
         draft_tokens: torch.Tensor,  # [batch, spec_step]
         draft_probs: torch.Tensor,   # [batch, spec_step]
-        spec_step: int,
-        top_p: float,
-        rand_top_k: int,
-        filter_value: float = -float("Inf"),
-        min_tokens_to_keep: int = 1, 
+        random_seed: int = None
     )  -> Tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
@@ -123,11 +111,7 @@ class MojoMagicRejectSampling(MojoOperator):
         target_logits: torch.Tensor, # [batch, spec_step + 1, vocab_size]
         draft_tokens: torch.Tensor,  # [batch, spec_step]
         draft_probs: torch.Tensor,   # [batch, spec_step]
-        spec_step: int,
-        top_p: float,
-        rand_top_k: int,
-        filter_value: float = -float("Inf"),
-        min_tokens_to_keep: int = 1, 
+        random_seed: int = None
     ) -> Tuple[int, int, int]:
         raise NotImplementedError
 

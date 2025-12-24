@@ -76,7 +76,7 @@ from .operators.sampling import MojoTopKSampling
 from .operators.sampling import MojoTopPFilter
 from .operators.sampling import MojoTopPSampling
 from .operators.sampling import MojoRejectSampling
-from .operators.sampling import MojoMagicRejectSampling
+from .operators.sampling import MojoJoinProbRejectSampling
 
 """ functions """
 from .functions.activation import MojoSiluFunction
@@ -149,7 +149,7 @@ __all__ = [
     "MojoTopPSampling",
     "MojoTopKSampling",
     "MojoRejectSampling",
-    "MojoMagicRejectSampling",
+    "MojoJoinProbRejectSampling",
     "MojoApplyPenaltiesTempurate",
     "MojoTopPFilter",
 

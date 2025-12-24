@@ -10,12 +10,12 @@ from mojo_opset.backends.ttx.kernels.npu.sample import fused_penalties_temp_impl
 from mojo_opset.backends.ttx.kernels.npu.sample import top_p_filter_impl
 from mojo_opset.backends.ttx.kernels.npu.sample import top_p_sampling_impl
 from mojo_opset.backends.ttx.kernels.npu.sample import reject_sampling_impl
-from mojo_opset.backends.ttx.kernels.npu.sample import magic_reject_sampling_impl
+from mojo_opset.backends.ttx.kernels.npu.sample import join_prob_reject_sampling_impl
 from mojo_opset.core import MojoApplyPenaltiesTempurate
 from mojo_opset.core import MojoTopPFilter
 from mojo_opset.core import MojoTopPSampling
 from mojo_opset.core import MojoRejectSampling
-from mojo_opset.core import MojoMagicRejectSampling
+from mojo_opset.core import MojoJoinProbRejectSampling
 
 class TTXTopPSampling(MojoTopPSampling, default_priority=0):
     supported_platforms_list = ["npu"]
@@ -47,41 +47,27 @@ class TTXRejectSampling(MojoRejectSampling):
         target_logits: torch.Tensor, # [batch, spec_step + 1, vocab_size]
         draft_tokens: torch.Tensor,  # [batch, spec_step]
         draft_probs: torch.Tensor,   # [batch, spec_step]
-        spec_step: int,
-        top_p: float,
-        rand_top_k: int,
-        filter_value: float = -float("Inf"),
-        min_tokens_to_keep: int = 1, ):
+        random_seed: int = None,
+    ):
         return reject_sampling_impl(
             target_logits, 
             draft_tokens,
             draft_probs,
-            spec_step,
-            top_p,
-            rand_top_k,
-            filter_value,
-            min_tokens_to_keep
+            random_seed,
         )
 
-class TTXRejectMagicRejectSampling(MojoMagicRejectSampling):
+class TTXJoinProbRejectSampling(MojoJoinProbRejectSampling):
     def forward_std(self,
         target_logits: torch.Tensor, # [batch, spec_step + 1, vocab_size]
         draft_tokens: torch.Tensor,  # [batch, spec_step]
         draft_probs: torch.Tensor,   # [batch, spec_step]
-        spec_step: int,
-        top_p: float,
-        rand_top_k: int,
-        filter_value: float = -float("Inf"),
-        min_tokens_to_keep: int = 1, ):
-        return magic_reject_sampling_impl(
+        random_seed: int = None,
+    ):
+        return join_prob_reject_sampling_impl(
             target_logits, 
             draft_tokens,
             draft_probs,
-            spec_step,
-            top_p,
-            rand_top_k,
-            filter_value,
-            min_tokens_to_keep
+            random_seed,
         )
 
 

@@ -13,10 +13,12 @@ from mojo_opset import MojoApplyPenaltiesTempurate
 from mojo_opset import MojoTopPFilter
 from mojo_opset import MojoTopPSampling
 from mojo_opset import MojoRejectSampling
+from mojo_opset import MojoJoinProbRejectSampling
 from mojo_opset.backends.reference.operators.sampling import RefApplyPenaltiesTempurate
 from mojo_opset.backends.reference.operators.sampling import RefTopPFilter
 from mojo_opset.backends.reference.operators.sampling import RefTopPSampling
 from mojo_opset.backends.reference.operators.sampling import RefRejectSampling
+from mojo_opset.backends.reference.operators.sampling import RefJoinProbRejectSampling
 
 @pytest.mark.parametrize(
     "logits, topk, topp, min_tokens_to_keep",
@@ -33,7 +35,7 @@ def test_topp_sampling(logits, topk, topp, min_tokens_to_keep):
 
 @pytest.mark.parametrize(
     "logits, topk, topp, min_tokens_to_keep",
-    [(torch.randn(20, 151936), 1000, 0.75, 1)],
+    [(torch.randn(20, 151936), 1000, 0.75, 1), (torch.randn(60, 155136), 100, 0.7, 1)],
 )
 @auto_switch_platform()
 @bypass_not_implemented
@@ -46,21 +48,72 @@ def test_topp_filter(logits, topk, topp, min_tokens_to_keep):
     )
 
 @pytest.mark.parametrize(
-    "target_logits, draft_tokens, draft_probs, spec_step, top_p, rand_top_k",
-    [(torch.rand((15, 4, 155136), dtype=torch.float32), torch.randint(0, 155136, (15, 3)), torch.rand((15, 3), dtype=torch.float32), 3, 0.7, 100)],
+    "target_logits, draft_tokens, draft_probs, spec_step",
+    [(torch.randn((15, 4, 155136), dtype=torch.float32), torch.randint(0, 155136, (15, 3)), torch.ones((15, 3), dtype=torch.float32), 3)],
 )
 @auto_switch_platform()
 @bypass_not_implemented
-def test_reject_sampler(target_logits, draft_tokens, draft_probs, spec_step, top_p, rand_top_k):
+def test_reject_sampler(target_logits, draft_tokens, draft_probs, spec_step):
     torch.manual_seed(42)
 
-    draft_probs = draft_probs / draft_probs.sum(dim=-1, keepdim=True)
-    
     reject_sampling = MojoRejectSampling()
     ref_reject_sampling = RefRejectSampling()
 
-    ref_reject_sampling.forward_diff_with(
-        reject_sampling, target_logits, draft_tokens, draft_probs, spec_step, top_p, rand_top_k
+    batch_size = target_logits.shape[0]
+    
+    ref_token_ids, ref_accept_len = ref_reject_sampling(target_logits, draft_tokens, draft_probs, 42)
+    ttx_token_ids, ttx_accept_len = reject_sampling(target_logits, draft_tokens, draft_probs, 42)
+    
+    range_mask = torch.arange(spec_step + 1).expand(batch_size, -1).to(ref_accept_len.device)
+    
+    ref_mask = range_mask < ref_accept_len.unsqueeze(-1).expand(-1,spec_step + 1)
+    ref_token_ids = ref_token_ids * ref_mask
+    
+    ttx_mask = range_mask < ttx_accept_len.unsqueeze(-1).expand(-1,spec_step + 1)
+    ttx_token_ids = ttx_token_ids * ttx_mask
+
+    torch.testing.assert_close(
+        ref_token_ids.to(torch.float32), ttx_token_ids.to(torch.float32), atol=1e-2, rtol=1e-2
+    )
+    
+    torch.testing.assert_close(
+        ref_accept_len.to(torch.float32), ttx_accept_len.to(torch.float32), atol=1e-2, rtol=1e-2
+    )
+
+@pytest.mark.parametrize(
+    "target_logits, draft_tokens, draft_probs, spec_step",
+    [(torch.rand((15, 4, 155136), dtype=torch.float32), torch.randint(0, 155136, (15, 3)), torch.ones((15, 3), dtype=torch.float32), 3)],
+)
+@auto_switch_platform()
+@bypass_not_implemented
+def test_join_prob_reject_sampler(target_logits, draft_tokens, draft_probs, spec_step):
+    torch.manual_seed(42)
+
+    reject_join_prob_sampling = MojoJoinProbRejectSampling()
+    ref_join_prob_sampling = RefJoinProbRejectSampling()
+
+    batch_size = target_logits.shape[0]
+    
+    ref_token_ids, ref_accept_len = ref_join_prob_sampling(target_logits, draft_tokens, draft_probs, 42)
+    ttx_token_ids, ttx_accept_len = reject_join_prob_sampling(target_logits, draft_tokens, draft_probs, 42)
+    
+    range_mask = torch.arange(spec_step + 1).expand(batch_size, -1).to(ref_accept_len.device)
+    
+    ref_mask = range_mask < ref_accept_len.unsqueeze(-1).expand(-1,spec_step + 1)
+    ref_token_ids = ref_token_ids * ref_mask
+    
+    ttx_mask = range_mask < ttx_accept_len.unsqueeze(-1).expand(-1,spec_step + 1)
+    ttx_token_ids = ttx_token_ids * ttx_mask
+
+    print(ref_token_ids , ref_accept_len)
+    print(ttx_token_ids , ttx_accept_len)
+
+    torch.testing.assert_close(
+        ref_token_ids.to(torch.float32), ttx_token_ids.to(torch.float32), atol=1e-2, rtol=1e-2
+    )
+    
+    torch.testing.assert_close(
+        ref_accept_len.to(torch.float32), ttx_accept_len.to(torch.float32), atol=1e-2, rtol=1e-2
     )
 
 def split_batch_to_list(x: torch.Tensor) -> List[Union[None, torch.Tensor]]:
