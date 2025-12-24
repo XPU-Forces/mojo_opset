@@ -105,9 +105,6 @@ def test_join_prob_reject_sampler(target_logits, draft_tokens, draft_probs, spec
     ttx_mask = range_mask < ttx_accept_len.unsqueeze(-1).expand(-1,spec_step + 1)
     ttx_token_ids = ttx_token_ids * ttx_mask
 
-    print(ref_token_ids , ref_accept_len)
-    print(ttx_token_ids , ttx_accept_len)
-
     torch.testing.assert_close(
         ref_token_ids.to(torch.float32), ttx_token_ids.to(torch.float32), atol=1e-2, rtol=1e-2
     )
