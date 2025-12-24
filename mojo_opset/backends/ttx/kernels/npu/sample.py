@@ -291,7 +291,7 @@ def reject_sampling_impl(
     output_accept_lens = torch.empty((batch_size), device=device, dtype=torch.int32)
 
     if random_seed is not None:
-        torch.manual_seed(42)
+        torch.manual_seed(random_seed)
 
     rand_vals = torch.rand(batch_size, 1, device=target_probs.device)
 
@@ -327,7 +327,7 @@ def _join_prob_reject_sampler_kernel(
     batch_draft_token_ids_ptr = draft_token_ids_ptr + batch_idx * max_spec_len
     batch_draft_probs_ptr     = draft_probs_ptr     + batch_idx * max_spec_len
     batch_target_probs_ptr    = target_probs_ptr    + batch_idx * (max_spec_len + 1) * vocab_size
-    batch_uniform_random      = uniform_random_ptr + batch_idx * max_spec_len
+    batch_uniform_random      = uniform_random_ptr  + batch_idx * max_spec_len
 
     # cum probs
     batch_cum_probs_ptr = cum_probs_ptr + batch_idx * max_spec_len
@@ -387,7 +387,7 @@ def join_prob_reject_sampling_impl(
     cumsum_rand_buffer =  torch.empty((batch_size, spec_step), device=device, dtype=torch.float32)
 
     if random_seed is not None:
-        torch.manual_seed(42)
+        torch.manual_seed(random_seed)
 
     rand_vals = torch.rand(batch_size, spec_step, device=target_probs.device)
 

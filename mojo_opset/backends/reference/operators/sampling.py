@@ -72,7 +72,7 @@ class RefRejectSampling(MojoRejectSampling, default_priority=LAST_PRIORITY):
         spec_step = draft_probs.shape[1]
 
         if random_seed is not None:
-            torch.manual_seed(42)
+            torch.manual_seed(random_seed)
 
         rand_vals = torch.rand(batch_size, 1, device=device)        
         target_probs = torch.gather(target_probs[:, :spec_step, :], -1, draft_tokens.unsqueeze(-1)).squeeze(-1)
@@ -108,7 +108,7 @@ class RefJoinProbRejectSampling(MojoJoinProbRejectSampling, default_priority=LAS
         ratios = torch.minimum(torch.ones_like(target_token_probs), target_token_probs / draft_probs)
         pi = torch.cumprod(ratios, dim=1)
         if random_seed is not None:
-            torch.manual_seed(42)
+            torch.manual_seed(random_seed)
 
         ratios = torch.rand(batch_size, spec_step, device=target_probs.device)
         _rand = torch.cumprod(ratios, dim=1)
