@@ -80,6 +80,7 @@ from .operators.sampling import MojoTopPSampling
 from .functions.activation import MojoSiluFunction
 from .functions.attention import MojoSdpaFunction
 from .functions.convolution import MojoCausalConv1dFunction
+from .functions.convolution import causal_conv1d
 from .functions.loss_function import MojoFusedLinearCrossEntropyFunction
 from .functions.normalization import MojoRMSNormFunction
 from .functions.position_embedding import MojoRoPEFunction
@@ -157,7 +158,7 @@ __all__ = [
     "MojoFusedLinearCrossEntropyFunction",
     "MojoCausalConv1dFunction",
     "MojoSdpaFunction",
-    
-    "LAST_PRIORITY",
+
+    "causal_conv1d",
 ]
 # fmt: on

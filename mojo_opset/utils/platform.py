@@ -18,7 +18,12 @@ def get_platform() -> Literal["npu", "mlu", "meta_device"]:
     Detect whether the system has NPU or MLU, fallback device is meta_device.
     """
     try:
-        subprocess.run(["npu-smi", "info"], check=True)
+        subprocess.run(
+            ["npu-smi", "info"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         logger.info("Ascend NPU detected")
         return "npu"
     except (subprocess.SubprocessError, FileNotFoundError):

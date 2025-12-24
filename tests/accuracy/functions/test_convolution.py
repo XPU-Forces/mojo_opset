@@ -6,69 +6,7 @@ from einops import rearrange
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
-from mojo_opset import MojoCausalConv1dFunction
-from mojo_opset.backends.ttx.kernels.utils import input_guard
-
-
-@input_guard(make_contiguous=True, auto_to_device=True)
-def mojo_causal_conv1d(
-    x: torch.Tensor,
-    weight: torch.Tensor | None = None,
-    bias: torch.Tensor | None = None,
-    residual: torch.Tensor | None = None,
-    initial_state: torch.Tensor | None = None,
-    output_final_state: bool | None = False,
-    activation: str | None = None,
-    backend: str | None = "triton",
-    cu_seqlens: torch.Tensor | None = None,
-    **kwargs,
-):
-    """
-    A causal 1D convolution implementation that powers Mamba/Mamba2 and DeltaNet architectures.
-
-    When a residual connection is provided, this implements the Canon operation
-    described in the paper at https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5240330.
-
-    Args:
-        x (torch.Tensor):
-            Input tensor of shape [B, T, D].
-        weight (Optional[torch.Tensor]):
-            Weight tensor of shape [D, W]. Default: `None`.
-        bias (Optional[torch.Tensor]):
-            Bias tensor of shape [D]. Default: `None`.
-        residual (Optional[torch.Tensor]):
-            Residual tensor of shape [B, T, D]. Default: `None`.
-        initial_state (Optional[torch.Tensor]):
-            Initial state tensor of shape [N, D, W],
-            where `N` is the number of sequences in the batch and `W` is the kernel size.
-            If provided, the initial state is used to initialize the cache. Default: `None`.
-        output_final_state (Optional[bool]):
-            Whether to output the final state of shape [N, D, W]. Default: `False`.
-        activation (Optional[str]):
-            Activations applied to output, only `swish`/`silu` or `None` (i.e., no activation) are supported.
-            Default: `None`.
-        backend (Optional[str]):
-            Specifies the backend to use for the convolution operation. Supported values are `'cuda'` and `'triton'`.
-            Default: `'triton'`.
-        cu_seqlens (Optional[torch.Tensor]):
-            Cumulative sequence lengths (optional)
-
-    Returns:
-        Tuple of (output, final_state).
-        If `output_final_state` is `False`, the final state is `None`.
-    """
-
-    y, final_state = MojoCausalConv1dFunction.apply(
-        x,
-        weight,
-        bias,
-        residual,
-        initial_state,
-        output_final_state,
-        activation,
-        cu_seqlens,
-    )
-    return y, final_state
+from mojo_opset import causal_conv1d
 
 
 def causal_conv1d_ref(
@@ -174,7 +112,7 @@ def test_conv(
     if has_residual:
         ref_dr, residual.grad = residual.grad, None
 
-    tri, _ = mojo_causal_conv1d(x, weight, bias, residual=residual, activation=activation)
+    tri, _ = causal_conv1d(x, weight, bias, residual=residual, activation=activation)
     tri.backward(dy)
     tri_dx, x.grad = x.grad, None
     tri_dw, weight.grad = weight.grad, None
@@ -263,7 +201,7 @@ def test_conv_varlen(
     if has_residual:
         ref_dr, residual.grad = residual.grad, None
 
-    tri, _ = mojo_causal_conv1d(x, weight, bias, residual=residual, activation=activation, cu_seqlens=cu_seqlens)
+    tri, _ = causal_conv1d(x, weight, bias, residual=residual, activation=activation, cu_seqlens=cu_seqlens)
     tri.backward(dy)
     tri_dx, x.grad = x.grad, None
     tri_dw, weight.grad = weight.grad, None
