@@ -11,11 +11,14 @@ from mojo_opset.backends.reference.operators.sampling import RefTopPFilter
 from mojo_opset.backends.reference.operators.sampling import RefRejectSampling
 from mojo_opset.backends.reference.operators.sampling import RefJoinProbRejectSampling
 
+
 @pytest.mark.parametrize(
     "logits, topk, topp, min_tokens_to_keep",
-    [(torch.randn(120, 151936), 1000, 0.7, 1),
-    (torch.randn(15, 155136), 100, 0.7, 1),
-    (torch.randn(18, 155136), 100, 0.7, 1)],
+    [
+        (torch.randn(120, 151936), 1000, 0.7, 1),
+        (torch.randn(15, 155136), 100, 0.7, 1),
+        (torch.randn(18, 155136), 100, 0.7, 1),
+    ],
 )
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
@@ -26,9 +29,17 @@ def test_topp_filter(logits, topk, topp, min_tokens_to_keep):
     perf(lambda: top_p_filter_ref(logits, topp, min_tokens_to_keep, topk))  # noqa: F821
     perf(lambda: top_p_filter(logits, topp, min_tokens_to_keep, topk))  # noqa: F821
 
+
 @pytest.mark.parametrize(
     "target_logits, draft_tokens, draft_probs, spec_step",
-    [(torch.randn((15, 4, 155136), dtype=torch.float32), torch.randint(0, 155136, (15, 3)), torch.ones((15, 3), dtype=torch.float32), 3)],
+    [
+        (
+            torch.randn((15, 4, 155136), dtype=torch.float32),
+            torch.randint(0, 155136, (15, 3)),
+            torch.ones((15, 3), dtype=torch.float32),
+            3,
+        )
+    ],
 )
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
@@ -41,9 +52,19 @@ def test_reject_sampling(target_logits, draft_tokens, draft_probs, spec_step):
     perf(lambda: ref_reject_sampling(target_logits, draft_tokens, draft_probs))  # noqa: F821
     perf(lambda: reject_sampling(target_logits, draft_tokens, draft_probs))  # noqa: F821
 
+
 @pytest.mark.parametrize(
     "target_logits, draft_tokens, draft_probs, spec_step, top_p, rand_top_k",
-    [(torch.rand((15, 4, 155136), dtype=torch.float32), torch.randint(0, 155136, (15, 3)), torch.rand((15, 3), dtype=torch.float32), 3, 0.7, 100)],
+    [
+        (
+            torch.rand((15, 4, 155136), dtype=torch.float32),
+            torch.randint(0, 155136, (15, 3)),
+            torch.rand((15, 3), dtype=torch.float32),
+            3,
+            0.7,
+            100,
+        )
+    ],
 )
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
@@ -55,4 +76,3 @@ def test_magic_reject_sampling(target_logits, draft_tokens, draft_probs, spec_st
 
     perf(lambda: ref_reject_sampling(target_logits, draft_tokens, draft_probs))  # noqa: F821
     perf(lambda: reject_sampling(target_logits, draft_tokens, draft_probs))  # noqa: F821
-

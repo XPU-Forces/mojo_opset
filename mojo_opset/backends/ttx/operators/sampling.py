@@ -17,6 +17,7 @@ from mojo_opset.core import MojoTopPSampling
 from mojo_opset.core import MojoRejectSampling
 from mojo_opset.core import MojoJoinProbRejectSampling
 
+
 class TTXTopPSampling(MojoTopPSampling, default_priority=0):
     supported_platforms_list = ["npu"]
 
@@ -42,29 +43,33 @@ class TTXTopPFilter(MojoTopPFilter, default_priority=0):
             rand_top_k=rand_top_k,
         )
 
+
 class TTXRejectSampling(MojoRejectSampling):
-    def forward_std(self,
-        target_logits: torch.Tensor, # [batch, spec_step + 1, vocab_size]
+    def forward_std(
+        self,
+        target_logits: torch.Tensor,  # [batch, spec_step + 1, vocab_size]
         draft_tokens: torch.Tensor,  # [batch, spec_step]
-        draft_probs: torch.Tensor,   # [batch, spec_step]
+        draft_probs: torch.Tensor,  # [batch, spec_step]
         random_seed: int = None,
     ):
         return reject_sampling_impl(
-            target_logits, 
+            target_logits,
             draft_tokens,
             draft_probs,
             random_seed,
         )
 
+
 class TTXJoinProbRejectSampling(MojoJoinProbRejectSampling):
-    def forward_std(self,
-        target_logits: torch.Tensor, # [batch, spec_step + 1, vocab_size]
+    def forward_std(
+        self,
+        target_logits: torch.Tensor,  # [batch, spec_step + 1, vocab_size]
         draft_tokens: torch.Tensor,  # [batch, spec_step]
-        draft_probs: torch.Tensor,   # [batch, spec_step]
+        draft_probs: torch.Tensor,  # [batch, spec_step]
         random_seed: int = None,
     ):
         return join_prob_reject_sampling_impl(
-            target_logits, 
+            target_logits,
             draft_tokens,
             draft_probs,
             random_seed,

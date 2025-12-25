@@ -59,12 +59,13 @@ class RefTopPFilter(MojoTopPFilter, default_priority=LAST_PRIORITY):
 
         return final_probs_dist, sorted_topk_indices
 
+
 class RefRejectSampling(MojoRejectSampling, default_priority=LAST_PRIORITY):
     def forward_std(
-        self, 
-        target_probs: torch.Tensor, # [batch, spec_step + 1, vocab_size]
+        self,
+        target_probs: torch.Tensor,  # [batch, spec_step + 1, vocab_size]
         draft_tokens: torch.Tensor,  # [batch, spec_step]
-        draft_probs: torch.Tensor,   # [batch, spec_step]
+        draft_probs: torch.Tensor,  # [batch, spec_step]
         random_seed: int = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         device = target_probs.device
@@ -74,31 +75,27 @@ class RefRejectSampling(MojoRejectSampling, default_priority=LAST_PRIORITY):
         if random_seed is not None:
             torch.manual_seed(random_seed)
 
-        rand_vals = torch.rand(batch_size, 1, device=device)        
+        rand_vals = torch.rand(batch_size, 1, device=device)
         target_probs = torch.gather(target_probs[:, :spec_step, :], -1, draft_tokens.unsqueeze(-1)).squeeze(-1)
 
         reject_matrix = (target_probs / draft_probs) < rand_vals
-        reject_matrix = torch.cat(
-            [reject_matrix.int(), torch.ones((batch_size, 1), device=device)], dim=1
-        )
+        reject_matrix = torch.cat([reject_matrix.int(), torch.ones((batch_size, 1), device=device)], dim=1)
         accepted_len = torch.argmax(reject_matrix, dim=1)
 
         next_tokens = torch.empty((batch_size, spec_step + 1), device=device, dtype=torch.int32)
-        next_tokens = torch.cat(
-            [draft_tokens, torch.zeros((batch_size, 1), dtype=torch.long, device=device)], dim=-1
-        )
+        next_tokens = torch.cat([draft_tokens, torch.zeros((batch_size, 1), dtype=torch.long, device=device)], dim=-1)
 
         return next_tokens, accepted_len
 
 
 class RefJoinProbRejectSampling(MojoJoinProbRejectSampling, default_priority=LAST_PRIORITY):
-    def forward_std(self, 
-        target_probs: torch.Tensor, 
-        draft_tokens: torch.Tensor, 
-        draft_probs: torch.Tensor, 
+    def forward_std(
+        self,
+        target_probs: torch.Tensor,
+        draft_tokens: torch.Tensor,
+        draft_probs: torch.Tensor,
         random_seed: int = None,
-    )-> Tuple[torch.Tensor, torch.Tensor]:
-        device = target_probs.device
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         batch_size, _, _ = target_probs.shape
         spec_step = draft_probs.shape[1]
 

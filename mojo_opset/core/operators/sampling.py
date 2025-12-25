@@ -75,18 +75,18 @@ class MojoRejectSampling(MojoOperator):
     @abstractmethod
     def forward_std(
         self,
-        target_logits: torch.Tensor, # [batch, spec_step + 1, vocab_size]
+        target_logits: torch.Tensor,  # [batch, spec_step + 1, vocab_size]
         draft_tokens: torch.Tensor,  # [batch, spec_step]
-        draft_probs: torch.Tensor,   # [batch, spec_step]
+        draft_probs: torch.Tensor,  # [batch, spec_step]
         random_seed: int = None,
-    )  -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
     def forward_analysis(
         self,
-        target_logits: torch.Tensor, # [batch, spec_step + 1, vocab_size]
+        target_logits: torch.Tensor,  # [batch, spec_step + 1, vocab_size]
         draft_tokens: torch.Tensor,  # [batch, spec_step]
-        draft_probs: torch.Tensor,   # [batch, spec_step]
+        draft_probs: torch.Tensor,  # [batch, spec_step]
         random_seed: int = None,
     ) -> Tuple[int, int, int]:
         raise NotImplementedError
@@ -99,21 +99,22 @@ class MojoJoinProbRejectSampling(MojoOperator):
     @abstractmethod
     def forward_std(
         self,
-        target_logits: torch.Tensor, # [batch, spec_step + 1, vocab_size]
+        target_logits: torch.Tensor,  # [batch, spec_step + 1, vocab_size]
         draft_tokens: torch.Tensor,  # [batch, spec_step]
-        draft_probs: torch.Tensor,   # [batch, spec_step]
-        random_seed: int = None
-    )  -> Tuple[torch.Tensor, torch.Tensor]:
+        draft_probs: torch.Tensor,  # [batch, spec_step]
+        random_seed: int = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
     def forward_analysis(
         self,
-        target_logits: torch.Tensor, # [batch, spec_step + 1, vocab_size]
+        target_logits: torch.Tensor,  # [batch, spec_step + 1, vocab_size]
         draft_tokens: torch.Tensor,  # [batch, spec_step]
-        draft_probs: torch.Tensor,   # [batch, spec_step]
-        random_seed: int = None
+        draft_probs: torch.Tensor,  # [batch, spec_step]
+        random_seed: int = None,
     ) -> Tuple[int, int, int]:
         raise NotImplementedError
+
 
 class MojoApplyPenaltiesTempurate(MojoOperator):
     def __init__(
