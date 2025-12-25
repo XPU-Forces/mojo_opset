@@ -1,10 +1,37 @@
+import torch
+import torch.nn.functional as F
+
+from mojo_opset.utils.logging import get_logger
+
 from ..mojo_function import MojoFuncBase
+from ..mojo_function import mojo_func_dispatcher
+
+logger = get_logger(__name__)
 
 
-class MojoBlockDiffusionAttentionFunction(MojoFuncBase):
+@mojo_func_dispatcher
+class MojoSdpaFunction(MojoFuncBase):
     @staticmethod
-    def forward_ref(ctx, query, key, value, attn_mask, softmax_scale=None):
-        pass
+    def forward_ref(ctx, query, key, value, mask, scale=1.0, enable_gqa=False):
+        ctx.scale = scale
+        ctx.enable_gqa = enable_gqa
+        ctx.scale = scale
+        score = torch.matmul(query, key.transpose(-1, -2)).to(torch.float32) * scale
+        score.masked_fill_(mask == 0, float("-inf"))
+        p = F.softmax(score - torch.max(score, dim=-1, keepdim=True).values, dim=-1)
+        output = torch.matmul(p.to(query.dtype), value)
+        ctx.save_for_backward(query, key, value, output, mask)
+        return output
 
-    def backward_ref(ctx, grad_output):
-        pass
+    def backward_ref(ctx, do):
+        query, key, value, output, mask = ctx.saved_tensors
+        score = torch.matmul(query, key.transpose(-1, -2)).to(torch.float32) * ctx.scale
+        score.masked_fill_(mask == 0, float("-inf"))
+        p = F.softmax(score - torch.max(score, dim=-1, keepdim=True).values, dim=-1)
+        dv = torch.matmul(p.transpose(-1, -2).to(query.dtype), do)
+        dp = torch.matmul(do, value.transpose(-1, -2))
+        ds = p * (dp - torch.sum(do * output, dim=-1, keepdim=True))
+        dq = torch.matmul(ds.to(query.dtype), key) * ctx.scale
+        dk = torch.matmul(ds.to(query.dtype).transpose(-1, -2), query) * ctx.scale
+
+        return dq, dk, dv

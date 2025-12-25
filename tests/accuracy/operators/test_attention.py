@@ -1,11 +1,17 @@
+import functools
 import math
 
 import pytest
 import torch
 
 from tests.utils import auto_switch_platform
+from tests.utils import bypass_not_implemented
 
+from mojo_opset import MojoPagedDecodeGQA
+from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoSdpa
+from mojo_opset.backends.reference.operators.attention import RefPagedDecodeGQA
+from mojo_opset.backends.reference.operators.attention import RefPagedPrefillGQA
 from mojo_opset.backends.reference.operators.attention import RefSdpa
 
 
@@ -236,6 +242,7 @@ def test_paged_prefill_gqa(
     )
 
 
+@functools.lru_cache()
 def generate_diffusion_attention_mask(
     seq_length: int,
     block_size: int,

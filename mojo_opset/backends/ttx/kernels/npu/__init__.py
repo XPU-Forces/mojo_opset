@@ -9,7 +9,9 @@ from .rmsnorm import rmsnorm_fwd_impl
 from .rmsnorm import rmsnorm_infer_impl
 from .rope import rope_bwd_impl
 from .rope import rope_fwd_impl
-from .sdpa import sdpa_impl
+from .sdpa import sdpa_bwd_impl
+from .sdpa import sdpa_fwd_impl
+from .sdpa import sdpa_infer_impl
 from .silu import silu_bwd_impl
 from .silu import silu_fwd_impl
 from .swiglu import swiglu_bwd_impl
@@ -31,5 +33,7 @@ __all__ = [
     "silu_fwd_impl",
     "swiglu_bwd_impl",
     "swiglu_fwd_impl",
-    "sdpa_impl",
+    "sdpa_infer_impl",
+    "sdpa_fwd_impl",
+    "sdpa_bwd_impl",
 ]

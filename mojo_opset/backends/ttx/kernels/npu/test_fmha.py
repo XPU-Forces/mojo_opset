@@ -421,7 +421,7 @@ def _attn_fwd(
         tl.store(O_block_ptr, accumulator.to(Out.type.element_ty))
 
 
-def sdpa_impl(
+def sdpa_infer_impl(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -569,4 +569,4 @@ q, k, v, blockwise_diffusion_attn_mask = generate_test_data(
     bsz=1, head_num=1, head_dim=128, seq_length=1024, block_size=32
 )
 
-sdpa_impl(q, k, v, blockwise_diffusion_attn_mask)
+sdpa_infer_impl(q, k, v, blockwise_diffusion_attn_mask)

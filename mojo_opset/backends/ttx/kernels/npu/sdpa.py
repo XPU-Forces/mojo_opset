@@ -24,7 +24,7 @@ def get_device_properties() -> Tuple[int, int]:
 
 
 @triton.jit
-def _attn_fwd_inner(
+def _sdpa_infer_inner(
     acc_ptr,
     l_i,
     m_i,
@@ -61,10 +61,11 @@ def _attn_fwd_inner(
         # NOTE(zhangjihang): tl.where will introduce ub overflow
         qk = qk * qk_scale
         mask = tl.load(mask_ptr)
-        qk = mask.to(tl.float32) * qk - (1.0 - mask.to(tl.float32)) * 1e6
-        # qk = tl.where(mask, qk, float("-inf"))
 
-        # qk = tl.where(mask == 1, qk, float("-inf"))
+        qk += (1 - mask.to(tl.float32)) * (-1e6)
+        # qk = tl.where(mask, qk, float("-inf"))  # 32B # bool
+        # qk = tl.where(mask, float("-inf"), qk)  # 32B # bool
+
         m_ij = tl.maximum(m_i, tl.max(qk, 1))  # Scaled max
         qk = qk - m_ij[:, None]  # Stabilize
 
@@ -170,14 +171,13 @@ def get_autotune_config():
 #     key=["BSZ", "Q_HEAD_NUM", "SEQ", "HEAD_DIM"],  # 加入 shape 相关的关键参数
 # )
 @triton.jit
-def _attn_fwd(
+def _sdpa_infer_kernel(
     Q,
     K,
     V,
     mask,
     M,
     Out,
-    acc,
     scale,
     stride_qz: tl.constexpr,
     stride_qh: tl.constexpr,
@@ -217,7 +217,7 @@ def _attn_fwd(
 
         bsz_offset = task_bn_idx // Q_HEAD_NUM
         q_head_num_offset = task_bn_idx % Q_HEAD_NUM
-        kv_head_num_offset = task_bn_idx % KV_HEAD_NUM
+        kv_head_num_offset = q_head_num_offset // (Q_HEAD_NUM // KV_HEAD_NUM)
         q_bn_offset = bsz_offset.to(tl.int64) * stride_qz + q_head_num_offset.to(tl.int64) * stride_qh
         kv_bn_offset = bsz_offset.to(tl.int64) * stride_kz + kv_head_num_offset.to(tl.int64) * stride_kh
         # Create block pointers for Q, K, V, Output
@@ -261,36 +261,28 @@ def _attn_fwd(
         l_i = tl.zeros([BLOCK_M], dtype=tl.float32) + 1.0
 
         # Initialize accumulator
-        if HEAD_DIM < 256:
-            acc_ptr = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
-        else:
-            acc_offset = (
-                bsz_offset.to(tl.int64) * stride_qz // stride_qm * HEAD_DIM
-                + q_head_num_offset.to(tl.int64) * stride_qh // stride_qm * HEAD_DIM
-                + task_seq_idx * BLOCK_M * HEAD_DIM
-            )
-            acc_ptr = acc + acc_offset
+        acc_ptr = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
 
         # load q: it will stay in SRAM throughout
         q = tl.load(Q_block_ptr)
 
-        acc_ptr, l_i, m_i = _attn_fwd_inner(
+        acc_ptr, l_i, m_i = _sdpa_infer_inner(
             acc_ptr,
             l_i,
             m_i,
             q,
             K_block_ptr,
-            V_block_ptr,  #
+            V_block_ptr,
             mask,
             task_seq_idx,
-            scale,  #
+            scale,
             BLOCK_M,
             HEAD_DIM,
             BLOCK_N,
             offs_m,
             offs_n,
             SEQ,
-            V.dtype.element_ty == tl.float8e5,  #
+            V.dtype.element_ty == tl.float8e5,
         )
 
         m_i += tl.math.log(l_i)
@@ -303,14 +295,22 @@ def _attn_fwd(
         tl.store(O_block_ptr, accumulator.to(Out.type.element_ty))
 
 
-@triton.autotune(configs=[triton.Config({'BLOCK_R': 128, 'BLOCK_C': 128}, num_warps=4, num_stages=2),], key=['N', 'S', 'H'])
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_R": 128, "BLOCK_C": 128}, num_warps=4, num_stages=2),
+    ],
+    key=["N", "S", "H"],
+)
 @triton.jit
 def kernel_sdpa_fwd(
-    q, k, v, o,
+    q,
+    k,
+    v,
+    o,
     lse,
     mask,
-    scale : tl.constexpr,
-    num_group : tl.constexpr,
+    scale: tl.constexpr,
+    num_group: tl.constexpr,
     B: tl.constexpr,
     N: tl.constexpr,
     S: tl.constexpr,
@@ -346,28 +346,25 @@ def kernel_sdpa_fwd(
         idx_h = tl.arange(0, H)
 
         ptr_q = (
-            q + 
-            idx_b * STRIDE_Q_B + 
-            idx_n * STRIDE_Q_N + 
-            (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S + 
-            idx_h[None, :] * STRIDE_Q_H
+            q
+            + idx_b * STRIDE_Q_B
+            + idx_n * STRIDE_Q_N
+            + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S
+            + idx_h[None, :] * STRIDE_Q_H
         )
         ptr_o = (
-            o + 
-            idx_b * STRIDE_Q_B + 
-            idx_n * STRIDE_Q_N + 
-            (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S + 
-            idx_h[None, :] * STRIDE_Q_H
+            o
+            + idx_b * STRIDE_Q_B
+            + idx_n * STRIDE_Q_N
+            + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S
+            + idx_h[None, :] * STRIDE_Q_H
         )
         ptr_lse = (
-            lse + 
-            idx_b * STRIDE_D_B + 
-            idx_n * STRIDE_D_N + 
-            (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] * STRIDE_D_S
+            lse + idx_b * STRIDE_D_B + idx_n * STRIDE_D_N + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] * STRIDE_D_S
         )
 
-        mask_q = ((idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < S)
-        mask_lse = ((idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] < S)
+        mask_q = (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < S
+        mask_lse = (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] < S
 
         block_q = tl.load(ptr_q, mask=mask_q, other=0.0)
         block_o = tl.full([BLOCK_R, H], 0.0, dtype=HIGH_TYPE)
@@ -375,38 +372,42 @@ def kernel_sdpa_fwd(
         block_m = tl.full([BLOCK_R], -1e6, dtype=HIGH_TYPE)
         for idx_c in range(0, num_c):
             ptr_k = (
-                k + 
-                idx_b * STRIDE_K_B + 
-                (idx_n // group_size) * STRIDE_K_N + 
-                (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] * STRIDE_K_S + 
-                idx_h[None, :] * STRIDE_K_H
+                k
+                + idx_b * STRIDE_K_B
+                + (idx_n // group_size) * STRIDE_K_N
+                + (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] * STRIDE_K_S
+                + idx_h[None, :] * STRIDE_K_H
             )
             ptr_v = (
-                v + 
-                idx_b * STRIDE_V_B + 
-                (idx_n // group_size) * STRIDE_V_N + 
-                (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] * STRIDE_V_S + 
-                idx_h[None, :] * STRIDE_V_H
+                v
+                + idx_b * STRIDE_V_B
+                + (idx_n // group_size) * STRIDE_V_N
+                + (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] * STRIDE_V_S
+                + idx_h[None, :] * STRIDE_V_H
             )
             ptr_mask = (
-                mask + 
-                (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * S + 
-                (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[None, :]
+                mask
+                + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * S
+                + (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[None, :]
             )
 
-            mask_kv = ((idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] < S)
-            mask_mask = ((idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < S) & ((idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[None, :] < S)
+            mask_kv = (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] < S
+            mask_mask = ((idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < S) & (
+                (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[None, :] < S
+            )
 
             block_mask = tl.load(ptr_mask, mask=mask_mask, other=False)
             block_k = tl.load(ptr_k, mask=mask_kv, other=0.0)
             block_v = tl.load(ptr_v, mask=mask_kv, other=0.0)
 
-            block_s = tl.dot(block_q, block_k.T).to(HIGH_TYPE) * scale
+            block_s = tl.dot(block_q, tl.trans(block_k)) * scale
             block_s -= (1.0 - block_mask.to(HIGH_TYPE)) * 1e6
             block_m_1 = tl.maximum(block_m, tl.max(block_s, axis=1))
             block_s = tl.exp(block_s - block_m_1[:, None])
             block_l_1 = tl.exp(block_m - block_m_1) * block_l + tl.sum(block_s, axis=1)
-            block_o = tl.exp(block_m - block_m_1)[:, None] * block_o + tl.dot(block_s.to(LOW_TYPE), block_v).to(HIGH_TYPE)
+            block_o = tl.exp(block_m - block_m_1)[:, None] * block_o + tl.dot(block_s.to(LOW_TYPE), block_v).to(
+                HIGH_TYPE
+            )
             block_m = block_m_1
             block_l = block_l_1
 
@@ -416,10 +417,17 @@ def kernel_sdpa_fwd(
         tl.store(ptr_lse, block_lse, mask=mask_lse)
 
 
-@triton.autotune(configs=[triton.Config({'BLOCK_R': 128}, num_warps=4, num_stages=2),], key=['N', 'S', 'H'])
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_R": 128}, num_warps=4, num_stages=2),
+    ],
+    key=["N", "S", "H"],
+)
 @triton.jit
 def kernel_sdpa_bwd_d(
-    o, do, d,
+    o,
+    do,
+    d,
     B: tl.constexpr,
     N: tl.constexpr,
     S: tl.constexpr,
@@ -443,27 +451,22 @@ def kernel_sdpa_bwd_d(
         idx_r = task_id % num_r
         idx_h = tl.arange(0, H)
         ptr_o = (
-            o +
-            idx_b * STRIDE_O_B + 
-            idx_n * STRIDE_O_N + 
-            (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_O_S + 
-            idx_h[None, :] * STRIDE_O_H
+            o
+            + idx_b * STRIDE_O_B
+            + idx_n * STRIDE_O_N
+            + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_O_S
+            + idx_h[None, :] * STRIDE_O_H
         )
         ptr_do = (
-            do +
-            idx_b * STRIDE_O_B + 
-            idx_n * STRIDE_O_N + 
-            (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_O_S + 
-            idx_h[None, :] * STRIDE_O_H
+            do
+            + idx_b * STRIDE_O_B
+            + idx_n * STRIDE_O_N
+            + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_O_S
+            + idx_h[None, :] * STRIDE_O_H
         )
-        ptr_d = (
-            d +
-            idx_b * STRIDE_D_B + 
-            idx_n * STRIDE_D_N + 
-            (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] * STRIDE_D_S
-        )
-        mask_o = ((idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < S)
-        mask_d = ((idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] < S)
+        ptr_d = d + idx_b * STRIDE_D_B + idx_n * STRIDE_D_N + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] * STRIDE_D_S
+        mask_o = (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < S
+        mask_d = (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] < S
 
         block_o = tl.load(ptr_o, mask=mask_o, other=0.0)
         block_do = tl.load(ptr_do, mask=mask_o, other=0.0)
@@ -471,14 +474,24 @@ def kernel_sdpa_bwd_d(
         tl.store(ptr_d, block_d, mask=mask_d)
 
 
-@triton.autotune(configs=[triton.Config({'BLOCK_R': 128, 'BLOCK_C': 64}, num_warps=4, num_stages=2),], key=['N', 'S', 'H'])
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_R": 128, "BLOCK_C": 64}, num_warps=4, num_stages=2),
+    ],
+    key=["N", "S", "H"],
+)
 @triton.jit
 def kernel_sdpa_bwd_q(
-    q, k, v, do, d, dq,
+    q,
+    k,
+    v,
+    do,
+    d,
+    dq,
     lse,
     mask,
-    scale : tl.constexpr,
-    num_group : tl.constexpr,
+    scale: tl.constexpr,
+    num_group: tl.constexpr,
     B: tl.constexpr,
     N: tl.constexpr,
     S: tl.constexpr,
@@ -514,41 +527,33 @@ def kernel_sdpa_bwd_q(
         idx_h = tl.arange(0, H)
 
         ptr_q = (
-            q +
-            idx_b * STRIDE_Q_B + 
-            idx_n * STRIDE_Q_N + 
-            (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S + 
-            idx_h[None, :] * STRIDE_Q_H
+            q
+            + idx_b * STRIDE_Q_B
+            + idx_n * STRIDE_Q_N
+            + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S
+            + idx_h[None, :] * STRIDE_Q_H
         )
         ptr_do = (
-            do +
-            idx_b * STRIDE_Q_B + 
-            idx_n * STRIDE_Q_N + 
-            (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S + 
-            idx_h[None, :] * STRIDE_Q_H
+            do
+            + idx_b * STRIDE_Q_B
+            + idx_n * STRIDE_Q_N
+            + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S
+            + idx_h[None, :] * STRIDE_Q_H
         )
         ptr_dq = (
-            dq +
-            idx_b * STRIDE_Q_B + 
-            idx_n * STRIDE_Q_N + 
-            (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S + 
-            idx_h[None, :] * STRIDE_Q_H
+            dq
+            + idx_b * STRIDE_Q_B
+            + idx_n * STRIDE_Q_N
+            + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S
+            + idx_h[None, :] * STRIDE_Q_H
         )
-        ptr_d = (
-            d +
-            idx_b * STRIDE_D_B + 
-            idx_n * STRIDE_D_N + 
-            (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] * STRIDE_D_S
-        )
+        ptr_d = d + idx_b * STRIDE_D_B + idx_n * STRIDE_D_N + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] * STRIDE_D_S
         ptr_lse = (
-            lse +
-            idx_b * STRIDE_D_B + 
-            idx_n * STRIDE_D_N + 
-            (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] * STRIDE_D_S
+            lse + idx_b * STRIDE_D_B + idx_n * STRIDE_D_N + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] * STRIDE_D_S
         )
 
-        mask_q = ((idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < S)
-        mask_d = ((idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] < S)
+        mask_q = (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < S
+        mask_d = (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] < S
         block_q = tl.load(ptr_q, mask=mask_q, other=0.0)
         block_do = tl.load(ptr_do, mask=mask_q, other=0.0)
         block_lse = tl.load(ptr_lse, mask=mask_d, other=0.0)
@@ -557,33 +562,35 @@ def kernel_sdpa_bwd_q(
 
         for idx_c in range(0, num_c):
             ptr_k = (
-                k +
-                idx_b * STRIDE_K_B + 
-                (idx_n // group_size) * STRIDE_K_N + 
-                (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] * STRIDE_K_S + 
-                idx_h[None, :] * STRIDE_K_H
+                k
+                + idx_b * STRIDE_K_B
+                + (idx_n // group_size) * STRIDE_K_N
+                + (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] * STRIDE_K_S
+                + idx_h[None, :] * STRIDE_K_H
             )
             ptr_v = (
-                v +
-                idx_b * STRIDE_V_B + 
-                (idx_n // group_size) * STRIDE_V_N + 
-                (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] * STRIDE_V_S + 
-                idx_h[None, :] * STRIDE_V_H
+                v
+                + idx_b * STRIDE_V_B
+                + (idx_n // group_size) * STRIDE_V_N
+                + (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] * STRIDE_V_S
+                + idx_h[None, :] * STRIDE_V_H
             )
             ptr_mask = (
-                mask + 
-                (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * S + 
-                (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[None, :]
+                mask
+                + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * S
+                + (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[None, :]
             )
 
-            mask_kv = ((idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] < S)
-            mask_mask = ((idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < S) & ((idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[None, :] < S)
+            mask_kv = (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] < S
+            mask_mask = ((idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < S) & (
+                (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[None, :] < S
+            )
 
             block_k = tl.load(ptr_k, mask=mask_kv, other=0.0)
             block_v = tl.load(ptr_v, mask=mask_kv, other=0.0)
             block_mask = tl.load(ptr_mask, mask=mask_mask, other=False)
 
-            block_s = tl.dot(block_q, block_k.T).to(HIGH_TYPE) * scale
+            block_s = tl.dot(block_q, block_k.T) * scale
             block_s -= (1.0 - block_mask.to(HIGH_TYPE)) * 1e6
             block_p = tl.exp(block_s - block_lse[:, None])
             block_dp = tl.dot(block_do, block_v.T).to(HIGH_TYPE)
@@ -593,14 +600,25 @@ def kernel_sdpa_bwd_q(
         tl.store(ptr_dq, block_dq.to(LOW_TYPE), mask=mask_q)
 
 
-@triton.autotune(configs=[triton.Config({'BLOCK_R': 64, 'BLOCK_C': 128}, num_warps=4, num_stages=2),], key=['N', 'S', 'H'])
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_R": 64, "BLOCK_C": 128}, num_warps=4, num_stages=2),
+    ],
+    key=["N", "S", "H"],
+)
 @triton.jit
 def kernel_sdpa_bwd_kv(
-    q, k, v, do, d, dk, dv,
+    q,
+    k,
+    v,
+    do,
+    d,
+    dk,
+    dv,
     lse,
     mask,
-    scale : tl.constexpr,
-    num_group : tl.constexpr,
+    scale: tl.constexpr,
+    num_group: tl.constexpr,
     B: tl.constexpr,
     N: tl.constexpr,
     S: tl.constexpr,
@@ -636,35 +654,35 @@ def kernel_sdpa_bwd_kv(
         idx_h = tl.arange(0, H)
 
         ptr_k = (
-            k + 
-            idx_b * STRIDE_K_B + 
-            idx_group * STRIDE_K_N + 
-            (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] * STRIDE_K_S + 
-            idx_h[None, :] * STRIDE_K_H
+            k
+            + idx_b * STRIDE_K_B
+            + idx_group * STRIDE_K_N
+            + (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] * STRIDE_K_S
+            + idx_h[None, :] * STRIDE_K_H
         )
         ptr_v = (
-            v + 
-            idx_b * STRIDE_V_B + 
-            idx_group * STRIDE_V_N + 
-            (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] * STRIDE_V_S + 
-            idx_h[None, :] * STRIDE_V_H
+            v
+            + idx_b * STRIDE_V_B
+            + idx_group * STRIDE_V_N
+            + (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] * STRIDE_V_S
+            + idx_h[None, :] * STRIDE_V_H
         )
         ptr_dk = (
-            dk + 
-            idx_b * STRIDE_K_B + 
-            idx_group * STRIDE_K_N + 
-            (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] * STRIDE_K_S + 
-            idx_h[None, :] * STRIDE_K_H
+            dk
+            + idx_b * STRIDE_K_B
+            + idx_group * STRIDE_K_N
+            + (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] * STRIDE_K_S
+            + idx_h[None, :] * STRIDE_K_H
         )
         ptr_dv = (
-            dv + 
-            idx_b * STRIDE_V_B + 
-            idx_group * STRIDE_V_N + 
-            (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] * STRIDE_V_S + 
-            idx_h[None, :] * STRIDE_V_H
+            dv
+            + idx_b * STRIDE_V_B
+            + idx_group * STRIDE_V_N
+            + (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] * STRIDE_V_S
+            + idx_h[None, :] * STRIDE_V_H
         )
 
-        mask_kv = ((idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] < S)
+        mask_kv = (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] < S
         block_k = tl.load(ptr_k, mask=mask_kv, other=0.0)
         block_v = tl.load(ptr_v, mask=mask_kv, other=0.0)
         block_dk = tl.full([BLOCK_C, H], 0.0, dtype=HIGH_TYPE)
@@ -674,40 +692,42 @@ def kernel_sdpa_bwd_kv(
             idx_n = idx_group * group_size + idx_ingroup
             for idx_r in range(0, num_r):
                 ptr_q = (
-                    q + 
-                    idx_b * STRIDE_Q_B + 
-                    idx_n * STRIDE_Q_N + 
-                    (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S + 
-                    idx_h[None, :] * STRIDE_Q_H
+                    q
+                    + idx_b * STRIDE_Q_B
+                    + idx_n * STRIDE_Q_N
+                    + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S
+                    + idx_h[None, :] * STRIDE_Q_H
                 )
                 ptr_do = (
-                    do + 
-                    idx_b * STRIDE_Q_B + 
-                    idx_n * STRIDE_Q_N + 
-                    (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S + 
-                    idx_h[None, :] * STRIDE_Q_H
+                    do
+                    + idx_b * STRIDE_Q_B
+                    + idx_n * STRIDE_Q_N
+                    + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S
+                    + idx_h[None, :] * STRIDE_Q_H
                 )
                 ptr_d = (
-                    d + 
-                    idx_b * STRIDE_D_B + 
-                    idx_n * STRIDE_D_N + 
-                    (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] * STRIDE_D_S
+                    d
+                    + idx_b * STRIDE_D_B
+                    + idx_n * STRIDE_D_N
+                    + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] * STRIDE_D_S
                 )
                 ptr_lse = (
-                    lse + 
-                    idx_b * STRIDE_D_B + 
-                    idx_n * STRIDE_D_N + 
-                    (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] * STRIDE_D_S
+                    lse
+                    + idx_b * STRIDE_D_B
+                    + idx_n * STRIDE_D_N
+                    + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] * STRIDE_D_S
                 )
                 ptr_mask = (
-                    mask + 
-                    (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * S + 
-                    (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[None, :]
+                    mask
+                    + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * S
+                    + (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[None, :]
                 )
 
-                mask_q = ((idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < S)
-                mask_d = ((idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] < S)
-                mask_mask = ((idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < S) & ((idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[None, :] < S)
+                mask_q = (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < S
+                mask_d = (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] < S
+                mask_mask = ((idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < S) & (
+                    (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[None, :] < S
+                )
 
                 block_q = tl.load(ptr_q, mask=mask_q, other=0.0)
                 block_do = tl.load(ptr_do, mask=mask_q, other=0.0)
@@ -715,7 +735,7 @@ def kernel_sdpa_bwd_kv(
                 block_d = tl.load(ptr_d, mask=mask_d, other=0.0)
                 block_mask = tl.load(ptr_mask, mask=mask_mask, other=False)
 
-                block_s = tl.dot(block_q, block_k.T).to(HIGH_TYPE) * scale
+                block_s = tl.dot(block_q, block_k.T) * scale
                 block_s -= (1.0 - block_mask.to(HIGH_TYPE)) * 1e6
                 block_p = tl.exp(block_s - block_lse[:, None])
                 block_dv += tl.dot(block_p.to(LOW_TYPE).T, block_do).to(HIGH_TYPE)
@@ -727,7 +747,7 @@ def kernel_sdpa_bwd_kv(
         tl.store(ptr_dv, block_dv.to(LOW_TYPE), mask=mask_kv)
 
 
-def sdpa_impl(
+def sdpa_infer_impl(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -749,7 +769,7 @@ def sdpa_impl(
     # shape constraints
     assert q.shape[-1] == k.shape[-1] and k.shape[-1] == v.shape[-1]
     head_dim = q.shape[-1]
-    assert head_dim in {64, 128}  # 注释用于泛化测试 head_dim
+    assert head_dim in {64, 128}
     assert q.shape[-2] == k.shape[-2] and k.shape[-2] == v.shape[-2]
     seq_length = q.shape[-2]
     assert len(mask.shape) == 2 and mask.shape[0] == seq_length and mask.shape[1] == seq_length
@@ -768,23 +788,18 @@ def sdpa_impl(
     extra_kern_args = {}
     cube_num, vector_num = get_device_properties()
     num_cores = cube_num
-    acc = torch.zeros(
-        (q.shape[0], q.shape[1], q.shape[2], head_dim),
-        dtype=torch.float32,
-        device=q.device,
-    )
     M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
 
-    # mask = mask.to(torch.int8)
+    # mask = 1 - mask.to(torch.int8)
+    # mask = (1.0 - mask.to(torch.float32)) * (-1e6)
 
-    _attn_fwd[(num_cores,)](
+    _sdpa_infer_kernel[(num_cores,)](
         q,
         k,
         v,
         mask,
         M,
         o,
-        acc,
         scale,
         q.stride(0),
         q.stride(1),
@@ -816,6 +831,7 @@ def sdpa_impl(
         enable_hivm_auto_cv_balance=True,
         tile_mix_vector_loop=2,  # 中间vector切分； 1:2
         tile_mix_cube_loop=4,  # (128, 128) * (128, 512); (M, N)大的切分
+        enable_ubuf_saving=True,
         **extra_kern_args,
     )
     # NOTE(zhangjihang): Not need for inference now
@@ -837,8 +853,8 @@ def sdpa_fwd_impl(
     Forward computation interface:
     Args:
         q: Query tensor (Q), shape [BSZ, Q_HEAD_NUM, SEQ, HEAD_DIM]
-        k: Key tensor (K), shape [BSZ, Q_HEAD_NUM, SEQ, HEAD_DIM]
-        v: Value tensor (V), shape [BSZ, Q_HEAD_NUM, SEQ, HEAD_DIM]
+        k: Key tensor (K), shape [BSZ, KV_HEAD_NUM, SEQ, HEAD_DIM]
+        v: Value tensor (V), shape [BSZ, KV_HEAD_NUM, SEQ, HEAD_DIM]
         mask: Attention mask, shape [SEQ, SEQ]
         scale: Scaling factor for QK product
     Returns:
@@ -861,16 +877,33 @@ def sdpa_fwd_impl(
     num_cores, _ = get_device_properties()
 
     kernel_sdpa_fwd[(num_cores,)](
-        q, k, v, o,
+        q,
+        k,
+        v,
+        o,
         lse,
         mask,
         scale,
         k.shape[1],
-        q.shape[0], q.shape[1], q.shape[2], q.shape[3],
-        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-        lse.stride(0), lse.stride(1), lse.stride(2),
+        q.shape[0],
+        q.shape[1],
+        q.shape[2],
+        q.shape[3],
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        k.stride(3),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        v.stride(3),
+        lse.stride(0),
+        lse.stride(1),
+        lse.stride(2),
     )
 
     return o, lse
@@ -893,15 +926,15 @@ def sdpa_bwd_impl(
         o: Attention output tensor, shape [BSZ, Q_HEAD_NUM, SEQ, HEAD_DIM]
         do: Gradient tensor for o, shape [BSZ, Q_HEAD_NUM, SEQ, HEAD_DIM]
         q: Query tensor (Q), shape [BSZ, Q_HEAD_NUM, SEQ, HEAD_DIM]
-        k: Key tensor (K), shape [BSZ, Q_HEAD_NUM, SEQ, HEAD_DIM]
-        v: Value tensor (V), shape [BSZ, Q_HEAD_NUM, SEQ, HEAD_DIM]
+        k: Key tensor (K), shape [BSZ, KV_HEAD_NUM, SEQ, HEAD_DIM]
+        v: Value tensor (V), shape [BSZ, KV_HEAD_NUM, SEQ, HEAD_DIM]
         lse: Logsumexp tensor, shape [BSZ, Q_HEAD_NUM, SEQ]
         mask: Attention mask, shape [SEQ, SEQ]
         scale: Scaling factor for QK product
     Returns:
         dq: Gradient tensor for Query tensor (Q), shape [BSZ, Q_HEAD_NUM, SEQ, HEAD_DIM]
-        dk: Gradient tensor for Key tensor (K), shape [BSZ, Q_HEAD_NUM, SEQ, HEAD_DIM]
-        dv: Gradient tensor for Value tensor (V), shape [BSZ, Q_HEAD_NUM, SEQ, HEAD_DIM]
+        dk: Gradient tensor for Key tensor (K), shape [BSZ, KV_HEAD_NUM, SEQ, HEAD_DIM]
+        dv: Gradient tensor for Value tensor (V), shape [BSZ, KV_HEAD_NUM, SEQ, HEAD_DIM]
     """
     # shape constraints
     assert len(q.shape) == 4 and len(k.shape) == 4 and len(v.shape) == 4 and len(lse.shape) == 3
@@ -922,34 +955,83 @@ def sdpa_bwd_impl(
     dv = torch.empty_like(v)
 
     kernel_sdpa_bwd_d[(num_cores,)](
-        o, do, d,
-        o.shape[0], o.shape[1], o.shape[2], o.shape[3],
-        o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-        d.stride(0), d.stride(1), d.stride(2),
+        o,
+        do,
+        d,
+        o.shape[0],
+        o.shape[1],
+        o.shape[2],
+        o.shape[3],
+        o.stride(0),
+        o.stride(1),
+        o.stride(2),
+        o.stride(3),
+        d.stride(0),
+        d.stride(1),
+        d.stride(2),
     )
     kernel_sdpa_bwd_q[(num_cores,)](
-        q, k, v, do, d, dq,
+        q,
+        k,
+        v,
+        do,
+        d,
+        dq,
         lse,
         mask,
         scale,
         k.shape[1],
-        q.shape[0], q.shape[1], q.shape[2], q.shape[3],
-        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-        d.stride(0), d.stride(1), d.stride(2),
+        q.shape[0],
+        q.shape[1],
+        q.shape[2],
+        q.shape[3],
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        k.stride(3),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        v.stride(3),
+        d.stride(0),
+        d.stride(1),
+        d.stride(2),
     )
     kernel_sdpa_bwd_kv[(num_cores,)](
-        q, k, v, do, d, dk, dv,
+        q,
+        k,
+        v,
+        do,
+        d,
+        dk,
+        dv,
         lse,
         mask,
         scale,
         k.shape[1],
-        q.shape[0], q.shape[1], q.shape[2], q.shape[3],
-        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-        d.stride(0), d.stride(1), d.stride(2),
+        q.shape[0],
+        q.shape[1],
+        q.shape[2],
+        q.shape[3],
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        k.stride(3),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        v.stride(3),
+        d.stride(0),
+        d.stride(1),
+        d.stride(2),
     )
-    
+
     return dq, dk, dv

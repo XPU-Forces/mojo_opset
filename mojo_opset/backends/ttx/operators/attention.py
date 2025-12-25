@@ -4,7 +4,7 @@ import torch
 
 from mojo_opset.backends.ttx.kernels import paged_attention_decode
 from mojo_opset.backends.ttx.kernels import paged_attention_prefill
-from mojo_opset.backends.ttx.kernels import spda
+from mojo_opset.backends.ttx.kernels import sdpa_infer
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoSdpa
@@ -87,7 +87,7 @@ class TTXSdpa(MojoSdpa, default_priority=0):
         key: torch.Tensor,
         value: torch.Tensor,
     ):
-        output = spda(
+        output = sdpa_infer(
             q=query,
             k=key,
             v=value,
