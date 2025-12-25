@@ -1,14 +1,13 @@
 import torch
 import torch.nn.functional as F
 
+from mojo_opset.core.function import MojoFunction
 from mojo_opset.utils.logging import get_logger
-
-from ..mojo_function import MojoFunction
 
 logger = get_logger(__name__)
 
 
-class MojoBlockDiffusionAttentionFunction(MojoFunction):
+class MojoSdpaFunction(MojoFunction):
     @staticmethod
     def forward_ref(ctx, query, key, value, mask, scale=1.0, enable_gqa=False):
         ctx.scale = scale
@@ -32,4 +31,8 @@ class MojoBlockDiffusionAttentionFunction(MojoFunction):
         dq = torch.matmul(ds.to(query.dtype), key) * ctx.scale
         dk = torch.matmul(ds.to(query.dtype).transpose(-1, -2), query) * ctx.scale
 
+<<<<<<< HEAD
         return dq, dk, dv, None
+=======
+        return dq, dk, dv
+>>>>>>> d73744c (add sdpa function interface and fix some)

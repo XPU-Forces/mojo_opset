@@ -10,6 +10,12 @@ from tests.utils import bypass_not_implemented
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoSdpa
+<<<<<<< HEAD
+=======
+from mojo_opset.backends.reference.operators.attention import RefPagedDecodeGQA
+from mojo_opset.backends.reference.operators.attention import RefPagedPrefillGQA
+from mojo_opset.backends.reference.operators.attention import RefSdpa
+>>>>>>> 4ab577b (add sdpa function interface and fix some)
 
 
 def generate_paged_decode_data(
