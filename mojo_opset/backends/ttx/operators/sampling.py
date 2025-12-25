@@ -9,9 +9,13 @@ import torch
 from mojo_opset.backends.ttx.kernels.npu.sample import fused_penalties_temp_impl
 from mojo_opset.backends.ttx.kernels.npu.sample import top_p_filter_impl
 from mojo_opset.backends.ttx.kernels.npu.sample import top_p_sampling_impl
+from mojo_opset.backends.ttx.kernels.npu.sample import reject_sampling_impl
+from mojo_opset.backends.ttx.kernels.npu.sample import join_prob_reject_sampling_impl
 from mojo_opset.core import MojoApplyPenaltiesTempurate
 from mojo_opset.core import MojoTopPFilter
 from mojo_opset.core import MojoTopPSampling
+from mojo_opset.core import MojoRejectSampling
+from mojo_opset.core import MojoJoinProbRejectSampling
 
 
 class TTXTopPSampling(MojoTopPSampling, default_priority=0):
@@ -37,6 +41,38 @@ class TTXTopPFilter(MojoTopPFilter, default_priority=0):
             filter_value=self.filter_value,
             min_tokens_to_keep=min_tokens_to_keep,
             rand_top_k=rand_top_k,
+        )
+
+
+class TTXRejectSampling(MojoRejectSampling):
+    def forward_std(
+        self,
+        target_logits: torch.Tensor,  # [batch, spec_step + 1, vocab_size]
+        draft_tokens: torch.Tensor,  # [batch, spec_step]
+        draft_probs: torch.Tensor,  # [batch, spec_step]
+        random_seed: int = None,
+    ):
+        return reject_sampling_impl(
+            target_logits,
+            draft_tokens,
+            draft_probs,
+            random_seed,
+        )
+
+
+class TTXJoinProbRejectSampling(MojoJoinProbRejectSampling):
+    def forward_std(
+        self,
+        target_logits: torch.Tensor,  # [batch, spec_step + 1, vocab_size]
+        draft_tokens: torch.Tensor,  # [batch, spec_step]
+        draft_probs: torch.Tensor,  # [batch, spec_step]
+        random_seed: int = None,
+    ):
+        return join_prob_reject_sampling_impl(
+            target_logits,
+            draft_tokens,
+            draft_probs,
+            random_seed,
         )
 
 
