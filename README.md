@@ -36,8 +36,10 @@ Ascend NPU官方支持。
 | MoE         | MojoMoECombine              | TBD               | TBD           |
 | MoE         | MojoMoeDispatchQuant        | TBD               | TBD           |
 | Sampling    | MojoTopKSampling            | TBD               | TBD           |
-| Sampling    | MojoTopPSampling            | TBD               | TBD           |
-| Sampling    | MojoRejectSampling          | TBD               | TBD           |
+| Sampling    | MojoTopPSampling            | ✅                | ✅             |
+| Sampling    | MojoTopPSampling            | ✅                | ✅             |
+| Sampling    | MojoRejectSampling          | ✅                | ✅             |
+| Sampling    | MojoApplyPenaltiesTempurate | ✅                | ✅             |
 | Norm        | MojoNorm                    | ✅                | ✅             |
 | Norm        | MojoResidualAddNorm         | ✅                | ✅             |
 | Norm        | MojoNormQuant               | TBD               | TBD           |
