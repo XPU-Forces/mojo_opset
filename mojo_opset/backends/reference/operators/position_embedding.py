@@ -3,8 +3,8 @@ from typing import Tuple
 
 import torch
 
-from mojo_opset.core import LAST_PRIORITY
 from mojo_opset.core import MojoRoPE
+from mojo_opset.utils.mode import LAST_PRIORITY
 
 
 class RefRoPE(MojoRoPE, default_priority=LAST_PRIORITY):

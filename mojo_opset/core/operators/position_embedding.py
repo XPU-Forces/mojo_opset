@@ -63,11 +63,6 @@ class MojoRoPE(MojoOperator):
     ) -> Tuple[Any]:
         raise NotImplementedError
 
-    def forward_analysis(
-        self, q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-    ) -> Tuple[int, int, int]:
-        pass
-
 
 class MojoRoPEStoreKV(MojoOperator):
     pass

@@ -40,9 +40,6 @@ class MojoTopPSampling(MojoOperator):
     def forward_std(self, logits: torch.Tensor) -> Tuple[Any]:
         raise NotImplementedError
 
-    def forward_analysis(self, logits) -> Tuple[int, int, int]:
-        raise NotImplementedError
-
 
 class MojoTopPFilter(MojoOperator):
     def __init__(
@@ -60,11 +57,6 @@ class MojoTopPFilter(MojoOperator):
 
     @abstractmethod
     def forward_std(self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int) -> Tuple[Any]:
-        raise NotImplementedError
-
-    def forward_analysis(
-        self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int
-    ) -> Tuple[int, int, int]:
         raise NotImplementedError
 
 
@@ -137,15 +129,4 @@ class MojoApplyPenaltiesTempurate(MojoOperator):
         repetition_penalties: List[float],
         temps: Optional[List[Optional[float]]] = None,
     ) -> torch.Tensor:
-        raise NotImplementedError
-
-    def forward_analysis(
-        self,
-        logits: torch.Tensor,
-        token_freqs: List[Union[None, torch.Tensor]],
-        presence_penalties: List[float],
-        frequency_penalties: List[float],
-        repetition_penalties: List[float],
-        temps: Optional[List[Optional[float]]] = None,
-    ) -> Tuple[int, int, int]:
         raise NotImplementedError

@@ -1,10 +1,10 @@
 import torch
 import torch.nn.functional as F
 
-from mojo_opset.core import LAST_PRIORITY
 from mojo_opset.core import MojoGelu
 from mojo_opset.core import MojoSilu
 from mojo_opset.core import MojoSwiGLU
+from mojo_opset.utils.mode import LAST_PRIORITY
 
 
 class RefGelu(MojoGelu, default_priority=LAST_PRIORITY):

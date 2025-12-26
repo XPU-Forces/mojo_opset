@@ -4,9 +4,9 @@ from typing import Tuple
 import torch
 import torch.nn.functional as F
 
-from mojo_opset.core import LAST_PRIORITY
 from mojo_opset.core import MojoNorm
 from mojo_opset.core import MojoResidualAddNorm
+from mojo_opset.utils.mode import LAST_PRIORITY
 
 
 class RefNorm(MojoNorm, default_priority=LAST_PRIORITY):

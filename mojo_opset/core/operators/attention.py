@@ -89,11 +89,6 @@ class MojoPagedDecodeGQA(MojoOperator):
     ) -> Tuple[Any]:
         raise NotImplementedError
 
-    def forward_analysis(
-        self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None
-    ) -> Tuple[int, int, int]:
-        pass
-
 
 class MojoPrefillGQA(MojoOperator):
     pass
@@ -165,17 +160,6 @@ class MojoPagedPrefillGQA(MojoOperator):
     ) -> Tuple[Any]:
         raise NotImplementedError
 
-    def forward_analysis(
-        self,
-        query: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
-        block_tables: torch.Tensor,
-        softmax_scale: Optional[float] = None,
-    ) -> Tuple[int, int, int]:
-        pass
-
 
 class MojoDecodeMLA(MojoOperator):
     pass
@@ -245,13 +229,4 @@ class MojoBlockDiffusionAttention(MojoOperator):
         value: torch.Tensor,
         softmax_scale: Optional[float] = None,
     ):
-        raise NotImplementedError("MojoBlockDiffusionAttention forward_std not implemented")
-
-    def forward_analysis(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        softmax_scale: Optional[float] = None,
-    ):
-        raise NotImplementedError("MojoBlockDiffusionAttention forward_analysis not implemented")
+        raise NotImplementedError("MojoSdpa forward_std not implemented")
