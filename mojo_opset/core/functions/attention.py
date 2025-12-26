@@ -34,4 +34,4 @@ class MojoSdpaFunction(MojoFuncBase):
         dq = torch.matmul(ds.to(query.dtype), key) * ctx.scale
         dk = torch.matmul(ds.to(query.dtype).transpose(-1, -2), query) * ctx.scale
 
-        return dq, dk, dv
+        return dq, dk, dv, None
