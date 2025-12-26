@@ -941,7 +941,7 @@ def fused_linear_cross_entropy_1d_bwd_impl(
                 HAS_SOFTCAPPING=True if softcap is not None else False,
             )
 
-        grad_logits_chunk = logits_chunk * grad_output_chunk.unsqueeze(1)  # chunk_size x V
+        grad_logits_chunk = logits_chunk.mul_(grad_output_chunk.unsqueeze(1))  # chunk_size x V
         grad_input[start_idx:end_idx] = torch.matmul(grad_logits_chunk, weight)
 
         if grad_weight is not None:
