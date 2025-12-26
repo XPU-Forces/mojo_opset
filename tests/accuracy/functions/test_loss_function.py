@@ -22,6 +22,8 @@ from mojo_opset import MojoFusedLinearCrossEntropyFunction
     "has_bias, has_ce_weight, ignore_index, label_smoothing, lse_square_scale, reduction, return_z_loss",
     [
         (False, False, -100, 0.0, 0.0, "mean", False),
+        (False, False, -100, 0.0, 0.0, "sum", False),
+        (False, False, -100, 0.0, 0.0, "none", False),
     ],
 )
 @auto_switch_platform()
@@ -68,7 +70,10 @@ def test_fused_ce_forward_backward_diff(
         loss = output
         z_loss = None
 
-    grad_output = torch.rand_like(loss)
+    if reduction == "mean":
+        grad_output = torch.rand_like(loss)
+    else:
+        grad_output = torch.rand_like(loss) / input_tensor.shape[0]
 
     if return_z_loss:
         grad_z_loss = torch.rand_like(z_loss)
