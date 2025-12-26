@@ -5,6 +5,7 @@ import torch
 from mojo_opset.core import MojoMoECombine
 from mojo_opset.core import MojoMoEDispatch
 from mojo_opset.core import MojoMoEGate
+from mojo_opset.utils.mode import LAST_PRIORITY
 
 
 class RefMoECombine(MojoMoECombine):
