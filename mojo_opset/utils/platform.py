@@ -13,12 +13,17 @@ logger = get_logger(__name__)
 
 
 @functools.lru_cache
-def get_platform() -> Literal["npu", "mlu", "cpu"]:
+def get_platform() -> Literal["npu", "mlu", "meta_device"]:
     """
-    Detect whether the system has NPU or MLU.
+    Detect whether the system has NPU or MLU, fallback device is meta_device.
     """
     try:
-        subprocess.run(["npu-smi", "info"], check=True)
+        subprocess.run(
+            ["npu-smi", "info"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         logger.info("Ascend NPU detected")
         return "npu"
     except (subprocess.SubprocessError, FileNotFoundError):
@@ -28,7 +33,7 @@ def get_platform() -> Literal["npu", "mlu", "cpu"]:
             return "mlu"
         except (subprocess.SubprocessError, FileNotFoundError):
             logger.info("No accelerator detected")
-            return "cpu"
+            return "meta_device"
 
 
 def get_impl_by_platform():
@@ -48,19 +53,25 @@ def get_impl_by_platform():
         caller_dir = os.path.dirname(caller_module.__file__)
         package_name = getattr(caller_module, "__package__", "")
 
-        for _, module_name, _ in pkgutil.iter_modules([caller_dir]):
-            full_module_name = f"{package_name}.{module_name}"
-            module = importlib.import_module(full_module_name)
+        api_dir_lists = ["operators", "functions"]
 
-            for name, op in inspect.getmembers(module, inspect.isclass):
-                if (
-                    issubclass(op, MojoOperator)
-                    and op is not MojoOperator
-                    and op.__module__ == full_module_name
-                    and platform in getattr(op, "supported_platforms_list", [])
-                ):
-                    logger.debug(f"Found supported operator '{name}' in {full_module_name}")
-                    import_op_map[name] = op
+        for api_dir in api_dir_lists:
+            api_dir_path = os.path.join(caller_dir, api_dir)
+            api_package_name = f"{package_name}.{api_dir}"
+
+            for _, module_name, _ in pkgutil.iter_modules([api_dir_path]):
+                full_module_name = f"{api_package_name}.{module_name}"
+                module = importlib.import_module(full_module_name)
+
+                for name, op in inspect.getmembers(module, inspect.isclass):
+                    if (
+                        issubclass(op, MojoOperator)
+                        and op is not MojoOperator
+                        and op.__module__ == full_module_name
+                        and platform in getattr(op, "supported_platforms_list", [])
+                    ):
+                        logger.debug(f"Found supported operator '{name}' in {full_module_name}")
+                        import_op_map[name] = op
 
     except (ImportError, IndexError) as e:
         logger.error(f"Failed to discover operators: {e}")

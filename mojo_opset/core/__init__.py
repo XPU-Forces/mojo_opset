@@ -5,82 +5,86 @@ All Mojo Operators contained in Mojo Opsets listed here.
 # Set of all valid KV layouts for parameter validation (sorted for consistent ordering)
 VALID_KV_LAYOUTS = sorted({"NPU_ND", "NPU_NZ", "AMD_CB"})
 
-""" mojo activation """
-from .activation.mojo_gelu import MojoGelu
-from .activation.mojo_gelu import MojoGeluQuant
-from .activation.mojo_silu import MojoSilu
-from .activation.mojo_silu import MojoSiluQuant
-from .activation.mojo_swiglu import MojoSwiGLU
+""" activation """
+from .operators.activation import MojoGelu
+from .operators.activation import MojoGeluQuant
+from .operators.activation import MojoSilu
+from .operators.activation import MojoSiluQuant
+from .operators.activation import MojoSwiGLU
 
-""" mojo attn """
-from .attn.mojo_decode_gqa import MojoDecodeGQA
-from .attn.mojo_decode_gqa import MojoPagedDecodeGQA
-from .attn.mojo_decode_mla import MojoDecodeMLA
-from .attn.mojo_decode_mla import MojoPagedDecodeMLA
-from .attn.mojo_decode_nsa import MojoDecodeNSA
-from .attn.mojo_decode_nsa import MojoPagedDecodeNSA
-from .attn.mojo_prefill_gqa import MojoPagedPrefillGQA
-from .attn.mojo_prefill_gqa import MojoPrefillGQA
-from .attn.mojo_prefill_mla import MojoPagedPrefillMLA
-from .attn.mojo_prefill_mla import MojoPrefillMLA
-from .attn.mojo_prefill_nsa import MojoPagedPrefillNSA
-from .attn.mojo_prefill_nsa import MojoPrefillNSA
+""" attention """
+from .operators.attention import MojoBlockDiffusionAttention
+from .operators.attention import MojoDecodeGQA
+from .operators.attention import MojoDecodeMLA
+from .operators.attention import MojoDecodeNSA
+from .operators.attention import MojoPagedDecodeGQA
+from .operators.attention import MojoPagedDecodeMLA
+from .operators.attention import MojoPagedDecodeNSA
+from .operators.attention import MojoPagedPrefillGQA
+from .operators.attention import MojoPagedPrefillMLA
+from .operators.attention import MojoPagedPrefillNSA
+from .operators.attention import MojoPrefillGQA
+from .operators.attention import MojoPrefillMLA
+from .operators.attention import MojoPrefillNSA
 
-""" mojo kvcache """
-from .kvcache.mojo_kv_cast import MojoKVCacheCast
-from .kvcache.mojo_store_kvcache import MojoStoreKVCache
-from .kvcache.mojo_store_kvcache import MojoStoreMLAKVCache
-from .kvcache.mojo_store_kvcache import MojoStorePagedKVCache
-from .kvcache.mojo_store_kvcache import MojoStorePagedMLAKVCache
+""" kvcache """
+from .operators.kvcache import MojoKVCacheCast
+from .operators.kvcache import MojoStoreKVCache
+from .operators.kvcache import MojoStoreMLAKVCache
+from .operators.kvcache import MojoStorePagedKVCache
+from .operators.kvcache import MojoStorePagedMLAKVCache
 
-""" mojo linear """
-from .linear.mojo_linear import MojoBatchLinear
-from .linear.mojo_linear import MojoGroupLinear
-from .linear.mojo_linear import MojoLinear
-from .linear.mojo_linear_cc import MojoAllGatherLinear
-from .linear.mojo_linear_cc import MojoLinearAll2All
-from .linear.mojo_linear_cc import MojoLinearAllReduce
-from .linear.mojo_linear_cc import MojoLinearReduceScatter
+""" linear """
+from .operators.linear import MojoAllGatherLinear
+from .operators.linear import MojoBatchLinear
+from .operators.linear import MojoGroupLinear
+from .operators.linear import MojoLinear
+from .operators.linear import MojoLinearAll2All
+from .operators.linear import MojoLinearAllReduce
+from .operators.linear import MojoLinearReduceScatter
 
 """ mojo misc """
-from .misc.mojo_quant import MojoDequant
-from .misc.mojo_quant import MojoQuant
-from .misc.mojo_wte import MojoEmbedding
-from .misc.mojo_wte import MojoParallelEmbedding
+from .operators.misc import MojoDequant
+from .operators.misc import MojoEmbedding
+from .operators.misc import MojoParallelEmbedding
+from .operators.misc import MojoQuant
 
-""" mojo moe """
-from .moe.mojo_moe_combine import MojoBigEPCombine
-from .moe.mojo_moe_combine import MojoMoECombine
-from .moe.mojo_moe_dispatch import MojoBigEPDispatch
-from .moe.mojo_moe_dispatch import MojoMoEDispatch
-from .moe.mojo_moe_gate import MojoMoEGate
+""" moe """
+from .operators.moe import MojoBigEPCombine
+from .operators.moe import MojoBigEPDispatch
+from .operators.moe import MojoMoECombine
+from .operators.moe import MojoMoEDispatch
+from .operators.moe import MojoMoEGate
 
-""" mojo norm """
-from .norm.mojo_add_norm import MojoResidualAddNorm
-from .norm.mojo_add_norm import MojoResidualAddNormCast
-from .norm.mojo_add_norm import MojoResidualAddNormQuant
-from .norm.mojo_norm import MojoNorm
-from .norm.mojo_norm import MojoNormQuant
+""" normalization """
+from .operators.normalization import MojoNorm
+from .operators.normalization import MojoNormQuant
+from .operators.normalization import MojoResidualAddNorm
+from .operators.normalization import MojoResidualAddNormCast
+from .operators.normalization import MojoResidualAddNormQuant
 
-""" mojo pos_emb """
-from .pos_emb.mojo_rope import MojoNormRoPE
-from .pos_emb.mojo_rope import MojoNormRoPEStoreKV
-from .pos_emb.mojo_rope import MojoRoPE
-from .pos_emb.mojo_rope import MojoRoPEStoreKV
+""" position_embedding """
+from .operators.position_embedding import MojoNormRoPE
+from .operators.position_embedding import MojoNormRoPEStoreKV
+from .operators.position_embedding import MojoRoPE
+from .operators.position_embedding import MojoRoPEStoreKV
 
-""" mojo sampling """
-from .sampling.mojo_sampling import MojoApplyPenaltiesTempurate
-from .sampling.mojo_sampling import MojoRejectSampling
-from .sampling.mojo_sampling import MojoTopKSampling
-from .sampling.mojo_sampling import MojoTopPFilter
-from .sampling.mojo_sampling import MojoTopPSampling
+""" sampling """
+from .operators.sampling import MojoApplyPenaltiesTempurate
+from .operators.sampling import MojoRejectSampling
+from .operators.sampling import MojoTopKSampling
+from .operators.sampling import MojoTopPFilter
+from .operators.sampling import MojoTopPSampling
+from .operators.sampling import MojoRejectSampling
+from .operators.sampling import MojoJoinProbRejectSampling
 
-""" mojo functions """
-from .functions.mojo_causal_conv1d import MojoCausalConv1dFunction
-from .functions.mojo_linear_crossentropy_func import MojoFusedLinearCrossEntropyFunction
-from .functions.mojo_rmsnorm_func import MojoRMSNormFunction
-from .functions.mojo_rope_func import MojoRoPEFunction
-from .functions.mojo_silu_func import MojoSiluFunction
+""" functions """
+from .functions.activation import MojoSiluFunction
+from .functions.convolution import MojoCausalConv1dFunction
+from .functions.convolution import causal_conv1d
+from .functions.loss_function import MojoFusedLinearCrossEntropyFunction
+from .functions.normalization import MojoRMSNormFunction
+from .functions.position_embedding import MojoRoPEFunction
 
 LAST_PRIORITY = 999
 
@@ -104,6 +108,7 @@ __all__ = [
     "MojoPagedDecodeMLA",
     "MojoDecodeNSA",
     "MojoPagedDecodeNSA",
+    "MojoBlockDiffusionAttention",
 
     "MojoStoreKVCache",
     "MojoStorePagedKVCache",
@@ -145,6 +150,7 @@ __all__ = [
     "MojoTopPSampling",
     "MojoTopKSampling",
     "MojoRejectSampling",
+    "MojoJoinProbRejectSampling",
     "MojoApplyPenaltiesTempurate",
     "MojoTopPFilter",
 
@@ -153,6 +159,7 @@ __all__ = [
     "MojoRoPEFunction",
     "MojoFusedLinearCrossEntropyFunction",
     "MojoCausalConv1dFunction",
+    "causal_conv1d",
     "LAST_PRIORITY",
 ]
 # fmt: on
