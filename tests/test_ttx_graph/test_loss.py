@@ -43,6 +43,43 @@ def test_fused_ce(
     if has_ce_weight:
         ce_weight = torch.rand(weight.shape[0], device=weight.device, dtype=torch.float32) + 0.1
 
+    if reduction == "none":
+        torch.library.opcheck(
+            torch.ops.ttx.fused_linear_cross_entropy_1d,
+            (
+                input_tensor,
+                weight,
+                target,
+                ce_weight,
+                bias,
+                ignore_index,
+                lse_square_scale,
+                label_smoothing,
+                None,
+                return_z_loss,
+            ),
+        )
+        torch.library.opcheck(
+            torch.ops.ttx.fused_linear_cross_entropy_1d_bwd,
+            (
+                torch.full((input_tensor.shape[0],), 1.0, dtype=grad_input.dtype, device=grad_input.device),
+                input_tensor,
+                weight,
+                target,
+                ce_weight,
+                bias,
+                ignore_index,
+                lse_square_scale,
+                label_smoothing,
+                None,
+                None,
+            ),
+            # NOTE: Since we directly register the backward operator itself, the
+            # test_aot_dispatch_dynamic check is unnecessary.
+            test_utils=("test_schema", "test_autograd_registration", "test_faketensor"),
+        )
+        return
+
     torch.library.opcheck(
         torch.ops.ttx.fused_linear_cross_entropy,
         (

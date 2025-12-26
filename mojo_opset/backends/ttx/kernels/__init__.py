@@ -397,7 +397,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         label_smoothing: float = 0.0,
         softcap: Optional[float] = None,
         return_z_loss: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         return fused_linear_cross_entropy_1d_fwd_impl(
             _input,
             weight,
@@ -424,11 +424,11 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         softcap: Optional[float] = None,
         return_z_loss: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        loss = torch.empty((), dtype=torch.float32, device=_input.device)
+        loss = torch.empty((_input.shape[0],), dtype=torch.float32, device=_input.device)
 
         z_loss = None
         if return_z_loss:
-            z_loss = torch.empty((), dtype=_input.dtype, device=_input.device)
+            z_loss = torch.empty((_input.shape[0],), dtype=_input.dtype, device=_input.device)
 
         return loss, z_loss
 
