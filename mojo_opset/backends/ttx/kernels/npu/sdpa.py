@@ -297,7 +297,12 @@ def _sdpa_infer_kernel(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_R": 128, "BLOCK_C": 128}, num_warps=4, num_stages=2),
+        triton.Config({'multibuffer': True, "BLOCK_R": 128, "BLOCK_C": 128}),
+        triton.Config({'multibuffer': True, "BLOCK_R": 64, "BLOCK_C": 128}),
+        triton.Config({'multibuffer': True, "BLOCK_R": 128, "BLOCK_C": 64}),
+        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 256}),
+        triton.Config({'multibuffer': False, "BLOCK_R": 256, "BLOCK_C": 128}),
+        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 128}),
     ],
     key=["N", "S", "H"],
 )
@@ -416,10 +421,13 @@ def kernel_sdpa_fwd(
         tl.store(ptr_o, block_o.to(LOW_TYPE), mask=mask_q)
         tl.store(ptr_lse, block_lse, mask=mask_lse)
 
-
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_R": 128}, num_warps=4, num_stages=2),
+        triton.Config({'multibuffer': True, "BLOCK_R": 128}),
+        triton.Config({'multibuffer': True, "BLOCK_R": 64}),
+        triton.Config({'multibuffer': False, "BLOCK_R": 256}),
+        triton.Config({'multibuffer': False, "BLOCK_R": 128}),
+        triton.Config({'multibuffer': False, "BLOCK_R": 64}),
     ],
     key=["N", "S", "H"],
 )
@@ -476,7 +484,12 @@ def kernel_sdpa_bwd_d(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_R": 128, "BLOCK_C": 64}, num_warps=4, num_stages=2),
+        triton.Config({'multibuffer': True, "BLOCK_R": 128, "BLOCK_C": 64}),
+        triton.Config({'multibuffer': True, "BLOCK_R": 64, "BLOCK_C": 128}),
+        triton.Config({'multibuffer': True, "BLOCK_R": 64, "BLOCK_C": 64}),
+        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 128}),
+        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 64}),
+        triton.Config({'multibuffer': False, "BLOCK_R": 64, "BLOCK_C": 128}),
     ],
     key=["N", "S", "H"],
 )
@@ -602,7 +615,12 @@ def kernel_sdpa_bwd_q(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_R": 64, "BLOCK_C": 128}, num_warps=4, num_stages=2),
+        triton.Config({'multibuffer': True, "BLOCK_R": 128, "BLOCK_C": 64}),
+        triton.Config({'multibuffer': True, "BLOCK_R": 64, "BLOCK_C": 128}),
+        triton.Config({'multibuffer': True, "BLOCK_R": 64, "BLOCK_C": 64}),
+        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 128}),
+        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 64}),
+        triton.Config({'multibuffer': False, "BLOCK_R": 64, "BLOCK_C": 128}),
     ],
     key=["N", "S", "H"],
 )
