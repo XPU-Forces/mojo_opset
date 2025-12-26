@@ -2,6 +2,8 @@ from .flash_attention import paged_attention_decode_impl
 from .flash_attention import paged_attention_prefill_impl
 from .fused_linear_cross_entropy import fused_linear_cross_entropy_bwd_impl
 from .fused_linear_cross_entropy import fused_linear_cross_entropy_fwd_impl
+from .fused_linear_cross_entropy import fused_linear_cross_entropy_1d_bwd_impl
+from .fused_linear_cross_entropy import fused_linear_cross_entropy_1d_fwd_impl
 from .gelu import gelu_bwd_impl
 from .gelu import gelu_fwd_impl
 from .rmsnorm import rmsnorm_bwd_impl
@@ -19,6 +21,8 @@ __all__ = [
     "paged_attention_prefill_impl",
     "fused_linear_cross_entropy_bwd_impl",
     "fused_linear_cross_entropy_fwd_impl",
+    "fused_linear_cross_entropy_1d_bwd_impl",
+    "fused_linear_cross_entropy_1d_fwd_impl",
     "gelu_bwd_impl",
     "gelu_fwd_impl",
     "rmsnorm_bwd_impl",

@@ -39,8 +39,8 @@ paged_attention_decode_impl = getattr(ttx_backend_module, "paged_attention_decod
 fused_linear_cross_entropy_fwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_fwd_impl")
 fused_linear_cross_entropy_bwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_bwd_impl")
 
-fused_linear_cross_entropy_fwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_1d_bwd_impl")
-fused_linear_cross_entropy_bwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_1d_fwd_impl")
+fused_linear_cross_entropy_1d_fwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_1d_fwd_impl")
+fused_linear_cross_entropy_1d_bwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_1d_bwd_impl")
 
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
