@@ -76,9 +76,6 @@ class MojoGroupLinear(MojoOperator):
     def forward_std(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
-    def forward_analysis(self, input: torch.Tensor, group_list: torch.Tensor) -> Tuple[int, int, int]:
-        pass
-
 
 class MojoLinearAllReduce(MojoOperator):
     pass

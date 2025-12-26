@@ -9,7 +9,7 @@ from typing import Tuple
 import torch
 
 from mojo_opset.utils.logging import get_logger
-from mojo_opset.utils.mode import get_forward_mode
+from mojo_opset.utils.mode import get_forward_mode, EXCLUSIVE_PRIORITY
 from mojo_opset.utils.platform import get_platform
 
 logger = get_logger(__name__)
@@ -29,7 +29,7 @@ class MojoOpMeta(ABCMeta):
 class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
     supported_platforms_list = ["npu", "mlu", "meta_device"]
 
-    def __init_subclass__(cls, default_priority=0, backend="ttx", **kwargs):
+    def __init_subclass__(cls, default_priority=EXCLUSIVE_PRIORITY, backend="ttx", **kwargs):
         super().__init_subclass__(**kwargs)
 
         is_direct_child = MojoOperator in cls.__bases__
@@ -97,9 +97,7 @@ class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
         self.layer_idx = layer_idx
 
         self._forward_map = {
-            "STD": self.forward_std,
-            # "DIFF": self.forward_diff,
-            "ANALYZE": self.forward_analysis,
+            "STD": self.forward_std
         }
 
         mode, layer_idx = get_forward_mode()
@@ -160,15 +158,4 @@ class MojoOperator(ABC, torch.nn.Module, metaclass=MojoOpMeta):
         Normal forward function, this function supposed to be implemented by backend.
         """
 
-        raise NotImplementedError
-
-    # TODO(zhangjihang): this method should be move to backend and implemented by a Ref class.
-    @abstractmethod
-    def forward_analysis(self, *args, **kwargs) -> Tuple[Any]:
-        """
-        This function is used to analyze the operator.
-
-        Returns:
-            Tuple[Any]: The result of the operator, IO Bytes / FLOPS.
-        """
         raise NotImplementedError

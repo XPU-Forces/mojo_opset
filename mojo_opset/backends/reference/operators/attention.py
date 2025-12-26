@@ -4,13 +4,11 @@ from typing import Optional
 
 import torch
 
-from mojo_opset.core import LAST_PRIORITY
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoSdpa
 
-
-class RefPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=LAST_PRIORITY):
+class RefPagedPrefillGQA(MojoPagedPrefillGQA):
     def forward_std(
         self,
         query: torch.Tensor,
@@ -79,7 +77,7 @@ class RefPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=LAST_PRIORITY):
         return output
 
 
-class RefPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=LAST_PRIORITY):
+class RefPagedDecodeGQA(MojoPagedDecodeGQA):
     def forward_std(
         self,
         q: torch.Tensor,
@@ -131,7 +129,7 @@ class RefPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=LAST_PRIORITY):
         return out
 
 
-class RefSdpa(MojoSdpa, default_priority=LAST_PRIORITY):
+class RefSdpa(MojoSdpa):
     def forward_std(
         self,
         query: torch.Tensor,

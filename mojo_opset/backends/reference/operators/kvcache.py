@@ -2,8 +2,8 @@ from typing import Optional
 
 import torch
 
-from mojo_opset.core import LAST_PRIORITY
 from mojo_opset.core import MojoStorePagedKVCache
+from mojo_opset.utils.mode import LAST_PRIORITY
 
 
 class RefStorePagedKVCache(MojoStorePagedKVCache, default_priority=LAST_PRIORITY):

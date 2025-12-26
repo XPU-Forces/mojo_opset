@@ -6,12 +6,12 @@ from typing import Union
 
 import torch
 
-from mojo_opset.core import LAST_PRIORITY
 from mojo_opset.core import MojoApplyPenaltiesTempurate
+from mojo_opset.core import MojoJoinProbRejectSampling
+from mojo_opset.core import MojoRejectSampling
 from mojo_opset.core import MojoTopPFilter
 from mojo_opset.core import MojoTopPSampling
-from mojo_opset.core import MojoRejectSampling
-from mojo_opset.core import MojoJoinProbRejectSampling
+from mojo_opset.utils.mode import LAST_PRIORITY
 
 
 class RefTopPSampling(MojoTopPSampling, default_priority=LAST_PRIORITY):

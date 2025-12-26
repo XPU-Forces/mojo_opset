@@ -1,8 +1,8 @@
 import torch
 
-from mojo_opset.core import LAST_PRIORITY
 from mojo_opset.core import MojoGroupLinear
 from mojo_opset.core import MojoLinear
+from mojo_opset.utils.mode import LAST_PRIORITY
 
 
 class RefLinear(MojoLinear, default_priority=LAST_PRIORITY):
