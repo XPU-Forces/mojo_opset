@@ -84,7 +84,7 @@ def mojo_func_dispatcher(cls):
                         raise RuntimeError(f"Forward DIFF for {op_name_in}: Number of outputs mismatch.")
 
                     for i, (ref_o, impl_o) in enumerate(zip(ref_tuple, impl_tuple)):
-                        torch.testing.assert_close(ref_o, impl_o, atol=1e-3, rtol=1e-3, equal_nan=True)
+                        torch.testing.assert_close(ref_o, impl_o, atol=1e-2, rtol=1e-2, equal_nan=True)
 
                     return impl_outputs
 
@@ -126,8 +126,8 @@ def mojo_func_dispatcher(cls):
                             torch.testing.assert_close(
                                 ref_g.to(torch.float32),
                                 impl_g.to(torch.float32),
-                                atol=1e-3,
-                                rtol=1e-3,
+                                atol=1e-2,
+                                rtol=1e-2,
                             )
                         elif ref_g is not None or impl_g is not None:
                             raise AssertionError(

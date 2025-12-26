@@ -62,9 +62,9 @@ def _sdpa_infer_inner(
         qk = qk * qk_scale
         mask = tl.load(mask_ptr)
 
-        qk += (1 - mask.to(tl.float32)) * (-1e6)
+        # qk += (1 - mask.to(tl.float32)) * (-1e6)
         # qk = tl.where(mask, qk, float("-inf"))  # 32B # bool
-        # qk = tl.where(mask, float("-inf"), qk)  # 32B # bool
+        qk = tl.where(mask, float("-inf"), qk)  # 32B # bool
 
         m_ij = tl.maximum(m_i, tl.max(qk, 1))  # Scaled max
         qk = qk - m_ij[:, None]  # Stabilize
@@ -297,16 +297,12 @@ def _sdpa_infer_kernel(
 
 @triton.autotune(
     configs=[
-<<<<<<< HEAD
-        triton.Config({'multibuffer': True, "BLOCK_R": 128, "BLOCK_C": 128}),
-        triton.Config({'multibuffer': True, "BLOCK_R": 64, "BLOCK_C": 128}),
-        triton.Config({'multibuffer': True, "BLOCK_R": 128, "BLOCK_C": 64}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 256}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 256, "BLOCK_C": 128}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 128}),
-=======
-        triton.Config({"BLOCK_R": 128, "BLOCK_C": 128}, num_warps=4, num_stages=2),
->>>>>>> d73744c (add sdpa function interface and fix some)
+        triton.Config({"multibuffer": True, "BLOCK_R": 128, "BLOCK_C": 128}),
+        triton.Config({"multibuffer": True, "BLOCK_R": 64, "BLOCK_C": 128}),
+        triton.Config({"multibuffer": True, "BLOCK_R": 128, "BLOCK_C": 64}),
+        triton.Config({"multibuffer": False, "BLOCK_R": 128, "BLOCK_C": 256}),
+        triton.Config({"multibuffer": False, "BLOCK_R": 256, "BLOCK_C": 128}),
+        triton.Config({"multibuffer": False, "BLOCK_R": 128, "BLOCK_C": 128}),
     ],
     key=["N", "S", "H"],
 )
@@ -425,20 +421,14 @@ def kernel_sdpa_fwd(
         tl.store(ptr_o, block_o.to(LOW_TYPE), mask=mask_q)
         tl.store(ptr_lse, block_lse, mask=mask_lse)
 
-<<<<<<< HEAD
-@triton.autotune(
-    configs=[
-        triton.Config({'multibuffer': True, "BLOCK_R": 128}),
-        triton.Config({'multibuffer': True, "BLOCK_R": 64}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 256}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 128}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 64}),
-=======
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_R": 128}, num_warps=4, num_stages=2),
->>>>>>> d73744c (add sdpa function interface and fix some)
+        triton.Config({"multibuffer": True, "BLOCK_R": 128}),
+        triton.Config({"multibuffer": True, "BLOCK_R": 64}),
+        triton.Config({"multibuffer": False, "BLOCK_R": 256}),
+        triton.Config({"multibuffer": False, "BLOCK_R": 128}),
+        triton.Config({"multibuffer": False, "BLOCK_R": 64}),
     ],
     key=["N", "S", "H"],
 )
@@ -495,16 +485,12 @@ def kernel_sdpa_bwd_d(
 
 @triton.autotune(
     configs=[
-<<<<<<< HEAD
-        triton.Config({'multibuffer': True, "BLOCK_R": 128, "BLOCK_C": 64}),
-        triton.Config({'multibuffer': True, "BLOCK_R": 64, "BLOCK_C": 128}),
-        triton.Config({'multibuffer': True, "BLOCK_R": 64, "BLOCK_C": 64}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 128}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 64}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 64, "BLOCK_C": 128}),
-=======
-        triton.Config({"BLOCK_R": 128, "BLOCK_C": 64}, num_warps=4, num_stages=2),
->>>>>>> d73744c (add sdpa function interface and fix some)
+        triton.Config({"multibuffer": True, "BLOCK_R": 128, "BLOCK_C": 64}),
+        triton.Config({"multibuffer": True, "BLOCK_R": 64, "BLOCK_C": 128}),
+        triton.Config({"multibuffer": True, "BLOCK_R": 64, "BLOCK_C": 64}),
+        triton.Config({"multibuffer": False, "BLOCK_R": 128, "BLOCK_C": 128}),
+        triton.Config({"multibuffer": False, "BLOCK_R": 128, "BLOCK_C": 64}),
+        triton.Config({"multibuffer": False, "BLOCK_R": 64, "BLOCK_C": 128}),
     ],
     key=["N", "S", "H"],
 )
@@ -630,16 +616,12 @@ def kernel_sdpa_bwd_q(
 
 @triton.autotune(
     configs=[
-<<<<<<< HEAD
-        triton.Config({'multibuffer': True, "BLOCK_R": 128, "BLOCK_C": 64}),
-        triton.Config({'multibuffer': True, "BLOCK_R": 64, "BLOCK_C": 128}),
-        triton.Config({'multibuffer': True, "BLOCK_R": 64, "BLOCK_C": 64}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 128}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 64}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 64, "BLOCK_C": 128}),
-=======
-        triton.Config({"BLOCK_R": 64, "BLOCK_C": 128}, num_warps=4, num_stages=2),
->>>>>>> d73744c (add sdpa function interface and fix some)
+        triton.Config({"multibuffer": True, "BLOCK_R": 128, "BLOCK_C": 64}),
+        triton.Config({"multibuffer": True, "BLOCK_R": 64, "BLOCK_C": 128}),
+        triton.Config({"multibuffer": True, "BLOCK_R": 64, "BLOCK_C": 64}),
+        triton.Config({"multibuffer": False, "BLOCK_R": 128, "BLOCK_C": 128}),
+        triton.Config({"multibuffer": False, "BLOCK_R": 128, "BLOCK_C": 64}),
+        triton.Config({"multibuffer": False, "BLOCK_R": 64, "BLOCK_C": 128}),
     ],
     key=["N", "S", "H"],
 )
@@ -860,7 +842,7 @@ def sdpa_infer_impl(
         SEQ=seq_length,
         HEAD_DIM=head_dim,
         BLOCK_M=64,
-        BLOCK_N=256,
+        BLOCK_N=128,
         multibuffer=True,  # autotune config, 控制开double buffer
         unit_flag=True,  # autotune config, cube搬出的一个优化项
         limit_auto_multi_buffer_only_for_local_buffer=False,  # autotune config, 是否开启cube和vector的并行，false表示开启
@@ -876,6 +858,10 @@ def sdpa_infer_impl(
     # ctx.scale = scale
     # ctx.HEAD_DIM = head_dim
     return o
+
+    # head_num 8:1 16K 32 block_size
+    # sdpa -> flash_attention_score ~ 7000+us
+    # triton 20000+us -> 14000+us flex_attention(triton + torch.compile)
 
 
 def sdpa_fwd_impl(

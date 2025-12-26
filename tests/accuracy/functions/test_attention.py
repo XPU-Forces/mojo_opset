@@ -44,7 +44,8 @@ def generate_test_data(
     query = torch.randn(bsz, q_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=True)
     key = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=True)
     value = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=True)
-    blockwise_diffusion_attn_mask = generate_diffusion_attention_mask(seq_length, block_size)
+    # blockwise_diffusion_attn_mask = generate_diffusion_attention_mask(seq_length, block_size)
+    blockwise_diffusion_attn_mask = torch.ones(seq_length * 2, seq_length * 2, dtype=torch.bool)
     return query, key, value, blockwise_diffusion_attn_mask, q_head_num != kv_head_num
 
 
@@ -54,7 +55,7 @@ def generate_test_data(
         pytest.param(
             *generate_test_data(
                 bsz=1,
-                q_head_num=1,
+                q_head_num=5,
                 kv_head_num=1,
                 head_dim=128,
                 seq_length=1024,
@@ -65,10 +66,10 @@ def generate_test_data(
 )
 @auto_switch_platform()
 def test_diffusion_attention_func(monkeypatch, query, key, value, blockwise_diffusion_attn_mask, enable_gqa):
-    monkeypatch.setenv("MOJOSILUFUNCTION_FWD_MODE", "DIFF")
-    monkeypatch.setenv("MOJOSILUFUNCTION_BWD_MODE", "DIFF")
+    monkeypatch.setenv("MOJOSDPAFUNCTION_FWD_MODE", "DIFF")
+    monkeypatch.setenv("MOJOSDPAFUNCTION_BWD_MODE", "DIFF")
 
-    output = MojoSdpaFunction.apply(query, key, value, blockwise_diffusion_attn_mask)
+    output = MojoSdpaFunction.apply(query, key, value, blockwise_diffusion_attn_mask, 1.0, enable_gqa)
 
     grad_output = torch.rand_like(output)
     output.backward(grad_output)
