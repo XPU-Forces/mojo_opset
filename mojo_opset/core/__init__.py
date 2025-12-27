@@ -6,7 +6,7 @@ All Mojo Operators contained in Mojo Opsets listed here.
 VALID_KV_LAYOUTS = sorted({"NPU_ND", "NPU_NZ", "AMD_CB"})
 
 """mojo bigop"""
-from .bigop.m8_bigop import MojoM8BigOp
+# from .bigop.m8_bigop import MojoM8BigOp
 
 """ mojo activation """
 from .activation.mojo_gelu import MojoGelu
@@ -88,7 +88,7 @@ from .functions.mojo_silu_func import MojoSiluFunction
 
 # fmt: off
 __all__ = [
-    "MojoM8BigOp",
+    # "MojoM8BigOp",
 
     "MojoGelu",
     "MojoGeluQuant",
