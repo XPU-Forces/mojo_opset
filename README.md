@@ -20,7 +20,7 @@ Ascend NPU官方支持。
 
 ### 3.1 Mojo Operator List
 
-| Op Category | Op Name                     | torch reference   | triton implement |
+| Op Category | Op Name                     | torch ref   | triton implement |
 | :---------- | :-------------------------- | :---------------- | :------------ |
 | Embedding   | MojoEmbedding               | TBD               | TBD           |
 | Embedding   | MojoParallelEmbedding       | TBD               | TBD           |
@@ -104,7 +104,7 @@ Mojo Opset 会按照内部的优先级顺序来选用后端实现（后续我们
 export MOJO_BACKEND="+TTX"
 ```
 
-### 4.3 modeling reference
+### 4.3 modeling ref
 以 qwen3 dense 为例 [modify from here](https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py)，您可以通过以下任意一种方式使用 Mojo Opset 构建模型：
 
 (1) monkey patch

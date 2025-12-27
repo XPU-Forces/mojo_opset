@@ -84,7 +84,7 @@ class MojoPagedDecodeGQA(MojoOperator):
         self.tp_size = tp_size
         self.is_varlen = is_varlen
 
-    def forward_std(
+    def forward(
         self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None
     ) -> Tuple[Any]:
         raise NotImplementedError
@@ -149,7 +149,7 @@ class MojoPagedPrefillGQA(MojoOperator):
         self.tp_size = tp_size
         self.is_varlen = is_varlen
 
-    def forward_std(
+    def forward(
         self,
         query: torch.Tensor,
         k_cache: torch.Tensor,
@@ -222,11 +222,11 @@ class MojoBlockDiffusionAttention(MojoOperator):
         super().__init__(name, layer_idx)
         self.mask = mask
 
-    def forward_std(
+    def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         softmax_scale: Optional[float] = None,
     ):
-        raise NotImplementedError("MojoSdpa forward_std not implemented")
+        raise NotImplementedError("MojoSdpa forward not implemented")

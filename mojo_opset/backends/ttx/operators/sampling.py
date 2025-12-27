@@ -7,21 +7,21 @@ from typing import Union
 import torch
 
 from mojo_opset.backends.ttx.kernels.npu.sample import fused_penalties_temp_impl
+from mojo_opset.backends.ttx.kernels.npu.sample import join_prob_reject_sampling_impl
+from mojo_opset.backends.ttx.kernels.npu.sample import reject_sampling_impl
 from mojo_opset.backends.ttx.kernels.npu.sample import top_p_filter_impl
 from mojo_opset.backends.ttx.kernels.npu.sample import top_p_sampling_impl
-from mojo_opset.backends.ttx.kernels.npu.sample import reject_sampling_impl
-from mojo_opset.backends.ttx.kernels.npu.sample import join_prob_reject_sampling_impl
 from mojo_opset.core import MojoApplyPenaltiesTempurate
+from mojo_opset.core import MojoJoinProbRejectSampling
+from mojo_opset.core import MojoRejectSampling
 from mojo_opset.core import MojoTopPFilter
 from mojo_opset.core import MojoTopPSampling
-from mojo_opset.core import MojoRejectSampling
-from mojo_opset.core import MojoJoinProbRejectSampling
 
 
-class TTXTopPSampling(MojoTopPSampling, default_priority=0):
+class TTXTopPSampling(MojoTopPSampling):
     supported_platforms_list = ["npu"]
 
-    def forward_std(self, logits: torch.Tensor) -> Tuple[Any]:
+    def forward(self, logits: torch.Tensor) -> Tuple[Any]:
         return top_p_sampling_impl(
             logits=logits,
             top_p=self.top_p,
@@ -31,10 +31,10 @@ class TTXTopPSampling(MojoTopPSampling, default_priority=0):
         )
 
 
-class TTXTopPFilter(MojoTopPFilter, default_priority=0):
+class TTXTopPFilter(MojoTopPFilter):
     supported_platforms_list = ["npu"]
 
-    def forward_std(self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int) -> Tuple[Any]:
+    def forward(self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int) -> Tuple[Any]:
         return top_p_filter_impl(
             logits=logits,
             top_p=top_p,
@@ -45,7 +45,7 @@ class TTXTopPFilter(MojoTopPFilter, default_priority=0):
 
 
 class TTXRejectSampling(MojoRejectSampling):
-    def forward_std(
+    def forward(
         self,
         target_logits: torch.Tensor,  # [batch, spec_step + 1, vocab_size]
         draft_tokens: torch.Tensor,  # [batch, spec_step]
@@ -61,7 +61,7 @@ class TTXRejectSampling(MojoRejectSampling):
 
 
 class TTXJoinProbRejectSampling(MojoJoinProbRejectSampling):
-    def forward_std(
+    def forward(
         self,
         target_logits: torch.Tensor,  # [batch, spec_step + 1, vocab_size]
         draft_tokens: torch.Tensor,  # [batch, spec_step]
@@ -76,10 +76,10 @@ class TTXJoinProbRejectSampling(MojoJoinProbRejectSampling):
         )
 
 
-class TTXApplyPenaltiesTempurate(MojoApplyPenaltiesTempurate, default_priority=0):
+class TTXApplyPenaltiesTempurate(MojoApplyPenaltiesTempurate):
     supported_platforms_list = ["npu"]
 
-    def forward_std(
+    def forward(
         self,
         logits: torch.Tensor,
         token_freqs: List[Union[None, torch.Tensor]],

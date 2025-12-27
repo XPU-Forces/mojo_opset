@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 class MojoSiluFunction(MojoFuncBase):
     @staticmethod
     def forward_ref(ctx, input):
-        sigmoid_x = torch.sigmoid(input)
+        sigmoid_x = torch.sigmoid(input)    
         ctx.save_for_backward(input)
         return input * sigmoid_x
 

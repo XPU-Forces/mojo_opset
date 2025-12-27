@@ -8,10 +8,10 @@ from mojo_opset.core import MojoNorm
 from mojo_opset.core import MojoResidualAddNorm
 
 
-class TTXNorm(MojoNorm, default_priority=0):
+class TTXNorm(MojoNorm):
     supported_platforms_list = ["npu"]
 
-    def forward_std(self, hidden_state: torch.Tensor):
+    def forward(self, hidden_state: torch.Tensor):
         if self.norm_type == "rmsnorm":
             return rmsnorm_infer(hidden_state, self.gamma, self.epsilon)
         elif self.norm_type == "layernorm":
@@ -20,10 +20,10 @@ class TTXNorm(MojoNorm, default_priority=0):
             raise NotImplementedError(f"[TTXNorm] Only support rmsnorm/layernorm, but got {self.norm_type}")
 
 
-class TTXResidualAddNorm(MojoResidualAddNorm, default_priority=0):
+class TTXResidualAddNorm(MojoResidualAddNorm):
     supported_platforms_list = ["npu"]
 
-    def forward_std(self, hidden_state: torch.Tensor, residual: torch.Tensor = None):
+    def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor = None):
         if self.norm_type == "rmsnorm":
             norm_func = ttx_fused_add_rms_norm
             kwargs = dict(weight=self.gamma)

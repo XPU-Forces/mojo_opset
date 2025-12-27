@@ -52,7 +52,7 @@ class MojoRoPE(MojoOperator):
         self.max_seq_len = max_seq_len
         self.is_varlen = is_varlen
 
-    def forward_std(
+    def forward(
         self,
         q: torch.Tensor,  # [BNSD]
         k: torch.Tensor,  # [BNSD]
