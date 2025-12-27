@@ -7,7 +7,6 @@ import torch
 from mojo_opset.core import MojoBlockDiffusionAttention
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
-from mojo_opset.utils.mode import LAST_PRIORITY
 
 
 class RefPagedPrefillGQA(MojoPagedPrefillGQA):

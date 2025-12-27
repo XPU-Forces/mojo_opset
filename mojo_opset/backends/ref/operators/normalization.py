@@ -6,7 +6,6 @@ import torch.nn.functional as F
 
 from mojo_opset.core import MojoNorm
 from mojo_opset.core import MojoResidualAddNorm
-from mojo_opset.utils.mode import LAST_PRIORITY
 
 
 class RefNorm(MojoNorm):
