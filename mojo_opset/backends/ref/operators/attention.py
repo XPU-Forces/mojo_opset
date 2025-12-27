@@ -8,8 +8,9 @@ from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoSdpa
 
+
 class RefPagedPrefillGQA(MojoPagedPrefillGQA):
-    def forward_std(
+    def forward(
         self,
         query: torch.Tensor,
         k_cache: torch.Tensor,
@@ -78,7 +79,7 @@ class RefPagedPrefillGQA(MojoPagedPrefillGQA):
 
 
 class RefPagedDecodeGQA(MojoPagedDecodeGQA):
-    def forward_std(
+    def forward(
         self,
         q: torch.Tensor,
         k_cache: torch.Tensor,
@@ -130,7 +131,7 @@ class RefPagedDecodeGQA(MojoPagedDecodeGQA):
 
 
 class RefSdpa(MojoSdpa):
-    def forward_std(
+    def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,

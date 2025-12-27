@@ -1,7 +1,5 @@
 import os
 
-LAST_PRIORITY = 999
-EXCLUSIVE_PRIORITY = -1
 
 class SingletonMeta(type):
     """put here temporary, will be removed later"""

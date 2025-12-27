@@ -1,6 +1,6 @@
-from .reference import *
-
 from mojo_opset.utils.platform import get_platform
+
+from .ref import *
 
 platform = get_platform()
 

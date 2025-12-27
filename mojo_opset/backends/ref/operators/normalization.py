@@ -6,11 +6,10 @@ import torch.nn.functional as F
 
 from mojo_opset.core import MojoNorm
 from mojo_opset.core import MojoResidualAddNorm
-from mojo_opset.utils.mode import LAST_PRIORITY
 
 
-class RefNorm(MojoNorm, default_priority=LAST_PRIORITY):
-    def forward_std(self, hidden_state: torch.Tensor) -> torch.Tensor:
+class RefNorm(MojoNorm):
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         x = hidden_state
         eps = float(self.epsilon)
         if self.is_varlen:
@@ -37,8 +36,8 @@ class RefNorm(MojoNorm, default_priority=LAST_PRIORITY):
         return y
 
 
-class RefResidualAddNorm(MojoResidualAddNorm, default_priority=LAST_PRIORITY):
-    def forward_std(self, hidden_state: torch.Tensor, residual: torch.Tensor = None) -> torch.Tensor:
+class RefResidualAddNorm(MojoResidualAddNorm):
+    def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor = None) -> torch.Tensor:
         def norm_func(hidden_state: torch.Tensor) -> Tuple[Any]:
             if self.norm_type == "layernorm":
                 return F.layer_norm(

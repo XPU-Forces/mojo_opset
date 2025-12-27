@@ -1,9 +1,7 @@
 from typing import Optional
-from typing import Tuple
 
 import torch
 
-from ...utils.mode import get_mojo_exec_mode
 from ..mojo_operator import MojoOperator
 
 
@@ -47,8 +45,8 @@ class MojoLinear(MojoOperator):
                     raise ValueError(f"bias should be 1-D with shape [out_dim={out_dim}], but got {tuple(bias.shape)}")
         self.bias = bias
         self.is_varlen = is_varlen
-        mode_str = get_mojo_exec_mode(MojoLinear.__name__, "FWD", self.layer_idx)
-        self._set_forward_mode(mode_str)
+        # mode_str = get_mojo_exec_mode(MojoLinear.__name__, "FWD", self.layer_idx)
+        # self._set_forward_mode(mode_str)
 
 
 class MojoBatchLinear(MojoOperator):
@@ -70,10 +68,10 @@ class MojoGroupLinear(MojoOperator):
         self.trans_weight = trans_weight
         self.weight = weight
 
-        mode_str = get_mojo_exec_mode(MojoGroupLinear.__name__, "FWD", self.layer_idx)
-        self._set_forward_mode(mode_str)
+        # mode_str = get_mojo_exec_mode(MojoGroupLinear.__name__, "FWD", self.layer_idx)
+        # self._set_forward_mode(mode_str)
 
-    def forward_std(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
 

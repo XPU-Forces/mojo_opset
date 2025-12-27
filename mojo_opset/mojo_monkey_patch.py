@@ -70,7 +70,7 @@ def apply_mojo_op_to_qwen3(
 
     # if model is not None:
     #     # The model instance already exists, so we need to additionally patch the
-    #     # instance variables that reference already-instantiated modules
+    #     # instance variables that ref already-instantiated modules
 
     #     # get the base model from the model instance
     #     base_model: Qwen3Model = getattr(model, model.base_model_prefix, model)

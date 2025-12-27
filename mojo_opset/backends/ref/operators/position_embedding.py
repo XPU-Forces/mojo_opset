@@ -4,11 +4,10 @@ from typing import Tuple
 import torch
 
 from mojo_opset.core import MojoRoPE
-from mojo_opset.utils.mode import LAST_PRIORITY
 
 
-class RefRoPE(MojoRoPE, default_priority=LAST_PRIORITY):
-    def forward_std(
+class RefRoPE(MojoRoPE):
+    def forward(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
