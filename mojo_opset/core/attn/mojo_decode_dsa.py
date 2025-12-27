@@ -31,12 +31,22 @@ class MojoDecodeDSA(MojoOperator):
         topk_indices: torch.Tensor,
         start_pos: int,
     ) -> torch.Tensor:
-        bsz, _, _, qk_nope_head_dim = q_nope.shape
-        _, _, _, qk_rope_head_dim = q_pe.shape
-        kv_lora_rank = kv_cache.shape[2]
+        bsz, _, n_heads, qk_nope_head_dim = q_nope.shape
+        qk_rope_head_dim = q_pe.shape[-1]
+        kv_lora_rank = kv_cache.shape[-1]
+        v_head_dim = wkv_b.shape[0] // n_heads - qk_nope_head_dim
         end_pos = start_pos + 1
 
-        wkv_b = wkv_b.view(self.n_local_heads, -1, kv_lora_rank)
+        q_nope = q_nope.to(torch.float32)
+        q_pe = q_pe.to(torch.float32)
+        kv_cache = kv_cache.to(torch.float32)
+        pe_cache = pe_cache.to(torch.float32)
+        wkv_b = wkv_b.to(torch.float32)
+
+        if self.softmax_scale is None:
+            self.softmax_scale = (qk_nope_head_dim + qk_rope_head_dim) ** -0.5
+
+        wkv_b = wkv_b.view(n_heads, -1, kv_lora_rank)
         q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :qk_nope_head_dim])
         scores = (
             torch.einsum("bshc,btc->bsht", q_nope, kv_cache[:bsz, :end_pos])
@@ -48,7 +58,9 @@ class MojoDecodeDSA(MojoOperator):
 
         scores = scores.softmax(dim=-1)
         o = torch.einsum("bsht,btc->bshc", scores, kv_cache[:bsz, :end_pos])
-        o = torch.einsum("bshc,hdc->bshd", o, wkv_b[:, -self.v_head_dim :])
+        o = torch.einsum("bshc,hdc->bshd", o, wkv_b[:, -v_head_dim:])
+
+        return o
 
     def forward_analysis(
         self,
