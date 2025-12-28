@@ -10,14 +10,12 @@ class RefGelu(MojoGelu):
         super().__init__(op_name, layer_idx)
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
-        # return torch.nn.GELU()(hidden_state)
         return torch.nn.functional.gelu(hidden_state)
 
 
 class RefSilu(MojoSilu):
     def __init__(self, op_name: str = "", layer_idx: int = 0):
         super().__init__(op_name, layer_idx)
-        # self._forward = torch.nn.SiLU()
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         return torch.nn.functional.silu(hidden_state)
