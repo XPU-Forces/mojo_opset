@@ -84,15 +84,10 @@ class MojoPagedDecodeGQA(MojoOperator):
         self.tp_size = tp_size
         self.is_varlen = is_varlen
 
-    def forward_std(
+    def forward(
         self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None
     ) -> Tuple[Any]:
         raise NotImplementedError
-
-    def forward_analysis(
-        self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None
-    ) -> Tuple[int, int, int]:
-        pass
 
 
 class MojoPrefillGQA(MojoOperator):
@@ -154,7 +149,7 @@ class MojoPagedPrefillGQA(MojoOperator):
         self.tp_size = tp_size
         self.is_varlen = is_varlen
 
-    def forward_std(
+    def forward(
         self,
         query: torch.Tensor,
         k_cache: torch.Tensor,
@@ -164,17 +159,6 @@ class MojoPagedPrefillGQA(MojoOperator):
         softmax_scale: Optional[float] = None,
     ) -> Tuple[Any]:
         raise NotImplementedError
-
-    def forward_analysis(
-        self,
-        query: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
-        block_tables: torch.Tensor,
-        softmax_scale: Optional[float] = None,
-    ) -> Tuple[int, int, int]:
-        pass
 
 
 class MojoDecodeMLA(MojoOperator):
@@ -238,20 +222,11 @@ class MojoBlockDiffusionAttention(MojoOperator):
         super().__init__(name, layer_idx)
         self.mask = mask
 
-    def forward_std(
+    def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         softmax_scale: Optional[float] = None,
     ):
-        raise NotImplementedError("MojoBlockDiffusionAttention forward_std not implemented")
-
-    def forward_analysis(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        softmax_scale: Optional[float] = None,
-    ):
-        raise NotImplementedError("MojoBlockDiffusionAttention forward_analysis not implemented")
+        raise NotImplementedError("MojoSdpa forward not implemented")

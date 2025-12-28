@@ -8,22 +8,22 @@ from mojo_opset.core import MojoSilu
 from mojo_opset.core import MojoSwiGLU
 
 
-class TTXGelu(MojoGelu, default_priority=0):
+class TTXGelu(MojoGelu):
     supported_platforms_list = ["npu"]
 
-    def forward_std(self, hidden_state: torch.Tensor):
+    def forward(self, hidden_state: torch.Tensor):
         return gelu_fwd(hidden_state)
 
 
-class TTXSilu(MojoSilu, default_priority=0):
+class TTXSilu(MojoSilu):
     supported_platforms_list = ["npu"]
 
-    def forward_std(self, hidden_state: torch.Tensor):
+    def forward(self, hidden_state: torch.Tensor):
         return silu_fwd(hidden_state)
 
 
-class TTXSwiGLU(MojoSwiGLU, default_priority=0):
+class TTXSwiGLU(MojoSwiGLU):
     supported_platforms_list = ["npu"]
 
-    def forward_std(self, gate_out: torch.Tensor, up_out: torch.Tensor):
+    def forward(self, gate_out: torch.Tensor, up_out: torch.Tensor):
         return swiglu_fwd(gate_out, up_out)

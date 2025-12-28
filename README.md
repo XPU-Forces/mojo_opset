@@ -20,7 +20,7 @@ Ascend NPU官方支持。
 
 ### 3.1 Mojo Operator List
 
-| Op Category | Op Name                     | torch reference   | triton implement |
+| Op Category | Op Name                     | torch ref         | triton implement |
 | :---------- | :-------------------------- | :---------------- | :------------ |
 | Embedding   | MojoEmbedding               | TBD               | TBD           |
 | Embedding   | MojoParallelEmbedding       | TBD               | TBD           |
@@ -31,13 +31,15 @@ Ascend NPU官方支持。
 | Attention   | MojoPagedPrefillNSA         | TBD               | TBD           |
 | Attention   | MojoPagedDecodeNSA          | TBD               | TBD           |
 | Attention   | MojoWindownAttenton         | TBD               | TBD           |
-| MoE         | MojoMoEGate                 | TBD               | TBD           |
-| MoE         | MojoMoEDispatch             | TBD               | TBD           |
-| MoE         | MojoMoECombine              | TBD               | TBD           |
+| MoE         | MojoMoEGate                 | ✅                | TBD           |
+| MoE         | MojoMoEDispatch             | ✅                | TBD           |
+| MoE         | MojoMoECombine              | ✅                | TBD           |
 | MoE         | MojoMoeDispatchQuant        | TBD               | TBD           |
 | Sampling    | MojoTopKSampling            | TBD               | TBD           |
-| Sampling    | MojoTopPSampling            | TBD               | TBD           |
-| Sampling    | MojoRejectSampling          | TBD               | TBD           |
+| Sampling    | MojoTopPSampling            | ✅                | ✅             |
+| Sampling    | MojoTopPSampling            | ✅                | ✅             |
+| Sampling    | MojoRejectSampling          | ✅                | ✅             |
+| Sampling    | MojoApplyPenaltiesTempurate | ✅                | ✅             |
 | Norm        | MojoNorm                    | ✅                | ✅             |
 | Norm        | MojoResidualAddNorm         | ✅                | ✅             |
 | Norm        | MojoNormQuant               | TBD               | TBD           |
@@ -47,12 +49,12 @@ Ascend NPU官方支持。
 | PositionEmb | MojoNormRotary              | TBD               | TBD           |
 | PositionEmb | MojoNormRotaryStorKV        | TBD               | TBD           |
 | KVCache     | MojoKVCacheCast             | TBD               | TBD           |
-| KVCache     | MojoStorePagedKVCache       | TBD               | TBD           |
+| KVCache     | MojoStorePagedKVCache       | ✅                | TBD           |
 | KVCache     | MojoStorePagedMLAKVCache    | TBD               | TBD           |
-| Linear      | MojoLinear                  | TBD               | TBD           |
+| Linear      | MojoLinear                  | ✅                | TBD           |
 | Linear      | MojoQuantLinear             | TBD               | TBD           |
 | Linear      | MojoBatchLinear             | TBD               | TBD           |
-| Linear      | MojoGroupLinear             | TBD               | TBD           |
+| Linear      | MojoGroupLinear             | ✅                | TBD           |
 | Quantize    | MojoQuant                   | TBD               | TBD           |
 | Quantize    | MojoDequant                 | TBD               | TBD           |
 | Activation  | MojoGelu                    | ✅                | ✅             |
@@ -102,7 +104,7 @@ Mojo Opset 会按照内部的优先级顺序来选用后端实现（后续我们
 export MOJO_BACKEND="+TTX"
 ```
 
-### 4.3 modeling reference
+### 4.3 modeling ref
 以 qwen3 dense 为例 [modify from here](https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py)，您可以通过以下任意一种方式使用 Mojo Opset 构建模型：
 
 (1) monkey patch

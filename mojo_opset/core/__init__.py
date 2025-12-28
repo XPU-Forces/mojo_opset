@@ -71,12 +71,11 @@ from .operators.position_embedding import MojoRoPEStoreKV
 
 """ sampling """
 from .operators.sampling import MojoApplyPenaltiesTempurate
+from .operators.sampling import MojoJoinProbRejectSampling
 from .operators.sampling import MojoRejectSampling
 from .operators.sampling import MojoTopKSampling
 from .operators.sampling import MojoTopPFilter
 from .operators.sampling import MojoTopPSampling
-from .operators.sampling import MojoRejectSampling
-from .operators.sampling import MojoJoinProbRejectSampling
 
 """ functions """
 from .functions.activation import MojoSiluFunction
@@ -85,8 +84,6 @@ from .functions.convolution import causal_conv1d
 from .functions.loss_function import MojoFusedLinearCrossEntropyFunction
 from .functions.normalization import MojoRMSNormFunction
 from .functions.position_embedding import MojoRoPEFunction
-
-LAST_PRIORITY = 999
 
 # fmt: off
 __all__ = [
@@ -159,7 +156,7 @@ __all__ = [
     "MojoRoPEFunction",
     "MojoFusedLinearCrossEntropyFunction",
     "MojoCausalConv1dFunction",
+    
     "causal_conv1d",
-    "LAST_PRIORITY",
 ]
 # fmt: on

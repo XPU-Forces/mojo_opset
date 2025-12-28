@@ -6,8 +6,8 @@ from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoNorm
 from mojo_opset import MojoResidualAddNorm
-from mojo_opset.backends.reference.operators.normalization import RefNorm
-from mojo_opset.backends.reference.operators.normalization import RefResidualAddNorm
+from mojo_opset.backends.ref.operators.normalization import RefNorm
+from mojo_opset.backends.ref.operators.normalization import RefResidualAddNorm
 
 
 @pytest.mark.parametrize(

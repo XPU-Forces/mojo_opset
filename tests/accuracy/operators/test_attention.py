@@ -9,9 +9,6 @@ from tests.utils import bypass_not_implemented
 from mojo_opset import MojoBlockDiffusionAttention
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
-from mojo_opset.backends.reference.operators.attention import RefBlockDiffusionAttention
-from mojo_opset.backends.reference.operators.attention import RefPagedDecodeGQA
-from mojo_opset.backends.reference.operators.attention import RefPagedPrefillGQA
 
 
 def generate_paged_decode_data(
@@ -101,13 +98,8 @@ def test_paged_decode_gqa(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
-    paged_decode_attn_ref = RefPagedDecodeGQA(
-        is_causal=True,
-        gqa_layout=gqa_layout,
-    )
 
-    paged_decode_attn_ref.forward_diff_with(
-        paged_decode_attn,
+    paged_decode_attn.forward_diff_with_ref(
         query,
         k_cache,
         v_cache,
@@ -220,16 +212,11 @@ def test_paged_prefill_gqa(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
-    paged_prefill_attn_ref = RefPagedPrefillGQA(
-        is_causal=True,
-        gqa_layout=gqa_layout,
-    )
 
     head_dim = query.shape[-1]
     sm_scale = 1.0 / math.sqrt(head_dim)
 
-    paged_prefill_attn_ref.forward_diff_with(
-        paged_prefill_attn,
+    paged_prefill_attn.forward_diff_with_ref(
         query,
         k_cache,
         v_cache,
@@ -292,8 +279,10 @@ def test_diffusion_attention(
     value: torch.Tensor,
     blockwise_diffusion_attn_mask: torch.Tensor,
 ):
-    diffusion_attn_ref = RefBlockDiffusionAttention(mask=blockwise_diffusion_attn_mask)
     diffusion_attn = MojoBlockDiffusionAttention(mask=blockwise_diffusion_attn_mask)
-    diffusion_attn_ref.forward_diff_with(
-        diffusion_attn, query, key, value, softmax_scale=1.0 / math.sqrt(query.shape[-1])
+    diffusion_attn.forward_diff_with_ref(
+        query,
+        key,
+        value,
+        softmax_scale=1.0 / math.sqrt(query.shape[-1]),
     )

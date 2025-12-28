@@ -4,12 +4,12 @@ import torch
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
-from mojo_opset import MojoTopPFilter
-from mojo_opset import MojoRejectSampling
 from mojo_opset import MojoJoinProbRejectSampling
-from mojo_opset.backends.reference.operators.sampling import RefTopPFilter
-from mojo_opset.backends.reference.operators.sampling import RefRejectSampling
-from mojo_opset.backends.reference.operators.sampling import RefJoinProbRejectSampling
+from mojo_opset import MojoRejectSampling
+from mojo_opset import MojoTopPFilter
+from mojo_opset.backends.ref.operators.sampling import RefJoinProbRejectSampling
+from mojo_opset.backends.ref.operators.sampling import RefRejectSampling
+from mojo_opset.backends.ref.operators.sampling import RefTopPFilter
 
 
 @pytest.mark.parametrize(

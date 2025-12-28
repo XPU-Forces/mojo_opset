@@ -10,15 +10,12 @@ from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoApplyPenaltiesTempurate
+from mojo_opset import MojoJoinProbRejectSampling
+from mojo_opset import MojoRejectSampling
 from mojo_opset import MojoTopPFilter
 from mojo_opset import MojoTopPSampling
-from mojo_opset import MojoRejectSampling
-from mojo_opset import MojoJoinProbRejectSampling
-from mojo_opset.backends.reference.operators.sampling import RefApplyPenaltiesTempurate
-from mojo_opset.backends.reference.operators.sampling import RefTopPFilter
-from mojo_opset.backends.reference.operators.sampling import RefTopPSampling
-from mojo_opset.backends.reference.operators.sampling import RefRejectSampling
-from mojo_opset.backends.reference.operators.sampling import RefJoinProbRejectSampling
+from mojo_opset.backends.ref.operators.sampling import RefJoinProbRejectSampling
+from mojo_opset.backends.ref.operators.sampling import RefRejectSampling
 
 
 @pytest.mark.parametrize(
@@ -29,9 +26,8 @@ from mojo_opset.backends.reference.operators.sampling import RefJoinProbRejectSa
 @bypass_not_implemented
 def test_topp_sampling(logits, topk, topp, min_tokens_to_keep):
     top_p_sampling = MojoTopPSampling(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk)
-    top_p_sampling_ref = RefTopPSampling(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk)
 
-    top_p_sampling_ref.forward_diff_with(top_p_sampling, logits)
+    top_p_sampling.forward_diff_with_ref(logits)
 
 
 @pytest.mark.parametrize(
@@ -42,10 +38,8 @@ def test_topp_sampling(logits, topk, topp, min_tokens_to_keep):
 @bypass_not_implemented
 def test_topp_filter(logits, topk, topp, min_tokens_to_keep):
     top_p_filter = MojoTopPFilter()
-    top_p_filter_ref = RefTopPFilter()
 
-    top_p_filter_ref.forward_diff_with(
-        top_p_filter, logits=logits, top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk
+    top_p_filter.forward_diff_with_ref(logits=logits, top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk,
     )
 
 
@@ -158,6 +152,5 @@ def test_apply_penalties_temp(logits):
     temps = [random.uniform(0.1, 2.0) for _ in range(BATCH_SIZE)]
 
     apply_penalties = MojoApplyPenaltiesTempurate()
-    apply_penalties_ref = RefApplyPenaltiesTempurate()
 
-    apply_penalties_ref.forward_diff_with(apply_penalties, logits, token_freqs, pres_pens, freq_pens, rep_pens, temps)
+    apply_penalties.forward_diff_with_ref(logits, token_freqs, pres_pens, freq_pens, rep_pens, temps)

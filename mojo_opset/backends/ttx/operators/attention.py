@@ -9,10 +9,10 @@ from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
 
 
-class TTXPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
+class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
     supported_platforms_list = ["npu"]
 
-    def forward_std(
+    def forward(
         self,
         query: torch.Tensor,
         k_cache: torch.Tensor,
@@ -43,10 +43,10 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
         return output
 
 
-class TTXPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
+class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
     supported_platforms_list = ["npu"]
 
-    def forward_std(
+    def forward(
         self,
         query: torch.Tensor,
         k_cache: torch.Tensor,
@@ -77,10 +77,10 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
         return output
 
 
-class TTXBlockDiffusionAttention(MojoBlockDiffusionAttention, default_priority=0):
+class TTXBlockDiffusionAttention(MojoBlockDiffusionAttention):
     supported_platforms_list = ["npu"]
 
-    def forward_std(
+    def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
