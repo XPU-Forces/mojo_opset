@@ -96,13 +96,13 @@ def process_excel(input_file):
     step1_filename = os.path.splitext(input_file)[0] + '_step_1.xlsx'
     
     # Columns for "进项发票"
-    cols_input = ['开票日期', '销方名称', '货物或应税劳务名称', '规格型号', '单位', '数量', '单价', '金额', '税率', '税额', '价税合计', '数电发票号码']
+    cols_input = ['开票日期', '销方名称', '货物或应税劳务名称', '规格型号', '单位', '数量', '单价', '金额', '税率', '税额', '价税合计', '数电发票号码', '发票代码']
     # Ensure columns exist
     cols_input = [c for c in cols_input if c in df.columns]
     
     # Columns for "报销发票"
     # Note: Added '数电发票号码' because Step 6 requires it for aggregation
-    cols_reimburse = ['开票日期', '发票票种', '销方名称', '金额', '税率', '税额', '价税合计', '数电发票号码']
+    cols_reimburse = ['开票日期', '发票票种', '销方名称', '金额', '税率', '税额', '价税合计', '数电发票号码', '发票代码']
     cols_reimburse = [c for c in cols_reimburse if c in df.columns]
 
     with pd.ExcelWriter(step1_filename, engine='openpyxl') as writer:
@@ -127,7 +127,7 @@ def process_excel(input_file):
         
         # (1) Merge text columns
         # “货物或应税劳务名称、规格型号、单位、数量、单价”
-        merge_cols = ['货物或应税劳务名称', '规格型号', '单位', '数量', '单价']
+        merge_cols = ['货物或应税劳务名称', '规格型号', '单位', '数量', '单价', '价税合计']
         merged_text_parts = []
         for idx, row in group.iterrows():
             parts = [str(row[c]) for c in merge_cols if pd.notna(row[c])]
