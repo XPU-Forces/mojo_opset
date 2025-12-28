@@ -20,7 +20,7 @@ Ascend NPU官方支持。
 
 ### 3.1 Mojo Operator List
 
-| Op Category | Op Name                     | torch ref   | triton implement |
+| Op Category | Op Name                     | torch ref         | triton implement |
 | :---------- | :-------------------------- | :---------------- | :------------ |
 | Embedding   | MojoEmbedding               | TBD               | TBD           |
 | Embedding   | MojoParallelEmbedding       | TBD               | TBD           |
@@ -31,9 +31,9 @@ Ascend NPU官方支持。
 | Attention   | MojoPagedPrefillNSA         | TBD               | TBD           |
 | Attention   | MojoPagedDecodeNSA          | TBD               | TBD           |
 | Attention   | MojoWindownAttenton         | TBD               | TBD           |
-| MoE         | MojoMoEGate                 | TBD               | TBD           |
-| MoE         | MojoMoEDispatch             | TBD               | TBD           |
-| MoE         | MojoMoECombine              | TBD               | TBD           |
+| MoE         | MojoMoEGate                 | ✅                | TBD           |
+| MoE         | MojoMoEDispatch             | ✅                | TBD           |
+| MoE         | MojoMoECombine              | ✅                | TBD           |
 | MoE         | MojoMoeDispatchQuant        | TBD               | TBD           |
 | Sampling    | MojoTopKSampling            | TBD               | TBD           |
 | Sampling    | MojoTopPSampling            | ✅                | ✅             |
@@ -49,12 +49,12 @@ Ascend NPU官方支持。
 | PositionEmb | MojoNormRotary              | TBD               | TBD           |
 | PositionEmb | MojoNormRotaryStorKV        | TBD               | TBD           |
 | KVCache     | MojoKVCacheCast             | TBD               | TBD           |
-| KVCache     | MojoStorePagedKVCache       | TBD               | TBD           |
+| KVCache     | MojoStorePagedKVCache       | ✅                | TBD           |
 | KVCache     | MojoStorePagedMLAKVCache    | TBD               | TBD           |
-| Linear      | MojoLinear                  | TBD               | TBD           |
+| Linear      | MojoLinear                  | ✅                | TBD           |
 | Linear      | MojoQuantLinear             | TBD               | TBD           |
 | Linear      | MojoBatchLinear             | TBD               | TBD           |
-| Linear      | MojoGroupLinear             | TBD               | TBD           |
+| Linear      | MojoGroupLinear             | ✅                | TBD           |
 | Quantize    | MojoQuant                   | TBD               | TBD           |
 | Quantize    | MojoDequant                 | TBD               | TBD           |
 | Activation  | MojoGelu                    | ✅                | ✅             |
