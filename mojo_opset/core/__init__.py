@@ -23,6 +23,7 @@ from .attn.mojo_decode_mla import MojoPagedDecodeMLA
 from .attn.mojo_decode_nsa import MojoDecodeNSA
 from .attn.mojo_decode_nsa import MojoPagedDecodeNSA
 from .attn.mojo_indexer import MojoLightningIndexer
+from .attn.mojo_indexer import MojoIndexer
 from .attn.mojo_linear_attn import MojoGatedDeltaRule
 from .attn.mojo_prefill_gqa import MojoPagedPrefillGQA
 from .attn.mojo_prefill_gqa import MojoPrefillGQA
@@ -109,6 +110,7 @@ __all__ = [
     "MojoPagedDecodeNSA",
     "MojoGatedDeltaRule",
     "MojoLightningIndexer",
+    "MojoIndexer",
 
     "MojoStoreKVCache",
     "MojoStorePagedKVCache",

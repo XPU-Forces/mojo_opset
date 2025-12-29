@@ -58,6 +58,78 @@ class MojoLightningIndexer(MojoOperator):
     ) -> Tuple[int, int, int]:
         pass
 
+def lightindex(
+    query: torch.Tensor,
+    query_scale: torch.Tensor,
+    key: torch.Tensor,
+    key_scale: Optional[torch.Tensor] = None,
+) -> Tuple[Any]:
+    """
+    Light index calculation with query and optional key scaling.
+    
+    Args:
+        query: [B, M, H, K] query tensor
+        query_scale: [B, M, H] query scaling factors
+        key: [B, N, K] key tensor
+        key_scale: Optional scaling factors for key.
+                   Can be [B, N, K], [B, N], [N, K], or [N]
+    Returns:
+        index_score: [B, M, N]
+    """
+    batch_size, q_seq_len, num_heads, head_dim = query.shape
+    k_seq_len = key.shape[1]
+    topk = q_seq_len // 2
+    
+    # Create index score tensor
+    index_score = torch.zeros((batch_size, q_seq_len, k_seq_len), 
+                              dtype=torch.float32, device=query.device)
+    
+    # Handle key_scale: validate and broadcast if needed
+    if key_scale is None:
+        # If no key_scale provided, use all ones
+        key_scale_expanded = torch.ones((batch_size, k_seq_len, head_dim), 
+                                        dtype=torch.float32, device=query.device)
+    else:
+        key_scale_shape = key_scale.shape         
+        if len(key_scale_shape) == 1:
+            # [N] -> expand to [B, N, K]
+            assert key_scale_shape[0] == k_seq_len, \
+            f"key_scale [N] must have N={k_seq_len}, got {key_scale_shape[0]}"
+            key_scale_expanded = key_scale.to(torch.float32).unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, head_dim)
+        else:
+            raise ValueError(f"Invalid key_scale shape {key_scale_shape}")
+    
+    # Process each batch and sequence position
+    for batch_id in range(batch_size):
+        # Get batch slices
+        key_batch = key[batch_id].to(torch.float32)  # [N, K]
+        key_scale_batch = key_scale_expanded[batch_id]  # [N, K]
+        
+        # Apply key scaling: K_scaled = K * key_scale
+        key_scaled = key_batch * key_scale_batch
+        
+        for i in range(q_seq_len):
+            # Get query slice: [H, K]
+            q_slice = query[batch_id, i].to(torch.float32)
+            
+            # Calculate dot product: Q @ K_scaled^T = [H, N]
+            dot_product = torch.matmul(q_slice, key_scaled.transpose(0, 1))
+            
+            # Apply ReLU
+            relu_out = torch.maximum(dot_product, torch.tensor(0.0))
+            
+            # Get query scale for this position: [H] -> [H, 1]
+            q_scale_slice = query_scale[batch_id, i].unsqueeze(-1)  # [H, 1]
+            
+            # Apply query scaling: [H, N] * [H, 1] = [H, N] (broadcast along N dimension)
+            scaled_out = relu_out * q_scale_slice
+            
+            # Sum over heads: [N]
+            reduce_out = torch.sum(scaled_out, dim=0)
+            
+            # Store result
+            index_score[batch_id, i] = reduce_out
+    return index_score
 
 class LayerNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
@@ -99,7 +171,6 @@ def rotate_activation(x: torch.Tensor) -> torch.Tensor:
 
 
 def int8_index(
-    self,
     query: torch.Tensor,
     query_scale: torch.Tensor,
     key: torch.Tensor,
@@ -166,6 +237,7 @@ class MojoIndexer(MojoOperator):
         layer_idx: int = 0,
     ):
         super().__init__(op_name, layer_idx)
+        torch.set_default_device('npu:0')
         self.dim = dim
         self.n_heads = n_heads
         self.n_local_heads = n_heads // 1  # world size
@@ -173,11 +245,11 @@ class MojoIndexer(MojoOperator):
         self.rope_head_dim = qk_rope_head_dim
         self.topk = topk
         self.q_lora_rank = q_lora_rank
-        self.wq_b = F.linear(self.q_lora_rank, self.n_heads * self.head_dim)
-        self.wk = F.linear(self.dim, self.head_dim)
+        self.wq_b = nn.Linear(self.q_lora_rank, self.n_heads * self.head_dim)
+        self.wk = nn.Linear(self.dim, self.head_dim)
         self.k_norm = LayerNorm(self.head_dim)
         # weights_proj in the checkpoint is stored in bf16, while the parameters here are stored in fp32 for convenient.
-        self.weights_proj = F.linear(self.dim, self.n_heads)
+        self.weights_proj = nn.Linear(self.dim, self.n_heads)
         self.softmax_scale = self.head_dim**-0.5
         self.scale_fmt = scale_fmt
 
@@ -219,19 +291,25 @@ class MojoIndexer(MojoOperator):
         self.k_cache[:bsz, start_pos:end_pos] = k_int8
         self.k_scale_cache[:bsz, start_pos:end_pos] = k_scale
         weights = self.weights_proj(x.float()) * self.n_heads**-0.5
-        weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
-        index_score = int8_index(
+        #weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
+        # index_score = int8_index(
+        #     q_int8.contiguous(),
+        #     weights,
+        #     key=self.k_cache[:bsz, :end_pos].contiguous(),
+        #     key_scale=self.k_scale_cache[:bsz, :end_pos].contiguous(),
+        # )
+        index_score = lightindex(
             q_int8.contiguous(),
             weights,
-            self.k_cache[:bsz, :end_pos].contiguous(),
-            self.k_scale_cache[:bsz, :end_pos].contiguous(),
+            key=self.k_cache[:bsz, :end_pos].contiguous(),
+            key_scale=self.k_scale_cache[:bsz, :end_pos].contiguous(),
         )
         if mask is not None:
             index_score += mask
         topk_indices = index_score.topk(min(self.index_topk, end_pos), dim=-1)[1]
-        # topk_indices_ = topk_indices.clone()
-        # dist.broadcast(topk_indices_, src=0)
-        # assert torch.all(topk_indices == topk_indices_), f"{topk_indices=} {topk_indices_=}"
+        topk_indices_ = topk_indices.clone()
+        dist.broadcast(topk_indices_, src=0)
+        assert torch.all(topk_indices == topk_indices_), f"{topk_indices=} {topk_indices_=}"
         return topk_indices
 
     def forward_analysis(
