@@ -38,7 +38,8 @@ def get_platform() -> Literal["npu", "mlu", "meta_device"]:
 
 def get_impl_by_platform():
     import_op_map = {}
-    from mojo_opset.core.mojo_operator import MojoOperator
+    from mojo_opset.core.function import MojoFunction
+    from mojo_opset.core.operator import MojoOperator
 
     platform = get_platform()
 
@@ -66,7 +67,8 @@ def get_impl_by_platform():
                 for name, op in inspect.getmembers(module, inspect.isclass):
                     if (
                         issubclass(op, MojoOperator)
-                        and op is not MojoOperator
+                        or issubclass(op, MojoFunction)
+                        and op not in [MojoOperator, MojoFunction]
                         and op.__module__ == full_module_name
                         and platform in getattr(op, "supported_platforms_list", [])
                     ):

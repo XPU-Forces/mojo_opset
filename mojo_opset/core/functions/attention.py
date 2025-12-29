@@ -3,14 +3,12 @@ import torch.nn.functional as F
 
 from mojo_opset.utils.logging import get_logger
 
-from ..mojo_function import MojoFuncBase
-from ..mojo_function import mojo_func_dispatcher
+from ..mojo_function import MojoFunction
 
 logger = get_logger(__name__)
 
 
-@mojo_func_dispatcher
-class MojoSdpaFunction(MojoFuncBase):
+class MojoBlockDiffusionAttentionFunction(MojoFunction):
     @staticmethod
     def forward_ref(ctx, query, key, value, mask, scale=1.0, enable_gqa=False):
         ctx.scale = scale

@@ -17,19 +17,21 @@ class MojoOperator(ABC, torch.nn.Module):
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
 
-        is_direct_child = MojoOperator in cls.__bases__
+        is_mojo_core_op_cls = MojoOperator in cls.__bases__
 
-        if is_direct_child:
+        if is_mojo_core_op_cls:
             from mojo_opset.core.backend_registry import MojoBackendRegistry
 
+            # We place a registry for every core mojo op class.
             cls._registry = MojoBackendRegistry(cls)
         else:
+            # Register the child class to the core mojo op class's registry.
             cls._registry.register(cls)
 
     def __new__(cls, *args, **kwargs):
-        is_direct_child = MojoOperator in cls.__bases__
+        is_mojo_core_op_cls = MojoOperator in cls.__bases__
 
-        if is_direct_child:
+        if is_mojo_core_op_cls:
             if not hasattr(cls, "_registry") or not cls._registry:
                 raise NotImplementedError(f"No {cls.__name__} implementation found, please register at least one.")
 

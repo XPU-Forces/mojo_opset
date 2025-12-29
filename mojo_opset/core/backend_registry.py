@@ -1,25 +1,30 @@
 from typing import Dict
+from typing import Union
 
 from mojo_opset.utils.logging import get_logger
 from mojo_opset.utils.platform import get_platform
 
-from .mojo_operator import MojoOperator
+from .function import MojoFunction
+from .operator import MojoOperator
 
 logger = get_logger(__name__)
 
 
 class MojoBackendRegistry:
-    def __init__(self, core_op_cls):
+    def __init__(self, core_op_cls: Union[MojoOperator, MojoFunction]):
         assert core_op_cls.__name__.startswith("Mojo"), (
             f"Operator {core_op_cls.__name__} who is a subclass of MojoOperator, class name must start with Mojo."
         )
         self._core_op_cls = core_op_cls
         self._operator_name = core_op_cls.__name__[4:]
-        self._registry: Dict[str, MojoOperator] = {}
+        self._registry: Dict[str, Union[MojoOperator, MojoFunction]] = {}
         # TODO(zhangjihang): support more backend priority list.
         self._backend_priority_list = ["ttx", "ref", "analysis"]  # Default backend implementation priority.
 
-    def register(self, cls: MojoOperator):
+    def get_core_op_cls(self):
+        return self._core_op_cls
+
+    def register(self, cls: Union[MojoOperator, MojoFunction]):
         idx = cls.__name__.find(self._operator_name)
         assert idx != -1, (
             f"Operator {cls.__name__} who be a subclass of {self._core_op_cls.__name__} must "
@@ -43,19 +48,19 @@ class MojoBackendRegistry:
                 )
 
             self._registry[impl_backend_name] = cls
-            self._sort()
+            self.sort()
         else:
             logger.warning(f"Operator {cls.__name__} is not supported on {curr_platform} platform.")
 
-    def get(self, backend_name: str) -> MojoOperator:
+    def get(self, backend_name: str) -> Union[MojoOperator, MojoFunction]:
         assert backend_name in self._registry.keys(), (
             f"Operator {self.__name__} does not implement the target backend {backend_name}."
         )
         return self._registry[backend_name]
 
-    def get_first_class(self) -> MojoOperator:
-        assert len(self._registry) > 0, f"Operator {self.__name__} does not implement any backend."
-        return self._registry[self._backend_priority_list[0]]
+    def get_first_class(self) -> Union[MojoOperator, MojoFunction]:
+        assert len(self._registry) > 0, f"Operator {self._operator_name} does not implement any backend."
+        return list(self._registry.values())[0]
 
-    def _sort(self):
+    def sort(self):
         self._registry = dict(sorted(self._registry.items(), key=lambda x: self._backend_priority_list.index(x[0])))

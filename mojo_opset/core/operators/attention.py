@@ -5,7 +5,7 @@ from typing import Tuple
 import torch
 
 from .. import VALID_KV_LAYOUTS
-from ..mojo_operator import MojoOperator
+from ..operator import MojoOperator
 
 
 class MojoDecodeGQA(MojoOperator):

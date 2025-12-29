@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+from tests.utils import MockFunctionCtx
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
@@ -11,10 +12,14 @@ from mojo_opset import MojoSiluFunction
 @auto_switch_platform()
 @bypass_not_implemented
 def test_silu_forward_backward_diff(monkeypatch, x):
-    monkeypatch.setenv("MOJOSILUFUNCTION_FWD_MODE", "DIFF")
-    monkeypatch.setenv("MOJOSILUFUNCTION_BWD_MODE", "DIFF")
+    ctx = MockFunctionCtx()
+    y = MojoSiluFunction.forward(ctx, x)
 
-    y = MojoSiluFunction.apply(x)
+    ctx_ref = MockFunctionCtx()
+    y_ref = MojoSiluFunction._registry.get("ref").forward(ctx_ref, x)
+    assert torch.allclose(y, y_ref)
 
-    grad_output = torch.rand_like(y)
-    y.backward(grad_output)
+    dy = torch.rand_like(y)
+    dx = MojoSiluFunction.backward(ctx, dy)
+    dx_ref = MojoSiluFunction._registry.get("ref").backward(ctx_ref, dy)
+    assert torch.allclose(dx, dx_ref)

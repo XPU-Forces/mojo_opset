@@ -79,6 +79,7 @@ from .operators.sampling import MojoTopPSampling
 
 """ functions """
 from .functions.activation import MojoSiluFunction
+from .functions.activation import mojo_silu
 from .functions.attention import MojoSdpaFunction
 from .functions.convolution import MojoCausalConv1dFunction
 from .functions.convolution import causal_conv1d
@@ -160,5 +161,6 @@ __all__ = [
     "MojoSdpaFunction",
 
     "causal_conv1d",
+    "mojo_silu"
 ]
 # fmt: on

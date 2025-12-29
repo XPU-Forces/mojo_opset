@@ -1,4 +1,4 @@
-from ..mojo_operator import MojoOperator
+from ..operator import MojoOperator
 
 
 class MojoQuant(MojoOperator):

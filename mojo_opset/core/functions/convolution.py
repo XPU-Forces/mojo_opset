@@ -1,11 +1,11 @@
 import torch
 
-from ..mojo_function import MojoFuncBase
-from ..mojo_function import mojo_func_dispatcher
+from ..function import MojoFunction
+from ..function import mojo_func_dispatcher
 
 
 @mojo_func_dispatcher
-class MojoCausalConv1dFunction(MojoFuncBase):
+class MojoCausalConv1dFunction(MojoFunction):
     @staticmethod
     def forward_dump(
         ctx,
