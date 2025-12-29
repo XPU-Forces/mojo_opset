@@ -33,4 +33,4 @@ class TTXSdpaFunction(MojoSdpaFunction):
             ctx.scale,
             ctx.enable_gqa,
         )
-        return dq, dk, dv, None
+        return dq, dk, dv, None, None, None

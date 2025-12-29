@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 @mojo_func_dispatcher
 class MojoSdpaFunction(MojoFuncBase):
     @staticmethod
-    def forward_ref(ctx, query, key, value, mask, scale=1.0, enable_gqa=False):
+    def forward_ref(ctx, query : torch.Tensor, key : torch.Tensor, value : torch.Tensor, mask : torch.Tensor, scale : float = 1.0, enable_gqa : bool = False):
         ctx.scale = scale
         ctx.enable_gqa = enable_gqa
         ctx.scale = scale
