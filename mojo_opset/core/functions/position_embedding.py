@@ -1,11 +1,11 @@
 import torch
 
-from ..mojo_function import MojoFuncBase
-from ..mojo_function import mojo_func_dispatcher
+from ..function import MojoFunction
+from ..function import mojo_func_dispatcher
 
 
 @mojo_func_dispatcher
-class MojoRoPEFunction(MojoFuncBase):
+class MojoRoPEFunction(MojoFunction):
     @staticmethod
     def forward_ref(ctx, q, k, cos, sin):
         def rotate_half(x):

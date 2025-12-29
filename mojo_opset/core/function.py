@@ -166,37 +166,71 @@ def mojo_func_dispatcher(cls):
     return cls
 
 
-class MojoFuncBase(Function):
+class MojoFunction(Function):
+    supported_platforms_list = ["npu", "mlu"]
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
 
-        is_direct_child = MojoFuncBase in cls.__bases__
+        is_mojo_core_func_cls = MojoFunction in cls.__bases__
 
-        if is_direct_child:
-            cls._registry = []
+        if is_mojo_core_func_cls:
+            from mojo_opset.core.backend_registry import MojoBackendRegistry
+
+            cls._registry = MojoBackendRegistry(cls)
         else:
-            family_head = None
-            for base in cls.mro()[1:]:
-                if base is MojoFuncBase:
-                    break
-                if MojoFuncBase in base.__bases__:
-                    family_head = base
-                    break
+            cls._registry.register(cls)
+            cls._registry.sort()
 
-            if family_head:
-                default_priority = cls.default_priority if hasattr(cls, "default_priority") else 0
+            target_backend = os.environ.get("MOJO_BACKEND", None)
+            core_op_cls = cls._registry.get_core_op_cls()
+            if not target_backend:
+                core_op_cls.forward = cls._registry.get_first_class().forward
+                core_op_cls.backward = cls._registry.get_first_class().backward
+            else:
+                core_op_cls.forward = cls._registry.get(target_backend).forward
+                core_op_cls.backward = cls._registry.get(target_backend).backward
 
-                env_var_name = f"{cls.__name__}_PRIORITY".upper()
-                env_priority = os.getenv(env_var_name)
+            print(core_op_cls, core_op_cls.forward, core_op_cls.backward)
 
-                priority = int(env_priority) if env_priority is not None else default_priority
+    @staticmethod
+    def forward(ctx, *args, **kwargs):
+        pass
 
-                logger.info(
-                    f"Register {cls.__name__} as {family_head.__name__} implementation with priority {priority}"
-                )
+    @staticmethod
+    def backward(ctx, *arg, **kwargs):
+        pass
 
-                if priority in [x[0] for x in family_head._registry]:
-                    raise ValueError(f"Operator {cls.__name__} priority {priority} has been registered")
+    # def __init_subclass__(cls, **kwargs):
+    #     super().__init_subclass__(**kwargs)
 
-                family_head._registry.append((priority, cls))
-                family_head._registry.sort(reverse=False, key=lambda x: x[0])
+    #     is_direct_child = MojoFunction in cls.__bases__
+
+    #     if is_direct_child:
+    #         cls._registry = []
+    #     else:
+    #         family_head = None
+    #         for base in cls.mro()[1:]:
+    #             if base is MojoFunction:
+    #                 break
+    #             if MojoFunction in base.__bases__:
+    #                 family_head = base
+    #                 break
+
+    #         if family_head:
+    #             default_priority = cls.default_priority if hasattr(cls, "default_priority") else 0
+
+    #             env_var_name = f"{cls.__name__}_PRIORITY".upper()
+    #             env_priority = os.getenv(env_var_name)
+
+    #             priority = int(env_priority) if env_priority is not None else default_priority
+
+    #             logger.info(
+    #                 f"Register {cls.__name__} as {family_head.__name__} implementation with priority {priority}"
+    #             )
+
+    #             if priority in [x[0] for x in family_head._registry]:
+    #                 raise ValueError(f"Operator {cls.__name__} priority {priority} has been registered")
+
+    #             family_head._registry.append((priority, cls))
+    #             family_head._registry.sort(reverse=False, key=lambda x: x[0])

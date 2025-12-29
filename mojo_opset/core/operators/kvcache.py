@@ -1,5 +1,5 @@
 from .. import VALID_KV_LAYOUTS
-from ..mojo_operator import MojoOperator
+from ..operator import MojoOperator
 
 
 class MojoStoreKVCache(MojoOperator):

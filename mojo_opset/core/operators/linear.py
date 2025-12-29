@@ -2,7 +2,7 @@ from typing import Optional
 
 import torch
 
-from ..mojo_operator import MojoOperator
+from ..operator import MojoOperator
 
 
 class MojoLinear(MojoOperator):
