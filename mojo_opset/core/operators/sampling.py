@@ -7,7 +7,7 @@ from typing import Union
 
 import torch
 
-from ..mojo_operator import MojoOperator
+from ..operator import MojoOperator
 
 
 class MojoTopKSampling(MojoOperator):

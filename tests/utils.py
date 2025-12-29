@@ -6,7 +6,7 @@ import re
 import sys
 import time
 
-from typing import Callable
+from typing import Callable, List
 
 import pytest
 import torch
@@ -245,3 +245,10 @@ def perf_npu(executor, profiling_dir="./npu_profiling", active=5):
             f.write("| Name | Parameters | Device Latency (us) | Host Latency (ms) |\n")
             f.write("|------|------------|---------------------|-------------------|\n")
         f.write(plain_log_file + "\n")
+
+class MockFunctionCtx:
+    def __init__(self):
+        self.saved_tensors = None
+    
+    def save_for_backward(self, *tensors):
+        self.saved_tensors = tensors

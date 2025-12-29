@@ -5,7 +5,7 @@ from typing import Tuple
 
 import torch
 
-from ..mojo_operator import MojoOperator
+from ..operator import MojoOperator
 
 
 class MojoNorm(MojoOperator):
