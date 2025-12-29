@@ -2,7 +2,6 @@ from abc import ABC
 from abc import abstractmethod
 from typing import Any
 from typing import Tuple
-from typing import Union
 
 import torch
 
@@ -46,7 +45,6 @@ class MojoOperator(ABC, torch.nn.Module):
             instance = target_class.__new__(target_class, *args, **kwargs)
             return instance
         else:
-            print(cls)
             return super().__new__(cls)
 
     def __init__(self, op_name: str, layer_idx: int):
@@ -62,17 +60,14 @@ class MojoOperator(ABC, torch.nn.Module):
 
     def forward_diff_with(
         self,
+        other_op: "MojoOperator",
         *args,
-        other_op: Union["MojoOperator", str],
         atol: float = 1e-2,
         rtol: float = 1e-2,
         random_seed: int = 42,
         **kwargs,
     ):
         """
-        Compare the output of self.forward with other_op.forward.
-        If other_op is a backend_name, requires two backend implement share same states.
-
         Args:
             *args: The arguments to pass to self.forward.
             other_op: The other operator to compare with.
@@ -92,11 +87,7 @@ class MojoOperator(ABC, torch.nn.Module):
         args_for_ref = tuple(arg.clone() if isinstance(arg, torch.Tensor) else arg for arg in args)
         kwargs_for_ref = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in kwargs.items()}
 
-        refs_result = None
-        if isinstance(other_op, str):
-            refs_result = self._registry.get(other_op).forward(self, *args_for_ref, **kwargs_for_ref)
-        else:
-            refs_result = other_op.forward(*args_for_ref, **kwargs_for_ref)
+        refs_result = other_op.forward(*args_for_ref, **kwargs_for_ref)
 
         assert norm_result is not None, "forward should return a non-None value."
         assert refs_result is not None, "comparison operator should return a non-None value."
@@ -110,20 +101,3 @@ class MojoOperator(ABC, torch.nn.Module):
             )
 
         return norm_result
-
-    def forward_diff_with_ref(
-        self,
-        *args,
-        atol: float = 1e-2,
-        rtol: float = 1e-2,
-        random_seed: int = 42,
-        **kwargs,
-    ):
-        return self.forward_diff_with(
-            *args,
-            other_op="ref",
-            atol=atol,
-            rtol=rtol,
-            random_seed=random_seed,
-            **kwargs,
-        )
