@@ -99,8 +99,13 @@ def test_paged_decode_gqa(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
+    paged_decode_attn_ref = MojoPagedDecodeGQA._registry.get("ref")(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+    )
 
-    paged_decode_attn.forward_diff_with_ref(
+    paged_decode_attn.forward_diff_with(
+        paged_decode_attn_ref,
         query,
         k_cache,
         v_cache,
@@ -214,10 +219,16 @@ def test_paged_prefill_gqa(
         gqa_layout=gqa_layout,
     )
 
+    paged_prefill_attn_ref = MojoPagedPrefillGQA._registry.get("ref")(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+    )
+
     head_dim = query.shape[-1]
     sm_scale = 1.0 / math.sqrt(head_dim)
 
-    paged_prefill_attn.forward_diff_with_ref(
+    paged_prefill_attn.forward_diff_with(
+        paged_prefill_attn_ref,
         query,
         k_cache,
         v_cache,

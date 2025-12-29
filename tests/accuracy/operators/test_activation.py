@@ -17,7 +17,8 @@ from mojo_opset import MojoSwiGLU
 @bypass_not_implemented
 def test_gelu(x):
     gelu = MojoGelu()
-    gelu.forward_diff_with_ref(x)
+    gelu_ref = MojoGelu._registry.get("ref")()
+    gelu.forward_diff_with(gelu_ref, x)
 
 
 @pytest.mark.parametrize(
@@ -28,7 +29,8 @@ def test_gelu(x):
 @bypass_not_implemented
 def test_silu(x):
     silu = MojoSilu()
-    silu.forward_diff_with_ref(x)
+    silu_ref = MojoSilu._registry.get("ref")()
+    silu.forward_diff_with(silu_ref, x)
 
 
 @pytest.mark.parametrize(
@@ -44,4 +46,5 @@ def test_silu(x):
 @bypass_not_implemented
 def test_swiglu(gate_out, up_out):
     swiglu = MojoSwiGLU()
-    swiglu.forward_diff_with_ref(gate_out, up_out)
+    swiglu_ref = MojoSwiGLU._registry.get("ref")()
+    swiglu.forward_diff_with(swiglu_ref, gate_out, up_out)
