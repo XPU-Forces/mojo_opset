@@ -29,7 +29,6 @@ except Exception:
     configs=[
         triton.Config({"BLOCK_SIZE": 4096}),
         triton.Config({"BLOCK_SIZE": 8192}),
-        triton.Config({"BLOCK_SIZE": 16384}),
     ],
     key=["n_cols"],
     restore_value=["X_ptr"],
@@ -270,7 +269,6 @@ def _cross_entropy_kernel(
     configs=[
         triton.Config({"BLOCK_SIZE": 4096}),
         triton.Config({"BLOCK_SIZE": 8192}),
-        triton.Config({"BLOCK_SIZE": 16384}),
     ],
     key=["n_cols"],
     restore_value=["X_ptr"],
