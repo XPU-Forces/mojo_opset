@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 
 from ..mojo_function import MojoFuncBase
@@ -45,14 +47,14 @@ class MojoCausalConv1dFunction(MojoFuncBase):
 
 def causal_conv1d(
     x: torch.Tensor,
-    weight: torch.Tensor | None = None,
-    bias: torch.Tensor | None = None,
-    residual: torch.Tensor | None = None,
-    initial_state: torch.Tensor | None = None,
-    output_final_state: bool | None = False,
-    activation: str | None = None,
-    backend: str | None = "triton",
-    cu_seqlens: torch.Tensor | None = None,
+    weight: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    residual: Optional[torch.Tensor] = None,
+    initial_state: Optional[torch.Tensor] = None,
+    output_final_state: Optional[bool] = False,
+    activation: Optional[str] = None,
+    backend: Optional[str] = "triton",
+    cu_seqlens: Optional[torch.Tensor] = None,
     **kwargs,
 ):
     """
