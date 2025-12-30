@@ -22,10 +22,10 @@ from mojo_opset.backends.ttx.kernels.utils import prepare_chunk_indices
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
-@triton.autotune(
-    configs=[triton.Config({"BD": BD}) for BD in [16, 32, 64, 128]],
-    key=["D", "W", "NB"],
-)
+# @triton.autotune(
+#     configs=[triton.Config({"BD": BD}) for BD in [16, 32, 64, 128]],
+#     key=["D", "W", "NB"],
+# )
 @triton.jit
 def causal_conv1d_fwd_kernel(
     x,
@@ -77,7 +77,7 @@ def causal_conv1d_fwd_kernel(
             # b_yi = tl.load(p_yi, boundary_check=(0, 1),padding_option="zero").to(tl.float32)
             yi_offset_0 = i_t * BT + i_w + tl.arange(0, BT)[:, None]
             yi_offset_1 = i_d * BD + tl.arange(0, BD)[None, :]
-            mask = (yi_offset_0 < T) & (yi_offset_1 < D)
+            mask = (yi_offset_0 < T) & (yi_offset_1 < D) & (yi_offset_0 >= 0)
             # [BT, BD]
             b_yi = tl.load(x + bos * D + yi_offset_0 * D + yi_offset_1, mask=mask, other=0.0).to(tl.float32)
             if HAS_WEIGHT:
@@ -90,7 +90,7 @@ def causal_conv1d_fwd_kernel(
             # b_yi = tl.load(p_yi, boundary_check=(0, 1),padding_option="zero").to(tl.float32)
             yi_offset_0 = i_t * BT + i_w + tl.arange(0, BT)[:, None]
             yi_offset_1 = i_d * BD + tl.arange(0, BD)[None, :]
-            mask = (yi_offset_0 < T) & (yi_offset_1 < D)
+            mask = (yi_offset_0 < T) & (yi_offset_1 < D) & (yi_offset_0 >= 0)
             # [BT, BD]
             b_yi = tl.load(x + bos * D + yi_offset_0 * D + yi_offset_1, mask=mask, other=0.0).to(tl.float32)
             if HAS_WEIGHT:
@@ -445,6 +445,7 @@ def causal_conv1d_fwd(
         BW=BW,
         NB=NB,
         ACTIVATION=activation,
+        BD=128,
     )
     final_state = None
     if output_final_state:
@@ -474,7 +475,7 @@ def causal_conv1d_bwd(
     B, T, D = x.shape
     W = weight.shape[1] if weight is not None else None
     BT = min(32, triton.next_power_of_2(triton.cdiv(max(16, B * T), get_num_cores())))
-    print(f"causal_conv1d_bwd BT {BT} x.shape {x.shape}")
+
     BW = triton.next_power_of_2(W)
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)

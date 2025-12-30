@@ -1,3 +1,5 @@
+import os
+
 from typing import Optional
 
 import torch
@@ -25,6 +27,8 @@ class TTXCausalConv1dFunction(MojoCausalConv1dFunction):
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
         ctx.save_for_backward(x, weight, bias, residual, initial_state)
+
+        os.environ["TRITON_ALL_BLOCKS_PARALLEL"] = "1"
         y, final_state = causal_conv1d_fwd(
             x=x,
             weight=weight,
@@ -35,12 +39,15 @@ class TTXCausalConv1dFunction(MojoCausalConv1dFunction):
             activation=activation,
             cu_seqlens=cu_seqlens,
         )
+        os.environ["TRITON_ALL_BLOCKS_PARALLEL"] = "0"
         return y, final_state
 
     @staticmethod
     @input_guard(make_contiguous=True, auto_to_device=True)
     def backward(ctx, dy: torch.Tensor, dht: Optional[torch.Tensor]):
         x, weight, bias, residual, initial_state = ctx.saved_tensors
+
+        os.environ["TRITON_ALL_BLOCKS_PARALLEL"] = "1"
         dx, dw, db, dr, dh0 = causal_conv1d_bwd(
             x=x,
             dy=dy,
@@ -52,4 +59,5 @@ class TTXCausalConv1dFunction(MojoCausalConv1dFunction):
             activation=ctx.activation,
             cu_seqlens=ctx.cu_seqlens,
         )
+        os.environ["TRITON_ALL_BLOCKS_PARALLEL"] = "0"
         return dx, dw, db, dr, dh0, None, None, None
