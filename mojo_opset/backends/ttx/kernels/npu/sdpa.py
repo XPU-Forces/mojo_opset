@@ -297,12 +297,15 @@ def _sdpa_infer_kernel(
 
 @triton.autotune(
     configs=[
-        triton.Config({'multibuffer': True, "BLOCK_R": 128, "BLOCK_C": 128}),
-        triton.Config({'multibuffer': True, "BLOCK_R": 64, "BLOCK_C": 128}),
-        triton.Config({'multibuffer': True, "BLOCK_R": 128, "BLOCK_C": 64}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 256}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 256, "BLOCK_C": 128}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 128}),
+        triton.Config(
+            {"BLOCK_R": 64, "BLOCK_C": 128},
+            multibuffer=True,
+            unit_flag=True,
+            set_workspace_multibuffer=2,
+            enable_hivm_auto_cv_balance=True,
+            tile_mix_vector_loop=2,
+            tile_mix_cube_loop=2
+        )
     ],
     key=["N", "S", "H"],
 )
@@ -424,10 +427,6 @@ def kernel_sdpa_fwd(
 @triton.autotune(
     configs=[
         triton.Config({'multibuffer': True, "BLOCK_R": 128}),
-        triton.Config({'multibuffer': True, "BLOCK_R": 64}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 256}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 128}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 64}),
     ],
     key=["N", "S", "H"],
 )
@@ -484,12 +483,14 @@ def kernel_sdpa_bwd_d(
 
 @triton.autotune(
     configs=[
-        triton.Config({'multibuffer': True, "BLOCK_R": 128, "BLOCK_C": 64}),
-        triton.Config({'multibuffer': True, "BLOCK_R": 64, "BLOCK_C": 128}),
-        triton.Config({'multibuffer': True, "BLOCK_R": 64, "BLOCK_C": 64}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 128}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 64}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 64, "BLOCK_C": 128}),
+        triton.Config({"BLOCK_R": 64, "BLOCK_C": 128},
+        multibuffer=True,
+        unit_flag=True,
+        set_workspace_multibuffer=2,
+        enable_hivm_auto_cv_balance=True,
+        tile_mix_vector_loop=2,
+        tile_mix_cube_loop=2
+        )
     ],
     key=["N", "S", "H"],
 )
@@ -615,12 +616,14 @@ def kernel_sdpa_bwd_q(
 
 @triton.autotune(
     configs=[
-        triton.Config({'multibuffer': True, "BLOCK_R": 128, "BLOCK_C": 64}),
-        triton.Config({'multibuffer': True, "BLOCK_R": 64, "BLOCK_C": 128}),
-        triton.Config({'multibuffer': True, "BLOCK_R": 64, "BLOCK_C": 64}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 128}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 128, "BLOCK_C": 64}),
-        triton.Config({'multibuffer': False, "BLOCK_R": 64, "BLOCK_C": 128}),
+        triton.Config({"BLOCK_R": 128, "BLOCK_C": 64},
+        multibuffer=True,
+        unit_flag=True,
+        set_workspace_multibuffer=2,
+        enable_hivm_auto_cv_balance=True,
+        tile_mix_vector_loop=2,
+        tile_mix_cube_loop=2
+        )
     ],
     key=["N", "S", "H"],
 )
