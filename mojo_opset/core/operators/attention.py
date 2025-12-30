@@ -217,16 +217,13 @@ class MojoPagedPrefillNSA(MojoOperator):
         self.softmax_scale = softmax_scale
 
 
-class MojoBlockDiffusionAttention(MojoOperator):
-    def __init__(self, mask: Optional[torch.Tensor] = None, name: str = "", layer_idx: int = 0):
-        super().__init__(name, layer_idx)
-        self.mask = mask
+class MojoSdpa(MojoOperator):
+    supported_platforms_list = ["npu"]
 
     def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        softmax_scale: Optional[float] = None,
     ):
         raise NotImplementedError("MojoSdpa forward not implemented")

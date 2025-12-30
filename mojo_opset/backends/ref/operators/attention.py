@@ -4,9 +4,9 @@ from typing import Optional
 
 import torch
 
-from mojo_opset.core import MojoBlockDiffusionAttention
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
+from mojo_opset.core import MojoSdpa
 
 
 class RefPagedPrefillGQA(MojoPagedPrefillGQA):
@@ -130,7 +130,7 @@ class RefPagedDecodeGQA(MojoPagedDecodeGQA):
         return out
 
 
-class RefBlockDiffusionAttention(MojoBlockDiffusionAttention):
+class RefSdpa(MojoSdpa):
     def forward(
         self,
         query: torch.Tensor,
@@ -142,9 +142,10 @@ class RefBlockDiffusionAttention(MojoBlockDiffusionAttention):
             query,
             key,
             value,
-            attn_mask=self.mask.to(torch.bool),
+            attn_mask=self.mask,
             dropout_p=0.0,
             is_causal=False,
             scale=softmax_scale,
+            enable_gqa=self.enable_gqa,
         )
         return output
