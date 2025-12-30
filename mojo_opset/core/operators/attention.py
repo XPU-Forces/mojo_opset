@@ -216,6 +216,8 @@ class MojoPagedPrefillNSA(MojoOperator):
 
 
 class MojoSdpa(MojoOperator):
+    supported_platforms_list = ["npu"]
+
     def __init__(
         self,
         mask: Optional[torch.Tensor] = None,
