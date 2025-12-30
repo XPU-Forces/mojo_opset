@@ -10,12 +10,6 @@ from tests.utils import bypass_not_implemented
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoSdpa
-<<<<<<< HEAD
-=======
-from mojo_opset.backends.reference.operators.attention import RefPagedDecodeGQA
-from mojo_opset.backends.reference.operators.attention import RefPagedPrefillGQA
-from mojo_opset.backends.reference.operators.attention import RefSdpa
->>>>>>> 4ab577b (add sdpa function interface and fix some)
 
 
 def generate_paged_decode_data(
@@ -283,6 +277,7 @@ def generate_test_data(
     key = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16)
     value = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16)
     blockwise_diffusion_attn_mask = generate_diffusion_attention_mask(seq_length, block_size)
+    # blockwise_diffusion_attn_mask = torch.ones(seq_length * 2, seq_length * 2, dtype=torch.bool)
     return query, key, value, blockwise_diffusion_attn_mask, q_head_num != kv_head_num
 
 

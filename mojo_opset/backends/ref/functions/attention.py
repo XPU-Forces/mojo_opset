@@ -19,7 +19,6 @@ class RefSdpaFunction(MojoSdpaFunction):
             enable_gqa=enable_gqa,
         )
         ctx.save_for_backward(query, key, value, mask)
-        print("forward output:", output)
         return output
 
     @staticmethod

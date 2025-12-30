@@ -3,6 +3,7 @@ import functools
 import pytest
 import torch
 
+from tests.utils import MockFunctionCtx
 from tests.utils import auto_switch_platform
 
 from mojo_opset import MojoSdpaFunction
@@ -66,10 +67,21 @@ def generate_test_data(
 )
 @auto_switch_platform()
 def test_diffusion_attention_func(monkeypatch, query, key, value, blockwise_diffusion_attn_mask, enable_gqa):
-    monkeypatch.setenv("MOJOSDPAFUNCTION_FWD_MODE", "DIFF")
-    monkeypatch.setenv("MOJOSDPAFUNCTION_BWD_MODE", "DIFF")
+    ctx = MockFunctionCtx()
+    o = MojoSdpaFunction.forward(ctx, query, key, value, blockwise_diffusion_attn_mask, 1.0, enable_gqa)
 
-    output = MojoSdpaFunction.apply(query, key, value, blockwise_diffusion_attn_mask, 1.0, enable_gqa)
+    ctx_ref = MockFunctionCtx()
+    o_ref = MojoSdpaFunction._registry.get("ref").forward(
+        ctx_ref, query, key, value, blockwise_diffusion_attn_mask, 1.0, enable_gqa
+    )
 
-    grad_output = torch.rand_like(output)
-    output.backward(grad_output)
+    assert torch.allclose(o, o_ref)
+
+    do = torch.rand_like(o)
+    dq, dk, dv = MojoSdpaFunction.backward(ctx, do)
+
+    dq_ref, dk_ref, dv_ref = MojoSdpaFunction._registry.get("ref").backward(ctx_ref, do)
+
+    assert torch.allclose(dq, dq_ref)
+    assert torch.allclose(dk, dk_ref)
+    assert torch.allclose(dv, dv_ref)

@@ -63,8 +63,8 @@ def _sdpa_infer_inner(
         mask = tl.load(mask_ptr)
 
         # qk += (1 - mask.to(tl.float32)) * (-1e6)
-        # qk = tl.where(mask, qk, float("-inf"))  # 32B # bool
-        qk = tl.where(mask, float("-inf"), qk)  # 32B # bool
+        # TODO(zhangjihang): tl.where with a non-boolean condition is deprecated and will error out in a future triton release. Got int8
+        qk = tl.where(mask, qk, -1e6)  # 32B # bool
 
         m_ij = tl.maximum(m_i, tl.max(qk, 1))  # Scaled max
         qk = qk - m_ij[:, None]  # Stabilize
@@ -811,7 +811,6 @@ def sdpa_infer_impl(
 
     # mask = 1 - mask.to(torch.int8)
     # mask = (1.0 - mask.to(torch.float32)) * (-1e6)
-
     _sdpa_infer_kernel[(num_cores,)](
         q,
         k,
