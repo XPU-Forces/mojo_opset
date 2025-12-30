@@ -191,8 +191,6 @@ class MojoFunction(Function):
                 core_op_cls.forward = cls._registry.get(target_backend).forward
                 core_op_cls.backward = cls._registry.get(target_backend).backward
 
-            print(core_op_cls, core_op_cls.forward, core_op_cls.backward)
-
     @staticmethod
     def forward(ctx, *args, **kwargs):
         pass

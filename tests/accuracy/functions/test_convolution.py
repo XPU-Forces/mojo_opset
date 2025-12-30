@@ -85,7 +85,6 @@ def test_conv(
     dummy_tensor: torch.Tensor,
 ):
     device = dummy_tensor.device
-    print(f"device is {device}")
     torch.manual_seed(42)
 
     x = torch.randn(B, T, D).to(device, dtype).requires_grad_(True)

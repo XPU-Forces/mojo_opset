@@ -257,7 +257,6 @@ def generate_diffusion_attention_mask(
     seq_length: int,
     block_size: int,
 ) -> torch.Tensor:
-    print("generate diffusion attention mask...")
     total_length = seq_length * 2
     attn_mask = torch.zeros(total_length, total_length, dtype=torch.int8)
 
