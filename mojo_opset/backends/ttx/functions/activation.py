@@ -1,12 +1,11 @@
-import torch
-
 from mojo_opset.backends.ttx.kernels import silu_bwd
 from mojo_opset.backends.ttx.kernels import silu_fwd
-
 from mojo_opset.core import MojoSiluFunction
 
 
 class TTXSiluFunction(MojoSiluFunction):
+    supported_platforms_list = ["npu"]
+
     @staticmethod
     def forward(ctx, input):
         """

@@ -1,7 +1,11 @@
 import pytest
 import torch
 
-from tests.utils import auto_switch_platform, bypass_not_implemented
+from tests.utils import MockFunctionCtx
+from tests.utils import assert_close
+from tests.utils import auto_switch_platform
+from tests.utils import bypass_not_implemented
+
 from mojo_opset import MojoRMSNormFunction
 
 
@@ -11,11 +15,16 @@ from mojo_opset import MojoRMSNormFunction
 )
 @auto_switch_platform()
 @bypass_not_implemented
-def test_rmsnorm_forward_backward_diff(monkeypatch, x, w):
-    monkeypatch.setenv("MOJORMSNORMFUNCTION_FWD_MODE", "DIFF")
-    monkeypatch.setenv("MOJORMSNORMFUNCTION_BACKWARD_MODE", "DIFF")
+def test_rmsnorm_forward_backward_diff(x, w):
+    ctx = MockFunctionCtx()
+    y = MojoRMSNormFunction.forward(ctx, x, w, 1e-6)
 
-    y = MojoRMSNormFunction.apply(x, w, 1e-6)
+    ctx_ref = MockFunctionCtx()
+    y_ref = MojoRMSNormFunction._registry.get("ref").forward(ctx_ref, x, w, 1e-6)
+    assert_close(y, y_ref)
 
-    grad_output = torch.rand_like(y)
-    y.backward(grad_output)
+    dy = torch.rand_like(y)
+    grads = MojoRMSNormFunction.backward(ctx, dy)
+    grads_ref = MojoRMSNormFunction._registry.get("ref").backward(ctx_ref, dy)
+    
+    assert_close(grads, grads_ref)

@@ -20,6 +20,7 @@ from mojo_opset import MojoRoPE
 @bypass_not_implemented
 def test_pos_emb(q, k):
     rope = MojoRoPE(is_varlen=False)
+    rope_ref = MojoRoPE._registry.get("ref")(is_varlen=False)
 
     # Transpose q and k to mock the memory layout transformation used in the real inference framework.
 
@@ -34,4 +35,4 @@ def test_pos_emb(q, k):
     cos = emb.cos()[None, None, :, :]
     sin = emb.sin()[None, None, :, :]
 
-    rope.forward_diff_with_ref(q, k, cos, sin)
+    rope.forward_diff_with(rope_ref, q, k, cos, sin)

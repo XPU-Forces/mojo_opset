@@ -5,7 +5,7 @@ from typing import Tuple
 import torch
 
 from .. import VALID_KV_LAYOUTS
-from ..mojo_operator import MojoOperator
+from ..operator import MojoOperator
 
 
 class MojoDecodeGQA(MojoOperator):
@@ -84,9 +84,7 @@ class MojoPagedDecodeGQA(MojoOperator):
         self.tp_size = tp_size
         self.is_varlen = is_varlen
 
-    def forward(
-        self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None
-    ) -> Tuple[Any]:
+    def forward(self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None) -> Tuple[Any]:
         raise NotImplementedError
 
 
@@ -217,16 +215,23 @@ class MojoPagedPrefillNSA(MojoOperator):
         self.softmax_scale = softmax_scale
 
 
-class MojoBlockDiffusionAttention(MojoOperator):
-    def __init__(self, mask: Optional[torch.Tensor] = None, name: str = "", layer_idx: int = 0):
-        super().__init__(name, layer_idx)
+class MojoSdpa(MojoOperator):
+    supported_platforms_list = ["npu"]
+
+    def __init__(
+        self,
+        mask: Optional[torch.Tensor] = None,
+        scale: float = 1.0,
+        enable_gqa: bool = False,
+    ):
         self.mask = mask
+        self.scale = scale
+        self.enable_gqa = enable_gqa
 
     def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        softmax_scale: Optional[float] = None,
     ):
         raise NotImplementedError("MojoSdpa forward not implemented")

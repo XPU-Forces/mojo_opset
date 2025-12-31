@@ -5,7 +5,7 @@ from typing import Tuple
 
 import torch
 
-from ..mojo_operator import MojoOperator
+from ..operator import MojoOperator
 
 
 class MojoNorm(MojoOperator):
@@ -48,9 +48,6 @@ class MojoNorm(MojoOperator):
         self.norm_type = norm_type
         self.affine = gamma is not None and beta is not None
         self.is_varlen = is_varlen
-
-        # mode_str = get_mojo_exec_mode(MojoNorm.__name__, "FWD", self.layer_idx)
-        # self._set_forward_mode(mode_str)
 
     @abstractmethod
     def forward(self, hidden_state: torch.Tensor) -> Tuple[Any]:

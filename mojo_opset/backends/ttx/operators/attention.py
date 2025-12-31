@@ -4,9 +4,10 @@ import torch
 
 from mojo_opset.backends.ttx.kernels import paged_attention_decode
 from mojo_opset.backends.ttx.kernels import paged_attention_prefill
-from mojo_opset.core import MojoBlockDiffusionAttention
+from mojo_opset.backends.ttx.kernels import sdpa_infer
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
+from mojo_opset.core import MojoSdpa
 
 
 class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
@@ -77,7 +78,7 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         return output
 
 
-class TTXBlockDiffusionAttention(MojoBlockDiffusionAttention):
+class TTXSdpa(MojoSdpa):
     supported_platforms_list = ["npu"]
 
     def forward(
@@ -85,15 +86,13 @@ class TTXBlockDiffusionAttention(MojoBlockDiffusionAttention):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        softmax_scale: Optional[float] = None,
     ):
-        output = torch.nn.functional.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            attn_mask=self.mask.to(torch.bool),
-            dropout_p=0.0,
-            is_causal=False,
-            scale=softmax_scale,
+        output = sdpa_infer(
+            q=query,
+            k=key,
+            v=value,
+            mask=self.mask,
+            scale=self.scale,
+            enable_gqa=self.enable_gqa,
         )
         return output
