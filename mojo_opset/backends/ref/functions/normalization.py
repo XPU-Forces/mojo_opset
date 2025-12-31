@@ -18,7 +18,7 @@ class RefRMSNormFunction(MojoRMSNormFunction):
 
     @staticmethod
     def backward(ctx, grad_output):
-        input, weight, _ = ctx.saved_tensors
+        input, weight = ctx.saved_tensors
         normalized_shape = ctx.normalized_shape
         eps = ctx.eps
 

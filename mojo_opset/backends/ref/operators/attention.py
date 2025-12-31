@@ -136,7 +136,6 @@ class RefSdpa(MojoSdpa):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        softmax_scale: Optional[float] = None,
     ):
         output = torch.nn.functional.scaled_dot_product_attention(
             query,
@@ -145,7 +144,7 @@ class RefSdpa(MojoSdpa):
             attn_mask=self.mask,
             dropout_p=0.0,
             is_causal=False,
-            scale=softmax_scale,
+            scale=self.scale,
             enable_gqa=self.enable_gqa,
         )
         return output

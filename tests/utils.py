@@ -7,6 +7,9 @@ import sys
 import time
 
 from typing import Callable
+from typing import Union
+from typing import Tuple
+from typing import Any
 
 import pytest
 import torch
@@ -22,35 +25,46 @@ from mojo_opset.utils.platform import get_platform
 logger = get_logger(__name__)
 
 
-def assert_close(impl: torch.Tensor, ref: torch.Tensor, dtype: torch.dtype = None):
-    assert impl.shape == ref.shape
-    assert impl.dtype == ref.dtype
-    if dtype is None:
-        dtype = impl.dtype
-    if dtype == torch.bfloat16:
-        max_atol = 0.1
-        max_rtol = 0.05
-        mean_atol = 0.01
-        mean_rtol = 0.01
-    elif dtype == torch.float16:
-        max_atol = 2e-2
-        max_rtol = 2e-2
-        mean_atol = 2e-2
-        mean_rtol = 2e-2
-    elif dtype == torch.float32:
-        max_atol = 6e-3
-        max_rtol = 6e-3
-        mean_atol = 1e-4
-        mean_rtol = 1e-4
-    else:
-        logger.warning(f"dtype {dtype} is not supported.")
-        assert False
+def assert_close(
+    results: Union[torch.Tensor, Tuple[Any, ...]],
+    refs: Union[torch.Tensor, Tuple[Any, ...]],
+):
+    assert type(results) is type(refs)
+    if isinstance(results, torch.Tensor) and isinstance(refs, torch.Tensor):
+        results = tuple([results])
+        refs = tuple([refs])
 
-    torch.testing.assert_close(impl, ref, atol=max_atol, rtol=max_rtol)
-    assert (
-        torch.mean(torch.abs(ref - impl)) < max_atol
-        or torch.mean(torch.abs((ref - impl) / (ref + mean_atol))) < mean_rtol
-    )
+    for result, ref in zip(results, refs):
+        if isinstance(result, torch.Tensor) and isinstance(ref, torch.Tensor):
+            assert result.shape == ref.shape
+            assert result.dtype == ref.dtype
+            dtype = result.dtype
+            if dtype == torch.bfloat16:
+                max_atol = 0.1
+                max_rtol = 0.05
+                mean_atol = 0.01
+                mean_rtol = 0.01
+            elif dtype == torch.float16:
+                max_atol = 2e-2
+                max_rtol = 2e-2
+                mean_atol = 2e-2
+                mean_rtol = 2e-2
+            elif dtype == torch.float32:
+                max_atol = 6e-3
+                max_rtol = 6e-3
+                mean_atol = 1e-4
+                mean_rtol = 1e-4
+            else:
+                logger.warning(f"dtype {dtype} is not supported.")
+                assert False
+
+            torch.testing.assert_close(result, ref, atol=max_atol, rtol=max_rtol)
+            assert (
+                torch.mean(torch.abs(ref - result)) < max_atol
+                or torch.mean(torch.abs((ref - result) / (ref + mean_atol))) < mean_rtol
+            )
+        else:
+            assert result == ref
 
 
 def get_executor_info(executor):

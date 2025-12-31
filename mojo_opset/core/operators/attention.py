@@ -84,9 +84,7 @@ class MojoPagedDecodeGQA(MojoOperator):
         self.tp_size = tp_size
         self.is_varlen = is_varlen
 
-    def forward(
-        self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None
-    ) -> Tuple[Any]:
+    def forward(self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None) -> Tuple[Any]:
         raise NotImplementedError
 
 
@@ -219,6 +217,16 @@ class MojoPagedPrefillNSA(MojoOperator):
 
 class MojoSdpa(MojoOperator):
     supported_platforms_list = ["npu"]
+
+    def __init__(
+        self,
+        mask: Optional[torch.Tensor] = None,
+        scale: float = 1.0,
+        enable_gqa: bool = False,
+    ):
+        self.mask = mask
+        self.scale = scale
+        self.enable_gqa = enable_gqa
 
     def forward(
         self,

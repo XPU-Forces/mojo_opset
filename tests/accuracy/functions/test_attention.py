@@ -78,10 +78,8 @@ def test_diffusion_attention_func(query, key, value, blockwise_diffusion_attn_ma
     assert_close(o, o_ref)
 
     do = torch.rand_like(o)
-    dq, dk, dv, _, _, _ = MojoSdpaFunction.backward(ctx, do)
+    grads = MojoSdpaFunction.backward(ctx, do)
 
-    dq_ref, dk_ref, dv_ref, _, _, _ = MojoSdpaFunction._registry.get("ref").backward(ctx_ref, do)
+    grads_ref = MojoSdpaFunction._registry.get("ref").backward(ctx_ref, do)
 
-    assert_close(dq, dq_ref)
-    assert_close(dk, dk_ref)
-    assert_close(dv, dv_ref)
+    assert_close(grads, grads_ref)

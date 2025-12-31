@@ -31,9 +31,6 @@ class MojoTopPSampling(MojoOperator):
         self.min_tokens_to_keep = min_tokens_to_keep
         self.rand_top_k = rand_top_k
 
-        # mode_str = get_mojo_exec_mode(MojoTopPSampling.__name__, "FWD", self.layer_idx)
-        # self._set_forward_mode(mode_str)
-
     @abstractmethod
     def forward(self, logits: torch.Tensor) -> Tuple[Any]:
         raise NotImplementedError
@@ -49,9 +46,6 @@ class MojoTopPFilter(MojoOperator):
         super().__init__(op_name, layer_idx)
 
         self.filter_value = filter_value
-
-        # mode_str = get_mojo_exec_mode(MojoTopPSampling.__name__, "FWD", self.layer_idx)
-        # self._set_forward_mode(mode_str)
 
     @abstractmethod
     def forward(self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int) -> Tuple[Any]:
@@ -113,9 +107,6 @@ class MojoApplyPenaltiesTempurate(MojoOperator):
         layer_idx: int = 0,
     ):
         super().__init__(op_name, layer_idx)
-
-        # mode_str = get_mojo_exec_mode(MojoTopPSampling.__name__, "FWD", self.layer_idx)
-        # self._set_forward_mode(mode_str)
 
     @abstractmethod
     def forward(

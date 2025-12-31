@@ -45,8 +45,6 @@ class MojoLinear(MojoOperator):
                     raise ValueError(f"bias should be 1-D with shape [out_dim={out_dim}], but got {tuple(bias.shape)}")
         self.bias = bias
         self.is_varlen = is_varlen
-        # mode_str = get_mojo_exec_mode(MojoLinear.__name__, "FWD", self.layer_idx)
-        # self._set_forward_mode(mode_str)
 
 
 class MojoBatchLinear(MojoOperator):
@@ -67,9 +65,6 @@ class MojoGroupLinear(MojoOperator):
             raise TypeError("trans_weight must be bool.")
         self.trans_weight = trans_weight
         self.weight = weight
-
-        # mode_str = get_mojo_exec_mode(MojoGroupLinear.__name__, "FWD", self.layer_idx)
-        # self._set_forward_mode(mode_str)
 
     def forward(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
