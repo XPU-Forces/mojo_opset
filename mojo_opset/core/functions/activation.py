@@ -1,8 +1,4 @@
-from mojo_opset.utils.logging import get_logger
-
 from ..function import MojoFunction
-
-logger = get_logger(__name__)
 
 
 class MojoSiluFunction(MojoFunction):
@@ -15,4 +11,5 @@ class MojoSiluFunction(MojoFunction):
         pass
 
 
-mojo_silu = MojoSiluFunction.apply
+def mojo_silu(input):
+    return MojoSiluFunction.apply(input)

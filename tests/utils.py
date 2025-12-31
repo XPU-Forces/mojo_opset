@@ -6,7 +6,7 @@ import re
 import sys
 import time
 
-from typing import Callable, List
+from typing import Callable
 
 import pytest
 import torch
@@ -20,6 +20,37 @@ from mojo_opset.utils.logging import get_logger
 from mojo_opset.utils.platform import get_platform
 
 logger = get_logger(__name__)
+
+
+def assert_close(impl: torch.Tensor, ref: torch.Tensor, dtype: torch.dtype = None):
+    assert impl.shape == ref.shape
+    assert impl.dtype == ref.dtype
+    if dtype is None:
+        dtype = impl.dtype
+    if dtype == torch.bfloat16:
+        max_atol = 0.1
+        max_rtol = 0.05
+        mean_atol = 0.01
+        mean_rtol = 0.01
+    elif dtype == torch.float16:
+        max_atol = 2e-2
+        max_rtol = 2e-2
+        mean_atol = 2e-2
+        mean_rtol = 2e-2
+    elif dtype == torch.float32:
+        max_atol = 6e-3
+        max_rtol = 6e-3
+        mean_atol = 1e-4
+        mean_rtol = 1e-4
+    else:
+        logger.warning(f"dtype {dtype} is not supported.")
+        assert False
+
+    torch.testing.assert_close(impl, ref, atol=max_atol, rtol=max_rtol)
+    assert (
+        torch.mean(torch.abs(ref - impl)) < max_atol
+        or torch.mean(torch.abs((ref - impl) / (ref + mean_atol))) < mean_rtol
+    )
 
 
 def get_executor_info(executor):
@@ -246,9 +277,10 @@ def perf_npu(executor, profiling_dir="./npu_profiling", active=5):
             f.write("|------|------------|---------------------|-------------------|\n")
         f.write(plain_log_file + "\n")
 
+
 class MockFunctionCtx:
     def __init__(self):
         self.saved_tensors = None
-    
+
     def save_for_backward(self, *tensors):
         self.saved_tensors = tensors

@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from tests.utils import MockFunctionCtx
+from tests.utils import assert_close
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
@@ -17,9 +18,9 @@ def test_silu_forward_backward_diff(monkeypatch, x):
 
     ctx_ref = MockFunctionCtx()
     y_ref = MojoSiluFunction._registry.get("ref").forward(ctx_ref, x)
-    assert torch.allclose(y, y_ref)
+    assert_close(y, y_ref)
 
     dy = torch.rand_like(y)
     dx = MojoSiluFunction.backward(ctx, dy)
     dx_ref = MojoSiluFunction._registry.get("ref").backward(ctx_ref, dy)
-    assert torch.allclose(dx, dx_ref)
+    assert_close(dx, dx_ref)

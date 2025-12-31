@@ -25,6 +25,7 @@ class TTXCausalConv1dFunction(MojoCausalConv1dFunction):
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
         ctx.save_for_backward(x, weight, bias, residual, initial_state)
+
         y, final_state = causal_conv1d_fwd(
             x=x,
             weight=weight,

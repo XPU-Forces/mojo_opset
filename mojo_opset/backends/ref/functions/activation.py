@@ -1,9 +1,6 @@
 import torch
 
-from mojo_opset.core.functions.activation import MojoSiluFunction
-from mojo_opset.utils.logging import get_logger
-
-logger = get_logger(__name__)
+from mojo_opset.core import MojoSiluFunction
 
 
 class RefSiluFunction(MojoSiluFunction):

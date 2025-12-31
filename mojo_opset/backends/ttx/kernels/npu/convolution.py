@@ -1,5 +1,6 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+
 from typing import Optional
 
 import torch
@@ -21,10 +22,6 @@ from mojo_opset.backends.ttx.kernels.utils import prepare_chunk_indices
         "USE_INITIAL_STATE": lambda args: args["initial_state"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
-)
-@triton.autotune(
-    configs=[triton.Config({"BD": BD}) for BD in [16, 32, 64, 128]],
-    key=["D", "W", "NB"],
 )
 @triton.jit
 def causal_conv1d_fwd_kernel(
@@ -77,7 +74,7 @@ def causal_conv1d_fwd_kernel(
             # b_yi = tl.load(p_yi, boundary_check=(0, 1),padding_option="zero").to(tl.float32)
             yi_offset_0 = i_t * BT + i_w + tl.arange(0, BT)[:, None]
             yi_offset_1 = i_d * BD + tl.arange(0, BD)[None, :]
-            mask = (yi_offset_0 < T) & (yi_offset_1 < D)
+            mask = (yi_offset_0 < T) & (yi_offset_1 < D) & (yi_offset_0 >= 0)
             # [BT, BD]
             b_yi = tl.load(x + bos * D + yi_offset_0 * D + yi_offset_1, mask=mask, other=0.0).to(tl.float32)
             if HAS_WEIGHT:
@@ -90,7 +87,7 @@ def causal_conv1d_fwd_kernel(
             # b_yi = tl.load(p_yi, boundary_check=(0, 1),padding_option="zero").to(tl.float32)
             yi_offset_0 = i_t * BT + i_w + tl.arange(0, BT)[:, None]
             yi_offset_1 = i_d * BD + tl.arange(0, BD)[None, :]
-            mask = (yi_offset_0 < T) & (yi_offset_1 < D)
+            mask = (yi_offset_0 < T) & (yi_offset_1 < D) & (yi_offset_0 >= 0)
             # [BT, BD]
             b_yi = tl.load(x + bos * D + yi_offset_0 * D + yi_offset_1, mask=mask, other=0.0).to(tl.float32)
             if HAS_WEIGHT:
@@ -418,7 +415,8 @@ def causal_conv1d_fwd(
         x = rearrange(x, "b t ... -> b t (...)")
     B, T, D, W = *x.shape, weight.shape[1]
     BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B * T), get_num_cores())))
-    BW = triton.next_power_of_2(W)
+    BW = W
+    # BW = triton.next_power_of_2(W)
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     NB = triton.cdiv(B * T, 1024)
@@ -445,6 +443,7 @@ def causal_conv1d_fwd(
         BW=BW,
         NB=NB,
         ACTIVATION=activation,
+        BD=128,
     )
     final_state = None
     if output_final_state:
@@ -474,6 +473,7 @@ def causal_conv1d_bwd(
     B, T, D = x.shape
     W = weight.shape[1] if weight is not None else None
     BT = min(32, triton.next_power_of_2(triton.cdiv(max(16, B * T), get_num_cores())))
+
     BW = triton.next_power_of_2(W)
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
@@ -607,111 +607,3 @@ def causal_conv1d_update_states(
         BD=BD,
     )
     return final_state
-
-
-class CausalConv1dFunction(torch.autograd.Function):
-    @staticmethod
-    @input_guard(make_contiguous=True, auto_to_device=True)
-    def forward(
-        ctx,
-        x: torch.Tensor,
-        weight: Optional[torch.Tensor] = None,
-        bias: Optional[torch.Tensor] = None,
-        residual: Optional[torch.Tensor] = None,
-        initial_state: Optional[torch.Tensor] = None,
-        output_final_state: bool = False,
-        activation: str = None,
-        cu_seqlens: Optional[torch.Tensor] = None,
-    ):
-        ctx.activation = activation
-        ctx.cu_seqlens = cu_seqlens
-        ctx.save_for_backward(x, weight, bias, residual, initial_state)
-        y, final_state = causal_conv1d_fwd(
-            x=x,
-            weight=weight,
-            bias=bias,
-            residual=residual,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            activation=activation,
-            cu_seqlens=cu_seqlens,
-        )
-        return y, final_state
-
-    @staticmethod
-    @input_guard(make_contiguous=True, auto_to_device=True)
-    def backward(ctx, dy: torch.Tensor, dht: Optional[torch.Tensor]):
-        x, weight, bias, residual, initial_state = ctx.saved_tensors
-        dx, dw, db, dr, dh0 = causal_conv1d_bwd(
-            x=x,
-            dy=dy,
-            dht=dht,
-            weight=weight,
-            bias=bias,
-            residual=residual,
-            initial_state=initial_state,
-            activation=ctx.activation,
-            cu_seqlens=ctx.cu_seqlens,
-        )
-        return dx, dw, db, dr, dh0, None, None, None
-
-
-@input_guard(make_contiguous=True, auto_to_device=True)
-def causal_conv1d(
-    x: torch.Tensor,
-    weight: Optional[torch.Tensor] = None,
-    bias: Optional[torch.Tensor] = None,
-    residual: Optional[torch.Tensor] = None,
-    initial_state: Optional[torch.Tensor] = None,
-    output_final_state: bool = False,
-    activation: str = None,
-    backend: str = "triton",
-    cu_seqlens: Optional[torch.Tensor] = None,
-    **kwargs,
-):
-    """
-    A causal 1D convolution implementation that powers Mamba/Mamba2 and DeltaNet architectures.
-
-    When a residual connection is provided, this implements the Canon operation
-    described in the paper at https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5240330.
-
-    Args:
-        x (torch.Tensor):
-            Input tensor of shape [B, T, D].
-        weight (Optional[torch.Tensor]):
-            Weight tensor of shape [D, W]. Default: `None`.
-        bias (Optional[torch.Tensor]):
-            Bias tensor of shape [D]. Default: `None`.
-        residual (Optional[torch.Tensor]):
-            Residual tensor of shape [B, T, D]. Default: `None`.
-        initial_state (Optional[torch.Tensor]):
-            Initial state tensor of shape [N, D, W],
-            where `N` is the number of sequences in the batch and `W` is the kernel size.
-            If provided, the initial state is used to initialize the cache. Default: `None`.
-        output_final_state (Optional[bool]):
-            Whether to output the final state of shape [N, D, W]. Default: `False`.
-        activation (Optional[str]):
-            Activations applied to output, only `swish`/`silu` or `None` (i.e., no activation) are supported.
-            Default: `None`.
-        backend (Optional[str]):
-            Specifies the backend to use for the convolution operation. Supported values are `'cuda'` and `'triton'`.
-            Default: `'triton'`.
-        cu_seqlens (Optional[torch.Tensor]):
-            Cumulative sequence lengths (optional)
-
-    Returns:
-        Tuple of (output, final_state).
-        If `output_final_state` is `False`, the final state is `None`.
-    """
-
-    y, final_state = CausalConv1dFunction.apply(
-        x,
-        weight,
-        bias,
-        residual,
-        initial_state,
-        output_final_state,
-        activation,
-        cu_seqlens,
-    )
-    return y, final_state

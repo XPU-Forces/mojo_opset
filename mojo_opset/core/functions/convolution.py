@@ -1,13 +1,13 @@
+from typing import Optional
+
 import torch
 
 from ..function import MojoFunction
-from ..function import mojo_func_dispatcher
 
 
-@mojo_func_dispatcher
 class MojoCausalConv1dFunction(MojoFunction):
     @staticmethod
-    def forward_dump(
+    def forward(
         ctx,
         x,
         weight,
@@ -21,38 +21,20 @@ class MojoCausalConv1dFunction(MojoFunction):
         pass
 
     @staticmethod
-    def forward_ref(
-        ctx,
-        x,
-        weight,
-        bias=None,
-        initial_state=None,
-        output_final_state=False,
-        final_states_out=None,
-        activation=None,
-        cu_seqlens=None,
-    ):
-        raise NotImplementedError
-
-    @staticmethod
-    def backward_dump(ctx, *grad_outputs):
+    def backward(ctx, *grad_outputs):
         pass
 
-    @staticmethod
-    def backward_ref(ctx, *grad_outputs):
-        raise NotImplementedError
 
-
-def causal_conv1d(
+def mojo_causal_conv1d(
     x: torch.Tensor,
-    weight: torch.Tensor | None = None,
-    bias: torch.Tensor | None = None,
-    residual: torch.Tensor | None = None,
-    initial_state: torch.Tensor | None = None,
-    output_final_state: bool | None = False,
-    activation: str | None = None,
-    backend: str | None = "triton",
-    cu_seqlens: torch.Tensor | None = None,
+    weight: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    residual: Optional[torch.Tensor] = None,
+    initial_state: Optional[torch.Tensor] = None,
+    output_final_state: bool = False,
+    activation: Optional[str] = None,
+    backend: str = "triton",
+    cu_seqlens: Optional[torch.Tensor] = None,
     **kwargs,
 ):
     """

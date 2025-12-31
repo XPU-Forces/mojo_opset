@@ -81,11 +81,15 @@ from .operators.sampling import MojoTopPSampling
 from .functions.activation import MojoSiluFunction
 from .functions.activation import mojo_silu
 from .functions.attention import MojoSdpaFunction
+from .functions.attention import mojo_sdpa
 from .functions.convolution import MojoCausalConv1dFunction
-from .functions.convolution import causal_conv1d
+from .functions.convolution import mojo_causal_conv1d
 from .functions.loss_function import MojoFusedLinearCrossEntropyFunction
+from .functions.loss_function import MojoFusedLinearCrossEntropyLoss
+from .functions.normalization import MojoRMSNorm
 from .functions.normalization import MojoRMSNormFunction
 from .functions.position_embedding import MojoRoPEFunction
+from .functions.position_embedding import mojo_rope
 
 # fmt: off
 __all__ = [
@@ -160,7 +164,11 @@ __all__ = [
     "MojoCausalConv1dFunction",
     "MojoSdpaFunction",
 
-    "causal_conv1d",
-    "mojo_silu"
+    "mojo_causal_conv1d",
+    "mojo_silu",
+    "mojo_sdpa",
+    "MojoFusedLinearCrossEntropyLoss",
+    "mojo_rope",
+    "MojoRMSNorm",
 ]
 # fmt: on

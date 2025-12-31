@@ -12,3 +12,6 @@ class MojoSdpaFunction(MojoFunction):
     @staticmethod
     def backward(ctx, do):
         pass
+
+def mojo_sdpa(query, key, value, mask, scale=1.0, enable_gqa=False):
+    return MojoSdpaFunction.apply(query, key, value, mask, scale, enable_gqa)
