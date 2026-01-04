@@ -58,4 +58,4 @@ jobs:
         shell: bash
         run: |
           echo "Running ttx modeling tests..."
-          MOJO_BACKEND="+TTX" python3 -m pytest tests/test_qwen3_dense_patching.py
+          MOJO_BACKEND="ttx" python3 -m pytest tests/test_qwen3_dense_patching.py

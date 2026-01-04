@@ -52,15 +52,15 @@ class MojoBackendRegistry:
         else:
             logger.warning(f"Operator {cls.__name__} is not supported on {curr_platform} platform.")
 
-    def get(self, backend_name: str) -> Union[MojoOperator, MojoFunction]:
-        assert backend_name in self._registry.keys(), (
-            f"Operator {self.__name__} does not implement the target backend {backend_name}."
+    def get(self, backend_name: str = None) -> Union[MojoOperator, MojoFunction]:
+        if (backend_name is None) or (backend_name not in self._registry.keys()):  # get first class
+            assert len(self._registry) > 0, f"{self._operator_name} does not implement any backend."
+            return list(self._registry.values())[0]
+
+        assert backend_name in self._backend_priority_list, (
+            f"{self._operator_name} does not support the target backend {backend_name}."
         )
         return self._registry[backend_name]
-
-    def get_first_class(self) -> Union[MojoOperator, MojoFunction]:
-        assert len(self._registry) > 0, f"Operator {self._operator_name} does not implement any backend."
-        return list(self._registry.values())[0]
 
     def sort(self):
         self._registry = dict(sorted(self._registry.items(), key=lambda x: self._backend_priority_list.index(x[0])))
