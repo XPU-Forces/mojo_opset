@@ -220,6 +220,7 @@ def kernel_sda_fwd_up(
     k,
     v,
     o,
+    fp32o,
     lse,
     scale: tl.constexpr,
     NUM_GROUP: tl.constexpr,
@@ -267,6 +268,13 @@ def kernel_sda_fwd_up(
         )
         ptr_o = (
             o
+            + idx_b * STRIDE_Q_B
+            + idx_n * STRIDE_Q_N
+            + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S
+            + idx_h[None, :] * STRIDE_Q_H
+        )
+        ptr_fp32o = (
+            fp32o
             + idx_b * STRIDE_Q_B
             + idx_n * STRIDE_Q_N
             + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S
@@ -413,6 +421,7 @@ def kernel_sda_fwd_up(
         block_o = block_o / block_l[:, None]
         block_lse = tl.log(block_l) + block_m
         tl.store(ptr_o, block_o.to(LOW_TYPE), mask=mask_q)
+        tl.store(ptr_fp32o, block_o, mask=mask_q)
         tl.store(ptr_lse, block_lse, mask=mask_lse)
 
 
@@ -436,6 +445,7 @@ def kernel_sda_fwd_down(
     k,
     v,
     o,
+    fp32o,
     lse,
     scale: tl.constexpr,
     NUM_GROUP: tl.constexpr,
@@ -483,6 +493,13 @@ def kernel_sda_fwd_down(
         )
         ptr_o = (
             o
+            + idx_b * STRIDE_Q_B
+            + idx_n * STRIDE_Q_N
+            + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S
+            + idx_h[None, :] * STRIDE_Q_H
+        )
+        ptr_fp32o = (
+            fp32o
             + idx_b * STRIDE_Q_B
             + idx_n * STRIDE_Q_N
             + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S
@@ -595,6 +612,7 @@ def kernel_sda_fwd_down(
         block_o = block_o / block_l[:, None]
         block_lse = tl.log(block_l) + block_m
         tl.store(ptr_o, block_o.to(LOW_TYPE), mask=mask_q)
+        tl.store(ptr_fp32o, block_o, mask=mask_q)
         tl.store(ptr_lse, block_lse, mask=mask_lse)
 
 
@@ -606,7 +624,7 @@ def kernel_sda_fwd_down(
 )
 @triton.jit
 def kernel_sda_bwd_d(
-    o,
+    fp32o,
     do,
     d,
     B: tl.constexpr,
@@ -631,8 +649,8 @@ def kernel_sda_bwd_d(
         idx_n = task_id // num_r % N
         idx_r = task_id % num_r
         idx_h = tl.arange(0, H)
-        ptr_o = (
-            o
+        ptr_fp32o = (
+            fp32o
             + idx_b * STRIDE_O_B
             + idx_n * STRIDE_O_N
             + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_O_S
@@ -649,9 +667,9 @@ def kernel_sda_bwd_d(
         mask_o = (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < S
         mask_d = (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] < S
 
-        block_o = tl.load(ptr_o, mask=mask_o, other=0.0)
+        block_o = tl.load(ptr_fp32o, mask=mask_o, other=0.0)
         block_do = tl.load(ptr_do, mask=mask_o, other=0.0)
-        block_d = tl.sum(block_do.to(HIGH_TYPE) * block_o.to(HIGH_TYPE), axis=1)
+        block_d = tl.sum(block_do.to(HIGH_TYPE) * block_o, axis=1)
         tl.store(ptr_d, block_d, mask=mask_d)
 
 
@@ -1533,6 +1551,7 @@ def diffusion_attention_fwd_impl(
     assert q.shape[3] == k.shape[3] and k.shape[3] == v.shape[3] and q.shape[3] in {64, 128}
 
     o = torch.empty_like(q)
+    fp32o = torch.empty_like(q, dtype=torch.float32)
     lse = torch.zeros((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
     num_cores, _ = get_device_properties()
 
@@ -1541,6 +1560,7 @@ def diffusion_attention_fwd_impl(
         k,
         v,
         o,
+        fp32o,
         lse,
         scale,
         k.shape[1],
@@ -1570,6 +1590,7 @@ def diffusion_attention_fwd_impl(
         k,
         v,
         o,
+        fp32o,
         lse,
         scale,
         k.shape[1],
@@ -1594,11 +1615,11 @@ def diffusion_attention_fwd_impl(
         lse.stride(2),
         BLOCK_SIZE=32,
     )
-    return o, lse
+    return o, fp32o, lse
 
 
 def diffusion_attention_bwd_impl(
-    o: torch.Tensor,
+    fp32o: torch.Tensor,
     do: torch.Tensor,
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1627,7 +1648,7 @@ def diffusion_attention_bwd_impl(
     """
     # shape constraints
     assert len(q.shape) == 4 and len(k.shape) == 4 and len(v.shape) == 4 and len(lse.shape) == 3
-    assert q.shape == o.shape and o.shape == do.shape
+    assert q.shape == fp32o.shape and fp32o.shape == do.shape
     assert len(mask.shape) == 2 and mask.dtype == torch.bool and mask.shape[0] == mask.shape[1]
     if gqa_enabled:
         assert k.shape[1] == v.shape[1] and q.shape[1] % k.shape[1] == 0
@@ -1645,17 +1666,17 @@ def diffusion_attention_bwd_impl(
 
     if eval_kernel == 0 or eval_kernel == 1:
         kernel_sda_bwd_d[(num_cores,)](
-            o,
+            fp32o,
             do,
             d,
-            o.shape[0],
-            o.shape[1],
-            o.shape[2],
-            o.shape[3],
-            o.stride(0),
-            o.stride(1),
-            o.stride(2),
-            o.stride(3),
+            fp32o.shape[0],
+            fp32o.shape[1],
+            fp32o.shape[2],
+            fp32o.shape[3],
+            fp32o.stride(0),
+            fp32o.stride(1),
+            fp32o.stride(2),
+            fp32o.stride(3),
             d.stride(0),
             d.stride(1),
             d.stride(2),

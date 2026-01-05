@@ -58,7 +58,7 @@ def assert_close(
                 logger.warning(f"dtype {dtype} is not supported.")
                 assert False
 
-            torch.testing.assert_close(result, ref, atol=max_atol, rtol=max_rtol)
+            torch.testing.assert_close(result.to(torch.float32), ref.to(torch.float32), atol=max_atol, rtol=max_rtol) 
             assert (
                 torch.mean(torch.abs(ref - result)) < max_atol
                 or torch.mean(torch.abs((ref - result) / (ref + mean_atol))) < mean_rtol
