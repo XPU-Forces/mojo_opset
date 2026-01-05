@@ -1,4 +1,3 @@
-import functools
 import math
 
 import pytest
@@ -12,7 +11,6 @@ from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoSdpa
 from mojo_opset.backends.ref.operators.attention import RefPagedDecodeGQA
 from mojo_opset.backends.ref.operators.attention import RefPagedPrefillGQA
-from mojo_opset.backends.ref.operators.attention import RefSdpa
 
 
 def generate_paged_decode_data(
@@ -252,30 +250,6 @@ def test_paged_prefill_gqa(
     )
 
 
-@functools.lru_cache()
-def generate_diffusion_attention_mask(
-    seq_length: int,
-    block_size: int,
-) -> torch.Tensor:
-    total_length = seq_length * 2
-    attn_mask = torch.zeros(total_length, total_length, dtype=torch.int8)
-
-    for i in range(total_length):
-        for j in range(total_length):
-            block_i = i // block_size
-            block_j = j // block_size
-            if block_i == block_j:
-                attn_mask[i, j] = 1
-
-            if j >= seq_length and i < seq_length and ((j - seq_length) // block_size) < block_i:
-                attn_mask[i, j] = 1
-
-            if i >= seq_length and j >= seq_length and block_j < block_i:
-                attn_mask[i, j] = 1
-
-    return attn_mask.to(torch.bool)
-
-
 def generate_test_data(
     bsz: int,
     q_head_num: int,
@@ -284,11 +258,10 @@ def generate_test_data(
     seq_length: int,
     block_size: int,
 ):
-    query = torch.randn(bsz, q_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16)
-    key = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16)
-    value = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16)
-    # blockwise_diffusion_attn_mask = generate_diffusion_attention_mask(seq_length, block_size)
-    blockwise_diffusion_attn_mask = torch.ones(seq_length * 2, seq_length * 2, dtype=torch.bool)
+    query = torch.randn(bsz, q_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=False)
+    key = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=False)
+    value = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=False)
+    blockwise_diffusion_attn_mask = torch.ones(seq_length * 2, seq_length * 2, dtype=torch.bool, requires_grad=False)
     return query, key, value, blockwise_diffusion_attn_mask, q_head_num != kv_head_num
 
 
@@ -308,14 +281,14 @@ def generate_test_data(
     ],
 )
 @auto_switch_platform(set_perf=True)
-def test_diffusion_attention(
+def test_sdpa(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
     blockwise_diffusion_attn_mask: torch.Tensor,
     enable_gqa: bool,
 ):
-    diffusion_attn_ref = RefSdpa(
+    diffusion_attn_ref = MojoSdpa._registry.get("ref")(
         mask=blockwise_diffusion_attn_mask, scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
     )
     diffusion_attn = MojoSdpa(

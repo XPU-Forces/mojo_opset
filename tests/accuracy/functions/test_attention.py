@@ -45,8 +45,8 @@ def generate_test_data(
     query = torch.randn(bsz, q_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=True)
     key = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=True)
     value = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=True)
-    # blockwise_diffusion_attn_mask = generate_diffusion_attention_mask(seq_length, block_size)
-    blockwise_diffusion_attn_mask = torch.ones(seq_length * 2, seq_length * 2, dtype=torch.bool)
+    blockwise_diffusion_attn_mask = generate_diffusion_attention_mask(seq_length, block_size)
+    # blockwise_diffusion_attn_mask = torch.ones(seq_length * 2, seq_length * 2, dtype=torch.bool)
     return query, key, value, blockwise_diffusion_attn_mask, q_head_num != kv_head_num
 
 

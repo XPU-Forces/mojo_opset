@@ -57,14 +57,15 @@ def _sdpa_infer_inner(
         # Modify K
         trans_k = tl.trans(k)
         qk = tl.dot(q, trans_k)
+        # tl.compile_hint(qk, "tile_cube_loop")
 
         # NOTE(zhangjihang): tl.where will introduce ub overflow
         qk = qk * qk_scale
-        mask = tl.load(mask_ptr)
+        # mask = tl.load(mask_ptr)
 
         # qk += (1 - mask.to(tl.float32)) * (-1e6)
         # TODO(zhangjihang): tl.where with a non-boolean condition is deprecated and will error out in a future triton release. Got int8
-        qk = tl.where(mask, qk, -1e6)  # 32B # bool
+        # qk = tl.where(mask, qk, -1e6)  # 32B # bool
 
         m_ij = tl.maximum(m_i, tl.max(qk, 1))  # Scaled max
         qk = qk - m_ij[:, None]  # Stabilize
@@ -82,6 +83,7 @@ def _sdpa_infer_inner(
         # -- Update output accumulator --
         acc_ptr = acc_ptr * alpha[:, None]
         acc_ptr = tl.dot(p_cast, v, acc_ptr)
+        tl.compile_hint(acc_ptr, "tile_cube_loop")
 
         m_i = m_ij  # Update current block max
         # Advance V and K block pointers to next BLOCK_N range
@@ -840,15 +842,15 @@ def sdpa_infer_impl(
         kv_head_num,
         SEQ=seq_length,
         HEAD_DIM=head_dim,
-        BLOCK_M=64,
-        BLOCK_N=128,
+        BLOCK_M=128,
+        BLOCK_N=256,
         multibuffer=True,  # autotune config, 控制开double buffer
         unit_flag=True,  # autotune config, cube搬出的一个优化项
         limit_auto_multi_buffer_only_for_local_buffer=False,  # autotune config, 是否开启cube和vector的并行，false表示开启
         set_workspace_multibuffer=4,  # autotune config, 表示同时cube和vector有几个并行，【2,4】，仅limit_auto_multi_buffer_only_for_local_buffer=False 时生效
-        enable_hivm_auto_cv_balance=True,
+        # enable_hivm_auto_cv_balance=True,
         tile_mix_vector_loop=2,  # 中间vector切分； 1:2
-        tile_mix_cube_loop=4,  # (128, 128) * (128, 512); (M, N)大的切分
+        tile_mix_cube_loop=2,  # (128, 128) * (128, 512); (M, N)大的切分
         enable_ubuf_saving=True,
         **extra_kern_args,
     )
