@@ -7,7 +7,7 @@ from tests.utils import MockFunctionCtx
 from tests.utils import assert_close
 from tests.utils import auto_switch_platform
 
-from mojo_opset import MojoSdpaFunction
+from mojo_opset import MojoDiffusionAttentionFunction
 
 
 @functools.lru_cache()
@@ -45,8 +45,7 @@ def generate_test_data(
     query = torch.randn(bsz, q_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=True)
     key = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=True)
     value = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=True)
-    # blockwise_diffusion_attn_mask = generate_diffusion_attention_mask(seq_length, block_size)
-    blockwise_diffusion_attn_mask = torch.ones(seq_length * 2, seq_length * 2, dtype=torch.bool)
+    blockwise_diffusion_attn_mask = generate_diffusion_attention_mask(seq_length, block_size)
     return query, key, value, blockwise_diffusion_attn_mask, q_head_num != kv_head_num
 
 
@@ -63,23 +62,33 @@ def generate_test_data(
                 block_size=32,
             )
         ),
+        pytest.param(
+            *generate_test_data(
+                bsz=1,
+                q_head_num=1,
+                kv_head_num=1,
+                head_dim=128,
+                seq_length=1024,
+                block_size=32,
+            )
+        ),
     ],
 )
 @auto_switch_platform()
 def test_diffusion_attention_func(query, key, value, blockwise_diffusion_attn_mask, enable_gqa):
     ctx = MockFunctionCtx()
-    o = MojoSdpaFunction.forward(ctx, query, key, value, blockwise_diffusion_attn_mask, 1.0, enable_gqa)
+    o = MojoDiffusionAttentionFunction.forward(ctx, query, key, value, blockwise_diffusion_attn_mask, 1.0, enable_gqa)
 
     ctx_ref = MockFunctionCtx()
-    o_ref = MojoSdpaFunction._registry.get("ref").forward(
+    o_ref = MojoDiffusionAttentionFunction._registry.get("ref").forward(
         ctx_ref, query, key, value, blockwise_diffusion_attn_mask, 1.0, enable_gqa
     )
 
     assert_close(o, o_ref)
 
     do = torch.rand_like(o)
-    grads = MojoSdpaFunction.backward(ctx, do)
+    grads = MojoDiffusionAttentionFunction.backward(ctx, do)
 
-    grads_ref = MojoSdpaFunction._registry.get("ref").backward(ctx_ref, do)
+    grads_ref = MojoDiffusionAttentionFunction._registry.get("ref").backward(ctx_ref, do)
 
     assert_close(grads, grads_ref)

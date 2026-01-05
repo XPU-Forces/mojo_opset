@@ -1,3 +1,5 @@
+from .diffution_attention import diffusion_attention_bwd_impl
+from .diffution_attention import diffusion_attention_fwd_impl
 from .flash_attention import paged_attention_decode_impl
 from .flash_attention import paged_attention_prefill_impl
 from .fused_linear_cross_entropy import fused_linear_cross_entropy_bwd_impl
@@ -36,4 +38,6 @@ __all__ = [
     "sdpa_infer_impl",
     "sdpa_fwd_impl",
     "sdpa_bwd_impl",
+    "diffusion_attention_fwd_impl",
+    "diffusion_attention_bwd_impl",
 ]

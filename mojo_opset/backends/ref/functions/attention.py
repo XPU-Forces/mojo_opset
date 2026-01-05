@@ -1,10 +1,10 @@
 import torch
 import torch.nn.functional as F
 
-from mojo_opset.core import MojoSdpaFunction
+from mojo_opset.core import MojoDiffusionAttentionFunction
 
 
-class RefSdpaFunction(MojoSdpaFunction):
+class RefDiffusionAttentionFunction(MojoDiffusionAttentionFunction):
     @staticmethod
     def forward(ctx, query, key, value, mask, scale=1.0, enable_gqa=False):
         ctx.scale = scale

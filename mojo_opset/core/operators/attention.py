@@ -182,7 +182,8 @@ class MojoPagedDecodeNSA(MojoOperator):
     Paged MLA attention operator for LLM Decode.
     """
 
-    def __init__(self, is_causal, softmax_scale, window_size, alibi_slope):
+    def __init__(self, is_causal, softmax_scale, window_size, alibi_slope, op_name: str = "", layer_idx: int = 0):
+        super().__init__(op_name, layer_idx)
         self.is_causal = is_causal
         self.softmax_scale = softmax_scale
 
@@ -210,20 +211,22 @@ class MojoPagedPrefillNSA(MojoOperator):
     Paged MLA attention operator for LLM Prefill.
     """
 
-    def __init__(self, is_causal, softmax_scale, window_size, alibi_slope):
+    def __init__(self, is_causal, softmax_scale, window_size, alibi_slope, op_name: str = "", layer_idx: int = 0):
+        super().__init__(op_name, layer_idx)
         self.is_causal = is_causal
         self.softmax_scale = softmax_scale
 
 
 class MojoSdpa(MojoOperator):
-    supported_platforms_list = ["npu"]
-
     def __init__(
         self,
         mask: Optional[torch.Tensor] = None,
         scale: float = 1.0,
         enable_gqa: bool = False,
+        op_name: str = "",
+        layer_idx: int = 0,
     ):
+        super().__init__(op_name, layer_idx)
         self.mask = mask
         self.scale = scale
         self.enable_gqa = enable_gqa
