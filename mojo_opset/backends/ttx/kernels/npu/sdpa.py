@@ -851,7 +851,7 @@ def sdpa_infer_impl(
         # enable_hivm_auto_cv_balance=True,
         tile_mix_vector_loop=2,  # 中间vector切分； 1:2
         tile_mix_cube_loop=2,  # (128, 128) * (128, 512); (M, N)大的切分
-        enable_ubuf_saving=True,
+        # enable_ubuf_saving=True,
         **extra_kern_args,
     )
     # NOTE(zhangjihang): Not need for inference now
