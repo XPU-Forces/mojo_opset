@@ -80,8 +80,8 @@ from .operators.sampling import MojoTopPSampling
 """ functions """
 from .functions.activation import MojoSiluFunction
 from .functions.activation import mojo_silu
-from .functions.attention import MojoSdpaFunction
-from .functions.attention import mojo_sdpa
+from .functions.attention import MojoDiffusionAttentionFunction
+from .functions.attention import mojo_diffusion_attention
 from .functions.convolution import MojoCausalConv1dFunction
 from .functions.convolution import mojo_causal_conv1d
 from .functions.loss_function import MojoFusedLinearCrossEntropyFunction
@@ -162,11 +162,11 @@ __all__ = [
     "MojoRoPEFunction",
     "MojoFusedLinearCrossEntropyFunction",
     "MojoCausalConv1dFunction",
-    "MojoSdpaFunction",
+    "MojoDiffusionAttentionFunction",
 
     "mojo_causal_conv1d",
     "mojo_silu",
-    "mojo_sdpa",
+    "mojo_diffusion_attention",
     "MojoFusedLinearCrossEntropyLoss",
     "mojo_rope",
     "MojoRMSNorm",
