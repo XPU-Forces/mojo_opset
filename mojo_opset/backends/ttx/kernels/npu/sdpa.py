@@ -164,7 +164,7 @@ def get_autotune_config():
                         tile_mix_cube_loop=tile_mix_cube_loop,
                     )
                 )
-    print(f"configs: {configs}")
+    # print(f"configs: {configs}")
     return configs
 
 

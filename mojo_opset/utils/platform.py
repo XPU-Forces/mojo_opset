@@ -24,15 +24,15 @@ def get_platform() -> Literal["npu", "mlu", "meta_device"]:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        logger.info("Ascend NPU detected")
+        logger.debug("Ascend NPU detected")
         return "npu"
     except (subprocess.SubprocessError, FileNotFoundError):
         try:
             subprocess.run(["cnmon"], check=True)
-            logger.info("Cambricon MLU detected")
+            logger.debug("Cambricon MLU detected")
             return "mlu"
         except (subprocess.SubprocessError, FileNotFoundError):
-            logger.info("No accelerator detected")
+            logger.debug("No accelerator detected")
             return "meta_device"
 
 

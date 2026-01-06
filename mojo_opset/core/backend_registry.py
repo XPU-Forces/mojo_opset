@@ -9,6 +9,8 @@ from .operator import MojoOperator
 
 logger = get_logger(__name__)
 
+BACKEND_PRIORITY_LIST = ["ttx", "ref", "analysis"]
+
 
 class MojoBackendRegistry:
     def __init__(self, core_op_cls: Union[MojoOperator, MojoFunction]):
@@ -18,8 +20,6 @@ class MojoBackendRegistry:
         self._core_op_cls = core_op_cls
         self._operator_name = core_op_cls.__name__[4:]
         self._registry: Dict[str, Union[MojoOperator, MojoFunction]] = {}
-        # TODO(zhangjihang): support more backend priority list.
-        self._backend_priority_list = ["ttx", "ref", "analysis"]  # Default backend implementation priority.
 
     def get_core_op_cls(self):
         return self._core_op_cls
@@ -31,9 +31,9 @@ class MojoBackendRegistry:
             f"contain {self._operator_name} in its name."
         )
         impl_backend_name = cls.__name__[:idx].lower()
-        assert impl_backend_name in self._backend_priority_list, (
+        assert impl_backend_name in BACKEND_PRIORITY_LIST, (
             f"Operator {cls.__name__} backend[{impl_backend_name}] is not supported, "
-            f"please choose from {self._backend_priority_list}."
+            f"please choose from {BACKEND_PRIORITY_LIST}."
         )
 
         curr_platform = get_platform()
@@ -52,15 +52,25 @@ class MojoBackendRegistry:
         else:
             logger.warning(f"Operator {cls.__name__} is not supported on {curr_platform} platform.")
 
-    def get(self, backend_name: str) -> Union[MojoOperator, MojoFunction]:
-        assert backend_name in self._registry.keys(), (
-            f"Operator {self.__name__} does not implement the target backend {backend_name}."
-        )
-        return self._registry[backend_name]
+    def get(self, backend_name: str = None) -> Union[MojoOperator, MojoFunction]:
+        # Since the selection of `backend_name` is not deterministic, the import order
+        # may lead to missing registrations. To avoid this, we first ensure that all
+        # backends are fully registered before accessing or executing the registry
+        # of a specific backend.
+        if (backend_name is None) or (backend_name not in self._registry.keys()):  # get first class
+            assert len(self._registry) > 0, f"{self._operator_name} does not implement any backend."
+            return list(self._registry.values())[0]
 
-    def get_first_class(self) -> Union[MojoOperator, MojoFunction]:
-        assert len(self._registry) > 0, f"Operator {self._operator_name} does not implement any backend."
-        return list(self._registry.values())[0]
+        try:
+            return self._registry[backend_name]
+        except Exception as e:
+            fallback = list(self._registry.values())[0]
+            logger.warning(
+                f"Failed to get backend '{backend_name}' for "
+                f"{self._operator_name}, falling back to '{fallback.__class__.__name__}'. "
+                f"Error: {e}"
+            )
+            return fallback
 
     def sort(self):
-        self._registry = dict(sorted(self._registry.items(), key=lambda x: self._backend_priority_list.index(x[0])))
+        self._registry = dict(sorted(self._registry.items(), key=lambda x: BACKEND_PRIORITY_LIST.index(x[0])))

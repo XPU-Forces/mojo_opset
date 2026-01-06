@@ -7,6 +7,8 @@ from tests.utils import bypass_not_implemented
 from mojo_opset import MojoNorm
 from mojo_opset import MojoResidualAddNorm
 
+torch.manual_seed(42)
+
 shapes = [
     (32, 1024),
     (64, 8192),

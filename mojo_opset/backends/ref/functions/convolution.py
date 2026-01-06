@@ -1,3 +1,7 @@
+from typing import Optional
+
+import torch
+
 from mojo_opset.core import MojoCausalConv1dFunction
 
 
@@ -5,17 +9,17 @@ class RefCausalConv1dFunction(MojoCausalConv1dFunction):
     @staticmethod
     def forward(
         ctx,
-        x,
-        weight,
-        bias=None,
-        initial_state=None,
-        output_final_state=False,
-        final_states_out=None,
-        activation=None,
-        cu_seqlens=None,
+        x: torch.Tensor,
+        weight: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+        residual: Optional[torch.Tensor] = None,
+        initial_state: Optional[torch.Tensor] = None,
+        output_final_state: bool = False,
+        activation: str = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
     ):
         pass
 
     @staticmethod
-    def backward(ctx, *grad_outputs):
+    def backward(ctx, dy: torch.Tensor, dht: Optional[torch.Tensor]):
         pass

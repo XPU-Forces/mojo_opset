@@ -25,12 +25,9 @@ class MojoFunction(Function):
 
             target_backend = os.environ.get("MOJO_BACKEND", None)
             core_op_cls = cls._registry.get_core_op_cls()
-            if not target_backend:
-                core_op_cls.forward = cls._registry.get_first_class().forward
-                core_op_cls.backward = cls._registry.get_first_class().backward
-            else:
-                core_op_cls.forward = cls._registry.get(target_backend).forward
-                core_op_cls.backward = cls._registry.get(target_backend).backward
+
+            core_op_cls.forward = cls._registry.get(target_backend).forward
+            core_op_cls.backward = cls._registry.get(target_backend).backward
 
     @staticmethod
     def forward(ctx, *args, **kwargs):
