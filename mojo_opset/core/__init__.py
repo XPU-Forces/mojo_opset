@@ -13,7 +13,6 @@ from .operators.activation import MojoSiluQuant
 from .operators.activation import MojoSwiGLU
 
 """ attention """
-from .operators.attention import MojoBlockDiffusionAttention
 from .operators.attention import MojoDecodeGQA
 from .operators.attention import MojoDecodeMLA
 from .operators.attention import MojoDecodeNSA
@@ -26,6 +25,7 @@ from .operators.attention import MojoPagedPrefillNSA
 from .operators.attention import MojoPrefillGQA
 from .operators.attention import MojoPrefillMLA
 from .operators.attention import MojoPrefillNSA
+from .operators.attention import MojoSdpa
 
 """ kvcache """
 from .operators.kvcache import MojoKVCacheCast
@@ -71,22 +71,25 @@ from .operators.position_embedding import MojoRoPEStoreKV
 
 """ sampling """
 from .operators.sampling import MojoApplyPenaltiesTempurate
+from .operators.sampling import MojoJoinProbRejectSampling
 from .operators.sampling import MojoRejectSampling
 from .operators.sampling import MojoTopKSampling
 from .operators.sampling import MojoTopPFilter
 from .operators.sampling import MojoTopPSampling
-from .operators.sampling import MojoRejectSampling
-from .operators.sampling import MojoJoinProbRejectSampling
 
 """ functions """
 from .functions.activation import MojoSiluFunction
+from .functions.activation import mojo_silu
+from .functions.attention import MojoDiffusionAttentionFunction
+from .functions.attention import mojo_diffusion_attention
 from .functions.convolution import MojoCausalConv1dFunction
-from .functions.convolution import causal_conv1d
+from .functions.convolution import mojo_causal_conv1d
 from .functions.loss_function import MojoFusedLinearCrossEntropyFunction
+from .functions.loss_function import MojoFusedLinearCrossEntropyLoss
+from .functions.normalization import MojoRMSNorm
 from .functions.normalization import MojoRMSNormFunction
 from .functions.position_embedding import MojoRoPEFunction
-
-LAST_PRIORITY = 999
+from .functions.position_embedding import mojo_rope
 
 # fmt: off
 __all__ = [
@@ -108,7 +111,7 @@ __all__ = [
     "MojoPagedDecodeMLA",
     "MojoDecodeNSA",
     "MojoPagedDecodeNSA",
-    "MojoBlockDiffusionAttention",
+    "MojoSdpa",
 
     "MojoStoreKVCache",
     "MojoStorePagedKVCache",
@@ -159,7 +162,13 @@ __all__ = [
     "MojoRoPEFunction",
     "MojoFusedLinearCrossEntropyFunction",
     "MojoCausalConv1dFunction",
-    "causal_conv1d",
-    "LAST_PRIORITY",
+    "MojoDiffusionAttentionFunction",
+
+    "mojo_causal_conv1d",
+    "mojo_silu",
+    "mojo_diffusion_attention",
+    "MojoFusedLinearCrossEntropyLoss",
+    "mojo_rope",
+    "MojoRMSNorm",
 ]
 # fmt: on

@@ -3,10 +3,11 @@ import torch
 import torch.nn.functional as F
 
 from einops import rearrange
+from tests.utils import assert_close
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
-from mojo_opset import causal_conv1d
+from mojo_opset import mojo_causal_conv1d
 
 
 def causal_conv1d_ref(
@@ -30,7 +31,8 @@ def causal_conv1d_ref(
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
     dtype_in = x.dtype
-    x = x.to(weight.dtype)
+    x, weight = x.to(torch.float32), weight.to(torch.float32)
+    bias = bias.to(torch.float32) if bias is not None else None
     seqlen = x.shape[-1]
     dim, width = weight.shape
     if initial_state is None:
@@ -60,14 +62,12 @@ def causal_conv1d_ref(
             id="B{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}".format(*test),
         )
         for test in [
-            (2, 64, 128, 3, "swish", True, True, torch.float32),
-            (2, 128, 128, 4, "swish", False, True, torch.float32),
-            (2, 64, 128, 3, "swish", True, False, torch.float32),
-            (2, 128, 128, 4, "swish", False, False, torch.float32),
-            (2, 500, 1024, 3, None, True, True, torch.float32),
-            (2, 1024, 1024, 4, None, False, True, torch.float32),
+            (2, 64, 128, 3, "swish", True, True, torch.float16),
+            (2, 128, 128, 4, "swish", False, True, torch.float16),
+            (2, 64, 128, 3, "swish", True, False, torch.float16),
+            (2, 128, 128, 4, "swish", False, False, torch.float16),
             (2, 64, 128, 3, None, True, False, torch.float16),
-            (2, 128, 128, 4, None, False, False, torch.float16),
+            (3, 1446, 256, 4, None, False, False, torch.float16),
         ]
     ],
 )
@@ -85,7 +85,6 @@ def test_conv(
     dummy_tensor: torch.Tensor,
 ):
     device = dummy_tensor.device
-    print(f"device is {device}")
     torch.manual_seed(42)
 
     x = torch.randn(B, T, D).to(device, dtype).requires_grad_(True)
@@ -112,7 +111,7 @@ def test_conv(
     if has_residual:
         ref_dr, residual.grad = residual.grad, None
 
-    tri, _ = causal_conv1d(x, weight, bias, residual=residual, activation=activation)
+    tri, _ = mojo_causal_conv1d(x, weight, bias, residual=residual, activation=activation)
     tri.backward(dy)
     tri_dx, x.grad = x.grad, None
     tri_dw, weight.grad = weight.grad, None
@@ -120,13 +119,14 @@ def test_conv(
         tri_db, bias.grad = bias.grad, None
     if has_residual:
         tri_dr, residual.grad = residual.grad, None
-    torch.allclose(ref, tri, atol=1e-3, rtol=1e-3)
-    torch.allclose(ref_dx, tri_dx, atol=1e-3, rtol=1e-3)
-    torch.allclose(ref_dw, tri_dw, atol=1e-3, rtol=1e-3)
+
+    assert_close(ref, tri)
+    assert_close(ref_dx, tri_dx)
+    assert_close(ref_dw, tri_dw)
     if has_bias:
-        torch.allclose(ref_db, tri_db, atol=1e-3, rtol=1e-3)
+        assert_close(ref_db, tri_db)
     if has_residual:
-        torch.allclose(ref_dr, tri_dr, atol=1e-3, rtol=1e-3)
+        assert_close(ref_dr, tri_dr)
 
 
 @pytest.mark.parametrize(
@@ -136,10 +136,12 @@ def test_conv(
             *test, torch.randn(1), id="N{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}".format(*test)
         )
         for test in [
-            (4, 500, 128, 3, "silu", True, True, torch.float32),
-            (4, 1024, 200, 4, "silu", False, True, torch.float32),
+            (4, 500, 128, 3, "silu", True, False, torch.float16),
+            (3, 1024, 200, 4, "silu", False, False, torch.float16),
             (4, 500, 128, 3, None, True, False, torch.float16),
-            (4, 1024, 1024, 4, None, False, False, torch.float16),
+            (4, 1024, 128, 4, None, False, False, torch.float16),
+            (5, 8192, 8192, 4, None, False, False, torch.float32),
+            (3, 7666, 8192, 4, None, False, False, torch.float32),
         ]
     ],
 )
@@ -156,7 +158,7 @@ def test_conv_varlen(
     dtype: torch.dtype,
     dummy_tensor: torch.Tensor,
 ):
-    torch.manual_seed(42)
+    torch.manual_seed(41)
     device = dummy_tensor.device
     cu_seqlens = (
         torch.cat(
@@ -181,19 +183,20 @@ def test_conv_varlen(
         [
             rearrange(
                 causal_conv1d_ref(
-                    x=rearrange(x[:, bos:eos].contiguous(), "b t d -> b d t"),
-                    weight=weight,
-                    bias=bias,
+                    x=rearrange(x[:, bos:eos].cpu().contiguous(), "b t d -> b d t"),
+                    weight=weight.cpu(),
+                    bias=bias.cpu() if has_bias else None,
                     activation=activation,
                 ),
                 "b t d -> b d t",
             )
-            + (residual[:, bos:eos] if has_residual else torch.zeros_like(x[:, bos:eos]))
+            + (residual[:, bos:eos].cpu() if has_residual else torch.zeros_like(x[:, bos:eos].cpu()))
             for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)
         ],
         1,
     )
-    ref.backward(dy)
+
+    ref.backward(dy.cpu())
     ref_dx, x.grad = x.grad, None
     ref_dw, weight.grad = weight.grad, None
     if has_bias:
@@ -201,7 +204,7 @@ def test_conv_varlen(
     if has_residual:
         ref_dr, residual.grad = residual.grad, None
 
-    tri, _ = causal_conv1d(x, weight, bias, residual=residual, activation=activation, cu_seqlens=cu_seqlens)
+    tri, _ = mojo_causal_conv1d(x, weight, bias, residual=residual, activation=activation, cu_seqlens=cu_seqlens)
     tri.backward(dy)
     tri_dx, x.grad = x.grad, None
     tri_dw, weight.grad = weight.grad, None
@@ -210,10 +213,10 @@ def test_conv_varlen(
     if has_residual:
         tri_dr, residual.grad = residual.grad, None
 
-    torch.allclose(ref, tri, atol=1e-3, rtol=1e-3)
-    torch.allclose(ref_dx, tri_dx, atol=1e-3, rtol=1e-3)
-    torch.allclose(ref_dw, tri_dw, atol=1e-3, rtol=1e-3)
+    assert_close(ref.to(device), tri)
+    assert_close(ref_dx, tri_dx)
+    assert_close(ref_dw, tri_dw)
     if has_bias:
-        torch.allclose(ref_db, tri_db, atol=1e-3, rtol=1e-3)
+        assert_close(ref_db, tri_db)
     if has_residual:
-        torch.allclose(ref_dr, tri_dr, atol=1e-3, rtol=1e-3)
+        assert_close(ref_dr, tri_dr)

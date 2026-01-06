@@ -1,12 +1,11 @@
 import torch
 
-from mojo_opset.core import LAST_PRIORITY
 from mojo_opset.core import MojoGroupLinear
 from mojo_opset.core import MojoLinear
 
 
-class RefLinear(MojoLinear, default_priority=LAST_PRIORITY):
-    def forward_std(self, input: torch.Tensor) -> torch.Tensor:
+class RefLinear(MojoLinear):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         in_dim = self.weight.shape[0]
         if input.shape[-1] != in_dim:
             raise ValueError(f"input should have last dim {in_dim}, but got {input.shape[-1]}")
@@ -20,8 +19,8 @@ class RefLinear(MojoLinear, default_priority=LAST_PRIORITY):
             return torch.nn.functional.linear(input, self.weight.t(), self.bias)
 
 
-class RefGroupLinear(MojoGroupLinear, default_priority=LAST_PRIORITY):
-    def forward_std(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:
+class RefGroupLinear(MojoGroupLinear):
+    def forward(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:
         """
         Args:
             input: Tensor of shape [sum(group_list), M]

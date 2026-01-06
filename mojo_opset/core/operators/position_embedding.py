@@ -4,7 +4,7 @@ from typing import Tuple
 
 import torch
 
-from ..mojo_operator import MojoOperator
+from ..operator import MojoOperator
 
 
 class MojoRoPE(MojoOperator):
@@ -52,7 +52,7 @@ class MojoRoPE(MojoOperator):
         self.max_seq_len = max_seq_len
         self.is_varlen = is_varlen
 
-    def forward_std(
+    def forward(
         self,
         q: torch.Tensor,  # [BNSD]
         k: torch.Tensor,  # [BNSD]
@@ -62,11 +62,6 @@ class MojoRoPE(MojoOperator):
         cum_sum_query_len: Optional[torch.Tensor] = None,
     ) -> Tuple[Any]:
         raise NotImplementedError
-
-    def forward_analysis(
-        self, q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-    ) -> Tuple[int, int, int]:
-        pass
 
 
 class MojoRoPEStoreKV(MojoOperator):

@@ -2,14 +2,13 @@ from typing import Optional
 
 import torch
 
-from mojo_opset.core import LAST_PRIORITY
 from mojo_opset.core import MojoMoECombine
 from mojo_opset.core import MojoMoEDispatch
 from mojo_opset.core import MojoMoEGate
 
 
-class RefMoECombine(MojoMoECombine, default_priority=LAST_PRIORITY):
-    def forward_std(
+class RefMoECombine(MojoMoECombine):
+    def forward(
         self,
         hidden_states: torch.Tensor,
         expert_weights: torch.Tensor,
@@ -49,8 +48,8 @@ class RefMoECombine(MojoMoECombine, default_priority=LAST_PRIORITY):
             return y
 
 
-class RefMoEDispatch(MojoMoEDispatch, default_priority=LAST_PRIORITY):
-    def forward_std(
+class RefMoEDispatch(MojoMoEDispatch):
+    def forward(
         self,
         hidden_states: torch.Tensor,
         expert_ids: torch.Tensor,
@@ -96,8 +95,8 @@ class RefMoEDispatch(MojoMoEDispatch, default_priority=LAST_PRIORITY):
             return y
 
 
-class RefMoEGate(MojoMoEGate, default_priority=LAST_PRIORITY):
-    def forward_std(self, hidden_states: torch.Tensor) -> torch.Tensor:
+class RefMoEGate(MojoMoEGate):
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         x = hidden_states
         if self.gate_weight.ndim == 2:
             D, E = self.gate_weight.shape

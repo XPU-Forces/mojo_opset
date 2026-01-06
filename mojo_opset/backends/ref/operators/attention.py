@@ -4,14 +4,13 @@ from typing import Optional
 
 import torch
 
-from mojo_opset.core import LAST_PRIORITY
-from mojo_opset.core import MojoBlockDiffusionAttention
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
+from mojo_opset.core import MojoSdpa
 
 
-class RefPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=LAST_PRIORITY):
-    def forward_std(
+class RefPagedPrefillGQA(MojoPagedPrefillGQA):
+    def forward(
         self,
         query: torch.Tensor,
         k_cache: torch.Tensor,
@@ -79,8 +78,8 @@ class RefPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=LAST_PRIORITY):
         return output
 
 
-class RefPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=LAST_PRIORITY):
-    def forward_std(
+class RefPagedDecodeGQA(MojoPagedDecodeGQA):
+    def forward(
         self,
         q: torch.Tensor,
         k_cache: torch.Tensor,
@@ -131,21 +130,21 @@ class RefPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=LAST_PRIORITY):
         return out
 
 
-class RefBlockDiffusionAttention(MojoBlockDiffusionAttention, default_priority=LAST_PRIORITY):
-    def forward_std(
+class RefSdpa(MojoSdpa):
+    def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        softmax_scale: Optional[float] = None,
     ):
         output = torch.nn.functional.scaled_dot_product_attention(
             query,
             key,
             value,
-            attn_mask=self.mask.to(torch.bool),
+            attn_mask=self.mask,
             dropout_p=0.0,
             is_causal=False,
-            scale=softmax_scale,
+            scale=self.scale,
+            enable_gqa=self.enable_gqa,
         )
         return output

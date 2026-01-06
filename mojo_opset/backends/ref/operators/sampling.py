@@ -6,16 +6,15 @@ from typing import Union
 
 import torch
 
-from mojo_opset.core import LAST_PRIORITY
 from mojo_opset.core import MojoApplyPenaltiesTempurate
+from mojo_opset.core import MojoJoinProbRejectSampling
+from mojo_opset.core import MojoRejectSampling
 from mojo_opset.core import MojoTopPFilter
 from mojo_opset.core import MojoTopPSampling
-from mojo_opset.core import MojoRejectSampling
-from mojo_opset.core import MojoJoinProbRejectSampling
 
 
-class RefTopPSampling(MojoTopPSampling, default_priority=LAST_PRIORITY):
-    def forward_std(self, logits: torch.Tensor) -> Tuple[Any]:
+class RefTopPSampling(MojoTopPSampling):
+    def forward(self, logits: torch.Tensor) -> Tuple[Any]:
         logits = logits.to(torch.float32)
         top_k = min(self.rand_top_k, logits.size(-1))
         sorted_topk_logits, sorted_topk_indices = torch.topk(logits, top_k)
@@ -38,8 +37,8 @@ class RefTopPSampling(MojoTopPSampling, default_priority=LAST_PRIORITY):
         return next_probs, next_tokens
 
 
-class RefTopPFilter(MojoTopPFilter, default_priority=LAST_PRIORITY):
-    def forward_std(
+class RefTopPFilter(MojoTopPFilter):
+    def forward(
         self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         dtype = logits.dtype
@@ -60,8 +59,8 @@ class RefTopPFilter(MojoTopPFilter, default_priority=LAST_PRIORITY):
         return final_probs_dist, sorted_topk_indices
 
 
-class RefRejectSampling(MojoRejectSampling, default_priority=LAST_PRIORITY):
-    def forward_std(
+class RefRejectSampling(MojoRejectSampling):
+    def forward(
         self,
         target_probs: torch.Tensor,  # [batch, spec_step + 1, vocab_size]
         draft_tokens: torch.Tensor,  # [batch, spec_step]
@@ -88,8 +87,8 @@ class RefRejectSampling(MojoRejectSampling, default_priority=LAST_PRIORITY):
         return next_tokens, accepted_len
 
 
-class RefJoinProbRejectSampling(MojoJoinProbRejectSampling, default_priority=LAST_PRIORITY):
-    def forward_std(
+class RefJoinProbRejectSampling(MojoJoinProbRejectSampling):
+    def forward(
         self,
         target_probs: torch.Tensor,
         draft_tokens: torch.Tensor,
@@ -123,8 +122,8 @@ class RefJoinProbRejectSampling(MojoJoinProbRejectSampling, default_priority=LAS
         return next_tokens, accepted_len.int()
 
 
-class RefApplyPenaltiesTempurate(MojoApplyPenaltiesTempurate, default_priority=LAST_PRIORITY):
-    def forward_std(
+class RefApplyPenaltiesTempurate(MojoApplyPenaltiesTempurate):
+    def forward(
         self,
         logits: torch.Tensor,
         token_freqs: List[Union[None, torch.Tensor]],

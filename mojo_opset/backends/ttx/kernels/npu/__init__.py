@@ -1,3 +1,5 @@
+from .diffution_attention import diffusion_attention_bwd_impl
+from .diffution_attention import diffusion_attention_fwd_impl
 from .flash_attention import paged_attention_decode_impl
 from .flash_attention import paged_attention_prefill_impl
 from .fused_linear_cross_entropy import fused_linear_cross_entropy_bwd_impl
@@ -11,6 +13,9 @@ from .rmsnorm import rmsnorm_fwd_impl
 from .rmsnorm import rmsnorm_infer_impl
 from .rope import rope_bwd_impl
 from .rope import rope_fwd_impl
+from .sdpa import sdpa_bwd_impl
+from .sdpa import sdpa_fwd_impl
+from .sdpa import sdpa_infer_impl
 from .silu import silu_bwd_impl
 from .silu import silu_fwd_impl
 from .swiglu import swiglu_bwd_impl
@@ -34,4 +39,9 @@ __all__ = [
     "silu_fwd_impl",
     "swiglu_bwd_impl",
     "swiglu_fwd_impl",
+    "sdpa_infer_impl",
+    "sdpa_fwd_impl",
+    "sdpa_bwd_impl",
+    "diffusion_attention_fwd_impl",
+    "diffusion_attention_bwd_impl",
 ]

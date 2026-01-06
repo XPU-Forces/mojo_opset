@@ -5,8 +5,7 @@ from typing import Tuple
 
 import torch
 
-from ...utils.mode import get_mojo_exec_mode
-from ..mojo_operator import MojoOperator
+from ..operator import MojoOperator
 
 
 class MojoNorm(MojoOperator):
@@ -50,11 +49,8 @@ class MojoNorm(MojoOperator):
         self.affine = gamma is not None and beta is not None
         self.is_varlen = is_varlen
 
-        mode_str = get_mojo_exec_mode(MojoNorm.__name__, "FWD", self.layer_idx)
-        self._set_forward_mode(mode_str)
-
     @abstractmethod
-    def forward_std(self, hidden_state: torch.Tensor) -> Tuple[Any]:
+    def forward(self, hidden_state: torch.Tensor) -> Tuple[Any]:
         raise NotImplementedError
 
     def forward_analysis(self, hidden_state) -> Tuple[int, int, int]:
@@ -135,7 +131,7 @@ class MojoResidualAddNorm(MojoOperator):
         self.is_varlen = is_varlen
 
     @abstractmethod
-    def forward_std(self, hidden_state: torch.Tensor, residual: torch.Tensor = None) -> Tuple[Any]:
+    def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor = None) -> Tuple[Any]:
         raise NotImplementedError
 
     def forward_analysis(self, hidden_state: torch.Tensor, residual: torch.Tensor = None) -> Tuple[Any]:

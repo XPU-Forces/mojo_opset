@@ -7,6 +7,9 @@ import sys
 import time
 
 from typing import Callable
+from typing import Union
+from typing import Tuple
+from typing import Any
 
 import pytest
 import torch
@@ -20,6 +23,48 @@ from mojo_opset.utils.logging import get_logger
 from mojo_opset.utils.platform import get_platform
 
 logger = get_logger(__name__)
+
+
+def assert_close(
+    results: Union[torch.Tensor, Tuple[Any, ...]],
+    refs: Union[torch.Tensor, Tuple[Any, ...]],
+):
+    assert type(results) is type(refs)
+    if isinstance(results, torch.Tensor) and isinstance(refs, torch.Tensor):
+        results = tuple([results])
+        refs = tuple([refs])
+
+    for result, ref in zip(results, refs):
+        if isinstance(result, torch.Tensor) and isinstance(ref, torch.Tensor):
+            assert result.shape == ref.shape
+            assert result.dtype == ref.dtype
+            dtype = result.dtype
+            if dtype == torch.bfloat16:
+                max_atol = 0.1
+                max_rtol = 0.05
+                mean_atol = 0.01
+                mean_rtol = 0.01
+            elif dtype == torch.float16:
+                max_atol = 2e-2
+                max_rtol = 2e-2
+                mean_atol = 2e-2
+                mean_rtol = 2e-2
+            elif dtype == torch.float32:
+                max_atol = 6e-3
+                max_rtol = 6e-3
+                mean_atol = 1e-4
+                mean_rtol = 1e-4
+            else:
+                logger.warning(f"dtype {dtype} is not supported.")
+                assert False
+
+            torch.testing.assert_close(result.to(torch.float32), ref.to(torch.float32), atol=max_atol, rtol=max_rtol) 
+            assert (
+                torch.mean(torch.abs(ref - result)) < max_atol
+                or torch.mean(torch.abs((ref - result) / (ref + mean_atol))) < mean_rtol
+            )
+        else:
+            assert result == ref
 
 
 def get_executor_info(executor):
@@ -245,3 +290,11 @@ def perf_npu(executor, profiling_dir="./npu_profiling", active=5):
             f.write("| Name | Parameters | Device Latency (us) | Host Latency (ms) |\n")
             f.write("|------|------------|---------------------|-------------------|\n")
         f.write(plain_log_file + "\n")
+
+
+class MockFunctionCtx:
+    def __init__(self):
+        self.saved_tensors = None
+
+    def save_for_backward(self, *tensors):
+        self.saved_tensors = tensors

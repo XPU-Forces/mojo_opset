@@ -1,23 +1,15 @@
-import torch
-
-from mojo_opset.utils.logging import get_logger
-
-from ..mojo_function import MojoFuncBase
-from ..mojo_function import mojo_func_dispatcher
-
-logger = get_logger(__name__)
+from ..function import MojoFunction
 
 
-@mojo_func_dispatcher
-class MojoSiluFunction(MojoFuncBase):
+class MojoSiluFunction(MojoFunction):
     @staticmethod
-    def forward_ref(ctx, input):
-        sigmoid_x = torch.sigmoid(input)
-        ctx.save_for_backward(input)
-        return input * sigmoid_x
+    def forward(ctx, input):
+        pass
 
     @staticmethod
-    def backward_ref(ctx, grad_output):
-        (input,) = ctx.saved_tensors
-        grad_input = grad_output * torch.sigmoid(input) * (1 + input * (1 - torch.sigmoid(input)))
-        return grad_input
+    def backward(ctx, grad_output):
+        pass
+
+
+def mojo_silu(input):
+    return MojoSiluFunction.apply(input)

@@ -5,7 +5,7 @@ from typing import Tuple
 import torch
 
 from .. import VALID_KV_LAYOUTS
-from ..mojo_operator import MojoOperator
+from ..operator import MojoOperator
 
 
 class MojoDecodeGQA(MojoOperator):
@@ -84,15 +84,8 @@ class MojoPagedDecodeGQA(MojoOperator):
         self.tp_size = tp_size
         self.is_varlen = is_varlen
 
-    def forward_std(
-        self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None
-    ) -> Tuple[Any]:
+    def forward(self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None) -> Tuple[Any]:
         raise NotImplementedError
-
-    def forward_analysis(
-        self, q, k_cache, v_cache, seqlens, block_tables, softmax_scale: Optional[float] = None
-    ) -> Tuple[int, int, int]:
-        pass
 
 
 class MojoPrefillGQA(MojoOperator):
@@ -154,7 +147,7 @@ class MojoPagedPrefillGQA(MojoOperator):
         self.tp_size = tp_size
         self.is_varlen = is_varlen
 
-    def forward_std(
+    def forward(
         self,
         query: torch.Tensor,
         k_cache: torch.Tensor,
@@ -164,17 +157,6 @@ class MojoPagedPrefillGQA(MojoOperator):
         softmax_scale: Optional[float] = None,
     ) -> Tuple[Any]:
         raise NotImplementedError
-
-    def forward_analysis(
-        self,
-        query: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
-        block_tables: torch.Tensor,
-        softmax_scale: Optional[float] = None,
-    ) -> Tuple[int, int, int]:
-        pass
 
 
 class MojoDecodeMLA(MojoOperator):
@@ -200,7 +182,8 @@ class MojoPagedDecodeNSA(MojoOperator):
     Paged MLA attention operator for LLM Decode.
     """
 
-    def __init__(self, is_causal, softmax_scale, window_size, alibi_slope):
+    def __init__(self, is_causal, softmax_scale, window_size, alibi_slope, op_name: str = "", layer_idx: int = 0):
+        super().__init__(op_name, layer_idx)
         self.is_causal = is_causal
         self.softmax_scale = softmax_scale
 
@@ -228,30 +211,30 @@ class MojoPagedPrefillNSA(MojoOperator):
     Paged MLA attention operator for LLM Prefill.
     """
 
-    def __init__(self, is_causal, softmax_scale, window_size, alibi_slope):
+    def __init__(self, is_causal, softmax_scale, window_size, alibi_slope, op_name: str = "", layer_idx: int = 0):
+        super().__init__(op_name, layer_idx)
         self.is_causal = is_causal
         self.softmax_scale = softmax_scale
 
 
-class MojoBlockDiffusionAttention(MojoOperator):
-    def __init__(self, mask: Optional[torch.Tensor] = None, name: str = "", layer_idx: int = 0):
-        super().__init__(name, layer_idx)
+class MojoSdpa(MojoOperator):
+    def __init__(
+        self,
+        mask: Optional[torch.Tensor] = None,
+        scale: float = 1.0,
+        enable_gqa: bool = False,
+        op_name: str = "",
+        layer_idx: int = 0,
+    ):
+        super().__init__(op_name, layer_idx)
         self.mask = mask
+        self.scale = scale
+        self.enable_gqa = enable_gqa
 
-    def forward_std(
+    def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        softmax_scale: Optional[float] = None,
     ):
-        raise NotImplementedError("MojoBlockDiffusionAttention forward_std not implemented")
-
-    def forward_analysis(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        softmax_scale: Optional[float] = None,
-    ):
-        raise NotImplementedError("MojoBlockDiffusionAttention forward_analysis not implemented")
+        raise NotImplementedError("MojoSdpa forward not implemented")

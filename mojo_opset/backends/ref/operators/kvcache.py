@@ -2,12 +2,11 @@ from typing import Optional
 
 import torch
 
-from mojo_opset.core import LAST_PRIORITY
 from mojo_opset.core import MojoStorePagedKVCache
 
 
-class RefStorePagedKVCache(MojoStorePagedKVCache, default_priority=LAST_PRIORITY):
-    def forward_std(
+class RefStorePagedKVCache(MojoStorePagedKVCache):
+    def forward(
         self,
         key: torch.Tensor,
         value: torch.Tensor,

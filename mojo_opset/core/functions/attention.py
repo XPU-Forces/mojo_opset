@@ -1,10 +1,18 @@
-from ..mojo_function import MojoFuncBase
+from mojo_opset.core.function import MojoFunction
+from mojo_opset.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
-class MojoBlockDiffusionAttentionFunction(MojoFuncBase):
+class MojoDiffusionAttentionFunction(MojoFunction):
     @staticmethod
-    def forward_ref(ctx, query, key, value, attn_mask, softmax_scale=None):
+    def forward(ctx, query, key, value, mask, scale=1.0, enable_gqa=False):
         pass
 
-    def backward_ref(ctx, grad_output):
+    @staticmethod
+    def backward(ctx, do):
         pass
+
+
+def mojo_diffusion_attention(query, key, value, mask, scale=1.0, enable_gqa=False):
+    return MojoDiffusionAttentionFunction.apply(query, key, value, mask, scale, enable_gqa)

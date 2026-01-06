@@ -1,3 +1,4 @@
+import functools
 import math
 
 import pytest
@@ -6,12 +7,9 @@ import torch
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
-from mojo_opset import MojoBlockDiffusionAttention
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
-from mojo_opset.backends.reference.operators.attention import RefBlockDiffusionAttention
-from mojo_opset.backends.reference.operators.attention import RefPagedDecodeGQA
-from mojo_opset.backends.reference.operators.attention import RefPagedPrefillGQA
+from mojo_opset import MojoSdpa
 
 
 def generate_paged_decode_data(
@@ -101,13 +99,13 @@ def test_paged_decode_gqa(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
-    paged_decode_attn_ref = RefPagedDecodeGQA(
+    paged_decode_attn_ref = MojoPagedDecodeGQA._registry.get("ref")(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
 
-    paged_decode_attn_ref.forward_diff_with(
-        paged_decode_attn,
+    paged_decode_attn.forward_diff_with(
+        paged_decode_attn_ref,
         query,
         k_cache,
         v_cache,
@@ -220,7 +218,8 @@ def test_paged_prefill_gqa(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
-    paged_prefill_attn_ref = RefPagedPrefillGQA(
+
+    paged_prefill_attn_ref = MojoPagedPrefillGQA._registry.get("ref")(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
@@ -228,8 +227,8 @@ def test_paged_prefill_gqa(
     head_dim = query.shape[-1]
     sm_scale = 1.0 / math.sqrt(head_dim)
 
-    paged_prefill_attn_ref.forward_diff_with(
-        paged_prefill_attn,
+    paged_prefill_attn.forward_diff_with(
+        paged_prefill_attn_ref,
         query,
         k_cache,
         v_cache,
@@ -241,11 +240,11 @@ def test_paged_prefill_gqa(
     )
 
 
+@functools.lru_cache()
 def generate_diffusion_attention_mask(
     seq_length: int,
     block_size: int,
 ) -> torch.Tensor:
-    print("generate diffusion attention mask...")
     total_length = seq_length * 2
     attn_mask = torch.zeros(total_length, total_length, dtype=torch.int8)
 
@@ -262,27 +261,38 @@ def generate_diffusion_attention_mask(
             if i >= seq_length and j >= seq_length and block_j < block_i:
                 attn_mask[i, j] = 1
 
-    return attn_mask
+    return attn_mask.to(torch.bool)
 
 
 def generate_test_data(
     bsz: int,
-    head_num: int,
+    q_head_num: int,
+    kv_head_num: int,
     head_dim: int,
     seq_length: int,
     block_size: int,
 ):
-    query = torch.randn(bsz, head_num, seq_length * 2, head_dim, dtype=torch.bfloat16)
-    key = torch.randn(bsz, head_num, seq_length * 2, head_dim, dtype=torch.bfloat16)
-    value = torch.randn(bsz, head_num, seq_length * 2, head_dim, dtype=torch.bfloat16)
+    query = torch.randn(bsz, q_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16)
+    key = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16)
+    value = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16)
     blockwise_diffusion_attn_mask = generate_diffusion_attention_mask(seq_length, block_size)
-    return query, key, value, blockwise_diffusion_attn_mask
+    # blockwise_diffusion_attn_mask = torch.ones(seq_length * 2, seq_length * 2, dtype=torch.bool)
+    return query, key, value, blockwise_diffusion_attn_mask, q_head_num != kv_head_num
 
 
 @pytest.mark.parametrize(
-    "query, key, value, blockwise_diffusion_attn_mask",
+    "query, key, value, blockwise_diffusion_attn_mask, enable_gqa",
     [
-        pytest.param(*generate_test_data(bsz=1, head_num=1, head_dim=128, seq_length=1024, block_size=32)),
+        pytest.param(
+            *generate_test_data(
+                bsz=1,
+                q_head_num=8,
+                kv_head_num=2,
+                head_dim=128,
+                seq_length=1024,
+                block_size=32,
+            )
+        ),
     ],
 )
 @auto_switch_platform()
@@ -291,9 +301,12 @@ def test_diffusion_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     blockwise_diffusion_attn_mask: torch.Tensor,
+    enable_gqa: bool,
 ):
-    diffusion_attn_ref = RefBlockDiffusionAttention(mask=blockwise_diffusion_attn_mask)
-    diffusion_attn = MojoBlockDiffusionAttention(mask=blockwise_diffusion_attn_mask)
-    diffusion_attn_ref.forward_diff_with(
-        diffusion_attn, query, key, value, softmax_scale=1.0 / math.sqrt(query.shape[-1])
+    diffusion_attn_ref = MojoSdpa._registry.get("ref")(
+        mask=blockwise_diffusion_attn_mask, scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
     )
+    diffusion_attn = MojoSdpa(
+        mask=blockwise_diffusion_attn_mask, scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
+    )
+    diffusion_attn_ref.forward_diff_with(diffusion_attn, query, key, value)

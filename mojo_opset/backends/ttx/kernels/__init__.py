@@ -38,9 +38,16 @@ paged_attention_decode_impl = getattr(ttx_backend_module, "paged_attention_decod
 
 fused_linear_cross_entropy_fwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_fwd_impl")
 fused_linear_cross_entropy_bwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_bwd_impl")
-
 fused_linear_cross_entropy_1d_fwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_1d_fwd_impl")
 fused_linear_cross_entropy_1d_bwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_1d_bwd_impl")
+
+sdpa_infer_impl = getattr(ttx_backend_module, "sdpa_infer_impl")
+sdpa_fwd_impl = getattr(ttx_backend_module, "sdpa_fwd_impl")
+sdpa_bwd_impl = getattr(ttx_backend_module, "sdpa_bwd_impl")
+
+diffusion_attention_fwd_impl = getattr(ttx_backend_module, "diffusion_attention_fwd_impl")
+diffusion_attention_bwd_impl = getattr(ttx_backend_module, "diffusion_attention_bwd_impl")
+
 
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
@@ -504,3 +511,8 @@ else:
     fused_linear_cross_entropy_bwd = fused_linear_cross_entropy_bwd_impl
     fused_linear_cross_entropy_1d_fwd = fused_linear_cross_entropy_1d_fwd_impl
     fused_linear_cross_entropy_1d_bwd = fused_linear_cross_entropy_1d_bwd_impl
+    sdpa_infer = sdpa_infer_impl
+    sdpa_fwd = sdpa_fwd_impl
+    sdpa_bwd = sdpa_bwd_impl
+    diffusion_attention_fwd = diffusion_attention_fwd_impl
+    diffusion_attention_bwd = diffusion_attention_bwd_impl

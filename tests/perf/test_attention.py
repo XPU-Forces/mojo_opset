@@ -8,8 +8,9 @@ from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
-from mojo_opset.backends.reference.operators.attention import RefPagedDecodeGQA
-from mojo_opset.backends.reference.operators.attention import RefPagedPrefillGQA
+from mojo_opset import MojoSdpa
+from mojo_opset.backends.ref.operators.attention import RefPagedDecodeGQA
+from mojo_opset.backends.ref.operators.attention import RefPagedPrefillGQA
 
 
 def generate_paged_decode_data(
@@ -247,3 +248,51 @@ def test_paged_prefill_gqa(
             softmax_scale=sm_scale,
         )
     )
+
+
+def generate_test_data(
+    bsz: int,
+    q_head_num: int,
+    kv_head_num: int,
+    head_dim: int,
+    seq_length: int,
+    block_size: int,
+):
+    query = torch.randn(bsz, q_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=False)
+    key = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=False)
+    value = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=False)
+    blockwise_diffusion_attn_mask = torch.ones(seq_length * 2, seq_length * 2, dtype=torch.bool, requires_grad=False)
+    return query, key, value, blockwise_diffusion_attn_mask, q_head_num != kv_head_num
+
+
+@pytest.mark.parametrize(
+    "query, key, value, blockwise_diffusion_attn_mask, enable_gqa",
+    [
+        pytest.param(
+            *generate_test_data(
+                bsz=1,
+                q_head_num=8,
+                kv_head_num=1,
+                head_dim=128,
+                seq_length=8192,
+                block_size=32,
+            )
+        ),
+    ],
+)
+@auto_switch_platform(set_perf=True)
+def test_sdpa(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    blockwise_diffusion_attn_mask: torch.Tensor,
+    enable_gqa: bool,
+):
+    diffusion_attn_ref = MojoSdpa._registry.get("ref")(
+        mask=blockwise_diffusion_attn_mask, scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
+    )
+    diffusion_attn = MojoSdpa(
+        mask=blockwise_diffusion_attn_mask, scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
+    )
+    perf(lambda: diffusion_attn_ref(query, key, value))
+    perf(lambda: diffusion_attn(query, key, value))

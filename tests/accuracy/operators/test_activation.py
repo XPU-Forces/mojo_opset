@@ -7,9 +7,6 @@ from tests.utils import bypass_not_implemented
 from mojo_opset import MojoGelu
 from mojo_opset import MojoSilu
 from mojo_opset import MojoSwiGLU
-from mojo_opset.backends.reference.operators.activation import RefGelu
-from mojo_opset.backends.reference.operators.activation import RefSilu
-from mojo_opset.backends.reference.operators.activation import RefSwiGLU
 
 
 @pytest.mark.parametrize(
@@ -19,9 +16,9 @@ from mojo_opset.backends.reference.operators.activation import RefSwiGLU
 @auto_switch_platform()
 @bypass_not_implemented
 def test_gelu(x):
-    gelu_ref = RefGelu()
     gelu = MojoGelu()
-    gelu_ref.forward_diff_with(gelu, x)
+    gelu_ref = MojoGelu._registry.get("ref")()
+    gelu.forward_diff_with(gelu_ref, x)
 
 
 @pytest.mark.parametrize(
@@ -31,9 +28,9 @@ def test_gelu(x):
 @auto_switch_platform()
 @bypass_not_implemented
 def test_silu(x):
-    silu_ref = RefSilu()
     silu = MojoSilu()
-    silu_ref.forward_diff_with(silu, x)
+    silu_ref = MojoSilu._registry.get("ref")()
+    silu.forward_diff_with(silu_ref, x)
 
 
 @pytest.mark.parametrize(
@@ -48,6 +45,6 @@ def test_silu(x):
 @auto_switch_platform()
 @bypass_not_implemented
 def test_swiglu(gate_out, up_out):
-    swiglu_ref = RefSwiGLU()
     swiglu = MojoSwiGLU()
-    swiglu_ref.forward_diff_with(swiglu, gate_out, up_out)
+    swiglu_ref = MojoSwiGLU._registry.get("ref")()
+    swiglu.forward_diff_with(swiglu_ref, gate_out, up_out)

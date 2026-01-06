@@ -10,15 +10,12 @@ from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoApplyPenaltiesTempurate
+from mojo_opset import MojoJoinProbRejectSampling
+from mojo_opset import MojoRejectSampling
 from mojo_opset import MojoTopPFilter
 from mojo_opset import MojoTopPSampling
-from mojo_opset import MojoRejectSampling
-from mojo_opset import MojoJoinProbRejectSampling
-from mojo_opset.backends.reference.operators.sampling import RefApplyPenaltiesTempurate
-from mojo_opset.backends.reference.operators.sampling import RefTopPFilter
-from mojo_opset.backends.reference.operators.sampling import RefTopPSampling
-from mojo_opset.backends.reference.operators.sampling import RefRejectSampling
-from mojo_opset.backends.reference.operators.sampling import RefJoinProbRejectSampling
+from mojo_opset.backends.ref.operators.sampling import RefJoinProbRejectSampling
+from mojo_opset.backends.ref.operators.sampling import RefRejectSampling
 
 
 @pytest.mark.parametrize(
@@ -29,9 +26,11 @@ from mojo_opset.backends.reference.operators.sampling import RefJoinProbRejectSa
 @bypass_not_implemented
 def test_topp_sampling(logits, topk, topp, min_tokens_to_keep):
     top_p_sampling = MojoTopPSampling(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk)
-    top_p_sampling_ref = RefTopPSampling(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk)
+    top_p_sampling_ref = MojoTopPSampling._registry.get("ref")(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk)
 
-    top_p_sampling_ref.forward_diff_with(top_p_sampling, logits)
+
+
+    top_p_sampling.forward_diff_with(top_p_sampling_ref, logits)
 
 
 @pytest.mark.parametrize(
@@ -42,10 +41,9 @@ def test_topp_sampling(logits, topk, topp, min_tokens_to_keep):
 @bypass_not_implemented
 def test_topp_filter(logits, topk, topp, min_tokens_to_keep):
     top_p_filter = MojoTopPFilter()
-    top_p_filter_ref = RefTopPFilter()
+    top_p_filter_ref = MojoTopPFilter._registry.get("ref")()
 
-    top_p_filter_ref.forward_diff_with(
-        top_p_filter, logits=logits, top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk
+    top_p_filter.forward_diff_with(top_p_filter_ref, logits=logits, top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk,
     )
 
 
@@ -66,7 +64,7 @@ def test_reject_sampler(target_logits, draft_tokens, draft_probs, spec_step):
     torch.manual_seed(42)
 
     reject_sampling = MojoRejectSampling()
-    ref_reject_sampling = RefRejectSampling()
+    ref_reject_sampling = MojoRejectSampling._registry.get("ref")()
 
     batch_size = target_logits.shape[0]
 
@@ -103,7 +101,7 @@ def test_join_prob_reject_sampler(target_logits, draft_tokens, draft_probs, spec
     torch.manual_seed(42)
 
     reject_join_prob_sampling = MojoJoinProbRejectSampling()
-    ref_join_prob_sampling = RefJoinProbRejectSampling()
+    ref_join_prob_sampling = MojoJoinProbRejectSampling._registry.get("ref")()
 
     batch_size = target_logits.shape[0]
 
@@ -158,6 +156,6 @@ def test_apply_penalties_temp(logits):
     temps = [random.uniform(0.1, 2.0) for _ in range(BATCH_SIZE)]
 
     apply_penalties = MojoApplyPenaltiesTempurate()
-    apply_penalties_ref = RefApplyPenaltiesTempurate()
+    apply_penalties_ref = MojoApplyPenaltiesTempurate._registry.get("ref")()
 
-    apply_penalties_ref.forward_diff_with(apply_penalties, logits, token_freqs, pres_pens, freq_pens, rep_pens, temps)
+    apply_penalties.forward_diff_with(apply_penalties_ref, logits, token_freqs, pres_pens, freq_pens, rep_pens, temps)
