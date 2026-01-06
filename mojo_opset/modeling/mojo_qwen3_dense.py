@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 
-from mojo_opset import MojoNorm, MojoLinear
+from mojo_opset import MojoNorm, MojoLinear, MojoRoPE
 
 
 def silu(x):
@@ -368,6 +368,7 @@ class Qwen3Attention(nn.Module):
 
         self.q_norm = MojoNorm(epsilon=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(self.head_dim)), is_varlen=False)
         self.k_norm = MojoNorm(epsilon=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(self.head_dim)), is_varlen=False)
+        self.rope = MojoRoPE()
 
     def forward(self, hidden_states, position_embeddings, attention_mask, past_key_values, use_cache, **kwargs):
         bsz, q_len, _ = hidden_states.size()
@@ -386,7 +387,7 @@ class Qwen3Attention(nn.Module):
         key_states = self.k_norm(key_states).transpose(1, 2)  # [BNSD]
         value_states = value_states.transpose(1, 2)  # [BNSD]
         cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = self.rope(query_states, key_states, cos, sin)
 
         if past_key_values is None:
             raise ValueError("Paged Attention requires a PagedDummyCache instance.")
@@ -470,7 +471,7 @@ class Qwen3Model(nn.Module):
         position_ids = torch.arange(past_len, past_len + seq_len, device=device, dtype=torch.long).unsqueeze(0)
 
         hidden_states = self.embed_tokens(input_ids)
-        cos, sin = self.rotary(hidden_states, position_ids)
+        cos, sin = self.rotary(hidden_states, position_ids)  # position_ids increment
         position_embeddings = (cos, sin)
 
         for layer in self.layers:
