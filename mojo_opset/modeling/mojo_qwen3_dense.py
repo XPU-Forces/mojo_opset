@@ -6,11 +6,7 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 
-from mojo_opset import MojoNorm, MojoLinear, MojoRoPE
-
-
-def silu(x):
-    return nn.functional.silu(x)
+from mojo_opset import MojoNorm, MojoLinear, MojoRoPE, MojoSilu
 
 
 class Qwen3Config:
@@ -146,28 +142,6 @@ class Qwen3RotaryEmbedding(nn.Module):
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
-def rotate_half(x):
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    if n_rep == 1:
-        return hidden_states
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
-
-
 class Qwen3MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -175,7 +149,7 @@ class Qwen3MLP(nn.Module):
         self.gate_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.intermediate_size, self.hidden_size)))
         self.up_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.intermediate_size, self.hidden_size)))
         self.down_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.hidden_size, self.intermediate_size)))
-        self.act_fn = silu
+        self.act_fn = MojoSilu()
 
     def forward(self, x):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
@@ -494,7 +468,6 @@ class Qwen3ForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.model = Qwen3Model(config)
-        # self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.lm_head = MojoLinear(weight=nn.Parameter(torch.ones(config.vocab_size, config.hidden_size)))
 
     def forward(
