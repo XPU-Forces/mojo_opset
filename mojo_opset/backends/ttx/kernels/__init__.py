@@ -38,6 +38,8 @@ paged_attention_decode_impl = getattr(ttx_backend_module, "paged_attention_decod
 
 fused_linear_cross_entropy_fwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_fwd_impl")
 fused_linear_cross_entropy_bwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_bwd_impl")
+fused_linear_cross_entropy_1d_fwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_1d_fwd_impl")
+fused_linear_cross_entropy_1d_bwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_1d_bwd_impl")
 
 sdpa_infer_impl = getattr(ttx_backend_module, "sdpa_infer_impl")
 sdpa_fwd_impl = getattr(ttx_backend_module, "sdpa_fwd_impl")
@@ -390,6 +392,107 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
 
     fused_linear_cross_entropy_bwd = torch.ops.ttx.fused_linear_cross_entropy_bwd
 
+    @torch.library.custom_op("ttx::fused_linear_cross_entropy_1d", mutates_args={})
+    def fused_linear_cross_entropy_1d_fwd(
+        _input: torch.Tensor,
+        weight: torch.Tensor,
+        target: torch.Tensor,
+        ce_weight: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+        ignore_index: int = -100,
+        lse_square_scale: float = 0.0,
+        label_smoothing: float = 0.0,
+        softcap: Optional[float] = None,
+        return_z_loss: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return fused_linear_cross_entropy_1d_fwd_impl(
+            _input,
+            weight,
+            target,
+            ce_weight,
+            bias,
+            ignore_index,
+            lse_square_scale,
+            label_smoothing,
+            softcap,
+            return_z_loss,
+        )
+
+    @fused_linear_cross_entropy_1d_fwd.register_fake
+    def fused_linear_cross_entropy_1d_fwd_fake(
+        _input: torch.Tensor,
+        weight: torch.Tensor,
+        target: torch.Tensor,
+        ce_weight: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+        ignore_index: int = -100,
+        lse_square_scale: float = 0.0,
+        label_smoothing: float = 0.0,
+        softcap: Optional[float] = None,
+        return_z_loss: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        loss = torch.empty((_input.shape[0],), dtype=torch.float32, device=_input.device)
+
+        z_loss = None
+        if return_z_loss:
+            z_loss = torch.empty((_input.shape[0],), dtype=_input.dtype, device=_input.device)
+
+        return loss, z_loss
+
+    @torch.library.custom_op("ttx::fused_linear_cross_entropy_1d_bwd", mutates_args={})
+    def fused_linear_cross_entropy_1d_bwd(
+        grad_output: torch.Tensor,
+        _input: torch.Tensor,
+        weight: torch.Tensor,
+        target: torch.Tensor,
+        ce_weight: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+        ignore_index: int = -100,
+        lse_square_scale: float = 0.0,
+        label_smoothing: float = 0.0,
+        softcap: Optional[float] = None,
+        accum_dtype: Optional[torch.dtype] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return fused_linear_cross_entropy_1d_bwd_impl(
+            grad_output,
+            _input,
+            weight,
+            target,
+            ce_weight,
+            bias,
+            ignore_index,
+            lse_square_scale,
+            label_smoothing,
+            softcap,
+            accum_dtype,
+        )
+
+    @fused_linear_cross_entropy_1d_bwd.register_fake
+    def fused_linear_cross_entropy_1d_bwd_fake(
+        grad_output: torch.Tensor,
+        _input: torch.Tensor,
+        weight: torch.Tensor,
+        target: torch.Tensor,
+        ce_weight: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+        ignore_index: int = -100,
+        lse_square_scale: float = 0.0,
+        label_smoothing: float = 0.0,
+        softcap: Optional[float] = None,
+        accum_dtype: Optional[torch.dtype] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        grad_input = torch.empty_like(_input)
+
+        grad_weight = None
+        if weight is not None:
+            grad_weight = torch.empty_like(weight)
+
+        grad_bias = None
+        if bias is not None:
+            grad_bias = torch.empty_like(bias)
+
+        return grad_input, grad_weight, grad_bias
+
 else:
     gelu_fwd = gelu_fwd_impl
     gelu_bwd = gelu_bwd_impl
@@ -406,6 +509,8 @@ else:
     rmsnorm_infer = rmsnorm_infer_impl
     fused_linear_cross_entropy_fwd = fused_linear_cross_entropy_fwd_impl
     fused_linear_cross_entropy_bwd = fused_linear_cross_entropy_bwd_impl
+    fused_linear_cross_entropy_1d_fwd = fused_linear_cross_entropy_1d_fwd_impl
+    fused_linear_cross_entropy_1d_bwd = fused_linear_cross_entropy_1d_bwd_impl
     sdpa_infer = sdpa_infer_impl
     sdpa_fwd = sdpa_fwd_impl
     sdpa_bwd = sdpa_bwd_impl

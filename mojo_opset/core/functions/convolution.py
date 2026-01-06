@@ -31,9 +31,9 @@ def mojo_causal_conv1d(
     bias: Optional[torch.Tensor] = None,
     residual: Optional[torch.Tensor] = None,
     initial_state: Optional[torch.Tensor] = None,
-    output_final_state: bool = False,
+    output_final_state: Optional[bool] = False,
     activation: Optional[str] = None,
-    backend: str = "triton",
+    backend: Optional[str] = "triton",
     cu_seqlens: Optional[torch.Tensor] = None,
     **kwargs,
 ):
