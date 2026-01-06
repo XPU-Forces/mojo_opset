@@ -43,7 +43,7 @@ class MojoNorm(MojoOperator):
             raise ValueError("RMSNorm don't support beta.")
 
         self.epsilon = float(epsilon)
-        self.gamma = gamma
+        self.weight = gamma
         self.beta = beta
         self.norm_type = norm_type
         self.affine = gamma is not None and beta is not None

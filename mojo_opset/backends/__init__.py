@@ -6,5 +6,5 @@ platform = get_platform()
 
 _SUPPORT_TTX_PLATFROM = ["npu"]
 
-if platform in _SUPPORT_TTX_PLATFROM:
-    from .ttx import *
+# if platform in _SUPPORT_TTX_PLATFROM:
+#     from .ttx import *

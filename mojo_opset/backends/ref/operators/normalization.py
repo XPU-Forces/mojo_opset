@@ -22,15 +22,17 @@ class RefNorm(MojoNorm):
             mu = x.mean(dim=-1, keepdim=True)
             var = ((x - mu) ** 2).mean(dim=-1, keepdim=True)
             y = (x - mu) / torch.sqrt(var + eps)
-            if self.gamma is not None:
-                y = y * self.gamma
+            if self.weight is not None:
+                y = y * self.weight
             if self.beta is not None:
                 y = y + self.beta
         elif self.norm_type == "rmsnorm":
-            rms = torch.sqrt((x.float() ** 2).mean(dim=-1, keepdim=True) + eps)
-            y = x / rms.to(x.dtype)
-            if self.gamma is not None:
-                y = y * self.gamma
+            x_dtype = x.dtype
+            x = x.to(torch.float32)
+            y = x * torch.rsqrt((x ** 2).mean(dim=-1, keepdim=True) + eps)
+            if self.weight is not None:
+                y = y * self.weight
+                y = y.to(x_dtype)
         else:
             raise ValueError("norm_type should be 'layernorm' or 'rmsnorm'")
         return y
@@ -43,12 +45,12 @@ class RefResidualAddNorm(MojoResidualAddNorm):
                 return F.layer_norm(
                     hidden_state,
                     [hidden_state.shape[-1]],
-                    weight=self.gamma,
+                    weight=self.weight,
                     bias=self.beta,
                     eps=self.epsilon,
                 )
             elif self.norm_type == "rmsnorm":
-                return F.rms_norm(hidden_state, (hidden_state.size(-1),), weight=self.gamma, eps=self.epsilon)
+                return F.rms_norm(hidden_state, (hidden_state.size(-1),), weight=self.weight, eps=self.epsilon)
 
         if self.norm_pos == "pre":
             if residual is not None:

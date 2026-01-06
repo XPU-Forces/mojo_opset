@@ -79,7 +79,8 @@ if __name__ == "__main__":
     if args.transformers:
         from transformers import AutoModelForCausalLM as model_class
     else:
-        from torch_qwen3_dense import Qwen3ForCausalLM as model_class
+        # from torch_qwen3_dense import Qwen3ForCausalLM as model_class
+        from mojo_qwen3_dense import Qwen3ForCausalLM as model_class
     
     print(f"Loading model from {args.model_path}...")
     model = build_model_from_hf(
