@@ -6,7 +6,14 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 
-from mojo_opset import MojoNorm, MojoLinear, MojoRoPE, MojoSilu
+from mojo_opset import (
+    MojoLinear,
+    MojoNorm,
+    MojoPagedDecodeGQA,
+    MojoPagedPrefillGQA,
+    MojoRoPE,
+    MojoSilu,
+)
 
 
 class Qwen3Config:
@@ -155,171 +162,6 @@ class Qwen3MLP(nn.Module):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
-def paged_attention_prefill(
-    q: torch.Tensor,
-    k_cache: torch.Tensor,
-    v_cache: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
-    block_tables: torch.Tensor,
-    softmax_scale: Optional[float] = None,
-):
-    total_q_tokens, num_q_heads, head_dim = q.shape
-    num_total_blocks, num_kv_heads, block_size, _ = k_cache.shape
-
-    if softmax_scale is None:
-        softmax_scale = 1.0 / math.sqrt(head_dim)
-
-    total_kv_tokens = total_q_tokens
-
-    k_unpadded = torch.zeros(total_kv_tokens, num_kv_heads, head_dim, dtype=q.dtype, device=q.device)
-    v_unpadded = torch.zeros(total_kv_tokens, num_kv_heads, head_dim, dtype=q.dtype, device=q.device)
-
-    q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-    batch_size = len(q_lens)
-
-    for i in range(batch_size):
-        seq_len = q_lens[i].item()
-        start_loc = cu_seqlens_q[i].item()
-        end_loc = cu_seqlens_q[i + 1].item()
-
-        num_blocks_for_seq = (seq_len + block_size - 1) // block_size
-
-        for j in range(num_blocks_for_seq):
-            physical_block_id = block_tables[i, j].item()
-
-            start_pos_in_seq = j * block_size
-            tokens_in_block = min(block_size, seq_len - start_pos_in_seq)
-
-            start_loc_in_batch = start_loc + start_pos_in_seq
-            end_loc_in_batch = start_loc_in_batch + tokens_in_block
-
-            k_slice = k_cache[physical_block_id, :, :tokens_in_block, :]
-
-            k_unpadded[start_loc_in_batch:end_loc_in_batch, :, :] = k_slice.permute(1, 0, 2)
-
-            v_slice = v_cache[physical_block_id, :, :tokens_in_block, :]
-            v_unpadded[start_loc_in_batch:end_loc_in_batch, :, :] = v_slice.permute(1, 0, 2)
-
-    if num_q_heads != num_kv_heads:
-        k_expanded = k_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=1)
-        v_expanded = v_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=1)
-    else:
-        k_expanded = k_unpadded
-        v_expanded = v_unpadded
-
-    attn_mask = torch.ones(total_q_tokens, total_q_tokens, device=q.device, dtype=torch.bool).tril(diagonal=0)
-
-    tok_to_seq = torch.repeat_interleave(torch.arange(batch_size, device=q.device), q_lens)
-
-    seq_mask = tok_to_seq[:, None] == tok_to_seq[None, :]
-    final_mask = attn_mask & seq_mask
-
-    attn_scores = torch.einsum("thd,khd->thk", q, k_expanded) * softmax_scale
-    attn_scores.masked_fill_(~final_mask.unsqueeze(1), -torch.inf)
-
-    attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(q.dtype)
-
-    output = torch.einsum("thk,khd->thd", attn_probs, v_expanded)
-    return output
-
-
-def paged_attention_decode(q, k_cache, v_cache, seqlens, block_tables, softmax_scale):
-    batch_size, num_q_heads, head_dim = q.shape
-    num_kv_heads, block_size, head_dim = k_cache.shape[1], k_cache.shape[2], k_cache.shape[3]
-    max_len_in_batch = seqlens.max().item()
-
-    k_ref = torch.zeros(batch_size, max_len_in_batch, num_kv_heads, head_dim, device=q.device, dtype=q.dtype)
-    v_ref = torch.zeros(batch_size, max_len_in_batch, num_kv_heads, head_dim, device=q.device, dtype=q.dtype)
-
-    for i in range(batch_size):
-        seq_len = seqlens[i].item()
-        num_blocks_for_seq = (seq_len + block_size - 1) // block_size
-
-        for j in range(num_blocks_for_seq):
-            physical_block_id = block_tables[i, j].item()
-
-            start_pos = j * block_size
-            tokens_in_block = min(block_size, seq_len - start_pos)
-
-            k_slice = k_cache[physical_block_id, :, :tokens_in_block, :]
-            v_slice = v_cache[physical_block_id, :, :tokens_in_block, :]
-
-            k_ref[i, start_pos : start_pos + tokens_in_block, :, :] = k_slice.permute(1, 0, 2)
-            v_ref[i, start_pos : start_pos + tokens_in_block, :, :] = v_slice.permute(1, 0, 2)
-
-    _, k_len, num_k_heads, _ = k_ref.shape
-    num_share_q_heads = num_q_heads // num_k_heads
-    if softmax_scale is None:
-        softmax_scale = 1 / math.sqrt(head_dim)
-
-    if num_share_q_heads > 1:
-        k_ref = k_ref.repeat_interleave(num_share_q_heads, dim=2)
-        v_ref = v_ref.repeat_interleave(num_share_q_heads, dim=2)
-
-    attn = torch.einsum("bhd,bkhd->bhk", q, k_ref) * softmax_scale
-
-    mask = torch.arange(k_len, device=q.device)[None, :] >= seqlens[:, None]
-    attn.masked_fill_(mask[:, None, :], -torch.inf)
-
-    attn = torch.softmax(attn, dim=-1, dtype=torch.float32).to(q.dtype)
-    out = torch.einsum("bhk,bkhd->bhd", attn, v_ref)
-    return out
-
-
-def paged_attention_forward(
-    module: "Qwen3Attention",
-    query_states: torch.Tensor,  # [BNSD]
-    key_states: torch.Tensor,  # [BNSD]
-    value_states: torch.Tensor,  # [BNSD]
-    past_key_values: PagedDummyCache,
-    context_lens: torch.Tensor,
-    **kwargs,
-):
-    bsz, num_q_heads, q_len, head_dim = query_states.shape
-    device = query_states.device
-
-    past_key_values.update(key_states, value_states, module.layer_idx)
-
-    if q_len > 1:
-        q_lens = torch.full((bsz,), q_len, dtype=torch.int32, device=device)
-        cu_seqlens_q = torch.cat([torch.tensor([0], device=device, dtype=torch.int32), q_lens.cumsum(0)])
-        total_tokens = cu_seqlens_q[-1].item()
-
-        q = query_states.permute(0, 2, 1, 3).reshape(total_tokens, num_q_heads, head_dim)
-
-        current_seq_lens = context_lens + q_len
-        max_len_in_batch = current_seq_lens.max().item()
-        # max_blocks = (max_len_in_batch + past_key_values.block_size - 1) // past_key_values.block_size
-
-        k_cache = past_key_values.k_cache
-        v_cache = past_key_values.v_cache
-
-        # Use per-layer block table
-        block_tables = past_key_values.block_tables[module.layer_idx]
-
-        attn_output_tnd = paged_attention_prefill(
-            q,
-            k_cache,
-            v_cache,
-            cu_seqlens_q,
-            block_tables,
-            softmax_scale=module.scaling,
-        )
-
-        attn_output = attn_output_tnd.reshape(bsz, q_len, num_q_heads, head_dim)
-        attn_output = attn_output.transpose(1, 2)
-
-    else:
-        q = query_states.squeeze(2)
-        k_cache, v_cache, block_tables = past_key_values.get_kv_for_decode(module.layer_idx)
-        current_seq_lens = context_lens + 1
-
-        attn_output_bhd = paged_attention_decode(q, k_cache, v_cache, current_seq_lens, block_tables, module.scaling)
-        attn_output = attn_output_bhd.unsqueeze(2)
-
-    return attn_output, None
-
-
 class Qwen3Attention(nn.Module):
     def __init__(self, config: Qwen3Config, layer_idx: int):
         super().__init__()
@@ -342,7 +184,9 @@ class Qwen3Attention(nn.Module):
 
         self.q_norm = MojoNorm(epsilon=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(self.head_dim)), is_varlen=False)
         self.k_norm = MojoNorm(epsilon=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(self.head_dim)), is_varlen=False)
-        self.rope = MojoRoPE()
+        self.rope = MojoRoPE(rotary_offset=0, interleaved=False, is_varlen=False, op_name="rope")
+        self.attn_prefill = MojoPagedPrefillGQA(op_name="attn_prefill", layer_idx=layer_idx)
+        self.attn_decode = MojoPagedDecodeGQA(op_name="attn_decode", layer_idx=layer_idx)
 
     def forward(self, hidden_states, position_embeddings, attention_mask, past_key_values, use_cache, **kwargs):
         bsz, q_len, _ = hidden_states.size()
@@ -366,8 +210,7 @@ class Qwen3Attention(nn.Module):
         if past_key_values is None:
             raise ValueError("Paged Attention requires a PagedDummyCache instance.")
 
-        attn_output, _ = paged_attention_forward(
-            self,
+        attn_output, _ = self.paged_attention_forward(
             query_states,
             key_states,
             value_states,
@@ -378,6 +221,51 @@ class Qwen3Attention(nn.Module):
         # Corrected reshape logic (from hf_qwen3_dense_demo.py patch)
         attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, self.hidden_size).contiguous()
         return self.o_proj(attn_output), None
+    
+    def paged_attention_forward(
+        self,
+        query_states: torch.Tensor,  # [BNSD]
+        key_states: torch.Tensor,  # [BNSD]
+        value_states: torch.Tensor,  # [BNSD]
+        past_key_values: PagedDummyCache,
+        context_lens: torch.Tensor,
+    ):
+        bsz, num_q_heads, q_len, head_dim = query_states.shape
+        device = query_states.device
+
+        past_key_values.update(key_states, value_states, self.layer_idx)
+
+        if q_len > 1:
+            q_lens = torch.full((bsz,), q_len, dtype=torch.int32, device=device)
+            cu_seqlens_q = torch.cat([torch.tensor([0], device=device, dtype=torch.int32), q_lens.cumsum(0)])
+            total_tokens = cu_seqlens_q[-1].item()
+
+            q = query_states.permute(0, 2, 1, 3).reshape(total_tokens, num_q_heads, head_dim)
+
+            current_seq_lens = context_lens + q_len
+            max_len_in_batch = current_seq_lens.max().item()
+            # max_blocks = (max_len_in_batch + past_key_values.block_size - 1) // past_key_values.block_size
+
+            k_cache = past_key_values.k_cache
+            v_cache = past_key_values.v_cache
+
+            # Use per-layer block table
+            block_tables = past_key_values.block_tables[self.layer_idx]
+
+            attn_output_tnd = self.attn_prefill(q, k_cache, v_cache, cu_seqlens_q, block_tables, self.scaling)
+            attn_output = attn_output_tnd.reshape(bsz, q_len, num_q_heads, head_dim)
+            attn_output = attn_output.transpose(1, 2)
+
+        else:
+            q = query_states.squeeze(2)
+            k_cache, v_cache, block_tables = past_key_values.get_kv_for_decode(self.layer_idx)
+            current_seq_lens = context_lens + 1
+
+            attn_output_bhd = self.attn_decode(q, k_cache, v_cache, current_seq_lens, block_tables, self.scaling)
+            attn_output = attn_output_bhd.unsqueeze(2)
+
+        return attn_output, None
+        
 
 
 class Qwen3DecoderLayer(nn.Module):
