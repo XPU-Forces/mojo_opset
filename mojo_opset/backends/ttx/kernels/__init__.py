@@ -13,8 +13,10 @@ platform = get_platform()
 
 try:
     ttx_backend_module = importlib.import_module(f".{platform}", package=__name__)
-except ImportError:
-    raise RuntimeError(f"Unsupported Triton Platform '{platform}'.")
+except ImportError as e:
+    raise RuntimeError(
+        f"Unsupported Triton Platform '{platform}': {e}"
+    ) from e
 
 
 gelu_fwd_impl = getattr(ttx_backend_module, "gelu_fwd_impl")
