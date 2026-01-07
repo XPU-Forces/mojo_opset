@@ -22,6 +22,7 @@ from .operators.attention import MojoPagedDecodeNSA
 from .operators.attention import MojoPagedPrefillGQA
 from .operators.attention import MojoPagedPrefillMLA
 from .operators.attention import MojoPagedPrefillNSA
+from .operators.attention import MojoPagedPrefillQuest
 from .operators.attention import MojoPrefillGQA
 from .operators.attention import MojoPrefillMLA
 from .operators.attention import MojoPrefillNSA
