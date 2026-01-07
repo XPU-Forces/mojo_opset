@@ -1,7 +1,6 @@
 import argparse
 import os
 import torch
-import torch_npu
 from transformers import AutoTokenizer
 from mojo_opset.utils.hf_utils import build_model_from_hf, _resolve_local_files_only
 
@@ -24,8 +23,6 @@ def generate(model, tokenizer, prompt, max_new_tokens, device):
     next_token_id = torch.argmax(next_token_logits, dim=-1).unsqueeze(-1)
     
     generated_ids = [next_token_id.item()]
-    token_str = tokenizer.decode(next_token_id.item())
-    # print(f"Token 0: {token_str!r}")
     
     # Decode loop
     input_ids = next_token_id
@@ -43,8 +40,6 @@ def generate(model, tokenizer, prompt, max_new_tokens, device):
         next_token_id = torch.argmax(next_token_logits, dim=-1).unsqueeze(-1)
         
         generated_ids.append(next_token_id.item())
-        token_str = tokenizer.decode(next_token_id.item())
-        # print(f"Token {i+1}: {token_str!r}")
         
         input_ids = next_token_id
         
@@ -79,7 +74,6 @@ if __name__ == "__main__":
     if args.transformers:
         from transformers import AutoModelForCausalLM as model_class
     else:
-        # from torch_qwen3_dense import Qwen3ForCausalLM as model_class
         from mojo_qwen3_dense import Qwen3ForCausalLM as model_class
     
     print(f"Loading model from {args.model_path}...")

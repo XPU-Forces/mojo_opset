@@ -172,10 +172,6 @@ class Qwen3Attention(nn.Module):
             self.num_heads // config.num_key_value_heads,
         )
         self.scaling = self.head_dim**-0.5
-        # self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
-        # self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        # self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        # self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias)
 
         self.q_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.num_heads * self.head_dim, self.hidden_size)))
         self.k_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.num_key_value_heads * self.head_dim, self.hidden_size)))
@@ -243,8 +239,6 @@ class Qwen3Attention(nn.Module):
             q = query_states.permute(0, 2, 1, 3).reshape(total_tokens, num_q_heads, head_dim)
 
             current_seq_lens = context_lens + q_len
-            max_len_in_batch = current_seq_lens.max().item()
-            # max_blocks = (max_len_in_batch + past_key_values.block_size - 1) // past_key_values.block_size
 
             k_cache = past_key_values.k_cache
             v_cache = past_key_values.v_cache

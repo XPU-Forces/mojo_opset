@@ -1,13 +1,8 @@
-import argparse
 import math
-import os
-from typing import Optional, Tuple, Set
+from typing import Optional, Tuple
 
 import torch
 from torch import nn
-
-from transformers import AutoTokenizer
-from mojo_opset.utils.hf_utils import build_model_from_hf, _resolve_local_files_only
 
 
 def silu(x):
@@ -515,47 +510,3 @@ class Qwen3ForCausalLM(nn.Module):
         hidden_states, past_key_values = self.model(input_ids, past_key_values=past_key_values, use_cache=use_cache)
         logits = self.lm_head(hidden_states)
         return logits, past_key_values
-
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", type=str, default=os.getenv("QWEN3_MODEL_PATH", ""))
-    parser.add_argument("--device", type=str, default=os.getenv("QWEN3_DEVICE", "npu"))
-    parser.add_argument("--num_layers", type=int, default=int(os.getenv("QWEN3_NUM_LAYERS", "36")))
-    parser.add_argument("--prompt", type=str, default="Hello，who are you?")
-    parser.add_argument("--max_new_tokens", type=int, default=0)
-    args = parser.parse_args()
-
-    if not args.model_path:
-        raise ValueError(
-            "Please pass --model_path /path/to/qwen3-8b (local dir with config.json & weights), "
-            "or set env QWEN3_MODEL_PATH."
-        )
-
-    local_files_only = _resolve_local_files_only(args.model_path)
-
-    model = build_model_from_hf(
-        Qwen3ForCausalLM,
-        args.model_path,
-        device=args.device,
-        num_layers=args.num_layers,
-        trust_remote_code=True,
-    )
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_path,
-        local_files_only=local_files_only,
-        trust_remote_code=True,
-        use_fast=True,
-    )
-    if tokenizer is not None:
-        input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids.to(args.device)
-    else:
-        assert False, "Tokenizer is None. Please check the model path."
-
-    with torch.no_grad():
-        logits, _ = model(input_ids)
-
-    print("logits:", tuple(logits.shape), logits.dtype, logits.device)
-    print("logits[0, 0, :5] =", logits[0, 0, :5])

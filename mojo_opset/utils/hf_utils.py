@@ -112,10 +112,6 @@ def build_model_from_hf(
         trust_remote_code=trust_remote_code,
     )
     
-    # for debug
-    if num_layers is not None:
-        hf_config.num_hidden_layers = num_layers
-
     # Check if the model class supports from_pretrained (standard HF models)
     if hasattr(model_class, "from_pretrained"):
         torch_model = model_class.from_pretrained(
