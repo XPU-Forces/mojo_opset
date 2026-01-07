@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 from transformers import AutoTokenizer
-from hf_utils import build_model_from_hf, _resolve_local_files_only
+from mojo_opset.utils.hf_utils import build_model_from_hf, _resolve_local_files_only
 
 
 def silu(x):

@@ -3,7 +3,7 @@ import os
 import torch
 import torch_npu
 from transformers import AutoTokenizer
-from hf_utils import build_model_from_hf, _resolve_local_files_only
+from mojo_opset.utils.hf_utils import build_model_from_hf, _resolve_local_files_only
 
 def generate(model, tokenizer, prompt, max_new_tokens, device):
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)

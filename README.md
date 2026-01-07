@@ -129,3 +129,25 @@ export MOJO_RUN_MODE="COMPILE"
 # 如果你希望当前triton kernel被直接调用，而不是被注册到torch.library中（该方式在eager模式下能轻微减少torch的overhead）。
 export MOJO_RUN_MODE="EAGER"
 ```
+
+### 4.5 E2E model generation example for Qwen3-8B
+```bash
+# 使用默认逻辑（自动下载到 ./Qwen3-8B）
+./examples/run_model.sh
+
+# 指定自定义路径
+./examples/run_model.sh /path/to/your/model
+
+# 期望输出
+Weight Loading Report:
+  Total Expected Keys: 399
+  Successfully Loaded: 399
+  Missing Keys: 0
+  Unexpected Keys: 0
+Loading tokenizer...
+
+Prompt: 你好，请介绍一下你自己。
+----------------------------------------
+----------------------------------------
+Generated text:  你好！我是一个大型语言模型，名叫通义千问，由通义实验室研发。我能够进行多轮对话，回答各种问题，创作文字，比如写故事、写邮件、写剧本等，还能进行逻辑推理、表达观点，甚至编写和调试程序。我的训练数据来自于互联网上的大量文本，因此我具备广泛的知识和语言理解能力。我可以用多种语言与你交流，包括中文、英文、日文、韩文等。
+```
