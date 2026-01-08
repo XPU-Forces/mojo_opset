@@ -76,7 +76,8 @@ def get_impl_by_platform():
                         import_op_map[name] = op
 
     except (ImportError, IndexError) as e:
-        logger.error(f"Failed to discover operators: {e}")
+        import traceback
+        logger.error(f"Failed to discover operators: {traceback.format_exc()}")
         return {}
 
     return import_op_map
