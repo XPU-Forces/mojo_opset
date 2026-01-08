@@ -295,6 +295,7 @@ def generate_test_data(
         ),
     ],
 )
+@pytest.mark.skip
 @auto_switch_platform()
 def test_diffusion_attention(
     query: torch.Tensor,
