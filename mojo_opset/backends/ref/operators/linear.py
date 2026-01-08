@@ -21,14 +21,6 @@ class RefLinear(MojoLinear):
 
 class RefGroupLinear(MojoGroupLinear):
     def forward(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            input: Tensor of shape [sum(group_list), M]
-            group_list: 1D tensor, num_tokens per expert
-
-        Returns:
-            Tensor of shape [sum(group_list), N]
-        """
         assert input.dim() == 2, "input must be 2D"
         assert self.weight.dim() == 3, "weight must be 3D"
         num_groups = group_list.numel()
