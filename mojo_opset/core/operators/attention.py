@@ -198,11 +198,11 @@ class MojoPagedPrefillBlockSparseAttention(MojoOperator):
     def forward(
         self,
         curr_query_seg,
-        curr_seg_causal,
         key,
         value,
+        whole_causal_mask,
         topk_page_indices,
-        whole_causal,
+        q_seg_start,
         q_chunk_size,
         num_pages,
         pad_len,

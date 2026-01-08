@@ -383,16 +383,13 @@ def mojo_quest(
 
             block_sparse_attention = MojoPagedPrefillBlockSparseAttention(None, page_size, q_seg_size, topk_ratio)
 
-            curr_seg_causal = whole_causal[
-                q_seg_id * q_seg_size : q_seg_id * q_seg_size + curr_seg_size, -q_chunk_sizes[i] :
-            ]
-
             curr_seg_output = block_sparse_attention(
                 curr_query_seg,
-                curr_seg_causal,
                 key,
                 value,
+                whole_causal,
                 topk_page_indices,
+                q_seg_id,
                 q_chunk_sizes[i],
                 num_pages,
                 pad_len,

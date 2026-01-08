@@ -153,10 +153,11 @@ class RefPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
     def forward(
         self,
         curr_query_seg,
-        curr_seg_causal,
         key,
         value,
+        whole_causal_mask,
         topk_page_indices,
+        q_seg_id,
         q_chunk_size,
         num_pages,
         pad_len,
@@ -186,7 +187,10 @@ class RefPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
         curr_seg_mask.scatter_(dim=-1, index=topk_token_indices, value=True)
         # curr_seg_causal = torch.tril(torch.ones((q_head_num, curr_seg_size, curr_seg_size), dtype= torch.bool, device=curr_seg_mask.device))
         # print(f"{curr_seg_mask.shape=} {q_seg_start=} {q_seg_end=}", flush=True)
-        curr_seg_mask[:, :, -q_chunk_size:] = curr_seg_causal
+        q_seg_start = q_seg_id * self.q_seg_size
+        curr_seg_mask[:, :, -q_chunk_size:] = whole_causal_mask[
+            q_seg_start : q_seg_start + curr_seg_size, -q_chunk_size:
+        ]
 
         curr_seg_score = curr_seg_score.masked_fill(~curr_seg_mask, torch.finfo(curr_seg_score.dtype).min)
         curr_seg_score = torch.softmax(curr_seg_score, -1, dtype=torch.float32).to(dtype=torch.bfloat16)
