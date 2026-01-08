@@ -150,17 +150,13 @@ class RefQuest(MojoQuest):
 
 class RefPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
 
-    def quest_attention(
+    def forward(
         self,
         curr_query_seg,
+        curr_seg_causal,
         key,
         value,
         topk_page_indices,
-        whole_causal,
-        q_seg_start,
-        q_seg_end,
-        q_seg_id,
-        q_seg_size,
         q_chunk_size,
         num_pages,
         pad_len,
@@ -168,10 +164,6 @@ class RefPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
         q_head_num, curr_seg_size, head_size = curr_query_seg.shape
         page_size = self.page_size
         top_k_page = topk_page_indices.shape[-1]
-        # ====================使用相同page========================
-        topk_page_indices_0 = topk_page_indices[:, 0]
-        topk_page_indices = topk_page_indices_0.unsqueeze(1).repeat(1, curr_seg_size, 1)
-        # ====================使用相同page========================
 
         # [nh, ql, topk_page, page_size]
         topk_token_indices = (topk_page_indices * page_size).unsqueeze(-1).repeat(1, 1, 1, page_size) + torch.arange(
@@ -184,7 +176,6 @@ class RefPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
         pad_indices = pad_indices.expand(q_head_num, curr_seg_size, -1)
         # [nh, ql, topk_page * page_size + pad_len]
         topk_token_indices = torch.cat([topk_token_indices, pad_indices], dim=-1)
-
         q_head_num, curr_seg_size, head_size = curr_query_seg.shape
         # [nh, q_seg_size, kv_seq_length]
         curr_seg_score = torch.bmm(curr_query_seg, key.transpose(-2, -1))
@@ -192,9 +183,8 @@ class RefPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
 
         # [nh, q_seg_size, kv_seq_length]
         curr_seg_mask = torch.zeros_like(curr_seg_score, dtype=torch.bool)
-        curr_seg_mask.scatter_(dim=-1, index=topk_token_indices[:, q_seg_start:q_seg_end, :], value=True)
+        curr_seg_mask.scatter_(dim=-1, index=topk_token_indices, value=True)
         # curr_seg_causal = torch.tril(torch.ones((q_head_num, curr_seg_size, curr_seg_size), dtype= torch.bool, device=curr_seg_mask.device))
-        curr_seg_causal = whole_causal[q_seg_id * q_seg_size : q_seg_id * q_seg_size + curr_seg_size, -q_chunk_size:]
         # print(f"{curr_seg_mask.shape=} {q_seg_start=} {q_seg_end=}", flush=True)
         curr_seg_mask[:, :, -q_chunk_size:] = curr_seg_causal
 

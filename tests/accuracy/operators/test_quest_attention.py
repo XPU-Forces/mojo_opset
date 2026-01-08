@@ -180,7 +180,7 @@ def original_session_cache_pa_flash_attention_quest128(
 
                 # [nh, q_seg_size, kv_seq_length]
                 curr_seg_mask = torch.zeros_like(curr_seg_score, dtype=torch.bool)
-                curr_seg_mask.scatter_(dim=-1, index=topk_token_indices[:, q_seg_start:q_seg_end, :], value=True)
+                curr_seg_mask.scatter_(dim=-1, index=topk_token_indices, value=True)
                 # curr_seg_causal = torch.tril(torch.ones((q_head_num, curr_seg_size, curr_seg_size), dtype= torch.bool, device=curr_seg_mask.device))
                 curr_seg_causal = whole_causal[
                     q_seg_id * q_seg_size : q_seg_id * q_seg_size + curr_seg_size, -q_chunk_sizes[i] :
@@ -373,21 +373,26 @@ def mojo_quest(
                 top_k_page,
             )
 
+            # ====================使用相同page========================
+            topk_page_indices_0 = topk_page_indices[:, 0]
+            topk_page_indices = topk_page_indices_0.unsqueeze(1).repeat(1, curr_seg_size, 1)
+            # ====================使用相同page========================
+
             # ====================quest========================
             from mojo_opset import MojoPagedPrefillBlockSparseAttention
 
             block_sparse_attention = MojoPagedPrefillBlockSparseAttention(None, page_size, q_seg_size, topk_ratio)
 
+            curr_seg_causal = whole_causal[
+                q_seg_id * q_seg_size : q_seg_id * q_seg_size + curr_seg_size, -q_chunk_sizes[i] :
+            ]
+
             curr_seg_output = block_sparse_attention(
                 curr_query_seg,
+                curr_seg_causal,
                 key,
                 value,
                 topk_page_indices,
-                whole_causal,
-                q_seg_start,
-                q_seg_end,
-                q_seg_id,
-                q_seg_size,
                 q_chunk_sizes[i],
                 num_pages,
                 pad_len,
