@@ -13,9 +13,9 @@ class TTXNorm(MojoNorm):
 
     def forward(self, hidden_state: torch.Tensor):
         if self.norm_type == "rmsnorm":
-            return rmsnorm_infer(hidden_state, self.gamma, self.epsilon)
+            return rmsnorm_infer(hidden_state, self.weight, self.epsilon)
         elif self.norm_type == "layernorm":
-            return ttx_layer_norm(hidden_state, self.gamma, self.beta, self.epsilon)
+            return ttx_layer_norm(hidden_state, self.weight, self.beta, self.epsilon)
         else:
             raise NotImplementedError(f"[TTXNorm] Only support rmsnorm/layernorm, but got {self.norm_type}")
 

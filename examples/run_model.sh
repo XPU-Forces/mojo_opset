@@ -27,7 +27,7 @@ if [ ! -d "$MODEL_PATH" ]; then
     
     echo "Downloading ${DEFAULT_MODEL_REPO} to ${MODEL_PATH}..."
     # Use python to download to ensure we control the path
-    python3 -c "from modelscope import snapshot_download; snapshot_download('${DEFAULT_MODEL_REPO}', local_dir='${MODEL_PATH}')"
+    python3 -c "from modelscope import snapshot_download; snapshot_download('${DEFAULT_MODEL_REPO}', local_dir='${MODEL_PATH}', max_workers=8)"
 fi
 
 echo "Running inference with model at: ${MODEL_PATH}"
