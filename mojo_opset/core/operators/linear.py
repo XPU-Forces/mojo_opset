@@ -40,7 +40,8 @@ class MojoLinear(MojoOperator):
             if not isinstance(bias, torch.Tensor):
                 raise TypeError("bias should be torch.Tensor or None")
             if weight.ndim == 2:
-                out_dim = weight.shape[1]
+                # Standard PyTorch Linear weight shape is [out_features, in_features]
+                out_dim = weight.shape[0]
                 if bias.ndim != 1 or bias.shape[0] != out_dim:
                     raise ValueError(f"bias should be 1-D with shape [out_dim={out_dim}], but got {tuple(bias.shape)}")
         self.bias = bias

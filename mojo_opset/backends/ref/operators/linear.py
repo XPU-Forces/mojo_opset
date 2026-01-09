@@ -6,17 +6,18 @@ from mojo_opset.core import MojoLinear
 
 class RefLinear(MojoLinear):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        in_dim = self.weight.shape[0]
+        # Standard PyTorch Linear weight shape is [out_features, in_features]
+        in_dim = self.weight.shape[1]
         if input.shape[-1] != in_dim:
             raise ValueError(f"input should have last dim {in_dim}, but got {input.shape[-1]}")
         if self.is_varlen:
             if input.ndim not in (2, 3):
                 raise ValueError(f"Expected TND when is_varlen=True; got shape {tuple(input.shape)}")
-            return torch.nn.functional.linear(input, self.weight.t(), self.bias)
+            return torch.nn.functional.linear(input, self.weight, self.bias)
         else:
             if input.ndim not in (3, 4):
                 raise ValueError(f"Expected BNSD when is_varlen=False; got shape {tuple(input.shape)}")
-            return torch.nn.functional.linear(input, self.weight.t(), self.bias)
+            return torch.nn.functional.linear(input, self.weight, self.bias)
 
 
 class RefGroupLinear(MojoGroupLinear):
