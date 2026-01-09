@@ -1,7 +1,9 @@
 import math
-from typing import Optional, Tuple
+
+from typing import Optional
 
 import torch
+
 from torch import nn
 
 
@@ -43,10 +45,8 @@ class PagedDummyCache:
         self.batch_size = batch_size
 
         max_blocks_per_seq = (config.max_position_embeddings + self.block_size - 1) // self.block_size
-        # Allocate total blocks for ALL layers
-        total_blocks = self.batch_size * max_blocks_per_seq * self.num_layers
+        total_blocks = self.batch_size * max_blocks_per_seq
 
-        # k_cache/v_cache now holds blocks for all layers
         self.k_cache = torch.zeros(
             (total_blocks, self.num_kv_heads, self.block_size, self.head_dim),
             dtype=torch.bfloat16,
@@ -58,10 +58,8 @@ class PagedDummyCache:
             device=self.device,
         )
 
-        # block_tables needs to be per-layer
-        self.block_tables = torch.zeros((self.num_layers, self.batch_size, max_blocks_per_seq), dtype=torch.long, device=self.device)
-        # seq_lens needs to be per-layer
-        self.seq_lens = torch.zeros((self.num_layers, self.batch_size), dtype=torch.long, device=self.device)
+        self.block_tables = torch.zeros((self.batch_size, max_blocks_per_seq), dtype=torch.long, device=self.device)
+        self.seq_lens = torch.zeros(self.batch_size, dtype=torch.long, device=self.device)
 
         self.free_blocks = torch.arange(total_blocks, device=self.device, dtype=torch.long)
         self.num_free_blocks = total_blocks
@@ -77,7 +75,7 @@ class PagedDummyCache:
         batch_size, _, new_seq_len, _ = key_states.shape
 
         for i in range(batch_size):
-            context_len = self.seq_lens[layer_idx, i].item()
+            context_len = self.seq_lens[i].item()
 
             old_num_blocks = (context_len + self.block_size - 1) // self.block_size
             new_total_len = context_len + new_seq_len
@@ -86,31 +84,36 @@ class PagedDummyCache:
             if new_num_blocks > old_num_blocks:
                 num_to_allocate = new_num_blocks - old_num_blocks
                 newly_allocated = self._allocate_blocks(num_to_allocate)
-                self.block_tables[layer_idx, i, old_num_blocks:new_num_blocks] = newly_allocated
+                self.block_tables[i, old_num_blocks:new_num_blocks] = newly_allocated
 
             for j in range(new_seq_len):
                 logical_pos = context_len + j
                 block_idx_in_table = logical_pos // self.block_size
                 pos_in_block = logical_pos % self.block_size
 
-                physical_block_id = self.block_tables[layer_idx, i, block_idx_in_table]
+                physical_block_id = self.block_tables[i, block_idx_in_table]
 
                 self.k_cache[physical_block_id, :, pos_in_block, :] = key_states[i, :, j, :]
                 self.v_cache[physical_block_id, :, pos_in_block, :] = value_states[i, :, j, :]
 
-            self.seq_lens[layer_idx, i] = new_total_len
+            self.seq_lens[i] = new_total_len
 
     def get_kv_for_prefill(self, layer_idx: int):
         return None, None
 
     def get_kv_for_decode(self, layer_idx: int):
-        max_slen = self.seq_lens[layer_idx].max().item()
+        max_slen = self.seq_lens.max().item()
         max_blocks = (max_slen + self.block_size - 1) // self.block_size
-        # Return per-layer block table
-        return self.k_cache, self.v_cache, self.block_tables[layer_idx, :, :max_blocks]
+        return self.k_cache, self.v_cache, self.block_tables
 
     def get_seq_length(self, layer_idx: int = 0):
-        return self.seq_lens[layer_idx].clone()
+        return self.seq_lens.clone()
+
+
+class DummyGradientCheckpointingLayer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self._is_gradient_checkpointing = False
 
 
 class Qwen3RotaryEmbedding(nn.Module):
@@ -165,18 +168,17 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 class Qwen3RMSNorm(nn.Module):
-    def __init__(self, eps: float = 1e-6, norm_type: str = "rmsnorm", gamma: Optional[torch.Tensor] = None):
+    def __init__(self, eps: float = 1e-6, norm_type: str = "rmsnorm", weight: Optional[torch.Tensor] = None):
         super().__init__()
         self.epsilon = float(eps)
-        self.weight = gamma
+        self.weight = weight
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.epsilon)
-        hidden_states = self.weight * hidden_states
-        return hidden_states.to(input_dtype)
+        return self.weight * hidden_states.to(input_dtype)
 
 
 class Qwen3MLP(nn.Module):
@@ -326,13 +328,12 @@ def paged_attention_forward(
 
         current_seq_lens = context_lens + q_len
         max_len_in_batch = current_seq_lens.max().item()
-        # max_blocks = (max_len_in_batch + past_key_values.block_size - 1) // past_key_values.block_size
+        max_blocks = (max_len_in_batch + past_key_values.block_size - 1) // past_key_values.block_size
 
         k_cache = past_key_values.k_cache
         v_cache = past_key_values.v_cache
 
-        # Use per-layer block table
-        block_tables = past_key_values.block_tables[module.layer_idx]
+        block_tables = past_key_values.block_tables
 
         attn_output_tnd = paged_attention_prefill(
             q,
@@ -371,9 +372,14 @@ class Qwen3Attention(nn.Module):
         self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias)
+        self.gamma = nn.Parameter(torch.ones(self.head_dim))
 
-        self.q_norm = Qwen3RMSNorm(eps=config.rms_norm_eps, gamma=nn.Parameter(torch.ones(self.head_dim)))
-        self.k_norm = Qwen3RMSNorm(eps=config.rms_norm_eps, gamma=nn.Parameter(torch.ones(self.head_dim)))
+        self.q_norm = (
+            Qwen3RMSNorm(eps=config.rms_norm_eps, gamma=self.gamma) if hasattr(config, "q_norm") else nn.Identity()
+        )
+        self.k_norm = (
+            Qwen3RMSNorm(eps=config.rms_norm_eps, gamma=self.gamma) if hasattr(config, "k_norm") else nn.Identity()
+        )
 
     def forward(self, hidden_states, position_embeddings, attention_mask, past_key_values, use_cache, **kwargs):
         bsz, q_len, _ = hidden_states.size()
@@ -406,21 +412,20 @@ class Qwen3Attention(nn.Module):
             context_lens=context_lens,
         )
 
-        # Corrected reshape logic (from hf_qwen3_dense_demo.py patch)
-        attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, self.hidden_size).contiguous()
+        attn_output = query_states.reshape(bsz, q_len, self.hidden_size).contiguous()
         return self.o_proj(attn_output), None
 
 
-class Qwen3DecoderLayer(nn.Module):
-    def __init__(self, config, layer_idx: int):
+class Qwen3DecoderLayer(DummyGradientCheckpointingLayer):
+    def __init__(self, config: Qwen3Config, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = Qwen3Attention(config, layer_idx)
         self.mlp = Qwen3MLP(config)
-        self.layer_idx = layer_idx
-
-        self.input_layernorm = Qwen3RMSNorm(config.rms_norm_eps, gamma=nn.Parameter(torch.ones(config.hidden_size)))
-        self.post_attention_layernorm = Qwen3RMSNorm(config.rms_norm_eps, gamma=nn.Parameter(torch.ones(config.hidden_size)))
+        self.gamma = nn.Parameter(torch.ones(config.hidden_size))
+        self.input_layernorm = Qwen3RMSNorm(config.rms_norm_eps, weight=self.gamma)
+        self.post_attention_layernorm = Qwen3RMSNorm(config.rms_norm_eps, weight=self.gamma)
+        self.attention_type = config.layer_types[layer_idx]
 
     def forward(
         self,
@@ -448,65 +453,3 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
-
-
-class Qwen3Model(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([Qwen3DecoderLayer(config, i) for i in range(config.num_hidden_layers)])
-
-        self.norm = Qwen3RMSNorm(config.rms_norm_eps, gamma=nn.Parameter(torch.ones(config.hidden_size)))
-        self.rotary = Qwen3RotaryEmbedding(config)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        past_key_values: Optional["PagedDummyCache"] = None,
-        use_cache: bool = True,
-    ) -> Tuple[torch.Tensor, "PagedDummyCache"]:
-        device = input_ids.device
-        bsz, seq_len = input_ids.shape
-
-        if past_key_values is None:
-            past_key_values = PagedDummyCache(self.config, batch_size=bsz, device=str(device), block_size=16)
-
-        past_len = int(past_key_values.get_seq_length(0).max().item())
-        position_ids = torch.arange(past_len, past_len + seq_len, device=device, dtype=torch.long).unsqueeze(0)
-
-        hidden_states = self.embed_tokens(input_ids)
-        cos, sin = self.rotary(hidden_states, position_ids)
-        position_embeddings = (cos, sin)
-
-        for layer in self.layers:
-            hidden_states = layer(
-                hidden_states=hidden_states,
-                attention_mask=None,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                use_cache=use_cache,
-                cache_position=None,
-                position_embeddings=position_embeddings,
-            )
-
-        hidden_states = self.norm(hidden_states)
-        return hidden_states, past_key_values
-
-
-class Qwen3ForCausalLM(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.model = Qwen3Model(config)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        past_key_values: Optional["PagedDummyCache"] = None,
-        use_cache: bool = True,
-    ):
-        hidden_states, past_key_values = self.model(input_ids, past_key_values=past_key_values, use_cache=use_cache)
-        logits = self.lm_head(hidden_states)
-        return logits, past_key_values

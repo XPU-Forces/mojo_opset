@@ -11,7 +11,7 @@ from mojo_opset.core import MojoResidualAddNorm
 class RefNorm(MojoNorm):
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         x = hidden_state
-        eps = float(self.epsilon)
+        eps = float(self.eps)
         if self.is_varlen:
             if x.ndim not in (2, 3):
                 raise ValueError(f"Expected TND when is_varlen=True; got shape {tuple(x.shape)}")
@@ -29,7 +29,7 @@ class RefNorm(MojoNorm):
         elif self.norm_type == "rmsnorm":
             x_dtype = x.dtype
             x = x.to(torch.float32)
-            y = x * torch.rsqrt((x ** 2).mean(dim=-1, keepdim=True) + eps)
+            y = x * torch.rsqrt((x**2).mean(dim=-1, keepdim=True) + eps)
             if self.weight is not None:
                 y = y * self.weight
                 y = y.to(x_dtype)
@@ -47,10 +47,10 @@ class RefResidualAddNorm(MojoResidualAddNorm):
                     [hidden_state.shape[-1]],
                     weight=self.weight,
                     bias=self.beta,
-                    eps=self.epsilon,
+                    eps=self.eps,
                 )
             elif self.norm_type == "rmsnorm":
-                return F.rms_norm(hidden_state, (hidden_state.size(-1),), weight=self.weight, eps=self.epsilon)
+                return F.rms_norm(hidden_state, (hidden_state.size(-1),), weight=self.weight, eps=self.eps)
 
         if self.norm_pos == "pre":
             if residual is not None:

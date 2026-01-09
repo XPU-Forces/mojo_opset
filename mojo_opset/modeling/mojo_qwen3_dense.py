@@ -1,19 +1,16 @@
-import argparse
-import math
-import os
-from typing import Optional, Tuple
+from typing import Optional
+from typing import Tuple
 
 import torch
+
 from torch import nn
 
-from mojo_opset import (
-    MojoLinear,
-    MojoNorm,
-    MojoPagedDecodeGQA,
-    MojoPagedPrefillGQA,
-    MojoRoPE,
-    MojoSilu,
-)
+from mojo_opset import MojoLinear
+from mojo_opset import MojoNorm
+from mojo_opset import MojoPagedDecodeGQA
+from mojo_opset import MojoPagedPrefillGQA
+from mojo_opset import MojoRoPE
+from mojo_opset import MojoSilu
 
 
 class Qwen3Config:
@@ -66,7 +63,9 @@ class PagedDummyCache:
         )
 
         # block_tables needs to be per-layer
-        self.block_tables = torch.zeros((self.num_layers, self.batch_size, max_blocks_per_seq), dtype=torch.long, device=self.device)
+        self.block_tables = torch.zeros(
+            (self.num_layers, self.batch_size, max_blocks_per_seq), dtype=torch.long, device=self.device
+        )
         # seq_lens needs to be per-layer
         self.seq_lens = torch.zeros((self.num_layers, self.batch_size), dtype=torch.long, device=self.device)
 
@@ -174,12 +173,20 @@ class Qwen3Attention(nn.Module):
         self.scaling = self.head_dim**-0.5
 
         self.q_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.num_heads * self.head_dim, self.hidden_size)))
-        self.k_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.num_key_value_heads * self.head_dim, self.hidden_size)))
-        self.v_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.num_key_value_heads * self.head_dim, self.hidden_size)))
+        self.k_proj = MojoLinear(
+            weight=nn.Parameter(torch.ones(self.num_key_value_heads * self.head_dim, self.hidden_size))
+        )
+        self.v_proj = MojoLinear(
+            weight=nn.Parameter(torch.ones(self.num_key_value_heads * self.head_dim, self.hidden_size))
+        )
         self.o_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.hidden_size, self.num_heads * self.head_dim)))
 
-        self.q_norm = MojoNorm(epsilon=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(self.head_dim)), is_varlen=False)
-        self.k_norm = MojoNorm(epsilon=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(self.head_dim)), is_varlen=False)
+        self.q_norm = MojoNorm(
+            eps=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(self.head_dim)), is_varlen=False
+        )
+        self.k_norm = MojoNorm(
+            eps=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(self.head_dim)), is_varlen=False
+        )
         self.rope = MojoRoPE(rotary_offset=0, interleaved=False, is_varlen=False, op_name="rope")
         self.attn_prefill = MojoPagedPrefillGQA(op_name="attn_prefill", layer_idx=layer_idx)
         self.attn_decode = MojoPagedDecodeGQA(op_name="attn_decode", layer_idx=layer_idx)
@@ -217,7 +224,7 @@ class Qwen3Attention(nn.Module):
         # Corrected reshape logic (from hf_qwen3_dense_demo.py patch)
         attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, self.hidden_size).contiguous()
         return self.o_proj(attn_output), None
-    
+
     def paged_attention_forward(
         self,
         query_states: torch.Tensor,  # [BNSD]
@@ -259,7 +266,6 @@ class Qwen3Attention(nn.Module):
             attn_output = attn_output_bhd.unsqueeze(2)
 
         return attn_output, None
-        
 
 
 class Qwen3DecoderLayer(nn.Module):
@@ -270,8 +276,12 @@ class Qwen3DecoderLayer(nn.Module):
         self.mlp = Qwen3MLP(config)
         self.layer_idx = layer_idx
 
-        self.input_layernorm = MojoNorm(epsilon=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(config.hidden_size)))
-        self.post_attention_layernorm = MojoNorm(epsilon=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(config.hidden_size)))
+        self.input_layernorm = MojoNorm(
+            eps=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(config.hidden_size))
+        )
+        self.post_attention_layernorm = MojoNorm(
+            eps=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(config.hidden_size))
+        )
 
     def forward(
         self,
@@ -308,7 +318,9 @@ class Qwen3Model(nn.Module):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList([Qwen3DecoderLayer(config, i) for i in range(config.num_hidden_layers)])
 
-        self.norm = MojoNorm(epsilon=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(config.hidden_size)))
+        self.norm = MojoNorm(
+            eps=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(config.hidden_size))
+        )
         self.rotary = Qwen3RotaryEmbedding(config)
 
     def forward(
@@ -361,4 +373,3 @@ class Qwen3ForCausalLM(nn.Module):
         hidden_states, past_key_values = self.model(input_ids, past_key_values=past_key_values, use_cache=use_cache)
         logits = self.lm_head(hidden_states)
         return logits, past_key_values
-

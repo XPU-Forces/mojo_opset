@@ -15,10 +15,10 @@ from tests.utils import auto_switch_platform
         ),
     ],
 )
-@pytest.mark.parametrize("epsilon, offset", [(1e-5, 0.0)])
+@pytest.mark.parametrize("eps, offset", [(1e-5, 0.0)])
 @pytest.mark.parametrize("casting_mode_int", [0])
 @auto_switch_platform()
-def test_rmsnorm(x, gamma, dy, epsilon, rstd, offset, casting_mode_int):
-    torch.library.opcheck(torch.ops.ttx.rmsnorm_infer, (x, gamma, epsilon))
-    torch.library.opcheck(torch.ops.ttx.rmsnorm_fwd, (x, gamma, epsilon, offset, casting_mode_int))
+def test_rmsnorm(x, gamma, dy, eps, rstd, offset, casting_mode_int):
+    torch.library.opcheck(torch.ops.ttx.rmsnorm_infer, (x, gamma, eps))
+    torch.library.opcheck(torch.ops.ttx.rmsnorm_fwd, (x, gamma, eps, offset, casting_mode_int))
     torch.library.opcheck(torch.ops.ttx.rmsnorm_bwd, (dy, x, gamma, rstd, offset, casting_mode_int, x.dtype))
