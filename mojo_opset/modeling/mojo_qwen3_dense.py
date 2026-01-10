@@ -184,10 +184,16 @@ class Qwen3Attention(nn.Module):
         self.o_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.hidden_size, self.num_heads * self.head_dim)))
 
         self.q_norm = MojoNorm(
-            eps=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(self.head_dim)), is_varlen=False
+            eps=config.rms_norm_eps,
+            norm_type="rmsnorm",
+            weight=nn.Parameter(torch.ones(self.head_dim)),
+            is_varlen=False,
         )
         self.k_norm = MojoNorm(
-            eps=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(self.head_dim)), is_varlen=False
+            eps=config.rms_norm_eps,
+            norm_type="rmsnorm",
+            weight=nn.Parameter(torch.ones(self.head_dim)),
+            is_varlen=False,
         )
         self.rope = MojoRoPE(rotary_offset=0, interleaved=False, is_varlen=False, op_name="rope")
         self.attn_prefill = MojoPagedPrefillGQA(op_name="attn_prefill", layer_idx=layer_idx)
@@ -279,10 +285,10 @@ class Qwen3DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
 
         self.input_layernorm = MojoNorm(
-            eps=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(config.hidden_size))
+            eps=config.rms_norm_eps, norm_type="rmsnorm", weight=nn.Parameter(torch.ones(config.hidden_size))
         )
         self.post_attention_layernorm = MojoNorm(
-            eps=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(config.hidden_size))
+            eps=config.rms_norm_eps, norm_type="rmsnorm", weight=nn.Parameter(torch.ones(config.hidden_size))
         )
 
     def forward(
@@ -321,7 +327,7 @@ class Qwen3Model(nn.Module):
         self.layers = nn.ModuleList([Qwen3DecoderLayer(config, i) for i in range(config.num_hidden_layers)])
 
         self.norm = MojoNorm(
-            eps=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(config.hidden_size))
+            eps=config.rms_norm_eps, norm_type="rmsnorm", weight=nn.Parameter(torch.ones(config.hidden_size))
         )
         self.rotary = Qwen3RotaryEmbedding(config)
 
