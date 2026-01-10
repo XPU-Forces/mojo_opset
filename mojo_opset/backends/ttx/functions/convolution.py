@@ -14,14 +14,14 @@ class TTXCausalConv1dFunction(MojoCausalConv1dFunction):
     def forward(
         ctx,
         x: torch.Tensor,
-        weight: Optional[torch.Tensor] = None,
-        bias: Optional[torch.Tensor] = None,
-        residual: Optional[torch.Tensor] = None,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+        residual: torch.Tensor,
         initial_state: Optional[torch.Tensor] = None,
         output_final_state: bool = False,
-        activation: str = None,
+        activation: Optional[str] = None,
         cu_seqlens: Optional[torch.Tensor] = None,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
         ctx.save_for_backward(x, weight, bias, residual, initial_state)
@@ -40,7 +40,11 @@ class TTXCausalConv1dFunction(MojoCausalConv1dFunction):
 
     @staticmethod
     @input_guard(make_contiguous=True, auto_to_device=True)
-    def backward(ctx, dy: torch.Tensor, dht: Optional[torch.Tensor]):
+    def backward(
+        ctx,
+        dy: torch.Tensor,
+        dht: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, None, None, None]:
         x, weight, bias, residual, initial_state = ctx.saved_tensors
 
         dx, dw, db, dr, dh0 = causal_conv1d_bwd(
