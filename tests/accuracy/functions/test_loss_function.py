@@ -81,7 +81,7 @@ def test_fused_ce_forward_backward_diff(
         return_z_loss,
         None,
     )
-    
+
     assert_close(output, output_ref)
 
     if return_z_loss:

@@ -26,5 +26,5 @@ def test_rmsnorm_forward_backward_diff(x, w):
     dy = torch.rand_like(y)
     grads = MojoRMSNormFunction.backward(ctx, dy)
     grads_ref = MojoRMSNormFunction._registry.get("ref").backward(ctx_ref, dy)
-    
+
     assert_close(grads, grads_ref)

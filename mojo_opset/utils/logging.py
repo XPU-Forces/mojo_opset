@@ -102,8 +102,7 @@ def get_logger(name: Optional[str] = None) -> "_Logger":
     else:
         # NOTE(liuyuan): share the root logger to the other modules that need it.
         if _get_library_name() not in name:
-            name = '.'.join((_get_library_name(), name))
-
+            name = ".".join((_get_library_name(), name))
 
     _configure_library_root_logger()
     return logging.getLogger(name)

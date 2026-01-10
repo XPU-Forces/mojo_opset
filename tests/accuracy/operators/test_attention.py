@@ -99,7 +99,7 @@ def test_paged_decode_gqa(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
-    paged_decode_attn_ref = MojoPagedDecodeGQA._registry.get("ref")(
+    paged_decode_attn_ref = MojoPagedDecodeGQA._registry.get("torch")(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
@@ -219,7 +219,7 @@ def test_paged_prefill_gqa(
         gqa_layout=gqa_layout,
     )
 
-    paged_prefill_attn_ref = MojoPagedPrefillGQA._registry.get("ref")(
+    paged_prefill_attn_ref = MojoPagedPrefillGQA._registry.get("torch")(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
@@ -304,7 +304,7 @@ def test_diffusion_attention(
     blockwise_diffusion_attn_mask: torch.Tensor,
     enable_gqa: bool,
 ):
-    diffusion_attn_ref = MojoSdpa._registry.get("ref")(
+    diffusion_attn_ref = MojoSdpa._registry.get("torch")(
         mask=blockwise_diffusion_attn_mask, scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
     )
     diffusion_attn = MojoSdpa(

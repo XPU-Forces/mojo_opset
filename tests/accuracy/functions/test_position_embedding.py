@@ -17,7 +17,6 @@ from mojo_opset import MojoRoPEFunction
 @auto_switch_platform()
 @bypass_not_implemented
 def test_rope_forward_backward_diff(q, k):
-
     q, k = q.transpose(1, 2), k.transpose(1, 2)
 
     inv_freq = 1.0 / (10000.0 ** (torch.arange(0, q.size(-1), 2).float().to(q.device) / q.size(-1)))
@@ -44,4 +43,3 @@ def test_rope_forward_backward_diff(q, k):
     grads_ref = MojoRoPEFunction._registry.get("ref").backward(ctx_ref, grad_q_out, grad_k_out)
 
     assert_close(grads, grads_ref)
-

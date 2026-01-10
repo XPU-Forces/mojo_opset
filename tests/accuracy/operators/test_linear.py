@@ -41,7 +41,7 @@ def test_group_gemm(input, weight, group_list):
         weight=weight,
     )
 
-    group_gemm_ref = MojoGroupLinear._registry.get("ref")(
+    group_gemm_ref = MojoGroupLinear._registry.get("torch")(
         trans_weight=False,
         weight=weight,
     )
