@@ -62,6 +62,7 @@ class MojoOperator(ABC, torch.nn.Module):
         atol: float = 1e-2,
         rtol: float = 1e-2,
         random_seed: int = 42,
+        mixed_tol: bool = False,
         **kwargs,
     ):
         """
@@ -91,10 +92,22 @@ class MojoOperator(ABC, torch.nn.Module):
 
         if isinstance(norm_result, tuple) or isinstance(norm_result, list):
             for norm, ref in zip(norm_result, refs_result):
-                torch.testing.assert_close(norm.to(torch.float32), ref.to(torch.float32), atol=atol, rtol=rtol)
+                if mixed_tol:
+                    mask = ref.abs() < 1.0
+                    tmpatol = tmprtol = 2**-6
+                    torch.testing.assert_close(norm[mask], ref[mask], atol=tmpatol, rtol=0)
+                    torch.testing.assert_close(norm[~mask], ref[~mask], atol=0, rtol=tmprtol)
+                else:
+                    torch.testing.assert_close(norm.to(torch.float32), ref.to(torch.float32), atol=atol, rtol=rtol)
         else:
-            torch.testing.assert_close(
-                norm_result.to(torch.float32), refs_result.to(torch.float32), atol=atol, rtol=rtol
-            )
+            if mixed_tol:
+                mask = refs_result.abs() < 1.0
+                tmpatol = tmprtol = 2**-6
+                torch.testing.assert_close(norm_result[mask], refs_result[mask], atol=tmpatol, rtol=0)
+                torch.testing.assert_close(norm_result[~mask], refs_result[~mask], atol=0, rtol=tmprtol)
+            else:
+                torch.testing.assert_close(
+                    norm_result.to(torch.float32), refs_result.to(torch.float32), atol=atol, rtol=rtol
+                )
 
         return norm_result
