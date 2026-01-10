@@ -9,7 +9,7 @@ from .operator import MojoOperator
 
 logger = get_logger(__name__)
 
-BACKEND_PRIORITY_LIST = ["ttx", "ref", "torch"]
+BACKEND_PRIORITY_LIST = ["ttx", "torch"]
 
 
 class MojoBackendRegistry:
@@ -45,7 +45,7 @@ class MojoBackendRegistry:
 
         curr_platform = get_platform()
         if curr_platform in cls.supported_platforms_list:
-            logger.info(
+            logger.debug(
                 f"Register {cls.__name__} as {self._core_op_cls.__name__} implementation with backend[{impl_backend_name}]"
             )
 

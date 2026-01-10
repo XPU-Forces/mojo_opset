@@ -1,4 +1,5 @@
 from typing import Optional
+from typing import Tuple
 
 import torch
 
@@ -15,13 +16,13 @@ class TTXCausalConv1dFunction(MojoCausalConv1dFunction):
         ctx,
         x: torch.Tensor,
         weight: torch.Tensor,
-        bias: torch.Tensor,
-        residual: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+        residual: Optional[torch.Tensor] = None,
         initial_state: Optional[torch.Tensor] = None,
         output_final_state: bool = False,
-        activation: Optional[str] = None,
+        activation: str = None,
         cu_seqlens: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
         ctx.save_for_backward(x, weight, bias, residual, initial_state)
@@ -43,7 +44,7 @@ class TTXCausalConv1dFunction(MojoCausalConv1dFunction):
     def backward(
         ctx,
         dy: torch.Tensor,
-        dht: Optional[torch.Tensor],
+        dht: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, None, None, None]:
         x, weight, bias, residual, initial_state = ctx.saved_tensors
 

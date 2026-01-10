@@ -1,7 +1,5 @@
 from mojo_opset.utils.platform import get_platform
 
-from .ref import *
-
 platform = get_platform()
 
 _SUPPORT_TTX_PLATFROM = ["npu"]
