@@ -6,6 +6,7 @@ import torch
 
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
+from mojo_opset.core import MojoQuest, MojoPagedPrefillBlockSparseAttention
 from mojo_opset.core import MojoSdpa
 
 
@@ -128,6 +129,75 @@ class RefPagedDecodeGQA(MojoPagedDecodeGQA):
         attn = torch.softmax(attn, dim=-1, dtype=torch.float32).to(q.dtype)
         out = torch.einsum("bhk,bkhd->bhd", attn, v_ref)
         return out
+
+
+class RefQuest(MojoQuest):
+
+    def forward(self, curr_query_seg, mins, maxs, top_k_page):
+
+        # [num_heads, q_len, 1, head_size] * [num_heads, 1, num_pages, head_dim]
+
+        q_min_k = curr_query_seg.unsqueeze(-2) * mins.unsqueeze(-3)
+        q_max_k = curr_query_seg.unsqueeze(-2) * maxs.unsqueeze(-3)
+
+        # [num_heads, q_len, num_pages]
+        page_score = torch.maximum(q_min_k, q_max_k).sum(dim=-1)
+        # [nh, ql, top_k_page]
+        _, topk_page_indices = page_score.topk(top_k_page, dim=-1)
+
+        return topk_page_indices
+
+
+class RefPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
+
+    def forward(
+        self,
+        curr_query_seg,
+        curr_seg_causal,
+        key,
+        value,
+        topk_page_indices,
+        q_chunk_size,
+        num_pages,
+        pad_len,
+    ):
+        q_head_num, curr_seg_size, head_size = curr_query_seg.shape
+        page_size = self.page_size
+        top_k_page = topk_page_indices.shape[-1]
+
+        # [nh, ql, topk_page, page_size]
+        topk_token_indices = (topk_page_indices * page_size).unsqueeze(-1).repeat(1, 1, 1, page_size) + torch.arange(
+            page_size, device=topk_page_indices.device
+        )
+        topk_token_indices = topk_token_indices.reshape(q_head_num, curr_seg_size, top_k_page * page_size)
+
+        pad_indices = num_pages * page_size + torch.arange(pad_len, device=topk_token_indices.device)
+        # [nh, ql, pad_len]
+        pad_indices = pad_indices.expand(q_head_num, curr_seg_size, -1)
+        # [nh, ql, topk_page * page_size + pad_len]
+        topk_token_indices = torch.cat([topk_token_indices, pad_indices], dim=-1)
+        q_head_num, curr_seg_size, head_size = curr_query_seg.shape
+        # [nh, q_seg_size, kv_seq_length]
+        curr_seg_score = torch.bmm(curr_query_seg, key.transpose(-2, -1))
+        curr_seg_score = curr_seg_score / math.sqrt(head_size)
+
+        # [nh, q_seg_size, kv_seq_length]
+        curr_seg_mask = torch.zeros_like(curr_seg_score, dtype=torch.bool)
+        curr_seg_mask.scatter_(dim=-1, index=topk_token_indices, value=True)
+        # curr_seg_causal = torch.tril(torch.ones((q_head_num, curr_seg_size, curr_seg_size), dtype= torch.bool, device=curr_seg_mask.device))
+        # print(f"{curr_seg_mask.shape=} {q_seg_start=} {q_seg_end=}", flush=True)
+        curr_seg_mask[:, :, -q_chunk_size:] = curr_seg_causal
+
+        curr_seg_score = curr_seg_score.masked_fill(~curr_seg_mask, torch.finfo(curr_seg_score.dtype).min)
+        curr_seg_score = torch.softmax(curr_seg_score, -1, dtype=torch.float32).to(dtype=torch.bfloat16)
+        # [nh, q_seg_size, head_size]
+        curr_seg_output = (
+            torch.bmm(curr_seg_score, value)
+            .permute(1, 0, 2)
+            .reshape(curr_seg_size, q_head_num * head_size)
+            .to(dtype=torch.bfloat16)
+        )
+        return curr_seg_output
 
 
 class RefSdpa(MojoSdpa):

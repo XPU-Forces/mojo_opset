@@ -159,6 +159,57 @@ class MojoPagedPrefillGQA(MojoOperator):
         raise NotImplementedError
 
 
+class MojoQuest(MojoOperator):
+    """
+    Paged Quest indexing operator for LLM Prefill.
+    """
+
+    def __init__(
+        self,
+        op_name: str = "",
+        layer_idx: int = 0,
+    ):
+        super().__init__(op_name, layer_idx)
+
+    def forward(self, curr_query_seg, mins, maxs, top_k_page):
+        raise NotImplementedError("MojoPagedPrefillQuest forward not implemented")
+
+
+class MojoPagedPrefillBlockSparseAttention(MojoOperator):
+    """
+    Paged Block Sparse Attention operator for LLM Prefill.
+    """
+
+    def __init__(
+        self,
+        causal_mask: Optional[torch.Tensor],
+        page_size: int,
+        q_seg_size: int,
+        topk_ratio: float,
+        op_name: str = "",
+        layer_idx: int = 0,
+    ):
+        super().__init__(op_name, layer_idx)
+        self.causal_mask = causal_mask
+        self.page_size = page_size
+        self.q_seg_size = q_seg_size
+        self.topk_ratio = topk_ratio
+
+    def forward(
+        self,
+        curr_query_seg,
+        curr_seg_causal,
+        key,
+        value,
+        topk_page_indices,
+        whole_causal,
+        q_chunk_size,
+        num_pages,
+        pad_len,
+    ):
+        raise NotImplementedError("MojoPagedPrefillBlockSparseAttention forward not implemented")
+
+
 class MojoDecodeMLA(MojoOperator):
     pass
 
