@@ -40,7 +40,7 @@ class TTXCausalConv1dFunction(MojoCausalConv1dFunction):
 
     @staticmethod
     @input_guard(make_contiguous=True, auto_to_device=True)
-    def backward(ctx, dy: torch.Tensor, dht: Optional[torch.Tensor]):
+    def backward(ctx, dy: torch.Tensor, dht: Optional[torch.Tensor] = None):
         x, weight, bias, residual, initial_state = ctx.saved_tensors
 
         dx, dw, db, dr, dh0 = causal_conv1d_bwd(
