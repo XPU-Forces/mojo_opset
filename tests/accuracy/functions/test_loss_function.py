@@ -1,10 +1,10 @@
 import pytest
 import torch
 
+from tests.utils import MockFunctionCtx
+from tests.utils import assert_close
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
-from tests.utils import assert_close
-from tests.utils import MockFunctionCtx
 
 from mojo_opset import MojoFusedLinearCrossEntropyFunction
 
@@ -66,7 +66,7 @@ def test_fused_ce_forward_backward_diff(
     )
 
     ctx_ref = MockFunctionCtx()
-    output_ref = MojoFusedLinearCrossEntropyFunction._registry.get("ref").forward(
+    output_ref = MojoFusedLinearCrossEntropyFunction._registry.get("torch").forward(
         ctx_ref,
         input_tensor,
         weight,
@@ -103,7 +103,7 @@ def test_fused_ce_forward_backward_diff(
         grad_z_loss,
     )
 
-    grad_ref = MojoFusedLinearCrossEntropyFunction._registry.get("ref").backward(
+    grad_ref = MojoFusedLinearCrossEntropyFunction._registry.get("torch").backward(
         ctx_ref,
         grad_output,
         grad_z_loss,
