@@ -1,7 +1,11 @@
-from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_bwd
-from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_fwd
+from typing import Optional
+
+import torch
+
 from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_1d_bwd
 from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_1d_fwd
+from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_bwd
+from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_fwd
 from mojo_opset.backends.ttx.kernels.npu.fused_linear_cross_entropy import amp_custom_bwd
 from mojo_opset.backends.ttx.kernels.npu.fused_linear_cross_entropy import amp_custom_fwd
 from mojo_opset.core import MojoFusedLinearCrossEntropyFunction
@@ -12,43 +16,23 @@ class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
     @amp_custom_fwd
     def forward(
         ctx,
-        _input,
-        weight,
-        target,
-        bias=None,
-        ce_weight=None,
-        ignore_index=-100,
-        lse_square_scale=0.0,
-        label_smoothing=0.0,
-        reduction="mean",
-        softcap=None,
+        input_tensor: torch.Tensor,
+        weight: torch.Tensor,
+        target: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+        ce_weight: Optional[torch.Tensor] = None,
+        ignore_index: int = -100,
+        lse_square_scale: float = 0.0,
+        label_smoothing: float = 0.0,
+        reduction: str = "mean",
+        softcap: Optional[float] = None,
         return_z_loss: bool = False,
-        accum_dtype=None,
-    ):
-        """
-        Fusing the last linear layer with cross-entropy loss
-            Reference: https://github.com/mgmalek/efficient_cross_entropy
-
-        Handle the forward and backward pass of the final linear layer via cross-entropy loss by avoiding
-        the materialization of the large logits tensor. Since Cross Entropy Loss is the last layer, we can
-        compute the gradient at the forward pass. By doing so, we don't have to store the _input and target
-        for the backward pass.
-
-        _input: (B*T, H) where B is batch size, T is sequence length, H is hidden dimension.
-        target: (B*T) where each value is in [0, V-1]
-        weight: (V, H) where V is the number of classes
-        bias: (V) where V is the number of classes
-        ce_weight: a manual rescaling weight given to each class. If given, has to be a Tensor of size V and floating point dtype
-        ignore_index: the index to ignore in the target
-        label_smoothing (float): The amount of smoothing when computing the loss, where 0.0 means no smoothing.
-        reduction: reduction to apply
-        accum_dtype (torch.dtype): the dtype of intermediate result buffers for weight and bias gradient accumulations.
-            Recommended to set `accum_dtype` to higher precision, e.g. `torch.float32`, if the training is unstable with original dtype. Default: `None`, performing accumulations in original dtype
-        """
+        accum_dtype: Optional[torch.dtype] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         # downcast to dtype and store for backward
         if reduction == "none":
             loss, z_loss = fused_linear_cross_entropy_1d_fwd(
-                _input=_input,
+                _input=input_tensor,
                 weight=weight,
                 target=target,
                 bias=bias,
@@ -60,7 +44,7 @@ class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
                 return_z_loss=return_z_loss,
             )
             ctx.save_for_backward(
-                _input.detach(),
+                input_tensor.detach(),
                 weight.detach() if weight is not None else None,
                 bias.detach() if bias is not None else None,
             )
@@ -76,7 +60,7 @@ class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
 
         else:
             loss, z_loss, grad_input, grad_weight, grad_bias = fused_linear_cross_entropy_fwd(
-                _input=_input,
+                _input=input_tensor,
                 weight=weight,
                 target=target,
                 bias=bias,
@@ -100,18 +84,22 @@ class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
         if return_z_loss:
             return loss, z_loss
         else:
-            return loss
+            return loss, None
 
     @staticmethod
     @amp_custom_bwd
-    def backward(ctx, grad_output, grad_output2=None):
+    def backward(
+        ctx,
+        grad_loss: torch.Tensor,
+        grad_z_loss: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, None, torch.Tensor, None, None, None, None, None, None]:
         if ctx.return_z_loss:
-            del grad_output2  # z_loss is only for logging
+            del grad_z_loss  # z_loss is only for logging
 
         if ctx.reduction == "none":
             _input, weight, bias = ctx.saved_tensors
             grad_input, grad_weight, grad_bias = fused_linear_cross_entropy_1d_bwd(
-                grad_output=grad_output,
+                grad_output=grad_loss,
                 _input=_input,
                 weight=weight,
                 target=ctx.target,
@@ -126,20 +114,7 @@ class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
         else:
             (grad_input, grad_weight, grad_bias) = ctx.saved_tensors
             grad_input, grad_weight, grad_bias = fused_linear_cross_entropy_bwd(
-                grad_output, grad_input, grad_weight, grad_bias
+                grad_loss, grad_input, grad_weight, grad_bias
             )
 
-        return (
-            grad_input,
-            grad_weight,
-            None,
-            grad_bias,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        return grad_input, grad_weight, None, grad_bias, None, None, None, None, None, None, None, None

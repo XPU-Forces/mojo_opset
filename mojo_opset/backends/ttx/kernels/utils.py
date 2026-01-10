@@ -196,13 +196,7 @@ def prepare_chunk_indices(cu_seqlens: torch.LongTensor, chunk_size: int) -> torc
     lens = triton.cdiv(prepare_lens(cu_seqlens), chunk_size)
     total = lens.sum()
     flat = torch.arange(total, device=cu_seqlens.device)
-    seq_ids = torch.repeat_interleave(
-        torch.arange(lens.numel(), device=cu_seqlens.device),
-        lens
-    )
+    seq_ids = torch.repeat_interleave(torch.arange(lens.numel(), device=cu_seqlens.device), lens)
     offsets = torch.cumsum(lens, 0) - lens
     indices = flat - offsets[seq_ids]
-    return torch.stack(
-        [indices.eq(0).cumsum(0) - 1, indices],
-        dim=1
-    )
+    return torch.stack([indices.eq(0).cumsum(0) - 1, indices], dim=1)

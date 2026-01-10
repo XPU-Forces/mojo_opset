@@ -134,7 +134,6 @@ def _cross_entropy_kernel(
     lse = m + tl.log(d)
 
     if OVERWRITE_GRAD_LOGITS:
-
         # [Online Softmax] Second pass: compute gradients
         # For 'mean' reduction, gradients are normalized by number of non-ignored elements (N)
         # dx_y = (softmax(x_y) - 1) / N
@@ -212,7 +211,6 @@ def _cross_entropy_kernel(
             tl.store(X_ptr + X_offsets, X_block, mask=X_offsets < n_cols)
 
     if not IS_BACKWARD:
-
         loss_ptr += program_id * loss_stride
         if RETURN_Z_LOSS:
             z_loss_ptr += program_id * loss_stride
@@ -505,9 +503,9 @@ def fused_linear_cross_entropy_fwd_impl(
     ce_weight_sum = 0.0
     if ce_weight is not None:
         assert ce_weight.shape[0] == V, f"If given, weight has to be a Tensor of size V. Got: {ce_weight.shape}"
-        assert torch.is_floating_point(
-            ce_weight
-        ), f"If given, weight has to be a Tensor of floating point dtype. Got: {ce_weight.dtype}"
+        assert torch.is_floating_point(ce_weight), (
+            f"If given, weight has to be a Tensor of floating point dtype. Got: {ce_weight.dtype}"
+        )
         total_sum_non_ignore_ce_weight = (
             torch.gather(ce_weight, dim=0, index=target.masked_select(target_mask)).sum().item()
         )
@@ -717,9 +715,9 @@ def fused_linear_cross_entropy_1d_fwd_impl(
     ce_weight_sum = 0.0
     if ce_weight is not None:
         assert ce_weight.shape[0] == V, f"If given, weight has to be a Tensor of size V. Got: {ce_weight.shape}"
-        assert torch.is_floating_point(
-            ce_weight
-        ), f"If given, weight has to be a Tensor of floating point dtype. Got: {ce_weight.dtype}"
+        assert torch.is_floating_point(ce_weight), (
+            f"If given, weight has to be a Tensor of floating point dtype. Got: {ce_weight.dtype}"
+        )
         total_sum_non_ignore_ce_weight = (
             torch.gather(ce_weight, dim=0, index=target.masked_select(target_mask)).sum().item()
         )
@@ -847,9 +845,9 @@ def fused_linear_cross_entropy_1d_bwd_impl(
     ce_weight_sum = 0.0
     if ce_weight is not None:
         assert ce_weight.shape[0] == V, f"If given, weight has to be a Tensor of size V. Got: {ce_weight.shape}"
-        assert torch.is_floating_point(
-            ce_weight
-        ), f"If given, weight has to be a Tensor of floating point dtype. Got: {ce_weight.dtype}"
+        assert torch.is_floating_point(ce_weight), (
+            f"If given, weight has to be a Tensor of floating point dtype. Got: {ce_weight.dtype}"
+        )
         total_sum_non_ignore_ce_weight = (
             torch.gather(ce_weight, dim=0, index=target.masked_select(target_mask)).sum().item()
         )

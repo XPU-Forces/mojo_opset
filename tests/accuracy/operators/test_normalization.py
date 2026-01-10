@@ -40,7 +40,7 @@ def test_rmsnorm(x, weight, eps):
         weight=weight,
     ).to(x.device)
 
-    rmsnorm_ref = MojoNorm._registry.get("ref")(
+    rmsnorm_ref = MojoNorm._registry.get("torch")(
         eps=eps,
         norm_type="rmsnorm",
         weight=weight,
@@ -79,7 +79,7 @@ def test_layernorm(x, weight, beta, eps):
         beta=beta,
     ).to(x.device)
 
-    layernorm_ref = MojoNorm._registry.get("ref")(
+    layernorm_ref = MojoNorm._registry.get("torch")(
         eps=eps,
         norm_type="layernorm",
         weight=weight,
@@ -126,7 +126,7 @@ def test_residual_add_norm(x, residual, weight, beta, norm_type, norm_pos, eps):
         norm_pos=norm_pos,
         norm_type=norm_type,
     )
-    add_norm_ref = MojoResidualAddNorm._registry.get("ref")(
+    add_norm_ref = MojoResidualAddNorm._registry.get("torch")(
         weight=weight,
         beta=beta,
         eps=eps,

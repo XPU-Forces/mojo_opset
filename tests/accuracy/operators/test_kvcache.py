@@ -79,7 +79,7 @@ def test_paged_update_kernel(block_size, batch_size, num_heads, head_dim, contex
     k_cache = k_cache_ref.clone()
     v_cache = v_cache_ref.clone()
 
-    store_paged_kv_ref = MojoStorePagedKVCache._registry.get("ref")(kv_layout="NPU_ND", block_size=block_size)
+    store_paged_kv_ref = MojoStorePagedKVCache._registry.get("torch")(kv_layout="NPU_ND", block_size=block_size)
     store_paged_kv = MojoStorePagedKVCache(kv_layout="NPU_ND", block_size=block_size)
 
     store_paged_kv_ref(

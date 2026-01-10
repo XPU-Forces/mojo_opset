@@ -23,9 +23,8 @@ class MojoOperator(ABC, torch.nn.Module):
 
             # We place a registry for every core mojo op class.
             cls._registry = MojoBackendRegistry(cls)
-        else:
-            # Register the child class to the core mojo op class's registry.
-            cls._registry.register(cls)
+
+        cls._registry.register(cls)
 
     def __new__(cls, *args, **kwargs):
         is_mojo_core_op_cls = MojoOperator in cls.__bases__
@@ -53,7 +52,7 @@ class MojoOperator(ABC, torch.nn.Module):
 
     @abstractmethod
     def forward(self, *args, **kwargs) -> Tuple[Any]:
-        pass
+        raise NotImplementedError
 
     def forward_diff_with(
         self,
