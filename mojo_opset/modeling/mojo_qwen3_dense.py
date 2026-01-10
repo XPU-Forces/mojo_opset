@@ -11,6 +11,7 @@ from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoRoPE
 from mojo_opset import MojoSilu
+from mojo_opset import MojoStorePagedKVCache
 
 
 class Qwen3Config:
@@ -71,6 +72,7 @@ class PagedDummyCache:
 
         self.free_blocks = torch.arange(total_blocks, device=self.device, dtype=torch.long)
         self.num_free_blocks = total_blocks
+        self.store_paged_kv = MojoStorePagedKVCache(kv_layout="NPU_ND", block_size=block_size)
 
     def _allocate_blocks(self, num_blocks: int):
         if num_blocks > self.num_free_blocks:
@@ -82,8 +84,10 @@ class PagedDummyCache:
     def update(self, key_states: torch.Tensor, value_states: torch.Tensor, layer_idx: int):
         batch_size, _, new_seq_len, _ = key_states.shape
 
+        current_seq_lens = self.seq_lens[layer_idx]
+
         for i in range(batch_size):
-            context_len = self.seq_lens[layer_idx, i].item()
+            context_len = current_seq_lens[i].item()
 
             old_num_blocks = (context_len + self.block_size - 1) // self.block_size
             new_total_len = context_len + new_seq_len
@@ -94,17 +98,15 @@ class PagedDummyCache:
                 newly_allocated = self._allocate_blocks(num_to_allocate)
                 self.block_tables[layer_idx, i, old_num_blocks:new_num_blocks] = newly_allocated
 
-            for j in range(new_seq_len):
-                logical_pos = context_len + j
-                block_idx_in_table = logical_pos // self.block_size
-                pos_in_block = logical_pos % self.block_size
-
-                physical_block_id = self.block_tables[layer_idx, i, block_idx_in_table]
-
-                self.k_cache[physical_block_id, :, pos_in_block, :] = key_states[i, :, j, :]
-                self.v_cache[physical_block_id, :, pos_in_block, :] = value_states[i, :, j, :]
-
-            self.seq_lens[layer_idx, i] = new_total_len
+        self.store_paged_kv(
+            key_states,
+            value_states,
+            self.k_cache,
+            self.v_cache,
+            self.block_tables[layer_idx],
+            current_seq_lens,
+        )
+        self.seq_lens[layer_idx] += new_seq_len
 
     def get_kv_for_prefill(self, layer_idx: int):
         return None, None
@@ -182,10 +184,16 @@ class Qwen3Attention(nn.Module):
         self.o_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.hidden_size, self.num_heads * self.head_dim)))
 
         self.q_norm = MojoNorm(
-            eps=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(self.head_dim)), is_varlen=False
+            eps=config.rms_norm_eps,
+            norm_type="rmsnorm",
+            weight=nn.Parameter(torch.ones(self.head_dim)),
+            is_varlen=False,
         )
         self.k_norm = MojoNorm(
-            eps=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(self.head_dim)), is_varlen=False
+            eps=config.rms_norm_eps,
+            norm_type="rmsnorm",
+            weight=nn.Parameter(torch.ones(self.head_dim)),
+            is_varlen=False,
         )
         self.rope = MojoRoPE(rotary_offset=0, interleaved=False, is_varlen=False, op_name="rope")
         self.attn_prefill = MojoPagedPrefillGQA(op_name="attn_prefill", layer_idx=layer_idx)
@@ -277,10 +285,10 @@ class Qwen3DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
 
         self.input_layernorm = MojoNorm(
-            eps=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(config.hidden_size))
+            eps=config.rms_norm_eps, norm_type="rmsnorm", weight=nn.Parameter(torch.ones(config.hidden_size))
         )
         self.post_attention_layernorm = MojoNorm(
-            eps=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(config.hidden_size))
+            eps=config.rms_norm_eps, norm_type="rmsnorm", weight=nn.Parameter(torch.ones(config.hidden_size))
         )
 
     def forward(
@@ -319,7 +327,7 @@ class Qwen3Model(nn.Module):
         self.layers = nn.ModuleList([Qwen3DecoderLayer(config, i) for i in range(config.num_hidden_layers)])
 
         self.norm = MojoNorm(
-            eps=config.rms_norm_eps, norm_type="rmsnorm", gamma=nn.Parameter(torch.ones(config.hidden_size))
+            eps=config.rms_norm_eps, norm_type="rmsnorm", weight=nn.Parameter(torch.ones(config.hidden_size))
         )
         self.rotary = Qwen3RotaryEmbedding(config)
 

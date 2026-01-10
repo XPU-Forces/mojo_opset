@@ -10,6 +10,7 @@ from .gelu import gelu_bwd_impl
 from .gelu import gelu_fwd_impl
 from .group_gemm import k_grouped_matmul_impl
 from .group_gemm import m_grouped_matmul_impl
+from .kv_cache import store_paged_kv_impl
 from .rmsnorm import rmsnorm_bwd_impl
 from .rmsnorm import rmsnorm_fwd_impl
 from .rmsnorm import rmsnorm_infer_impl
@@ -48,4 +49,5 @@ __all__ = [
     "diffusion_attention_bwd_impl",
     "m_grouped_matmul_impl",
     "k_grouped_matmul_impl",
+    "store_paged_kv_impl",
 ]

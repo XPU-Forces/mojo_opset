@@ -1,7 +1,6 @@
 #!/bin/bash
 
 export ASCEND_RT_VISIBLE_DEVICES=0
-export MOJO_BACKEND=ref
 
 # Determine the project root directory (parent of examples/)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
