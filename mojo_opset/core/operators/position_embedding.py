@@ -1,4 +1,3 @@
-from typing import Any
 from typing import Optional
 from typing import Tuple
 
@@ -8,21 +7,6 @@ from ..operator import MojoOperator
 
 
 class MojoRoPE(MojoOperator):
-    """
-    Common parameter definitions for Rotary Position Embedding (RoPE) operator.
-
-    Init parameters:
-    - rotary_offset (int): Rotary position offset, default 0.
-    - interleaved (bool): Whether to use interleaved mode, default False.
-    - dynamic_ntk (bool): Whether to use dynamic NTK scaling, default False.
-    - max_seq_len (int|None): Maximum sequence length, optional.
-    - is_varlen (bool): When True, prioritize TND (continuous token perspective) processing; when False, use BSND; default True.
-    - op_name (str): Operator name placeholder.
-    - layer_idx (int): Layer index placeholder.
-
-    Description: Only covers common parameters and lightweight validation; forward computation body is placeholder, does not include backend or quantization implementation.
-    """
-
     def __init__(
         self,
         rotary_offset: int = 0,
@@ -33,6 +17,26 @@ class MojoRoPE(MojoOperator):
         op_name: str = "",
         layer_idx: int = 0,
     ):
+        """
+        Initialize rotary position embedding configuration.
+
+        Args:
+            rotary_offset (int, default=0): Non-negative rotation offset applied to positions.
+            interleaved (bool, default=False): If True, use interleaved head layout when applying rotary.
+            dynamic_ntk (bool, default=False): Enable dynamic NTK scaling to extend effective context length.
+            max_seq_len (Optional[int], default=None): Positive max sequence length for precomputation; or None.
+            is_varlen (bool, default=True): Prefer token-first TND layout when True; else use BSND.
+            op_name (str, default=""): Operator name metadata.
+            layer_idx (int, default=0): Layer index metadata.
+
+        Raises:
+            ValueError: If `rotary_offset` < 0 or `max_seq_len` <= 0 when provided.
+            TypeError: If `interleaved`, `dynamic_ntk`, or `is_varlen` are not bools.
+
+        Notes:
+            This initializer performs light validation and stores configuration flags; the
+            actual rotary application happens in the forward path.
+        """
         super().__init__(op_name, layer_idx)
 
         if not isinstance(rotary_offset, int) or rotary_offset < 0:
@@ -54,14 +58,40 @@ class MojoRoPE(MojoOperator):
 
     def forward(
         self,
-        q: torch.Tensor,  # [BNSD]
-        k: torch.Tensor,  # [BNSD]
+        q: torch.Tensor,
+        k: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
         position_ids: Optional[torch.Tensor] = None,
         cum_sum_query_len: Optional[torch.Tensor] = None,
-    ) -> Tuple[Any]:
-        raise NotImplementedError
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply rotary position embeddings (RoPE) to queries and keys.
+
+        Args:
+            q (torch.Tensor): Query tensor; last dimension must be even to allow rotation.
+            k (torch.Tensor): Key tensor; same shape as `q`.
+            cos (torch.Tensor): Precomputed cosine tensor, broadcastable to `q`/`k`.
+            sin (torch.Tensor): Precomputed sine tensor, broadcastable to `q`/`k`.
+            position_ids (Optional[torch.Tensor], default=None): Reserved; not used here.
+            cum_sum_query_len (Optional[torch.Tensor], default=None): Reserved; not used here.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: `(q_rot, k_rot)` with the same shape/dtype as inputs.
+
+        Notes:
+            Uses standard RoPE: `x_rot = x * cos + rotate_half(x) * sin`, where `rotate_half`
+            swaps the two halves of the last dimension with a sign flip.
+        """
+
+        def rotate_half(x):
+            x1 = x[..., : x.shape[-1] // 2]
+            x2 = x[..., x.shape[-1] // 2 :]
+            return torch.cat((-x2, x1), dim=-1)
+
+        q_rot = q * cos + rotate_half(q) * sin
+        k_rot = k * cos + rotate_half(k) * sin
+        return q_rot, k_rot
 
 
 class MojoRoPEStoreKV(MojoOperator):

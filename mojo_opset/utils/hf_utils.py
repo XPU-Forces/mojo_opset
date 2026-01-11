@@ -55,42 +55,44 @@ def load_weights_direct(model_path: str, torch_model: nn.Module) -> None:
             state_dict = torch.load(f, map_location="cpu")
 
         for key, tensor in state_dict.items():
-            # HF keys often start with "model." or are direct. 
+            # HF keys often start with "model." or are direct.
             # Our torch_model has "model." prefix for the transformer body, and "lm_head" outside.
             # If the checkpoint keys match exactly, we are good.
             # Check for potential prefix mismatches if necessary.
-            
+
             if key in expected_keys:
                 # Check shape
                 target_shape = model_state_dict[key].shape
                 if target_shape != tensor.shape:
-                    print(f"    WARNING: Shape mismatch for {key}. Expected {target_shape}, got {tensor.shape}. Skipping.")
+                    print(
+                        f"    WARNING: Shape mismatch for {key}. Expected {target_shape}, got {tensor.shape}. Skipping."
+                    )
                     continue
-                
+
                 with torch.no_grad():
                     model_state_dict[key].copy_(tensor)
                 loaded_keys.add(key)
             else:
                 unexpected_keys.add(key)
-        
+
         # Free memory
         del state_dict
         torch.npu.empty_cache() if torch.npu.is_available() else None
 
     # 4. Report
     missing_keys = expected_keys - loaded_keys
-    
+
     print("\nWeight Loading Report:")
     print(f"  Total Expected Keys: {len(expected_keys)}")
     print(f"  Successfully Loaded: {len(loaded_keys)}")
     print(f"  Missing Keys: {len(missing_keys)}")
     print(f"  Unexpected Keys: {len(unexpected_keys)}")
-    
+
     if missing_keys:
         print("\n  Missing Keys:")
         for k in sorted(list(missing_keys)):
             print(f"    - {k}")
-            
+
     if unexpected_keys:
         print("\n  Unexpected Keys:")
         for k in sorted(list(unexpected_keys)):
@@ -111,7 +113,7 @@ def build_model_from_hf(
         local_files_only=local_files_only,
         trust_remote_code=trust_remote_code,
     )
-    
+
     # Check if the model class supports from_pretrained (standard HF models)
     if hasattr(model_class, "from_pretrained"):
         torch_model = model_class.from_pretrained(
@@ -127,15 +129,12 @@ def build_model_from_hf(
         # Use no_init_weights to skip random initialization
         with no_init_weights():
             torch_model = model_class(hf_config)
-            
-        # Move to device directly. 
+
+        # Move to device directly.
         # NOT using to_empty() because it destroys initialized buffers (like RoPE inv_freq),
         # causing garbage output. .to() preserves buffers while moving parameters.
         torch_model = torch_model.to(torch.bfloat16).to(device).eval()
-        
+
         load_weights_direct(model_id_or_path, torch_model)
-        
+
         return torch_model
-
-
-

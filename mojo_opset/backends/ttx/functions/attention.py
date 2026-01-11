@@ -1,3 +1,5 @@
+import torch
+
 from mojo_opset.backends.ttx.kernels import diffusion_attention_bwd
 from mojo_opset.backends.ttx.kernels import diffusion_attention_fwd
 from mojo_opset.core import MojoDiffusionAttentionFunction
@@ -5,7 +7,15 @@ from mojo_opset.core import MojoDiffusionAttentionFunction
 
 class TTXDiffusionAttentionFunction(MojoDiffusionAttentionFunction):
     @staticmethod
-    def forward(ctx, query, key, value, mask, scale=1.0, enable_gqa=False):
+    def forward(
+        ctx,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        mask: torch.Tensor,
+        scale: float = 1.0,
+        enable_gqa: bool = False,
+    ) -> torch.Tensor:
         ctx.scale = scale
         ctx.enable_gqa = enable_gqa
         output, output_fp32, lse = diffusion_attention_fwd(
@@ -20,11 +30,14 @@ class TTXDiffusionAttentionFunction(MojoDiffusionAttentionFunction):
         return output
 
     @staticmethod
-    def backward(ctx, do):
+    def backward(
+        ctx,
+        grad_output: torch.Tensor,
+    ) -> torch.Tensor:
         query, key, value, mask, output_fp32, lse = ctx.saved_tensors
         dq, dk, dv = diffusion_attention_bwd(
             output_fp32,
-            do,
+            grad_output,
             query,
             key,
             value,

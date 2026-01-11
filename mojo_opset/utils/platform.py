@@ -77,6 +77,7 @@ def get_impl_by_platform():
 
     except (ImportError, IndexError) as e:
         import traceback
+
         logger.error(f"Failed to discover operators: {traceback.format_exc()}")
         return {}
 

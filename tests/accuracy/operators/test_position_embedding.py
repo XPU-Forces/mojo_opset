@@ -20,7 +20,7 @@ from mojo_opset import MojoRoPE
 @bypass_not_implemented
 def test_pos_emb(q, k):
     rope = MojoRoPE(is_varlen=False)
-    rope_ref = MojoRoPE._registry.get("ref")(is_varlen=False)
+    rope_ref = MojoRoPE._registry.get("torch")(is_varlen=False)
 
     # Transpose q and k to mock the memory layout transformation used in the real inference framework.
 

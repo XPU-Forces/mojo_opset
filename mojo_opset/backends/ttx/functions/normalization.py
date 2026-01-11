@@ -1,3 +1,5 @@
+import torch
+
 from mojo_opset.backends.ttx.kernels import rmsnorm_bwd
 from mojo_opset.backends.ttx.kernels import rmsnorm_fwd
 from mojo_opset.core import MojoRMSNormFunction
@@ -13,11 +15,12 @@ class TTXRMSNormFunction(MojoRMSNormFunction):
     """
 
     @staticmethod
-    def forward(ctx, X, W, eps):
-        """
-        X: (B, T, H) or (BxT, H)
-        W: (H,)
-        """
+    def forward(
+        ctx,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+    ) -> torch.Tensor:
         # FIXME: Currently, MojoNormFunction base class does not define fields like 'offset', so they are hardcoded here temporarily.
         offset = 0.0
         casting_mode = "llama"
@@ -25,31 +28,31 @@ class TTXRMSNormFunction(MojoRMSNormFunction):
         casting_mode_int = str_to_casting_mode[casting_mode]
 
         Y, RSTD = rmsnorm_fwd(
-            X,
-            W,
+            input,
+            weight,
             eps,
             offset,
             casting_mode_int,
         )
 
-        ctx.save_for_backward(X, W, RSTD)
+        ctx.save_for_backward(input, weight, RSTD)
 
         ctx.offset = offset
 
         ctx.casting_mode_int = casting_mode_int
-        ctx.X_dtype = X.dtype
+        ctx.X_dtype = input.dtype
 
         return Y
 
     @staticmethod
-    def backward(ctx, dY):
-        """
-        Y: (B, T, H) or (BxT, H)
-        """
+    def backward(
+        ctx,
+        grad_output: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, None]:
         X, W, RSTD = ctx.saved_tensors
 
         dX, dW = rmsnorm_bwd(
-            dY=dY,
+            dY=grad_output,
             X=X,
             W=W,
             RSTD=RSTD,

@@ -83,9 +83,9 @@ def test_qwen3_dense_patch():
 
     native_prefill_out, native_decode_out = run_single_pass(config, device, dtype, native_model_data)
 
-    from mojo_opset.mojo_monkey_patch import apply_mojo_op_to_qwen3
+    from mojo_opset.utils.patching import apply_mojo_to_qwen3
 
-    apply_mojo_op_to_qwen3()
+    apply_mojo_to_qwen3()
 
     patched_decoder_layer = torch_qwen3_dense.Qwen3DecoderLayer(config, 0).to(device).to(dtype).eval()
     patched_decoder_layer.load_state_dict(native_decoder_layer.state_dict())

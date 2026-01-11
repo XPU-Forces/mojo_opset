@@ -9,7 +9,7 @@ from .operator import MojoOperator
 
 logger = get_logger(__name__)
 
-BACKEND_PRIORITY_LIST = ["ttx", "ref", "analysis"]
+BACKEND_PRIORITY_LIST = ["ttx", "torch"]
 
 
 class MojoBackendRegistry:
@@ -31,6 +31,13 @@ class MojoBackendRegistry:
             f"contain {self._operator_name} in its name."
         )
         impl_backend_name = cls.__name__[:idx].lower()
+
+        # Hard code for some special cases
+        if impl_backend_name == "mojo":
+            impl_backend_name = "torch"
+        elif impl_backend_name == "analysis":
+            return
+
         assert impl_backend_name in BACKEND_PRIORITY_LIST, (
             f"Operator {cls.__name__} backend[{impl_backend_name}] is not supported, "
             f"please choose from {BACKEND_PRIORITY_LIST}."

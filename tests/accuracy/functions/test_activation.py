@@ -17,10 +17,10 @@ def test_silu_forward_backward_diff(monkeypatch, x):
     y = MojoSiluFunction.forward(ctx, x)
 
     ctx_ref = MockFunctionCtx()
-    y_ref = MojoSiluFunction._registry.get("ref").forward(ctx_ref, x)
+    y_ref = MojoSiluFunction._registry.get("torch").forward(ctx_ref, x)
     assert_close(y, y_ref)
 
     dy = torch.rand_like(y)
     dx = MojoSiluFunction.backward(ctx, dy)
-    dx_ref = MojoSiluFunction._registry.get("ref").backward(ctx_ref, dy)
+    dx_ref = MojoSiluFunction._registry.get("torch").backward(ctx_ref, dy)
     assert_close(dx, dx_ref)

@@ -1,7 +1,11 @@
 import pytest
 import torch
 
-from tests.utils import auto_switch_platform, bypass_not_implemented, MockFunctionCtx, assert_close
+from tests.utils import MockFunctionCtx
+from tests.utils import assert_close
+from tests.utils import auto_switch_platform
+from tests.utils import bypass_not_implemented
+
 from mojo_opset import MojoRoPEFunction
 
 
@@ -17,7 +21,6 @@ from mojo_opset import MojoRoPEFunction
 @auto_switch_platform()
 @bypass_not_implemented
 def test_rope_forward_backward_diff(q, k):
-
     q, k = q.transpose(1, 2), k.transpose(1, 2)
 
     inv_freq = 1.0 / (10000.0 ** (torch.arange(0, q.size(-1), 2).float().to(q.device) / q.size(-1)))
@@ -32,7 +35,7 @@ def test_rope_forward_backward_diff(q, k):
     q_rot, k_rot = MojoRoPEFunction.forward(ctx, q, k, cos, sin)
 
     ctx_ref = MockFunctionCtx()
-    q_rot_ref, k_rot_ref = MojoRoPEFunction._registry.get("ref").forward(ctx_ref, q, k, cos, sin)
+    q_rot_ref, k_rot_ref = MojoRoPEFunction._registry.get("torch").forward(ctx_ref, q, k, cos, sin)
 
     assert_close(q_rot, q_rot_ref)
     assert_close(k_rot, k_rot_ref)
@@ -41,7 +44,6 @@ def test_rope_forward_backward_diff(q, k):
     grad_k_out = torch.rand_like(k_rot)
 
     grads = MojoRoPEFunction.backward(ctx, grad_q_out, grad_k_out)
-    grads_ref = MojoRoPEFunction._registry.get("ref").backward(ctx_ref, grad_q_out, grad_k_out)
+    grads_ref = MojoRoPEFunction._registry.get("torch").backward(ctx_ref, grad_q_out, grad_k_out)
 
     assert_close(grads, grads_ref)
-

@@ -182,15 +182,7 @@ if __name__ == "__main__":
         },
     )
 
-    tracer.add_event(
-        "memory",
-        "mte",
-        "X",
-        start_time + 0.3,
-        duration=0.25,
-        process_id=0,
-        thread_id=3
-    )
+    tracer.add_event("memory", "mte", "X", start_time + 0.3, duration=0.25, process_id=0, thread_id=3)
 
     tracer.add_event(
         "rms_norm",
@@ -220,15 +212,7 @@ if __name__ == "__main__":
         },
     )
 
-    tracer.add_event(
-        "memory",
-        "mte",
-        "X",
-        start_time + 0.31,
-        duration=0.25,
-        process_id=1,
-        thread_id=3
-    )
+    tracer.add_event("memory", "mte", "X", start_time + 0.31, duration=0.25, process_id=1, thread_id=3)
 
     # 保存到文件
     tracer.save_to_file("custom_process_thread_timeline.json")
