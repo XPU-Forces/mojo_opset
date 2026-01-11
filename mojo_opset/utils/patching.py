@@ -8,7 +8,7 @@ from mojo_opset import MojoRoPE
 from mojo_opset import MojoSwiGLU
 
 
-def apply_mojo_op_to_qwen3(
+def apply_mojo_to_qwen3(
     rope: bool = True,
     cross_entropy: bool = False,
     fused_linear_cross_entropy: bool = True,
