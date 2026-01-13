@@ -19,6 +19,17 @@ class MojoFunction(Function):
             from mojo_opset.core.backend_registry import MojoBackendRegistry
 
             cls._registry = MojoBackendRegistry(cls)
+
+            # Auto generate fallback dispatch backend "torch", it is registered within its-own __init_subclass__ call
+            type(
+                "Torch" + cls._registry._operator_name,
+                (cls,),
+                {
+                    "__module__": cls.__module__,
+                    "forward": cls.forward,
+                    "backward": cls.backward,
+                },
+            )
         else:
             cls._registry.register(cls)
             cls._registry.sort()
