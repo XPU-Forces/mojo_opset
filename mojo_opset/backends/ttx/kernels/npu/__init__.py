@@ -16,6 +16,8 @@ from .rope import rope_fwd_impl
 from .sdpa import sdpa_bwd_impl
 from .sdpa import sdpa_fwd_impl
 from .sdpa import sdpa_infer_impl
+
+from .block_sparse_attention import block_quest_impl
 from .block_sparse_attention import block_sparse_paged_attention_prefill_impl
 
 
@@ -45,6 +47,7 @@ __all__ = [
     "sdpa_infer_impl",
     "sdpa_fwd_impl",
     "sdpa_bwd_impl",
+    "block_quest_impl",
     "block_sparse_paged_attention_prefill_impl",
     "diffusion_attention_fwd_impl",
     "diffusion_attention_bwd_impl",

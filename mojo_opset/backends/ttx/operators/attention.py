@@ -5,7 +5,7 @@ import torch
 from mojo_opset.backends.ttx.kernels import paged_attention_decode
 from mojo_opset.backends.ttx.kernels import paged_attention_prefill
 from mojo_opset.backends.ttx.kernels import sdpa_infer
-from mojo_opset.backends.ttx.kernels.npu.quest import ttx_quest
+from mojo_opset.backends.ttx.kernels import block_quest
 from mojo_opset.backends.ttx.kernels import block_sparse_paged_attention_prefill
 
 from mojo_opset.core import MojoPagedDecodeGQA
@@ -142,6 +142,6 @@ class TTXQuest(MojoQuest):
         curr_query_seg: torch.Tensor,
         mins: torch.Tensor,
         maxs: torch.Tensor,
-        top_k_page: torch.uint8,
+        top_k_page: int,
     ):
-        return ttx_quest(curr_query_seg, mins, maxs, top_k_page)
+        return block_quest(curr_query_seg, mins, maxs, top_k_page)
