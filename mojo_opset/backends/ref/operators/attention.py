@@ -6,7 +6,7 @@ import torch
 
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
-from mojo_opset.core import MojoQuest, MojoPagedPrefillBlockSparseAttention
+from mojo_opset.core import MojoBlockQuest, MojoPagedPrefillBlockSparseAttention
 from mojo_opset.core import MojoSdpa
 
 
@@ -131,16 +131,18 @@ class RefPagedDecodeGQA(MojoPagedDecodeGQA):
         return out
 
 
-class RefQuest(MojoQuest):
+class RefBlockQuest(MojoBlockQuest):
 
     def forward(self, curr_query_seg, mins, maxs, top_k_page):
+        assert curr_query_seg.shape[1] <= self.block_q
+        curr_query_seg = curr_query_seg[:, 0]
 
-        # [num_heads, q_len, 1, head_size] * [num_heads, 1, num_pages, head_dim]
+        # [num_heads, 1, head_size] * [num_heads, num_pages, head_size]
 
-        q_min_k = curr_query_seg.unsqueeze(-2) * mins.unsqueeze(-3)
-        q_max_k = curr_query_seg.unsqueeze(-2) * maxs.unsqueeze(-3)
+        q_min_k = curr_query_seg.unsqueeze(-2) * mins
+        q_max_k = curr_query_seg.unsqueeze(-2) * maxs
 
-        # [num_heads, q_len, num_pages]
+        # [num_heads, num_pages]
         page_score = torch.maximum(q_min_k, q_max_k).sum(dim=-1)
         # [nh, ql, top_k_page]
         _, topk_page_indices = page_score.topk(top_k_page, dim=-1)
@@ -167,9 +169,10 @@ class RefPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
         top_k_page = topk_page_indices.shape[-1]
 
         # [nh, ql, topk_page, page_size]
-        topk_token_indices = (topk_page_indices * page_size).unsqueeze(-1).repeat(1, 1, 1, page_size) + torch.arange(
-            page_size, device=topk_page_indices.device
-        )
+
+        topk_token_indices = (topk_page_indices * page_size).unsqueeze(1).unsqueeze(-1).repeat(
+            1, curr_seg_size, 1, page_size
+        ) + torch.arange(page_size, device=topk_page_indices.device)
         topk_token_indices = topk_token_indices.reshape(q_head_num, curr_seg_size, top_k_page * page_size)
 
         pad_indices = num_pages * page_size + torch.arange(pad_len, device=topk_token_indices.device)

@@ -360,11 +360,11 @@ def mojo_quest(
             curr_seg_size = q_seg_end - q_seg_start
             curr_query_seg = query[:, q_seg_start:q_seg_end, :]
 
-            # ====================quest========================
+            # ====================block-wise quest========================
 
-            from mojo_opset import MojoQuest
+            from mojo_opset import MojoBlockQuest
 
-            mojo_quest_op = MojoQuest(None)
+            mojo_quest_op = MojoBlockQuest(block_q=q_seg_size, block_kv=page_size)
             topk_page_indices = mojo_quest_op(
                 curr_query_seg,
                 mins,
@@ -372,12 +372,7 @@ def mojo_quest(
                 top_k_page,
             )
 
-            # ====================使用相同page========================
-            topk_page_indices_0 = topk_page_indices[:, 0]
-            topk_page_indices = topk_page_indices_0.unsqueeze(1).repeat(1, curr_seg_size, 1)
-            # ====================使用相同page========================
-
-            # ====================quest========================
+            # ====================block-wise quest========================
             from mojo_opset import MojoPagedPrefillBlockSparseAttention
 
             block_sparse_attention = MojoPagedPrefillBlockSparseAttention(

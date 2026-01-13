@@ -79,14 +79,16 @@ def block_quest_impl(
     maxs: torch.Tensor,
     top_k_page: int,
 ):
-    num_heads, q_len, head_dim = curr_query_seg.shape
+    curr_query_seg = curr_query_seg[:, 0]
+    num_heads, head_dim = curr_query_seg.shape
+    q_len = 1
 
     assert mins.shape[0] == maxs.shape[0]
     assert mins.shape[1] == maxs.shape[1]
     num_pages = mins.shape[1]
     assert top_k_page <= num_pages
 
-    page_score = torch.zeros(num_heads, q_len, num_pages, device=mins.device, dtype=mins.dtype)
+    page_score = torch.zeros(num_heads, num_pages, device=mins.device, dtype=mins.dtype)
 
     grid = (num_heads,)
     quest_reduce_kernel[grid](
@@ -413,7 +415,6 @@ def block_sparse_paged_attention_prefill_impl(
     q_seg_size: int,
     page_size: int,
 ) -> torch.Tensor:
-    topk_page_indices = topk_page_indices[:, 0]
     # topk_page_indices = torch.sort(topk_page_indices, axis=1).values
     num_q_heads, n_topk_pages = topk_page_indices.shape
 
@@ -434,16 +435,6 @@ def block_sparse_paged_attention_prefill_impl(
 
     grid = (num_cores,)
 
-    assert (
-        curr_query_seg.device
-        == key.device
-        == value.device
-        == topk_page_indices.device
-        == o.device
-        == whole_causal_mask.device
-        == torch.device("npu:0")
-    ), f"{curr_query_seg.device=} {key.device=} {value.device=} {topk_page_indices.device=} {o.device=} {whole_causal_mask.device=}"
-    assert curr_query_seg.dtype == key.dtype == value.dtype == o.dtype == torch.float32
     assert scale == 1 / math.sqrt(head_dim)
     assert q_seg_start + q_seg_len <= q_chunk_size
     print(curr_query_seg.shape, curr_query_seg.stride())
@@ -487,7 +478,7 @@ def block_sparse_paged_attention_prefill_impl(
         head_dim,
         q_seg_size,
         page_size,
-        BLOCK_SIZE_M=16,  # dummy, for test
-        BLOCK_SIZE_N=16,  # dummy, for test
+        BLOCK_SIZE_M=64,  # dummy, for test
+        BLOCK_SIZE_N=64,  # dummy, for test
     )
     return o

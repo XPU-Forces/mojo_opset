@@ -160,17 +160,21 @@ class MojoPagedPrefillGQA(MojoOperator):
         raise NotImplementedError
 
 
-class MojoQuest(MojoOperator):
+class MojoBlockQuest(MojoOperator):
     """
     Paged Quest indexing operator for LLM Prefill.
     """
 
     def __init__(
         self,
+        block_q: int,
+        block_kv: int,
         op_name: str = "",
         layer_idx: int = 0,
     ):
         super().__init__(op_name, layer_idx)
+        self.block_q = block_q
+        self.block_kv = block_kv
 
     def forward(self, curr_query_seg, mins, maxs, top_k_page):
         raise NotImplementedError("MojoPagedPrefillQuest forward not implemented")

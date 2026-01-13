@@ -11,10 +11,10 @@ from mojo_opset.backends.ttx.kernels import block_sparse_paged_attention_prefill
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoSdpa
-from mojo_opset.core import MojoQuest
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoSdpa
+from mojo_opset.core import MojoBlockQuest
 from mojo_opset.core import MojoPagedPrefillBlockSparseAttention
 
 
@@ -134,7 +134,7 @@ class TTXSdpa(MojoSdpa):
         return output
 
 
-class TTXQuest(MojoQuest):
+class TTXBlockQuest(MojoBlockQuest):
     supported_platforms_list = ["npu"]
 
     def forward(
