@@ -2,6 +2,7 @@ from typing import Any
 from typing import Optional
 from typing import Tuple
 
+import math
 import torch
 
 from .. import VALID_KV_LAYOUTS
@@ -186,15 +187,26 @@ class MojoPagedPrefillBlockSparseAttention(MojoOperator):
         page_size: int,
         q_seg_size: int,
         topk_ratio: float,
+        head_size: int,
+        q_head_num: int,
+        kv_head_num: int,
         op_name: str = "",
         layer_idx: int = 0,
     ):
-        super().__init__(op_name, layer_idx)
-        self.causal_mask = causal_mask
+        super().__init__()
         self.page_size = page_size
         self.q_seg_size = q_seg_size
         self.topk_ratio = topk_ratio
-        self.scale = 1.0
+        self.q_head_num = q_head_num
+        self.kv_head_num = kv_head_num
+        self.head_size = head_size
+        full_mask = torch.ones(self.q_seg_size, self.page_size, device=causal_mask.device, dtype=torch.bool)
+        empty_mask = torch.zeros(self.q_seg_size, self.page_size, device=causal_mask.device, dtype=torch.bool)
+        session_mask = torch.ones(
+            self.q_seg_size, self.q_seg_size * 3, device=causal_mask.device, dtype=torch.bool
+        ).tril(diagonal=self.q_seg_size)
+        self.mask = torch.cat([full_mask, empty_mask, session_mask], dim=1)
+        self.scale = 1 / math.sqrt(head_size)
 
     def forward(
         self,

@@ -86,32 +86,32 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         return output
 
 
-# class TTXPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
-#     supported_platforms_list = ["npu"]
+class TTXPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
+    supported_platforms_list = ["npu"]
 
-#     def forward(
-#         self,
-#         curr_query_seg,
-#         key,
-#         value,
-#         whole_causal_mask,
-#         topk_page_indices,
-#         q_seg_id,
-#         q_chunk_size,
-#     ):
-#         output = block_sparse_paged_attention_prefill(
-#             curr_query_seg,
-#             key,
-#             value,
-#             self.scale,
-#             whole_causal_mask,
-#             topk_page_indices,
-#             q_seg_id,
-#             q_chunk_size,
-#             self.q_seg_size,
-#             self.page_size,
-#         )
-#         return output
+    def forward(
+        self,
+        curr_query_seg,
+        key,
+        value,
+        whole_causal_mask,
+        topk_page_indices,
+        q_seg_id,
+        q_chunk_size,
+    ):
+        output = block_sparse_paged_attention_prefill(
+            curr_query_seg,
+            key,
+            value,
+            self.scale,
+            self.mask,
+            topk_page_indices,
+            q_seg_id,
+            q_chunk_size,
+            self.q_seg_size,
+            self.page_size,
+        )
+        return output
 
 
 class TTXSdpa(MojoSdpa):

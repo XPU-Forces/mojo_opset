@@ -414,7 +414,7 @@ def block_sparse_paged_attention_prefill_impl(
     page_size: int,
 ) -> torch.Tensor:
     topk_page_indices = topk_page_indices[:, 0]
-    topk_page_indices = torch.sort(topk_page_indices, axis=1).values
+    # topk_page_indices = torch.sort(topk_page_indices, axis=1).values
     num_q_heads, n_topk_pages = topk_page_indices.shape
 
     _, q_seg_len, head_dim = curr_query_seg.shape
@@ -441,8 +441,8 @@ def block_sparse_paged_attention_prefill_impl(
         == topk_page_indices.device
         == o.device
         == whole_causal_mask.device
-        == torch.device("cuda:0")
-    )
+        == torch.device("npu:0")
+    ), f"{curr_query_seg.device=} {key.device=} {value.device=} {topk_page_indices.device=} {o.device=} {whole_causal_mask.device=}"
     assert curr_query_seg.dtype == key.dtype == value.dtype == o.dtype == torch.float32
     assert scale == 1 / math.sqrt(head_dim)
     assert q_seg_start + q_seg_len <= q_chunk_size

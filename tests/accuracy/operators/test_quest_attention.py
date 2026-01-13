@@ -11,8 +11,8 @@ def test_paged_prefill_quest():
     q_head_num = 8
     kv_head_num = 1
     kv_idx = [torch.tensor([0, 1, 2, 3], device=key_cache.device)]
-    kv_len = [32 * 3]
-    q_len_list = [32]
+    kv_len = [32 * 3 - 5]
+    q_len_list = [8]
     sparse_limit = 64
     original_out = original_session_cache_pa_flash_attention_quest128(
         qkv,
@@ -380,7 +380,9 @@ def mojo_quest(
             # ====================quest========================
             from mojo_opset import MojoPagedPrefillBlockSparseAttention
 
-            block_sparse_attention = MojoPagedPrefillBlockSparseAttention(None, page_size, q_seg_size, topk_ratio)
+            block_sparse_attention = MojoPagedPrefillBlockSparseAttention(
+                whole_causal, page_size, q_seg_size, topk_ratio, head_size, q_head_num, kv_head_num
+            )
 
             curr_seg_output = block_sparse_attention(
                 curr_query_seg,
