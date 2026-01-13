@@ -4,15 +4,15 @@ import math
 
 
 def test_paged_prefill_quest():
-    qkv = torch.randn(24, 1280).bfloat16()
-    key_cache = torch.randn(1024, 1, 32, 128).bfloat16()
-    value_cache = torch.randn(1024, 1, 32, 128).bfloat16()
-    causal_mask = torch.ones(1024, 1024, dtype=torch.bool).tril(diagonal=0)
+    qkv = torch.randn(128, 1280).npu()  # .bfloat16()
+    key_cache = torch.randn(1024, 1, 32, 128).npu()  # .bfloat16()
+    value_cache = torch.randn(1024, 1, 32, 128).npu()  # .bfloat16()
+    causal_mask = torch.ones(1024, 1024, dtype=torch.bool).tril(diagonal=0).npu()
     q_head_num = 8
     kv_head_num = 1
-    kv_idx = [torch.tensor([0, 1, 2, 3])]
+    kv_idx = [torch.tensor([0, 1, 2, 3], device=key_cache.device)]
     kv_len = [32 * 3]
-    q_len_list = [17]
+    q_len_list = [32]
     sparse_limit = 64
     original_out = original_session_cache_pa_flash_attention_quest128(
         qkv,
@@ -289,7 +289,7 @@ def mojo_quest(
     )  # [1,8,24,128]
 
     # mojo_quest_op(query, key_cache, value_cache, torch.tensor(q_len_list), kv_cache_indices, kv_seq_lengths)
-    query_lengths = torch.tensor(q_len_list)
+    query_lengths = torch.tensor(q_len_list, device=query.device)
     bsz, q_head_num, q_seq_length, head_size = query.shape
     assert bsz == 1
     query = query.squeeze(0)
@@ -345,7 +345,6 @@ def mojo_quest(
         # if prefill_sparse and kv_len[i] > 0 and valid_kv_seq_length > sparse_limit:
 
         num_pages = valid_kv_seq_length // page_size
-        pad_len = valid_kv_seq_length - num_pages * page_size
 
         # [num_heads, num_pages, chunk_size, head_dim]
         page_k = key[:, : num_pages * page_size].reshape(q_head_num, num_pages, page_size, head_size)
@@ -391,25 +390,25 @@ def mojo_quest(
                 topk_page_indices,
                 q_seg_id,
                 q_chunk_sizes[i],
-                num_pages,
-                pad_len,
             )
             if q_seg_id == 0:
                 output_all = curr_seg_output
             else:
-                output_all = torch.cat([output_all, curr_seg_output], axis=0)
+                output_all = torch.cat([output_all, curr_seg_output], axis=1)  # [h_qo, q_seg_size, d]
 
         expects.append(output_all)
 
     tmp = (
-        torch.zeros((q_seq_length - cu_seqlen_q[-1], q_head_num * head_size))
+        torch.zeros((q_head_num, q_seq_length - cu_seqlen_q[-1], head_size))
         .to(dtype=expects[0].dtype)
         .to(expects[0].device)
     )
     expects.append(tmp)
 
-    expect = torch.cat(expects, axis=0)
-    return expect
+    print([expect.shape for expect in expects])
+
+    expect = torch.cat(expects, axis=1)
+    return expect.permute(1, 0, 2).reshape(q_seq_length, q_head_num * head_size).bfloat16()
 
 
 if __name__ == "__main__":

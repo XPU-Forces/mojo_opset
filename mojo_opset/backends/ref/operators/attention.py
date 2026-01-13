@@ -159,9 +159,9 @@ class RefPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
         topk_page_indices,
         q_seg_id,
         q_chunk_size,
-        num_pages,
-        pad_len,
     ):
+        num_pages = value.shape[1] // self.page_size
+        pad_len = value.shape[1] - num_pages * self.page_size
         q_head_num, curr_seg_size, head_size = curr_query_seg.shape
         page_size = self.page_size
         top_k_page = topk_page_indices.shape[-1]
@@ -188,6 +188,7 @@ class RefPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
         # curr_seg_causal = torch.tril(torch.ones((q_head_num, curr_seg_size, curr_seg_size), dtype= torch.bool, device=curr_seg_mask.device))
         # print(f"{curr_seg_mask.shape=} {q_seg_start=} {q_seg_end=}", flush=True)
         q_seg_start = q_seg_id * self.q_seg_size
+        # Note!!!: the session_cache_part is always attentioned
         curr_seg_mask[:, :, -q_chunk_size:] = whole_causal_mask[
             q_seg_start : q_seg_start + curr_seg_size, -q_chunk_size:
         ]
@@ -197,8 +198,8 @@ class RefPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
         # [nh, q_seg_size, head_size]
         curr_seg_output = (
             torch.bmm(curr_seg_score, value)
-            .permute(1, 0, 2)
-            .reshape(curr_seg_size, q_head_num * head_size)
+            # .permute(1, 0, 2)
+            # .reshape(curr_seg_size, q_head_num * head_size)
             .to(dtype=torch.bfloat16)
         )
         return curr_seg_output

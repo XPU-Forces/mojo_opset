@@ -194,6 +194,7 @@ class MojoPagedPrefillBlockSparseAttention(MojoOperator):
         self.page_size = page_size
         self.q_seg_size = q_seg_size
         self.topk_ratio = topk_ratio
+        self.scale = 1.0
 
     def forward(
         self,
@@ -202,10 +203,8 @@ class MojoPagedPrefillBlockSparseAttention(MojoOperator):
         value,
         whole_causal_mask,
         topk_page_indices,
-        q_seg_start,
+        q_seg_id,
         q_chunk_size,
-        num_pages,
-        pad_len,
     ):
         raise NotImplementedError("MojoPagedPrefillBlockSparseAttention forward not implemented")
 
