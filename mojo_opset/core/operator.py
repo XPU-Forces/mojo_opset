@@ -23,8 +23,10 @@ class MojoOperator(ABC, torch.nn.Module):
 
             # We place a registry for every core mojo op class.
             cls._registry = MojoBackendRegistry(cls)
-
-        cls._registry.register(cls)
+            auto_ref_cls = type(cls.__name__.replace("Mojo", "Torch", 1), (cls,), {"__module__": cls.__module__})
+            cls._registry.register(auto_ref_cls)
+        else:
+            cls._registry.register(cls)
 
     def __new__(cls, *args, **kwargs):
         is_mojo_core_op_cls = MojoOperator in cls.__bases__
@@ -35,9 +37,7 @@ class MojoOperator(ABC, torch.nn.Module):
 
             import os
 
-            target_backend = os.environ.get("MOJO_BACKEND", None)
-            if target_backend == "torch":
-                return super().__new__(cls)
+            target_backend = os.environ.get("MOJO_BACKEND")
 
             target_class = cls._registry.get(target_backend)
             instance = target_class.__new__(target_class, *args, **kwargs)
