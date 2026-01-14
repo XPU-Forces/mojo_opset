@@ -42,6 +42,12 @@ jobs:
           pip install -e .\[npu\] --index-url https://bytedpypi.byted.org/simple
           python3 -m build .
           pip install dist/*.whl --force-reinstall --no-deps
+
+      - name: test-Base
+        shell: bash
+        run: |
+          echo "Running base tests..."
+          python3 -m pytest tests/base
     
       - name: test-TTX
         shell: bash
