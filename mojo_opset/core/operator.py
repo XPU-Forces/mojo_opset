@@ -23,8 +23,8 @@ class MojoOperator(ABC, torch.nn.Module):
 
             # We place a registry for every core mojo op class.
             cls._registry = MojoBackendRegistry(cls)
-            auto_ref_cls = type(cls.__name__.replace("Mojo", "Torch", 1), (cls,), {"__module__": cls.__module__})
-            cls._registry.register(auto_ref_cls)
+            # Auto generate fallback dispatch backend "torch", it is registered within its-own __init_subclass__ call
+            type("Torch" + cls._registry._operator_name, (cls,), {"__module__": cls.__module__})
         else:
             cls._registry.register(cls)
 
