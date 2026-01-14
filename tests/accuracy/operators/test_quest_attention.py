@@ -10,8 +10,8 @@ def test_paged_prefill_quest():
     causal_mask = torch.ones(1024, 1024, dtype=torch.bool).tril(diagonal=0).npu()
     q_head_num = 8
     kv_head_num = 1
-    kv_idx = [torch.tensor([0, 1, 2, 3], device=key_cache.device)]
-    kv_len = [32 * 3 - 5]
+    kv_idx = [torch.tensor([0, 1, 2, 3, 4], device=key_cache.device)]
+    kv_len = [32 * 4 - 5]
     q_len_list = [8]
     sparse_limit = 64
     original_out = original_session_cache_pa_flash_attention_quest128(
@@ -59,7 +59,7 @@ def original_session_cache_pa_flash_attention_quest128(
     block_idx,
     sparse_limit,
 ):
-
+    topk_page_indices_debug = None
     prefill_sparse = True
     # sparse_limit = 1024
     # page_size = 64
@@ -157,6 +157,10 @@ def original_session_cache_pa_flash_attention_quest128(
                 # ====================使用相同page========================
                 seq_len_t = page_score.shape[1]
                 topk_page_indices_0 = topk_page_indices[:, 0]
+                if topk_page_indices_debug is None:
+                    topk_page_indices_debug = topk_page_indices_0
+                else:
+                    topk_page_indices_debug = torch.cat([topk_page_indices_debug, topk_page_indices_0], dim=1)
                 topk_page_indices = topk_page_indices_0.unsqueeze(1).repeat(1, seq_len_t, 1)
                 # ====================使用相同page========================
 
@@ -247,7 +251,7 @@ def original_session_cache_pa_flash_attention_quest128(
     expects.append(tmp)
 
     expect = torch.cat(expects, axis=0)
-    return expect
+    return topk_page_indices_debug, expect
 
 
 def mojo_quest(
@@ -264,6 +268,7 @@ def mojo_quest(
     block_idx,
     sparse_limit,
 ):
+    topk_page_indices_debug = None
     prefill_sparse = True
     # sparse_limit = 1024
     # page_size = 64
@@ -371,6 +376,11 @@ def mojo_quest(
                 maxs,
                 top_k_page,
             )
+            topk_page_indices_0 = topk_page_indices[:, 0]
+            if topk_page_indices_debug is None:
+                topk_page_indices_debug = topk_page_indices_0
+            else:
+                topk_page_indices_debug = torch.cat([topk_page_indices_debug, topk_page_indices_0], dim=1)
 
             # ====================block-wise quest========================
             from mojo_opset import MojoPagedPrefillBlockSparseAttention
@@ -384,7 +394,7 @@ def mojo_quest(
                 key,
                 value,
                 whole_causal,
-                topk_page_indices,
+                topk_page_indices_0,
                 q_seg_id,
                 q_chunk_sizes[i],
             )
@@ -405,7 +415,7 @@ def mojo_quest(
     print([expect.shape for expect in expects])
 
     expect = torch.cat(expects, axis=1)
-    return expect.permute(1, 0, 2).reshape(q_seq_length, q_head_num * head_size).bfloat16()
+    return topk_page_indices_debug, expect.permute(1, 0, 2).reshape(q_seq_length, q_head_num * head_size).bfloat16()
 
 
 if __name__ == "__main__":

@@ -4,107 +4,142 @@ import math
 import triton
 import triton.language as tl
 from triton.runtime.libentry import libentry
+from .utils import get_num_cores
 
 
 @triton.autotune(
     configs=[
-        triton.Config(kwargs={"BLOCK_M": 1, "BLOCK_N": 32}),
-        triton.Config(kwargs={"BLOCK_M": 1, "BLOCK_N": 64}),
-        triton.Config(kwargs={"BLOCK_M": 1, "BLOCK_N": 128}),
-        triton.Config(kwargs={"BLOCK_M": 1, "BLOCK_N": 256}),
-        triton.Config(kwargs={"BLOCK_M": 16, "BLOCK_N": 16}),
-        triton.Config(kwargs={"BLOCK_M": 16, "BLOCK_N": 32}),
-        triton.Config(kwargs={"BLOCK_M": 16, "BLOCK_N": 64}),
+        triton.Config(kwargs={"BLOCK_SEQ": 1, "BLOCK_PAGE": 32}),
+        triton.Config(kwargs={"BLOCK_SEQ": 1, "BLOCK_PAGE": 64}),
+        triton.Config(kwargs={"BLOCK_SEQ": 1, "BLOCK_PAGE": 128}),
+        triton.Config(kwargs={"BLOCK_SEQ": 1, "BLOCK_PAGE": 256}),
+        triton.Config(kwargs={"BLOCK_SEQ": 16, "BLOCK_PAGE": 16}),
+        triton.Config(kwargs={"BLOCK_SEQ": 16, "BLOCK_PAGE": 32}),
+        triton.Config(kwargs={"BLOCK_SEQ": 16, "BLOCK_PAGE": 64}),
     ],
-    key=["NUM_PAGES", "Q_LEN"],
+    key=["Q_LEN"],
 )
 @libentry()
 @triton.jit
 def quest_reduce_kernel(
+    Page_score,
     Curr_query_seg,
     Mins,
     Maxs,
-    Page_score,
-    stride_query_h,
-    stride_query_l,
-    stride_minmax_h,
-    stride_minmax_p,
-    stride_score_h,
-    stride_score_l,
-    NUM_PAGES: tl.constexpr,
-    Q_LEN: tl.constexpr,
+    num_pages,
+    q_len,
+    STRIDE_SCORE_H: tl.constexpr,
+    STRIDE_SCORE_L: tl.constexpr,
+    STRIDE_SCORE_P: tl.constexpr,
+    STRIDE_Q_H: tl.constexpr,
+    STRIDE_Q_L: tl.constexpr,
+    STRIDE_Q_E: tl.constexpr,
+    STRIDE_MIN_H: tl.constexpr,
+    STRIDE_MIN_P: tl.constexpr,
+    STRIDE_MIN_E: tl.constexpr,
+    STRIDE_MAX_H: tl.constexpr,
+    STRIDE_MAX_P: tl.constexpr,
+    STRIDE_MAX_E: tl.constexpr,
+    NUM_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
+    BLOCK_SEQ: tl.constexpr,
+    BLOCK_PAGE: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    head_num = pid
+    core_step = tl.num_programs(0)
+    num_q_blocks = tl.cdiv(q_len, BLOCK_SEQ)
+    num_tasks = NUM_HEADS * num_q_blocks
 
-    offset_block_len = tl.arange(0, BLOCK_M)
-    offset_block_page = tl.arange(0, BLOCK_N)
-    offset_d = tl.arange(0, HEAD_DIM)
+    for task_id in range(pid, num_tasks, core_step):
+        head_idx = task_id % NUM_HEADS
+        offset_q = task_id // NUM_HEADS * BLOCK_SEQ + tl.arange(0, BLOCK_SEQ)
+        mask_q = offset_q < q_len
+        curr_query_seg = tl.load(
+            Curr_query_seg
+            + head_idx * STRIDE_Q_H
+            + offset_q[:, None] * STRIDE_Q_L
+            + tl.arange(0, HEAD_DIM)[None, :] * STRIDE_Q_E,
+            mask=mask_q[:, None],
+        )  # [BLOCK_SEQ, HEAD_DIM]
+        curr_query_seg = curr_query_seg.expand_dims(1)  # [BLOCK_SEQ, 1, HEAD_DIM]
 
-    for start_len in range(0, Q_LEN, BLOCK_M):
-        offset_len = start_len + offset_block_len
-        offset_query = head_num * stride_query_h + (offset_len * stride_query_l)[:, None] + offset_d[None, :]
-        curr_query_seg = tl.load(Curr_query_seg + offset_query, mask=offset_len[:, None] < Q_LEN, other=0.0)
-        curr_query_seg = curr_query_seg.expand_dims(axis=1)  # [BLOCK_M, 1, HEAD_DIM]
+        for start_page in range(0, num_pages, BLOCK_PAGE):
+            offset_page = start_page + tl.arange(0, BLOCK_PAGE)
+            mask_page = offset_page < num_pages
 
-        for start_page in range(0, NUM_PAGES, BLOCK_N):
-            offset_page = start_page + offset_block_page
-            offset_minmax = head_num * stride_minmax_h + (offset_page * stride_minmax_p)[:, None] + offset_d[None, :]
+            mins = tl.load(
+                Mins
+                + head_idx * STRIDE_MIN_H
+                + offset_page[:, None] * STRIDE_MIN_P
+                + tl.arange(0, HEAD_DIM) * STRIDE_MIN_E,
+                mask=mask_page[:, None],
+                other=0.0,
+            )  # [BLOCK_PAGE, HEAD_DIM]
+            mins = mins.expand_dims(0)  # [1, BLOCK_PAGE, HEAD_DIM]
+            q_min_k = curr_query_seg * mins  # [BLOCK_SEQ, BLOCK_PAGE, HEAD_DIM]
 
-            mins = tl.load(Mins + offset_minmax, mask=offset_page[:, None] < NUM_PAGES, other=0.0)
-            mins = mins.expand_dims(axis=0)  # [1, BLOCK_N, HEAD_DIM]
-            q_min_k = curr_query_seg * mins
-
-            maxs = tl.load(Maxs + offset_minmax, mask=offset_page[:, None] < NUM_PAGES, other=0.0)
-            maxs = maxs.expand_dims(axis=0)  # [1, BLOCK_N, HEAD_DIM]
-            q_max_k = curr_query_seg * maxs
+            maxs = tl.load(
+                Maxs
+                + head_idx * STRIDE_MAX_H
+                + offset_page[:, None] * STRIDE_MAX_P
+                + tl.arange(0, HEAD_DIM) * STRIDE_MAX_E,
+                mask=mask_page[:, None],
+                other=0.0,
+            )  # [BLOCK_PAGE, HEAD_DIM]
+            maxs = maxs.expand_dims(0)  # [1, BLOCK_PAGE, HEAD_DIM]
+            q_max_k = curr_query_seg * maxs  # [BLOCK_SEQ, BLOCK_PAGE, HEAD_DIM]
 
             max_qk = tl.maximum(q_min_k, q_max_k)
-            page_score_tile = tl.sum(max_qk, axis=-1)
+            page_score_tile = tl.sum(max_qk, axis=-1)  # [BLOCK_SEQ, BLOCK_PAGE]
 
-            offset_score = head_num * stride_score_h + (offset_len * stride_score_l)[:, None] + offset_page[None, :]
             tl.store(
-                Page_score + offset_score,
+                Page_score
+                + head_idx * STRIDE_SCORE_H
+                + offset_q[:, None] * STRIDE_SCORE_L
+                + offset_page[None, :] * STRIDE_SCORE_P,
                 page_score_tile,
-                mask=(offset_len[:, None] < Q_LEN) & (offset_page[None, :] < NUM_PAGES),
+                mask=mask_q[:, None] & mask_page[None, :],
             )
 
 
-def block_quest_impl(
+def quest_impl(
     curr_query_seg: torch.Tensor,
     mins: torch.Tensor,
     maxs: torch.Tensor,
     top_k_page: int,
 ):
-    curr_query_seg = curr_query_seg[:, 0]
-    num_heads, head_dim = curr_query_seg.shape
-    q_len = 1
+    num_heads, q_len, head_dim = curr_query_seg.shape
 
     assert mins.shape[0] == maxs.shape[0]
     assert mins.shape[1] == maxs.shape[1]
     num_pages = mins.shape[1]
     assert top_k_page <= num_pages
 
-    page_score = torch.zeros(num_heads, num_pages, device=mins.device, dtype=mins.dtype)
+    page_score = torch.zeros(num_heads, q_len, num_pages, device=mins.device, dtype=mins.dtype)
 
-    grid = (num_heads,)
+    num_vec = get_num_cores("vector")
+    grid = (num_vec,)
     quest_reduce_kernel[grid](
+        page_score,
         curr_query_seg,
         mins,
         maxs,
-        page_score,
-        curr_query_seg.stride(0),
-        curr_query_seg.stride(1),
-        mins.stride(0),
-        mins.stride(1),
+        num_pages,
+        q_len,
         page_score.stride(0),
         page_score.stride(1),
-        NUM_PAGES=num_pages,
-        Q_LEN=q_len,
-        HEAD_DIM=head_dim,
+        page_score.stride(2),
+        curr_query_seg.stride(0),
+        curr_query_seg.stride(1),
+        curr_query_seg.stride(2),
+        mins.stride(0),
+        mins.stride(1),
+        mins.stride(2),
+        maxs.stride(0),
+        maxs.stride(1),
+        maxs.stride(2),
+        num_heads,
+        head_dim,
     )
     _, topk_page_indices = page_score.topk(top_k_page, dim=-1)
 

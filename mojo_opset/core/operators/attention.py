@@ -321,17 +321,16 @@ class MojoBlockQuest(MojoOperator):
         self.block_kv = block_kv
 
     def forward(self, curr_query_seg, mins, maxs, top_k_page):
-        assert curr_query_seg.shape[1] <= self.block_q
-        curr_query_seg = curr_query_seg[:, 0]
+        curr_query_seg = curr_query_seg[:, :: self.block_q]
 
-        # [num_heads, 1, head_size] * [num_heads, num_pages, head_size]
+        # [num_heads, num_segs, 1, head_size] * [num_heads, 1, num_pages, head_size]
+        # --> [num_heads, num_segs, num_pages, head_size]
+        q_min_k = curr_query_seg.unsqueeze(-2) * mins.unsqueeze(-3)
+        q_max_k = curr_query_seg.unsqueeze(-2) * maxs.unsqueeze(-3)
 
-        q_min_k = curr_query_seg.unsqueeze(-2) * mins
-        q_max_k = curr_query_seg.unsqueeze(-2) * maxs
-
-        # [num_heads, num_pages]
+        # [num_heads, num_segs, num_pages]
         page_score = torch.maximum(q_min_k, q_max_k).sum(dim=-1)
-        # [nh, ql, top_k_page]
+        # [num_heads, num_segs, top_k_page]
         _, topk_page_indices = page_score.topk(top_k_page, dim=-1)
 
         return topk_page_indices
