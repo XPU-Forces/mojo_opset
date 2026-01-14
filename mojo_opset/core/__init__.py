@@ -77,6 +77,9 @@ from .operators.sampling import MojoTopKSampling
 from .operators.sampling import MojoTopPFilter
 from .operators.sampling import MojoTopPSampling
 
+""" convolution"""
+from .operators.convolution import MojoCausalConv1dUpdateState
+
 """ functions """
 from .functions.activation import MojoSiluFunction
 from .functions.activation import mojo_silu
@@ -156,6 +159,8 @@ __all__ = [
     "MojoJoinProbRejectSampling",
     "MojoApplyPenaltiesTempurate",
     "MojoTopPFilter",
+
+    "MojoCausalConv1dUpdateState",
 
     "MojoSiluFunction",
     "MojoRMSNormFunction",
