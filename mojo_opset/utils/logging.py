@@ -62,6 +62,7 @@ def _get_default_logging_level() -> "logging._Level":
     return _default_log_level
 
 
+@lru_cache
 def _get_library_name() -> str:
     return __name__.split(".")[0]
 
@@ -81,7 +82,7 @@ def _configure_library_root_logger() -> None:
             return
 
         formatter = logging.Formatter(
-            fmt="[%(levelname)s] %(asctime)s >> %(message)s",
+            fmt="[%(levelname)s] %(asctime)s %(pathname)s:%(lineno)d >> %(message)s",
             datefmt="%m/%d/%Y %H:%M:%S",
         )
         _default_handler = logging.StreamHandler(sys.stdout)
@@ -98,6 +99,10 @@ def get_logger(name: Optional[str] = None) -> "_Logger":
     """
     if name is None:
         name = _get_library_name()
+    else:
+        # NOTE(liuyuan): share the root logger to the other modules that need it.
+        if _get_library_name() not in name:
+            name = ".".join((_get_library_name(), name))
 
     _configure_library_root_logger()
     return logging.getLogger(name)

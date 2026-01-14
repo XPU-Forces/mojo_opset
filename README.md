@@ -1,26 +1,46 @@
-# Mojo Opset
-## 1. 简介
-Mojo Opset 是一个基于面向 LLM & DiT 类模型专用 Opset，支持多种硬件加速器以及不同的算子实现。用户能够基于 Mojo Opset
-快速搭建 LLM 模型，轻松获取不同硬件加速器的 SOTA 性能。Mojo Opset 包含推理加速和训练加速两部分算子，其中推理部分以
-Mojo Operator方式提供，训练部分则以 Mojo Function部分提供。
+# 🧱 Mojo Opset
+## Overview
+Mojo Opset is a domain specialized opset for LLMs and multimodal models that provides operator suites for both inference acceleration and training acceleration. It supports multiple hardware accelerators and diverse operator implementations, while abstracting away the differences and complexity of implementation strategies and hardware backends for users. The goal is to help users quickly build LLM models with Mojo Opset and achieve state-of-the-art performance across different accelerators.
 
 
-## 2. 实现后端
+## Backend Implementations
 
-### 2.1 ttx-kernels
-ttx-kernels 提供了 Mojo Opset 的 triton 版本实现。
+### Torch native
+Mojo Opset provides a baseline implementation built on PyTorch native ops. This implementation serves as the golden reference for different backends and also functions as the fallback backend while other backends are being developed.
+
+### 🔥🔥🔥 Triton-x (TTX for short)
+TTX is a triton implementation for Mojo Opset.
+
+Supported Hardware:
+- Ascend NPU 910B/C
+
+TTX now is compatible with `torch.compile`.
+You can control the run mode via the `MOJO_RUN_MODE` environment variable. The supported modes are `EAGER` and `COMPILE`; `EAGER` is enabled by default. The `COMPILE` mode requires the current Torch version to be >= 2.7.0; otherwise, an error will be raised.
+```bash
+# If you want the current Triton kernel to be registered in torch.library and captured by torch.dynamo
+# to enable longer-term optimizations (default mode).
+export MOJO_RUN_MODE="COMPILE"
+
+# If you want the current Triton kernel to be invoked directly rather than registered in torch.library
+# (this can slightly reduce PyTorch overhead in eager mode).
+export MOJO_RUN_MODE="EAGER"
+```
 
 source code: mojo_opset/backends/ttx/kernels
 
-### 2.2 torch_npu(ongoing)
-Ascend NPU官方支持。
+### Backend Selection
+You can control the backend you want to use via the `MOJO_BACKEND` environment variable; the currently supported backends are list as below:
+- "ttx"
+- "torch"
+
+When multiple backends are added, Mojo Opset selects the backend implementation according to its internal priority order (We plan to add a tuner feature later to automatically choose the optimal implementation for the current scenario).
 
 
-## 3. Op List
+## Op List
 
-### 3.1 Mojo Operator List
+### Mojo Operator List
 
-| Op Category | Op Name                     | torch ref         | triton implement |
+| Op Category | Op Name                     | torch native      | ttx           |
 | :---------- | :-------------------------- | :---------------- | :------------ |
 | Embedding   | MojoEmbedding               | TBD               | TBD           |
 | Embedding   | MojoParallelEmbedding       | TBD               | TBD           |
@@ -30,7 +50,8 @@ Ascend NPU官方支持。
 | Attention   | MojoPagedDecodeMLA          | TBD               | TBD           |
 | Attention   | MojoPagedPrefillNSA         | TBD               | TBD           |
 | Attention   | MojoPagedDecodeNSA          | TBD               | TBD           |
-| Attention   | MojoWindownAttenton         | TBD               | TBD           |
+| Attention   | MojoSlidingWindownAttenton  | TBD               | TBD           |
+| Attention   | MojoSdpa                    | ✅                | ✅             |
 | MoE         | MojoMoEGate                 | ✅                | TBD           |
 | MoE         | MojoMoEDispatch             | ✅                | TBD           |
 | MoE         | MojoMoECombine              | ✅                | TBD           |
@@ -49,12 +70,12 @@ Ascend NPU官方支持。
 | PositionEmb | MojoNormRotary              | TBD               | TBD           |
 | PositionEmb | MojoNormRotaryStorKV        | TBD               | TBD           |
 | KVCache     | MojoKVCacheCast             | TBD               | TBD           |
-| KVCache     | MojoStorePagedKVCache       | ✅                | TBD           |
+| KVCache     | MojoStorePagedKVCache       | ✅                | ✅             |
 | KVCache     | MojoStorePagedMLAKVCache    | TBD               | TBD           |
 | Linear      | MojoLinear                  | ✅                | TBD           |
 | Linear      | MojoQuantLinear             | TBD               | TBD           |
 | Linear      | MojoBatchLinear             | TBD               | TBD           |
-| Linear      | MojoGroupLinear             | ✅                | TBD           |
+| Linear      | MojoGroupLinear             | ✅                | ✅             |
 | Quantize    | MojoQuant                   | TBD               | TBD           |
 | Quantize    | MojoDequant                 | TBD               | TBD           |
 | Activation  | MojoGelu                    | ✅                | ✅             |
@@ -69,11 +90,12 @@ Ascend NPU官方支持。
 | Comm&Comp   | MojoLinearReduceScatter     | TBD               | TBD           |
 
 
-### 3.2 Mojo Function List
+### Mojo Function List
 
-| Op Category | Op Name                     | Description       | Additional    |
+| Op Category | Op Name                     | torch native      | ttx           |
 | :---------- | :-------------------------- | :---------------- | :------------ |
-| Attention   | MojoFlashAttentionFunc      | TBD               | TBD           |
+| Attention   | MojoSdpaFunc                | ✅                | ✅             |
+| Attention   | MojoDiffusionAttentionFunc  | ✅                | ✅             |
 | PositionEmb | MojoRotaryEmbFunc           | ✅                | ✅             |
 | Activation  | MojoSiluFunc                | ✅                | ✅             |
 | Activation  | MojoSwiGluFunc              | TBD               | TBD           |
@@ -83,49 +105,54 @@ Ascend NPU官方支持。
 | Loss        | MojoLinearCrossEntropyFunc  | ✅                | ✅             |
 
 
-## 4. Usage
-### 4.1 apply mojo op
+## Usage
+### Apply mojo op
 ```python
 from mojo_opset import MojoSilu
 
-silu = MojoSilu(
-    op_name="demo",
-    layer_idx=0,
-)
+silu = MojoSilu()
 
-silu(torch.randn(128, 128).npu())
+silu(torch.randn(128, 128))
 ```
 
-### 4.2 backend selection
-您可以通过环境变量`MOJO_BACKEND`来控制您想要选用的后端，当前支持的后端主要为`TTX`；当您添加多个后端后，
-Mojo Opset 会按照内部的优先级顺序来选用后端实现（后续我们将添加一个 tuner 功能，自动选取当前场景下的最优实现）。
-默认会开启所有后端，即`+ALL`。
+### Modeling with Mojo Opset
+You can build the model using Mojo Opset in the following ways:
+
+1. Build model from mojo opset
+
+    You can also build your modeling by mojo opset directly, [Mojo qwen3 dense modeling](./mojo_opset/modeling/mojo_qwen3_dense.py) is an example.
+
+2. Patch for transformers models(🚧 coming soon).
+
+    For [hugging face transformers](https://github.com/huggingface/transformers) models, you can use Mojo Opset to build the model by monkey patching the original modeling code.
+
+    ```python
+    from transformers import Qwen3ForCausalLM
+
+    # 1. Apply mojo opset to qwen3 model
+    mojo_opset.patching.apply_mojo_to_qwen3()
+
+    
+    # 2. Instantiate patched model
+    model = transformers.AutoModelForCausalLM("path/to/qwen3/model")
+    ```
+
+
+### E2E model generation example for Qwen3-8B
 ```bash
-export MOJO_BACKEND="+TTX"
+bash ./examples/run_model.sh
+
+Prompt: 你好，请介绍一下你自己。
+----------------------------------------
+----------------------------------------
+Generated text:  你好！我是一个大型语言模型，名叫通义千问，由通义实验室研发。我能够进行多轮对话，回答各种问题，创作文字，比如写故事、写邮件、写剧本等，还能进行逻辑推理、表达观点，甚至编写和调试程序。我的训练数据来自于互联网上的大量文本，因此我具备广泛的知识和语言理解能力。我可以用多种语言与你交流，包括中文、英文、日文、韩文等。
 ```
 
-### 4.3 modeling ref
-以 qwen3 dense 为例 [modify from here](https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py)，您可以通过以下任意一种方式使用 Mojo Opset 构建模型：
-
-(1) monkey patch
-
-modeling/torch_qwen3_dense.py 中提供了原生 torch 实现的 modeling，我们实现了相应的 monkey-patch 替换机制（mojo_opset/mojo_monkey_patch.py），仅需一行代码即可将 native modeling 中若干组件替换为 Mojo op，并进一步 dispatch 到高性能后端实现。您可以运行：
-```bash
-MOJO_BACKEND="+TTX" pytest -s tests/test_qwen3_dense_patching.py
-```
-跑通一个 decoder layer 的 prefill/decode 流程。
-
-(2) 即插即用
-
-modeling/mojo_qwen3_dense.py 中提供了直接基于 Mojo Opset 实现的 modeling，效果等同于(1)中 monkey-patch 替换后的模型。
-
-### 4.4 compatibility with torch.compile
-您可以通过环境变量`MOJO_RUN_MODE`来控制您想要选用的运行模式，当前支持的运行模式包括`EAGER`, `COMPILE`；默认会开启`EAGER`模式。
-其中`COMPILE`模式要求当前torch版本>=2.7.0，否则会报错。
-```bash
-# 如果你希望当前triton kernel被注册到torch.library中，并支持被torch.dynamo捕获，以支持更长远的优化（默认模式）。
-export MOJO_RUN_MODE="COMPILE"
-
-# 如果你希望当前triton kernel被直接调用，而不是被注册到torch.library中（该方式在eager模式下能轻微减少torch的overhead）。
-export MOJO_RUN_MODE="EAGER"
-```
+## 🚧 Future Work
+- Add more mojo ops.
+- Support more backend implementations and support more Hardware accelerators.
+    - Ascend NPU's official implementation using Ascend C language.
+    - Support Cambircon MLU using triton language.
+- Performance optimization.
+    - A tuner for various backend implementations, ensure users can always get the best performance.
+    - A compilation mechanism for replacement the original torch ops with mojo ops.

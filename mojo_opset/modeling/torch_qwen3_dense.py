@@ -168,17 +168,17 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 class Qwen3RMSNorm(nn.Module):
-    def __init__(self, eps: float = 1e-6, norm_type: str = "rmsnorm", gamma: Optional[torch.Tensor] = None):
+    def __init__(self, eps: float = 1e-6, norm_type: str = "rmsnorm", weight: Optional[torch.Tensor] = None):
         super().__init__()
         self.epsilon = float(eps)
-        self.gamma = gamma
+        self.weight = weight
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.epsilon)
-        return self.gamma * hidden_states.to(input_dtype)
+        return self.weight * hidden_states.to(input_dtype)
 
 
 class Qwen3MLP(nn.Module):
@@ -423,8 +423,8 @@ class Qwen3DecoderLayer(DummyGradientCheckpointingLayer):
         self.self_attn = Qwen3Attention(config, layer_idx)
         self.mlp = Qwen3MLP(config)
         self.gamma = nn.Parameter(torch.ones(config.hidden_size))
-        self.input_layernorm = Qwen3RMSNorm(config.rms_norm_eps, gamma=self.gamma)
-        self.post_attention_layernorm = Qwen3RMSNorm(config.rms_norm_eps, gamma=self.gamma)
+        self.input_layernorm = Qwen3RMSNorm(config.rms_norm_eps, weight=self.gamma)
+        self.post_attention_layernorm = Qwen3RMSNorm(config.rms_norm_eps, weight=self.gamma)
         self.attention_type = config.layer_types[layer_idx]
 
     def forward(

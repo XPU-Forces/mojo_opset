@@ -13,8 +13,8 @@ platform = get_platform()
 
 try:
     ttx_backend_module = importlib.import_module(f".{platform}", package=__name__)
-except ImportError:
-    raise RuntimeError(f"Unsupported Triton Platform '{platform}'.")
+except ImportError as e:
+    raise RuntimeError(f"Unsupported Triton Platform '{platform}': {e}") from e
 
 
 gelu_fwd_impl = getattr(ttx_backend_module, "gelu_fwd_impl")
@@ -52,6 +52,10 @@ block_sparse_paged_attention_prefill_impl = getattr(ttx_backend_module, "block_s
 diffusion_attention_fwd_impl = getattr(ttx_backend_module, "diffusion_attention_fwd_impl")
 diffusion_attention_bwd_impl = getattr(ttx_backend_module, "diffusion_attention_bwd_impl")
 
+m_grouped_matmul_impl = getattr(ttx_backend_module, "m_grouped_matmul_impl")
+k_grouped_matmul_impl = getattr(ttx_backend_module, "k_grouped_matmul_impl")
+
+store_paged_kv_impl = getattr(ttx_backend_module, "store_paged_kv_impl")
 
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
@@ -59,6 +63,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     # =====================================
     # Register GELU
     # =====================================
+
     @torch.library.custom_op("ttx::gelu", mutates_args={})
     def gelu_fwd(x: torch.Tensor) -> torch.Tensor:
         return gelu_fwd_impl(x)
@@ -497,6 +502,122 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
 
         return grad_input, grad_weight, grad_bias
 
+    # ====================================
+    # Register Group gemm
+    # ====================================
+
+    @torch.library.custom_op("ttx::m_grouped_matmul", mutates_args={})
+    def m_grouped_matmul(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        size_per_group: torch.Tensor,
+        num_groups: int,
+        M: int,
+        N: int,
+        K: int,
+        strideBN: int,
+        strideBK: int,
+        trans_b: bool = False,
+    ) -> torch.Tensor:
+        return m_grouped_matmul_impl(
+            A,
+            B,
+            C,
+            size_per_group,
+            num_groups,
+            M,
+            N,
+            K,
+            strideBN,
+            strideBK,
+            trans_b,
+        )
+
+    @m_grouped_matmul.register_fake
+    def m_grouped_matmul_fake(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        size_per_group: torch.Tensor,
+        num_groups: int,
+        M: int,
+        N: int,
+        K: int,
+        strideBN: int,
+        strideBK: int,
+        trans_b: bool = False,
+    ) -> torch.Tensor:
+        return torch.empty_like(C)
+
+    @torch.library.custom_op("ttx::k_grouped_matmul", mutates_args={})
+    def k_grouped_matmul(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        size_per_group: torch.Tensor,
+        num_groups: int,
+        M: int,
+        N: int,
+    ) -> torch.Tensor:
+        return k_grouped_matmul_impl(
+            A,
+            B,
+            C,
+            size_per_group,
+            num_groups,
+            M,
+            N,
+        )
+
+    @k_grouped_matmul.register_fake
+    def k_grouped_matmul_fake(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        size_per_group: torch.Tensor,
+        num_groups: int,
+        M: int,
+        N: int,
+    ) -> torch.Tensor:
+        return torch.empty_like(C)
+
+    # ====================================
+    # Register Store KV
+    # ====================================
+
+    @torch.library.custom_op("ttx::store_paged_kv", mutates_args={})
+    def store_paged_kv(
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        block_tables: torch.Tensor,
+        context_lens: torch.Tensor,
+        block_size: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return store_paged_kv_impl(
+            key_states,
+            value_states,
+            k_cache,
+            v_cache,
+            block_tables,
+            context_lens,
+            block_size,
+        )
+
+    @store_paged_kv.register_fake
+    def store_paged_kv_fake(
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        block_tables: torch.Tensor,
+        context_lens: torch.Tensor,
+        block_size: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return torch.empty_like(k_cache), torch.empty_like(v_cache)
+
 else:
     gelu_fwd = gelu_fwd_impl
     gelu_bwd = gelu_bwd_impl
@@ -524,3 +645,6 @@ else:
 
     diffusion_attention_fwd = diffusion_attention_fwd_impl
     diffusion_attention_bwd = diffusion_attention_bwd_impl
+    m_grouped_matmul = m_grouped_matmul_impl
+    k_grouped_matmul = k_grouped_matmul_impl
+    store_paged_kv = store_paged_kv_impl

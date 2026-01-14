@@ -9,14 +9,14 @@ from .operator import MojoOperator
 
 logger = get_logger(__name__)
 
-BACKEND_PRIORITY_LIST = ["ttx", "ref", "analysis"]
+BACKEND_PRIORITY_LIST = ["ttx", "torch"]
 
 
 class MojoBackendRegistry:
     def __init__(self, core_op_cls: Union[MojoOperator, MojoFunction]):
-        assert core_op_cls.__name__.startswith("Mojo"), (
-            f"Operator {core_op_cls.__name__} who is a subclass of MojoOperator, class name must start with Mojo."
-        )
+        assert core_op_cls.__name__.startswith(
+            "Mojo"
+        ), f"Operator {core_op_cls.__name__} who is a subclass of MojoOperator, class name must start with Mojo."
         self._core_op_cls = core_op_cls
         self._operator_name = core_op_cls.__name__[4:]
         self._registry: Dict[str, Union[MojoOperator, MojoFunction]] = {}
@@ -31,6 +31,13 @@ class MojoBackendRegistry:
             f"contain {self._operator_name} in its name."
         )
         impl_backend_name = cls.__name__[:idx].lower()
+
+        # Hard code for some special cases
+        assert impl_backend_name != "mojo", "should not register base backend"
+
+        if impl_backend_name == "analysis":
+            return
+
         assert impl_backend_name in BACKEND_PRIORITY_LIST, (
             f"Operator {cls.__name__} backend[{impl_backend_name}] is not supported, "
             f"please choose from {BACKEND_PRIORITY_LIST}."

@@ -13,9 +13,9 @@ class TTXNorm(MojoNorm):
 
     def forward(self, hidden_state: torch.Tensor):
         if self.norm_type == "rmsnorm":
-            return rmsnorm_infer(hidden_state, self.gamma, self.epsilon)
+            return rmsnorm_infer(hidden_state, self.weight, self.eps)
         elif self.norm_type == "layernorm":
-            return ttx_layer_norm(hidden_state, self.gamma, self.beta, self.epsilon)
+            return ttx_layer_norm(hidden_state, self.weight, self.beta, self.eps)
         else:
             raise NotImplementedError(f"[TTXNorm] Only support rmsnorm/layernorm, but got {self.norm_type}")
 
@@ -26,10 +26,10 @@ class TTXResidualAddNorm(MojoResidualAddNorm):
     def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor = None):
         if self.norm_type == "rmsnorm":
             norm_func = ttx_fused_add_rms_norm
-            kwargs = dict(weight=self.gamma)
+            kwargs = dict(weight=self.weight)
         elif self.norm_type == "layernorm":
             norm_func = ttx_fused_add_layer_norm
-            kwargs = dict(weight=self.gamma, bias=self.beta)
+            kwargs = dict(weight=self.weight, bias=self.beta)
         else:
             raise NotImplementedError(
                 f"[TTXResidualAddNorm] Only support rmsnorm and layernorm, but got {self.norm_type}"
@@ -39,7 +39,7 @@ class TTXResidualAddNorm(MojoResidualAddNorm):
             hidden_states=hidden_state,
             residual=residual,
             add_mode=self.norm_pos,
-            eps=self.epsilon,
+            eps=self.eps,
             **kwargs,
         )
 

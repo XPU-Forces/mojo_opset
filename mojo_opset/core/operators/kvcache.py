@@ -1,3 +1,7 @@
+from typing import Tuple
+
+import torch
+
 from .. import VALID_KV_LAYOUTS
 from ..operator import MojoOperator
 
@@ -10,32 +14,76 @@ class MojoStorePagedKVCache(MojoOperator):
     def __init__(
         self,
         kv_layout: str = VALID_KV_LAYOUTS[0],
-        kv_dim: int = None,
-        is_varlen: bool = True,
+        block_size: int = 16,
         op_name: str = "",
     ):
         """
-        Common parameter definitions for StoreKVPaged.
+        Initialize KV cache operator configuration.
 
-        Init parameters:
-        - kv_layout (str): KV computation layout, values defined by VALID_KV_LAYOUTS, default VALID_KV_LAYOUTS[0].
-        - kv_dim (int): KV hidden dimension D_kv, used in scenarios like MLA to distinguish KV compression dimension from K dimension; positive integer.
-        - is_varlen (bool): When True, prioritize TND continuous token perspective; when False, use BNSD; default True.
-        - op_name (str): Operator name placeholder.
+        Args:
+            kv_layout (str, default=VALID_KV_LAYOUTS[0]): Layout identifier; must be one of
+                `VALID_KV_LAYOUTS`.
+            block_size (int, default=16): Block length used when the layout is block-based.
+            op_name (str, default=""): Operator name metadata.
 
-        Scope and description:
-        - Only covers common parameters; does not involve paging strategy details and quantization parameters (QuantMode/QuantParam).
+        Raises:
+            ValueError: If `kv_layout` is not in `VALID_KV_LAYOUTS`.
+
+        Notes:
+            Stores configuration only; actual read/write behavior depends on `kv_layout`
+            and is implemented in forward.
         """
         super().__init__(op_name)
         if kv_layout not in VALID_KV_LAYOUTS:
             raise ValueError(f"kv_layout must be one of {VALID_KV_LAYOUTS}, got {kv_layout}")
-        if kv_dim is None or not isinstance(kv_dim, int) or kv_dim <= 0:
-            raise ValueError("kv_dim must be a positive integer")
-        if not isinstance(is_varlen, bool):
-            raise TypeError("is_varlen must be a boolean type")
+
         self.kv_layout = kv_layout
-        self.kv_dim = kv_dim
-        self.is_varlen = is_varlen
+        self.block_size = block_size
+
+    def forward(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        block_tables: torch.Tensor,
+        context_lens: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Append new K/V tokens into a block-based KV cache.
+
+        Args:
+            key_states (torch.Tensor): Shape (B, Hkv, T_new, Dkv) — new key tokens.
+            value_states (torch.Tensor): Shape (B, Hkv, T_new, Dkv) — new value tokens.
+            k_cache (torch.Tensor): Shape (N_blocks, Hkv, block_size, Dkv) — key cache.
+            v_cache (torch.Tensor): Shape (N_blocks, Hkv, block_size, Dkv) — value cache.
+            block_tables (torch.Tensor): Shape (B, num_blocks) mapping logical blocks to physical IDs.
+            context_lens (torch.Tensor): Shape (B,) current sequence lengths per batch.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: Updated `(k_cache, v_cache)` after in-place writes.
+
+        Notes:
+            - Logical position = `context_len + j`; block index = `pos // self.block_size`;
+              position within block = `pos % self.block_size`.
+            - Writes are performed in-place without bounds checking; caller must ensure capacity.
+        """
+        batch_size, _, new_seq_len, _ = key_states.shape
+
+        for i in range(batch_size):
+            context_len = context_lens[i].item()
+
+            for j in range(new_seq_len):
+                logical_pos = context_len + j
+                block_idx_in_table = logical_pos // self.block_size
+                pos_in_block = logical_pos % self.block_size
+
+                physical_block_id = block_tables[i, block_idx_in_table].item()
+
+                k_cache[physical_block_id, :, pos_in_block, :] = key_states[i, :, j, :]
+                v_cache[physical_block_id, :, pos_in_block, :] = value_states[i, :, j, :]
+
+        return k_cache, v_cache
 
 
 class MojoStoreMLAKVCache(MojoOperator):

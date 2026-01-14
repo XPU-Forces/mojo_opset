@@ -1,0 +1,48 @@
+import random
+
+import pytest
+import torch
+
+from tests.utils import auto_switch_platform
+from tests.utils import bypass_not_implemented
+
+from mojo_opset import MojoGroupLinear
+
+
+def generate_random_list(length, total_sum):
+    avg = total_sum // length
+    lst = [0] * length
+    for i in range(length):
+        lst[i] = random.randint(0, 2 * int(avg))
+    ratio = total_sum / sum(lst)
+    lst = [int(x * ratio) for x in lst]
+
+    diff = total_sum - sum(lst)
+    lst[-1] += diff
+    return torch.Tensor(lst).to(torch.int64)
+
+
+@pytest.mark.parametrize(
+    "input, weight, group_list",
+    [
+        (
+            torch.randn(size=(8 * 2560, 4096), dtype=dtype),
+            torch.randn(size=(8, 4096, 4096), dtype=dtype),
+            generate_random_list(8, 8 * 2560),
+        )
+        for dtype in [torch.float16, torch.bfloat16]
+    ],
+)
+@auto_switch_platform()
+@bypass_not_implemented
+def test_group_gemm(input, weight, group_list):
+    group_gemm = MojoGroupLinear(
+        trans_weight=False,
+        weight=weight,
+    )
+
+    group_gemm_ref = MojoGroupLinear._registry.get("torch")(
+        trans_weight=False,
+        weight=weight,
+    )
+    group_gemm.forward_diff_with(group_gemm_ref, input, group_list, mixed_tol=True)
