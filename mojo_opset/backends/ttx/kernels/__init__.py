@@ -45,6 +45,10 @@ sdpa_infer_impl = getattr(ttx_backend_module, "sdpa_infer_impl")
 sdpa_fwd_impl = getattr(ttx_backend_module, "sdpa_fwd_impl")
 sdpa_bwd_impl = getattr(ttx_backend_module, "sdpa_bwd_impl")
 
+quest_impl = getattr(ttx_backend_module, "quest_impl")
+block_sparse_paged_attention_prefill_impl = getattr(ttx_backend_module, "block_sparse_paged_attention_prefill_impl")
+
+
 diffusion_attention_fwd_impl = getattr(ttx_backend_module, "diffusion_attention_fwd_impl")
 diffusion_attention_bwd_impl = getattr(ttx_backend_module, "diffusion_attention_bwd_impl")
 
@@ -635,6 +639,10 @@ else:
     sdpa_infer = sdpa_infer_impl
     sdpa_fwd = sdpa_fwd_impl
     sdpa_bwd = sdpa_bwd_impl
+
+    quest = quest_impl
+    block_sparse_paged_attention_prefill = block_sparse_paged_attention_prefill_impl
+
     diffusion_attention_fwd = diffusion_attention_fwd_impl
     diffusion_attention_bwd = diffusion_attention_bwd_impl
     m_grouped_matmul = m_grouped_matmul_impl

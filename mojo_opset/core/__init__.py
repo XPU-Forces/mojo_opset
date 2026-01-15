@@ -22,6 +22,8 @@ from .operators.attention import MojoPagedDecodeNSA
 from .operators.attention import MojoPagedPrefillGQA
 from .operators.attention import MojoPagedPrefillMLA
 from .operators.attention import MojoPagedPrefillNSA
+from .operators.attention import MojoBlockQuest
+from .operators.attention import MojoPagedPrefillBlockSparseAttention
 from .operators.attention import MojoPrefillGQA
 from .operators.attention import MojoPrefillMLA
 from .operators.attention import MojoPrefillNSA
@@ -112,6 +114,9 @@ __all__ = [
     "MojoDecodeNSA",
     "MojoPagedDecodeNSA",
     "MojoSdpa",
+
+    "MojoBlockQuest",
+    "MojoPagedPrefillBlockSparseAttention",
 
     "MojoStoreKVCache",
     "MojoStorePagedKVCache",

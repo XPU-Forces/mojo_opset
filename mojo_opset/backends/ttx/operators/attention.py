@@ -5,9 +5,17 @@ import torch
 from mojo_opset.backends.ttx.kernels import paged_attention_decode
 from mojo_opset.backends.ttx.kernels import paged_attention_prefill
 from mojo_opset.backends.ttx.kernels import sdpa_infer
+from mojo_opset.backends.ttx.kernels import quest
+from mojo_opset.backends.ttx.kernels import block_sparse_paged_attention_prefill
+
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoSdpa
+from mojo_opset.core import MojoPagedDecodeGQA
+from mojo_opset.core import MojoPagedPrefillGQA
+from mojo_opset.core import MojoSdpa
+from mojo_opset.core import MojoBlockQuest
+from mojo_opset.core import MojoPagedPrefillBlockSparseAttention
 
 
 class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
@@ -22,15 +30,15 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
     ):
-        assert self.window_size == -1, (
-            f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
-        )
-        assert self.gqa_layout == "ABAB", (
-            f"[TTXPagedPrefillGQA] TTX only support ABAB layout, but got gqa_layout={self.gqa_layout}"
-        )
-        assert self.is_causal, (
-            f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
-        )
+        assert (
+            self.window_size == -1
+        ), f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
+        assert (
+            self.gqa_layout == "ABAB"
+        ), f"[TTXPagedPrefillGQA] TTX only support ABAB layout, but got gqa_layout={self.gqa_layout}"
+        assert (
+            self.is_causal
+        ), f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
 
         output = paged_attention_prefill(
             q=query,
@@ -56,15 +64,15 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
     ):
-        assert self.window_size == -1, (
-            f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
-        )
-        assert self.gqa_layout == "ABAB", (
-            f"[TTXPagedPrefillGQA] TTX only support ABAB layout, but got gqa_layout={self.gqa_layout}"
-        )
-        assert self.is_causal, (
-            f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
-        )
+        assert (
+            self.window_size == -1
+        ), f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
+        assert (
+            self.gqa_layout == "ABAB"
+        ), f"[TTXPagedPrefillGQA] TTX only support ABAB layout, but got gqa_layout={self.gqa_layout}"
+        assert (
+            self.is_causal
+        ), f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
 
         output = paged_attention_decode(
             q=query,
@@ -75,6 +83,47 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
             sm_scale=softmax_scale,
         )
 
+        return output
+
+
+class TTXBlockQuest(MojoBlockQuest):
+    supported_platforms_list = ["npu"]
+
+    def forward(
+        self,
+        curr_query_seg: torch.Tensor,
+        mins: torch.Tensor,
+        maxs: torch.Tensor,
+        top_k_page: int,
+    ):
+        return quest(curr_query_seg[:, :: self.block_q], mins, maxs, top_k_page)
+
+
+class TTXPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
+    supported_platforms_list = ["npu"]
+
+    def forward(
+        self,
+        curr_query_seg,
+        key,
+        value,
+        whole_causal_mask,
+        topk_page_indices,
+        q_seg_id,
+        q_chunk_size,
+    ):
+        output = block_sparse_paged_attention_prefill(
+            curr_query_seg,
+            key,
+            value,
+            self.scale,
+            self.mask,
+            topk_page_indices,
+            q_seg_id,
+            q_chunk_size,
+            self.q_seg_size,
+            self.page_size,
+        )
         return output
 
 
