@@ -4,42 +4,54 @@ import math
 
 
 def test_paged_prefill_quest():
-    qkv = torch.randn(128, 1280).npu().bfloat16()
-    key_cache = torch.randn(1024, 1, 32, 128).npu().bfloat16()
-    value_cache = torch.randn(1024, 1, 32, 128).npu().bfloat16()
-    causal_mask = torch.ones(1024, 1024, dtype=torch.bool).tril(diagonal=0).npu()
-    q_head_num = 8
-    kv_head_num = 1
-    kv_idx = [torch.tensor([0, 1, 2, 3, 4], device=key_cache.device)]
-    kv_len = [32 * 4 - 5]
-    q_len_list = [8]
+    MAX_QLEN = 4096
+    HEAD_DIM = 128
+    Q_HEAD_NUM = 8
+    KV_HEAD_NUM = 1
+    PAGE_SIZE = 128
+    MAX_PAGE = 32
+    Q_SEG_SIZE = int(os.environ.get("Q_SEG_SIZE", 1024))
+    TOPK_RATIO = float(os.environ.get("TOPK_RATIO", 0.25))
+    page_rep = os.environ.get("PAGE_REP", "default_value")
     sparse_limit = 64
+
+    qkv = torch.randn(MAX_QLEN, HEAD_DIM * (Q_HEAD_NUM + KV_HEAD_NUM * 2)).npu()  # .bfloat16()
+    key_cache = torch.randn(MAX_PAGE, KV_HEAD_NUM, PAGE_SIZE, HEAD_DIM).npu()  # .bfloat16()
+    value_cache = torch.randn(MAX_PAGE, KV_HEAD_NUM, PAGE_SIZE, HEAD_DIM).npu()  # .bfloat16()
+    kv_len0 = 499
+    q_len0 = 399
+    kv_idx = [torch.tensor(list(range((kv_len0 + q_len0) // PAGE_SIZE + 1)), device=key_cache.device)]
+    kv_len = [kv_len0]
+    q_len_list = [q_len0]
+
     original_out = original_session_cache_pa_flash_attention_quest128(
         qkv,
         key_cache,
         value_cache,
-        causal_mask,
-        q_head_num,
-        kv_head_num,
+        Q_HEAD_NUM,
+        KV_HEAD_NUM,
         kv_idx,
         kv_len,
         q_len_list,
         0,
         0,
+        Q_SEG_SIZE,
+        TOPK_RATIO,
         sparse_limit,
     )
     mojo_output = mojo_quest(
         qkv,
         key_cache,
         value_cache,
-        causal_mask,
-        q_head_num,
-        kv_head_num,
+        Q_HEAD_NUM,
+        KV_HEAD_NUM,
         kv_idx,
         kv_len,
         q_len_list,
         0,
         0,
+        Q_SEG_SIZE,
+        TOPK_RATIO,
         sparse_limit,
     )
     torch.testing.assert_close(mojo_output, original_out)
@@ -49,7 +61,6 @@ def original_session_cache_pa_flash_attention_quest128(
     qkv,  # [24,1280]
     key_cache,  # [1024,1,256,128]
     value_cache,  # [1024,1,256,128]
-    causal_mask,  # [2048,2048]
     q_head_num,  # 8
     kv_head_num,  # 1
     kv_idx,  # [0,]
@@ -57,17 +68,16 @@ def original_session_cache_pa_flash_attention_quest128(
     q_len_list,  # [17,0,..]
     global_rank,
     block_idx,
+    q_seg_size,
+    topk_ratio,
     sparse_limit,
 ):
     topk_page_indices_debug = None
     prefill_sparse = True
     # sparse_limit = 1024
     # page_size = 64
-    page_size = key_cache.shape[2] // kv_head_num
+    page_size = key_cache.shape[2]
     # q_seg_size = 512
-    q_seg_size = int(os.environ.get("Q_SEG_SIZE", 1024))
-    topk_ratio = float(os.environ.get("TOPK_RATIO", 0.25))
-    page_rep = os.environ.get("PAGE_REP", "default_value")
 
     # cache_size = key_cache.shape[0] # 1024
     q_seq_length = qkv.shape[0]
@@ -258,7 +268,6 @@ def mojo_quest(
     qkv,  # [24,1280]
     key_cache,  # [1024,1,256,128]
     value_cache,  # [1024,1,256,128]
-    causal_mask,  # [2048,2048]
     q_head_num,  # 8
     kv_head_num,  # 1
     kv_idx,  # [0,]
@@ -266,17 +275,16 @@ def mojo_quest(
     q_len_list,  # [17,0,..]
     global_rank,
     block_idx,
+    q_seg_size,  # 1024
+    topk_ratio,
     sparse_limit,
 ):
     topk_page_indices_debug = None
     prefill_sparse = True
     # sparse_limit = 1024
     # page_size = 64
-    page_size = key_cache.shape[2] // kv_head_num
+    page_size = key_cache.shape[2]
     # q_seg_size = 512
-    q_seg_size = int(os.environ.get("Q_SEG_SIZE", 1024))
-    topk_ratio = float(os.environ.get("TOPK_RATIO", 0.25))
-    page_rep = os.environ.get("PAGE_REP", "default_value")
 
     # cache_size = key_cache.shape[0] # 1024
     q_seq_length = qkv.shape[0]
@@ -415,7 +423,7 @@ def mojo_quest(
     print([expect.shape for expect in expects])
 
     expect = torch.cat(expects, axis=1)
-    return topk_page_indices_debug, expect.permute(1, 0, 2).reshape(q_seq_length, q_head_num * head_size).bfloat16()
+    return topk_page_indices_debug, expect.permute(1, 0, 2).reshape(q_seq_length, q_head_num * head_size)  # .bfloat16()
 
 
 if __name__ == "__main__":
