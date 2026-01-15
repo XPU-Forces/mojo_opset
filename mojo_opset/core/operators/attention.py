@@ -360,11 +360,12 @@ class MojoPagedPrefillBlockSparseAttention(MojoOperator):
         self.q_head_num = q_head_num
         self.kv_head_num = kv_head_num
         self.head_size = head_size
-        full_mask = torch.ones(self.q_seg_size, self.page_size, device=causal_mask.device, dtype=torch.bool)
-        empty_mask = torch.zeros(self.q_seg_size, self.page_size, device=causal_mask.device, dtype=torch.bool)
+        mask_block_size = max(self.page_size, max(self.q_seg_size, 128))
+        full_mask = torch.ones(mask_block_size, mask_block_size, device=causal_mask.device, dtype=torch.bool)
+        empty_mask = torch.zeros(mask_block_size, mask_block_size, device=causal_mask.device, dtype=torch.bool)
         session_mask = torch.ones(
-            self.q_seg_size, self.q_seg_size * 3, device=causal_mask.device, dtype=torch.bool
-        ).tril(diagonal=self.q_seg_size)
+            mask_block_size, mask_block_size * 3, device=causal_mask.device, dtype=torch.bool
+        ).tril(diagonal=mask_block_size)
         self.mask = torch.cat([full_mask, empty_mask, session_mask], dim=1)
         self.scale = 1 / math.sqrt(head_size)
 

@@ -147,8 +147,8 @@ def quest_impl(
 
 
 @triton.jit
-def get_mask_ptr_offset_n_kvcache(q_start, q_block, q_len, kv_start, kv_block, kv_len):
-    offset_kv = min(max(kv_start + kv_block - kv_len, 0), kv_block)
+def get_mask_ptr_offset_n_cross(q_start, q_block, q_len, kv_start, kv_block, kv_len):
+    offset_kv = min(max(kv_start - kv_len, -kv_block), 0)
     return offset_kv
 
 
@@ -279,7 +279,7 @@ def paged_sparse_prefill_kernel(
     KV_PAGE_SIZE: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
-    # BLOCK_SIZE_D: tl.constexpr,
+    BLOCK_SIZE_MASK: tl.constexpr,
 ):
     """
     Block sparse prefill attention kernel
@@ -374,10 +374,12 @@ def paged_sparse_prefill_kernel(
                 q,
                 K_block_ptr,
                 V_block_ptr,
-                session_mask_ptr + q_block_idx * BLOCK_SIZE_M * stride_session_mask_m,
+                session_mask_ptr
+                + q_block_idx * BLOCK_SIZE_M * stride_session_mask_m
+                + BLOCK_SIZE_MASK * stride_session_mask_n,
                 stride_session_mask_m,
                 stride_session_mask_n,
-                get_mask_ptr_offset_n_kvcache,
+                get_mask_ptr_offset_n_cross,
                 scale,
                 BLOCK_SIZE_M,
                 HEAD_DIM,
@@ -415,7 +417,7 @@ def paged_sparse_prefill_kernel(
             V_block_ptr,
             session_mask_ptr
             + q_block_idx * BLOCK_SIZE_M * stride_session_mask_m
-            + (KV_PAGE_SIZE * 2 + Q_SEG_SIZE + q_block_idx * BLOCK_SIZE_M) * stride_session_mask_n,
+            + (BLOCK_SIZE_MASK * 3 + q_block_idx * BLOCK_SIZE_M) * stride_session_mask_n,
             stride_session_mask_m,
             stride_session_mask_n,
             get_mask_ptr_offset_n_causal,
@@ -478,7 +480,8 @@ def block_sparse_paged_attention_prefill_impl(
     # print(f"{curr_seg_causal.shape=} {curr_seg_causal.stride(0)} {curr_seg_causal.stride(1)} {curr_seg_causal}")
     curr_seg_causal = whole_causal_mask
 
-    print(f"{topk_page_indices.stride()=}")
+    mask_block_size = curr_seg_causal.size(0)
+
     paged_sparse_prefill_kernel[grid](
         curr_query_seg,
         key,
@@ -513,7 +516,8 @@ def block_sparse_paged_attention_prefill_impl(
         head_dim,
         q_seg_size,
         page_size,
-        BLOCK_SIZE_M=32,  # dummy, for test
-        BLOCK_SIZE_N=32,  # dummy, for test
+        BLOCK_SIZE_M=64,  # dummy, for test
+        BLOCK_SIZE_N=128,  # dummy, for test
+        BLOCK_SIZE_MASK=mask_block_size,
     )
     return o
