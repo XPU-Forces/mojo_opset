@@ -235,6 +235,9 @@ def causal_conv1d_bwd_kernel(
         if HAS_BIAS:
             b_db = tl.zeros((BD,), dtype=tl.float32)
 
+        if HAS_WEIGHT:
+            bf_dw = tl.zeros((BD, W), dtype=tl.float32)
+
         if not USE_FINAL_STATE:
             for i_w in tl.static_range(0, W):
                 p_dy = tl.make_block_ptr(dy + bos * D, (T_len, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
@@ -249,13 +252,15 @@ def causal_conv1d_bwd_kernel(
                     b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
                 b_wdy = b_dy
                 if HAS_WEIGHT:
-                    b_wdy = b_wdy * tl.sum(b_w * (o_w == (W - i_w - 1)), 1)
-
+                    i_w_mask = (o_w == (W - i_w - 1))
+                    b_wdy = b_wdy * tl.sum(b_w * i_w_mask, 1)
                     b_dw = tl.sum(b_dy * b_x, 0)
-                    tl.store(dw + i_tg * D * W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
+                    bf_dw += b_dw[:, None] * i_w_mask
                 if HAS_BIAS and i_w == 0:
                     b_db += tl.sum(b_dy, 0)
                 b_dx += b_wdy
+            if HAS_WEIGHT:
+                tl.store(dw + i_tg * D * W + o_d[:, None] * W + o_w, bf_dw.to(dw.dtype.element_ty), mask = m_d[:, None] & m_w)
         elif i_t * BT >= W:
             for i_w in tl.static_range(0, W):
                 p_dy = tl.make_block_ptr(dy + bos * D, (T_len, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
@@ -270,13 +275,15 @@ def causal_conv1d_bwd_kernel(
                     b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
                 b_wdy = b_dy
                 if HAS_WEIGHT:
-                    b_wdy = b_wdy * tl.sum(b_w * (o_w == (W - i_w - 1)), 1)
-
+                    i_w_mask = (o_w == (W - i_w - 1))
+                    b_wdy = b_wdy * tl.sum(b_w * i_w_mask, 1)
                     b_dw = tl.sum(b_dy * b_x, 0)
-                    tl.store(dw + i_tg * D * W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
+                    bf_dw += b_dw[:, None] * i_w_mask
                 if HAS_BIAS and i_w == 0:
                     b_db += tl.sum(b_dy, 0)
                 b_dx += b_wdy
+            if HAS_WEIGHT:
+                tl.store(dw + i_tg * D * W + o_d[:, None] * W + o_w, bf_dw.to(dw.dtype.element_ty), mask = m_d[:, None] & m_w)
         else:
             o_t = i_t * BT + tl.arange(0, BT)
             for i_w in tl.static_range(0, W):
@@ -318,12 +325,15 @@ def causal_conv1d_bwd_kernel(
                         ).to(tl.float32)
 
                         b_dw += tl.sum(b_dy_head * b_xc, 0)
-                    tl.store(dw + i_tg * D * W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
+                    bf_dw += b_dw[:, None] * (o_w == (W - i_w - 1))
 
                 if HAS_BIAS and i_w == 0:
                     b_db += tl.sum(b_dy_shift, 0)
                 b_wdy = b_dy_shift if not HAS_WEIGHT else (b_dy_shift * tl.sum(b_w * (o_w == (W - i_w - 1)), 1))
                 b_dx += b_wdy
+            
+            if HAS_WEIGHT:
+                tl.store(dw + i_tg * D * W + o_d[:, None] * W + o_w, bf_dw.to(dw.dtype.element_ty), mask = m_d[:, None] & m_w)
 
             if USE_INITIAL_STATE:
                 p_dy0 = tl.make_block_ptr(dy + bos * D, (T_len, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
@@ -371,6 +381,7 @@ def causal_conv1d_bwd_kernel(
 
         p_dx = tl.make_block_ptr(dx + bos * D, (T_len, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
         tl.store(p_dx, tl.cast(b_dx, dtype=p_dx.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+
 
 
 @triton.heuristics(
