@@ -513,7 +513,7 @@ def block_sparse_paged_attention_prefill_impl(
         head_dim,
         q_seg_size,
         page_size,
-        BLOCK_SIZE_M=64,  # dummy, for test
-        BLOCK_SIZE_N=64,  # dummy, for test
+        BLOCK_SIZE_M=32,  # dummy, for test
+        BLOCK_SIZE_N=32,  # dummy, for test
     )
     return o

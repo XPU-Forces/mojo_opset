@@ -353,7 +353,7 @@ class MojoPagedPrefillBlockSparseAttention(MojoOperator):
         op_name: str = "",
         layer_idx: int = 0,
     ):
-        super().__init__()
+        super().__init__(op_name, layer_idx)
         self.page_size = page_size
         self.q_seg_size = q_seg_size
         self.topk_ratio = topk_ratio

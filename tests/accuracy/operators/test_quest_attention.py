@@ -193,13 +193,13 @@ def original_session_cache_pa_flash_attention_quest128(
                 curr_seg_mask[:, :, -q_chunk_sizes[i] :] = curr_seg_causal
 
                 curr_seg_score = curr_seg_score.masked_fill(~curr_seg_mask, torch.finfo(curr_seg_score.dtype).min)
-                curr_seg_score = torch.softmax(curr_seg_score, -1, dtype=torch.float32).to(dtype=torch.bfloat16)
+                curr_seg_score = torch.softmax(curr_seg_score, -1, dtype=torch.float32)  # .to(dtype=torch.bfloat16)
                 # [nh, q_seg_size, head_size]
                 curr_seg_output = (
                     torch.bmm(curr_seg_score, value)
                     .permute(1, 0, 2)
                     .reshape(curr_seg_size, q_head_num * head_size)
-                    .to(dtype=torch.bfloat16)
+                    # .to(dtype=torch.bfloat16)
                 )
                 if q_seg_id == 0:
                     output_all = curr_seg_output
@@ -415,7 +415,7 @@ def mojo_quest(
     print([expect.shape for expect in expects])
 
     expect = torch.cat(expects, axis=1)
-    return topk_page_indices_debug, expect.permute(1, 0, 2).reshape(q_seq_length, q_head_num * head_size).bfloat16()
+    return topk_page_indices_debug, expect.permute(1, 0, 2).reshape(q_seq_length, q_head_num * head_size)  # .bfloat16()
 
 
 if __name__ == "__main__":
