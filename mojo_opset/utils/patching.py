@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 
-from mojo_opset import MojoNorm
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoRoPE
@@ -24,13 +23,13 @@ def apply_mojo_to_qwen3(
         "cross_entropy and fused_linear_cross_entropy cannot both be True."
     )
 
-    from mojo_opset.modeling import torch_qwen3_dense
+    from transformers.models.qwen3 import modeling_qwen3
 
     if rope:
-        torch_qwen3_dense.apply_rotary_pos_emb = MojoRoPE()
+        modeling_qwen3.apply_rotary_pos_emb = MojoRoPE()
 
-    if rms_norm:
-        torch_qwen3_dense.Qwen3RMSNorm = MojoNorm
+    # if rms_norm:
+    #     torch_qwen3_dense.Qwen3RMSNorm = MojoNorm
 
     if swiglu:
 
@@ -58,11 +57,11 @@ def apply_mojo_to_qwen3(
 
                 return self.down_proj(fused_output)
 
-        torch_qwen3_dense.Qwen3MLP = MojoSwiGLUMLP
+        modeling_qwen3.Qwen3MLP = MojoSwiGLUMLP
 
     if attn:
-        torch_qwen3_dense.paged_attention_prefill = MojoPagedPrefillGQA()
-        torch_qwen3_dense.paged_attention_decode = MojoPagedDecodeGQA()
+        modeling_qwen3.paged_attention_prefill = MojoPagedPrefillGQA()
+        modeling_qwen3.paged_attention_decode = MojoPagedDecodeGQA()
 
     # NOTE: Currently, only a native decoder layer is implemented as a patch example; the
     # full model is not defined yet, so only static replacement before model instantiation is supported.

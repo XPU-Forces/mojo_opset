@@ -4,8 +4,17 @@ from mojo_opset.backends.ttx.kernels import rmsnorm_infer
 from mojo_opset.backends.ttx.kernels.npu.fused_add_layer_norm import ttx_fused_add_layer_norm
 from mojo_opset.backends.ttx.kernels.npu.fused_add_rms_norm import ttx_fused_add_rms_norm
 from mojo_opset.backends.ttx.kernels.npu.layernorm import ttx_layer_norm
+from mojo_opset.core import MojoLayerNorm
 from mojo_opset.core import MojoNorm
 from mojo_opset.core import MojoResidualAddNorm
+from mojo_opset.core import MojoRMSNorm
+
+
+class TTXLayerNorm(MojoLayerNorm):
+    supported_platforms_list = ["npu"]
+
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
+        return ttx_layer_norm(hidden_state, self.weight, self.bias, self.eps)
 
 
 class TTXNorm(MojoNorm):
@@ -18,6 +27,13 @@ class TTXNorm(MojoNorm):
             return ttx_layer_norm(hidden_state, self.weight, self.beta, self.eps)
         else:
             raise NotImplementedError(f"[TTXNorm] Only support rmsnorm/layernorm, but got {self.norm_type}")
+
+
+class TTXRMSNorm(MojoRMSNorm):
+    supported_platforms_list = ["npu"]
+
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
+        return rmsnorm_infer(hidden_state, self.weight, self.eps)
 
 
 class TTXResidualAddNorm(MojoResidualAddNorm):

@@ -8,6 +8,67 @@ import torch.nn.functional as F
 from ..operator import MojoOperator
 
 
+class MojoLayerNorm(MojoOperator):
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+        eps: float = 1e-5,
+    ):
+        super().__init__()
+        # for patching torch.nn.LayerNorm
+        self.weight = weight
+        self.bias = bias
+        self.eps = eps
+
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for LayerNorm.
+
+        Args:
+            hidden_state (torch.Tensor): Input tensor of shape (..., seq_len, hidden_size).
+
+        Returns:
+            torch.Tensor: Normalized tensor of same shape as input.
+        """
+        return F.layer_norm(
+            hidden_state,
+            [hidden_state.shape[-1]],
+            weight=self.weight,
+            bias=self.bias,
+            eps=self.eps,
+        )
+
+
+class MojoRMSNorm(MojoOperator):
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        eps: float = 1e-5,
+    ):
+        super().__init__()
+        # for patching torch.nn.RMSNorm
+        self.weight = weight
+        self.eps = eps
+
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for RMSNorm.
+
+        Args:
+            hidden_state (torch.Tensor): Input tensor of shape (..., seq_len, hidden_size).
+
+        Returns:
+            torch.Tensor: Normalized tensor of same shape as input.
+        """
+        return F.rms_norm(
+            hidden_state,
+            [hidden_state.shape[-1]],
+            weight=self.weight,
+            eps=self.eps,
+        )
+
+
 class MojoNorm(MojoOperator):
     def __init__(
         self,
@@ -16,8 +77,6 @@ class MojoNorm(MojoOperator):
         weight: Optional[torch.Tensor] = None,
         beta: Optional[torch.Tensor] = None,
         is_varlen: bool = True,
-        op_name: str = "",
-        layer_idx: int = 0,
     ):
         """
         Initialize normalization operator configuration.
@@ -37,7 +96,7 @@ class MojoNorm(MojoOperator):
         Notes:
             Sets `self.affine` True only when both `weight` and `beta` are provided.
         """
-        super().__init__(op_name, layer_idx)
+        super().__init__()
 
         if norm_type not in ["rmsnorm", "layernorm"]:
             raise ValueError('norm_type should be {"rmsnorm","layernorm"}')
@@ -109,10 +168,8 @@ class MojoNormQuant(MojoOperator):
         hidden_size,
         eps: float = 1e-05,
         norm_type: str = "rmsnorm",
-        op_name: str = "",
-        layer_idx: int = 0,
     ):
-        super().__init__(op_name, layer_idx)
+        super().__init__()
         self.variance_epsilon = eps
 
         self.norm_type = norm_type
@@ -128,8 +185,6 @@ class MojoResidualAddNorm(MojoOperator):
         beta: Optional[torch.Tensor] = None,
         norm_pos: str = "pre",
         is_varlen: bool = True,
-        op_name: str = "",
-        layer_idx: int = 0,
     ):
         """
         Initialize normalization operator (LayerNorm/RMSNorm) with position control.
@@ -150,7 +205,7 @@ class MojoResidualAddNorm(MojoOperator):
         Notes:
             `self.affine` is True only when both `weight` and `beta` are provided.
         """
-        super().__init__(op_name, layer_idx)
+        super().__init__()
 
         if norm_type not in ["rmsnorm", "layernorm"]:
             raise ValueError('norm_type should be {"rmsnorm","layernorm"}')

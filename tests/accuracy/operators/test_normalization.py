@@ -4,7 +4,7 @@ import torch
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
-from mojo_opset import MojoNorm
+from mojo_opset import MojoNorm, MojoLayerNorm, MojoRMSNorm
 from mojo_opset import MojoResidualAddNorm
 
 torch.manual_seed(42)
@@ -34,15 +34,13 @@ dtypes = [torch.float32, torch.float16, torch.bfloat16]
 @auto_switch_platform()
 @bypass_not_implemented
 def test_rmsnorm(x, weight, eps):
-    rmsnorm = MojoNorm(
+    rmsnorm = MojoRMSNorm(
         eps=eps,
-        norm_type="rmsnorm",
         weight=weight,
     ).to(x.device)
 
-    rmsnorm_ref = MojoNorm._registry.get("torch")(
+    rmsnorm_ref = MojoRMSNorm._registry.get("torch")(
         eps=eps,
-        norm_type="rmsnorm",
         weight=weight,
     ).to(x.device)
 
@@ -58,7 +56,7 @@ def test_rmsnorm(x, weight, eps):
 
 
 @pytest.mark.parametrize(
-    "x, weight, beta",
+    "x, weight, bias",
     [
         (
             torch.randn(size=(256, 128), dtype=dtype),
@@ -71,26 +69,24 @@ def test_rmsnorm(x, weight, eps):
 @pytest.mark.parametrize("eps", [1e-5])
 @auto_switch_platform()
 @bypass_not_implemented
-def test_layernorm(x, weight, beta, eps):
-    layernorm = MojoNorm(
+def test_layernorm(x, weight, bias, eps):
+    layernorm = MojoLayerNorm(
         eps=eps,
-        norm_type="layernorm",
         weight=weight,
-        beta=beta,
+        bias=bias,
     ).to(x.device)
 
-    layernorm_ref = MojoNorm._registry.get("torch")(
+    layernorm_ref = MojoLayerNorm._registry.get("torch")(
         eps=eps,
-        norm_type="layernorm",
         weight=weight,
-        beta=beta,
+        bias=bias,
     ).to(x.device)
 
     with torch.no_grad():
         layernorm.weight.copy_(weight.to(torch.float32))
-        layernorm.beta.copy_(beta.to(torch.float32))
+        layernorm.bias.copy_(bias.to(torch.float32))
         layernorm_ref.weight.copy_(weight.to(torch.float32))
-        layernorm_ref.beta.copy_(beta.to(torch.float32))
+        layernorm_ref.bias.copy_(bias.to(torch.float32))
 
     if x.dtype == torch.float32:
         atol, rtol = 1e-4, 1e-5

@@ -58,6 +58,8 @@ from .operators.moe import MojoMoEGate
 
 """ normalization """
 from .operators.normalization import MojoNorm
+from .operators.normalization import MojoLayerNorm
+from .operators.normalization import MojoRMSNorm
 from .operators.normalization import MojoNormQuant
 from .operators.normalization import MojoResidualAddNorm
 from .operators.normalization import MojoResidualAddNormCast
@@ -140,6 +142,8 @@ __all__ = [
     "MojoBigEPCombine",
 
     "MojoNorm",
+    "MojoLayerNorm",
+    "MojoRMSNorm",
     "MojoNormQuant",
     "MojoResidualAddNorm",
     "MojoResidualAddNormQuant",
