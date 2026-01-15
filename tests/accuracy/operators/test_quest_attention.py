@@ -4,9 +4,9 @@ import math
 
 
 def test_paged_prefill_quest():
-    qkv = torch.randn(128, 1280).npu()  # .bfloat16()
-    key_cache = torch.randn(1024, 1, 32, 128).npu()  # .bfloat16()
-    value_cache = torch.randn(1024, 1, 32, 128).npu()  # .bfloat16()
+    qkv = torch.randn(128, 1280).npu().bfloat16()
+    key_cache = torch.randn(1024, 1, 32, 128).npu().bfloat16()
+    value_cache = torch.randn(1024, 1, 32, 128).npu().bfloat16()
     causal_mask = torch.ones(1024, 1024, dtype=torch.bool).tril(diagonal=0).npu()
     q_head_num = 8
     kv_head_num = 1
@@ -179,7 +179,7 @@ def original_session_cache_pa_flash_attention_quest128(
                 # ====================quest========================
 
                 # [nh, q_seg_size, kv_seq_length]
-                curr_seg_score = torch.bmm(curr_query_seg, key.transpose(-2, -1))
+                curr_seg_score = torch.bmm(curr_query_seg.float(), key.float().transpose(-2, -1))
                 curr_seg_score = curr_seg_score / math.sqrt(head_size)
 
                 # [nh, q_seg_size, kv_seq_length]
@@ -196,10 +196,10 @@ def original_session_cache_pa_flash_attention_quest128(
                 curr_seg_score = torch.softmax(curr_seg_score, -1, dtype=torch.float32)  # .to(dtype=torch.bfloat16)
                 # [nh, q_seg_size, head_size]
                 curr_seg_output = (
-                    torch.bmm(curr_seg_score, value)
+                    torch.bmm(curr_seg_score, value.float())
                     .permute(1, 0, 2)
                     .reshape(curr_seg_size, q_head_num * head_size)
-                    # .to(dtype=torch.bfloat16)
+                    .to(dtype=qkv.dtype)
                 )
                 if q_seg_id == 0:
                     output_all = curr_seg_output
@@ -415,7 +415,7 @@ def mojo_quest(
     print([expect.shape for expect in expects])
 
     expect = torch.cat(expects, axis=1)
-    return topk_page_indices_debug, expect.permute(1, 0, 2).reshape(q_seq_length, q_head_num * head_size)  # .bfloat16()
+    return topk_page_indices_debug, expect.permute(1, 0, 2).reshape(q_seq_length, q_head_num * head_size).bfloat16()
 
 
 if __name__ == "__main__":
