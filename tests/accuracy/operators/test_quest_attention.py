@@ -4,12 +4,12 @@ import math
 
 
 def test_paged_prefill_quest():
-    MAX_QLEN = 4096
+    MAX_QLEN = 16384
     HEAD_DIM = 128
     Q_HEAD_NUM = 8
     KV_HEAD_NUM = 1
     PAGE_SIZE = 128
-    MAX_PAGE = 32
+    MAX_PAGE = 256
     Q_SEG_SIZE = int(os.environ.get("Q_SEG_SIZE", 1024))
     TOPK_RATIO = float(os.environ.get("TOPK_RATIO", 0.25))
     page_rep = os.environ.get("PAGE_REP", "default_value")
@@ -18,8 +18,8 @@ def test_paged_prefill_quest():
     qkv = torch.randn(MAX_QLEN, HEAD_DIM * (Q_HEAD_NUM + KV_HEAD_NUM * 2)).npu()  # .bfloat16()
     key_cache = torch.randn(MAX_PAGE, KV_HEAD_NUM, PAGE_SIZE, HEAD_DIM).npu()  # .bfloat16()
     value_cache = torch.randn(MAX_PAGE, KV_HEAD_NUM, PAGE_SIZE, HEAD_DIM).npu()  # .bfloat16()
-    kv_len0 = 499
-    q_len0 = 399
+    kv_len0 = 5499
+    q_len0 = 4399
     kv_idx = [torch.tensor(list(range((kv_len0 + q_len0) // PAGE_SIZE + 1)), device=key_cache.device)]
     kv_len = [kv_len0]
     q_len_list = [q_len0]
@@ -94,44 +94,30 @@ def original_session_cache_pa_flash_attention_quest128(
         .contiguous()
     )  # [1,8,24,128]
 
-    # [total_pages, h_qo, page_size, d]
-    key_cache = key_cache.repeat_interleave(q_head_num // kv_head_num, dim=1)
-    # [total_pages, h_qo, page_size, d]
-    value_cache = value_cache.repeat_interleave(q_head_num // kv_head_num, dim=1)
-
-    key_cache_list = []
-    value_cache_list = []
-    for sublist in kv_cache_indices:
-        valid_mask = sublist != -1
-        valid_indices = sublist[valid_mask]
-        if valid_indices.numel() > 0:
-            key_sub = key_cache.index_select(0, valid_indices)
-            value_sub = value_cache.index_select(0, valid_indices)
-            key_cache_list.append(key_sub)
-            value_cache_list.append(value_sub)
-
-    key_cache_new = []
-    value_cache_new = []
-    for k_sublist, v_sublist in zip(key_cache_list, value_cache_list):
-        k_sublist_t = list(k_sublist)
-        key_cache_new.append(torch.cat(k_sublist_t, dim=1))
-        v_sublist_t = list(v_sublist)
-        value_cache_new.append(torch.cat(v_sublist_t, dim=1))
-
     query_start = 0
     expects = []
     for i in range(len(kv_cache_indices)):
+        sublist = kv_cache_indices[i]
+        valid_mask = sublist != -1
+        valid_indices = sublist[valid_mask]
+
+        key_sub = key_cache.index_select(0, valid_indices)
+        value_sub = value_cache.index_select(0, valid_indices)
 
         valid_kv_seq_length = kv_seq_lengths[i] + q_chunk_sizes[i]  # 19
 
         top_k = int(valid_kv_seq_length * topk_ratio)
         top_k_page = top_k // page_size
 
-        key_cache_i = key_cache_new[i]
-        key = key_cache_i[:, :valid_kv_seq_length, :]  # [8,128,19]
+        key_cache_i = key_sub.permute(1, 0, 2, 3).reshape(kv_head_num, -1, head_size)
+        key = (
+            key_cache_i[:, :valid_kv_seq_length, :].repeat_interleave(q_head_num // kv_head_num, dim=0).contiguous()
+        )  # [8,19, 128]
 
-        value_cache_i = value_cache_new[i]
-        value = value_cache_i[:, :valid_kv_seq_length, :].contiguous()  # [8,19,128]
+        value_cache_i = value_sub.permute(1, 0, 2, 3).reshape(kv_head_num, -1, head_size)
+        value = (
+            value_cache_i[:, :valid_kv_seq_length, :].repeat_interleave(q_head_num // kv_head_num, dim=0).contiguous()
+        )  # [8,19,128]
 
         whole_causal = torch.tril(
             torch.ones((q_chunk_sizes[i], valid_kv_seq_length), dtype=torch.bool, device=key.device),
@@ -307,30 +293,6 @@ def mojo_quest(
     assert bsz == 1
     query = query.squeeze(0)
     kv_head_num = key_cache.shape[1]
-    # [total_pages, h_qo, page_size, d]
-    key_cache = key_cache.repeat_interleave(q_head_num // kv_head_num, dim=1)
-    # [total_pages, h_qo, page_size, d]
-    value_cache = value_cache.repeat_interleave(q_head_num // kv_head_num, dim=1)
-
-    key_cache_list = []
-    value_cache_list = []
-    for sublist in kv_cache_indices:
-        valid_mask = sublist != -1
-        valid_indices = sublist[valid_mask]
-        if valid_indices.numel() > 0:
-            key_sub = key_cache.index_select(0, valid_indices)
-            value_sub = value_cache.index_select(0, valid_indices)
-            key_cache_list.append(key_sub)
-            value_cache_list.append(value_sub)
-
-    key_cache_new = []
-    value_cache_new = []
-    for k_sublist, v_sublist in zip(key_cache_list, value_cache_list):
-        k_sublist_t = list(k_sublist)
-        key_cache_new.append(torch.cat(k_sublist_t, dim=1))
-        v_sublist_t = list(v_sublist)
-        value_cache_new.append(torch.cat(v_sublist_t, dim=1))
-
     expects = []
     q_chunk_sizes = query_lengths.tolist()
     cu_seqlen_q = torch.cumsum(query_lengths, dim=0)
@@ -339,16 +301,27 @@ def mojo_quest(
     for i in range(len(kv_cache_indices)):
         query_start = cu_seqlen_q[i]
 
+        sublist = kv_cache_indices[i]
+        valid_mask = sublist != -1
+        valid_indices = sublist[valid_mask]
+
+        key_sub = key_cache.index_select(0, valid_indices)
+        value_sub = value_cache.index_select(0, valid_indices)
+
         valid_kv_seq_length = kv_seq_lengths[i] + q_chunk_sizes[i]  # 19
 
         top_k = int(valid_kv_seq_length * topk_ratio)
         top_k_page = top_k // page_size
 
-        key_cache_i = key_cache_new[i]
-        key = key_cache_i[:, :valid_kv_seq_length, :]  # [8,128,19]
+        key_cache_i = key_sub.permute(1, 0, 2, 3).reshape(kv_head_num, -1, head_size)
+        key = (
+            key_cache_i[:, :valid_kv_seq_length, :].repeat_interleave(q_head_num // kv_head_num, dim=0).contiguous()
+        )  # [8,19, 128]
 
-        value_cache_i = value_cache_new[i]
-        value = value_cache_i[:, :valid_kv_seq_length, :].contiguous()  # [8,19,128]
+        value_cache_i = value_sub.permute(1, 0, 2, 3).reshape(kv_head_num, -1, head_size)
+        value = (
+            value_cache_i[:, :valid_kv_seq_length, :].repeat_interleave(q_head_num // kv_head_num, dim=0).contiguous()
+        )  # [8,19,128]
 
         whole_causal = torch.tril(
             torch.ones((q_chunk_sizes[i], valid_kv_seq_length), dtype=torch.bool, device=key.device),
