@@ -51,3 +51,7 @@ __all__ = [
     "k_grouped_matmul_impl",
     "store_paged_kv_impl",
 ]
+
+from .patches import apply_ttx_npu_patches
+
+apply_ttx_npu_patches()
