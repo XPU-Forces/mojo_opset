@@ -22,7 +22,7 @@ from .operators.attention import MojoPagedDecodeNSA
 from .operators.attention import MojoPagedPrefillGQA
 from .operators.attention import MojoPagedPrefillMLA
 from .operators.attention import MojoPagedPrefillNSA
-from .operators.attention import MojoBlockQuest
+from .operators.attention import MojoBlockSparseAttention
 from .operators.attention import MojoPagedPrefillBlockSparseAttention
 from .operators.attention import MojoPrefillGQA
 from .operators.attention import MojoPrefillMLA
@@ -50,6 +50,8 @@ from .operators.misc import MojoDequant
 from .operators.misc import MojoEmbedding
 from .operators.misc import MojoParallelEmbedding
 from .operators.misc import MojoQuant
+from .operators.misc import MojoQuest
+from .operators.misc import MojoPagedPrefillBlockQuest
 
 """ moe """
 from .operators.moe import MojoBigEPCombine
@@ -115,7 +117,9 @@ __all__ = [
     "MojoPagedDecodeNSA",
     "MojoSdpa",
 
-    "MojoBlockQuest",
+    "MojoQuest",
+    "MojoPagedPrefillBlockQuest",
+    "MojoBlockSparseAttention",
     "MojoPagedPrefillBlockSparseAttention",
 
     "MojoStoreKVCache",

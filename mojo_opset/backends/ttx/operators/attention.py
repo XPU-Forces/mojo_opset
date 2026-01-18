@@ -5,7 +5,6 @@ import torch
 from mojo_opset.backends.ttx.kernels import paged_attention_decode
 from mojo_opset.backends.ttx.kernels import paged_attention_prefill
 from mojo_opset.backends.ttx.kernels import sdpa_infer
-from mojo_opset.backends.ttx.kernels import quest
 from mojo_opset.backends.ttx.kernels import block_sparse_paged_attention_prefill
 
 from mojo_opset.core import MojoPagedDecodeGQA
@@ -14,8 +13,7 @@ from mojo_opset.core import MojoSdpa
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoSdpa
-from mojo_opset.core import MojoBlockQuest
-from mojo_opset.core import MojoPagedPrefillBlockSparseAttention
+from mojo_opset.core import MojoBlockSparseAttention
 
 
 class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
@@ -86,20 +84,7 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         return output
 
 
-class TTXBlockQuest(MojoBlockQuest):
-    supported_platforms_list = ["npu"]
-
-    def forward(
-        self,
-        curr_query_seg: torch.Tensor,
-        mins: torch.Tensor,
-        maxs: torch.Tensor,
-        top_k_page: int,
-    ):
-        return quest(curr_query_seg[:, :: self.block_q], mins, maxs, top_k_page)
-
-
-class TTXPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
+class TTXBlockSparseAttention(MojoBlockSparseAttention):
     supported_platforms_list = ["npu"]
 
     def forward(

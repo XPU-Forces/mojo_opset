@@ -20,7 +20,7 @@ from .sdpa import sdpa_bwd_impl
 from .sdpa import sdpa_fwd_impl
 from .sdpa import sdpa_infer_impl
 
-from .block_sparse_attention import quest_impl
+from .quest import quest_impl
 from .block_sparse_attention import block_sparse_paged_attention_prefill_impl
 
 
