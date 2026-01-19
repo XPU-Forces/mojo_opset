@@ -7,7 +7,7 @@ from tests.utils import MockFunctionCtx
 from tests.utils import assert_close
 from tests.utils import auto_switch_platform
 
-from mojo_opset import MojoDiffusionAttentionFunction
+from mojo_opset.experimental import MojoDiffusionAttentionFunction
 
 
 @functools.lru_cache()
