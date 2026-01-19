@@ -104,7 +104,7 @@ def _sdpa_infer_inner(
 
 
 @triton.jit
-def paged_sparse_prefill_kernel(
+def block_sparse_fwd_kernel(
     q_ptr,
     k_ptr,
     v_ptr,
@@ -301,7 +301,7 @@ def paged_sparse_prefill_kernel(
         tl.store(O_block_ptr, accumulator.to(o_ptr.type.element_ty), boundary_check=(0, 1))
 
 
-def block_sparse_paged_attention_prefill_impl(
+def block_sparse_attention_impl(
     curr_query_seg,
     key,
     value,
@@ -343,7 +343,7 @@ def block_sparse_paged_attention_prefill_impl(
 
     mask_block_size = curr_seg_causal.size(0)
 
-    paged_sparse_prefill_kernel[grid](
+    block_sparse_fwd_kernel[grid](
         curr_query_seg,
         key,
         value,

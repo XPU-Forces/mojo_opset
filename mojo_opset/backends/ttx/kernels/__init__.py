@@ -46,7 +46,9 @@ sdpa_fwd_impl = getattr(ttx_backend_module, "sdpa_fwd_impl")
 sdpa_bwd_impl = getattr(ttx_backend_module, "sdpa_bwd_impl")
 
 quest_impl = getattr(ttx_backend_module, "quest_impl")
-block_sparse_paged_attention_prefill_impl = getattr(ttx_backend_module, "block_sparse_paged_attention_prefill_impl")
+paged_prefill_block_quest_impl = getattr(ttx_backend_module, "paged_prefill_block_quest_impl")
+block_sparse_attention_impl = getattr(ttx_backend_module, "block_sparse_attention_impl")
+# block_sparse_attention_paged_prefill_impl = getattr(ttx_backend_module, "block_sparse_attention_paged_prefill_impl")
 
 
 diffusion_attention_fwd_impl = getattr(ttx_backend_module, "diffusion_attention_fwd_impl")
@@ -641,7 +643,8 @@ else:
     sdpa_bwd = sdpa_bwd_impl
 
     quest = quest_impl
-    block_sparse_paged_attention_prefill = block_sparse_paged_attention_prefill_impl
+    paged_prefill_block_quest = paged_prefill_block_quest_impl
+    block_sparse_attention = block_sparse_attention_impl
 
     diffusion_attention_fwd = diffusion_attention_fwd_impl
     diffusion_attention_bwd = diffusion_attention_bwd_impl

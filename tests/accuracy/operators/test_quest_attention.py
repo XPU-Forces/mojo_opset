@@ -71,6 +71,7 @@ def test_paged_prefill_quest():
         sparse_limit,
     )
     torch.testing.assert_close(mojo_output_v2, original_out)
+    print("PASS!!")
 
 
 def original_session_cache_pa_flash_attention_quest128(
@@ -409,8 +410,6 @@ def mojo_quest(
     )
     expects.append(tmp)
 
-    print([expect.shape for expect in expects])
-
     expect = torch.cat(expects, axis=1)
     return topk_page_indices_debug, expect.permute(1, 0, 2).reshape(q_seq_length, q_head_num * head_size)  # .bfloat16()
 
@@ -441,7 +440,11 @@ def mojo_block_quest(
     q_seq_length = qkv.shape[0]
     # kv_seq_length = key_cache.shape[2]
     head_size = key_cache.shape[-1]
-    kv_cache_indices = kv_idx
+    max_kv_seq_length = max(q_len_list + kv_len)
+    kv_cache_indices = []
+    for kv_idx_i in kv_idx:
+        kv_cache_indices.append(torch.nn.functional.pad(kv_idx_i, (0, max_kv_seq_length - kv_idx_i.shape[0]), value=-1))
+    kv_cache_indices = torch.stack(kv_cache_indices)
     kv_seq_lengths = kv_len
     q_chunk_sizes = q_len_list
 
@@ -457,7 +460,6 @@ def mojo_block_quest(
         torch.ones((max_seq_lengths, max_seq_lengths), dtype=torch.bool, device=query.device),
         diagonal=0,
     )
-    print(whole_causal[0, 0])
 
     # mojo_quest_op(query, key_cache, value_cache, torch.tensor(q_len_list), kv_cache_indices, kv_seq_lengths)
     query_lengths = torch.tensor(q_len_list, device=query.device)
@@ -465,13 +467,10 @@ def mojo_block_quest(
     cu_seqlen_q = torch.cumsum(query_lengths, dim=0)
     cu_seqlen_q = torch.nn.functional.pad(cu_seqlen_q, (1, 0), value=0)
 
-    print(cu_seqlen_q)
-
     kv_cache_lengths = torch.tensor(kv_seq_lengths, device=query_lengths.device, dtype=query_lengths.dtype)
     kv_lengths = query_lengths + kv_cache_lengths
     cu_seqlen_kv = torch.cumsum(kv_lengths, dim=0)
     cu_seqlen_kv = torch.nn.functional.pad(cu_seqlen_kv, (1, 0), value=0)
-    print(cu_seqlen_kv)
 
     bsz, q_head_num, q_seq_length, head_size = query.shape
     assert bsz == 1
@@ -488,7 +487,7 @@ def mojo_block_quest(
     )
     num_topk_tokens = (valid_kv_seq_lengths * topk_ratio).int()
     num_topk_pages = num_topk_tokens // page_size
-    print(f"{query.shape=}")
+
     from mojo_opset.core import MojoPagedPrefillBlockQuest
 
     block_quest = MojoPagedPrefillBlockQuest(q_seg_size, page_size)
@@ -503,7 +502,6 @@ def mojo_block_quest(
         num_topk_pages,
     )
     topk_page_indices_debug = topk_page_idxs
-    print(f"topk_page_idxs: {topk_page_idxs.shape=}")
 
     from mojo_opset.core import MojoPagedPrefillBlockSparseAttention
 

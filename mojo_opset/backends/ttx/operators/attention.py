@@ -5,7 +5,7 @@ import torch
 from mojo_opset.backends.ttx.kernels import paged_attention_decode
 from mojo_opset.backends.ttx.kernels import paged_attention_prefill
 from mojo_opset.backends.ttx.kernels import sdpa_infer
-from mojo_opset.backends.ttx.kernels import block_sparse_paged_attention_prefill
+from mojo_opset.backends.ttx.kernels import block_sparse_attention
 
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
@@ -97,7 +97,7 @@ class TTXBlockSparseAttention(MojoBlockSparseAttention):
         q_seg_id,
         q_chunk_size,
     ):
-        output = block_sparse_paged_attention_prefill(
+        output = block_sparse_attention(
             curr_query_seg,
             key,
             value,
