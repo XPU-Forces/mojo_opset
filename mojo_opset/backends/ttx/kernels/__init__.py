@@ -49,6 +49,11 @@ layernorm_fwd_impl = _get_kernel_impl(ttx_backend_module, "layernorm_fwd_impl")
 fused_add_rmsnorm_infer_impl = _get_kernel_impl(ttx_backend_module, "fused_add_rmsnorm_infer_impl")
 fused_add_layernorm_infer_impl = _get_kernel_impl(ttx_backend_module, "fused_add_layernorm_infer_impl")
 
+diffusion_attention_fwd_impl = getattr(ttx_backend_module, "diffusion_attention_fwd_impl")
+diffusion_attention_bwd_impl = getattr(ttx_backend_module, "diffusion_attention_bwd_impl")
+diffusion_attention_up_fwd_impl = getattr(ttx_backend_module, "diffusion_attention_up_fwd_impl")
+diffusion_attention_up_bwd_impl = getattr(ttx_backend_module, "diffusion_attention_up_bwd_impl")
+
 paged_attention_prefill_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_prefill_impl")
 paged_attention_decode_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_decode_impl")
 
@@ -699,6 +704,8 @@ else:
     sdpa_bwd = sdpa_bwd_impl
     diffusion_attention_fwd = diffusion_attention_fwd_impl
     diffusion_attention_bwd = diffusion_attention_bwd_impl
+    diffusion_attention_up_fwd = diffusion_attention_up_fwd_impl
+    diffusion_attention_up_bwd = diffusion_attention_up_bwd_impl
     m_grouped_matmul = m_grouped_matmul_impl
     k_grouped_matmul = k_grouped_matmul_impl
     store_paged_kv = store_paged_kv_impl

@@ -1,6 +1,8 @@
 from .convolution import causal_conv1d_bwd_impl
 from .convolution import causal_conv1d_fwd_impl
 from .convolution import causal_conv1d_update_bdt_impl
+from .diffusion_attention_up import diffusion_attention_up_bwd_impl
+from .diffusion_attention_up import diffusion_attention_up_fwd_impl
 from .diffution_attention import diffusion_attention_bwd_impl
 from .diffution_attention import diffusion_attention_fwd_impl
 from .flash_attention import paged_attention_decode_impl
@@ -69,6 +71,8 @@ __all__ = [
     "sdpa_bwd_impl",
     "diffusion_attention_fwd_impl",
     "diffusion_attention_bwd_impl",
+    "diffusion_attention_up_fwd_impl",
+    "diffusion_attention_up_bwd_impl",
     "m_grouped_matmul_impl",
     "k_grouped_matmul_impl",
     "store_paged_kv_impl",
