@@ -2,7 +2,7 @@ import torch
 
 from mojo_opset.backends.ttx.kernels import diffusion_attention_bwd
 from mojo_opset.backends.ttx.kernels import diffusion_attention_fwd
-from mojo_opset.core import MojoDiffusionAttentionFunction
+from mojo_opset.experimental import MojoDiffusionAttentionFunction
 
 
 class TTXDiffusionAttentionFunction(MojoDiffusionAttentionFunction):

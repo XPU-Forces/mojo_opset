@@ -5,7 +5,6 @@ from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoRoPE
-from mojo_opset.backends.ref.operators.position_embedding import RefRoPE
 
 
 @pytest.mark.parametrize(
@@ -21,7 +20,7 @@ from mojo_opset.backends.ref.operators.position_embedding import RefRoPE
 @bypass_not_implemented
 def test_pos_emb(q, k):
     rope = MojoRoPE(is_varlen=False)
-    rope_ref = RefRoPE(is_varlen=False)
+    rope_ref = MojoRoPE(is_varlen=False)._registry.get("torch")()
 
     # Transpose q and k to mock the memory layout transformation used in the real inference framework.
 
