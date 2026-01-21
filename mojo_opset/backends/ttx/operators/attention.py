@@ -6,6 +6,7 @@ from mojo_opset.backends.ttx.kernels import paged_attention_decode
 from mojo_opset.backends.ttx.kernels import paged_attention_prefill
 from mojo_opset.backends.ttx.kernels import sdpa_infer
 from mojo_opset.backends.ttx.kernels import block_sparse_attention
+from mojo_opset.backends.ttx.kernels import block_sparse_attention_paged_prefill
 
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
@@ -14,6 +15,7 @@ from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoSdpa
 from mojo_opset.core import MojoBlockSparseAttention
+from mojo_opset.core import MojoPagedPrefillBlockSparseAttention
 
 
 class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
@@ -106,6 +108,40 @@ class TTXBlockSparseAttention(MojoBlockSparseAttention):
             topk_page_indices,
             q_seg_id,
             q_chunk_size,
+            self.q_seg_size,
+            self.page_size,
+        )
+        return output
+
+
+class TTXPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
+    supported_platforms_list = ["npu"]
+
+    def forward(
+        self,
+        query,
+        key_cache,
+        value_cache,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        whole_causal_mask,
+        block_table,
+        q_chunk_indices,
+        selected_page_indices,
+        cu_num_selected_pages_per_chunk,
+    ):
+        output = block_sparse_attention_paged_prefill(
+            query,
+            key_cache,
+            value_cache,
+            self.scale,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            self.mask,
+            block_table,
+            q_chunk_indices,
+            selected_page_indices,
+            cu_num_selected_pages_per_chunk,
             self.q_seg_size,
             self.page_size,
         )

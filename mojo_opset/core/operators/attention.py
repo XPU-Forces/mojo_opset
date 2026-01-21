@@ -436,13 +436,11 @@ class MojoPagedPrefillBlockSparseAttention(MojoOperator):
         cu_seqlens_k,
         whole_causal_mask,
         kv_cache_indices,
+        q_chunk_idx,
         topk_page_indices,
         cu_num_topk_pages_per_seg,
     ):
         expects = torch.zeros_like(query)
-        from mojo_opset.backends.ttx.kernels.utils import prepare_chunk_indices
-
-        q_chunk_idx = prepare_chunk_indices(cu_seqlens_q, self.q_seg_size)
 
         curr_seq_id = -1
 
@@ -511,7 +509,7 @@ class MojoPagedPrefillBlockSparseAttention(MojoOperator):
                 curr_seg_output
             )
 
-        return expects.permute(1, 0, 2).reshape(-1, self.q_head_num * self.head_size)
+        return expects
 
 
 class MojoDecodeMLA(MojoOperator):

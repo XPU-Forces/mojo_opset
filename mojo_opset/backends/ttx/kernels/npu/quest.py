@@ -308,6 +308,11 @@ def paged_prefill_block_quest_impl(
         chunk_size,
         head_dim,
     )
+
+    num_topk_pages_per_seg = num_topk_pages.repeat_interleave(num_q_chunks)
+    cu_num_topk_pages_per_seg = torch.cumsum(num_topk_pages_per_seg, dim=0)
+    cu_num_topk_pages_per_seg = torch.nn.functional.pad(cu_num_topk_pages_per_seg, (1, 0), value=0)
+
     topk_page_indices = []
     for i in range(len(kv_cache_indices)):
         curr_q_page_scores = page_score[:, cu_tot_valid_pages_per_query[i] : cu_tot_valid_pages_per_query[i + 1]]
@@ -315,4 +320,4 @@ def paged_prefill_block_quest_impl(
         _, chunk_topk_page_indices = curr_q_page_scores.topk(num_topk_pages[i].item(), dim=-1)
         topk_page_indices.append(chunk_topk_page_indices.reshape(num_q_heads, -1))
 
-    return torch.cat(topk_page_indices, dim=-1)
+    return torch.cat(topk_page_indices, dim=-1), q_chunk_indices, cu_num_topk_pages_per_seg

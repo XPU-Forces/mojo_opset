@@ -66,8 +66,11 @@ class MojoPagedPrefillBlockQuest(MojoOperator):
         kv_head_num = page_k_mins.shape[1]
 
         topk_pages = []
+        q_chunk_indices = []
+        q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        kv_lens = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
         for i in range(len(kv_cache_indices)):
-            kv_len = cu_seqlens_k[i + 1].item() - cu_seqlens_k[i].item()
+            kv_len = kv_lens[i].item()
             top_k_page = num_topk_pages[i].item()
 
             sublist = kv_cache_indices[i]
@@ -101,5 +104,14 @@ class MojoPagedPrefillBlockQuest(MojoOperator):
             # [num_heads, num_segs, top_k_page]
             _, topk_page_indices = page_score.topk(top_k_page, dim=-1)
             topk_pages.append(topk_page_indices.reshape(q_head_num, -1))
+            num_q_chunks = (q_lens[i].item() + self.chunk_size - 1) // self.chunk_size
+            local_chunk_indices = torch.arange(num_q_chunks, device=num_topk_pages.device, dtype=num_topk_pages.dtype)
+            q_id_indices = torch.full_like(local_chunk_indices, i)
+            q_chunk_indices.append(torch.stack([q_id_indices, local_chunk_indices], dim=-1))
 
-        return torch.cat(topk_pages, dim=1)
+        num_segs = (q_lens + self.chunk_size - 1) // self.chunk_size
+        num_topk_pages_per_seg = num_topk_pages.repeat_interleave(num_segs)
+        cu_num_topk_pages_per_seg = torch.cumsum(num_topk_pages_per_seg, dim=0)
+        cu_num_topk_pages_per_seg = torch.nn.functional.pad(cu_num_topk_pages_per_seg, (1, 0), value=0)
+
+        return torch.cat(topk_pages, dim=1), torch.cat(q_chunk_indices, dim=0), cu_num_topk_pages_per_seg
