@@ -129,6 +129,33 @@ def input_guard(
     return decorator
 
 
+# TODO(liuyuan): remove the followling statements when triton-npu support checking whether an address is device-valid.
+# See https://github.com/triton-lang/triton/blob/571d07b84ffbaee4b873c2918208e2c640057768/third_party/nvidia/backend/driver.py#L415
+def tensor_device_guard_for_triton_kernel(path, name, device="npu"):
+    enable = True
+    if not enable:
+        return
+
+    import pkgutil
+    import importlib
+    from inspect import getmembers
+    import torch.utils._pytree as pytree
+    from triton.runtime.jit import JITFunction
+
+    def device_guard(*args, **kwargs):
+        if not pytree.tree_all_only(
+            torch.Tensor, lambda x: x.device.type == device, (args, kwargs)
+        ):
+            raise TypeError(
+                "Found cpu tensor(s) which should not be passed to the triton kernel."
+            )
+
+    for _, name, _ in pkgutil.walk_packages(path, prefix=f"{name}."):
+        module = importlib.import_module(name)
+        for obj_name, obj in getmembers(module):
+            if isinstance(obj, JITFunction):
+                obj.add_pre_run_hook(device_guard)
+
 contiguous = input_guard
 
 
