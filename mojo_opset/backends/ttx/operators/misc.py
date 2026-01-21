@@ -21,7 +21,17 @@ class TTXQuest(MojoQuest):
 class TTXPagedPrefillBlockQuest(MojoPagedPrefillBlockQuest):
     supported_platforms_list = ["npu"]
 
-    def forward(self, query, cu_seqlens_q, page_k_mins, page_k_maxs, kv_cache_indices, cu_seqlens_k, num_topk_pages):
+    def forward(
+        self,
+        query,
+        cu_seqlens_q,
+        page_k_mins,
+        page_k_maxs,
+        kv_cache_indices,
+        cu_seqlens_k,
+        num_topk_pages,
+        recent_window,
+    ):
         return paged_prefill_block_quest(
             query,
             cu_seqlens_q,
@@ -32,4 +42,5 @@ class TTXPagedPrefillBlockQuest(MojoPagedPrefillBlockQuest):
             num_topk_pages,
             self.chunk_size,
             self.page_size,
+            recent_window,
         )

@@ -61,7 +61,17 @@ class MojoPagedPrefillBlockQuest(MojoOperator):
         self.chunk_size = chunk_size
         self.page_size = page_size
 
-    def forward(self, query, cu_seqlens_q, page_k_mins, page_k_maxs, kv_cache_indices, cu_seqlens_k, num_topk_pages):
+    def forward(
+        self,
+        query,
+        cu_seqlens_q,
+        page_k_mins,
+        page_k_maxs,
+        kv_cache_indices,
+        cu_seqlens_k,
+        num_topk_pages,
+        recent_window,
+    ):
         q_head_num, _, head_size = query.shape
         kv_head_num = page_k_mins.shape[1]
 
@@ -69,9 +79,13 @@ class MojoPagedPrefillBlockQuest(MojoOperator):
         q_chunk_indices = []
         q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
         kv_lens = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+        num_sparse_pages = []
         for i in range(len(kv_cache_indices)):
             kv_len = kv_lens[i].item()
-            top_k_page = num_topk_pages[i].item()
+            q_len = q_lens[i].item()
+            valid_num_pages = max(0, kv_len - q_len - recent_window) // self.page_size
+
+            top_k_page = min(num_topk_pages[i].item(), valid_num_pages)
 
             sublist = kv_cache_indices[i]
             valid_mask = sublist != -1
@@ -79,7 +93,6 @@ class MojoPagedPrefillBlockQuest(MojoOperator):
 
             # if prefill_sparse and kv_len[i] > 0 and valid_kv_seq_length > sparse_limit:
 
-            valid_num_pages = kv_len // self.page_size
             mins = (
                 page_k_mins.index_select(0, valid_indices)[:valid_num_pages]
                 .permute(1, 0, 2)
@@ -108,10 +121,16 @@ class MojoPagedPrefillBlockQuest(MojoOperator):
             local_chunk_indices = torch.arange(num_q_chunks, device=num_topk_pages.device, dtype=num_topk_pages.dtype)
             q_id_indices = torch.full_like(local_chunk_indices, i)
             q_chunk_indices.append(torch.stack([q_id_indices, local_chunk_indices], dim=-1))
+            num_sparse_pages.extend([valid_num_pages] * num_q_chunks)
 
         num_segs = (q_lens + self.chunk_size - 1) // self.chunk_size
         num_topk_pages_per_seg = num_topk_pages.repeat_interleave(num_segs)
         cu_num_topk_pages_per_seg = torch.cumsum(num_topk_pages_per_seg, dim=0)
         cu_num_topk_pages_per_seg = torch.nn.functional.pad(cu_num_topk_pages_per_seg, (1, 0), value=0)
 
-        return torch.cat(topk_pages, dim=1), torch.cat(q_chunk_indices, dim=0), cu_num_topk_pages_per_seg
+        return (
+            torch.cat(topk_pages, dim=1),
+            torch.cat(q_chunk_indices, dim=0),
+            torch.tensor(num_sparse_pages, device=num_topk_pages.device, dtype=num_topk_pages.dtype),
+            cu_num_topk_pages_per_seg,
+        )

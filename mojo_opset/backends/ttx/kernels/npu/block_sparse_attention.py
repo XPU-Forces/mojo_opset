@@ -8,18 +8,6 @@ from .utils import get_num_cores
 
 
 @triton.jit
-def get_mask_ptr_offset_n_cross(q_start, q_block, q_len, kv_start, kv_block, kv_len):
-    offset_kv = min(max(kv_start - kv_len, -kv_block), 0)
-    return offset_kv
-
-
-@triton.jit
-def get_mask_ptr_offset_n_causal(q_start, q_block, q_len, kv_start, kv_block, kv_len):
-    offset_kv = min(max(kv_start - q_start, -kv_block), kv_block)
-    return offset_kv
-
-
-@triton.jit
 def mask_mod_fn(mask_ptr, mask_size, mask_stride_m, mask_stride_n, q_start, Q_BLOCK, q_end, kv_start, KV_BLOCK, kv_end):
 
     offset_len = min(max(kv_start - kv_end, -KV_BLOCK), 0)
@@ -39,7 +27,7 @@ def mask_mod_fn(mask_ptr, mask_size, mask_stride_m, mask_stride_n, q_start, Q_BL
 
 
 @triton.jit
-def _sdpa_infer_inner(
+def _sdpa_infer_subkv(
     acc_ptr,
     l_i,
     m_i,
@@ -56,10 +44,10 @@ def _sdpa_infer_inner(
     BLOCK_N: tl.constexpr,  # Block size constants
     offs_m,
     offs_n,
-    SEQ,
+    sub_kv_len,
     fp8_v: tl.constexpr,
 ):
-    n_iters = tl.cdiv(SEQ, BLOCK_N)
+    n_iters = tl.cdiv(sub_kv_len, BLOCK_N)
     # Iterate over all k, v blocks in the current stage and accumulate the output
     for kv_block_idx in range(n_iters):  # Process BLOCK_N columns at a time
         start_n = kv_block_idx * BLOCK_N
@@ -90,7 +78,7 @@ def _sdpa_infer_inner(
                 offs_m + BLOCK_M,
                 offs_n + start_n,
                 BLOCK_N,
-                offs_n + SEQ,
+                offs_n + sub_kv_len,
             )
             qk = tl.where(mask, qk, float("-inf"))  # 32B # bool
 
@@ -249,7 +237,7 @@ def block_sparse_fwd_kernel(
 
             sub_seq = max(min(KV_PAGE_SIZE, kv_cache_len - kv_offset), 0)
 
-            acc, l_i, m_i = _sdpa_infer_inner(
+            acc, l_i, m_i = _sdpa_infer_subkv(
                 acc,
                 l_i,
                 m_i,
@@ -288,7 +276,7 @@ def block_sparse_fwd_kernel(
             order=(1, 0),
         )
 
-        acc, l_i, m_i = _sdpa_infer_inner(
+        acc, l_i, m_i = _sdpa_infer_subkv(
             acc,
             l_i,
             m_i,
@@ -313,7 +301,7 @@ def block_sparse_fwd_kernel(
         accumulator = acc / l_i[:, None]
 
         # NOTE(zhangjihang): for training
-        # m_ptrs = M + task_bn_idx * SEQ + offs_m
+        # m_ptrs = M + task_bn_idx * sub_kv_len + offs_m
         # tl.store(m_ptrs, m_i)
         tl.store(O_block_ptr, accumulator.to(o_ptr.type.element_ty), boundary_check=(0, 1))
 
@@ -338,9 +326,6 @@ def block_sparse_attention_impl(
     kv_cache_len = kv_len - q_chunk_size
     q_seg_start = q_seg_id * q_seg_size
 
-    print("page_idx:", topk_page_indices * page_size)
-    print(f"{kv_len=} {kv_cache_len=} {q_chunk_size=}")
-
     o = torch.zeros_like(curr_query_seg, memory_format=torch.contiguous_format)
     assert o.is_contiguous()
 
@@ -351,7 +336,6 @@ def block_sparse_attention_impl(
 
     assert scale == 1 / math.sqrt(head_dim)
     assert q_seg_start + q_seg_len <= q_chunk_size
-    print(curr_query_seg.shape, curr_query_seg.stride())
     # curr_seg_causal = whole_causal_mask[q_seg_start : q_seg_start + q_seg_len, -q_chunk_size:]
     # curr_seg_causal = whole_causal_mask[-q_chunk_size:, -q_chunk_size:]
     # print(f"{curr_seg_causal.shape=} {curr_seg_causal.stride(0)} {curr_seg_causal.stride(1)} {curr_seg_causal}")
@@ -413,7 +397,8 @@ def block_sparse_attention_paged_prefill_kernel(
     cu_seqlens_k_ptr,
     total_q_chunks,
     q_chunk_indices_ptr,
-    selected_kv_page_indices_ptr,
+    num_sparse_pages_ptr,
+    selected_pages_ptr,
     cu_num_kv_pages_per_chunk_ptr,
     o_stride_h,
     o_stride_l,
@@ -433,8 +418,9 @@ def block_sparse_attention_paged_prefill_kernel(
     block_table_stride_p,
     mask_stride_q,
     mask_stride_kv,
-    selected_kv_page_indices_stride_h,
-    selected_kv_page_indices_stride_p,
+    num_sparse_pages_stride_c,
+    selected_pages_stride_h,
+    selected_pages_stride_p,
     cu_num_kv_pages_per_chunk_stride_c,
     Q_HEAD_NUM: tl.constexpr,
     KV_HEAD_NUM: tl.constexpr,
@@ -481,7 +467,7 @@ def block_sparse_attention_paged_prefill_kernel(
         kv_end = tl.load(cu_seqlens_k_ptr + q_id + 1)
         kv_len = kv_end - kv_start
         kv_cache_len = kv_len - q_len
-
+        num_sparse_pages = tl.load(num_sparse_pages_ptr + q_chunk_idx * num_sparse_pages_stride_c)
         q_seg_start = q_start + seg_id * Q_CHUNK_SIZE
         q_seg_len = min(q_end - q_seg_start, Q_CHUNK_SIZE)
 
@@ -526,9 +512,9 @@ def block_sparse_attention_paged_prefill_kernel(
             # tl.device_print("n_topk_pages %d", n_topk_pages)
             for selected_page_idx in range(selected_pages_l, selected_pages_r):
                 logical_page_idx = tl.load(
-                    selected_kv_page_indices_ptr
-                    + q_head_idx * selected_kv_page_indices_stride_h
-                    + selected_page_idx * selected_kv_page_indices_stride_p
+                    selected_pages_ptr
+                    + q_head_idx * selected_pages_stride_h
+                    + selected_page_idx * selected_pages_stride_p
                 )
                 physical_page_idx = tl.load(
                     block_table_ptr + block_table_stride_q * q_id + block_table_stride_p * logical_page_idx
@@ -536,7 +522,7 @@ def block_sparse_attention_paged_prefill_kernel(
                 k_page_offset = physical_page_idx * k_stride_p + kv_head_idx * k_stride_h
                 v_page_offset = physical_page_idx * v_stride_p + kv_head_idx * v_stride_h
                 page_start = 0
-                page_end = max(min(KV_PAGE_SIZE, kv_cache_len - logical_page_idx * KV_PAGE_SIZE), 0)
+                page_end = KV_PAGE_SIZE  # always full page
                 page_len = page_end - page_start
                 page_offset = page_start
 
@@ -557,7 +543,7 @@ def block_sparse_attention_paged_prefill_kernel(
                     order=(1, 0),
                 )
 
-                acc, l_i, m_i = _sdpa_infer_inner(
+                acc, l_i, m_i = _sdpa_infer_subkv(
                     acc,
                     l_i,
                     m_i,
@@ -578,7 +564,7 @@ def block_sparse_attention_paged_prefill_kernel(
                     v_cache_ptr.dtype.element_ty == tl.float8e5,
                 )
 
-            new_kv_page_idx_start = kv_cache_len // KV_PAGE_SIZE
+            new_kv_page_idx_start = num_sparse_pages
             new_kv_page_idx_end = tl.cdiv(
                 kv_len,
                 KV_PAGE_SIZE,
@@ -592,7 +578,7 @@ def block_sparse_attention_paged_prefill_kernel(
                 k_page_offset = physical_page_idx * k_stride_p + kv_head_idx * k_stride_h
                 v_page_offset = physical_page_idx * v_stride_p + kv_head_idx * v_stride_h
 
-                page_start = max(kv_cache_len, logical_page_idx * KV_PAGE_SIZE) % KV_PAGE_SIZE
+                page_start = 0  # always full page
                 page_end = max(min(KV_PAGE_SIZE, kv_len - logical_page_idx * KV_PAGE_SIZE), 0)
                 page_len = page_end - page_start
                 # accumulate over session kv
@@ -614,7 +600,7 @@ def block_sparse_attention_paged_prefill_kernel(
                     order=(1, 0),
                 )
 
-                acc, l_i, m_i = _sdpa_infer_inner(
+                acc, l_i, m_i = _sdpa_infer_subkv(
                     acc,
                     l_i,
                     m_i,
@@ -639,7 +625,7 @@ def block_sparse_attention_paged_prefill_kernel(
             accumulator = acc / l_i[:, None]
 
             # NOTE(zhangjihang): for training
-            # m_ptrs = M + task_bn_idx * SEQ + offs_m
+            # m_ptrs = M + task_bn_idx * sub_kv_len + offs_m
             # tl.store(m_ptrs, m_i)
             tl.store(O_block_ptr, accumulator.to(o_ptr.type.element_ty), boundary_check=(0, 1))
 
@@ -654,7 +640,8 @@ def block_sparse_attention_paged_prefill_impl(
     whole_causal_mask,
     kv_cache_indices,
     q_chunk_indices,
-    kv_page_indices,
+    num_sparse_pages,
+    selected_pages,
     cu_num_kv_pages_per_chunk,
     q_chunk_size: int,
     kv_page_size: int,
@@ -691,7 +678,8 @@ def block_sparse_attention_paged_prefill_impl(
         cu_seqlens_k,
         total_q_chunks,
         q_chunk_indices,
-        kv_page_indices,
+        num_sparse_pages,
+        selected_pages,
         cu_num_kv_pages_per_chunk,
         o.stride(0),
         o.stride(1),
@@ -711,8 +699,9 @@ def block_sparse_attention_paged_prefill_impl(
         kv_cache_indices.stride(1),
         whole_causal_mask.stride(0),
         whole_causal_mask.stride(1),
-        kv_page_indices.stride(0),
-        kv_page_indices.stride(1),
+        num_sparse_pages.stride(0),
+        selected_pages.stride(0),
+        selected_pages.stride(1),
         cu_num_kv_pages_per_chunk.stride(0),
         q_head_num,
         kv_head_num,

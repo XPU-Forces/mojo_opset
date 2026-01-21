@@ -437,6 +437,7 @@ class MojoPagedPrefillBlockSparseAttention(MojoOperator):
         whole_causal_mask,
         kv_cache_indices,
         q_chunk_idx,
+        num_sparse_pages,
         topk_page_indices,
         cu_num_topk_pages_per_seg,
     ):
@@ -452,8 +453,7 @@ class MojoPagedPrefillBlockSparseAttention(MojoOperator):
 
                 q_chunk_size = cu_seqlens_q[q_idx + 1].item() - cu_seqlens_q[q_idx].item()
                 kv_len = cu_seqlens_k[q_idx + 1].item() - cu_seqlens_k[q_idx].item()
-                pad_len = kv_len % self.page_size
-                valid_num_pages = kv_len // self.page_size
+
                 sublist = kv_cache_indices[q_idx]
                 valid_mask = sublist != -1
                 valid_indices = sublist[valid_mask]
@@ -474,6 +474,8 @@ class MojoPagedPrefillBlockSparseAttention(MojoOperator):
                     .contiguous()
                 )
 
+            valid_num_pages = num_sparse_pages[i].item()
+            pad_len = kv_len - valid_num_pages * self.page_size
             q_seg_start = seg_id * self.q_seg_size
             curr_seg_size = min(self.q_seg_size, q_chunk_size - q_seg_start)
             curr_query_seg = curr_query[:, q_seg_start : q_seg_start + curr_seg_size]

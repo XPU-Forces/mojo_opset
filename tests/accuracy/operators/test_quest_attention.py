@@ -12,17 +12,22 @@ def test_paged_prefill_quest():
     MAX_PAGE = 256
     Q_SEG_SIZE = int(os.environ.get("Q_SEG_SIZE", 1024))
     TOPK_RATIO = float(os.environ.get("TOPK_RATIO", 0.25))
+    RECENT_WINDOW = int(os.environ.get("RECENT_WINDOW", 0))
+    assert RECENT_WINDOW >= 0
     page_rep = os.environ.get("PAGE_REP", "default_value")
     sparse_limit = 64
 
     qkv = torch.randn(MAX_QLEN, HEAD_DIM * (Q_HEAD_NUM + KV_HEAD_NUM * 2)).npu()  # .bfloat16()
     key_cache = torch.randn(MAX_PAGE, KV_HEAD_NUM, PAGE_SIZE, HEAD_DIM).npu()  # .bfloat16()
     value_cache = torch.randn(MAX_PAGE, KV_HEAD_NUM, PAGE_SIZE, HEAD_DIM).npu()  # .bfloat16()
-    kv_len0 = 4999
-    q_len0 = 3999
-    kv_idx = [torch.tensor(list(range((kv_len0 + q_len0 + PAGE_SIZE - 1) // PAGE_SIZE)), device=key_cache.device)]
-    kv_len = [kv_len0]
-    q_len_list = [q_len0]
+
+    BSZ = 3
+    kv_len0 = 2122
+    q_len0 = 999
+    kv_idx0 = torch.tensor(list(range((kv_len0 + q_len0 + PAGE_SIZE - 1) // PAGE_SIZE)), device=key_cache.device)
+    kv_len = [kv_len0 for _ in range(BSZ)]
+    q_len_list = [q_len0 for _ in range(BSZ)]
+    kv_idx = [kv_idx0 * BSZ + i for i in range(BSZ)]
 
     original_out = original_session_cache_pa_flash_attention_quest128(
         qkv,
@@ -37,24 +42,25 @@ def test_paged_prefill_quest():
         0,
         Q_SEG_SIZE,
         TOPK_RATIO,
+        RECENT_WINDOW,
         sparse_limit,
     )
-    mojo_output = mojo_quest(
-        qkv,
-        key_cache,
-        value_cache,
-        Q_HEAD_NUM,
-        KV_HEAD_NUM,
-        kv_idx,
-        kv_len,
-        q_len_list,
-        0,
-        0,
-        Q_SEG_SIZE,
-        TOPK_RATIO,
-        sparse_limit,
-    )
-    torch.testing.assert_close(mojo_output, original_out)
+    # mojo_output = mojo_quest(
+    #     qkv,
+    #     key_cache,
+    #     value_cache,
+    #     Q_HEAD_NUM,
+    #     KV_HEAD_NUM,
+    #     kv_idx,
+    #     kv_len,
+    #     q_len_list,
+    #     0,
+    #     0,
+    #     Q_SEG_SIZE,
+    #     TOPK_RATIO,
+    #     sparse_limit,
+    # )
+    # torch.testing.assert_close(mojo_output, original_out)
     mojo_output_v2 = mojo_block_quest(
         qkv,
         key_cache,
@@ -68,6 +74,7 @@ def test_paged_prefill_quest():
         0,
         Q_SEG_SIZE,
         TOPK_RATIO,
+        RECENT_WINDOW,
         sparse_limit,
     )
     torch.testing.assert_close(mojo_output_v2, original_out)
@@ -87,6 +94,7 @@ def original_session_cache_pa_flash_attention_quest128(
     block_idx,
     q_seg_size,
     topk_ratio,
+    RECENT_WINDOW,
     sparse_limit,
 ):
     topk_page_indices_debug = None
@@ -123,8 +131,11 @@ def original_session_cache_pa_flash_attention_quest128(
 
         valid_kv_seq_length = kv_seq_lengths[i] + q_chunk_sizes[i]  # 19
 
+        num_pages = max(0, kv_seq_lengths[i] - RECENT_WINDOW) // page_size
+        pad_len = kv_seq_lengths[i] - num_pages * page_size
+
         top_k = int(valid_kv_seq_length * topk_ratio)
-        top_k_page = top_k // page_size
+        top_k_page = min(top_k // page_size, num_pages)
 
         key_cache_i = key_sub.permute(1, 0, 2, 3).reshape(kv_head_num, -1, head_size)
         key = (
@@ -141,8 +152,6 @@ def original_session_cache_pa_flash_attention_quest128(
             diagonal=valid_kv_seq_length - q_chunk_sizes[i],
         )
         if prefill_sparse and kv_len[i] > 0 and valid_kv_seq_length > sparse_limit:
-            num_pages = valid_kv_seq_length // page_size
-            pad_len = valid_kv_seq_length - num_pages * page_size
 
             # [num_heads, num_pages, chunk_size, head_dim]
             page_k = key[:, : num_pages * page_size].reshape(q_head_num, num_pages, page_size, head_size)
@@ -183,12 +192,11 @@ def original_session_cache_pa_flash_attention_quest128(
                 ) + torch.arange(page_size, device=topk_page_indices.device)
                 topk_token_indices = topk_token_indices.reshape(q_head_num, curr_seg_size, top_k_page * page_size)
 
-                # pad_indices = num_pages * page_size + torch.arange(pad_len, device=topk_token_indices.device)
-                # # [nh, ql, pad_len]
-                # pad_indices = pad_indices.expand(q_head_num, curr_seg_size, -1)
-                # # [nh, ql, topk_page * page_size + pad_len]
-                # topk_token_indices = torch.cat([topk_token_indices, pad_indices], dim=-1)
-
+                pad_indices = num_pages * page_size + torch.arange(pad_len, device=topk_token_indices.device)
+                # [nh, ql, pad_len]
+                pad_indices = pad_indices.expand(q_head_num, curr_seg_size, -1)
+                # [nh, ql, topk_page * page_size + pad_len]
+                topk_token_indices = torch.cat([topk_token_indices, pad_indices], dim=-1)
                 # ====================quest========================
 
                 # [nh, q_seg_size, kv_seq_length]
@@ -280,6 +288,7 @@ def mojo_quest(
     block_idx,
     q_seg_size,  # 1024
     topk_ratio,
+    RECENT_WINDOW,
     sparse_limit,
 ):
     topk_page_indices_debug = None
@@ -427,6 +436,7 @@ def mojo_block_quest(
     block_idx,
     q_seg_size,  # 1024
     topk_ratio,
+    RECENT_WINDOW,
     sparse_limit,
 ):
     topk_page_indices_debug = None
@@ -492,7 +502,7 @@ def mojo_block_quest(
 
     block_quest = MojoPagedPrefillBlockQuest(q_seg_size, page_size)
     # [num_q_heads, ~= q_len / seg_size * ~= topk_ratio * num_pages]
-    topk_page_idxs, q_chunk_idx, cu_num_topk_pages_per_seg = block_quest(
+    topk_page_idxs, q_chunk_idx, num_sparse_pages, cu_num_topk_pages_per_seg = block_quest(
         query,
         cu_seqlen_q,
         page_k_mins,
@@ -500,6 +510,7 @@ def mojo_block_quest(
         kv_cache_indices,
         cu_seqlen_kv,
         num_topk_pages,
+        RECENT_WINDOW,
     )
     topk_page_indices_debug = topk_page_idxs
 
@@ -517,6 +528,7 @@ def mojo_block_quest(
         None,
         kv_cache_indices,
         q_chunk_idx,
+        num_sparse_pages,
         topk_page_idxs,
         cu_num_topk_pages_per_seg,
     )

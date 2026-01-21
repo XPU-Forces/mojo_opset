@@ -127,6 +127,7 @@ class TTXPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
         whole_causal_mask,
         block_table,
         q_chunk_indices,
+        num_sparse_pages,
         selected_page_indices,
         cu_num_selected_pages_per_chunk,
     ):
@@ -140,6 +141,7 @@ class TTXPagedPrefillBlockSparseAttention(MojoPagedPrefillBlockSparseAttention):
             self.mask,
             block_table,
             q_chunk_indices,
+            num_sparse_pages,
             selected_page_indices,
             cu_num_selected_pages_per_chunk,
             self.q_seg_size,
