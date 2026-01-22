@@ -20,7 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 npu = [
-    "byted-triton-x >= 3.2.0.post18",
+    "byted-triton-x >= 3.2.0.post19",
     "torch_npu==2.7.1",
     "attrs",
     "decorator"
