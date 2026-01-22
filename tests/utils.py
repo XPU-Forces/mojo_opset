@@ -206,6 +206,7 @@ def device_perf_npu(executor, profiling_dir="./npu_profiling", active=5):
         for _ in range(10):
             executor()
             prof.step()
+            torch.npu.synchronize()
 
         torch.npu.synchronize()
 
