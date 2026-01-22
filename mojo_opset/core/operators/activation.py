@@ -4,9 +4,6 @@ from ..operator import MojoOperator
 
 
 class MojoGelu(MojoOperator):
-    def __init__(self, op_name: str = "", layer_idx: int = 0):
-        super().__init__(op_name, layer_idx)
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass with GELU activation.
@@ -25,9 +22,6 @@ class MojoGeluQuant(MojoOperator):
 
 
 class MojoSilu(MojoOperator):
-    def __init__(self, op_name: str = "", layer_idx: int = 0):
-        super().__init__(op_name, layer_idx)
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass with SiLU (Swish) activation.
@@ -50,13 +44,6 @@ class MojoSiluQuant(MojoOperator):
 
 
 class MojoSwiGLU(MojoOperator):
-    def __init__(
-        self,
-        op_name: str = "",
-        layer_idx: int = 0,
-    ):
-        super().__init__(op_name, layer_idx)
-
     def forward(self, gate_out: torch.Tensor, up_out: torch.Tensor) -> torch.Tensor:
         """
         Forward pass with SwiGLU activation.

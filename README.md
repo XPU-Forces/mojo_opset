@@ -61,8 +61,10 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Sampling    | MojoTopPSampling            | ✅                | ✅             |
 | Sampling    | MojoRejectSampling          | ✅                | ✅             |
 | Sampling    | MojoApplyPenaltiesTempurate | ✅                | ✅             |
-| Norm        | MojoNorm                    | ✅                | ✅             |
-| Norm        | MojoResidualAddNorm         | ✅                | ✅             |
+| Norm        | MojoRMSNorm                 | ✅                | ✅             |
+| Norm        | MojoLayerNorm               | ✅                | ✅             |
+| Norm        | MojoResidualAddRMSNorm      | ✅                | ✅             |
+| Norm        | MojoResidualAddLayerNorm    | ✅                | ✅             |
 | Norm        | MojoNormQuant               | TBD               | TBD           |
 | Norm        | MojoResidualAddNormQuant    | TBD               | TBD           |
 | Norm        | MojoResidualAddNormCast     | TBD               | TBD           |

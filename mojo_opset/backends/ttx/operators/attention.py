@@ -31,7 +31,6 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         assert self.is_causal, (
             f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
-
         output = paged_attention_prefill(
             q=query,
             k_cache=k_cache,

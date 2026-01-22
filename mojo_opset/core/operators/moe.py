@@ -12,7 +12,6 @@ class MojoMoEGate(MojoOperator):
         top_k: int,
         select_method: str = "TOPKSoftmax",
         is_varlen: bool = True,
-        op_name: str = "",
     ):
         """
         Common parameter definitions for MoE Gating operator.
@@ -26,7 +25,7 @@ class MojoMoEGate(MojoOperator):
 
         Scope: Only covers common parameters, does not involve backend specialization or quantization implementation.
         """
-        super().__init__(op_name)
+        super().__init__()
         self.gate_weight = gate_weight
 
         self.top_k = top_k
@@ -70,7 +69,6 @@ class MojoMoEDispatch(MojoOperator):
         ep_group: Optional[object] = None,
         tp_group: Optional[object] = None,
         is_varlen: bool = True,
-        op_name: str = "",
     ):
         """
         Common parameter definitions for MoE Dispatch operator.
@@ -83,7 +81,7 @@ class MojoMoEDispatch(MojoOperator):
 
         Scope: Only covers common semantics, does not involve backend communication implementation or core partitioning details.
         """
-        super().__init__(op_name)
+        super().__init__()
         self.ep_group = ep_group
         self.tp_group = tp_group
         self.is_varlen = is_varlen

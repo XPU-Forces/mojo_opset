@@ -1,3 +1,5 @@
+import os
+
 from abc import ABC
 from abc import abstractmethod
 from typing import Any
@@ -45,12 +47,9 @@ class MojoOperator(ABC, torch.nn.Module):
         else:
             return super().__new__(cls)
 
-    def __init__(self, op_name: str = "", layer_idx: int = 0):
+    def __init__(self):
         torch.nn.Module.__init__(self)
         ABC.__init__(self)
-
-        self.op_name = op_name
-        self.layer_idx = layer_idx
 
     @abstractmethod
     def forward(self, *args, **kwargs) -> Tuple[Any]:

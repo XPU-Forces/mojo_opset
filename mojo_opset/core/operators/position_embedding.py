@@ -14,8 +14,6 @@ class MojoRoPE(MojoOperator):
         dynamic_ntk: bool = False,
         max_seq_len: Optional[int] = None,
         is_varlen: bool = True,
-        op_name: str = "",
-        layer_idx: int = 0,
     ):
         """
         Initialize rotary position embedding configuration.
@@ -26,8 +24,6 @@ class MojoRoPE(MojoOperator):
             dynamic_ntk (bool, default=False): Enable dynamic NTK scaling to extend effective context length.
             max_seq_len (Optional[int], default=None): Positive max sequence length for precomputation; or None.
             is_varlen (bool, default=True): Prefer token-first TND layout when True; else use BSND.
-            op_name (str, default=""): Operator name metadata.
-            layer_idx (int, default=0): Layer index metadata.
 
         Raises:
             ValueError: If `rotary_offset` < 0 or `max_seq_len` <= 0 when provided.
@@ -37,7 +33,7 @@ class MojoRoPE(MojoOperator):
             This initializer performs light validation and stores configuration flags; the
             actual rotary application happens in the forward path.
         """
-        super().__init__(op_name, layer_idx)
+        super().__init__()
 
         if not isinstance(rotary_offset, int) or rotary_offset < 0:
             raise ValueError("rotary_offset should be non-negative integer.")

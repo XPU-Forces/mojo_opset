@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 from ..function import MojoFunction
@@ -71,31 +70,3 @@ class MojoRMSNormFunction(MojoFunction):
         grad_weight = weight_with_grad.grad
 
         return grad_input, grad_weight, None
-
-
-class MojoRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6, **kwargs):
-        super().__init__()
-
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        RMSNorm function.
-        The normalized dimension is the last dimension of hidden_states.
-
-        Args:
-            hidden_states (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Result of the RMSNorm activation.
-        """
-        return MojoRMSNormFunction.apply(
-            hidden_states,
-            self.weight,
-            self.variance_epsilon,
-        )

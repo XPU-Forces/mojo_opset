@@ -57,15 +57,14 @@ def _sdpa_infer_inner(
         # Modify K
         trans_k = tl.trans(k)
         qk = tl.dot(q, trans_k)
-        # tl.compile_hint(qk, "tile_cube_loop")
 
         # NOTE(zhangjihang): tl.where will introduce ub overflow
         qk = qk * qk_scale
-        # mask = tl.load(mask_ptr)
+        mask = tl.load(mask_ptr)
 
         # qk += (1 - mask.to(tl.float32)) * (-1e6)
-        # TODO(zhangjihang): tl.where with a non-boolean condition is deprecated and will error out in a future triton release. Got int8
-        # qk = tl.where(mask, qk, -1e6)  # 32B # bool
+        # qk = tl.where(mask, qk, float("-inf"))
+        qk = tl.where(mask, qk, -1e6)
 
         m_ij = tl.maximum(m_i, tl.max(qk, 1))  # Scaled max
         qk = qk - m_ij[:, None]  # Stabilize
@@ -83,7 +82,7 @@ def _sdpa_infer_inner(
         # -- Update output accumulator --
         acc_ptr = acc_ptr * alpha[:, None]
         acc_ptr = tl.dot(p_cast, v, acc_ptr)
-        tl.compile_hint(acc_ptr, "tile_cube_loop")
+        tl.compile_hint(acc_ptr, "tile_cube_loop", 2)
 
         m_i = m_ij  # Update current block max
         # Advance V and K block pointers to next BLOCK_N range
@@ -837,27 +836,24 @@ def sdpa_infer_impl(
         o.stride(1),
         o.stride(2),
         o.stride(3),
-        q.shape[0],
-        q_head_num,
-        kv_head_num,
+        BSZ=q.shape[0],
+        Q_HEAD_NUM=q_head_num,
+        KV_HEAD_NUM=kv_head_num,
         SEQ=seq_length,
         HEAD_DIM=head_dim,
         BLOCK_M=128,
-        BLOCK_N=256,
-        multibuffer=True,  # autotune config, 控制开double buffer
-        unit_flag=True,  # autotune config, cube搬出的一个优化项
-        limit_auto_multi_buffer_only_for_local_buffer=False,  # autotune config, 是否开启cube和vector的并行，false表示开启
-        set_workspace_multibuffer=4,  # autotune config, 表示同时cube和vector有几个并行，【2,4】，仅limit_auto_multi_buffer_only_for_local_buffer=False 时生效
-        # enable_hivm_auto_cv_balance=True,
-        tile_mix_vector_loop=2,  # 中间vector切分； 1:2
-        tile_mix_cube_loop=2,  # (128, 128) * (128, 512); (M, N)大的切分
-        # enable_ubuf_saving=True,
+        BLOCK_N=512,
+        enable_ubuf_saving=True,
+        enable_hivm_auto_cv_balance=True,
+        multibuffer=True,  # 控制开double_buffer
+        unit_flag=True,  # cube搬出的一个优化项
+        limit_auto_multi_buffer_only_for_local_buffer=False,
+        limit_auto_multi_buffer_of_local_buffer="no-l0c",
+        set_workspace_multibuffer=4,
+        tile_mix_vector_loop=8,
+        tile_mix_cube_loop=4,
         **extra_kern_args,
     )
-    # NOTE(zhangjihang): Not need for inference now
-    # ctx.save_for_backward(q, k, v, o, M)
-    # ctx.scale = scale
-    # ctx.HEAD_DIM = head_dim
     return o
 
     # head_num 8:1 16K 32 block_size
