@@ -9,8 +9,6 @@ from tests.utils import bypass_not_implemented
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoSdpa
-from mojo_opset.backends.ref.operators.attention import RefPagedDecodeGQA
-from mojo_opset.backends.ref.operators.attention import RefPagedPrefillGQA
 
 
 def generate_paged_decode_data(
@@ -96,10 +94,10 @@ def test_paged_decode_gqa(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
-    paged_attn_decode_ref = RefPagedDecodeGQA(
+    paged_attn_decode_ref = MojoPagedDecodeGQA(
         is_causal=True,
         gqa_layout=gqa_layout,
-    )
+    )._registry.get("torch")()
 
     perf(  # noqa: F821
         lambda: paged_attn_decode_ref(
@@ -220,10 +218,10 @@ def test_paged_prefill_gqa(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
-    paged_attn_prefill_ref = RefPagedPrefillGQA(
+    paged_attn_prefill_ref = MojoPagedPrefillGQA(
         is_causal=True,
         gqa_layout=gqa_layout,
-    )
+    )._registry.get("torch")()
 
     head_dim = query.shape[-1]
     sm_scale = 1.0 / math.sqrt(head_dim)

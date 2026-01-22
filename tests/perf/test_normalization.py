@@ -6,8 +6,6 @@ from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoNorm
 from mojo_opset import MojoResidualAddNorm
-from mojo_opset.backends.ref.operators.normalization import RefNorm
-from mojo_opset.backends.ref.operators.normalization import RefResidualAddNorm
 
 
 @pytest.mark.parametrize(
@@ -37,13 +35,13 @@ def test_residual_add_norm(x, residual, gamma, beta, norm_type, norm_pos, eps):
         norm_pos=norm_pos,
         norm_type=norm_type,
     )
-    add_norm_ref = RefResidualAddNorm(
+    add_norm_ref = MojoResidualAddNorm(
         gamma=gamma,
         beta=beta,
         eps=eps,
         norm_pos=norm_pos,
         norm_type=norm_type,
-    )
+    )._registry.get("torch")()
 
     perf(lambda: add_norm_ref(x, residual))  # noqa: F821
     perf(lambda: add_norm(x, residual))  # noqa: F821
@@ -68,11 +66,11 @@ def test_rmsnorm(x, gamma, eps):
         norm_type="rmsnorm",
         gamma=gamma,
     ).to(x.device)
-    rmsnorm_ref = RefNorm(
+    rmsnorm_ref = MojoNorm(
         eps=eps,
         norm_type="rmsnorm",
         gamma=gamma,
-    ).to(x.device)
+    )._registry.get("torch")().to(x.device)
 
     with torch.no_grad():
         rmsnorm.gamma.copy_(gamma.to(torch.float32))
@@ -102,12 +100,12 @@ def test_layernorm(x, gamma, beta, eps):
         gamma=gamma,
         beta=beta,
     ).to(x.device)
-    layernorm_ref = RefNorm(
+    layernorm_ref = MojoNorm(
         eps=eps,
         norm_type="layernorm",
         gamma=gamma,
         beta=beta,
-    ).to(x.device)
+    )._registry.get("torch")().to(x.device)
 
     with torch.no_grad():
         layernorm.gamma.copy_(gamma.to(torch.float32))
