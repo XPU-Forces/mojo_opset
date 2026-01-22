@@ -18,8 +18,10 @@ from mojo_opset import MojoSwiGLU
 def test_gelu(x):
     gelu = MojoGelu()
     gelu_ref = MojoGelu._registry.get("torch")()
+    gelu_npu = MojoGelu._registry.get("torch_npu")()
     perf(lambda: gelu_ref(x))  # noqa: F821
     perf(lambda: gelu(x))  # noqa: F821
+    perf(lambda: gelu_npu(x))  # noqa: F821
 
 
 @pytest.mark.parametrize(
