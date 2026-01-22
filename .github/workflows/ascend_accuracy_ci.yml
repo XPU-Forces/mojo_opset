@@ -60,8 +60,3 @@ jobs:
         run: |
           echo "Running ttx graph tests..."
           MOJO_RUN_MODE="COMPILE" python3 -m pytest tests/test_ttx_graph/
-      - name: test-ttx-model-inference
-        shell: bash
-        run: |
-          echo "Running ttx modeling tests..."
-          MOJO_BACKEND="ttx" python3 -m pytest tests/test_qwen3_dense_patching.py

@@ -6,10 +6,10 @@ import re
 import sys
 import time
 
-from typing import Callable
-from typing import Union
-from typing import Tuple
 from typing import Any
+from typing import Callable
+from typing import Tuple
+from typing import Union
 
 import pytest
 import torch
@@ -260,11 +260,12 @@ def perf_npu(executor, profiling_dir="./npu_profiling", active=5):
     with open(csv_file_path, mode="r", newline="", encoding="utf-8") as file:
         reader = csv.DictReader(file)
 
+        # Still need this loop because one op may launch may kernels.
         for row in reader:
-            avg_time = float(row["Total Time(us)"])
+            avg_time = float(row["Avg Time(us)"])
             total_avg_time_us += avg_time
 
-    device_latency = total_avg_time_us / active
+    # device_latency = total_avg_time_us / active
     host_latency = host_perf(executor, "npu")
 
     func_name, para_list = get_executor_info(executor)
@@ -272,7 +273,7 @@ def perf_npu(executor, profiling_dir="./npu_profiling", active=5):
     plain_log_full = (
         f"[{func_name}] | "
         f"{', '.join(para_list)} | "
-        f"Device latency = {device_latency:.4f} us | "
+        f"Device latency = {total_avg_time_us:.4f} us | "
         f"Host latency = {host_latency:.4f} ms | "
         f"Profile dir = {kernel_profiling_path}"
     )
@@ -280,7 +281,7 @@ def perf_npu(executor, profiling_dir="./npu_profiling", active=5):
     logger.info(plain_log_full)
 
     plain_log_file = (
-        f"| {func_name} | {format_executor_info(para_list)} | {device_latency:.4f} us | {host_latency:.4f} ms |"
+        f"| {func_name} | {format_executor_info(para_list)} | {total_avg_time_us:.4f} us | {host_latency:.4f} ms |"
     )
     log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf/benchmark.md")
     os.makedirs(os.path.dirname(log_path), exist_ok=True)

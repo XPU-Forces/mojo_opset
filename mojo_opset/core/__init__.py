@@ -57,11 +57,13 @@ from .operators.moe import MojoMoEDispatch
 from .operators.moe import MojoMoEGate
 
 """ normalization """
-from .operators.normalization import MojoNorm
+from .operators.normalization import MojoLayerNorm
 from .operators.normalization import MojoNormQuant
-from .operators.normalization import MojoResidualAddNorm
+from .operators.normalization import MojoResidualAddLayerNorm
 from .operators.normalization import MojoResidualAddNormCast
 from .operators.normalization import MojoResidualAddNormQuant
+from .operators.normalization import MojoResidualAddRMSNorm
+from .operators.normalization import MojoRMSNorm
 
 """ position_embedding """
 from .operators.position_embedding import MojoNormRoPE
@@ -84,7 +86,6 @@ from .functions.convolution import MojoCausalConv1dFunction
 from .functions.convolution import mojo_causal_conv1d
 from .functions.loss_function import MojoFusedLinearCrossEntropyFunction
 from .functions.loss_function import MojoFusedLinearCrossEntropyLoss
-from .functions.normalization import MojoRMSNorm
 from .functions.normalization import MojoRMSNormFunction
 from .functions.position_embedding import MojoRoPEFunction
 from .functions.position_embedding import mojo_rope
@@ -137,9 +138,11 @@ __all__ = [
     "MojoMoECombine",
     "MojoBigEPCombine",
 
-    "MojoNorm",
+    "MojoLayerNorm",
+    "MojoRMSNorm",
+    "MojoResidualAddRMSNorm",
+    "MojoResidualAddLayerNorm",
     "MojoNormQuant",
-    "MojoResidualAddNorm",
     "MojoResidualAddNormQuant",
     "MojoResidualAddNormCast",
 
@@ -165,6 +168,5 @@ __all__ = [
     "mojo_silu",
     "MojoFusedLinearCrossEntropyLoss",
     "mojo_rope",
-    "MojoRMSNorm",
 ]
 # fmt: on
