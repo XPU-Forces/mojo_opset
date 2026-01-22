@@ -6,10 +6,6 @@ import torch.nn.functional as F
 from ..operator import MojoOperator
 
 class MojoCausalConv1dUpdateState(MojoOperator):
-    def __init__(self, op_name = "", layer_idx = 0):
-        super().__init__(op_name, layer_idx)
-    
-
     def forward(
         self,
         hidden_states: torch.Tensor,
