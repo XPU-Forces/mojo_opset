@@ -4,8 +4,10 @@ import torch
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
-from mojo_opset import MojoNorm
-from mojo_opset import MojoResidualAddNorm
+from mojo_opset import MojoLayerNorm
+from mojo_opset import MojoResidualAddLayerNorm
+from mojo_opset import MojoResidualAddRMSNorm
+from mojo_opset import MojoRMSNorm
 
 torch.manual_seed(42)
 
@@ -34,15 +36,13 @@ dtypes = [torch.float32, torch.float16, torch.bfloat16]
 @auto_switch_platform()
 @bypass_not_implemented
 def test_rmsnorm(x, weight, eps):
-    rmsnorm = MojoNorm(
+    rmsnorm = MojoRMSNorm(
         eps=eps,
-        norm_type="rmsnorm",
         weight=weight,
     ).to(x.device)
 
-    rmsnorm_ref = MojoNorm._registry.get("torch")(
+    rmsnorm_ref = MojoRMSNorm._registry.get("torch")(
         eps=eps,
-        norm_type="rmsnorm",
         weight=weight,
     ).to(x.device)
 
@@ -58,7 +58,7 @@ def test_rmsnorm(x, weight, eps):
 
 
 @pytest.mark.parametrize(
-    "x, weight, beta",
+    "x, weight, bias",
     [
         (
             torch.randn(size=(256, 128), dtype=dtype),
@@ -71,26 +71,24 @@ def test_rmsnorm(x, weight, eps):
 @pytest.mark.parametrize("eps", [1e-5])
 @auto_switch_platform()
 @bypass_not_implemented
-def test_layernorm(x, weight, beta, eps):
-    layernorm = MojoNorm(
+def test_layernorm(x, weight, bias, eps):
+    layernorm = MojoLayerNorm(
         eps=eps,
-        norm_type="layernorm",
         weight=weight,
-        beta=beta,
+        bias=bias,
     ).to(x.device)
 
-    layernorm_ref = MojoNorm._registry.get("torch")(
+    layernorm_ref = MojoLayerNorm._registry.get("torch")(
         eps=eps,
-        norm_type="layernorm",
         weight=weight,
-        beta=beta,
+        bias=bias,
     ).to(x.device)
 
     with torch.no_grad():
         layernorm.weight.copy_(weight.to(torch.float32))
-        layernorm.beta.copy_(beta.to(torch.float32))
+        layernorm.bias.copy_(bias.to(torch.float32))
         layernorm_ref.weight.copy_(weight.to(torch.float32))
-        layernorm_ref.beta.copy_(beta.to(torch.float32))
+        layernorm_ref.bias.copy_(bias.to(torch.float32))
 
     if x.dtype == torch.float32:
         atol, rtol = 1e-4, 1e-5
@@ -100,7 +98,48 @@ def test_layernorm(x, weight, beta, eps):
 
 
 @pytest.mark.parametrize(
-    "x, residual, weight, beta",
+    "x, residual, weight",
+    [
+        (
+            torch.randn(size=(128, 128), dtype=dtype),
+            torch.randn(size=(128, 128), dtype=dtype),
+            torch.randn(size=(128,), dtype=dtype),
+        )
+        for dtype in [torch.float32, torch.float16, torch.bfloat16]
+    ],
+)
+@pytest.mark.parametrize("eps", [1e-5])
+@pytest.mark.parametrize("norm_pos", ["pre", "post"])
+@auto_switch_platform()
+@bypass_not_implemented
+def test_residual_add_rms_norm(x, residual, weight, norm_pos, eps):
+    add_norm = MojoResidualAddRMSNorm(
+        weight=weight,
+        eps=eps,
+        norm_pos=norm_pos,
+    )
+    add_norm_ref = MojoResidualAddRMSNorm._registry.get("torch")(
+        weight=weight,
+        eps=eps,
+        norm_pos=norm_pos,
+    )
+
+    if x.dtype == torch.float32:
+        atol, rtol = 1e-5, 1e-6
+    else:
+        atol, rtol = 3e-2, 6e-3
+
+    add_norm.forward_diff_with(
+        add_norm_ref,
+        x,
+        residual,
+        atol=atol,
+        rtol=rtol,
+    )
+
+
+@pytest.mark.parametrize(
+    "x, residual, weight, bias",
     [
         (
             torch.randn(size=(128, 128), dtype=dtype),
@@ -113,25 +152,20 @@ def test_layernorm(x, weight, beta, eps):
 )
 @pytest.mark.parametrize("eps", [1e-5])
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
-@pytest.mark.parametrize("norm_type", ["rmsnorm", "layernorm"])
 @auto_switch_platform()
 @bypass_not_implemented
-def test_residual_add_norm(x, residual, weight, beta, norm_type, norm_pos, eps):
-    beta = beta if norm_type == "layernorm" else None
-
-    add_norm = MojoResidualAddNorm(
+def test_residual_add_layernorm(x, residual, weight, bias, norm_pos, eps):
+    add_norm = MojoResidualAddLayerNorm(
         weight=weight,
-        beta=beta,
+        bias=bias,
         eps=eps,
         norm_pos=norm_pos,
-        norm_type=norm_type,
     )
-    add_norm_ref = MojoResidualAddNorm._registry.get("torch")(
+    add_norm_ref = MojoResidualAddLayerNorm._registry.get("torch")(
         weight=weight,
-        beta=beta,
+        bias=bias,
         eps=eps,
         norm_pos=norm_pos,
-        norm_type=norm_type,
     )
 
     if x.dtype == torch.float32:

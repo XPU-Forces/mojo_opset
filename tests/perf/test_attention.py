@@ -254,7 +254,6 @@ def generate_test_data(
     kv_head_num: int,
     head_dim: int,
     seq_length: int,
-    block_size: int,
 ):
     query = torch.randn(bsz, q_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=False)
     key = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=False)
@@ -270,10 +269,9 @@ def generate_test_data(
             *generate_test_data(
                 bsz=1,
                 q_head_num=8,
-                kv_head_num=1,
+                kv_head_num=2,
                 head_dim=128,
                 seq_length=8192,
-                block_size=32,
             )
         ),
     ],
@@ -286,7 +284,7 @@ def test_sdpa(
     blockwise_diffusion_attn_mask: torch.Tensor,
     enable_gqa: bool,
 ):
-    diffusion_attn_ref = MojoSdpa._registry.get("ref")(
+    diffusion_attn_ref = MojoSdpa._registry.get("torch")(
         mask=blockwise_diffusion_attn_mask, scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
     )
     diffusion_attn = MojoSdpa(
