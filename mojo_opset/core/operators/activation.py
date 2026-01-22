@@ -1,4 +1,5 @@
 import torch
+import torch_npu
 
 from ..operator import MojoOperator
 
@@ -18,6 +19,30 @@ class MojoGelu(MojoOperator):
             torch.Tensor: Same shape as input with element-wise GELU applied.
         """
         return torch.nn.functional.gelu(x)
+    
+class TorchNpuGelu(MojoGelu):
+    def __init__(self, op_name: str = "", layer_idx: int = 0):
+        super().__init__(op_name, layer_idx)
+    
+    def forward(
+        self, x: torch.Tensor, 
+        approximate: str = 'none'
+    ) -> torch.Tensor:
+        """
+        Forward pass with GELU activation.
+
+        Args:
+            x (torch.Tensor): Input tensor of any shape.
+            approximate (str, optional): Approximation method for GELU. Defaults to 'none'.
+
+        Returns:
+            torch.Tensor: Same shape as input with element-wise GELU applied.
+        """
+        if approximate not in ['none', 'tanh']:
+            raise ValueError(f"Unsupported approximate method: {approximate}\". "
+                             "Only 'none' and 'tanh' are supported.")
+        return torch_npu.npu_gelu(x, approximate=approximate)
+
 
 
 class MojoGeluQuant(MojoOperator):

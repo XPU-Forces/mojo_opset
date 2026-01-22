@@ -19,6 +19,8 @@ def test_gelu(x):
     gelu = MojoGelu()
     gelu_ref = MojoGelu._registry.get("torch")()
     gelu.forward_diff_with(gelu_ref, x)
+    gelu_npu = MojoGelu._registry.get("torch_npu")()
+    gelu.forward_diff_with(gelu_npu, x)
 
 
 @pytest.mark.parametrize(

@@ -9,7 +9,8 @@ from .operator import MojoOperator
 
 logger = get_logger(__name__)
 
-BACKEND_PRIORITY_LIST = ["ttx", "torch"]
+BACKEND_PRIORITY_LIST = ["ttx", "torch_npu", "torch"]
+BACKEND_PRIORITY_MAP = {"torchnpu": "torch_npu"} ## Avoid the issue of failed identification of underscore "_" in the torch_npu backend name
 
 
 class MojoBackendRegistry:
@@ -31,6 +32,9 @@ class MojoBackendRegistry:
             f"contain {self._operator_name} in its name."
         )
         impl_backend_name = cls.__name__[:idx].lower()
+
+        if impl_backend_name not in BACKEND_PRIORITY_LIST and impl_backend_name in BACKEND_PRIORITY_MAP: 
+            impl_backend_name = BACKEND_PRIORITY_MAP[impl_backend_name] 
 
         # Hard code for some special cases
         assert impl_backend_name != "mojo", "should not register base backend"
