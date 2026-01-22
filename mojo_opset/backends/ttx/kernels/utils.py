@@ -129,18 +129,32 @@ def input_guard(
     return decorator
 
 
+def get_bool_env(key, default=True):
+    import os
+    value = os.environ.get(key, None)
+    if value is None:
+        return default
+    value = value.lower()
+    if value in ("1", "yes", "true"):
+        return True
+    elif value in ("0", "no", "false"):
+        return False
+    else:
+        return default
+
 # TODO(liuyuan): remove the followling statements when triton-npu support checking whether an address is device-valid.
 # See https://github.com/triton-lang/triton/blob/571d07b84ffbaee4b873c2918208e2c640057768/third_party/nvidia/backend/driver.py#L415
 def tensor_device_guard_for_triton_kernel(path, name, device="npu"):
-    enable = True
-    if not enable:
+
+    disable = get_bool_env("MOJO_DISABLE_TENSOR_GUARD", False)
+    if disable:
         return
 
     import pkgutil
     import importlib
     from inspect import getmembers
     import torch.utils._pytree as pytree
-    from triton.runtime.jit import JITFunction
+    from triton.runtime.jit import JITFunction, KernelInterface
 
     def device_guard(*args, **kwargs):
         if not pytree.tree_all_only(
@@ -153,8 +167,17 @@ def tensor_device_guard_for_triton_kernel(path, name, device="npu"):
     for _, name, _ in pkgutil.walk_packages(path, prefix=f"{name}."):
         module = importlib.import_module(name)
         for obj_name, obj in getmembers(module):
-            if isinstance(obj, JITFunction):
+            if not isinstance(obj, KernelInterface):
+                continue
+
+            # NOTE(liuyuan): for autotuners.
+            while not isinstance(obj, JITFunction):
+                obj = obj.fn
+            try:
                 obj.add_pre_run_hook(device_guard)
+            except:
+                breakpoint()
+
 
 contiguous = input_guard
 
