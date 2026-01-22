@@ -708,7 +708,7 @@ def block_sparse_attention_paged_prefill_impl(
         head_dim,
         q_chunk_size,
         kv_page_size,
-        BLOCK_SIZE_M=64,  # dummy, for test
+        BLOCK_SIZE_M=128,  # dummy, for test
         BLOCK_SIZE_N=128,  # dummy, for test
         AUX_MASK_SIZE=mask_block_size,
     )
