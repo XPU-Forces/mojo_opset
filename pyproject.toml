@@ -12,11 +12,18 @@ readme = { file = "README.md", content-type = "text/markdown" }
 authors = [{name="SeedXPU", email='yuminghui.exp@bytedance.com'}]
 dependencies = [
     "einops",
+    "PyYAML",
+    "packaging",
+    "pytest",
+    "pybind11"
 ]
 
 [project.optional-dependencies]
 npu = [
-    "byted-triton-x >= 3.2.0.post18"
+    "byted-triton-x >= 3.2.0.post18",
+    "torch_npu==2.7.1",
+    "attrs",
+    "decorator"
 ]
 mlu = [
 ]
