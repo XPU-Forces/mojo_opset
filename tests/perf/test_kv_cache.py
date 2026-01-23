@@ -1,11 +1,10 @@
 import pytest
 import torch
 
-from tests.utils import assert_close
-from tests.utils import bypass_not_implemented
-
 from mojo_opset import MojoStorePagedKVCache
 from mojo_opset.utils.platform import get_platform
+from tests.utils import auto_switch_platform
+from tests.utils import bypass_not_implemented
 
 
 def generate_inputs(batch_size, num_heads, head_dim, new_seq_len, context_len_val, block_size, device):
@@ -64,6 +63,7 @@ def generate_inputs(batch_size, num_heads, head_dim, new_seq_len, context_len_va
     ],
 )
 @bypass_not_implemented
+@auto_switch_platform(set_perf=True)
 def test_paged_update_kernel(block_size, batch_size, num_heads, head_dim, context_len, new_seq_len):
     device = get_platform()
     key_states, value_states, k_cache_ref, v_cache_ref, block_tables, context_lens = generate_inputs(
@@ -79,26 +79,15 @@ def test_paged_update_kernel(block_size, batch_size, num_heads, head_dim, contex
     k_cache = k_cache_ref.clone()
     v_cache = v_cache_ref.clone()
 
-    store_paged_kv_ref = MojoStorePagedKVCache._registry.get("torch")(kv_layout="NPU_ND", block_size=block_size)
     store_paged_kv = MojoStorePagedKVCache(kv_layout="NPU_ND", block_size=block_size)
 
-    store_paged_kv_ref(
-        key_states,
-        value_states,
-        k_cache_ref,
-        v_cache_ref,
-        block_tables,
-        context_lens,
+    perf(  # noqa: F821
+        lambda: store_paged_kv(
+            key_states,
+            value_states,
+            k_cache,
+            v_cache,
+            block_tables,
+            context_lens,
+        )
     )
-
-    store_paged_kv(
-        key_states,
-        value_states,
-        k_cache,
-        v_cache,
-        block_tables,
-        context_lens,
-    )
-
-    assert_close(k_cache, k_cache_ref)
-    assert_close(v_cache, v_cache_ref)

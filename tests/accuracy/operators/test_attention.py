@@ -286,18 +286,17 @@ def generate_test_data(
         pytest.param(
             *generate_test_data(
                 bsz=1,
-                q_head_num=8,
-                kv_head_num=2,
+                q_head_num=5,
+                kv_head_num=1,
                 head_dim=128,
-                seq_length=1024,
+                seq_length=2048,
                 block_size=32,
             )
         ),
     ],
 )
-@pytest.mark.skip
 @auto_switch_platform()
-def test_diffusion_attention(
+def test_sdpa(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,

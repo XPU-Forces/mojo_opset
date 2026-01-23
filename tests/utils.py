@@ -1,4 +1,5 @@
 import csv
+import datetime
 import functools
 import inspect
 import os
@@ -6,10 +7,10 @@ import re
 import sys
 import time
 
-from typing import Callable
-from typing import Union
-from typing import Tuple
 from typing import Any
+from typing import Callable
+from typing import Tuple
+from typing import Union
 
 import pytest
 import torch
@@ -29,6 +30,16 @@ def assert_close(
     results: Union[torch.Tensor, Tuple[Any, ...]],
     refs: Union[torch.Tensor, Tuple[Any, ...]],
 ):
+    """
+    Asserts that the results are close to the reference tensors within specified tolerances.
+
+    Args:
+        results (Union[torch.Tensor, Tuple[Any, ...]]): The calculated result tensor(s).
+        refs (Union[torch.Tensor, Tuple[Any, ...]]): The reference/golden tensor(s).
+
+    Raises:
+        AssertionError: If shapes, dtypes, or values do not match within tolerance.
+    """
     assert type(results) is type(refs)
     if isinstance(results, torch.Tensor) and isinstance(refs, torch.Tensor):
         results = tuple([results])
@@ -68,6 +79,16 @@ def assert_close(
 
 
 def get_executor_info(executor):
+    """
+    Inspects a callable executor to retrieve its name and enclosed input arguments.
+
+    Args:
+        executor (Callable): The function or closure to inspect.
+
+    Returns:
+        Tuple[str, List[str]] or None: A tuple containing the function name and formatted arguments, or None if inspection fails.
+    """
+
     def format_arg(arg):
         if isinstance(arg, torch.Tensor):
             return f"Tensor(shape={tuple(arg.shape)}, dtype={arg.dtype}, device={arg.device})"
@@ -110,13 +131,19 @@ def get_executor_info(executor):
     func_name = matches[0]
     result = [r for r in result if f"<{func_name}>" not in r]
 
-    # if "forward_ref" in inspect.getsource(executor).strip():
-    #     func_name += "_TORCH_REF"
-
     return func_name, result
 
 
 def format_executor_info(info_list):
+    """
+    Formats the executor information list into a human-readable string.
+
+    Args:
+        info_list (List[str]): List containing the function name as the first element and arguments as subsequent elements.
+
+    Returns:
+        str: A formatted string representation.
+    """
     func = info_list[0]
     args = info_list[1:]
 
@@ -126,6 +153,15 @@ def format_executor_info(info_list):
 
 
 def auto_switch_platform(set_perf: bool = False):
+    """
+    Decorator to automatically move tensor arguments to the current platform device and optionally inject performance testing.
+
+    Args:
+        set_perf (bool): If True, injects a 'perf' function into the module for performance profiling (NPU only).
+
+    Returns:
+        Callable: The decorated function.
+    """
     device = get_platform()
 
     if set_perf:
@@ -153,6 +189,16 @@ def auto_switch_platform(set_perf: bool = False):
 
 # Skip current test if this case is not implemented on current chosen backend.
 def bypass_not_implemented(func: Callable) -> Callable:
+    """
+    Decorator to skip a test if it raises a NotImplementedError.
+
+    Args:
+        func (Callable): The test function to wrap.
+
+    Returns:
+        Callable: The wrapped function that handles NotImplementedError.
+    """
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         try:
@@ -164,15 +210,18 @@ def bypass_not_implemented(func: Callable) -> Callable:
     return wrapper
 
 
-def is_similar(result, golden, atol=1e-2, rtol=1e-2):
-    return result.shape == golden.shape and torch.allclose(result, golden, atol, rtol)
-
-
-def get_max_diff(result, golden):
-    return torch.max(torch.abs(result - golden))
-
-
 def device_perf_npu(executor, profiling_dir="./npu_profiling", active=5):
+    """
+    Profiles the NPU kernel execution time using torch_npu.profiler.
+
+    Args:
+        executor (Callable): The function to profile.
+        profiling_dir (str): Directory to save profiling results.
+        active (int): Number of active steps for profiling.
+
+    Returns:
+        Tuple[float, str] or None: Average kernel time in us and path to the profiling logic, or None on failure.
+    """
     if not os.path.exists(profiling_dir):
         os.makedirs(profiling_dir)
 
@@ -182,11 +231,7 @@ def device_perf_npu(executor, profiling_dir="./npu_profiling", active=5):
         l2_cache=False,
         data_simplification=False,
     )
-    # When using the Triton backend, JIT compilation causes the first execution to include
-    # extra compile-time ops; without a warm-up run, the op counts in the profiling results
-    # will be inconsistent.
-    executor()
-    torch.npu.synchronize()
+
     with torch_npu.profiler.profile(
         activities=[torch_npu.profiler.ProfilerActivity.CPU, torch_npu.profiler.ProfilerActivity.NPU],
         schedule=torch_npu.profiler.schedule(wait=0, warmup=5, active=active, repeat=1, skip_first=0),
@@ -208,52 +253,23 @@ def device_perf_npu(executor, profiling_dir="./npu_profiling", active=5):
             prof.step()
             torch.npu.synchronize()
 
-        torch.npu.synchronize()
-
     try:
-        all_subdirs = [
-            os.path.join(profiling_dir, d)
-            for d in os.listdir(profiling_dir)
-            if os.path.isdir(os.path.join(profiling_dir, d))
-        ]
+        kernel_profiling_path = max(
+            [
+                os.path.join(profiling_dir, d)
+                for d in os.listdir(profiling_dir)
+                if os.path.isdir(os.path.join(profiling_dir, d))
+            ],
+            key=os.path.getmtime,
+        )
+        csv_file_path = os.path.join(kernel_profiling_path, "ASCEND_PROFILER_OUTPUT", "op_statistic.csv")
 
-        if all_subdirs:
-            return max(all_subdirs, key=os.path.getmtime)
-        else:
-            logger.warning("Profiling dir unfound.")
+        if not os.path.exists(csv_file_path):
+            logger.error(f"File not found: {csv_file_path}")
             return None
 
     except Exception as e:
-        logger.warning(f"Failed to get Profiling folder name: {e}")
-        return None
-
-
-def host_perf(func, device, warmup=3, repeat=10):
-    if device.lower() == "npu":
-        sync = torch.npu.synchronize
-    else:
-        sync = lambda: None
-
-    for _ in range(warmup):
-        func()
-        sync()
-
-    start = time.time()
-    for _ in range(repeat):
-        func()
-        sync()
-    end = time.time()
-
-    avg_time = (end - start) / repeat * 1000
-    return avg_time
-
-
-def perf_npu(executor, profiling_dir="./npu_profiling", active=5):
-    kernel_profiling_path = device_perf_npu(executor, profiling_dir, active)
-    csv_file_path = os.path.join(kernel_profiling_path, "ASCEND_PROFILER_OUTPUT", "op_statistic.csv")
-
-    if not os.path.exists(csv_file_path):
-        logger.warning(f"File not found: {csv_file_path}")
+        logger.error(f"Failed to get Profiling folder name: {e}")
         return None
 
     total_avg_time_us = 0.0
@@ -265,12 +281,91 @@ def perf_npu(executor, profiling_dir="./npu_profiling", active=5):
             avg_time = float(row["Total Time(us)"])
             total_avg_time_us += avg_time
 
-    device_latency = total_avg_time_us / active
+    return total_avg_time_us / active, kernel_profiling_path
+
+
+def device_perf_mlu(executor, profiling_dir="./mlu_profiling", active=5):
+    """
+    Profiles the MLU kernel execution time (Not Implemented).
+
+    Args:
+        executor (Callable): The function to profile.
+        profiling_dir (str): Directory to save profiling results.
+        active (int): Number of active steps.
+
+    Raises:
+        NotImplementedError: This function is not yet implemented.
+    """
+    raise NotImplementedError
+
+
+def device_perf_ilu(executor, profiling_dir="./mlu_profiling", active=5):
+    """
+    Profiles the ILU kernel execution time (Not Implemented).
+
+    Args:
+        executor (Callable): The function to profile.
+        profiling_dir (str): Directory to save profiling results.
+        active (int): Number of active steps.
+
+    Raises:
+        NotImplementedError: This function is not yet implemented.
+    """
+    raise NotImplementedError
+
+
+def host_perf(func, device, warmup=3, repeat=10):
+    """
+    Measures the host-side latency of a function execution.
+
+    Args:
+        func (Callable): The function to measure.
+        device (str): Device type ('npu', etc.) for synchronization.
+        warmup (int): Number of warmup iterations.
+        repeat (int): Number of measurement iterations.
+
+    Returns:
+        float: Average execution time in milliseconds.
+    """
+    if device.lower() == "npu":
+        sync = torch.npu.synchronize
+    else:
+        sync = lambda: None
+
+    for _ in range(warmup):
+        func()
+
+    sync()
+    start = time.time()
+    for _ in range(repeat):
+        func()
+        sync()
+    end = time.time()
+
+    avg_time = (end - start) / repeat * 1000
+    return avg_time
+
+
+def perf_npu(executor, profiling_dir="./npu_profiling", active=5):
+    """
+    Performs comprehensive NPU performance testing including device and host latency.
+
+    Args:
+        executor (Callable): The function to benchmark.
+        profiling_dir (str): Directory for NPU profiling data.
+        active (int): Number of active profiling steps.
+
+    Returns:
+        None: Logs and writes benchmark results to a file.
+    """
+    device_latency, kernel_profiling_path = device_perf_npu(executor, profiling_dir, active)
     host_latency = host_perf(executor, "npu")
 
     func_name, para_list = get_executor_info(executor)
 
-    plain_log_full = (
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    logger.info(
         f"[{func_name}] | "
         f"{', '.join(para_list)} | "
         f"Device latency = {device_latency:.4f} us | "
@@ -278,24 +373,30 @@ def perf_npu(executor, profiling_dir="./npu_profiling", active=5):
         f"Profile dir = {kernel_profiling_path}"
     )
 
-    logger.info(plain_log_full)
-
-    plain_log_file = (
-        f"| {func_name} | {format_executor_info(para_list)} | {device_latency:.4f} us | {host_latency:.4f} ms |"
-    )
+    plain_log_file = f"| {timestamp} | {func_name} | {format_executor_info(para_list)} | {device_latency:.4f} us | {host_latency:.4f} ms |"
     log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf/benchmark.md")
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
     with open(log_path, "a", encoding="utf-8") as f:
-        if not os.path.exists(log_path) or os.path.getsize(log_path) == 0:
-            f.write("| Name | Parameters | Device Latency (us) | Host Latency (ms) |\n")
-            f.write("|------|------------|---------------------|-------------------|\n")
+        if not (os.path.exists(log_path) and os.path.getsize(log_path) > 1):
+            f.write("| Timestamp | Op Name | Parameters | Device Latency (us) | Host Latency (ms) |\n")
+            f.write("|-----------|---------|------------|---------------------|-------------------|\n")
         f.write(plain_log_file + "\n")
 
 
 class MockFunctionCtx:
+    """
+    A mock context object to simulate torch.autograd.Function context methods.
+    """
+
     def __init__(self):
         self.saved_tensors = None
 
     def save_for_backward(self, *tensors):
+        """
+        Simulates saving tensors for backward pass.
+
+        Args:
+            *tensors: Variable number of tensors to save.
+        """
         self.saved_tensors = tensors

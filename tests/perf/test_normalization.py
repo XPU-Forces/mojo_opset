@@ -1,15 +1,41 @@
 import pytest
 import torch
 
+from mojo_opset import MojoLayerNorm
+from mojo_opset import MojoResidualAddLayerNorm
+from mojo_opset import MojoResidualAddRMSNorm
+from mojo_opset import MojoRMSNorm
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
-from mojo_opset import MojoNorm
-from mojo_opset import MojoResidualAddNorm
+
+@pytest.mark.parametrize(
+    "x, residual, weight",
+    [
+        (
+            torch.randn(size=(128, 128), dtype=dtype),
+            torch.randn(size=(128, 128), dtype=dtype),
+            torch.randn(size=(128,), dtype=dtype),
+        )
+        for dtype in [torch.float32, torch.float16, torch.bfloat16]
+    ],
+)
+@pytest.mark.parametrize("eps", [1e-5])
+@pytest.mark.parametrize("norm_pos", ["pre", "post"])
+@auto_switch_platform(set_perf=True)
+@bypass_not_implemented
+def test_residual_add_rmsnorm(x, residual, weight, norm_pos, eps):
+    add_norm = MojoResidualAddRMSNorm(
+        weight=weight,
+        eps=eps,
+        norm_pos=norm_pos,
+    )
+
+    perf(lambda: add_norm(x, residual))  # noqa: F821
 
 
 @pytest.mark.parametrize(
-    "x, residual, gamma, beta",
+    "x, residual, weight, bias",
     [
         (
             torch.randn(size=(128, 128), dtype=dtype),
@@ -22,33 +48,21 @@ from mojo_opset import MojoResidualAddNorm
 )
 @pytest.mark.parametrize("eps", [1e-5])
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
-@pytest.mark.parametrize("norm_type", ["rmsnorm", "layernorm"])
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
-def test_residual_add_norm(x, residual, gamma, beta, norm_type, norm_pos, eps):
-    beta = beta if norm_type == "layernorm" else None
-
-    add_norm = MojoResidualAddNorm(
-        gamma=gamma,
-        beta=beta,
+def test_residual_add_layernorm(x, residual, weight, bias, norm_pos, eps):
+    add_norm = MojoResidualAddLayerNorm(
+        weight=weight,
+        bias=bias,
         eps=eps,
         norm_pos=norm_pos,
-        norm_type=norm_type,
     )
-    add_norm_ref = MojoResidualAddNorm(
-        gamma=gamma,
-        beta=beta,
-        eps=eps,
-        norm_pos=norm_pos,
-        norm_type=norm_type,
-    )._registry.get("torch")()
 
-    perf(lambda: add_norm_ref(x, residual))  # noqa: F821
     perf(lambda: add_norm(x, residual))  # noqa: F821
 
 
 @pytest.mark.parametrize(
-    "x, gamma",
+    "x, weight",
     [
         (
             torch.randn(size=(1, 32, 2048), dtype=dtype),
@@ -60,27 +74,20 @@ def test_residual_add_norm(x, residual, gamma, beta, norm_type, norm_pos, eps):
 @pytest.mark.parametrize("eps", [1e-5])
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
-def test_rmsnorm(x, gamma, eps):
-    rmsnorm = MojoNorm(
-        eps=eps,
-        norm_type="rmsnorm",
-        gamma=gamma,
+def test_rmsnorm(x, weight, eps):
+    rmsnorm = MojoRMSNorm(
+        weight,
+        eps,
     ).to(x.device)
-    rmsnorm_ref = MojoNorm(
-        eps=eps,
-        norm_type="rmsnorm",
-        gamma=gamma,
-    )._registry.get("torch")().to(x.device)
 
     with torch.no_grad():
-        rmsnorm.gamma.copy_(gamma.to(torch.float32))
+        rmsnorm.weight.copy_(weight.to(torch.float32))
 
-    perf(lambda: rmsnorm_ref(x))  # noqa: F821
     perf(lambda: rmsnorm(x))  # noqa: F821
 
 
 @pytest.mark.parametrize(
-    "x, gamma, beta",
+    "x, weight, bias",
     [
         (
             torch.randn(size=(256, 128), dtype=dtype),
@@ -93,23 +100,15 @@ def test_rmsnorm(x, gamma, eps):
 @pytest.mark.parametrize("eps", [1e-5])
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
-def test_layernorm(x, gamma, beta, eps):
-    layernorm = MojoNorm(
+def test_layernorm(x, weight, bias, eps):
+    layernorm = MojoLayerNorm(
+        weight=weight,
+        bias=bias,
         eps=eps,
-        norm_type="layernorm",
-        gamma=gamma,
-        beta=beta,
     ).to(x.device)
-    layernorm_ref = MojoNorm(
-        eps=eps,
-        norm_type="layernorm",
-        gamma=gamma,
-        beta=beta,
-    )._registry.get("torch")().to(x.device)
 
     with torch.no_grad():
-        layernorm.gamma.copy_(gamma.to(torch.float32))
-        layernorm.beta.copy_(beta.to(torch.float32))
+        layernorm.weight.copy_(weight.to(torch.float32))
+        layernorm.bias.copy_(bias.to(torch.float32))
 
-    perf(lambda: layernorm_ref(x))  # noqa: F821
     perf(lambda: layernorm(x))  # noqa: F821

@@ -30,16 +30,15 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
     ):
-        assert (
-            self.window_size == -1
-        ), f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
-        assert (
-            self.gqa_layout == "ABAB"
-        ), f"[TTXPagedPrefillGQA] TTX only support ABAB layout, but got gqa_layout={self.gqa_layout}"
-        assert (
-            self.is_causal
-        ), f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
-
+        assert self.window_size == -1, (
+            f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
+        )
+        assert self.gqa_layout == "ABAB", (
+            f"[TTXPagedPrefillGQA] TTX only support ABAB layout, but got gqa_layout={self.gqa_layout}"
+        )
+        assert self.is_causal, (
+            f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
+        )
         output = paged_attention_prefill(
             q=query,
             k_cache=k_cache,
