@@ -28,11 +28,11 @@ from .operators.attention import MojoPrefillNSA
 from .operators.attention import MojoSdpa
 
 """ kvcache """
-from .operators.kvcache import MojoKVCacheCast
-from .operators.kvcache import MojoStoreKVCache
-from .operators.kvcache import MojoStoreMLAKVCache
-from .operators.kvcache import MojoStorePagedKVCache
-from .operators.kvcache import MojoStorePagedMLAKVCache
+from .operators.kv_cache import MojoKVCacheCast
+from .operators.kv_cache import MojoStoreKVCache
+from .operators.kv_cache import MojoStoreMLAKVCache
+from .operators.kv_cache import MojoStorePagedKVCache
+from .operators.kv_cache import MojoStorePagedMLAKVCache
 
 """ linear """
 from .operators.linear import MojoAllGatherLinear
