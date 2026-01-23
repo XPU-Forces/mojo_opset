@@ -691,3 +691,162 @@ def causal_conv1d_update_states(
         BD=BD,
     )
     return final_state
+
+
+
+@triton.jit()
+def causal_conv1d_update_kernel_bdt_fwd(
+    x_ptr,                  # [B, D, T]
+    conv_state_ptr,         # [B, D, ST]
+    weight_ptr,             # [D, W]
+    bias_ptr, 
+    conv_state_indices_ptr,
+    out_ptr,                # [B, D, OT]
+    batch: tl.constexpr,
+    dim: tl.constexpr,
+    state_len: tl.constexpr, # ST 
+    seq_len: tl.constexpr,   # T
+    width: tl.constexpr,     # W
+    out_len: tl.constexpr,   # OT
+    x_batch_stride: tl.constexpr,
+    conv_batch_stride: tl.constexpr,
+    out_batch_stride: tl.constexpr,
+    HAS_BIAS: tl.constexpr,    # TODO
+    SILU_ACTIVATION: tl.constexpr,
+    T_CHK_SIZE: tl.constexpr,
+    D_CHK_SIZE: tl.constexpr,
+    NUM_T_CHK: tl.constexpr,
+    NUM_D_CHK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    pnum = tl.num_programs(0)
+
+    total_task = batch * NUM_D_CHK * NUM_T_CHK
+    
+    for task_id in tl.range(pid, total_task, pnum):
+        di = task_id % NUM_D_CHK
+        bti = task_id // NUM_D_CHK
+        bi = bti // NUM_T_CHK
+        ti = bti % NUM_T_CHK
+        
+        out_block = tl.zeros((D_CHK_SIZE, T_CHK_SIZE), dtype=x_ptr.dtype.element_ty)
+        
+        w = tl.load(tl.make_block_ptr(
+            weight_ptr,
+            shape = (dim, width),
+            strides = (width, 1),
+            offsets = (di * D_CHK_SIZE, 0),
+            block_shape = (D_CHK_SIZE, width),
+            order = (1, 0)
+        ), boundary_check=(0, 1), padding_option="zero")
+
+        for wi in tl.static_range(-width+1, 1):
+            if ti * T_CHK_SIZE + wi >= 0:
+                # all x
+                x_block_ptr = tl.make_block_ptr(
+                    x_ptr,
+                    shape = (batch, dim, seq_len),
+                    strides = (dim * seq_len, seq_len, 1),
+                    offsets = (bi, di * D_CHK_SIZE, ti * T_CHK_SIZE + wi),
+                    block_shape = (1, D_CHK_SIZE, T_CHK_SIZE),
+                    order = (2, 1, 0)
+                )
+                x = tl.load(x_block_ptr, boundary_check=(0, 1, 2), padding_option="zero").view(D_CHK_SIZE, T_CHK_SIZE)
+                new_x = x
+            else:
+                # state and x
+                pad_size = - (ti * T_CHK_SIZE + wi)
+                x_off_ptr = (bi * dim + di * D_CHK_SIZE) * seq_len + ti * T_CHK_SIZE - pad_size
+                block_ptr = tl.arange(0, D_CHK_SIZE)[:, None] * seq_len + tl.arange(0, T_CHK_SIZE)[None, :]
+                mask = (tl.arange(0, T_CHK_SIZE)[None, :] >= pad_size)
+                mask = (tl.arange(0, D_CHK_SIZE)[:, None] + di * D_CHK_SIZE < dim) & mask
+                x = tl.load(x_ptr + x_off_ptr + block_ptr, mask=mask, other=0)
+                st = tl.load(tl.make_block_ptr(
+                    conv_state_ptr,
+                    shape = (batch, dim, state_len),
+                    strides = (dim * state_len, state_len, 1),
+                    offsets = (bi, di * D_CHK_SIZE, state_len - pad_size),
+                    block_shape = (1, D_CHK_SIZE, T_CHK_SIZE),
+                    order = (2, 1, 0)
+                ), boundary_check=(0, 1, 2), padding_option="zero").view(D_CHK_SIZE, T_CHK_SIZE)
+                new_x = st + x
+            
+            new_state_start_off = seq_len - state_len
+            t_start_off = ti * T_CHK_SIZE + wi
+            t_end_off = (ti + 1) * T_CHK_SIZE + wi
+            if wi == 0 and t_end_off >= new_state_start_off:
+                t_off = t_start_off - new_state_start_off
+                nst_off_y0 = tl.arange(0, D_CHK_SIZE)[:, None] + di * D_CHK_SIZE
+                nst_off_y1 = tl.arange(0, T_CHK_SIZE)[None, :] + t_off
+                nst_mask = (nst_off_y0 < dim) & (nst_off_y1 >= 0) & (nst_off_y1 < state_len) 
+                block_ptr = bi * dim * state_len + nst_off_y0 * state_len + nst_off_y1
+                block_ptr = tl.maximum(block_ptr, 0)
+                tl.store(conv_state_ptr + block_ptr, new_x, mask = nst_mask)
+
+            w_chl_wi = tl.sum(w * (tl.arange(0, width) == wi+width-1)[None, :], 1)
+            x_mul_chl_wi = new_x * w_chl_wi[:, None]
+            out_block += x_mul_chl_wi
+                
+        if SILU_ACTIVATION:
+            out_block = out_block * tl.sigmoid(out_block)
+        tl.store(tl.make_block_ptr(
+            out_ptr,
+            shape = (batch, dim, out_len),
+            strides = (dim * out_len, out_len, 1),
+            offsets = (bi, di * D_CHK_SIZE, ti * T_CHK_SIZE),
+            block_shape = (1, D_CHK_SIZE, T_CHK_SIZE),
+            order = (2, 1, 0)
+        ), out_block[None, :, :], boundary_check=(0, 1, 2))
+    
+
+@input_guard(make_contiguous=True, auto_to_device=True)
+def causal_conv1d_update_bdt_fwd(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    activation: Optional[str] = None,
+    conv_state_indices: Optional[str] = None,
+):
+    if isinstance(activation, bool):
+        activation = "silu" if activation is True else None
+    elif activation is not None:
+        assert activation in ["silu", "swish"]
+    unsqueeze = x.dim() == 2
+    if unsqueeze:
+        x = x.unsqueeze(-1)
+    batch, dim, seqlen = x.shape
+    _, width = weight.shape
+    out = torch.empty_like(x)
+    NUM_CORES = get_num_cores()
+
+    T_CHK_SIZE = max(256, min(512, triton.next_power_of_2(triton.cdiv(seqlen, NUM_CORES))))
+    D_CHK_SIZE = 16
+
+    NUM_T_CHK = triton.cdiv(out.shape[-1], T_CHK_SIZE)
+    NUM_D_CHK = triton.cdiv(dim, D_CHK_SIZE)
+
+    causal_conv1d_update_kernel_bdt_fwd[(NUM_CORES, 1)](
+        x, conv_state, weight, bias, conv_state_indices,
+        out,
+        batch = batch,
+        dim = dim,
+        state_len = conv_state.shape[-1], # 3 4 5 
+        seq_len = x.shape[-1], # 1 2 
+        width = width, # 4, <= seq_len + state_len
+        out_len = out.shape[-1],
+        x_batch_stride = x.stride()[0],
+        conv_batch_stride = conv_state.stride()[0],
+        out_batch_stride = out.stride()[0],
+        HAS_BIAS = bias is not None,
+        SILU_ACTIVATION = activation in ["silu", "swish"],
+        T_CHK_SIZE = T_CHK_SIZE,
+        D_CHK_SIZE = D_CHK_SIZE,
+        NUM_T_CHK = NUM_T_CHK,
+        NUM_D_CHK = NUM_D_CHK,
+    )
+
+    if unsqueeze:
+        out = out.squeeze(-1)
+    return out
+
