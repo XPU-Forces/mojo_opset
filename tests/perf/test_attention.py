@@ -3,12 +3,11 @@ import math
 import pytest
 import torch
 
-from tests.utils import auto_switch_platform
-from tests.utils import bypass_not_implemented
-
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoSdpa
+from tests.utils import auto_switch_platform
+from tests.utils import bypass_not_implemented
 
 
 def generate_paged_decode_data(
@@ -94,21 +93,7 @@ def test_paged_decode_gqa(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
-    paged_attn_decode_ref = MojoPagedDecodeGQA(
-        is_causal=True,
-        gqa_layout=gqa_layout,
-    )._registry.get("torch")()
 
-    perf(  # noqa: F821
-        lambda: paged_attn_decode_ref(
-            query,
-            k_cache,
-            v_cache,
-            seqlens,
-            block_tables,
-            softmax_scale=sm_scale,
-        )
-    )
     perf(  # noqa: F821
         lambda: paged_attn_decode(
             query,
@@ -218,24 +203,10 @@ def test_paged_prefill_gqa(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
-    paged_attn_prefill_ref = MojoPagedPrefillGQA(
-        is_causal=True,
-        gqa_layout=gqa_layout,
-    )._registry.get("torch")()
 
     head_dim = query.shape[-1]
     sm_scale = 1.0 / math.sqrt(head_dim)
 
-    perf(  # noqa: F821
-        lambda: paged_attn_prefill_ref(
-            query,
-            k_cache,
-            v_cache,
-            cu_seqlens_q,
-            block_tables,
-            softmax_scale=sm_scale,
-        )
-    )
     perf(  # noqa: F821
         lambda: paged_attn_prefill(
             query,
@@ -284,11 +255,7 @@ def test_sdpa(
     blockwise_diffusion_attn_mask: torch.Tensor,
     enable_gqa: bool,
 ):
-    diffusion_attn_ref = MojoSdpa._registry.get("torch")(
-        mask=blockwise_diffusion_attn_mask, scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
-    )
     diffusion_attn = MojoSdpa(
         mask=blockwise_diffusion_attn_mask, scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
     )
-    perf(lambda: diffusion_attn_ref(query, key, value))
-    perf(lambda: diffusion_attn(query, key, value))
+    perf(lambda: diffusion_attn(query, key, value))  # noqa: F821
