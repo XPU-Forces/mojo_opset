@@ -7,8 +7,6 @@ import torch
 import triton
 import triton.language as tl
 
-from einops import rearrange
-
 from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 from mojo_opset.backends.ttx.kernels.utils import input_guard
 from mojo_opset.backends.ttx.kernels.utils import prepare_chunk_indices
@@ -38,7 +36,6 @@ def causal_conv1d_fwd_kernel(
     D: tl.constexpr,
     W: tl.constexpr,
     BT: tl.constexpr,
-    BW: tl.constexpr,
     BD: tl.constexpr,
     ACTIVATION: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
@@ -84,7 +81,8 @@ def causal_conv1d_fwd_kernel(
         m_w = o_w >= 0
 
         if HAS_WEIGHT:
-            b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None], other=0.0).to(tl.float32)
+            p_w = tl.make_block_ptr(weight, (W, D), (D, 1), (0, i_d * BD), (W, BD), (1, 0))
+            b_w = tl.load(p_w, boundary_check=(0, 1))
 
         b_y = tl.zeros((BT, BD), dtype=tl.float32)
 
@@ -95,9 +93,11 @@ def causal_conv1d_fwd_kernel(
                 yi_offset_0 = i_t * BT + i_w + tl.arange(0, BT)[:, None]
 
                 mask = (yi_offset_0 < T_len) & (yi_offset_1 < D) & (yi_offset_0 >= 0)
+                # We keep intra loop load because preloading will cause ub overflow under certain tiling.
                 b_yi = tl.load(x + bos * D + yi_offset_0 * D + yi_offset_1, mask=mask, other=0.0).to(tl.float32)
                 if HAS_WEIGHT:
-                    b_yi *= tl.sum(b_w * (o_w == (i_w + W - 1)), 1)
+                    b_yi *= tl.extract_slice(b_w, [i_w + W - 1, 0], [1, BD], [1, 1])
+
                 b_y += b_yi
         elif i_t * BT >= W:
             for i_w in tl.static_range(-W + 1, 1):
@@ -105,7 +105,7 @@ def causal_conv1d_fwd_kernel(
                 mask = (yi_offset_0 < T_len) & (yi_offset_1 < D) & (yi_offset_0 >= 0)
                 b_yi = tl.load(x + bos * D + yi_offset_0 * D + yi_offset_1, mask=mask, other=0.0).to(tl.float32)
                 if HAS_WEIGHT:
-                    b_yi *= tl.sum(b_w * (o_w == (i_w + W - 1)), 1)
+                    b_yi *= tl.extract_slice(b_w, [i_w + W - 1, 0], [1, BD], [1, 1])
                 b_y += b_yi
         else:
             o_t = i_t * BT + tl.arange(0, BT)
@@ -123,7 +123,7 @@ def causal_conv1d_fwd_kernel(
                 )
 
                 if HAS_WEIGHT:
-                    b_yi *= tl.sum(b_w * (o_w == (i_w + W - 1)), 1)
+                    b_yi *= tl.extract_slice(b_w, [i_w + W - 1, 0], [1, BD], [1, 1])
                 b_y += b_yi
 
         if HAS_BIAS:
@@ -171,7 +171,6 @@ def causal_conv1d_bwd_kernel(
     D: tl.constexpr,
     W: tl.constexpr,
     BT: tl.constexpr,
-    BW: tl.constexpr,
     BD: tl.constexpr,
     ACTIVATION: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
@@ -229,38 +228,44 @@ def causal_conv1d_bwd_kernel(
             p_x = tl.make_block_ptr(x + bos * D, (T_len, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
             b_x = tl.load(p_x, boundary_check=(0, 1))
 
-            b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0)
+            p_w = tl.make_block_ptr(weight, (W, D), (D, 1), (0, i_d * BD), (W, BD), (1, 0))
+            b_w = tl.load(p_w, boundary_check=(0, 1), padding_option="zero")
 
         b_dx = tl.zeros((BT, BD), dtype=tl.float32)
         if HAS_BIAS:
             b_db = tl.zeros((BD,), dtype=tl.float32)
 
-        if HAS_WEIGHT:
-            bf_dw = tl.zeros((BD, W), dtype=tl.float32)
-
         if not USE_FINAL_STATE:
-            for i_w in tl.static_range(0, W):
-                p_dy = tl.make_block_ptr(dy + bos * D, (T_len, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+            b_dw = tl.zeros((W, BD), dtype=tl.float32)
 
-                b_dy = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
+            p_dy = tl.make_block_ptr(dy + bos * D, (T_len, D), (D, 1), (i_t * BT, i_d * BD), (BT * W, BD), (1, 0))
+            b_dy = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
+
+            if ACTIVATION == "swish" or ACTIVATION == "silu":
+                p_y = tl.make_block_ptr(y + bos * D, (T_len, D), (D, 1), (i_t * BT, i_d * BD), (BT * W, BD), (1, 0))
+                b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
+
+            for i_w in tl.static_range(0, W):
+                b_dy_sub = tl.extract_slice(b_dy, [i_w, 0], [BT, BD], [1, 1])
+
                 if ACTIVATION == "swish" or ACTIVATION == "silu":
-                    p_y = tl.make_block_ptr(
-                        y + bos * D, (T_len, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0)
-                    )
-                    b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
-                    b_ys = tl.sigmoid(b_y)
-                    b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
-                b_wdy = b_dy
+                    b_y_sub = tl.extract_slice(b_y, [i_w, 0], [BT, BD], [1, 1])
+                    b_ys = tl.sigmoid(b_y_sub)
+                    b_dy_sub = b_dy_sub * b_ys * (1 + b_y_sub * (1 - b_ys))
+
+                b_wdy = b_dy_sub
                 if HAS_WEIGHT:
-                    i_w_mask = (o_w == (W - i_w - 1))
-                    b_wdy = b_wdy * tl.sum(b_w * i_w_mask, 1)
-                    b_dw = tl.sum(b_dy * b_x, 0)
-                    bf_dw += b_dw[:, None] * i_w_mask
+                    b_wdy = b_wdy * tl.extract_slice(b_w, [W - i_w - 1, 0], [1, BD], [1, 1])
+
+                    b_dw_sub = tl.sum(b_dy_sub * b_x, 0)  # [BT, BD] * [BT, BD] --> sum(0) = [BD]
+                    b_dw = tl.insert_slice(b_dw, b_dw_sub[None, :], [W - i_w - 1, 0], [1, BD], [1, 1])
+
                 if HAS_BIAS and i_w == 0:
-                    b_db += tl.sum(b_dy, 0)
+                    b_db += tl.sum(b_dy_sub, 0)
                 b_dx += b_wdy
-            if HAS_WEIGHT:
-                tl.store(dw + i_tg * D * W + o_d[:, None] * W + o_w, bf_dw.to(dw.dtype.element_ty), mask = m_d[:, None] & m_w)
+
+            p_dw = tl.make_block_ptr(dw + i_tg * W * D, (W, D), (D, 1), (0, i_d * BD), (W, BD), (1, 0))
+            tl.store(p_dw, b_dw.to(dw.dtype.element_ty))
         elif i_t * BT >= W:
             for i_w in tl.static_range(0, W):
                 p_dy = tl.make_block_ptr(dy + bos * D, (T_len, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
@@ -275,15 +280,13 @@ def causal_conv1d_bwd_kernel(
                     b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
                 b_wdy = b_dy
                 if HAS_WEIGHT:
-                    i_w_mask = (o_w == (W - i_w - 1))
-                    b_wdy = b_wdy * tl.sum(b_w * i_w_mask, 1)
+                    b_wdy = b_wdy * tl.extract_slice(b_w, [W - i_w - 1, 0], [1, BD], [1, 1])
+
                     b_dw = tl.sum(b_dy * b_x, 0)
-                    bf_dw += b_dw[:, None] * i_w_mask
+                    tl.store(dw + i_tg * D * W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
                 if HAS_BIAS and i_w == 0:
                     b_db += tl.sum(b_dy, 0)
                 b_dx += b_wdy
-            if HAS_WEIGHT:
-                tl.store(dw + i_tg * D * W + o_d[:, None] * W + o_w, bf_dw.to(dw.dtype.element_ty), mask = m_d[:, None] & m_w)
         else:
             o_t = i_t * BT + tl.arange(0, BT)
             for i_w in tl.static_range(0, W):
@@ -325,15 +328,16 @@ def causal_conv1d_bwd_kernel(
                         ).to(tl.float32)
 
                         b_dw += tl.sum(b_dy_head * b_xc, 0)
-                    bf_dw += b_dw[:, None] * (o_w == (W - i_w - 1))
+                    tl.store(dw + i_tg * D * W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
 
                 if HAS_BIAS and i_w == 0:
                     b_db += tl.sum(b_dy_shift, 0)
-                b_wdy = b_dy_shift if not HAS_WEIGHT else (b_dy_shift * tl.sum(b_w * (o_w == (W - i_w - 1)), 1))
+                b_wdy = (
+                    b_dy_shift
+                    if not HAS_WEIGHT
+                    else (b_dy_shift * tl.extract_slice(b_w, [W - i_w - 1, 0], [1, BD], [1, 1]))
+                )
                 b_dx += b_wdy
-            
-            if HAS_WEIGHT:
-                tl.store(dw + i_tg * D * W + o_d[:, None] * W + o_w, bf_dw.to(dw.dtype.element_ty), mask = m_d[:, None] & m_w)
 
             if USE_INITIAL_STATE:
                 p_dy0 = tl.make_block_ptr(dy + bos * D, (T_len, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
@@ -350,7 +354,7 @@ def causal_conv1d_bwd_kernel(
                         w_idx_rows = i_w - 1 - o_t
 
                         w_mask = o_w[None, :] == w_idx_rows[:, None]
-                        w_pick = tl.sum(b_w[None, :, :] * w_mask[:, None, :], 2)
+                        w_pick = tl.sum(tl.trans(b_w)[None, :, :] * w_mask[:, None, :], 2)
                     else:
                         w_pick = 1.0
                     contrib = (b_dy0 * w_pick).to(tl.float32)
@@ -383,74 +387,6 @@ def causal_conv1d_bwd_kernel(
         tl.store(p_dx, tl.cast(b_dx, dtype=p_dx.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
 
 
-
-@triton.heuristics(
-    {
-        "USE_INITIAL_STATE": lambda args: args["cache"] is not None,
-        "HAS_WEIGHT": lambda args: args["weight"] is not None,
-        "HAS_BIAS": lambda args: args["bias"] is not None,
-        "HAS_RESIDUAL": lambda args: args["residual"] is not None,
-    }
-)
-@triton.jit
-def causal_conv1d_update_kernel(
-    x,
-    cache,
-    residual,
-    y,
-    weight,
-    bias,
-    D: tl.constexpr,
-    W: tl.constexpr,
-    BD: tl.constexpr,
-    BW: tl.constexpr,
-    ACTIVATION: tl.constexpr,
-    USE_INITIAL_STATE: tl.constexpr,
-    HAS_WEIGHT: tl.constexpr,
-    HAS_BIAS: tl.constexpr,
-    HAS_RESIDUAL: tl.constexpr,
-):
-    i_d, i_n = tl.program_id(0), tl.program_id(1)
-
-    o_d = i_d * BD + tl.arange(0, BD)
-    o_w = tl.arange(0, BW) + W - BW
-    m_d = o_d < D
-    m_w = o_w >= 0
-    m_c = o_w < W - 1
-
-    b_x = tl.load(x + i_n * D + o_d, mask=m_d, other=0).to(tl.float32)
-
-    if USE_INITIAL_STATE:
-        p_cache = tl.make_block_ptr(cache + i_n * D * W, (D, W), (W, 1), (i_d * BD, W - BW + 1), (BD, BW), (1, 0))
-
-        b_cache = tl.load(p_cache, boundary_check=(0, 1)).to(tl.float32)
-        b_cache = tl.where(m_c[None, :], b_cache, b_x[:, None])
-    else:
-        b_cache = tl.zeros((BD, BW), dtype=tl.float32)
-
-    if HAS_WEIGHT:
-        b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0)
-        b_y = tl.sum(b_cache * b_w, 1)
-    else:
-        b_y = tl.sum(b_cache, 1)
-    if HAS_BIAS:
-        b_y += tl.load(bias + o_d, mask=m_d)
-
-    if ACTIVATION == "swish" or ACTIVATION == "silu":
-        b_y = b_y * tl.sigmoid(b_y)
-
-    if HAS_RESIDUAL:
-        b_y += tl.load(residual + i_n * D + o_d, mask=m_d, other=0)
-
-    tl.store(y + i_n * D + o_d, tl.cast(b_y, dtype=y.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_d)
-
-    if USE_INITIAL_STATE:
-        b_cache = tl.cast(b_cache, dtype=cache.dtype.element_ty, fp_downcast_rounding="rtne")
-
-        p_cache = tl.make_block_ptr(cache + i_n * D * W, (D, W), (W, 1), (i_d * BD, W - BW), (BD, BW), (1, 0))
-        tl.store(p_cache, b_cache, boundary_check=(0, 1))
-
-
 @input_guard(make_contiguous=True, auto_to_device=True)
 def causal_conv1d_fwd(
     x: torch.Tensor,
@@ -463,16 +399,15 @@ def causal_conv1d_fwd(
     cu_seqlens: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     shape = x.shape
-    if x.shape[-1] != weight.shape[0]:
-        x = rearrange(x, "b t ... -> b t (...)")
-    B, T, D, W = *x.shape, weight.shape[1]
+    assert x.shape[-1] == weight.shape[-1], "x [B, T, D], weight [W, D], please check."
+    B, T, D, W = *x.shape, weight.shape[0]
 
     NUM_CORES = get_num_cores()
 
     BT = min(32, triton.next_power_of_2(triton.cdiv(max(16, B * T), NUM_CORES)))
-    BW = W
 
     BD = 256
+    assert D % BD == 0, "D must be divisible by BD."
     NUM_BLKS_D = triton.cdiv(D, BD)
 
     if cu_seqlens is not None:
@@ -501,7 +436,6 @@ def causal_conv1d_fwd(
         D=D,
         W=W,
         BT=BT,
-        BW=BW,
         BD=BD,
         ACTIVATION=activation,
         NUM_CHKS=NUM_CHKS,
@@ -532,16 +466,16 @@ def causal_conv1d_bwd(
     cu_seqlens: Optional[torch.Tensor] = None,
 ):
     shape = x.shape
-    if x.shape[-1] != weight.shape[0]:
-        x = rearrange(x, "b t ... -> b t (...)")
+    assert x.shape[-1] == weight.shape[-1], "x [B, T, D], weight [W, D], please check."
+
     B, T, D = x.shape
-    W = weight.shape[1] if weight is not None else None
+    W = weight.shape[0] if weight is not None else None
 
     NUM_CORES = get_num_cores()
-    BT = min(16, triton.next_power_of_2(triton.cdiv(max(16, B * T), NUM_CORES)))
-    BW = triton.next_power_of_2(W)
+    BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B * T), NUM_CORES)))
 
-    BD = 32
+    BD = 64
+    assert D % BD == 0, "D must be divisible by BD."
     NUM_Blk_D = triton.cdiv(D, BD)
 
     if cu_seqlens is not None:
@@ -568,7 +502,7 @@ def causal_conv1d_bwd(
             output_final_state=False,
         )
     dx = torch.empty_like(x)
-    dw = weight.new_empty(B * NT, *weight.shape, dtype=torch.float) if weight is not None else None
+    dw = weight.new_empty(B * NT, W, D, dtype=torch.float) if weight is not None else None
     db = bias.new_empty(B * NT, *bias.shape, dtype=torch.float) if bias is not None else None
     dr = dy if residual is not None else None
 
@@ -602,7 +536,6 @@ def causal_conv1d_bwd(
         D=D,
         W=W,
         BT=BT,
-        BW=BW,
         BD=BD,
         ACTIVATION=activation,
         NUM_Blk_D=NUM_Blk_D,
@@ -611,7 +544,7 @@ def causal_conv1d_bwd(
     )
 
     if weight is not None:
-        dw = dw.sum(0).to(weight)
+        dw = dw.sum(0).permute(1, 0).contiguous().to(weight)
     if bias is not None:
         db = db.sum(0).to(bias)
     if initial_state is not None:
@@ -677,7 +610,7 @@ def causal_conv1d_update_states(
 
     final_state = torch.empty(N, D, W, dtype=x.dtype, device=x.device)
     BD = min(triton.next_power_of_2(D), 256)
-    BW = triton.next_power_of_2(W)
+    BW = W
     grid = (triton.cdiv(D, BD), N)
     causal_conv1d_states_fwd_kernel[grid](
         x=x,
