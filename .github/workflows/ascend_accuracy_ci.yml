@@ -55,6 +55,11 @@ jobs:
           echo "Running ttx kernels tests..."
           python3 -m pytest tests/accuracy/operators/
           python3 -m pytest tests/accuracy/functions/
+      - name: test-torch-npu
+        shell: bash
+        run: |
+          echo "Running torch_npu base tests..."
+          MOJO_BACKEND="torch_npu" python3 -m pytest tests/accuracy/operators/
       - name: test-TTX-graph
         shell: bash
         run: |
