@@ -11,7 +11,11 @@ from mojo_opset import MojoSwiGLU
 
 @pytest.mark.parametrize(
     "x",
-    [(torch.rand(128, 128))],
+    [
+        (torch.rand(128, 128, dtype=torch.bfloat16)),
+        (torch.rand(999, 9999, dtype=torch.bfloat16)),
+        (torch.rand(1024, 10240, dtype=torch.bfloat16)),
+    ],
 )
 @auto_switch_platform()
 @bypass_not_implemented
@@ -23,7 +27,11 @@ def test_gelu(x):
 
 @pytest.mark.parametrize(
     "x",
-    [(torch.rand(128, 128))],
+    [
+        (torch.rand(128, 128, dtype=torch.bfloat16)),
+        (torch.rand(999, 9999, dtype=torch.bfloat16)),
+        (torch.rand(1024, 10240, dtype=torch.bfloat16)),
+    ],
 )
 @auto_switch_platform()
 @bypass_not_implemented
@@ -37,9 +45,17 @@ def test_silu(x):
     "gate_out, up_out",
     [
         (
-            torch.rand(size=(256, 128)),
-            torch.rand(size=(256, 128)),
-        )
+            torch.rand(size=(256, 128), dtype=torch.bfloat16),
+            torch.rand(size=(256, 128), dtype=torch.bfloat16),
+        ),
+        (
+            torch.rand(size=(1024, 10240), dtype=torch.bfloat16),
+            torch.rand(size=(1024, 10240), dtype=torch.bfloat16),
+        ),
+        (
+            torch.rand(size=(999, 9999), dtype=torch.bfloat16),
+            torch.rand(size=(999, 9999), dtype=torch.bfloat16),
+        ),
     ],
 )
 @auto_switch_platform()
