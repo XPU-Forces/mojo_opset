@@ -26,10 +26,8 @@ class MojoQuest(MojoOperator):
 
     def __init__(
         self,
-        op_name: str = "",
-        layer_idx: int = 0,
     ):
-        super().__init__(op_name, layer_idx)
+        super().__init__()
 
     def forward(self, query, mins, maxs, top_k_page):
 
@@ -54,10 +52,8 @@ class MojoPagedPrefillBlockQuest(MojoOperator):
         self,
         chunk_size: int,
         page_size: int,
-        op_name: str = "",
-        layer_idx: int = 0,
     ):
-        super().__init__(op_name, layer_idx)
+        super().__init__()
         self.chunk_size = chunk_size
         self.page_size = page_size
 

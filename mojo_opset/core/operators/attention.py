@@ -264,10 +264,8 @@ class MojoBlockSparseAttention(MojoOperator):
         head_size: int,
         q_head_num: int,
         kv_head_num: int,
-        op_name: str = "",
-        layer_idx: int = 0,
     ):
-        super().__init__(op_name, layer_idx)
+        super().__init__()
         self.page_size = page_size
         self.q_seg_size = q_seg_size
         self.topk_ratio = topk_ratio
@@ -349,17 +347,14 @@ class MojoPagedPrefillBlockSparseAttention(MojoOperator):
         causal_mask: Optional[torch.Tensor],
         page_size: int,
         q_seg_size: int,
-        topk_ratio: float,
         head_size: int,
         q_head_num: int,
         kv_head_num: int,
-        op_name: str = "",
-        layer_idx: int = 0,
+        scale: float,
     ):
-        super().__init__(op_name, layer_idx)
+        super().__init__()
         self.page_size = page_size
         self.q_seg_size = q_seg_size
-        self.topk_ratio = topk_ratio
         self.q_head_num = q_head_num
         self.kv_head_num = kv_head_num
         self.head_size = head_size
@@ -371,7 +366,7 @@ class MojoPagedPrefillBlockSparseAttention(MojoOperator):
             mask_block_size, mask_block_size * 3, device=causal_mask.device, dtype=torch.bool
         ).tril(diagonal=mask_block_size)
         self.mask = torch.cat([full_mask, empty_mask, session_mask], dim=1)
-        self.scale = 1 / math.sqrt(head_size)
+        self.scale = scale
 
     def forward(
         self,

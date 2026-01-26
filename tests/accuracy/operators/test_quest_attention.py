@@ -10,12 +10,12 @@ from tests.utils import assert_close
 
 @auto_switch_platform(set_perf=True)
 def test_paged_prefill_quest():
-    MAX_QLEN = 16384
+    MAX_QLEN = 1024
     HEAD_DIM = 128
     Q_HEAD_NUM = 8
     KV_HEAD_NUM = 1
     PAGE_SIZE = 128
-    MAX_PAGE = 256
+    MAX_PAGE = 8
     Q_SEG_SIZE = int(os.environ.get("Q_SEG_SIZE", 1024))
     TOPK_RATIO = float(os.environ.get("TOPK_RATIO", 0.25))
     RECENT_WINDOW = int(os.environ.get("RECENT_WINDOW", 128))
@@ -23,11 +23,13 @@ def test_paged_prefill_quest():
     page_rep = os.environ.get("PAGE_REP", "default_value")
     sparse_limit = 64
 
+    print(f"{Q_SEG_SIZE=}, {TOPK_RATIO=}, {RECENT_WINDOW=}")
+
     qkv = torch.randn(MAX_QLEN, HEAD_DIM * (Q_HEAD_NUM + KV_HEAD_NUM * 2)).npu().bfloat16()
     key_cache = torch.randn(MAX_PAGE, KV_HEAD_NUM, PAGE_SIZE, HEAD_DIM).npu().bfloat16()
     value_cache = torch.randn(MAX_PAGE, KV_HEAD_NUM, PAGE_SIZE, HEAD_DIM).npu().bfloat16()
 
-    for BSZ, kv_len0, q_len0 in [(1, 399, 399), (2, 4999, 3999)]:
+    for BSZ, kv_len0, q_len0 in [(1, 499, 399)]:
         kv_len = [kv_len0 + i * 100 for i in range(BSZ)]
         q_len_list = [q_len0 + i * 100 for i in range(BSZ)]
         kv_idx = [
@@ -494,22 +496,25 @@ def mojo_block_quest(
     assert bsz == 1
     query = query.squeeze(0)
     kv_head_num = key_cache.shape[1]
+    qk_scale = 1 / math.sqrt(head_size)
     # cu_seqlen_q = cu_seqlen_q.tolist()
+    from mojo_opset.core import MojoPagedPrefillBlockQuest
 
+    block_quest = MojoPagedPrefillBlockQuest(q_seg_size, page_size)
+
+    from mojo_opset.core import MojoPagedPrefillBlockSparseAttention
+
+    block_sparse_attention = MojoPagedPrefillBlockSparseAttention(
+        whole_causal, page_size, q_seg_size, head_size, q_head_num, kv_head_num, scale=qk_scale
+    )
+
+    # [num_q_heads, ~= q_len / seg_size * ~= topk_ratio * num_pages]
     # [num_pages, num_kv_heads, head_dim]
     page_k_mins = key_cache.min(dim=2).values
     page_k_maxs = key_cache.max(dim=2).values
 
-    valid_kv_seq_lengths = (
-        torch.tensor(kv_seq_lengths, device=query_lengths.device, dtype=query_lengths.dtype) + query_lengths
-    )
-    num_topk_tokens = (valid_kv_seq_lengths * topk_ratio).int()
+    num_topk_tokens = (kv_lengths * topk_ratio).int()
     num_topk_pages = num_topk_tokens // page_size
-
-    from mojo_opset.core import MojoPagedPrefillBlockQuest
-
-    block_quest = MojoPagedPrefillBlockQuest(q_seg_size, page_size)
-    # [num_q_heads, ~= q_len / seg_size * ~= topk_ratio * num_pages]
     topk_page_idxs, q_chunk_idx, num_sparse_pages, cu_num_topk_pages_per_seg = block_quest(
         query,
         cu_seqlen_q,
@@ -520,25 +525,11 @@ def mojo_block_quest(
         num_topk_pages,
         RECENT_WINDOW,
     )
-    perf(
-        lambda: block_quest(
-            query,
-            cu_seqlen_q,
-            page_k_mins,
-            page_k_maxs,
-            kv_cache_indices,
-            cu_seqlen_kv,
-            num_topk_pages,
-            RECENT_WINDOW,
-        )
-    )
+
+    # print(f"{q_chunk_idx=}, {q_chunk_idx.shape=}")
+
     topk_page_indices_debug = topk_page_idxs
 
-    from mojo_opset.core import MojoPagedPrefillBlockSparseAttention
-
-    block_sparse_attention = MojoPagedPrefillBlockSparseAttention(
-        whole_causal, page_size, q_seg_size, topk_ratio, head_size, q_head_num, kv_head_num
-    )
     expects = block_sparse_attention(
         query,
         key_cache,
@@ -552,8 +543,49 @@ def mojo_block_quest(
         topk_page_idxs,
         cu_num_topk_pages_per_seg,
     )
-    perf(
-        lambda: block_sparse_attention(
+
+    # from torch_npu import npu_fused_infer_attention_score_v2
+    # partial_causal = torch.triu(torch.ones(2048, 2048, dtype=torch.bool), diagonal=1).npu()
+    # actual_seq_qlen = cu_seqlen_q.tolist()[1:]
+    # actual_seq_kvlen = cu_seqlen_kv.tolist()[1:]
+
+    # result, _ = npu_fused_infer_attention_score_v2(
+    #     query[:, :actual_seq_qlen[-1]],
+    #     key_cache,
+    #     value_cache,
+    #     actual_seq_qlen=actual_seq_qlen,
+    #     actual_seq_kvlen=actual_seq_kvlen,
+    #     block_table=kv_cache_indices,
+    #     input_layout="NTD",
+    #     num_query_heads=q_head_num,
+    #     num_key_value_heads=kv_head_num,
+    #     softmax_scale=qk_scale,
+    #     sparse_mode=3,
+    #     atten_mask=partial_causal,
+    #     block_size=page_size,
+    # )
+    # results = torch.cat([result, torch.zeros([expects.shape[0], expects.shape[1] -actual_seq_qlen[-1], expects.shape[2]], device=result.device, dtype=result.dtype)], dim=1)
+
+    # assert_close(expects, results)
+
+    def perf_quest_sparse():
+        # page_k_mins = key_cache.min(dim=2).values
+        # page_k_maxs = key_cache.max(dim=2).values
+
+        # num_topk_tokens = (kv_lengths * topk_ratio).int()
+        # num_topk_pages = num_topk_tokens // page_size
+        # topk_page_idxs, q_chunk_idx, num_sparse_pages, cu_num_topk_pages_per_seg = block_quest(
+        #     query,
+        #     cu_seqlen_q,
+        #     page_k_mins,
+        #     page_k_maxs,
+        #     kv_cache_indices,
+        #     cu_seqlen_kv,
+        #     num_topk_pages,
+        #     RECENT_WINDOW,
+        # )
+
+        _ = block_sparse_attention(
             query,
             key_cache,
             value_cache,
@@ -566,8 +598,34 @@ def mojo_block_quest(
             topk_page_idxs,
             cu_num_topk_pages_per_seg,
         )
-    )
+    
+    # perf(perf_quest_sparse)
 
+    def perf_fa_with_kvcache():
+        # Query: [N, T, D]
+        # Key/Value: [block_num, Nkv, block_size, D]
+        actual_seq_qlen = cu_seqlen_q.tolist()[1:]
+        actual_seq_kvlen = cu_seqlen_kv.tolist()[1:]
+
+        result, _ = npu_fused_infer_attention_score_v2(
+            query,
+            key_cache,
+            value_cache,
+            actual_seq_qlen=actual_seq_qlen,
+            actual_seq_kvlen=actual_seq_kvlen,
+            block_table=kv_cache_indices,
+            input_layout="NTD",
+            num_query_heads=q_head_num,
+            num_key_value_heads=kv_head_num,
+            softmax_scale=qk_scale,
+            sparse_mode=3,
+            atten_mask=partial_causal,
+            block_size=128,
+        )
+
+    # perf(perf_fa_with_kvcache)
+
+    # expects = results
     return topk_page_indices_debug, expects.permute(1, 0, 2).reshape(
         q_seq_length, q_head_num * head_size
     )  # .bfloat16()

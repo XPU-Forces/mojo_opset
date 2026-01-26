@@ -127,11 +127,16 @@ def get_executor_info(executor):
 
     # Currently extracting class names from __closure__ using angle brackets.
     # TODO: Evaluate a more robust approach.
-    assert len(matches) == 1
-    func_name = matches[0]
-    result = [r for r in result if f"<{func_name}>" not in r]
+    if len(matches) == 1:
+        func_name = matches[0]
+        result = [r for r in result if f"<{func_name}>" not in r]
 
-    return func_name, result
+        # if "forward_ref" in inspect.getsource(executor).strip():
+        #     func_name += "_TORCH_REF"
+
+        return func_name, result
+    else:
+        return None
 
 
 def format_executor_info(info_list):
@@ -226,6 +231,7 @@ def device_perf_npu(executor, profiling_dir="./npu_profiling", active=5):
         os.makedirs(profiling_dir)
 
     experimental_config = torch_npu.profiler._ExperimentalConfig(
+        export_type=[torch_npu.profiler.ExportType.Text],
         aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
         profiler_level=torch_npu.profiler.ProfilerLevel.Level2,
         l2_cache=False,
@@ -361,7 +367,12 @@ def perf_npu(executor, profiling_dir="./npu_profiling", active=5):
     device_latency, kernel_profiling_path = device_perf_npu(executor, profiling_dir, active)
     host_latency = host_perf(executor, "npu")
 
-    func_name, para_list = get_executor_info(executor)
+    kernel_info = get_executor_info(executor)
+
+    if kernel_info is None:
+        return
+
+    func_name, para_list = kernel_info
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 

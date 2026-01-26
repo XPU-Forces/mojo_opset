@@ -308,7 +308,7 @@ def paged_prefill_block_quest_impl(
         chunk_size,
         head_dim,
     )
-
+    num_topk_pages = torch.minimum(num_topk_pages, num_valid_pages)
     num_topk_pages_per_seg = num_topk_pages.repeat_interleave(num_q_chunks)
     num_sparse_pages_per_seg = num_valid_pages.repeat_interleave(num_q_chunks)
 
