@@ -430,6 +430,7 @@ def block_sparse_attention_paged_prefill_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     AUX_MASK_SIZE: tl.constexpr,
+    NUM_STAGE: tl.constexpr = 4,
 ):
     """
     Block sparse prefill attention kernel
@@ -512,6 +513,7 @@ def block_sparse_attention_paged_prefill_kernel(
 
         # accumulate over kv cache pages
         # tl.device_print("n_topk_pages %d", n_topk_pages)
+        # for selected_page_idx in tl.range(selected_pages_l, selected_pages_r, loop_unroll_factor=NUM_STAGE):
         for selected_page_idx in range(selected_pages_l, selected_pages_r):
             logical_page_idx = tl.load(
                 selected_pages_ptr
@@ -573,6 +575,7 @@ def block_sparse_attention_paged_prefill_kernel(
             # min(kv_cache_len + seg_id * Q_CHUNK_SIZE + q_block_start + BLOCK_SIZE_M, kv_len), KV_PAGE_SIZE
         )
 
+        # for logical_page_idx in tl.range(new_kv_page_idx_start, new_kv_page_idx_end, loop_unroll_factor=NUM_STAGE):
         for logical_page_idx in range(new_kv_page_idx_start, new_kv_page_idx_end):
             physical_page_idx = tl.load(
                 block_table_ptr + block_table_stride_q * q_id + block_table_stride_p * logical_page_idx
