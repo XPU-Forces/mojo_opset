@@ -129,24 +129,11 @@ def input_guard(
     return decorator
 
 
-def get_bool_env(key, default=True):
-    import os
-    value = os.environ.get(key, None)
-    if value is None:
-        return default
-    value = value.lower()
-    if value in ("1", "yes", "true"):
-        return True
-    elif value in ("0", "no", "false"):
-        return False
-    else:
-        return default
-
 # TODO(liuyuan): remove the followling statements when triton-npu support checking whether an address is device-valid.
 # See https://github.com/triton-lang/triton/blob/571d07b84ffbaee4b873c2918208e2c640057768/third_party/nvidia/backend/driver.py#L415
 def tensor_device_guard_for_triton_kernel(path, name, device="npu"):
-
-    disable = get_bool_env("MOJO_DISABLE_TENSOR_GUARD", False)
+    from mojo_opset.utils.misc import get_bool_env
+    disable = get_bool_env("MOJO_DISABLE_TENSOR_GUARD", True)
     if disable:
         return
 
