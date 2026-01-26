@@ -1,12 +1,3 @@
-import torch
-import torch.nn as nn
-
-# from mojo_opset import MojoPagedDecodeGQA
-# from mojo_opset import MojoPagedPrefillGQA
-from mojo_opset import MojoRoPE
-from mojo_opset import MojoSwiGLU
-
-
 def apply_mojo_to_qwen3(
     rope: bool = True,
     cross_entropy: bool = False,
@@ -18,6 +9,15 @@ def apply_mojo_to_qwen3(
     """
     Apply mojo op to replace original implementation in HuggingFace Qwen3 models.
     """
+    import torch
+    import torch.nn as nn
+
+    from mojo_opset import MojoNorm
+    from mojo_opset import MojoPagedDecodeGQA
+    from mojo_opset import MojoPagedPrefillGQA
+    from mojo_opset import MojoRoPE
+    from mojo_opset import MojoSwiGLU
+
     assert not (cross_entropy and fused_linear_cross_entropy), (
         "cross_entropy and fused_linear_cross_entropy cannot both be True."
     )
@@ -79,3 +79,46 @@ def apply_mojo_to_qwen3(
     #         if rms_norm:
     #             _patch_rms_norm_module(decoder_layer.input_layernorm)
     #             _patch_rms_norm_module(decoder_layer.post_attention_layernorm)
+
+
+from contextlib import contextmanager
+@contextmanager
+def rewrite_assertion(module_name):
+    from mojo_opset.utils.misc import get_bool_env
+    disable = get_bool_env("MOJO_DISABLE_ASSERTION_REWRITE", False)
+    if disable:
+        return
+
+    from .misc import get_bool_env
+    from _pytest.stash import Stash
+    from _pytest.assertion import install_importhook
+    from mojo_opset.utils.logging import get_logger
+    import contextlib
+    class DummyConfig:
+        def __init__(self):
+            self.stash = Stash()
+            self._cleanup_stack = []
+            class DummyTrace:
+                def __init__(self, logger):
+                    self._logger = logger
+                    class Root:
+                        @staticmethod
+                        def get(name):
+                            return DummyTrace(get_logger(name))
+                    self.root = Root
+                def __call__(self, msg):
+                    self._logger.debug(msg)
+
+            self.trace = DummyTrace(get_logger(module_name))
+        def getini(self, x):
+            return ["*.py"]
+        def add_cleanup(self, func):
+            self._cleanup_stack.append(func)
+
+    __dummy_cfg = DummyConfig()
+    try:
+        install_importhook(__dummy_cfg)
+        yield
+    finally:
+        for func in __dummy_cfg._cleanup_stack:
+            func()
