@@ -19,7 +19,7 @@ class TTXStorePagedKVCache(MojoStorePagedKVCache):
         cu_seq_lens: torch.Tensor,
         kv_lens: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        store_paged_kv(
+        return store_paged_kv(
             key_states,
             value_states,
             key_cache,

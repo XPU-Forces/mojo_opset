@@ -202,3 +202,5 @@ def store_paged_kv_impl(
         total_chunks,
         CHUNK_SIZE=block_size,
     )
+
+    return key_cache, value_cache

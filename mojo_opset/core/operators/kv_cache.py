@@ -98,6 +98,8 @@ class MojoStorePagedKVCache(MojoOperator):
                 current_block_table_idx += 1
                 current_block_offset = 0
 
+        return key_cache, value_cache
+
 
 class MojoStoreMLAKVCache(MojoOperator):
     pass

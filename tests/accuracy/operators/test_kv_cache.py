@@ -65,7 +65,7 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, kv_lens_val,
     store_paged_kv_ref = MojoStorePagedKVCache._registry.get("torch")()
     store_paged_kv = MojoStorePagedKVCache()
 
-    store_paged_kv_ref(
+    k_cache_ref, v_cache_ref = store_paged_kv_ref(
         key_states,
         value_states,
         k_cache_ref,
@@ -75,7 +75,7 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, kv_lens_val,
         kv_lens,
     )
 
-    store_paged_kv(
+    k_cache, v_cache = store_paged_kv(
         key_states,
         value_states,
         k_cache,
