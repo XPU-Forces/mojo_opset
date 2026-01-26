@@ -1,127 +1,204 @@
+import torch
 import triton
 import triton.language as tl
 
+from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
+from mojo_opset.backends.ttx.kernels.utils import prepare_lens
+
+
+def prepare_kv_chunk_indices(cu_seqlens: torch.Tensor, kv_lens: torch.Tensor, chunk_size: int) -> torch.Tensor:
+    """
+    Generates metadata for each chunk to support arbitrary KV start positions.
+
+    Output Tensor Shape: [Total_Chunks, 3]
+    Columns:
+        0: batch_idx (Sequence ID)
+        1: token_offset_in_seq (Offset of this chunk in the current K/V sequence)
+        2: logical_kv_start_index (Logical KV position = kv_lens[batch] + token_offset)
+    """
+    seqlens = prepare_lens(cu_seqlens)
+
+    chunks_per_seq = triton.cdiv(seqlens, chunk_size)
+    seq_ids = torch.repeat_interleave(torch.arange(len(seqlens), device=cu_seqlens.device), chunks_per_seq)
+
+    cumulative_chunks = torch.cumsum(chunks_per_seq, 0)
+    chunk_starts = torch.cat([torch.tensor([0], device=cu_seqlens.device), cumulative_chunks[:-1]])
+
+    flat_indices = torch.arange(chunks_per_seq.sum(), device=cu_seqlens.device)
+    chunk_idx_in_seq = flat_indices - chunk_starts[seq_ids]
+
+    token_offset_in_qkv = (chunk_idx_in_seq * chunk_size).to(torch.int32)
+
+    if kv_lens is not None:
+        batch_kv_lens = kv_lens[seq_ids]
+        logical_kv_start = batch_kv_lens.to(torch.int32) + token_offset_in_qkv
+    else:
+        logical_kv_start = token_offset_in_qkv
+
+    indices = torch.stack([seq_ids.to(torch.int32), token_offset_in_qkv, logical_kv_start], dim=1).to(torch.int32)
+    return indices
+
 
 @triton.jit
-def _store_paged_kv_kernel(
-    K_States,
-    V_States,
-    K_Cache,
-    V_Cache,
-    Block_Tables,
-    Seq_Lens,
-    stride_ks_b,
-    stride_ks_h,
-    stride_ks_l,
-    stride_ks_d,
-    stride_vs_b,
-    stride_vs_h,
-    stride_vs_l,
-    stride_vs_d,
+def _store_paged_kv_cache_kernel(
+    k_ptr,
+    v_ptr,
+    key_cache_ptr,
+    value_cache_ptr,
+    block_table_ptr,
+    cu_seqlens_ptr,
+    chunk_indices_ptr,
+    stride_k_tok,
+    stride_k_head,
+    stride_k_dim,
+    stride_v_tok,
+    stride_v_head,
+    stride_v_dim,
     stride_kc_blk,
-    stride_kc_h,
-    stride_kc_s,
-    stride_kc_d,
+    stride_kc_head,
+    stride_kc_tok,
+    stride_kc_dim,
     stride_vc_blk,
-    stride_vc_h,
-    stride_vc_s,
-    stride_vc_d,
-    stride_bt_b,
-    stride_bt_s,
-    NEW_SEQ_LEN,
-    BLOCK_SIZE: tl.constexpr,
-    HEAD_DIM: tl.constexpr,
+    stride_vc_head,
+    stride_vc_tok,
+    stride_vc_dim,
+    stride_bt_batch,
+    stride_bt_blk,
+    num_kv_heads,
+    head_dim: tl.constexpr,
+    block_size: tl.constexpr,
+    total_chunks,
+    CHUNK_SIZE: tl.constexpr,
 ):
-    pid_chunk = tl.program_id(0)
-    pid_batch = tl.program_id(1)
-    pid_head = tl.program_id(2)
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
 
-    start_token_idx = pid_chunk * BLOCK_SIZE
-    if start_token_idx >= NEW_SEQ_LEN:
-        return
+    for chunk_id_linear in range(pid, total_chunks, num_programs):
+        meta_ptr = chunk_indices_ptr + chunk_id_linear * 3
+        batch_idx = tl.load(meta_ptr)
+        token_offset_in_seq = tl.load(meta_ptr + 1)
+        logical_kv_start = tl.load(meta_ptr + 2)
 
-    offs_token_in_chunk = tl.arange(0, BLOCK_SIZE)
-    offs_token_global = start_token_idx + offs_token_in_chunk
-    mask_token = offs_token_global < NEW_SEQ_LEN
+        seq_start_tok = tl.load(cu_seqlens_ptr + batch_idx)
+        global_token_idx = seq_start_tok + token_offset_in_seq
 
-    context_len = tl.load(Seq_Lens + pid_batch)
-    logical_pos_vector = context_len + offs_token_global
+        seq_len_curr = tl.load(cu_seqlens_ptr + batch_idx + 1) - seq_start_tok
+        valid_len = seq_len_curr - token_offset_in_seq
 
-    logical_block_idx_vector = logical_pos_vector // BLOCK_SIZE
-    offset_in_block_vector = logical_pos_vector % BLOCK_SIZE
+        curr_log_pos = logical_kv_start
+        curr_kv_pos = global_token_idx
 
-    ptr_block_table = Block_Tables + pid_batch * stride_bt_b + logical_block_idx_vector * stride_bt_s
-    physical_block_ids = tl.load(ptr_block_table, mask=mask_token, other=0)
+        remain_chunk_len = CHUNK_SIZE
+        remain_chunk_len = tl.minimum(remain_chunk_len, valid_len)
 
-    offs_d = tl.arange(0, HEAD_DIM)
+        processed = 0
+        while processed < remain_chunk_len:
+            block_table_idx = curr_log_pos // block_size
+            block_inner_off = curr_log_pos % block_size
 
-    ptr_k_in = (
-        K_States
-        + pid_batch * stride_ks_b
-        + pid_head * stride_ks_h
-        + offs_token_global[:, None] * stride_ks_l
-        + offs_d[None, :] * stride_ks_d
-    )
-    ptr_v_in = (
-        V_States
-        + pid_batch * stride_vs_b
-        + pid_head * stride_vs_h
-        + offs_token_global[:, None] * stride_vs_l
-        + offs_d[None, :] * stride_vs_d
-    )
+            physical_block_id = tl.load(block_table_ptr + batch_idx * stride_bt_batch + block_table_idx * stride_bt_blk)
 
-    k_data = tl.load(ptr_k_in, mask=mask_token[:, None], other=0.0)
-    v_data = tl.load(ptr_v_in, mask=mask_token[:, None], other=0.0)
+            space_in_block = block_size - block_inner_off
+            sub_len = tl.minimum(remain_chunk_len - processed, space_in_block).to(tl.int32)
 
-    ptr_k_out = (
-        K_Cache
-        + physical_block_ids[:, None] * stride_kc_blk
-        + pid_head * stride_kc_h
-        + offset_in_block_vector[:, None] * stride_kc_s
-        + offs_d[None, :] * stride_kc_d
-    )
-    ptr_v_out = (
-        V_Cache
-        + physical_block_ids[:, None] * stride_vc_blk
-        + pid_head * stride_vc_h
-        + offset_in_block_vector[:, None] * stride_vc_s
-        + offs_d[None, :] * stride_vc_d
-    )
+            offs_sub = tl.arange(0, CHUNK_SIZE)
+            mask_sub = offs_sub < sub_len
 
-    tl.store(ptr_k_out, k_data, mask=mask_token[:, None])
-    tl.store(ptr_v_out, v_data, mask=mask_token[:, None])
+            offs_d = tl.arange(0, head_dim)
+
+            for h in range(num_kv_heads):
+                src_k_ptr = (
+                    k_ptr
+                    + (curr_kv_pos + offs_sub[:, None]) * stride_k_tok
+                    + h * stride_k_head
+                    + offs_d[None, :] * stride_k_dim
+                )
+
+                k_val = tl.load(src_k_ptr, mask=mask_sub[:, None], other=0.0)
+
+                dst_k_ptr = (
+                    key_cache_ptr
+                    + physical_block_id * stride_kc_blk
+                    + h * stride_kc_head
+                    + (block_inner_off + offs_sub[:, None]) * stride_kc_tok
+                    + offs_d[None, :] * stride_kc_dim
+                )
+
+                tl.store(dst_k_ptr, k_val, mask=mask_sub[:, None])
+
+                src_v_ptr = (
+                    v_ptr
+                    + (curr_kv_pos + offs_sub[:, None]) * stride_v_tok
+                    + h * stride_v_head
+                    + offs_d[None, :] * stride_v_dim
+                )
+
+                v_val = tl.load(src_v_ptr, mask=mask_sub[:, None], other=0.0)
+
+                dst_v_ptr = (
+                    value_cache_ptr
+                    + physical_block_id * stride_vc_blk
+                    + h * stride_vc_head
+                    + (block_inner_off + offs_sub[:, None]) * stride_vc_tok
+                    + offs_d[None, :] * stride_vc_dim
+                )
+
+                tl.store(dst_v_ptr, v_val, mask=mask_sub[:, None])
+
+            processed += sub_len
+            curr_log_pos += sub_len
+            curr_kv_pos += sub_len
 
 
-def store_paged_kv_impl(key_states, value_states, k_cache, v_cache, block_tables, context_lens, block_size):
-    batch_size, num_heads, new_seq_len, head_dim = key_states.shape
-    grid = ((new_seq_len + block_size - 1) // block_size, batch_size, num_heads)
+def store_paged_kv_impl(
+    k_states: torch.Tensor,
+    v_states: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    kv_lens: torch.Tensor,
+):
+    assert k_states.is_contiguous() and v_states.is_contiguous()
 
-    _store_paged_kv_kernel[grid](
-        key_states,
-        value_states,
-        k_cache,
-        v_cache,
-        block_tables,
-        context_lens,
-        key_states.stride(0),
-        key_states.stride(1),
-        key_states.stride(2),
-        key_states.stride(3),
-        value_states.stride(0),
-        value_states.stride(1),
-        value_states.stride(2),
-        value_states.stride(3),
-        k_cache.stride(0),
-        k_cache.stride(1),
-        k_cache.stride(2),
-        k_cache.stride(3),
-        v_cache.stride(0),
-        v_cache.stride(1),
-        v_cache.stride(2),
-        v_cache.stride(3),
-        block_tables.stride(0),
-        block_tables.stride(1),
-        new_seq_len,
-        BLOCK_SIZE=block_size,
-        HEAD_DIM=head_dim,
+    num_kv_heads = k_states.shape[1]
+    head_dim = k_states.shape[2]
+
+    block_size = key_cache.shape[2]
+
+    chunk_indices = prepare_kv_chunk_indices(cu_seqlens, kv_lens, block_size)
+    total_chunks = chunk_indices.shape[0]
+
+    num_programs = get_num_cores("vector")
+    grid = (num_programs,)
+
+    _store_paged_kv_cache_kernel[grid](
+        k_states,
+        v_states,
+        key_cache,
+        value_cache,
+        block_table,
+        cu_seqlens,
+        chunk_indices,
+        k_states.stride(0),
+        k_states.stride(1),
+        k_states.stride(2),
+        v_states.stride(0),
+        v_states.stride(1),
+        v_states.stride(2),
+        key_cache.stride(0),
+        key_cache.stride(1),
+        key_cache.stride(2),
+        key_cache.stride(3),
+        value_cache.stride(0),
+        value_cache.stride(1),
+        value_cache.stride(2),
+        value_cache.stride(3),
+        block_table.stride(0),
+        block_table.stride(1),
+        num_kv_heads,
+        head_dim,
+        block_size,
+        total_chunks,
+        CHUNK_SIZE=block_size,
     )

@@ -12,65 +12,91 @@ class MojoStoreKVCache(MojoOperator):
 class MojoStorePagedKVCache(MojoOperator):
     def __init__(
         self,
-        block_size: int = 16,
     ):
-        """
-        Initialize block-based KV cache configuration.
-
-        Args:
-            block_size (int, default=16): Size of each cache block; must be > 0.
-
-        Notes:
-            This only stores configuration; forward paths use `block_size` to map logical
-            positions to (block_id, offset) within the cache.
-        """
         super().__init__()
-        self.block_size = block_size
 
     def forward(
         self,
         key_states: torch.Tensor,
         value_states: torch.Tensor,
-        key_cahce: torch.Tensor,
-        value_cahce: torch.Tensor,
-        block_tables: torch.Tensor,
-        context_lens: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        cu_seq_lens: torch.Tensor,
+        kv_lens: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Append new K/V tokens into a block-based KV cache.
 
         Args:
-            key_states (torch.Tensor): Shape (B, Hkv, T_new, Dkv) — new key tokens.
-            value_states (torch.Tensor): Shape (B, Hkv, T_new, Dkv) — new value tokens.
-            key_cahce (torch.Tensor): Shape (N_blocks, Hkv, block_size, Dkv) — key cache.
-            value_cahce (torch.Tensor): Shape (N_blocks, Hkv, block_size, Dkv) — value cache.
-            block_tables (torch.Tensor): Shape (B, num_blocks) mapping logical blocks to physical IDs.
-            context_lens (torch.Tensor): Shape (B,) current sequence lengths per batch.
+            key_states (torch.Tensor): Shape (token_num, kv_head_num, head_dim) — new key tokens.
+            value_states (torch.Tensor): Shape (token_num, kv_head_num, head_dim) — new value tokens.
+            key_cache (torch.Tensor): Shape (total_phys_blocks, kv_heads, block_size, head_dim) — key cache.
+            value_cache (torch.Tensor): Shape (total_phys_blocks, kv_heads, block_size, head_dim) — value cache.
+            block_table (torch.Tensor): Shape (bsz, max_blocks_per_seq) mapping logical blocks to physical IDs.
+            cu_seq_lens (torch.Tensor): Shape (bsz + 1,) cumulative sequence lengths per batch.
+            kv_lens (torch.Tensor): Shape (bsz,) current sequence lengths per batch.
 
         Returns:
             Tuple[torch.Tensor, torch.Tensor]: Updated `(key_cahce, value_cahce)` after in-place writes.
-
-        Notes:
-            - Logical position = `context_len + j`; block index = `pos // self.block_size`;
-              position within block = `pos % self.block_size`.
-            - Writes are performed in-place without bounds checking; caller must ensure capacity.
         """
-        batch_size, _, new_seq_len, _ = key_states.shape
+        assert len(key_states.shape) == 3 and len(value_states.shape) == 3 and key_states.shape == value_states.shape, (
+            "key/value states must be (token_num, kv_head_num, head_dim), please check."
+        )
 
-        for i in range(batch_size):
-            context_len = context_lens[i].item()
+        block_size = key_cache.shape[2]
+        num_batches = len(kv_lens) if kv_lens is not None else 0
 
-            for j in range(new_seq_len):
-                logical_pos = context_len + j
-                block_idx_in_table = logical_pos // self.block_size
-                pos_in_block = logical_pos % self.block_size
+        for batch_id in range(num_batches):
+            k_start = cu_seq_lens[batch_id].item()
+            k_end = cu_seq_lens[batch_id + 1].item()
+            now_seq_len = k_end - k_start
 
-                physical_block_id = block_tables[i, block_idx_in_table].item()
+            if now_seq_len <= 0:
+                continue
 
-                key_cahce[physical_block_id, :, pos_in_block, :] = key_states[i, :, j, :]
-                value_cahce[physical_block_id, :, pos_in_block, :] = value_states[i, :, j, :]
+            now_key = key_states[k_start:k_end]
+            now_value = value_states[k_start:k_end]
 
-        return key_cahce, value_cahce
+            now_key = now_key.permute(1, 0, 2)
+            now_value = now_value.permute(1, 0, 2)
+
+            now_kv_len_start = kv_lens[batch_id].item()
+            now_block_table = block_table[batch_id]
+
+            start_block_table_idx = now_kv_len_start // block_size
+            block_offset_in_first_block = now_kv_len_start % block_size
+
+            remain_to_store = now_seq_len
+            source_ptr = 0
+
+            current_block_table_idx = start_block_table_idx
+            current_block_offset = block_offset_in_first_block
+
+            while remain_to_store > 0:
+                if current_block_table_idx >= len(now_block_table):
+                    break
+
+                block_id = now_block_table[current_block_table_idx].item()
+                if block_id < 0:
+                    break
+
+                capacity = block_size - current_block_offset
+                store_len = min(remain_to_store, capacity)
+
+                key_cache[block_id, :, current_block_offset : current_block_offset + store_len, :] = now_key[
+                    :, source_ptr : source_ptr + store_len, :
+                ]
+
+                value_cache[block_id, :, current_block_offset : current_block_offset + store_len, :] = now_value[
+                    :, source_ptr : source_ptr + store_len, :
+                ]
+
+                source_ptr += store_len
+                remain_to_store -= store_len
+
+                current_block_table_idx += 1
+                current_block_offset = 0
 
 
 class MojoStoreMLAKVCache(MojoOperator):

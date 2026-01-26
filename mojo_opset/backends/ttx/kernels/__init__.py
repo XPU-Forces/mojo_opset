@@ -586,33 +586,33 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     def store_paged_kv(
         key_states: torch.Tensor,
         value_states: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
-        block_tables: torch.Tensor,
-        context_lens: torch.Tensor,
-        block_size: int,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        cu_seq_lens: torch.Tensor,
+        kv_lens: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return store_paged_kv_impl(
             key_states,
             value_states,
-            k_cache,
-            v_cache,
-            block_tables,
-            context_lens,
-            block_size,
+            key_cache,
+            value_cache,
+            block_table,
+            cu_seq_lens,
+            kv_lens,
         )
 
     @store_paged_kv.register_fake
     def store_paged_kv_fake(
         key_states: torch.Tensor,
         value_states: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
-        block_tables: torch.Tensor,
-        context_lens: torch.Tensor,
-        block_size: int,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        cu_seq_lens: torch.Tensor,
+        kv_lens: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return torch.empty_like(k_cache), torch.empty_like(v_cache)
+        return torch.empty_like(key_cache), torch.empty_like(value_cache)
 
 else:
     gelu_fwd = gelu_fwd_impl
