@@ -7,79 +7,62 @@ from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 
-def generate_inputs(batch_size, num_heads, head_dim, new_seq_len, context_len_val, block_size, device):
-    total_len = context_len_val + new_seq_len
-
-    num_logical_blocks = (total_len + block_size - 1) // block_size
-
-    total_pool_blocks = 1000
-
-    block_tables = torch.zeros((batch_size, num_logical_blocks + 10), dtype=torch.long, device=device)
-
-    all_indices = torch.randperm(total_pool_blocks, device=device)
-    cursor = 0
-    for i in range(batch_size):
-        needed_ids = all_indices[cursor : cursor + num_logical_blocks]
-        block_tables[i, :num_logical_blocks] = needed_ids
-        cursor += num_logical_blocks
-
-    k_cache = torch.zeros(
-        (total_pool_blocks, num_heads, block_size, head_dim),
-        dtype=torch.float16,
-        device=device,
-    )
-    v_cache = torch.zeros(
-        (total_pool_blocks, num_heads, block_size, head_dim),
-        dtype=torch.float16,
-        device=device,
-    )
-
-    key_states = torch.randn(
-        (batch_size, num_heads, new_seq_len, head_dim),
-        dtype=torch.float16,
-        device=device,
-    )
-    value_states = torch.randn(
-        (batch_size, num_heads, new_seq_len, head_dim),
-        dtype=torch.float16,
-        device=device,
-    )
-
-    context_lens = torch.full((batch_size,), context_len_val, dtype=torch.long, device=device)
-
-    return key_states, value_states, k_cache, v_cache, block_tables, context_lens
-
-
-@pytest.mark.parametrize("block_size", [16, 32])
-@pytest.mark.parametrize("batch_size, num_heads, head_dim", [(1, 4, 64), (4, 8, 64), (16, 16, 128), (1, 8, 128)])
 @pytest.mark.parametrize(
-    "context_len, new_seq_len",
+    "batch_size, kv_heads, head_dim, block_size, kv_lens_val, seq_lens_val",
     [
-        (0, 32),
-        (0, 35),
-        (31, 1),
-        (32, 1),
-        (10, 20),
+        (2, 2, 128, 128, [0, 0], [130, 33]),
+        (2, 2, 128, 128, [32, 35], [1, 1]),
+        (2, 2, 128, 128, [15, 40], [788, 126]),
+        (2, 2, 128, 256, [15, 40], [788, 126]),
+        (1, 1, 128, 128, [0], [5]),
+        (1, 1, 128, 128, [5], [1]),
+        (8, 2, 128, 128, [224, 542, 34, 41, 54, 57, 65, 0], [432, 84, 977, 93, 23, 89, 31, 555]),
+        (8, 2, 128, 128, [772, 974, 3232, 43, 77, 7633, 888, 1], [1, 1, 1, 1, 1, 1, 1, 1]),
     ],
 )
 @bypass_not_implemented
 @auto_switch_platform(set_perf=True)
-def test_paged_update_kernel(block_size, batch_size, num_heads, head_dim, context_len, new_seq_len):
+def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, kv_lens_val, seq_lens_val):
     device = get_platform()
-    key_states, value_states, k_cache_ref, v_cache_ref, block_tables, context_lens = generate_inputs(
-        batch_size,
-        num_heads,
-        head_dim,
-        new_seq_len,
-        context_len,
-        block_size,
-        device,
-    )
+
+    kv_lens = torch.tensor(kv_lens_val, dtype=torch.long, device=device)
+    seq_lens = torch.tensor(seq_lens_val, dtype=torch.long, device=device)
+
+    cu_seqlens = torch.cat(
+        [torch.zeros(1, dtype=torch.int32, device=device), torch.cumsum(seq_lens, dim=0, dtype=torch.int32)]
+    ).to(torch.long)
+
+    total_tokens = cu_seqlens[-1].item()
+
+    key_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=torch.bfloat16, device=device)
+    value_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=torch.bfloat16, device=device)
+
+    max_kv_len = (kv_lens + seq_lens).max().item()
+    max_blocks_per_seq = (max_kv_len + block_size - 1) // block_size + 2
+
+    total_blocks_needed = sum([(k + s + block_size - 1) // block_size for k, s in zip(kv_lens_val, seq_lens_val)])
+    total_phys_blocks = total_blocks_needed + 10
+
+    cache_shape = (total_phys_blocks, kv_heads, block_size, head_dim)
+
+    k_cache_ref = torch.zeros(cache_shape, dtype=torch.bfloat16, device=device)
+    v_cache_ref = torch.zeros(cache_shape, dtype=torch.bfloat16, device=device)
+
+    k_cache = torch.zeros(cache_shape, dtype=torch.bfloat16, device=device)
+    v_cache = torch.zeros(cache_shape, dtype=torch.bfloat16, device=device)
+
+    block_table = torch.full((batch_size, max_blocks_per_seq), -1, dtype=torch.long, device=device)
+    curr = 0
+    for i in range(batch_size):
+        needed = (kv_lens_val[i] + seq_lens_val[i] + block_size - 1) // block_size
+        ids = torch.arange(curr, curr + needed, device=device)
+        block_table[i, :needed] = ids
+        curr += needed
 
     k_cache = k_cache_ref.clone()
     v_cache = v_cache_ref.clone()
 
-    store_paged_kv = MojoStorePagedKVCache(kv_layout="NPU_ND", block_size=block_size)
+    store_paged_kv = MojoStorePagedKVCache()
 
     perf(  # noqa: F821
         lambda: store_paged_kv(
@@ -87,7 +70,8 @@ def test_paged_update_kernel(block_size, batch_size, num_heads, head_dim, contex
             value_states,
             k_cache,
             v_cache,
-            block_tables,
-            context_lens,
+            block_table,
+            cu_seqlens,
+            kv_lens,
         )
     )

@@ -6,9 +6,9 @@ import torch
 from torch import nn
 
 from mojo_opset import MojoLinear
-from mojo_opset import MojoNorm
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
+from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoRoPE
 from mojo_opset import MojoSilu
 from mojo_opset import MojoStorePagedKVCache
@@ -72,7 +72,7 @@ class PagedDummyCache:
 
         self.free_blocks = torch.arange(total_blocks, device=self.device, dtype=torch.long)
         self.num_free_blocks = total_blocks
-        self.store_paged_kv = MojoStorePagedKVCache(kv_layout="NPU_ND", block_size=block_size)
+        self.store_paged_kv = MojoStorePagedKVCache()
 
     def _allocate_blocks(self, num_blocks: int):
         if num_blocks > self.num_free_blocks:
@@ -82,7 +82,11 @@ class PagedDummyCache:
         return allocated
 
     def update(self, key_states: torch.Tensor, value_states: torch.Tensor, layer_idx: int):
-        batch_size, _, new_seq_len, _ = key_states.shape
+        batch_size, head_num, new_seq_len, head_dim = key_states.shape
+
+        key_states = key_states.permute(0, 2, 1, 3).reshape(-1, head_num, head_dim)
+        value_states = value_states.permute(0, 2, 1, 3).reshape(-1, head_num, head_dim)
+        cu_seqlens = torch.arange(0, (batch_size + 1) * new_seq_len, step=new_seq_len, device=key_states.device)
 
         current_seq_lens = self.seq_lens[layer_idx]
 
@@ -104,6 +108,7 @@ class PagedDummyCache:
             self.k_cache,
             self.v_cache,
             self.block_tables[layer_idx],
+            cu_seqlens,
             current_seq_lens,
         )
         self.seq_lens[layer_idx] += new_seq_len
@@ -183,21 +188,17 @@ class Qwen3Attention(nn.Module):
         )
         self.o_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.hidden_size, self.num_heads * self.head_dim)))
 
-        self.q_norm = MojoNorm(
-            eps=config.rms_norm_eps,
-            norm_type="rmsnorm",
+        self.q_norm = MojoRMSNorm(
             weight=nn.Parameter(torch.ones(self.head_dim)),
-            is_varlen=False,
-        )
-        self.k_norm = MojoNorm(
             eps=config.rms_norm_eps,
-            norm_type="rmsnorm",
-            weight=nn.Parameter(torch.ones(self.head_dim)),
-            is_varlen=False,
         )
-        self.rope = MojoRoPE(rotary_offset=0, interleaved=False, is_varlen=False, op_name="rope")
-        self.attn_prefill = MojoPagedPrefillGQA(op_name="attn_prefill", layer_idx=layer_idx)
-        self.attn_decode = MojoPagedDecodeGQA(op_name="attn_decode", layer_idx=layer_idx)
+        self.k_norm = MojoRMSNorm(
+            weight=nn.Parameter(torch.ones(self.head_dim)),
+            eps=config.rms_norm_eps,
+        )
+        self.rope = MojoRoPE(rotary_offset=0, interleaved=False, is_varlen=False)
+        self.attn_prefill = MojoPagedPrefillGQA()
+        self.attn_decode = MojoPagedDecodeGQA()
 
     def forward(self, hidden_states, position_embeddings, attention_mask, past_key_values, use_cache, **kwargs):
         bsz, q_len, _ = hidden_states.size()
@@ -284,11 +285,9 @@ class Qwen3DecoderLayer(nn.Module):
         self.mlp = Qwen3MLP(config)
         self.layer_idx = layer_idx
 
-        self.input_layernorm = MojoNorm(
-            eps=config.rms_norm_eps, norm_type="rmsnorm", weight=nn.Parameter(torch.ones(config.hidden_size))
-        )
-        self.post_attention_layernorm = MojoNorm(
-            eps=config.rms_norm_eps, norm_type="rmsnorm", weight=nn.Parameter(torch.ones(config.hidden_size))
+        self.input_layernorm = MojoRMSNorm(weight=nn.Parameter(torch.ones(config.hidden_size)), eps=config.rms_norm_eps)
+        self.post_attention_layernorm = MojoRMSNorm(
+            weight=nn.Parameter(torch.ones(config.hidden_size)), eps=config.rms_norm_eps
         )
 
     def forward(
@@ -326,9 +325,7 @@ class Qwen3Model(nn.Module):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList([Qwen3DecoderLayer(config, i) for i in range(config.num_hidden_layers)])
 
-        self.norm = MojoNorm(
-            eps=config.rms_norm_eps, norm_type="rmsnorm", weight=nn.Parameter(torch.ones(config.hidden_size))
-        )
+        self.norm = MojoRMSNorm(weight=nn.Parameter(torch.ones(config.hidden_size)), eps=config.rms_norm_eps)
         self.rotary = Qwen3RotaryEmbedding(config)
 
     def forward(
