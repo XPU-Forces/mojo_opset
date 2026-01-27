@@ -30,7 +30,9 @@ class MojoTopKSampling(MojoOperator):
         Notes:
             Stores configuration only; actual sampling happens in `forward`.
         """
-        super().__init__(op_name, layer_idx)
+        super().__init__()
+        self.op_name = op_name
+        self.layer_idx = layer_idx
 
         self.top_k = top_k
         self.filter_value = filter_value
