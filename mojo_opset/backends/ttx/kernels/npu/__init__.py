@@ -9,6 +9,7 @@ from .fused_linear_cross_entropy import fused_linear_cross_entropy_bwd_impl
 from .fused_linear_cross_entropy import fused_linear_cross_entropy_fwd_impl
 from .gelu import gelu_bwd_impl
 from .gelu import gelu_fwd_impl
+from .gemm import matmul_impl
 from .group_gemm import k_grouped_matmul_impl
 from .group_gemm import m_grouped_matmul_impl
 from .kv_cache import store_paged_kv_impl

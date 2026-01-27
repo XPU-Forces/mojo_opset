@@ -48,6 +48,7 @@ sdpa_bwd_impl = getattr(ttx_backend_module, "sdpa_bwd_impl")
 diffusion_attention_fwd_impl = getattr(ttx_backend_module, "diffusion_attention_fwd_impl")
 diffusion_attention_bwd_impl = getattr(ttx_backend_module, "diffusion_attention_bwd_impl")
 
+matmul_impl = getattr(ttx_backend_module, "matmul_impl")
 m_grouped_matmul_impl = getattr(ttx_backend_module, "m_grouped_matmul_impl")
 k_grouped_matmul_impl = getattr(ttx_backend_module, "k_grouped_matmul_impl")
 
@@ -498,6 +499,15 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
 
         return grad_input, grad_weight, grad_bias
 
+
+    # ====================================
+    # Register Gemm
+    # ====================================
+    @torch.library.custom_op("ttx::matmul", mutates_args={})
+    def matmul(x: torch.Tensor, w: torch.Tensor, bias: torch.Tensor = None, )  -> torch.Tensor:
+        return matmul_impl(x, w, bias)
+
+
     # ====================================
     # Register Group gemm
     # ====================================
@@ -637,6 +647,7 @@ else:
     sdpa_bwd = sdpa_bwd_impl
     diffusion_attention_fwd = diffusion_attention_fwd_impl
     diffusion_attention_bwd = diffusion_attention_bwd_impl
+    matmul = matmul_impl
     m_grouped_matmul = m_grouped_matmul_impl
     k_grouped_matmul = k_grouped_matmul_impl
     store_paged_kv = store_paged_kv_impl
