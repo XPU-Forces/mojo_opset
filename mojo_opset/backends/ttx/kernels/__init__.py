@@ -244,6 +244,16 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         return quant_int8_infer_impl(input_tensor, scale_tensor)
 
 
+    @quant_int8_infer.register_fake
+    def quant_int8_infer_fake(
+        input_tensor: torch.Tensor,
+        scale_tensor: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch, seqlen, _ = input_tensor.shape
+
+        return torch.empty_like(input_tensor, dtype=torch.int8), torch.empty(batch, seqlen, dtype=torch.float32)
+
+
     # ====================================
     # Register rmsnorm
     # ====================================
