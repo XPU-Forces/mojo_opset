@@ -42,6 +42,15 @@ class MojoBackendRegistry:
         if impl_backend_name == "analysis":
             return
 
+        # in case of backen class named mistake
+        if impl_backend_name not in BACKEND_PRIORITY_LIST:
+            for target_backend in BACKEND_PRIORITY_LIST:
+                if impl_backend_name.startswith(target_backend):
+                    raise NameError(
+                        f"Operator {cls.__name__} backend[{impl_backend_name}] is not supported, "
+                        f"are you wish to named {target_backend.upper()}{self._operator_name} ?"
+                    )
+
         assert impl_backend_name in BACKEND_PRIORITY_LIST, (
             f"Operator {cls.__name__} backend[{impl_backend_name}] is not supported, "
             f"please choose from {BACKEND_PRIORITY_LIST}."
