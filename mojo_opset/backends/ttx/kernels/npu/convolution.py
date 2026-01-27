@@ -630,6 +630,7 @@ def causal_conv1d_update_states(
 def causal_conv1d_update_kernel_bdt_fwd(
     x_ptr,                  # [B, D, T]
     conv_state_ptr,         # [B, D, ST]
+    conv_state_update_ptr,
     weight_ptr,             # [D, W]
     bias_ptr, 
     conv_state_indices_ptr,
@@ -721,7 +722,7 @@ def causal_conv1d_update_kernel_bdt_fwd(
                 nst_off_y1_h = tl.arange(0, ST_STORE_HEAD_TILE_SIZE)[None, :]
                 nst_mask_h = (nst_off_y0 < dim) & (nst_off_y1_h >= 0) & (nst_off_y1_h < state_len) 
                 block_ptr_h = bi * dim * state_len + nst_off_y0 * state_len + nst_off_y1_h
-                tl.store(conv_state_ptr + block_ptr_h, x_new_h, mask = nst_mask_h)
+                tl.store(conv_state_update_ptr + block_ptr_h, x_new_h, mask = nst_mask_h)
             else:
                 x_new_s = tl.extract_slice(x_b, (width - 1, 0), (T_CHK_SIZE, D_CHK_SIZE), (1, 1))
                 x_new_s = tl.trans(x_new_s, (1, 0))
@@ -729,7 +730,7 @@ def causal_conv1d_update_kernel_bdt_fwd(
                 nst_off_y1 = width - 1 + t_off + tl.arange(0, T_CHK_SIZE)[None, :]
                 nst_mask = (nst_off_y0 < dim) & (nst_off_y1 >= 0) & (nst_off_y1 < state_len) 
                 block_ptr = bi * dim * state_len + nst_off_y0 * state_len + nst_off_y1
-                tl.store(conv_state_ptr + block_ptr, x_new_s, mask = nst_mask)
+                tl.store(conv_state_update_ptr + block_ptr, x_new_s, mask = nst_mask)
 
         for owi in tl.range(0, width):
             new_x = tl.extract_slice(x_b, 
@@ -779,11 +780,12 @@ def causal_conv1d_update_bdt_fwd(
 
     NUM_T_CHK = triton.cdiv(out.shape[-1], T_CHK_SIZE)
     NUM_D_CHK = triton.cdiv(dim, D_CHK_SIZE)
+    conv_state_update = torch.empty_like(conv_state)
 
     # A const tile size variable to update negative address of conv state
     ST_STORE_HEAD_TILE_SIZE = width if (seqlen % T_CHK_SIZE) > width else (width - seqlen % T_CHK_SIZE) % T_CHK_SIZE
     causal_conv1d_update_kernel_bdt_fwd[(NUM_CORES, 1)](
-        x, conv_state, weight, bias, conv_state_indices,
+        x, conv_state, conv_state_update, weight, bias, conv_state_indices,
         out,
         batch = int(batch),
         dim = int(dim),
@@ -802,7 +804,7 @@ def causal_conv1d_update_bdt_fwd(
         NUM_D_CHK = NUM_D_CHK,
         ST_STORE_HEAD_TILE_SIZE = int(ST_STORE_HEAD_TILE_SIZE)
     )
-
+    conv_state.copy_(conv_state_update)
     if unsqueeze:
         out = out.squeeze(-1)
     return out
