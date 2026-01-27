@@ -8,6 +8,7 @@ from mojo_opset import MojoLayerNorm
 from mojo_opset import MojoResidualAddLayerNorm
 from mojo_opset import MojoResidualAddRMSNorm
 from mojo_opset import MojoRMSNorm
+from mojo_opset import MojoResidualAddNormCast
 
 torch.manual_seed(42)
 
@@ -175,6 +176,55 @@ def test_residual_add_layernorm(x, residual, weight, bias, norm_pos, eps):
 
     add_norm.forward_diff_with(
         add_norm_ref,
+        x,
+        residual,
+        atol=atol,
+        rtol=rtol,
+    )
+
+@pytest.mark.parametrize(
+    "x, residual, weight, bias",
+    [
+        (
+            torch.randn(size=(128, 128), dtype=dtype),
+            torch.randn(size=(128, 128), dtype=dtype),
+            torch.randn(size=(128,), dtype=dtype),
+            torch.randn(size=(128,), dtype=dtype),
+        )
+        for dtype in [torch.float16, torch.bfloat16]
+    ],
+)
+@pytest.mark.parametrize("eps", [1e-5])
+@pytest.mark.parametrize("norm_type", ["layernorm", "rmsnorm"])
+@pytest.mark.parametrize("norm_pos", ["pre", "post"])
+@pytest.mark.parametrize("cast_type", ["int8"])
+@auto_switch_platform()
+@bypass_not_implemented
+def test_residual_add_norm_cast(x, residual, weight, bias, eps, norm_type, norm_pos, cast_type):
+    add_norm_cast = MojoResidualAddNormCast(
+        weight=weight,
+        bias=bias,
+        eps=eps,
+        norm_type=norm_type,
+        norm_pos=norm_pos,
+        cast_type=cast_type,
+    )
+    add_norm_cast_ref = MojoResidualAddNormCast._registry.get("torch")(
+        weight=weight,
+        bias=bias,
+        eps=eps,
+        norm_type=norm_type,
+        norm_pos=norm_pos,
+        cast_type=cast_type,
+    )
+
+    if x.dtype == torch.float32:
+        atol, rtol = 1e-5, 1e-6
+    else:
+        atol, rtol = 3e-2, 6e-3
+
+    add_norm_cast.forward_diff_with(
+        add_norm_cast_ref,
         x,
         residual,
         atol=atol,
