@@ -7,14 +7,16 @@ from ..operator import MojoOperator
 class MojoLayerNorm(MojoOperator):
     def __init__(
         self,
-        hidden_size: int,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
         eps: float = 1e-5,
     ):
         """
         Initialize LayerNorm patch parameters.
 
         Args:
-            hidden_size (int): Size of 1-D affine scale and shift vector.
+            weight (torch.Tensor): 1-D affine scale vector of length D (hidden size).
+            bias (torch.Tensor): 1-D affine shift vector of length D (hidden size).
             eps (float, default=1e-5): Epsilon added to the variance for numerical stability; must be > 0.
 
         Notes:
@@ -22,8 +24,8 @@ class MojoLayerNorm(MojoOperator):
               will lead to errors when applying LayerNorm.
         """
         super().__init__()
-        self.weight = torch.nn.Parameter(torch.empty(hidden_size))
-        self.bias = torch.nn.Parameter(torch.empty(hidden_size))
+        self.weight = weight
+        self.bias = bias
         self.variance_epsilon = eps
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
@@ -50,14 +52,14 @@ class MojoLayerNorm(MojoOperator):
 class MojoRMSNorm(MojoOperator):
     def __init__(
         self,
-        hidden_size: int,
+        weight: torch.Tensor,
         eps: float = 1e-5,
     ):
         """
         Initialize RMSNorm patch parameters.
 
         Args:
-            hidden_size (int): Size of 1-D affine scale vector.
+            weight (torch.Tensor): 1-D affine scale vector of length D (hidden size).
             eps (float, default=1e-5): Epsilon added for numerical stability; must be > 0.
 
         Notes:
@@ -65,7 +67,7 @@ class MojoRMSNorm(MojoOperator):
               will lead to errors when applying RMSNorm.
         """
         super().__init__()
-        self.weight = torch.nn.Parameter(torch.empty(hidden_size))
+        self.weight = weight
         self.variance_epsilon = eps
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
@@ -95,7 +97,7 @@ class MojoNormQuant(MojoOperator):
 class MojoResidualAddRMSNorm(MojoOperator):
     def __init__(
         self,
-        hidden_size: int,
+        weight: torch.Tensor,
         eps: float = 1e-05,
         norm_pos: str = "pre",
     ):
@@ -103,7 +105,7 @@ class MojoResidualAddRMSNorm(MojoOperator):
         Initialize residual-add RMSNorm operator with position control.
 
         Args:
-            hidden_size (int): Size of  1-D affine scale of length D (hidden size).
+            weight (torch.Tensor): Required 1-D affine scale of length D (hidden size).
             eps (float, default=1e-05): Epsilon for numerical stability; must be > 0.
             norm_pos (str, default="pre"): Normalization placement; one of {"pre", "post"}.
 
@@ -117,7 +119,7 @@ class MojoResidualAddRMSNorm(MojoOperator):
             raise ValueError("norm_pos should be 'pre' or 'post'")
 
         self.variance_epsilon = float(eps)
-        self.weight = torch.nn.Parameter(torch.empty(hidden_size))
+        self.weight = weight
         self.norm_pos = norm_pos
 
     def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
@@ -145,7 +147,8 @@ class MojoResidualAddRMSNorm(MojoOperator):
 class MojoResidualAddLayerNorm(MojoOperator):
     def __init__(
         self,
-        hidden_size:int,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
         eps: float = 1e-05,
         norm_pos: str = "pre",
     ):
@@ -153,7 +156,8 @@ class MojoResidualAddLayerNorm(MojoOperator):
         Initialize residual-add LayerNorm operator with position control.
 
         Args:
-            hidden_size (int): Size of 1-D affine scale and shift vector.
+            weight (torch.Tensor): Required 1-D affine scale vector of length D (hidden size).
+            bias (torch.Tensor): Required 1-D affine shift vector of length D (hidden size).
             eps (float, default=1e-05): Epsilon for numerical stability; must be > 0.
             norm_pos (str, default="pre"): Normalization placement; one of {"pre", "post"}.
 
@@ -167,14 +171,10 @@ class MojoResidualAddLayerNorm(MojoOperator):
             raise ValueError("norm_pos should be 'pre' or 'post'")
 
         self.variance_epsilon = float(eps)
-        self.weight = (
-            torch.nn.Parameter(torch.empty(hidden_size)) if hidden_size > 0 else None
-        )
-        self.bias = (
-            torch.nn.Parameter(torch.empty(hidden_size)) if hidden_size > 0 else None
-        )
+        self.weight = weight
+        self.bias = bias
         self.norm_pos = norm_pos
-        self.affine = self.weight is not None and self.bias is not None
+        self.affine = weight is not None and bias is not None
 
     def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
         """
