@@ -23,6 +23,7 @@ class TTXCausalConv1dFunction(MojoCausalConv1dFunction):
         activation: str = None,
         cu_seqlens: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        weight = weight.permute(1, 0).contiguous()
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
         ctx.save_for_backward(x, weight, bias, residual, initial_state)
