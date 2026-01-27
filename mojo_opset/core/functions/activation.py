@@ -3,6 +3,22 @@ import torch
 from ..function import MojoFunction
 
 
+class MojoSiluKernel:
+    def forward(a, b, c):
+        pass
+
+    def backward(grad, a, b, c):
+        pass
+
+
+class MojoBigOp(MojoFunction):
+    def forward(
+        ctx,
+    ):
+        a, b = ctx.save_tensors
+        MojoSiluKernel.forward(a, b, c)
+
+
 class MojoSiluFunction(MojoFunction):
     """
     Implements the SiLU (Sigmoid Linear Unit) activation function as default.

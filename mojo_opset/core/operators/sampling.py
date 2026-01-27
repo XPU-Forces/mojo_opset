@@ -76,8 +76,6 @@ class MojoTopPSampling(MojoOperator):
         filter_value: float = -float("Inf"),
         min_tokens_to_keep: int = 1,
         rand_top_k: int = 1000,
-        op_name: str = "",
-        layer_idx: int = 0,
     ):
         """
         Initialize nucleus (top-p) sampling configuration.
@@ -87,13 +85,11 @@ class MojoTopPSampling(MojoOperator):
             filter_value (float, default=-inf): Logit value used to mask filtered tokens.
             min_tokens_to_keep (int, default=1): Minimum tokens retained regardless of `top_p`.
             rand_top_k (int, default=1000): Randomized upper cap for top-k fallback.
-            op_name (str, default=""): Operator name metadata.
-            layer_idx (int, default=0): Layer index metadata.
 
         Notes:
             Stores configuration only; actual sampling logic is implemented elsewhere.
         """
-        super().__init__(op_name, layer_idx)
+        super().__init__()
 
         self.top_p = top_p
         self.filter_value = filter_value
@@ -145,8 +141,6 @@ class MojoTopPFilter(MojoOperator):
     def __init__(
         self,
         filter_value: float = -float("Inf"),
-        op_name: str = "",
-        layer_idx: int = 0,
     ):
         """
         Initialize filtering configuration for sampling operators.
@@ -159,7 +153,7 @@ class MojoTopPFilter(MojoOperator):
         Notes:
             Stores configuration only; actual sampling/masking is handled in `forward`.
         """
-        super().__init__(op_name, layer_idx)
+        super().__init__()
 
         self.filter_value = filter_value
 
@@ -205,9 +199,6 @@ class MojoTopPFilter(MojoOperator):
 
 
 class MojoRejectSampling(MojoOperator):
-    def __init__(self, op_name: str = "", layer_idx: int = 0):
-        super().__init__(op_name, layer_idx)
-
     def forward(
         self,
         target_probs: torch.Tensor,  # [batch, spec_step + 1, vocab_size]
@@ -255,9 +246,6 @@ class MojoRejectSampling(MojoOperator):
 
 
 class MojoJoinProbRejectSampling(MojoOperator):
-    def __init__(self, op_name: str = "", layer_idx: int = 0):
-        super().__init__(op_name, layer_idx)
-
     def forward(
         self,
         target_probs: torch.Tensor,
@@ -312,13 +300,6 @@ class MojoJoinProbRejectSampling(MojoOperator):
 
 
 class MojoApplyPenaltiesTempurate(MojoOperator):
-    def __init__(
-        self,
-        op_name: str = "",
-        layer_idx: int = 0,
-    ):
-        super().__init__(op_name, layer_idx)
-
     def forward(
         self,
         logits: torch.Tensor,

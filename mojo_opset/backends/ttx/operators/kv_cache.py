@@ -13,19 +13,18 @@ class TTXStorePagedKVCache(MojoStorePagedKVCache):
         self,
         key_states: torch.Tensor,
         value_states: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
-        block_tables: torch.Tensor,
-        context_lens: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        cu_seq_lens: torch.Tensor,
+        kv_lens: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        assert self.kv_layout == "NPU_ND", "Only NPU_ND layout is supported."
-
-        store_paged_kv(
+        return store_paged_kv(
             key_states,
             value_states,
-            k_cache,
-            v_cache,
-            block_tables,
-            context_lens,
-            self.block_size,
+            key_cache,
+            value_cache,
+            block_table,
+            cu_seq_lens,
+            kv_lens,
         )

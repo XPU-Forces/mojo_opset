@@ -19,12 +19,12 @@ device = get_platform()
             id="B{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}".format(*test),
         )
         for test in [
-            (2, 64, 128, 3, "swish", True, True, torch.float16),
-            (2, 128, 128, 4, "swish", False, True, torch.float16),
-            (2, 64, 128, 3, "swish", True, False, torch.float16),
-            (2, 128, 128, 4, "swish", False, False, torch.float16),
-            (2, 64, 128, 3, None, True, False, torch.float16),
-            (3, 1446, 256, 4, None, False, False, torch.float16),
+            (2, 64, 1024, 3, "swish", True, True, torch.float16),
+            (2, 128, 8192, 4, "swish", False, True, torch.float16),
+            (2, 64, 8192, 3, "swish", True, False, torch.float16),
+            (2, 128, 4096, 4, "swish", False, False, torch.float16),
+            (2, 64, 8192, 3, None, True, False, torch.float16),
+            (3, 1446, 8192, 4, None, False, False, torch.float16),
         ]
     ],
 )
@@ -72,12 +72,16 @@ def test_conv(
     [
         pytest.param(*test, id="N{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}".format(*test))
         for test in [
-            (4, 500, 128, 3, "silu", True, False, torch.float16),
-            (3, 1024, 200, 4, "silu", False, False, torch.float16),
-            (4, 500, 128, 3, None, True, False, torch.float16),
-            (4, 1024, 128, 4, None, False, False, torch.float16),
+            (4, 500, 1024, 3, "silu", True, False, torch.float16),
+            (3, 1024, 256, 4, "silu", False, False, torch.float16),
+            (4, 500, 1024, 3, None, True, False, torch.float16),
+            (4, 1024, 1024, 4, None, False, False, torch.float16),
             (5, 8192, 8192, 4, None, False, False, torch.float32),
             (3, 7666, 8192, 4, None, False, False, torch.float32),
+            (5, 12291, 8192, 4, None, False, False, torch.bfloat16),
+            (5, 12291, 8192, 4, "silu", False, False, torch.bfloat16),
+            (6, 11357, 8192, 4, None, False, False, torch.bfloat16),
+            (9, 10287, 8192, 4, "silu", False, False, torch.bfloat16),
         ]
     ],
 )

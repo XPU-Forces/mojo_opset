@@ -1,3 +1,4 @@
+from .convolution import causal_conv1d_update_bdt_fwd
 from .diffution_attention import diffusion_attention_bwd_impl
 from .diffution_attention import diffusion_attention_fwd_impl
 from .flash_attention import paged_attention_decode_impl
@@ -25,6 +26,7 @@ from .swiglu import swiglu_bwd_impl
 from .swiglu import swiglu_fwd_impl
 
 __all__ = [
+    "causal_conv1d_update_bdt_fwd",
     "paged_attention_decode_impl",
     "paged_attention_prefill_impl",
     "fused_linear_cross_entropy_bwd_impl",
@@ -51,3 +53,7 @@ __all__ = [
     "k_grouped_matmul_impl",
     "store_paged_kv_impl",
 ]
+
+from mojo_opset.backends.ttx.kernels.utils import tensor_device_guard_for_triton_kernel
+# NOTE(liuyuan): Automatically add guard to torch tensor for triton kernels.
+tensor_device_guard_for_triton_kernel(__path__, __name__)

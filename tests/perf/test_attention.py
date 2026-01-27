@@ -3,12 +3,11 @@ import math
 import pytest
 import torch
 
-from tests.utils import auto_switch_platform
-from tests.utils import bypass_not_implemented
-
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoSdpa
+from tests.utils import auto_switch_platform
+from tests.utils import bypass_not_implemented
 
 
 def generate_paged_decode_data(
@@ -94,21 +93,7 @@ def test_paged_decode_gqa(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
-    paged_attn_decode_ref = MojoPagedDecodeGQA(
-        is_causal=True,
-        gqa_layout=gqa_layout,
-    )._registry.get("torch")()
 
-    perf(  # noqa: F821
-        lambda: paged_attn_decode_ref(
-            query,
-            k_cache,
-            v_cache,
-            seqlens,
-            block_tables,
-            softmax_scale=sm_scale,
-        )
-    )
     perf(  # noqa: F821
         lambda: paged_attn_decode(
             query,
@@ -218,24 +203,10 @@ def test_paged_prefill_gqa(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
-    paged_attn_prefill_ref = MojoPagedPrefillGQA(
-        is_causal=True,
-        gqa_layout=gqa_layout,
-    )._registry.get("torch")()
 
     head_dim = query.shape[-1]
     sm_scale = 1.0 / math.sqrt(head_dim)
 
-    perf(  # noqa: F821
-        lambda: paged_attn_prefill_ref(
-            query,
-            k_cache,
-            v_cache,
-            cu_seqlens_q,
-            block_tables,
-            softmax_scale=sm_scale,
-        )
-    )
     perf(  # noqa: F821
         lambda: paged_attn_prefill(
             query,
@@ -254,7 +225,6 @@ def generate_test_data(
     kv_head_num: int,
     head_dim: int,
     seq_length: int,
-    block_size: int,
 ):
     query = torch.randn(bsz, q_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=False)
     key = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=torch.bfloat16, requires_grad=False)
@@ -270,10 +240,9 @@ def generate_test_data(
             *generate_test_data(
                 bsz=1,
                 q_head_num=8,
-                kv_head_num=1,
+                kv_head_num=2,
                 head_dim=128,
                 seq_length=8192,
-                block_size=32,
             )
         ),
     ],
@@ -286,11 +255,7 @@ def test_sdpa(
     blockwise_diffusion_attn_mask: torch.Tensor,
     enable_gqa: bool,
 ):
-    diffusion_attn_ref = MojoSdpa._registry.get("ref")(
-        mask=blockwise_diffusion_attn_mask, scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
-    )
     diffusion_attn = MojoSdpa(
         mask=blockwise_diffusion_attn_mask, scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
     )
-    perf(lambda: diffusion_attn_ref(query, key, value))
-    perf(lambda: diffusion_attn(query, key, value))
+    perf(lambda: diffusion_attn(query, key, value))  # noqa: F821
