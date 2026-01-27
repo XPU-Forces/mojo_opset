@@ -721,7 +721,6 @@ def causal_conv1d_update_kernel_bdt_fwd(
                 nst_off_y1_h = tl.arange(0, ST_STORE_HEAD_TILE_SIZE)[None, :]
                 nst_mask_h = (nst_off_y0 < dim) & (nst_off_y1_h >= 0) & (nst_off_y1_h < state_len) 
                 block_ptr_h = bi * dim * state_len + nst_off_y0 * state_len + nst_off_y1_h
-                tl.static_assert(block_ptr_h.dtype == tl.int32, "Offsets must be int32 for performance!")
                 tl.store(conv_state_ptr + block_ptr_h, x_new_h, mask = nst_mask_h)
             else:
                 x_new_s = tl.extract_slice(x_b, (width - 1, 0), (T_CHK_SIZE, D_CHK_SIZE), (1, 1))
@@ -730,8 +729,6 @@ def causal_conv1d_update_kernel_bdt_fwd(
                 nst_off_y1 = width - 1 + t_off + tl.arange(0, T_CHK_SIZE)[None, :]
                 nst_mask = (nst_off_y0 < dim) & (nst_off_y1 >= 0) & (nst_off_y1 < state_len) 
                 block_ptr = bi * dim * state_len + nst_off_y0 * state_len + nst_off_y1
-                tl.static_assert(block_ptr.dtype == tl.int32, "Offsets must be int32 for performance!")
-                # block_ptr = tl.maximum(block_ptr, 0)
                 tl.store(conv_state_ptr + block_ptr, x_new_s, mask = nst_mask)
 
         for owi in tl.range(0, width):
