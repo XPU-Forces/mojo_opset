@@ -10,6 +10,7 @@ from tests.utils import auto_switch_platform, bypass_not_implemented
 dtype_str_map = {
     "bfloat16": torch.bfloat16,
     "float32": torch.float32,
+    "float16": torch.float16,
 }
 
 
@@ -17,12 +18,15 @@ dtype_str_map = {
     "batch, seq_len, head_dim, dtype,",
     [
         (
-            2,
-            1024,
-            64,
+            batch,
+            seq_len,
+            head_dim,
             dtype,
         )
-        for dtype in ["bfloat16", "float32"]
+        for batch in [1, 4]
+        for seq_len in [256, 334, 512, 777, 973, 1024, 2048, 2233, 8192, 16384]
+        for head_dim in [64, 128]
+        for dtype in ["bfloat16", "float16", "float32"]
     ],
 )
 @auto_switch_platform()
