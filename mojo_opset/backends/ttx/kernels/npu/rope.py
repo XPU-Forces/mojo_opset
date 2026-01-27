@@ -6,6 +6,8 @@ import triton.language as tl
 
 from triton.runtime.libentry import libentry
 
+from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
+
 
 @triton.autotune(
     configs=[
@@ -220,15 +222,23 @@ def rope_fwd_impl(
     cos: torch.Tensor,  # [BSD]
     sin: torch.Tensor,  # [BSD]
 ) -> Tuple[torch.Tensor, torch.Tensor]:  # [BNSD]
-    q_t = q.transpose(1, 2).contiguous()
-    k_t = k.transpose(1, 2).contiguous()
+    seq_len, head_dim = sin.shape[-2], sin.shape[-1]
+
+    if q.shape[2] == seq_len:  # [B, N, S, D]
+        q_t = q.transpose(1, 2).contiguous()
+        k_t = k.transpose(1, 2).contiguous()
+    else:
+        assert q.shape[1] == seq_len  # [B, S, N, D]
+        q_t = q.contiguous()
+        k_t = k.contiguous()
+
     q_rope = torch.empty_like(q_t)
     k_rope = torch.empty_like(k_t)
 
-    batch_size, seq_len, n_q_head, head_dim = q_t.shape
+    batch_size, _, n_q_head, _ = q_t.shape
     n_kv_head = k_t.shape[2]
 
-    num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
+    num_programs = get_num_cores("vector")
     grid = (num_programs,)
 
     cos_batch_size = cos.shape[0]
@@ -266,19 +276,26 @@ def rope_bwd_impl(
     sin: torch.Tensor,
     cos: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    dq_t = dq.transpose(1, 2).contiguous()
-    dk_t = dk.transpose(1, 2).contiguous()
+    seq_len, head_dim = sin.shape[-2], sin.shape[-1]
+
+    if dq.shape[2] == seq_len:  # [B, N, S, D]
+        dq_t = dq.transpose(1, 2).contiguous()
+        dk_t = dk.transpose(1, 2).contiguous()
+    else:
+        assert dq.shape[1] == seq_len  # [B, S, N, D]
+        dq_t = dq.contiguous()
+        dk_t = dk.contiguous()
 
     grad_q = torch.empty_like(dq_t)
     grad_k = torch.empty_like(dk_t)
 
-    batch_size, seq_len, n_q_head, head_dim = dq_t.shape
+    batch_size, _, n_q_head, _ = dq_t.shape
     n_kv_head = dk_t.shape[2]
     cos_batch_size = cos.shape[0]
     cos = cos.contiguous()
     sin = sin.contiguous()
 
-    num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
+    num_programs = get_num_cores("vector")
     grid = (num_programs,)
 
     _rope_backward_kernel[grid](
