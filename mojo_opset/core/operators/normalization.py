@@ -22,6 +22,7 @@ class MojoLayerNorm(MojoOperator):
             eps (float, default=1e-5): Epsilon added to the variance for numerical stability; must be > 0.
             weight(torch.Tensor, torch.nn.Parameter): The user-specified weight if given. Default to None.
             bias(torch.Tensor, torch.nn.Parameter): The user-specified bias if given. Default to None.
+            **kwargs: The keyword arguments of torch.empty, such as device, dtype and so on to create the weight and bias.
 
         Notes:
             - `weight` and `bias` must be 1-D and match the last dimension D of the input; mismatches
@@ -77,6 +78,7 @@ class MojoRMSNorm(MojoOperator):
             hidden_size (int): Size of 1-D affine scale vector.
             eps (float, default=1e-5): Epsilon added for numerical stability; must be > 0.
             weight(torch.Tensor, torch.nn.Parameter): The user-specified weight if given. Default to None.
+            **kwargs: The keyword arguments of torch.empty, such as device, dtype and so on to create the weight and bias.
 
         Notes:
             - `weight` must be 1-D and match the last dimension D of the input; mismatches
@@ -132,6 +134,7 @@ class MojoResidualAddRMSNorm(MojoOperator):
             eps (float, default=1e-05): Epsilon for numerical stability; must be > 0.
             norm_pos (str, default="pre"): Normalization placement; one of {"pre", "post"}.
             weight(torch.Tensor, torch.nn.Parameter): The user-specified weight if given. Default to None.
+            **kwargs: The keyword arguments of torch.empty, such as device, dtype and so on to create the weight and bias.
 
         Behavior:
             - norm_pos="pre": residual = hidden_state + residual; hidden_state = rms_norm(residual).
@@ -192,6 +195,7 @@ class MojoResidualAddLayerNorm(MojoOperator):
             norm_pos (str, default="pre"): Normalization placement; one of {"pre", "post"}.
             weight(torch.Tensor, torch.nn.Parameter): The user-specified weight if given. Default to None.
             bias(torch.Tensor, torch.nn.Parameter): The user-specified bias if given. Default to None.
+            **kwargs: The keyword arguments of torch.empty, such as device, dtype and so on to create the weight and bias.
 
         Behavior:
             - norm_pos="pre": residual = hidden_state + residual; hidden_state = layer_norm(residual).
