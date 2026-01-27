@@ -1,5 +1,4 @@
 import os
-
 from abc import ABC
 from abc import abstractmethod
 from typing import Any
@@ -61,6 +60,7 @@ class MojoOperator(ABC, torch.nn.Module):
         *args,
         atol: float = 1e-2,
         rtol: float = 1e-2,
+        ptol: float = 1.0,
         random_seed: int = 42,
         mixed_tol: bool = False,
         **kwargs,
@@ -71,10 +71,12 @@ class MojoOperator(ABC, torch.nn.Module):
             other_op: The other operator to compare with.
             atol: The absolute tolerance.
             rtol: The relative tolerance.
+            ptol: The percentage tolerance. When match_ratio >= ptol is considered as passing.
             random_seed: The random seed to use.
             **kwargs: The keyword arguments to pass to self.forward.
         """
         # for some cases, we expect std & ref impl share the same random seed init state, i.e. sampling.
+        os.environ['PYTHONHASHSEED'] = str(random_seed)
         torch.manual_seed(random_seed)
         # maybe inplace, deep copy is needed.
         args_for_std = tuple(arg.clone() if isinstance(arg, torch.Tensor) else arg for arg in args)
@@ -93,21 +95,40 @@ class MojoOperator(ABC, torch.nn.Module):
         if isinstance(norm_result, tuple) or isinstance(norm_result, list):
             for norm, ref in zip(norm_result, refs_result):
                 if mixed_tol:
-                    mask = ref.abs() < 1.0
-                    tmpatol = tmprtol = 2**-6
-                    torch.testing.assert_close(norm[mask], ref[mask], atol=tmpatol, rtol=0)
-                    torch.testing.assert_close(norm[~mask], ref[~mask], atol=0, rtol=tmprtol)
+                    check_mixed_tol_diff(norm, ref)
+                if ptol != 1.0:
+                    check_percentage_tol_diff(norm, ref, atol=atol, rtol=rtol, ptol=ptol)
                 else:
                     torch.testing.assert_close(norm.to(torch.float32), ref.to(torch.float32), atol=atol, rtol=rtol)
         else:
             if mixed_tol:
-                mask = refs_result.abs() < 1.0
-                tmpatol = tmprtol = 2**-6
-                torch.testing.assert_close(norm_result[mask], refs_result[mask], atol=tmpatol, rtol=0)
-                torch.testing.assert_close(norm_result[~mask], refs_result[~mask], atol=0, rtol=tmprtol)
+                check_mixed_tol_diff(norm_result, refs_result)
+            if ptol != 1.0:
+                check_percentage_tol_diff(norm_result, refs_result, atol=atol, rtol=rtol, ptol=ptol)
             else:
                 torch.testing.assert_close(
                     norm_result.to(torch.float32), refs_result.to(torch.float32), atol=atol, rtol=rtol
                 )
 
         return norm_result
+
+
+def check_mixed_tol_diff(norm, ref):
+    mask = ref.abs() < 1.0
+    tmpatol = tmprtol = 2**-6
+    torch.testing.assert_close(norm[mask], ref[mask], atol=tmpatol, rtol=0)
+    torch.testing.assert_close(norm[~mask], ref[~mask], atol=0, rtol=tmprtol)
+
+
+def check_percentage_tol_diff(norm, ref, atol, rtol, ptol):
+    ptol = min(1.0, max(0.9, ptol))
+
+    matches = torch.isclose(norm, ref, rtol=rtol, atol=atol)
+    total = matches.numel()
+    match = int(torch.sum(matches))
+    mismatch = total - match
+    match_ratio = match / total
+
+    assert (
+        match_ratio >= ptol
+    ), f"{match_ratio=:.5%} ({match=} / {mismatch=} / {total=}) is under {ptol=:%}, Please Check!"
