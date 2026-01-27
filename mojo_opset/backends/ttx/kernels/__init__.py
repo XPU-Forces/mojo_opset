@@ -29,6 +29,8 @@ rope_bwd_impl = getattr(ttx_backend_module, "rope_bwd_impl")
 swiglu_fwd_impl = getattr(ttx_backend_module, "swiglu_fwd_impl")
 swiglu_bwd_impl = getattr(ttx_backend_module, "swiglu_bwd_impl")
 
+quant_int8_infer_impl = getattr(ttx_backend_module, "quant_int8_infer_impl")
+
 rmsnorm_fwd_impl = getattr(ttx_backend_module, "rmsnorm_fwd_impl")
 rmsnorm_bwd_impl = getattr(ttx_backend_module, "rmsnorm_bwd_impl")
 rmsnorm_infer_impl = getattr(ttx_backend_module, "rmsnorm_infer_impl")
@@ -229,6 +231,18 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         cos: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(dq), torch.empty_like(dk)
+
+
+    # ====================================
+    # Register Quant
+    # ====================================
+    @torch.library.custom_op("ttx::quant_int8_infer", mutates_args={})
+    def quant_int8_infer(
+        input_tensor: torch.Tensor,
+        scale_tensor: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return quant_int8_infer_impl(input_tensor, scale_tensor)
+
 
     # ====================================
     # Register rmsnorm
@@ -625,6 +639,7 @@ else:
     paged_attention_decode = paged_attention_decode_impl
     rope_fwd = rope_fwd_impl
     rope_bwd = rope_bwd_impl
+    quant_int8_infer = quant_int8_infer_impl
     rmsnorm_fwd = rmsnorm_fwd_impl
     rmsnorm_bwd = rmsnorm_bwd_impl
     rmsnorm_infer = rmsnorm_infer_impl
