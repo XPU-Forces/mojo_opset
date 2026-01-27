@@ -10,14 +10,14 @@ from tests.utils import assert_close
 
 @auto_switch_platform(set_perf=True)
 def test_paged_prefill_quest():
-    MAX_QLEN = 1024
+    MAX_QLEN = 16384
     HEAD_DIM = 128
     Q_HEAD_NUM = 8
     KV_HEAD_NUM = 1
     PAGE_SIZE = 128
-    MAX_PAGE = 20
+    MAX_PAGE = 256
     Q_SEG_SIZE = int(os.environ.get("Q_SEG_SIZE", 1024))
-    TOPK_RATIO = float(os.environ.get("TOPK_RATIO", 1))
+    TOPK_RATIO = float(os.environ.get("TOPK_RATIO", 0.25))
     RECENT_WINDOW = int(os.environ.get("RECENT_WINDOW", 128))
     assert RECENT_WINDOW >= 0
     page_rep = os.environ.get("PAGE_REP", "default_value")
@@ -29,7 +29,7 @@ def test_paged_prefill_quest():
     key_cache = torch.randn(MAX_PAGE, KV_HEAD_NUM, PAGE_SIZE, HEAD_DIM).npu().bfloat16()
     value_cache = torch.randn(MAX_PAGE, KV_HEAD_NUM, PAGE_SIZE, HEAD_DIM).npu().bfloat16()
 
-    for BSZ, kv_len0, q_len0 in [(1, 128*10, 128*8)]:
+    for BSZ, kv_len0, q_len0 in [(2, 4999, 3999)]:
         kv_len = [kv_len0 + i * 100 for i in range(BSZ)]
         q_len_list = [q_len0 + i * 100 for i in range(BSZ)]
         kv_idx = [
@@ -530,23 +530,23 @@ def mojo_block_quest(
 
     topk_page_indices_debug = topk_page_idxs
 
-    block_sparse_config = (
-        whole_causal, page_size, q_seg_size, head_size, q_head_num, kv_head_num, qk_scale
-    )
-    block_sparse_inputs = (
-        query,
-        key_cache,
-        value_cache,
-        cu_seqlen_q,
-        cu_seqlen_kv,
-        None,
-        kv_cache_indices,
-        q_chunk_idx,
-        num_sparse_pages,
-        topk_page_idxs,
-        cu_num_topk_pages_per_seg,
-    )
-    torch.save({"config": block_sparse_config, "inputs": block_sparse_inputs}, "inputs.pt")
+    # block_sparse_config = (
+    #     whole_causal, page_size, q_seg_size, head_size, q_head_num, kv_head_num, qk_scale
+    # )
+    # block_sparse_inputs = (
+    #     query,
+    #     key_cache,
+    #     value_cache,
+    #     cu_seqlen_q,
+    #     cu_seqlen_kv,
+    #     None,
+    #     kv_cache_indices,
+    #     q_chunk_idx,
+    #     num_sparse_pages,
+    #     topk_page_idxs,
+    #     cu_num_topk_pages_per_seg,
+    # )
+    # torch.save({"config": block_sparse_config, "inputs": block_sparse_inputs}, "inputs.pt")
 
     expects = block_sparse_attention(
         query,
@@ -617,7 +617,7 @@ def mojo_block_quest(
             cu_num_topk_pages_per_seg,
         )
     
-    # perf(perf_quest_sparse)
+    perf(perf_quest_sparse)
 
     def perf_fa_with_kvcache():
         # Query: [N, T, D]
@@ -650,11 +650,11 @@ def mojo_block_quest(
 
 
 if __name__ == "__main__":
-    # test_paged_prefill_quest()
-    the_io = torch.load("inputs.pt")
-    from mojo_opset.core import MojoPagedPrefillBlockSparseAttention
+    test_paged_prefill_quest()
+    # the_io = torch.load("inputs.pt")
+    # from mojo_opset.core import MojoPagedPrefillBlockSparseAttention
 
-    block_sparse_attention = MojoPagedPrefillBlockSparseAttention(*the_io["config"])
-    expects = block_sparse_attention(
-        *the_io["inputs"]
-    )
+    # block_sparse_attention = MojoPagedPrefillBlockSparseAttention(*the_io["config"])
+    # expects = block_sparse_attention(
+    #     *the_io["inputs"]
+    # )

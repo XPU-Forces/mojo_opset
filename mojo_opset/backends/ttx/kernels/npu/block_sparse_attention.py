@@ -716,6 +716,8 @@ def block_sparse_attention_paged_prefill_impl(
         BLOCK_SIZE_M=128,  # dummy, for test
         BLOCK_SIZE_N=128,  # dummy, for test
         AUX_MASK_SIZE=mask_block_size,
+        limit_auto_multi_buffer_only_for_local_buffer=False,
+        set_workspace_multibuffer=4,
     )
     # num_blocks_per_chunk = (q_chunk_size + 127)  // 128
     # num_blocks = total_q_chunks * q_head_num * num_blocks_per_chunk
