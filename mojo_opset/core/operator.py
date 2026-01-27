@@ -71,7 +71,7 @@ class MojoOperator(ABC, torch.nn.Module):
             other_op: The other operator to compare with.
             atol: The absolute tolerance.
             rtol: The relative tolerance.
-            ptol: The percentage tolerance. When match_ratio >= ptol is considered as passing.
+            ptol: The percentage tolerance. When match_ratio >= ptol is considered to pass.
             random_seed: The random seed to use.
             **kwargs: The keyword arguments to pass to self.forward.
         """
