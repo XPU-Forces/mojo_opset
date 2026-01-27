@@ -10,7 +10,63 @@ from ..operator import MojoOperator
 
 
 class MojoTopKSampling(MojoOperator):
-    pass
+    def __init__(
+        self,
+        top_k: int = 50,
+        filter_value: float = -float("Inf"),
+        min_tokens_to_keep: int = 1,
+        op_name: str = "",
+        layer_idx: int = 0,
+    ):
+        """Initialize top-k sampling configuration.
+
+        Args:
+            top_k (int, default=50): Number of highest-logit tokens to keep.
+            filter_value (float, default=-inf): Logit value used to mask filtered tokens.
+            min_tokens_to_keep (int, default=1): Minimum tokens retained regardless of `top_k`.
+            op_name (str, default=""): Operator name metadata.
+            layer_idx (int, default=0): Layer index metadata.
+
+        Notes:
+            Stores configuration only; actual sampling happens in `forward`.
+        """
+        super().__init__(op_name, layer_idx)
+
+        self.top_k = top_k
+        self.filter_value = filter_value
+        self.min_tokens_to_keep = min_tokens_to_keep
+
+    def forward(self, logits: torch.Tensor) -> Tuple[Any]:
+        """Perform top-k sampling over the last dimension of logits.
+
+        Args:
+            logits (torch.Tensor): Logits of shape (..., V) where the last dimension
+                `V` is the vocabulary size. Cast to float32 for numerical stability.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: `(next_probs, next_tokens)` where each has
+            shape (..., 1). `next_tokens` contains sampled token indices; `next_probs`
+            contains the corresponding probabilities.
+
+        Notes:
+            - Caps K to `min(self.top_k, V)`.
+            - Ensures at least `min_tokens_to_keep` tokens are kept.
+            - Sampling uses `torch.multinomial` over the top-k probability distribution.
+        """
+        logits = logits.to(torch.float32)
+        top_k = min(self.top_k, logits.size(-1))
+        top_k = max(top_k, self.min_tokens_to_keep)
+
+        sorted_topk_logits, sorted_topk_indices = torch.topk(logits, top_k)
+
+        final_probs_dist = torch.nn.functional.softmax(sorted_topk_logits, dim=-1)
+
+        select_index = torch.multinomial(final_probs_dist, num_samples=1)
+
+        next_tokens = torch.gather(sorted_topk_indices, dim=-1, index=select_index)
+        next_probs = torch.gather(final_probs_dist, dim=-1, index=select_index)
+
+        return next_probs, next_tokens
 
 
 class MojoTopPSampling(MojoOperator):
