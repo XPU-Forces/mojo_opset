@@ -2,6 +2,97 @@ import torch
 import triton
 import triton.language as tl
 
+@triton.jit
+def _top_k_sample_kernel(
+    sorted_logits_ptr,
+    sorted_indices_ptr,
+    rand_data_ptr,
+    output_ptr,
+    output_probs_ptr,
+    filter_value,
+    min_tokens_to_keep,
+    stride_logits_b,
+    stride_logits_k,
+    stride_indices_b,
+    stride_indices_k,
+    stride_rand_b,
+    stride_rand_k,
+    stride_out0_b,
+    stride_out0_k,
+    stride_out1_b,
+    stride_out1_k,
+    TOP_K: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    row_logits_ptr = sorted_logits_ptr + pid * stride_logits_b
+    offsets = tl.arange(0, TOP_K)
+
+    logits = tl.load(row_logits_ptr + offsets * stride_logits_k)
+
+    logits_max = tl.max(logits, 0)
+    numerator = tl.exp(logits - logits_max)
+    probs = numerator / tl.sum(numerator, 0)
+    
+    row_rand_ptr = rand_data_ptr + pid * stride_rand_b
+    row_scores_ptr = output_ptr + pid * stride_out0_b
+    row_probs_ptr = output_probs_ptr + pid * stride_out1_b
+
+    noise = tl.load(row_rand_ptr + offsets * stride_rand_k)
+    eps = 1e-9
+    scores = probs / (noise + eps)
+
+    tl.store(row_scores_ptr + offsets * stride_out0_k, scores)
+    tl.store(row_probs_ptr + offsets * stride_out1_k, probs)
+    
+
+def top_k_sampling_impl(
+    logits: torch.FloatTensor,
+    top_k: int = 50,
+    filter_value: float = -float("Inf"),
+    min_tokens_to_keep: int = 1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    device = logits.device
+    logits = logits.to(torch.float32)
+    batch_size, _ = logits.shape
+
+    sorted_logits, sorted_topk_indices = torch.topk(logits, top_k)
+
+    rand_data = torch.rand_like(sorted_logits, device=device)
+
+    output_scores = torch.empty_like(sorted_logits)
+    output_final_probs = torch.empty_like(sorted_logits)
+
+    grid = (batch_size,)
+    _top_k_sample_kernel[grid](
+        sorted_logits,
+        sorted_topk_indices,
+        rand_data,
+        output_scores,
+        output_final_probs,
+        filter_value,
+        min_tokens_to_keep,
+        sorted_logits.stride(0),
+        sorted_logits.stride(1),
+        sorted_topk_indices.stride(0),
+        sorted_topk_indices.stride(1),
+        rand_data.stride(0),
+        rand_data.stride(1),
+        output_scores.stride(0),
+        output_scores.stride(1),
+        output_final_probs.stride(0),
+        output_final_probs.stride(1),
+        TOP_K=top_k,
+    )
+
+    sampled_index_in_topk = torch.argmax(output_scores, dim=-1, keepdim=True)
+
+    output_tokens = torch.gather(sorted_topk_indices, -1, sampled_index_in_topk)
+
+    output_probs = torch.gather(output_final_probs, -1, sampled_index_in_topk)
+
+    return output_probs, output_tokens
+
 
 @triton.jit
 def _top_p_sample_kernel(
