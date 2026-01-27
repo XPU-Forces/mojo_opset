@@ -5,6 +5,7 @@ from triton.runtime.libentry import libentry
 
 from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 
+
 def lightning_index_impl(
     query: torch.Tensor,
     query_scale: torch.Tensor,
@@ -48,8 +49,11 @@ def lightning_index_impl(
     )
     return output
 
+
 @triton.autotune(
     configs=[
+        triton.Config({"BLOCK_SIZE_N": 16}),
+        triton.Config({"BLOCK_SIZE_N": 32}),
         triton.Config({"BLOCK_SIZE_N": 64}),
         triton.Config({"BLOCK_SIZE_N": 128}),
         triton.Config({"BLOCK_SIZE_N": 256}),
@@ -124,7 +128,7 @@ def lightning_index_kernel(
         offs_h = tl.arange(0, H)
         offs_k = tl.arange(0, K)
         offs_n = tl.arange(0, BLOCK_SIZE_N)
-        
+
         key_ptrs = (
             key_ptr
             + batch_idx * key_stride_b
@@ -145,7 +149,7 @@ def lightning_index_kernel(
         k_scale = tl.load(key_scale_ptrs, mask=mask[:, None], other=0.0)
 
         k = k * k_scale
-        
+
         query_ptrs = (
             query_ptr
             + batch_idx * query_stride_b
@@ -156,7 +160,7 @@ def lightning_index_kernel(
         q = tl.load(query_ptrs)
 
         relu_qk = tl.maximum(tl.dot(q.to(k.dtype), tl.trans(k)), 0.0)
-        
+
         query_scale_ptrs = (
             query_scale_ptr
             + batch_idx * query_scale_stride_b

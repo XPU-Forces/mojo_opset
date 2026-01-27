@@ -625,8 +625,8 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         query_scale: torch.Tensor,
         key: torch.Tensor,
         key_scale: Optional[torch.Tensor] = None,
-    )  -> torch.Tensor:
-        return lightning_index_impl(query, query_scale, key, key_scale)\
+    ) -> torch.Tensor:
+        return lightning_index_impl(query, query_scale, key, key_scale)
     
     @lightning_index.register_fake
     def lightning_index_fake(
@@ -634,7 +634,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         query_scale: torch.Tensor,
         key: torch.Tensor,
         key_scale: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         batch_size, q_seq_len, _, _ = query.shape
         k_seq_len = key.shape[1]
         return torch.empty(batch_size, q_seq_len, k_seq_len, dtype=torch.float32, device=query.device)
