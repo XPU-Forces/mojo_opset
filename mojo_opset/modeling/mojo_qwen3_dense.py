@@ -196,7 +196,7 @@ class Qwen3Attention(nn.Module):
             hidden_size=self.head_dim,
             eps=config.rms_norm_eps,
         )
-        self.rope = MojoRoPE(rotary_offset=0, interleaved=False, is_varlen=False)
+        self.rope = MojoRoPE()
         self.attn_prefill = MojoPagedPrefillGQA()
         self.attn_decode = MojoPagedDecodeGQA()
 
