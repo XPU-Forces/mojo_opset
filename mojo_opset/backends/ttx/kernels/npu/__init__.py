@@ -22,6 +22,7 @@ from .sdpa import sdpa_fwd_impl
 from .sdpa import sdpa_infer_impl
 from .silu import silu_bwd_impl
 from .silu import silu_fwd_impl
+from .store_lowrank import store_label_cache_fwd_impl
 from .swiglu import swiglu_bwd_impl
 from .swiglu import swiglu_fwd_impl
 
@@ -52,6 +53,7 @@ __all__ = [
     "m_grouped_matmul_impl",
     "k_grouped_matmul_impl",
     "store_paged_kv_impl",
+    "store_label_cache_fwd_impl",
 ]
 
 from mojo_opset.backends.ttx.kernels.utils import tensor_device_guard_for_triton_kernel
