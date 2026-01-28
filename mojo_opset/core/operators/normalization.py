@@ -6,12 +6,10 @@ from ..operator import MojoOperator
 def layernrom_initialize_weigth(self, hidden_size, **kwargs):
     for k, v in kwargs.items():
         if v is None:
-            v = torch.nn.Parameter(
-                torch.empty(hidden_size, **self.tensor_factory_kwargs)
-            )
+            v = torch.empty(hidden_size, **self.tensor_factory_kwargs)
         else:
             assert v.size(0) == hidden_size
-        setattr(self, k, v)
+        self.register_parameter(k, torch.nn.Parameter(v))
 
 
 class MojoLayerNorm(MojoOperator):
