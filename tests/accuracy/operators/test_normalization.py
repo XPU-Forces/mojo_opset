@@ -37,9 +37,8 @@ dtypes = [torch.float32, torch.float16, torch.bfloat16]
 @bypass_not_implemented
 def test_rmsnorm(x, weight, eps):
     rmsnorm = MojoRMSNorm(
-        eps=eps,
-        hidden_size=weight.size(0),
-    ).to(x.device).to(weight.dtype)
+        eps=eps, hidden_size=weight.size(0), device=x.device, dtype=weight.dtype
+    )
 
     rmsnorm_ref = MojoRMSNorm._registry.get("torch")(
         eps=eps,
@@ -73,9 +72,8 @@ def test_rmsnorm(x, weight, eps):
 @bypass_not_implemented
 def test_layernorm(x, weight, bias, eps):
     layernorm = MojoLayerNorm(
-        eps=eps,
-        hidden_size=weight.size(0),
-    ).to(x.device).to(weight.dtype)
+        eps=eps, hidden_size=weight.size(0), dtype=weight.dtype, device=x.device
+    )
 
     layernorm_ref = MojoLayerNorm._registry.get("torch")(
         eps=eps,
@@ -115,6 +113,8 @@ def test_residual_add_rms_norm(x, residual, weight, norm_pos, eps):
         hidden_size=weight.size(0),
         eps=eps,
         norm_pos=norm_pos,
+        device=x.device,
+        dtype=weight.dtype
     )
     add_norm_ref = MojoResidualAddRMSNorm._registry.get("torch")(
         hidden_size=weight.size(0),
@@ -159,15 +159,17 @@ def test_residual_add_layernorm(x, residual, weight, bias, norm_pos, eps):
         hidden_size=weight.size(0),
         eps=eps,
         norm_pos=norm_pos,
+        weight=weight,
+        bias=bias
     )
     add_norm_ref = MojoResidualAddLayerNorm._registry.get("torch")(
         hidden_size=weight.size(0),
         eps=eps,
         norm_pos=norm_pos,
+        weight=weight,
+        bias=bias
     )
 
-    add_norm_ref.weight = add_norm.weight = torch.nn.Parameter(weight)
-    add_norm_ref.bias = add_norm.bias = torch.nn.Parameter(bias)
 
     if x.dtype == torch.float32:
         atol, rtol = 1e-5, 1e-6

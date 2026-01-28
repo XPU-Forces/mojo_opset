@@ -8,6 +8,7 @@ from typing import Tuple
 import torch
 
 from mojo_opset.utils.logging import get_logger
+from mojo_opset.utils.misc import get_tensor_factory_kwargs
 
 logger = get_logger(__name__)
 
@@ -47,9 +48,10 @@ class MojoOperator(ABC, torch.nn.Module):
         else:
             return super().__new__(cls)
 
-    def __init__(self):
+    def __init__(self, **kwargs):
         torch.nn.Module.__init__(self)
         ABC.__init__(self)
+        self.tensor_factory_kwargs = get_tensor_factory_kwargs(**kwargs)
 
     @abstractmethod
     def forward(self, *args, **kwargs) -> Tuple[Any]:
