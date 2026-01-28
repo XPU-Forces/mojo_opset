@@ -15,6 +15,14 @@ def _apply_optional_smooth_scale(input_fp: torch.Tensor, smooth_scale: Optional[
         scale_fp = scale_fp.unsqueeze(0)
     return input_fp * scale_fp
 
+def layernrom_initialize_weigth(self, hidden_size, **kwargs):
+    for k, v in kwargs.items():
+        if v is None:
+            v = torch.empty(hidden_size, **self.tensor_factory_kwargs)
+        else:
+            assert v.size(0) == hidden_size
+        self.register_parameter(k, torch.nn.Parameter(v))
+
 
 class MojoLayerNorm(MojoOperator):
     def __init__(
