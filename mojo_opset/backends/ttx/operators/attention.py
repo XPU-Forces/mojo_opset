@@ -13,12 +13,19 @@ from mojo_opset.core import MojoSdpa
 class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
     supported_platforms_list = ["npu"]
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        AUX_MASK_SIZE=1024
+        self.aux_mask = torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE*3, dtype=torch.bool).tril(AUX_MASK_SIZE).npu()
+
+
     def forward(
         self,
         query: torch.Tensor,
         k_cache: torch.Tensor,
         v_cache: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
+        seqlens_kv: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
     ):
@@ -36,8 +43,10 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
             k_cache=k_cache,
             v_cache=v_cache,
             cu_seqlens_q=cu_seqlens_q,
+            seqlens_kv=seqlens_kv,
             block_tables=block_tables,
             sm_scale=softmax_scale,
+            aux_mask=self.aux_mask,
         )
 
         return output
