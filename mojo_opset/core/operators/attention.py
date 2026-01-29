@@ -283,6 +283,11 @@ class MojoPagedPrefillMLA(MojoOperator):
         self.is_causal = is_causal
         self.window_size = window_size
 
+        # NOTE: implementation of forward currently operates under the condition that is_causal and window_size are defaults.
+        # assert
+        assert self.is_causal == True, "is_casual should be True."
+        assert self.window_size == -1, "window_size should be -1."
+
     def forward(
         self,
         query: torch.Tensor,
