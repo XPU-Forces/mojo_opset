@@ -7,6 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
+MAX_BLOCK_C = 64
 
 @cache
 def get_device_properties() -> Tuple[int, int]:
@@ -855,6 +856,7 @@ def kernel_da_bwd_kv_ur(
     cu_seqlens,
     num_seqs,
     scale,
+    full_mask,
     GROUP_SIZE: tl.constexpr,
     S: tl.constexpr,
     N: tl.constexpr,
@@ -885,10 +887,9 @@ def kernel_da_bwd_kv_ur(
 
     offs_r_local = tl.arange(0, BLOCK_C)[:, None]
     offs_c_local = tl.arange(0, BLOCK_C)[None, :]
-    chunk_idx_r = offs_r_local // BLOCK_SIZE
-    chunk_idx_c = offs_c_local // BLOCK_SIZE
-    full_block_mask = chunk_idx_r > chunk_idx_c
-
+    MAX_BLOCK_C = 64 # TODO: should be tl.constexpr and determined when mask generation.
+    full_block_mask = tl.load(full_mask + offs_r_local * MAX_BLOCK_C + offs_c_local)
+    
     for idx_seq in range(num_seqs):
         seq_ed = tl.load(cu_seqlens + idx_seq)
         offset_block_c_ed = offset_block_c_st + tl.cdiv(seq_ed - seq_st, BLOCK_C)
@@ -1141,6 +1142,14 @@ def diffusion_attention_up_bwd_impl(
     dk = torch.empty_like(k)
     dv = torch.empty_like(v)
 
+    if not hasattr(diffusion_attention_up_bwd_impl, "mask_ur"):
+        print("generate mask_ur")
+        offs_r_local = torch.arange(0, MAX_BLOCK_C)[:, None]
+        offs_c_local = torch.arange(0, MAX_BLOCK_C)[None, :]
+        chunk_idx_r = offs_r_local // BLOCK_SIZE
+        chunk_idx_c = offs_c_local // BLOCK_SIZE
+        diffusion_attention_up_bwd_impl.mask_ur = (chunk_idx_r > chunk_idx_c).to(q.device)
+
     kernel_da_bwd_d[(num_cores,)](
         fp32o,
         do,
@@ -1223,6 +1232,7 @@ def diffusion_attention_up_bwd_impl(
         cu_seqlen,
         cu_seqlen.shape[0],
         scale,
+        diffusion_attention_up_bwd_impl.mask_ur,
         q.shape[1] // k.shape[1],
         q.shape[0] // 2,
         q.shape[1],
