@@ -212,7 +212,7 @@ test_configs = [
         for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs
     ],
 )
-@pytest.mark.parametrize("gqa_layout", ["ABAB"])
+@pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
 @auto_switch_platform()
 @bypass_not_implemented
 def test_paged_prefill_gqa(

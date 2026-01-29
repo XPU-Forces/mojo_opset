@@ -178,8 +178,8 @@ class MojoPagedPrefillGQA(MojoOperator):
             value_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
             cu_seqlens_q (torch.Tensor): Cumulative query lengths, shape (B+1,);
                 `cu_seqlens_q[i]` is the start offset for query at batch i; `cu_seqlens_q[-1] == T`.
-            cu_seqlens_kv (torch.Tensor): Cumulative key/value lengths, shape (B+1,);
-                `cu_seqlens_kv[i]` is the start offset for key/value at batch i; `cu_seqlens_kv[-1] == T`.
+            seqlens_kv (torch.Tensor): key/value lengths, shape (B,);
+                `seqlens_kv[i]` is the length for key/value in key/value cache at batch i.
             block_tables (torch.Tensor): Logical-to-physical block IDs per batch,
                 shape (B, num_blocks).
             softmax_scale (Optional[float]): Attention scaling factor; defaults to 1/sqrt(D).
@@ -230,8 +230,12 @@ class MojoPagedPrefillGQA(MojoOperator):
                 v_unpadded[start_pos_in_seq:end_pos_in_seq, :, :] = v_slice.permute(1, 0, 2)
 
             if num_q_heads != num_kv_heads:
-                k_expanded = k_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=1)
-                v_expanded = v_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=1)
+                if self.gqa_layout == "AABB":
+                    k_expanded = k_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=1)
+                    v_expanded = v_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=1)
+                else:
+                    k_expanded = k_unpadded.repeat((1, num_q_heads // num_kv_heads, 1))
+                    v_expanded = v_unpadded.repeat((1, num_q_heads // num_kv_heads, 1))
             else:
                 k_expanded = k_unpadded
                 v_expanded = v_unpadded

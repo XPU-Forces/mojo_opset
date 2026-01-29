@@ -133,6 +133,7 @@ def paged_prefill_kernel(
     PAGE_SIZE: tl.constexpr,
     NUM_Q_HEADS: tl.constexpr,
     NUM_KV_HEADS: tl.constexpr,
+    GQA_INTERLEAVE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -147,7 +148,10 @@ def paged_prefill_kernel(
     for task_id in range(pid, num_tasks, n_progs):
         chunk_id = task_id // NUM_Q_HEADS
         q_head_id = task_id % NUM_Q_HEADS
-        kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
+        if GQA_INTERLEAVE:
+            kv_head_id = q_head_id % NUM_KV_HEADS
+        else:
+            kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
 
         b_id = tl.load(q_chunk_indices_ptr + chunk_id * 2)
         q_block_id = tl.load(q_chunk_indices_ptr + chunk_id * 2 + 1)
@@ -253,6 +257,7 @@ def paged_attention_prefill_impl(
     cu_seqlens_q: torch.Tensor,
     seqlens_kv: torch.Tensor,
     block_tables: torch.Tensor,
+    gqa_interleave: bool,
     sm_scale: Optional[float] = None,
     aux_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
@@ -316,10 +321,13 @@ def paged_attention_prefill_impl(
         block_size,
         num_q_heads,
         num_kv_heads,
+        gqa_interleave,
         head_dim,
         BLOCK_SIZE_M=CHUNK_SIZE,
         BLOCK_SIZE_N=block_size,
         BLOCK_SIZE_D=head_dim,
+        limit_auto_multi_buffer_only_for_local_buffer=False,
+        set_workspace_multibuffer=4, 
     )
     return o
 
