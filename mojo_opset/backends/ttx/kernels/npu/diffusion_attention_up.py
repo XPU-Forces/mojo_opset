@@ -165,15 +165,15 @@ def micro_kernel_bwd_kv(
     mask_d = (offset_r + tl.arange(0, BLOCK_R))[:] < offset_r_ed
 
     block_q = tl.load(ptr_q, mask=mask_q, other=0.0)
-    block_s = tl.dot(block_q, block_k.T).to(HIGH_TYPE) * scale
+    block_lse = tl.load(ptr_lse, mask=mask_d, other=0.0)
+    block_s = tl.dot(block_q, block_k).to(HIGH_TYPE) * scale
     if block_mask is not None:
         block_s += block_mask
-    block_lse = tl.load(ptr_lse, mask=mask_d, other=0.0)
-    block_p = tl.exp(block_s - block_lse[:, None])
     block_do = tl.load(ptr_do, mask=mask_q, other=0.0)
+    block_p = tl.exp(block_s - block_lse[:, None])
     block_dv += tl.dot(block_p.to(LOW_TYPE).T, block_do).to(HIGH_TYPE)
-    block_dp = tl.dot(block_do, block_v.T).to(HIGH_TYPE)
     block_d = tl.load(ptr_d, mask=mask_d, other=0.0)
+    block_dp = tl.dot(block_do, block_v).to(HIGH_TYPE)
     block_ds = block_p * (block_dp - block_d[:, None])
     block_dk += tl.dot(block_ds.to(LOW_TYPE).T, block_q).to(HIGH_TYPE) * scale
 
@@ -779,6 +779,9 @@ def kernel_da_bwd_kv_ul(
             block_dk = tl.full([BLOCK_C, H], 0.0, dtype=HIGH_TYPE)
             block_dv = tl.full([BLOCK_C, H], 0.0, dtype=HIGH_TYPE)
 
+            block_k = tl.trans(block_k)
+            block_v = tl.trans(block_v)
+
             for idx_ingroup in range(GROUP_SIZE):
                 idx_n = idx_group * GROUP_SIZE + idx_ingroup
 
@@ -880,6 +883,12 @@ def kernel_da_bwd_kv_ur(
     offset_block_c_st = 0
     NUM_GROUP = N // GROUP_SIZE
 
+    offs_r_local = tl.arange(0, BLOCK_C)[:, None]
+    offs_c_local = tl.arange(0, BLOCK_C)[None, :]
+    chunk_idx_r = offs_r_local // BLOCK_SIZE
+    chunk_idx_c = offs_c_local // BLOCK_SIZE
+    full_block_mask = chunk_idx_r > chunk_idx_c
+
     for idx_seq in range(num_seqs):
         seq_ed = tl.load(cu_seqlens + idx_seq)
         offset_block_c_ed = offset_block_c_st + tl.cdiv(seq_ed - seq_st, BLOCK_C)
@@ -923,16 +932,14 @@ def kernel_da_bwd_kv_ur(
             block_dk = tl.full([BLOCK_C, H], 0.0, dtype=HIGH_TYPE)
             block_dv = tl.full([BLOCK_C, H], 0.0, dtype=HIGH_TYPE)
 
+            block_k = tl.trans(block_k)
+            block_v = tl.trans(block_v)
+
             for idx_ingroup in range(GROUP_SIZE):
                 idx_n = idx_group * GROUP_SIZE + idx_ingroup
 
-                offs_r_local = tl.arange(0, BLOCK_C)[:, None]
-                offs_c_local = tl.arange(0, BLOCK_C)[None, :]
-                chunk_idx_r = offs_r_local // BLOCK_SIZE
-                chunk_idx_c = offs_c_local // BLOCK_SIZE
-
                 block_mask_bool = (
-                    (chunk_idx_r > chunk_idx_c)
+                    full_block_mask
                     & (seq_st + idx_c * BLOCK_C + offs_r_local < seq_ed)
                     & (seq_st + idx_c * BLOCK_C + offs_c_local < seq_ed)
                 )
@@ -989,7 +996,7 @@ def kernel_da_bwd_kv_ur(
                         HIGH_TYPE,
                     )
 
-                for idx_r in range(idx_c * BLOCK_C // BLOCK_R + 1, S // BLOCK_R):
+                for idx_r in range(idx_c * BLOCK_C // BLOCK_R + 1, (seq_ed - seq_st + BLOCK_R - 1) // BLOCK_R):
                     block_dk, block_dv = micro_kernel_bwd_kv(
                         q,
                         block_k,
