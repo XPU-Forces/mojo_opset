@@ -66,8 +66,7 @@ def get_impl_by_platform():
 
                 for name, op in inspect.getmembers(module, inspect.isclass):
                     if (
-                        issubclass(op, MojoOperator)
-                        or issubclass(op, MojoFunction)
+                        (issubclass(op, MojoOperator) or issubclass(op, MojoFunction))
                         and op not in [MojoOperator, MojoFunction]
                         and op.__module__ == full_module_name
                         and platform in getattr(op, "supported_platforms_list", [])
@@ -75,7 +74,7 @@ def get_impl_by_platform():
                         logger.debug(f"Found supported operator '{name}' in {full_module_name}")
                         import_op_map[name] = op
 
-    except (ImportError, IndexError) as e:
+    except (ImportError, IndexError):
         import traceback
 
         logger.error(f"Failed to discover operators: {traceback.format_exc()}")
