@@ -10,14 +10,16 @@ from .operator import MojoOperator
 logger = get_logger(__name__)
 
 BACKEND_PRIORITY_LIST = ["ttx", "torch_npu", "torch"]
-BACKEND_PRIORITY_MAP = {"torchnpu": "torch_npu"} ## Avoid the issue of failed identification of underscore "_" in the torch_npu backend name
+BACKEND_PRIORITY_MAP = {
+    "torchnpu": "torch_npu"
+}  ## Avoid the issue of failed identification of underscore "_" in the torch_npu backend name
 
 
 class MojoBackendRegistry:
     def __init__(self, core_op_cls: Union[MojoOperator, MojoFunction]):
-        assert core_op_cls.__name__.startswith(
-            "Mojo"
-        ), f"Operator {core_op_cls.__name__} who is a subclass of MojoOperator, class name must start with Mojo."
+        assert core_op_cls.__name__.startswith("Mojo"), (
+            f"Operator {core_op_cls.__name__} who is a subclass of MojoOperator, class name must start with Mojo."
+        )
         self._core_op_cls = core_op_cls
         self._operator_name = core_op_cls.__name__[4:]
         self._registry: Dict[str, Union[MojoOperator, MojoFunction]] = {}
@@ -33,7 +35,7 @@ class MojoBackendRegistry:
         )
         impl_backend_name = cls.__name__[:idx].lower()
 
-        if (impl_backend_name not in BACKEND_PRIORITY_LIST and impl_backend_name in BACKEND_PRIORITY_MAP):
+        if impl_backend_name not in BACKEND_PRIORITY_LIST and impl_backend_name in BACKEND_PRIORITY_MAP:
             impl_backend_name = BACKEND_PRIORITY_MAP[impl_backend_name]
 
         # Hard code for some special cases
@@ -70,7 +72,13 @@ class MojoBackendRegistry:
         # of a specific backend.
         if (backend_name is None) or (backend_name not in self._registry.keys()):  # get first class
             assert len(self._registry) > 0, f"{self._operator_name} does not implement any backend."
-            return list(self._registry.values())[0]
+            fallback = list(self._registry.values())[0]
+            logger.debug(
+                "Backend '%s' is not registered, falling back to %s.",
+                backend_name or "<default>",
+                fallback.__name__,
+            )
+            return fallback
 
         try:
             return self._registry[backend_name]
