@@ -240,7 +240,7 @@ class MojoPagedPrefillGQA(MojoOperator):
                 k_expanded = k_unpadded
                 v_expanded = v_unpadded
 
-            attn_scores = torch.einsum("thd,khd->thk", q, k_expanded) * softmax_scale
+            attn_scores = torch.einsum("thd,khd->thk", q, k_expanded).float() * softmax_scale
             if self.is_causal:
                 attn_mask = torch.ones(q_seq_len, kv_seq_len, device=query.device, dtype=torch.bool).tril(kv_seq_len - q_seq_len)
                 attn_scores.masked_fill_(~attn_mask.unsqueeze(1), -torch.inf)
