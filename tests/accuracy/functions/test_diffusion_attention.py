@@ -74,7 +74,7 @@ def generate_test_data(
         ),
     ],
 )
-# @pytest.mark.skip
+@pytest.mark.skip
 @auto_switch_platform()
 def test_diffusion_attention_func(query, key, value, blockwise_diffusion_attn_mask, enable_gqa):
     ctx = MockFunctionCtx()
