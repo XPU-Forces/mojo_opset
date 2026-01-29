@@ -10,7 +10,10 @@ from tests.utils import bypass_not_implemented
 
 @pytest.mark.parametrize(
     "x",
-    [(torch.rand(128, 128))],
+    [
+        (torch.rand(128, 128)),
+        (torch.rand(1024, 10240)),
+    ],
 )
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented

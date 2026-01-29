@@ -12,9 +12,7 @@ def apply_mojo_to_qwen3(
     import torch
     import torch.nn as nn
 
-    from mojo_opset import MojoNorm
-    from mojo_opset import MojoPagedDecodeGQA
-    from mojo_opset import MojoPagedPrefillGQA
+    from mojo_opset import MojoRMSNorm
     from mojo_opset import MojoRoPE
     from mojo_opset import MojoSwiGLU
 
@@ -29,8 +27,8 @@ def apply_mojo_to_qwen3(
 
     # TODO(zhangjihang): need to discuss here, patch module seems a little bit tricky.
     # Better ways is that mojo_opset provide a functional api.
-    # if rms_norm:
-    #     modeling_qwen3.Qwen3RMSNorm.forward = MojoRMSNorm.forward
+    if rms_norm:
+        modeling_qwen3.Qwen3RMSNorm = MojoRMSNorm
 
     if swiglu:
 
@@ -82,36 +80,47 @@ def apply_mojo_to_qwen3(
 
 
 from contextlib import contextmanager
+
+
 @contextmanager
 def rewrite_assertion(module_name):
     from mojo_opset.utils.misc import get_bool_env
+
     disable = get_bool_env("MOJO_DISABLE_ASSERTION_REWRITE", False)
     if disable:
         return
 
-    from .misc import get_bool_env
-    from _pytest.stash import Stash
     from _pytest.assertion import install_importhook
+    from _pytest.stash import Stash
+
     from mojo_opset.utils.logging import get_logger
-    import contextlib
+
+    from .misc import get_bool_env
+
     class DummyConfig:
         def __init__(self):
             self.stash = Stash()
             self._cleanup_stack = []
+
             class DummyTrace:
                 def __init__(self, logger):
                     self._logger = logger
+
                     class Root:
                         @staticmethod
                         def get(name):
                             return DummyTrace(get_logger(name))
+
                     self.root = Root
+
                 def __call__(self, msg):
                     self._logger.debug(msg)
 
             self.trace = DummyTrace(get_logger(module_name))
+
         def getini(self, x):
             return ["*.py"]
+
         def add_cleanup(self, func):
             self._cleanup_stack.append(func)
 
