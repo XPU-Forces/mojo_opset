@@ -1,5 +1,4 @@
 import os
-
 from abc import ABC
 from abc import abstractmethod
 from typing import Any
@@ -8,6 +7,8 @@ from typing import Tuple
 import torch
 
 from mojo_opset.utils.logging import get_logger
+from mojo_opset.utils.acc import check_tol_diff
+
 from mojo_opset.utils.misc import get_tensor_factory_kwargs
 
 logger = get_logger(__name__)
@@ -63,6 +64,7 @@ class MojoOperator(ABC, torch.nn.Module):
         *args,
         atol: float = 1e-2,
         rtol: float = 1e-2,
+        ptol: float = 1.0,
         random_seed: int = 42,
         mixed_tol: bool = False,
         **kwargs,
@@ -73,10 +75,13 @@ class MojoOperator(ABC, torch.nn.Module):
             other_op: The other operator to compare with.
             atol: The absolute tolerance.
             rtol: The relative tolerance.
+            ptol: The percentage tolerance. When match_ratio >= ptol is considered to pass.
             random_seed: The random seed to use.
+            mixed_tol: if true, atol, rtol and ptol are ignored.
             **kwargs: The keyword arguments to pass to self.forward.
         """
         # for some cases, we expect std & ref impl share the same random seed init state, i.e. sampling.
+        os.environ["PYTHONHASHSEED"] = str(random_seed)
         torch.manual_seed(random_seed)
         # maybe inplace, deep copy is needed.
         args_for_std = tuple(arg.clone() if isinstance(arg, torch.Tensor) else arg for arg in args)
@@ -92,24 +97,6 @@ class MojoOperator(ABC, torch.nn.Module):
         assert norm_result is not None, "forward should return a non-None value."
         assert refs_result is not None, "comparison operator should return a non-None value."
 
-        if isinstance(norm_result, tuple) or isinstance(norm_result, list):
-            for norm, ref in zip(norm_result, refs_result):
-                if mixed_tol:
-                    mask = ref.abs() < 1.0
-                    tmpatol = tmprtol = 2**-6
-                    torch.testing.assert_close(norm[mask], ref[mask], atol=tmpatol, rtol=0)
-                    torch.testing.assert_close(norm[~mask], ref[~mask], atol=0, rtol=tmprtol)
-                else:
-                    torch.testing.assert_close(norm.to(torch.float32), ref.to(torch.float32), atol=atol, rtol=rtol)
-        else:
-            if mixed_tol:
-                mask = refs_result.abs() < 1.0
-                tmpatol = tmprtol = 2**-6
-                torch.testing.assert_close(norm_result[mask], refs_result[mask], atol=tmpatol, rtol=0)
-                torch.testing.assert_close(norm_result[~mask], refs_result[~mask], atol=0, rtol=tmprtol)
-            else:
-                torch.testing.assert_close(
-                    norm_result.to(torch.float32), refs_result.to(torch.float32), atol=atol, rtol=rtol
-                )
+        check_tol_diff(norm_result, refs_result, atol, rtol, ptol, mixed_tol)
 
         return norm_result
