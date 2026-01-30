@@ -184,6 +184,65 @@ def test_residual_add_layernorm(x, residual, weight, bias, norm_pos, eps):
     )
 
 @pytest.mark.parametrize(
+    "x, residual, weight",
+    [
+        (
+            torch.randn(size=(128, 128), dtype=dtype),
+            torch.randn(size=(128, 128), dtype=dtype),
+            torch.randn(size=(128,), dtype=dtype),
+        )
+        for dtype in [torch.float32, torch.float16, torch.bfloat16]
+    ],
+)
+@pytest.mark.parametrize("eps", [1e-5])
+@pytest.mark.parametrize("norm_pos", ["pre", "post"])
+@pytest.mark.parametrize("cast_type", ["int8", "float32"])
+@auto_switch_platform()
+@bypass_not_implemented
+def test_residual_add_rms_norm_cast(x, residual, weight, norm_pos, eps, cast_type):
+    device = x.device
+
+    add_norm_cast = MojoResidualAddRMSNormCast(
+        norm_size=weight.size(0), 
+        eps=eps, 
+        norm_pos=norm_pos,
+        cast_type=cast_type,
+        device=device, 
+        dtype=weight.dtype
+    )
+
+    add_norm_cast_ref = MojoResidualAddRMSNormCast._registry.get("torch")(
+        norm_size=weight.size(0),
+        eps=eps,
+        norm_pos=norm_pos,
+        cast_type=cast_type,
+    ).to(device).to(weight.dtype)
+    
+    with torch.no_grad():
+        add_norm_cast.weight.copy_(weight)
+        add_norm_cast_ref.weight.copy_(weight)
+
+    if x.dtype == torch.float32:
+        atol, rtol = 1e-5, 1e-6
+    elif x.dtype == torch.float16:
+        atol, rtol = 3e-2, 6e-3
+    else:  # bfloat16
+        atol, rtol = 5e-2, 1e-2
+
+    if cast_type == "int8":
+        atol *= 10
+        rtol *= 10
+
+    add_norm_cast.forward_diff_with(
+        add_norm_cast_ref,
+        x,
+        residual,
+        atol=atol,
+        rtol=rtol,
+    )
+
+
+@pytest.mark.parametrize(
     "x, residual, weight, bias",
     [
         (
@@ -192,80 +251,52 @@ def test_residual_add_layernorm(x, residual, weight, bias, norm_pos, eps):
             torch.randn(size=(128,), dtype=dtype),
             torch.randn(size=(128,), dtype=dtype),
         )
-        for dtype in [torch.float16, torch.bfloat16]
+        for dtype in [torch.float32, torch.float16, torch.bfloat16]
     ],
 )
 @pytest.mark.parametrize("eps", [1e-5])
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
-@pytest.mark.parametrize("cast_type", ["int8"])
+@pytest.mark.parametrize("cast_type", ["int8", "float32"])
 @auto_switch_platform()
 @bypass_not_implemented
-def test_residual_add_layer_norm_cast(x, residual, weight, bias, eps, norm_pos, cast_type):
-    add_layer_norm_cast = MojoResidualAddLayerNormCast(
-        weight=weight,
-        bias=bias,
+def test_residual_add_layer_norm_cast(x, residual, weight, bias, norm_pos, eps, cast_type):
+    device = x.device
+
+    add_norm_cast = MojoResidualAddLayerNormCast(
+        norm_size=weight.size(0),
         eps=eps,
         norm_pos=norm_pos,
         cast_type=cast_type,
+        device=device,
+        dtype=weight.dtype
     )
-    add_layer_norm_cast_ref = MojoResidualAddLayerNormCast._registry.get("torch")(
-        weight=weight,
-        bias=bias,
+
+    add_norm_cast_ref = MojoResidualAddLayerNormCast._registry.get("torch")(
+        norm_size=weight.size(0),
         eps=eps,
         norm_pos=norm_pos,
         cast_type=cast_type,
-    )
+    ).to(device).to(weight.dtype)
+
+    with torch.no_grad():
+        add_norm_cast.weight.copy_(weight)
+        add_norm_cast.bias.copy_(bias)
+        add_norm_cast_ref.weight.copy_(weight)
+        add_norm_cast_ref.bias.copy_(bias)
 
     if x.dtype == torch.float32:
         atol, rtol = 1e-5, 1e-6
-    else:
+    elif x.dtype == torch.float16:
         atol, rtol = 3e-2, 6e-3
+    else:  # bfloat16
+        atol, rtol = 5e-2, 1e-2
 
-    add_layer_norm_cast.forward_diff_with(
-        add_layer_norm_cast_ref,
-        x,
-        residual,
-        atol=atol,
-        rtol=rtol,
-    )
+    if cast_type == "int8":
+        atol *= 10
+        rtol *= 10
 
-@pytest.mark.parametrize(
-    "x, residual, weight",
-    [
-        (
-            torch.randn(size=(128, 128), dtype=dtype),
-            torch.randn(size=(128, 128), dtype=dtype),
-            torch.randn(size=(128,), dtype=dtype),
-        )
-        for dtype in [torch.float16, torch.bfloat16]
-    ],
-)
-@pytest.mark.parametrize("eps", [1e-5])
-@pytest.mark.parametrize("norm_pos", ["pre", "post"])
-@pytest.mark.parametrize("cast_type", ["int8"])
-@auto_switch_platform()
-@bypass_not_implemented
-def test_residual_add_rms_norm_cast(x, residual, weight, eps, norm_pos, cast_type):
-    add_rms_norm_cast = MojoResidualAddRMSNormCast(
-        weight=weight,
-        eps=eps,
-        norm_pos=norm_pos,
-        cast_type=cast_type,
-    )
-    add_rms_norm_cast_ref = MojoResidualAddRMSNormCast._registry.get("torch")(
-        weight=weight,
-        eps=eps,
-        norm_pos=norm_pos,
-        cast_type=cast_type,
-    )
-
-    if x.dtype == torch.float32:
-        atol, rtol = 1e-5, 1e-6
-    else:
-        atol, rtol = 3e-2, 6e-3
-
-    add_rms_norm_cast.forward_diff_with(
-        add_rms_norm_cast_ref,
+    add_norm_cast.forward_diff_with(
+        add_norm_cast_ref,
         x,
         residual,
         atol=atol,

@@ -217,20 +217,22 @@ class MojoResidualAddNormQuant(MojoOperator):
 class MojoResidualAddRMSNormCast(MojoOperator):
     def __init__(
         self,
-        weight: torch.Tensor,
+        norm_size: int,
         eps: float = 1e-05,
         norm_pos: str = "pre",
         cast_type: str = "int8",
+        **kwargs,
     ):
         """
         Initialize residual-add RMSNorm with type casting operator.
 
         Args:
-            weight (torch.Tensor): Required 1-D affine scale vector of length D (hidden size).
+            norm_size (int): Size of 1-D affine scale vector.
             eps (float, default=1e-05): Epsilon for numerical stability; must be > 0.
             norm_pos (str, default="pre"): Normalization placement; one of {"pre", "post"}.
             cast_type (str, default="int8"): Type to cast the normalized output to,
                 one of {"int8", "float16", "bfloat16", "float32"}.
+            **kwargs: The keyword arguments of torch.empty, such as device, dtype and so on to create the weight.
 
         Behavior:
             - norm_pos="pre": 
@@ -243,7 +245,7 @@ class MojoResidualAddRMSNormCast(MojoOperator):
                 3. cast_out = hidden_state.to(cast_type)
                 4. residual = hidden_state
         """
-        super().__init__()
+        super().__init__(**kwargs)
         
         if norm_pos not in ["pre", "post"]:
             raise ValueError("norm_pos should be 'pre' or 'post'")
@@ -253,7 +255,7 @@ class MojoResidualAddRMSNormCast(MojoOperator):
         self.norm_pos = norm_pos
         self.cast_type = cast_type
         self.variance_epsilon = float(eps)
-        self.weight = weight
+        self.weight = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
         
         # Map string to torch dtype
         self.cast_dtype = {
@@ -326,22 +328,22 @@ class MojoResidualAddRMSNormCast(MojoOperator):
 class MojoResidualAddLayerNormCast(MojoOperator):
     def __init__(
         self,
-        weight: torch.Tensor,
-        bias: torch.Tensor,
+        norm_size: int,
         eps: float = 1e-05,
         norm_pos: str = "pre",
         cast_type: str = "int8",
+        **kwargs,
     ):
         """
         Initialize residual-add LayerNorm with type casting operator.
 
         Args:
-            weight (torch.Tensor): Required 1-D affine scale vector of length D (hidden size).
-            bias (torch.Tensor): Required 1-D affine shift vector of length D (hidden size).
+            norm_size (int): Size of 1-D affine scale and shift vector.
             eps (float, default=1e-05): Epsilon for numerical stability; must be > 0.
             norm_pos (str, default="pre"): Normalization placement; one of {"pre", "post"}.
             cast_type (str, default="int8"): Type to cast the normalized output to,
                 one of {"int8", "float16", "bfloat16", "float32"}.
+            **kwargs: The keyword arguments of torch.empty, such as device, dtype and so on to create the weight and bias.
 
         Behavior:
             - norm_pos="pre": 
@@ -354,7 +356,7 @@ class MojoResidualAddLayerNormCast(MojoOperator):
                 3. cast_out = hidden_state.to(cast_type)
                 4. residual = hidden_state
         """
-        super().__init__()
+        super().__init__(**kwargs)
         
         if norm_pos not in ["pre", "post"]:
             raise ValueError("norm_pos should be 'pre' or 'post'")
@@ -364,8 +366,8 @@ class MojoResidualAddLayerNormCast(MojoOperator):
         self.norm_pos = norm_pos
         self.cast_type = cast_type
         self.variance_epsilon = float(eps)
-        self.weight = weight
-        self.bias = bias
+        self.weight = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
+        self.bias = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
         
         # Map string to torch dtype
         self.cast_dtype = {
