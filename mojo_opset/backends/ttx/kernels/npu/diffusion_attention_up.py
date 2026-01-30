@@ -7,7 +7,6 @@ import torch
 import triton
 import triton.language as tl
 
-MAX_BLOCK_C = 64
 
 @cache
 def get_device_properties() -> Tuple[int, int]:
@@ -61,15 +60,16 @@ def micro_kernel_fwd(
 
     mask_kv = (offset_c + tl.arange(0, BLOCK_C))[:, None] < offset_c_ed
     block_k = tl.load(ptr_k, mask=mask_kv, other=0.0)
-    block_s = tl.dot(block_q, block_k.T) * scale
+    block_k = tl.trans(block_k)
+    block_s = tl.dot(block_q, block_k) * scale
+    block_v = tl.load(ptr_v, mask=mask_kv, other=0.0)
     if block_mask is not None:
         block_s += block_mask
     block_m_1 = tl.maximum(block_m, tl.max(block_s, axis=1))
     block_s = tl.exp(block_s - block_m_1[:, None])
     block_l_1 = tl.exp(block_m - block_m_1) * block_l + tl.sum(block_s, axis=1)
-
-    block_v = tl.load(ptr_v, mask=mask_kv, other=0.0)
-    block_o = tl.exp(block_m - block_m_1)[:, None].to(LOW_TYPE) * block_o + tl.dot(block_s.to(LOW_TYPE), block_v).to(
+    block_o = tl.exp(block_m - block_m_1)[:, None].to(LOW_TYPE) * block_o 
+    block_o = block_o + tl.dot(block_s.to(LOW_TYPE), block_v).to(
         LOW_TYPE
     )
 
@@ -193,7 +193,7 @@ def micro_kernel_bwd_kv(
             # tile_mix_cube_loop=2,
         )
     ],
-    key=["N", "S", "H"],
+    key=["N", "H"],
 )
 @triton.jit
 def kernel_da_fwd_u(
@@ -206,6 +206,8 @@ def kernel_da_fwd_u(
     cu_seqlens,
     num_seqs,
     scale,
+    mask_ul,
+    mask_ur,
     GROUP_SIZE: tl.constexpr,
     S,
     N: tl.constexpr,
@@ -221,6 +223,7 @@ def kernel_da_fwd_u(
     STRIDE_V_H: tl.constexpr,
     STRIDE_D_S: tl.constexpr,
     STRIDE_D_N: tl.constexpr,
+    STRIDE_MASK,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -233,6 +236,11 @@ def kernel_da_fwd_u(
 
     seq_st = 0
     offset_block_r_st = 0
+
+    offset_r_local = tl.arange(0, BLOCK_R)[:, None]
+    offset_c_local = tl.arange(0, BLOCK_R)[None, :]
+    block_mask_full_ul = tl.load(mask_ul + offset_r_local * STRIDE_MASK + offset_c_local)
+    block_mask_full_ur = tl.load(mask_ur + offset_r_local * STRIDE_MASK + offset_c_local)
 
     for idx_seq in range(num_seqs):
         seq_ed = tl.load(cu_seqlens + idx_seq)
@@ -274,14 +282,12 @@ def kernel_da_fwd_u(
             block_l = tl.full([BLOCK_R], 0.0, dtype=HIGH_TYPE)
             block_m = tl.full([BLOCK_R], -1e6, dtype=HIGH_TYPE)
 
-            offs_r_local = tl.arange(0, BLOCK_R)[:, None]
-            offs_c_local = tl.arange(0, BLOCK_R)[None, :]
-            chunk_idx_r = offs_r_local // BLOCK_SIZE
-            chunk_idx_c = offs_c_local // BLOCK_SIZE
+            block_mask_shape = (
+                (seq_st + idx_r * BLOCK_R + offset_r_local < seq_ed) &
+                (seq_st + idx_r * BLOCK_R + offset_c_local < seq_ed)
+            )
             block_mask_bool = (
-                (chunk_idx_r == chunk_idx_c)
-                & (seq_st + idx_r * BLOCK_R + offs_r_local < seq_ed)
-                & (seq_st + idx_r * BLOCK_R + offs_c_local < seq_ed)
+                block_mask_full_ul & block_mask_shape
             )
             block_mask = (block_mask_bool.to(HIGH_TYPE) - 1.0) * 1e6
 
@@ -311,9 +317,7 @@ def kernel_da_fwd_u(
             )
 
             block_mask_bool = (
-                (chunk_idx_r > chunk_idx_c)
-                & (seq_st + idx_r * BLOCK_R + offs_r_local < seq_ed)
-                & (seq_st + idx_r * BLOCK_R + offs_c_local < seq_ed)
+                block_mask_full_ur & block_mask_shape
             )
             block_mask = (block_mask_bool.to(LOW_TYPE) - 1.0) * 1e6
 
@@ -410,7 +414,7 @@ def kernel_da_fwd_u(
             {"BLOCK_R": 64},
         ),
     ],
-    key=["N", "S", "H"],
+    key=["N", "H"],
 )
 @triton.jit
 def kernel_da_bwd_d(
@@ -469,7 +473,7 @@ def kernel_da_bwd_d(
             # tile_mix_cube_loop=2,
         )
     ],
-    key=["N", "S", "H"],
+    key=["N", "H"],
 )
 @triton.jit
 def kernel_da_bwd_q_u(
@@ -483,6 +487,8 @@ def kernel_da_bwd_q_u(
     cu_seqlens,
     num_seqs,
     scale,
+    mask_ur,
+    mask_ul,
     GROUP_SIZE: tl.constexpr,
     S,
     N: tl.constexpr,
@@ -498,6 +504,7 @@ def kernel_da_bwd_q_u(
     STRIDE_V_H: tl.constexpr,
     STRIDE_D_S: tl.constexpr,
     STRIDE_D_N: tl.constexpr,
+    STRIDE_MASK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -509,6 +516,11 @@ def kernel_da_bwd_q_u(
 
     seq_st = 0
     offset_block_r_st = 0
+
+    offset_r_local = tl.arange(0, BLOCK_R)[:, None]
+    offset_c_local = tl.arange(0, BLOCK_R)[None, :]
+    block_mask_full_ul = tl.load(mask_ul + offset_r_local * STRIDE_MASK + offset_c_local)
+    block_mask_full_ur = tl.load(mask_ur + offset_r_local * STRIDE_MASK + offset_c_local)
 
     for idx_seq in range(num_seqs):
         seq_ed = tl.load(cu_seqlens + idx_seq)
@@ -550,16 +562,12 @@ def kernel_da_bwd_q_u(
             block_lse = tl.load(ptr_lse, mask=mask_d, other=0.0)
             block_d = tl.load(ptr_d, mask=mask_d, other=0.0)
             block_dq = tl.full([BLOCK_R, H], 0.0, dtype=HIGH_TYPE)
-
-            offs_r_local = tl.arange(0, BLOCK_R)[:, None]
-            offs_c_local = tl.arange(0, BLOCK_R)[None, :]
-            chunk_idx_r = offs_r_local // BLOCK_SIZE
-            chunk_idx_c = offs_c_local // BLOCK_SIZE
-
+            block_mask_shape = (
+                (seq_st + idx_r * BLOCK_R + offset_r_local < seq_ed) &
+                (seq_st + idx_r * BLOCK_R + offset_c_local < seq_ed)
+            )
             block_mask_bool = (
-                (chunk_idx_r == chunk_idx_c)
-                & (seq_st + idx_r * BLOCK_R + offs_r_local < seq_ed)
-                & (seq_st + idx_r * BLOCK_R + offs_c_local < seq_ed)
+                block_mask_full_ul & block_mask_shape
             )
             block_mask = (block_mask_bool.to(LOW_TYPE) - 1.0) * 1e6
 
@@ -589,12 +597,8 @@ def kernel_da_bwd_q_u(
                 HIGH_TYPE,
             )
 
-            offs_r_local = tl.arange(0, BLOCK_R)[:, None]
-            offs_c_local = tl.arange(0, BLOCK_R)[None, :]
-            chunk_idx_r = offs_r_local // BLOCK_SIZE
-            chunk_idx_c = offs_c_local // BLOCK_SIZE
             block_mask_bool = (
-                (chunk_idx_r > chunk_idx_c) & (offs_r_local < seq_ed - seq_st) & (offs_c_local < seq_ed - seq_st)
+                block_mask_full_ur & block_mask_shape
             )
             block_mask = (block_mask_bool.to(LOW_TYPE) - 1.0) * 1e6
             block_dq = micro_kernel_bwd_q(
@@ -694,7 +698,7 @@ def kernel_da_bwd_q_u(
             # tile_mix_cube_loop=2,
         )
     ],
-    key=["N", "S", "H"],
+    key=["N", "H"],
 )
 @triton.jit
 def kernel_da_bwd_kv_ul(
@@ -709,8 +713,9 @@ def kernel_da_bwd_kv_ul(
     cu_seqlens,
     num_seqs,
     scale,
+    mask_ul,
     GROUP_SIZE: tl.constexpr,
-    S: tl.constexpr,
+    S,
     N: tl.constexpr,
     H: tl.constexpr,
     STRIDE_Q_S: tl.constexpr,
@@ -724,6 +729,7 @@ def kernel_da_bwd_kv_ul(
     STRIDE_V_H: tl.constexpr,
     STRIDE_D_S: tl.constexpr,
     STRIDE_D_N: tl.constexpr,
+    STRIDE_MASK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -736,6 +742,10 @@ def kernel_da_bwd_kv_ul(
     seq_st = 0
     offset_block_c_st = 0
     NUM_GROUP = N // GROUP_SIZE
+
+    offs_r_local = tl.arange(0, BLOCK_C)[:, None]
+    offs_c_local = tl.arange(0, BLOCK_C)[None, :]
+    block_mask_full_ul = tl.load(mask_ul + offs_r_local * STRIDE_MASK + offs_c_local)
 
     for idx_seq in range(num_seqs):
         seq_ed = tl.load(cu_seqlens + idx_seq)
@@ -786,13 +796,8 @@ def kernel_da_bwd_kv_ul(
             for idx_ingroup in range(GROUP_SIZE):
                 idx_n = idx_group * GROUP_SIZE + idx_ingroup
 
-                offs_r_local = tl.arange(0, BLOCK_C)[:, None]
-                offs_c_local = tl.arange(0, BLOCK_C)[None, :]
-                chunk_idx_r = offs_r_local // BLOCK_SIZE
-                chunk_idx_c = offs_c_local // BLOCK_SIZE
-
                 block_mask_bool = (
-                    (chunk_idx_r == chunk_idx_c)
+                    block_mask_full_ul
                     & (seq_st + idx_c * BLOCK_C + offs_r_local < seq_ed)
                     & (seq_st + idx_c * BLOCK_C + offs_c_local < seq_ed)
                 )
@@ -841,7 +846,7 @@ def kernel_da_bwd_kv_ul(
             # tile_mix_cube_loop=2,
         )
     ],
-    key=["N", "S", "H"],
+    key=["N", "H"],
 )
 @triton.jit
 def kernel_da_bwd_kv_ur(
@@ -856,9 +861,9 @@ def kernel_da_bwd_kv_ur(
     cu_seqlens,
     num_seqs,
     scale,
-    full_mask,
+    mask_ur,
     GROUP_SIZE: tl.constexpr,
-    S: tl.constexpr,
+    S,
     N: tl.constexpr,
     H: tl.constexpr,
     STRIDE_Q_S: tl.constexpr,
@@ -872,6 +877,7 @@ def kernel_da_bwd_kv_ur(
     STRIDE_V_H: tl.constexpr,
     STRIDE_D_S: tl.constexpr,
     STRIDE_D_N: tl.constexpr,
+    STRIDE_MASK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -887,8 +893,7 @@ def kernel_da_bwd_kv_ur(
 
     offs_r_local = tl.arange(0, BLOCK_C)[:, None]
     offs_c_local = tl.arange(0, BLOCK_C)[None, :]
-    MAX_BLOCK_C = 64 # TODO: should be tl.constexpr and determined when mask generation.
-    full_block_mask = tl.load(full_mask + offs_r_local * MAX_BLOCK_C + offs_c_local)
+    block_mask_full_ur = tl.load(mask_ur + offs_r_local * STRIDE_MASK + offs_c_local)
     
     for idx_seq in range(num_seqs):
         seq_ed = tl.load(cu_seqlens + idx_seq)
@@ -940,7 +945,7 @@ def kernel_da_bwd_kv_ur(
                 idx_n = idx_group * GROUP_SIZE + idx_ingroup
 
                 block_mask_bool = (
-                    full_block_mask
+                    block_mask_full_ur
                     & (seq_st + idx_c * BLOCK_C + offs_r_local < seq_ed)
                     & (seq_st + idx_c * BLOCK_C + offs_c_local < seq_ed)
                 )
@@ -1066,6 +1071,16 @@ def diffusion_attention_up_fwd_impl(
     lse = torch.zeros((q.shape[0], q.shape[1]), device=q.device, dtype=torch.float32)
     num_cores, _ = get_device_properties()
 
+    if (not hasattr(diffusion_attention_up_fwd_impl, "inited")):
+        diffusion_attention_up_fwd_impl.inited = True
+        BLOCK_MASK = 64
+        offset_r_local = torch.arange(0, BLOCK_MASK)[:, None]
+        offset_c_local = torch.arange(0, BLOCK_MASK)[None, :]
+        chunk_idx_r = offset_r_local // BLOCK_SIZE
+        chunk_idx_c = offset_c_local // BLOCK_SIZE
+        diffusion_attention_up_fwd_impl.mask_ur = (chunk_idx_r > chunk_idx_c).to(q.device)
+        diffusion_attention_up_fwd_impl.mask_ul = (chunk_idx_r == chunk_idx_c).to(q.device)
+
     kernel_da_fwd_u[(num_cores,)](
         q,
         k,
@@ -1076,6 +1091,8 @@ def diffusion_attention_up_fwd_impl(
         cu_seqlen,
         cu_seqlen.shape[0],
         scale,
+        diffusion_attention_up_fwd_impl.mask_ul,
+        diffusion_attention_up_fwd_impl.mask_ur,
         q.shape[1] // k.shape[1],
         q.shape[0] // 2,
         q.shape[1],
@@ -1091,6 +1108,7 @@ def diffusion_attention_up_fwd_impl(
         v.stride(2),
         lse.stride(0),
         lse.stride(1),
+        diffusion_attention_up_fwd_impl.mask_ul.stride(0),
         BLOCK_SIZE=BLOCK_SIZE,
     )
 
@@ -1136,21 +1154,23 @@ def diffusion_attention_up_bwd_impl(
     assert q.shape[2] == k.shape[2] and k.shape[2] == v.shape[2] and q.shape[2] in {64, 128}
     assert q.shape[0] == lse.shape[0] and q.shape[1] == lse.shape[1]
 
-    num_cores, _ = get_device_properties()
+    num_cores, num_vectorcore = get_device_properties()
     d = torch.empty_like(lse)
     dq = torch.empty_like(q)
     dk = torch.empty_like(k)
     dv = torch.empty_like(v)
 
-    if not hasattr(diffusion_attention_up_bwd_impl, "mask_ur"):
-        print("generate mask_ur")
-        offs_r_local = torch.arange(0, MAX_BLOCK_C)[:, None]
-        offs_c_local = torch.arange(0, MAX_BLOCK_C)[None, :]
-        chunk_idx_r = offs_r_local // BLOCK_SIZE
-        chunk_idx_c = offs_c_local // BLOCK_SIZE
+    if (not hasattr(diffusion_attention_up_bwd_impl, "inited")):
+        diffusion_attention_up_bwd_impl.inited = True
+        BLOCK_MASK = 64
+        offset_r_local = torch.arange(0, BLOCK_MASK)[:, None]
+        offset_c_local = torch.arange(0, BLOCK_MASK)[None, :]
+        chunk_idx_r = offset_r_local // BLOCK_SIZE
+        chunk_idx_c = offset_c_local // BLOCK_SIZE
+        diffusion_attention_up_bwd_impl.mask_ul = (chunk_idx_r == chunk_idx_c).to(q.device)
         diffusion_attention_up_bwd_impl.mask_ur = (chunk_idx_r > chunk_idx_c).to(q.device)
 
-    kernel_da_bwd_d[(num_cores,)](
+    kernel_da_bwd_d[(num_vectorcore,)](
         fp32o,
         do,
         d,
@@ -1174,6 +1194,8 @@ def diffusion_attention_up_bwd_impl(
         cu_seqlen,
         cu_seqlen.shape[0],
         scale,
+        diffusion_attention_up_bwd_impl.mask_ur,
+        diffusion_attention_up_bwd_impl.mask_ul,
         q.shape[1] // k.shape[1],
         q.shape[0] // 2,
         q.shape[1],
@@ -1189,6 +1211,7 @@ def diffusion_attention_up_bwd_impl(
         v.stride(2),
         d.stride(0),
         d.stride(1),
+        diffusion_attention_up_bwd_impl.mask_ul.stride(0),
         BLOCK_SIZE=BLOCK_SIZE,
     )
     kernel_da_bwd_kv_ul[(num_cores,)](
@@ -1203,6 +1226,7 @@ def diffusion_attention_up_bwd_impl(
         cu_seqlen,
         cu_seqlen.shape[0],
         scale,
+        diffusion_attention_up_bwd_impl.mask_ul,
         q.shape[1] // k.shape[1],
         q.shape[0] // 2,
         q.shape[1],
@@ -1218,6 +1242,7 @@ def diffusion_attention_up_bwd_impl(
         v.stride(2),
         d.stride(0),
         d.stride(1),
+        diffusion_attention_up_bwd_impl.mask_ul.stride(0),
         BLOCK_SIZE=BLOCK_SIZE,
     )
     kernel_da_bwd_kv_ur[(num_cores,)](
@@ -1248,6 +1273,7 @@ def diffusion_attention_up_bwd_impl(
         v.stride(2),
         d.stride(0),
         d.stride(1),
+        diffusion_attention_up_bwd_impl.mask_ul.stride(0),
         BLOCK_SIZE=BLOCK_SIZE,
     )
 
