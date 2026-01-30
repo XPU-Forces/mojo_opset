@@ -4,6 +4,7 @@ from typing import Any
 from typing import Optional
 from typing import Tuple
 
+import math
 import torch
 
 from ..operator import MojoOperator
@@ -247,6 +248,211 @@ class MojoPagedPrefillGQA(MojoOperator):
 
         output = torch.einsum("thk,khd->thd", attn_probs, v_expanded)
         return output
+
+
+class MojoBlockSparseAttention(MojoOperator):
+    """
+    Block Sparse Attention operator for LLM Prefill.
+    """
+
+    def __init__(
+        self,
+        causal_mask: Optional[torch.Tensor],
+        page_size: int,
+        q_seg_size: int,
+        topk_ratio: float,
+        head_size: int,
+        q_head_num: int,
+        kv_head_num: int,
+    ):
+        super().__init__()
+        self.page_size = page_size
+        self.q_seg_size = q_seg_size
+        self.topk_ratio = topk_ratio
+        self.q_head_num = q_head_num
+        self.kv_head_num = kv_head_num
+        self.head_size = head_size
+        mask_block_size = max(self.page_size, max(self.q_seg_size, 128))
+        full_mask = torch.ones(mask_block_size, mask_block_size, device=causal_mask.device, dtype=torch.bool)
+        empty_mask = torch.zeros(mask_block_size, mask_block_size, device=causal_mask.device, dtype=torch.bool)
+        session_mask = torch.ones(
+            mask_block_size, mask_block_size * 3, device=causal_mask.device, dtype=torch.bool
+        ).tril(diagonal=mask_block_size)
+        self.mask = torch.cat([full_mask, empty_mask, session_mask], dim=1)
+        self.scale = 1 / math.sqrt(head_size)
+
+    def forward(
+        self,
+        curr_query_seg,
+        key,
+        value,
+        whole_causal_mask,
+        topk_page_indices,
+        q_seg_id,
+        q_chunk_size,
+    ):
+        num_pages = value.shape[1] // self.page_size
+        pad_len = value.shape[1] - num_pages * self.page_size
+        q_head_num, curr_seg_size, head_size = curr_query_seg.shape
+        page_size = self.page_size
+        top_k_page = topk_page_indices.shape[-1]
+
+        # [nh, ql, topk_page, page_size]
+
+        topk_token_indices = (topk_page_indices * page_size).unsqueeze(1).unsqueeze(-1).repeat(
+            1, curr_seg_size, 1, page_size
+        ) + torch.arange(page_size, device=topk_page_indices.device)
+        topk_token_indices = topk_token_indices.reshape(q_head_num, curr_seg_size, top_k_page * page_size)
+
+        pad_indices = num_pages * page_size + torch.arange(pad_len, device=topk_token_indices.device)
+        # [nh, ql, pad_len]
+        pad_indices = pad_indices.expand(q_head_num, curr_seg_size, -1)
+        # [nh, ql, topk_page * page_size + pad_len]
+        topk_token_indices = torch.cat([topk_token_indices, pad_indices], dim=-1)
+        q_head_num, curr_seg_size, head_size = curr_query_seg.shape
+        # [nh, q_seg_size, kv_seq_length]
+        curr_seg_score = torch.bmm(curr_query_seg, key.transpose(-2, -1))
+        curr_seg_score = curr_seg_score / math.sqrt(head_size)
+
+        # [nh, q_seg_size, kv_seq_length]
+        curr_seg_mask = torch.zeros_like(curr_seg_score, dtype=torch.bool)
+        curr_seg_mask.scatter_(dim=-1, index=topk_token_indices, value=True)
+        # curr_seg_causal = torch.tril(torch.ones((q_head_num, curr_seg_size, curr_seg_size), dtype= torch.bool, device=curr_seg_mask.device))
+        # print(f"{curr_seg_mask.shape=} {q_seg_start=} {q_seg_end=}", flush=True)
+        q_seg_start = q_seg_id * self.q_seg_size
+        # Note!!!: the session_cache_part is always attentioned
+        curr_seg_mask[:, :, -q_chunk_size:] = whole_causal_mask[
+            q_seg_start : q_seg_start + curr_seg_size, -q_chunk_size:
+        ]
+
+        curr_seg_score = curr_seg_score.masked_fill(~curr_seg_mask, torch.finfo(curr_seg_score.dtype).min)
+        curr_seg_score = torch.softmax(curr_seg_score, -1, dtype=torch.float32).to(dtype=torch.bfloat16)
+        # [nh, q_seg_size, head_size]
+        curr_seg_output = (
+            torch.bmm(curr_seg_score, value)
+            # .permute(1, 0, 2)
+            # .reshape(curr_seg_size, q_head_num * head_size)
+            .to(dtype=torch.bfloat16)
+        )
+        return curr_seg_output
+
+
+class MojoPagedPrefillBlockSparseAttention(MojoOperator):
+    """
+    Block Sparse Attention operator for LLM Prefill with Paged KVCache.
+    """
+
+    def __init__(
+        self,
+        causal_mask: Optional[torch.Tensor],
+        page_size: int,
+        q_seg_size: int,
+        head_size: int,
+        q_head_num: int,
+        kv_head_num: int,
+        scale: float,
+    ):
+        super().__init__()
+        self.page_size = page_size
+        self.q_seg_size = q_seg_size
+        self.q_head_num = q_head_num
+        self.kv_head_num = kv_head_num
+        self.head_size = head_size
+        self.whole_mask = causal_mask
+        mask_block_size = max(self.page_size, max(self.q_seg_size, 128))
+        full_mask = torch.ones(mask_block_size, mask_block_size, device=causal_mask.device, dtype=torch.bool)
+        empty_mask = torch.zeros(mask_block_size, mask_block_size, device=causal_mask.device, dtype=torch.bool)
+        session_mask = torch.ones(
+            mask_block_size, mask_block_size * 3, device=causal_mask.device, dtype=torch.bool
+        ).tril(diagonal=mask_block_size)
+        self.mask = torch.cat([full_mask, empty_mask, session_mask], dim=1)
+        self.scale = scale
+
+    def forward(
+        self,
+        query,
+        key,
+        value,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        whole_causal_mask,
+        kv_cache_indices,
+        q_chunk_idx,
+        num_sparse_pages,
+        topk_page_indices,
+        cu_num_topk_pages_per_seg,
+    ):
+        expects = torch.zeros_like(query)
+
+        curr_seq_id = -1
+
+        for i in range(q_chunk_idx.shape[0]):
+            q_idx = q_chunk_idx[i][0].item()
+            seg_id = q_chunk_idx[i][1].item()
+            if q_idx != curr_seq_id:
+                curr_seq_id = q_idx
+
+                q_chunk_size = cu_seqlens_q[q_idx + 1].item() - cu_seqlens_q[q_idx].item()
+                kv_len = cu_seqlens_k[q_idx + 1].item() - cu_seqlens_k[q_idx].item()
+
+                sublist = kv_cache_indices[q_idx]
+                valid_mask = sublist != -1
+                valid_indices = sublist[valid_mask]
+                curr_query = query[:, cu_seqlens_q[q_idx] : cu_seqlens_q[q_idx + 1]]
+
+                key_cache_i = (
+                    key[valid_indices]
+                    .reshape(-1, self.kv_head_num, self.head_size)
+                    .permute(1, 0, 2)[:, :kv_len, :]
+                    .repeat_interleave(self.q_head_num // self.kv_head_num, dim=0)
+                    .contiguous()
+                )
+                value_cache_i = (
+                    value[valid_indices]
+                    .reshape(-1, self.kv_head_num, self.head_size)
+                    .permute(1, 0, 2)[:, :kv_len, :]
+                    .repeat_interleave(self.q_head_num // self.kv_head_num, dim=0)
+                    .contiguous()
+                )
+
+            valid_num_pages = num_sparse_pages[i].item()
+            pad_len = kv_len - valid_num_pages * self.page_size
+            q_seg_start = seg_id * self.q_seg_size
+            curr_seg_size = min(self.q_seg_size, q_chunk_size - q_seg_start)
+            curr_query_seg = curr_query[:, q_seg_start : q_seg_start + curr_seg_size]
+            topk_page_indices_seg = topk_page_indices[
+                :, cu_num_topk_pages_per_seg[i] : cu_num_topk_pages_per_seg[i + 1]
+            ]
+
+            topk_token_indices_seg = (topk_page_indices_seg * self.page_size).unsqueeze(1).unsqueeze(-1).repeat(
+                1, curr_seg_size, 1, self.page_size
+            ) + torch.arange(self.page_size, device=topk_page_indices.device)
+
+            topk_token_indices_seg = topk_token_indices_seg.reshape(self.q_head_num, curr_seg_size, -1)
+
+            pad_indices = valid_num_pages * self.page_size + torch.arange(pad_len, device=topk_token_indices_seg.device)
+            # [nh, ql, pad_len]
+            pad_indices = pad_indices.expand(self.q_head_num, curr_seg_size, -1)
+            # [nh, ql, topk_page * page_size + pad_len]
+            topk_token_indices_seg = torch.cat([topk_token_indices_seg, pad_indices], dim=-1)
+
+            curr_seg_score = torch.bmm(curr_query_seg.float(), key_cache_i.float().transpose(-2, -1))
+            curr_seg_score = curr_seg_score * self.scale
+
+            curr_seg_mask = torch.zeros_like(curr_seg_score, dtype=torch.bool)
+            curr_seg_mask.scatter_(dim=-1, index=topk_token_indices_seg, value=True)
+            curr_seg_mask[:, :, -q_chunk_size:] = self.whole_mask[
+                q_seg_start : q_seg_start + curr_seg_size, :q_chunk_size
+            ]
+
+            curr_seg_score = curr_seg_score.masked_fill(~curr_seg_mask, float("-inf"))
+            curr_seg_score = torch.softmax(curr_seg_score, dim=-1)
+            curr_seg_output = torch.bmm(curr_seg_score, value_cache_i.float()).to(query.dtype)
+            expects[:, cu_seqlens_q[q_idx] + q_seg_start : cu_seqlens_q[q_idx] + q_seg_start + curr_seg_size] = (
+                curr_seg_output
+            )
+
+        return expects
 
 
 class MojoDecodeMLA(MojoOperator):

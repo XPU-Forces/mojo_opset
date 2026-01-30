@@ -20,6 +20,13 @@ from .rope import rope_fwd_impl
 from .sdpa import sdpa_bwd_impl
 from .sdpa import sdpa_fwd_impl
 from .sdpa import sdpa_infer_impl
+
+from .quest import quest_impl
+from .quest import paged_prefill_block_quest_impl
+from .block_sparse_attention import block_sparse_attention_impl
+from .block_sparse_attention import block_sparse_attention_paged_prefill_impl
+
+
 from .silu import silu_bwd_impl
 from .silu import silu_fwd_impl
 from .store_lowrank import store_label_cache_fwd_impl
@@ -48,6 +55,10 @@ __all__ = [
     "sdpa_infer_impl",
     "sdpa_fwd_impl",
     "sdpa_bwd_impl",
+    "quest_impl",
+    "paged_prefill_block_quest_impl",
+    "block_sparse_attention_impl",
+    "block_sparse_attention_paged_prefill_impl",
     "diffusion_attention_fwd_impl",
     "diffusion_attention_bwd_impl",
     "m_grouped_matmul_impl",
