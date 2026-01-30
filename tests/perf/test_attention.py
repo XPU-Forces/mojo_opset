@@ -1,4 +1,5 @@
 import math
+from typing import Optional
 
 import pytest
 import torch
@@ -121,10 +122,11 @@ def generate_paged_prefill_data(
     cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0)])
 
     if max_kv_computed_len <= 0:
-        kv_cache_lens = torch.zeros_like(q_lens)
+        kv_cache_lens = None
+        kv_lens = q_lens
     else:
         kv_cache_lens = torch.randint(max_kv_computed_len // 2, max_kv_computed_len, (batch_size,), dtype=torch.int32)
-    kv_lens = q_lens + kv_cache_lens
+        kv_lens = q_lens + kv_cache_lens
     cu_seqlens_kv = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0)])
 
     total_q_tokens = cu_seqlens_q[-1].item()
@@ -171,7 +173,7 @@ def generate_paged_prefill_data(
             k_cache[physical_block_id, :, :tokens_in_block, :] = k_slice
             v_cache[physical_block_id, :, :tokens_in_block, :] = v_slice
 
-    return query, k_cache, v_cache, cu_seqlens_q, kv_lens, block_tables
+    return query, k_cache, v_cache, cu_seqlens_q, block_tables, None if kv_cache_lens is None else kv_lens
 
 
 test_configs = [
@@ -181,7 +183,7 @@ test_configs = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_seqlens_q, seqlens_kv, block_tables",
+    "query, k_cache, v_cache, cu_seqlens_q, block_tables, seqlens_kv",
     [
         pytest.param(
             *generate_paged_prefill_data(
@@ -207,9 +209,9 @@ def test_paged_prefill_gqa(
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
-    seqlens_kv: torch.Tensor,
     block_tables: torch.Tensor,
     gqa_layout: str,
+    seqlens_kv: Optional[torch.Tensor],
 ):
     paged_attn_prefill = MojoPagedPrefillGQA(
         is_causal=True,
@@ -225,9 +227,9 @@ def test_paged_prefill_gqa(
             k_cache,
             v_cache,
             cu_seqlens_q,
-            seqlens_kv,
             block_tables,
             softmax_scale=sm_scale,
+            seqlens_kv=seqlens_kv,
         )
     )
 

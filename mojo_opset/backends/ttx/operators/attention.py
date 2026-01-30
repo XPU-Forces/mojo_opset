@@ -25,9 +25,9 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         k_cache: torch.Tensor,
         v_cache: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
-        seqlens_kv: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
+        seqlens_kv: Optional[torch.Tensor] = None,
     ):
         assert self.window_size == -1, (
             f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"

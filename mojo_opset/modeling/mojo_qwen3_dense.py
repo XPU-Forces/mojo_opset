@@ -262,7 +262,7 @@ class Qwen3Attention(nn.Module):
             # Use per-layer block table
             block_tables = past_key_values.block_tables[self.layer_idx]
 
-            attn_output_tnd = self.attn_prefill(q, k_cache, v_cache, cu_seqlens_q, current_seq_lens, block_tables, self.scaling)
+            attn_output_tnd = self.attn_prefill(q, k_cache, v_cache, cu_seqlens_q, block_tables, self.scaling, current_seq_lens)
             attn_output = attn_output_tnd.reshape(bsz, q_len, num_q_heads, head_dim)
             attn_output = attn_output.transpose(1, 2)
 

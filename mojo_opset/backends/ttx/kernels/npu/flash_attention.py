@@ -158,9 +158,12 @@ def paged_prefill_kernel(
 
         q_start_loc = tl.load(cu_seqlens_q_ptr + b_id)
         q_end_loc = tl.load(cu_seqlens_q_ptr + b_id + 1)
-        kv_seq_len = tl.load(seqlens_kv_ptr + b_id)
-
         q_seq_len = q_end_loc - q_start_loc
+
+        if seqlens_kv_ptr is None:
+            kv_seq_len = q_seq_len
+        else:
+            kv_seq_len = tl.load(seqlens_kv_ptr + b_id)
         kv_cache_len = kv_seq_len - q_seq_len
 
         q_block_start_in_seq = q_block_id * BLOCK_SIZE_M
@@ -255,7 +258,7 @@ def paged_attention_prefill_impl(
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
-    seqlens_kv: torch.Tensor,
+    seqlens_kv: Optional[torch.Tensor],
     block_tables: torch.Tensor,
     gqa_interleave: bool,
     sm_scale: Optional[float] = None,
@@ -263,7 +266,7 @@ def paged_attention_prefill_impl(
 ) -> torch.Tensor:
     _, num_q_heads, head_dim = q.shape
     _, num_kv_heads, block_size, _ = k_cache.shape
-    batch_size = seqlens_kv.shape[0]
+    batch_size = block_tables.shape[0]
 
     if sm_scale is None:
         sm_scale = 1.0 / math.sqrt(head_dim)

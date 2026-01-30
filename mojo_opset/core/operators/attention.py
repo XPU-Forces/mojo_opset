@@ -165,9 +165,9 @@ class MojoPagedPrefillGQA(MojoOperator):
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
-        seq_lens_kv: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
+        seqlens_kv: Optional[torch.Tensor] = None,
     ) -> Tuple[Any]:
         """
         Paged prefill attention with grouped query heads (GQA) using a blocked KV cache.
@@ -178,11 +178,12 @@ class MojoPagedPrefillGQA(MojoOperator):
             value_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
             cu_seqlens_q (torch.Tensor): Cumulative query lengths, shape (B+1,);
                 `cu_seqlens_q[i]` is the start offset for query at batch i; `cu_seqlens_q[-1] == T`.
-            seqlens_kv (torch.Tensor): key/value lengths, shape (B,);
-                `seqlens_kv[i]` is the length for key/value in key/value cache at batch i.
             block_tables (torch.Tensor): Logical-to-physical block IDs per batch,
                 shape (B, num_blocks).
             softmax_scale (Optional[float]): Attention scaling factor; defaults to 1/sqrt(D).
+            seqlens_kv (Optional[torch.Tensor]): key/value lengths, shape (B,);
+                `seqlens_kv[i]` is the length for key/value in key/value cache at batch i.
+                If None, defaults to `cu_seqlens_q[i+1] - cu_seqlens_q[i]` for each batch i.
 
         Returns:
             torch.Tensor: Attention output of shape (T, Hq, D).
@@ -208,7 +209,10 @@ class MojoPagedPrefillGQA(MojoOperator):
             start_loc = cu_seqlens_q[i].item()
             end_loc = cu_seqlens_q[i + 1].item()
             q = query[start_loc:end_loc]
-            kv_seq_len = seq_lens_kv[i].item()
+            if seqlens_kv is None:
+                kv_seq_len = q_seq_len
+            else:
+                kv_seq_len = seqlens_kv[i].item()
         
 
             num_blocks_for_seq = (kv_seq_len + block_size - 1) // block_size
