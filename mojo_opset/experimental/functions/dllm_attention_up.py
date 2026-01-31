@@ -7,9 +7,9 @@ from mojo_opset.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-class MojoDiffusionAttentionUpFunction(MojoFunction):
+class MojoDllmAttentionUpFunction(MojoFunction):
     """
-    MojoDiffusionAttentionFunction implements the specific attention for text diffusion.
+    MojoDllmAttentionUpFunction implements the specific attention for text diffusion.
     """
 
     @staticmethod
@@ -154,7 +154,7 @@ class MojoDiffusionAttentionUpFunction(MojoFunction):
         return dq, dk, dv, None, None, None
 
 
-def mojo_diffusion_attention_up(
+def mojo_dllm_attention_up(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -178,4 +178,4 @@ def mojo_diffusion_attention_up(
     Returns:
         torch.Tensor: The output of the attention function.
     """
-    return MojoDiffusionAttentionUpFunction.apply(query, key, value, cu_seqlen, scale, BLOCK_SIZE)
+    return MojoDllmAttentionUpFunction.apply(query, key, value, cu_seqlen, scale, BLOCK_SIZE)

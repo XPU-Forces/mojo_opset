@@ -8,7 +8,7 @@ from tests.utils import MockFunctionCtx
 from tests.utils import assert_close
 from tests.utils import auto_switch_platform
 
-from mojo_opset.experimental import MojoDiffusionAttentionUpFunction
+from mojo_opset.experimental import MojoDllmAttentionUpFunction
 
 
 def generate_test_data(
@@ -68,18 +68,18 @@ def generate_test_data(
 @auto_switch_platform()
 def test_diffusion_attention_up_func(query, key, value, cu_seqlen, scale, block_size):
     ctx = MockFunctionCtx()
-    o = MojoDiffusionAttentionUpFunction.forward(ctx, query, key, value, cu_seqlen, scale, block_size)
+    o = MojoDllmAttentionUpFunction.forward(ctx, query, key, value, cu_seqlen, scale, block_size)
 
     ctx_ref = MockFunctionCtx()
-    o_ref = MojoDiffusionAttentionUpFunction._registry.get("torch").forward(
+    o_ref = MojoDllmAttentionUpFunction._registry.get("torch").forward(
         ctx_ref, query, key, value, cu_seqlen, scale, block_size
     )
 
     assert_close(o, o_ref)
 
     do = torch.rand_like(o)
-    grads = MojoDiffusionAttentionUpFunction.backward(ctx, do)
+    grads = MojoDllmAttentionUpFunction.backward(ctx, do)
 
-    grads_ref = MojoDiffusionAttentionUpFunction._registry.get("torch").backward(ctx_ref, do)
+    grads_ref = MojoDllmAttentionUpFunction._registry.get("torch").backward(ctx_ref, do)
 
     assert_close(grads, grads_ref)

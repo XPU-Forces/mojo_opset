@@ -185,12 +185,6 @@ def micro_kernel_bwd_kv(
     configs=[
         triton.Config(
             {"BLOCK_R": 64, "BLOCK_C": 128},
-            # multibuffer=True,
-            # unit_flag=True,
-            # set_workspace_multibuffer=2,
-            # enable_hivm_auto_cv_balance=True,
-            # tile_mix_vector_loop=2,
-            # tile_mix_cube_loop=2,
         )
     ],
     key=["N", "H"],
@@ -223,13 +217,11 @@ def kernel_da_fwd_u(
     STRIDE_V_H: tl.constexpr,
     STRIDE_D_S: tl.constexpr,
     STRIDE_D_N: tl.constexpr,
-    STRIDE_MASK,
+    STRIDE_MASK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
     LOW_TYPE: tl.constexpr = tl.bfloat16,
     HIGH_TYPE: tl.constexpr = tl.float32,
-    # MAX_NUM_SEQ: tl.constexpr = 1024,
 ):
     pid = tl.program_id(axis=0)
     pnum = tl.num_programs(axis=0)
@@ -407,6 +399,192 @@ def kernel_da_fwd_u(
         seq_st = seq_ed
         offset_block_r_st = offset_block_r_ed
 
+@triton.autotune(
+    configs=[
+        triton.Config(
+            {"BLOCK_R": 64, "BLOCK_C": 128},
+        )
+    ],
+    key=["N", "H"],
+)
+@triton.jit
+def kernel_da_fwd_d(
+    q,
+    k,
+    v,
+    o,
+    fp32o,
+    lse,
+    cu_seqlens,
+    num_seqs,
+    scale,
+    mask_dr,
+    GROUP_SIZE: tl.constexpr,
+    S,
+    N: tl.constexpr,
+    H: tl.constexpr,
+    STRIDE_Q_S: tl.constexpr,
+    STRIDE_Q_N: tl.constexpr,
+    STRIDE_Q_H: tl.constexpr,
+    STRIDE_K_S: tl.constexpr,
+    STRIDE_K_N: tl.constexpr,
+    STRIDE_K_H: tl.constexpr,
+    STRIDE_V_S: tl.constexpr,
+    STRIDE_V_N: tl.constexpr,
+    STRIDE_V_H: tl.constexpr,
+    STRIDE_D_S: tl.constexpr,
+    STRIDE_D_N: tl.constexpr,
+    STRIDE_MASK: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+    LOW_TYPE: tl.constexpr = tl.bfloat16,
+    HIGH_TYPE: tl.constexpr = tl.float32,
+):
+    pid = tl.program_id(axis=0)
+    pnum = tl.num_programs(axis=0)
+
+    seq_st = 0
+    offset_block_r_st = 0
+
+    offset_r_local = tl.arange(0, BLOCK_R)[:, None]
+    offset_c_local = tl.arange(0, BLOCK_R)[None, :]
+    block_mask_full_dr = tl.load(mask_dr + offset_r_local * STRIDE_MASK + offset_c_local)
+
+    for idx_seq in range(num_seqs):
+        seq_ed = tl.load(cu_seqlens + idx_seq)
+        offset_block_r_ed = offset_block_r_st + tl.cdiv(seq_ed - seq_st, BLOCK_R)
+        for task_id in range(
+            offset_block_r_st * N + ((pid % pnum - offset_block_r_st * N % pnum + pnum) % pnum),
+            offset_block_r_ed * N,
+            pnum,
+        ):
+            idx_r = task_id // N - offset_block_r_st
+            idx_n = task_id % N
+            idx_h = tl.arange(0, H)
+
+            ptr_q = (
+                q
+                + idx_n * STRIDE_Q_N
+                + (S + seq_st + idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S
+                + idx_h[None, :] * STRIDE_Q_H
+            )
+            ptr_o = (
+                o
+                + idx_n * STRIDE_Q_N
+                + (S + seq_st + idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S
+                + idx_h[None, :] * STRIDE_Q_H
+            )
+            ptr_fp32o = (
+                fp32o
+                + idx_n * STRIDE_Q_N
+                + (S + seq_st + idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S
+                + idx_h[None, :] * STRIDE_Q_H
+            )
+            ptr_lse = lse + idx_n * STRIDE_D_N + (S + seq_st + idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] * STRIDE_D_S
+
+            mask_q = (seq_st + idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < seq_ed
+            mask_lse = (seq_st + idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] < seq_ed
+
+            block_q = tl.load(ptr_q, mask=mask_q, other=0.0)
+            block_o = tl.full([BLOCK_R, H], 0.0, dtype=HIGH_TYPE)
+            block_l = tl.full([BLOCK_R], 0.0, dtype=HIGH_TYPE)
+            block_m = tl.full([BLOCK_R], -1e6, dtype=HIGH_TYPE)
+
+            block_mask_shape = (
+                (seq_st + idx_r * BLOCK_R + offset_r_local < seq_ed) &
+                (seq_st + idx_r * BLOCK_R + offset_c_local < seq_ed)
+            )
+
+            block_mask_bool = (
+                block_mask_full_dr & block_mask_shape
+            )
+            block_mask = (block_mask_bool.to(LOW_TYPE) - 1.0) * 1e6
+
+            block_o, block_m, block_l = micro_kernel_fwd(
+                block_q,
+                k,
+                v,
+                block_o,
+                block_m,
+                block_l,
+                scale,
+                S + seq_st + idx_r * BLOCK_R,
+                S + seq_ed,
+                block_mask,
+                idx_n,
+                idx_h,
+                STRIDE_K_S,
+                STRIDE_K_N,
+                STRIDE_K_H,
+                STRIDE_V_S,
+                STRIDE_V_N,
+                STRIDE_V_H,
+                GROUP_SIZE,
+                BLOCK_R,
+                LOW_TYPE,
+                HIGH_TYPE,
+            )
+
+            for idx_tile_r in range(idx_r * BLOCK_R // BLOCK_C * BLOCK_C // BLOCK_R, idx_r):
+                block_o, block_m, block_l = micro_kernel_fwd(
+                    block_q,
+                    k,
+                    v,
+                    block_o,
+                    block_m,
+                    block_l,
+                    scale,
+                    S + seq_st + idx_tile_r * BLOCK_R,
+                    S + seq_ed,
+                    None,
+                    idx_n,
+                    idx_h,
+                    STRIDE_K_S,
+                    STRIDE_K_N,
+                    STRIDE_K_H,
+                    STRIDE_V_S,
+                    STRIDE_V_N,
+                    STRIDE_V_H,
+                    GROUP_SIZE,
+                    BLOCK_R,
+                    LOW_TYPE,
+                    HIGH_TYPE,
+                )
+
+            for idx_c in range(idx_r * BLOCK_R // BLOCK_C):
+                block_o, block_m, block_l = micro_kernel_fwd(
+                    block_q,
+                    k,
+                    v,
+                    block_o,
+                    block_m,
+                    block_l,
+                    scale,
+                    S + seq_st + idx_c * BLOCK_C,
+                    S + seq_ed,
+                    None,
+                    idx_n,
+                    idx_h,
+                    STRIDE_K_S,
+                    STRIDE_K_N,
+                    STRIDE_K_H,
+                    STRIDE_V_S,
+                    STRIDE_V_N,
+                    STRIDE_V_H,
+                    GROUP_SIZE,
+                    BLOCK_C,
+                    LOW_TYPE,
+                    HIGH_TYPE,
+                )
+
+            block_o = block_o / block_l[:, None]
+            block_lse = tl.log(block_l) + block_m
+            tl.store(ptr_o, block_o.to(LOW_TYPE), mask=mask_q)
+            tl.store(ptr_fp32o, block_o, mask=mask_q)
+            tl.store(ptr_lse, block_lse, mask=mask_lse)
+
+        seq_st = seq_ed
+        offset_block_r_st = offset_block_r_ed
 
 @triton.autotune(
     configs=[
@@ -465,12 +643,6 @@ def kernel_da_bwd_d(
     configs=[
         triton.Config(
             {"BLOCK_R": 64, "BLOCK_C": 128},
-            # multibuffer=True,
-            # unit_flag=True,
-            # set_workspace_multibuffer=2,
-            # enable_hivm_auto_cv_balance=True,
-            # tile_mix_vector_loop=2,
-            # tile_mix_cube_loop=2,
         )
     ],
     key=["N", "H"],
@@ -507,7 +679,6 @@ def kernel_da_bwd_q_u(
     STRIDE_MASK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
     LOW_TYPE: tl.constexpr = tl.bfloat16,
     HIGH_TYPE: tl.constexpr = tl.float32,
 ):
@@ -685,23 +856,201 @@ def kernel_da_bwd_q_u(
         seq_st = seq_ed
         offset_block_r_st = offset_block_r_ed
 
-
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_R": 256, "BLOCK_C": 64},
-            # multibuffer=True,
-            # unit_flag=True,
-            # set_workspace_multibuffer=2,
-            # enable_hivm_auto_cv_balance=True,
-            # tile_mix_vector_loop=2,
-            # tile_mix_cube_loop=2,
+            {"BLOCK_R": 64, "BLOCK_C": 128},
         )
     ],
     key=["N", "H"],
 )
 @triton.jit
-def kernel_da_bwd_kv_ul(
+def kernel_da_bwd_q_d(
+    q,
+    k,
+    v,
+    do,
+    d,
+    lse,
+    dq,
+    cu_seqlens,
+    num_seqs,
+    scale,
+    mask_dr,
+    GROUP_SIZE: tl.constexpr,
+    S,
+    N: tl.constexpr,
+    H: tl.constexpr,
+    STRIDE_Q_S: tl.constexpr,
+    STRIDE_Q_N: tl.constexpr,
+    STRIDE_Q_H: tl.constexpr,
+    STRIDE_K_S: tl.constexpr,
+    STRIDE_K_N: tl.constexpr,
+    STRIDE_K_H: tl.constexpr,
+    STRIDE_V_S: tl.constexpr,
+    STRIDE_V_N: tl.constexpr,
+    STRIDE_V_H: tl.constexpr,
+    STRIDE_D_S: tl.constexpr,
+    STRIDE_D_N: tl.constexpr,
+    STRIDE_MASK: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+    LOW_TYPE: tl.constexpr = tl.bfloat16,
+    HIGH_TYPE: tl.constexpr = tl.float32,
+):
+    pid = tl.program_id(axis=0)
+    pnum = tl.num_programs(axis=0)
+
+    seq_st = 0
+    offset_block_r_st = 0
+
+    offset_r_local = tl.arange(0, BLOCK_R)[:, None]
+    offset_c_local = tl.arange(0, BLOCK_R)[None, :]
+    block_mask_full_dr = tl.load(mask_dr + offset_r_local * STRIDE_MASK + offset_c_local)
+
+    for idx_seq in range(num_seqs):
+        seq_ed = tl.load(cu_seqlens + idx_seq)
+        offset_block_r_ed = offset_block_r_st + tl.cdiv(seq_ed - seq_st, BLOCK_R)
+        for task_id in range(
+            offset_block_r_st * N + ((pid % pnum - offset_block_r_st * N % pnum + pnum) % pnum),
+            offset_block_r_ed * N,
+            pnum,
+        ):
+            idx_r = task_id // N - offset_block_r_st
+            idx_n = task_id % N
+            idx_h = tl.arange(0, H)
+
+            ptr_q = (
+                q
+                + idx_n * STRIDE_Q_N
+                + (S + seq_st + idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S
+                + idx_h[None, :] * STRIDE_Q_H
+            )
+            ptr_do = (
+                do
+                + idx_n * STRIDE_Q_N
+                + (S + seq_st + idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S
+                + idx_h[None, :] * STRIDE_Q_H
+            )
+            ptr_dq = (
+                dq
+                + idx_n * STRIDE_Q_N
+                + (S + seq_st + idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S
+                + idx_h[None, :] * STRIDE_Q_H
+            )
+            ptr_d = d + idx_n * STRIDE_D_N + (S + seq_st + idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] * STRIDE_D_S
+            ptr_lse = lse + idx_n * STRIDE_D_N + (S + seq_st + idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] * STRIDE_D_S
+            mask_q = (seq_st + idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < seq_ed
+            mask_d = (seq_st + idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:] < seq_ed
+
+            block_q = tl.load(ptr_q, mask=mask_q, other=0.0)
+            block_do = tl.load(ptr_do, mask=mask_q, other=0.0)
+            block_lse = tl.load(ptr_lse, mask=mask_d, other=0.0)
+            block_d = tl.load(ptr_d, mask=mask_d, other=0.0)
+            block_dq = tl.full([BLOCK_R, H], 0.0, dtype=HIGH_TYPE)
+            block_mask_shape = (
+                (seq_st + idx_r * BLOCK_R + offset_r_local < seq_ed) &
+                (seq_st + idx_r * BLOCK_R + offset_c_local < seq_ed)
+            )
+            block_mask_bool = (
+                block_mask_full_dr & block_mask_shape
+            )
+            block_mask = (block_mask_bool.to(LOW_TYPE) - 1.0) * 1e6
+            block_dq = micro_kernel_bwd_q(
+                block_q,
+                k,
+                v,
+                block_do,
+                block_d,
+                block_dq,
+                block_lse,
+                scale,
+                S + seq_st + idx_r * BLOCK_R,
+                S + seq_ed,
+                block_mask,
+                idx_n,
+                idx_h,
+                STRIDE_K_S,
+                STRIDE_K_N,
+                STRIDE_K_H,
+                STRIDE_V_S,
+                STRIDE_V_N,
+                STRIDE_V_H,
+                GROUP_SIZE,
+                BLOCK_R,
+                LOW_TYPE,
+                HIGH_TYPE,
+            )
+
+            for idx_tile_r in range(idx_r * BLOCK_R // BLOCK_C * BLOCK_C // BLOCK_R, idx_r):
+                block_dq = micro_kernel_bwd_q(
+                    block_q,
+                    k,
+                    v,
+                    block_do,
+                    block_d,
+                    block_dq,
+                    block_lse,
+                    scale,
+                    S + seq_st + idx_tile_r * BLOCK_R,
+                    S + seq_ed,
+                    None,
+                    idx_n,
+                    idx_h,
+                    STRIDE_K_S,
+                    STRIDE_K_N,
+                    STRIDE_K_H,
+                    STRIDE_V_S,
+                    STRIDE_V_N,
+                    STRIDE_V_H,
+                    GROUP_SIZE,
+                    BLOCK_R,
+                    LOW_TYPE,
+                    HIGH_TYPE,
+                )
+
+            for idx_c in range(idx_r * BLOCK_R // BLOCK_C):
+                block_dq = micro_kernel_bwd_q(
+                    block_q,
+                    k,
+                    v,
+                    block_do,
+                    block_d,
+                    block_dq,
+                    block_lse,
+                    scale,
+                    S + seq_st + idx_c * BLOCK_C,
+                    S + seq_ed,
+                    None,
+                    idx_n,
+                    idx_h,
+                    STRIDE_K_S,
+                    STRIDE_K_N,
+                    STRIDE_K_H,
+                    STRIDE_V_S,
+                    STRIDE_V_N,
+                    STRIDE_V_H,
+                    GROUP_SIZE,
+                    BLOCK_C,
+                    LOW_TYPE,
+                    HIGH_TYPE,
+                )
+
+            tl.store(ptr_dq, block_dq.to(LOW_TYPE), mask=mask_q)
+        seq_st = seq_ed
+        offset_block_r_st = offset_block_r_ed
+
+
+@triton.autotune(
+    configs=[
+        triton.Config(
+            {"BLOCK_R": 256, "BLOCK_C": 64},
+        )
+    ],
+    key=["N", "H"],
+)
+@triton.jit
+def kernel_da_bwd_kv_l(
     q,
     k,
     v,
@@ -732,7 +1081,6 @@ def kernel_da_bwd_kv_ul(
     STRIDE_MASK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
     LOW_TYPE: tl.constexpr = tl.bfloat16,
     HIGH_TYPE: tl.constexpr = tl.float32,
 ):
@@ -837,19 +1185,13 @@ def kernel_da_bwd_kv_ul(
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_R": 128, "BLOCK_C": 64},
-            # multibuffer=True,
-            # unit_flag=True,
-            # set_workspace_multibuffer=2,
-            # enable_hivm_auto_cv_balance=True,
-            # tile_mix_vector_loop=2,
-            # tile_mix_cube_loop=2,
+            {"BLOCK_R": 64, "BLOCK_C": 64},
         )
     ],
     key=["N", "H"],
 )
 @triton.jit
-def kernel_da_bwd_kv_ur(
+def kernel_da_bwd_kv_r(
     q,
     k,
     v,
@@ -862,6 +1204,7 @@ def kernel_da_bwd_kv_ur(
     num_seqs,
     scale,
     mask_ur,
+    mask_dr,
     GROUP_SIZE: tl.constexpr,
     S,
     N: tl.constexpr,
@@ -880,7 +1223,6 @@ def kernel_da_bwd_kv_ur(
     STRIDE_MASK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
     LOW_TYPE: tl.constexpr = tl.bfloat16,
     HIGH_TYPE: tl.constexpr = tl.float32,
 ):
@@ -894,6 +1236,7 @@ def kernel_da_bwd_kv_ur(
     offs_r_local = tl.arange(0, BLOCK_C)[:, None]
     offs_c_local = tl.arange(0, BLOCK_C)[None, :]
     block_mask_full_ur = tl.load(mask_ur + offs_r_local * STRIDE_MASK + offs_c_local)
+    block_mask_full_dr = tl.load(mask_dr + offs_r_local * STRIDE_MASK + offs_c_local)
     
     for idx_seq in range(num_seqs):
         seq_ed = tl.load(cu_seqlens + idx_seq)
@@ -944,10 +1287,13 @@ def kernel_da_bwd_kv_ur(
             for idx_ingroup in range(GROUP_SIZE):
                 idx_n = idx_group * GROUP_SIZE + idx_ingroup
 
+                block_mask_shape = (
+                    (seq_st + idx_c * BLOCK_C + offs_r_local < seq_ed) &
+                    (seq_st + idx_c * BLOCK_C + offs_c_local < seq_ed)
+                )
                 block_mask_bool = (
                     block_mask_full_ur
-                    & (seq_st + idx_c * BLOCK_C + offs_r_local < seq_ed)
-                    & (seq_st + idx_c * BLOCK_C + offs_c_local < seq_ed)
+                    & block_mask_shape
                 )
                 block_mask = (block_mask_bool.to(LOW_TYPE) - 1.0) * 1e6
 
@@ -1028,13 +1374,96 @@ def kernel_da_bwd_kv_ur(
                         HIGH_TYPE,
                     )
 
+                block_mask_bool = (
+                    block_mask_full_dr
+                    & block_mask_shape
+                )
+                block_mask = (block_mask_bool.to(LOW_TYPE) - 1.0) * 1e6
+
+                block_dk, block_dv = micro_kernel_bwd_kv(
+                    q,
+                    block_k,
+                    block_v,
+                    do,
+                    d,
+                    block_dk,
+                    block_dv,
+                    lse,
+                    scale,
+                    S + seq_st + idx_c * BLOCK_C,
+                    S + seq_ed,
+                    block_mask,
+                    idx_n,
+                    idx_h,
+                    STRIDE_Q_S,
+                    STRIDE_Q_N,
+                    STRIDE_Q_H,
+                    STRIDE_D_S,
+                    STRIDE_D_N,
+                    BLOCK_C,
+                    LOW_TYPE,
+                    HIGH_TYPE,
+                )
+
+                for idx_tile_r in range(idx_c + 1, (idx_c * BLOCK_C // BLOCK_R + 1) * BLOCK_R // BLOCK_C):
+                    block_dk, block_dv = micro_kernel_bwd_kv(
+                        q,
+                        block_k,
+                        block_v,
+                        do,
+                        d,
+                        block_dk,
+                        block_dv,
+                        lse,
+                        scale,
+                        S + seq_st + idx_tile_r * BLOCK_C,
+                        S + seq_ed,
+                        None,
+                        idx_n,
+                        idx_h,
+                        STRIDE_Q_S,
+                        STRIDE_Q_N,
+                        STRIDE_Q_H,
+                        STRIDE_D_S,
+                        STRIDE_D_N,
+                        BLOCK_C,
+                        LOW_TYPE,
+                        HIGH_TYPE,
+                    )
+
+                for idx_r in range(idx_c * BLOCK_C // BLOCK_R + 1, (seq_ed - seq_st + BLOCK_R - 1) // BLOCK_R):
+                    block_dk, block_dv = micro_kernel_bwd_kv(
+                        q,
+                        block_k,
+                        block_v,
+                        do,
+                        d,
+                        block_dk,
+                        block_dv,
+                        lse,
+                        scale,
+                        S + seq_st + idx_r * BLOCK_R,
+                        S + seq_ed,
+                        None,
+                        idx_n,
+                        idx_h,
+                        STRIDE_Q_S,
+                        STRIDE_Q_N,
+                        STRIDE_Q_H,
+                        STRIDE_D_S,
+                        STRIDE_D_N,
+                        BLOCK_R,
+                        LOW_TYPE,
+                        HIGH_TYPE,
+                    )
+
             tl.store(ptr_dk, block_dk.to(LOW_TYPE), mask=mask_kv)
             tl.store(ptr_dv, block_dv.to(LOW_TYPE), mask=mask_kv)
         seq_st = seq_ed
         offset_block_c_st = offset_block_c_ed
 
 
-def diffusion_attention_up_fwd_impl(
+def dllm_attention_fwd_impl(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -1071,15 +1500,16 @@ def diffusion_attention_up_fwd_impl(
     lse = torch.zeros((q.shape[0], q.shape[1]), device=q.device, dtype=torch.float32)
     num_cores, _ = get_device_properties()
 
-    if (not hasattr(diffusion_attention_up_fwd_impl, "inited")):
-        diffusion_attention_up_fwd_impl.inited = True
+    if (not hasattr(dllm_attention_fwd_impl, "inited")):
+        dllm_attention_fwd_impl.inited = True
         BLOCK_MASK = 64
         offset_r_local = torch.arange(0, BLOCK_MASK)[:, None]
         offset_c_local = torch.arange(0, BLOCK_MASK)[None, :]
         chunk_idx_r = offset_r_local // BLOCK_SIZE
         chunk_idx_c = offset_c_local // BLOCK_SIZE
-        diffusion_attention_up_fwd_impl.mask_ur = (chunk_idx_r > chunk_idx_c).to(q.device)
-        diffusion_attention_up_fwd_impl.mask_ul = (chunk_idx_r == chunk_idx_c).to(q.device)
+        dllm_attention_fwd_impl.mask_ul = (chunk_idx_r == chunk_idx_c).to(q.device)
+        dllm_attention_fwd_impl.mask_ur = (chunk_idx_r > chunk_idx_c).to(q.device)
+        dllm_attention_fwd_impl.mask_dr = (chunk_idx_r >= chunk_idx_c).to(q.device)
 
     kernel_da_fwd_u[(num_cores,)](
         q,
@@ -1091,8 +1521,8 @@ def diffusion_attention_up_fwd_impl(
         cu_seqlen,
         cu_seqlen.shape[0],
         scale,
-        diffusion_attention_up_fwd_impl.mask_ul,
-        diffusion_attention_up_fwd_impl.mask_ur,
+        dllm_attention_fwd_impl.mask_ul,
+        dllm_attention_fwd_impl.mask_ur,
         q.shape[1] // k.shape[1],
         q.shape[0] // 2,
         q.shape[1],
@@ -1108,14 +1538,41 @@ def diffusion_attention_up_fwd_impl(
         v.stride(2),
         lse.stride(0),
         lse.stride(1),
-        diffusion_attention_up_fwd_impl.mask_ul.stride(0),
-        BLOCK_SIZE=BLOCK_SIZE,
+        dllm_attention_fwd_impl.mask_ul.stride(0),
+    )
+    kernel_da_fwd_d[(num_cores,)](
+        q,
+        k,
+        v,
+        o,
+        o_f32,
+        lse,
+        cu_seqlen,
+        cu_seqlen.shape[0],
+        scale,
+        dllm_attention_fwd_impl.mask_dr,
+        q.shape[1] // k.shape[1],
+        q.shape[0] // 2,
+        q.shape[1],
+        q.shape[2],
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        lse.stride(0),
+        lse.stride(1),
+        dllm_attention_fwd_impl.mask_ul.stride(0),
     )
 
     return o, o_f32, lse
 
 
-def diffusion_attention_up_bwd_impl(
+def dllm_attention_bwd_impl(
     fp32o: torch.Tensor,
     do: torch.Tensor,
     q: torch.Tensor,
@@ -1160,15 +1617,16 @@ def diffusion_attention_up_bwd_impl(
     dk = torch.empty_like(k)
     dv = torch.empty_like(v)
 
-    if (not hasattr(diffusion_attention_up_bwd_impl, "inited")):
-        diffusion_attention_up_bwd_impl.inited = True
+    if (not hasattr(dllm_attention_bwd_impl, "inited")):
+        dllm_attention_bwd_impl.inited = True
         BLOCK_MASK = 64
         offset_r_local = torch.arange(0, BLOCK_MASK)[:, None]
         offset_c_local = torch.arange(0, BLOCK_MASK)[None, :]
         chunk_idx_r = offset_r_local // BLOCK_SIZE
         chunk_idx_c = offset_c_local // BLOCK_SIZE
-        diffusion_attention_up_bwd_impl.mask_ul = (chunk_idx_r == chunk_idx_c).to(q.device)
-        diffusion_attention_up_bwd_impl.mask_ur = (chunk_idx_r > chunk_idx_c).to(q.device)
+        dllm_attention_bwd_impl.mask_ul = (chunk_idx_r == chunk_idx_c).to(q.device)
+        dllm_attention_bwd_impl.mask_ur = (chunk_idx_r > chunk_idx_c).to(q.device)
+        dllm_attention_bwd_impl.mask_dr = (chunk_idx_r >= chunk_idx_c).to(q.device)
 
     kernel_da_bwd_d[(num_vectorcore,)](
         fp32o,
@@ -1194,8 +1652,8 @@ def diffusion_attention_up_bwd_impl(
         cu_seqlen,
         cu_seqlen.shape[0],
         scale,
-        diffusion_attention_up_bwd_impl.mask_ur,
-        diffusion_attention_up_bwd_impl.mask_ul,
+        dllm_attention_bwd_impl.mask_ur,
+        dllm_attention_bwd_impl.mask_ul,
         q.shape[1] // k.shape[1],
         q.shape[0] // 2,
         q.shape[1],
@@ -1211,10 +1669,38 @@ def diffusion_attention_up_bwd_impl(
         v.stride(2),
         d.stride(0),
         d.stride(1),
-        diffusion_attention_up_bwd_impl.mask_ul.stride(0),
-        BLOCK_SIZE=BLOCK_SIZE,
+        dllm_attention_bwd_impl.mask_ul.stride(0),
     )
-    kernel_da_bwd_kv_ul[(num_cores,)](
+    kernel_da_bwd_q_d[(num_cores,)](
+        q,
+        k,
+        v,
+        do,
+        d,
+        lse,
+        dq,
+        cu_seqlen,
+        cu_seqlen.shape[0],
+        scale,
+        dllm_attention_bwd_impl.mask_dr,
+        q.shape[1] // k.shape[1],
+        q.shape[0] // 2,
+        q.shape[1],
+        q.shape[2],
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        d.stride(0),
+        d.stride(1),
+        dllm_attention_bwd_impl.mask_ul.stride(0),
+    )
+    kernel_da_bwd_kv_l[(num_cores,)](
         q,
         k,
         v,
@@ -1226,7 +1712,7 @@ def diffusion_attention_up_bwd_impl(
         cu_seqlen,
         cu_seqlen.shape[0],
         scale,
-        diffusion_attention_up_bwd_impl.mask_ul,
+        dllm_attention_bwd_impl.mask_ul,
         q.shape[1] // k.shape[1],
         q.shape[0] // 2,
         q.shape[1],
@@ -1242,10 +1728,9 @@ def diffusion_attention_up_bwd_impl(
         v.stride(2),
         d.stride(0),
         d.stride(1),
-        diffusion_attention_up_bwd_impl.mask_ul.stride(0),
-        BLOCK_SIZE=BLOCK_SIZE,
+        dllm_attention_bwd_impl.mask_ul.stride(0),
     )
-    kernel_da_bwd_kv_ur[(num_cores,)](
+    kernel_da_bwd_kv_r[(num_cores,)](
         q,
         k,
         v,
@@ -1257,7 +1742,8 @@ def diffusion_attention_up_bwd_impl(
         cu_seqlen,
         cu_seqlen.shape[0],
         scale,
-        diffusion_attention_up_bwd_impl.mask_ur,
+        dllm_attention_bwd_impl.mask_ur,
+        dllm_attention_bwd_impl.mask_dr,
         q.shape[1] // k.shape[1],
         q.shape[0] // 2,
         q.shape[1],
@@ -1273,8 +1759,7 @@ def diffusion_attention_up_bwd_impl(
         v.stride(2),
         d.stride(0),
         d.stride(1),
-        diffusion_attention_up_bwd_impl.mask_ul.stride(0),
-        BLOCK_SIZE=BLOCK_SIZE,
+        dllm_attention_bwd_impl.mask_ul.stride(0),
     )
 
     return dq, dk, dv

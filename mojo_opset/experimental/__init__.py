@@ -4,15 +4,15 @@ Once we find the operators of contrib become more and more stable in community, 
 """
 
 from mojo_opset.experimental.operators.store_lowrank import MojoStoreLowrank
-from mojo_opset.experimental.functions.diffusion_attention import MojoDiffusionAttentionFunction
-from mojo_opset.experimental.functions.diffusion_attention import mojo_diffusion_attention
-from mojo_opset.experimental.functions.diffusion_attention_up import MojoDiffusionAttentionUpFunction
-from mojo_opset.experimental.functions.diffusion_attention_up import mojo_diffusion_attention_up
+from mojo_opset.experimental.functions.dllm_attention import MojoDllmAttentionFunction
+from mojo_opset.experimental.functions.dllm_attention import mojo_dllm_attention
+from mojo_opset.experimental.functions.dllm_attention_up import MojoDllmAttentionUpFunction
+from mojo_opset.experimental.functions.dllm_attention_up import mojo_dllm_attention_up
 
 all = [
-    "MojoDiffusionAttentionFunction",
-    "mojo_diffusion_attention",
     "MojoStoreLowrank",
-    "MojoDiffusionAttentionUpFunction",
-    "mojo_diffusion_attention_up",
+    "MojoDllmAttentionFunction",
+    "mojo_dllm_attention",
+    "MojoDllmAttentionUpFunction",
+    "mojo_dllm_attention_up",
 ]
