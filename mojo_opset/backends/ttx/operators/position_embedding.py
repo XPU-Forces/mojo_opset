@@ -3,7 +3,7 @@ from typing import Tuple
 
 import torch
 
-from mojo_opset.backends.ttx.kernels.npu.rope import rope_fwd_impl
+from mojo_opset.backends.ttx.kernels import rope_fwd
 from mojo_opset.core import MojoRoPE
 
 
@@ -20,4 +20,4 @@ class TTXRoPE(MojoRoPE):
         kv_lens: Optional[torch.Tensor] = None,
         head_first: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return rope_fwd_impl(q, k, cos, sin, cu_seqlens, kv_lens, head_first)
+        return rope_fwd(q, k, cos, sin, cu_seqlens, kv_lens, head_first)
