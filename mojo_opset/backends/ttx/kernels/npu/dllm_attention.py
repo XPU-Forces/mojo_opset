@@ -189,7 +189,7 @@ def micro_kernel_bwd_kv(
     ],
     key=["N", "H"],
 )
-@triton.jit
+@triton.jit(do_not_specialize=["cu_seqlens", "num_seqs", "S"])
 def kernel_da_fwd_u(
     q,
     k,
@@ -407,7 +407,7 @@ def kernel_da_fwd_u(
     ],
     key=["N", "H"],
 )
-@triton.jit
+@triton.jit(do_not_specialize=["cu_seqlens", "num_seqs", "S"])
 def kernel_da_fwd_d(
     q,
     k,
@@ -594,7 +594,7 @@ def kernel_da_fwd_d(
     ],
     key=["N", "H"],
 )
-@triton.jit
+@triton.jit(do_not_specialize=["cu_seqlens", "num_seqs", "S"])
 def kernel_da_bwd_d(
     fp32o,
     do,
@@ -647,7 +647,7 @@ def kernel_da_bwd_d(
     ],
     key=["N", "H"],
 )
-@triton.jit
+@triton.jit(do_not_specialize=["cu_seqlens", "num_seqs", "S"])
 def kernel_da_bwd_q_u(
     q,
     k,
@@ -864,7 +864,7 @@ def kernel_da_bwd_q_u(
     ],
     key=["N", "H"],
 )
-@triton.jit
+@triton.jit(do_not_specialize=["cu_seqlens", "num_seqs", "S"])
 def kernel_da_bwd_q_d(
     q,
     k,
@@ -1049,7 +1049,7 @@ def kernel_da_bwd_q_d(
     ],
     key=["N", "H"],
 )
-@triton.jit
+@triton.jit(do_not_specialize=["cu_seqlens", "num_seqs", "S"])
 def kernel_da_bwd_kv_l(
     q,
     k,
@@ -1190,7 +1190,7 @@ def kernel_da_bwd_kv_l(
     ],
     key=["N", "H"],
 )
-@triton.jit
+@triton.jit(do_not_specialize=["cu_seqlens", "num_seqs", "S"])
 def kernel_da_bwd_kv_r(
     q,
     k,
