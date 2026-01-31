@@ -57,5 +57,6 @@ __all__ = [
 ]
 
 from mojo_opset.backends.ttx.kernels.utils import tensor_device_guard_for_triton_kernel
+
 # NOTE(liuyuan): Automatically add guard to torch tensor for triton kernels.
 tensor_device_guard_for_triton_kernel(__path__, __name__)
