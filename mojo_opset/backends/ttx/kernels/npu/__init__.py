@@ -1,10 +1,10 @@
 from .convolution import causal_conv1d_bwd_impl
 from .convolution import causal_conv1d_fwd_impl
 from .convolution import causal_conv1d_update_bdt_impl
-from .diffusion_attention_up import diffusion_attention_up_bwd_impl
-from .diffusion_attention_up import diffusion_attention_up_fwd_impl
-from .diffution_attention import diffusion_attention_bwd_impl
-from .diffution_attention import diffusion_attention_fwd_impl
+from .dllm_attention_up import dllm_attention_up_bwd_impl
+from .dllm_attention_up import dllm_attention_up_fwd_impl
+from .dllm_attention import dllm_attention_bwd_impl
+from .dllm_attention import dllm_attention_fwd_impl
 from .flash_attention import paged_attention_decode_impl
 from .flash_attention import paged_attention_prefill_impl
 from .fused_add_layernorm import fused_add_layernorm_infer_impl
@@ -69,10 +69,10 @@ __all__ = [
     "sdpa_infer_impl",
     "sdpa_fwd_impl",
     "sdpa_bwd_impl",
-    "diffusion_attention_fwd_impl",
-    "diffusion_attention_bwd_impl",
-    "diffusion_attention_up_fwd_impl",
-    "diffusion_attention_up_bwd_impl",
+    "dllm_attention_fwd_impl",
+    "dllm_attention_bwd_impl",
+    "dllm_attention_up_fwd_impl",
+    "dllm_attention_up_bwd_impl",
     "m_grouped_matmul_impl",
     "k_grouped_matmul_impl",
     "store_paged_kv_impl",
