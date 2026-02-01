@@ -17,10 +17,6 @@ class MojoGelu(MojoOperator):
         return torch.nn.functional.gelu(x)
 
 
-class MojoGeluQuant(MojoOperator):
-    pass
-
-
 class MojoSilu(MojoOperator):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -37,10 +33,6 @@ class MojoSilu(MojoOperator):
             SiLU is defined as x * sigmoid(x).
         """
         return torch.nn.functional.silu(x)
-
-
-class MojoSiluQuant(MojoOperator):
-    pass
 
 
 class MojoSwiGLU(MojoOperator):

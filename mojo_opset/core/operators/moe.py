@@ -59,10 +59,6 @@ class MojoMoECombine(MojoOperator):
         self.is_varlen = is_varlen
 
 
-class MojoBigEPCombine(MojoOperator):
-    pass
-
-
 class MojoMoEDispatch(MojoOperator):
     def __init__(
         self,
@@ -85,7 +81,3 @@ class MojoMoEDispatch(MojoOperator):
         self.ep_group = ep_group
         self.tp_group = tp_group
         self.is_varlen = is_varlen
-
-
-class MojoBigEPDispatch(MojoOperator):
-    pass

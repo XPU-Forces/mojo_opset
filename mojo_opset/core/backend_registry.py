@@ -91,13 +91,12 @@ class MojoBackendRegistry:
         try:
             return self._registry[backend_name]
         except Exception as e:
-            fallback = list(self._registry.values())[0]
             logger.warning(
                 f"Failed to get backend '{backend_name}' for "
                 f"{self._operator_name}, falling back to '{fallback.__class__.__name__}'. "
                 f"Error: {e}"
             )
-            return fallback
+            return list(self._registry.values())[0]
 
     def sort(self):
         self._registry = dict(sorted(self._registry.items(), key=lambda x: BACKEND_PRIORITY_LIST.index(x[0])))

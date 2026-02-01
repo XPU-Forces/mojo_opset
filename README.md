@@ -71,7 +71,6 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | PositionEmb | MojoRotaryEmb               | ✅                | ✅             |
 | PositionEmb | MojoNormRotary              | TBD               | TBD           |
 | PositionEmb | MojoNormRotaryStorKV        | TBD               | TBD           |
-| KVCache     | MojoKVCacheCast             | TBD               | TBD           |
 | KVCache     | MojoStorePagedKVCache       | ✅                | ✅             |
 | KVCache     | MojoStorePagedMLAKVCache    | TBD               | TBD           |
 | Linear      | MojoLinear                  | ✅                | TBD           |
@@ -83,8 +82,6 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Activation  | MojoGelu                    | ✅                | ✅             |
 | Activation  | MojoSilu                    | ✅                | ✅             |
 | Activation  | MojoSwiGlu                  | ✅                | ✅             |
-| Activation  | MojoSiluQuant               | TBD               | TBD           |
-| Activation  | MojoGeluQuant               | TBD               | TBD           |
 | Activation  | MojoSwiGluQuant             | TBD               | TBD           |
 | Comm&Comp   | MojoLinearAllReduce         | TBD               | TBD           |
 | Comm&Comp   | MojoAllGatherLinear         | TBD               | TBD           |
