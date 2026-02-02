@@ -42,19 +42,19 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 
 | Op Category | Op Name                     | torch native      | ttx           |
 | :---------- | :-------------------------- | :---------------- | :------------ |
+| Attention   | MojoSdpa                    | ✅                | ✅             |
 | Embedding   | MojoEmbedding               | TBD               | TBD           |
 | Embedding   | MojoParallelEmbedding       | TBD               | TBD           |
-| Attention   | MojoPagedPrefillGQA         | ✅                | ✅             |
-| Attention   | MojoPagedDecodeGQA          | ✅                | ✅             |
+| Attention   | MojoPagedPrefillGQA         | 🚧                | 🚧             |
+| Attention   | MojoPagedDecodeGQA          | 🚧                | 🚧             |
 | Attention   | MojoPagedPrefillMLA         | TBD               | TBD           |
 | Attention   | MojoPagedDecodeMLA          | TBD               | TBD           |
 | Attention   | MojoPagedPrefillNSA         | TBD               | TBD           |
 | Attention   | MojoPagedDecodeNSA          | TBD               | TBD           |
 | Attention   | MojoSlidingWindownAttenton  | TBD               | TBD           |
-| Attention   | MojoSdpa                    | ✅                | ✅             |
 | MoE         | MojoMoEGating               | ✅                | TBD           |
-| MoE         | MojoMoEDispatch             | ✅                | TBD           |
-| MoE         | MojoMoECombine              | ✅                | TBD           |
+| MoE         | MojoMoEDispatch             | 🚧                | TBD           |
+| MoE         | MojoMoECombine              | 🚧                | TBD           |
 | MoE         | MojoMoeDispatchQuant        | TBD               | TBD           |
 | Sampling    | MojoTopKSampling            | TBD               | TBD           |
 | Sampling    | MojoTopPSampling            | ✅                | ✅             |
