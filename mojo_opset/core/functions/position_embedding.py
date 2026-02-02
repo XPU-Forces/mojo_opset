@@ -77,23 +77,3 @@ class MojoRoPEFunction(MojoFunction):
         grad_k = grad_k_part1 + grad_k_part2
 
         return grad_q, grad_k, None, None
-
-
-def mojo_rope(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    The RoPE function.
-    Args:
-        q: The query tensor.
-        k: The key tensor.
-        cos: The cosine tensor.
-        sin: The sine tensor.
-
-    Returns:
-        tuple: The rotated query tensor and key tensor.
-    """
-    return MojoRoPEFunction.apply(q, k, cos, sin)

@@ -7,11 +7,3 @@ class MojoQuant(MojoOperator):
 
 class MojoDequant(MojoOperator):
     pass
-
-
-class MojoEmbedding(MojoOperator):
-    pass
-
-
-class MojoParallelEmbedding(MojoOperator):
-    pass

@@ -5,10 +5,6 @@ import torch
 from ..operator import MojoOperator
 
 
-class MojoStoreKVCache(MojoOperator):
-    pass
-
-
 class MojoStorePagedKVCache(MojoOperator):
     def __init__(
         self,
@@ -106,8 +102,4 @@ class MojoStoreMLAKVCache(MojoOperator):
 
 
 class MojoStorePagedMLAKVCache(MojoOperator):
-    pass
-
-
-class MojoKVCacheCast(MojoOperator):
     pass
