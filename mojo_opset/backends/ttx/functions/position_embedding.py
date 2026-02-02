@@ -17,8 +17,7 @@ class TTXRoPEFunction(MojoRoPEFunction):
         q_rope, k_rope = rope_fwd(q, k, cos, sin)
 
         ctx.save_for_backward(cos, sin)
-        # NOTE(zhangjihang): why we need save seq length here?
-        # ctx.seq_len = seq_len
+
         return q_rope, k_rope
 
     @staticmethod
@@ -28,7 +27,6 @@ class TTXRoPEFunction(MojoRoPEFunction):
         grad_output_k: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, None, None]:
         cos, sin = ctx.saved_tensors
-        # seq_len = ctx.seq_len
 
         grad_q, grad_k = rope_bwd(grad_output_q, grad_output_k, sin, cos)
 
