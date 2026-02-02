@@ -168,6 +168,7 @@ class MojoPagedPrefillGQA(MojoOperator):
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
         seqlens_kv: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
     ) -> Tuple[Any]:
         """
         Paged prefill attention with grouped query heads (GQA) using a blocked KV cache.
@@ -184,6 +185,11 @@ class MojoPagedPrefillGQA(MojoOperator):
             seqlens_kv (Optional[torch.Tensor]): key/value lengths, shape (B,);
                 `seqlens_kv[i]` is the length for key/value in key/value cache at batch i.
                 If None, defaults to `cu_seqlens_q[i+1] - cu_seqlens_q[i]` for each batch i.
+            mask (Optional[torch.Tensor]): Attention mask; defaults to None.
+                If mask is None, it means a full mask or causal mask based on `is_causal`.
+                If mask is not None, and is_causal=False, applies the mask to the attention scores.
+                Currently we do not constrain the shape of mask, it is recommended be of shape (B, T, T) or (T, T),
+                where B is the block size, and T >= max(max(seqlens_kv), max(seqlens_q)).
 
         Returns:
             torch.Tensor: Attention output of shape (T, Hq, D).
@@ -247,6 +253,13 @@ class MojoPagedPrefillGQA(MojoOperator):
             attn_scores = torch.einsum("thd,khd->thk", q, k_expanded).float() * softmax_scale
             if self.is_causal:
                 attn_mask = torch.ones(q_seq_len, kv_seq_len, device=query.device, dtype=torch.bool).tril(kv_seq_len - q_seq_len)
+                attn_scores.masked_fill_(~attn_mask.unsqueeze(1), -torch.inf)
+            elif mask is not None:
+                if mask.dim() == 2:
+                    attn_mask = mask
+                else:
+                    attn_mask = mask[i]
+                attn_mask = attn_mask[kv_seq_len - q_seq_len:kv_seq_len, :kv_seq_len]
                 attn_scores.masked_fill_(~attn_mask.unsqueeze(1), -torch.inf)
 
             attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
