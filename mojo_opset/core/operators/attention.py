@@ -133,7 +133,6 @@ class MojoPrefillGQA(MojoOperator):
     GQA attention operator.
     Args:
         is_causal (bool): Whether to apply causal masking.
-        is_prefill (bool): Whether running in prefill mode.
         softmax_scale (float): Scaling factor for the softmax operation.
         gqa_layout (str): Layout for GQA attention.
         rm_padding (bool): Whether to remove padding from attention computation.
@@ -144,7 +143,6 @@ class MojoPrefillGQA(MojoOperator):
     def __init__(
         self,
         is_causal: bool = True,
-        is_prefill: bool = True,
         gqa_layout: str = "ABAB",
         rm_padding: bool = False,
         window_size: int = -1,
@@ -192,6 +190,9 @@ class MojoPrefillGQA(MojoOperator):
         if self.gqa_layout == "ABAB":
             k_cache = torch.cat([k_cache] * group, axis=1).reshape(-1, head_dim, seq_len)
             v_cache = torch.cat([v_cache] * group, axis=1).reshape(-1, seq_len, head_dim)
+        elif self.gqa_layout == "AABB":
+            k_cache = k_cache.repeat_interleave(group, dim=1).reshape(-1, head_dim, seq_len)
+            v_cache = v_cache.repeat_interleave(group, dim=1).reshape(-1, seq_len, head_dim)
         else:
             raise NotImplementedError
 
