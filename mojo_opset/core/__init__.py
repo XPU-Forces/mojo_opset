@@ -43,6 +43,10 @@ from .operators.linear import MojoLinearAll2All
 from .operators.linear import MojoLinearAllReduce
 from .operators.linear import MojoLinearReduceScatter
 
+""" matmul """
+from .operators.matmul import MojoGroupedMatmul
+from .operators.matmul import MojoGroupQuantMatmulReduceSum
+
 """ mojo misc """
 from .operators.misc import MojoDequant
 from .operators.misc import MojoEmbedding
@@ -97,6 +101,8 @@ from .functions.position_embedding import mojo_rope
 __all__ = [
     "MojoGelu",
     "MojoGeluQuant",
+    "MojoGroupedMatmul",
+    "MojoGroupQuantMatmulReduceSum",
     "MojoSilu",
     "MojoSiluQuant",
     "MojoSwiGLU",
