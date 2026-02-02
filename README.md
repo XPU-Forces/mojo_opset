@@ -52,7 +52,7 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Attention   | MojoPagedDecodeNSA          | TBD               | TBD           |
 | Attention   | MojoSlidingWindownAttenton  | TBD               | TBD           |
 | Attention   | MojoSdpa                    | ✅                | ✅             |
-| MoE         | MojoMoEGate                 | ✅                | TBD           |
+| MoE         | MojoMoEGating               | ✅                | TBD           |
 | MoE         | MojoMoEDispatch             | ✅                | TBD           |
 | MoE         | MojoMoECombine              | ✅                | TBD           |
 | MoE         | MojoMoeDispatchQuant        | TBD               | TBD           |
@@ -61,6 +61,8 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Sampling    | MojoTopPSampling            | ✅                | ✅             |
 | Sampling    | MojoRejectSampling          | ✅                | ✅             |
 | Sampling    | MojoApplyPenaltiesTempurate | ✅                | ✅             |
+| Quantize    | MojoQuant                   | ✅                | ✅             |
+| Quantize    | MojoDequant                 | ✅                | ✅             |
 | Norm        | MojoRMSNorm                 | ✅                | ✅             |
 | Norm        | MojoLayerNorm               | ✅                | ✅             |
 | Norm        | MojoResidualAddRMSNorm      | ✅                | ✅             |
@@ -98,7 +100,6 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | PositionEmb | MojoRotaryEmbFunc           | ✅                | ✅             |
 | Activation  | MojoSiluFunc                | ✅                | ✅             |
 | Activation  | MojoSwiGluFunc              | TBD               | TBD           |
-| MoE         | MojoMoEGatingFunc           | TBD               | TBD           |
 | Norm        | MojoRMSNormFunc             | ✅                | ✅             |
 | Comm&Comp   | MojoLinearAllReduce         | TBD               | TBD           |
 | Loss        | MojoLinearCrossEntropyFunc  | ✅                | ✅             |
@@ -120,32 +121,38 @@ You can build the model using Mojo Opset in the following ways:
 1. Build model from mojo opset
 
     You can also build your modeling by mojo opset directly, [Mojo qwen3 dense modeling](./mojo_opset/modeling/mojo_qwen3_dense.py) is an example.
+    
+    And you can try the example by running the following command:
 
-2. Patch for transformers models(🚧 coming soon).
+    ```bash
+    bash ./examples/run_model.sh
+
+    Prompt: 你好，请介绍一下你自己。
+    ----------------------------------------
+    ----------------------------------------
+    Generated text:  你好！我是一个大型语言模型，名叫通义千问，由通义实验室研发。我能够进行多轮对话，回答各种问题，创作文字，比如写故事、写邮件、写剧本等，还能进行逻辑推理、表达观点，甚至编写和调试程序。我的训练数据来自于互联网上的大量文本，因此我具备广泛的知识和语言理解能力。我可以用多种语言与你交流，包括中文、英文、日文、韩文等。
+    ```
+
+
+2. Patch for transformers models.
 
     For [hugging face transformers](https://github.com/huggingface/transformers) models, you can use Mojo Opset to build the model by monkey patching the original modeling code.
 
     ```python
-    from transformers import Qwen3ForCausalLM
-
     # 1. Apply mojo opset to qwen3 model
-    mojo_opset.patching.apply_mojo_to_qwen3()
+    mojo_opsetutils.patching.apply_mojo_to_qwen3()
 
-    
     # 2. Instantiate patched model
     model = transformers.AutoModelForCausalLM("path/to/qwen3/model")
     ```
 
+    And you can try the example by running the following command:
+    ```python
+    python ./examples/qwen3_patch.py
+    ```
 
 ### E2E model generation example for Qwen3-8B
-```bash
-bash ./examples/run_model.sh
 
-Prompt: 你好，请介绍一下你自己。
-----------------------------------------
-----------------------------------------
-Generated text:  你好！我是一个大型语言模型，名叫通义千问，由通义实验室研发。我能够进行多轮对话，回答各种问题，创作文字，比如写故事、写邮件、写剧本等，还能进行逻辑推理、表达观点，甚至编写和调试程序。我的训练数据来自于互联网上的大量文本，因此我具备广泛的知识和语言理解能力。我可以用多种语言与你交流，包括中文、英文、日文、韩文等。
-```
 
 ## 🚧 Future Work
 - Add more mojo ops.

@@ -1,7 +1,7 @@
 import torch
 from mojo_opset import (
     MojoEmbedding,
-    MojoMoEGate,
+    MojoMoEGating,
     MojoMoEDispatch,
     MojoMoECombine,
     MojoLinear,
@@ -26,7 +26,7 @@ class MojoQwen3MoeBlock(torch.nn.Module):
             head_dim=128,
         )
         self.post_norm = MojoNorm()
-        self.moe_gate = MojoMoEGate(
+        self.moe_gate = MojoMoEGating(
             in_features=4096,
             num_experts=8,
         )

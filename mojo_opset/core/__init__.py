@@ -54,7 +54,7 @@ from .operators.quantize import MojoQuant
 """ moe """
 from .operators.moe import MojoMoECombine
 from .operators.moe import MojoMoEDispatch
-from .operators.moe import MojoMoEGate
+from .operators.moe import MojoMoEGating
 
 """ normalization """
 from .operators.normalization import MojoLayerNorm
@@ -131,7 +131,7 @@ __all__ = [
     "MojoEmbedding",
     "MojoParallelEmbedding",
 
-    "MojoMoEGate",
+    "MojoMoEGating",
     "MojoMoEDispatch",
     "MojoMoECombine",
 
