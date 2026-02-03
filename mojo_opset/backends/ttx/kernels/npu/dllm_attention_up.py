@@ -184,13 +184,11 @@ def micro_kernel_bwd_kv(
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_R": 64, "BLOCK_C": 128},
-            # multibuffer=True,
-            # unit_flag=True,
-            # set_workspace_multibuffer=2,
-            # enable_hivm_auto_cv_balance=True,
-            # tile_mix_vector_loop=2,
-            # tile_mix_cube_loop=2,
+           {"BLOCK_R": 64, "BLOCK_C": 256},
+            limit_auto_multi_buffer_only_for_local_buffer=False,
+            set_workspace_multibuffer=2, 
+            tile_mix_vector_loop=2, 
+            tile_mix_cube_loop=4
         )
     ],
     key=["N", "H"],
@@ -412,6 +410,10 @@ def kernel_da_fwd_u(
     configs=[
         triton.Config(
             {"BLOCK_R": 64},
+            limit_auto_multi_buffer_only_for_local_buffer=False,
+            set_workspace_multibuffer=2, 
+            tile_mix_vector_loop=2, 
+            tile_mix_cube_loop=4
         ),
     ],
     key=["N", "H"],
@@ -464,13 +466,7 @@ def kernel_da_bwd_d(
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_R": 64, "BLOCK_C": 128},
-            # multibuffer=True,
-            # unit_flag=True,
-            # set_workspace_multibuffer=2,
-            # enable_hivm_auto_cv_balance=True,
-            # tile_mix_vector_loop=2,
-            # tile_mix_cube_loop=2,
+            {"BLOCK_R": 64, "BLOCK_C": 256},
         )
     ],
     key=["N", "H"],
@@ -690,12 +686,6 @@ def kernel_da_bwd_q_u(
     configs=[
         triton.Config(
             {"BLOCK_R": 256, "BLOCK_C": 64},
-            # multibuffer=True,
-            # unit_flag=True,
-            # set_workspace_multibuffer=2,
-            # enable_hivm_auto_cv_balance=True,
-            # tile_mix_vector_loop=2,
-            # tile_mix_cube_loop=2,
         )
     ],
     key=["N", "H"],
@@ -837,13 +827,7 @@ def kernel_da_bwd_kv_ul(
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_R": 128, "BLOCK_C": 64},
-            # multibuffer=True,
-            # unit_flag=True,
-            # set_workspace_multibuffer=2,
-            # enable_hivm_auto_cv_balance=True,
-            # tile_mix_vector_loop=2,
-            # tile_mix_cube_loop=2,
+            {"BLOCK_R": 256, "BLOCK_C": 64},
         )
     ],
     key=["N", "H"],
@@ -1169,7 +1153,6 @@ def dllm_attention_up_bwd_impl(
         chunk_idx_c = offset_c_local // BLOCK_SIZE
         dllm_attention_up_bwd_impl.mask_ul = (chunk_idx_r == chunk_idx_c).to(q.device)
         dllm_attention_up_bwd_impl.mask_ur = (chunk_idx_r > chunk_idx_c).to(q.device)
-
     kernel_da_bwd_d[(num_vectorcore,)](
         fp32o,
         do,

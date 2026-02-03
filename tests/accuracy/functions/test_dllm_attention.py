@@ -67,7 +67,7 @@ def generate_test_data(
 )
 # @pytest.mark.skip
 @auto_switch_platform()
-def test_diffusion_attention_up_func(query, key, value, cu_seqlen, scale, block_size):
+def test_diffusion_attention_func(query, key, value, cu_seqlen, scale, block_size):
     ctx = MockFunctionCtx()
     o = MojoDllmAttentionFunction.forward(ctx, query, key, value, cu_seqlen, scale, block_size)
 
