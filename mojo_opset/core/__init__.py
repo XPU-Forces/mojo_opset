@@ -89,6 +89,7 @@ from .functions.loss_function import MojoFusedLinearCrossEntropyFunction
 from .functions.loss_function import MojoFusedLinearCrossEntropyLoss
 from .functions.normalization import MojoRMSNormFunction
 from .functions.position_embedding import MojoRoPEFunction
+from .functions.attention import MojoFusionAttentionFunction
 
 # fmt: off
 __all__ = [
@@ -162,6 +163,7 @@ __all__ = [
     "MojoRoPEFunction",
     "MojoFusedLinearCrossEntropyFunction",
     "MojoCausalConv1dFunction",
+    "MojoFusionAttentionFunction",
 
     "MojoFusedLinearCrossEntropyLoss",
 ]
