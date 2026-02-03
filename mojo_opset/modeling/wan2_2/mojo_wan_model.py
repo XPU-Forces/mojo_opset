@@ -62,9 +62,9 @@ class WanSelfAttention(nn.Module):
         self.k = MojoLinear(weight=nn.Parameter(torch.ones(dim, dim)), bias=nn.Parameter(torch.zeros(dim)))
         self.v = MojoLinear(weight=nn.Parameter(torch.ones(dim, dim)), bias=nn.Parameter(torch.zeros(dim)))
         self.o = MojoLinear(weight=nn.Parameter(torch.ones(dim, dim)), bias=nn.Parameter(torch.zeros(dim)))
-        self.norm_q = MojoRMSNorm(dim, eps=eps, weight=nn.Parameter(torch.ones(dim))) if qk_norm else nn.Identity()
-        self.norm_k = MojoRMSNorm(dim, eps=eps, weight=nn.Parameter(torch.ones(dim))) if qk_norm else nn.Identity()
-        self.sdpa = MojoSdpa._registry.get("torch")()
+        self.norm_q = MojoRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+        self.norm_k = MojoRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+        self.sdpa = MojoSdpa._registry.get("torch_npu")(num_heads=num_heads)
         self.grid_rope = MojoGridRoPE()
 
     def forward(self, x, seq_lens, grid_sizes, freqs):
@@ -145,14 +145,13 @@ class WanAttentionBlock(nn.Module):
         self.eps = eps
 
         # layers
-        self.norm1 = MojoLayerNorm._registry.get("torch")(dim, eps)
+        self.norm1 = MojoLayerNorm._registry.get("torch")(dim, eps, elementwise_affine=False)
         self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm,
                                           eps)
-        self.norm3 = (MojoLayerNorm(dim, eps, weight=nn.Parameter(torch.ones(dim)), bias=nn.Parameter(torch.zeros(dim)))
-                      if cross_attn_norm else nn.Identity())
+        self.norm3 = (MojoLayerNorm(dim, eps) if cross_attn_norm else nn.Identity())
         self.cross_attn = WanCrossAttention(dim, num_heads, (-1, -1), qk_norm,
                                             eps)
-        self.norm2 = MojoLayerNorm._registry.get("torch")(dim, eps)
+        self.norm2 = MojoLayerNorm._registry.get("torch")(dim, eps, elementwise_affine=False)
         self.ffn = nn.Sequential(
             MojoLinear(weight=nn.Parameter(torch.ones(ffn_dim, dim)), bias=nn.Parameter(torch.zeros(ffn_dim))),
             MojoGelu(),
@@ -210,7 +209,7 @@ class Head(nn.Module):
 
         # layers
         out_dim = math.prod(patch_size) * out_dim
-        self.norm = MojoLayerNorm._registry.get("torch")(dim, eps)
+        self.norm = MojoLayerNorm._registry.get("torch")(dim, eps, elementwise_affine=False)
         self.head = MojoLinear(weight=nn.Parameter(torch.ones(out_dim, dim)), bias=nn.Parameter(torch.zeros(out_dim)))
 
         # modulation

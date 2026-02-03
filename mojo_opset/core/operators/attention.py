@@ -340,11 +340,15 @@ class MojoSdpa(MojoOperator):
         mask: Optional[torch.Tensor] = None,
         scale: Optional[float] = None,
         enable_gqa: bool = False,
+        layout: str = "BNSD",
+        num_heads: Optional[int] = None,
     ):
         super().__init__()
         self.mask = mask
         self.scale = scale
         self.enable_gqa = enable_gqa
+        self.layout = layout
+        self.num_heads = num_heads
 
     def forward(
         self,
@@ -368,36 +372,15 @@ class MojoSdpa(MojoOperator):
             - `scale=self.scale` sets custom scaling; if None, SDPA uses default scaling.
             - `enable_gqa=self.enable_gqa` allows grouped query attention when supported.
         """
-        # output = torch.nn.functional.scaled_dot_product_attention(
-        #     query,
-        #     key,
-        #     value,
-        #     attn_mask=self.mask,
-        #     dropout_p=0.0,
-        #     is_causal=False,
-        #     scale=self.scale,
-        #     enable_gqa=self.enable_gqa,
-        # )
-
-        output = torch_npu.npu_fusion_attention(
-            query=query,
-            key=key,
-            value=value,
-            scale=query.shape[-1] ** -0.5,
-            head_num=query.shape[1],
-            input_layout="BNSD",
-            sparse_mode=0
-        )[0]
-
-        # output = torch_npu.npu_fused_infer_attention_score(
-        #     query=query,
-        #     key=key,
-        #     value=value,
-        #     scale=query.shape[-1] ** -0.5,
-        #     num_heads=query.shape[1],
-        #     input_layout="BNSD",
-        #     pre_tokens=2147483647, 
-        #     next_tokens=2147483647
-        # )[0]
+        output = torch.nn.functional.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=self.mask,
+            dropout_p=0.0,
+            is_causal=False,
+            scale=self.scale,
+            enable_gqa=self.enable_gqa,
+        )
 
         return output

@@ -48,7 +48,6 @@ from .operators.linear import MojoLinearReduceScatter
 from .operators.embedding import MojoEmbedding
 from .operators.embedding import MojoParallelEmbedding
 from .operators.embedding import MojoRelativeEmbedding
-from .operators.embedding import MojoUpsample
 
 """ quantize """
 from .operators.quantize import MojoDequant
@@ -137,7 +136,6 @@ __all__ = [
     "MojoEmbedding",
     "MojoParallelEmbedding",
     "MojoRelativeEmbedding",
-    "MojoUpsample",
 
     "MojoMoEGating",
     "MojoMoEDispatch",

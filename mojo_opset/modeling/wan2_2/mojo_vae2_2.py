@@ -7,7 +7,6 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from mojo_opset import MojoChannelRMSNorm
-from mojo_opset import MojoUpsample
 from mojo_opset import MojoSilu
 
 __all__ = [
@@ -88,12 +87,12 @@ class Resample(nn.Module):
         # layers
         if mode == "upsample2d":
             self.resample = nn.Sequential(
-                MojoUpsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
+                Upsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
                 nn.Conv2d(dim, dim, 3, padding=1),
             )
         elif mode == "upsample3d":
             self.resample = nn.Sequential(
-                MojoUpsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
+                Upsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
                 nn.Conv2d(dim, dim, 3, padding=1),
             )
             self.time_conv = CausalConv3d(

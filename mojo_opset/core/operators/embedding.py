@@ -74,13 +74,3 @@ class MojoRelativeEmbedding(MojoOperator):
         rel_pos_large = torch.min(rel_pos_large, torch.full_like(rel_pos_large, num_buckets - 1))
         rel_buckets += torch.where(rel_pos < max_exact, rel_pos, rel_pos_large)
         return rel_buckets
-
-
-class MojoUpsample(MojoOperator):
-    def __init__(self, scale_factor, mode: str = "nearest-exact"):
-        super().__init__()
-        self.scale_factor = scale_factor
-        self.mode = mode
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.nn.functional.interpolate(x.float(), scale_factor=self.scale_factor, mode=self.mode).type_as(x)
