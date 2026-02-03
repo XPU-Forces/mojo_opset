@@ -9,6 +9,7 @@ class MojoLayerNorm(MojoOperator):
         self,
         norm_size: int,
         eps: float = 1e-5,
+        elementwise_affine: bool = True,
         **kwargs,
     ):
         """
@@ -17,11 +18,16 @@ class MojoLayerNorm(MojoOperator):
         Args:
             norm_size (int): Size of 1-D affine scale and shift vector.
             eps (float, default=1e-5): Epsilon added to the variance for numerical stability; must be > 0.
+            elementwise_affine (bool, default=True): Whether to apply elementwise affine transform.
             **kwargs: The keyword arguments of torch.empty, such as device, dtype and so on to create the weight and bias.
         """
         super().__init__(**kwargs)
-        self.weight = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
-        self.bias = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
+        if elementwise_affine:
+            self.weight = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
+            self.bias = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
+        else:
+            self.weight = None
+            self.bias = None
         self.variance_epsilon = eps
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
@@ -205,6 +211,25 @@ class MojoResidualAddLayerNorm(MojoOperator):
             residual = hidden_state
 
         return hidden_state, residual
+
+
+class MojoChannelRMSNorm(MojoOperator):
+    def __init__(self, hidden_size, channel_first=True, images=True, bias=False, **kwargs):
+        super().__init__(**kwargs)
+        b_dims = (1, 1) if images else (1, 1, 1)
+        shape = (hidden_size, *b_dims) if channel_first else (hidden_size,)
+        self.scale = hidden_size ** 0.5
+        self.gamma = torch.nn.Parameter(torch.ones(shape, **self.tensor_factory_kwargs))
+        self.bias = torch.nn.Parameter(torch.zeros(shape, **self.tensor_factory_kwargs)) if bias else None
+        self.channel_first = channel_first
+
+    def forward(self, x):
+        dim = 1 if self.channel_first else -1
+        y = torch.nn.functional.normalize(x, dim=dim) * self.scale
+        y = y * self.gamma
+        if self.bias is not None:
+            y = y + self.bias
+        return y
 
 
 class MojoResidualAddNormQuant(MojoOperator):
