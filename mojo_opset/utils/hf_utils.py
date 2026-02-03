@@ -1,12 +1,12 @@
 import glob
 import os
-from typing import Optional
+from typing import Optional, List
+from collections import OrderedDict
 
 import torch
 from torch import nn
 from transformers import AutoConfig, AutoTokenizer
 from safetensors.torch import load_file as load_safetensors
-from transformers.modeling_utils import no_init_weights
 
 
 def _env_flag_true(name: str) -> bool:
@@ -28,6 +28,7 @@ def _resolve_local_files_only(model_id_or_path: str) -> bool:
 
 
 def load_weights_direct(model_path: str, torch_model: nn.Module) -> None:
+    from transformers.modeling_utils import no_init_weights
     # 1. Collect weight files
     safetensors_files = sorted(glob.glob(os.path.join(model_path, "*.safetensors")))
     bin_files = sorted(glob.glob(os.path.join(model_path, "*.bin")))
@@ -138,3 +139,123 @@ def build_model_from_hf(
         load_weights_direct(model_id_or_path, torch_model)
 
         return torch_model
+
+
+"""
+An example for name_mapping_dict, the values should be weight-keys of our own model.
+        weight_renaming = {
+            "linear_qkv_proj": "linear_attn_block.projs.qkv",
+            "dt_bias": "linear_attn_block.dt_bias",
+            "linear_o_proj": "linear_attn_block.projs.output",
+            "a_proj": "linear_attn_block.projs.a",
+            "b_proj": "linear_attn_block.projs.b",
+            "context_groupnorm_linear": "linear_attn_block.context_rms_norm",
+            "q_norm": "flash_attn_block.rms_norms.query",
+            "k_norm": "flash_attn_block.rms_norms.key",
+            "qkv_proj": "flash_attn_block.projs.qkv",
+            "o_proj": "flash_attn_block.projs.output",
+            "context_groupnorm": "flash_attn_block.context_rms_norm",
+            "o_norm": "rms_norm",
+            "mlp.moe.experts": "ffn",
+            "gate_up_proj": "fc1",
+            "down_proj": "fc2",
+            "self_attention": "attention",
+        }
+"""
+def create_renaming_by_dict(name_mapping_dict: dict, longest_match_first=True):
+    from transformers.core_model_loading import WeightRenaming
+    assert name_mapping_dict
+
+    # NOTE(liuyuan): Longest-match-first should be the most common match.
+    if longest_match_first:
+        name_mapping_dict = sorted(
+            name_mapping_dict.items(), key=lambda x: (len(x[0]), x[1]), reverse=True
+        )
+    # NOTE(liuyuan): Although WeightRenaming supports multi-pattern matching, it still requires careful control over the mapping logic. Therefore, we recommend that users create complex WeightRenaming themselves.
+    return list(map(lambda x: WeightRenaming(x[0], x[1]), name_mapping_dict))
+
+
+"""
+An example to create a WeightConverter with custom ConversionOps.
+        from typing import Any
+        class SimpleConverter(ConversionOps):
+            @torch.no_grad
+            def convert(
+                self, input_dict: dict[str, Any], source_patterns: list[str], target_patterns: list[str], **kwargs
+            ) -> dict[str, list[torch.Tensor]]:
+                result_tensor = None
+                target_pattern = self.get_target_pattern(input_dict, source_patterns, target_patterns)
+                for source_pattern in source_patterns:
+                    source_tensor = input_dict[source_pattern].float()
+                    if result_tensor is None:
+                        result_tensor = torch.zeros_like(source_tensor)
+                    result_tensor += source_tensor
+                return {target_pattern : result_tensor * 0.5}
+
+            def get_target_pattern(self, input_dict: dict, source_patterns: str, target_patterns: list[str]) -> str:
+                assert len(source_pattern) == 2
+                return target_aptterns[0]
+        weight_converter = WeightConverter(["Hello","moto"], ["Nokia"], operations=[SimpleConverter()])
+"""
+def load_weights_with_renaming_and_converter(
+    model: torch.nn.Module,
+    hf_dir_or_preload_state_dict: str | OrderedDict,
+    strict_loading=True,
+    renamings: List["WeightRenaming"] = [],
+    converters: List["WeightConverter"] = [],
+):
+    # TODO(liuyuan): Once we model with transformers.modeling_utils.PreTrainedModel and transformers.configuration_utils.PretrainedConfig, we should use convert_and_load_state_dict_in_model directly.
+    # TODO(liuyuan): If partial weight-loading is required, perharps we could use the index json (aka. transformers.utils.SAFE_WEIGHTS_INDEX_NAME) to do the key renaming ahead of time.
+    from transformers.core_model_loading import WeightConverter, WeightRenaming, rename_source_key
+    from copy import deepcopy
+
+    state_dict_list = []
+    if isinstance(hf_dir_or_preload_state_dict, str):
+        import glob
+        safetensors_files = sorted(glob.glob(os.path.join(hf_dir_or_preload_state_dict, "*.safetensors")))
+        from safetensors.torch import load_file as load_safetensors
+        for f in safetensors_files:
+            state_dict_list.append(load_safetensors(f))
+    elif isinstance(hf_dir_or_preload_state_dict, OrderedDict):
+        state_dict_list = (
+            hf_dir_or_preload_state_dict
+            if isinstance(hf_dir_or_preload_state_dict, list)
+            else [hf_dir_or_preload_state_dict]
+        )
+    else:
+        raise TypeError(
+            f"hf_dir_or_preload_state_dict is supposed to be string or OrderedDict, but found {type(hf_dir_or_preload_state_dict)}"
+        )
+
+    model_state_dict = model.state_dict()
+    param_name_to_load: dict[str, WeightRenaming | WeightConverter] = {}
+    pattern_to_converter = {
+        k: converter
+        for converter in converters
+        for k in converter.source_patterns
+    }
+
+    for state_dict in state_dict_list:
+        for key in state_dict.keys():
+            renamed_key, src_pat = rename_source_key(key, renamings, converters)
+            if renamed_key in model_state_dict:
+                if src_pat is not None:
+                    new_converter = deepcopy(pattern_to_converter[src_pat])
+                    mapping = param_name_to_load.setdefault(renamed_key, new_converter)
+                else:
+                    mapping = param_name_to_load.setdefault(renamed_key, WeightRenaming(key, renamed_key))
+                    src_pat = key
+                mapping.add_tensor(
+                    renamed_key, key, src_pat, state_dict[key]
+                )
+
+    new_state_dict = {}
+    for k, mapping in param_name_to_load.items():
+        converted_tensor,_ = mapping.convert(k)
+        for k,v in converted_tensor.items():
+            if isinstance(v, list):
+                converted_tensor[k] = v[0]
+        new_state_dict.update(converted_tensor)
+
+    return model.load_state_dict(new_state_dict, strict=strict_loading)
+    # print(model.load_state_dict(new_state_dict, strict=False))
