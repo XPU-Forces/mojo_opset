@@ -17,23 +17,25 @@ class MojoMoE(MojoOperator):
         ep_size: Optional[int] = None,
         ep_rank: Optional[int] = None,
     ):
+        if activation != "swiglu":
+            raise NotImplementedError(f"MojoMoe: Activation {activation} is not supported.")
+
         self.hidden_size = hidden_size
         self.ffn_intermediate_size = ffn_intermediate_size
         self.num_experts = num_experts
         self.top_k = top_k
         self.expert_weights = torch.nn.Parameter(torch.empty(hidden_size, num_experts))
-        self.ffn1_weights = torch.nn.Parameter(torch.empty(num_experts, hidden_size, ffn_intermediate_size))
-        self.ffn2_weights = torch.nn.Parameter(torch.empty(num_experts, ffn_intermediate_size, hidden_size))
-
-        if activation != "swiglu":
-            raise NotImplementedError(f"MojoMoe: Activation {activation} is not supported.")
-        self.activation_func = lambda x: torch.nn.functional.silu(x) * x
+        # Ref: https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.linear.html
+        # torch.nn.functional.linear: out = input @ weight.T + bias
+        self.ffn1_weights = torch.nn.Parameter(torch.empty(num_experts, 2 * ffn_intermediate_size, hidden_size))
+        self.ffn2_weights = torch.nn.Parameter(torch.empty(num_experts, hidden_size, ffn_intermediate_size))
+        self.activation_func = lambda x: torch.nn.functional.silu((xc := x.chunk(2, dim=-1))[0]) * xc[1]
 
         self.expert_start = 0
         self.expert_end = num_experts
         if ep_size and ep_rank:
             self.expert_start = ep_rank * num_experts // ep_size
-            self.expert_end = min((ep_rank + 1) * num_experts // ep_size, num_experts)
+            self.expert_end = min((ep_rank + 1) * num_experts // ep_size, num_experts % ep_size)
 
     def _gating(self, hidden_states):
         gate_logits = torch.nn.functional.linear(hidden_states, self.expert_weights)
@@ -93,11 +95,18 @@ class MojoMoE(MojoOperator):
     ) -> torch.Tensor:
         top_k_indices, top_k_gates = self._gating(hidden_states)
         expert_inputs, pack_gates, pack_index = self._dispatch(
-            hidden_states, top_k_gates, top_k_indices,
+            hidden_states,
+            top_k_gates,
+            top_k_indices,
         )
         experts_outputs = self._experts(expert_inputs)
-        experts_output = self._combine(experts_outputs, hidden_states, pack_gates, pack_index,)
-        
+        experts_output = self._combine(
+            experts_outputs,
+            hidden_states,
+            pack_gates,
+            pack_index,
+        )
+
         return experts_output
 
 
