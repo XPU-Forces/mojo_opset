@@ -26,8 +26,22 @@ class MojoMoEGating(MojoOperator):
         super().__init__()
         self.gate_weight = torch.nn.Parameter(torch.empty(hidden_size, num_experts, **self.tensor_factory_kwargs))
         self.top_k = top_k
-
+        
     def forward(self, hidden_states: torch.Tensor,) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass for MoE Gating operator.
+
+        Input:
+        - hidden_states (torch.Tensor): Input tensor of shape [batch_size, seq_len, hidden_size].
+
+        Output:
+        - torch.Tensor: Output tensor of shape [batch_size, seq_len, num_experts].
+        """
+        
+        raise NotImplementedError("MojoMoEGating forward 仅进行通用参数校验,不包含具体 gating 逻辑")
+
+
+    def forward_ref(self, hidden_states: torch.Tensor,) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass for MoE Gating operator.
 
