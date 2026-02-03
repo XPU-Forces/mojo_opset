@@ -45,8 +45,10 @@ sdpa_infer_impl = getattr(ttx_backend_module, "sdpa_infer_impl")
 sdpa_fwd_impl = getattr(ttx_backend_module, "sdpa_fwd_impl")
 sdpa_bwd_impl = getattr(ttx_backend_module, "sdpa_bwd_impl")
 
-diffusion_attention_fwd_impl = getattr(ttx_backend_module, "diffusion_attention_fwd_impl")
-diffusion_attention_bwd_impl = getattr(ttx_backend_module, "diffusion_attention_bwd_impl")
+dllm_attention_fwd_impl = getattr(ttx_backend_module, "dllm_attention_fwd_impl")
+dllm_attention_bwd_impl = getattr(ttx_backend_module, "dllm_attention_bwd_impl")
+dllm_attention_up_fwd_impl = getattr(ttx_backend_module, "dllm_attention_up_fwd_impl")
+dllm_attention_up_bwd_impl = getattr(ttx_backend_module, "dllm_attention_up_bwd_impl")
 
 m_grouped_matmul_impl = getattr(ttx_backend_module, "m_grouped_matmul_impl")
 k_grouped_matmul_impl = getattr(ttx_backend_module, "k_grouped_matmul_impl")
@@ -635,8 +637,10 @@ else:
     sdpa_infer = sdpa_infer_impl
     sdpa_fwd = sdpa_fwd_impl
     sdpa_bwd = sdpa_bwd_impl
-    diffusion_attention_fwd = diffusion_attention_fwd_impl
-    diffusion_attention_bwd = diffusion_attention_bwd_impl
+    dllm_attention_fwd = dllm_attention_fwd_impl
+    dllm_attention_bwd = dllm_attention_bwd_impl
+    dllm_attention_up_fwd = dllm_attention_up_fwd_impl
+    dllm_attention_up_bwd = dllm_attention_up_bwd_impl
     m_grouped_matmul = m_grouped_matmul_impl
     k_grouped_matmul = k_grouped_matmul_impl
     store_paged_kv = store_paged_kv_impl
