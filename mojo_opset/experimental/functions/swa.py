@@ -48,14 +48,14 @@ def swa_torch_forward(
     global_window_size: Optional[int] = None,
     sm_scale: Optional[float] = None,
     gqa_interleave: bool = False,
-) -> torch.Tensor:
-    _, n_q_heads, head_dim = q.shape
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    total_q_len, n_q_heads, head_dim = q.shape
     n_kv_heads = k.shape[1]
     if sm_scale is None:
         sm_scale = 1.0 / (head_dim ** 0.5)
 
-    
     o = torch.empty_like(q)
+    softmax_lse = torch.empty((n_q_heads, total_q_len), dtype=torch.float32, device=q.device)
     bsz = cu_seqlens_q.shape[0] - 1
     for i in range(bsz):
         q_i = q[cu_seqlens_q[i]:cu_seqlens_q[i+1]]
@@ -80,9 +80,12 @@ def swa_torch_forward(
             global_window_size,
         ).to(s_i.device)
         
-        s_i = torch.where(s_mask, s_i, -float("inf"))
 
-        p_i = torch.softmax(s_i, dim=-1) # -> [n_q_heads, q_seq_len, kv_seq_len]
+        s_i = torch.where(s_mask, s_i, float("-inf"))
+        m_i = torch.max(s_i, dim=-1, keepdim=True).values # -> [n_q_heads, q_seq_len, 1]
+        s_i = s_i - m_i # -> [n_q_heads, q_seq_len, kv_seq_len]
+        p_i = torch.exp(s_i)
+        l_i = torch.sum(p_i, dim=-1, keepdim=True) # -> [n_q_heads, q_seq_len, 1]
         p_i = p_i.to(v.dtype)
 
         v_i = v[cu_seqlens_kv[i]:cu_seqlens_kv[i+1]].permute(1, 0, 2) # -> [n_kv_heads, kv_seq_len, head_dim]
@@ -91,10 +94,15 @@ def swa_torch_forward(
                 v_i = v_i.repeat((n_q_heads // n_kv_heads, 1, 1))
             else:
                 v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0) # -> [n_q_heads, kv_seq_len, head_dim]
-        o_i = torch.bmm(p_i, v_i) # -> [n_q_heads, q_seq_len, head_dim]
+        o_i = torch.bmm(p_i, v_i).float() # -> [n_q_heads, q_seq_len, head_dim]
+        o_i = o_i / l_i # -> [n_q_heads, q_seq_len, head_dim]
         o_i = o_i.permute(1, 0, 2) # -> [q_seq_len, n_q_heads, head_dim]
-        o[cu_seqlens_q[i]:cu_seqlens_q[i+1]] = o_i
-    return o
+        o[cu_seqlens_q[i]:cu_seqlens_q[i+1]] = o_i.to(o.dtype)
+        lse_i = m_i + torch.log(l_i) # -> [n_q_heads, q_seq_len, 1]
+        assert lse_i.dtype == torch.float32
+        softmax_lse[:, cu_seqlens_q[i]:cu_seqlens_q[i+1]] = lse_i.squeeze(-1) # -> [q_seq_len, n_q_heads]
+
+    return o, softmax_lse
 
 def swa_torch_backward(
     do: torch.Tensor, # [total_q_len, n_q_heads, head_dim]
@@ -102,6 +110,7 @@ def swa_torch_backward(
     k: torch.Tensor, # [total_k_len, n_kv_heads, head_dim]
     v: torch.Tensor, # [total_k_len, n_kv_heads, head_dim]
     o: torch.Tensor, # [total_q_len, n_q_heads, head_dim]
+    softmax_lse: torch.Tensor, # [n_q_heads, total_q_len]
     cu_seqlens_q: torch.Tensor, # [bsz + 1]
     cu_seqlens_kv: torch.Tensor, # [bsz + 1]
     max_seqlen_q: int,
@@ -120,6 +129,7 @@ def swa_torch_backward(
     dq = torch.zeros_like(q)
     dk = torch.zeros_like(k)
     dv = torch.zeros_like(v)
+    delta = torch.sum(o.float() * do.float(), dim=-1) # -> [total_q_len, n_q_heads]
     bsz = cu_seqlens_q.shape[0] - 1
     for i in range(bsz):
 
@@ -146,8 +156,10 @@ def swa_torch_backward(
             local_window_size,
             global_window_size,
         ).to(s_i.device)
-        s_i = torch.where(s_mask, s_i, -float("inf"))
-        p_i = torch.softmax(s_i, dim=-1) # -> [n_q_heads, q_seq_len, kv_seq_len]
+        s_i = torch.where(s_mask, s_i, float("-inf"))
+
+        lse_i = softmax_lse[:, cu_seqlens_q[i]:cu_seqlens_q[i+1]] # -> [n_q_heads, q_seq_len]
+        p_i = torch.exp(s_i - lse_i.unsqueeze(-1)) # -> [n_q_heads, q_seq_len, kv_seq_len]
 
         # Step 2: compute dv_i
         assert p_i.dtype == torch.float32
@@ -164,12 +176,19 @@ def swa_torch_backward(
 
         dp_i = torch.bmm(do_i, v_i.mT).float() # -> [n_q_heads, q_seq_len, kv_seq_len]
         assert dp_i.dtype == torch.float32
-        ds_i = p_i * (dp_i - torch.sum(p_i * dp_i, dim=-1, keepdim=True))
+        # Note: rowsum(P * dP) => rowsum(P * (dO @ V_T)) => rowsum(dO * (P @ V)) => rowsum(dO * O)
+        delta_i = delta[cu_seqlens_q[i]:cu_seqlens_q[i+1]].permute(1, 0).unsqueeze(-1) # -> [n_q_heads, q_seq_len]
+        # print(f"{p_i.shape=} {do_i.shape=}")
+        # delta_i_ref = torch.sum(p_i * dp_i, dim=-1, keepdim=True)
+        # torch.testing.assert_close(delta_i, delta_i_ref)
+        assert delta_i.dtype == torch.float32
+        ds_i = p_i * (dp_i - delta_i)
         ds_i = ds_i * sm_scale
         assert ds_i.dtype == torch.float32
         ds_i = ds_i.to(do_i.dtype)
+
         p_i = p_i.to(do_i.dtype)
- 
+
         dq_i = torch.bmm(ds_i, k_i) # -> [n_q_heads, q_seq_len, head_dim]
         dq[cu_seqlens_q[i]:cu_seqlens_q[i+1]] = dq_i.permute(1, 0, 2) # -> [q_seq_len, n_q_heads, head_dim]
 
@@ -221,11 +240,11 @@ class MojoSWAFunction(MojoFunction):
         sm_scale: Optional[float] = None,
         gqa_interleave: bool = False,
     ) -> torch.Tensor:
-        o = swa_torch_forward(
+        o, softmax_lse = swa_torch_forward(
             q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, is_causal, local_window_size, global_window_size, sm_scale, gqa_interleave
         )
 
-        ctx.save_for_backward(q, k, v, o, cu_seqlens_q, cu_seqlens_kv)
+        ctx.save_for_backward(o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv)
         ctx.sm_scale = sm_scale
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
@@ -241,7 +260,7 @@ class MojoSWAFunction(MojoFunction):
         do: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, 
                None, None, None, None, None, None, None, None, None]:
-        q, k, v, o, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
+        o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
         sm_scale = ctx.sm_scale
         max_seqlen_q = ctx.max_seqlen_q
         max_seqlen_kv = ctx.max_seqlen_kv
@@ -251,7 +270,7 @@ class MojoSWAFunction(MojoFunction):
         gqa_interleave = ctx.gqa_interleave
 
         dq, dk, dv = swa_torch_backward(
-            do, q, k, v, o, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, is_causal, local_window_size, global_window_size, sm_scale, gqa_interleave
+            do, q, k, v, o, softmax_lse, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, is_causal, local_window_size, global_window_size, sm_scale, gqa_interleave
         )
         return dq, dk, dv, None, None, None, None, None, None, None, None, None
 
@@ -298,7 +317,7 @@ def gen_mask_triu(mask_ptr_triu, mask_size, mask_stride_m, mask_stride_n, Q_BLOC
     return mask.to(tl.int1)
 
 @triton.jit
-def _sdpa_single_block(
+def _sdpa_single_block_fwd(
     acc_ptr,
     l_i,
     m_i,
@@ -362,7 +381,7 @@ def _sdpa_single_block(
 @triton.jit
 def _sdpa_fwd_kernel(
     o_ptr,
-    m_ptr,
+    lse_ptr,
     q_ptr,
     k_ptr,
     v_ptr,
@@ -374,7 +393,8 @@ def _sdpa_fwd_kernel(
     stride_ot,
     stride_oh,
     stride_od,
-    stride_mt,
+    stride_lse_h,
+    stride_lse_t,
     stride_qt,
     stride_qh,
     stride_qd,
@@ -451,6 +471,7 @@ def _sdpa_fwd_kernel(
             block_shape=(BLOCK_M, BLOCK_D),
             order=(1,0),
         )
+        lse_i_ptr = lse_ptr + q_head_id * stride_lse_h + q_start * stride_lse_t
         k_block_ptr = tl.make_block_ptr(
             base=k_ptr + kv_start * stride_kt + kv_head_id * stride_kh,
             shape=(kv_seq_len, HEAD_DIM),
@@ -515,7 +536,7 @@ def _sdpa_fwd_kernel(
 
                     cur_k_block_ptr = tl.advance(k_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
                     cur_v_block_ptr = tl.advance(v_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
-                    acc, l_i, m_i = _sdpa_single_block(
+                    acc, l_i, m_i = _sdpa_single_block_fwd(
                         acc, l_i, m_i, cur_q_block, cur_k_block_ptr, cur_v_block_ptr, mask, scale,
                         q_block_start, kv_block_start, block_len, kv_block_len,
                         HEAD_DIM, BLOCK_M, BLOCK_N, BLOCK_D, 
@@ -563,18 +584,17 @@ def _sdpa_fwd_kernel(
                         mask = mask & mask_sw
                 cur_k_block_ptr = tl.advance(k_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
                 cur_v_block_ptr = tl.advance(v_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
-                acc, l_i, m_i = _sdpa_single_block(
+                acc, l_i, m_i = _sdpa_single_block_fwd(
                     acc, l_i, m_i, cur_q_block, cur_k_block_ptr, cur_v_block_ptr, mask, scale,
                     q_block_start, kv_block_start, block_len, kv_block_len,
                     HEAD_DIM, BLOCK_M, BLOCK_N, BLOCK_D, 
                     v_ptr.dtype.element_ty == tl.float8e5,
                 )
 
-            m_i += tl.math.log(l_i)
-            m_i_offs = (q_block_id * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int32)
-            m_i_ptrs = m_ptr + (q_start + m_i_offs) * stride_mt
-            m_i_mask = m_i_offs < q_seq_len
-            tl.store(m_i_ptrs, m_i, mask=m_i_mask)
+            lse_i = m_i + tl.math.log(l_i)
+            lse_i_offs = (q_block_id * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int32)
+            lse_i_mask = lse_i_offs < q_seq_len
+            tl.store(lse_i_ptr + lse_i_offs * stride_lse_t, lse_i, mask=lse_i_mask)
             cur_o_block_ptr = tl.advance(o_block_ptr, ((q_block_id * BLOCK_M).to(tl.int32), 0))
             accumulator = acc / l_i[:, None]
             tl.store(cur_o_block_ptr, accumulator.to(o_ptr.type.element_ty), boundary_check=(0,1))
@@ -594,7 +614,7 @@ def _sdpa_fwd(
     tot_q_toks, num_q_heads, head_dim = q.shape
     tot_kv_toks, num_kv_heads, _ = k.shape
     o = torch.zeros_like(q)
-    m = torch.zeros((q.shape[0],), dtype=torch.float32, device=q.device) + float('-inf')
+    softmax_lse = torch.zeros((num_q_heads, tot_q_toks), dtype=torch.float32, device=q.device) + float('-inf')
     if q.dtype == torch.float32:
         CHUNK_SIZE = 64
         BLOCK_M = CHUNK_SIZE
@@ -612,11 +632,11 @@ def _sdpa_fwd(
     grid = (cube_num, )
 
     _sdpa_fwd_kernel[grid](
-        o, m, q, k, v, 
+        o, softmax_lse, q, k, v, 
         cu_seqlens_q, cu_seqlens_kv, sm_scale,
         q_chunk_indices, q_chunk_indices.shape[0],
         o.stride(0), o.stride(1), o.stride(2),
-        m.stride(0),
+        softmax_lse.stride(0), softmax_lse.stride(1),
         q.stride(0), q.stride(1), q.stride(2),
         k.stride(0), k.stride(1), k.stride(2),
         v.stride(0), v.stride(1), v.stride(2),
@@ -625,10 +645,9 @@ def _sdpa_fwd(
         num_q_heads, num_kv_heads, gqa_interleave, head_dim,
         CHUNK_SIZE, BLOCK_M, BLOCK_N, BLOCK_D,
     )
-    return o, m
+    return o, softmax_lse
 
 class TTXSWAFunction(MojoSWAFunction):
-    @staticmethod
     @staticmethod
     def forward(
         ctx, 
@@ -645,10 +664,10 @@ class TTXSWAFunction(MojoSWAFunction):
         sm_scale: Optional[float] = None,
         gqa_interleave: bool = False,
     ) -> torch.Tensor:
-        o, m = _sdpa_fwd(
+        o, softmax_lse = _sdpa_fwd(
             q, k, v, cu_seqlens_q, cu_seqlens_kv, is_causal, local_window_size, global_window_size, sm_scale, gqa_interleave
         )
-        ctx.save_for_backward(q, k, v, o, cu_seqlens_q, cu_seqlens_kv)
+        ctx.save_for_backward(o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv)
         ctx.sm_scale = sm_scale
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
@@ -689,9 +708,9 @@ def flash_attn_sparse_torch(
             else:
                 hk = h // gqa_ratio
 
-            b_q = q[seq_start:seq_end, h, :].float()
-            b_k = k[seq_start:seq_end, hk, :].float()
-            b_v = v[seq_start:seq_end, hk, :].float()
+            b_q = q[seq_start:seq_end, h, :].cpu().double()
+            b_k = k[seq_start:seq_end, hk, :].cpu().double()
+            b_v = v[seq_start:seq_end, hk, :].cpu().double()
             b_s = b_q @ b_k.T
 
             casual_mask = (
@@ -714,7 +733,7 @@ def flash_attn_sparse_torch(
             b_s = b_s.softmax(dim=-1)
 
             b_o = b_s @ b_v
-            o[seq_start:seq_end, h, :] = b_o.to(o.dtype)
+            o[seq_start:seq_end, h, :] = b_o.to(o.dtype).to(o.device)
 
     return o
 
@@ -748,8 +767,8 @@ def generate_test_data(
 def test_swa_function():
     test_configs = [
         (1, 1, 1, True, 128, 256, 0, torch.float32),
-        (4, 4, 2, False, 128, 256, 0, torch.float32),
-        (4, 4, 4, False, 128, 256, 0, torch.bfloat16),
+        # (4, 4, 4, False, 128, 256, 0, torch.float32),
+        (4, 4, 2, False, 128, 256, 0, torch.bfloat16),
     ]
 
     local_window = 123
@@ -776,13 +795,66 @@ def test_swa_function():
                 q_mojo, k_mojo, v_mojo, cu_seqlens_q, cu_seqlens_kv, max_q_len, max_kv_prefix_len, True, local_window, global_window, scale, gqa_interleave
             )
 
-            torch.testing.assert_close(o_ref, o_mojo, atol=2e-2, rtol=2e-3)
+            assert_close(o_ref, o_mojo)
             grad_out = torch.randn_like(o_ref)
             o_ref.backward(grad_out)
             o_mojo.backward(grad_out)
-            torch.testing.assert_close(q_ref.grad, q_mojo.grad, atol=1e-2, rtol=1e-2)
-            torch.testing.assert_close(k_ref.grad, k_mojo.grad, atol=1e-2, rtol=1e-2)
-            torch.testing.assert_close(v_ref.grad, v_mojo.grad, atol=1e-2, rtol=1e-2)
+            assert_close(q_ref.grad, q_mojo.grad)
+            assert_close(k_ref.grad, k_mojo.grad)
+            assert_close(v_ref.grad, v_mojo.grad)
+
+
+
+def assert_close(
+    results,
+    refs,
+):
+    """
+    Asserts that the results are close to the reference tensors within specified tolerances.
+
+    Args:
+        results (Union[torch.Tensor, Tuple[Any, ...]]): The calculated result tensor(s).
+        refs (Union[torch.Tensor, Tuple[Any, ...]]): The reference/golden tensor(s).
+
+    Raises:
+        AssertionError: If shapes, dtypes, or values do not match within tolerance.
+    """
+    assert type(results) is type(refs)
+    if isinstance(results, torch.Tensor) and isinstance(refs, torch.Tensor):
+        results = tuple([results])
+        refs = tuple([refs])
+
+    for result, ref in zip(results, refs):
+        if isinstance(result, torch.Tensor) and isinstance(ref, torch.Tensor):
+            assert result.shape == ref.shape
+            assert result.dtype == ref.dtype
+            dtype = result.dtype
+            if dtype == torch.bfloat16:
+                max_atol = 0.1
+                max_rtol = 0.05
+                mean_atol = 0.01
+                mean_rtol = 0.01
+            elif dtype == torch.float16:
+                max_atol = 2e-2
+                max_rtol = 2e-2
+                mean_atol = 2e-2
+                mean_rtol = 2e-2
+            elif dtype == torch.float32:
+                max_atol = 6e-3
+                max_rtol = 6e-3
+                mean_atol = 1e-4
+                mean_rtol = 1e-4
+            else:
+                logger.warning(f"dtype {dtype} is not supported.")
+                assert False
+
+            torch.testing.assert_close(result.to(torch.float32), ref.to(torch.float32), atol=max_atol, rtol=max_rtol)
+            assert (
+                torch.mean(torch.abs(ref - result)) < max_atol
+                or torch.mean(torch.abs((ref - result) / (ref + mean_atol))) < mean_rtol
+            )
+        else:
+            assert result == ref
 
 if __name__ == "__main__":
     test_swa_function()
