@@ -14,7 +14,6 @@ if __name__ == "__main__":
     parser.add_argument("--prompts", type=str or List, default=None)
     parser.add_argument("--model_path", type=str)
     parser.add_argument("--tokenizer_path", type=str)
-    parser.add_argument("--attn_implementation", type=str, default="flash_attention_2", choices=["flash_attention_2", "eager", "sdpa"])
     parser.add_argument("--use_cache", type=bool, default=True)
     parser.add_argument("--max_new_tokens", type=int, default=4096)
     parser.add_argument("--thinking_budget", type=int, default=-1)
@@ -37,11 +36,6 @@ if __name__ == "__main__":
     else:
         quantization_config = None
 
-    print("----config----", quantization_config)
-
-    # if args.transformers:
-    #     from transformers import AutoModelForCausalLM as model_class
-    # else:
     from mojo_seed_oss_base import SeedOssForCausalLM as model_class
 
     print(f"Loading model from {args.model_path}...")
@@ -49,17 +43,11 @@ if __name__ == "__main__":
         model_class,
         model_path,
         device="npu",
-        num_layers=32,
         trust_remote_code=True,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-
-    from mojo_opset.utils.platform import get_platform
-    platform = get_platform()
-
-    model.eval()
-    model.to('npu:1')
+    local_files_only = _resolve_local_files_only(tokenizer_path)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=local_files_only)
 
     if args.prompts is None:
         prompts = [
@@ -94,4 +82,4 @@ if __name__ == "__main__":
         print(output)
 
     del model
-    torch.cuda.empty_cache()
+    torch.npu.empty_cache()
