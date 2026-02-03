@@ -4,8 +4,10 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import html
+import re
+from transformers import AutoTokenizer
 
-from .tokenizers import HuggingfaceTokenizer
 from mojo_opset import MojoLinear
 from mojo_opset import MojoGelu
 from mojo_opset import MojoRMSNorm
@@ -25,6 +27,41 @@ def fp16_clamp(x):
         clamp = torch.finfo(x.dtype).max - 1000
         x = torch.clamp(x, min=-clamp, max=clamp)
     return x
+
+class HuggingfaceTokenizer:
+    def __init__(self, name, seq_len=None, clean=None, **kwargs):
+        assert clean in (None, 'whitespace', 'lower', 'canonicalize')
+        self.name = name
+        self.seq_len = seq_len
+        self.clean = clean
+        self.tokenizer = AutoTokenizer.from_pretrained(name, **kwargs)
+        self.vocab_size = self.tokenizer.vocab_size
+
+    def __call__(self, sequence, **kwargs):
+        return_mask = kwargs.pop('return_mask', False)
+        _kwargs = {'return_tensors': 'pt'}
+        if self.seq_len is not None:
+            _kwargs.update({'padding': 'max_length', 'truncation': True, 'max_length': self.seq_len})
+        _kwargs.update(**kwargs)
+        if isinstance(sequence, str):
+            sequence = [sequence]
+        if self.clean:
+            sequence = [self._clean(u) for u in sequence]
+        ids = self.tokenizer(sequence, **_kwargs)
+        if return_mask:
+            return ids.input_ids, ids.attention_mask
+        else:
+            return ids.input_ids
+
+    def _clean(self, text):
+        text = html.unescape(html.unescape(text)).strip()
+        if self.clean == 'whitespace':
+            text = re.sub(r'\s+', ' ', text).strip()
+        elif self.clean == 'lower':
+            text = re.sub(r'\s+', ' ', text).strip().lower()
+        elif self.clean == 'canonicalize':
+            text = re.sub(r'[_\s]+', ' ', text).strip().lower()
+        return text
 
 
 class T5LayerNorm(nn.Module):
