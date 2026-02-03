@@ -8,7 +8,6 @@ import html
 import re
 from transformers import AutoTokenizer
 
-from mojo_opset import MojoLinear
 from mojo_opset import MojoGelu
 from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoRelativeEmbedding
@@ -91,10 +90,10 @@ class T5Attention(nn.Module):
         self.head_dim = dim_attn // num_heads
 
         # layers
-        self.q = MojoLinear(weight=nn.Parameter(torch.empty(dim_attn, dim)), bias=None)
-        self.k = MojoLinear(weight=nn.Parameter(torch.empty(dim_attn, dim)), bias=None)
-        self.v = MojoLinear(weight=nn.Parameter(torch.empty(dim_attn, dim)), bias=None)
-        self.o = MojoLinear(weight=nn.Parameter(torch.empty(dim, dim_attn)), bias=None)
+        self.q = nn.Linear(dim, dim_attn, bias=False)
+        self.k = nn.Linear(dim, dim_attn, bias=False)
+        self.v = nn.Linear(dim, dim_attn, bias=False)
+        self.o = nn.Linear(dim_attn, dim, bias=False)
         self.dropout = nn.Dropout(dropout)
         self.attn_core = MojoT5FullAttention()
 
@@ -131,11 +130,11 @@ class T5FeedForward(nn.Module):
 
         # layers
         self.gate = nn.Sequential(
-            MojoLinear(weight=nn.Parameter(torch.empty(dim_ffn, dim)), bias=None),
+            nn.Linear(dim, dim_ffn, bias=False),
             MojoGelu._registry.get("torch")(),
         )
-        self.fc1 = MojoLinear(weight=nn.Parameter(torch.empty(dim_ffn, dim)), bias=None)
-        self.fc2 = MojoLinear(weight=nn.Parameter(torch.empty(dim, dim_ffn)), bias=None)
+        self.fc1 = nn.Linear(dim, dim_ffn, bias=False)
+        self.fc2 = nn.Linear(dim_ffn, dim, bias=False)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
@@ -353,7 +352,7 @@ class T5Model(nn.Module):
         self.decoder = T5Decoder(self.token_embedding, dim, dim_attn, dim_ffn,
                                  num_heads, decoder_layers, num_buckets,
                                  shared_pos, dropout)
-        self.head = MojoLinear(weight=nn.Parameter(torch.empty(vocab_size, dim)), bias=None)
+        self.head = nn.Linear(dim, vocab_size, bias=False)
 
     def forward(self, encoder_ids, encoder_mask, decoder_ids, decoder_mask):
         x = self.encoder(encoder_ids, encoder_mask)

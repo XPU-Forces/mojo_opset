@@ -5,7 +5,6 @@ from typing import Optional
 from typing import Tuple
 
 import torch
-import torch_npu
 
 from ..operator import MojoOperator
 
@@ -280,11 +279,6 @@ class MojoT5FullAttention(MojoOperator):
     def __init__(self):
         """
         Initialize T5-style full attention operator.
-
-        Args:
-            softmax_dtype (Optional[torch.dtype], default=torch.float32):
-                Dtype used for softmax computation. If None, softmax runs in float32
-                then casts back to input dtype, matching typical T5 behavior.
         """
         super().__init__()
 
