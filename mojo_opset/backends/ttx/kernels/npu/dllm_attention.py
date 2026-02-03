@@ -184,7 +184,11 @@ def micro_kernel_bwd_kv(
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_R": 64, "BLOCK_C": 128},
+            {"BLOCK_R": 64, "BLOCK_C": 256},
+            limit_auto_multi_buffer_only_for_local_buffer=False,
+            set_workspace_multibuffer=2, 
+            tile_mix_vector_loop=2, 
+            tile_mix_cube_loop=4
         )
     ],
     key=["N", "H"],
@@ -402,7 +406,11 @@ def kernel_da_fwd_u(
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_R": 64, "BLOCK_C": 128},
+            {"BLOCK_R": 64, "BLOCK_C": 256},
+            limit_auto_multi_buffer_only_for_local_buffer=False,
+            set_workspace_multibuffer=2, 
+            tile_mix_vector_loop=2, 
+            tile_mix_cube_loop=4
         )
     ],
     key=["N", "H"],
@@ -642,7 +650,7 @@ def kernel_da_bwd_d(
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_R": 64, "BLOCK_C": 128},
+            {"BLOCK_R": 64, "BLOCK_C": 256},
         )
     ],
     key=["N", "H"],
@@ -859,7 +867,7 @@ def kernel_da_bwd_q_u(
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_R": 64, "BLOCK_C": 128},
+            {"BLOCK_R": 64, "BLOCK_C": 256},
         )
     ],
     key=["N", "H"],
@@ -1185,7 +1193,7 @@ def kernel_da_bwd_kv_l(
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_R": 64, "BLOCK_C": 64},
+            {"BLOCK_R": 256, "BLOCK_C": 64},          
         )
     ],
     key=["N", "H"],
