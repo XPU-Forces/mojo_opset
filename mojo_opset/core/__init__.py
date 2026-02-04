@@ -37,15 +37,13 @@ from .operators.kv_cache import MojoStorePagedMLAKVCache
 """ linear """
 from .operators.linear import MojoAllGatherLinear
 from .operators.linear import MojoBatchLinear
+from .operators.linear import MojoDequantGroupLinear
 from .operators.linear import MojoGroupLinear
 from .operators.linear import MojoLinear
 from .operators.linear import MojoLinearAll2All
 from .operators.linear import MojoLinearAllReduce
 from .operators.linear import MojoLinearReduceScatter
-
-""" matmul """
-from .operators.matmul import MojoGroupedMatmul
-from .operators.matmul import MojoGroupQuantMatmulReduceSum
+from .operators.linear import MojoQuantGroupLinear
 
 """ mojo misc """
 from .operators.misc import MojoDequant
@@ -101,8 +99,6 @@ from .functions.position_embedding import mojo_rope
 __all__ = [
     "MojoGelu",
     "MojoGeluQuant",
-    "MojoGroupedMatmul",
-    "MojoGroupQuantMatmulReduceSum",
     "MojoSilu",
     "MojoSiluQuant",
     "MojoSwiGLU",
@@ -130,6 +126,8 @@ __all__ = [
     "MojoLinear",
     "MojoBatchLinear",
     "MojoGroupLinear",
+    "MojoQuantGroupLinear",
+    "MojoDequantGroupLinear",
     "MojoLinearAllReduce",
     "MojoLinearAll2All",
     "MojoAllGatherLinear",
