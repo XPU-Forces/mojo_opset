@@ -1,7 +1,7 @@
 import torch
 
-from mojo_opset.backends.ttx.kernels import m_grouped_matmul
-from mojo_opset.core import MojoGroupLinear
+from mojo_opset.backends.ttx.kernels import matmul, m_grouped_matmul
+from mojo_opset.core import MojoGroupLinear, MojoLinear
 
 
 class TTXGroupLinear(MojoGroupLinear):
@@ -27,6 +27,34 @@ class TTXGroupLinear(MojoGroupLinear):
 
         C = input.new_empty(M, N)
 
-        m_grouped_matmul(input, self.weight, C, group_list, num_groups, M, N, K, strideBN, strideBK, self.trans_weight)
+        m_grouped_matmul(
+            input,
+            self.weight,
+            C,
+            group_list,
+            num_groups,
+            M,
+            N,
+            K,
+            strideBN,
+            strideBK,
+            self.trans_weight,
+        )
 
         return C
+
+
+class TTXLinear(MojoLinear):
+    supported_platforms_list = ["npu"]
+
+    def forward(self, x: torch.Tensor, bias: torch.Tensor = None) -> torch.Tensor:
+        # B, M, K = x.shape
+        # N = self.weight.shape[1]
+
+        assert x.shape[-1] == x.shape[-1], "Incompatible dimensions"
+        assert x.is_contiguous(), "Matrix A must be contiguous"
+        assert x.dim() in [3, 4]
+        assert self.weight.dim() == 2
+
+
+        return matmul(x, self.weight, bias)

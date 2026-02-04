@@ -50,6 +50,7 @@ from .operators.embedding import MojoParallelEmbedding
 """ quantize """
 from .operators.quantize import MojoDequant
 from .operators.quantize import MojoQuant
+from .operators.misc import MojoQuantInt8
 
 """ moe """
 from .operators.moe import MojoMoE
@@ -127,6 +128,7 @@ __all__ = [
     "MojoLinearReduceScatter",
 
     "MojoQuant",
+    "MojoQuantInt8",
     "MojoDequant",
 
     "MojoEmbedding",

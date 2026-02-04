@@ -9,9 +9,11 @@ from .fused_linear_cross_entropy import fused_linear_cross_entropy_bwd_impl
 from .fused_linear_cross_entropy import fused_linear_cross_entropy_fwd_impl
 from .gelu import gelu_bwd_impl
 from .gelu import gelu_fwd_impl
+from .gemm import matmul_impl
 from .group_gemm import k_grouped_matmul_impl
 from .group_gemm import m_grouped_matmul_impl
 from .kv_cache import store_paged_kv_impl
+from .quant import quant_int8_infer_impl
 from .rmsnorm import rmsnorm_bwd_impl
 from .rmsnorm import rmsnorm_fwd_impl
 from .rmsnorm import rmsnorm_infer_impl
@@ -36,6 +38,7 @@ __all__ = [
     "fused_linear_cross_entropy_1d_fwd_impl",
     "gelu_bwd_impl",
     "gelu_fwd_impl",
+    "quant_int8_impl",
     "rmsnorm_bwd_impl",
     "rmsnorm_fwd_impl",
     "rmsnorm_infer_impl",
