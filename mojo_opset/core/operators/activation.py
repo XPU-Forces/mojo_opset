@@ -59,35 +59,26 @@ class MojoIndexerRotateActivation(MojoOperator):
         Forward pass with GELU activation.
 
         Args:
-            x (torch.Tensor): Input tensor of any shape.
+            x (torch.Tensor): Input tensor with shape (*, D), where D is the last dimension (feature dimension).
+                This allows for flexible input shapes:
+                - 2D: (batch_size, D)
+                - 3D: (batch_size, sequence_length, D)
+                - 4D: (batch_size, channels, height, D)
+                - Even: (D,) for single samples
+                where D represents the feature dimension.
 
         Returns:
             torch.Tensor: Same shape as input with element-wise GELU applied.
         """
+        from .misc import hadamard
 
-        def hadamard(n: int, dtype, device):
-            """Torch version hadamard matrix generation"""
-            if n < 1:
-                lg2 = 0
-            else:
-                lg2 = int(math.log(n, 2))
-
-            if 2**lg2 != n:
-                raise ValueError(f"n must be a power of 2, but got {n}")
-
-            H = torch.tensor([1], dtype=dtype, device=device)
-            for i in range(0, lg2):
-                H = torch.vstack((torch.hstack((H, H)), torch.hstack((H, -H))))
-            return H
-        
-        hidden_size = x.size(-1)
         x_shape = x.shape
         dim = x.shape[-1]
         x = x.reshape(-1, dim)
-        log_dim = math.ceil(math.log2(dim))
-        dim_padded = 2**log_dim
+        dim_padded = 2 ** math.ceil(math.log2(dim))
+
         if dim != dim_padded:
             x = torch.nn.functional.pad(x, (0, dim_padded - dim))
-        out = torch.nn.functional.linear(x, torch.tensor(hadamard(dim_padded, dtype=float, device=x.device), dtype=x.dtype, device=x.device))
-        out = out * hidden_size**-0.5
+        hadamard_tensor = hadamard(dim_padded, dtype=x.dtype, device=x.device)
+        out = torch.nn.functional.linear(x, hadamard_tensor) * dim**-0.5
         return out[..., :dim].reshape(*x_shape)

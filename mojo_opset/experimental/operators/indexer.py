@@ -1,20 +1,13 @@
 import math
-
-from typing import Any
-from typing import Optional
-from typing import Tuple
+from typing import Any, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from scipy.linalg import hadamard
+
+from mojo_opset.core import MojoIndexerRoPE, MojoIndexerRotateActivation, MojoLayerNorm, MojoLightningIndexer, MojoLinear, MojoQuant, MojoQuantInt8
 from mojo_opset.core.operator import MojoOperator
-from mojo_opset.core import MojoLinear, MojoLayerNorm
-from mojo_opset.core import MojoIndexerRoPE
-from mojo_opset.core import MojoIndexerRotateActivation
-from mojo_opset.core import MojoQuantInt8, MojoQuant
-from mojo_opset.core import MojoLightningIndexer
 from mojo_opset.utils.platform import get_platform
 
 
@@ -70,6 +63,7 @@ class MojoIndexer(MojoOperator):
         end_pos = start_pos + seqlen
 
         q = self.wq_b(qr)
+
         q = q.view(bsz, seqlen, self.n_heads, self.head_dim)
 
         with torch.no_grad():
@@ -77,6 +71,7 @@ class MojoIndexer(MojoOperator):
 
         cos = freqs_cis.real.unsqueeze(0).expand(bsz, -1, -1)
         sin = freqs_cis.imag.unsqueeze(0).expand(bsz, -1, -1)
+
         q, k = self.rope(q, k, cos, sin, rope_head_dim=self.rope_head_dim)
 
         q = self.activation(q)
@@ -84,7 +79,6 @@ class MojoIndexer(MojoOperator):
 
         q_quant, q_scale = self.quant(q, None)
         k_quant, k_scale = self.quant(k, None)
-
         self.k_cache[:bsz, start_pos:end_pos] = k_quant
         self.k_scale_cache[:bsz, start_pos:end_pos] = k_scale
 
@@ -101,4 +95,5 @@ class MojoIndexer(MojoOperator):
         if mask is not None:
             index_score += mask
         topk_indices = index_score.topk(min(self.topk, end_pos), dim=-1)[1]
+
         return topk_indices, index_score

@@ -1,6 +1,8 @@
 import torch
+import torch_npu
 import triton
 import triton.language as tl
+import triton.runtime.driver as driver
 from torch import Tensor
 
 from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
@@ -8,90 +10,138 @@ from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 
 def matmul_impl(x: Tensor, w: Tensor, bias: Tensor = None) -> Tensor:
 
-    input_shape = x.shape  # * B, M, K
-    x = x.reshape(-1, w.shape[-1])
-    M, K = x.shape
-    N = w.shape[0]  # * N, K
-    b_t = w.T  # * K, N
-    # Allocates output.
-    c = torch.empty((M, N), device=x.device, dtype=x.dtype)
-    # 1D launch kernel where each block gets its own program.
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),)
-    acc_dtype = tl.float32
-    matmul_kernel_2d[grid](
+    input_shape = x.shape  # * [B, M, K]
+    x = x.reshape(-1, w.shape[-1])  # * [BM, K]
+
+    BM, K = x.shape
+    N = w.shape[0]
+    b_t = w.T.contiguous()
+
+    mat_c = torch.empty(BM, N, dtype=x.dtype, device=x.device)  # * [BM, N]
+
+    num_cores = get_num_cores("cube")
+    # * 避免频繁调优，设置最小的基块
+    base_block_size = 64
+    TRESHHOLD_M = BM // base_block_size
+    TRESHHOLD_N = N // base_block_size
+
+    matmul_kernel[(num_cores,)](
         x,
         b_t,
-        c,
-        M,
+        mat_c,
+        BM,
         N,
         K,
-        acc_dtype,
-        x.stride(0),
-        x.stride(1),
-        b_t.stride(0),
-        b_t.stride(1),
-        c.stride(0),
-        c.stride(1),
+        TRESHHOLD_M,
+        TRESHHOLD_N,
+        num_cores,
     )
     # TODO: fuse add
     if bias is not None:
         c += bias.unsqueeze(0)
     new_shape = input_shape[:-1] + (b_t.shape[-1],)
-    return c.reshape(new_shape)
+
+    return mat_c.reshape(new_shape)  # * [B, M, N]
 
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32}),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 32}),
-        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 32}),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 32}),
-        triton.Config({"BLOCK_M": 256, "BLOCK_N": 64, "BLOCK_K": 32}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 4}),  # * added
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 4}),  # * added
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 4}),
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 4}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 6}),
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 6}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 8}),
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 8}),
     ],
-    key=["M", "N", "K"],
+    key=["TRESHHOLD_M", "TRESHHOLD_N", "K"],  # * K 轴不会频繁变化，但是 M、N 轴的长度会频繁变化，不作为调优传参
 )
 @triton.jit
-def matmul_kernel_2d(
-    a_ptr,
-    b_ptr,
-    c_ptr,
-    M: tl.constexpr,
-    N: tl.constexpr,
+def matmul_kernel(
+    mat_a,
+    mat_b,
+    mat_c,
+    M,
+    N,
     K: tl.constexpr,
-    acc_dtype: tl.constexpr,
-    stride_am: tl.constexpr,
-    stride_ak: tl.constexpr,
-    stride_bk: tl.constexpr,
-    stride_bn: tl.constexpr,
-    stride_cm: tl.constexpr,
-    stride_cn: tl.constexpr,
+    TRESHHOLD_M: tl.constexpr,  # * autotune args
+    TRESHHOLD_N: tl.constexpr,  # * autotune args
+    num_cores: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    BLOCK_TRESHHOLD: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
-    num_pid_n = tl.cdiv(N, BLOCK_N)
-    pid_m = pid // num_pid_n
-    pid_n = pid % num_pid_n
+    task_m_idx = 0
+    task_n_idx = 0
 
-    offs_am = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_bn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    offs_k = tl.arange(0, BLOCK_K)
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    """
+    Refer to https://gitcode.com/Ascend/triton-ascend/blob/master/ascend/examples/tutorials/13-matrix-multiplication-optimized.py
+    """
+    NUM_BLOCKS_M = tl.cdiv(M, BLOCK_M)
+    NUM_BLOCKS_N = tl.cdiv(N, BLOCK_N)
+    NUM_BLOCKS = NUM_BLOCKS_M * NUM_BLOCKS_N
+    # * 当任务量较多时，可以使能对角线分核策略进行优化
+    if NUM_BLOCKS_M >= BLOCK_TRESHHOLD or NUM_BLOCKS_N >= BLOCK_TRESHHOLD:
+        for block_idx in range(pid, NUM_BLOCKS, num_cores):
+            # * 8 * 8 对角线分核代码实现
+            curThresholdM = BLOCK_TRESHHOLD if block_idx < (NUM_BLOCKS_M // BLOCK_TRESHHOLD * BLOCK_TRESHHOLD) * NUM_BLOCKS_N else NUM_BLOCKS_M % BLOCK_TRESHHOLD
+            curThresholdM_thresholdN = curThresholdM * BLOCK_TRESHHOLD
+            curThresholdN = (
+                BLOCK_TRESHHOLD
+                if block_idx % (NUM_BLOCKS_N * BLOCK_TRESHHOLD) < (curThresholdM * NUM_BLOCKS_N) // curThresholdM_thresholdN * curThresholdM_thresholdN
+                else NUM_BLOCKS_N % BLOCK_TRESHHOLD
+            )
+            localRelativeBlock = block_idx % (BLOCK_TRESHHOLD * NUM_BLOCKS_N) % (BLOCK_TRESHHOLD * curThresholdM)
+            task_m_idx = localRelativeBlock % curThresholdM + block_idx // (BLOCK_TRESHHOLD * NUM_BLOCKS_N) * BLOCK_TRESHHOLD
+            # * 求最小公倍数，方便求基本块的坐标
+            x, y = curThresholdM, curThresholdN if curThresholdM > curThresholdN else curThresholdN, curThresholdM
+            while y != 0:
+                x, y = y, x % y
+            lcm = curThresholdM * curThresholdN // x
+            task_n_idx = (localRelativeBlock + (localRelativeBlock // lcm)) % curThresholdN + block_idx % (BLOCK_TRESHHOLD * NUM_BLOCKS_N) // curThresholdM_thresholdN * BLOCK_TRESHHOLD
 
-    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=acc_dtype)
-    for k in range(0, tl.cdiv(K, BLOCK_K)):
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)
-        accumulator = tl.dot(a, b, accumulator, out_dtype=acc_dtype)
-        a_ptrs += BLOCK_K * stride_ak
-        b_ptrs += BLOCK_K * stride_bk
-    # c = accumulator.to(c_ptr.dtype.element_ty)
-    c = accumulator
+            m_start = task_m_idx * BLOCK_M
+            n_start = task_n_idx * BLOCK_N
 
-    offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    tl.store(c_ptrs, c, mask=c_mask)
+            mat_c_block = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for k_start in range(0, K, BLOCK_K):
+                mat_a_offset = ((m_start + tl.arange(0, BLOCK_M)) * K)[:, None] + (k_start + tl.arange(0, BLOCK_K))[None, :]
+                mat_a_mask = ((m_start + tl.arange(0, BLOCK_M)) < M)[:, None] & ((k_start + tl.arange(0, BLOCK_K)) < K)[None, :]
+                mat_a_block = tl.load(mat_a + mat_a_offset, mask=mat_a_mask, other=0.0)
+                tl.compile_hint(mat_a_block, "dot_pad_only_k")
+                mat_b_offset = ((k_start + tl.arange(0, BLOCK_K)) * N)[:, None] + (n_start + tl.arange(0, BLOCK_N))[None, :]
+                mat_b_mask = ((k_start + tl.arange(0, BLOCK_K)) < K)[:, None] & ((n_start + tl.arange(0, BLOCK_N)) < N)[None, :]
+                mat_b_block = tl.load(mat_b + mat_b_offset, mask=mat_b_mask, other=0.0)
+                tl.compile_hint(mat_b_block, "dot_pad_only_k")
+                mat_c_block = tl.dot(mat_a_block, mat_b_block, mat_c_block)
+            mat_c_offset = ((m_start + tl.arange(0, BLOCK_M)) * N)[:, None] + (n_start + tl.arange(0, BLOCK_N))[None, :]
+            mat_c_mask = ((m_start + tl.arange(0, BLOCK_M)) < M)[:, None] & ((n_start + tl.arange(0, BLOCK_N)) < N)[None, :]
+            tl.store(mat_c + mat_c_offset, mat_c_block.to(tl.bfloat16), mask=mat_c_mask)
+    # if NUM_BLOCKS_M >= BLOCK_TRESHHOLD:
+    #     pass
+    else:
+        # * 传统顺序分核
+        pass
+        for block_idx in range(pid, NUM_BLOCKS, num_cores):
+            task_m_idx = block_idx // NUM_BLOCKS_N
+            task_n_idx = block_idx % NUM_BLOCKS_N
+            m_start = task_m_idx * BLOCK_M
+            n_start = task_n_idx * BLOCK_N
+
+            mat_c_block = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for k_start in range(0, K, BLOCK_K):
+                mat_a_offset = ((m_start + tl.arange(0, BLOCK_M)) * K)[:, None] + (k_start + tl.arange(0, BLOCK_K))[None, :]
+                mat_a_mask = ((m_start + tl.arange(0, BLOCK_M)) < M)[:, None] & ((k_start + tl.arange(0, BLOCK_K)) < K)[None, :]
+                mat_a_block = tl.load(mat_a + mat_a_offset, mask=mat_a_mask, other=0.0)
+                tl.compile_hint(mat_a_block, "dot_pad_only_k")
+                mat_b_offset = ((k_start + tl.arange(0, BLOCK_K)) * N)[:, None] + (n_start + tl.arange(0, BLOCK_N))[None, :]
+                mat_b_mask = ((k_start + tl.arange(0, BLOCK_K)) < K)[:, None] & ((n_start + tl.arange(0, BLOCK_N)) < N)[None, :]
+                mat_b_block = tl.load(mat_b + mat_b_offset, mask=mat_b_mask, other=0.0)
+                tl.compile_hint(mat_b_block, "dot_pad_only_k")
+                mat_c_block = tl.dot(mat_a_block, mat_b_block, mat_c_block)
+            mat_c_offset = ((m_start + tl.arange(0, BLOCK_M)) * N)[:, None] + (n_start + tl.arange(0, BLOCK_N))[None, :]
+            mat_c_mask = ((m_start + tl.arange(0, BLOCK_M)) < M)[:, None] & ((n_start + tl.arange(0, BLOCK_N)) < N)[None, :]
+            tl.store(mat_c + mat_c_offset, mat_c_block.to(tl.bfloat16), mask=mat_c_mask)

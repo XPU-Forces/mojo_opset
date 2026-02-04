@@ -1,14 +1,15 @@
-import torch
 from typing import Optional
 
+import torch
+
 from mojo_opset.backends.ttx.kernels import lightning_indexer_impl
+from mojo_opset.backends.ttx.operators.activation import TTXIndexerRotateActivation
+from mojo_opset.backends.ttx.operators.indexer_rope import TTXIndexerRoPE
+from mojo_opset.backends.ttx.operators.linear import TTXLinear
+from mojo_opset.backends.ttx.operators.misc import TTXQuant, TTXQuantInt8
+from mojo_opset.backends.ttx.operators.normalization import TTXLayerNorm
 from mojo_opset.core import MojoLightningIndexer
 from mojo_opset.experimental import MojoIndexer
-from mojo_opset.backends.ttx.operators.linear import TTXLinear
-from mojo_opset.backends.ttx.operators.normalization import TTXLayerNorm
-from mojo_opset.backends.ttx.operators.indexer_rope import TTXIndexerRoPE
-from mojo_opset.backends.ttx.operators.activation import TTXIndexerRotateActivation
-from mojo_opset.backends.ttx.operators.misc import TTXQuantInt8, TTXQuant
 from mojo_opset.utils.platform import get_platform
 
 
@@ -35,9 +36,7 @@ class TTXLightningIndexer(MojoLightningIndexer):
         ), f"query_scale must be [B, M, H], got {query_scale.size()}"
 
         # Create index score tensor
-        index_score = torch.zeros(
-            (batch_size, q_seq_len, k_seq_len), dtype=torch.float32, device=query.device
-        )
+        index_score = torch.zeros((batch_size, q_seq_len, k_seq_len), dtype=torch.float32, device=query.device)
 
         # Handle key_scale: validate and broadcast if needed
         if key_scale is None:
@@ -51,14 +50,8 @@ class TTXLightningIndexer(MojoLightningIndexer):
             key_scale_shape = key_scale.shape
             if len(key_scale_shape) == 1:
                 # [N] -> expand to [B, N]
-                assert (
-                    key_scale_shape[0] == k_seq_len
-                ), f"key_scale [N] must have N={k_seq_len}, got {key_scale_shape[0]}"
-                key_scale = (
-                    key_scale.to(torch.float32)
-                    .unsqueeze(0)
-                    .expand(batch_size, -1)
-                )
+                assert key_scale_shape[0] == k_seq_len, f"key_scale [N] must have N={k_seq_len}, got {key_scale_shape[0]}"
+                key_scale = key_scale.to(torch.float32).unsqueeze(0).expand(batch_size, -1)
             elif len(key_scale_shape) == 2:
                 assert key_scale_shape == (
                     batch_size,
@@ -113,12 +106,11 @@ class TTXIndexer(MojoIndexer):
             self.quant = TTXQuant()
         self.lightning_indexer = TTXLightningIndexer()
 
-
     def forward(self, x: torch.Tensor, qr: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
         bsz, seqlen, _ = x.size()
         end_pos = start_pos + seqlen
-
         q = self.wq_b(qr)
+
         q = q.view(bsz, seqlen, self.n_heads, self.head_dim)
 
         with torch.no_grad():
@@ -126,6 +118,7 @@ class TTXIndexer(MojoIndexer):
 
         cos = freqs_cis.real.unsqueeze(0).expand(bsz, -1, -1)
         sin = freqs_cis.imag.unsqueeze(0).expand(bsz, -1, -1)
+
         q, k = self.rope(q, k, cos, sin, rope_head_dim=self.rope_head_dim)
 
         q = self.activation(q)
@@ -141,8 +134,8 @@ class TTXIndexer(MojoIndexer):
         weights = weights * q_scale * self.softmax_scale
 
         index_score = self.lightning_indexer(
-            q_quant,
-            weights,
+            q_quant.contiguous(),
+            weights.contiguous(),
             key=self.k_cache_ttx[:bsz, :end_pos].contiguous(),
             key_scale=self.k_scale_cache_ttx[:bsz, :end_pos].contiguous(),
         )

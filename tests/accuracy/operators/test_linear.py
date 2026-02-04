@@ -39,7 +39,17 @@ def generate_random_list(length, total_sum):
             K,
             dtype,
         )
-        for M, N, K in [(1024, 128, 7168),]
+        for M, N in [
+            (1024, 1024),
+            (2048, 2048),
+            (4096, 4096),
+            (4096, 4096),
+            (8192, 8192),
+            (1, 32 * 1024),
+            (8, 32 * 1024),
+            (1, 128 * 1024),
+        ]
+        for K in [333, 4096, 7168]
         for batch_size in [1, 8, 32]
         for dtype in ["bfloat16", "float16", "float32"]
     ],
@@ -53,12 +63,12 @@ def test_gemm(batch_size, M, N, K, dtype):
         "float16": (1e-3, 1e-5, 1.0),
         "float32": (1.3e-6, 1e-5, 1.0),
     }
-    if device == 'npu':
+    if device == "npu":
         os.environ["CLOSE_MATMUL_K_SHIFT"] = "1"
     atol, rtol, ptol = map_tol[dtype]
     dtype = dtype_str_map[dtype]
 
-    x = torch.randn(batch_size, M, K, device=device, dtype=dtype) # BNSD or TND
+    x = torch.randn(batch_size, M, K, device=device, dtype=dtype)  # BNSD or TND
     weight = torch.randn(N, K, device=device, dtype=dtype)
 
     gemm = MojoLinear(
@@ -96,4 +106,3 @@ def test_group_gemm(input, weight, group_list):
         weight=weight,
     )
     group_gemm.forward_diff_with(group_gemm_ref, input, group_list, mixed_tol=True)
-

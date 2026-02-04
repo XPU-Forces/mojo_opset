@@ -62,8 +62,12 @@ __all__ = [
     "store_paged_kv_impl",
     "store_label_cache_fwd_impl",
     "lightning_indexer_impl",
+    "quant_int8_infer_impl",
+    "indexer_rope_impl",
+    "matmul_impl",
 ]
 
 from mojo_opset.backends.ttx.kernels.utils import tensor_device_guard_for_triton_kernel
+
 # NOTE(liuyuan): Automatically add guard to torch tensor for triton kernels.
 tensor_device_guard_for_triton_kernel(__path__, __name__)
