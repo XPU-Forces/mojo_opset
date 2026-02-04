@@ -18,7 +18,9 @@ from .rmsnorm import rmsnorm_bwd_impl
 from .rmsnorm import rmsnorm_fwd_impl
 from .rmsnorm import rmsnorm_infer_impl
 from .rope import rope_bwd_impl
+from .indexer_rotate_activation import indexer_rotate_activation_impl
 from .rope import rope_fwd_impl
+from .indexer_rope import indexer_rope_impl
 from .sdpa import sdpa_bwd_impl
 from .sdpa import sdpa_fwd_impl
 from .sdpa import sdpa_infer_impl
@@ -47,6 +49,7 @@ __all__ = [
     "rope_fwd_impl",
     "silu_bwd_impl",
     "silu_fwd_impl",
+    "indexer_rotate_activation_impl",
     "swiglu_bwd_impl",
     "swiglu_fwd_impl",
     "sdpa_infer_impl",

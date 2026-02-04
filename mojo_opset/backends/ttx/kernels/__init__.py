@@ -23,8 +23,12 @@ gelu_bwd_impl = getattr(ttx_backend_module, "gelu_bwd_impl")
 silu_fwd_impl = getattr(ttx_backend_module, "silu_fwd_impl")
 silu_bwd_impl = getattr(ttx_backend_module, "silu_bwd_impl")
 
+indexer_rotate_activation_impl = getattr(ttx_backend_module, "indexer_rotate_activation_impl")
+
 rope_fwd_impl = getattr(ttx_backend_module, "rope_fwd_impl")
 rope_bwd_impl = getattr(ttx_backend_module, "rope_bwd_impl")
+
+indexer_rope_impl = getattr(ttx_backend_module, "indexer_rope_impl")
 
 swiglu_fwd_impl = getattr(ttx_backend_module, "swiglu_fwd_impl")
 swiglu_bwd_impl = getattr(ttx_backend_module, "swiglu_bwd_impl")
@@ -146,6 +150,16 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         b: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(dc), torch.empty_like(dc)
+    
+    # ====================================
+    # Register indexer_rotate_activation
+    # ====================================
+
+    @torch.library.custom_op("ttx::indexer_rotate_activation", mutates_args={})
+    def indexer_rotate_activation(
+        x: torch.Tensor
+    ) -> torch.Tensor:
+        return indexer_rotate_activation_impl(x)
 
     # ====================================
     # Register Attention
@@ -257,6 +271,20 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         return torch.empty_like(input_tensor, dtype=torch.int8), torch.empty(batch, seqlen, dtype=torch.float32)
 
 
+    # ====================================
+    # Register Indexer_rope
+    # ====================================
+
+    @torch.library.custom_op("ttx::indexer_rope", mutates_args={})
+    def indexer_rope(
+        q: torch.Tensor,  # [BNSD]
+        k: torch.Tensor,  # [BSD]
+        cos: torch.Tensor,  # [BSD]
+        sin: torch.Tensor,  # [BSD]
+        rope_head_dim: int = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:  # [BNSD]
+        return indexer_rope_impl(q, k, cos, sin, rope_head_dim)
+    
     # ====================================
     # Register rmsnorm
     # ====================================
@@ -685,6 +713,7 @@ else:
     rope_fwd = rope_fwd_impl
     rope_bwd = rope_bwd_impl
     quant_int8_infer = quant_int8_infer_impl
+    indexer_rope = indexer_rope_impl
     rmsnorm_fwd = rmsnorm_fwd_impl
     rmsnorm_bwd = rmsnorm_bwd_impl
     rmsnorm_infer = rmsnorm_infer_impl

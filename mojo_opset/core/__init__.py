@@ -13,6 +13,7 @@ from .operator import MojoOperator
 from .operators.activation import MojoGelu
 from .operators.activation import MojoSilu
 from .operators.activation import MojoSwiGLU
+from .operators.activation import MojoIndexerRotateActivation
 
 """ attention """
 from .operators.attention import MojoDecodeGQA
@@ -72,6 +73,7 @@ from .operators.position_embedding import MojoNormRoPE
 from .operators.position_embedding import MojoNormRoPEStoreKV
 from .operators.position_embedding import MojoRoPE
 from .operators.position_embedding import MojoRoPEStoreKV
+from .operators.position_embedding import MojoIndexerRoPE
 
 """ sampling """
 from .operators.sampling import MojoApplyPenaltiesTempurate
@@ -103,6 +105,7 @@ __all__ = [
     "MojoGelu",
     "MojoSilu",
     "MojoSwiGLU",
+    "MojoIndexerRotateActivation",
 
     "MojoPrefillGQA",
     "MojoPagedPrefillGQA",
@@ -154,6 +157,7 @@ __all__ = [
     "MojoRoPEStoreKV",
     "MojoNormRoPE",
     "MojoNormRoPEStoreKV",
+    "MojoIndexerRoPE",
 
     "MojoTopPSampling",
     "MojoTopKSampling",
