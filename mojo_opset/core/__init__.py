@@ -84,6 +84,9 @@ from .operators.sampling import MojoTopPSampling
 """ convolution"""
 from .operators.convolution import MojoCausalConv1dUpdateState
 
+""" indexer """
+from .operators.indexer import MojoLightningIndex
+
 """ functions """
 from .functions.activation import MojoSiluFunction
 from .functions.convolution import MojoCausalConv1dFunction
@@ -166,6 +169,8 @@ __all__ = [
     "MojoRoPEFunction",
     "MojoFusedLinearCrossEntropyFunction",
     "MojoCausalConv1dFunction",
+
+    "MojoLightningIndex",
 
     "MojoFusedLinearCrossEntropyLoss",
 ]

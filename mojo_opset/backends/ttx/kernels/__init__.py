@@ -56,6 +56,8 @@ k_grouped_matmul_impl = getattr(ttx_backend_module, "k_grouped_matmul_impl")
 
 store_paged_kv_impl = getattr(ttx_backend_module, "store_paged_kv_impl")
 
+lightning_index_impl = getattr(ttx_backend_module, "lightning_index_impl")
+
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
 
@@ -648,6 +650,29 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(key_cache), torch.empty_like(value_cache)
 
+    # ====================================
+    # Register Lightning_index
+    # ====================================
+    @torch.library.custom_op("ttx::lightning_index", mutates_args={})
+    def lightning_index(
+        query: torch.Tensor,
+        query_scale: torch.Tensor,
+        key: torch.Tensor,
+        key_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return lightning_index_impl(query, query_scale, key, key_scale)
+    
+    @lightning_index.register_fake
+    def lightning_index_fake(
+        query: torch.Tensor,
+        query_scale: torch.Tensor,
+        key: torch.Tensor,
+        key_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        batch_size, q_seq_len, _, _ = query.shape
+        k_seq_len = key.shape[1]
+        return torch.empty(batch_size, q_seq_len, k_seq_len, dtype=torch.float32, device=query.device)
+
 else:
     gelu_fwd = gelu_fwd_impl
     gelu_bwd = gelu_bwd_impl
@@ -676,3 +701,4 @@ else:
     m_grouped_matmul = m_grouped_matmul_impl
     k_grouped_matmul = k_grouped_matmul_impl
     store_paged_kv = store_paged_kv_impl
+    lightning_index = lightning_index_impl
