@@ -29,7 +29,7 @@ from .silu import silu_fwd_impl
 from .store_lowrank import store_label_cache_fwd_impl
 from .swiglu import swiglu_bwd_impl
 from .swiglu import swiglu_fwd_impl
-from .lightning_index import lightning_index_impl
+from .lightning_indexer import lightning_indexer_impl
 
 __all__ = [
     "causal_conv1d_update_bdt_fwd",
@@ -60,7 +60,7 @@ __all__ = [
     "m_grouped_matmul_impl",
     "k_grouped_matmul_impl",
     "store_paged_kv_impl",
-    "lightning_index_impl",
+    "lightning_indexer_impl",
     "store_label_cache_fwd_impl",
 ]
 

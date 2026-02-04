@@ -60,7 +60,7 @@ k_grouped_matmul_impl = getattr(ttx_backend_module, "k_grouped_matmul_impl")
 
 store_paged_kv_impl = getattr(ttx_backend_module, "store_paged_kv_impl")
 
-lightning_index_impl = getattr(ttx_backend_module, "lightning_index_impl")
+lightning_indexer_impl = getattr(ttx_backend_module, "lightning_indexer_impl")
 
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
@@ -150,15 +150,13 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         b: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(dc), torch.empty_like(dc)
-    
+
     # ====================================
     # Register indexer_rotate_activation
     # ====================================
 
     @torch.library.custom_op("ttx::indexer_rotate_activation", mutates_args={})
-    def indexer_rotate_activation(
-        x: torch.Tensor
-    ) -> torch.Tensor:
+    def indexer_rotate_activation(x: torch.Tensor) -> torch.Tensor:
         return indexer_rotate_activation_impl(x)
 
     # ====================================
@@ -249,7 +247,6 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(dq), torch.empty_like(dk)
 
-
     # ====================================
     # Register Quant
     # ====================================
@@ -260,7 +257,6 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return quant_int8_infer_impl(input_tensor, scale_tensor)
 
-
     @quant_int8_infer.register_fake
     def quant_int8_infer_fake(
         input_tensor: torch.Tensor,
@@ -269,7 +265,6 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         batch, seqlen, _ = input_tensor.shape
 
         return torch.empty_like(input_tensor, dtype=torch.int8), torch.empty(batch, seqlen, dtype=torch.float32)
-
 
     # ====================================
     # Register Indexer_rope
@@ -284,7 +279,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         rope_head_dim: int = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:  # [BNSD]
         return indexer_rope_impl(q, k, cos, sin, rope_head_dim)
-    
+
     # ====================================
     # Register rmsnorm
     # ====================================
@@ -426,9 +421,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     # NOTE: Since custom_op does not support input/output aliasing, we register the
     # operator manually using torch.library.impl.
     fused_linear_cross_entropy_bwd_schema = (
-        "(Tensor grad_output, Tensor(a!) grad_input, "
-        "Tensor(a!)? grad_weight=None, Tensor(a!)? grad_bias=None) -> "
-        "(Tensor(a) grad_input, Tensor(a)? grad_weight, Tensor(a)? grad_bias)"
+        "(Tensor grad_output, Tensor(a!) grad_input, " "Tensor(a!)? grad_weight=None, Tensor(a!)? grad_bias=None) -> " "(Tensor(a) grad_input, Tensor(a)? grad_weight, Tensor(a)? grad_bias)"
     )
     torch.library.define("ttx::fused_linear_cross_entropy_bwd", fused_linear_cross_entropy_bwd_schema)
 
@@ -553,14 +546,12 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
 
         return grad_input, grad_weight, grad_bias
 
-
     # ====================================
     # Register Gemm
     # ====================================
     @torch.library.custom_op("ttx::matmul", mutates_args={})
-    def matmul(x: torch.Tensor, w: torch.Tensor, bias: torch.Tensor = None, )  -> torch.Tensor:
+    def matmul(x: torch.Tensor, w: torch.Tensor, bias: torch.Tensor = None) -> torch.Tensor:
         return matmul_impl(x, w, bias)
-
 
     # ====================================
     # Register Group gemm
@@ -679,19 +670,19 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         return torch.empty_like(key_cache), torch.empty_like(value_cache)
 
     # ====================================
-    # Register Lightning_index
+    # Register lightning_indexer
     # ====================================
-    @torch.library.custom_op("ttx::lightning_index", mutates_args={})
-    def lightning_index(
+    @torch.library.custom_op("ttx::lightning_indexer", mutates_args={})
+    def lightning_indexer(
         query: torch.Tensor,
         query_scale: torch.Tensor,
         key: torch.Tensor,
         key_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return lightning_index_impl(query, query_scale, key, key_scale)
-    
-    @lightning_index.register_fake
-    def lightning_index_fake(
+        return lightning_indexer_impl(query, query_scale, key, key_scale)
+
+    @lightning_indexer.register_fake
+    def lightning_indexer_fake(
         query: torch.Tensor,
         query_scale: torch.Tensor,
         key: torch.Tensor,
@@ -730,4 +721,5 @@ else:
     m_grouped_matmul = m_grouped_matmul_impl
     k_grouped_matmul = k_grouped_matmul_impl
     store_paged_kv = store_paged_kv_impl
-    lightning_index = lightning_index_impl
+    lightning_indexer = lightning_indexer_impl
+    indexer_rotate_activation = indexer_rotate_activation_impl

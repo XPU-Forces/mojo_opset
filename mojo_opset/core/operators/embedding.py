@@ -9,9 +9,6 @@ class MojoQuant(MojoOperator):
 
 class MojoQuantInt8(MojoOperator):
 
-    def __init__(self):
-        pass
-
     def forward(self, input_tensor:torch.Tensor, scale_tensor:torch.Tensor=None):
         if scale_tensor is None:
             scaled_fp32 = scaled_fp32.to(torch.float64)

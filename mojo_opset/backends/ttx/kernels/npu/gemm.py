@@ -8,17 +8,15 @@ from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 
 def matmul_impl(x: Tensor, w: Tensor, bias: Tensor = None) -> Tensor:
 
-    input_shape = x.shape
+    input_shape = x.shape  # * B, M, K
     x = x.reshape(-1, w.shape[-1])
     M, K = x.shape
-    N = w.shape[-2]
-    b_t = w.T
+    N = w.shape[0]  # * N, K
+    b_t = w.T  # * K, N
     # Allocates output.
     c = torch.empty((M, N), device=x.device, dtype=x.dtype)
     # 1D launch kernel where each block gets its own program.
-    grid = lambda META: (
-        triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),
-    )
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),)
     acc_dtype = tl.float32
     matmul_kernel_2d[grid](
         x,
@@ -35,7 +33,7 @@ def matmul_impl(x: Tensor, w: Tensor, bias: Tensor = None) -> Tensor:
         c.stride(0),
         c.stride(1),
     )
-    #TODO: fuse add
+    # TODO: fuse add
     if bias is not None:
         c += bias.unsqueeze(0)
     new_shape = input_shape[:-1] + (b_t.shape[-1],)
@@ -45,10 +43,10 @@ def matmul_impl(x: Tensor, w: Tensor, bias: Tensor = None) -> Tensor:
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32}),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'BLOCK_K': 32}),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 128, 'BLOCK_K': 32}),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 256, 'BLOCK_K': 32}),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64, 'BLOCK_K': 32}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 32}),
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 32}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 32}),
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 64, "BLOCK_K": 32}),
     ],
     key=["M", "N", "K"],
 )

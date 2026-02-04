@@ -15,7 +15,7 @@ class MojoLinear(MojoOperator):
         Common parameter definitions for Linear operator.
 
         Init parameters:
-        - weight (torch.Tensor): Weight tensor, shape [in_dim, out_dim].
+        - weight (torch.Tensor): Weight tensor, shape [out_dim, in_dim].
         - bias (Optional[torch.Tensor]): Bias tensor, shape aligned with output dimension; optional.
         """
         super().__init__()

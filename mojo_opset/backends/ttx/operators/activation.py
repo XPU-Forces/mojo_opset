@@ -29,9 +29,10 @@ class TTXSwiGLU(MojoSwiGLU):
 
     def forward(self, gate_out: torch.Tensor, up_out: torch.Tensor):
         return swiglu_fwd(gate_out, up_out)
-    
+
+
 class TTXIndexerRotateActivation(MojoIndexerRotateActivation):
     supported_platforms_list = ["npu"]
 
-    def forward(self, x: torch.Tensor)-> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return indexer_rotate_activation(x)

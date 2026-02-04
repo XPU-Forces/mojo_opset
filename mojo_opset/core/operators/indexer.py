@@ -4,10 +4,7 @@ from typing import Optional
 from ..operator import MojoOperator
 
 
-class MojoLightningIndex(MojoOperator):
-
-    def __init__(self):
-        pass
+class MojoLightningIndexer(MojoOperator):
 
     def forward(
         self,
@@ -25,7 +22,7 @@ class MojoLightningIndex(MojoOperator):
             query_scale: Query scaling factors. Shape '[B, M, H]'.
             key: Key tensor. Shape '[B, N, K]', where N is the sequence length of key.
             key_scale: Optional scaling factors for key. Shape can be '[B, N, K]', '[B, N]', '[N, K]', or '[N]'.
-            
+
         Returns:
             index_score: Index score tensor. Shape '[B, M, N]'.
         """

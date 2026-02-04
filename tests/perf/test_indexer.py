@@ -3,7 +3,7 @@ import random
 import pytest
 import torch
 
-from mojo_opset import MojoLightningIndex
+from mojo_opset import MojoLightningIndexer
 from mojo_opset.utils.platform import get_platform
 from tests.utils import auto_switch_platform, bypass_not_implemented
 
@@ -31,7 +31,7 @@ TEST_DTYPES = [torch.bfloat16, torch.float16, torch.float32]
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_lightning_index(query, query_scale, key, key_scale):
-    indexer = MojoLightningIndex()
+    indexer = MojoLightningIndexer()
     indexer_ref = indexer._registry.get("torch")()
 
     perf(lambda: indexer_ref(query, query_scale, key, key_scale))

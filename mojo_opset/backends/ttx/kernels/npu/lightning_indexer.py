@@ -6,7 +6,7 @@ from triton.runtime.libentry import libentry
 from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 
 
-def lightning_index_impl(
+def lightning_indexer_impl(
     query: torch.Tensor,
     query_scale: torch.Tensor,
     key: torch.Tensor,
@@ -19,7 +19,7 @@ def lightning_index_impl(
     num_cores = get_num_cores("cube")
 
     grid = (num_cores,)
-    lightning_index_kernel[grid](
+    lightning_indexer_kernel[grid](
         query,
         key,
         query_scale,
@@ -61,7 +61,7 @@ def lightning_index_impl(
 )
 @libentry()
 @triton.jit
-def lightning_index_kernel(
+def lightning_indexer_kernel(
     query_ptr,
     key_ptr,
     query_scale_ptr,

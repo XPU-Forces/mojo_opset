@@ -1,11 +1,11 @@
 import torch
 from typing import Optional
 
-from mojo_opset.backends.ttx.kernels import lightning_index_impl
-from mojo_opset.core import MojoLightningIndex
+from mojo_opset.backends.ttx.kernels import lightning_indexer_impl
+from mojo_opset.core import MojoLightningIndexer
 
 
-class TTXLightningIndex(MojoLightningIndex):
+class TTXLightningIndexer(MojoLightningIndexer):
     supported_platforms_list = ["npu"]
 
     def forward(
@@ -72,6 +72,6 @@ class TTXLightningIndex(MojoLightningIndex):
         query_scale = query_scale.contiguous()
         key = key.contiguous()
 
-        index_score = lightning_index_impl(query, query_scale, key, key_scale)
+        index_score = lightning_indexer_impl(query, query_scale, key, key_scale)
 
         return index_score

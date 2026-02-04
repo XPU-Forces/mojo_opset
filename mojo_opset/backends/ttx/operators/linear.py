@@ -1,3 +1,4 @@
+from tkinter import X
 import torch
 
 from mojo_opset.backends.ttx.kernels import matmul, m_grouped_matmul
@@ -47,14 +48,11 @@ class TTXGroupLinear(MojoGroupLinear):
 class TTXLinear(MojoLinear):
     supported_platforms_list = ["npu"]
 
-    def forward(self, x: torch.Tensor, bias: torch.Tensor = None) -> torch.Tensor:
-        # B, M, K = x.shape
-        # N = self.weight.shape[1]
+    def forward(self, input: torch.Tensor, bias: torch.Tensor = None) -> torch.Tensor:
+        in_dim = self.weight.shape[1]
+        if input.shape[-1] != in_dim:
+            raise ValueError(f"input should have last dim {in_dim}, but got {input.shape[-1]}")
+        if input.ndim not in (3, 4):
+            raise ValueError(f"Expected BNSD when is_varlen=False; got shape {tuple(input.shape)}")
 
-        assert x.shape[-1] == x.shape[-1], "Incompatible dimensions"
-        assert x.is_contiguous(), "Matrix A must be contiguous"
-        assert x.dim() in [3, 4]
-        assert self.weight.dim() == 2
-
-
-        return matmul(x, self.weight, bias)
+        return matmul(input, self.weight, bias)

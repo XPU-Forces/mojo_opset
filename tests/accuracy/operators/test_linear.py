@@ -40,7 +40,7 @@ def generate_random_list(length, total_sum):
             dtype,
         )
         for M, N, K in [(1024, 128, 7168),]
-        for batch_size in [1, 8]
+        for batch_size in [1, 8, 32]
         for dtype in ["bfloat16", "float16", "float32"]
     ],
 )
@@ -97,7 +97,3 @@ def test_group_gemm(input, weight, group_list):
     )
     group_gemm.forward_diff_with(group_gemm_ref, input, group_list, mixed_tol=True)
 
-
-# if __name__ == "__main__":
-#     pass
-#     pytest.main(["-s", "-v", "tests/accuracy/operators/test_linear.py::test_gemm"])

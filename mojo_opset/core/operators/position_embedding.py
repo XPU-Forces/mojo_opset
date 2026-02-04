@@ -54,21 +54,17 @@ class MojoRoPE(MojoOperator):
         k_rot = k * cos + rotate_half(k) * sin
         return q_rot, k_rot
 
+
 class MojoIndexerRoPE(MojoOperator):
-    def __init__(self):
+
+    def __init__(self, interleaved: bool = False):
+        self.interleaved = interleaved
         super().__init__()
 
-    def forward(
-        self,
-        q : torch.Tensor,
-        k : torch.Tensor,
-        cos : torch.Tensor,
-        sin : torch.Tensor,
-        rope_head_dim : int = None
-        )-> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, rope_head_dim: int = None) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Apply rotary position embedding to two tensors simultaneously
-        
+
         Args:
             q: First input tensor [batch, seq_len, dim] or [batch, seq_len, n_heads, dim]
             k: Second input tensor [batch, seq_len, dim] or [batch, seq_len, n_heads, dim]
@@ -89,7 +85,7 @@ class MojoIndexerRoPE(MojoOperator):
             dtype = tensor.dtype
             original_shape = tensor.shape
             tensor_float = tensor.float()
-            
+
             if tensor.dim() == 4:
                 # [batch, seq_len, n_heads, dim]
                 batch, seq_len, n_heads, dim = tensor.shape
@@ -102,10 +98,10 @@ class MojoIndexerRoPE(MojoOperator):
                 sin_expanded = sin
             else:
                 raise ValueError(f"Input tensor must be 3D or 4D, got {tensor.dim()}D")
-            
+
             assert dim % 2 == 0, f"dim must be even, got {dim}"
             assert cos_expanded.size(-1) == dim // 2, f"cos last dim must be {dim//2}, got {cos_expanded.size(-1)}"
-            
+
             # Reshape tensor to non-interleaved format: [x0, x1, x2, x3, ...] -> [x0, x2, ..., x1, x3, ...]
             if tensor.dim() == 4:
                 # [batch, seq_len, n_heads, dim] -> [batch, seq_len, n_heads, 2, dim//2]
@@ -121,11 +117,11 @@ class MojoIndexerRoPE(MojoOperator):
                 # [batch, seq_len, dim//2, 2]
                 x1 = tensor_reshaped[..., 0]  # Real part
                 x2 = tensor_reshaped[..., 1]  # Imaginary part
-            
+
             # Apply rotation matrix: [x1, x2] * [cos, -sin; sin, cos] = [x1*cos - x2*sin, x1*sin + x2*cos]
             x1_rot = x1 * cos_expanded - x2 * sin_expanded
             x2_rot = x1 * sin_expanded + x2 * cos_expanded
-            
+
             # Convert back to interleaved format
             if tensor.dim() == 4:
                 # [batch, seq_len, n_heads, dim//2, 2]
@@ -137,7 +133,7 @@ class MojoIndexerRoPE(MojoOperator):
                 rotated = torch.stack([x1_rot, x2_rot], dim=-1)
                 rotated = rotated.transpose(2, 3).contiguous()
                 rotated = rotated.view(batch, seq_len, dim)
-            
+
             return rotated.to(dtype)
 
         # Apply rotary position embedding to x and y separately
@@ -147,6 +143,7 @@ class MojoIndexerRoPE(MojoOperator):
         q_rope = torch.cat([q_pe, q_nope], dim=-1)
         k_rope = torch.cat([k_pe, k_nope], dim=-1)
         return q_rope, k_rope
+
 
 class MojoRoPEStoreKV(MojoOperator):
     pass
