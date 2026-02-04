@@ -16,8 +16,7 @@ class MojoOperator(ABC, torch.nn.Module):
     supported_platforms_list = ["npu", "mlu", "meta_device"]
 
     def __init_subclass__(cls, **kwargs):
-        # Consume any extra subclass kwargs (e.g., default_priority) without forwarding to ABC
-        super().__init_subclass__()
+        super().__init_subclass__(**kwargs)
 
         is_mojo_core_op_cls = MojoOperator in cls.__bases__
 

@@ -358,13 +358,7 @@ def perf_npu(executor, profiling_dir="./npu_profiling", active=5):
     Returns:
         None: Logs and writes benchmark results to a file.
     """
-    res = device_perf_npu(executor, profiling_dir, active)
-    if res is None:
-        device_latency = float("nan")
-        kernel_profiling_path = "<no_profile>"
-    else:
-        device_latency, kernel_profiling_path = res
-
+    device_latency, kernel_profiling_path = device_perf_npu(executor, profiling_dir, active)
     host_latency = host_perf(executor, "npu")
 
     func_name, para_list = get_executor_info(executor)

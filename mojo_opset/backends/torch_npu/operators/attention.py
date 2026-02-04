@@ -9,12 +9,11 @@ import numpy as np
 class TorchNpuPrefillGQA(MojoPrefillGQA, default_priority=0):
     def __init__(self,
                  is_causal: bool = True,
-                 is_prefill: bool = True,
                  gqa_layout: str = "ABAB",
                  window_size: int = -1,
                  op_name: str = "",
                  layer_idx: int = 0,):
-        super().__init__(is_causal, is_prefill, gqa_layout, False, window_size, op_name, layer_idx)
+        super().__init__(is_causal, gqa_layout, False, window_size, op_name, layer_idx)
 
     def forward(self, query, k_cache, v_cache, cu_seqlens_q, softmax_scale=None):
         batch_size, num_q_heads, seq_len, head_dim = query.shape

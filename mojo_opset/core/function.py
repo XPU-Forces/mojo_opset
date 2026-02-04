@@ -11,8 +11,7 @@ class MojoFunction(Function):
     supported_platforms_list = ["npu", "mlu"]
 
     def __init_subclass__(cls, **kwargs):
-        # Consume any extra subclass kwargs (e.g., default_priority) without forwarding
-        super().__init_subclass__()
+        super().__init_subclass__(**kwargs)
 
         is_mojo_core_func_cls = MojoFunction in cls.__bases__
 
