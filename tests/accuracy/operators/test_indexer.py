@@ -29,7 +29,7 @@ dtype_str_map = {
             torch.randn(B, M, H, K, dtype=dtype),
             torch.randn(B, M, H, dtype=torch.float32),
             torch.randn(B, N, K, dtype=dtype),
-            torch.randn(B, N, K, dtype=torch.float32),
+            torch.randn(B, N, dtype=torch.float32),
         )
         for (B, M, N, H, K) in TEST_SHAPES
         for dtype in TEST_DTYPES
@@ -75,7 +75,14 @@ def test_lightning_indexer(query, query_scale, key, key_scale):
 @bypass_not_implemented
 def test_indexer(batch, q_seq_len, head_dim, dim, q_lora_rank, dummy_tensor, dtype):
     device = get_platform()
+    map_tol = {
+        "bfloat16": (1.6e-2, 1e-5, 1.0),
+        "float16": (1e-3, 1e-5, 1.0),
+        "float32": (1.3e-6, 1e-5, 1.0),
+    }
+    atol, rtol, ptol = map_tol[dtype]
     dtype = dtype_str_map[dtype]
+
     rope_head_dim = 32
     n_heads = 64
     start_pos = 0
@@ -85,39 +92,12 @@ def test_indexer(batch, q_seq_len, head_dim, dim, q_lora_rank, dummy_tensor, dty
     query_scale = torch.randn(batch, q_seq_len, q_lora_rank, device=device, dtype=dtype)
     topk = 2048 if q_seq_len >= 4096 else q_seq_len // 2
     freqs_cis = precompute_freqs_cis(q_seq_len, rope_head_dim, device=device)
-    k_w = torch.randn(head_dim, dim, dtype=x.dtype, device=x.device)
-    q_w = torch.randn(
-        (n_heads * head_dim),
-        q_lora_rank,
-        dtype=query_scale.dtype,
-        device=query_scale.device,
-    )
-    weights_w = torch.randn(n_heads, dim, dtype=torch.float32)
 
-    indexer = MojoIndexer(n_heads=n_heads, head_dim=head_dim, qk_rope_head_dim=rope_head_dim, topk=topk)
     indexer_ref = MojoIndexer._registry.get("torch")(n_heads=n_heads, head_dim=head_dim, qk_rope_head_dim=rope_head_dim, topk=topk)
+    indexer = MojoIndexer(parent_instance=indexer_ref)
 
     indexer.to(dtype=dtype, device=device)
-
-    #* sync weight
-    wq_b = torch.randn_like(indexer.wq_b.weight.data)
-    indexer.wq_b.weight.data.copy_(wq_b)
-    indexer_ref.wq_b.weight.data.copy_(wq_b)
-
-    wk = torch.randn_like(indexer.wk.weight.data)
-    indexer.wk.weight.data.copy_(wk)
-    indexer_ref.wk.weight.data.copy_(wk)
-
-    k_norm_weight = torch.randn_like(indexer.k_norm.weight.data)
-    k_norm_bias = torch.randn_like(indexer.k_norm.bias.data)
-    indexer.k_norm.weight.data.copy_(k_norm_weight)
-    indexer.k_norm.bias.data.copy_(k_norm_bias)
-    indexer_ref.k_norm.weight.data.copy_(k_norm_weight)
-    indexer_ref.k_norm.bias.data.copy_(k_norm_bias)
-
-    weights_proj = torch.randn_like(indexer.weights_proj.weight.data)
-    indexer.weights_proj.weight.data.copy_(weights_proj)
-    indexer_ref.weights_proj.weight.data.copy_(weights_proj)
+    indexer_ref.to(dtype=dtype, device=device)
 
     indexer.forward_diff_with(
         indexer_ref,
@@ -126,11 +106,10 @@ def test_indexer(batch, q_seq_len, head_dim, dim, q_lora_rank, dummy_tensor, dty
         start_pos,
         freqs_cis,
         None,
-        k_w,
-        q_w,
-        weights_w,
+        atol=atol,
+        rtol=rtol,
+        ptol=ptol,
     )
-
 
 def precompute_freqs_cis(seqlen, dim, device) -> torch.Tensor:
     base = 10000.0

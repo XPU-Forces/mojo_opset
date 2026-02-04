@@ -158,6 +158,10 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     @torch.library.custom_op("ttx::indexer_rotate_activation", mutates_args={})
     def indexer_rotate_activation(x: torch.Tensor) -> torch.Tensor:
         return indexer_rotate_activation_impl(x)
+    
+    @indexer_rotate_activation.register_fake
+    def indexer_rotate_activation(x: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(x)
 
     # ====================================
     # Register Attention
@@ -250,6 +254,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     # ====================================
     # Register Quant
     # ====================================
+
     @torch.library.custom_op("ttx::quant_int8_infer", mutates_args={})
     def quant_int8_infer(
         input_tensor: torch.Tensor,
@@ -549,9 +554,16 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     # ====================================
     # Register Gemm
     # ====================================
+
     @torch.library.custom_op("ttx::matmul", mutates_args={})
     def matmul(x: torch.Tensor, w: torch.Tensor, bias: torch.Tensor = None) -> torch.Tensor:
         return matmul_impl(x, w, bias)
+    
+    @matmul.register_fake
+    def matmul(x: torch.Tensor, w: torch.Tensor, bias: torch.Tensor = None) -> torch.Tensor:
+        M = x.shape[0]
+        N = w.shape[0]
+        return torch.empty(M, N, dtype=x.dtype, device=x.device)
 
     # ====================================
     # Register Group gemm
@@ -672,6 +684,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     # ====================================
     # Register lightning_indexer
     # ====================================
+
     @torch.library.custom_op("ttx::lightning_indexer", mutates_args={})
     def lightning_indexer(
         query: torch.Tensor,
@@ -699,12 +712,13 @@ else:
     silu_bwd = silu_bwd_impl
     swiglu_fwd = swiglu_fwd_impl
     swiglu_bwd = swiglu_bwd_impl
+    indexer_rotate_activation = indexer_rotate_activation_impl
     paged_attention_prefill = paged_attention_prefill_impl
     paged_attention_decode = paged_attention_decode_impl
     rope_fwd = rope_fwd_impl
     rope_bwd = rope_bwd_impl
-    quant_int8_infer = quant_int8_infer_impl
     indexer_rope = indexer_rope_impl
+    quant_int8_infer = quant_int8_infer_impl
     rmsnorm_fwd = rmsnorm_fwd_impl
     rmsnorm_bwd = rmsnorm_bwd_impl
     rmsnorm_infer = rmsnorm_infer_impl
@@ -722,4 +736,3 @@ else:
     k_grouped_matmul = k_grouped_matmul_impl
     store_paged_kv = store_paged_kv_impl
     lightning_indexer = lightning_indexer_impl
-    indexer_rotate_activation = indexer_rotate_activation_impl

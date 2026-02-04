@@ -60,8 +60,8 @@ __all__ = [
     "m_grouped_matmul_impl",
     "k_grouped_matmul_impl",
     "store_paged_kv_impl",
-    "lightning_indexer_impl",
     "store_label_cache_fwd_impl",
+    "lightning_indexer_impl",
 ]
 
 from mojo_opset.backends.ttx.kernels.utils import tensor_device_guard_for_triton_kernel

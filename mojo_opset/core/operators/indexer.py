@@ -6,6 +6,9 @@ from ..operator import MojoOperator
 
 class MojoLightningIndexer(MojoOperator):
 
+    def __init__(self):
+        super().__init__()
+
     def forward(
         self,
         query: torch.Tensor,
@@ -21,7 +24,7 @@ class MojoLightningIndexer(MojoOperator):
                 H is head number, K is head dimension.
             query_scale: Query scaling factors. Shape '[B, M, H]'.
             key: Key tensor. Shape '[B, N, K]', where N is the sequence length of key.
-            key_scale: Optional scaling factors for key. Shape can be '[B, N, K]', '[B, N]', '[N, K]', or '[N]'.
+            key_scale: Optional scaling factors for key. Shape can be '[B, N]' or '[N]'.
 
         Returns:
             index_score: Index score tensor. Shape '[B, M, N]'.
@@ -36,9 +39,7 @@ class MojoLightningIndexer(MojoOperator):
         ), f"query_scale must be [B, M, H], got {query_scale.size()}"
 
         # Create index score tensor
-        index_score = torch.zeros(
-            (batch_size, q_seq_len, k_seq_len), dtype=torch.float32, device=query.device
-        )
+        index_score = torch.zeros((batch_size, q_seq_len, k_seq_len), dtype=torch.float32, device=query.device)
 
         # Handle key_scale: validate and broadcast if needed
         if key_scale is None:
@@ -51,31 +52,14 @@ class MojoLightningIndexer(MojoOperator):
         else:
             key_scale_shape = key_scale.shape
             if len(key_scale_shape) == 1:
-                # [N] -> expand to [B, N, K]
-                assert (
-                    key_scale_shape[0] == k_seq_len
-                ), f"key_scale [N] must have N={k_seq_len}, got {key_scale_shape[0]}"
-                key_scale = (
-                    key_scale.to(torch.float32)
-                    .unsqueeze(0)
-                    .unsqueeze(-1)
-                    .expand(batch_size, -1, head_dim)
-                )
+                # [N] -> expand to [B, N]
+                assert key_scale_shape[0] == k_seq_len, f"key_scale [N] must have N={k_seq_len}, got {key_scale_shape[0]}"
+                key_scale = key_scale.to(torch.float32).unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, head_dim)
             elif len(key_scale_shape) == 2:
-                # [B,N] -> expand to [B, N, K]
                 assert key_scale_shape == (
                     batch_size,
                     k_seq_len,
                 ), f"key_scale must be [B, N], got {key_scale_shape}"
-                key_scale = (
-                    key_scale.to(torch.float32).unsqueeze(-1).expand(-1, -1, head_dim)
-                )
-            elif len(key_scale_shape) == 3:
-                assert key_scale_shape == (
-                    batch_size,
-                    k_seq_len,
-                    head_dim,
-                ), f"key_scale must be [B, N, K], got {key_scale_shape}"
             else:
                 raise ValueError(f"Invalid key_scale shape {key_scale_shape}")
 
@@ -83,9 +67,9 @@ class MojoLightningIndexer(MojoOperator):
         for batch_id in range(batch_size):
             # Get batch slices
             key_batch = key[batch_id].to(torch.float32)  # [N, K]
-            key_scale_batch = key_scale[batch_id]  # [N, K]
+            key_scale_batch = key_scale[batch_id].unsqueeze(-1)  # [N, 1]
 
-            # Apply key scaling: K_scaled = K * key_scale
+            # Apply key scaling: [N, K] * [N, 1] = [N, K] (broadcast along K dimension)
             key_scaled = key_batch * key_scale_batch
 
             for i in range(q_seq_len):

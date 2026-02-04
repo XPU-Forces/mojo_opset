@@ -37,7 +37,6 @@ def lightning_indexer_impl(
         query_scale.stride(2),
         key_scale.stride(0),
         key_scale.stride(1),
-        key_scale.stride(2),
         output.stride(0),
         output.stride(1),
         output.stride(2),
@@ -79,7 +78,6 @@ def lightning_indexer_kernel(
     query_scale_stride_h,
     key_scale_stride_b,
     key_scale_stride_n,
-    key_scale_stride_k,
     output_stride_b,
     output_stride_m,
     output_stride_n,
@@ -99,9 +97,9 @@ def lightning_indexer_kernel(
         output_ptr (tl.tensor): Pointer to the index score.
         query_scale_ptr (tl.tensor): Pointer to scaling factors for Q (float), or weights.
         B (tl.constexpr): Batch size.
-        H (tl.constexpr): Number of Q heads.
         M (tl.constexpr): Q sequence length.
         N (tl.constexpr): K sequence length.
+        H (tl.constexpr): Number of Q heads.
         K (tl.constexpr): dim length.
         BLOCK_SIZE_N (tl.constexpr): Block size for the N dimension.
 
@@ -141,12 +139,11 @@ def lightning_indexer_kernel(
             key_scale_ptr
             + batch_idx * key_scale_stride_b
             + n_idx * BLOCK_SIZE_N * key_scale_stride_n
-            + offs_n[:, None] * key_scale_stride_n
-            + offs_k[None, :] * key_scale_stride_k
+            + offs_n * key_scale_stride_n
         )
-        k_scale = tl.load(key_scale_ptrs, mask=mask[:, None], other=0.0)
+        k_scale = tl.load(key_scale_ptrs, mask=mask, other=0.0)
 
-        k = k * k_scale
+        k = k * k_scale[:, None]
 
         query_ptrs = (
             query_ptr

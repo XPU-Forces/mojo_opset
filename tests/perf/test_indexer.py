@@ -1,10 +1,7 @@
-import random
-
 import pytest
 import torch
 
 from mojo_opset import MojoLightningIndexer
-from mojo_opset.utils.platform import get_platform
 from tests.utils import auto_switch_platform, bypass_not_implemented
 
 TEST_SHAPES = [
@@ -22,7 +19,7 @@ TEST_DTYPES = [torch.bfloat16, torch.float16, torch.float32]
             torch.randn(B, M, H, K, dtype=dtype),
             torch.randn(B, M, H, dtype=torch.float32),
             torch.randn(B, N, K, dtype=dtype),
-            torch.randn(B, N, K, dtype=torch.float32),
+            torch.randn(B, N, dtype=torch.float32),
         )
         for (B, M, N, H, K) in TEST_SHAPES
         for dtype in TEST_DTYPES
