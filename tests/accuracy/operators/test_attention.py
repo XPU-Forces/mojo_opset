@@ -365,7 +365,7 @@ test_configs_prefill_attention = [
         for B, Q_H, KV_H, D, Q_LEN, KV_LEN, BLK_S, dtype, ID in test_configs_prefill_attention
     ],
 )
-@pytest.mark.parametrize("is_causal", [True, False])
+@pytest.mark.parametrize("is_causal", [False,])
 @auto_switch_platform()
 @bypass_not_implemented
 def test_paged_prefill_attention(

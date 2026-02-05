@@ -68,7 +68,8 @@ class TorchNpuPagedPrefillAttention(MojoPagedPrefillAttention):
         _, num_query_heads, _ = query.shape
         _, num_key_value_heads, block_size, _ = key_query.shape
         if self.is_causal:
-            out_npu, _ = torch_npu.npu_fused_infer_attention_score_v2(query, key_query, value_query, 
+            atten_mask = torch.triu(torch.ones(2048, 2048, dtype=torch.bool)).to(query.device)
+            out_npu, _ = torch_npu.npu_fused_infer_attention_score_v2(query, key_query, value_query, atten_mask=atten_mask, 
                 actual_seq_qlen=actual_seq_qlen, actual_seq_kvlen=actual_seq_kvlen, block_table=block_tables,
                 num_query_heads=num_query_heads, num_key_value_heads=num_key_value_heads, softmax_scale=softmax_scale,
                 sparse_mode=3, input_layout="TND", block_size=block_size)
