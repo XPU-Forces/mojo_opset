@@ -6,9 +6,8 @@ import torch
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
-from mojo_opset import MojoDequantGroupLinear
 from mojo_opset import MojoGroupLinear
-from mojo_opset import MojoQuantGroupLinear
+from mojo_opset import MojoQuantGroupLinearReduceSum
 from tests.utils import get_platform
 
 
@@ -31,15 +30,6 @@ def generate_quant_group_linear_data(b: int, m: int, k: int, n: int):
     x1_scale = torch.randn(b, m, dtype=torch.float32)
     x2_scale = torch.randn(n, dtype=torch.bfloat16)
     return x1, weight, x1_scale, x2_scale
-
-
-def generate_dequant_group_linear_data(num_groups: int, total_m: int, k: int, n: int):
-    input = torch.randn(total_m, k, dtype=torch.float16)
-    weight = torch.randint(-128, 128, (num_groups, k, n), dtype=torch.int8)
-    group_list = generate_random_list(num_groups, total_m)
-    antiquant_scale = [torch.rand(k, n, dtype=torch.float32) for _ in range(num_groups)]
-    antiquant_offset = [torch.rand(k, n, dtype=torch.float32) for _ in range(num_groups)]
-    return input, weight, group_list, antiquant_scale, antiquant_offset
 
 
 @pytest.mark.parametrize(
@@ -80,48 +70,17 @@ def test_group_gemm(input, weight, group_list):
 )
 @auto_switch_platform()
 @bypass_not_implemented
-def test_quant_group_linear(x1, weight, x1_scale, x2_scale, atol, rtol):
-    quant_linear = MojoQuantGroupLinear(
+def test_quant_group_linear_reduce_sum(x1, weight, x1_scale, x2_scale, atol, rtol):
+    quant_linear = MojoQuantGroupLinearReduceSum(
         trans_weight=False,
         weight=weight,
     )
-    quant_linear_ref = MojoQuantGroupLinear._registry.get("torch")(
+    quant_linear_ref = MojoQuantGroupLinearReduceSum._registry.get("torch")(
         trans_weight=False,
         weight=weight,
     )
     quant_linear.forward_diff_with(quant_linear_ref, x1, x1_scale, x2_scale, atol=atol, rtol=rtol)
 
-
-@pytest.mark.parametrize(
-    "input, weight, group_list, antiquant_scale, antiquant_offset, atol, rtol",
-    [
-        pytest.param(
-            *generate_dequant_group_linear_data(num_groups=4, total_m=32, k=64, n=96),
-            1e-2,
-            1e-2,
-        )
-    ],
-)
-@auto_switch_platform()
-@bypass_not_implemented
-def test_dequant_group_linear(input, weight, group_list, antiquant_scale, antiquant_offset, atol, rtol):
-    dequant_linear = MojoDequantGroupLinear(
-        trans_weight=False,
-        weight=weight,
-    )
-    dequant_linear_ref = MojoDequantGroupLinear._registry.get("torch")(
-        trans_weight=False,
-        weight=weight,
-    )
-    dequant_linear.forward_diff_with(
-        dequant_linear_ref,
-        input,
-        group_list,
-        antiquant_scale,
-        antiquant_offset,
-        atol=atol,
-        rtol=rtol,
-    )
 
 _test_grouped_matmul_cases = [
     (

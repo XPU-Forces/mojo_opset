@@ -102,7 +102,7 @@ class MojoGroupLinear(MojoOperator):
         return torch.cat(out_list, dim=0)
 
 
-class MojoQuantGroupLinear(MojoOperator):
+class MojoQuantGroupLinearReduceSum(MojoOperator):
     def __init__(
         self,
         weight: torch.Tensor,
@@ -133,86 +133,11 @@ class MojoQuantGroupLinear(MojoOperator):
         out = x2_scale[None, None, :] * out
         out = x1_scale[:, :, None] * out
 
-        out_1 = torch.zeros(m, n, dtype=torch.bfloat16, device=out.device)
+        reduced_out = torch.zeros(m, n, dtype=torch.bfloat16, device=out.device)
         for i in range(b):
-            out_1 += out[i, ...].to(torch.bfloat16)
+            reduced_out += out[i, ...].to(torch.bfloat16)
 
-        return out_1
-
-
-class MojoDequantGroupLinear(MojoOperator):
-    def __init__(
-        self,
-        weight: torch.Tensor,
-        trans_weight: bool = False,
-    ):
-        super().__init__()
-
-        if not isinstance(trans_weight, bool):
-            raise TypeError("trans_weight must be bool.")
-        self.trans_weight = trans_weight
-        self.weight = weight
-
-    def forward(
-        self,
-        input: torch.Tensor,
-        group_list: torch.Tensor,
-        antiquant_scale: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
-        antiquant_offset: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
-    ) -> torch.Tensor:
-        assert input.dim() == 2, "input must be 2D"
-        assert self.weight.dim() == 3, "weight must be 3D"
-        num_groups = group_list.numel()
-        assert self.weight.size(0) == num_groups, "self.weight must have same group count as group_list"
-
-        if self.trans_weight:
-            weight = self.weight.transpose(1, 2).contiguous()
-        else:
-            weight = self.weight
-
-        group_start = group_list.cumsum(0) - group_list
-        group_end = group_list.cumsum(0)
-
-        out_list = []
-        for g, (start, end) in enumerate(zip(group_start.tolist(), group_end.tolist())):
-            a_g = input[start:end, :]
-            b_g = weight[g, :, :]
-
-            scale_g = None
-            if antiquant_scale is not None:
-                if isinstance(antiquant_scale, list):
-                    if len(antiquant_scale) != num_groups:
-                        raise ValueError("antiquant_scale must match group count")
-                    scale_g = antiquant_scale[g]
-                elif antiquant_scale.dim() > 0 and antiquant_scale.size(0) == num_groups:
-                    scale_g = antiquant_scale[g]
-                else:
-                    scale_g = antiquant_scale
-
-            offset_g = None
-            if antiquant_offset is not None:
-                if isinstance(antiquant_offset, list):
-                    if len(antiquant_offset) != num_groups:
-                        raise ValueError("antiquant_offset must match group count")
-                    offset_g = antiquant_offset[g]
-                elif antiquant_offset.dim() > 0 and antiquant_offset.size(0) == num_groups:
-                    offset_g = antiquant_offset[g]
-                else:
-                    offset_g = antiquant_offset
-
-            if scale_g is not None:
-                if isinstance(scale_g, torch.Tensor):
-                    scale_g = scale_g.to(b_g.device)
-                if offset_g is None:
-                    offset_g = b_g.new_tensor(0)
-                elif isinstance(offset_g, torch.Tensor):
-                    offset_g = offset_g.to(b_g.device)
-                b_g = (b_g.float() - offset_g) * scale_g
-
-            out_g = a_g @ b_g
-            out_list.append(out_g)
-
-        return torch.cat(out_list, dim=0)
+        return reduced_out
 
 
 class MojoLinearAllReduce(MojoOperator):

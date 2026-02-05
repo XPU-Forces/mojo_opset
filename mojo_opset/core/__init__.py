@@ -37,13 +37,12 @@ from .operators.kv_cache import MojoStorePagedMLAKVCache
 """ linear """
 from .operators.linear import MojoAllGatherLinear
 from .operators.linear import MojoBatchLinear
-from .operators.linear import MojoDequantGroupLinear
 from .operators.linear import MojoGroupLinear
 from .operators.linear import MojoLinear
 from .operators.linear import MojoLinearAll2All
 from .operators.linear import MojoLinearAllReduce
 from .operators.linear import MojoLinearReduceScatter
-from .operators.linear import MojoQuantGroupLinear
+from .operators.linear import MojoQuantGroupLinearReduceSum
 
 """ mojo misc """
 from .operators.misc import MojoDequant
@@ -126,8 +125,7 @@ __all__ = [
     "MojoLinear",
     "MojoBatchLinear",
     "MojoGroupLinear",
-    "MojoQuantGroupLinear",
-    "MojoDequantGroupLinear",
+    "MojoQuantGroupLinearReduceSum",
     "MojoLinearAllReduce",
     "MojoLinearAll2All",
     "MojoAllGatherLinear",
