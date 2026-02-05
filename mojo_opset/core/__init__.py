@@ -130,6 +130,7 @@ __all__ = [
     "MojoGemmAll2All",
     "MojoAllGatherGemm",
     "MojoGemmReduceScatter",
+    "MojoQuantGroupLinearReduceSum",
 
     "MojoQuant",
     "MojoDequant",
