@@ -5,18 +5,15 @@ from typing import Callable, Optional, Union
 import torch
 import torch.nn as nn
 
-from transformers.cache_utils import Cache, DynamicCache
-from transformers.generation import GenerationMixin
-from transformers.masking_utils import create_causal_mask
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-from transformers.modeling_utils import PreTrainedModel
 
 from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoLinear
 from mojo_opset import MojoSilu
 from mojo_opset import MojoRoPE
-from mojo_opset import MojoSdpa
+from mojo_opset import MojoStorePagedKVCache
+from mojo_opset import MojoPagedPrefillGQA
+from mojo_opset import MojoPagedDecodeGQA
 
 
 class SeedOssConfig():
@@ -39,15 +36,89 @@ class SeedOssConfig():
         self.residual_dropout = 0.1
         self.mlp_bias = False
         self.head_dim = 128
-        self.rope_parameters = {
-            "rope_type": "default",
-            "rope_theta": 10000000.0,
+        self.rope_scaling = {
+            "rope_type": "default"
         }
+        self.rope_theta = 10000000.0,
 
         self.tie_word_embeddings = False
         self.pad_token_id = 1
         self.bos_token_id = 0
         self.eos_token_id = 2
+
+
+class PagedDummyCache:
+    def __init__(self, config: SeedOssConfig, batch_size: int, device: str, block_size: int = 16):
+        self.num_layers = config.num_hidden_layers
+        self.device = device
+        self.block_size = block_size
+        self.num_kv_heads = config.num_key_value_heads
+        self.head_dim = config.head_dim
+        self.batch_size = batch_size
+        max_blocks_per_seq = (config.max_position_embeddings + self.block_size - 1) // self.block_size
+        total_blocks = self.batch_size * max_blocks_per_seq * self.num_layers
+        self.k_cache = torch.zeros(
+            (total_blocks, self.num_kv_heads, self.block_size, self.head_dim),
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        self.v_cache = torch.zeros(
+            (total_blocks, self.num_kv_heads, self.block_size, self.head_dim),
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        self.block_tables = torch.zeros(
+            (self.num_layers, self.batch_size, max_blocks_per_seq), dtype=torch.long, device=self.device
+        )
+        self.seq_lens = torch.zeros((self.num_layers, self.batch_size), dtype=torch.long, device=self.device)
+        self.free_blocks = torch.arange(total_blocks, device=self.device, dtype=torch.long)
+        self.num_free_blocks = total_blocks
+        self.store_paged_kv = MojoStorePagedKVCache()
+
+    def _allocate_blocks(self, num_blocks: int):
+        if num_blocks > self.num_free_blocks:
+            raise ValueError("PagedDummyCache: Out of memory!")
+        allocated = self.free_blocks[self.num_free_blocks - num_blocks : self.num_free_blocks]
+        self.num_free_blocks -= num_blocks
+        return allocated
+
+    def update(self, key_states: torch.Tensor, value_states: torch.Tensor, layer_idx: int, cache_kwargs=None):
+        batch_size, head_num, new_seq_len, head_dim = key_states.shape
+        key_states = key_states.permute(0, 2, 1, 3).contiguous().view(-1, head_num, head_dim)
+        value_states = value_states.permute(0, 2, 1, 3).contiguous().view(-1, head_num, head_dim)
+        cu_seqlens = torch.arange(0, (batch_size + 1) * new_seq_len, step=new_seq_len, device=key_states.device)
+        current_seq_lens = self.seq_lens[layer_idx]
+        for i in range(batch_size):
+            context_len = current_seq_lens[i].item()
+            old_num_blocks = (context_len + self.block_size - 1) // self.block_size
+            new_total_len = context_len + new_seq_len
+            new_num_blocks = (new_total_len + self.block_size - 1) // self.block_size
+            if new_num_blocks > old_num_blocks:
+                num_to_allocate = new_num_blocks - old_num_blocks
+                newly_allocated = self._allocate_blocks(num_to_allocate)
+                self.block_tables[layer_idx, i, old_num_blocks:new_num_blocks] = newly_allocated
+
+        self.store_paged_kv(
+            key_states,
+            value_states,
+            self.k_cache,
+            self.v_cache,
+            self.block_tables[layer_idx],
+            cu_seqlens,
+            current_seq_lens,
+        )
+        self.seq_lens[layer_idx] += new_seq_len
+
+    def get_kv_for_prefill(self, layer_idx: int):
+        return None, None
+
+    def get_kv_for_decode(self, layer_idx: int):
+        max_slen = self.seq_lens[layer_idx].max().item()
+        max_blocks = (max_slen + self.block_size - 1) // self.block_size
+        return self.k_cache, self.v_cache, self.block_tables[layer_idx, :, :max_blocks]
+
+    def get_seq_length(self, layer_idx: int = 0):
+        return self.seq_lens[layer_idx].clone()
 
 
 class SeedOssMLP(nn.Module):
@@ -108,7 +179,8 @@ class SeedOssAttention(nn.Module):
             bias=(nn.Parameter(torch.zeros(config.hidden_size)) if config.attention_out_bias else None),
         )
         self.rope = MojoRoPE._registry.get("torch")()
-        self.sdpa = MojoSdpa._registry.get("torch")(scale=self.scaling)
+        self.attn_prefill = MojoPagedPrefillGQA()
+        self.attn_decode = MojoPagedDecodeGQA()
 
         self.residual_dropout = config.residual_dropout
 
@@ -117,7 +189,7 @@ class SeedOssAttention(nn.Module):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor],
-        past_key_values: Optional[Cache] = None,
+        past_key_values: Optional[PagedDummyCache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -131,21 +203,52 @@ class SeedOssAttention(nn.Module):
         cos, sin = position_embeddings
         query_states, key_states = self.rope(query_states, key_states, cos, sin)
 
-        if past_key_values is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+        if past_key_values is None:
+            raise ValueError("PagedDummyCache is required for SeedOssAttention")
 
-        # attention_mask
-        attn_output = self.sdpa(
+        context_lens = past_key_values.get_seq_length(self.layer_idx)
+        attn_output = self._paged_attention_forward(
             query_states,
             key_states,
             value_states,
-        )
+            past_key_values,
+            context_lens,
+        ).transpose(1, 2)
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         attn_output = nn.functional.dropout(attn_output, p=self.residual_dropout, training=self.training)
+
+        return attn_output
+
+    def _paged_attention_forward(
+        self,
+        query_states: torch.Tensor,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        past_key_values,
+        context_lens: torch.Tensor,
+    ):
+        bsz, num_q_heads, q_len, head_dim = query_states.shape
+        device = query_states.device
+        past_key_values.update(key_states, value_states, self.layer_idx)
+
+        if q_len > 1:
+            q_lens = torch.full((bsz,), q_len, dtype=torch.int32, device=device)
+            cu_seqlens_q = torch.cat([torch.tensor([0], device=device, dtype=torch.int32), q_lens.cumsum(0)])
+            total_tokens = int(cu_seqlens_q[-1].item())
+            q = query_states.permute(0, 2, 1, 3).reshape(total_tokens, num_q_heads, head_dim)
+            k_cache = past_key_values.k_cache
+            v_cache = past_key_values.v_cache
+            block_tables = past_key_values.block_tables[self.layer_idx]
+            attn_output_tnd = self.attn_prefill(q, k_cache, v_cache, cu_seqlens_q, block_tables, self.scaling)
+            attn_output = attn_output_tnd.reshape(bsz, q_len, num_q_heads, head_dim).transpose(1, 2)
+        else:
+            q = query_states.squeeze(2)
+            k_cache, v_cache, block_tables = past_key_values.get_kv_for_decode(self.layer_idx)
+            current_seq_lens = context_lens + 1
+            attn_output_bhd = self.attn_decode(q, k_cache, v_cache, current_seq_lens, block_tables, self.scaling)
+            attn_output = attn_output_bhd.unsqueeze(2)
 
         return attn_output
 
@@ -166,7 +269,7 @@ class SeedOssDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        past_key_values: Optional[PagedDummyCache] = None,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
@@ -209,9 +312,13 @@ class SeedOssRotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
-
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+        dim = config.head_dim
+        if hasattr(config, "rope_theta"):
+            theta = config.rope_theta
+        else:
+            theta = 10000.0
+        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, device=device, dtype=torch.float) / dim))
+        self.attention_scaling = 1.0
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
 
@@ -229,9 +336,10 @@ class SeedOssRotaryEmbedding(nn.Module):
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
-class SeedOssModel(PreTrainedModel):
+class SeedOssModel(nn.Module):
     def __init__(self, config: SeedOssConfig):
-        super().__init__(config)
+        super().__init__()
+        self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
@@ -248,7 +356,7 @@ class SeedOssModel(PreTrainedModel):
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        past_key_values: Optional[PagedDummyCache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
@@ -261,25 +369,19 @@ class SeedOssModel(PreTrainedModel):
             inputs_embeds: torch.Tensor = self.embed_tokens(input_ids)
 
         if use_cache and past_key_values is None:
-            past_key_values = DynamicCache(config=self.config)
+            bsz = inputs_embeds.shape[0]
+            past_key_values = PagedDummyCache(self.config, batch_size=bsz, device=str(inputs_embeds.device), block_size=16)
 
         if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position: torch.Tensor = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-            )
+            if past_key_values is not None:
+                past_seen_tokens = past_key_values.get_seq_length()  # [B]
+            else:
+                past_seen_tokens = torch.zeros(inputs_embeds.size(0), dtype=torch.long, device=inputs_embeds.device)
+            step = torch.arange(inputs_embeds.shape[1], dtype=torch.long, device=inputs_embeds.device)  # [S]
+            cache_position: torch.Tensor = past_seen_tokens[:, None] + step[None, :]  # [B, S]
 
         if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)
-
-        causal_mask = create_causal_mask(
-            config=self.config,
-            input_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            cache_position=cache_position,
-            past_key_values=past_key_values,
-            position_ids=position_ids,
-        )
+            position_ids = cache_position
 
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
@@ -287,7 +389,7 @@ class SeedOssModel(PreTrainedModel):
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             hidden_states = decoder_layer(
                 hidden_states,
-                attention_mask=causal_mask,
+                attention_mask=None,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 cache_position=cache_position,
@@ -302,9 +404,9 @@ class SeedOssModel(PreTrainedModel):
         )
 
 
-class SeedOssForCausalLM(PreTrainedModel, GenerationMixin):
+class SeedOssForCausalLM(nn.Module):
     def __init__(self, config):
-        super().__init__(config)
+        super().__init__()
         self.model = SeedOssModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = MojoLinear(
@@ -317,7 +419,7 @@ class SeedOssForCausalLM(PreTrainedModel, GenerationMixin):
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        past_key_values: Optional[PagedDummyCache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
