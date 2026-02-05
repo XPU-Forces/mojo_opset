@@ -174,6 +174,15 @@ def create_renaming_by_dict(name_mapping_dict: dict, longest_match_first=True):
     # NOTE(liuyuan): Although WeightRenaming supports multi-pattern matching, it still requires careful control over the mapping logic. Therefore, we recommend that users create complex WeightRenaming themselves.
     return list(map(lambda x: WeightRenaming(x[0], x[1]), name_mapping_dict))
 
+def load_hf_weights(hf_dir):
+    state_dict = {}
+    import glob
+    safetensors_files = sorted(glob.glob(os.path.join(hf_dir, "*.safetensors")))
+    from safetensors.torch import load_file as load_safetensors
+    for f in safetensors_files:
+        state_dict.update(load_safetensors(f))
+    return state_dict
+
 
 """
 An example to create a WeightConverter with custom ConversionOps.
@@ -199,7 +208,7 @@ An example to create a WeightConverter with custom ConversionOps.
 """
 def load_weights_with_renaming_and_converter(
     model: torch.nn.Module,
-    hf_dir_or_preload_state_dict: str | OrderedDict,
+    hf_dir_or_preload_state_dict: str | dict | OrderedDict,
     strict_loading=True,
     renamings: List["WeightRenaming"] = [],
     converters: List["WeightConverter"] = [],
@@ -209,19 +218,10 @@ def load_weights_with_renaming_and_converter(
     from transformers.core_model_loading import WeightConverter, WeightRenaming, rename_source_key
     from copy import deepcopy
 
-    state_dict_list = []
     if isinstance(hf_dir_or_preload_state_dict, str):
-        import glob
-        safetensors_files = sorted(glob.glob(os.path.join(hf_dir_or_preload_state_dict, "*.safetensors")))
-        from safetensors.torch import load_file as load_safetensors
-        for f in safetensors_files:
-            state_dict_list.append(load_safetensors(f))
-    elif isinstance(hf_dir_or_preload_state_dict, OrderedDict):
-        state_dict_list = (
-            hf_dir_or_preload_state_dict
-            if isinstance(hf_dir_or_preload_state_dict, list)
-            else [hf_dir_or_preload_state_dict]
-        )
+        state_dict = load_hf_weights(hf_dir_or_preload_state_dict)
+    elif isinstance(hf_dir_or_preload_state_dict, (OrderedDict, dict)):
+        state_dict = hf_dir_or_preload_state_dict
     else:
         raise TypeError(
             f"hf_dir_or_preload_state_dict is supposed to be string or OrderedDict, but found {type(hf_dir_or_preload_state_dict)}"
@@ -235,19 +235,18 @@ def load_weights_with_renaming_and_converter(
         for k in converter.source_patterns
     }
 
-    for state_dict in state_dict_list:
-        for key in state_dict.keys():
-            renamed_key, src_pat = rename_source_key(key, renamings, converters)
-            if renamed_key in model_state_dict:
-                if src_pat is not None:
-                    new_converter = deepcopy(pattern_to_converter[src_pat])
-                    mapping = param_name_to_load.setdefault(renamed_key, new_converter)
-                else:
-                    mapping = param_name_to_load.setdefault(renamed_key, WeightRenaming(key, renamed_key))
-                    src_pat = key
-                mapping.add_tensor(
-                    renamed_key, key, src_pat, state_dict[key]
-                )
+    for key in state_dict.keys():
+        renamed_key, src_pat = rename_source_key(key, renamings, converters)
+        if renamed_key in model_state_dict:
+            if src_pat is not None:
+                new_converter = deepcopy(pattern_to_converter[src_pat])
+                mapping = param_name_to_load.setdefault(renamed_key, new_converter)
+            else:
+                mapping = param_name_to_load.setdefault(renamed_key, WeightRenaming(key, renamed_key))
+                src_pat = key
+            mapping.add_tensor(
+                renamed_key, key, src_pat, state_dict[key]
+            )
 
     new_state_dict = {}
     for k, mapping in param_name_to_load.items():
@@ -258,4 +257,3 @@ def load_weights_with_renaming_and_converter(
         new_state_dict.update(converted_tensor)
 
     return model.load_state_dict(new_state_dict, strict=strict_loading)
-    # print(model.load_state_dict(new_state_dict, strict=False))
