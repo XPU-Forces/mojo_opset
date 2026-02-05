@@ -132,10 +132,11 @@ def generate_paged_prefill_data(
     cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0)])
 
     if max_kv_computed_len <= 0:
-        kv_cache_lens = torch.zeros_like(q_lens)
+        kv_cache_lens = None
+        kv_lens = q_lens
     else:
         kv_cache_lens = torch.randint(max_kv_computed_len // 2, max_kv_computed_len, (batch_size,), dtype=torch.int32)
-    kv_lens = q_lens + kv_cache_lens
+        kv_lens = q_lens + kv_cache_lens
     cu_seqlens_kv = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0)])
 
     total_q_tokens = cu_seqlens_q[-1].item()
@@ -182,7 +183,7 @@ def generate_paged_prefill_data(
             k_cache[physical_block_id, :, :tokens_in_block, :] = k_slice
             v_cache[physical_block_id, :, :tokens_in_block, :] = v_slice
 
-    return query, k_cache, v_cache, cu_seqlens_q, kv_lens, block_tables
+    return query, k_cache, v_cache, cu_seqlens_q, block_tables, kv_lens
 
 
 test_configs = [
@@ -192,7 +193,7 @@ test_configs = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_seqlens_q, seqlens_kv, block_tables, atol, rtol",
+    "query, k_cache, v_cache, cu_seqlens_q, block_tables, seqlens_kv, atol, rtol",
     [
         pytest.param(
             *generate_paged_prefill_data(
@@ -212,7 +213,7 @@ test_configs = [
         for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs
     ],
 )
-@pytest.mark.parametrize("gqa_layout", ["ABAB"])
+@pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
 @auto_switch_platform()
 @bypass_not_implemented
 def test_paged_prefill_gqa(
@@ -222,6 +223,7 @@ def test_paged_prefill_gqa(
     cu_seqlens_q: torch.Tensor,
     seqlens_kv: torch.Tensor,
     block_tables: torch.Tensor,
+    seqlens_kv: torch.Tensor,
     atol: float,
     rtol: float,
     gqa_layout: str,
@@ -248,6 +250,7 @@ def test_paged_prefill_gqa(
         seqlens_kv,
         block_tables,
         softmax_scale=sm_scale,
+        seqlens_kv=seqlens_kv,
         atol=atol,
         rtol=rtol,
     )

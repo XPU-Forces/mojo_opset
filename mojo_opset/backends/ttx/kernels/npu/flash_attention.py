@@ -133,6 +133,7 @@ def paged_prefill_kernel(
     PAGE_SIZE: tl.constexpr,
     NUM_Q_HEADS: tl.constexpr,
     NUM_KV_HEADS: tl.constexpr,
+    GQA_INTERLEAVE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -147,16 +148,22 @@ def paged_prefill_kernel(
     for task_id in range(pid, num_tasks, n_progs):
         chunk_id = task_id // NUM_Q_HEADS
         q_head_id = task_id % NUM_Q_HEADS
-        kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
+        if GQA_INTERLEAVE:
+            kv_head_id = q_head_id % NUM_KV_HEADS
+        else:
+            kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
 
         b_id = tl.load(q_chunk_indices_ptr + chunk_id * 2)
         q_block_id = tl.load(q_chunk_indices_ptr + chunk_id * 2 + 1)
 
         q_start_loc = tl.load(cu_seqlens_q_ptr + b_id)
         q_end_loc = tl.load(cu_seqlens_q_ptr + b_id + 1)
-        kv_seq_len = tl.load(seqlens_kv_ptr + b_id)
-
         q_seq_len = q_end_loc - q_start_loc
+
+        if seqlens_kv_ptr is None:
+            kv_seq_len = q_seq_len
+        else:
+            kv_seq_len = tl.load(seqlens_kv_ptr + b_id)
         kv_cache_len = kv_seq_len - q_seq_len
 
         q_block_start_in_seq = q_block_id * BLOCK_SIZE_M
@@ -251,14 +258,15 @@ def paged_attention_prefill_impl(
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
-    seqlens_kv: torch.Tensor,
+    seqlens_kv: Optional[torch.Tensor],
     block_tables: torch.Tensor,
+    gqa_interleave: bool,
     sm_scale: Optional[float] = None,
     aux_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     _, num_q_heads, head_dim = q.shape
     _, num_kv_heads, block_size, _ = k_cache.shape
-    batch_size = seqlens_kv.shape[0]
+    batch_size = block_tables.shape[0]
 
     if sm_scale is None:
         sm_scale = 1.0 / math.sqrt(head_dim)
@@ -316,10 +324,13 @@ def paged_attention_prefill_impl(
         block_size,
         num_q_heads,
         num_kv_heads,
+        gqa_interleave,
         head_dim,
         BLOCK_SIZE_M=CHUNK_SIZE,
         BLOCK_SIZE_N=block_size,
         BLOCK_SIZE_D=head_dim,
+        limit_auto_multi_buffer_only_for_local_buffer=False,
+        set_workspace_multibuffer=4, 
     )
     return o
 

@@ -10,14 +10,16 @@ from .operator import MojoOperator
 logger = get_logger(__name__)
 
 BACKEND_PRIORITY_LIST = ["ttx", "torch_npu", "torch"]
-BACKEND_PRIORITY_MAP = {"torchnpu": "torch_npu"} ## Avoid the issue of failed identification of underscore "_" in the torch_npu backend name
+BACKEND_PRIORITY_MAP = {
+    "torchnpu": "torch_npu"
+}  ## Avoid the issue of failed identification of underscore "_" in the torch_npu backend name
 
 
 class MojoBackendRegistry:
     def __init__(self, core_op_cls: Union[MojoOperator, MojoFunction]):
-        assert core_op_cls.__name__.startswith(
-            "Mojo"
-        ), f"Operator {core_op_cls.__name__} who is a subclass of MojoOperator, class name must start with Mojo."
+        assert core_op_cls.__name__.startswith("Mojo"), (
+            f"Operator {core_op_cls.__name__} who is a subclass of MojoOperator, class name must start with Mojo."
+        )
         self._core_op_cls = core_op_cls
         self._operator_name = core_op_cls.__name__[4:]
         self._registry: Dict[str, Union[MojoOperator, MojoFunction]] = {}
@@ -33,7 +35,7 @@ class MojoBackendRegistry:
         )
         impl_backend_name = cls.__name__[:idx].lower()
 
-        if (impl_backend_name not in BACKEND_PRIORITY_LIST and impl_backend_name in BACKEND_PRIORITY_MAP):
+        if impl_backend_name not in BACKEND_PRIORITY_LIST and impl_backend_name in BACKEND_PRIORITY_MAP:
             impl_backend_name = BACKEND_PRIORITY_MAP[impl_backend_name]
 
         # Hard code for some special cases
@@ -42,10 +44,18 @@ class MojoBackendRegistry:
         if impl_backend_name == "analysis":
             return
 
-        assert impl_backend_name in BACKEND_PRIORITY_LIST, (
-            f"Operator {cls.__name__} backend[{impl_backend_name}] is not supported, "
-            f"please choose from {BACKEND_PRIORITY_LIST}."
-        )
+        # in case of backend class name mistake
+        if impl_backend_name not in BACKEND_PRIORITY_LIST:
+            for target_backend in BACKEND_PRIORITY_LIST:
+                if impl_backend_name.startswith(target_backend):
+                    raise NameError(
+                        f"Operator {cls.__name__} backend[{impl_backend_name}] is not supported, "
+                        f"are you wish to named {target_backend.upper()}{self._operator_name} ?"
+                    )
+            raise AssertionError(
+                f"Operator {cls.__name__} backend[{impl_backend_name}] is not supported, "
+                f"please choose from {BACKEND_PRIORITY_LIST}."
+            )
 
         curr_platform = get_platform()
         if curr_platform in cls.supported_platforms_list:
@@ -70,18 +80,23 @@ class MojoBackendRegistry:
         # of a specific backend.
         if (backend_name is None) or (backend_name not in self._registry.keys()):  # get first class
             assert len(self._registry) > 0, f"{self._operator_name} does not implement any backend."
-            return list(self._registry.values())[0]
+            fallback = list(self._registry.values())[0]
+            logger.debug(
+                "Backend '%s' is not registered, falling back to %s.",
+                backend_name or "<default>",
+                fallback.__name__,
+            )
+            return fallback
 
         try:
             return self._registry[backend_name]
         except Exception as e:
-            fallback = list(self._registry.values())[0]
             logger.warning(
                 f"Failed to get backend '{backend_name}' for "
                 f"{self._operator_name}, falling back to '{fallback.__class__.__name__}'. "
                 f"Error: {e}"
             )
-            return fallback
+            return list(self._registry.values())[0]
 
     def sort(self):
         self._registry = dict(sorted(self._registry.items(), key=lambda x: BACKEND_PRIORITY_LIST.index(x[0])))

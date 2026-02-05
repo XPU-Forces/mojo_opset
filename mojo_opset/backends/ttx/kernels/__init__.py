@@ -154,10 +154,11 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         cu_seqlens_q: torch.Tensor,
         seqlens_kv: torch.Tensor,
         block_tables: torch.Tensor,
+        gqa_interleave: bool,
         sm_scale: Optional[float] = None,
         aux_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return paged_attention_prefill_impl(q, k_cache, v_cache, cu_seqlens_q, seqlens_kv, block_tables, sm_scale, aux_mask)
+        return paged_attention_prefill_impl(q, k_cache, v_cache, cu_seqlens_q, seqlens_kv, block_tables, gqa_interleave, sm_scale, aux_mask)
 
     @paged_attention_prefill.register_fake
     def paged_attention_prefill_fake(
@@ -167,6 +168,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         cu_seqlens_q: torch.Tensor,
         seqlens_kv: torch.Tensor,
         block_tables: torch.Tensor,
+        gqa_interleave: bool,
         sm_scale: Optional[float] = None,
         aux_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:

@@ -189,11 +189,11 @@ class Qwen3Attention(nn.Module):
         self.o_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.hidden_size, self.num_heads * self.head_dim)))
 
         self.q_norm = MojoRMSNorm(
-            hidden_size=self.head_dim,
+            norm_size=self.head_dim,
             eps=config.rms_norm_eps,
         )
         self.k_norm = MojoRMSNorm(
-            hidden_size=self.head_dim,
+            norm_size=self.head_dim,
             eps=config.rms_norm_eps,
         )
         self.rope = MojoRoPE()
@@ -262,7 +262,7 @@ class Qwen3Attention(nn.Module):
             # Use per-layer block table
             block_tables = past_key_values.block_tables[self.layer_idx]
 
-            attn_output_tnd = self.attn_prefill(q, k_cache, v_cache, cu_seqlens_q, current_seq_lens, block_tables, self.scaling)
+            attn_output_tnd = self.attn_prefill(q, k_cache, v_cache, cu_seqlens_q, block_tables, self.scaling, current_seq_lens)
             attn_output = attn_output_tnd.reshape(bsz, q_len, num_q_heads, head_dim)
             attn_output = attn_output.transpose(1, 2)
 
@@ -285,9 +285,9 @@ class Qwen3DecoderLayer(nn.Module):
         self.mlp = Qwen3MLP(config)
         self.layer_idx = layer_idx
 
-        self.input_layernorm = MojoRMSNorm(hidden_size=config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = MojoRMSNorm(norm_size=config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = MojoRMSNorm(
-            hidden_size=config.hidden_size, eps=config.rms_norm_eps
+            norm_size=config.hidden_size, eps=config.rms_norm_eps
         )
 
     def forward(
@@ -325,7 +325,7 @@ class Qwen3Model(nn.Module):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList([Qwen3DecoderLayer(config, i) for i in range(config.num_hidden_layers)])
 
-        self.norm = MojoRMSNorm(hidden_size=config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = MojoRMSNorm(norm_size=config.hidden_size, eps=config.rms_norm_eps)
         self.rotary = Qwen3RotaryEmbedding(config)
 
     def forward(
