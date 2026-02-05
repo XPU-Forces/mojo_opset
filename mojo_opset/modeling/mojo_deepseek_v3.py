@@ -355,8 +355,6 @@ class DeepseekV3MoE(nn.Module):
         super().__init__()
         self.config = config
         
-        # self.experts = DeepseekV3NaiveMoe(config)
-        # self.gate = DeepseekV3TopkRouter(config)
         self.routed_experts = MojoMoE(
             hidden_size=config.hidden_size,
             ffn_intermediate_size=config.moe_intermediate_size,
@@ -377,60 +375,6 @@ class DeepseekV3MoE(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
         self.top_k = config.num_experts_per_tok
 
-    def route_tokens_to_experts(
-        self, router_logits: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Route tokens to top-k experts using group-wise selection.
-        
-        Args:
-            router_logits: Logits from router network
-            
-        Returns:
-            Tuple of (expert_indices, expert_weights)
-        """
-        # Apply sigmoid and bias correction
-        router_logits = router_logits.sigmoid()
-        router_logits_for_choice = router_logits + self.gate.e_score_correction_bias
-        
-        # Group-wise expert selection [B*S, TopK]
-        group_scores = (
-            router_logits_for_choice.view(
-                -1, self.n_group, self.n_routed_experts // self.n_group
-            )
-            .topk(2, dim=-1)[0]
-            .sum(dim=-1)
-        )
-        group_idx = torch.topk(
-            group_scores, k=self.topk_group, dim=-1, sorted=False
-        )[1]
-        
-        # Create mask for selected groups
-        group_mask = torch.zeros_like(group_scores)
-        group_mask.scatter_(1, group_idx, 1)
-        score_mask = (
-            group_mask.unsqueeze(-1)
-            .expand(-1, self.n_group, self.n_routed_experts // self.n_group)
-            .reshape(-1, self.n_routed_experts)
-        )
-        
-        # Select top-k experts within chosen groups
-        scores_for_choice = router_logits_for_choice.masked_fill(
-            ~score_mask.bool(), 0.0
-        )
-        topk_indices = torch.topk(
-            scores_for_choice, k=self.top_k, dim=-1, sorted=False
-        )[1]
-        topk_weights = router_logits.gather(1, topk_indices)
-        
-        # Normalize weights if required
-        if self.norm_topk_prob:
-            denominator = topk_weights.sum(dim=-1, keepdim=True) + 1e-20
-            topk_weights /= denominator
-            
-        topk_weights = topk_weights * self.routed_scaling_factor
-        return topk_indices, topk_weights
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
         Forward pass through MoE layer.
@@ -444,15 +388,6 @@ class DeepseekV3MoE(nn.Module):
         residuals = hidden_states #[BSH]
         orig_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
-        # # Route to experts
-        # router_logits = self.gate(hidden_states) #[B*S, H_router]
-        # topk_indices, topk_weights = self.route_tokens_to_experts(router_logits)
-        
-        # # Process through routed experts
-        # hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        # hidden_states = self.experts(
-        #     hidden_states, topk_indices, topk_weights
-        # ).view(*orig_shape)
         hidden_states = self.routed_experts(hidden_states).view(*orig_shape)
         
         # Add shared expert output
