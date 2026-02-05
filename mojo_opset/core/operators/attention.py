@@ -165,7 +165,6 @@ class MojoPagedPrefillGQA(MojoOperator):
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
-        seq_lens_kv: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
         seqlens_kv: Optional[torch.Tensor] = None,
