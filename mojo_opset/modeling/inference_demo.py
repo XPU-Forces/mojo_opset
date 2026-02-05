@@ -33,7 +33,14 @@ def resolve_model_class(model_path: str):
 
 
 def generate(model, tokenizer, prompt, max_new_tokens, device):
-    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+    messages = [{"role": "user", "content": prompt}]
+    input_ids = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,              
+        add_generation_prompt=True,
+        return_tensors="pt",
+        thinking_budget=-1
+    ).to(device)
 
     # Prefill
     print(f"\nPrompt: {prompt}")

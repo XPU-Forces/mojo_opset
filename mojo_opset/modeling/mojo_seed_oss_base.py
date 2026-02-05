@@ -8,7 +8,6 @@ import torch.nn as nn
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
 from mojo_opset import MojoRMSNorm
-from mojo_opset import MojoLinear
 from mojo_opset import MojoSilu
 from mojo_opset import MojoRoPE
 from mojo_opset import MojoStorePagedKVCache
@@ -127,19 +126,10 @@ class SeedOssMLP(nn.Module):
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.gate_proj = MojoLinear(
-            weight=nn.Parameter(torch.empty(self.intermediate_size, self.hidden_size)),
-            bias=(nn.Parameter(torch.zeros(self.intermediate_size)) if config.mlp_bias else None),
-        )
-        self.up_proj = MojoLinear(
-            weight=nn.Parameter(torch.empty(self.intermediate_size, self.hidden_size)),
-            bias=(nn.Parameter(torch.zeros(self.intermediate_size)) if config.mlp_bias else None),
-        )
-        self.down_proj = MojoLinear(
-            weight=nn.Parameter(torch.empty(self.hidden_size, self.intermediate_size)),
-            bias=(nn.Parameter(torch.zeros(self.hidden_size)) if config.mlp_bias else None),
-        )
-        self.act_fn = MojoSilu._registry.get("torch")()
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
+        self.act_fn = MojoSilu()
 
         self.residual_dropout = config.residual_dropout
 
@@ -162,23 +152,19 @@ class SeedOssAttention(nn.Module):
         self.attention_dropout = config.attention_dropout
         self.is_causal = True
 
-        self.q_proj = MojoLinear(
-            weight=nn.Parameter(torch.empty(self.num_attention_heads * self.head_dim, config.hidden_size)),
-            bias=(nn.Parameter(torch.zeros(self.num_attention_heads * self.head_dim)) if config.attention_bias else None),
+        self.q_proj = nn.Linear(
+            config.hidden_size, self.num_attention_heads * self.head_dim, bias=config.attention_bias
         )
-        self.k_proj = MojoLinear(
-            weight=nn.Parameter(torch.empty(config.num_key_value_heads * self.head_dim, config.hidden_size)),
-            bias=(nn.Parameter(torch.zeros(config.num_key_value_heads * self.head_dim)) if config.attention_bias else None),
+        self.k_proj = nn.Linear(
+            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
         )
-        self.v_proj = MojoLinear(
-            weight=nn.Parameter(torch.empty(config.num_key_value_heads * self.head_dim, config.hidden_size)),
-            bias=(nn.Parameter(torch.zeros(config.num_key_value_heads * self.head_dim)) if config.attention_bias else None),
+        self.v_proj = nn.Linear(
+            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
         )
-        self.o_proj = MojoLinear(
-            weight=nn.Parameter(torch.empty(config.hidden_size, self.num_attention_heads * self.head_dim)),
-            bias=(nn.Parameter(torch.zeros(config.hidden_size)) if config.attention_out_bias else None),
+        self.o_proj = nn.Linear(
+            self.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_out_bias
         )
-        self.rope = MojoRoPE._registry.get("torch")()
+        self.rope = MojoRoPE()
         self.attn_prefill = MojoPagedPrefillGQA()
         self.attn_decode = MojoPagedDecodeGQA()
 
@@ -261,8 +247,8 @@ class SeedOssDecoderLayer(nn.Module):
         self.self_attn = SeedOssAttention(config=config, layer_idx=layer_idx)
 
         self.mlp = SeedOssMLP(config)
-        self.input_layernorm = MojoRMSNorm._registry.get("torch")(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = MojoRMSNorm._registry.get("torch")(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = MojoRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = MojoRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -347,7 +333,7 @@ class SeedOssModel(nn.Module):
         self.layers = nn.ModuleList(
             [SeedOssDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
-        self.norm = MojoRMSNorm._registry.get("torch")(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = MojoRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = SeedOssRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
 
@@ -409,10 +395,7 @@ class SeedOssForCausalLM(nn.Module):
         super().__init__()
         self.model = SeedOssModel(config)
         self.vocab_size = config.vocab_size
-        self.lm_head = MojoLinear(
-            weight=nn.Parameter(torch.empty(config.vocab_size, config.hidden_size)),
-            bias=None,
-        )
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
     def forward(
         self,
