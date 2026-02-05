@@ -3,7 +3,6 @@ from typing import List, Optional, Union
 import torch
 import torch_npu
 
-from mojo_opset.core import MojoDequantGroupLinear
 from mojo_opset.core import MojoGroupLinear
 from mojo_opset.core import MojoQuantGroupLinearReduceSum
 from mojo_opset.utils.logging import get_logger
