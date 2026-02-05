@@ -277,113 +277,82 @@ class MojoPagedDecodeMLA(MojoOperator):
         query: torch.Tensor,
         key_query: torch.Tensor,
         value_query: torch.Tensor,
-        current_seq_lens: torch.Tensor,
+        seqlens: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
-        kv_up_proj_weight: torch.Tensor | None = None,
-        kv_lora_rank: int | None = None,
-        qk_nope_head_dim: int | None = None,
-        v_head_dim: int | None = None,
     ):
         """
-        Paged decode MLA attention operator.
+        Paged decode attention with multi-head latent attention (MLA) using a blocked KV cache.
 
-        Reconstructs per-token K/V from blocked caches and computes attention for
-        all tokens (flattened across batch), returning a tensor of shape
-        (B, Hq, D).
+        Args:
+            query (torch.Tensor): Query of shape (B, Hq, D).
+            key_query (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
+            value_query (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
+            seqlens (torch.Tensor): Sequence lengths for each batch, shape (B,).
+            block_tables (torch.Tensor): (B, num_blocks) mapping logical blocks to physical IDs.
+            softmax_scale (Optional[float]): Scale factor; defaults to 1/sqrt(D).
+
+        Returns:
+            torch.Tensor: Attention output of shape (B, Hq, D).
+
+        Notes:
+            - If Hq > Hkv, K/V heads are repeated to match query heads.
+            - Causal mask uses per-batch sequence lengths `seqlens`.
+            - Softmax is computed in float32 and cast back to the input dtype.
         """
-        if kv_up_proj_weight is None or kv_lora_rank is None or qk_nope_head_dim is None or v_head_dim is None:
-            raise ValueError("MojoPagedDecodeMLA requires kv_up_proj_weight, kv_lora_rank, qk_nope_head_dim, v_head_dim for MLA decode mode")
+        batch_size, num_q_heads, head_dim = query.shape
+        num_kv_heads, block_size, _ = key_query.shape[1:]  # (Hkv, block_size, D)
 
-        batch_size, num_q_heads, qk_head_dim = query.shape
-        num_total_blocks, block_size, kv_rank = key_query.shape
+        max_len_in_batch = seqlens.max().item()
 
-        if kv_rank != kv_lora_rank:
-            raise ValueError(
-                f"key_query last dim (kv_rank={kv_rank}) != kv_lora_rank={kv_lora_rank}"
-            )
-
-        max_len_in_batch = current_seq_lens.max().item()
-
-        # Allocate buffers for the compressed KV and positional (PE) parts.
-        kv_comp = torch.zeros(
-            batch_size, max_len_in_batch, kv_lora_rank, device=query.device, dtype=key_query.dtype
+        k_ref = torch.zeros(
+            batch_size, max_len_in_batch, num_kv_heads, head_dim, device=query.device, dtype=query.dtype
         )
-        pe_comp = torch.zeros(
-            batch_size, max_len_in_batch, value_query.shape[-1], device=query.device, dtype=value_query.dtype
+        v_ref = torch.zeros(
+            batch_size, max_len_in_batch, num_kv_heads, head_dim, device=query.device, dtype=query.dtype
         )
 
-        # Fill per-batch buffers by mapping logical -> physical blocks
+        # Fill k_ref / v_ref by mapping logical blocks -> physical blocks using block_tables.
         for i in range(batch_size):
-            seq_len = current_seq_lens[i].item()
+            seq_len = seqlens[i].item()
             num_blocks_for_seq = (seq_len + block_size - 1) // block_size
+
             for j in range(num_blocks_for_seq):
                 physical_block_id = block_tables[i, j].item()
                 start_pos = j * block_size
                 tokens_in_block = min(block_size, seq_len - start_pos)
 
-                # `k_slice`: (tokens_in_block, kv_lora_rank)
-                k_slice = key_query[physical_block_id, :tokens_in_block, :]
-                # `p_slice`: (tokens_in_block, pe_dim)
-                p_slice = value_query[physical_block_id, :tokens_in_block, :]
+                k_slice = key_query[physical_block_id, :, :tokens_in_block, :]
+                k_ref[i, start_pos : start_pos + tokens_in_block, :, :] = k_slice.permute(1, 0, 2)
 
-                kv_comp[i, start_pos : start_pos + tokens_in_block, :] = k_slice
-                pe_comp[i, start_pos : start_pos + tokens_in_block, :] = p_slice
+                v_slice = value_query[physical_block_id, :, :tokens_in_block, :]
+                v_ref[i, start_pos : start_pos + tokens_in_block, :, :] = v_slice.permute(1, 0, 2)
 
-        # Split the query into non-positional (nope) and positional (pe/rotary) components.
-        q_nope = query[..., :qk_nope_head_dim]
-        q_pe = query[..., qk_nope_head_dim:]
+        _, k_len, num_k_heads, _ = k_ref.shape
 
-        if q_nope.shape[-1] != qk_nope_head_dim:
-            raise ValueError(
-                f"q_nope dim {q_nope.shape[-1]} != qk_nope_head_dim {qk_nope_head_dim}"
-            )
-        if q_pe.shape[-1] != pe_comp.shape[-1]:
-            raise ValueError(
-                f"q_pe dim {q_pe.shape[-1]} != pe_comp dim {pe_comp.shape[-1]}"
-            )
+        # Support repeating KV heads to match query heads (GQA-like layouts).
+        if num_q_heads % num_k_heads != 0:
+            raise ValueError(f"num_q_heads ({num_q_heads}) must be divisible by num_kv_heads ({num_k_heads})")
+        num_share_q_heads = num_q_heads // num_k_heads
 
-        # Reshape the up-projection weight into per-head blocks.
-        num_heads = num_q_heads
-        w = kv_up_proj_weight
-        if w.ndim == 2 and w.shape[0] == num_heads * (qk_nope_head_dim + v_head_dim):
-            wkv_b = w.view(num_heads, qk_nope_head_dim + v_head_dim, kv_lora_rank)
-        elif w.ndim == 3 and w.shape[0] == num_heads:
-            wkv_b = w
-        else:
-            # Conservative reshape with informative error if it fails later.
-            wkv_b = w.reshape(num_heads, qk_nope_head_dim + v_head_dim, kv_lora_rank)
+        if num_share_q_heads > 1:
+            # Repeat each KV head block to expand from Hkv -> Hq
+            k_ref = k_ref.repeat_interleave(num_share_q_heads, dim=2)
+            v_ref = v_ref.repeat_interleave(num_share_q_heads, dim=2)
 
-        wkv_b = wkv_b.to(query.dtype).to(query.device)
+        # Compute attention scores:
+        # einsum("bhd,bkhd->bhk") computes dot-product between query (B,Hq,D) and keys per position (B,L,Hq,D) -> (B,Hq,L)
+        attn = torch.einsum("bhd,bkhd->bhk", query, k_ref) * softmax_scale
 
-        # Project `q_nope` into the kv_lora space on a per-head basis.
-        q_nope_proj = torch.einsum("bhd,hdc->bhc", q_nope, wkv_b[:, :qk_nope_head_dim, :])
+        # Mask out positions beyond each sequence length per batch.
+        mask = torch.arange(k_len, device=query.device)[None, :] >= seqlens[:, None]
+        attn.masked_fill_(mask[:, None, :], -torch.inf)
 
-        # Compute attention scores as the sum of two contributions.
-        # Resulting shape: (B, H, L)
-        attn_scores = (
-            torch.einsum("bhc,blc->bhl", q_nope_proj, kv_comp)
-            + torch.einsum("bhr,blr->bhl", q_pe, pe_comp)
-        ) * softmax_scale
+        # Softmax in float32 for stability, then cast back to query dtype.
+        attn = torch.softmax(attn, dim=-1, dtype=torch.float32).to(query.dtype)
 
-        # Mask positions beyond each sequence length per batch and apply softmax for numerical stability.
-        k_len = kv_comp.shape[1]
-        mask = torch.arange(k_len, device=query.device)[None, :] >= current_seq_lens[:, None]
-        attn_scores.masked_fill_(mask[:, None, :], -torch.inf)
-
-        attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
-
-        # Weighted sum over compressed kv -> (B, H, kv_lora_rank)
-        weighted = torch.einsum("bhl,blc->bhc", attn_probs, kv_comp)
-
-        # Project `weighted` back to value space using the v slice of `wkv_b`.
-        v_proj = wkv_b[:, qk_nope_head_dim : qk_nope_head_dim + v_head_dim, :]
-        if v_proj.shape[2] != kv_lora_rank:
-            raise ValueError(
-                f"v_proj last dim {v_proj.shape[2]} != kv_lora_rank {kv_lora_rank}"
-            )
-
-        out = torch.einsum("bhc,hdc->bhd", weighted, v_proj)
+        # Weighted sum of values: einsum("bhk,bkhd->bhd") -> (B, Hq, D)
+        out = torch.einsum("bhk,bkhd->bhd", attn, v_ref)
         return out
 
 
