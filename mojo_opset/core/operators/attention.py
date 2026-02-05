@@ -52,8 +52,8 @@ class MojoPagedDecodeGQA(MojoOperator):
     def forward(
         self,
         query: torch.Tensor,
-        key_query: torch.Tensor,
-        value_query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
@@ -64,8 +64,8 @@ class MojoPagedDecodeGQA(MojoOperator):
 
         Args:
             query (torch.Tensor): Query of shape (B, Hq, D).
-            key_query (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
-            value_query (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
+            key_cache (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
+            value_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
             cu_seqlens_q (torch.Tensor): Cumulative query lengths (unused here; see Notes).
             block_tables (torch.Tensor): (B, num_blocks) mapping logical blocks to physical IDs.
             softmax_scale (Optional[float]): Scale factor; defaults to 1/sqrt(D).
@@ -83,7 +83,7 @@ class MojoPagedDecodeGQA(MojoOperator):
         assert not cu_seq_lens, "varlen is not supported"
 
         batch_size, num_q_heads, head_dim = query.shape
-        num_kv_heads, block_size, head_dim = key_query.shape[1], key_query.shape[2], key_query.shape[3]
+        num_kv_heads, block_size, head_dim = key_cache.shape[1], key_cache.shape[2], key_cache.shape[3]
         max_len_in_batch = seqlens.max().item()
 
         k_ref = torch.zeros(
@@ -103,8 +103,8 @@ class MojoPagedDecodeGQA(MojoOperator):
                 start_pos = j * block_size
                 tokens_in_block = min(block_size, seq_len - start_pos)
 
-                k_slice = key_query[physical_block_id, :, :tokens_in_block, :]
-                v_slice = value_query[physical_block_id, :, :tokens_in_block, :]
+                k_slice = key_cache[physical_block_id, :, :tokens_in_block, :]
+                v_slice = value_cache[physical_block_id, :, :tokens_in_block, :]
 
                 k_ref[i, start_pos : start_pos + tokens_in_block, :, :] = k_slice.permute(1, 0, 2)
                 v_ref[i, start_pos : start_pos + tokens_in_block, :, :] = v_slice.permute(1, 0, 2)
@@ -162,24 +162,34 @@ class MojoPagedPrefillGQA(MojoOperator):
     def forward(
         self,
         query: torch.Tensor,
-        key_query: torch.Tensor,
-        value_query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
+        seqlens_kv: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
     ) -> Tuple[Any]:
         """
         Paged prefill attention with grouped query heads (GQA) using a blocked KV cache.
 
         Args:
             query (torch.Tensor): Query tokens of shape (T, Hq, D).
-            key_query (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
-            value_query (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
+            key_cache (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
+            value_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
             cu_seqlens_q (torch.Tensor): Cumulative query lengths, shape (B+1,);
-                `cu_seqlens_q[i]` is the start offset for batch i; `cu_seqlens_q[-1] == T`.
+                `cu_seqlens_q[i]` is the start offset for query at batch i; `cu_seqlens_q[-1] == T`.
             block_tables (torch.Tensor): Logical-to-physical block IDs per batch,
                 shape (B, num_blocks).
             softmax_scale (Optional[float]): Attention scaling factor; defaults to 1/sqrt(D).
+            seqlens_kv (Optional[torch.Tensor]): key/value lengths, shape (B,);
+                `seqlens_kv[i]` is the length for key/value in key/value cache at batch i.
+                If None, defaults to `cu_seqlens_q[i+1] - cu_seqlens_q[i]` for each batch i.
+            mask (Optional[torch.Tensor]): Attention mask; defaults to None.
+                If mask is None, it means a full mask or causal mask based on `is_causal`.
+                If mask is not None, and is_causal=False, applies the mask to the attention scores.
+                Currently we do not constrain the shape of mask, it is recommended be of shape (B, T, T) or (T, T),
+                where B is the block size, and T >= max(max(seqlens_kv), max(seqlens_q)).
 
         Returns:
             torch.Tensor: Attention output of shape (T, Hq, D).
@@ -191,62 +201,70 @@ class MojoPagedPrefillGQA(MojoOperator):
             - Despite the type annotation Tuple[Any], this implementation returns a single tensor.
         """
         total_q_tokens, num_q_heads, head_dim = query.shape
-        num_total_blocks, num_kv_heads, block_size, _ = key_query.shape
+        _, num_kv_heads, block_size, _ = key_cache.shape
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(head_dim)
 
-        total_kv_tokens = total_q_tokens
-
-        k_unpadded = torch.zeros(total_kv_tokens, num_kv_heads, head_dim, dtype=query.dtype, device=query.device)
-        v_unpadded = torch.zeros(total_kv_tokens, num_kv_heads, head_dim, dtype=query.dtype, device=query.device)
+        outputs = torch.zeros(total_q_tokens, num_q_heads, head_dim, dtype=query.dtype, device=query.device)
 
         q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
         batch_size = len(q_lens)
 
         for i in range(batch_size):
-            seq_len = q_lens[i].item()
+            q_seq_len = q_lens[i].item()
             start_loc = cu_seqlens_q[i].item()
             end_loc = cu_seqlens_q[i + 1].item()
+            q = query[start_loc:end_loc]
+            if seqlens_kv is None:
+                kv_seq_len = q_seq_len
+            else:
+                kv_seq_len = seqlens_kv[i].item()
+        
 
-            num_blocks_for_seq = (seq_len + block_size - 1) // block_size
+            num_blocks_for_seq = (kv_seq_len + block_size - 1) // block_size
+            k_unpadded = torch.zeros(kv_seq_len, num_kv_heads, head_dim, dtype=query.dtype, device=query.device)
+            v_unpadded = torch.zeros(kv_seq_len, num_kv_heads, head_dim, dtype=query.dtype, device=query.device)
 
             for j in range(num_blocks_for_seq):
                 physical_block_id = block_tables[i, j].item()
 
                 start_pos_in_seq = j * block_size
-                tokens_in_block = min(block_size, seq_len - start_pos_in_seq)
+                end_pos_in_seq = min(start_pos_in_seq + block_size, kv_seq_len)
+                tokens_in_block = end_pos_in_seq - start_pos_in_seq
 
-                start_loc_in_batch = start_loc + start_pos_in_seq
-                end_loc_in_batch = start_loc_in_batch + tokens_in_block
+                k_slice = key_cache[physical_block_id, :, :tokens_in_block, :]
 
-                k_slice = key_query[physical_block_id, :, :tokens_in_block, :]
+                k_unpadded[start_pos_in_seq:end_pos_in_seq, :, :] = k_slice.permute(1, 0, 2)
 
-                k_unpadded[start_loc_in_batch:end_loc_in_batch, :, :] = k_slice.permute(1, 0, 2)
+                v_slice = value_cache[physical_block_id, :, :tokens_in_block, :]
+                v_unpadded[start_pos_in_seq:end_pos_in_seq, :, :] = v_slice.permute(1, 0, 2)
 
-                v_slice = value_query[physical_block_id, :, :tokens_in_block, :]
-                v_unpadded[start_loc_in_batch:end_loc_in_batch, :, :] = v_slice.permute(1, 0, 2)
+            if num_q_heads != num_kv_heads:
+                if self.gqa_layout == "AABB":
+                    k_expanded = k_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=1)
+                    v_expanded = v_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=1)
+                else:
+                    k_expanded = k_unpadded.repeat((1, num_q_heads // num_kv_heads, 1))
+                    v_expanded = v_unpadded.repeat((1, num_q_heads // num_kv_heads, 1))
+            else:
+                k_expanded = k_unpadded
+                v_expanded = v_unpadded
 
-        if num_q_heads != num_kv_heads:
-            k_expanded = k_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=1)
-            v_expanded = v_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=1)
-        else:
-            k_expanded = k_unpadded
-            v_expanded = v_unpadded
+            attn_scores = torch.einsum("thd,khd->thk", q, k_expanded).float() * softmax_scale
+            if self.is_causal:
+                attn_mask = torch.ones(q_seq_len, kv_seq_len, device=query.device, dtype=torch.bool).tril(kv_seq_len - q_seq_len)
+                attn_scores.masked_fill_(~attn_mask.unsqueeze(1), -torch.inf)
+            elif mask is not None:
+                if mask.dim() == 2:
+                    attn_mask = mask
+                else:
+                    attn_mask = mask[i]
+                attn_mask = attn_mask[kv_seq_len - q_seq_len:kv_seq_len, :kv_seq_len]
+                attn_scores.masked_fill_(~attn_mask.unsqueeze(1), -torch.inf)
 
-        attn_mask = torch.ones(total_q_tokens, total_q_tokens, device=query.device, dtype=torch.bool).tril(diagonal=0)
-
-        tok_to_seq = torch.repeat_interleave(torch.arange(batch_size, device=query.device), q_lens)
-
-        seq_mask = tok_to_seq[:, None] == tok_to_seq[None, :]
-        final_mask = attn_mask & seq_mask
-
-        attn_scores = torch.einsum("thd,khd->thk", query, k_expanded) * softmax_scale
-        attn_scores.masked_fill_(~final_mask.unsqueeze(1), -torch.inf)
-
-        attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
-
-        output = torch.einsum("thk,khd->thd", attn_probs, v_expanded)
-        return output
+            attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
+            outputs[start_loc:end_loc] = torch.einsum("thk,khd->thd", attn_probs, v_expanded)
+        return outputs
 
 
 class MojoDecodeMLA(MojoOperator):
