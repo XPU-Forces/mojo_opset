@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import List, Optional, Union
 
 import torch
 
@@ -100,6 +100,44 @@ class MojoGroupLinear(MojoOperator):
             out_list.append(out_g)
 
         return torch.cat(out_list, dim=0)
+
+
+class MojoQuantGroupLinearReduceSum(MojoOperator):
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        trans_weight: bool = False,
+    ):
+        super().__init__()
+
+        if not isinstance(trans_weight, bool):
+            raise TypeError("trans_weight must be bool.")
+        self.trans_weight = trans_weight
+        self.weight = weight
+
+    def forward(self, input: torch.Tensor, x1_scale: torch.Tensor, x2_scale: torch.Tensor) -> torch.Tensor:
+        assert input.dim() == 3, "input must be 3D"
+        assert self.weight.dim() == 3, "weight must be 3D"
+
+        if self.trans_weight:
+            weight = self.weight.transpose(1, 2).contiguous()
+        else:
+            weight = self.weight
+
+        b, m, k = input.shape
+        b_w, k_w, n = weight.shape
+        assert b == b_w, "input and weight must have same batch size"
+        assert k == k_w, "K of input should be equal to K of weight"
+
+        out = torch.bmm(input.float(), weight.float()).to(torch.float32)
+        out = x2_scale[None, None, :] * out
+        out = x1_scale[:, :, None] * out
+
+        reduced_out = torch.zeros(m, n, dtype=torch.bfloat16, device=out.device)
+        for i in range(b):
+            reduced_out += out[i, ...].to(torch.bfloat16)
+
+        return reduced_out
 
 
 class MojoLinearAllReduce(MojoOperator):

@@ -42,6 +42,7 @@ from .operators.linear import MojoLinear
 from .operators.linear import MojoLinearAll2All
 from .operators.linear import MojoLinearAllReduce
 from .operators.linear import MojoLinearReduceScatter
+from .operators.linear import MojoQuantGroupLinearReduceSum
 
 """ embedding """
 from .operators.embedding import MojoEmbedding
@@ -121,6 +122,7 @@ __all__ = [
     "MojoLinear",
     "MojoBatchLinear",
     "MojoGroupLinear",
+    "MojoQuantGroupLinearReduceSum",
     "MojoLinearAllReduce",
     "MojoLinearAll2All",
     "MojoAllGatherLinear",

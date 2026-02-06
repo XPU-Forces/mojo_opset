@@ -129,7 +129,93 @@ class MojoPagedDecodeGQA(MojoOperator):
 
 
 class MojoPrefillGQA(MojoOperator):
-    pass
+    """
+    GQA attention operator.
+    Args:
+        is_causal (bool): Whether to apply causal masking.
+        softmax_scale (float): Scaling factor for the softmax operation.
+        gqa_layout (str): Layout for GQA attention.
+        rm_padding (bool): Whether to remove padding from attention computation.
+        window_size (int): Window size for attention computation, -1 means full attention.
+        op_name (str): Name of the operator.
+    """
+
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "ABAB",
+        rm_padding: bool = False,
+        window_size: int = -1,
+        op_name: str = "",
+        layer_idx: int = 0,
+    ):
+        super().__init__(op_name, layer_idx)
+
+        self.is_causal = is_causal
+        self.gqa_layout = gqa_layout
+        self.rm_padding = rm_padding
+        self.window_size = window_size
+
+    """
+    Forward pass of the Mojo GQA attention operator, reference for backend.
+    Args:
+        query (torch.Tensor): Query tensor, in shape [B, Q_H, S, D].
+        key (torch.Tensor): Key tensor, in shape [B, K_H, S, D].
+        value (torch.Tensor): Value tensor, inshape [B, V_H, S, D].
+
+    Returns:
+        torch.Tensor: Output tensor.
+    """
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        if self.window_size != -1:
+            raise NotImplementedError
+
+        batch_size, num_attn_heads, seq_len, head_dim = query.size()
+
+        num_kv_heads = k_cache.shape[1]
+
+        group = num_attn_heads // num_kv_heads
+
+        query = query.reshape(-1, seq_len, head_dim)
+        k_cache = torch.transpose(k_cache, -2, -1)
+
+        if self.gqa_layout == "ABAB":
+            k_cache = torch.cat([k_cache] * group, axis=1).reshape(-1, head_dim, seq_len)
+            v_cache = torch.cat([v_cache] * group, axis=1).reshape(-1, seq_len, head_dim)
+        elif self.gqa_layout == "AABB":
+            k_cache = k_cache.repeat_interleave(group, dim=1).reshape(-1, head_dim, seq_len)
+            v_cache = v_cache.repeat_interleave(group, dim=1).reshape(-1, seq_len, head_dim)
+        else:
+            raise NotImplementedError
+
+        score = torch.bmm(query, k_cache).float()
+
+        if softmax_scale is None:
+            score *= 1 / (head_dim**0.5)
+        else:
+            score *= softmax_scale
+
+        if self.is_causal:
+            mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool, device=query.device))
+            score.masked_fill_(~mask, float("-inf"))
+        else:
+            raise NotImplementedError
+
+        score = torch.softmax(score, -1).to(query.dtype)
+
+        attn_output = torch.bmm(score, v_cache)
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(batch_size, seq_len, num_attn_heads, head_dim)
+
+        return attn_output
 
 
 class MojoPagedPrefillGQA(MojoOperator):
