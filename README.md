@@ -69,7 +69,8 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Norm        | MojoResidualAddLayerNorm    | ✅                | ✅             |
 | Norm        | MojoNormQuant               | TBD               | TBD           |
 | Norm        | MojoResidualAddNormQuant    | TBD               | TBD           |
-| Norm        | MojoResidualAddNormCast     | TBD               | TBD           |
+| Norm        | MojoResidualAddRMSNormCast  | TBD               | TBD           |
+| Norm        | MojoResidualAddLayerNormCast| TBD               | TBD           |
 | PositionEmb | MojoRotaryEmb               | ✅                | ✅             |
 | PositionEmb | MojoNormRotary              | TBD               | TBD           |
 | PositionEmb | MojoNormRotaryStorKV        | TBD               | TBD           |

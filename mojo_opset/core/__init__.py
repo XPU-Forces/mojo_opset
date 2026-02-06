@@ -61,9 +61,10 @@ from .operators.moe import MojoMoEGating
 from .operators.normalization import MojoLayerNorm
 from .operators.normalization import MojoNormQuant
 from .operators.normalization import MojoResidualAddLayerNorm
-from .operators.normalization import MojoResidualAddNormCast
+from .operators.normalization import MojoResidualAddLayerNormCast
 from .operators.normalization import MojoResidualAddNormQuant
 from .operators.normalization import MojoResidualAddRMSNorm
+from .operators.normalization import MojoResidualAddRMSNormCast
 from .operators.normalization import MojoRMSNorm
 
 """ position_embedding """
@@ -143,7 +144,8 @@ __all__ = [
     "MojoResidualAddLayerNorm",
     "MojoNormQuant",
     "MojoResidualAddNormQuant",
-    "MojoResidualAddNormCast",
+    "MojoResidualAddRMSNormCast",
+    "MojoResidualAddLayerNormCast",
 
     "MojoRoPE",
     "MojoRoPEStoreKV",
