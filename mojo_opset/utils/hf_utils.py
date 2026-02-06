@@ -5,8 +5,9 @@ from collections import OrderedDict
 
 import torch
 from torch import nn
-from transformers import AutoConfig, AutoTokenizer
 from safetensors.torch import load_file as load_safetensors
+from mojo_opset.utils.logging import get_logger
+logger = get_logger(__name__)
 
 
 def _env_flag_true(name: str) -> bool:
@@ -28,6 +29,7 @@ def _resolve_local_files_only(model_id_or_path: str) -> bool:
 
 
 def load_weights_direct(model_path: str, torch_model: nn.Module) -> None:
+    from transformers import AutoConfig, AutoTokenizer
     from transformers.modeling_utils import no_init_weights
     # 1. Collect weight files
     safetensors_files = sorted(glob.glob(os.path.join(model_path, "*.safetensors")))
@@ -237,7 +239,9 @@ def load_weights_with_renaming_and_converter(
 
     for key in state_dict.keys():
         renamed_key, src_pat = rename_source_key(key, renamings, converters)
+        logger.debug("%s is supposed to be renamed as %s", key, renamed_key)
         if renamed_key in model_state_dict:
+            logger.debug("Renaming\033[1;31m %s \033[0m as\033[1;32m %s \033[0m", key, renamed_key)
             if src_pat is not None:
                 new_converter = deepcopy(pattern_to_converter[src_pat])
                 mapping = param_name_to_load.setdefault(renamed_key, new_converter)
