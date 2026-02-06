@@ -14,6 +14,19 @@ from mojo_opset import MojoJoinProbRejectSampling
 from mojo_opset import MojoRejectSampling
 from mojo_opset import MojoTopPFilter
 from mojo_opset import MojoTopPSampling
+from mojo_opset import MojoTopKSampling
+
+@pytest.mark.parametrize(
+    "logits, topk, min_tokens_to_keep",
+    [(torch.randn(20, 151936), 1000, 1)],
+)
+@auto_switch_platform()
+@bypass_not_implemented
+def test_topk_sampling(logits, topk, min_tokens_to_keep):
+    top_k_sampling = MojoTopKSampling(top_k=topk, min_tokens_to_keep=min_tokens_to_keep)
+    top_k_sampling_ref = MojoTopKSampling._registry.get("torch")(top_k=topk, min_tokens_to_keep=min_tokens_to_keep)
+
+    top_k_sampling.forward_diff_with(top_k_sampling_ref, logits)
 
 
 @pytest.mark.parametrize(
