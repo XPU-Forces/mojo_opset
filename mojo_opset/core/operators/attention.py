@@ -302,12 +302,10 @@ class MojoPagedPrefillNSA(MojoOperator):
 class MojoSdpa(MojoOperator):
     def __init__(
         self,
-        mask: Optional[torch.Tensor] = None,
-        scale: float = 1.0,
+        scale: Optional[float] = None,
         enable_gqa: bool = False,
     ):
         super().__init__()
-        self.mask = mask
         self.scale = scale
         self.enable_gqa = enable_gqa
 
@@ -316,6 +314,7 @@ class MojoSdpa(MojoOperator):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
     ):
         """
         Scaled Dot-Product Attention (SDPA) operator.
@@ -324,12 +323,13 @@ class MojoSdpa(MojoOperator):
             query (torch.Tensor): Query tensor; shape must be compatible with SDPA.
             key (torch.Tensor): Key tensor; same embedding dimension as query.
             value (torch.Tensor): Value tensor; same embedding dimension as key.
+            attn_mask (Optional[torch.Tensor]): Attention mask tensor; shape must be broadcastable with SDPA.
 
         Returns:
             torch.Tensor: Attention output with the same batch/head layout as `query`.
 
         Notes:
-            - Uses `attn_mask=self.mask` (provided externally) and disables dropout.
+            - Uses `attn_mask=attn_mask` (provided externally) and disables dropout.
             - `scale=self.scale` sets custom scaling; if None, SDPA uses default scaling.
             - `enable_gqa=self.enable_gqa` allows grouped query attention when supported.
         """
@@ -337,7 +337,7 @@ class MojoSdpa(MojoOperator):
             query,
             key,
             value,
-            attn_mask=self.mask,
+            attn_mask=attn_mask,
             dropout_p=0.0,
             is_causal=False,
             scale=self.scale,
