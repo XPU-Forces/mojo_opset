@@ -79,7 +79,7 @@ test_configs_decode = [
         for B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, ID in test_configs_decode
     ],
 )
-@pytest.mark.parametrize("gqa_layout", ["ABAB"])
+@pytest.mark.parametrize("gqa_layout", ["AABB"])
 @auto_switch_platform()
 @bypass_not_implemented
 def test_paged_decode_gqa(
