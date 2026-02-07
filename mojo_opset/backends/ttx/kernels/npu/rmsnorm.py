@@ -426,7 +426,6 @@ def rmsnorm_fwd_impl(
         offset,
         casting_mode_int=casting_mode_int,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
-        multibuffer=True,
     )
 
     Y = Y.reshape(*shape)
@@ -484,7 +483,6 @@ def rmsnorm_bwd_impl(
             casting_mode_int,
             X_dtype_triton,
             BLOCK_SIZE_N=align(X_2d, n_cols, VEC_ALIGN_BYTES),
-            multibuffer=True,
         )
         dW = _dW.sum(dim=0).to(W.dtype)
     else:
@@ -508,7 +506,6 @@ def rmsnorm_bwd_impl(
             X_dtype_triton,
             BLOCK_SIZE_N=COL_BLOCKING_THRESHOLD,
             BLOCK_SIZE_M=2,  # Empirical value
-            multibuffer=True,
         )
         dW = _dW.squeeze(0).to(W.dtype)
 

@@ -33,25 +33,24 @@ def gelu_tanh_approx(x):
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_SIZE_M": 1, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 2, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 4, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 8, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 12, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 16, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 20, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 24, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 32, "multibuffer": True}),
+        triton.Config({"BLOCK_SIZE_M": 1}),
+        triton.Config({"BLOCK_SIZE_M": 2}),
+        triton.Config({"BLOCK_SIZE_M": 4}),
+        triton.Config({"BLOCK_SIZE_M": 8}),
+        triton.Config({"BLOCK_SIZE_M": 12}),
+        triton.Config({"BLOCK_SIZE_M": 16}),
+        triton.Config({"BLOCK_SIZE_M": 20}),
+        triton.Config({"BLOCK_SIZE_M": 24}),
+        triton.Config({"BLOCK_SIZE_M": 32}),
     ],
     key=["n_rows", "n_cols"],
 )
 @libentry()
 @triton.jit
 def _gelu_fwd_kernel(
-    X_ptr,
-    Y_ptr,
-    stride_x_row,
-    stride_y_row,
+    x,
+    y,
+    stride_row,
     n_rows,
     n_cols,
     BLOCK_SIZE_N: tl.constexpr,
@@ -72,8 +71,8 @@ def _gelu_fwd_kernel(
             cols_mask = cols_off < n_cols
             block_mask = rows_mask[:, None] & cols_mask[None, :]
 
-            x_ptrs = X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :]
-            y_ptrs = Y_ptr + rows_off[:, None] * stride_y_row + cols_off[None, :]
+            x_ptrs = x + rows_off[:, None] * stride_row + cols_off[None, :]
+            y_ptrs = y + rows_off[:, None] * stride_row + cols_off[None, :]
 
             x_chunk = tl.load(x_ptrs, mask=block_mask, other=0.0)
 
@@ -87,28 +86,26 @@ def _gelu_fwd_kernel(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_SIZE_M": 1, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 2, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 4, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 8, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 12, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 16, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 20, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 24, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 32, "multibuffer": True}),
+        triton.Config({"BLOCK_SIZE_M": 1}),
+        triton.Config({"BLOCK_SIZE_M": 2}),
+        triton.Config({"BLOCK_SIZE_M": 4}),
+        triton.Config({"BLOCK_SIZE_M": 8}),
+        triton.Config({"BLOCK_SIZE_M": 12}),
+        triton.Config({"BLOCK_SIZE_M": 16}),
+        triton.Config({"BLOCK_SIZE_M": 20}),
+        triton.Config({"BLOCK_SIZE_M": 24}),
+        triton.Config({"BLOCK_SIZE_M": 32}),
     ],
     key=["n_rows", "n_cols"],
-    restore_value=["dY_ptr", "dX_ptr"],
+    restore_value=["dy", "dx"],
 )
 @libentry()
 @triton.jit
 def _gelu_bwd_kernel(
-    dY_ptr,
-    X_ptr,
-    dX_ptr,
-    stride_dy_row,
-    stride_x_row,
-    stride_dx_row,
+    dy,
+    x,
+    dx,
+    stride_row,
     n_rows,
     n_cols,
     BLOCK_SIZE_N: tl.constexpr,
@@ -129,9 +126,9 @@ def _gelu_bwd_kernel(
             cols_mask = cols_off < n_cols
             block_mask = rows_mask[:, None] & cols_mask[None, :]
 
-            dy_ptrs = dY_ptr + rows_off[:, None] * stride_dy_row + cols_off[None, :]
-            x_ptrs = X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :]
-            dx_ptrs = dX_ptr + rows_off[:, None] * stride_dx_row + cols_off[None, :]
+            dy_ptrs = dy + rows_off[:, None] * stride_row + cols_off[None, :]
+            x_ptrs = x + rows_off[:, None] * stride_row + cols_off[None, :]
+            dx_ptrs = dx + rows_off[:, None] * stride_row + cols_off[None, :]
 
             dy_chunk = tl.load(dy_ptrs, mask=block_mask, other=0.0)
             x_chunk = tl.load(x_ptrs, mask=block_mask, other=0.0)
@@ -182,7 +179,6 @@ def gelu_fwd_impl(x: torch.Tensor) -> torch.Tensor:
         x_2d,
         y,
         x_2d.stride(0),
-        y.stride(0),
         n_rows,
         n_cols,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
@@ -227,8 +223,6 @@ def gelu_bwd_impl(
         x_2d,
         dx,
         dy_2d.stride(0),
-        x_2d.stride(0),
-        dx.stride(0),
         n_rows,
         n_cols,
         BLOCK_SIZE_N=BLOCK_SIZE_N,

@@ -32,27 +32,25 @@ def silu(x):
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_SIZE_M": 1, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 2, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 4, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 8, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 12, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 16, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 20, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 24, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 32, "multibuffer": True}),
+        triton.Config({"BLOCK_SIZE_M": 1}),
+        triton.Config({"BLOCK_SIZE_M": 2}),
+        triton.Config({"BLOCK_SIZE_M": 4}),
+        triton.Config({"BLOCK_SIZE_M": 8}),
+        triton.Config({"BLOCK_SIZE_M": 12}),
+        triton.Config({"BLOCK_SIZE_M": 16}),
+        triton.Config({"BLOCK_SIZE_M": 20}),
+        triton.Config({"BLOCK_SIZE_M": 24}),
+        triton.Config({"BLOCK_SIZE_M": 32}),
     ],
     key=["n_rows", "n_cols"],
 )
 @libentry()
 @triton.jit
 def _swiglu_fwd_kernel(
-    A_ptr,
-    B_ptr,
-    C_ptr,
-    stride_a_row,
-    stride_b_row,
-    stride_c_row,
+    a,
+    b,
+    c,
+    stride_row,
     n_rows,
     n_cols,
     BLOCK_SIZE_N: tl.constexpr,
@@ -73,9 +71,9 @@ def _swiglu_fwd_kernel(
             cols_mask = cols_off < n_cols
             block_mask = rows_mask[:, None] & cols_mask[None, :]
 
-            a_ptrs = A_ptr + rows_off[:, None] * stride_a_row + cols_off[None, :]
-            b_ptrs = B_ptr + rows_off[:, None] * stride_b_row + cols_off[None, :]
-            c_ptrs = C_ptr + rows_off[:, None] * stride_c_row + cols_off[None, :]
+            a_ptrs = a + rows_off[:, None] * stride_row + cols_off[None, :]
+            b_ptrs = b + rows_off[:, None] * stride_row + cols_off[None, :]
+            c_ptrs = c + rows_off[:, None] * stride_row + cols_off[None, :]
 
             a_chunk = tl.load(a_ptrs, mask=block_mask, other=0.0)
             b_chunk = tl.load(b_ptrs, mask=block_mask, other=0.0)
@@ -90,32 +88,28 @@ def _swiglu_fwd_kernel(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_SIZE_M": 1, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 2, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 4, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 8, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 12, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 16, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 20, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 24, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 32, "multibuffer": True}),
+        triton.Config({"BLOCK_SIZE_M": 1}),
+        triton.Config({"BLOCK_SIZE_M": 2}),
+        triton.Config({"BLOCK_SIZE_M": 4}),
+        triton.Config({"BLOCK_SIZE_M": 8}),
+        triton.Config({"BLOCK_SIZE_M": 12}),
+        triton.Config({"BLOCK_SIZE_M": 16}),
+        triton.Config({"BLOCK_SIZE_M": 20}),
+        triton.Config({"BLOCK_SIZE_M": 24}),
+        triton.Config({"BLOCK_SIZE_M": 32}),
     ],
     key=["n_rows", "n_cols"],
-    restore_value=["dC_ptr", "dA_ptr", "dB_ptr"],
+    restore_value=["dc", "da", "db"],
 )
 @libentry()
 @triton.jit
 def _swiglu_bwd_kernel(
-    dC_ptr,
-    A_ptr,
-    B_ptr,
-    dA_ptr,
-    dB_ptr,
-    stride_dc_row,
-    stride_a_row,
-    stride_b_row,
-    stride_da_row,
-    stride_db_row,
+    dc,
+    a,
+    b,
+    da,
+    db,
+    stride_row,
     n_rows,
     n_cols,
     BLOCK_SIZE_N: tl.constexpr,
@@ -136,11 +130,11 @@ def _swiglu_bwd_kernel(
             cols_mask = cols_off < n_cols
             block_mask = rows_mask[:, None] & cols_mask[None, :]
 
-            dc_ptrs = dC_ptr + rows_off[:, None] * stride_dc_row + cols_off[None, :]
-            a_ptrs = A_ptr + rows_off[:, None] * stride_a_row + cols_off[None, :]
-            b_ptrs = B_ptr + rows_off[:, None] * stride_b_row + cols_off[None, :]
-            da_ptrs = dA_ptr + rows_off[:, None] * stride_da_row + cols_off[None, :]
-            db_ptrs = dB_ptr + rows_off[:, None] * stride_db_row + cols_off[None, :]
+            dc_ptrs = dc + rows_off[:, None] * stride_row + cols_off[None, :]
+            a_ptrs = a + rows_off[:, None] * stride_row + cols_off[None, :]
+            b_ptrs = b + rows_off[:, None] * stride_row + cols_off[None, :]
+            da_ptrs = da + rows_off[:, None] * stride_row + cols_off[None, :]
+            db_ptrs = db + rows_off[:, None] * stride_row + cols_off[None, :]
 
             dc_chunk = tl.load(dc_ptrs, mask=block_mask, other=0.0)
             a_chunk = tl.load(a_ptrs, mask=block_mask, other=0.0)
@@ -195,8 +189,6 @@ def swiglu_fwd_impl(
         b_2d,
         c,
         a_2d.stride(0),
-        b_2d.stride(0),
-        c.stride(0),
         n_rows,
         n_cols,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
@@ -248,10 +240,6 @@ def swiglu_bwd_impl(
         da,
         db,
         dc_2d.stride(0),
-        a_2d.stride(0),
-        b_2d.stride(0),
-        da.stride(0),
-        db.stride(0),
         n_rows,
         n_cols,
         BLOCK_SIZE_N=BLOCK_SIZE_N,

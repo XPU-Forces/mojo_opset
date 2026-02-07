@@ -47,14 +47,15 @@ jobs:
         shell: bash
         run: |
           echo "Running base tests..."
+          pip install transformers==5.1.0
           python3 -m pytest tests/base
     
       - name: test-TTX
         shell: bash
         run: |
           echo "Running ttx kernels tests..."
-          python3 -m pytest tests/accuracy/operators/
-          python3 -m pytest tests/accuracy/functions/
+          MOJO_BACKEND="ttx" python3 -m pytest tests/accuracy/operators/
+          MOJO_BACKEND="ttx" python3 -m pytest tests/accuracy/functions/
       - name: test-torch-npu
         shell: bash
         run: |

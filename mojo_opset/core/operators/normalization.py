@@ -7,23 +7,21 @@ from ..operator import MojoOperator
 class MojoLayerNorm(MojoOperator):
     def __init__(
         self,
-        hidden_size: int,
+        norm_size: int,
         eps: float = 1e-5,
+        **kwargs,
     ):
         """
         Initialize LayerNorm patch parameters.
 
         Args:
-            hidden_size (int): Size of 1-D affine scale and shift vector.
+            norm_size (int): Size of 1-D affine scale and shift vector.
             eps (float, default=1e-5): Epsilon added to the variance for numerical stability; must be > 0.
-
-        Notes:
-            - `weight` and `bias` must be 1-D and match the last dimension D of the input; mismatches
-              will lead to errors when applying LayerNorm.
+            **kwargs: The keyword arguments of torch.empty, such as device, dtype and so on to create the weight and bias.
         """
-        super().__init__()
-        self.weight = torch.nn.Parameter(torch.empty(hidden_size))
-        self.bias = torch.nn.Parameter(torch.empty(hidden_size))
+        super().__init__(**kwargs)
+        self.weight = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
+        self.bias = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
         self.variance_epsilon = eps
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
@@ -50,22 +48,20 @@ class MojoLayerNorm(MojoOperator):
 class MojoRMSNorm(MojoOperator):
     def __init__(
         self,
-        hidden_size: int,
+        norm_size: int,
         eps: float = 1e-5,
+        **kwargs,
     ):
         """
         Initialize RMSNorm patch parameters.
 
         Args:
-            hidden_size (int): Size of 1-D affine scale vector.
-            eps (float, default=1e-5): Epsilon added for numerical stability; must be > 0.
-
-        Notes:
-            - `weight` must be 1-D and match the last dimension D of the input; mismatches
-              will lead to errors when applying RMSNorm.
+            norm_size (int): Size of 1-D affine scale vector.
+            eps (float, default=1e-5): Epsilon added for numerical stability; must be > 0.\
+            **kwargs: The keyword arguments of torch.empty, such as device, dtype and so on to create the weight and bias.
         """
-        super().__init__()
-        self.weight = torch.nn.Parameter(torch.empty(hidden_size))
+        super().__init__(**kwargs)
+        self.weight = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
         self.variance_epsilon = eps
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
@@ -95,29 +91,32 @@ class MojoNormQuant(MojoOperator):
 class MojoResidualAddRMSNorm(MojoOperator):
     def __init__(
         self,
-        hidden_size: int,
+        norm_size: int,
         eps: float = 1e-05,
         norm_pos: str = "pre",
+        **kwargs,
     ):
         """
         Initialize residual-add RMSNorm operator with position control.
 
         Args:
-            hidden_size (int): Size of  1-D affine scale of length D (hidden size).
+            norm_size (int): Size of  1-D affine scale of length D (hidden size).
             eps (float, default=1e-05): Epsilon for numerical stability; must be > 0.
             norm_pos (str, default="pre"): Normalization placement; one of {"pre", "post"}.
+            **kwargs: The keyword arguments of torch.empty, such as device, dtype and so on to create the weight and bias.
 
         Behavior:
             - norm_pos="pre": residual = hidden_state + residual; hidden_state = rms_norm(residual).
             - norm_pos="post": hidden_state = hidden_state + residual; hidden_state = rms_norm(hidden_state);
               residual = hidden_state.
         """
-        super().__init__()
+        super().__init__(**kwargs)
         if norm_pos not in ["pre", "post"]:
             raise ValueError("norm_pos should be 'pre' or 'post'")
 
         self.variance_epsilon = float(eps)
-        self.weight = torch.nn.Parameter(torch.empty(hidden_size))
+        self.weight = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
+
         self.norm_pos = norm_pos
 
     def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
@@ -145,34 +144,32 @@ class MojoResidualAddRMSNorm(MojoOperator):
 class MojoResidualAddLayerNorm(MojoOperator):
     def __init__(
         self,
-        hidden_size:int,
+        norm_size: int,
         eps: float = 1e-05,
         norm_pos: str = "pre",
+        **kwargs,
     ):
         """
         Initialize residual-add LayerNorm operator with position control.
 
         Args:
-            hidden_size (int): Size of 1-D affine scale and shift vector.
+            norm_size (int): Size of 1-D affine scale and shift vector.
             eps (float, default=1e-05): Epsilon for numerical stability; must be > 0.
             norm_pos (str, default="pre"): Normalization placement; one of {"pre", "post"}.
+            **kwargs: The keyword arguments of torch.empty, such as device, dtype and so on to create the weight and bias.
 
         Behavior:
             - norm_pos="pre": residual = hidden_state + residual; hidden_state = layer_norm(residual).
             - norm_pos="post": hidden_state = hidden_state + residual; hidden_state = layer_norm(hidden_state);
               residual = hidden_state.
         """
-        super().__init__()
+        super().__init__(**kwargs)
         if norm_pos not in ["pre", "post"]:
             raise ValueError("norm_pos should be 'pre' or 'post'")
 
         self.variance_epsilon = float(eps)
-        self.weight = (
-            torch.nn.Parameter(torch.empty(hidden_size)) if hidden_size > 0 else None
-        )
-        self.bias = (
-            torch.nn.Parameter(torch.empty(hidden_size)) if hidden_size > 0 else None
-        )
+        self.weight = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
+        self.bias = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
         self.norm_pos = norm_pos
         self.affine = self.weight is not None and self.bias is not None
 

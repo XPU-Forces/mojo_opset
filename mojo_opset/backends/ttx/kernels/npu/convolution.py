@@ -626,11 +626,11 @@ def causal_conv1d_update_states(
     return final_state
 
 
-
 @triton.jit()
 def causal_conv1d_update_kernel_bdt_fwd(
     x_ptr,                  # [B, D, T]
     conv_state_ptr,         # [B, D, ST]
+    conv_state_update_ptr,
     weight_ptr,             # [D, W]
     bias_ptr, 
     conv_state_indices_ptr,
@@ -650,6 +650,7 @@ def causal_conv1d_update_kernel_bdt_fwd(
     D_CHK_SIZE: tl.constexpr,
     NUM_T_CHK: tl.constexpr,
     NUM_D_CHK: tl.constexpr,
+    ST_STORE_HEAD_TILE_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
     pnum = tl.num_programs(0)
@@ -661,9 +662,7 @@ def causal_conv1d_update_kernel_bdt_fwd(
         bti = task_id // NUM_D_CHK
         bi = bti // NUM_T_CHK
         ti = bti % NUM_T_CHK
-        
-        out_block = tl.zeros((D_CHK_SIZE, T_CHK_SIZE), dtype=x_ptr.dtype.element_ty)
-        
+
         w = tl.load(tl.make_block_ptr(
             weight_ptr,
             shape = (dim, width),
@@ -673,53 +672,74 @@ def causal_conv1d_update_kernel_bdt_fwd(
             order = (1, 0)
         ), boundary_check=(0, 1), padding_option="zero")
 
-        for wi in tl.static_range(-width+1, 1):
-            if ti * T_CHK_SIZE + wi >= 0:
-                # all x
-                x_block_ptr = tl.make_block_ptr(
-                    x_ptr,
-                    shape = (batch, dim, seq_len),
-                    strides = (dim * seq_len, seq_len, 1),
-                    offsets = (bi, di * D_CHK_SIZE, ti * T_CHK_SIZE + wi),
-                    block_shape = (1, D_CHK_SIZE, T_CHK_SIZE),
-                    order = (2, 1, 0)
-                )
-                x = tl.load(x_block_ptr, boundary_check=(0, 1, 2), padding_option="zero").view(D_CHK_SIZE, T_CHK_SIZE)
-                new_x = x
+        if ti == 0:
+            st_b = tl.load(
+                tl.make_block_ptr(
+                    conv_state_ptr + bi * state_len * dim,
+                    shape = (dim, state_len),
+                    strides = (state_len, 1),
+                    offsets = (di * D_CHK_SIZE, state_len - (width-1)),
+                    block_shape = (D_CHK_SIZE, (width - 1) + T_CHK_SIZE),
+                    order = (1, 0)
+                ), boundary_check=(0, 1), padding_option="zero"
+            )
+            offset0_x = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)
+            offset1_x = ti * T_CHK_SIZE + tl.arange(0, T_CHK_SIZE)
+            mask_x = (offset0_x < dim)[:, None] & ((offset1_x >= 0) & (offset1_x < seq_len))[None, :]
+            block_off_x = bi * dim * seq_len + offset0_x[:, None] * seq_len + offset1_x[None, :]
+            x_b_tmp = tl.load(
+                x_ptr + block_off_x,
+                mask = mask_x, other = 0
+            )
+            x_b = tl.insert_slice(st_b, x_b_tmp, (0, width - 1), (D_CHK_SIZE, T_CHK_SIZE), (1, 1))
+        else:
+            offset0 = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)
+            offset1 = ti * T_CHK_SIZE - (width - 1) + tl.arange(0, T_CHK_SIZE + width - 1)
+            mask = (offset0 < dim)[:, None] & ((offset1 >= 0) & (offset1 < seq_len))[None, :]
+            block_off = bi * dim * seq_len + offset0[:, None] * seq_len + offset1[None, :]
+            x_b = tl.load(
+                x_ptr + block_off,
+                mask = mask, other = 0
+            )
+        
+        
+        out_block = tl.zeros((T_CHK_SIZE, D_CHK_SIZE), dtype=x_ptr.dtype.element_ty)
+        x_b = tl.trans(x_b, (1, 0))
+        w = tl.trans(w, (1, 0))
+
+        new_state_start_off = seq_len - state_len
+        t_start_off = ti * T_CHK_SIZE - (width - 1)
+        t_end_off = (ti + 1) * T_CHK_SIZE
+        if t_end_off >= new_state_start_off:
+            t_off = t_start_off - new_state_start_off
+            if t_off < -(width - 1):
+                # NOTE: In order to avoid use tl.maximum for negative offset, 
+                #       we pre-compute a fix head tile size (ST_STORE_HEAD_TILE_SIZE) 
+                #       to store the scene of negative address
+                x_new_h = tl.extract_slice(x_b, (-t_off, 0), (ST_STORE_HEAD_TILE_SIZE, D_CHK_SIZE), (1, 1))
+                x_new_h = tl.trans(x_new_h, (1, 0))
+                nst_off_y0 = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)[:, None]
+                nst_off_y1_h = tl.arange(0, ST_STORE_HEAD_TILE_SIZE)[None, :]
+                nst_mask_h = (nst_off_y0 < dim) & (nst_off_y1_h >= 0) & (nst_off_y1_h < state_len) 
+                block_ptr_h = bi * dim * state_len + nst_off_y0 * state_len + nst_off_y1_h
+                tl.store(conv_state_update_ptr + block_ptr_h, x_new_h, mask = nst_mask_h)
             else:
-                # state and x
-                pad_size = - (ti * T_CHK_SIZE + wi)
-                x_off_ptr = (bi * dim + di * D_CHK_SIZE) * seq_len + ti * T_CHK_SIZE - pad_size
-                block_ptr = tl.arange(0, D_CHK_SIZE)[:, None] * seq_len + tl.arange(0, T_CHK_SIZE)[None, :]
-                mask = (tl.arange(0, T_CHK_SIZE)[None, :] >= pad_size)
-                mask = (tl.arange(0, D_CHK_SIZE)[:, None] + di * D_CHK_SIZE < dim) & mask
-                x = tl.load(x_ptr + x_off_ptr + block_ptr, mask=mask, other=0)
-                st = tl.load(tl.make_block_ptr(
-                    conv_state_ptr,
-                    shape = (batch, dim, state_len),
-                    strides = (dim * state_len, state_len, 1),
-                    offsets = (bi, di * D_CHK_SIZE, state_len - pad_size),
-                    block_shape = (1, D_CHK_SIZE, T_CHK_SIZE),
-                    order = (2, 1, 0)
-                ), boundary_check=(0, 1, 2), padding_option="zero").view(D_CHK_SIZE, T_CHK_SIZE)
-                new_x = st + x
-            
-            new_state_start_off = seq_len - state_len
-            t_start_off = ti * T_CHK_SIZE + wi
-            t_end_off = (ti + 1) * T_CHK_SIZE + wi
-            if wi == 0 and t_end_off >= new_state_start_off:
-                t_off = t_start_off - new_state_start_off
-                nst_off_y0 = tl.arange(0, D_CHK_SIZE)[:, None] + di * D_CHK_SIZE
-                nst_off_y1 = tl.arange(0, T_CHK_SIZE)[None, :] + t_off
+                x_new_s = tl.extract_slice(x_b, (width - 1, 0), (T_CHK_SIZE, D_CHK_SIZE), (1, 1))
+                x_new_s = tl.trans(x_new_s, (1, 0))
+                nst_off_y0 = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)[:, None]
+                nst_off_y1 = width - 1 + t_off + tl.arange(0, T_CHK_SIZE)[None, :]
                 nst_mask = (nst_off_y0 < dim) & (nst_off_y1 >= 0) & (nst_off_y1 < state_len) 
                 block_ptr = bi * dim * state_len + nst_off_y0 * state_len + nst_off_y1
-                block_ptr = tl.maximum(block_ptr, 0)
-                tl.store(conv_state_ptr + block_ptr, new_x, mask = nst_mask)
+                tl.store(conv_state_update_ptr + block_ptr, x_new_s, mask = nst_mask)
 
-            w_chl_wi = tl.sum(w * (tl.arange(0, width) == wi+width-1)[None, :], 1)
-            x_mul_chl_wi = new_x * w_chl_wi[:, None]
+        for owi in tl.range(0, width):
+            new_x = tl.extract_slice(x_b, 
+                (owi, 0), (T_CHK_SIZE, D_CHK_SIZE), (1, 1))
+            w_chl_wi = tl.extract_slice(w, (owi, 0), (1, D_CHK_SIZE), (1, 1))
+            x_mul_chl_wi = new_x * w_chl_wi
             out_block += x_mul_chl_wi
-                
+        out_block = tl.trans(out_block, (1, 0))
+
         if SILU_ACTIVATION:
             out_block = out_block * tl.sigmoid(out_block)
         tl.store(tl.make_block_ptr(
@@ -756,18 +776,23 @@ def causal_conv1d_update_bdt_fwd(
     T_CHK_SIZE = max(256, min(512, triton.next_power_of_2(triton.cdiv(seqlen, NUM_CORES))))
     D_CHK_SIZE = 16
 
+    assert T_CHK_SIZE >= width 
+
     NUM_T_CHK = triton.cdiv(out.shape[-1], T_CHK_SIZE)
     NUM_D_CHK = triton.cdiv(dim, D_CHK_SIZE)
+    conv_state_update = torch.empty_like(conv_state)
 
+    # A const tile size variable to update negative address of conv state
+    ST_STORE_HEAD_TILE_SIZE = width if (seqlen % T_CHK_SIZE) > width else (width - seqlen % T_CHK_SIZE) % T_CHK_SIZE
     causal_conv1d_update_kernel_bdt_fwd[(NUM_CORES, 1)](
-        x, conv_state, weight, bias, conv_state_indices,
+        x, conv_state, conv_state_update, weight, bias, conv_state_indices,
         out,
-        batch = batch,
-        dim = dim,
-        state_len = conv_state.shape[-1], # 3 4 5 
-        seq_len = x.shape[-1], # 1 2 
-        width = width, # 4, <= seq_len + state_len
-        out_len = out.shape[-1],
+        batch = int(batch),
+        dim = int(dim),
+        state_len = int(conv_state.shape[-1]),
+        seq_len = int(x.shape[-1]),
+        width = int(width),
+        out_len = int(out.shape[-1]),
         x_batch_stride = x.stride()[0],
         conv_batch_stride = conv_state.stride()[0],
         out_batch_stride = out.stride()[0],
@@ -777,8 +802,9 @@ def causal_conv1d_update_bdt_fwd(
         D_CHK_SIZE = D_CHK_SIZE,
         NUM_T_CHK = NUM_T_CHK,
         NUM_D_CHK = NUM_D_CHK,
+        ST_STORE_HEAD_TILE_SIZE = int(ST_STORE_HEAD_TILE_SIZE)
     )
-
+    conv_state.copy_(conv_state_update)
     if unsqueeze:
         out = out.squeeze(-1)
     return out
