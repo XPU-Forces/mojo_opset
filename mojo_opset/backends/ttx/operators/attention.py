@@ -67,13 +67,13 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         softmax_scale: Optional[float] = None,
     ):
         assert self.window_size == -1, (
-            f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
+            f"[TTXPagedDecodeGQA] TTX does not support sliding window, but got window_size={self.window_size}"
         )
-        assert self.gqa_layout == "ABAB", (
-            f"[TTXPagedPrefillGQA] TTX only support ABAB layout, but got gqa_layout={self.gqa_layout}"
+        assert self.gqa_layout == "AABB", (
+            f"[TTXPagedDecodeGQA] TTX only support AABB layout, but got gqa_layout={self.gqa_layout}"
         )
         assert self.is_causal, (
-            f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
+            f"[TTXPagedDecodeGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
 
         output = paged_attention_decode(
