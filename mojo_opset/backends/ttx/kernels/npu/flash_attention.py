@@ -346,6 +346,7 @@ def paged_decode_kernel(
     BATCH_SIZE,
     NUM_Q_HEADS,
     NUM_KV_HEADS,
+    GQA_INTERLEAVE,
     HEAD_DIM,
     NUM_TOTAL_BLOCKS,
     MAX_NUM_BLOCKS_PER_SEQ,
@@ -373,7 +374,10 @@ def paged_decode_kernel(
     pid_h = tl.program_id(1)
 
     NUM_SHARE_Q_HEADS = NUM_Q_HEADS // NUM_KV_HEADS
-    pid_kh = pid_h // NUM_SHARE_Q_HEADS
+    if GQA_INTERLEAVE:
+        pid_kh = pid_h % NUM_KV_HEADS
+    else:
+        pid_kh = pid_h // NUM_SHARE_Q_HEADS
 
     kv_len = tl.load(seqlens_ptr + pid_b)
 
@@ -457,6 +461,7 @@ def paged_attention_decode_impl(
     v_cache: torch.Tensor,
     seqlens: torch.Tensor,
     block_tables: torch.Tensor,
+    gqa_interleave: bool,
     sm_scale: Optional[float] = None,
 ) -> torch.Tensor:
     batch_size, num_q_heads, head_dim = q.shape
@@ -481,6 +486,7 @@ def paged_attention_decode_impl(
         batch_size,
         num_q_heads,
         num_kv_heads,
+        gqa_interleave,
         head_dim,
         num_total_blocks,
         max_num_blocks_per_seq,

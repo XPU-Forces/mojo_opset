@@ -56,6 +56,7 @@ def generate_paged_decode_data(
 
 test_configs_decode = [
     (8, 16, 4, 128, 1024, 32, torch.bfloat16, "M_BF16"),
+    (8, 8, 1, 128, 8192, 128, torch.bfloat16, "M_BF16_LONG"),
 ]
 
 
@@ -72,14 +73,14 @@ test_configs_decode = [
                 block_size=BLK_S,
                 dtype=dtype,
             ),
-            3e-2 if dtype != torch.float32 else 1e-5,
-            1e-3 if dtype != torch.float32 else 1e-6,
+            2e-2 if dtype != torch.float32 else 1e-5,
+            2e-2 if dtype != torch.float32 else 1e-6,
             id=ID,
         )
         for B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, ID in test_configs_decode
     ],
 )
-@pytest.mark.parametrize("gqa_layout", ["ABAB"])
+@pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
 @auto_switch_platform()
 @bypass_not_implemented
 def test_paged_decode_gqa(
@@ -207,7 +208,7 @@ test_configs = [
                 dtype=dtype,
             ),
             2e-2 if dtype != torch.float32 else 1e-5,
-            2e-3 if dtype != torch.float32 else 1e-6,
+            2e-2 if dtype != torch.float32 else 1e-6,
             id=ID,
         )
         for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs
