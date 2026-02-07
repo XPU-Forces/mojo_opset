@@ -522,7 +522,7 @@ def _sdpa_fwd_kernel(
 
             if IS_CAUSAL:
                 num_total_kv_blocks = tl.cdiv(min((q_block_id + 1) * BLOCK_M + kv_computed_len, kv_seq_len), BLOCK_N)
-                if GLOBAL_WINDOW is not None:
+                if GLOBAL_WINDOW is not None and GLOBAL_WINDOW > 0:
                     num_global_window_blocks = min(tl.cdiv(GLOBAL_WINDOW, BLOCK_N), num_total_kv_blocks)
                     for kv_block_id in range(0, num_global_window_blocks):
                         kv_block_start = kv_block_id * BLOCK_N
@@ -565,6 +565,7 @@ def _sdpa_fwd_kernel(
                     sw_start_block = max(q_block_start - LOCAL_WINDOW, 0) //  BLOCK_N
                     start_block = max(sw_start_block, num_global_window_blocks)
                 elif GLOBAL_WINDOW is None:
+                    # vanilla causal attention
                     start_block = 0
                 else:
                     # Global window has been computed, but local window is None, so no more kvblocks
@@ -1210,7 +1211,7 @@ def _sdpa_bwd_dq_kernel(
 
             if IS_CAUSAL:
                 num_total_kv_blocks = tl.cdiv(min((q_block_id + 1) * BLOCK_M + kv_computed_len, kv_seq_len), BLOCK_N)
-                if GLOBAL_WINDOW is not None:
+                if GLOBAL_WINDOW is not None and GLOBAL_WINDOW > 0:
                     num_global_window_blocks = min(tl.cdiv(GLOBAL_WINDOW, BLOCK_N), num_total_kv_blocks)
                     for kv_block_id in range(0, num_global_window_blocks):
                         kv_block_start = kv_block_id * BLOCK_N
@@ -1252,6 +1253,7 @@ def _sdpa_bwd_dq_kernel(
                     sw_start_block = max(q_block_start - LOCAL_WINDOW, 0) //  BLOCK_N
                     start_block = max(sw_start_block, num_global_window_blocks)
                 elif GLOBAL_WINDOW is None:
+                    # vanilla causal attention
                     start_block = 0
                 else:
                     # Global window has been computed, but local window is None, so no more kvblocks
