@@ -17,7 +17,7 @@ class MojoPagedDecodeGQA(MojoOperator):
     def __init__(
         self,
         is_causal: bool = True,
-        gqa_layout: str = "ABAB",
+        gqa_layout: str = "AABB",
         window_size: int = -1,
     ):
         """
@@ -115,8 +115,12 @@ class MojoPagedDecodeGQA(MojoOperator):
             softmax_scale = 1.0 / math.sqrt(head_dim)
 
         if num_share_q_heads > 1:
-            k_ref = k_ref.repeat_interleave(num_share_q_heads, dim=2)
-            v_ref = v_ref.repeat_interleave(num_share_q_heads, dim=2)
+            if self.gqa_layout == "AABB":
+                k_ref = k_ref.repeat_interleave(num_share_q_heads, dim=2)
+                v_ref = v_ref.repeat_interleave(num_share_q_heads, dim=2)
+            else:
+                k_ref = k_ref.repeat((1, 1, num_share_q_heads, 1))
+                v_ref = v_ref.repeat((1, 1, num_share_q_heads, 1))
 
         attn = torch.einsum("bhd,bkhd->bhk", query, k_ref) * softmax_scale
 
@@ -136,7 +140,7 @@ class MojoPagedPrefillGQA(MojoOperator):
     def __init__(
         self,
         is_causal: bool = True,
-        gqa_layout: str = "ABAB",
+        gqa_layout: str = "AABB",
         window_size: int = -1,
     ):
         """
