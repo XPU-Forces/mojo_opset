@@ -7,16 +7,11 @@ from typing import Optional, Tuple
 def generate_swa_mask(
     q_seq_len: int,
     kv_seq_len: int,
-    is_causal: bool = True,
     local_window_size: Optional[int] = None,
     global_window_size: Optional[int] = None,
 ) -> torch.Tensor:
     kv_cache_len = kv_seq_len - q_seq_len
-    if is_causal:
-        causal_mask = (torch.arange(0, q_seq_len)[:, None] + kv_cache_len) >= torch.arange(0, kv_seq_len)[None, :]
-    else:
-        causal_mask = torch.ones((q_seq_len, kv_seq_len), dtype=torch.bool)
-    
+    causal_mask = (torch.arange(0, q_seq_len)[:, None] + kv_cache_len) >= torch.arange(0, kv_seq_len)[None, :]
     if local_window_size is not None:
         local_window_mask = (
             torch.arange(0, q_seq_len)[:, None] + kv_cache_len
@@ -24,7 +19,6 @@ def generate_swa_mask(
         ) & causal_mask
     else:
         local_window_mask = causal_mask
-    
     if global_window_size is not None:
         global_window_mask = (torch.arange(0, kv_seq_len) < global_window_size)[
             None, :
@@ -72,16 +66,14 @@ def swa_torch_forward(
                 k_i_T = k_i_T.repeat_interleave(n_q_heads // n_kv_heads, dim=0) # -> [n_q_heads, head_dim, kv_seq_len]
         s_i = torch.bmm(q_i, k_i_T).float() * sm_scale # -> [n_q_heads, q_seq_len, kv_seq_len]
 
-        s_mask = generate_swa_mask(
-            q_seq_len,
-            kv_seq_len,
-            is_causal,
-            local_window_size,
-            global_window_size,
-        ).to(s_i.device)
-        
-
-        s_i = torch.where(s_mask, s_i, float("-inf"))
+        if is_causal:
+            s_mask = generate_swa_mask(
+                q_seq_len,
+                kv_seq_len,
+                local_window_size,
+                global_window_size,
+            ).to(s_i.device)
+            s_i = torch.where(s_mask, s_i, float("-inf"))
         m_i = torch.max(s_i, dim=-1, keepdim=True).values # -> [n_q_heads, q_seq_len, 1]
         s_i = s_i - m_i # -> [n_q_heads, q_seq_len, kv_seq_len]
         p_i = torch.exp(s_i)
@@ -149,14 +141,14 @@ def swa_torch_backward(
 
         s_i = torch.bmm(q_i, k_i.mT).float() * sm_scale # -> [n_q_heads, q_seq_len, kv_seq_len]
 
-        s_mask = generate_swa_mask(
-            q_seq_len,
-            kv_seq_len,
-            is_causal,
-            local_window_size,
-            global_window_size,
-        ).to(s_i.device)
-        s_i = torch.where(s_mask, s_i, float("-inf"))
+        if is_causal:
+            s_mask = generate_swa_mask(
+                q_seq_len,
+                kv_seq_len,
+                local_window_size,
+                global_window_size,
+            ).to(s_i.device)
+            s_i = torch.where(s_mask, s_i, float("-inf"))
 
         lse_i = softmax_lse[:, cu_seqlens_q[i]:cu_seqlens_q[i+1]] # -> [n_q_heads, q_seq_len]
         p_i = torch.exp(s_i - lse_i.unsqueeze(-1)) # -> [n_q_heads, q_seq_len, kv_seq_len]
@@ -240,6 +232,8 @@ class MojoSWAFunction(MojoFunction):
         sm_scale: Optional[float] = None,
         gqa_interleave: bool = False,
     ) -> torch.Tensor:
+        # Note: if is_causal = False, local_window_size and global_window_size are not used.
+
         o, softmax_lse = swa_torch_forward(
             q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, is_causal, local_window_size, global_window_size, sm_scale, gqa_interleave
         )
@@ -528,20 +522,16 @@ def _sdpa_fwd_kernel(
 
             if IS_CAUSAL:
                 num_total_kv_blocks = tl.cdiv(min((q_block_id + 1) * BLOCK_M + kv_computed_len, kv_seq_len), BLOCK_N)
-            else:
-                num_total_kv_blocks = tl.cdiv(kv_seq_len, BLOCK_N)
-
-            if GLOBAL_WINDOW is not None:
-                num_global_window_blocks = min(tl.cdiv(GLOBAL_WINDOW, BLOCK_N), num_total_kv_blocks)
-                for kv_block_id in range(0, num_global_window_blocks):
-                    kv_block_start = kv_block_id * BLOCK_N
-                    kv_block_len = min(BLOCK_N, kv_seq_len - kv_block_start)
-                    mask = gen_mask_n_right_bound(
-                        aux_mask_ptr_10, aux_mask_size, stride_mask_m, stride_mask_n,
-                        BLOCK_M, BLOCK_N,
-                        kv_block_start, GLOBAL_WINDOW,
-                    )
-                    if IS_CAUSAL:
+                if GLOBAL_WINDOW is not None:
+                    num_global_window_blocks = min(tl.cdiv(GLOBAL_WINDOW, BLOCK_N), num_total_kv_blocks)
+                    for kv_block_id in range(0, num_global_window_blocks):
+                        kv_block_start = kv_block_id * BLOCK_N
+                        kv_block_len = min(BLOCK_N, kv_seq_len - kv_block_start)
+                        mask = gen_mask_n_right_bound(
+                            aux_mask_ptr_10, aux_mask_size, stride_mask_m, stride_mask_n,
+                            BLOCK_M, BLOCK_N,
+                            kv_block_start, GLOBAL_WINDOW,
+                        )
                         if LOCAL_WINDOW is not None:
                             mask_sw = gen_mask_triu(
                                 aux_mask_ptr_triu, aux_mask_size, stride_mask_m, stride_mask_n,
@@ -555,33 +545,32 @@ def _sdpa_fwd_kernel(
                             q_block_start, kv_block_start, 
                         )
                         mask = mask & mask_causal
-                    elif LOCAL_WINDOW is not None:
-                        mask_sw = gen_mask_n_left_bound(
-                            aux_mask_ptr_01, aux_mask_size, stride_mask_m, stride_mask_n,
-                            BLOCK_M, BLOCK_N,
-                            kv_block_start, kv_seq_len - LOCAL_WINDOW - 1
+                        mask = mask & q_mask
+                        cur_k_block_ptr = tl.advance(k_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
+                        cur_v_block_ptr = tl.advance(v_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
+                        acc, l_i, m_i = _sdpa_single_block_fwd(
+                            acc, l_i, m_i, cur_q_block, cur_k_block_ptr, cur_v_block_ptr, mask, scale,
+                            q_block_start, kv_block_start, block_len, kv_block_len,
+                            HEAD_DIM, BLOCK_M, BLOCK_N, BLOCK_D, 
+                            v_ptr.dtype.element_ty == tl.float8e5,
                         )
-                        mask = mask | mask_sw
-                    mask = mask & q_mask
-                    cur_k_block_ptr = tl.advance(k_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
-                    cur_v_block_ptr = tl.advance(v_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
-                    acc, l_i, m_i = _sdpa_single_block_fwd(
-                        acc, l_i, m_i, cur_q_block, cur_k_block_ptr, cur_v_block_ptr, mask, scale,
-                        q_block_start, kv_block_start, block_len, kv_block_len,
-                        HEAD_DIM, BLOCK_M, BLOCK_N, BLOCK_D, 
-                        v_ptr.dtype.element_ty == tl.float8e5,
-                    )
+                else:
+                    num_global_window_blocks = 0
             else:
+                num_total_kv_blocks = tl.cdiv(kv_seq_len, BLOCK_N)
                 num_global_window_blocks = 0
 
-            if LOCAL_WINDOW is not None:
-                if IS_CAUSAL:
+            if IS_CAUSAL:
+                if LOCAL_WINDOW is not None:
                     sw_start_block = max(q_block_start - LOCAL_WINDOW, 0) //  BLOCK_N
+                    start_block = max(sw_start_block, num_global_window_blocks)
+                elif GLOBAL_WINDOW is None:
+                    start_block = 0
                 else:
-                    sw_start_block = max(kv_seq_len - 1 - LOCAL_WINDOW, 0) // BLOCK_N
+                    # Global window has been computed, but local window is None, so no more kvblocks
+                    start_block = num_total_kv_blocks
             else:
-                sw_start_block = 0
-            start_block = max(sw_start_block, num_global_window_blocks)
+                start_block = 0
             for kv_block_id in range(start_block, num_total_kv_blocks):
                 kv_block_start = kv_block_id * BLOCK_N
                 kv_block_len = min(BLOCK_N, kv_seq_len - kv_block_start)
@@ -604,13 +593,7 @@ def _sdpa_fwd_kernel(
                         BLOCK_M, BLOCK_N,
                         kv_block_start, kv_seq_len,
                     )
-                    if LOCAL_WINDOW is not None:
-                        mask_sw  = gen_mask_n_left_bound(
-                            aux_mask_ptr_01, aux_mask_size, stride_mask_m, stride_mask_n,
-                            BLOCK_M, BLOCK_N,
-                            kv_block_start, kv_seq_len - LOCAL_WINDOW - 1
-                        )
-                        mask = mask & mask_sw
+                mask = mask & q_mask
                 cur_k_block_ptr = tl.advance(k_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
                 cur_v_block_ptr = tl.advance(v_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
                 acc, l_i, m_i = _sdpa_single_block_fwd(
@@ -815,9 +798,8 @@ def _sdpa_single_block_bwd_dq(
     # Softmax weights p = exp(qk - lse)
     # scale according to recorded logsumexp
     p = tl.math.exp(qk - lse[:, None])
-    p_cast = p.to(q.dtype)
     if mask is not None and mask is not True:
-        p_cast = tl.where(mask, p_cast, 0.0)  # 32B # bool
+        p = tl.where(mask, p, 0.0)  # 32B # bool
 
     # -- Compute dS ----
     # dp = do @ v.T
@@ -826,7 +808,7 @@ def _sdpa_single_block_bwd_dq(
     dp = tl.dot(do, v_T)
 
     # ds = p * (dp - d)
-    ds = p_cast * (dp - d[:, None]) * qk_scale
+    ds = p * (dp - d[:, None]) * qk_scale
     ds_cast = ds.to(q.dtype)
     
     # -- Compute dK ----
@@ -996,20 +978,22 @@ def _sdpa_bwd_dkdv_kernel(
 
                 if IS_CAUSAL:
                     cur_q_start = max(kv_block_start - kv_computed_len, 0)
-                    if GLOBAL_WINDOW is not None and kv_block_start < GLOBAL_WINDOW:
+                    if GLOBAL_WINDOW is None and LOCAL_WINDOW is None:
+                        # vanilla attention, iterate over all queries
+                        cur_q_end = q_seq_len
+                    elif GLOBAL_WINDOW is not None and kv_block_start < GLOBAL_WINDOW:
+                        # sink token is attended by all succeeding tokens
                         cur_q_end = q_seq_len
                     elif LOCAL_WINDOW is not None:
+                        # otherwise, it can only be attented as sliding window tokens
                         cur_q_end = min(max(kv_block_start + BLOCK_N + LOCAL_WINDOW - kv_computed_len, 0), q_seq_len)
                     else:
-                        cur_q_end = q_seq_len
+                        # Not attended
+                        cur_q_end = cur_q_start
                 else:
+                    # full attention, iterate over all queries
                     cur_q_start = 0
-                    if GLOBAL_WINDOW is not None and kv_block_start < GLOBAL_WINDOW:
-                        cur_q_end = q_seq_len
-                    elif LOCAL_WINDOW is not None and kv_block_start + BLOCK_N + LOCAL_WINDOW > kv_seq_len:
-                        cur_q_end = q_seq_len
-                    else:
-                        cur_q_end = 0
+                    cur_q_end = q_seq_len
 
                 num_total_q_blocks = tl.cdiv(cur_q_end - cur_q_start, BLOCK_M)
             
@@ -1026,13 +1010,6 @@ def _sdpa_bwd_dkdv_kernel(
                         BLOCK_N, BLOCK_M,
                         kv_block_start, GLOBAL_WINDOW,
                     )
-                    if (not IS_CAUSAL) and (LOCAL_WINDOW is not None):
-                        mask_sw = gen_mask_m_left_bound(
-                            aux_mask_ptr_01t, aux_mask_size, stride_mask_m, stride_mask_n,
-                            BLOCK_N, BLOCK_M,
-                            kv_block_start, kv_seq_len - 1 - LOCAL_WINDOW,
-                        )
-                        mask = mask | mask_sw
                     
                     k_mask = gen_mask_m_right_bound(
                         aux_mask_ptr_10t, aux_mask_size, stride_mask_m, stride_mask_n,
@@ -1233,20 +1210,16 @@ def _sdpa_bwd_dq_kernel(
 
             if IS_CAUSAL:
                 num_total_kv_blocks = tl.cdiv(min((q_block_id + 1) * BLOCK_M + kv_computed_len, kv_seq_len), BLOCK_N)
-            else:
-                num_total_kv_blocks = tl.cdiv(kv_seq_len, BLOCK_N)
-
-            if GLOBAL_WINDOW is not None:
-                num_global_window_blocks = min(tl.cdiv(GLOBAL_WINDOW, BLOCK_N), num_total_kv_blocks)
-                for kv_block_id in range(0, num_global_window_blocks):
-                    kv_block_start = kv_block_id * BLOCK_N
-                    kv_block_len = min(BLOCK_N, kv_seq_len - kv_block_start)
-                    mask = gen_mask_n_right_bound(
-                        aux_mask_ptr_10, aux_mask_size, stride_mask_m, stride_mask_n,
-                        BLOCK_M, BLOCK_N,
-                        kv_block_start, GLOBAL_WINDOW,
-                    )
-                    if IS_CAUSAL:
+                if GLOBAL_WINDOW is not None:
+                    num_global_window_blocks = min(tl.cdiv(GLOBAL_WINDOW, BLOCK_N), num_total_kv_blocks)
+                    for kv_block_id in range(0, num_global_window_blocks):
+                        kv_block_start = kv_block_id * BLOCK_N
+                        kv_block_len = min(BLOCK_N, kv_seq_len - kv_block_start)
+                        mask = gen_mask_n_right_bound(
+                            aux_mask_ptr_10, aux_mask_size, stride_mask_m, stride_mask_n,
+                            BLOCK_M, BLOCK_N,
+                            kv_block_start, GLOBAL_WINDOW,
+                        )
                         if LOCAL_WINDOW is not None:
                             mask_sw = gen_mask_triu(
                                 aux_mask_ptr_triu, aux_mask_size, stride_mask_m, stride_mask_n,
@@ -1260,33 +1233,31 @@ def _sdpa_bwd_dq_kernel(
                             q_block_start, kv_block_start, 
                         )
                         mask = mask & mask_causal
-                    elif LOCAL_WINDOW is not None:
-                        mask_sw = gen_mask_n_left_bound(
-                            aux_mask_ptr_01, aux_mask_size, stride_mask_m, stride_mask_n,
-                            BLOCK_M, BLOCK_N,
-                            kv_block_start, kv_seq_len - LOCAL_WINDOW - 1
+                        mask = mask & q_mask
+                        cur_k_block_ptr = tl.advance(k_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
+                        cur_v_block_ptr = tl.advance(v_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
+                        dq = _sdpa_single_block_bwd_dq(
+                            dq, cur_delta, cur_lse, cur_q_block, cur_do_block, cur_k_block_ptr, cur_v_block_ptr, mask, scale,
+                            q_block_start, kv_block_start, block_len, kv_block_len,
+                            HEAD_DIM, BLOCK_M, BLOCK_N, BLOCK_D, 
+                            v_ptr.dtype.element_ty == tl.float8e5,
                         )
-                        mask = mask | mask_sw
-                    mask = mask & q_mask
-                    cur_k_block_ptr = tl.advance(k_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
-                    cur_v_block_ptr = tl.advance(v_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
-                    dq = _sdpa_single_block_bwd_dq(
-                        dq, cur_delta, cur_lse, cur_q_block, cur_do_block, cur_k_block_ptr, cur_v_block_ptr, mask, scale,
-                        q_block_start, kv_block_start, block_len, kv_block_len,
-                        HEAD_DIM, BLOCK_M, BLOCK_N, BLOCK_D, 
-                        v_ptr.dtype.element_ty == tl.float8e5,
-                    )
-            else:
-                num_global_window_blocks = 0
-
-            if LOCAL_WINDOW is not None:
-                if IS_CAUSAL:
-                    sw_start_block = max(q_block_start - LOCAL_WINDOW, 0) //  BLOCK_N
                 else:
-                    sw_start_block = max(kv_seq_len - 1 - LOCAL_WINDOW, 0) // BLOCK_N
+                    num_global_window_blocks = 0
             else:
-                sw_start_block = 0
-            start_block = max(sw_start_block, num_global_window_blocks)
+                num_total_kv_blocks = tl.cdiv(kv_seq_len, BLOCK_N)
+                num_global_window_blocks = 0
+            if IS_CAUSAL:
+                if LOCAL_WINDOW is not None:
+                    sw_start_block = max(q_block_start - LOCAL_WINDOW, 0) //  BLOCK_N
+                    start_block = max(sw_start_block, num_global_window_blocks)
+                elif GLOBAL_WINDOW is None:
+                    start_block = 0
+                else:
+                    # Global window has been computed, but local window is None, so no more kvblocks
+                    start_block = num_total_kv_blocks
+            else:
+                start_block = 0
             for kv_block_id in range(start_block, num_total_kv_blocks):
                 kv_block_start = kv_block_id * BLOCK_N
                 kv_block_len = min(BLOCK_N, kv_seq_len - kv_block_start)
@@ -1309,13 +1280,6 @@ def _sdpa_bwd_dq_kernel(
                         BLOCK_M, BLOCK_N,
                         kv_block_start, kv_seq_len,
                     )
-                    if LOCAL_WINDOW is not None:
-                        mask_sw  = gen_mask_n_left_bound(
-                            aux_mask_ptr_01, aux_mask_size, stride_mask_m, stride_mask_n,
-                            BLOCK_M, BLOCK_N,
-                            kv_block_start, kv_seq_len - LOCAL_WINDOW - 1
-                        )
-                        mask = mask & mask_sw
                 mask = mask & q_mask
                 cur_k_block_ptr = tl.advance(k_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
                 cur_v_block_ptr = tl.advance(v_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
@@ -1406,7 +1370,6 @@ def _sdpa_bwd(
     CHUNK_SIZE = BLOCK_M
     q_chunk_indices = prepare_chunk_indices(cu_seqlens_q, CHUNK_SIZE)
     print(f"{q_chunk_indices=}")
-
     dq = torch.zeros_like(q)
     _sdpa_bwd_dq_kernel[grid](
         dq, do, delta, softmax_lse, q, k, v, 
@@ -1563,14 +1526,14 @@ def generate_test_data(
 
 def test_swa_function():
     test_configs = [
-        # (1, 1, 1, False, 128, 256, 0, torch.float32),
-        (4, 4, 2, True, 128, 512, 0, torch.float32),
+        (1, 1, 1, False, 128, 256, 0, torch.float32),
+        # (4, 4, 2, True, 128, 512, 0, torch.float32),
         # (4, 4, 2, False, 128, 256, 0, torch.bfloat16),
         # (4, 16, 4, False, 128, 4096, 0, torch.bfloat16),
     ]
 
-    local_window = 123
-    global_window = 63
+    local_window = 1023
+    global_window = 0
     for bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_q_len, max_kv_prefix_len, dtype in test_configs:
         print(bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_q_len, max_kv_prefix_len, dtype)
         scale = 1.0 / head_dim ** 0.5
@@ -1589,7 +1552,7 @@ def test_swa_function():
                 q_ref, k_ref, v_ref, cu_seqlens_q, gqa_interleave, scale, local_window, global_window
             )
 
-            o_mojo = MojoSWAFunction.apply(
+            o_mojo = MojoSWAFunction._registry.get("ttx").apply(
                 q_mojo, k_mojo, v_mojo, cu_seqlens_q, cu_seqlens_kv, max_q_len, max_kv_prefix_len, True, local_window, global_window, scale, gqa_interleave
             )
 
