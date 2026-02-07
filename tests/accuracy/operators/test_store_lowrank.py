@@ -6,7 +6,7 @@ from tests.utils import bypass_not_implemented
 
 from mojo_opset.experimental import MojoStoreLowrank
 
-kv_lens = [1024, 2048, 4096, 8192, 13312]
+kv_lens = [1, 24, 1024, 2048, 4096, 8192, 13312]
 slot_mappings = [torch.randperm(kv_len) for kv_len in kv_lens]
 
 shapes_label_cache = [

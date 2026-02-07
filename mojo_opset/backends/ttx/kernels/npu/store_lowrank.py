@@ -79,7 +79,7 @@ def store_label_cache_fwd_impl(
     if batch_data_size > ub_buffer:
         BATCH_BLOCK_NUM = 16
         num_programs = (token_num - 1 + BATCH_BLOCK_NUM) // BATCH_BLOCK_NUM
-
+    BATCH_BLOCK_NUM = max(16, BATCH_BLOCK_NUM)
     grid = (num_programs,)
 
     _store_label_cache_triton_kernel[grid](
