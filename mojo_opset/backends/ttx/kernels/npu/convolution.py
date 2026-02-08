@@ -773,7 +773,7 @@ def causal_conv1d_update_bdt_fwd(
     out = torch.empty_like(x)
     NUM_CORES = get_num_cores()
 
-    T_CHK_SIZE = max(256, min(512, triton.next_power_of_2(triton.cdiv(seqlen, NUM_CORES))))
+    T_CHK_SIZE = 256
     D_CHK_SIZE = 16
 
     assert T_CHK_SIZE >= width 
