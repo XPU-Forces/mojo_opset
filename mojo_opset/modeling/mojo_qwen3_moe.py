@@ -1,14 +1,12 @@
 import torch
-from mojo_opset import (
-    MojoEmbedding,
-    MojoMoEGating,
-    MojoMoEDispatch,
-    MojoMoECombine,
-    MojoLinear,
-    MojoNorm,
-)
+
+from mojo_opset import MojoEmbedding
+from mojo_opset import MojoMoECombine
+from mojo_opset import MojoMoEDispatch
+from mojo_opset import MojoMoEGating
+from mojo_opset import MojoNorm
 from mojo_opset.core.attn.mojo_prefill_gqa import MojoPrefillGQA
-from mojo_opset.core.linear.mojo_linear import MojoGroupLinear
+from mojo_opset.core.linear.mojo_linear import MojoGroupGemm
 
 
 class MojoQwen3MoeBlock(torch.nn.Module):
@@ -18,7 +16,7 @@ class MojoQwen3MoeBlock(torch.nn.Module):
             vocab_size=10000,
             embedding_dim=4096,
         )
-        self.qkv_proj = MojoLinear()
+        self.qkv_proj = torch.nn.Linear(4096, 4096 * 3)
         self.pre_norm = MojoNorm()
         self.attn = MojoPrefillGQA(
             hidden_size=4096,
@@ -32,7 +30,7 @@ class MojoQwen3MoeBlock(torch.nn.Module):
         )
 
         self.moe_dispatch = MojoMoEDispatch()
-        self.moe_gmm = MojoGroupLinear(
+        self.moe_gmm = MojoGroupGemm(
             in_features=4096,
             out_features=4096,
             num_groups=8,

@@ -1,10 +1,10 @@
 import torch
 
 from mojo_opset.backends.ttx.kernels import m_grouped_matmul
-from mojo_opset.core import MojoGroupLinear
+from mojo_opset.core import MojoGroupGemm
 
 
-class TTXGroupLinear(MojoGroupLinear):
+class TTXGroupGemm(MojoGroupGemm):
     supported_platforms_list = ["npu"]
 
     def forward(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:

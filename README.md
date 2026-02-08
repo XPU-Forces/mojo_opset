@@ -42,16 +42,24 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 
 | Op Category | Op Name                     | torch native      | ttx           |
 | :---------- | :-------------------------- | :---------------- | :------------ |
+| Activation  | MojoGelu                    | ✅                | ✅             |
+| Activation  | MojoSilu                    | ✅                | ✅             |
+| Activation  | MojoSwiGlu                  | ✅                | ✅             |
+| Activation  | MojoSwiGluQuant             | TBD               | TBD           |
+| Gemm        | MojoGroupGemm               | ✅                | ✅             |
+| Gemm        | MojoGemmAllReduce           | TBD               | TBD           |
+| Gemm        | MojoAllGatherGemm           | TBD               | TBD           |
+| Gemm        | MojoGemmAll2All             | TBD               | TBD           |
+| Gemm        | MojoGemmReduceScatter       | TBD               | TBD           |
 | Attention   | MojoSdpa                    | ✅                | ✅             |
-| Embedding   | MojoEmbedding               | TBD               | TBD           |
-| Embedding   | MojoParallelEmbedding       | TBD               | TBD           |
-| Attention   | MojoPagedPrefillGQA         | 🚧                | 🚧             |
-| Attention   | MojoPagedDecodeGQA          | 🚧                | 🚧             |
+| Attention   | MojoPagedPrefillGQA         | ✅                | ✅             |
+| Attention   | MojoPagedDecodeGQA          | ✅                | 🚧             |
 | Attention   | MojoPagedPrefillMLA         | TBD               | TBD           |
 | Attention   | MojoPagedDecodeMLA          | TBD               | TBD           |
 | Attention   | MojoPagedPrefillNSA         | TBD               | TBD           |
 | Attention   | MojoPagedDecodeNSA          | TBD               | TBD           |
 | Attention   | MojoSlidingWindownAttenton  | TBD               | TBD           |
+| MoE         | MojoMoE                     | ✅                | TBD           |
 | MoE         | MojoMoEGating               | ✅                | TBD           |
 | MoE         | MojoMoEDispatch             | 🚧                | TBD           |
 | MoE         | MojoMoECombine              | 🚧                | TBD           |
@@ -70,25 +78,14 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Norm        | MojoNormQuant               | TBD               | TBD           |
 | Norm        | MojoResidualAddNormQuant    | TBD               | TBD           |
 | Norm        | MojoResidualAddNormCast     | TBD               | TBD           |
-| PositionEmb | MojoRotaryEmb               | ✅                | ✅             |
-| PositionEmb | MojoNormRotary              | TBD               | TBD           |
-| PositionEmb | MojoNormRotaryStorKV        | TBD               | TBD           |
+| PositionEmb | MojoRoPE                    | ✅                | ✅             |
 | KVCache     | MojoStorePagedKVCache       | ✅                | ✅             |
 | KVCache     | MojoStorePagedMLAKVCache    | TBD               | TBD           |
-| Linear      | MojoLinear                  | ✅                | TBD           |
-| Linear      | MojoQuantLinear             | TBD               | TBD           |
-| Linear      | MojoBatchLinear             | TBD               | TBD           |
-| Linear      | MojoGroupLinear             | ✅                | ✅             |
 | Quantize    | MojoQuant                   | TBD               | TBD           |
 | Quantize    | MojoDequant                 | TBD               | TBD           |
-| Activation  | MojoGelu                    | ✅                | ✅             |
-| Activation  | MojoSilu                    | ✅                | ✅             |
-| Activation  | MojoSwiGlu                  | ✅                | ✅             |
-| Activation  | MojoSwiGluQuant             | TBD               | TBD           |
-| Comm&Comp   | MojoLinearAllReduce         | TBD               | TBD           |
-| Comm&Comp   | MojoAllGatherLinear         | TBD               | TBD           |
-| Comm&Comp   | MojoLinearAll2All           | TBD               | TBD           |
-| Comm&Comp   | MojoLinearReduceScatter     | TBD               | TBD           |
+| Embedding   | MojoEmbedding               | TBD               | TBD           |
+| Embedding   | MojoParallelEmbedding       | TBD               | TBD           |
+
 
 
 ### Mojo Function List
@@ -101,9 +98,9 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Activation  | MojoSiluFunc                | ✅                | ✅             |
 | Activation  | MojoSwiGluFunc              | TBD               | TBD           |
 | Norm        | MojoRMSNormFunc             | ✅                | ✅             |
-| Comm&Comp   | MojoLinearAllReduce         | TBD               | TBD           |
+| Gemm        | MojoGemmAllReduce           | TBD               | TBD           |
 | Loss        | MojoLinearCrossEntropyFunc  | ✅                | ✅             |
-
+·
 
 ## Usage
 ### Apply mojo op

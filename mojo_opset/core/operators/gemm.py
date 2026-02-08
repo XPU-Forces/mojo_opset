@@ -1,54 +1,9 @@
-from typing import Optional
-
 import torch
 
 from ..operator import MojoOperator
 
 
-class MojoLinear(MojoOperator):
-    def __init__(
-        self,
-        weight: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ):
-        """
-        Common parameter definitions for Linear operator.
-
-        Init parameters:
-        - weight (torch.Tensor): Weight tensor, shape [in_dim, out_dim].
-        - bias (Optional[torch.Tensor]): Bias tensor, shape aligned with output dimension; optional.
-        """
-        super().__init__()
-
-        if weight.ndim not in (2,):
-            raise ValueError(f"weight should be 2-D, but got {tuple(weight.shape)}")
-        self.weight = weight
-
-        if bias is not None:
-            if not isinstance(bias, torch.Tensor):
-                raise TypeError("bias should be torch.Tensor or None")
-            if weight.ndim == 2:
-                # Standard PyTorch Linear weight shape is [out_features, in_features]
-                out_dim = weight.shape[0]
-                if bias.ndim != 1 or bias.shape[0] != out_dim:
-                    raise ValueError(f"bias should be 1-D with shape [out_dim={out_dim}], but got {tuple(bias.shape)}")
-        self.bias = bias
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        # Standard PyTorch Linear weight shape is [out_features, in_features]
-        in_dim = self.weight.shape[1]
-        if input.shape[-1] != in_dim:
-            raise ValueError(f"input should have last dim {in_dim}, but got {input.shape[-1]}")
-        if input.ndim not in (3, 4):
-            raise ValueError(f"Expected BNSD when is_varlen=False; got shape {tuple(input.shape)}")
-        return torch.nn.functional.linear(input, self.weight, self.bias)
-
-
-class MojoBatchLinear(MojoOperator):
-    pass
-
-
-class MojoGroupLinear(MojoOperator):
+class MojoGroupGemm(MojoOperator):
     def __init__(
         self,
         weight: torch.Tensor,
@@ -102,17 +57,17 @@ class MojoGroupLinear(MojoOperator):
         return torch.cat(out_list, dim=0)
 
 
-class MojoLinearAllReduce(MojoOperator):
+class MojoGemmAllReduce(MojoOperator):
     pass
 
 
-class MojoAllGatherLinear(MojoOperator):
+class MojoAllGatherGemm(MojoOperator):
     pass
 
 
-class MojoLinearAll2All(MojoOperator):
+class MojoGemmAll2All(MojoOperator):
     pass
 
 
-class MojoLinearReduceScatter(MojoOperator):
+class MojoGemmReduceScatter(MojoOperator):
     pass
