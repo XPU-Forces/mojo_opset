@@ -55,6 +55,7 @@ def generate_paged_decode_data(
 
 test_configs_decode = [
     (8, 16, 4, 128, 1024, 32, torch.bfloat16, "M_BF16"),
+    (8, 8, 1, 128, 8192, 128, torch.bfloat16, "M_BF16_LONG"),
 ]
 
 
@@ -76,7 +77,7 @@ test_configs_decode = [
         for B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, ID in test_configs_decode
     ],
 )
-@pytest.mark.parametrize("gqa_layout", ["AABB"])
+@pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_paged_decode_gqa(

@@ -65,15 +65,16 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
+        mask: Optional[torch.Tensor] = None,
     ):
         assert self.window_size == -1, (
             f"[TTXPagedDecodeGQA] TTX does not support sliding window, but got window_size={self.window_size}"
         )
-        assert self.gqa_layout == "AABB", (
-            f"[TTXPagedDecodeGQA] TTX only support AABB layout, but got gqa_layout={self.gqa_layout}"
-        )
         assert self.is_causal, (
             f"[TTXPagedDecodeGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
+        )
+        assert mask is None, (
+            f"[TTXPagedDecodeGQA] TTX does not support mask, but got mask={mask}"
         )
 
         output = paged_attention_decode(
@@ -82,6 +83,7 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
             v_cache=v_cache,
             seqlens=seqlens,
             block_tables=block_tables,
+            gqa_interleave=self.gqa_layout == "ABAB",
             sm_scale=softmax_scale,
         )
 

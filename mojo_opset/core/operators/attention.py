@@ -58,6 +58,7 @@ class MojoPagedDecodeGQA(MojoOperator):
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
         cu_seq_lens: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
     ):
         """
         Paged decode attention with grouped query heads (GQA) using a blocked KV cache.
@@ -83,18 +84,25 @@ class MojoPagedDecodeGQA(MojoOperator):
         assert not cu_seq_lens, "varlen is not supported"
 
         batch_size, num_q_heads, head_dim = query.shape
-        num_kv_heads, block_size, head_dim = key_cache.shape[1], key_cache.shape[2], key_cache.shape[3]
-        max_len_in_batch = seqlens.max().item()
+        _, num_kv_heads, block_size, head_dim = key_cache.shape
 
-        k_ref = torch.zeros(
-            batch_size, max_len_in_batch, num_kv_heads, head_dim, device=query.device, dtype=query.dtype
-        )
-        v_ref = torch.zeros(
-            batch_size, max_len_in_batch, num_kv_heads, head_dim, device=query.device, dtype=query.dtype
-        )
+        num_share_q_heads = num_q_heads // num_kv_heads
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(head_dim)
+
+        outputs = torch.zeros(batch_size, num_q_heads, head_dim, dtype=query.dtype, device=query.device)
 
         for i in range(batch_size):
             seq_len = seqlens[i].item()
+
+            q = query[i]
+
+            k_ref = torch.zeros(
+                seq_len, num_kv_heads, head_dim, device=query.device, dtype=query.dtype
+            )
+            v_ref = torch.zeros(
+                seq_len, num_kv_heads, head_dim, device=query.device, dtype=query.dtype
+            )
             num_blocks_for_seq = (seq_len + block_size - 1) // block_size
 
             for j in range(num_blocks_for_seq):
@@ -106,30 +114,30 @@ class MojoPagedDecodeGQA(MojoOperator):
                 k_slice = key_cache[physical_block_id, :, :tokens_in_block, :]
                 v_slice = value_cache[physical_block_id, :, :tokens_in_block, :]
 
-                k_ref[i, start_pos : start_pos + tokens_in_block, :, :] = k_slice.permute(1, 0, 2)
-                v_ref[i, start_pos : start_pos + tokens_in_block, :, :] = v_slice.permute(1, 0, 2)
+                k_ref[start_pos : start_pos + tokens_in_block, :, :] = k_slice.permute(1, 0, 2)
+                v_ref[start_pos : start_pos + tokens_in_block, :, :] = v_slice.permute(1, 0, 2)
 
-        _, k_len, num_k_heads, _ = k_ref.shape
-        num_share_q_heads = num_q_heads // num_k_heads
-        if softmax_scale is None:
-            softmax_scale = 1.0 / math.sqrt(head_dim)
+            if num_share_q_heads > 1:
+                if self.gqa_layout == "AABB":
+                    k_ref = k_ref.repeat_interleave(num_share_q_heads, dim=1)
+                    v_ref = v_ref.repeat_interleave(num_share_q_heads, dim=1)
+                else:
+                    k_ref = k_ref.repeat((1, num_share_q_heads, 1))
+                    v_ref = v_ref.repeat((1, num_share_q_heads, 1))
 
-        if num_share_q_heads > 1:
-            if self.gqa_layout == "AABB":
-                k_ref = k_ref.repeat_interleave(num_share_q_heads, dim=2)
-                v_ref = v_ref.repeat_interleave(num_share_q_heads, dim=2)
-            else:
-                k_ref = k_ref.repeat((1, 1, num_share_q_heads, 1))
-                v_ref = v_ref.repeat((1, 1, num_share_q_heads, 1))
+            attn_scores = torch.einsum("hd,khd->hk", q, k_ref) * softmax_scale
+            # Note: if is_causal=True, we just do full attention over 1 query to seq_len key/value
+            if not self.is_causal and mask is not None:
+                if mask.dim() == 2:
+                    attn_mask = mask
+                else:
+                    attn_mask = mask[i]
+                attn_mask = attn_mask[seq_len, :seq_len]
+                attn_scores.masked_fill_(attn_mask.unsqueeze(0), -torch.inf)
 
-        attn = torch.einsum("bhd,bkhd->bhk", query, k_ref) * softmax_scale
-
-        mask = torch.arange(k_len, device=query.device)[None, :] >= seqlens[:, None]
-        attn.masked_fill_(mask[:, None, :], -torch.inf)
-
-        attn = torch.softmax(attn, dim=-1, dtype=torch.float32).to(query.dtype)
-        out = torch.einsum("bhk,bkhd->bhd", attn, v_ref)
-        return out
+            attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
+            outputs[i] = torch.einsum("hk,khd->hd", attn_probs, v_ref)
+        return outputs
 
 
 class MojoPrefillGQA(MojoOperator):
