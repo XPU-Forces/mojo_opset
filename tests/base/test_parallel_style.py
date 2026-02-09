@@ -18,6 +18,7 @@ def test_colwise_parallel():
             super().__init__()
             self.linear = nn.Linear(in_features=in_feature, out_features=out_feature)
 
+        @torch.inference_mode
         def forward(self, hidden_states):
             return self.linear(hidden_states)
     
@@ -42,7 +43,8 @@ def test_rowwise_parallel():
         def __init__(self, in_feature, out_feature):
             super().__init__()
             self.linear = nn.Linear(in_features=in_feature, out_features=out_feature)
-
+        
+        @torch.inference_mode
         def forward(self, hidden_states):
             return self.linear(hidden_states)
     
@@ -68,9 +70,10 @@ def test_moe_parallel():
             super().__init__()
             self.group_gemm = MojoGroupGemm(group_num=group_num, in_feature=in_feature, out_feature=out_feature)
 
+        @torch.inference_mode
         def forward(self, hidden_states, group_list):
-            return self.group_gemm(input=hidden_states, group_list=group_list)
-        
+            return self.group_gemm(hidden_states, group_list=group_list)
+
     in_feature = 4096
     out_feature = 1024 * 2
     num_experts = 384
@@ -97,10 +100,8 @@ def test_moe_parallel():
     group_list[64] = 2 * select_expert_num
     group_list[95] = 2 * select_expert_num
     
-    group_list = torch.tensor(group_list)
-
-    hidden_states = test_ep_group_gemm(hidden_states = hidden_states, group_list=group_list)
-
+    group_list = torch.tensor(group_list).npu()
+    hidden_states = test_ep_group_gemm(hidden_states, group_list)
 
 if __name__ == "__main__":
     #test_colwise_parallel()
