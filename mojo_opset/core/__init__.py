@@ -119,11 +119,20 @@ __all__ = [
     "MojoStoreMLAKVCache",
     "MojoStorePagedMLAKVCache",
 
+<<<<<<< HEAD
     "MojoGroupGemm",
     "MojoGemmAllReduce",
     "MojoGemmAll2All",
     "MojoAllGatherGemm",
     "MojoGemmReduceScatter",
+=======
+    "MojoBatchLinear",
+    "MojoGroupGemm",
+    "MojoLinearAllReduce",
+    "MojoLinearAll2All",
+    "MojoAllGatherLinear",
+    "MojoLinearReduceScatter",
+>>>>>>> a25badd ([WIP] impl expert parallel)
 
     "MojoQuant",
     "MojoDequant",
