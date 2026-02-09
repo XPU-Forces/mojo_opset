@@ -2,7 +2,7 @@ import torch
 
 from mojo_opset.backends.ttx.kernels import m_grouped_matmul
 from mojo_opset.core import MojoGroupGemm
-from torch.distributed.tensor import DTensor
+
 
 class TTXGroupGemm(MojoGroupGemm):
     supported_platforms_list = ["npu"]
@@ -25,7 +25,7 @@ class TTXGroupGemm(MojoGroupGemm):
         assert BK == K, "K of input should be equal to K of self.weight."
 
         C = input.new_empty(M, N)
-        print(isinstance(self.weight, DTensor), flush=True)
+
         m_grouped_matmul(input, self.weight.to_local(), C, group_list, num_groups, M, N, K, strideBN, strideBK, self.trans_weight)
 
         return C

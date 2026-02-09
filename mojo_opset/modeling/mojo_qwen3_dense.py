@@ -158,9 +158,9 @@ class Qwen3MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.hidden_size, self.intermediate_size = config.hidden_size, config.intermediate_size
-        self.gate_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.intermediate_size, self.hidden_size)))
-        self.up_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.intermediate_size, self.hidden_size)))
-        self.down_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.hidden_size, self.intermediate_size)))
+        self.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size, bias=False)
+        self.up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size, bias=False)
+        self.down_proj = torch.nn.Linear(in_features=self.intermediate_size, out_features=self.hidden_size, bias=False)
         self.act_fn = MojoSilu()
 
     def forward(self, x):
@@ -178,11 +178,14 @@ class Qwen3Attention(nn.Module):
         )
         self.scaling = self.head_dim**-0.5
 
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim)
-
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim,)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim,)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size,)
+        self.q_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.num_heads * self.head_dim, bias=False)
+        self.k_proj = torch.nn.Linear(
+            in_features=self.hidden_size, out_features=self.num_key_value_heads * self.head_dim, bias=False
+        )
+        self.v_proj = torch.nn.Linear(
+            in_features=self.hidden_size, out_features=self.num_key_value_heads * self.head_dim, bias=False
+        )
+        self.o_proj = torch.nn.Linear(in_features=self.num_heads * self.head_dim, out_features=self.hidden_size, bias=False)
 
         self.q_norm = MojoRMSNorm(
             norm_size=self.head_dim,
@@ -258,7 +261,9 @@ class Qwen3Attention(nn.Module):
             # Use per-layer block table
             block_tables = past_key_values.block_tables[self.layer_idx]
 
-            attn_output_tnd = self.attn_prefill(q, k_cache, v_cache, cu_seqlens_q, block_tables, self.scaling)
+            attn_output_tnd = self.attn_prefill(
+                q, k_cache, v_cache, cu_seqlens_q, block_tables, self.scaling, current_seq_lens
+            )
             attn_output = attn_output_tnd.reshape(bsz, q_len, num_q_heads, head_dim)
             attn_output = attn_output.transpose(1, 2)
 
@@ -282,9 +287,7 @@ class Qwen3DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
 
         self.input_layernorm = MojoRMSNorm(norm_size=config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = MojoRMSNorm(
-            norm_size=config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.post_attention_layernorm = MojoRMSNorm(norm_size=config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -363,7 +366,7 @@ class Qwen3ForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.model = Qwen3Model(config)
-        self.lm_head = MojoLinear(weight=nn.Parameter(torch.ones(config.vocab_size, config.hidden_size)))
+        self.lm_head = torch.nn.Linear(in_features=config.hidden_size, out_features=config.vocab_size, bias=False)
 
     def forward(
         self,

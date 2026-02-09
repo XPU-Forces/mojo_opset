@@ -13,6 +13,12 @@ from mojo_opset.core import MojoSdpa
 class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
     supported_platforms_list = ["npu"]
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        AUX_MASK_SIZE=1024
+        self.aux_mask = torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE*3, dtype=torch.bool).tril(AUX_MASK_SIZE).npu()
+
+
     def forward(
         self,
         query: torch.Tensor,
@@ -21,23 +27,28 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         cu_seqlens_q: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
+        seqlens_kv: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
     ):
         assert self.window_size == -1, (
             f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
         )
-        assert self.gqa_layout == "ABAB", (
-            f"[TTXPagedPrefillGQA] TTX only support ABAB layout, but got gqa_layout={self.gqa_layout}"
-        )
         assert self.is_causal, (
             f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
+        )
+        assert mask is None, (
+            f"[TTXPagedPrefillGQA] TTX does not support mask, but got mask={mask}"
         )
         output = paged_attention_prefill(
             q=query,
             k_cache=k_cache,
             v_cache=v_cache,
             cu_seqlens_q=cu_seqlens_q,
+            seqlens_kv=seqlens_kv,
             block_tables=block_tables,
+            gqa_interleave=self.gqa_layout == "ABAB",
             sm_scale=softmax_scale,
+            aux_mask=self.aux_mask,
         )
 
         return output
@@ -54,15 +65,16 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
+        mask: Optional[torch.Tensor] = None,
     ):
         assert self.window_size == -1, (
-            f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
-        )
-        assert self.gqa_layout == "ABAB", (
-            f"[TTXPagedPrefillGQA] TTX only support ABAB layout, but got gqa_layout={self.gqa_layout}"
+            f"[TTXPagedDecodeGQA] TTX does not support sliding window, but got window_size={self.window_size}"
         )
         assert self.is_causal, (
-            f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
+            f"[TTXPagedDecodeGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
+        )
+        assert mask is None, (
+            f"[TTXPagedDecodeGQA] TTX does not support mask, but got mask={mask}"
         )
 
         output = paged_attention_decode(
@@ -71,6 +83,7 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
             v_cache=v_cache,
             seqlens=seqlens,
             block_tables=block_tables,
+            gqa_interleave=self.gqa_layout == "ABAB",
             sm_scale=softmax_scale,
         )
 

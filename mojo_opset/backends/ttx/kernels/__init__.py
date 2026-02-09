@@ -152,10 +152,13 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         k_cache: torch.Tensor,
         v_cache: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
+        seqlens_kv: torch.Tensor,
         block_tables: torch.Tensor,
+        gqa_interleave: bool,
         sm_scale: Optional[float] = None,
+        aux_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return paged_attention_prefill_impl(q, k_cache, v_cache, cu_seqlens_q, block_tables, sm_scale)
+        return paged_attention_prefill_impl(q, k_cache, v_cache, cu_seqlens_q, seqlens_kv, block_tables, gqa_interleave, sm_scale, aux_mask)
 
     @paged_attention_prefill.register_fake
     def paged_attention_prefill_fake(
@@ -163,8 +166,11 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         k_cache: torch.Tensor,
         v_cache: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
+        seqlens_kv: torch.Tensor,
         block_tables: torch.Tensor,
+        gqa_interleave: bool,
         sm_scale: Optional[float] = None,
+        aux_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         return torch.empty_like(q)
 
@@ -175,9 +181,10 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         v_cache: torch.Tensor,
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
+        gqa_interleave: bool,
         sm_scale: Optional[float] = None,
     ) -> torch.Tensor:
-        return paged_attention_decode_impl(q, k_cache, v_cache, seqlens, block_tables, sm_scale)
+        return paged_attention_decode_impl(q, k_cache, v_cache, seqlens, block_tables, gqa_interleave, sm_scale)
 
     @paged_attention_decode.register_fake
     def paged_attention_decode_fake(
@@ -186,6 +193,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         v_cache: torch.Tensor,
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
+        gqa_interleave: bool,
         sm_scale: Optional[float] = None,
     ) -> torch.Tensor:
         return torch.empty_like(q)

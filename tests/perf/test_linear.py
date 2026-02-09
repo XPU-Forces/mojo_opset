@@ -3,7 +3,7 @@ import random
 import pytest
 import torch
 
-from mojo_opset import MojoGroupLinear
+from mojo_opset import MojoGroupGemm
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
@@ -35,7 +35,7 @@ def generate_random_list(length, total_sum):
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_group_gemm(input, weight, group_list):
-    group_gemm = MojoGroupLinear(
+    group_gemm = MojoGroupGemm(
         trans_weight=False,
         weight=weight,
     )

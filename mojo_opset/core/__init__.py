@@ -35,12 +35,11 @@ from .operators.kv_cache import MojoStorePagedKVCache
 from .operators.kv_cache import MojoStorePagedMLAKVCache
 
 """ linear """
-from .operators.linear import MojoAllGatherLinear
-from .operators.linear import MojoBatchLinear
-from .operators.linear import MojoGroupGemm
-from .operators.linear import MojoLinearAll2All
-from .operators.linear import MojoLinearAllReduce
-from .operators.linear import MojoLinearReduceScatter
+from .operators.gemm import MojoAllGatherGemm
+from .operators.gemm import MojoGemmAll2All
+from .operators.gemm import MojoGemmAllReduce
+from .operators.gemm import MojoGemmReduceScatter
+from .operators.gemm import MojoGroupGemm
 
 """ embedding """
 from .operators.embedding import MojoEmbedding
@@ -51,6 +50,7 @@ from .operators.quantize import MojoDequant
 from .operators.quantize import MojoQuant
 
 """ moe """
+from .operators.moe import MojoMoE
 from .operators.moe import MojoMoECombine
 from .operators.moe import MojoMoEDispatch
 from .operators.moe import MojoMoEGating
@@ -116,12 +116,11 @@ __all__ = [
     "MojoStoreMLAKVCache",
     "MojoStorePagedMLAKVCache",
 
-    "MojoBatchLinear",
     "MojoGroupGemm",
-    "MojoLinearAllReduce",
-    "MojoLinearAll2All",
-    "MojoAllGatherLinear",
-    "MojoLinearReduceScatter",
+    "MojoGemmAllReduce",
+    "MojoGemmAll2All",
+    "MojoAllGatherGemm",
+    "MojoGemmReduceScatter",
 
     "MojoQuant",
     "MojoDequant",
@@ -129,6 +128,7 @@ __all__ = [
     "MojoEmbedding",
     "MojoParallelEmbedding",
 
+    "MojoMoE",
     "MojoMoEGating",
     "MojoMoEDispatch",
     "MojoMoECombine",

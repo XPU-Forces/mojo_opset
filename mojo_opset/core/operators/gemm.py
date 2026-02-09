@@ -1,11 +1,6 @@
-from typing import Optional
-
 import torch
 
 from ..operator import MojoOperator
-
-class MojoBatchLinear(MojoOperator):
-    pass
 
 
 class MojoGroupGemm(MojoOperator):
@@ -61,17 +56,17 @@ class MojoGroupGemm(MojoOperator):
         return torch.cat(out_list, dim=0)
 
 
-class MojoLinearAllReduce(MojoOperator):
+class MojoGemmAllReduce(MojoOperator):
     pass
 
 
-class MojoAllGatherLinear(MojoOperator):
+class MojoAllGatherGemm(MojoOperator):
     pass
 
 
-class MojoLinearAll2All(MojoOperator):
+class MojoGemmAll2All(MojoOperator):
     pass
 
 
-class MojoLinearReduceScatter(MojoOperator):
+class MojoGemmReduceScatter(MojoOperator):
     pass
