@@ -9,15 +9,14 @@ from ..operator import MojoOperator
 class MojoGroupGemm(MojoOperator):
     def __init__(
         self,
-        weight: torch.Tensor,
+        group_num,
+        in_feature,
+        out_feature,
         trans_weight=False,
     ):
         super().__init__()
-
-        if not isinstance(trans_weight, bool):
-            raise TypeError("trans_weight must be bool.")
+        self.weight = torch.nn.Parameter(torch.empty(group_num, in_feature, out_feature, **self.tensor_factory_kwargs))
         self.trans_weight = trans_weight
-        self.weight = weight
 
     def forward(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:
         """
