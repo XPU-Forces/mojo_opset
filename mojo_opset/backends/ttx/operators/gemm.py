@@ -1,5 +1,7 @@
 import torch
 
+from torch.distributed.tensor import DTensor
+
 from mojo_opset.backends.ttx.kernels import m_grouped_matmul
 from mojo_opset.core import MojoGroupGemm
 
@@ -26,6 +28,14 @@ class TTXGroupGemm(MojoGroupGemm):
 
         C = input.new_empty(M, N)
 
-        m_grouped_matmul(input, self.weight.to_local(), C, group_list, num_groups, M, N, K, strideBN, strideBK, self.trans_weight)
+        if isinstance(self.weight, DTensor):
+            weight = self.weight.to_local()
+        else:
+            weight = self.weight
+
+        if isinstance(input, DTensor):
+            input = input.to_local()
+
+        m_grouped_matmul(input, weight, C, group_list, num_groups, M, N, K, strideBN, strideBK, self.trans_weight)
 
         return C
