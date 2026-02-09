@@ -17,7 +17,7 @@ class TTXGroupGemm(MojoGroupGemm):
 
         assert input.stride(-1) == 1, "Please make sure input is K-major."
 
-        if self.trans_weight:
+        if not self.trans_weight:
             num_groups, N, BK = self.weight.shape
             strideBN, strideBK = self.weight.stride(1), self.weight.stride(2)
         else:
