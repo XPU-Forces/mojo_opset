@@ -5,7 +5,6 @@ import torch
 
 from torch import nn
 
-from mojo_opset import MojoLinear
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoRMSNorm
@@ -179,14 +178,11 @@ class Qwen3Attention(nn.Module):
         )
         self.scaling = self.head_dim**-0.5
 
-        self.q_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.num_heads * self.head_dim, self.hidden_size)))
-        self.k_proj = MojoLinear(
-            weight=nn.Parameter(torch.ones(self.num_key_value_heads * self.head_dim, self.hidden_size))
-        )
-        self.v_proj = MojoLinear(
-            weight=nn.Parameter(torch.ones(self.num_key_value_heads * self.head_dim, self.hidden_size))
-        )
-        self.o_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.hidden_size, self.num_heads * self.head_dim)))
+        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim)
+
+        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim,)
+        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim,)
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size,)
 
         self.q_norm = MojoRMSNorm(
             norm_size=self.head_dim,

@@ -8,7 +8,7 @@ from mojo_opset import (
     MojoNorm,
 )
 from mojo_opset.core.attn.mojo_prefill_gqa import MojoPrefillGQA
-from mojo_opset.core.linear.mojo_linear import MojoGroupLinear
+from mojo_opset.core.linear.mojo_linear import MojoGroupGemm
 
 
 class MojoQwen3MoeBlock(torch.nn.Module):
@@ -32,7 +32,7 @@ class MojoQwen3MoeBlock(torch.nn.Module):
         )
 
         self.moe_dispatch = MojoMoEDispatch()
-        self.moe_gmm = MojoGroupLinear(
+        self.moe_gmm = MojoGroupGemm(
             in_features=4096,
             out_features=4096,
             num_groups=8,
