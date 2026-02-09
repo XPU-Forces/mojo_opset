@@ -18,8 +18,8 @@ from torch.distributed.tensor import (
 )
 
 from torch.distributed.tensor.placement_types import Placement
+from torch.distributed.tensor import DTensor
 
-from mojo_opset import MojoBatchLinear
 from mojo_opset import MojoEmbedding
 from mojo_opset import MojoGroupGemm
 
@@ -38,7 +38,7 @@ class MojoColwiseParallel(ColwiseParallel):
         )
 
         self._parallel_style_map = {
-            (nn.Linear, MojoBatchLinear): self._partition_linear_fn,
+            (nn.Linear): self._partition_linear_fn,
             (MojoEmbedding): self._partition_embedding_fn,
         }
 
@@ -83,7 +83,7 @@ class MojoRowwiseParallel(RowwiseParallel):
         )
 
         self._parallel_style_map = {
-            (nn.Linear, MojoBatchLinear): (
+            (nn.Linear): (
                 self._partition_linear_fn,
                 (Shard(-1),),
             ),
@@ -129,13 +129,34 @@ class MojoExpertParallel(ParallelStyle):
         use_local_output: bool = True,
     ):
         super().__init__()
-        self.input_layouts = (input_layouts or Shard(-1),)
+        self.input_layouts = (input_layouts or Replicate(),)
         self.output_layouts = (output_layouts or Replicate(),)
         self.use_local_output = use_local_output
+        self.desired_input_layouts = (Replicate(),)
 
         self._parallel_style_map = {
             (MojoGroupGemm): self._partition_fn,
         }
+
+    @staticmethod
+    def _prepare_input_fn(
+        input_layouts, desired_input_layouts, mod, inputs, device_mesh
+    ):
+        # TODO: figure out dynamo support for instance method and switch this to instance method
+
+        # annotate module input placements/sharding with input_layouts
+        input_tensor = inputs[0]
+        if not isinstance(input_tensor, DTensor):
+            input_tensor = DTensor.from_local(
+                input_tensor, device_mesh, input_layouts, run_check=False
+            )
+
+        # transform the input layouts to the desired layouts of ColwiseParallel
+        if input_layouts != desired_input_layouts:
+            input_tensor = input_tensor.redistribute(
+                placements=desired_input_layouts, async_op=True
+            )
+        return input_tensor
 
     def _partition_fn(self, name: str, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         module.register_parameter(
@@ -166,4 +187,7 @@ class MojoExpertParallel(ParallelStyle):
             module,
             device_mesh,
             partition_fn,
+            partial(
+                self._prepare_input_fn, self.input_layouts, self.desired_input_layouts
+            ),
         )
