@@ -44,6 +44,8 @@ class MojoRoPE(MojoOperator):
         """
 
         assert cu_seqlens is None, "cu_seqlens is not supported yet."
+        assert q.dim() == k.dim() == cos.dim() == sin.dim()
+        assert q.size(-1) == k.size(-1) == cos.size(-1) == sin.size(-1)
 
         def rotate_half(x):
             x1 = x[..., : x.shape[-1] // 2]
