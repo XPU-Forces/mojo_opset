@@ -38,7 +38,7 @@ COL_BLOCKING_THRESHOLD = 4096
 )
 @libentry()
 @triton.jit
-def _layer_norm_fwd_kernel(
+def _layernorm_fwd_kernel(
     X_ptr,
     Y_ptr,
     W_ptr,
@@ -156,7 +156,7 @@ def _layer_norm_fwd_kernel(
 )
 @libentry()
 @triton.jit
-def _layer_norm_bwd_kernel(
+def _layernorm_bwd_kernel(
     DY_ptr,
     DX_ptr,
     DW_ptr,
@@ -247,7 +247,7 @@ def _layer_norm_bwd_kernel(
 )
 @libentry()
 @triton.jit
-def _layer_norm_bwd_large_cols_kernel(
+def _layernorm_bwd_large_cols_kernel(
     DY_ptr,
     DX_ptr,
     DW_ptr,
@@ -346,7 +346,52 @@ def _layer_norm_bwd_large_cols_kernel(
             tl.atomic_add(DB_ptr + cols_off, dB_chunk, mask=cols_mask)
 
 
-def layer_norm_fwd(x, w, b, eps):
+def layernorm_infer_impl(
+    hidden_states: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    shape = hidden_states.shape
+    dim = shape[-1]
+    x_2d = hidden_states.reshape(-1, dim)
+    n_rows, n_cols = x_2d.shape
+
+    # Determine block size using the standard pattern
+    if n_cols > COL_BLOCKING_THRESHOLD:
+        BLOCK_SIZE_N = 2048
+    else:
+        BLOCK_SIZE_N = align(hidden_states, n_cols, VEC_ALIGN_BYTES)
+
+    # Get number of programs
+    num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
+    grid = (num_programs,)
+
+    # Create output tensors
+    y = torch.empty_like(x_2d)
+    mean = torch.empty(n_rows, dtype=hidden_states.dtype, device=hidden_states.device)
+    rstd = torch.empty(n_rows, dtype=hidden_states.dtype, device=hidden_states.device)
+
+    # Launch kernel
+    _layernorm_fwd_kernel[grid](
+        x_2d,
+        y,
+        weight,
+        bias,
+        mean,
+        rstd,
+        x_2d.stride(0),
+        y.stride(0),
+        n_rows,
+        n_cols,
+        eps,
+        BLOCK_SIZE_N=BLOCK_SIZE_N,
+    )
+
+    return y.reshape(*shape)
+
+
+def layernorm_fwd_impl(x, w, b, eps):
     shape = x.shape
     dim = shape[-1]
     x_2d = x.reshape(-1, dim)
@@ -368,7 +413,7 @@ def layer_norm_fwd(x, w, b, eps):
     rstd = torch.empty(n_rows, dtype=x.dtype, device=x.device)
 
     # Launch kernel
-    _layer_norm_fwd_kernel[grid](
+    _layernorm_fwd_kernel[grid](
         x_2d,
         y,
         w,
@@ -386,7 +431,7 @@ def layer_norm_fwd(x, w, b, eps):
     return y.reshape(*shape), x_2d, mean, rstd
 
 
-def layer_norm_bwd(dy, x_2d, w, b, mean, rstd):
+def layernorm_bwd_impl(dy, x_2d, w, b, mean, rstd):
     shape = dy.shape
     dim = shape[-1]
     dy_2d = dy.reshape(-1, dim)
@@ -411,7 +456,7 @@ def layer_norm_bwd(dy, x_2d, w, b, mean, rstd):
         db = torch.zeros(n_cols, dtype=torch.float32, device=b.device)
 
         # Launch kernel
-        _layer_norm_bwd_kernel[grid](
+        _layernorm_bwd_kernel[grid](
             dy_2d,
             dx,
             dw,
@@ -434,7 +479,7 @@ def layer_norm_bwd(dy, x_2d, w, b, mean, rstd):
         db = torch.zeros(n_cols, dtype=torch.float32, device=b.device)
 
         # Launch kernel
-        _layer_norm_bwd_large_cols_kernel[grid](
+        _layernorm_bwd_large_cols_kernel[grid](
             dy_2d,
             dx,
             dw,
@@ -457,44 +502,3 @@ def layer_norm_bwd(dy, x_2d, w, b, mean, rstd):
     db = db.to(b.dtype)
 
     return dx.reshape(*shape), dw, db
-
-
-class TTXLayerNormFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x, w, b, eps):
-        """
-        x: input tensor of any shape
-        w: weight tensor of shape (hidden_size,)
-        b: bias tensor of shape (hidden_size,)
-        eps: small constant for numerical stability
-        """
-        y, x_2d, mean, rstd = layer_norm_fwd(x, w, b, eps)
-        ctx.save_for_backward(x_2d, w, b, mean, rstd)
-        return y
-
-    @staticmethod
-    def backward(ctx, dy):
-        """
-        dy: gradient of output
-        """
-        x_2d, w, b, mean, rstd = ctx.saved_tensors
-        dx, dw, db = layer_norm_bwd(dy, x_2d, w, b, mean, rstd)
-        return dx, dw, db, None
-
-
-def ttx_layer_norm(x, weight, bias, eps=1e-6):
-    """
-    TTX LayerNorm activation function for inference.
-
-    Implements: y = (x - mean) / sqrt(var + eps) * weight + bias
-
-    Args:
-        x: Input tensor of any shape
-        weight: Weight tensor of shape (hidden_size,)
-        bias: Bias tensor of shape (hidden_size,)
-        eps: Small constant for numerical stability. Default: 1e-6
-
-    Returns:
-        Output tensor with same shape as input
-    """
-    return TTXLayerNormFunction.apply(x, weight, bias, eps)
