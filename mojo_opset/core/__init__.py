@@ -81,6 +81,9 @@ from .operators.sampling import MojoTopPSampling
 """ convolution"""
 from .operators.convolution import MojoCausalConv1dUpdateState
 
+""" mlp"""
+from .operators.mlp import MojoSwiGLUMLP
+
 """ functions """
 from .functions.activation import MojoSiluFunction
 from .functions.convolution import MojoCausalConv1dFunction
@@ -154,6 +157,8 @@ __all__ = [
     "MojoTopPFilter",
 
     "MojoCausalConv1dUpdateState",
+
+    "MojoSwiGLUMLP",
 
     "MojoSiluFunction",
     "MojoRMSNormFunction",
