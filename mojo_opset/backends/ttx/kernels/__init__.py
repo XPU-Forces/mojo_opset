@@ -224,8 +224,9 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         cu_seqlens: Optional[torch.Tensor] = None,
         kv_lens: Optional[torch.Tensor] = None,
         head_first: bool = True,
+        rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return rope_fwd_impl(q, k, cos, sin, cu_seqlens, kv_lens, head_first)
+        return rope_fwd_impl(q, k, cos, sin, cu_seqlens, kv_lens, head_first, rope_percentage)
 
     @rope_fwd.register_fake
     def rope_fwd_fake(
@@ -236,6 +237,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         cu_seqlens: Optional[torch.Tensor] = None,
         kv_lens: Optional[torch.Tensor] = None,
         head_first: bool = True,
+        rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(q), torch.empty_like(k)
 
@@ -248,8 +250,9 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         cu_seqlens: Optional[torch.Tensor] = None,
         kv_lens: Optional[torch.Tensor] = None,
         head_first: bool = True,
+        rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return rope_bwd_impl(dq, dk, cos, sin, cu_seqlens, kv_lens, head_first)
+        return rope_bwd_impl(dq, dk, cos, sin, cu_seqlens, kv_lens, head_first, rope_percentage)
 
     @rope_bwd.register_fake
     def rope_bwd_fake(
@@ -260,6 +263,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         cu_seqlens: Optional[torch.Tensor] = None,
         kv_lens: Optional[torch.Tensor] = None,
         head_first: bool = True,
+        rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(dq), torch.empty_like(dk)
 
