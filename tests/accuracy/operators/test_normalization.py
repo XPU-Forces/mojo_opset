@@ -1,7 +1,6 @@
 import pytest
 import torch
 
-from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoLayerNorm
@@ -22,21 +21,22 @@ dtypes = [torch.float32, torch.float16, torch.bfloat16]
 
 
 @pytest.mark.parametrize(
-    "x, weight",
+    "shape",
     [
-        (
-            torch.randn(size=shape, dtype=dtype),
-            torch.randn(size=(shape[-1],), dtype=torch.float32),
-        )
-        for dtype in dtypes
-        for shape in shapes
+        (32, 1024),
+        (64, 8192),
+        (57, 7338),
+        (2, 256),
+        (7762, 18778),
     ],
 )
+@pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("eps", [1e-5])
-@auto_switch_platform()
 @bypass_not_implemented
-def test_rmsnorm(x, weight, eps):
-    rmsnorm = MojoRMSNorm(eps=eps, norm_size=weight.size(0), device=x.device, dtype=weight.dtype)
+def test_rmsnorm(shape, dtype, eps):
+    x = torch.randn(size=shape, dtype=dtype)
+    weight = torch.randn(size=(shape[-1],), dtype=dtype)
+    rmsnorm = MojoRMSNorm(eps=eps, norm_size=shape[-1], device=x.device, dtype=x.dtype)
 
     rmsnorm_ref = (
         MojoRMSNorm._registry.get("torch")(
@@ -59,20 +59,22 @@ def test_rmsnorm(x, weight, eps):
 
 
 @pytest.mark.parametrize(
-    "x, weight, bias",
+    "shape",
     [
-        (
-            torch.randn(size=(256, 128), dtype=dtype),
-            torch.randn(size=(128,), dtype=dtype),
-            torch.randn(size=(128,), dtype=dtype),
-        )
-        for dtype in [torch.float32, torch.float16, torch.bfloat16]
+        (32, 1024),
+        (64, 8192),
+        (57, 7338),
+        (2, 256),
+        (7762, 18778),
     ],
 )
+@pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("eps", [1e-5])
-@auto_switch_platform()
 @bypass_not_implemented
-def test_layernorm(x, weight, bias, eps):
+def test_layernorm(shape, dtype, eps):
+    x = torch.randn(size=shape, dtype=dtype)
+    weight = torch.randn(size=(shape[-1],), dtype=dtype)
+    bias = torch.randn(size=(shape[-1],), dtype=dtype)
     layernorm = MojoLayerNorm(eps=eps, norm_size=weight.size(0), dtype=weight.dtype, device=x.device)
 
     layernorm_ref = (
@@ -98,21 +100,23 @@ def test_layernorm(x, weight, bias, eps):
 
 
 @pytest.mark.parametrize(
-    "x, residual, weight",
+    "shape",
     [
-        (
-            torch.randn(size=(128, 128), dtype=dtype),
-            torch.randn(size=(128, 128), dtype=dtype),
-            torch.randn(size=(128,), dtype=dtype),
-        )
-        for dtype in [torch.float32, torch.float16, torch.bfloat16]
+        (32, 1024),
+        (64, 8192),
+        (57, 7338),
+        (2, 256),
+        (7762, 18778),
     ],
 )
+@pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("eps", [1e-5])
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
-@auto_switch_platform()
 @bypass_not_implemented
-def test_residual_add_rms_norm(x, residual, weight, norm_pos, eps):
+def test_residual_add_rms_norm(shape, dtype, norm_pos, eps):
+    x = torch.randn(size=shape, dtype=dtype)
+    residual = torch.randn(size=shape, dtype=dtype)
+    weight = torch.randn(size=(shape[-1],), dtype=dtype)
     add_norm = MojoResidualAddRMSNorm(
         norm_size=weight.size(0), eps=eps, norm_pos=norm_pos, device=x.device, dtype=weight.dtype
     )
@@ -139,22 +143,24 @@ def test_residual_add_rms_norm(x, residual, weight, norm_pos, eps):
 
 
 @pytest.mark.parametrize(
-    "x, residual, weight, bias",
+    "shape",
     [
-        (
-            torch.randn(size=(128, 128), dtype=dtype),
-            torch.randn(size=(128, 128), dtype=dtype),
-            torch.randn(size=(128,), dtype=dtype),
-            torch.randn(size=(128,), dtype=dtype),
-        )
-        for dtype in [torch.float32, torch.float16, torch.bfloat16]
+        (32, 1024),
+        (64, 8192),
+        (57, 7338),
+        (2, 256),
+        (7762, 18778),
     ],
 )
+@pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("eps", [1e-5])
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
-@auto_switch_platform()
 @bypass_not_implemented
-def test_residual_add_layernorm(x, residual, weight, bias, norm_pos, eps):
+def test_residual_add_layernorm(shape, dtype, norm_pos, eps):
+    x = torch.randn(size=shape, dtype=dtype)
+    residual = torch.randn(size=shape, dtype=dtype)
+    weight = torch.randn(size=(shape[-1],), dtype=dtype)
+    bias = torch.randn(size=(shape[-1],), dtype=dtype)
     add_norm = MojoResidualAddLayerNorm(
         norm_size=weight.size(0),
         eps=eps,

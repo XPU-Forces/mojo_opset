@@ -29,10 +29,9 @@ dtypes = [torch.float32, torch.bfloat16]
         for shape in shapes
     ],
 )
-@pytest.mark.parametrize("eps", [1e-5])
 @auto_switch_platform()
 @bypass_not_implemented
-def test_rmsnorm_forward_backward_diff(x, weight, eps):
+def test_rmsnorm_forward_backward_diff(x, weight):
     ctx = MockFunctionCtx()
     y = MojoRMSNormFunction.forward(ctx, x, weight, 1e-6)
 

@@ -3,16 +3,15 @@ import torch
 
 from tests.utils import MockFunctionCtx
 from tests.utils import assert_close
-from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoSiluFunction
 
 
-@pytest.mark.parametrize("x", [torch.rand(128, 128, requires_grad=True)])
-@auto_switch_platform()
+@pytest.mark.parametrize("shape", [([128, 128]), ([999, 9999]), ([1024, 10240]),])
 @bypass_not_implemented
-def test_silu_forward_backward_diff(monkeypatch, x):
+def test_silu_forward_backward_diff(shape):
+    x = torch.rand(*shape, requires_grad=True)
     ctx = MockFunctionCtx()
     y = MojoSiluFunction.forward(ctx, x)
 

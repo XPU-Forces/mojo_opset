@@ -5,7 +5,6 @@ from tests.utils import assert_close
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoStorePagedKVCache
-from mojo_opset.utils.platform import get_platform
 
 
 @pytest.mark.parametrize(
@@ -23,10 +22,8 @@ from mojo_opset.utils.platform import get_platform
 )
 @bypass_not_implemented
 def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, kv_lens_val, seq_lens_val):
-    device = get_platform()
-
-    kv_lens = torch.tensor(kv_lens_val, dtype=torch.long, device=device)
-    seq_lens = torch.tensor(seq_lens_val, dtype=torch.long, device=device)
+    kv_lens = torch.tensor(kv_lens_val, dtype=torch.long)
+    seq_lens = torch.tensor(seq_lens_val, dtype=torch.long)
 
     is_decode = torch.all(seq_lens == 1)
 
@@ -40,8 +37,8 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, kv_lens_val,
 
     total_tokens = cu_seqlens[-1].item() if not is_decode else len(kv_lens_val)
 
-    key_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=torch.bfloat16, device=device)
-    value_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=torch.bfloat16, device=device)
+    key_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=torch.bfloat16)
+    value_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=torch.bfloat16)
 
     max_kv_len = (kv_lens + seq_lens).max().item()
     max_blocks_per_seq = (max_kv_len + block_size - 1) // block_size + 2
@@ -51,17 +48,17 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, kv_lens_val,
 
     cache_shape = (total_phys_blocks, kv_heads, block_size, head_dim)
 
-    k_cache_ref = torch.zeros(cache_shape, dtype=torch.bfloat16, device=device)
-    v_cache_ref = torch.zeros(cache_shape, dtype=torch.bfloat16, device=device)
+    k_cache_ref = torch.zeros(cache_shape, dtype=torch.bfloat16)
+    v_cache_ref = torch.zeros(cache_shape, dtype=torch.bfloat16)
 
-    k_cache = torch.zeros(cache_shape, dtype=torch.bfloat16, device=device)
-    v_cache = torch.zeros(cache_shape, dtype=torch.bfloat16, device=device)
+    k_cache = torch.zeros(cache_shape, dtype=torch.bfloat16)
+    v_cache = torch.zeros(cache_shape, dtype=torch.bfloat16)
 
-    block_table = torch.full((batch_size, max_blocks_per_seq), -1, dtype=torch.long, device=device)
+    block_table = torch.full((batch_size, max_blocks_per_seq), -1, dtype=torch.long)
     curr = 0
     for i in range(batch_size):
         needed = (kv_lens_val[i] + seq_lens_val[i] + block_size - 1) // block_size
-        ids = torch.arange(curr, curr + needed, device=device)
+        ids = torch.arange(curr, curr + needed)
         block_table[i, :needed] = ids
         curr += needed
 

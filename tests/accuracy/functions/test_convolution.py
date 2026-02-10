@@ -6,10 +6,6 @@ from tests.utils import assert_close
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoCausalConv1dFunction
-from mojo_opset.utils.platform import get_platform
-
-device = get_platform()
-
 
 @pytest.mark.parametrize(
     ("B", "T", "D", "W", "activation", "has_bias", "has_residual", "dtype"),
@@ -41,11 +37,11 @@ def test_conv(
 ):
     torch.manual_seed(42)
 
-    x = torch.randn(B, T, D).to(device, dtype).requires_grad_(True)
-    weight = torch.randn(D, W).to(device, dtype).requires_grad_(True)
-    bias = torch.randn(D).to(device, dtype).requires_grad_(True) if has_bias else None
+    x = torch.randn(B, T, D).to(dtype).requires_grad_(True)
+    weight = torch.randn(D, W).to(dtype).requires_grad_(True)
+    bias = torch.randn(D).to(dtype).requires_grad_(True) if has_bias else None
     residual = x.detach().clone().requires_grad_(True) if has_residual else None
-    dy = torch.randn(B, T, D).to(device, dtype)
+    dy = torch.randn(B, T, D).to(dtype)
 
     ctx = MockFunctionCtx()
     y, _ = MojoCausalConv1dFunction.forward(ctx, x, weight, bias, residual, None, False, activation)
@@ -107,15 +103,14 @@ def test_conv_varlen(
             ],
             0,
         )
-        .to(device)
         .sort()[0]
     )
 
-    x = torch.randn(1, T, D).to(device, dtype).requires_grad_(True)
-    weight = torch.randn(D, W).to(device, dtype).requires_grad_(True)
-    bias = torch.randn(D).to(device, dtype).requires_grad_(True) if has_bias else None
+    x = torch.randn(1, T, D).to(dtype).requires_grad_(True)
+    weight = torch.randn(D, W).to(dtype).requires_grad_(True)
+    bias = torch.randn(D).to(dtype).requires_grad_(True) if has_bias else None
     residual = x.detach().clone().requires_grad_(True) if has_residual else None
-    dy = torch.randn(1, T, D).to(device, dtype)
+    dy = torch.randn(1, T, D).to(dtype)
 
     ctx = MockFunctionCtx()
     y, _ = MojoCausalConv1dFunction.forward(ctx, x, weight, bias, residual, None, False, activation, cu_seqlens)

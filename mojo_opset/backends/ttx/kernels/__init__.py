@@ -665,6 +665,9 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(key_cache), torch.empty_like(value_cache)
 
+    # TODO(zhangjihang): Support compile mode
+    sdpa_infer = sdpa_infer_impl
+
 else:
     causal_conv1d_fwd = causal_conv1d_fwd_impl
     causal_conv1d_bwd = causal_conv1d_bwd_impl

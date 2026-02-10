@@ -1,16 +1,15 @@
 import pytest
 
-from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
-from mojo_opset import MojoSilu, MojoSiluFunction
+from mojo_opset import MojoSilu
+from mojo_opset import MojoSiluFunction
 
 
 @pytest.mark.parametrize(
     "MojoOpCls",
     [MojoSilu],
 )
-@auto_switch_platform()
 @bypass_not_implemented
 def test_operator_dispatch(MojoOpCls):
     op_default = MojoOpCls()
@@ -32,7 +31,6 @@ def test_operator_dispatch(MojoOpCls):
     "MojoFunc",
     [MojoSiluFunction],
 )
-@auto_switch_platform()
 @bypass_not_implemented
 def test_function_dispatch(MojoFunc):
     func_default = MojoFunc

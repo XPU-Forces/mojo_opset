@@ -61,38 +61,25 @@ test_configs_decode = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, seqlens, block_tables, atol, rtol",
+    "B, Q_H, KV_H, D, S_LEN, BLK_S, dtype",
     [
-        pytest.param(
-            *generate_paged_decode_data(
-                batch_size=B,
-                num_q_heads=Q_H,
-                num_kv_heads=KV_H,
-                head_dim=D,
-                max_seq_len=S_LEN,
-                block_size=BLK_S,
-                dtype=dtype,
-            ),
-            2e-2 if dtype != torch.float32 else 1e-5,
-            2e-2 if dtype != torch.float32 else 1e-6,
-            id=ID,
-        )
-        for B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, ID in test_configs_decode
+        (8, 16, 4, 128, 1024, 32, torch.bfloat16),
+        (8, 8, 1, 128, 8192, 128, torch.bfloat16),
     ],
 )
 @pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
-@auto_switch_platform()
 @bypass_not_implemented
-def test_paged_decode_gqa(
-    query: torch.Tensor,
-    k_cache: torch.Tensor,
-    v_cache: torch.Tensor,
-    seqlens: torch.Tensor,
-    block_tables: torch.Tensor,
-    atol: float,
-    rtol: float,
-    gqa_layout: str,
-):
+def test_paged_decode_gqa(B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, gqa_layout):
+    query, k_cache, v_cache, seqlens, block_tables = generate_paged_decode_data(
+        batch_size=B,
+        num_q_heads=Q_H,
+        num_kv_heads=KV_H,
+        head_dim=D,
+        max_seq_len=S_LEN,
+        block_size=BLK_S,
+        dtype=dtype,
+    )
+
     head_dim = query.shape[-1]
     sm_scale = 1.0 / math.sqrt(head_dim)
 
@@ -104,6 +91,9 @@ def test_paged_decode_gqa(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
+
+    atol = 2e-2 if dtype != torch.float32 else 1e-5
+    rtol = 2e-2 if dtype != torch.float32 else 1e-6
 
     paged_decode_attn.forward_diff_with(
         paged_decode_attn_ref,
@@ -186,48 +176,26 @@ def generate_paged_prefill_data(
 
     return query, k_cache, v_cache, cu_seqlens_q, block_tables, kv_lens
 
-
-test_configs = [
-    (2, 16, 4, 128, 1024, 0, 32, torch.bfloat16, "M_BF16"),
-    (2, 8, 1, 128, 4096, 8192, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
-]
-
-
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_seqlens_q, block_tables, seqlens_kv, atol, rtol",
+    "B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype",
     [
-        pytest.param(
-            *generate_paged_prefill_data(
-                batch_size=B,
-                num_q_heads=Q_H,
-                num_kv_heads=KV_H,
-                head_dim=D,
-                max_q_len=Q_LEN,
-                max_kv_computed_len=KV_COMPUTED_LEN,
-                block_size=BLK_S,
-                dtype=dtype,
-            ),
-            2e-2 if dtype != torch.float32 else 1e-5,
-            2e-2 if dtype != torch.float32 else 1e-6,
-            id=ID,
-        )
-        for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs
+        (2, 16, 4, 128, 1024, 0, 32, torch.bfloat16),
+        (2, 8, 1, 128, 4096, 8192, 128, torch.bfloat16),
     ],
 )
 @pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
-@auto_switch_platform()
 @bypass_not_implemented
-def test_paged_prefill_gqa(
-    query: torch.Tensor,
-    k_cache: torch.Tensor,
-    v_cache: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
-    block_tables: torch.Tensor,
-    seqlens_kv: torch.Tensor,
-    atol: float,
-    rtol: float,
-    gqa_layout: str,
-):
+def test_paged_prefill_gqa(B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, gqa_layout):
+    query, k_cache, v_cache, cu_seqlens_q, block_tables, seqlens_kv = generate_paged_prefill_data(
+        batch_size=B,
+        num_q_heads=Q_H,
+        num_kv_heads=KV_H,
+        head_dim=D,
+        max_q_len=Q_LEN,
+        max_kv_computed_len=KV_COMPUTED_LEN,
+        block_size=BLK_S,
+        dtype=dtype,
+    )
     paged_prefill_attn = MojoPagedPrefillGQA(
         is_causal=True,
         gqa_layout=gqa_layout,
@@ -250,8 +218,8 @@ def test_paged_prefill_gqa(
         block_tables,
         softmax_scale=sm_scale,
         seqlens_kv=seqlens_kv,
-        atol=atol,
-        rtol=rtol,
+        atol=2e-2 if dtype != torch.float32 else 1e-5,
+        rtol=2e-2 if dtype != torch.float32 else 1e-6,
     )
 
 
@@ -296,28 +264,20 @@ def generate_test_data(
 
 
 @pytest.mark.parametrize(
-    "query, key, value, blockwise_diffusion_attn_mask, enable_gqa",
-    [
-        pytest.param(
-            *generate_test_data(
-                bsz=1,
-                q_head_num=5,
-                kv_head_num=1,
-                head_dim=128,
-                seq_length=2048,
-                block_size=32,
-            )
-        ),
-    ],
+    "bsz, q_head_num, kv_head_num, head_dim, seq_length, block_size",
+    [(1, 5, 1, 128, 2048, 32,)],
 )
-@auto_switch_platform()
 def test_sdpa(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    blockwise_diffusion_attn_mask: torch.Tensor,
-    enable_gqa: bool,
+    bsz,
+    q_head_num,
+    kv_head_num,
+    head_dim,
+    seq_length,
+    block_size,
 ):
+    query, key, value, blockwise_diffusion_attn_mask, enable_gqa = generate_test_data(
+        bsz, q_head_num, kv_head_num, head_dim, seq_length, block_size
+    )
     diffusion_attn_ref = MojoSdpa._registry.get("torch")(
         mask=blockwise_diffusion_attn_mask, scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
     )

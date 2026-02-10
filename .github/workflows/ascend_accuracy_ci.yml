@@ -38,7 +38,7 @@ jobs:
         shell: bash
         run: |
           export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
-          pip install -U pip setuptools wheel build
+          pip install -U pip setuptools wheel build pytest-xdist
           pip install -e .\[npu\] --index-url https://bytedpypi.byted.org/simple
           python3 -m build .
           pip install dist/*.whl --force-reinstall --no-deps
@@ -54,15 +54,21 @@ jobs:
         shell: bash
         run: |
           echo "Running ttx kernels tests..."
-          MOJO_BACKEND="ttx" python3 -m pytest tests/accuracy/operators/
-          MOJO_BACKEND="ttx" python3 -m pytest tests/accuracy/functions/
+          unset ASCEND_VISIBLE_DEVICES
+          unset ASCEND_RT_VISIBLE_DEVICES
+          echo "ASCEND_VISIBLE_DEVICES: $ASCEND_VISIBLE_DEVICES"
+          echo "ASCEND_RT_VISIBLE_DEVICES: $ASCEND_RT_VISIBLE_DEVICES"
+          MOJO_BACKEND="ttx" python3 -m pytest -n 8 tests/accuracy/operators/
+          MOJO_BACKEND="ttx" python3 -m pytest -n 8 tests/accuracy/functions/
       - name: test-torch-npu
         shell: bash
         run: |
           echo "Running torch_npu base tests..."
-          MOJO_BACKEND="torch_npu" python3 -m pytest tests/accuracy/operators/
+          unset ASCEND_VISIBLE_DEVICES
+          unset ASCEND_RT_VISIBLE_DEVICES
+          MOJO_BACKEND="torch_npu" python3 -m pytest -n 8 tests/accuracy/operators/
       - name: test-TTX-graph
         shell: bash
         run: |
           echo "Running ttx graph tests..."
-          MOJO_RUN_MODE="COMPILE" python3 -m pytest tests/test_ttx_graph/
+          MOJO_RUN_MODE="COMPILE" python3 -m pytest -n 8 tests/test_ttx_graph/

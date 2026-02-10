@@ -1,7 +1,6 @@
 import pytest
 import torch
 
-from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoGelu
@@ -10,57 +9,50 @@ from mojo_opset import MojoSwiGLU
 
 
 @pytest.mark.parametrize(
-    "x",
+    "shape",
     [
-        (torch.rand(128, 128, dtype=torch.bfloat16)),
-        (torch.rand(999, 9999, dtype=torch.bfloat16)),
-        (torch.rand(1024, 10240, dtype=torch.bfloat16)),
+        ([128, 128]),
+        ([999, 9999]),
+        ([1024, 10240]),
     ],
 )
-@auto_switch_platform()
 @bypass_not_implemented
-def test_gelu(x):
+def test_gelu(shape):
+    x = torch.rand(*shape, dtype=torch.bfloat16)
     gelu = MojoGelu()
     gelu_ref = MojoGelu._registry.get("torch")()
     gelu.forward_diff_with(gelu_ref, x)
 
 
 @pytest.mark.parametrize(
-    "x",
+    "shape",
     [
-        (torch.rand(128, 128, dtype=torch.bfloat16)),
-        (torch.rand(999, 9999, dtype=torch.bfloat16)),
-        (torch.rand(1024, 10240, dtype=torch.bfloat16)),
+        ([128, 128]),
+        ([999, 9999]),
+        ([1024, 10240]),
     ],
 )
-@auto_switch_platform()
 @bypass_not_implemented
-def test_silu(x):
+def test_silu(shape):
+    x = torch.rand(*shape, dtype=torch.bfloat16)
     silu = MojoSilu()
     silu_ref = MojoSilu._registry.get("torch")()
     silu.forward_diff_with(silu_ref, x)
 
 
 @pytest.mark.parametrize(
-    "gate_out, up_out",
+    "shape",
     [
-        (
-            torch.rand(size=(256, 128), dtype=torch.bfloat16),
-            torch.rand(size=(256, 128), dtype=torch.bfloat16),
-        ),
-        (
-            torch.rand(size=(1024, 10240), dtype=torch.bfloat16),
-            torch.rand(size=(1024, 10240), dtype=torch.bfloat16),
-        ),
-        (
-            torch.rand(size=(999, 9999), dtype=torch.bfloat16),
-            torch.rand(size=(999, 9999), dtype=torch.bfloat16),
-        ),
+        ([256, 128]),
+        ([1024, 10240]),
+        ([999, 9999]),
     ],
 )
-@auto_switch_platform()
 @bypass_not_implemented
-def test_swiglu(gate_out, up_out):
+def test_swiglu(shape):
+    gate_out = torch.rand(*shape, dtype=torch.bfloat16)
+    up_out = torch.rand(*shape, dtype=torch.bfloat16)
     swiglu = MojoSwiGLU()
     swiglu_ref = MojoSwiGLU._registry.get("torch")()
     swiglu.forward_diff_with(swiglu_ref, gate_out, up_out)
+
