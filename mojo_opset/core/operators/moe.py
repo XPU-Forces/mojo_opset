@@ -34,8 +34,8 @@ class MojoMoE(MojoOperator):
         self.expert_start = 0
         self.expert_end = num_experts
         if ep_size and ep_rank:
-            self.expert_start = ep_rank * num_experts // ep_size
-            self.expert_end = min((ep_rank + 1) * num_experts // ep_size, num_experts % ep_size)
+            self.experts_start_idx = ep_rank * num_experts // ep_size
+            self.experts_end_idx = min((ep_rank + 1) * num_experts // ep_size, num_experts % ep_size)
 
     def _gating(self, hidden_states):
         gate_logits = torch.nn.functional.linear(hidden_states, self.expert_weights)

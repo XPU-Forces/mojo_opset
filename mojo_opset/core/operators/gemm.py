@@ -1,20 +1,23 @@
 import torch
 
+
+from torch.nn import functional as F
+from torch.distributed.tensor import DTensor
+
 from ..operator import MojoOperator
 
 
 class MojoGroupGemm(MojoOperator):
     def __init__(
         self,
-        weight: torch.Tensor,
+        group_num,
+        in_feature,
+        out_feature,
         trans_weight=False,
     ):
         super().__init__()
-
-        if not isinstance(trans_weight, bool):
-            raise TypeError("trans_weight must be bool.")
+        self.weight = torch.nn.Parameter(torch.empty(group_num, out_feature, in_feature, **self.tensor_factory_kwargs))
         self.trans_weight = trans_weight
-        self.weight = weight
 
     def forward(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:
         """
@@ -36,22 +39,33 @@ class MojoGroupGemm(MojoOperator):
             weights are transposed from (G, Dout, Din) to (G, Din, Dout).
             - Each group's output is computed as `input_g @ weight_g`.
         """
+
+        if isinstance(self.weight, DTensor):
+            weight = self.weight.to_local()
+        else:
+            weight = self.weight
+
+        if isinstance(input, DTensor):
+            input = input.to_local()
+
         assert input.dim() == 2, "input must be 2D"
-        assert self.weight.dim() == 3, "weight must be 3D"
+        assert weight.dim() == 3, "weight must be 3D"
+
         num_groups = group_list.numel()
-        assert self.weight.size(0) == num_groups, "self.weight must have same group count as group_list"
+        assert weight.size(0) == num_groups, "self.weight must have same group count as group_list"
 
         if self.trans_weight:
-            self.weight = self.weight.transpose(1, 2).contiguous()
+            weight = weight.transpose(1, 2).contiguous()
 
         group_start = group_list.cumsum(0) - group_list
         group_end = group_list.cumsum(0)
 
         out_list = []
+
         for g, (start, end) in enumerate(zip(group_start.tolist(), group_end.tolist())):
             a_g = input[start:end, :]
-            b_g = self.weight[g, :, :]
-            out_g = a_g @ b_g
+            b_g = weight[g, :, :]
+            out_g = F.linear(a_g, b_g)
             out_list.append(out_g)
 
         return torch.cat(out_list, dim=0)
