@@ -36,6 +36,9 @@ class TTXGroupGemm(MojoGroupGemm):
         if isinstance(input, DTensor):
             input = input.to_local()
 
+        if isinstance(C, DTensor):
+            C = C.to_local()
+
         m_grouped_matmul(input, weight, C, group_list, num_groups, M, N, K, strideBN, strideBK, self.trans_weight)
 
         return C
