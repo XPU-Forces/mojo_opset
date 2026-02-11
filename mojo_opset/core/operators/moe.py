@@ -16,11 +16,15 @@ class MojoMoE(MojoOperator):
         hidden_size,
         intermediate_size,
         ep_rank,
-        world_size,
+        ep_size,
+        activation: str = "swiglu",
     ):
         super().__init__()
+        if activation != "swiglu":
+            raise NotImplementedError(f"MojoMoe: Activation {activation} is not supported.")
+
         self.ep_rank = ep_rank
-        self.ep_size = world_size
+        self.ep_size = ep_size
 
         # NOTE: in some cases, branches may have different expert num or topk
         self.num_experts = num_experts
@@ -40,6 +44,7 @@ class MojoMoE(MojoOperator):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.ffn_hidden_size = intermediate_size
+        self.activation_func = lambda x: torch.nn.functional.silu((xc := x.chunk(2, dim=-1))[0]) * xc[1]
 
         self.fc1 = nn.Parameter(torch.empty(self.num_experts_per_partion, self.ffn_hidden_size * 2, self.hidden_size))
         self.fc2 = nn.Parameter(torch.empty(self.num_experts_per_partion, self.hidden_size, self.ffn_hidden_size))
@@ -47,12 +52,17 @@ class MojoMoE(MojoOperator):
         setattr(self.gating_weight, "force_dtype", torch.float32)
 
     def _gating(self, x):
-        scores = torch.matmul(x.float(), self.gating_weight.float())
-        scores = scores.softmax(dim=-1)
-        values, indices = torch.topk(scores, k=self.top_k, dim=-1)
-        weights = values / torch.sum(values, dim=-1, keepdim=True)
+        # gate_logits = torch.matmul(x.float(), self.gating_weight.float())
+        # gate_logits = gate_logits.softmax(dim=-1)
+        # values, indices = torch.topk(gate_logits, k=self.top_k, dim=-1)
+        # weights = values / torch.sum(values, dim=-1, keepdim=True)
 
-        return indices, weights.to(x.dtype)
+        # return indices, weights.to(x.dtype)
+
+        gate_logits = torch.matmul(x.float(), self.gating_weight.float())
+        top_k_logits, top_k_indices = torch.topk(gate_logits, self.top_k, dim=-1)
+        expert_weights = torch.softmax(top_k_logits, dim=-1)
+        return top_k_indices, expert_weights.to(x.dtype)
 
     def _dispatch_ep(self, inp, top_k_gates, top_k_indices):
         token_idx = (
@@ -81,7 +91,7 @@ class MojoMoE(MojoOperator):
 
     def _experts(self, expert_inputs):
         fc1_out = [F.linear(expert_inputs[i], self.fc1[i]) for i in range(len(expert_inputs))]
-        fc1_out = [F.silu((xc := x.chunk(2, dim=-1))[0]) * xc[1] for x in fc1_out]
+        fc1_out = [self.activation_func(x) for x in fc1_out]
         fc2_out = [F.linear(fc1_out[i], self.fc2[i]) for i in range(len(fc1_out))]
         return fc2_out
 

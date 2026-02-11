@@ -216,6 +216,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     # Register Rope
     # ====================================
 
+    @torch.library.custom_op("ttx::rope", mutates_args={})
     def rope_fwd(
         q: torch.Tensor,
         k: torch.Tensor,
