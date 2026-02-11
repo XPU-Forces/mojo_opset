@@ -5,10 +5,10 @@ import torch
 
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
+from tests.utils import get_platform
 
 from mojo_opset import MojoGroupLinear
 from mojo_opset import MojoQuantGroupLinearReduceSum
-from tests.utils import get_platform
 
 
 def generate_random_list(length, total_sum):
@@ -33,26 +33,45 @@ def generate_quant_group_linear_data(b: int, m: int, k: int, n: int):
 
 
 @pytest.mark.parametrize(
-    "input, weight, group_list",
+    "input, weight, group_list, trans_weight",
     [
         (
             torch.randn(size=(8 * 2560, 4096), dtype=dtype),
             torch.randn(size=(8, 4096, 4096), dtype=dtype),
             generate_random_list(8, 8 * 2560),
+            False,
+        )
+        for dtype in [torch.float16, torch.bfloat16]
+    ]
+    + [
+        (
+            torch.randn(size=(4 * 1024, 2048), dtype=dtype),
+            torch.randn(size=(4, 2048, 1024), dtype=dtype),
+            generate_random_list(4, 4 * 1024),
+            False,
+        )
+        for dtype in [torch.float16, torch.bfloat16]
+    ]
+    + [
+        (
+            torch.randn(size=(6 * 512, 1024), dtype=dtype),
+            torch.randn(size=(6, 2048, 1024), dtype=dtype),
+            generate_random_list(6, 6 * 512),
+            True,
         )
         for dtype in [torch.float16, torch.bfloat16]
     ],
 )
 @auto_switch_platform()
 @bypass_not_implemented
-def test_group_gemm(input, weight, group_list):
+def test_group_gemm(input, weight, group_list, trans_weight):
     group_gemm = MojoGroupLinear(
-        trans_weight=False,
+        trans_weight=trans_weight,
         weight=weight,
     )
 
     group_gemm_ref = MojoGroupLinear._registry.get("torch")(
-        trans_weight=False,
+        trans_weight=trans_weight,
         weight=weight,
     )
     group_gemm.forward_diff_with(group_gemm_ref, input, group_list, mixed_tol=True)
@@ -65,7 +84,17 @@ def test_group_gemm(input, weight, group_list):
             *generate_quant_group_linear_data(b=4, m=7, k=128, n=256),
             1e-1,
             1e-2,
-        )
+        ),
+        pytest.param(
+            *generate_quant_group_linear_data(b=1, m=16, k=64, n=128),
+            1e-1,
+            1e-2,
+        ),
+        pytest.param(
+            *generate_quant_group_linear_data(b=2, m=9, k=256, n=512),
+            1e-1,
+            1e-2,
+        ),
     ],
 )
 @auto_switch_platform()
@@ -124,4 +153,3 @@ def test_grouped_matmul_cases_via_group_linear(inputs, weights, bias, dtype):
     for x, w, out in zip(input_tensors, weight_tensors, outputs):
         ref = x @ w
         torch.testing.assert_close(out.to(torch.float32), ref.to(torch.float32), atol=1e-3, rtol=1e-3)
-

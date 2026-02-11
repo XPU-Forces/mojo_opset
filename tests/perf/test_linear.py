@@ -68,4 +68,3 @@ def test_quant_group_linear_reduce_sum_perf(x1, weight, x1_scale, x2_scale):
         op(x1, x1_scale, x2_scale)
 
     perf(run)  # noqa: F821
-

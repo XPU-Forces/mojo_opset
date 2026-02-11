@@ -1,6 +1,11 @@
+from typing import Optional
+from typing import Tuple
+
 import torch
-from mojo_opset.core import MojoRMSNorm, MojoResidualAddRMSNorm
 import torch_npu
+
+from mojo_opset.core import MojoResidualAddRMSNorm
+from mojo_opset.core import MojoRMSNorm
 
 
 class TorchNpuRMSNorm(MojoRMSNorm, default_priority=0):
@@ -11,7 +16,7 @@ class TorchNpuRMSNorm(MojoRMSNorm, default_priority=0):
     ):
         super().__init__(weight, eps)
 
-    def forward(self, hidden_state: torch.Tensor):
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         return torch_npu.npu_rms_norm(hidden_state, self.weight, epsilon=self.variance_epsilon)[0]
 
 
@@ -24,7 +29,11 @@ class TorchNpuResidualAddRMSNorm(MojoResidualAddRMSNorm, default_priority=0):
     ):
         super().__init__(weight, eps, norm_pos)
 
-    def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor = None):
+    def forward(
+        self,
+        hidden_state: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         hidden_state_out, _, residual_before_norm = torch_npu.npu_add_rms_norm(
             hidden_state, residual, self.weight, self.variance_epsilon
         )
