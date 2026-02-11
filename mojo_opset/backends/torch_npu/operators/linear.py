@@ -1,5 +1,3 @@
-from typing import List, Optional, Union
-
 import torch
 import torch_npu
 
@@ -11,7 +9,11 @@ logger = get_logger(__name__)
 
 
 class TorchNpuGroupLinear(MojoGroupLinear):
-    def forward(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input: torch.Tensor,
+        group_list: torch.Tensor,
+    ) -> torch.Tensor:
         assert input.dim() == 2, "input must be 2D"
         assert self.weight.dim() == 3, "weight must be 3D"
         num_groups = group_list.numel()
@@ -29,7 +31,12 @@ class TorchNpuGroupLinear(MojoGroupLinear):
 
 
 class TorchNpuQuantGroupLinearReduceSum(MojoQuantGroupLinearReduceSum):
-    def forward(self, input: torch.Tensor, x1_scale: torch.Tensor, x2_scale: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input: torch.Tensor,
+        x1_scale: torch.Tensor,
+        x2_scale: torch.Tensor,
+    ) -> torch.Tensor:
         assert input.dim() == 3, "input must be 3D"
         assert self.weight.dim() == 3, "weight must be 3D"
 
