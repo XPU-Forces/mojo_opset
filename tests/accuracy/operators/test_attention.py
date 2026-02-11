@@ -1,6 +1,6 @@
 import functools
 import math
-
+import random
 import pytest
 import torch
 
@@ -9,8 +9,19 @@ from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
+from mojo_opset import MojoPagedPrefillAttention
 from mojo_opset import MojoSdpa
 
+def set_seed(seed):
+    torch.manual_seed(seed)
+    random.seed(seed)
+
+
+def print_shape(expression):
+    import inspect
+    frame = inspect.currentframe().f_back
+    tensor = eval(expression, frame.f_globals, frame.f_locals)
+    print(f"{expression}.shape: {tensor.shape}")
 
 def generate_paged_decode_data(
     batch_size: int,
@@ -254,6 +265,160 @@ def test_paged_prefill_gqa(
         rtol=rtol,
     )
 
+def generate_paged_prefill_attention_data(
+    batch_size: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    max_q_len: int,
+    max_kv_len: int,
+    block_size: int,
+    dtype: torch.dtype,
+    device: torch.device = None,
+):
+    set_seed(42)
+    if device is None:
+        device = torch.device("npu")
+    
+    q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
+    kv_lens = torch.randint(max_kv_len // 2, max_kv_len, (batch_size,), dtype=torch.int32)
+
+    q_lens = torch.clamp(q_lens, min=1)
+    kv_lens = torch.clamp(kv_lens, min=1)
+
+    cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), 
+                              torch.cumsum(q_lens, 0)]).to(device)
+    cu_seqlens_kv = torch.cat([torch.tensor([0], dtype=torch.int32), 
+                               torch.cumsum(kv_lens, 0)]).to(device)
+    
+    total_q_tokens = cu_seqlens_q[-1].item()
+    total_kv_tokens = cu_seqlens_kv[-1].item()
+
+    query = torch.randn(total_q_tokens, num_q_heads, head_dim, dtype=dtype).to(device)
+
+    k_unpadded = torch.randn(total_kv_tokens, num_kv_heads, head_dim, dtype=dtype).to(device)
+    v_unpadded = torch.randn(total_kv_tokens, num_kv_heads, head_dim, dtype=dtype).to(device)
+
+    max_num_blocks_per_seq = (kv_lens.max().item() + block_size - 1) // block_size
+
+    total_blocks_needed = int(
+        torch.div(kv_lens + block_size - 1, block_size, rounding_mode="floor").sum().item()
+    )
+    
+    if total_blocks_needed == 0:
+        total_blocks_needed = batch_size * max_num_blocks_per_seq
+
+    num_total_blocks = total_blocks_needed + 10
+
+    k_cache = torch.zeros(num_total_blocks, num_kv_heads, block_size, head_dim, 
+                         dtype=dtype, device=device)
+    v_cache = torch.zeros(num_total_blocks, num_kv_heads, block_size, head_dim, 
+                         dtype=dtype, device=device)
+
+    block_tables = torch.zeros(batch_size, max_num_blocks_per_seq, dtype=torch.int32, device=device) # npu only support int32
+
+    free_blocks = torch.randperm(num_total_blocks, device=device)
+    
+    current_block_offset = 0
+    for i in range(batch_size):
+        seq_kv_len = kv_lens[i].item()
+        kv_start_loc = cu_seqlens_kv[i].item()
+        
+        num_blocks_for_seq = (seq_kv_len + block_size - 1) // block_size
+
+        assigned_blocks = free_blocks[current_block_offset:current_block_offset + num_blocks_for_seq]
+        block_tables[i, :num_blocks_for_seq] = assigned_blocks
+        current_block_offset += num_blocks_for_seq
+
+        kv_seq = k_unpadded[kv_start_loc:kv_start_loc + seq_kv_len]
+        v_seq = v_unpadded[kv_start_loc:kv_start_loc + seq_kv_len]
+        
+        for j in range(num_blocks_for_seq):
+            physical_block_id = assigned_blocks[j]
+            start_pos_in_seq = j * block_size
+            tokens_in_block = min(block_size, seq_kv_len - start_pos_in_seq)
+            
+            if tokens_in_block <= 0:
+                continue
+
+            k_slice = kv_seq[start_pos_in_seq:start_pos_in_seq + tokens_in_block].permute(1, 0, 2)
+            v_slice = v_seq[start_pos_in_seq:start_pos_in_seq + tokens_in_block].permute(1, 0, 2)
+
+            k_cache[physical_block_id, :, :tokens_in_block, :] = k_slice
+            v_cache[physical_block_id, :, :tokens_in_block, :] = v_slice
+    
+    return query, k_cache, v_cache, cu_seqlens_q, cu_seqlens_kv, block_tables
+
+
+# 测试配置
+test_configs_prefill_attention = [
+    # (batch_size, num_q_heads, num_kv_heads, head_dim, max_q_len, max_kv_len, block_size, dtype, test_id)
+    (2, 16, 4, 128, 512, 512, 128, torch.bfloat16, "M_BF16_SAME_LEN_SIZE_128"),
+    (2, 16, 4, 128, 512, 256, 128, torch.bfloat16, "M_BF16_KV_SHORTER"),
+    (2, 16, 4, 128, 256, 512, 128, torch.bfloat16, "M_BF16_Q_SHORTER"),
+]
+
+
+@pytest.mark.parametrize(
+    "query, k_cache, v_cache, cu_seqlens_q, cu_seqlens_kv, block_tables, atol, rtol",
+    [
+        pytest.param(
+            *generate_paged_prefill_attention_data(
+                batch_size=B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_q_len=Q_LEN,
+                max_kv_len=KV_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            7e-3 if dtype != torch.float32 else 1e-5,
+            7e-3 if dtype != torch.float32 else 1e-6,
+            id=ID,
+        )
+        for B, Q_H, KV_H, D, Q_LEN, KV_LEN, BLK_S, dtype, ID in test_configs_prefill_attention
+    ],
+)
+@pytest.mark.parametrize("is_causal", [False,])
+@auto_switch_platform()
+@bypass_not_implemented
+def test_paged_prefill_attention(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_kv: torch.Tensor,
+    block_tables: torch.Tensor,
+    atol: float,
+    rtol: float,
+    is_causal: bool,
+):
+    paged_prefill_attn = MojoPagedPrefillAttention(
+        is_causal=is_causal,
+        window_size=-1,
+    )
+
+    paged_prefill_attn_ref = MojoPagedPrefillAttention._registry.get("torch")(
+        is_causal=is_causal,
+        window_size=-1,
+    )
+
+    head_dim = query.shape[-1]
+    sm_scale = 1.0 / math.sqrt(head_dim)
+
+    paged_prefill_attn.forward_diff_with(
+        paged_prefill_attn_ref,
+        query,
+        k_cache,
+        v_cache,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        block_tables,
+        softmax_scale=sm_scale,
+        atol=atol,
+        rtol=rtol,
+    )
 
 @functools.lru_cache()
 def generate_diffusion_attention_mask(
