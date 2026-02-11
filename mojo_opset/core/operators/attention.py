@@ -287,53 +287,6 @@ class MojoPagedDecodeMLA(MojoOperator):
     pass
 
 
-class MojoT5FullAttention(MojoOperator):
-    def __init__(self):
-        """
-        Initialize T5-style full attention operator.
-        """
-        super().__init__()
-
-    def forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        pos_bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Apply full attention as used by T5 (no scaling), with optional mask and positional bias.
-
-        Args:
-            q (torch.Tensor): Query tensor of shape [B, Lq, N, C].
-            k (torch.Tensor): Key tensor of shape [B, Lk, N, C].
-            v (torch.Tensor): Value tensor of shape [B, Lk, N, C].
-            mask (Optional[torch.Tensor]): Attention mask; either [B, Lk] or [B, Lq, Lk].
-            pos_bias (Optional[torch.Tensor]): Positional bias of shape [B, N, Lq, Lk].
-
-        Returns:
-            torch.Tensor: Output tensor of shape [B, Lq, N, C].
-        """
-        b = q.size(0)
-        n = q.size(2)
-        lq = q.size(1)
-        lk = k.size(1)
-        attn_bias = q.new_zeros(b, n, lq, lk)
-        if pos_bias is not None:
-            attn_bias = attn_bias + pos_bias
-        if mask is not None:
-            if mask.ndim == 2:
-                mask = mask.view(b, 1, 1, -1)
-            else:
-                mask = mask.unsqueeze(1)
-            attn_bias.masked_fill_(mask == 0, torch.finfo(q.dtype).min)
-        attn = torch.einsum("binc,bjnc->bnij", q, k) + attn_bias
-        attn = torch.softmax(attn.float(), dim=-1).type_as(attn)
-        out = torch.einsum("bnij,bjnc->binc", attn, v)
-        return out
-
-
 class MojoDecodeNSA(MojoOperator):
     pass
 
@@ -361,24 +314,19 @@ class MojoPagedPrefillNSA(MojoOperator):
 class MojoSdpa(MojoOperator):
     def __init__(
         self,
-        mask: Optional[torch.Tensor] = None,
         scale: Optional[float] = None,
         enable_gqa: bool = False,
-        layout: str = "BNSD",
-        num_heads: Optional[int] = None,
     ):
         super().__init__()
-        self.mask = mask
         self.scale = scale
         self.enable_gqa = enable_gqa
-        self.layout = layout
-        self.num_heads = num_heads
 
     def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
     ):
         """
         Scaled Dot-Product Attention (SDPA) operator.
@@ -387,12 +335,13 @@ class MojoSdpa(MojoOperator):
             query (torch.Tensor): Query tensor; shape must be compatible with SDPA.
             key (torch.Tensor): Key tensor; same embedding dimension as query.
             value (torch.Tensor): Value tensor; same embedding dimension as key.
+            attn_mask (Optional[torch.Tensor]): Attention mask tensor; shape must be broadcastable with SDPA.
 
         Returns:
             torch.Tensor: Attention output with the same batch/head layout as `query`.
 
         Notes:
-            - Uses `attn_mask=self.mask` (provided externally) and disables dropout.
+            - Uses `attn_mask=attn_mask` (provided externally) and disables dropout.
             - `scale=self.scale` sets custom scaling; if None, SDPA uses default scaling.
             - `enable_gqa=self.enable_gqa` allows grouped query attention when supported.
         """
@@ -400,7 +349,7 @@ class MojoSdpa(MojoOperator):
             query,
             key,
             value,
-            attn_mask=self.mask,
+            attn_mask=attn_mask,
             dropout_p=0.0,
             is_causal=False,
             scale=self.scale,

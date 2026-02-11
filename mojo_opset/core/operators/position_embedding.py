@@ -99,9 +99,7 @@ class MojoGridRoPE(MojoOperator):
         output = []
         for i, (f, h, w) in enumerate(grid_sizes.tolist()):
             seq_len = f * h * w
-            x_i = torch.view_as_complex(
-                x[i, :seq_len].to(torch.float32).reshape(seq_len, n, -1, 2)
-            )
+            x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float32).reshape(seq_len, n, -1, 2))
             freqs_i = freqs_list[i]
             x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
             x_i = torch.cat([x_i, x[i, seq_len:]])
