@@ -12,9 +12,14 @@ from .gelu import gelu_fwd_impl
 from .group_gemm import k_grouped_matmul_impl
 from .group_gemm import m_grouped_matmul_impl
 from .kv_cache import store_paged_kv_impl
+from .layernorm import layernorm_infer_impl
+from .layernorm import layernorm_bwd_impl
+from .layernorm import layernorm_fwd_impl
 from .rmsnorm import rmsnorm_bwd_impl
 from .rmsnorm import rmsnorm_fwd_impl
 from .rmsnorm import rmsnorm_infer_impl
+from .fused_add_rmsnorm import fused_add_rmsnorm_infer_impl
+from .fused_add_layernorm import fused_add_layernorm_infer_impl
 from .rope import rope_bwd_impl
 from .rope import rope_fwd_impl
 from .sdpa import sdpa_bwd_impl
@@ -39,6 +44,11 @@ __all__ = [
     "rmsnorm_bwd_impl",
     "rmsnorm_fwd_impl",
     "rmsnorm_infer_impl",
+    "layernorm_infer_impl",
+    "layernorm_bwd_impl",
+    "layernorm_fwd_impl",
+    "fused_add_rmsnorm_infer_impl",
+    "fused_add_layernorm_infer_impl",
     "rope_bwd_impl",
     "rope_fwd_impl",
     "silu_bwd_impl",
@@ -57,5 +67,6 @@ __all__ = [
 ]
 
 from mojo_opset.backends.ttx.kernels.utils import tensor_device_guard_for_triton_kernel
+
 # NOTE(liuyuan): Automatically add guard to torch tensor for triton kernels.
 tensor_device_guard_for_triton_kernel(__path__, __name__)

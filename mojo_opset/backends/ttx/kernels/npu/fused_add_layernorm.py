@@ -1,5 +1,3 @@
-from typing import Tuple
-
 import torch
 import triton
 import triton.language as tl
@@ -14,12 +12,12 @@ This file contains the implementation of Fused Add Layer Norm for NPU.
 
 This op supports two modes for residual addition based on the user's definition:
 1. 'pre':
-    - S = X + R
+    - S = hidden_states + residual
     - Y = layernorm(S)
     - Returns (Y, S). Y is the input to the next sublayer, S is the new residual.
 
 2. 'post':
-    - S = X + R
+    - S = hidden_states + residual
     - Y = layernorm(S)
     - Returns (Y, Y). Y is used as both the new hidden state and the new residual.
 
@@ -213,13 +211,66 @@ def _fused_add_layernorm_bwd_kernel(
             tl.store(dX_ptr_row_block + cols_off[None, :], dS_block.to(dX_ptr.dtype.element_ty), mask=block_mask)
 
 
+def fused_add_layernorm_infer_impl(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    add_mode: str = "pre",
+    eps: float = 1e-6,
+):
+    shape = hidden_states.shape
+    dim = shape[-1]
+    X_2d = hidden_states.reshape(-1, dim)
+    R_2d = residual.reshape(-1, dim)
+    n_rows, n_cols = X_2d.shape
+
+    BLOCK_SIZE_N = align(X_2d, n_cols, VEC_ALIGN_BYTES)
+    num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
+    grid = (num_programs,)
+
+    Mean = torch.empty(n_rows, dtype=torch.float32, device=hidden_states.device)
+    RSTD = torch.empty(n_rows, dtype=torch.float32, device=hidden_states.device)
+
+    Y = torch.empty_like(X_2d)
+    S = torch.empty_like(X_2d)
+
+    _fused_add_layernorm_fwd_kernel[grid](
+        Y,
+        Y.stride(0),
+        S,
+        S.stride(0),
+        X_2d,
+        X_2d.stride(0),
+        R_2d,
+        R_2d.stride(0),
+        weight,
+        bias,
+        Mean,
+        Mean.stride(0),
+        RSTD,
+        RSTD.stride(0),
+        n_rows,
+        n_cols,
+        eps,
+        BLOCK_SIZE_N=BLOCK_SIZE_N,
+    )
+
+    if add_mode == "pre":
+        return Y.reshape(*shape), S.reshape(*shape)
+    elif add_mode == "post":
+        return Y.reshape(*shape), Y.reshape(*shape)
+    else:
+        raise ValueError(f"Invalid add_mode: '{add_mode}'. Must be 'pre' or 'post'.")
+
+
 class TTXFusedAddLayerNormFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, X, R, W, B, add_mode, eps, in_place):
-        shape = X.shape
+    def forward(ctx, hidden_states, residual, weight, bias, add_mode, eps, in_place):
+        shape = hidden_states.shape
         dim = shape[-1]
-        X_2d = X.reshape(-1, dim)
-        R_2d = R.reshape(-1, dim)
+        X_2d = hidden_states.reshape(-1, dim)
+        R_2d = residual.reshape(-1, dim)
         n_rows, n_cols = X_2d.shape
 
         BLOCK_SIZE_N = align(X_2d, n_cols, VEC_ALIGN_BYTES)
@@ -229,8 +280,8 @@ class TTXFusedAddLayerNormFunction(torch.autograd.Function):
         ctx.add_mode = add_mode
         ctx.in_place = in_place
 
-        Mean = torch.empty(n_rows, dtype=torch.float32, device=X.device)
-        RSTD = torch.empty(n_rows, dtype=torch.float32, device=X.device)
+        Mean = torch.empty(n_rows, dtype=torch.float32, device=hidden_states.device)
+        RSTD = torch.empty(n_rows, dtype=torch.float32, device=hidden_states.device)
 
         Y = torch.empty_like(X_2d)
         S = torch.empty_like(X_2d)
@@ -244,8 +295,8 @@ class TTXFusedAddLayerNormFunction(torch.autograd.Function):
             X_2d.stride(0),
             R_2d,
             R_2d.stride(0),
-            W,
-            B,
+            weight,
+            bias,
             Mean,
             Mean.stride(0),
             RSTD,
@@ -256,7 +307,7 @@ class TTXFusedAddLayerNormFunction(torch.autograd.Function):
             BLOCK_SIZE_N=BLOCK_SIZE_N,
         )
 
-        ctx.save_for_backward(S.reshape(-1, dim), W, B, Mean, RSTD)
+        ctx.save_for_backward(S.reshape(-1, dim), weight, bias, Mean, RSTD)
 
         if add_mode == "pre":
             return Y.reshape(*shape), S.reshape(*shape)
@@ -275,7 +326,7 @@ class TTXFusedAddLayerNormFunction(torch.autograd.Function):
             dY = grad_output1 + grad_output2
             dS_out = None
 
-        S_2d, W, B, Mean, RSTD = ctx.saved_tensors
+        S_2d, weight, bias, Mean, RSTD = ctx.saved_tensors
 
         shape = dY.shape
         dim = shape[-1]
@@ -288,8 +339,8 @@ class TTXFusedAddLayerNormFunction(torch.autograd.Function):
         num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
         grid = (num_programs,)
 
-        _dW = torch.zeros((num_programs, n_cols), dtype=torch.float32, device=W.device)
-        _dB = torch.zeros((num_programs, n_cols), dtype=torch.float32, device=B.device)
+        _dW = torch.zeros((num_programs, n_cols), dtype=torch.float32, device=weight.device)
+        _dB = torch.zeros((num_programs, n_cols), dtype=torch.float32, device=bias.device)
         dX_2d = torch.empty_like(dY_2d)
 
         BLOCK_SIZE_N = align(S_2d, n_cols, VEC_ALIGN_BYTES)
@@ -303,7 +354,7 @@ class TTXFusedAddLayerNormFunction(torch.autograd.Function):
             dX_2d.stride(0),
             S_2d,
             S_2d.stride(0),
-            W,
+            weight,
             Mean,
             RSTD,
             _dW,
@@ -316,50 +367,10 @@ class TTXFusedAddLayerNormFunction(torch.autograd.Function):
             BLOCK_SIZE_N=BLOCK_SIZE_N,
         )
 
-        dW = _dW.sum(0).to(W.dtype)
-        dB = _dB.sum(0).to(B.dtype)
+        dW = _dW.sum(0).to(weight.dtype)
+        dB = _dB.sum(0).to(bias.dtype)
 
         dX = dX_2d.reshape(*shape)
         dR = dX.clone()
 
         return dX, dR, dW, dB, None, None, None
-
-
-def ttx_fused_add_layer_norm(
-    hidden_states: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
-    add_mode: str = "pre",
-    eps: float = 1e-5,
-    in_place: bool = False,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    TTX Fused Add Layer Norm function.
-
-    Performs fused residual addition and Layer Normalization.
-    Supports two modes via the `add_mode` parameter:
-
-    1. `add_mode="pre"` (default):
-        - `S = hidden_states + residual`
-        - `Y = layernorm(S, weight, bias)`
-        - Returns a tuple: `(Y, S)`.
-
-    2. `add_mode="post"`:
-        - `S = hidden_states + residual`
-        - `Y = layernorm(S, weight, bias)`
-        - Returns a tuple: `(Y, Y)`.
-
-    Args:
-        hidden_states: Input tensor.
-        residual: Residual tensor of the same shape.
-        weight: Gamma weights for LayerNorm of shape (H,).
-        bias: Beta biases for LayerNorm of shape (H,).
-        add_mode: The mode of residual addition, "pre" or "post". Default: "pre".
-        eps: Small value for numerical stability. Default: 1e-5.
-        in_place: Whether to use in-place operations. Not fully supported. Default: False.
-
-    Returns:
-        A tuple `(output, new_residual)`.
-    """
-    return TTXFusedAddLayerNormFunction.apply(hidden_states, residual, weight, bias, add_mode, eps, in_place)

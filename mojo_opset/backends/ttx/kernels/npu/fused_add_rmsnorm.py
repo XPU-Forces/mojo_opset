@@ -15,12 +15,12 @@ This file contains the implementation of Fused Add RMS Norm for NPU.
 
 This op supports two modes for residual addition based on the user's definition:
 1. 'pre':
-    - S = X + R
+    - S = hidden_states + residual
     - Y = rmsnorm(S)
     - Returns (Y, S). Y is the input to the next sublayer, S is the new residual.
 
 2. 'post':
-    - S = X + R
+    - S = hidden_states + residual
     - Y = rmsnorm(S)
     - Returns (Y, Y). Y is both the input to the next sublayer and the new residual.
 
@@ -53,7 +53,7 @@ _CASTING_MODE_GEMMA: tl.constexpr = tl.constexpr(1)
 )
 @libentry()
 @triton.jit
-def _fused_add_rms_norm_fwd_kernel(
+def _fused_add_rmsnorm_fwd_kernel(
     Y_ptr,
     Y_row_stride,
     S_ptr,
@@ -142,7 +142,7 @@ def _fused_add_rms_norm_fwd_kernel(
 )
 @libentry()
 @triton.jit
-def _fused_add_rms_norm_bwd_kernel(
+def _fused_add_rmsnorm_bwd_kernel(
     dY_ptr,
     dY_row_stride,
     dS_out_ptr,
@@ -222,19 +222,79 @@ def _fused_add_rms_norm_bwd_kernel(
     tl.store(dW_ptr_prog, dW_acc, mask=cols_mask)
 
 
+def fused_add_rmsnorm_infer_impl(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    add_mode: str = "pre",
+    eps: float = 1e-6,
+    offset: float = 0.0,
+    casting_mode: str = "llama",
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    shape = hidden_states.shape
+    dim = shape[-1]
+    hidden_states_2d = hidden_states.reshape(-1, dim)
+    residual_2d = residual.reshape(-1, dim)
+    n_rows, n_cols = hidden_states_2d.shape
+
+    if n_cols > COL_BLOCKING_THRESHOLD:
+        BLOCK_SIZE_N = 2048
+    else:
+        BLOCK_SIZE_N = align(hidden_states, n_cols, VEC_ALIGN_BYTES)
+
+    num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
+    grid = (num_programs,)
+
+    str_to_casting_mode = {"llama": 0, "gemma": 1, "none": -1}
+    _casting_mode = str_to_casting_mode[casting_mode]
+
+    rstd_dtype = torch.float32 if _casting_mode in (0, 1) else hidden_states.dtype
+    RSTD = torch.empty(n_rows, dtype=rstd_dtype, device=hidden_states.device)
+
+    Y = torch.empty_like(hidden_states_2d)
+    S = torch.empty_like(hidden_states_2d)
+
+    _fused_add_rmsnorm_fwd_kernel[grid](
+        Y,
+        Y.stride(0),
+        S,
+        S.stride(0),
+        hidden_states_2d,
+        hidden_states_2d.stride(0),
+        residual_2d,
+        residual_2d.stride(0),
+        weight,
+        RSTD,
+        RSTD.stride(0),
+        n_rows,
+        n_cols,
+        eps,
+        offset,
+        casting_mode=_casting_mode,
+        BLOCK_SIZE_N=BLOCK_SIZE_N,
+    )
+
+    if add_mode == "pre":
+        return Y.reshape(*shape), S.reshape(*shape)
+    elif add_mode == "post":
+        return Y.reshape(*shape), Y.reshape(*shape)
+    else:
+        raise ValueError(f"Invalid add_mode: {add_mode}. Must be 'pre' or 'post'.")
+
+
 class TTXFusedAddRMSNormFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, X, R, W, add_mode, eps, offset, casting_mode, in_place):
-        shape = X.shape
+    def forward(ctx, hidden_states, residual, weight, add_mode, eps, offset, casting_mode, in_place):
+        shape = hidden_states.shape
         dim = shape[-1]
-        X_2d = X.reshape(-1, dim)
-        R_2d = R.reshape(-1, dim)
-        n_rows, n_cols = X_2d.shape
+        hidden_states_2d = hidden_states.reshape(-1, dim)
+        residual_2d = residual.reshape(-1, dim)
+        n_rows, n_cols = hidden_states_2d.shape
 
         if n_cols > COL_BLOCKING_THRESHOLD:
             BLOCK_SIZE_N = 2048
         else:
-            BLOCK_SIZE_N = align(X, n_cols, VEC_ALIGN_BYTES)
+            BLOCK_SIZE_N = align(hidden_states, n_cols, VEC_ALIGN_BYTES)
 
         num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
         grid = (num_programs,)
@@ -246,24 +306,24 @@ class TTXFusedAddRMSNormFunction(torch.autograd.Function):
         ctx.offset = offset
         ctx.in_place = in_place
         ctx.casting_mode_int = _casting_mode
-        ctx.S_dtype_triton = torch_to_triton_dtype.get(X.dtype)
+        ctx.S_dtype_triton = torch_to_triton_dtype.get(hidden_states.dtype)
 
-        rstd_dtype = torch.float32 if _casting_mode in (0, 1) else X.dtype
-        RSTD = torch.empty(n_rows, dtype=rstd_dtype, device=X.device)
+        rstd_dtype = torch.float32 if _casting_mode in (0, 1) else hidden_states.dtype
+        RSTD = torch.empty(n_rows, dtype=rstd_dtype, device=hidden_states.device)
 
-        Y = torch.empty_like(X_2d)
-        S = torch.empty_like(X_2d)
+        Y = torch.empty_like(hidden_states_2d)
+        S = torch.empty_like(hidden_states_2d)
 
-        _fused_add_rms_norm_fwd_kernel[grid](
+        _fused_add_rmsnorm_fwd_kernel[grid](
             Y,
             Y.stride(0),
             S,
             S.stride(0),
-            X_2d,
-            X_2d.stride(0),
-            R_2d,
-            R_2d.stride(0),
-            W,
+            hidden_states_2d,
+            hidden_states_2d.stride(0),
+            residual_2d,
+            residual_2d.stride(0),
+            weight,
             RSTD,
             RSTD.stride(0),
             n_rows,
@@ -274,7 +334,7 @@ class TTXFusedAddRMSNormFunction(torch.autograd.Function):
             BLOCK_SIZE_N=BLOCK_SIZE_N,
         )
 
-        ctx.save_for_backward(S.reshape(-1, dim), W, RSTD)
+        ctx.save_for_backward(S.reshape(-1, dim), weight, RSTD)
 
         if add_mode == "pre":
             return Y.reshape(*shape), S.reshape(*shape)
@@ -294,7 +354,7 @@ class TTXFusedAddRMSNormFunction(torch.autograd.Function):
             dY = grad_output1 + grad_output2
             dS_out = None
 
-        S_2d, W, RSTD = ctx.saved_tensors
+        S_2d, weight, RSTD = ctx.saved_tensors
 
         shape = dY.shape
         dim = shape[-1]
@@ -308,24 +368,24 @@ class TTXFusedAddRMSNormFunction(torch.autograd.Function):
         grid = (num_programs,)
 
         if n_cols <= COL_BLOCKING_THRESHOLD:
-            _dW = torch.zeros((num_programs, n_cols), dtype=torch.float32, device=W.device)
+            _dW = torch.zeros((num_programs, n_cols), dtype=torch.float32, device=weight.device)
             BLOCK_SIZE_N = align(S_2d, n_cols, VEC_ALIGN_BYTES)
         else:
-            _dW = torch.zeros((1, n_cols), dtype=torch.float32, device=W.device)
+            _dW = torch.zeros((1, n_cols), dtype=torch.float32, device=weight.device)
             BLOCK_SIZE_N = 2048
 
-        dX_2d = torch.empty_like(dY_2d)
+        dhidden_states_2d = torch.empty_like(dY_2d)
 
-        _fused_add_rms_norm_bwd_kernel[grid](
+        _fused_add_rmsnorm_bwd_kernel[grid](
             dY_2d,
             dY_2d.stride(0),
             dS_out_2d,
             dS_out_2d.stride(0),
-            dX_2d,
-            dX_2d.stride(0),
+            dhidden_states_2d,
+            dhidden_states_2d.stride(0),
             S_2d,
             S_2d.stride(0),
-            W,
+            weight,
             RSTD,
             RSTD.stride(0),
             _dW,
@@ -339,53 +399,9 @@ class TTXFusedAddRMSNormFunction(torch.autograd.Function):
             BLOCK_SIZE_N=BLOCK_SIZE_N,
         )
 
-        dW = _dW.sum(dim=0).to(W.dtype)
+        dW = _dW.sum(dim=0).to(weight.dtype)
 
-        dX = dX_2d.reshape(*shape)
+        dX = dhidden_states_2d.reshape(*shape)
         dR = dX.clone()
 
         return dX, dR, dW, None, None, None, None, None
-
-
-def ttx_fused_add_rms_norm(
-    hidden_states: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    add_mode: str = "pre",
-    eps: float = 1e-6,
-    offset: float = 0.0,
-    casting_mode: str = "llama",
-    in_place: bool = False,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    TTX Fused Add RMS Norm function.
-
-    This function performs a fused operation combining residual addition with RMS normalization.
-    It supports two modes via the `add_mode` parameter, based on common transformer patterns:
-
-    1. `add_mode="pre"` (default, e.g., Llama):
-        - `S = hidden_states + residual`
-        - `Y = rmsnorm(S)`
-        - Returns a tuple: `(Y, S)`. `Y` is the normalized output, `S` is the new residual.
-
-    2. `add_mode="post"` (e.g., as defined by user):
-        - `S = hidden_states + residual`
-        - `Y = rmsnorm(S)`
-        - Returns a tuple: `(Y, Y)`. `Y` is used as both the new hidden state and the new residual.
-
-    Args:
-        hidden_states: Input tensor of shape (B, T, H) or (BT, H).
-        residual: Residual tensor of the same shape as hidden_states.
-        weight: Weight tensor for RMS norm of shape (H,).
-        add_mode: The mode of residual addition, either "pre" or "post". Default: "pre".
-        eps: Small value for numerical stability. Default: 1e-6.
-        offset: Offset value for the weight tensor. Default: 0.0.
-        casting_mode: Precision casting mode ("llama", "gemma", "none"). Default: "llama".
-        in_place: Whether to use in-place operations. Default: False.
-
-    Returns:
-        A tuple `(output, new_residual)`. The content depends on `add_mode`.
-    """
-    return TTXFusedAddRMSNormFunction.apply(
-        hidden_states, residual, weight, add_mode, eps, offset, casting_mode, in_place
-    )
