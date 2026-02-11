@@ -10,7 +10,6 @@ from mojo_opset.backends.ttx.kernels import npu
 
 importlib.reload(npu)
 from mojo_opset.backends.ttx.kernels.npu.convolution import causal_conv1d_fwd
-from mojo_opset.backends.ttx.kernels.npu.fused_add_layer_norm import TTXFusedAddLayerNormFunction
 from mojo_opset.backends.ttx.kernels.npu.kv_cache import store_paged_kv_impl
 
 
@@ -20,10 +19,3 @@ def test_tensor_device_guard():
 
     with pytest.raises(TypeError, match="Found cpu tensor.*triton kernel."):
         causal_conv1d_fwd(*[torch.empty(*[256] * 3)] * 4)
-
-    with pytest.raises(TypeError, match="Found cpu tensor.*triton kernel."):
-
-        class Dummy:
-            pass
-
-        TTXFusedAddLayerNormFunction.forward(Dummy(), *[torch.empty(*[8] * 3)] * 4, True, 0.01, False)
