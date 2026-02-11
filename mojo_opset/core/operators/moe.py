@@ -52,13 +52,6 @@ class MojoMoE(MojoOperator):
         setattr(self.gating_weight, "force_dtype", torch.float32)
 
     def _gating(self, x):
-        # gate_logits = torch.matmul(x.float(), self.gating_weight.float())
-        # gate_logits = gate_logits.softmax(dim=-1)
-        # values, indices = torch.topk(gate_logits, k=self.top_k, dim=-1)
-        # weights = values / torch.sum(values, dim=-1, keepdim=True)
-
-        # return indices, weights.to(x.dtype)
-
         gate_logits = torch.matmul(x.float(), self.gating_weight.float())
         top_k_logits, top_k_indices = torch.topk(gate_logits, self.top_k, dim=-1)
         expert_weights = torch.softmax(top_k_logits, dim=-1)
