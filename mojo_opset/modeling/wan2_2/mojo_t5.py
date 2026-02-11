@@ -11,13 +11,13 @@ from transformers import AutoTokenizer
 from mojo_opset import MojoGelu
 from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoRelativeEmbedding
-from mojo_opset import MojoT5FullAttention
+from mojo_opset import MojoSdpa
 
 __all__ = [
-    'T5Model',
-    'T5Encoder',
-    'T5Decoder',
-    'T5EncoderModel',
+    "T5Model",
+    "T5Encoder",
+    "T5Decoder",
+    "T5EncoderModel",
 ]
 
 
@@ -27,9 +27,10 @@ def fp16_clamp(x):
         x = torch.clamp(x, min=-clamp, max=clamp)
     return x
 
+
 class HuggingfaceTokenizer:
     def __init__(self, name, seq_len=None, clean=None, **kwargs):
-        assert clean in (None, 'whitespace', 'lower', 'canonicalize')
+        assert clean in (None, "whitespace", "lower", "canonicalize")
         self.name = name
         self.seq_len = seq_len
         self.clean = clean
@@ -37,10 +38,10 @@ class HuggingfaceTokenizer:
         self.vocab_size = self.tokenizer.vocab_size
 
     def __call__(self, sequence, **kwargs):
-        return_mask = kwargs.pop('return_mask', False)
-        _kwargs = {'return_tensors': 'pt'}
+        return_mask = kwargs.pop("return_mask", False)
+        _kwargs = {"return_tensors": "pt"}
         if self.seq_len is not None:
-            _kwargs.update({'padding': 'max_length', 'truncation': True, 'max_length': self.seq_len})
+            _kwargs.update({"padding": "max_length", "truncation": True, "max_length": self.seq_len})
         _kwargs.update(**kwargs)
         if isinstance(sequence, str):
             sequence = [sequence]
@@ -54,17 +55,16 @@ class HuggingfaceTokenizer:
 
     def _clean(self, text):
         text = html.unescape(html.unescape(text)).strip()
-        if self.clean == 'whitespace':
-            text = re.sub(r'\s+', ' ', text).strip()
-        elif self.clean == 'lower':
-            text = re.sub(r'\s+', ' ', text).strip().lower()
-        elif self.clean == 'canonicalize':
-            text = re.sub(r'[_\s]+', ' ', text).strip().lower()
+        if self.clean == "whitespace":
+            text = re.sub(r"\s+", " ", text).strip()
+        elif self.clean == "lower":
+            text = re.sub(r"\s+", " ", text).strip().lower()
+        elif self.clean == "canonicalize":
+            text = re.sub(r"[_\s]+", " ", text).strip().lower()
         return text
 
 
 class T5LayerNorm(nn.Module):
-
     def __init__(self, dim, eps=1e-6):
         super(T5LayerNorm, self).__init__()
         self.dim = dim
@@ -72,15 +72,13 @@ class T5LayerNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
-        x = x * torch.rsqrt(x.float().pow(2).mean(dim=-1, keepdim=True) +
-                            self.eps)
+        x = x * torch.rsqrt(x.float().pow(2).mean(dim=-1, keepdim=True) + self.eps)
         if self.weight.dtype in [torch.float16, torch.bfloat16]:
             x = x.type_as(self.weight)
         return self.weight * x
 
 
 class T5Attention(nn.Module):
-
     def __init__(self, dim, dim_attn, num_heads, dropout=0.1):
         assert dim_attn % num_heads == 0
         super(T5Attention, self).__init__()
@@ -95,7 +93,7 @@ class T5Attention(nn.Module):
         self.v = nn.Linear(dim, dim_attn, bias=False)
         self.o = nn.Linear(dim_attn, dim, bias=False)
         self.dropout = nn.Dropout(dropout)
-        self.attn_core = MojoT5FullAttention()
+        self.attn = MojoSdpa(scale=1.0)
 
     def forward(self, x, context=None, mask=None, pos_bias=None):
         """
@@ -112,17 +110,25 @@ class T5Attention(nn.Module):
         k = self.k(context).view(b, -1, n, c)
         v = self.v(context).view(b, -1, n, c)
 
-        x = self.attn_core(q, k, v, mask=mask, pos_bias=pos_bias)
+        # attention bias
+        attn_bias = x.new_zeros(b, n, q.size(1), k.size(1))
+        if pos_bias is not None:
+            attn_bias += pos_bias
+        if mask is not None:
+            assert mask.ndim in [2, 3]
+            mask = mask.view(b, 1, 1, -1) if mask.ndim == 2 else mask.unsqueeze(1)
+            attn_bias.masked_fill_(mask == 0, torch.finfo(x.dtype).min)
+
+        x = self.attn(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), attn_mask=attn_bias)
 
         # output
-        x = x.reshape(b, -1, n * c)
+        x = x.transpose(1, 2).reshape(b, -1, n * c)
         x = self.o(x)
         x = self.dropout(x)
         return x
 
 
 class T5FeedForward(nn.Module):
-
     def __init__(self, dim, dim_ffn, dropout=0.1):
         super(T5FeedForward, self).__init__()
         self.dim = dim
@@ -131,7 +137,7 @@ class T5FeedForward(nn.Module):
         # layers
         self.gate = nn.Sequential(
             nn.Linear(dim, dim_ffn, bias=False),
-            MojoGelu._registry.get("torch")(),
+            MojoGelu(),
         )
         self.fc1 = nn.Linear(dim, dim_ffn, bias=False)
         self.fc2 = nn.Linear(dim_ffn, dim, bias=False)
@@ -146,15 +152,7 @@ class T5FeedForward(nn.Module):
 
 
 class T5SelfAttention(nn.Module):
-
-    def __init__(self,
-                 dim,
-                 dim_attn,
-                 dim_ffn,
-                 num_heads,
-                 num_buckets,
-                 shared_pos=True,
-                 dropout=0.1):
+    def __init__(self, dim, dim_attn, dim_ffn, num_heads, num_buckets, shared_pos=True, dropout=0.1):
         super(T5SelfAttention, self).__init__()
         self.dim = dim
         self.dim_attn = dim_attn
@@ -168,27 +166,17 @@ class T5SelfAttention(nn.Module):
         self.attn = T5Attention(dim, dim_attn, num_heads, dropout)
         self.norm2 = T5LayerNorm(dim)
         self.ffn = T5FeedForward(dim, dim_ffn, dropout)
-        self.pos_embedding = None if shared_pos else MojoRelativeEmbedding(
-            num_buckets, num_heads, bidirectional=True)
+        self.pos_embedding = None if shared_pos else MojoRelativeEmbedding(num_buckets, num_heads, bidirectional=True)
 
     def forward(self, x, mask=None, pos_bias=None):
-        e = pos_bias if self.shared_pos else self.pos_embedding(
-            x.size(1), x.size(1))
+        e = pos_bias if self.shared_pos else self.pos_embedding(x.size(1), x.size(1))
         x = fp16_clamp(x + self.attn(self.norm1(x), mask=mask, pos_bias=e))
         x = fp16_clamp(x + self.ffn(self.norm2(x)))
         return x
 
 
 class T5CrossAttention(nn.Module):
-
-    def __init__(self,
-                 dim,
-                 dim_attn,
-                 dim_ffn,
-                 num_heads,
-                 num_buckets,
-                 shared_pos=True,
-                 dropout=0.1):
+    def __init__(self, dim, dim_attn, dim_ffn, num_heads, num_buckets, shared_pos=True, dropout=0.1):
         super(T5CrossAttention, self).__init__()
         self.dim = dim
         self.dim_attn = dim_attn
@@ -204,36 +192,18 @@ class T5CrossAttention(nn.Module):
         self.cross_attn = T5Attention(dim, dim_attn, num_heads, dropout)
         self.norm3 = MojoRMSNorm(dim, eps=1e-6)
         self.ffn = T5FeedForward(dim, dim_ffn, dropout)
-        self.pos_embedding = None if shared_pos else MojoRelativeEmbedding(
-            num_buckets, num_heads, bidirectional=False)
+        self.pos_embedding = None if shared_pos else MojoRelativeEmbedding(num_buckets, num_heads, bidirectional=False)
 
-    def forward(self,
-                x,
-                mask=None,
-                encoder_states=None,
-                encoder_mask=None,
-                pos_bias=None):
-        e = pos_bias if self.shared_pos else self.pos_embedding(
-            x.size(1), x.size(1))
+    def forward(self, x, mask=None, encoder_states=None, encoder_mask=None, pos_bias=None):
+        e = pos_bias if self.shared_pos else self.pos_embedding(x.size(1), x.size(1))
         x = fp16_clamp(x + self.self_attn(self.norm1(x), mask=mask, pos_bias=e))
-        x = fp16_clamp(x + self.cross_attn(
-            self.norm2(x), context=encoder_states, mask=encoder_mask))
+        x = fp16_clamp(x + self.cross_attn(self.norm2(x), context=encoder_states, mask=encoder_mask))
         x = fp16_clamp(x + self.ffn(self.norm3(x)))
         return x
 
 
 class T5Encoder(nn.Module):
-
-    def __init__(self,
-                 vocab,
-                 dim,
-                 dim_attn,
-                 dim_ffn,
-                 num_heads,
-                 num_layers,
-                 num_buckets,
-                 shared_pos=True,
-                 dropout=0.1):
+    def __init__(self, vocab, dim, dim_attn, dim_ffn, num_heads, num_layers, num_buckets, shared_pos=True, dropout=0.1):
         super(T5Encoder, self).__init__()
         self.dim = dim
         self.dim_attn = dim_attn
@@ -244,22 +214,21 @@ class T5Encoder(nn.Module):
         self.shared_pos = shared_pos
 
         # layers
-        self.token_embedding = vocab if isinstance(vocab, nn.Embedding) \
-            else nn.Embedding(vocab, dim)
-        self.pos_embedding = MojoRelativeEmbedding(
-            num_buckets, num_heads, bidirectional=True) if shared_pos else None
+        self.token_embedding = vocab if isinstance(vocab, nn.Embedding) else nn.Embedding(vocab, dim)
+        self.pos_embedding = MojoRelativeEmbedding(num_buckets, num_heads, bidirectional=True) if shared_pos else None
         self.dropout = nn.Dropout(dropout)
-        self.blocks = nn.ModuleList([
-            T5SelfAttention(dim, dim_attn, dim_ffn, num_heads, num_buckets,
-                            shared_pos, dropout) for _ in range(num_layers)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                T5SelfAttention(dim, dim_attn, dim_ffn, num_heads, num_buckets, shared_pos, dropout)
+                for _ in range(num_layers)
+            ]
+        )
         self.norm = T5LayerNorm(dim)
 
     def forward(self, ids, mask=None):
         x = self.token_embedding(ids)
         x = self.dropout(x)
-        e = self.pos_embedding(x.size(1),
-                               x.size(1)) if self.shared_pos else None
+        e = self.pos_embedding(x.size(1), x.size(1)) if self.shared_pos else None
         for block in self.blocks:
             x = block(x, mask, pos_bias=e)
         x = self.norm(x)
@@ -268,17 +237,7 @@ class T5Encoder(nn.Module):
 
 
 class T5Decoder(nn.Module):
-
-    def __init__(self,
-                 vocab,
-                 dim,
-                 dim_attn,
-                 dim_ffn,
-                 num_heads,
-                 num_layers,
-                 num_buckets,
-                 shared_pos=True,
-                 dropout=0.1):
+    def __init__(self, vocab, dim, dim_attn, dim_ffn, num_heads, num_layers, num_buckets, shared_pos=True, dropout=0.1):
         super(T5Decoder, self).__init__()
         self.dim = dim
         self.dim_attn = dim_attn
@@ -289,15 +248,15 @@ class T5Decoder(nn.Module):
         self.shared_pos = shared_pos
 
         # layers
-        self.token_embedding = vocab if isinstance(vocab, nn.Embedding) \
-            else nn.Embedding(vocab, dim)
-        self.pos_embedding = MojoRelativeEmbedding(
-            num_buckets, num_heads, bidirectional=False) if shared_pos else None
+        self.token_embedding = vocab if isinstance(vocab, nn.Embedding) else nn.Embedding(vocab, dim)
+        self.pos_embedding = MojoRelativeEmbedding(num_buckets, num_heads, bidirectional=False) if shared_pos else None
         self.dropout = nn.Dropout(dropout)
-        self.blocks = nn.ModuleList([
-            T5CrossAttention(dim, dim_attn, dim_ffn, num_heads, num_buckets,
-                             shared_pos, dropout) for _ in range(num_layers)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                T5CrossAttention(dim, dim_attn, dim_ffn, num_heads, num_buckets, shared_pos, dropout)
+                for _ in range(num_layers)
+            ]
+        )
         self.norm = T5LayerNorm(dim)
 
     def forward(self, ids, mask=None, encoder_states=None, encoder_mask=None):
@@ -312,8 +271,7 @@ class T5Decoder(nn.Module):
         # layers
         x = self.token_embedding(ids)
         x = self.dropout(x)
-        e = self.pos_embedding(x.size(1),
-                               x.size(1)) if self.shared_pos else None
+        e = self.pos_embedding(x.size(1), x.size(1)) if self.shared_pos else None
         for block in self.blocks:
             x = block(x, mask, encoder_states, encoder_mask, pos_bias=e)
         x = self.norm(x)
@@ -322,18 +280,19 @@ class T5Decoder(nn.Module):
 
 
 class T5Model(nn.Module):
-
-    def __init__(self,
-                 vocab_size,
-                 dim,
-                 dim_attn,
-                 dim_ffn,
-                 num_heads,
-                 encoder_layers,
-                 decoder_layers,
-                 num_buckets,
-                 shared_pos=True,
-                 dropout=0.1):
+    def __init__(
+        self,
+        vocab_size,
+        dim,
+        dim_attn,
+        dim_ffn,
+        num_heads,
+        encoder_layers,
+        decoder_layers,
+        num_buckets,
+        shared_pos=True,
+        dropout=0.1,
+    ):
         super(T5Model, self).__init__()
         self.vocab_size = vocab_size
         self.dim = dim
@@ -346,12 +305,12 @@ class T5Model(nn.Module):
 
         # layers
         self.token_embedding = nn.Embedding(vocab_size, dim)
-        self.encoder = T5Encoder(self.token_embedding, dim, dim_attn, dim_ffn,
-                                 num_heads, encoder_layers, num_buckets,
-                                 shared_pos, dropout)
-        self.decoder = T5Decoder(self.token_embedding, dim, dim_attn, dim_ffn,
-                                 num_heads, decoder_layers, num_buckets,
-                                 shared_pos, dropout)
+        self.encoder = T5Encoder(
+            self.token_embedding, dim, dim_attn, dim_ffn, num_heads, encoder_layers, num_buckets, shared_pos, dropout
+        )
+        self.decoder = T5Decoder(
+            self.token_embedding, dim, dim_attn, dim_ffn, num_heads, decoder_layers, num_buckets, shared_pos, dropout
+        )
         self.head = nn.Linear(dim, vocab_size, bias=False)
 
     def forward(self, encoder_ids, encoder_mask, decoder_ids, decoder_mask):
@@ -361,28 +320,30 @@ class T5Model(nn.Module):
         return x
 
 
-def _t5(name,
-        encoder_only=False,
-        decoder_only=False,
-        return_tokenizer=False,
-        tokenizer_kwargs={},
-        dtype=torch.float32,
-        device='cpu',
-        **kwargs):
+def _t5(
+    name,
+    encoder_only=False,
+    decoder_only=False,
+    return_tokenizer=False,
+    tokenizer_kwargs={},
+    dtype=torch.float32,
+    device="cpu",
+    **kwargs,
+):
     # sanity check
     assert not (encoder_only and decoder_only)
 
     # params
     if encoder_only:
         model_cls = T5Encoder
-        kwargs['vocab'] = kwargs.pop('vocab_size')
-        kwargs['num_layers'] = kwargs.pop('encoder_layers')
-        _ = kwargs.pop('decoder_layers')
+        kwargs["vocab"] = kwargs.pop("vocab_size")
+        kwargs["num_layers"] = kwargs.pop("encoder_layers")
+        _ = kwargs.pop("decoder_layers")
     elif decoder_only:
         model_cls = T5Decoder
-        kwargs['vocab'] = kwargs.pop('vocab_size')
-        kwargs['num_layers'] = kwargs.pop('decoder_layers')
-        _ = kwargs.pop('encoder_layers')
+        kwargs["vocab"] = kwargs.pop("vocab_size")
+        kwargs["num_layers"] = kwargs.pop("decoder_layers")
+        _ = kwargs.pop("encoder_layers")
     else:
         model_cls = T5Model
 
@@ -407,13 +368,13 @@ def umt5_xxl(**kwargs):
         decoder_layers=24,
         num_buckets=32,
         shared_pos=False,
-        dropout=0.1)
+        dropout=0.1,
+    )
     cfg.update(**kwargs)
-    return _t5('umt5-xxl', **cfg)
+    return _t5("umt5-xxl", **cfg)
 
 
 class T5EncoderModel:
-
     def __init__(
         self,
         text_len,
@@ -430,25 +391,21 @@ class T5EncoderModel:
         self.tokenizer_path = tokenizer_path
 
         # init model
-        model = umt5_xxl(
-            encoder_only=True,
-            return_tokenizer=False,
-            dtype=dtype,
-            device=device).eval().requires_grad_(False)
-        logging.info(f'loading {checkpoint_path}')
-        model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
+        model = (
+            umt5_xxl(encoder_only=True, return_tokenizer=False, dtype=dtype, device=device).eval().requires_grad_(False)
+        )
+        logging.info(f"loading {checkpoint_path}")
+        model.load_state_dict(torch.load(checkpoint_path, map_location="cpu"))
         self.model = model
         if shard_fn is not None:
             self.model = shard_fn(self.model, sync_module_states=False)
         else:
             self.model.to(self.device)
         # init tokenizer
-        self.tokenizer = HuggingfaceTokenizer(
-            name=tokenizer_path, seq_len=text_len, clean='whitespace')
+        self.tokenizer = HuggingfaceTokenizer(name=tokenizer_path, seq_len=text_len, clean="whitespace")
 
     def __call__(self, texts, device):
-        ids, mask = self.tokenizer(
-            texts, return_mask=True, add_special_tokens=True)
+        ids, mask = self.tokenizer(texts, return_mask=True, add_special_tokens=True)
         ids = ids.to(device)
         mask = mask.to(device)
         seq_lens = mask.gt(0).sum(dim=1).long()

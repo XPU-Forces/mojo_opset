@@ -218,7 +218,7 @@ class MojoChannelRMSNorm(MojoOperator):
         super().__init__(**kwargs)
         b_dims = (1, 1) if images else (1, 1, 1)
         shape = (hidden_size, *b_dims) if channel_first else (hidden_size,)
-        self.scale = hidden_size ** 0.5
+        self.scale = hidden_size**0.5
         self.gamma = torch.nn.Parameter(torch.ones(shape, **self.tensor_factory_kwargs))
         self.bias = torch.nn.Parameter(torch.zeros(shape, **self.tensor_factory_kwargs)) if bias else None
         self.channel_first = channel_first

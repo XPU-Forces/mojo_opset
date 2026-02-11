@@ -68,9 +68,12 @@ class MojoRelativeEmbedding(MojoOperator):
             rel_pos = -torch.min(rel_pos, torch.zeros_like(rel_pos))
 
         max_exact = num_buckets // 2
-        rel_pos_large = max_exact + (torch.log(rel_pos.float() / max_exact) /
-                                     math.log(self.max_dist / max_exact) *
-                                     (num_buckets - max_exact)).long()
+        rel_pos_large = (
+            max_exact
+            + (
+                torch.log(rel_pos.float() / max_exact) / math.log(self.max_dist / max_exact) * (num_buckets - max_exact)
+            ).long()
+        )
         rel_pos_large = torch.min(rel_pos_large, torch.full_like(rel_pos_large, num_buckets - 1))
         rel_buckets += torch.where(rel_pos < max_exact, rel_pos, rel_pos_large)
         return rel_buckets
