@@ -17,41 +17,53 @@ except ImportError as e:
     raise RuntimeError(f"Unsupported Triton Platform '{platform}': {e}") from e
 
 
-gelu_fwd_impl = getattr(ttx_backend_module, "gelu_fwd_impl")
-gelu_bwd_impl = getattr(ttx_backend_module, "gelu_bwd_impl")
+def _get_kernel_impl(ttx_backend_module, kernel_name):
+    def _not_impl(*args, **kwargs):
+        raise NotImplementedError(f"Kernel '{kernel_name}' not implemented for platform '{platform}'.")
 
-silu_fwd_impl = getattr(ttx_backend_module, "silu_fwd_impl")
-silu_bwd_impl = getattr(ttx_backend_module, "silu_bwd_impl")
+    return getattr(ttx_backend_module, kernel_name, _not_impl)
 
-rope_fwd_impl = getattr(ttx_backend_module, "rope_fwd_impl")
-rope_bwd_impl = getattr(ttx_backend_module, "rope_bwd_impl")
 
-swiglu_fwd_impl = getattr(ttx_backend_module, "swiglu_fwd_impl")
-swiglu_bwd_impl = getattr(ttx_backend_module, "swiglu_bwd_impl")
+gelu_fwd_impl = _get_kernel_impl(ttx_backend_module, "gelu_fwd_impl")
+gelu_bwd_impl = _get_kernel_impl(ttx_backend_module, "gelu_bwd_impl")
 
-rmsnorm_fwd_impl = getattr(ttx_backend_module, "rmsnorm_fwd_impl")
-rmsnorm_bwd_impl = getattr(ttx_backend_module, "rmsnorm_bwd_impl")
-rmsnorm_infer_impl = getattr(ttx_backend_module, "rmsnorm_infer_impl")
+silu_fwd_impl = _get_kernel_impl(ttx_backend_module, "silu_fwd_impl")
+silu_bwd_impl = _get_kernel_impl(ttx_backend_module, "silu_bwd_impl")
 
-paged_attention_prefill_impl = getattr(ttx_backend_module, "paged_attention_prefill_impl")
-paged_attention_decode_impl = getattr(ttx_backend_module, "paged_attention_decode_impl")
+rope_fwd_impl = _get_kernel_impl(ttx_backend_module, "rope_fwd_impl")
+rope_bwd_impl = _get_kernel_impl(ttx_backend_module, "rope_bwd_impl")
 
-fused_linear_cross_entropy_fwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_fwd_impl")
-fused_linear_cross_entropy_bwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_bwd_impl")
-fused_linear_cross_entropy_1d_fwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_1d_fwd_impl")
-fused_linear_cross_entropy_1d_bwd_impl = getattr(ttx_backend_module, "fused_linear_cross_entropy_1d_bwd_impl")
+swiglu_fwd_impl = _get_kernel_impl(ttx_backend_module, "swiglu_fwd_impl")
+swiglu_bwd_impl = _get_kernel_impl(ttx_backend_module, "swiglu_bwd_impl")
 
-sdpa_infer_impl = getattr(ttx_backend_module, "sdpa_infer_impl")
-sdpa_fwd_impl = getattr(ttx_backend_module, "sdpa_fwd_impl")
-sdpa_bwd_impl = getattr(ttx_backend_module, "sdpa_bwd_impl")
+rmsnorm_fwd_impl = _get_kernel_impl(ttx_backend_module, "rmsnorm_fwd_impl")
+rmsnorm_bwd_impl = _get_kernel_impl(ttx_backend_module, "rmsnorm_bwd_impl")
+rmsnorm_infer_impl = _get_kernel_impl(ttx_backend_module, "rmsnorm_infer_impl")
+layernorm_infer_impl = _get_kernel_impl(ttx_backend_module, "layernorm_infer_impl")
+layernorm_bwd_impl = _get_kernel_impl(ttx_backend_module, "layernorm_bwd_impl")
+layernorm_fwd_impl = _get_kernel_impl(ttx_backend_module, "layernorm_fwd_impl")
+fused_add_rmsnorm_infer_impl = _get_kernel_impl(ttx_backend_module, "fused_add_rmsnorm_infer_impl")
+fused_add_layernorm_infer_impl = _get_kernel_impl(ttx_backend_module, "fused_add_layernorm_infer_impl")
 
-diffusion_attention_fwd_impl = getattr(ttx_backend_module, "diffusion_attention_fwd_impl")
-diffusion_attention_bwd_impl = getattr(ttx_backend_module, "diffusion_attention_bwd_impl")
+paged_attention_prefill_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_prefill_impl")
+paged_attention_decode_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_decode_impl")
 
-m_grouped_matmul_impl = getattr(ttx_backend_module, "m_grouped_matmul_impl")
-k_grouped_matmul_impl = getattr(ttx_backend_module, "k_grouped_matmul_impl")
+fused_linear_cross_entropy_fwd_impl = _get_kernel_impl(ttx_backend_module, "fused_linear_cross_entropy_fwd_impl")
+fused_linear_cross_entropy_bwd_impl = _get_kernel_impl(ttx_backend_module, "fused_linear_cross_entropy_bwd_impl")
+fused_linear_cross_entropy_1d_fwd_impl = _get_kernel_impl(ttx_backend_module, "fused_linear_cross_entropy_1d_fwd_impl")
+fused_linear_cross_entropy_1d_bwd_impl = _get_kernel_impl(ttx_backend_module, "fused_linear_cross_entropy_1d_bwd_impl")
 
-store_paged_kv_impl = getattr(ttx_backend_module, "store_paged_kv_impl")
+sdpa_infer_impl = _get_kernel_impl(ttx_backend_module, "sdpa_infer_impl")
+sdpa_fwd_impl = _get_kernel_impl(ttx_backend_module, "sdpa_fwd_impl")
+sdpa_bwd_impl = _get_kernel_impl(ttx_backend_module, "sdpa_bwd_impl")
+
+diffusion_attention_fwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_attention_fwd_impl")
+diffusion_attention_bwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_attention_bwd_impl")
+
+m_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "m_grouped_matmul_impl")
+k_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "k_grouped_matmul_impl")
+
+store_paged_kv_impl = _get_kernel_impl(ttx_backend_module, "store_paged_kv_impl")
 
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
@@ -158,7 +170,9 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         sm_scale: Optional[float] = None,
         aux_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return paged_attention_prefill_impl(q, k_cache, v_cache, cu_seqlens_q, seqlens_kv, block_tables, gqa_interleave, sm_scale, aux_mask)
+        return paged_attention_prefill_impl(
+            q, k_cache, v_cache, cu_seqlens_q, seqlens_kv, block_tables, gqa_interleave, sm_scale, aux_mask
+        )
 
     @paged_attention_prefill.register_fake
     def paged_attention_prefill_fake(
@@ -170,7 +184,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         block_tables: torch.Tensor,
         gqa_interleave: bool,
         sm_scale: Optional[float] = None,
-        aux_mask: Optional[torch.Tensor] = None
+        aux_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return torch.empty_like(q)
 
@@ -181,9 +195,10 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         v_cache: torch.Tensor,
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
+        gqa_interleave: bool,
         sm_scale: Optional[float] = None,
     ) -> torch.Tensor:
-        return paged_attention_decode_impl(q, k_cache, v_cache, seqlens, block_tables, sm_scale)
+        return paged_attention_decode_impl(q, k_cache, v_cache, seqlens, block_tables, gqa_interleave, sm_scale)
 
     @paged_attention_decode.register_fake
     def paged_attention_decode_fake(
@@ -192,6 +207,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         v_cache: torch.Tensor,
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
+        gqa_interleave: bool,
         sm_scale: Optional[float] = None,
     ) -> torch.Tensor:
         return torch.empty_like(q)
@@ -634,6 +650,11 @@ else:
     rmsnorm_fwd = rmsnorm_fwd_impl
     rmsnorm_bwd = rmsnorm_bwd_impl
     rmsnorm_infer = rmsnorm_infer_impl
+    layernorm_fwd = layernorm_fwd_impl
+    layernorm_bwd = layernorm_bwd_impl
+    layernorm_infer = layernorm_infer_impl
+    fused_add_rmsnorm_infer = fused_add_rmsnorm_infer_impl
+    fused_add_layernorm_infer = fused_add_layernorm_infer_impl
     fused_linear_cross_entropy_fwd = fused_linear_cross_entropy_fwd_impl
     fused_linear_cross_entropy_bwd = fused_linear_cross_entropy_bwd_impl
     fused_linear_cross_entropy_1d_fwd = fused_linear_cross_entropy_1d_fwd_impl

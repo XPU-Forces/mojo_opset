@@ -6,7 +6,7 @@ import torch
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
-from mojo_opset import MojoGroupLinear
+from mojo_opset import MojoGroupGemm
 
 
 def generate_random_list(length, total_sum):
@@ -36,12 +36,12 @@ def generate_random_list(length, total_sum):
 @auto_switch_platform()
 @bypass_not_implemented
 def test_group_gemm(input, weight, group_list):
-    group_gemm = MojoGroupLinear(
+    group_gemm = MojoGroupGemm(
         trans_weight=False,
         weight=weight,
     )
 
-    group_gemm_ref = MojoGroupLinear._registry.get("torch")(
+    group_gemm_ref = MojoGroupGemm._registry.get("torch")(
         trans_weight=False,
         weight=weight,
     )
