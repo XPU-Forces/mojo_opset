@@ -111,7 +111,7 @@ class MojoRoPE(MojoOperator):
             sin: Sine position embeddings
             cu_seqlens: Cumulative sequence lengths for varlen scenario
             kv_lens: Historical KV cache lengths(NOT include the tokens from the current decode step).
-            head_first: True for padded input [B, N, S, D], False for [B, S, N, D]
+            head_first: True for padded input [B, N, S, D], False for [B, S, N, D], only used for padded input(as 'Scenario descriptions' above)
             rope_percentage: Percentage of head dim to apply RoPE (default: 1.0)
 
         Returns:
