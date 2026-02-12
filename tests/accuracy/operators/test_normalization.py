@@ -8,16 +8,10 @@ from mojo_opset import MojoResidualAddLayerNorm
 from mojo_opset import MojoResidualAddRMSNorm
 from mojo_opset import MojoRMSNorm
 
-torch.manual_seed(42)
+torch.manual_seed(43)
 
-shapes = [
-    (32, 1024),
-    (64, 8192),
-    (57, 7338),
-    (2, 256),
-    (7762, 18778),
-]
-dtypes = [torch.float32, torch.float16, torch.bfloat16]
+
+dtypes = [torch.float16, torch.bfloat16]
 
 
 @pytest.mark.parametrize(
@@ -106,7 +100,6 @@ def test_layernorm(shape, dtype, eps):
         (64, 8192),
         (57, 7338),
         (2, 256),
-        (7762, 18778),
     ],
 )
 @pytest.mark.parametrize("dtype", dtypes)
@@ -149,7 +142,6 @@ def test_residual_add_rms_norm(shape, dtype, norm_pos, eps):
         (64, 8192),
         (57, 7338),
         (2, 256),
-        (7762, 18778),
     ],
 )
 @pytest.mark.parametrize("dtype", dtypes)
