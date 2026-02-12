@@ -3,7 +3,6 @@ import random
 import pytest
 import torch
 
-from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoGroupGemm
@@ -23,19 +22,21 @@ def generate_random_list(length, total_sum):
 
 
 @pytest.mark.parametrize(
-    "input, weight, group_list",
+    "group_size, token_num, hidden_dim",
     [
-        (
-            torch.randn(size=(8 * 2560, 4096), dtype=dtype),
-            torch.randn(size=(8, 4096, 4096), dtype=dtype),
-            generate_random_list(8, 8 * 2560),
-        )
-        for dtype in [torch.float16, torch.bfloat16]
+        (8, 8 * 2560, 4096),
     ],
 )
-@auto_switch_platform()
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.float16, torch.bfloat16],
+)
 @bypass_not_implemented
-def test_group_gemm(input, weight, group_list):
+def test_group_gemm(group_size, token_num, hidden_dim, dtype):
+    input = torch.randn(size=(token_num, hidden_dim), dtype=dtype)
+    weight = torch.randn(size=(group_size, hidden_dim, hidden_dim), dtype=dtype)
+    group_list = generate_random_list(group_size, token_num).to(input.device)
+
     group_gemm = MojoGroupGemm(
         trans_weight=False,
         weight=weight,

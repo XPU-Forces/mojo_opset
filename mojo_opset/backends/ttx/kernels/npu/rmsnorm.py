@@ -11,30 +11,31 @@ from mojo_opset.backends.ttx.kernels.utils import align
 from mojo_opset.backends.ttx.kernels.utils import ceil_div
 from mojo_opset.backends.ttx.kernels.utils import torch_to_triton_dtype
 
-"""
-This file incorporates code from Unsloth licensed under the Apache License, Version 2.0.
-See the original Unsloth repository at https://github.com/unslothai/unsloth.
-
-Portions of this file are adapted from:
-https://github.com/linkedin/Liger-Kernel/blob/7382a8761f9af679482b968f9348013d933947c7/src/liger_kernel/ops/rmsnorm.py#L30
-which in turn is based on Unsloth code at:
-https://github.com/unslothai/unsloth/blob/fd753fed99ed5f10ef8a9b7139588d9de9ddecfb/unsloth/kernels/rms_layernorm.py#L22
-
-Modifications in this repository by triton-x team, 2025.
-"""
-
-
 COL_BLOCKING_THRESHOLD = 2048
 
 _CASTING_MODE_NONE: tl.constexpr = tl.constexpr(-1)
 _CASTING_MODE_LLAMA: tl.constexpr = tl.constexpr(0)
 _CASTING_MODE_GEMMA: tl.constexpr = tl.constexpr(1)
 
+TOKEN_BLOCK_SIZE_TABLE = {
+    2048: 4,
+    1024: 8,
+    512: 10,
+    256: 18,
+    128: 24,
+}
+
 
 def rms_norm_fwd_heuristics(args):
-    # Empirical value; hard-coded.
-    if args["n_cols"] <= COL_BLOCKING_THRESHOLD:
-        return ceil_div(8192, args["n_cols"])
+    hidden_dim = args["n_cols"]
+    if hidden_dim <= COL_BLOCKING_THRESHOLD:
+        if hidden_dim in TOKEN_BLOCK_SIZE_TABLE:
+            return TOKEN_BLOCK_SIZE_TABLE[hidden_dim]
+
+        for dim_thresh, block_size in sorted(TOKEN_BLOCK_SIZE_TABLE.items()):
+            if hidden_dim <= dim_thresh:
+                return block_size
+        return 1
     else:
         return 4
 
@@ -385,7 +386,8 @@ def _rmsnorm_bwd_large_cols_kernel(
                 dX_ptr + rows_off[:, None] * dX_row_stride + cols_off[None, :], dX_chunk.to(X_dtype), mask=block_mask
             )
 
-            tl.atomic_add(dW_ptr + cols_off, dW_chunk_sum, mask=cols_mask)
+            dW_existing = tl.load(dW_ptr + pid * dW_row_stride + cols_off, mask=cols_mask, other=0.0)
+            tl.store(dW_ptr + pid * dW_row_stride + cols_off, dW_existing + dW_chunk_sum, mask=cols_mask)
 
 
 def rmsnorm_fwd_impl(
@@ -454,15 +456,7 @@ def rmsnorm_bwd_impl(
 
     grid = (num_programs,)
 
-    if n_cols <= COL_BLOCKING_THRESHOLD:
-        _dW = torch.zeros((num_programs, n_cols), dtype=torch.float32, device=W.device)
-    else:
-        _dW = torch.zeros((1, n_cols), dtype=torch.float32, device=W.device)
-
-    # if in_place:
-    #     dX_2d = dY_2d
-    # else:
-    #     dX_2d = torch.empty_like(dY_2d)
+    _dW = torch.zeros((num_programs, n_cols), dtype=torch.float32, device=W.device)
     dX_2d = torch.empty_like(dY_2d)
 
     if n_cols <= COL_BLOCKING_THRESHOLD:
@@ -485,9 +479,7 @@ def rmsnorm_bwd_impl(
             X_dtype_triton,
             BLOCK_SIZE_N=align(X_2d, n_cols, VEC_ALIGN_BYTES),
         )
-        dW = _dW.sum(dim=0).to(W.dtype)
     else:
-        _dW.zero_()
         _rmsnorm_bwd_large_cols_kernel[grid](
             dY_2d,
             dY_2d.stride(0),
@@ -508,8 +500,8 @@ def rmsnorm_bwd_impl(
             BLOCK_SIZE_N=COL_BLOCKING_THRESHOLD,
             BLOCK_SIZE_M=2,  # Empirical value
         )
-        dW = _dW.squeeze(0).to(W.dtype)
 
+    dW = _dW.sum(dim=0).to(W.dtype)
     dX = dX_2d.reshape(*shape)
 
     return dX, dW

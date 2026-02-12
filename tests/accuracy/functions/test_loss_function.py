@@ -3,39 +3,27 @@ import torch
 
 from tests.utils import MockFunctionCtx
 from tests.utils import assert_close
-from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoFusedLinearCrossEntropyFunction
 
 
 @pytest.mark.parametrize(
-    "input_tensor, weight, target, bias",
-    [
-        (
-            torch.randn(2048, 1024, dtype=torch.bfloat16, requires_grad=True),
-            torch.randn(4096, 1024, dtype=torch.bfloat16, requires_grad=True),
-            torch.randint(0, 4096, (2048,), dtype=torch.long),
-            None,
-        )
-    ],
+    "batch, hidden_size, target_size",
+    [(2048, 1024, 4096)],
 )
 @pytest.mark.parametrize(
-    "has_bias, has_ce_weight, ignore_index, label_smoothing, lse_square_scale, reduction, return_z_loss",
+    "has_bias, has_ce_weight, ignore_index, label_smoothing, lse_square_scale, return_z_loss",
     [
-        (False, False, -100, 0.0, 0.0, "mean", False),
-        (False, False, -100, 0.0, 0.0, "sum", False),
-        (False, False, -100, 0.0, 0.0, "none", False),
+        (False, False, -100, 0.0, 0.0, False),
     ],
 )
-@auto_switch_platform()
+@pytest.mark.parametrize("reduction", ["mean", "sum", "none"])
 @bypass_not_implemented
 def test_fused_ce_forward_backward_diff(
-    # monkeypatch,
-    input_tensor,
-    weight,
-    target,
-    bias,
+    batch,
+    hidden_size,
+    target_size,
     has_bias,
     has_ce_weight,
     ignore_index,
@@ -44,6 +32,11 @@ def test_fused_ce_forward_backward_diff(
     reduction,
     return_z_loss,
 ):
+    input_tensor = torch.randn(batch, hidden_size, dtype=torch.bfloat16, requires_grad=True)
+    weight = torch.randn(target_size, hidden_size, dtype=torch.bfloat16, requires_grad=True)
+    target = torch.randint(0, target_size, (batch,), dtype=torch.long)
+    bias = None
+
     ce_weight = None
     if has_ce_weight:
         ce_weight = torch.rand(weight.shape[0], device=weight.device, dtype=torch.float32) + 0.1
