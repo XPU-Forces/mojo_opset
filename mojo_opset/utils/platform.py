@@ -100,6 +100,8 @@ def get_impl_by_platform():
             api_package_name = f"{package_name}.{api_dir}"
 
             for _, module_name, _ in pkgutil.iter_modules([api_dir_path]):
+                if platform != "npu" and module_name in ["convolution", "sampling", "store_lowrank", "loss_function"] :
+                    continue
                 full_module_name = f"{api_package_name}.{module_name}"
                 module = importlib.import_module(full_module_name)
 

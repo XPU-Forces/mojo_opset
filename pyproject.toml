@@ -21,6 +21,7 @@ npu = [
     "byted-triton-x >= 3.2.0.post24"
 ]
 mlu = [
+    "triton >= 3.2.0"
 ]
 amd = [
 ]
