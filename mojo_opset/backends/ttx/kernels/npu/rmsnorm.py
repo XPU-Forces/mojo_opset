@@ -114,6 +114,7 @@ def rmsnorm_infer_impl(
     w: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
+    assert x.size(-1) == w.size(-1)
     shape = x.shape
     dim = shape[-1]
     X_2d = x.reshape(-1, dim)
