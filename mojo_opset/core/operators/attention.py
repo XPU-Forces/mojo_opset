@@ -297,7 +297,96 @@ class MojoPrefillMLA(MojoOperator):
 
 
 class MojoPagedPrefillMLA(MojoOperator):
-    pass
+    def __init__(
+        self,
+        is_causal: bool = True,
+        window_size: int = -1,
+    ):
+        super().__init__()
+
+        if not isinstance(window_size, int) or (window_size != -1 and window_size < 1):
+            raise ValueError(f"window_size must be -1 or >= 1, got {window_size}")
+
+        self.is_causal = is_causal
+        self.window_size = window_size
+
+        # NOTE: implementation of forward currently operates under the condition that is_causal and window_size are defaults.
+        # assert
+        assert self.is_causal == True, "is_casual should be True."
+        assert self.window_size == -1, "window_size should be -1."
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key_query: torch.Tensor,
+        value_query: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        block_tables: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        """
+        Paged prefill MLA attention operator.
+
+        Reconstructs per-token K/V from blocked caches and computes attention for
+        all tokens (flattened across batch), returning a tensor of shape
+        (T, Hq, D).
+        """
+        total_q_tokens, num_q_heads, head_dim = query.shape
+        num_total_blocks, num_kv_heads, block_size, _ = key_query.shape
+
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(head_dim)
+
+        # allocate unpadded buffers
+        k_unpadded = torch.zeros(total_q_tokens, num_kv_heads, head_dim, dtype=query.dtype, device=query.device)
+        v_unpadded = torch.zeros(total_q_tokens, num_kv_heads, head_dim, dtype=query.dtype, device=query.device)
+
+        q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        batch_size = len(q_lens)
+
+        for i in range(batch_size):
+            seq_len = q_lens[i].item()
+            start_loc = cu_seqlens_q[i].item()
+
+            num_blocks_for_seq = (seq_len + block_size - 1) // block_size
+
+            for j in range(num_blocks_for_seq):
+                physical_block_id = block_tables[i, j].item()
+
+                start_pos_in_seq = j * block_size
+                tokens_in_block = min(block_size, seq_len - start_pos_in_seq)
+
+                start_loc_in_batch = start_loc + start_pos_in_seq
+                end_loc_in_batch = start_loc_in_batch + tokens_in_block
+
+                k_slice = key_query[physical_block_id, :, :tokens_in_block, :]
+                k_unpadded[start_loc_in_batch:end_loc_in_batch, :, :] = k_slice.permute(1, 0, 2)
+
+                v_slice = value_query[physical_block_id, :, :tokens_in_block, :]
+                v_unpadded[start_loc_in_batch:end_loc_in_batch, :, :] = v_slice.permute(1, 0, 2)
+
+        # expand K/V heads to match query heads when necessary
+        if num_q_heads != num_kv_heads:
+            factor = num_q_heads // num_kv_heads
+            k_expanded = k_unpadded.repeat_interleave(factor, dim=1)
+            v_expanded = v_unpadded.repeat_interleave(factor, dim=1)
+        else:
+            k_expanded = k_unpadded
+            v_expanded = v_unpadded
+
+        # causal lower-triangular mask and per-sequence restriction
+        attn_mask = torch.ones(total_q_tokens, total_q_tokens, device=query.device, dtype=torch.bool).tril(diagonal=0)
+
+        tok_to_seq = torch.repeat_interleave(torch.arange(batch_size, device=query.device), q_lens)
+        seq_mask = tok_to_seq[:, None] == tok_to_seq[None, :]
+        final_mask = attn_mask & seq_mask
+
+        attn_scores = torch.einsum("thd,khd->thk", query, k_expanded) * softmax_scale
+        attn_scores.masked_fill_(~final_mask.unsqueeze(1), -torch.inf)
+
+        attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
+        output = torch.einsum("thk,khd->thd", attn_probs, v_expanded)
+        return output
 
 
 class MojoPrefillNSA(MojoOperator):
