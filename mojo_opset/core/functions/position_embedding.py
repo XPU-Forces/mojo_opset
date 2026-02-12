@@ -40,7 +40,7 @@ class MojoRoPEFunction(MojoFunction):
 
         ctx.save_for_backward(cos, sin)
 
-        return q_rot, k_rot
+        return q_rot.to(q.dtype), k_rot.to(k.dtype)
 
     @staticmethod
     def backward(
@@ -76,4 +76,4 @@ class MojoRoPEFunction(MojoFunction):
         grad_k_part2 = inverse_rotate_half(grad_output_k * sin)
         grad_k = grad_k_part1 + grad_k_part2
 
-        return grad_q, grad_k, None, None
+        return grad_q.to(grad_output_q.dtype), grad_k.to(grad_output_k.dtype), None, None

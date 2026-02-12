@@ -5,6 +5,10 @@ import torch
 from ..operator import MojoOperator
 
 
+class MojoStoreKVCache(MojoOperator):
+    pass
+
+
 class MojoStorePagedKVCache(MojoOperator):
     def __init__(
         self,
@@ -23,6 +27,7 @@ class MojoStorePagedKVCache(MojoOperator):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Append new K/V tokens into a block-based KV cache.
+        Supports both prefill (via cu_seq_lens) and decode (batch of 1 token) scenarios.
 
         Args:
             key_states (torch.Tensor): Shape (token_num, kv_head_num, head_dim) — new key tokens.
@@ -30,8 +35,9 @@ class MojoStorePagedKVCache(MojoOperator):
             key_cache (torch.Tensor): Shape (total_phys_blocks, kv_heads, block_size, head_dim) — key cache.
             value_cache (torch.Tensor): Shape (total_phys_blocks, kv_heads, block_size, head_dim) — value cache.
             block_table (torch.Tensor): Shape (bsz, max_blocks_per_seq) mapping logical blocks to physical IDs.
-            cu_seq_lens (torch.Tensor): Shape (bsz + 1,) cumulative sequence lengths per batch.
-            kv_lens (torch.Tensor): Shape (bsz,) current sequence lengths per batch.
+            cu_seq_lens (Optional[torch.Tensor]): Shape (bsz + 1,) cumulative sequence lengths for prefill.
+                                                 If None, assumes decode phase (1 token per sequence).
+            kv_lens (torch.Tensor): Shape (bsz,) current history sequence lengths per batch (start position for write).
 
         Returns:
             Tuple[torch.Tensor, torch.Tensor]: Updated `(key_cahce, value_cahce)` after in-place writes.
@@ -41,12 +47,20 @@ class MojoStorePagedKVCache(MojoOperator):
         )
 
         block_size = key_cache.shape[2]
+
         num_batches = len(kv_lens) if kv_lens is not None else 0
 
+        is_decode_mode = cu_seq_lens is None
+
         for batch_id in range(num_batches):
-            k_start = cu_seq_lens[batch_id].item()
-            k_end = cu_seq_lens[batch_id + 1].item()
-            now_seq_len = k_end - k_start
+            if not is_decode_mode:
+                k_start = cu_seq_lens[batch_id].item()
+                k_end = cu_seq_lens[batch_id + 1].item()
+                now_seq_len = k_end - k_start
+            else:
+                k_start = batch_id
+                k_end = batch_id + 1
+                now_seq_len = 1
 
             if now_seq_len <= 0:
                 continue

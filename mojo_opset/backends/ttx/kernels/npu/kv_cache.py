@@ -161,6 +161,9 @@ def store_paged_kv_impl(
 ):
     assert k_states.is_contiguous() and v_states.is_contiguous()
 
+    if cu_seqlens is None:
+        cu_seqlens = torch.arange(k_states.shape[0] + 1, device=k_states.device)
+
     num_kv_heads = k_states.shape[1]
     head_dim = k_states.shape[2]
 

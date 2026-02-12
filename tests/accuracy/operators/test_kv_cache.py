@@ -28,11 +28,17 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, kv_lens_val,
     kv_lens = torch.tensor(kv_lens_val, dtype=torch.long, device=device)
     seq_lens = torch.tensor(seq_lens_val, dtype=torch.long, device=device)
 
-    cu_seqlens = torch.cat(
-        [torch.zeros(1, dtype=torch.int32, device=device), torch.cumsum(seq_lens, dim=0, dtype=torch.int32)]
-    ).to(torch.long)
+    is_decode = torch.all(seq_lens == 1)
 
-    total_tokens = cu_seqlens[-1].item()
+    cu_seqlens = (
+        torch.cat(
+            [torch.zeros(1, dtype=torch.int32, device=device), torch.cumsum(seq_lens, dim=0, dtype=torch.int32)]
+        ).to(torch.long)
+        if not is_decode
+        else None
+    )
+
+    total_tokens = cu_seqlens[-1].item() if not is_decode else len(kv_lens_val)
 
     key_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=torch.bfloat16, device=device)
     value_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=torch.bfloat16, device=device)
