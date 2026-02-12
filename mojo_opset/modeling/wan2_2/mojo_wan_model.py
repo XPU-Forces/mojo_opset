@@ -27,7 +27,6 @@ def sinusoidal_embedding_1d(dim, position):
     return x
 
 
-@torch.amp.autocast("npu", enabled=False)
 def rope_params(max_seq_len, dim, theta=10000):
     assert dim % 2 == 0
     freqs = torch.outer(

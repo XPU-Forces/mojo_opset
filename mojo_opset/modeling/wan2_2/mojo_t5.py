@@ -379,7 +379,7 @@ class T5EncoderModel:
         self,
         text_len,
         dtype=torch.bfloat16,
-        device=torch.npu.current_device(),
+        device="cpu",
         checkpoint_path=None,
         tokenizer_path=None,
         shard_fn=None,

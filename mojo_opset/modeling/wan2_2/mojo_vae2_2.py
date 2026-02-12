@@ -841,7 +841,7 @@ class Wan2_2_VAE:
         dim_mult=[1, 2, 4, 4],
         temperal_downsample=[False, True, True],
         dtype=torch.float,
-        device="npu",
+        device="cpu",
     ):
 
         self.dtype = dtype
