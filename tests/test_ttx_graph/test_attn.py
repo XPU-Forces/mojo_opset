@@ -111,7 +111,8 @@ def test_paged_attention_prefill(
     sm_scale = 1.0 / math.sqrt(head_dim)
 
     torch.library.opcheck(
-        torch.ops.ttx.paged_attention_prefill, (query, k_cache, v_cache, cu_seqlens_q, seqlens_kv, block_tables, sm_scale)
+        torch.ops.ttx.paged_attention_prefill,
+        (query, k_cache, v_cache, cu_seqlens_q, seqlens_kv, block_tables, sm_scale),
     )
 
 

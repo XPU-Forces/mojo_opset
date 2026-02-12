@@ -5,27 +5,28 @@ import torch.nn.functional as F
 
 from ..operator import MojoOperator
 
+
 class MojoCausalConv1dUpdateState(MojoOperator):
     def forward(
         self,
         hidden_states: torch.Tensor,
         conv_state: torch.Tensor,
-        weight: torch.Tensor,         
+        weight: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
         activation: Optional[str] = None,
     ) -> torch.Tensor:
         """
         Causal Convolution-1D forward.
-        
+
         Args:
             hidden_states: Hidden states with shape of (batch, dim, seq_len)
             conv_state: Initial state to be convoluted with hidden_states, with shape of (batch, dim, state_len)
-            weight: Weight of Conv1d operator, with shape of (dim, window_size) 
+            weight: Weight of Conv1d operator, with shape of (dim, window_size)
             bias:  Bias of Conv1d, with shape of (dim,)
             activation: Flag for making silu activation on output
 
         Returns: Causal Conv1d output with shape of (batch, dim, seq_len  + state_len - window_size + 1)
-        
+
         Notes:
             - After forward this function conv_state will be update to final state.
         """

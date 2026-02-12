@@ -3,8 +3,8 @@ from typing import Tuple
 
 import torch
 
-from mojo_opset.backends.ttx.kernels.npu.convolution import causal_conv1d_bwd
-from mojo_opset.backends.ttx.kernels.npu.convolution import causal_conv1d_fwd
+from mojo_opset.backends.ttx.kernels import causal_conv1d_bwd
+from mojo_opset.backends.ttx.kernels import causal_conv1d_fwd
 from mojo_opset.backends.ttx.kernels.utils import input_guard
 from mojo_opset.core import MojoCausalConv1dFunction
 

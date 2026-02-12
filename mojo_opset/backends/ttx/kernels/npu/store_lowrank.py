@@ -42,7 +42,7 @@ def _store_label_cache_triton_kernel(
     tl.store(label_cache_ptr + label_cache_addr, key_lr_data, mask=valid_mask)
 
 
-def store_label_cache_fwd_impl(
+def store_label_cache_infer_impl(
     label_cache: torch.Tensor,
     key_lr: torch.Tensor,
     block_idxs: torch.Tensor,

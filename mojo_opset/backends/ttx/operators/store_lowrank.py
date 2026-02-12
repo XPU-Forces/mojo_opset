@@ -1,6 +1,6 @@
 import torch
 
-from mojo_opset.backends.ttx.kernels.npu.store_lowrank import store_label_cache_fwd_impl
+from mojo_opset.backends.ttx.kernels import store_label_cache_infer
 from mojo_opset.experimental import MojoStoreLowrank
 
 
@@ -15,7 +15,7 @@ class TTXStoreLowrank(MojoStoreLowrank):
         token_idxs: torch.Tensor,
         token_num: int,
     ):
-        return store_label_cache_fwd_impl(
+        return store_label_cache_infer(
             label_cache,
             key_lr,
             block_idxs,
