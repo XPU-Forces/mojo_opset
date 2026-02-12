@@ -6,14 +6,15 @@ from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_1d_bwd
 from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_1d_fwd
 from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_bwd
 from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_fwd
-from mojo_opset.backends.ttx.kernels.npu.fused_linear_cross_entropy import amp_custom_bwd
-from mojo_opset.backends.ttx.kernels.npu.fused_linear_cross_entropy import amp_custom_fwd
 from mojo_opset.core import MojoFusedLinearCrossEntropyFunction
+from mojo_opset.utils.platform import get_platform
+
+device = get_platform()
 
 
 class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
     @staticmethod
-    @amp_custom_fwd
+    @torch.amp.custom_fwd(device_type=device)
     def forward(
         ctx,
         input_tensor: torch.Tensor,
@@ -87,7 +88,7 @@ class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
             return loss, None
 
     @staticmethod
-    @amp_custom_bwd
+    @torch.amp.custom_bwd(device_type=device)
     def backward(
         ctx,
         grad_loss: torch.Tensor,

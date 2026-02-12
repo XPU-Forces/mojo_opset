@@ -97,12 +97,8 @@ class MojoPagedDecodeGQA(MojoOperator):
 
             q = query[i]
 
-            k_ref = torch.zeros(
-                seq_len, num_kv_heads, head_dim, device=query.device, dtype=query.dtype
-            )
-            v_ref = torch.zeros(
-                seq_len, num_kv_heads, head_dim, device=query.device, dtype=query.dtype
-            )
+            k_ref = torch.zeros(seq_len, num_kv_heads, head_dim, device=query.device, dtype=query.dtype)
+            v_ref = torch.zeros(seq_len, num_kv_heads, head_dim, device=query.device, dtype=query.dtype)
             num_blocks_for_seq = (seq_len + block_size - 1) // block_size
 
             for j in range(num_blocks_for_seq):
@@ -231,7 +227,6 @@ class MojoPagedPrefillGQA(MojoOperator):
                 kv_seq_len = q_seq_len
             else:
                 kv_seq_len = seqlens_kv[i].item()
-        
 
             num_blocks_for_seq = (kv_seq_len + block_size - 1) // block_size
             k_unpadded = torch.zeros(kv_seq_len, num_kv_heads, head_dim, dtype=query.dtype, device=query.device)
@@ -264,14 +259,16 @@ class MojoPagedPrefillGQA(MojoOperator):
 
             attn_scores = torch.einsum("thd,khd->thk", q, k_expanded).float() * softmax_scale
             if self.is_causal:
-                attn_mask = torch.ones(q_seq_len, kv_seq_len, device=query.device, dtype=torch.bool).tril(kv_seq_len - q_seq_len)
+                attn_mask = torch.ones(q_seq_len, kv_seq_len, device=query.device, dtype=torch.bool).tril(
+                    kv_seq_len - q_seq_len
+                )
                 attn_scores.masked_fill_(~attn_mask.unsqueeze(1), -torch.inf)
             elif mask is not None:
                 if mask.dim() == 2:
                     attn_mask = mask
                 else:
                     attn_mask = mask[i]
-                attn_mask = attn_mask[kv_seq_len - q_seq_len:kv_seq_len, :kv_seq_len]
+                attn_mask = attn_mask[kv_seq_len - q_seq_len : kv_seq_len, :kv_seq_len]
                 attn_scores.masked_fill_(~attn_mask.unsqueeze(1), -torch.inf)
 
             attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)

@@ -24,6 +24,10 @@ def _get_kernel_impl(ttx_backend_module, kernel_name):
     return getattr(ttx_backend_module, kernel_name, _not_impl)
 
 
+causal_conv1d_fwd_impl = _get_kernel_impl(ttx_backend_module, "causal_conv1d_fwd_impl")
+causal_conv1d_bwd_impl = _get_kernel_impl(ttx_backend_module, "causal_conv1d_bwd_impl")
+causal_conv1d_update_bdt_impl = _get_kernel_impl(ttx_backend_module, "causal_conv1d_update_bdt_impl")
+
 gelu_fwd_impl = _get_kernel_impl(ttx_backend_module, "gelu_fwd_impl")
 gelu_bwd_impl = _get_kernel_impl(ttx_backend_module, "gelu_bwd_impl")
 
@@ -64,6 +68,15 @@ m_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "m_grouped_matmul_i
 k_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "k_grouped_matmul_impl")
 
 store_paged_kv_impl = _get_kernel_impl(ttx_backend_module, "store_paged_kv_impl")
+
+store_label_cache_infer_impl = _get_kernel_impl(ttx_backend_module, "store_label_cache_infer_impl")
+
+fused_penalties_temp_impl = _get_kernel_impl(ttx_backend_module, "fused_penalties_temp_impl")
+join_prob_reject_sampling_impl = _get_kernel_impl(ttx_backend_module, "join_prob_reject_sampling_impl")
+reject_sampling_impl = _get_kernel_impl(ttx_backend_module, "reject_sampling_impl")
+top_p_filter_impl = _get_kernel_impl(ttx_backend_module, "top_p_filter_impl")
+top_p_sampling_impl = _get_kernel_impl(ttx_backend_module, "top_p_sampling_impl")
+
 
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
@@ -637,6 +650,9 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         return torch.empty_like(key_cache), torch.empty_like(value_cache)
 
 else:
+    causal_conv1d_fwd = causal_conv1d_fwd_impl
+    causal_conv1d_bwd = causal_conv1d_bwd_impl
+    causal_conv1d_update_bdt = causal_conv1d_update_bdt_impl
     gelu_fwd = gelu_fwd_impl
     gelu_bwd = gelu_bwd_impl
     silu_fwd = silu_fwd_impl
@@ -667,3 +683,9 @@ else:
     m_grouped_matmul = m_grouped_matmul_impl
     k_grouped_matmul = k_grouped_matmul_impl
     store_paged_kv = store_paged_kv_impl
+    store_label_cache_infer = store_label_cache_infer_impl
+    fused_penalties_temp = fused_penalties_temp_impl
+    join_prob_reject_sampling = join_prob_reject_sampling_impl
+    reject_sampling = reject_sampling_impl
+    top_p_filter = top_p_filter_impl
+    top_p_sampling = top_p_sampling_impl

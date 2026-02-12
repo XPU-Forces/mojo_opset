@@ -60,7 +60,6 @@ def test_residual_add_layernorm(x, residual, weight, bias, norm_pos, eps):
     add_norm.weight = torch.nn.Parameter(weight)
     add_norm.bias = torch.nn.Parameter(bias)
 
-
     perf(lambda: add_norm(x, residual))  # noqa: F821
 
 

@@ -15,9 +15,8 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        AUX_MASK_SIZE=1024
-        self.aux_mask = torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE*3, dtype=torch.bool).tril(AUX_MASK_SIZE).npu()
-
+        AUX_MASK_SIZE = 1024
+        self.aux_mask = torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE * 3, dtype=torch.bool).tril(AUX_MASK_SIZE).npu()
 
     def forward(
         self,
@@ -36,9 +35,7 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         assert self.is_causal, (
             f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
-        assert mask is None, (
-            f"[TTXPagedPrefillGQA] TTX does not support mask, but got mask={mask}"
-        )
+        assert mask is None, f"[TTXPagedPrefillGQA] TTX does not support mask, but got mask={mask}"
         output = paged_attention_prefill(
             q=query,
             k_cache=k_cache,
@@ -73,9 +70,7 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         assert self.is_causal, (
             f"[TTXPagedDecodeGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
-        assert mask is None, (
-            f"[TTXPagedDecodeGQA] TTX does not support mask, but got mask={mask}"
-        )
+        assert mask is None, f"[TTXPagedDecodeGQA] TTX does not support mask, but got mask={mask}"
 
         output = paged_attention_decode(
             q=query,
