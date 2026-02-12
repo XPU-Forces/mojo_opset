@@ -231,12 +231,16 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
 
     @torch.library.custom_op("ttx::rope", mutates_args={})
     def rope_fwd(
-        q: torch.Tensor,  # [BNSD]
-        k: torch.Tensor,  # [BNSD]
-        cos: torch.Tensor,  # [BSD]
-        sin: torch.Tensor,  # [BSD]
-    ) -> Tuple[torch.Tensor, torch.Tensor]:  # [BNSD]
-        return rope_fwd_impl(q, k, cos, sin)
+        q: torch.Tensor,
+        k: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        kv_lens: Optional[torch.Tensor] = None,
+        head_first: bool = True,
+        rope_percentage: float = 1.0,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return rope_fwd_impl(q, k, cos, sin, cu_seqlens, kv_lens, head_first, rope_percentage)
 
     @rope_fwd.register_fake
     def rope_fwd_fake(
@@ -244,6 +248,10 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         k: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        kv_lens: Optional[torch.Tensor] = None,
+        head_first: bool = True,
+        rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(q), torch.empty_like(k)
 
@@ -251,10 +259,14 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     def rope_bwd(
         dq: torch.Tensor,
         dk: torch.Tensor,
-        cos: torch.Tensor,
         sin: torch.Tensor,
+        cos: torch.Tensor,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        kv_lens: Optional[torch.Tensor] = None,
+        head_first: bool = True,
+        rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return rope_bwd_impl(dq, dk, cos, sin)
+        return rope_bwd_impl(dq, dk, cos, sin, cu_seqlens, kv_lens, head_first, rope_percentage)
 
     @rope_bwd.register_fake
     def rope_bwd_fake(
@@ -262,6 +274,10 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         dk: torch.Tensor,
         sin: torch.Tensor,
         cos: torch.Tensor,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        kv_lens: Optional[torch.Tensor] = None,
+        head_first: bool = True,
+        rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(dq), torch.empty_like(dk)
 

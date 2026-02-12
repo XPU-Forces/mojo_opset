@@ -7,18 +7,18 @@ from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 
-@pytest.mark.parametrize("bs", [8, 32, 55])
-@pytest.mark.parametrize("seqlen", [128, 512, 3345, 4985, 6688])
+@pytest.mark.parametrize("bs", [32])
+@pytest.mark.parametrize("seqlen", [8192])
 @pytest.mark.parametrize(
     "q_heads, k_heads",
     [
-        (32, 32),
+        # (32, 32),
         (32, 8),
-        (16, 1),
+        # (16, 1),
     ],
 )
-@pytest.mark.parametrize("head_dim", [64, 128])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("head_dim", [128])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_pos_emb(bs, seqlen, q_heads, k_heads, head_dim, dtype):

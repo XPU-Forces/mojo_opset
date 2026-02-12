@@ -17,6 +17,8 @@ class TTXRoPE(MojoRoPE):
         cos: torch.Tensor,
         sin: torch.Tensor,
         cu_seqlens: Optional[torch.Tensor] = None,
+        kv_lens: Optional[torch.Tensor] = None,
+        head_first: bool = True,
+        rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        assert cu_seqlens is None, "cu_seqlens is not supported yet."
-        return rope_fwd(q, k, cos, sin)
+        return rope_fwd(q, k, cos, sin, cu_seqlens, kv_lens, head_first, rope_percentage)
