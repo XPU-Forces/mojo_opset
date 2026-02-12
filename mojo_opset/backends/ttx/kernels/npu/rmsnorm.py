@@ -385,7 +385,8 @@ def _rmsnorm_bwd_large_cols_kernel(
                 dX_ptr + rows_off[:, None] * dX_row_stride + cols_off[None, :], dX_chunk.to(X_dtype), mask=block_mask
             )
 
-            tl.atomic_add(dW_ptr + cols_off, dW_chunk_sum, mask=cols_mask)
+            dW_existing = tl.load(dW_ptr + pid * dW_row_stride + cols_off, mask=cols_mask, other=0.0)
+            tl.store(dW_ptr + pid * dW_row_stride + cols_off, dW_existing + dW_chunk_sum, mask=cols_mask)
 
 
 def rmsnorm_fwd_impl(
@@ -454,15 +455,7 @@ def rmsnorm_bwd_impl(
 
     grid = (num_programs,)
 
-    if n_cols <= COL_BLOCKING_THRESHOLD:
-        _dW = torch.zeros((num_programs, n_cols), dtype=torch.float32, device=W.device)
-    else:
-        _dW = torch.zeros((1, n_cols), dtype=torch.float32, device=W.device)
-
-    # if in_place:
-    #     dX_2d = dY_2d
-    # else:
-    #     dX_2d = torch.empty_like(dY_2d)
+    _dW = torch.zeros((num_programs, n_cols), dtype=torch.float32, device=W.device)
     dX_2d = torch.empty_like(dY_2d)
 
     if n_cols <= COL_BLOCKING_THRESHOLD:
@@ -485,9 +478,7 @@ def rmsnorm_bwd_impl(
             X_dtype_triton,
             BLOCK_SIZE_N=align(X_2d, n_cols, VEC_ALIGN_BYTES),
         )
-        dW = _dW.sum(dim=0).to(W.dtype)
     else:
-        _dW.zero_()
         _rmsnorm_bwd_large_cols_kernel[grid](
             dY_2d,
             dY_2d.stride(0),
@@ -508,8 +499,8 @@ def rmsnorm_bwd_impl(
             BLOCK_SIZE_N=COL_BLOCKING_THRESHOLD,
             BLOCK_SIZE_M=2,  # Empirical value
         )
-        dW = _dW.squeeze(0).to(W.dtype)
 
+    dW = _dW.sum(dim=0).to(W.dtype)
     dX = dX_2d.reshape(*shape)
 
     return dX, dW
