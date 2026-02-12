@@ -44,6 +44,7 @@ from .operators.gemm import MojoGroupGemm
 """ embedding """
 from .operators.embedding import MojoEmbedding
 from .operators.embedding import MojoParallelEmbedding
+from .operators.embedding import MojoRelativeEmbedding
 
 """ quantize """
 from .operators.quantize import MojoDequant
@@ -63,12 +64,14 @@ from .operators.normalization import MojoResidualAddNormCast
 from .operators.normalization import MojoResidualAddNormQuant
 from .operators.normalization import MojoResidualAddRMSNorm
 from .operators.normalization import MojoRMSNorm
+from .operators.normalization import MojoChannelRMSNorm
 
 """ position_embedding """
 from .operators.position_embedding import MojoNormRoPE
 from .operators.position_embedding import MojoNormRoPEStoreKV
 from .operators.position_embedding import MojoRoPE
 from .operators.position_embedding import MojoRoPEStoreKV
+from .operators.position_embedding import MojoGridRoPE
 
 """ sampling """
 from .operators.sampling import MojoApplyPenaltiesTempurate
@@ -130,6 +133,7 @@ __all__ = [
 
     "MojoEmbedding",
     "MojoParallelEmbedding",
+    "MojoRelativeEmbedding",
 
     "MojoMoE",
     "MojoMoEGating",
@@ -138,6 +142,7 @@ __all__ = [
 
     "MojoLayerNorm",
     "MojoRMSNorm",
+    "MojoChannelRMSNorm",
     "MojoResidualAddRMSNorm",
     "MojoResidualAddLayerNorm",
     "MojoNormQuant",
@@ -148,6 +153,7 @@ __all__ = [
     "MojoRoPEStoreKV",
     "MojoNormRoPE",
     "MojoNormRoPEStoreKV",
+    "MojoGridRoPE",
 
     "MojoTopPSampling",
     "MojoTopKSampling",
