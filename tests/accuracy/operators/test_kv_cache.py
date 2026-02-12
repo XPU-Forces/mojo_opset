@@ -29,7 +29,7 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, kv_lens_val,
 
     cu_seqlens = (
         torch.cat(
-            [torch.zeros(1, dtype=torch.int32, device=device), torch.cumsum(seq_lens, dim=0, dtype=torch.int32)]
+            [torch.zeros(1, dtype=torch.int32), torch.cumsum(seq_lens, dim=0, dtype=torch.int32)]
         ).to(torch.long)
         if not is_decode
         else None
