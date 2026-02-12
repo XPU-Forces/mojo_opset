@@ -6,39 +6,33 @@ from triton.runtime.libentry import libentry
 
 from mojo_opset.backends.ttx.kernels.npu.utils import VEC_ALIGN_BYTES
 from mojo_opset.backends.ttx.kernels.utils import align
+from mojo_opset.backends.ttx.kernels.utils import ceil_div
 
-"""
-This file contains the implementation of Fused Add Layer Norm for NPU.
-
-This op supports two modes for residual addition based on the user's definition:
-1. 'pre':
-    - S = hidden_states + residual
-    - Y = layernorm(S)
-    - Returns (Y, S). Y is the input to the next sublayer, S is the new residual.
-
-2. 'post':
-    - S = hidden_states + residual
-    - Y = layernorm(S)
-    - Returns (Y, Y). Y is used as both the new hidden state and the new residual.
-
-The core computation kernel is identical for both modes; the difference lies in the
-return values and gradient flow handled by the autograd.Function.
-
-Modifications for NPU architecture and updated 'post' mode by triton-x team, 2025.
-"""
-
-COL_BLOCKING_THRESHOLD = 4096
+COL_BLOCKING_THRESHOLD = 2048
+TOKEN_BLOCK_SIZE_TABLE = {
+    2048: 4,
+    1024: 8,
+    512: 10,
+    256: 18,
+    128: 24,
+}
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE_M": 1}),
-        triton.Config({"BLOCK_SIZE_M": 2}),
-        triton.Config({"BLOCK_SIZE_M": 4}),
-        triton.Config({"BLOCK_SIZE_M": 8}),
-    ],
-    key=["n_cols"],
-)
+def layer_norm_fwd_heuristics(args):
+    hidden_dim = args["n_cols"]
+    if hidden_dim <= COL_BLOCKING_THRESHOLD:
+        if hidden_dim in TOKEN_BLOCK_SIZE_TABLE:
+            return TOKEN_BLOCK_SIZE_TABLE[hidden_dim]
+
+        for dim_thresh, block_size in sorted(TOKEN_BLOCK_SIZE_TABLE.items()):
+            if hidden_dim <= dim_thresh:
+                return block_size
+        return 1
+    else:
+        return 4
+
+
+@triton.heuristics({"BLOCK_SIZE_M": layer_norm_fwd_heuristics})
 @libentry()
 @triton.jit
 def _fused_add_layernorm_fwd_kernel(
@@ -111,15 +105,7 @@ def _fused_add_layernorm_fwd_kernel(
             tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk.to(Y_ptr.dtype.element_ty), mask=block_mask)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE_M": 1}),
-        triton.Config({"BLOCK_SIZE_M": 4}),
-        triton.Config({"BLOCK_SIZE_M": 8}),
-    ],
-    key=["n_cols"],
-    restore_value=["dY_ptr", "dX_ptr", "dW_ptr", "dB_ptr"],
-)
+@triton.heuristics({"BLOCK_SIZE_M": lambda args: ceil_div(4096, args["n_cols"])})
 @libentry()
 @triton.jit
 def _fused_add_layernorm_bwd_kernel(
@@ -225,7 +211,11 @@ def fused_add_layernorm_infer_impl(
     R_2d = residual.reshape(-1, dim)
     n_rows, n_cols = X_2d.shape
 
-    BLOCK_SIZE_N = align(X_2d, n_cols, VEC_ALIGN_BYTES)
+    if n_cols > COL_BLOCKING_THRESHOLD:
+        BLOCK_SIZE_N = COL_BLOCKING_THRESHOLD
+    else:
+        BLOCK_SIZE_N = align(X_2d, n_cols, VEC_ALIGN_BYTES)
+
     num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
     grid = (num_programs,)
 
@@ -262,115 +252,3 @@ def fused_add_layernorm_infer_impl(
         return Y.reshape(*shape), Y.reshape(*shape)
     else:
         raise ValueError(f"Invalid add_mode: '{add_mode}'. Must be 'pre' or 'post'.")
-
-
-class TTXFusedAddLayerNormFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, hidden_states, residual, weight, bias, add_mode, eps, in_place):
-        shape = hidden_states.shape
-        dim = shape[-1]
-        X_2d = hidden_states.reshape(-1, dim)
-        R_2d = residual.reshape(-1, dim)
-        n_rows, n_cols = X_2d.shape
-
-        BLOCK_SIZE_N = align(X_2d, n_cols, VEC_ALIGN_BYTES)
-        num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
-        grid = (num_programs,)
-
-        ctx.add_mode = add_mode
-        ctx.in_place = in_place
-
-        Mean = torch.empty(n_rows, dtype=torch.float32, device=hidden_states.device)
-        RSTD = torch.empty(n_rows, dtype=torch.float32, device=hidden_states.device)
-
-        Y = torch.empty_like(X_2d)
-        S = torch.empty_like(X_2d)
-
-        _fused_add_layernorm_fwd_kernel[grid](
-            Y,
-            Y.stride(0),
-            S,
-            S.stride(0),
-            X_2d,
-            X_2d.stride(0),
-            R_2d,
-            R_2d.stride(0),
-            weight,
-            bias,
-            Mean,
-            Mean.stride(0),
-            RSTD,
-            RSTD.stride(0),
-            n_rows,
-            n_cols,
-            eps,
-            BLOCK_SIZE_N=BLOCK_SIZE_N,
-        )
-
-        ctx.save_for_backward(S.reshape(-1, dim), weight, bias, Mean, RSTD)
-
-        if add_mode == "pre":
-            return Y.reshape(*shape), S.reshape(*shape)
-        elif add_mode == "post":
-            return Y.reshape(*shape), Y.reshape(*shape)
-        else:
-            raise ValueError(f"Invalid add_mode: '{add_mode}'. Must be 'pre' or 'post'.")
-
-    @staticmethod
-    def backward(ctx, *grad_outputs):
-        grad_output1, grad_output2 = grad_outputs
-
-        if ctx.add_mode == "pre":
-            dY, dS_out = grad_output1, grad_output2
-        else:
-            dY = grad_output1 + grad_output2
-            dS_out = None
-
-        S_2d, weight, bias, Mean, RSTD = ctx.saved_tensors
-
-        shape = dY.shape
-        dim = shape[-1]
-        dY_2d = dY.reshape(-1, dim)
-        n_rows, n_cols = dY_2d.shape
-
-        has_dS_out = dS_out is not None
-        dS_out_2d = dS_out.reshape(-1, dim) if has_dS_out else torch.empty((0, 0), device=dY.device)
-
-        num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
-        grid = (num_programs,)
-
-        _dW = torch.zeros((num_programs, n_cols), dtype=torch.float32, device=weight.device)
-        _dB = torch.zeros((num_programs, n_cols), dtype=torch.float32, device=bias.device)
-        dX_2d = torch.empty_like(dY_2d)
-
-        BLOCK_SIZE_N = align(S_2d, n_cols, VEC_ALIGN_BYTES)
-
-        _fused_add_layernorm_bwd_kernel[grid](
-            dY_2d,
-            dY_2d.stride(0),
-            dS_out_2d,
-            dS_out_2d.stride(0),
-            dX_2d,
-            dX_2d.stride(0),
-            S_2d,
-            S_2d.stride(0),
-            weight,
-            Mean,
-            RSTD,
-            _dW,
-            _dW.stride(0),
-            _dB,
-            _dB.stride(0),
-            n_rows,
-            n_cols,
-            has_dS_out=has_dS_out,
-            BLOCK_SIZE_N=BLOCK_SIZE_N,
-        )
-
-        dW = _dW.sum(0).to(weight.dtype)
-        dB = _dB.sum(0).to(bias.dtype)
-
-        dX = dX_2d.reshape(*shape)
-        dR = dX.clone()
-
-        return dX, dR, dW, dB, None, None, None

@@ -8,49 +8,38 @@ from triton.runtime.libentry import libentry
 
 from mojo_opset.backends.ttx.kernels.npu.utils import VEC_ALIGN_BYTES
 from mojo_opset.backends.ttx.kernels.utils import align
-from mojo_opset.backends.ttx.kernels.utils import torch_to_triton_dtype
+from mojo_opset.backends.ttx.kernels.utils import ceil_div
 
-"""
-This file contains the implementation of Fused Add RMS Norm for NPU.
-
-This op supports two modes for residual addition based on the user's definition:
-1. 'pre':
-    - S = hidden_states + residual
-    - Y = rmsnorm(S)
-    - Returns (Y, S). Y is the input to the next sublayer, S is the new residual.
-
-2. 'post':
-    - S = hidden_states + residual
-    - Y = rmsnorm(S)
-    - Returns (Y, Y). Y is both the input to the next sublayer and the new residual.
-
-The core computation kernel is identical for both modes; the difference lies in the
-return values and gradient flow handled by the autograd.Function.
-
-Original 'pre' mode implementation based on Liger Kernel:
-https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/fused_add_rms_norm.py
-
-Modifications for NPU architecture and updated 'post' mode by triton-x team, 2025.
-"""
-
-COL_BLOCKING_THRESHOLD = 4096
+COL_BLOCKING_THRESHOLD = 2048
 
 _CASTING_MODE_NONE: tl.constexpr = tl.constexpr(-1)
 _CASTING_MODE_LLAMA: tl.constexpr = tl.constexpr(0)
 _CASTING_MODE_GEMMA: tl.constexpr = tl.constexpr(1)
 
+TOKEN_BLOCK_SIZE_TABLE = {
+    2048: 4,
+    1024: 6,
+    512: 8,
+    256: 16,
+    128: 20,
+}
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE_M": 1, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 2, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 4, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 8, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 12, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 16, "multibuffer": True}),
-    ],
-    key=["n_cols"],
-)
+
+def rms_norm_fwd_heuristics(args):
+    hidden_dim = args["n_cols"]
+    if hidden_dim <= COL_BLOCKING_THRESHOLD:
+        if hidden_dim in TOKEN_BLOCK_SIZE_TABLE:
+            return TOKEN_BLOCK_SIZE_TABLE[hidden_dim]
+
+        for dim_thresh, block_size in sorted(TOKEN_BLOCK_SIZE_TABLE.items()):
+            if hidden_dim <= dim_thresh:
+                return block_size
+        return 1
+    else:
+        return 4
+
+
+@triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
 @libentry()
 @triton.jit
 def _fused_add_rmsnorm_fwd_kernel(
@@ -131,15 +120,7 @@ def _fused_add_rmsnorm_fwd_kernel(
             tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk, mask=block_mask)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE_M": 1, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 4, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 8, "multibuffer": True}),
-    ],
-    key=["n_cols"],
-    restore_value=["dY_ptr", "dS_out_ptr", "dX_ptr", "dW_ptr"],
-)
+@triton.heuristics({"BLOCK_SIZE_M": lambda args: ceil_div(4096, args["n_cols"])})
 @libentry()
 @triton.jit
 def _fused_add_rmsnorm_bwd_kernel(
@@ -280,128 +261,3 @@ def fused_add_rmsnorm_infer_impl(
         return Y.reshape(*shape), Y.reshape(*shape)
     else:
         raise ValueError(f"Invalid add_mode: {add_mode}. Must be 'pre' or 'post'.")
-
-
-class TTXFusedAddRMSNormFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, hidden_states, residual, weight, add_mode, eps, offset, casting_mode, in_place):
-        shape = hidden_states.shape
-        dim = shape[-1]
-        hidden_states_2d = hidden_states.reshape(-1, dim)
-        residual_2d = residual.reshape(-1, dim)
-        n_rows, n_cols = hidden_states_2d.shape
-
-        if n_cols > COL_BLOCKING_THRESHOLD:
-            BLOCK_SIZE_N = 2048
-        else:
-            BLOCK_SIZE_N = align(hidden_states, n_cols, VEC_ALIGN_BYTES)
-
-        num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
-        grid = (num_programs,)
-
-        str_to_casting_mode = {"llama": 0, "gemma": 1, "none": -1}
-        _casting_mode = str_to_casting_mode[casting_mode]
-
-        ctx.add_mode = add_mode
-        ctx.offset = offset
-        ctx.in_place = in_place
-        ctx.casting_mode_int = _casting_mode
-        ctx.S_dtype_triton = torch_to_triton_dtype.get(hidden_states.dtype)
-
-        rstd_dtype = torch.float32 if _casting_mode in (0, 1) else hidden_states.dtype
-        RSTD = torch.empty(n_rows, dtype=rstd_dtype, device=hidden_states.device)
-
-        Y = torch.empty_like(hidden_states_2d)
-        S = torch.empty_like(hidden_states_2d)
-
-        _fused_add_rmsnorm_fwd_kernel[grid](
-            Y,
-            Y.stride(0),
-            S,
-            S.stride(0),
-            hidden_states_2d,
-            hidden_states_2d.stride(0),
-            residual_2d,
-            residual_2d.stride(0),
-            weight,
-            RSTD,
-            RSTD.stride(0),
-            n_rows,
-            n_cols,
-            eps,
-            offset,
-            casting_mode=_casting_mode,
-            BLOCK_SIZE_N=BLOCK_SIZE_N,
-        )
-
-        ctx.save_for_backward(S.reshape(-1, dim), weight, RSTD)
-
-        if add_mode == "pre":
-            return Y.reshape(*shape), S.reshape(*shape)
-        elif add_mode == "post":
-            return Y.reshape(*shape), Y.reshape(*shape)
-        else:
-            raise ValueError(f"Invalid add_mode: {add_mode}. Must be 'pre' or 'post'.")
-
-    @staticmethod
-    def backward(ctx, *grad_outputs):
-        grad_output1, grad_output2 = grad_outputs
-
-        if ctx.add_mode == "pre":
-            dY = grad_output1
-            dS_out = grad_output2
-        else:
-            dY = grad_output1 + grad_output2
-            dS_out = None
-
-        S_2d, weight, RSTD = ctx.saved_tensors
-
-        shape = dY.shape
-        dim = shape[-1]
-        dY_2d = dY.reshape(-1, dim)
-        n_rows, n_cols = dY_2d.shape
-
-        has_dS_out = dS_out is not None
-        dS_out_2d = dS_out.reshape(-1, dim) if has_dS_out else torch.empty((0, 0), device=dY.device, dtype=dY.dtype)
-
-        num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
-        grid = (num_programs,)
-
-        if n_cols <= COL_BLOCKING_THRESHOLD:
-            _dW = torch.zeros((num_programs, n_cols), dtype=torch.float32, device=weight.device)
-            BLOCK_SIZE_N = align(S_2d, n_cols, VEC_ALIGN_BYTES)
-        else:
-            _dW = torch.zeros((1, n_cols), dtype=torch.float32, device=weight.device)
-            BLOCK_SIZE_N = 2048
-
-        dhidden_states_2d = torch.empty_like(dY_2d)
-
-        _fused_add_rmsnorm_bwd_kernel[grid](
-            dY_2d,
-            dY_2d.stride(0),
-            dS_out_2d,
-            dS_out_2d.stride(0),
-            dhidden_states_2d,
-            dhidden_states_2d.stride(0),
-            S_2d,
-            S_2d.stride(0),
-            weight,
-            RSTD,
-            RSTD.stride(0),
-            _dW,
-            _dW.stride(0),
-            n_rows,
-            n_cols,
-            ctx.offset,
-            casting_mode=ctx.casting_mode_int,
-            S_dtype=ctx.S_dtype_triton,
-            has_dS_out=has_dS_out,
-            BLOCK_SIZE_N=BLOCK_SIZE_N,
-        )
-
-        dW = _dW.sum(dim=0).to(weight.dtype)
-
-        dX = dhidden_states_2d.reshape(*shape)
-        dR = dX.clone()
-
-        return dX, dR, dW, None, None, None, None, None

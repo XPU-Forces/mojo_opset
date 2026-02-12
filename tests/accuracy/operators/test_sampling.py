@@ -6,7 +6,6 @@ from typing import Union
 import pytest
 import torch
 
-from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoApplyPenaltiesTempurate
@@ -17,12 +16,12 @@ from mojo_opset import MojoTopPSampling
 
 
 @pytest.mark.parametrize(
-    "logits, topk, topp, min_tokens_to_keep",
-    [(torch.randn(20, 151936), 1000, 0.75, 1)],
+    "shape, topk, topp, min_tokens_to_keep",
+    [((20, 151936), 1000, 0.75, 1)],
 )
-@auto_switch_platform()
 @bypass_not_implemented
-def test_topp_sampling(logits, topk, topp, min_tokens_to_keep):
+def test_topp_sampling(shape, topk, topp, min_tokens_to_keep):
+    logits = torch.randn(shape, dtype=torch.float32)
     top_p_sampling = MojoTopPSampling(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk)
     top_p_sampling_ref = MojoTopPSampling._registry.get("torch")(
         top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk
@@ -32,12 +31,12 @@ def test_topp_sampling(logits, topk, topp, min_tokens_to_keep):
 
 
 @pytest.mark.parametrize(
-    "logits, topk, topp, min_tokens_to_keep",
-    [(torch.randn(20, 151936), 1000, 0.75, 1), (torch.randn(60, 155136), 100, 0.7, 1)],
+    "shape, topk, topp, min_tokens_to_keep",
+    [((20, 151936), 1000, 0.75, 1), ((60, 155136), 100, 0.7, 1)],
 )
-@auto_switch_platform()
 @bypass_not_implemented
-def test_topp_filter(logits, topk, topp, min_tokens_to_keep):
+def test_topp_filter(shape, topk, topp, min_tokens_to_keep):
+    logits = torch.randn(shape, dtype=torch.float32)
     top_p_filter = MojoTopPFilter()
     top_p_filter_ref = MojoTopPFilter._registry.get("torch")()
 
@@ -51,20 +50,15 @@ def test_topp_filter(logits, topk, topp, min_tokens_to_keep):
 
 
 @pytest.mark.parametrize(
-    "target_logits, draft_tokens, draft_probs, spec_step",
-    [
-        (
-            torch.randn((15, 4, 155136), dtype=torch.float32),
-            torch.randint(0, 155136, (15, 3)),
-            torch.ones((15, 3), dtype=torch.float32),
-            3,
-        )
-    ],
+    "batch_size, vocab_size, spec_step",
+    [(15, 155136, 3)],
 )
-@auto_switch_platform()
 @bypass_not_implemented
-def test_reject_sampler(target_logits, draft_tokens, draft_probs, spec_step):
+def test_reject_sampler(batch_size, vocab_size, spec_step):
     torch.manual_seed(42)
+    target_logits = torch.randn((batch_size, 1 + spec_step, vocab_size), dtype=torch.float32)
+    draft_tokens = torch.randint(0, vocab_size, (batch_size, spec_step))
+    draft_probs = torch.ones((batch_size, spec_step), dtype=torch.float32)
 
     reject_sampling = MojoRejectSampling()
     ref_reject_sampling = MojoRejectSampling._registry.get("torch")()
@@ -88,20 +82,15 @@ def test_reject_sampler(target_logits, draft_tokens, draft_probs, spec_step):
 
 
 @pytest.mark.parametrize(
-    "target_logits, draft_tokens, draft_probs, spec_step",
-    [
-        (
-            torch.rand((15, 4, 155136), dtype=torch.float32),
-            torch.randint(0, 155136, (15, 3)),
-            torch.ones((15, 3), dtype=torch.float32),
-            3,
-        )
-    ],
+    "batch_size, vocab_size, spec_step",
+    [(15, 155136, 3)],
 )
-@auto_switch_platform()
 @bypass_not_implemented
-def test_join_prob_reject_sampler(target_logits, draft_tokens, draft_probs, spec_step):
+def test_join_prob_reject_sampler(batch_size, vocab_size, spec_step):
     torch.manual_seed(42)
+    target_logits = torch.randn((batch_size, 1 + spec_step, vocab_size), dtype=torch.float32)
+    draft_tokens = torch.randint(0, vocab_size, (batch_size, spec_step))
+    draft_probs = torch.ones((batch_size, spec_step), dtype=torch.float32)
 
     reject_join_prob_sampling = MojoJoinProbRejectSampling()
     ref_join_prob_sampling = MojoJoinProbRejectSampling._registry.get("torch")()
@@ -140,12 +129,12 @@ def split_batch_to_list(x: torch.Tensor) -> List[Union[None, torch.Tensor]]:
 
 
 @pytest.mark.parametrize(
-    "logits",
-    [(torch.randn(20, 151936))],
+    "shape",
+    [(20, 151936)],
 )
-@auto_switch_platform()
 @bypass_not_implemented
-def test_apply_penalties_temp(logits):
+def test_apply_penalties_temp(shape):
+    logits = torch.randn(shape, dtype=torch.float32)
     BATCH_SIZE = logits.shape[0]
     VOCAB_SIZE = logits.shape[1]
     token_freqs = torch.randint(0, 5, (BATCH_SIZE, VOCAB_SIZE), device=logits.device, dtype=torch.int32)

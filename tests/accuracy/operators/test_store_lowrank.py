@@ -1,7 +1,6 @@
 import pytest
 import torch
 
-from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset.experimental import MojoStoreLowrank
@@ -21,22 +20,25 @@ shapes_key_lr = [
 
 
 @pytest.mark.parametrize(
-    "label_cache, key_lr, block_idxs, token_idxs, token_num",
+    "shape_label_cache, shape_key_lr",
     [
-        (
-            torch.zeros(size=shape0, dtype=torch.bfloat16),
-            torch.randn(size=(slot_mapping.shape[0], *shape1), dtype=torch.bfloat16),
-            slot_mapping // 512,
-            slot_mapping % 512,
-            slot_mapping.shape[0],
-        )
-        for shape0, shape1 in zip(shapes_label_cache, shapes_key_lr)
-        for slot_mapping in slot_mappings
+        ((256, 1, 512, 128), (1, 128)),
+        ((256, 8, 512, 128), (8, 128)),
     ],
 )
-@auto_switch_platform()
+@pytest.mark.parametrize(
+    "kv_len",
+    [1024, 2048, 4096, 8192, 13312],
+)
 @bypass_not_implemented
-def test_store_lowrank(label_cache, key_lr, block_idxs, token_idxs, token_num):
+def test_store_lowrank(shape_label_cache, shape_key_lr, kv_len):
+    slot_mapping = torch.randperm(kv_len)
+    label_cache = torch.zeros(size=shape_label_cache, dtype=torch.bfloat16)
+    key_lr = torch.randn(size=(slot_mapping.shape[0], *shape_key_lr), dtype=torch.bfloat16)
+    block_idxs = slot_mapping // 512
+    token_idxs = slot_mapping % 512
+    token_num = slot_mapping.shape[0]
+
     store_lowrank = MojoStoreLowrank()
 
     store_lowrank_ref = MojoStoreLowrank._registry.get("torch")()
