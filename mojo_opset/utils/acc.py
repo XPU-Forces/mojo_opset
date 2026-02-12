@@ -22,7 +22,7 @@ def check_tol_diff(
         for norm_i, ref_i in zip(norm, ref):
             check_tol_diff(norm_i, ref_i, atol, rtol, ptol, mixed_tol)
         return
-    
+
     if mixed_tol:
         mask = ref.abs() < 1.0
         tmpatol = tmprtol = 2**-6
@@ -38,7 +38,9 @@ def check_tol_diff(
         mismatch = total - match
         match_ratio = match / total
 
-        assert match_ratio >= ptol, f"{match_ratio=:.5%} ({match=} / {mismatch=} / {total=}) is under {ptol=:%}, Please Check!"
+        assert match_ratio >= ptol, (
+            f"{match_ratio=:.5%} ({match=} / {mismatch=} / {total=}) is under {ptol=:%}, Please Check!"
+        )
 
     else:
         torch.testing.assert_close(norm.to(torch.float32), ref.to(torch.float32), atol=atol, rtol=rtol)

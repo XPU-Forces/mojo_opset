@@ -3,9 +3,10 @@ import importlib
 import inspect
 import os
 import pkgutil
-import subprocess
 
 from typing import Literal
+
+import torch
 
 from mojo_opset.utils.logging import get_logger
 
@@ -18,22 +19,20 @@ def get_platform() -> Literal["npu", "mlu", "meta_device"]:
     Detect whether the system has NPU or MLU, fallback device is meta_device.
     """
     try:
-        subprocess.run(
-            ["npu-smi", "info"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        logger.debug("Ascend NPU detected")
-        return "npu"
-    except (subprocess.SubprocessError, FileNotFoundError):
-        try:
-            subprocess.run(["cnmon"], check=True)
-            logger.debug("Cambricon MLU detected")
+        if torch.npu.is_available():
+            logger.info("Ascend NPU detected")
+            return "npu"
+    except Exception as e:
+        logger.debug(f"Failed to check NPU availability: {e}")
+    try:
+        if torch.mlu.is_available():
+            logger.info("Cambricon MLU detected")
             return "mlu"
-        except (subprocess.SubprocessError, FileNotFoundError):
-            logger.debug("No accelerator detected")
-            return "meta_device"
+    except Exception as e:
+        logger.debug(f"Failed to check MLU availability: {e}")
+
+    logger.warning("No accelerator detected")
+    return "meta_device"
 
 
 def get_impl_by_platform():

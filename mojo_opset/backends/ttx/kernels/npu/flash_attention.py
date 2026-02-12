@@ -9,16 +9,20 @@ import triton.language as tl
 from mojo_opset.backends.ttx.kernels.utils import prepare_chunk_indices
 from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 
-@triton.jit
-def causal_mask_fn(mask_ptr, mask_size, mask_stride_m, mask_stride_n, q_start, kv_start, q_end, kv_end, Q_BLOCK, KV_BLOCK):
 
+@triton.jit
+def causal_mask_fn(
+    mask_ptr, mask_size, mask_stride_m, mask_stride_n, q_start, kv_start, q_end, kv_end, Q_BLOCK, KV_BLOCK
+):
     offset_causal = min(max(kv_start - q_start, -mask_size), mask_size)
-    offsets_mask_causal = (tl.arange(0, Q_BLOCK)[:, None]) * mask_stride_m + (
-        mask_size + offset_causal + tl.arange(0, KV_BLOCK)[None, :]
-    ) * mask_stride_n
+    offsets_mask_causal = (
+        (tl.arange(0, Q_BLOCK)[:, None]) * mask_stride_m
+        + (mask_size + offset_causal + tl.arange(0, KV_BLOCK)[None, :]) * mask_stride_n
+    )
     mask_causal = tl.load(mask_ptr + offsets_mask_causal).to(tl.int1)
 
     return mask_causal
+
 
 @triton.jit
 def _sdpa_infer_single_block(
@@ -74,12 +78,12 @@ def _sdpa_infer_single_block(
     p = tl.math.exp(qk)
 
     p_cast = p.to(k_T.dtype)
-    
+
     # Load corresponding V block
-    v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")  
+    v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
     # Softmax denominator (sum of each row)
-    l_ij = tl.sum(p, 1)  
+    l_ij = tl.sum(p, 1)
     # -- Update m_i and l_i
     alpha = tl.math.exp(m_i - m_ij)  # Update factor: exp difference between old and new max
     l_i = l_i * alpha + l_ij  # Update softmax denominator
@@ -89,7 +93,7 @@ def _sdpa_infer_single_block(
     # tl.compile_hint(acc_ptr, "tile_cube_loop")
 
     # Update current block max
-    m_i = m_ij  
+    m_i = m_ij
 
     # NOTE(zhangjihang): for training
     # Return accumulated output acc_ptr, softmax denominator l_i, and max value m_i
@@ -171,24 +175,24 @@ def paged_prefill_kernel(
         q_block_len = q_block_end_in_seq - q_block_start_in_seq
 
         Q_block_ptr = tl.make_block_ptr(
-            base = q_ptr + (q_start_loc + q_block_start_in_seq) * stride_qt + q_head_id * stride_qh,
-            shape = (q_block_len, HEAD_DIM),
-            strides = (stride_qt, stride_qd),
-            offsets = (0, 0),
-            block_shape = (BLOCK_SIZE_M, BLOCK_SIZE_D),
+            base=q_ptr + (q_start_loc + q_block_start_in_seq) * stride_qt + q_head_id * stride_qh,
+            shape=(q_block_len, HEAD_DIM),
+            strides=(stride_qt, stride_qd),
+            offsets=(0, 0),
+            block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_D),
             order=(1, 0),
         )
         O_block_ptr = tl.make_block_ptr(
-            base = o_ptr + (q_start_loc + q_block_start_in_seq) * stride_ot + q_head_id * stride_oh,
-            shape = (q_block_len, HEAD_DIM),
-            strides = (stride_ot, stride_od),
-            offsets = (0, 0),
-            block_shape = (BLOCK_SIZE_M, BLOCK_SIZE_D),
+            base=o_ptr + (q_start_loc + q_block_start_in_seq) * stride_ot + q_head_id * stride_oh,
+            shape=(q_block_len, HEAD_DIM),
+            strides=(stride_ot, stride_od),
+            offsets=(0, 0),
+            block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_D),
             order=(1, 0),
         )
 
         q = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero")
-        
+
         m_i = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32) - float("inf")
         l_i = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_D), dtype=tl.float32)
@@ -196,10 +200,10 @@ def paged_prefill_kernel(
         num_logical_blocks = tl.cdiv(kv_cache_len + q_block_end_in_seq, PAGE_SIZE)
 
         tl.static_assert(PAGE_SIZE == BLOCK_SIZE_N, "Currently only BLOCK_SIZE_N==PAGE_SIZE supported")
-            
+
         for logical_block_idx in range(0, num_logical_blocks):
             physical_block_id = tl.load(block_tables_ptr + b_id * stride_bt_batch + logical_block_idx * stride_bt_block)
-            
+
             kv_block_start_in_seq = logical_block_idx * PAGE_SIZE
             kv_block_end_in_seq = min(kv_block_start_in_seq + PAGE_SIZE, kv_seq_len)
             kv_block_len = kv_block_end_in_seq - kv_block_start_in_seq
@@ -215,9 +219,9 @@ def paged_prefill_kernel(
                 base=v_cache_ptr + physical_block_id * stride_v_block + kv_head_id * stride_v_head,
                 shape=(kv_block_len, HEAD_DIM),
                 strides=(stride_v_blksz, stride_v_dim),
-                offsets=(0,0),
+                offsets=(0, 0),
                 block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
-                order=(1,0)
+                order=(1, 0),
             )
 
             acc, l_i, m_i = _sdpa_infer_single_block(
@@ -245,8 +249,7 @@ def paged_prefill_kernel(
 
         m_i += tl.math.log(l_i)
         accumulator = acc / l_i[:, None]
-    
-    
+
         # NOTE(zhangjihang): for training
         # m_ptrs = M + task_bn_idx * sub_kv_len + offs_m
         # tl.store(m_ptrs, m_i)
@@ -272,9 +275,9 @@ def paged_attention_prefill_impl(
         sm_scale = 1.0 / math.sqrt(head_dim)
 
     if aux_mask is None:
-        aux_mask = torch.ones(1024, 1024*3, dtype=torch.bool).tril(1024).npu()
-    
-    # Note(chenyifan): 
+        aux_mask = torch.ones(1024, 1024 * 3, dtype=torch.bool).tril(1024).npu()
+
+    # Note(chenyifan):
     #   In general, this paged attention kernel works in a `split-q` style.
     #   "bsz * query * q_head" is splited into tasks of shape [BLOCK_SIZE_M, HEAD_DIM]
     #   and then attributed to one program.
@@ -330,7 +333,7 @@ def paged_attention_prefill_impl(
         BLOCK_SIZE_N=block_size,
         BLOCK_SIZE_D=head_dim,
         limit_auto_multi_buffer_only_for_local_buffer=False,
-        set_workspace_multibuffer=4, 
+        set_workspace_multibuffer=4,
     )
     return o
 

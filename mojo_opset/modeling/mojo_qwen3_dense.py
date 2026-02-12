@@ -178,14 +178,18 @@ class Qwen3Attention(nn.Module):
         )
         self.scaling = self.head_dim**-0.5
 
-        self.q_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.num_heads * self.head_dim, bias=False)
+        self.q_proj = torch.nn.Linear(
+            in_features=self.hidden_size, out_features=self.num_heads * self.head_dim, bias=False
+        )
         self.k_proj = torch.nn.Linear(
             in_features=self.hidden_size, out_features=self.num_key_value_heads * self.head_dim, bias=False
         )
         self.v_proj = torch.nn.Linear(
             in_features=self.hidden_size, out_features=self.num_key_value_heads * self.head_dim, bias=False
         )
-        self.o_proj = torch.nn.Linear(in_features=self.num_heads * self.head_dim, out_features=self.hidden_size, bias=False)
+        self.o_proj = torch.nn.Linear(
+            in_features=self.num_heads * self.head_dim, out_features=self.hidden_size, bias=False
+        )
 
         self.q_norm = MojoRMSNorm(
             norm_size=self.head_dim,
