@@ -7,6 +7,7 @@ from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoCausalConv1dFunction
 
+
 @pytest.mark.parametrize(
     ("B", "T", "D", "W", "activation", "has_bias", "has_residual", "dtype"),
     [
@@ -37,11 +38,11 @@ def test_conv(
 ):
     torch.manual_seed(42)
 
-    x = torch.randn(B, T, D).to(dtype).requires_grad_(True)
-    weight = torch.randn(D, W).to(dtype).requires_grad_(True)
-    bias = torch.randn(D).to(dtype).requires_grad_(True) if has_bias else None
+    x = torch.rand(B, T, D).to(dtype).requires_grad_(True)
+    weight = torch.rand(D, W).to(dtype).requires_grad_(True)
+    bias = torch.rand(D).to(dtype).requires_grad_(True) if has_bias else None
     residual = x.detach().clone().requires_grad_(True) if has_residual else None
-    dy = torch.randn(B, T, D).to(dtype)
+    dy = torch.rand(B, T, D).to(dtype)
 
     ctx = MockFunctionCtx()
     y, _ = MojoCausalConv1dFunction.forward(ctx, x, weight, bias, residual, None, False, activation)
@@ -94,23 +95,20 @@ def test_conv_varlen(
 ):
     torch.manual_seed(41)
 
-    cu_seqlens = (
-        torch.cat(
-            [
-                torch.tensor([0], dtype=torch.long),
-                torch.arange(16, T)[torch.randperm(T - 16)[: N - 1]],
-                torch.tensor([T], dtype=torch.long),
-            ],
-            0,
-        )
-        .sort()[0]
-    )
+    cu_seqlens = torch.cat(
+        [
+            torch.tensor([0], dtype=torch.long),
+            torch.arange(16, T)[torch.randperm(T - 16)[: N - 1]],
+            torch.tensor([T], dtype=torch.long),
+        ],
+        0,
+    ).sort()[0]
 
-    x = torch.randn(1, T, D).to(dtype).requires_grad_(True)
-    weight = torch.randn(D, W).to(dtype).requires_grad_(True)
-    bias = torch.randn(D).to(dtype).requires_grad_(True) if has_bias else None
+    x = torch.rand(1, T, D).to(dtype).requires_grad_(True)
+    weight = torch.rand(D, W).to(dtype).requires_grad_(True)
+    bias = torch.rand(D).to(dtype).requires_grad_(True) if has_bias else None
     residual = x.detach().clone().requires_grad_(True) if has_residual else None
-    dy = torch.randn(1, T, D).to(dtype)
+    dy = torch.rand(1, T, D).to(dtype)
 
     ctx = MockFunctionCtx()
     y, _ = MojoCausalConv1dFunction.forward(ctx, x, weight, bias, residual, None, False, activation, cu_seqlens)
