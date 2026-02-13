@@ -281,7 +281,106 @@ class MojoDecodeMLA(MojoOperator):
 
 
 class MojoPagedDecodeMLA(MojoOperator):
-    pass
+    def __init__(
+        self,
+        is_causal: bool = True,
+        window_size: int = -1,
+    ):
+        super().__init__()
+
+        if not isinstance(window_size, int) or (window_size != -1 and window_size < 1):
+            raise ValueError(f"window_size must be -1 or >= 1, got {window_size}")
+
+        self.is_causal = is_causal
+        self.window_size = window_size
+
+        # NOTE: implementation of forward currently operates under the condition that is_causal and window_size are defaults.
+        # assert
+        assert self.is_causal == True, "is_casual should be True."
+        assert self.window_size == -1, "window_size should be -1."
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key_query: torch.Tensor,
+        value_query: torch.Tensor,
+        seqlens: torch.Tensor,
+        block_tables: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+    ):
+        """
+        Paged decode attention with multi-head latent attention (MLA) using a blocked KV cache.
+
+        Args:
+            query (torch.Tensor): Query of shape (B, Hq, D).
+            key_query (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
+            value_query (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
+            seqlens (torch.Tensor): Sequence lengths for each batch, shape (B,).
+            block_tables (torch.Tensor): (B, num_blocks) mapping logical blocks to physical IDs.
+            softmax_scale (Optional[float]): Scale factor; defaults to 1/sqrt(D).
+
+        Returns:
+            torch.Tensor: Attention output of shape (B, Hq, D).
+
+        Notes:
+            - If Hq > Hkv, K/V heads are repeated to match query heads.
+            - Causal mask uses per-batch sequence lengths `seqlens`.
+            - Softmax is computed in float32 and cast back to the input dtype.
+        """
+        batch_size, num_q_heads, head_dim = query.shape
+        num_kv_heads, block_size, _ = key_query.shape[1:]  # (Hkv, block_size, D)
+
+        max_len_in_batch = seqlens.max().item()
+
+        k_ref = torch.zeros(
+            batch_size, max_len_in_batch, num_kv_heads, head_dim, device=query.device, dtype=query.dtype
+        )
+        v_ref = torch.zeros(
+            batch_size, max_len_in_batch, num_kv_heads, head_dim, device=query.device, dtype=query.dtype
+        )
+
+        # Fill k_ref / v_ref by mapping logical blocks -> physical blocks using block_tables.
+        for i in range(batch_size):
+            seq_len = seqlens[i].item()
+            num_blocks_for_seq = (seq_len + block_size - 1) // block_size
+
+            for j in range(num_blocks_for_seq):
+                physical_block_id = block_tables[i, j].item()
+                start_pos = j * block_size
+                tokens_in_block = min(block_size, seq_len - start_pos)
+
+                k_slice = key_query[physical_block_id, :, :tokens_in_block, :]
+                k_ref[i, start_pos : start_pos + tokens_in_block, :, :] = k_slice.permute(1, 0, 2)
+
+                v_slice = value_query[physical_block_id, :, :tokens_in_block, :]
+                v_ref[i, start_pos : start_pos + tokens_in_block, :, :] = v_slice.permute(1, 0, 2)
+
+        _, k_len, num_k_heads, _ = k_ref.shape
+
+        # Support repeating KV heads to match query heads (GQA-like layouts).
+        if num_q_heads % num_k_heads != 0:
+            raise ValueError(f"num_q_heads ({num_q_heads}) must be divisible by num_kv_heads ({num_k_heads})")
+        num_share_q_heads = num_q_heads // num_k_heads
+
+        if num_share_q_heads > 1:
+            # Repeat each KV head block to expand from Hkv -> Hq
+            k_ref = k_ref.repeat_interleave(num_share_q_heads, dim=2)
+            v_ref = v_ref.repeat_interleave(num_share_q_heads, dim=2)
+
+        # Compute attention scores:
+        # einsum("bhd,bkhd->bhk") computes dot-product between query (B,Hq,D) and keys per position (B,L,Hq,D) -> (B,Hq,L)
+        attn = torch.einsum("bhd,bkhd->bhk", query, k_ref) * softmax_scale
+
+        # Mask out positions beyond each sequence length per batch.
+        mask = torch.arange(k_len, device=query.device)[None, :] >= seqlens[:, None]
+        attn.masked_fill_(mask[:, None, :], -torch.inf)
+
+        # Softmax in float32 for stability, then cast back to query dtype.
+        attn = torch.softmax(attn, dim=-1, dtype=torch.float32).to(query.dtype)
+
+        # Weighted sum of values: einsum("bhk,bkhd->bhd") -> (B, Hq, D)
+        out = torch.einsum("bhk,bkhd->bhd", attn, v_ref)
+        return out
 
 
 class MojoDecodeNSA(MojoOperator):
