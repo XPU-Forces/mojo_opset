@@ -224,7 +224,6 @@ def kernel_da_fwd_u(
     STRIDE_MASK,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
     LOW_TYPE: tl.constexpr = tl.bfloat16,
     HIGH_TYPE: tl.constexpr = tl.float32,
     # MAX_NUM_SEQ: tl.constexpr = 1024,
@@ -483,8 +482,8 @@ def kernel_da_bwd_q_u(
     cu_seqlens,
     num_seqs,
     scale,
-    mask_ur,
     mask_ul,
+    mask_ur,
     GROUP_SIZE: tl.constexpr,
     S,
     N: tl.constexpr,
@@ -503,7 +502,6 @@ def kernel_da_bwd_q_u(
     STRIDE_MASK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
     LOW_TYPE: tl.constexpr = tl.bfloat16,
     HIGH_TYPE: tl.constexpr = tl.float32,
 ):
@@ -722,7 +720,6 @@ def kernel_da_bwd_kv_ul(
     STRIDE_MASK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
     LOW_TYPE: tl.constexpr = tl.bfloat16,
     HIGH_TYPE: tl.constexpr = tl.float32,
 ):
@@ -864,7 +861,6 @@ def kernel_da_bwd_kv_ur(
     STRIDE_MASK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
     LOW_TYPE: tl.constexpr = tl.bfloat16,
     HIGH_TYPE: tl.constexpr = tl.float32,
 ):
@@ -1055,15 +1051,20 @@ def dllm_attention_up_fwd_impl(
     lse = torch.zeros((q.shape[0], q.shape[1]), device=q.device, dtype=torch.float32)
     num_cores, _ = get_device_properties()
 
-    if (not hasattr(dllm_attention_up_fwd_impl, "inited")):
-        dllm_attention_up_fwd_impl.inited = True
+    if (not hasattr(dllm_attention_up_fwd_impl, "masks")):
+        dllm_attention_up_fwd_impl.masks = {}
+    if BLOCK_SIZE not in dllm_attention_up_fwd_impl.masks:
         BLOCK_MASK = 64
         offset_r_local = torch.arange(0, BLOCK_MASK)[:, None]
         offset_c_local = torch.arange(0, BLOCK_MASK)[None, :]
         chunk_idx_r = offset_r_local // BLOCK_SIZE
         chunk_idx_c = offset_c_local // BLOCK_SIZE
-        dllm_attention_up_fwd_impl.mask_ur = (chunk_idx_r > chunk_idx_c).to(q.device)
-        dllm_attention_up_fwd_impl.mask_ul = (chunk_idx_r == chunk_idx_c).to(q.device)
+        mask_ul = (chunk_idx_r == chunk_idx_c).to(q.device)
+        mask_ur = (chunk_idx_r > chunk_idx_c).to(q.device)
+        dllm_attention_up_fwd_impl.masks[BLOCK_SIZE] = (mask_ul, mask_ur)
+    else:
+        mask_ul, mask_ur = dllm_attention_up_fwd_impl.masks[BLOCK_SIZE]
+
 
     kernel_da_fwd_u[(num_cores,)](
         q,
@@ -1075,8 +1076,8 @@ def dllm_attention_up_fwd_impl(
         cu_seqlen,
         cu_seqlen.shape[0],
         scale,
-        dllm_attention_up_fwd_impl.mask_ul,
-        dllm_attention_up_fwd_impl.mask_ur,
+        mask_ul,
+        mask_ur,
         q.shape[1] // k.shape[1],
         q.shape[0] // 2,
         q.shape[1],
@@ -1092,8 +1093,7 @@ def dllm_attention_up_fwd_impl(
         v.stride(2),
         lse.stride(0),
         lse.stride(1),
-        dllm_attention_up_fwd_impl.mask_ul.stride(0),
-        BLOCK_SIZE=BLOCK_SIZE,
+        mask_ul.stride(0),
     )
 
     return o, o_f32, lse
@@ -1144,15 +1144,20 @@ def dllm_attention_up_bwd_impl(
     dk = torch.empty_like(k)
     dv = torch.empty_like(v)
 
-    if (not hasattr(dllm_attention_up_bwd_impl, "inited")):
-        dllm_attention_up_bwd_impl.inited = True
+    if (not hasattr(dllm_attention_up_bwd_impl, "masks")):
+        dllm_attention_up_bwd_impl.masks = {}
+    if BLOCK_SIZE not in dllm_attention_up_bwd_impl.masks:
         BLOCK_MASK = 64
         offset_r_local = torch.arange(0, BLOCK_MASK)[:, None]
         offset_c_local = torch.arange(0, BLOCK_MASK)[None, :]
         chunk_idx_r = offset_r_local // BLOCK_SIZE
         chunk_idx_c = offset_c_local // BLOCK_SIZE
-        dllm_attention_up_bwd_impl.mask_ul = (chunk_idx_r == chunk_idx_c).to(q.device)
-        dllm_attention_up_bwd_impl.mask_ur = (chunk_idx_r > chunk_idx_c).to(q.device)
+        mask_ul = (chunk_idx_r == chunk_idx_c).to(q.device)
+        mask_ur = (chunk_idx_r > chunk_idx_c).to(q.device)
+        dllm_attention_up_bwd_impl.masks[BLOCK_SIZE] = (mask_ul, mask_ur)
+    else:
+        mask_ul, mask_ur = dllm_attention_up_bwd_impl.masks[BLOCK_SIZE]
+    
     kernel_da_bwd_d[(num_vectorcore,)](
         fp32o,
         do,
@@ -1177,8 +1182,8 @@ def dllm_attention_up_bwd_impl(
         cu_seqlen,
         cu_seqlen.shape[0],
         scale,
-        dllm_attention_up_bwd_impl.mask_ur,
-        dllm_attention_up_bwd_impl.mask_ul,
+        mask_ul,
+        mask_ur,
         q.shape[1] // k.shape[1],
         q.shape[0] // 2,
         q.shape[1],
@@ -1194,8 +1199,7 @@ def dllm_attention_up_bwd_impl(
         v.stride(2),
         d.stride(0),
         d.stride(1),
-        dllm_attention_up_bwd_impl.mask_ul.stride(0),
-        BLOCK_SIZE=BLOCK_SIZE,
+        mask_ul.stride(0),
     )
     kernel_da_bwd_kv_ul[(num_cores,)](
         q,
@@ -1209,7 +1213,7 @@ def dllm_attention_up_bwd_impl(
         cu_seqlen,
         cu_seqlen.shape[0],
         scale,
-        dllm_attention_up_bwd_impl.mask_ul,
+        mask_ul,
         q.shape[1] // k.shape[1],
         q.shape[0] // 2,
         q.shape[1],
@@ -1225,8 +1229,7 @@ def dllm_attention_up_bwd_impl(
         v.stride(2),
         d.stride(0),
         d.stride(1),
-        dllm_attention_up_bwd_impl.mask_ul.stride(0),
-        BLOCK_SIZE=BLOCK_SIZE,
+        mask_ul.stride(0),
     )
     kernel_da_bwd_kv_ur[(num_cores,)](
         q,
@@ -1240,7 +1243,7 @@ def dllm_attention_up_bwd_impl(
         cu_seqlen,
         cu_seqlen.shape[0],
         scale,
-        dllm_attention_up_bwd_impl.mask_ur,
+        mask_ur,
         q.shape[1] // k.shape[1],
         q.shape[0] // 2,
         q.shape[1],
@@ -1256,8 +1259,7 @@ def dllm_attention_up_bwd_impl(
         v.stride(2),
         d.stride(0),
         d.stride(1),
-        dllm_attention_up_bwd_impl.mask_ul.stride(0),
-        BLOCK_SIZE=BLOCK_SIZE,
+        mask_ur.stride(0),
     )
 
     return dq, dk, dv
