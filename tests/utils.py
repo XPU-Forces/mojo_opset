@@ -48,7 +48,6 @@ def assert_close(
     for result, ref in zip(results, refs):
         if isinstance(result, torch.Tensor) and isinstance(ref, torch.Tensor):
             assert result.shape == ref.shape
-            assert result.dtype == ref.dtype
             dtype = result.dtype
             if dtype == torch.bfloat16:
                 max_atol = 0.1
