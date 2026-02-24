@@ -10,7 +10,9 @@ from mojo_opset.backends.ttx.kernels.npu.utils import VEC_ALIGN_BYTES
 from mojo_opset.backends.ttx.kernels.utils import align
 from mojo_opset.backends.ttx.kernels.utils import ceil_div
 from mojo_opset.backends.ttx.kernels.utils import torch_to_triton_dtype
+from mojo_opset.utils.misc import get_bool_env
 
+IS_DETERMINISTIC = get_bool_env("MOJO_DETERMINISTIC", default=False)
 COL_BLOCKING_THRESHOLD = 2048
 
 _CASTING_MODE_NONE: tl.constexpr = tl.constexpr(-1)
@@ -316,6 +318,7 @@ def _rmsnorm_bwd_large_cols_kernel(
     X_dtype: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
+    IS_DETERMINISTIC: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     grid_size = tl.num_programs(axis=0)
@@ -386,8 +389,11 @@ def _rmsnorm_bwd_large_cols_kernel(
                 dX_ptr + rows_off[:, None] * dX_row_stride + cols_off[None, :], dX_chunk.to(X_dtype), mask=block_mask
             )
 
-            dW_existing = tl.load(dW_ptr + pid * dW_row_stride + cols_off, mask=cols_mask, other=0.0)
-            tl.store(dW_ptr + pid * dW_row_stride + cols_off, dW_existing + dW_chunk_sum, mask=cols_mask)
+            if IS_DETERMINISTIC:
+                dW_existing = tl.load(dW_ptr + pid * dW_row_stride + cols_off, mask=cols_mask, other=0.0)
+                tl.store(dW_ptr + pid * dW_row_stride + cols_off, dW_existing + dW_chunk_sum, mask=cols_mask)
+            else:
+                tl.atomic_add(dW_ptr + cols_off, dW_chunk_sum, mask=cols_mask)
 
 
 def rmsnorm_fwd_impl(
@@ -456,10 +462,10 @@ def rmsnorm_bwd_impl(
 
     grid = (num_programs,)
 
-    _dW = torch.zeros((num_programs, n_cols), dtype=torch.float32, device=W.device)
     dX_2d = torch.empty_like(dY_2d)
 
     if n_cols <= COL_BLOCKING_THRESHOLD:
+        _dW = torch.zeros((num_programs, n_cols), dtype=torch.float32, device=W.device)
         _rmsnorm_bwd_kernel[grid](
             dY_2d,
             dY_2d.stride(0),
@@ -479,7 +485,13 @@ def rmsnorm_bwd_impl(
             X_dtype_triton,
             BLOCK_SIZE_N=align(X_2d, n_cols, VEC_ALIGN_BYTES),
         )
+        dW = _dW.sum(dim=0).to(W.dtype)
     else:
+        if IS_DETERMINISTIC:
+            _dW = torch.zeros((num_programs, n_cols), dtype=torch.float32, device=W.device)
+        else:
+            _dW = torch.zeros((1, n_cols), dtype=torch.float32, device=W.device)
+
         _rmsnorm_bwd_large_cols_kernel[grid](
             dY_2d,
             dY_2d.stride(0),
@@ -499,9 +511,14 @@ def rmsnorm_bwd_impl(
             X_dtype_triton,
             BLOCK_SIZE_N=COL_BLOCKING_THRESHOLD,
             BLOCK_SIZE_M=2,  # Empirical value
+            IS_DETERMINISTIC=IS_DETERMINISTIC,
         )
 
-    dW = _dW.sum(dim=0).to(W.dtype)
+        if IS_DETERMINISTIC:
+            dW = _dW.sum(dim=0).to(W.dtype)
+        else:
+            dW = _dW.squeeze(0).to(W.dtype)
+
     dX = dX_2d.reshape(*shape)
 
     return dX, dW
