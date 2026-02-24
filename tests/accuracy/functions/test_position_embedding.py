@@ -24,7 +24,7 @@ from mojo_opset.utils.platform import get_platform
         (2, 1),
     ],
 )
-@pytest.mark.parametrize("head_dim", [128])
+@pytest.mark.parametrize("head_dim", [128, 88])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @bypass_not_implemented
 def test_pos_emb(bs, seqlen, q_heads, k_heads, head_dim, dtype):

@@ -21,8 +21,16 @@ torch.random.manual_seed(42)
         (64, 4),
     ],
 )
-@pytest.mark.parametrize("head_dim", [96])
-@pytest.mark.parametrize("rope_percentage", [1.0, 0.3333333333333333333333])
+@pytest.mark.parametrize(
+    "head_dim, rope_percentage",
+    [
+        (96, 1.0),
+        (96, 0.3333333333333333333333),
+        (128, 1.0),
+        (88, 1.0),
+        (128, 0.375),
+    ],
+)
 @pytest.mark.parametrize("mode", ["padding_prefill", "varlen_prefill", "decode"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @bypass_not_implemented
