@@ -1,8 +1,11 @@
+import os
+
 import pytest
 import torch
 
 from tests.utils import MockFunctionCtx
 from tests.utils import assert_close
+from tests.utils import assert_deterministic
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
@@ -45,3 +48,10 @@ def test_rmsnorm_forward_backward_diff(x, weight):
     grads_ref = MojoRMSNormFunction._registry.get("torch").backward(ctx_ref, dy)
 
     assert_close(grads, grads_ref)
+
+    if os.getenv("MOJO_DETERMINISTIC_TEST", "0"):
+        assert_deterministic(
+            func=lambda: MojoRMSNormFunction.forward(ctx, x, weight, 1e-6), err_msg_prefix="Forward pass."
+        )
+
+        assert_deterministic(func=lambda: MojoRMSNormFunction.backward(ctx, dy), err_msg_prefix="Backward pass.")

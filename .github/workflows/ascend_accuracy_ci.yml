@@ -64,7 +64,7 @@ jobs:
         shell: bash
         run: |
           echo "Running ttx kernels deterministic tests..."
-          MOJO_DETERMINISTIC=1 MOJO_BACKEND="ttx" python3 -m pytest tests/accuracy/functions/test_normalization.py 
+          MOJO_DETERMINISTIC_TEST=1 MOJO_DETERMINISTIC=1 MOJO_BACKEND="ttx" python3 -m pytest tests/accuracy/functions/test_normalization.py 
       - name: test-torch-npu
         shell: bash
         run: |
