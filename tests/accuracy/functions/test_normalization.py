@@ -3,15 +3,20 @@ import torch
 
 from tests.utils import MockFunctionCtx
 from tests.utils import assert_close
+from tests.utils import assert_deterministic
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoRMSNormFunction
+from mojo_opset.utils.misc import get_bool_env
+
+DETERMINISTIC_TEST = get_bool_env("MOJO_DETERMINISTIC", default=False)
 
 shapes = [
     (32, 1024),
     (64, 8192),
     (57, 7338),
+    (77, 489),
     (763, 8777),
     (7762, 18778),
 ]
@@ -44,3 +49,10 @@ def test_rmsnorm_forward_backward_diff(x, weight):
     grads_ref = MojoRMSNormFunction._registry.get("torch").backward(ctx_ref, dy)
 
     assert_close(grads, grads_ref)
+
+    if DETERMINISTIC_TEST:
+        assert_deterministic(
+            func=lambda: MojoRMSNormFunction.forward(ctx, x, weight, 1e-6), err_msg_prefix="Forward pass."
+        )
+
+        assert_deterministic(func=lambda: MojoRMSNormFunction.backward(ctx, dy), err_msg_prefix="Backward pass.")

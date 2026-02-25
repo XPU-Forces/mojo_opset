@@ -78,6 +78,78 @@ def assert_close(
             assert result == ref
 
 
+def assert_deterministic(
+    func: Callable[[], Any],
+    seed: int = 42,
+    num_runs: int = 2,
+    err_msg_prefix: str = "",
+):
+    """
+    Asserts that a given function produces deterministic results over multiple runs.
+
+    This function is useful for testing numerical operations in frameworks like
+    PyTorch to ensure they are not affected by sources of non-determinism
+    (e.g., certain CUDA algorithms).
+
+    Args:
+        func (Callable[[], Any]):
+            A no-argument function (lambda or regular function) that, when called,
+            executes the computation to be tested and returns its results.
+            The results can be a single tensor or a tuple of tensors.
+        seed (int, optional):
+            The random seed to reset PyTorch to before each run. Defaults to 42.
+        num_runs (int, optional):
+            The number of times to run the function. Must be at least 2. Defaults to 2.
+        err_msg_prefix (str, optional):
+            A prefix for the assertion error messages to provide more context. Defaults to "".
+
+    Raises:
+        AssertionError: If the results of any two runs are not identical.
+    """
+    assert num_runs >= 2, "Need at least 2 runs to check for determinism."
+
+    torch.manual_seed(seed)
+    result1 = func()
+
+    for i in range(1, num_runs):
+        torch.manual_seed(seed)
+        result_next = func()
+
+        _compare_deterministic_results(result1, result_next, err_msg_prefix, run_index=i + 1)
+
+
+def _compare_deterministic_results(res1: Any, res2: Any, prefix: str, run_index: int):
+    """Helper function to recursively compare two results (tensor or tuple of tensors)."""
+
+    prefix = f"{prefix}: " if prefix else ""
+
+    if isinstance(res1, tuple) and isinstance(res2, tuple):
+        assert len(res1) == len(res2), (
+            f"{prefix}Result tuples have different lengths between runs (run 1 vs run {run_index})."
+        )
+        for i, (item1, item2) in enumerate(zip(res1, res2)):
+            _compare_deterministic_results(
+                item1,
+                item2,
+                prefix=f"{prefix}Tuple element {i}",
+                run_index=run_index,
+            )
+
+    elif torch.is_tensor(res1) and torch.is_tensor(res2):
+        assert torch.equal(res1, res2), (
+            f"{prefix}Tensor result is not deterministic between runs (run 1 vs run {run_index}).\n"
+            f"Max difference: {(res1 - res2).abs().max().item()}"
+        )
+
+    elif res1 is None and res2 is None:
+        pass
+
+    else:
+        raise AssertionError(
+            f"{prefix}Type mismatch between runs (run 1 vs run {run_index}). Got {type(res1)} and {type(res2)}."
+        )
+
+
 def get_executor_info(executor):
     """
     Inspects a callable executor to retrieve its name and enclosed input arguments.
