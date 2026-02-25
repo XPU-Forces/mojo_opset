@@ -14,6 +14,7 @@ from typing import Union
 
 import pytest
 import torch
+from torch.autograd import DeviceType
 
 try:
     import torch_npu
@@ -395,10 +396,11 @@ def device_perf_mlu(executor, profiling_dir="./mlu_profiling", active=5):
             torch.mlu.synchronize()
 
     try:
+        mlu_total = 0.0
         stats = prof.key_averages()
         for item in stats:
-            if item.key == "Computation Kernel":
-                mlu_avg = item.device_time
+            if item.device_type == DeviceType.PrivateUse1 and not item.is_user_annotation:
+                mlu_total += item.self_device_time_total
 
         trace_files = [
             os.path.join(profiling_dir, f) 
@@ -407,7 +409,7 @@ def device_perf_mlu(executor, profiling_dir="./mlu_profiling", active=5):
         ]
         latest_trace = max(trace_files, key=os.path.getmtime) if trace_files else profiling_dir
 
-        return mlu_avg, latest_trace
+        return mlu_total / active, latest_trace
 
     except Exception as e:
         logger.error(f"Failed to extract MLU profiling data: {e}")
