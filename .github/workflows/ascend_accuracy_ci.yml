@@ -60,6 +60,11 @@ jobs:
           echo "ASCEND_RT_VISIBLE_DEVICES: $ASCEND_RT_VISIBLE_DEVICES"
           MOJO_BACKEND="ttx" python3 -m pytest -n 8 tests/accuracy/operators/
           MOJO_BACKEND="ttx" python3 -m pytest -n 8 tests/accuracy/functions/
+      - name: test-TTX-DETERMINISTIC
+        shell: bash
+        run: |
+          echo "Running ttx kernels deterministic tests..."
+          MOJO_DETERMINISTIC=1 MOJO_BACKEND="ttx" python3 -m pytest tests/accuracy/functions/test_normalization.py 
       - name: test-torch-npu
         shell: bash
         run: |
