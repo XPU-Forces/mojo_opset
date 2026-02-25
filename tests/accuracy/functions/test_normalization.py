@@ -10,7 +10,7 @@ from tests.utils import bypass_not_implemented
 from mojo_opset import MojoRMSNormFunction
 from mojo_opset.utils.misc import get_bool_env
 
-DETERMINISTIC_TEST = get_bool_env("MOJO_DETERMINISTIC_TEST", default=False)
+DETERMINISTIC_TEST = get_bool_env("MOJO_DETERMINISTIC", default=False)
 
 shapes = [
     (32, 1024),
