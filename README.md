@@ -159,7 +159,7 @@ You can build the model using Mojo Opset in the following ways:
 
 ### MOJO_DETERMINISTIC
 
-Controls whether deterministic computation is enabled.
+Controls whether deterministic computation is enabled (only TTX backend supported for now).
 
 | Value | Description |
 |-------|-------------|
