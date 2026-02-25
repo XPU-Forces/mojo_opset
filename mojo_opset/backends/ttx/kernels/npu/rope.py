@@ -21,6 +21,8 @@ ROPE_TOKEN_BLOCK_SIZE_TABLE = {
 SRAM_ALIGNMENT = 32
 
 
+# When the half RoPE dimension satisfies the SRAM byte-alignment requirement,
+# we can leverage a more efficient extension API to perform the RoPE computation.
 def _is_half_rope_dim_aligned(half_rope_dim: int, dtype_size: int = 2) -> bool:
     return (half_rope_dim * dtype_size) % SRAM_ALIGNMENT == 0
 
