@@ -1,12 +1,42 @@
 import argparse
 import os
 import torch
+import json
+import importlib
 from transformers import AutoTokenizer
 from mojo_opset.utils.hf_utils import build_model_from_hf, _resolve_local_files_only
 
 
+ARCH_MAP = {
+    "Qwen3ForCausalLM": ("mojo_qwen3_dense", "Qwen3ForCausalLM"),
+    "SeedOssForCausalLM": ("mojo_seed_oss_base", "SeedOssForCausalLM"),
+}
+
+
+def resolve_model_class(model_path: str):
+    cfg_path = os.path.join(model_path, "config.json")
+
+    if not os.path.isfile(cfg_path):
+        raise FileNotFoundError(f"config.json not found under {model_path}")
+
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    arch_list = cfg.get("architectures") or []
+    arch = arch_list[0] if isinstance(arch_list, list) and len(arch_list) > 0 else None
+    if arch not in ARCH_MAP:
+        raise ValueError(f"Unsupported architecture: {arch}")
+    mod_name, cls_name = ARCH_MAP[arch]
+    module = importlib.import_module(mod_name)
+
+    return getattr(module, cls_name)
+
+
 def generate(model, tokenizer, prompt, max_new_tokens, device):
-    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+    messages = [{"role": "user", "content": prompt}]
+    input_ids = tokenizer.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=True, return_tensors="pt", thinking_budget=-1
+    ).to(device)
 
     # Prefill
     print(f"\nPrompt: {prompt}")
@@ -58,7 +88,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", type=str, default=os.getenv("QWEN3_MODEL_PATH", ""))
     parser.add_argument("--device", type=str, default=os.getenv("QWEN3_DEVICE", "npu"))
     parser.add_argument("--num_layers", type=int, default=int(os.getenv("QWEN3_NUM_LAYERS", "36")))
-    parser.add_argument("--prompt", type=str, default="你好，请介绍一下你自己。")
+    parser.add_argument("--prompt", type=str, default="今天天气怎么样？")
     parser.add_argument("--max_new_tokens", type=int, default=100)
     parser.add_argument("--transformers", action="store_true", help="Use Transformers model")
     args = parser.parse_args()
@@ -76,7 +106,7 @@ if __name__ == "__main__":
     if args.transformers:
         from transformers import AutoModelForCausalLM as model_class
     else:
-        from mojo_qwen3_dense import Qwen3ForCausalLM as model_class
+        model_class = resolve_model_class(args.model_path)
 
     print(f"Loading model from {args.model_path}...")
     model = build_model_from_hf(
