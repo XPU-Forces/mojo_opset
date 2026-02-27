@@ -104,7 +104,7 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Norm        | MojoRMSNormFunc             | ✅                | ✅             |
 | Gemm        | MojoGemmAllReduce           | TBD               | TBD           |
 | Loss        | MojoLinearCrossEntropyFunc  | ✅                | ✅             |
-·
+
 
 ## Usage
 
