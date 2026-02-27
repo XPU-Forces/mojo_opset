@@ -4,6 +4,7 @@ from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 from mojo_opset.backends.ttx.kernels.utils import prepare_chunk_indices
 from typing import Optional, Tuple
 
+
 def generate_swa_mask(
     q_seq_len: int,
     kv_seq_len: int,
@@ -20,21 +21,20 @@ def generate_swa_mask(
     else:
         local_window_mask = causal_mask
     if global_window_size is not None:
-        global_window_mask = (torch.arange(0, kv_seq_len) < global_window_size)[
-            None, :
-        ] & causal_mask
+        global_window_mask = (torch.arange(0, kv_seq_len) < global_window_size)[None, :] & causal_mask
     else:
         global_window_mask = causal_mask
 
     s_mask = local_window_mask | global_window_mask
     return s_mask
 
+
 def swa_torch_forward(
-    q: torch.Tensor, # [total_q_len, n_q_heads, head_dim]
-    k: torch.Tensor, # [total_k_len, n_kv_heads, head_dim]
-    v: torch.Tensor, # [total_k_len, n_kv_heads, head_dim]
-    cu_seqlens_q: torch.Tensor, # [bsz + 1]
-    cu_seqlens_kv: torch.Tensor, # [bsz + 1]
+    q: torch.Tensor,  # [total_q_len, n_q_heads, head_dim]
+    k: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
+    v: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
+    cu_seqlens_q: torch.Tensor,  # [bsz + 1]
+    cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
     max_seqlen_q: int,
     max_seqlen_kv: int,
     is_causal: bool = True,
@@ -42,29 +42,30 @@ def swa_torch_forward(
     global_window_size: Optional[int] = None,
     sm_scale: Optional[float] = None,
     gqa_interleave: bool = False,
+    output_f32: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     total_q_len, n_q_heads, head_dim = q.shape
     n_kv_heads = k.shape[1]
     if sm_scale is None:
-        sm_scale = 1.0 / (head_dim ** 0.5)
+        sm_scale = 1.0 / (head_dim**0.5)
 
-    o = torch.empty_like(q)
+    o_f32 = torch.empty_like(q, dtype=torch.float32)
     softmax_lse = torch.empty((n_q_heads, total_q_len), dtype=torch.float32, device=q.device)
     bsz = cu_seqlens_q.shape[0] - 1
     for i in range(bsz):
-        q_i = q[cu_seqlens_q[i]:cu_seqlens_q[i+1]]
+        q_i = q[cu_seqlens_q[i] : cu_seqlens_q[i + 1]]
         q_seq_len = q_i.shape[0]
-        q_i = q_i.permute(1, 0, 2) # -> [n_q_heads, q_seq_len, head_dim]
+        q_i = q_i.permute(1, 0, 2)  # -> [n_q_heads, q_seq_len, head_dim]
 
-        k_i = k[cu_seqlens_kv[i]:cu_seqlens_kv[i+1]]
+        k_i = k[cu_seqlens_kv[i] : cu_seqlens_kv[i + 1]]
         kv_seq_len = k_i.shape[0]
         k_i_T = k_i.permute(1, 2, 0)
         if n_q_heads != n_kv_heads:
             if gqa_interleave:
                 k_i_T = k_i_T.repeat((n_q_heads // n_kv_heads, 1, 1))
             else:
-                k_i_T = k_i_T.repeat_interleave(n_q_heads // n_kv_heads, dim=0) # -> [n_q_heads, head_dim, kv_seq_len]
-        s_i = torch.bmm(q_i, k_i_T).float() * sm_scale # -> [n_q_heads, q_seq_len, kv_seq_len]
+                k_i_T = k_i_T.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, head_dim, kv_seq_len]
+        s_i = torch.bmm(q_i, k_i_T).float() * sm_scale  # -> [n_q_heads, q_seq_len, kv_seq_len]
 
         if is_causal:
             s_mask = generate_swa_mask(
@@ -74,37 +75,42 @@ def swa_torch_forward(
                 global_window_size,
             ).to(s_i.device)
             s_i = torch.where(s_mask, s_i, float("-inf"))
-        m_i = torch.max(s_i, dim=-1, keepdim=True).values # -> [n_q_heads, q_seq_len, 1]
-        s_i = s_i - m_i # -> [n_q_heads, q_seq_len, kv_seq_len]
+        m_i = torch.max(s_i, dim=-1, keepdim=True).values  # -> [n_q_heads, q_seq_len, 1]
+        s_i = s_i - m_i  # -> [n_q_heads, q_seq_len, kv_seq_len]
         p_i = torch.exp(s_i)
-        l_i = torch.sum(p_i, dim=-1, keepdim=True) # -> [n_q_heads, q_seq_len, 1]
+        l_i = torch.sum(p_i, dim=-1, keepdim=True)  # -> [n_q_heads, q_seq_len, 1]
         p_i = p_i.to(v.dtype)
 
-        v_i = v[cu_seqlens_kv[i]:cu_seqlens_kv[i+1]].permute(1, 0, 2) # -> [n_kv_heads, kv_seq_len, head_dim]
+        v_i = v[cu_seqlens_kv[i] : cu_seqlens_kv[i + 1]].permute(1, 0, 2)  # -> [n_kv_heads, kv_seq_len, head_dim]
         if n_q_heads != n_kv_heads:
             if gqa_interleave:
                 v_i = v_i.repeat((n_q_heads // n_kv_heads, 1, 1))
             else:
-                v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0) # -> [n_q_heads, kv_seq_len, head_dim]
-        o_i = torch.bmm(p_i, v_i).float() # -> [n_q_heads, q_seq_len, head_dim]
-        o_i = o_i / l_i # -> [n_q_heads, q_seq_len, head_dim]
-        o_i = o_i.permute(1, 0, 2) # -> [q_seq_len, n_q_heads, head_dim]
-        o[cu_seqlens_q[i]:cu_seqlens_q[i+1]] = o_i.to(o.dtype)
-        lse_i = m_i + torch.log(l_i) # -> [n_q_heads, q_seq_len, 1]
+                v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, kv_seq_len, head_dim]
+        o_i = torch.bmm(p_i, v_i).float()  # -> [n_q_heads, q_seq_len, head_dim]
+        o_i = o_i / l_i  # -> [n_q_heads, q_seq_len, head_dim]
+        o_i = o_i.permute(1, 0, 2)  # -> [q_seq_len, n_q_heads, head_dim]
+        o_f32[cu_seqlens_q[i] : cu_seqlens_q[i + 1]] = o_i
+        lse_i = m_i + torch.log(l_i)  # -> [n_q_heads, q_seq_len, 1]
         assert lse_i.dtype == torch.float32
-        softmax_lse[:, cu_seqlens_q[i]:cu_seqlens_q[i+1]] = lse_i.squeeze(-1) # -> [q_seq_len, n_q_heads]
+        softmax_lse[:, cu_seqlens_q[i] : cu_seqlens_q[i + 1]] = lse_i.squeeze(-1)  # -> [q_seq_len, n_q_heads]
 
-    return o, softmax_lse
+    o = o_f32.to(q.dtype)
+    if output_f32:
+        return o, softmax_lse, o_f32
+    else:
+        return o, softmax_lse
+
 
 def swa_torch_backward(
-    do: torch.Tensor, # [total_q_len, n_q_heads, head_dim]
-    q: torch.Tensor, # [total_q_len, n_q_heads, head_dim]
-    k: torch.Tensor, # [total_k_len, n_kv_heads, head_dim]
-    v: torch.Tensor, # [total_k_len, n_kv_heads, head_dim]
-    o: torch.Tensor, # [total_q_len, n_q_heads, head_dim]
-    softmax_lse: torch.Tensor, # [n_q_heads, total_q_len]
-    cu_seqlens_q: torch.Tensor, # [bsz + 1]
-    cu_seqlens_kv: torch.Tensor, # [bsz + 1]
+    do: torch.Tensor,  # [total_q_len, n_q_heads, head_dim]
+    q: torch.Tensor,  # [total_q_len, n_q_heads, head_dim]
+    k: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
+    v: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
+    o: torch.Tensor,  # [total_q_len, n_q_heads, head_dim]
+    softmax_lse: torch.Tensor,  # [n_q_heads, total_q_len]
+    cu_seqlens_q: torch.Tensor,  # [bsz + 1]
+    cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
     max_seqlen_q: int,
     max_seqlen_kv: int,
     is_causal: bool = True,
@@ -116,30 +122,30 @@ def swa_torch_backward(
     _, n_q_heads, head_dim = q.shape
     n_kv_heads = k.shape[1]
     if sm_scale is None:
-        sm_scale = 1.0 / (head_dim ** 0.5)
-    
+        sm_scale = 1.0 / (head_dim**0.5)
+
     dq = torch.zeros_like(q)
     dk = torch.zeros_like(k)
     dv = torch.zeros_like(v)
-    delta = torch.sum(o.float() * do.float(), dim=-1) # -> [total_q_len, n_q_heads]
+    delta = torch.sum(o.float() * do.float(), dim=-1)  # -> [total_q_len, n_q_heads]
     bsz = cu_seqlens_q.shape[0] - 1
     for i in range(bsz):
 
         # Step 1: recompute p_i
-        q_i = q[cu_seqlens_q[i]:cu_seqlens_q[i+1]]
+        q_i = q[cu_seqlens_q[i] : cu_seqlens_q[i + 1]]
         q_seq_len = q_i.shape[0]
-        q_i = q_i.permute(1, 0, 2) # -> [n_q_heads, q_seq_len, head_dim]
+        q_i = q_i.permute(1, 0, 2)  # -> [n_q_heads, q_seq_len, head_dim]
 
-        k_i = k[cu_seqlens_kv[i]:cu_seqlens_kv[i+1]]
+        k_i = k[cu_seqlens_kv[i] : cu_seqlens_kv[i + 1]]
         kv_seq_len = k_i.shape[0]
-        k_i = k_i.permute(1, 0, 2) # -> [n_kv_heads, kv_seq_len, head_dim]
+        k_i = k_i.permute(1, 0, 2)  # -> [n_kv_heads, kv_seq_len, head_dim]
         if n_q_heads != n_kv_heads:
             if gqa_interleave:
                 k_i = k_i.repeat((n_q_heads // n_kv_heads, 1, 1))
             else:
-                k_i = k_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0) # -> [n_q_heads, head_dim, kv_seq_len]
+                k_i = k_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, head_dim, kv_seq_len]
 
-        s_i = torch.bmm(q_i, k_i.mT).float() * sm_scale # -> [n_q_heads, q_seq_len, kv_seq_len]
+        s_i = torch.bmm(q_i, k_i.mT).float() * sm_scale  # -> [n_q_heads, q_seq_len, kv_seq_len]
 
         if is_causal:
             s_mask = generate_swa_mask(
@@ -150,26 +156,26 @@ def swa_torch_backward(
             ).to(s_i.device)
             s_i = torch.where(s_mask, s_i, float("-inf"))
 
-        lse_i = softmax_lse[:, cu_seqlens_q[i]:cu_seqlens_q[i+1]] # -> [n_q_heads, q_seq_len]
-        p_i = torch.exp(s_i - lse_i.unsqueeze(-1)) # -> [n_q_heads, q_seq_len, kv_seq_len]
+        lse_i = softmax_lse[:, cu_seqlens_q[i] : cu_seqlens_q[i + 1]]  # -> [n_q_heads, q_seq_len]
+        p_i = torch.exp(s_i - lse_i.unsqueeze(-1))  # -> [n_q_heads, q_seq_len, kv_seq_len]
 
         # Step 2: compute dv_i
         assert p_i.dtype == torch.float32
-        v_i = v[cu_seqlens_kv[i]:cu_seqlens_kv[i+1]]
-        v_i = v_i.permute(1, 0, 2) # -> [n_kv_heads, kv_seq_len, head_dim]
+        v_i = v[cu_seqlens_kv[i] : cu_seqlens_kv[i + 1]]
+        v_i = v_i.permute(1, 0, 2)  # -> [n_kv_heads, kv_seq_len, head_dim]
         if n_q_heads != n_kv_heads:
             if gqa_interleave:
                 v_i = v_i.repeat((n_q_heads // n_kv_heads, 1, 1))
             else:
-                v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0) # -> [n_q_heads, kv_seq_len, head_dim]
+                v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, kv_seq_len, head_dim]
 
-        do_i = do[cu_seqlens_q[i]:cu_seqlens_q[i+1]]
-        do_i = do_i.permute(1, 0, 2) # -> [n_q_heads, q_seq_len, head_dim]
+        do_i = do[cu_seqlens_q[i] : cu_seqlens_q[i + 1]]
+        do_i = do_i.permute(1, 0, 2)  # -> [n_q_heads, q_seq_len, head_dim]
 
-        dp_i = torch.bmm(do_i, v_i.mT).float() # -> [n_q_heads, q_seq_len, kv_seq_len]
+        dp_i = torch.bmm(do_i, v_i.mT).float()  # -> [n_q_heads, q_seq_len, kv_seq_len]
         assert dp_i.dtype == torch.float32
         # Note: rowsum(P * dP) => rowsum(P * (dO @ V_T)) => rowsum(dO * (P @ V)) => rowsum(dO * O)
-        delta_i = delta[cu_seqlens_q[i]:cu_seqlens_q[i+1]].permute(1, 0).unsqueeze(-1) # -> [n_q_heads, q_seq_len]
+        delta_i = delta[cu_seqlens_q[i] : cu_seqlens_q[i + 1]].permute(1, 0).unsqueeze(-1)  # -> [n_q_heads, q_seq_len]
         # print(f"{p_i.shape=} {do_i.shape=}")
         # delta_i_ref = torch.sum(p_i * dp_i, dim=-1, keepdim=True)
         # torch.testing.assert_close(delta_i, delta_i_ref)
@@ -181,36 +187,52 @@ def swa_torch_backward(
 
         p_i = p_i.to(do_i.dtype)
 
-        dq_i = torch.bmm(ds_i, k_i) # -> [n_q_heads, q_seq_len, head_dim]
-        dq[cu_seqlens_q[i]:cu_seqlens_q[i+1]] = dq_i.permute(1, 0, 2) # -> [q_seq_len, n_q_heads, head_dim]
+        dq_i = torch.bmm(ds_i, k_i)  # -> [n_q_heads, q_seq_len, head_dim]
+        dq[cu_seqlens_q[i] : cu_seqlens_q[i + 1]] = dq_i.permute(1, 0, 2)  # -> [q_seq_len, n_q_heads, head_dim]
 
         if n_q_heads != n_kv_heads:
             if gqa_interleave:
-                ds_i = ds_i.unflatten(0, (n_q_heads // n_kv_heads, n_kv_heads)).permute(1, 0, 2, 3) # -> [n_kv_heads, n_q_heads // n_kv_heads, q_seq_len, kv_seq_len]
-                q_i = q_i.unflatten(0, (n_q_heads // n_kv_heads, n_kv_heads)).permute(1, 0, 2, 3) # -> [n_kv_heads, n_q_heads // n_kv_heads, q_seq_len, head_dim]
+                ds_i = ds_i.unflatten(0, (n_q_heads // n_kv_heads, n_kv_heads)).permute(
+                    1, 0, 2, 3
+                )  # -> [n_kv_heads, n_q_heads // n_kv_heads, q_seq_len, kv_seq_len]
+                q_i = q_i.unflatten(0, (n_q_heads // n_kv_heads, n_kv_heads)).permute(
+                    1, 0, 2, 3
+                )  # -> [n_kv_heads, n_q_heads // n_kv_heads, q_seq_len, head_dim]
             else:
-                ds_i = ds_i.unflatten(0, (n_kv_heads, n_q_heads // n_kv_heads)) # -> [n_kv_heads, n_q_heads // n_kv_heads, q_seq_len, kv_seq_len]
-                q_i = q_i.unflatten(0, (n_kv_heads, n_q_heads // n_kv_heads)) # -> [n_kv_heads, n_q_heads // n_kv_heads, q_seq_len, head_dim]
+                ds_i = ds_i.unflatten(
+                    0, (n_kv_heads, n_q_heads // n_kv_heads)
+                )  # -> [n_kv_heads, n_q_heads // n_kv_heads, q_seq_len, kv_seq_len]
+                q_i = q_i.unflatten(
+                    0, (n_kv_heads, n_q_heads // n_kv_heads)
+                )  # -> [n_kv_heads, n_q_heads // n_kv_heads, q_seq_len, head_dim]
 
-            ds_i = ds_i.flatten(1, 2) # -> [n_kv_heads, n_q_heads // n_kv_heads * q_seq_len, kv_seq_len]
-            q_i = q_i.flatten(1, 2) # -> [n_kv_heads, n_q_heads // n_kv_heads * q_seq_len, head_dim]
-            
-        dk_i = torch.bmm(ds_i.mT, q_i) # -> [n_kv_heads, kv_seq_len, head_dim]
-        dk[cu_seqlens_kv[i]:cu_seqlens_kv[i+1]] = dk_i.permute(1, 0, 2) # -> [kv_seq_len, n_kv_heads, head_dim]
-        
+            ds_i = ds_i.flatten(1, 2)  # -> [n_kv_heads, n_q_heads // n_kv_heads * q_seq_len, kv_seq_len]
+            q_i = q_i.flatten(1, 2)  # -> [n_kv_heads, n_q_heads // n_kv_heads * q_seq_len, head_dim]
+
+        dk_i = torch.bmm(ds_i.mT, q_i)  # -> [n_kv_heads, kv_seq_len, head_dim]
+        dk[cu_seqlens_kv[i] : cu_seqlens_kv[i + 1]] = dk_i.permute(1, 0, 2)  # -> [kv_seq_len, n_kv_heads, head_dim]
+
         if n_q_heads != n_kv_heads:
             if gqa_interleave:
-                p_i = p_i.unflatten(0, (n_q_heads // n_kv_heads, n_kv_heads)).permute(1, 0, 2, 3) # -> [n_kv_heads, n_q_heads // n_kv_heads, q_seq_len, kv_seq_len]
-                do_i = do_i.unflatten(0, (n_q_heads // n_kv_heads, n_kv_heads)).permute(1, 0, 2, 3) # -> [n_kv_heads, n_q_heads // n_kv_heads, q_seq_len, head_dim]
+                p_i = p_i.unflatten(0, (n_q_heads // n_kv_heads, n_kv_heads)).permute(
+                    1, 0, 2, 3
+                )  # -> [n_kv_heads, n_q_heads // n_kv_heads, q_seq_len, kv_seq_len]
+                do_i = do_i.unflatten(0, (n_q_heads // n_kv_heads, n_kv_heads)).permute(
+                    1, 0, 2, 3
+                )  # -> [n_kv_heads, n_q_heads // n_kv_heads, q_seq_len, head_dim]
             else:
-                p_i = p_i.unflatten(0, (n_kv_heads, n_q_heads // n_kv_heads)) # -> [n_kv_heads, n_q_heads // n_kv_heads, q_seq_len, kv_seq_len]
-                do_i = do_i.unflatten(0, (n_kv_heads, n_q_heads // n_kv_heads)) # -> [n_kv_heads, n_q_heads // n_kv_heads, q_seq_len, head_dim]
+                p_i = p_i.unflatten(
+                    0, (n_kv_heads, n_q_heads // n_kv_heads)
+                )  # -> [n_kv_heads, n_q_heads // n_kv_heads, q_seq_len, kv_seq_len]
+                do_i = do_i.unflatten(
+                    0, (n_kv_heads, n_q_heads // n_kv_heads)
+                )  # -> [n_kv_heads, n_q_heads // n_kv_heads, q_seq_len, head_dim]
 
-            p_i = p_i.flatten(1, 2) # -> [n_kv_heads, n_q_heads // n_kv_heads * q_seq_len, kv_seq_len]
-            do_i = do_i.flatten(1, 2) # -> [n_kv_heads, n_q_heads // n_kv_heads * q_seq_len, head_dim]
+            p_i = p_i.flatten(1, 2)  # -> [n_kv_heads, n_q_heads // n_kv_heads * q_seq_len, kv_seq_len]
+            do_i = do_i.flatten(1, 2)  # -> [n_kv_heads, n_q_heads // n_kv_heads * q_seq_len, head_dim]
 
-        dv_i = torch.bmm(p_i.mT, do_i) # -> [n_q_heads, kv_seq_len, head_dim]
-        dv[cu_seqlens_kv[i]:cu_seqlens_kv[i+1]] = dv_i.permute(1, 0, 2)# -> [kv_seq_len, n_kv_heads, head_dim]
+        dv_i = torch.bmm(p_i.mT, do_i)  # -> [n_q_heads, kv_seq_len, head_dim]
+        dv[cu_seqlens_kv[i] : cu_seqlens_kv[i + 1]] = dv_i.permute(1, 0, 2)  # -> [kv_seq_len, n_kv_heads, head_dim]
     return dq, dk, dv
 
 
@@ -218,12 +240,12 @@ class MojoSWAFunction(MojoFunction):
 
     @staticmethod
     def forward(
-        ctx, 
-        q: torch.Tensor, # [total_q_len, n_q_heads, head_dim]
-        k: torch.Tensor, # [total_k_len, n_kv_heads, head_dim]
-        v: torch.Tensor, # [total_k_len, n_kv_heads, head_dim]
-        cu_seqlens_q: torch.Tensor, # [bsz + 1]
-        cu_seqlens_kv: torch.Tensor, # [bsz + 1]
+        ctx,
+        q: torch.Tensor,  # [total_q_len, n_q_heads, head_dim]
+        k: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
+        v: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
+        cu_seqlens_q: torch.Tensor,  # [bsz + 1]
+        cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
         max_seqlen_q: int,
         max_seqlen_kv: int,
         is_causal: bool = True,
@@ -231,14 +253,31 @@ class MojoSWAFunction(MojoFunction):
         global_window_size: Optional[int] = None,
         sm_scale: Optional[float] = None,
         gqa_interleave: bool = False,
+        output_f32: bool = False,
     ) -> torch.Tensor:
         # Note: if is_causal = False, local_window_size and global_window_size are not used.
 
-        o, softmax_lse = swa_torch_forward(
-            q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, is_causal, local_window_size, global_window_size, sm_scale, gqa_interleave
+        fwd_results = swa_torch_forward(
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            max_seqlen_q,
+            max_seqlen_kv,
+            is_causal,
+            local_window_size,
+            global_window_size,
+            sm_scale,
+            gqa_interleave,
+            output_f32,
         )
-
-        ctx.save_for_backward(o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv)
+        if output_f32:
+            o, softmax_lse, o_f32 = fwd_results
+            ctx.save_for_backward(o_f32, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv)
+        else:
+            o, softmax_lse = fwd_results
+            ctx.save_for_backward(o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv)
         ctx.sm_scale = sm_scale
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
@@ -246,14 +285,13 @@ class MojoSWAFunction(MojoFunction):
         ctx.local_window_size = local_window_size
         ctx.global_window_size = global_window_size
         ctx.gqa_interleave = gqa_interleave
+        ctx.output_f32 = output_f32
         return o
 
-
     def backward(
-        ctx, 
+        ctx,
         do: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, 
-               None, None, None, None, None, None, None, None, None]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, None, None, None, None, None, None, None, None, None]:
         o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
         sm_scale = ctx.sm_scale
         max_seqlen_q = ctx.max_seqlen_q
@@ -264,72 +302,127 @@ class MojoSWAFunction(MojoFunction):
         gqa_interleave = ctx.gqa_interleave
 
         dq, dk, dv = swa_torch_backward(
-            do, q, k, v, o, softmax_lse, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, is_causal, local_window_size, global_window_size, sm_scale, gqa_interleave
+            do,
+            q,
+            k,
+            v,
+            o,
+            softmax_lse,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            max_seqlen_q,
+            max_seqlen_kv,
+            is_causal,
+            local_window_size,
+            global_window_size,
+            sm_scale,
+            gqa_interleave,
         )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None
+
 
 AUX_MASK_SIZE = 256
-AUX_MASK = torch.cat([
-    torch.cat([
-        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).triu().bool(),
-        torch.ones(AUX_MASK_SIZE,AUX_MASK_SIZE).bool(),
-        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).tril().bool(),
-        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool()
-    ], dim=1),
-    torch.cat([
-        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-    ], dim=1),
-], dim=0).npu()
+AUX_MASK = torch.cat(
+    [
+        torch.cat(
+            [
+                torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).triu().bool(),
+                torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).tril().bool(),
+                torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+            ],
+            dim=1,
+        ),
+        torch.cat(
+            [
+                torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+            ],
+            dim=1,
+        ),
+    ],
+    dim=0,
+).npu()
 
 import triton
 import triton.language as tl
 
+
 @triton.jit
 def gen_mask_n_right_bound(mask_10_ptr, mask_size, mask_stride_m, mask_stride_n, M_BLOCK, N_BLOCK, n_start, right):
-  # tl.arange(n_start, n_start + N_BLOCK)[None, :] < right
-  offset = min(max(n_start - right, -mask_size), 0)
-  mask = tl.load(mask_10_ptr + tl.arange(0, M_BLOCK)[:, None] * mask_stride_m + (offset + tl.arange(0, N_BLOCK))[None, :] * mask_stride_n)
-  return mask.to(tl.int1)
+    # tl.arange(n_start, n_start + N_BLOCK)[None, :] < right
+    offset = min(max(n_start - right, -mask_size), 0)
+    mask = tl.load(
+        mask_10_ptr
+        + tl.arange(0, M_BLOCK)[:, None] * mask_stride_m
+        + (offset + tl.arange(0, N_BLOCK))[None, :] * mask_stride_n
+    )
+    return mask.to(tl.int1)
+
 
 @triton.jit
 def gen_mask_n_left_bound(mask_01_ptr, mask_size, mask_stride_m, mask_stride_n, M_BLOCK, N_BLOCK, n_start, left):
     # tl.arange(n_start, n_start + N_BLOCK)[None, :] >= left
     offset = min(max(n_start - left, -mask_size), 0)
-    mask = tl.load(mask_01_ptr + tl.arange(0, M_BLOCK)[:, None] * mask_stride_m + (offset + tl.arange(0, N_BLOCK))[None, :] * mask_stride_n)
+    mask = tl.load(
+        mask_01_ptr
+        + tl.arange(0, M_BLOCK)[:, None] * mask_stride_m
+        + (offset + tl.arange(0, N_BLOCK))[None, :] * mask_stride_n
+    )
     return mask.to(tl.int1)
+
 
 @triton.jit
 def gen_mask_m_right_bound(mask_10t_ptr, mask_size, mask_stride_m, mask_stride_n, M_BLOCK, N_BLOCK, m_start, right):
-  # tl.arange(m_start, m_start + M_BLOCK)[:, None] < right
-  offset = min(max(m_start - right, -mask_size), 0)
-  mask = tl.load(mask_10t_ptr + (offset + tl.arange(0, M_BLOCK)[:, None]) * mask_stride_m + tl.arange(0, N_BLOCK)[None, :] * mask_stride_n)
-  return mask.to(tl.int1)
+    # tl.arange(m_start, m_start + M_BLOCK)[:, None] < right
+    offset = min(max(m_start - right, -mask_size), 0)
+    mask = tl.load(
+        mask_10t_ptr
+        + (offset + tl.arange(0, M_BLOCK)[:, None]) * mask_stride_m
+        + tl.arange(0, N_BLOCK)[None, :] * mask_stride_n
+    )
+    return mask.to(tl.int1)
+
 
 @triton.jit
 def gen_mask_m_left_bound(mask_01t_ptr, mask_size, mask_stride_m, mask_stride_n, M_BLOCK, N_BLOCK, m_start, left):
     # tl.arange(m_start, m_start + M_BLOCK)[:, None] >= left
     offset = min(max(m_start - left, -mask_size), 0)
-    mask = tl.load(mask_01t_ptr + (offset + tl.arange(0, M_BLOCK)[:, None]) * mask_stride_m + tl.arange(0, N_BLOCK)[None, :] * mask_stride_n)
+    mask = tl.load(
+        mask_01t_ptr
+        + (offset + tl.arange(0, M_BLOCK)[:, None]) * mask_stride_m
+        + tl.arange(0, N_BLOCK)[None, :] * mask_stride_n
+    )
     return mask.to(tl.int1)
+
 
 @triton.jit
 def gen_mask_tril(mask_ptr_tril, mask_size, mask_stride_m, mask_stride_n, M_BLOCK, N_BLOCK, m_start, n_start):
     # tl.arange(n_start, n_start + N_BLOCK)[None, :] <= tl.arange(m_start, m_start + M_BLOCK)[:, None]
     offset = min(max(n_start - m_start, -mask_size), mask_size)
-    mask = tl.load(mask_ptr_tril + tl.arange(0, M_BLOCK)[:, None] * mask_stride_m + (offset + tl.arange(0, N_BLOCK))[None, :] * mask_stride_n)
+    mask = tl.load(
+        mask_ptr_tril
+        + tl.arange(0, M_BLOCK)[:, None] * mask_stride_m
+        + (offset + tl.arange(0, N_BLOCK))[None, :] * mask_stride_n
+    )
     return mask.to(tl.int1)
+
 
 @triton.jit
 def gen_mask_triu(mask_ptr_triu, mask_size, mask_stride_m, mask_stride_n, M_BLOCK, N_BLOCK, m_start, n_start):
     # tl.arange(n_start, n_start + N_BLOCK)[None, :] >= tl.arange(m_start, m_start + M_BLOCK)[:, None]
     len_offset = min(max(n_start - m_start, -mask_size), mask_size)
-    mask = tl.load(mask_ptr_triu + tl.arange(0, M_BLOCK)[:, None] * mask_stride_m + (len_offset + tl.arange(0, N_BLOCK))[None, :] * mask_stride_n)
+    mask = tl.load(
+        mask_ptr_triu
+        + tl.arange(0, M_BLOCK)[:, None] * mask_stride_m
+        + (len_offset + tl.arange(0, N_BLOCK))[None, :] * mask_stride_n
+    )
     return mask.to(tl.int1)
+
 
 @triton.jit
 def _sdpa_single_block_fwd(
@@ -372,12 +465,12 @@ def _sdpa_single_block_fwd(
     p = tl.math.exp(qk)
 
     p_cast = p.to(k_T.dtype)
-    
+
     # Load corresponding V block
-    v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")  
+    v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
     # Softmax denominator (sum of each row)
-    l_ij = tl.sum(p, 1)  
+    l_ij = tl.sum(p, 1)
     # -- Update m_i and l_i
     alpha = tl.math.exp(m_i - m_ij)  # Update factor: exp difference between old and new max
     l_i = l_i * alpha + l_ij  # Update softmax denominator
@@ -387,15 +480,17 @@ def _sdpa_single_block_fwd(
     # tl.compile_hint(acc_ptr, "tile_cube_loop")
 
     # Update current block max
-    m_i = m_ij  
+    m_i = m_ij
 
     # NOTE(zhangjihang): for training
     # Return accumulated output acc_ptr, softmax denominator l_i, and max value m_i
     return acc_ptr, l_i, m_i
 
+
 @triton.jit
 def _sdpa_fwd_kernel(
     o_ptr,
+    o_f32_ptr,
     lse_ptr,
     q_ptr,
     k_ptr,
@@ -408,6 +503,9 @@ def _sdpa_fwd_kernel(
     stride_ot,
     stride_oh,
     stride_od,
+    stride_ot_f32,
+    stride_oh_f32,
+    stride_od_f32,
     stride_lse_h,
     stride_lse_t,
     stride_qt,
@@ -434,13 +532,14 @@ def _sdpa_fwd_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    OUTPUT_F32: tl.constexpr,
 ):
     tl.static_assert(CHUNK_SIZE == BLOCK_M, "Currently only support CHUNK_SIZE == BLOCK_SIZE_M")
     tl.static_assert(HEAD_DIM <= BLOCK_D, "BLOCK_SIZE_D should not be less than HEAD_DIM")
     pid = tl.program_id(0)
     n_programs = tl.num_programs(0)
 
-    # Hint(chenyifan): 
+    # Hint(chenyifan):
     #   the prepared aux_mask is [[empty, triu, full, tril, empty],
     #                             [full, empty, empty, full, empty]]
     #   every mask [BLOCK_M, BLOCK_N] can be sliced from the aux_mask and further combined
@@ -479,7 +578,7 @@ def _sdpa_fwd_kernel(
             strides=(stride_qt, stride_qd),
             offsets=(0, 0),
             block_shape=(BLOCK_M, BLOCK_D),
-            order=(1,0),
+            order=(1, 0),
         )
         o_block_ptr = tl.make_block_ptr(
             base=o_ptr + q_start * stride_ot + q_head_id * stride_oh,
@@ -487,8 +586,17 @@ def _sdpa_fwd_kernel(
             strides=(stride_ot, stride_od),
             offsets=(0, 0),
             block_shape=(BLOCK_M, BLOCK_D),
-            order=(1,0),
+            order=(1, 0),
         )
+        if OUTPUT_F32:
+            o_f32_block_ptr = tl.make_block_ptr(
+                base=o_f32_ptr + q_start * stride_ot_f32 + q_head_id * stride_oh_f32,
+                shape=(q_seq_len, HEAD_DIM),
+                strides=(stride_ot_f32, stride_od_f32),
+                offsets=(0, 0),
+                block_shape=(BLOCK_M, BLOCK_D),
+                order=(1, 0),
+            )
         lse_i_ptr = lse_ptr + q_head_id * stride_lse_h + q_start * stride_lse_t
         k_block_ptr = tl.make_block_ptr(
             base=k_ptr + kv_start * stride_kt + kv_head_id * stride_kh,
@@ -496,7 +604,7 @@ def _sdpa_fwd_kernel(
             strides=(stride_kt, stride_kd),
             offsets=(0, 0),
             block_shape=(BLOCK_N, BLOCK_D),
-            order=(1,0),
+            order=(1, 0),
         )
         v_block_ptr = tl.make_block_ptr(
             base=v_ptr + kv_start * stride_vt + kv_head_id * stride_vh,
@@ -504,13 +612,18 @@ def _sdpa_fwd_kernel(
             strides=(stride_vt, stride_vd),
             offsets=(0, 0),
             block_shape=(BLOCK_N, BLOCK_D),
-            order=(1,0),
+            order=(1, 0),
         )
         if block_len > 0:
             q_mask = gen_mask_m_right_bound(
-                aux_mask_ptr_10t, aux_mask_size, stride_mask_m, stride_mask_n,
-                BLOCK_M, BLOCK_N,
-                q_block_id * BLOCK_M, q_seq_len,
+                aux_mask_ptr_10t,
+                aux_mask_size,
+                stride_mask_m,
+                stride_mask_n,
+                BLOCK_M,
+                BLOCK_N,
+                q_block_id * BLOCK_M,
+                q_seq_len,
             )
             cur_q_block_ptr = tl.advance(q_block_ptr, ((q_block_id * BLOCK_M).to(tl.int32), 0))
             cur_q_block = tl.load(cur_q_block_ptr, boundary_check=(0, 1), padding_option="zero")
@@ -528,30 +641,58 @@ def _sdpa_fwd_kernel(
                         kv_block_start = kv_block_id * BLOCK_N
                         kv_block_len = min(BLOCK_N, kv_seq_len - kv_block_start)
                         mask = gen_mask_n_right_bound(
-                            aux_mask_ptr_10, aux_mask_size, stride_mask_m, stride_mask_n,
-                            BLOCK_M, BLOCK_N,
-                            kv_block_start, GLOBAL_WINDOW,
+                            aux_mask_ptr_10,
+                            aux_mask_size,
+                            stride_mask_m,
+                            stride_mask_n,
+                            BLOCK_M,
+                            BLOCK_N,
+                            kv_block_start,
+                            GLOBAL_WINDOW,
                         )
                         if LOCAL_WINDOW is not None:
                             mask_sw = gen_mask_triu(
-                                aux_mask_ptr_triu, aux_mask_size, stride_mask_m, stride_mask_n,
-                                BLOCK_M, BLOCK_N,
-                                q_block_start, kv_block_start + LOCAL_WINDOW,
+                                aux_mask_ptr_triu,
+                                aux_mask_size,
+                                stride_mask_m,
+                                stride_mask_n,
+                                BLOCK_M,
+                                BLOCK_N,
+                                q_block_start,
+                                kv_block_start + LOCAL_WINDOW,
                             )
                             mask = mask | mask_sw
                         mask_causal = gen_mask_tril(
-                            aux_mask_ptr_tril, aux_mask_size, stride_mask_m, stride_mask_n,
-                            BLOCK_M, BLOCK_N,
-                            q_block_start, kv_block_start, 
+                            aux_mask_ptr_tril,
+                            aux_mask_size,
+                            stride_mask_m,
+                            stride_mask_n,
+                            BLOCK_M,
+                            BLOCK_N,
+                            q_block_start,
+                            kv_block_start,
                         )
                         mask = mask & mask_causal
                         mask = mask & q_mask
                         cur_k_block_ptr = tl.advance(k_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
                         cur_v_block_ptr = tl.advance(v_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
                         acc, l_i, m_i = _sdpa_single_block_fwd(
-                            acc, l_i, m_i, cur_q_block, cur_k_block_ptr, cur_v_block_ptr, mask, scale,
-                            q_block_start, kv_block_start, block_len, kv_block_len,
-                            HEAD_DIM, BLOCK_M, BLOCK_N, BLOCK_D, 
+                            acc,
+                            l_i,
+                            m_i,
+                            cur_q_block,
+                            cur_k_block_ptr,
+                            cur_v_block_ptr,
+                            mask,
+                            scale,
+                            q_block_start,
+                            kv_block_start,
+                            block_len,
+                            kv_block_len,
+                            HEAD_DIM,
+                            BLOCK_M,
+                            BLOCK_N,
+                            BLOCK_D,
                             v_ptr.dtype.element_ty == tl.float8e5,
                         )
                 else:
@@ -562,7 +703,7 @@ def _sdpa_fwd_kernel(
 
             if IS_CAUSAL:
                 if LOCAL_WINDOW is not None:
-                    sw_start_block = max(q_block_start - LOCAL_WINDOW, 0) //  BLOCK_N
+                    sw_start_block = max(q_block_start - LOCAL_WINDOW, 0) // BLOCK_N
                     start_block = max(sw_start_block, num_global_window_blocks)
                 elif GLOBAL_WINDOW is None:
                     # vanilla causal attention
@@ -577,30 +718,58 @@ def _sdpa_fwd_kernel(
                 kv_block_len = min(BLOCK_N, kv_seq_len - kv_block_start)
                 if IS_CAUSAL:
                     mask = gen_mask_tril(
-                        aux_mask_ptr_tril, aux_mask_size, stride_mask_m, stride_mask_n,
-                        BLOCK_M, BLOCK_N,
-                        q_block_start, kv_block_start,
+                        aux_mask_ptr_tril,
+                        aux_mask_size,
+                        stride_mask_m,
+                        stride_mask_n,
+                        BLOCK_M,
+                        BLOCK_N,
+                        q_block_start,
+                        kv_block_start,
                     )
                     if LOCAL_WINDOW is not None:
                         mask_sw = gen_mask_triu(
-                            aux_mask_ptr_triu, aux_mask_size, stride_mask_m, stride_mask_n,
-                            BLOCK_M, BLOCK_N,
-                            q_block_start, kv_block_start + LOCAL_WINDOW,
+                            aux_mask_ptr_triu,
+                            aux_mask_size,
+                            stride_mask_m,
+                            stride_mask_n,
+                            BLOCK_M,
+                            BLOCK_N,
+                            q_block_start,
+                            kv_block_start + LOCAL_WINDOW,
                         )
                         mask = mask & mask_sw
                 else:
                     mask = gen_mask_n_right_bound(
-                        aux_mask_ptr_10, aux_mask_size, stride_mask_m, stride_mask_n,
-                        BLOCK_M, BLOCK_N,
-                        kv_block_start, kv_seq_len,
+                        aux_mask_ptr_10,
+                        aux_mask_size,
+                        stride_mask_m,
+                        stride_mask_n,
+                        BLOCK_M,
+                        BLOCK_N,
+                        kv_block_start,
+                        kv_seq_len,
                     )
                 mask = mask & q_mask
                 cur_k_block_ptr = tl.advance(k_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
                 cur_v_block_ptr = tl.advance(v_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
                 acc, l_i, m_i = _sdpa_single_block_fwd(
-                    acc, l_i, m_i, cur_q_block, cur_k_block_ptr, cur_v_block_ptr, mask, scale,
-                    q_block_start, kv_block_start, block_len, kv_block_len,
-                    HEAD_DIM, BLOCK_M, BLOCK_N, BLOCK_D, 
+                    acc,
+                    l_i,
+                    m_i,
+                    cur_q_block,
+                    cur_k_block_ptr,
+                    cur_v_block_ptr,
+                    mask,
+                    scale,
+                    q_block_start,
+                    kv_block_start,
+                    block_len,
+                    kv_block_len,
+                    HEAD_DIM,
+                    BLOCK_M,
+                    BLOCK_N,
+                    BLOCK_D,
                     v_ptr.dtype.element_ty == tl.float8e5,
                 )
 
@@ -610,24 +779,29 @@ def _sdpa_fwd_kernel(
             tl.store(lse_i_ptr + lse_i_offs * stride_lse_t, lse_i, mask=lse_i_mask)
             cur_o_block_ptr = tl.advance(o_block_ptr, ((q_block_id * BLOCK_M).to(tl.int32), 0))
             accumulator = acc / l_i[:, None]
-            tl.store(cur_o_block_ptr, accumulator.to(o_ptr.type.element_ty), boundary_check=(0,1))
+            if OUTPUT_F32:
+                cur_o_f32_block_ptr = tl.advance(o_f32_block_ptr, ((q_block_id * BLOCK_M).to(tl.int32), 0))
+                tl.store(cur_o_f32_block_ptr, accumulator, boundary_check=(0, 1))
+            tl.store(cur_o_block_ptr, accumulator.to(o_ptr.type.element_ty), boundary_check=(0, 1))
+
 
 def _sdpa_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    cu_seqlens_q: torch.Tensor, # [bsz + 1]
-    cu_seqlens_kv: torch.Tensor, # [bsz + 1]
+    cu_seqlens_q: torch.Tensor,  # [bsz + 1]
+    cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
     is_causal: bool = True,
     local_window_size: Optional[int] = None,
     global_window_size: Optional[int] = None,
     sm_scale: Optional[float] = None,
     gqa_interleave: bool = False,
+    output_f32: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     tot_q_toks, num_q_heads, head_dim = q.shape
     tot_kv_toks, num_kv_heads, _ = k.shape
     o = torch.zeros_like(q)
-    softmax_lse = torch.zeros((num_q_heads, tot_q_toks), dtype=torch.float32, device=q.device) + float('-inf')
+    softmax_lse = torch.zeros((num_q_heads, tot_q_toks), dtype=torch.float32, device=q.device) + float("-inf")
     if q.dtype == torch.float32:
         CHUNK_SIZE = 64
         BLOCK_M = CHUNK_SIZE
@@ -638,27 +812,69 @@ def _sdpa_fwd(
         BLOCK_N = 64
     q_chunk_indices = prepare_chunk_indices(cu_seqlens_q, CHUNK_SIZE)
     print(f"{q_chunk_indices=}")
-    
+
     BLOCK_D = head_dim
     cube_num = get_num_cores("cube")
-    
-    grid = (cube_num, )
+
+    grid = (cube_num,)
+
+    if output_f32:
+        o_f32 = torch.zeros_like(q, dtype=torch.float32)
+        of32_stride_t, of32_stride_h, of32_stride_d = o_f32.stride(0), o_f32.stride(1), o_f32.stride(2)
+    else:
+        o_f32 = None
+        of32_stride_t, of32_stride_h, of32_stride_d = 0, 0, 0
 
     _sdpa_fwd_kernel[grid](
-        o, softmax_lse, q, k, v, 
-        cu_seqlens_q, cu_seqlens_kv, sm_scale,
-        q_chunk_indices, q_chunk_indices.shape[0],
-        o.stride(0), o.stride(1), o.stride(2),
-        softmax_lse.stride(0), softmax_lse.stride(1),
-        q.stride(0), q.stride(1), q.stride(2),
-        k.stride(0), k.stride(1), k.stride(2),
-        v.stride(0), v.stride(1), v.stride(2),
-        AUX_MASK, AUX_MASK_SIZE, AUX_MASK.stride(0), AUX_MASK.stride(1),
-        is_causal,global_window_size, local_window_size,
-        num_q_heads, num_kv_heads, gqa_interleave, head_dim,
-        CHUNK_SIZE, BLOCK_M, BLOCK_N, BLOCK_D,
+        o,
+        o_f32,
+        softmax_lse,
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        sm_scale,
+        q_chunk_indices,
+        q_chunk_indices.shape[0],
+        o.stride(0),
+        o.stride(1),
+        o.stride(2),
+        of32_stride_t,
+        of32_stride_h,
+        of32_stride_d,
+        softmax_lse.stride(0),
+        softmax_lse.stride(1),
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        AUX_MASK,
+        AUX_MASK_SIZE,
+        AUX_MASK.stride(0),
+        AUX_MASK.stride(1),
+        is_causal,
+        global_window_size,
+        local_window_size,
+        num_q_heads,
+        num_kv_heads,
+        gqa_interleave,
+        head_dim,
+        CHUNK_SIZE,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_D,
+        output_f32,
     )
-    return o, softmax_lse
+    if output_f32:
+        return o, softmax_lse, o_f32
+    else:
+        return o, softmax_lse
 
 
 @triton.autotune(
@@ -674,15 +890,21 @@ def _sdpa_fwd(
 )
 @triton.jit
 def _sdpa_bwd_preprocess(
-        d_ptr: torch.Tensor,
-        o_ptr: torch.Tensor,
-        do_ptr: torch.Tensor,
-        num_tokens: int,
-        d_stride_h: int, d_stride_t: int,
-        o_stride_t: int, o_stride_h: int, o_stride_d: int,
-        do_stride_t: int, do_stride_h: int, do_stride_d: int,
-        NUM_HEADS: tl.constexpr, HEAD_DIM: tl.constexpr,
-        BLOCK_SIZE: tl.constexpr,
+    d_ptr: torch.Tensor,
+    o_ptr: torch.Tensor,
+    do_ptr: torch.Tensor,
+    num_tokens: int,
+    d_stride_h: int,
+    d_stride_t: int,
+    o_stride_t: int,
+    o_stride_h: int,
+    o_stride_d: int,
+    do_stride_t: int,
+    do_stride_h: int,
+    do_stride_d: int,
+    NUM_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
     n_progs = tl.num_programs(0)
@@ -694,8 +916,19 @@ def _sdpa_bwd_preprocess(
         head_id = task_id % NUM_HEADS
         t_offs = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         t_mask = t_offs < num_tokens
-        o = tl.load(o_ptr + t_offs[:, None] * o_stride_t + head_id * o_stride_h + tl.arange(0, HEAD_DIM)[None, :] * o_stride_d, mask=t_mask[:, None], other=0.0)
-        do = tl.load(do_ptr + t_offs[:, None] * do_stride_t + head_id * do_stride_h + tl.arange(0, HEAD_DIM)[None, :] * do_stride_d, mask=t_mask[:, None], other=0.0)
+        o = tl.load(
+            o_ptr + t_offs[:, None] * o_stride_t + head_id * o_stride_h + tl.arange(0, HEAD_DIM)[None, :] * o_stride_d,
+            mask=t_mask[:, None],
+            other=0.0,
+        )
+        do = tl.load(
+            do_ptr
+            + t_offs[:, None] * do_stride_t
+            + head_id * do_stride_h
+            + tl.arange(0, HEAD_DIM)[None, :] * do_stride_d,
+            mask=t_mask[:, None],
+            other=0.0,
+        )
         delta = tl.sum(o.cast(tl.float32) * do.cast(tl.float32), axis=-1)
         tl.store(d_ptr + head_id * d_stride_h + t_offs * d_stride_t, delta, mask=t_mask)
 
@@ -729,7 +962,7 @@ def _sdpa_single_block_bwd_dkdv(
     # Load (transposed) K block
     q = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero")
     q_T = tl.trans(q)
-    qkT = tl.dot(k, q_T) # [BLOCK_N, BLOCK_M]
+    qkT = tl.dot(k, q_T)  # [BLOCK_N, BLOCK_M]
     # tl.compile_hint(qk, "tile_cube_loop")
     qkT = qkT * qk_scale
 
@@ -755,7 +988,7 @@ def _sdpa_single_block_bwd_dkdv(
     # dsT = pT * (dpT - dT)
     dsT = pT * (dpT - d[None, :]) * qk_scale
     dsT_cast = dsT.to(q_T.dtype)
-    
+
     # -- Compute dK ----
     # dk = dsT @ q
     dk = tl.dot(dsT_cast, q, dk_ptr)
@@ -791,7 +1024,7 @@ def _sdpa_single_block_bwd_dq(
     # Load (transposed) K block
     k = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
     k_T = tl.trans(k)
-    qk = tl.dot(q, k_T) # [BLOCK_M, BLOCK_N]
+    qk = tl.dot(q, k_T)  # [BLOCK_M, BLOCK_N]
     # tl.compile_hint(qk, "tile_cube_loop")
     qk = qk * qk_scale
 
@@ -811,7 +1044,7 @@ def _sdpa_single_block_bwd_dq(
     # ds = p * (dp - d)
     ds = p * (dp - d[:, None]) * qk_scale
     ds_cast = ds.to(q.dtype)
-    
+
     # -- Compute dK ----
     # dq = ds @ k
     dq = tl.dot(ds_cast, k, dq_ptr)
@@ -877,7 +1110,7 @@ def _sdpa_bwd_dkdv_kernel(
     pid = tl.program_id(0)
     n_programs = tl.num_programs(0)
 
-    # Hint(chenyifan): 
+    # Hint(chenyifan):
     #   the prepared aux_mask is [[empty, triu, full, tril, empty],
     #                             [full, empty, empty, full, empty]]
     #   every mask [BLOCK_M, BLOCK_N] can be sliced from the aux_mask and further combined
@@ -914,7 +1147,7 @@ def _sdpa_bwd_dkdv_kernel(
                 strides=(stride_dkt, stride_dkd),
                 offsets=(0, 0),
                 block_shape=(BLOCK_N, BLOCK_D),
-                order=(1,0),
+                order=(1, 0),
             )
             dv_block_ptr = tl.make_block_ptr(
                 base=dv_ptr + kv_start * stride_dvt + kv_head_id * stride_dvh,
@@ -922,7 +1155,7 @@ def _sdpa_bwd_dkdv_kernel(
                 strides=(stride_dvt, stride_dvd),
                 offsets=(0, 0),
                 block_shape=(BLOCK_N, BLOCK_D),
-                order=(1,0),
+                order=(1, 0),
             )
             k_block_ptr = tl.make_block_ptr(
                 base=k_ptr + kv_start * stride_kt + kv_head_id * stride_kh,
@@ -930,7 +1163,7 @@ def _sdpa_bwd_dkdv_kernel(
                 strides=(stride_kt, stride_kd),
                 offsets=(0, 0),
                 block_shape=(BLOCK_N, BLOCK_D),
-                order=(1,0),
+                order=(1, 0),
             )
             v_block_ptr = tl.make_block_ptr(
                 base=v_ptr + kv_start * stride_vt + kv_head_id * stride_vh,
@@ -938,14 +1171,14 @@ def _sdpa_bwd_dkdv_kernel(
                 strides=(stride_vt, stride_vd),
                 offsets=(0, 0),
                 block_shape=(BLOCK_N, BLOCK_D),
-                order=(1,0),
+                order=(1, 0),
             )
 
             cur_k_block_ptr = tl.advance(k_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
             cur_k_block = tl.load(cur_k_block_ptr, boundary_check=(0, 1), padding_option="zero")
             cur_v_block_ptr = tl.advance(v_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
             cur_v_block = tl.load(cur_v_block_ptr, boundary_check=(0, 1), padding_option="zero")
-   
+
             kv_block_start = kv_block_id * BLOCK_N
 
             dk = tl.zeros((BLOCK_N, HEAD_DIM), dtype=tl.float32)
@@ -964,7 +1197,7 @@ def _sdpa_bwd_dkdv_kernel(
                     strides=(stride_qt, stride_qd),
                     offsets=(0, 0),
                     block_shape=(BLOCK_M, BLOCK_D),
-                    order=(1,0),
+                    order=(1, 0),
                 )
                 do_block_ptr = tl.make_block_ptr(
                     base=do_ptr + q_start * stride_dot + q_head_id * stride_doh,
@@ -972,7 +1205,7 @@ def _sdpa_bwd_dkdv_kernel(
                     strides=(stride_dot, stride_dod),
                     offsets=(0, 0),
                     block_shape=(BLOCK_M, BLOCK_D),
-                    order=(1,0),
+                    order=(1, 0),
                 )
                 lse_i_ptr = lse_ptr + q_head_id * stride_lse_h + q_start * stride_lse_t
                 delta_i_ptr = delta_ptr + q_head_id * stride_delta_h + q_start * stride_delta_t
@@ -997,39 +1230,64 @@ def _sdpa_bwd_dkdv_kernel(
                     cur_q_end = q_seq_len
 
                 num_total_q_blocks = tl.cdiv(cur_q_end - cur_q_start, BLOCK_M)
-            
+
                 for q_block_id in range(0, num_total_q_blocks):
                     q_block_start = cur_q_start + q_block_id * BLOCK_M
                     q_block_len = min(BLOCK_M, cur_q_end - q_block_start)
                     q_mask = gen_mask_n_right_bound(
-                        aux_mask_ptr_10, aux_mask_size, stride_mask_m, stride_mask_n,
-                        BLOCK_N, BLOCK_M,
-                        q_block_start, q_seq_len,
+                        aux_mask_ptr_10,
+                        aux_mask_size,
+                        stride_mask_m,
+                        stride_mask_n,
+                        BLOCK_N,
+                        BLOCK_M,
+                        q_block_start,
+                        q_seq_len,
                     )
                     mask = gen_mask_m_right_bound(
-                        aux_mask_ptr_10t, aux_mask_size, stride_mask_m, stride_mask_n,
-                        BLOCK_N, BLOCK_M,
-                        kv_block_start, GLOBAL_WINDOW,
+                        aux_mask_ptr_10t,
+                        aux_mask_size,
+                        stride_mask_m,
+                        stride_mask_n,
+                        BLOCK_N,
+                        BLOCK_M,
+                        kv_block_start,
+                        GLOBAL_WINDOW,
                     )
-                    
+
                     k_mask = gen_mask_m_right_bound(
-                        aux_mask_ptr_10t, aux_mask_size, stride_mask_m, stride_mask_n,
-                        BLOCK_N, BLOCK_M,
-                        kv_block_start, kv_seq_len,
+                        aux_mask_ptr_10t,
+                        aux_mask_size,
+                        stride_mask_m,
+                        stride_mask_n,
+                        BLOCK_N,
+                        BLOCK_M,
+                        kv_block_start,
+                        kv_seq_len,
                     )
                     if IS_CAUSAL:
                         if LOCAL_WINDOW is not None:
                             mask_sw = gen_mask_tril(
-                                aux_mask_ptr_tril, aux_mask_size, stride_mask_m, stride_mask_n,
-                                BLOCK_N, BLOCK_M,
-                                kv_block_start + LOCAL_WINDOW, q_block_start + kv_computed_len,
+                                aux_mask_ptr_tril,
+                                aux_mask_size,
+                                stride_mask_m,
+                                stride_mask_n,
+                                BLOCK_N,
+                                BLOCK_M,
+                                kv_block_start + LOCAL_WINDOW,
+                                q_block_start + kv_computed_len,
                             )
 
                             mask = mask | mask_sw
                         mask_causal = gen_mask_triu(
-                            aux_mask_ptr_triu, aux_mask_size, stride_mask_m, stride_mask_n,
-                            BLOCK_N, BLOCK_M,
-                            kv_block_start, q_block_start + kv_computed_len
+                            aux_mask_ptr_triu,
+                            aux_mask_size,
+                            stride_mask_m,
+                            stride_mask_n,
+                            BLOCK_N,
+                            BLOCK_M,
+                            kv_block_start,
+                            q_block_start + kv_computed_len,
                         )
                         mask = mask & mask_causal
                     mask = mask & q_mask & k_mask
@@ -1043,21 +1301,31 @@ def _sdpa_bwd_dkdv_kernel(
                     cur_lse = tl.load(lse_i_ptr + q_offs * stride_lse_t, mask=q_offs < q_seq_len, other=-float("inf"))
                     tl.static_assert(cur_lse.dtype == tl.float32)
                     dk, dv = _sdpa_single_block_bwd_dkdv(
-                        dk, dv, 
-                        cur_delta, cur_lse,
-                        cur_q_block_ptr, cur_do_block_ptr,
-                        cur_k_block, cur_v_block, mask, scale,
-                        q_block_start + kv_computed_len, kv_block_start,
-                        q_block_len, block_len,
-                        HEAD_DIM, BLOCK_M, BLOCK_N, BLOCK_D, 
+                        dk,
+                        dv,
+                        cur_delta,
+                        cur_lse,
+                        cur_q_block_ptr,
+                        cur_do_block_ptr,
+                        cur_k_block,
+                        cur_v_block,
+                        mask,
+                        scale,
+                        q_block_start + kv_computed_len,
+                        kv_block_start,
+                        q_block_len,
+                        block_len,
+                        HEAD_DIM,
+                        BLOCK_M,
+                        BLOCK_N,
+                        BLOCK_D,
                         v_ptr.dtype.element_ty == tl.float8e5,
                     )
 
             cur_dk_block_ptr = tl.advance(dk_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
-            tl.store(cur_dk_block_ptr, dk.to(dk_ptr.type.element_ty), boundary_check=(0,1))
+            tl.store(cur_dk_block_ptr, dk.to(dk_ptr.type.element_ty), boundary_check=(0, 1))
             cur_dv_block_ptr = tl.advance(dv_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
-            tl.store(cur_dv_block_ptr, dv.to(dv_ptr.type.element_ty), boundary_check=(0,1))
-           
+            tl.store(cur_dv_block_ptr, dv.to(dv_ptr.type.element_ty), boundary_check=(0, 1))
 
 
 @triton.jit
@@ -1114,7 +1382,7 @@ def _sdpa_bwd_dq_kernel(
     pid = tl.program_id(0)
     n_programs = tl.num_programs(0)
 
-    # Hint(chenyifan): 
+    # Hint(chenyifan):
     #   the prepared aux_mask is [[empty, triu, full, tril, empty],
     #                             [full, empty, empty, full, empty]]
     #   every mask [BLOCK_M, BLOCK_N] can be sliced from the aux_mask and further combined
@@ -1153,7 +1421,7 @@ def _sdpa_bwd_dq_kernel(
             strides=(stride_qt, stride_qd),
             offsets=(0, 0),
             block_shape=(BLOCK_M, BLOCK_D),
-            order=(1,0),
+            order=(1, 0),
         )
         do_block_ptr = tl.make_block_ptr(
             base=do_ptr + q_start * stride_dot + q_head_id * stride_doh,
@@ -1161,7 +1429,7 @@ def _sdpa_bwd_dq_kernel(
             strides=(stride_dot, stride_dod),
             offsets=(0, 0),
             block_shape=(BLOCK_M, BLOCK_D),
-            order=(1,0),
+            order=(1, 0),
         )
         dq_block_ptr = tl.make_block_ptr(
             base=dq_ptr + q_start * stride_dqt + q_head_id * stride_dqh,
@@ -1169,7 +1437,7 @@ def _sdpa_bwd_dq_kernel(
             strides=(stride_dqt, stride_dqd),
             offsets=(0, 0),
             block_shape=(BLOCK_M, BLOCK_D),
-            order=(1,0),
+            order=(1, 0),
         )
         delta_i_ptr = delta_ptr + q_start * stride_delta_t + q_head_id * stride_delta_h
         lse_i_ptr = lse_ptr + q_head_id * stride_lse_h + q_start * stride_lse_t
@@ -1179,7 +1447,7 @@ def _sdpa_bwd_dq_kernel(
             strides=(stride_kt, stride_kd),
             offsets=(0, 0),
             block_shape=(BLOCK_N, BLOCK_D),
-            order=(1,0),
+            order=(1, 0),
         )
         v_block_ptr = tl.make_block_ptr(
             base=v_ptr + kv_start * stride_vt + kv_head_id * stride_vh,
@@ -1187,13 +1455,18 @@ def _sdpa_bwd_dq_kernel(
             strides=(stride_vt, stride_vd),
             offsets=(0, 0),
             block_shape=(BLOCK_N, BLOCK_D),
-            order=(1,0),
+            order=(1, 0),
         )
         if block_len > 0:
             q_mask = gen_mask_m_right_bound(
-                aux_mask_ptr_10t, aux_mask_size, stride_mask_m, stride_mask_n,
-                BLOCK_M, BLOCK_N,
-                q_block_id * BLOCK_M, q_seq_len,
+                aux_mask_ptr_10t,
+                aux_mask_size,
+                stride_mask_m,
+                stride_mask_n,
+                BLOCK_M,
+                BLOCK_N,
+                q_block_id * BLOCK_M,
+                q_seq_len,
             )
             cur_q_block_ptr = tl.advance(q_block_ptr, ((q_block_id * BLOCK_M).to(tl.int32), 0))
             cur_q_block = tl.load(cur_q_block_ptr, boundary_check=(0, 1), padding_option="zero")
@@ -1203,7 +1476,7 @@ def _sdpa_bwd_dq_kernel(
 
             q_offs = q_block_id * BLOCK_M + tl.arange(0, BLOCK_M)
             cur_delta = tl.load(delta_i_ptr + q_offs, q_offs < q_seq_len, other=0.0)
-            cur_lse  = tl.load(lse_i_ptr + q_offs, q_offs < q_seq_len, other=-float("inf"))
+            cur_lse = tl.load(lse_i_ptr + q_offs, q_offs < q_seq_len, other=-float("inf"))
 
             dq = tl.zeros((BLOCK_M, HEAD_DIM), dtype=tl.float32)
 
@@ -1217,30 +1490,59 @@ def _sdpa_bwd_dq_kernel(
                         kv_block_start = kv_block_id * BLOCK_N
                         kv_block_len = min(BLOCK_N, kv_seq_len - kv_block_start)
                         mask = gen_mask_n_right_bound(
-                            aux_mask_ptr_10, aux_mask_size, stride_mask_m, stride_mask_n,
-                            BLOCK_M, BLOCK_N,
-                            kv_block_start, GLOBAL_WINDOW,
+                            aux_mask_ptr_10,
+                            aux_mask_size,
+                            stride_mask_m,
+                            stride_mask_n,
+                            BLOCK_M,
+                            BLOCK_N,
+                            kv_block_start,
+                            GLOBAL_WINDOW,
                         )
                         if LOCAL_WINDOW is not None:
                             mask_sw = gen_mask_triu(
-                                aux_mask_ptr_triu, aux_mask_size, stride_mask_m, stride_mask_n,
-                                BLOCK_M, BLOCK_N,
-                                q_block_start, kv_block_start + LOCAL_WINDOW,
+                                aux_mask_ptr_triu,
+                                aux_mask_size,
+                                stride_mask_m,
+                                stride_mask_n,
+                                BLOCK_M,
+                                BLOCK_N,
+                                q_block_start,
+                                kv_block_start + LOCAL_WINDOW,
                             )
                             mask = mask | mask_sw
                         mask_causal = gen_mask_tril(
-                            aux_mask_ptr_tril, aux_mask_size, stride_mask_m, stride_mask_n,
-                            BLOCK_M, BLOCK_N,
-                            q_block_start, kv_block_start, 
+                            aux_mask_ptr_tril,
+                            aux_mask_size,
+                            stride_mask_m,
+                            stride_mask_n,
+                            BLOCK_M,
+                            BLOCK_N,
+                            q_block_start,
+                            kv_block_start,
                         )
                         mask = mask & mask_causal
                         mask = mask & q_mask
                         cur_k_block_ptr = tl.advance(k_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
                         cur_v_block_ptr = tl.advance(v_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
                         dq = _sdpa_single_block_bwd_dq(
-                            dq, cur_delta, cur_lse, cur_q_block, cur_do_block, cur_k_block_ptr, cur_v_block_ptr, mask, scale,
-                            q_block_start, kv_block_start, block_len, kv_block_len,
-                            HEAD_DIM, BLOCK_M, BLOCK_N, BLOCK_D, 
+                            dq,
+                            cur_delta,
+                            cur_lse,
+                            cur_q_block,
+                            cur_do_block,
+                            cur_k_block_ptr,
+                            cur_v_block_ptr,
+                            mask,
+                            scale,
+                            q_block_start,
+                            kv_block_start,
+                            block_len,
+                            kv_block_len,
+                            HEAD_DIM,
+                            BLOCK_M,
+                            BLOCK_N,
+                            BLOCK_D,
                             v_ptr.dtype.element_ty == tl.float8e5,
                         )
                 else:
@@ -1250,7 +1552,7 @@ def _sdpa_bwd_dq_kernel(
                 num_global_window_blocks = 0
             if IS_CAUSAL:
                 if LOCAL_WINDOW is not None:
-                    sw_start_block = max(q_block_start - LOCAL_WINDOW, 0) //  BLOCK_N
+                    sw_start_block = max(q_block_start - LOCAL_WINDOW, 0) // BLOCK_N
                     start_block = max(sw_start_block, num_global_window_blocks)
                 elif GLOBAL_WINDOW is None:
                     # vanilla causal attention
@@ -1265,52 +1567,81 @@ def _sdpa_bwd_dq_kernel(
                 kv_block_len = min(BLOCK_N, kv_seq_len - kv_block_start)
                 if IS_CAUSAL:
                     mask = gen_mask_tril(
-                        aux_mask_ptr_tril, aux_mask_size, stride_mask_m, stride_mask_n,
-                        BLOCK_M, BLOCK_N,
-                        q_block_start, kv_block_start,
+                        aux_mask_ptr_tril,
+                        aux_mask_size,
+                        stride_mask_m,
+                        stride_mask_n,
+                        BLOCK_M,
+                        BLOCK_N,
+                        q_block_start,
+                        kv_block_start,
                     )
                     if LOCAL_WINDOW is not None:
                         mask_sw = gen_mask_triu(
-                            aux_mask_ptr_triu, aux_mask_size, stride_mask_m, stride_mask_n,
-                            BLOCK_M, BLOCK_N,
-                            q_block_start, kv_block_start + LOCAL_WINDOW,
+                            aux_mask_ptr_triu,
+                            aux_mask_size,
+                            stride_mask_m,
+                            stride_mask_n,
+                            BLOCK_M,
+                            BLOCK_N,
+                            q_block_start,
+                            kv_block_start + LOCAL_WINDOW,
                         )
                         mask = mask & mask_sw
                 else:
                     mask = gen_mask_n_right_bound(
-                        aux_mask_ptr_10, aux_mask_size, stride_mask_m, stride_mask_n,
-                        BLOCK_M, BLOCK_N,
-                        kv_block_start, kv_seq_len,
+                        aux_mask_ptr_10,
+                        aux_mask_size,
+                        stride_mask_m,
+                        stride_mask_n,
+                        BLOCK_M,
+                        BLOCK_N,
+                        kv_block_start,
+                        kv_seq_len,
                     )
                 mask = mask & q_mask
                 cur_k_block_ptr = tl.advance(k_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
                 cur_v_block_ptr = tl.advance(v_block_ptr, ((kv_block_id * BLOCK_N).to(tl.int32), 0))
                 dq = _sdpa_single_block_bwd_dq(
-                    dq, cur_delta, cur_lse, cur_q_block, cur_do_block, cur_k_block_ptr, cur_v_block_ptr, mask, scale,
-                    q_block_start, kv_block_start, block_len, kv_block_len,
-                    HEAD_DIM, BLOCK_M, BLOCK_N, BLOCK_D, 
+                    dq,
+                    cur_delta,
+                    cur_lse,
+                    cur_q_block,
+                    cur_do_block,
+                    cur_k_block_ptr,
+                    cur_v_block_ptr,
+                    mask,
+                    scale,
+                    q_block_start,
+                    kv_block_start,
+                    block_len,
+                    kv_block_len,
+                    HEAD_DIM,
+                    BLOCK_M,
+                    BLOCK_N,
+                    BLOCK_D,
                     v_ptr.dtype.element_ty == tl.float8e5,
                 )
             cur_dq_block_ptr = tl.advance(dq_block_ptr, ((q_block_id * BLOCK_M).to(tl.int32), 0))
-            tl.store(cur_dq_block_ptr, dq.to(dq_block_ptr.type.element_ty), boundary_check=(0,1))
+            tl.store(cur_dq_block_ptr, dq.to(dq_block_ptr.type.element_ty), boundary_check=(0, 1))
 
 
 def _sdpa_bwd(
-        do: torch.Tensor,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        o: torch.Tensor,
-        softmax_lse: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
-        cu_seqlens_kv: torch.Tensor,
-        max_seqlen_q: int,
-        max_seqlen_kv: int,
-        is_causal: bool,
-        local_window_size: Optional[int],
-        global_window_size: Optional[int],
-        sm_scale: Optional[float],
-        gqa_interleave: bool,
+    do: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_kv: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+    is_causal: bool,
+    local_window_size: Optional[int],
+    global_window_size: Optional[int],
+    sm_scale: Optional[float],
+    gqa_interleave: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     tot_q_toks, num_q_heads, head_dim = q.shape
 
@@ -1318,21 +1649,29 @@ def _sdpa_bwd(
     o = o.contiguous()
     do = do.contiguous()
 
-    num_vecs = get_num_cores('vector')
+    num_vecs = get_num_cores("vector")
     _sdpa_bwd_preprocess[(num_vecs,)](
-        delta, o, do, tot_q_toks,
-        delta.stride(0), delta.stride(1),
-        o.stride(0), o.stride(1), o.stride(2),
-        do.stride(0), do.stride(1), do.stride(2),
-        num_q_heads, head_dim,
+        delta,
+        o,
+        do,
+        tot_q_toks,
+        delta.stride(0),
+        delta.stride(1),
+        o.stride(0),
+        o.stride(1),
+        o.stride(2),
+        do.stride(0),
+        do.stride(1),
+        do.stride(2),
+        num_q_heads,
+        head_dim,
     )
-    
 
     _, num_q_heads, head_dim = q.shape
     num_kv_heads = k.shape[1]
     if sm_scale is None:
-        sm_scale = 1.0 / (head_dim ** 0.5)
-    
+        sm_scale = 1.0 / (head_dim**0.5)
+
     dk = torch.zeros_like(k).contiguous()
     dv = torch.zeros_like(v).contiguous()
 
@@ -1345,62 +1684,130 @@ def _sdpa_bwd(
     CHUNK_SIZE = BLOCK_N
     kv_chunk_indices = prepare_chunk_indices(cu_seqlens_kv, CHUNK_SIZE)
     print(f"{kv_chunk_indices=}")
-    
+
     BLOCK_D = head_dim
     cube_num = get_num_cores("cube")
-    
-    grid = (cube_num, )
+
+    grid = (cube_num,)
 
     _sdpa_bwd_dkdv_kernel[grid](
-        dk, dv, do, delta, softmax_lse, q, k, v, 
-        cu_seqlens_q, cu_seqlens_kv, sm_scale,
-        kv_chunk_indices, kv_chunk_indices.shape[0],
-        dk.stride(0), dk.stride(1), dk.stride(2),
-        dv.stride(0), dv.stride(1), dv.stride(2),
-        do.stride(0), do.stride(1), do.stride(2),
-        delta.stride(0), delta.stride(1),
-        softmax_lse.stride(0), softmax_lse.stride(1),
-        q.stride(0), q.stride(1), q.stride(2),
-        k.stride(0), k.stride(1), k.stride(2),
-        v.stride(0), v.stride(1), v.stride(2),
-        AUX_MASK, AUX_MASK_SIZE, AUX_MASK.stride(0), AUX_MASK.stride(1),
-        is_causal,global_window_size, local_window_size,
-        num_q_heads, num_kv_heads, gqa_interleave, head_dim,
-        CHUNK_SIZE, BLOCK_M, BLOCK_N, BLOCK_D,
+        dk,
+        dv,
+        do,
+        delta,
+        softmax_lse,
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        sm_scale,
+        kv_chunk_indices,
+        kv_chunk_indices.shape[0],
+        dk.stride(0),
+        dk.stride(1),
+        dk.stride(2),
+        dv.stride(0),
+        dv.stride(1),
+        dv.stride(2),
+        do.stride(0),
+        do.stride(1),
+        do.stride(2),
+        delta.stride(0),
+        delta.stride(1),
+        softmax_lse.stride(0),
+        softmax_lse.stride(1),
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        AUX_MASK,
+        AUX_MASK_SIZE,
+        AUX_MASK.stride(0),
+        AUX_MASK.stride(1),
+        is_causal,
+        global_window_size,
+        local_window_size,
+        num_q_heads,
+        num_kv_heads,
+        gqa_interleave,
+        head_dim,
+        CHUNK_SIZE,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_D,
     )
-    
+
     CHUNK_SIZE = BLOCK_M
     q_chunk_indices = prepare_chunk_indices(cu_seqlens_q, CHUNK_SIZE)
     print(f"{q_chunk_indices=}")
     dq = torch.zeros_like(q)
     _sdpa_bwd_dq_kernel[grid](
-        dq, do, delta, softmax_lse, q, k, v, 
-        cu_seqlens_q, cu_seqlens_kv, sm_scale,
-        q_chunk_indices, q_chunk_indices.shape[0],
-        dq.stride(0), dq.stride(1), dq.stride(2),
-        do.stride(0), do.stride(1), do.stride(2),
-        delta.stride(0), delta.stride(1),
-        softmax_lse.stride(0), softmax_lse.stride(1),
-        q.stride(0), q.stride(1), q.stride(2),
-        k.stride(0), k.stride(1), k.stride(2),
-        v.stride(0), v.stride(1), v.stride(2),
-        AUX_MASK, AUX_MASK_SIZE, AUX_MASK.stride(0), AUX_MASK.stride(1),
-        is_causal,global_window_size, local_window_size,
-        num_q_heads, num_kv_heads, gqa_interleave, head_dim,
-        CHUNK_SIZE, BLOCK_M, BLOCK_N, BLOCK_D,
+        dq,
+        do,
+        delta,
+        softmax_lse,
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        sm_scale,
+        q_chunk_indices,
+        q_chunk_indices.shape[0],
+        dq.stride(0),
+        dq.stride(1),
+        dq.stride(2),
+        do.stride(0),
+        do.stride(1),
+        do.stride(2),
+        delta.stride(0),
+        delta.stride(1),
+        softmax_lse.stride(0),
+        softmax_lse.stride(1),
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        AUX_MASK,
+        AUX_MASK_SIZE,
+        AUX_MASK.stride(0),
+        AUX_MASK.stride(1),
+        is_causal,
+        global_window_size,
+        local_window_size,
+        num_q_heads,
+        num_kv_heads,
+        gqa_interleave,
+        head_dim,
+        CHUNK_SIZE,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_D,
     )
 
     return dq, dk, dv
 
+
 class TTXSWAFunction(MojoSWAFunction):
     @staticmethod
     def forward(
-        ctx, 
-        q: torch.Tensor, # [total_q_len, n_q_heads, head_dim]
-        k: torch.Tensor, # [total_k_len, n_kv_heads, head_dim]
-        v: torch.Tensor, # [total_k_len, n_kv_heads, head_dim]
-        cu_seqlens_q: torch.Tensor, # [bsz + 1]
-        cu_seqlens_kv: torch.Tensor, # [bsz + 1]
+        ctx,
+        q: torch.Tensor,  # [total_q_len, n_q_heads, head_dim]
+        k: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
+        v: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
+        cu_seqlens_q: torch.Tensor,  # [bsz + 1]
+        cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
         max_seqlen_q: int,
         max_seqlen_kv: int,
         is_causal: bool = True,
@@ -1408,11 +1815,28 @@ class TTXSWAFunction(MojoSWAFunction):
         global_window_size: Optional[int] = None,
         sm_scale: Optional[float] = None,
         gqa_interleave: bool = False,
+        output_f32: bool = False,
     ) -> torch.Tensor:
-        o, softmax_lse = _sdpa_fwd(
-            q, k, v, cu_seqlens_q, cu_seqlens_kv, is_causal, local_window_size, global_window_size, sm_scale, gqa_interleave
+
+        fwd_results = _sdpa_fwd(
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            is_causal,
+            local_window_size,
+            global_window_size,
+            sm_scale,
+            gqa_interleave,
+            output_f32,
         )
-        ctx.save_for_backward(o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv)
+        if output_f32:
+            o, softmax_lse, o_f32 = fwd_results
+            ctx.save_for_backward(o_f32, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv)
+        else:
+            o, softmax_lse = fwd_results
+            ctx.save_for_backward(o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv)
         ctx.sm_scale = sm_scale
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
@@ -1420,11 +1844,13 @@ class TTXSWAFunction(MojoSWAFunction):
         ctx.local_window_size = local_window_size
         ctx.global_window_size = global_window_size
         ctx.gqa_interleave = gqa_interleave
+        ctx.output_f32 = output_f32
         return o
 
     @staticmethod
-    def backward(ctx, do: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, 
-                                                     None, None, None, None, None, None, None, None, None]:
+    def backward(
+        ctx, do: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, None, None, None, None, None, None, None, None, None]:
         o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
         sm_scale = ctx.sm_scale
         max_seqlen_q = ctx.max_seqlen_q
@@ -1435,9 +1861,23 @@ class TTXSWAFunction(MojoSWAFunction):
         gqa_interleave = ctx.gqa_interleave
 
         dq, dk, dv = _sdpa_bwd(
-            do, q, k, v, o, softmax_lse, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, is_causal, local_window_size, global_window_size, sm_scale, gqa_interleave
+            do,
+            q,
+            k,
+            v,
+            o,
+            softmax_lse,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            max_seqlen_q,
+            max_seqlen_kv,
+            is_causal,
+            local_window_size,
+            global_window_size,
+            sm_scale,
+            gqa_interleave,
         )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None
 
 
 def flash_attn_sparse_torch(
@@ -1445,7 +1885,7 @@ def flash_attn_sparse_torch(
     k,
     v,
     cu_seqlens,
-    gqa_interleave: bool =False,
+    gqa_interleave: bool = False,
     softmax_scale=None,
     local_window_size=0,
     global_window_size=0,
@@ -1475,17 +1915,18 @@ def flash_attn_sparse_torch(
             b_v = v[seq_start:seq_end, hk, :].cpu().double()
             b_s = b_q @ b_k.T
 
-            casual_mask = (
-                torch.arange(0, seq_len)[:, None] >= torch.arange(0, seq_len)[None, :]
-            )
+            casual_mask = torch.arange(0, seq_len)[:, None] >= torch.arange(0, seq_len)[None, :]
             if local_window_size is not None or global_window_size is not None:
                 local_window_mask = (
-                    torch.arange(0, seq_len)[:, None]
-                    <= torch.arange(0, seq_len)[None, :] + local_window_size
-                ) if local_window_size is not None else False
-                global_window_mask = (torch.arange(0, seq_len) < global_window_size)[
-                    None, :
-                ] if global_window_size is not None else False
+                    (torch.arange(0, seq_len)[:, None] <= torch.arange(0, seq_len)[None, :] + local_window_size)
+                    if local_window_size is not None
+                    else False
+                )
+                global_window_mask = (
+                    (torch.arange(0, seq_len) < global_window_size)[None, :]
+                    if global_window_size is not None
+                    else False
+                )
                 b_s_mask = casual_mask & (local_window_mask | global_window_mask)
             else:
                 b_s_mask = casual_mask
@@ -1499,6 +1940,7 @@ def flash_attn_sparse_torch(
 
     return o
 
+
 def generate_test_data(
     bsz: int,
     q_head_num: int,
@@ -1511,7 +1953,9 @@ def generate_test_data(
 ):
     q_lens = torch.randint(max_q_len // 2, max_q_len, (bsz,), dtype=torch.int32, device=device)
     if max_kv_prefix_len > 0:
-        kv_prefix_lens = torch.randint(max_kv_prefix_len // 2, max_kv_prefix_len, (bsz,), dtype=torch.int32, device=device)
+        kv_prefix_lens = torch.randint(
+            max_kv_prefix_len // 2, max_kv_prefix_len, (bsz,), dtype=torch.int32, device=device
+        )
     else:
         kv_prefix_lens = torch.zeros(bsz, dtype=torch.int32, device=device)
     kv_lens = kv_prefix_lens + q_lens
@@ -1529,18 +1973,20 @@ def generate_test_data(
 def test_swa_function():
     test_configs = [
         (1, 1, 1, False, 128, 256, 0, torch.float32),
-        # (4, 4, 2, True, 128, 512, 0, torch.float32),
-        # (4, 4, 2, False, 128, 256, 0, torch.bfloat16),
-        # (4, 16, 4, False, 128, 4096, 0, torch.bfloat16),
+        (4, 4, 2, True, 128, 512, 0, torch.float32),
+        (4, 4, 2, False, 128, 256, 0, torch.bfloat16),
+        (4, 16, 4, False, 128, 4096, 0, torch.bfloat16),
     ]
 
     local_window = 1023
     global_window = 0
     for bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_q_len, max_kv_prefix_len, dtype in test_configs:
         print(bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_q_len, max_kv_prefix_len, dtype)
-        scale = 1.0 / head_dim ** 0.5
+        scale = 1.0 / head_dim**0.5
         for i in range(5):
-            query, key, value, cu_seqlens_q, cu_seqlens_kv = generate_test_data(bsz, q_head_num, kv_head_num, head_dim, max_q_len, max_kv_prefix_len, dtype)
+            query, key, value, cu_seqlens_q, cu_seqlens_kv = generate_test_data(
+                bsz, q_head_num, kv_head_num, head_dim, max_q_len, max_kv_prefix_len, dtype
+            )
             print(i, cu_seqlens_q, cu_seqlens_kv)
             q_ref = query.clone().detach().requires_grad_(True)
             k_ref = key.clone().detach().requires_grad_(True)
@@ -1555,7 +2001,19 @@ def test_swa_function():
             )
 
             o_mojo = MojoSWAFunction._registry.get("ttx").apply(
-                q_mojo, k_mojo, v_mojo, cu_seqlens_q, cu_seqlens_kv, max_q_len, max_kv_prefix_len, True, local_window, global_window, scale, gqa_interleave
+                q_mojo,
+                k_mojo,
+                v_mojo,
+                cu_seqlens_q,
+                cu_seqlens_kv,
+                max_q_len,
+                max_kv_prefix_len,
+                True,
+                local_window,
+                global_window,
+                scale,
+                gqa_interleave,
+                True,
             )
 
             assert_close(o_ref, o_mojo)
@@ -1565,7 +2023,6 @@ def test_swa_function():
             assert_close(q_ref.grad, q_mojo.grad)
             assert_close(k_ref.grad, k_mojo.grad)
             assert_close(v_ref.grad, v_mojo.grad)
-
 
 
 def assert_close(
@@ -1618,6 +2075,7 @@ def assert_close(
             )
         else:
             assert result == ref
+
 
 if __name__ == "__main__":
     test_swa_function()
