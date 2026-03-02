@@ -797,7 +797,7 @@ def swa_ttx_forward(
         BLOCK_M = CHUNK_SIZE
         BLOCK_N = 64
     q_chunk_indices = prepare_chunk_indices(cu_seqlens_q, CHUNK_SIZE)
-    print(f"{q_chunk_indices=}")
+    # print(f"{q_chunk_indices=}")
 
     BLOCK_D = head_dim
     cube_num = get_num_cores("cube")
@@ -1667,7 +1667,7 @@ def swa_ttx_backward(
         BLOCK_N = 64
     CHUNK_SIZE = BLOCK_N
     kv_chunk_indices = prepare_chunk_indices(cu_seqlens_kv, CHUNK_SIZE)
-    print(f"{kv_chunk_indices=}")
+    # print(f"{kv_chunk_indices=}")
 
     BLOCK_D = head_dim
     cube_num = get_num_cores("cube")
@@ -1729,7 +1729,7 @@ def swa_ttx_backward(
 
     CHUNK_SIZE = BLOCK_M
     q_chunk_indices = prepare_chunk_indices(cu_seqlens_q, CHUNK_SIZE)
-    print(f"{q_chunk_indices=}")
+    # print(f"{q_chunk_indices=}")
     dq = torch.zeros_like(q)
     _sdpa_bwd_dq_kernel[grid](
         dq,
