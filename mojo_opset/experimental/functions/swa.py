@@ -785,7 +785,7 @@ def _sdpa_fwd_kernel(
             tl.store(cur_o_block_ptr, accumulator.to(o_ptr.type.element_ty), boundary_check=(0, 1))
 
 
-def _sdpa_fwd(
+def swa_ttx_forward(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -1626,7 +1626,7 @@ def _sdpa_bwd_dq_kernel(
             tl.store(cur_dq_block_ptr, dq.to(dq_block_ptr.type.element_ty), boundary_check=(0, 1))
 
 
-def _sdpa_bwd(
+def swa_ttx_backward(
     do: torch.Tensor,
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1818,7 +1818,7 @@ class TTXSWAFunction(MojoSWAFunction):
         output_f32: bool = False,
     ) -> torch.Tensor:
 
-        fwd_results = _sdpa_fwd(
+        fwd_results = swa_ttx_forward(
             q,
             k,
             v,
@@ -1860,7 +1860,7 @@ class TTXSWAFunction(MojoSWAFunction):
         global_window_size = ctx.global_window_size
         gqa_interleave = ctx.gqa_interleave
 
-        dq, dk, dv = _sdpa_bwd(
+        dq, dk, dv = swa_ttx_backward(
             do,
             q,
             k,
