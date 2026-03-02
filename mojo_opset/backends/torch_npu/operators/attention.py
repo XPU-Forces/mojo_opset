@@ -84,9 +84,8 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
 
         if softmax_scale is None:
             softmax_scale = head_dim**-0.5
-        compress_mask = (
-            torch.from_numpy(np.triu(np.ones((2048, 2048), dtype=np.float16), k=1) * -1).to(dtype=torch.bool).to("npu")
-        )
+
+        compress_mask = torch.triu(torch.ones((2048, 2048), dtype=torch.bool, device=query.device), diagonal=1)
         out, _ = torch_npu.npu_fused_infer_attention_score(
             query=query,
             key=k_cache,
