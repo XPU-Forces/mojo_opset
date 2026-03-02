@@ -23,6 +23,7 @@ def merge_group_and_share_ffn(
     dp_rank = config.dp_rank
     if use_padding:
         raise NotImplementedError("merge_group_ffn not implemented.")
+        # TODO: Implement the NPU Triton version.
         global_max_batch_size = config.max_batch_size * config.dp_size
         assert group_ffn_output.shape[0] == global_max_batch_size
         merge_group_ffn(group_ffn_output, share_ffn_output, dp_rank_input_len, global_max_batch_size, dp_rank)
@@ -44,6 +45,7 @@ def dp_allreduce(
     dp_rank = config.dp_rank
     if use_padding:
         raise NotImplementedError("dp_pad not implemented.")
+        # TODO: Implement the NPU Triton version.
         global_max_batch_size = config.max_batch_size * config.dp_size
         hidden_states = dp_pad(hidden_states, dp_rank_input_len, global_max_batch_size, dp_rank)
     else:
@@ -52,6 +54,7 @@ def dp_allreduce(
         hidden_states = F.pad(hidden_states, (0, 0, left_len, right_len))
     if config.is_deterministic:
         raise NotImplementedError("all_reduce_with_all_to_all not implemented.")
+        # TODO: Implement the NPU Triton version.
     else:
         dist.all_reduce(hidden_states, group=config.dp_group)
     return hidden_states
@@ -70,6 +73,7 @@ def dp_scatter(
         return ffn_output
     if use_padding:
         raise NotImplementedError("dp_unpad not implemented.")
+        # TODO: Implement the NPU Triton version.
         return dp_unpad(ffn_output, dp_rank_input_len, local_token_num, dp_rank)
     else:
         cu_lens = list(accumulate([0] + host_dp_rank_input_len))
