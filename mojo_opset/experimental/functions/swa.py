@@ -35,8 +35,6 @@ def swa_torch_forward(
     v: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
     cu_seqlens_q: torch.Tensor,  # [bsz + 1]
     cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
-    max_seqlen_q: int,
-    max_seqlen_kv: int,
     is_causal: bool = True,
     local_window_size: Optional[int] = None,
     global_window_size: Optional[int] = None,
@@ -111,8 +109,6 @@ def swa_torch_backward(
     softmax_lse: torch.Tensor,  # [n_q_heads, total_q_len]
     cu_seqlens_q: torch.Tensor,  # [bsz + 1]
     cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
-    max_seqlen_q: int,
-    max_seqlen_kv: int,
     is_causal: bool = True,
     local_window_size: Optional[int] = None,
     global_window_size: Optional[int] = None,
@@ -246,8 +242,6 @@ class MojoSWAFunction(MojoFunction):
         v: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
         cu_seqlens_q: torch.Tensor,  # [bsz + 1]
         cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
-        max_seqlen_q: int,
-        max_seqlen_kv: int,
         is_causal: bool = True,
         local_window_size: Optional[int] = None,
         global_window_size: Optional[int] = None,
@@ -263,8 +257,6 @@ class MojoSWAFunction(MojoFunction):
             v,
             cu_seqlens_q,
             cu_seqlens_kv,
-            max_seqlen_q,
-            max_seqlen_kv,
             is_causal,
             local_window_size,
             global_window_size,
@@ -279,8 +271,6 @@ class MojoSWAFunction(MojoFunction):
             o, softmax_lse = fwd_results
             ctx.save_for_backward(o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv)
         ctx.sm_scale = sm_scale
-        ctx.max_seqlen_q = max_seqlen_q
-        ctx.max_seqlen_kv = max_seqlen_kv
         ctx.is_causal = is_causal
         ctx.local_window_size = local_window_size
         ctx.global_window_size = global_window_size
@@ -294,8 +284,6 @@ class MojoSWAFunction(MojoFunction):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, None, None, None, None, None, None, None, None, None]:
         o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
         sm_scale = ctx.sm_scale
-        max_seqlen_q = ctx.max_seqlen_q
-        max_seqlen_kv = ctx.max_seqlen_kv
         is_causal = ctx.is_causal
         local_window_size = ctx.local_window_size
         global_window_size = ctx.global_window_size
@@ -310,8 +298,6 @@ class MojoSWAFunction(MojoFunction):
             softmax_lse,
             cu_seqlens_q,
             cu_seqlens_kv,
-            max_seqlen_q,
-            max_seqlen_kv,
             is_causal,
             local_window_size,
             global_window_size,
@@ -1635,8 +1621,6 @@ def swa_ttx_backward(
     softmax_lse: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_kv: torch.Tensor,
-    max_seqlen_q: int,
-    max_seqlen_kv: int,
     is_causal: bool,
     local_window_size: Optional[int],
     global_window_size: Optional[int],
@@ -1808,8 +1792,6 @@ class TTXSWAFunction(MojoSWAFunction):
         v: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
         cu_seqlens_q: torch.Tensor,  # [bsz + 1]
         cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
-        max_seqlen_q: int,
-        max_seqlen_kv: int,
         is_causal: bool = True,
         local_window_size: Optional[int] = None,
         global_window_size: Optional[int] = None,
@@ -1838,8 +1820,6 @@ class TTXSWAFunction(MojoSWAFunction):
             o, softmax_lse = fwd_results
             ctx.save_for_backward(o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv)
         ctx.sm_scale = sm_scale
-        ctx.max_seqlen_q = max_seqlen_q
-        ctx.max_seqlen_kv = max_seqlen_kv
         ctx.is_causal = is_causal
         ctx.local_window_size = local_window_size
         ctx.global_window_size = global_window_size
@@ -1853,8 +1833,6 @@ class TTXSWAFunction(MojoSWAFunction):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, None, None, None, None, None, None, None, None, None]:
         o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
         sm_scale = ctx.sm_scale
-        max_seqlen_q = ctx.max_seqlen_q
-        max_seqlen_kv = ctx.max_seqlen_kv
         is_causal = ctx.is_causal
         local_window_size = ctx.local_window_size
         global_window_size = ctx.global_window_size
@@ -1869,8 +1847,6 @@ class TTXSWAFunction(MojoSWAFunction):
             softmax_lse,
             cu_seqlens_q,
             cu_seqlens_kv,
-            max_seqlen_q,
-            max_seqlen_kv,
             is_causal,
             local_window_size,
             global_window_size,
@@ -2006,8 +1982,6 @@ def test_swa_function():
                 v_mojo,
                 cu_seqlens_q,
                 cu_seqlens_kv,
-                max_q_len,
-                max_kv_prefix_len,
                 True,
                 local_window,
                 global_window,
