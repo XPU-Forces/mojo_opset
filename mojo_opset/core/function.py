@@ -8,7 +8,7 @@ logger = get_logger(__name__)
 
 
 class MojoFunction(Function):
-    supported_platforms_list = ["npu", "mlu"]
+    supported_platforms_list = ["npu", "mlu", "meta_device"]
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
