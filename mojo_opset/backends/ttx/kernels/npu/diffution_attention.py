@@ -203,13 +203,16 @@ def micro_kernel_bwd_kv(
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_R": 64, "BLOCK_C": 256},
-            multibuffer=True,
-            unit_flag=True,
-            set_workspace_multibuffer=2,
-            enable_hivm_auto_cv_balance=True,
-            tile_mix_vector_loop=2,
-            tile_mix_cube_loop=2,
+            {
+                "BLOCK_R": 64,
+                "BLOCK_C": 256,
+                "multibuffer": True,
+                "unit_flag": True,
+                "set_workspace_multibuffer": 2,
+                "enable_hivm_auto_cv_balance": True,
+                "tile_mix_vector_loop": 2,
+                "tile_mix_cube_loop": 2,
+            }
         )
     ],
     key=["N", "S", "H"],
@@ -428,13 +431,16 @@ def kernel_sda_fwd_up(
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_R": 64, "BLOCK_C": 256},
-            multibuffer=True,
-            unit_flag=True,
-            set_workspace_multibuffer=2,
-            enable_hivm_auto_cv_balance=True,
-            tile_mix_vector_loop=2,
-            tile_mix_cube_loop=2,
+            {
+                "BLOCK_R": 64,
+                "BLOCK_C": 256,
+                "multibuffer": True,
+                "unit_flag": True,
+                "set_workspace_multibuffer": 2,
+                "enable_hivm_auto_cv_balance": True,
+                "tile_mix_vector_loop": 2,
+                "tile_mix_cube_loop": 2,
+            }
         )
     ],
     key=["N", "S", "H"],
@@ -676,13 +682,16 @@ def kernel_sda_bwd_d(
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_R": 64, "BLOCK_C": 128},
-            multibuffer=True,
-            unit_flag=True,
-            set_workspace_multibuffer=2,
-            enable_hivm_auto_cv_balance=True,
-            tile_mix_vector_loop=2,
-            tile_mix_cube_loop=2,
+            {
+                "BLOCK_R": 64,
+                "BLOCK_C": 128,
+                "multibuffer": True,
+                "unit_flag": True,
+                "set_workspace_multibuffer": 2,
+                "enable_hivm_auto_cv_balance": True,
+                "tile_mix_vector_loop": 2,
+                "tile_mix_cube_loop": 2,
+            }
         )
     ],
     key=["N", "S", "H"],
@@ -903,13 +912,16 @@ def kernel_sda_bwd_q_up(
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_R": 64, "BLOCK_C": 128},
-            multibuffer=True,
-            unit_flag=True,
-            set_workspace_multibuffer=2,
-            enable_hivm_auto_cv_balance=True,
-            tile_mix_vector_loop=2,
-            tile_mix_cube_loop=2,
+            {
+                "BLOCK_R": 64,
+                "BLOCK_C": 128,
+                "multibuffer": True,
+                "unit_flag": True,
+                "set_workspace_multibuffer": 2,
+                "enable_hivm_auto_cv_balance": True,
+                "tile_mix_vector_loop": 2,
+                "tile_mix_cube_loop": 2,
+            }
         )
     ],
     key=["N", "S", "H"],
@@ -1095,13 +1107,16 @@ def kernel_sda_bwd_q_down(
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_R": 256, "BLOCK_C": 64},
-            multibuffer=True,
-            unit_flag=True,
-            set_workspace_multibuffer=2,
-            enable_hivm_auto_cv_balance=True,
-            tile_mix_vector_loop=2,
-            tile_mix_cube_loop=2,
+            {
+                "BLOCK_R": 256,
+                "BLOCK_C": 64,
+                "multibuffer": True,
+                "unit_flag": True,
+                "set_workspace_multibuffer": 2,
+                "enable_hivm_auto_cv_balance": True,
+                "tile_mix_vector_loop": 2,
+                "tile_mix_cube_loop": 2,
+            }
         )
     ],
     key=["N", "S", "H"],
@@ -1233,13 +1248,16 @@ def kernel_sda_bwd_kv_left(
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_R": 128, "BLOCK_C": 64},
-            multibuffer=True,
-            unit_flag=True,
-            set_workspace_multibuffer=2,
-            enable_hivm_auto_cv_balance=True,
-            tile_mix_vector_loop=2,
-            tile_mix_cube_loop=2,
+            {
+                "BLOCK_R": 128,
+                "BLOCK_C": 64,
+                "multibuffer": True,
+                "unit_flag": True,
+                "set_workspace_multibuffer": 2,
+                "enable_hivm_auto_cv_balance": True,
+                "tile_mix_vector_loop": 2,
+                "tile_mix_cube_loop": 2,
+            }
         )
     ],
     key=["N", "S", "H"],
