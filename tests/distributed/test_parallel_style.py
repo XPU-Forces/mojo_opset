@@ -1,5 +1,8 @@
 from typing import Optional
 
+import os
+
+import pytest
 import torch
 
 from torch import nn
@@ -14,7 +17,15 @@ from mojo_opset.distributed.parallel import (
 
 from mojo_opset import MojoGroupGemm
 
+def _get_world_size():
+    world_size = int(os.environ.get("WORLD_SIZE", "0"))
+    if world_size <= 0:
+        pytest.skip("This test requires launching with torchrun (WORLD_SIZE must be set).")
+    return world_size
+
 def test_colwise_parallel():
+    world_size = _get_world_size()
+
     class ColwiseGemm(torch.nn.Module):
         def __init__(self, in_feature, out_feature):
             super().__init__()
@@ -24,23 +35,25 @@ def test_colwise_parallel():
         def forward(self, hidden_states):
             return self.linear(hidden_states)
     
-    in_feature = 4096
-    out_feature = 16384
+    in_feature = 256
+    out_feature = 512 * world_size
 
     test_colwise_gemm = ColwiseGemm(in_feature, out_feature)
 
-    device_mesh = init_device_mesh("npu", (4,))
+    device_mesh = init_device_mesh("npu", (world_size,))
     test_colwise_gemm = parallelize_module(
         test_colwise_gemm, 
         device_mesh=device_mesh,
         parallelize_plan={"linear": MojoColwiseParallel()}
     )
 
-    hidden_states = torch.zeros(16,4096)
+    hidden_states = torch.zeros(16, in_feature)
     hidden_states = test_colwise_gemm(hidden_states)
-    assert hidden_states.shape[-1] == 16384 // 4
+    assert hidden_states.shape[-1] == out_feature // world_size
 
 def test_rowwise_parallel():
+    world_size = _get_world_size()
+
     class RowwiseGemm(torch.nn.Module):
         def __init__(self, in_feature, out_feature):
             super().__init__()
@@ -50,11 +63,11 @@ def test_rowwise_parallel():
         def forward(self, hidden_states):
             return self.linear(hidden_states)
     
-    in_feature = 16384
-    out_feature = 4096
+    in_feature = 512 * world_size
+    out_feature = 256
 
     test_rowwise_gemm = RowwiseGemm(in_feature, out_feature)
-    device_mesh = init_device_mesh("npu", (4,))
+    device_mesh = init_device_mesh("npu", (world_size,))
 
     test_rowwise_gemm = parallelize_module(
         test_rowwise_gemm, 
@@ -62,11 +75,13 @@ def test_rowwise_parallel():
         parallelize_plan={"linear": MojoRowwiseParallel()}
     )
 
-    hidden_states = torch.zeros(16,in_feature // 4)
+    hidden_states = torch.zeros(16, in_feature // world_size)
     assert hidden_states.shape[-1] == test_rowwise_gemm.linear.weight.to_local().shape[-1]
     hidden_states = test_rowwise_gemm(hidden_states)
 
 def test_moe_parallel():
+    world_size = _get_world_size()
+
     class MojoMoE(torch.nn.Module):
         def __init__(
             self,
@@ -81,7 +96,7 @@ def test_moe_parallel():
             super().__init__()
 
             if activation != "swiglu":
-                raise NotImplementedError(f"MojoMoe: Activation {activation} is not supported.")
+                raise NotImplementedError(f"MojoMoE: activation {activation} is not supported.")
 
             self.hidden_size = hidden_size
             self.ffn_intermediate_size = ffn_intermediate_size
@@ -143,7 +158,7 @@ def test_moe_parallel():
             experts_out = experts_out.mul(pack_gates).to(dtype=dtype)
 
             combined = torch.zeros(x.size(0), experts_out.size(1), device=experts_out.device, dtype=experts_out.dtype)
-            # combine samples that have been processed by the same k experts
+            # Combine tokens processed by the same set of top-k experts.
             scatter_indices = pack_index.unsqueeze(-1).expand(-1, combined.size(1))
             combined = combined.scatter_reduce(0, scatter_indices, experts_out, reduce="sum", include_self=True)
 
@@ -171,12 +186,12 @@ def test_moe_parallel():
 
             return experts_output
     
-    in_feature = 4096
-    out_feature = 1024
-    num_experts = 384
-    select_expert_num = 8
+    in_feature = 512
+    out_feature = 128
+    num_experts = 16 * world_size
+    select_expert_num = 2
 
-    device_mesh = init_device_mesh("npu", (4,))    
+    device_mesh = init_device_mesh("npu", (world_size,))    
     test_ep_moe = MojoMoE(
         in_feature, 
         out_feature, 
