@@ -53,7 +53,7 @@ class MojoColwiseParallel(ColwiseParallel):
         
         if not find_parallel_style:
             raise NotImplementedError(
-                f"RowwiseParallel currently is currently not supported on {type(module)}!"
+                f"MojoColwiseParallel: module type {type(module)} is not supported."
             )
 
         return distribute_module(
@@ -105,7 +105,7 @@ class MojoRowwiseParallel(RowwiseParallel):
         
         if not find_parallel_style:
             raise NotImplementedError(
-                f"RowwiseParallel currently is currently not supported on {type(module)}!"
+                f"MojoRowwiseParallel: module type {type(module)} is not supported."
             )
 
         return distribute_module(
@@ -142,16 +142,16 @@ class MojoExpertParallel(ParallelStyle):
     def _prepare_input_fn(
         input_layouts, desired_input_layouts, mod, inputs, device_mesh
     ):
-        # TODO: figure out dynamo support for instance method and switch this to instance method
+        # TODO: Confirm dynamo support for instance methods and switch back.
 
-        # annotate module input placements/sharding with input_layouts
+        # Annotate input placements/sharding with input_layouts.
         input_tensor = inputs[0]
         if not isinstance(input_tensor, DTensor):
             input_tensor = DTensor.from_local(
                 input_tensor, device_mesh, input_layouts, run_check=False
             )
 
-        # transform the input layouts to the desired layouts of ColwiseParallel
+        # Transform input layouts to desired layouts.
         if input_layouts != desired_input_layouts:
             input_tensor = input_tensor.redistribute(
                 placements=desired_input_layouts, async_op=True
@@ -180,7 +180,7 @@ class MojoExpertParallel(ParallelStyle):
 
         if not find_parallel_style:
             raise NotImplementedError(
-                f"ExpertParallel currently is currently not supported on {type(module)}!"
+                f"MojoExpertParallel: module type {type(module)} is not supported."
             )
 
         return distribute_module(
