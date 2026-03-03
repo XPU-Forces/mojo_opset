@@ -100,3 +100,8 @@ class MojoOperator(ABC, torch.nn.Module):
         check_tol_diff(norm_result, refs_result, atol, rtol, ptol, mixed_tol)
 
         return norm_result
+
+    def extra_repr(self) -> str:
+        # NOTE(liuyuan): it is recommended for every MojoOperator to implement its extra_repr so that the hyper parameters will be printed as well.
+        # See torch/nn/modules/linear.py:127
+        return ""
