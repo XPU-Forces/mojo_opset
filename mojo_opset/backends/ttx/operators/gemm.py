@@ -15,23 +15,23 @@ class TTXGroupGemm(MojoGroupGemm):
 
         M, K = input.shape
 
-        assert input.stride(-1) == 1, "Please make sure input is K-major."
-
-        if not self.trans_weight:
-            num_groups, N, BK = self.weight.shape
-            strideBN, strideBK = self.weight.stride(1), self.weight.stride(2)
-        else:
-            num_groups, BK, N = self.weight.shape
-            strideBK, strideBN = self.weight.stride(1), self.weight.stride(2)
-
-        assert BK == K, "K of input should be equal to K of self.weight."
-
-        C = input.new_empty(M, N)
+        assert input.stride(-1) == 1, "Please make sure input is K-major (last dim contiguous)."
 
         if isinstance(self.weight, DTensor):
             weight = self.weight.to_local()
         else:
             weight = self.weight
+
+        if not self.trans_weight:
+            num_groups, N, BK = weight.shape
+            strideBN, strideBK = weight.stride(1), weight.stride(2)
+        else:
+            num_groups, BK, N = weight.shape
+            strideBK, strideBN = weight.stride(1), weight.stride(2)
+
+        assert BK == K, "Input K must be equal to weight K."
+
+        C = input.new_empty(M, N)
 
         if isinstance(input, DTensor):
             input = input.to_local()
