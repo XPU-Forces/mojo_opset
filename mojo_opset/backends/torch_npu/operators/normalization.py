@@ -83,4 +83,3 @@ class TorchNpuResidualAddNormCast(MojoResidualAddNormCast):
         if self.norm_pos != "pre":
             residual = hidden_state
         return hidden_state, residual
-    
