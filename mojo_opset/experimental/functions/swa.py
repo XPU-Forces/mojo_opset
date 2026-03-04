@@ -308,31 +308,40 @@ class MojoSWAFunction(MojoFunction):
 
 
 AUX_MASK_SIZE = 256
-AUX_MASK = torch.cat(
-    [
-        torch.cat(
+AUX_MASK = None
+
+
+def get_aux_mask():
+    global AUX_MASK
+    global AUX_MASK_SIZE
+    if AUX_MASK is None:
+        AUX_MASK = torch.cat(
             [
-                torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-                torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).triu().bool(),
-                torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-                torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).tril().bool(),
-                torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                torch.cat(
+                    [
+                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).triu().bool(),
+                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).tril().bool(),
+                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                    ],
+                    dim=1,
+                ),
+                torch.cat(
+                    [
+                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                    ],
+                    dim=1,
+                ),
             ],
-            dim=1,
-        ),
-        torch.cat(
-            [
-                torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-                torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-                torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-                torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-                torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-            ],
-            dim=1,
-        ),
-    ],
-    dim=0,
-).npu()
+            dim=0,
+        ).npu()
+    return AUX_MASK_SIZE, AUX_MASK
+
 
 import triton
 import triton.language as tl
@@ -784,6 +793,7 @@ def swa_ttx_forward(
     gqa_interleave: bool = False,
     output_f32: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    AUX_MASK_SIZE, AUX_MASK = get_aux_mask()
     tot_q_toks, num_q_heads, head_dim = q.shape
     tot_kv_toks, num_kv_heads, _ = k.shape
     o = torch.zeros_like(q)
