@@ -1947,6 +1947,13 @@ def generate_test_data(
 
 
 def test_swa_function():
+    import datetime
+    import os
+
+    torch.distributed.init_process_group(backend="hccl")
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.npu.set_device(local_rank)
+
     test_configs = [
         (1, 1, 1, False, 128, 256, 0, torch.float32),
         (4, 4, 2, True, 128, 512, 0, torch.float32),
@@ -1957,13 +1964,17 @@ def test_swa_function():
     local_window = 1023
     global_window = 0
     for bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_q_len, max_kv_prefix_len, dtype in test_configs:
-        print(bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_q_len, max_kv_prefix_len, dtype)
+        if local_rank == 0:
+            print(bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_q_len, max_kv_prefix_len, dtype)
         scale = 1.0 / head_dim**0.5
         for i in range(5):
             query, key, value, cu_seqlens_q, cu_seqlens_kv = generate_test_data(
                 bsz, q_head_num, kv_head_num, head_dim, max_q_len, max_kv_prefix_len, dtype
             )
-            print(i, cu_seqlens_q, cu_seqlens_kv)
+            torch.distributed.barrier()
+            time = datetime.datetime.now()
+            if local_rank == 0:
+                print(i, cu_seqlens_q, cu_seqlens_kv)
             q_ref = query.clone().detach().requires_grad_(True)
             k_ref = key.clone().detach().requires_grad_(True)
             v_ref = value.clone().detach().requires_grad_(True)
@@ -1997,6 +2008,9 @@ def test_swa_function():
             assert_close(q_ref.grad, q_mojo.grad)
             assert_close(k_ref.grad, k_mojo.grad)
             assert_close(v_ref.grad, v_mojo.grad)
+            torch.distributed.barrier()
+            if local_rank == 0:
+                print("time cost:", datetime.datetime.now() - time)
 
 
 def assert_close(
