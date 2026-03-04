@@ -33,8 +33,8 @@ def swa_torch_forward(
     q: torch.Tensor,  # [total_q_len, n_q_heads, head_dim]
     k: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
     v: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
-    cu_seqlens_q: torch.Tensor,  # [bsz + 1]
-    cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
+    cu_seqlens_q_cpu: torch.Tensor,  # [bsz + 1]
+    cu_seqlens_kv_cpu: torch.Tensor,  # [bsz + 1]
     is_causal: bool = True,
     local_window_size: Optional[int] = None,
     global_window_size: Optional[int] = None,
@@ -49,13 +49,13 @@ def swa_torch_forward(
 
     o_f32 = torch.empty_like(q, dtype=torch.float32)
     softmax_lse = torch.empty((n_q_heads, total_q_len), dtype=torch.float32, device=q.device)
-    bsz = cu_seqlens_q.shape[0] - 1
+    bsz = cu_seqlens_q_cpu.shape[0] - 1
     for i in range(bsz):
-        q_i = q[cu_seqlens_q[i] : cu_seqlens_q[i + 1]]
+        q_i = q[cu_seqlens_q_cpu[i] : cu_seqlens_q_cpu[i + 1]]
         q_seq_len = q_i.shape[0]
         q_i = q_i.permute(1, 0, 2)  # -> [n_q_heads, q_seq_len, head_dim]
 
-        k_i = k[cu_seqlens_kv[i] : cu_seqlens_kv[i + 1]]
+        k_i = k[cu_seqlens_kv_cpu[i] : cu_seqlens_kv_cpu[i + 1]]
         kv_seq_len = k_i.shape[0]
         k_i_T = k_i.permute(1, 2, 0)
         if n_q_heads != n_kv_heads:
@@ -79,7 +79,9 @@ def swa_torch_forward(
         l_i = torch.sum(p_i, dim=-1, keepdim=True)  # -> [n_q_heads, q_seq_len, 1]
         p_i = p_i.to(v.dtype)
 
-        v_i = v[cu_seqlens_kv[i] : cu_seqlens_kv[i + 1]].permute(1, 0, 2)  # -> [n_kv_heads, kv_seq_len, head_dim]
+        v_i = v[cu_seqlens_kv_cpu[i] : cu_seqlens_kv_cpu[i + 1]].permute(
+            1, 0, 2
+        )  # -> [n_kv_heads, kv_seq_len, head_dim]
         if n_q_heads != n_kv_heads:
             if gqa_interleave:
                 v_i = v_i.repeat((n_q_heads // n_kv_heads, 1, 1))
@@ -88,10 +90,10 @@ def swa_torch_forward(
         o_i = torch.bmm(p_i, v_i).float()  # -> [n_q_heads, q_seq_len, head_dim]
         o_i = o_i / l_i  # -> [n_q_heads, q_seq_len, head_dim]
         o_i = o_i.permute(1, 0, 2)  # -> [q_seq_len, n_q_heads, head_dim]
-        o_f32[cu_seqlens_q[i] : cu_seqlens_q[i + 1]] = o_i
+        o_f32[cu_seqlens_q_cpu[i] : cu_seqlens_q_cpu[i + 1]] = o_i
         lse_i = m_i + torch.log(l_i)  # -> [n_q_heads, q_seq_len, 1]
         assert lse_i.dtype == torch.float32
-        softmax_lse[:, cu_seqlens_q[i] : cu_seqlens_q[i + 1]] = lse_i.squeeze(-1)  # -> [q_seq_len, n_q_heads]
+        softmax_lse[:, cu_seqlens_q_cpu[i] : cu_seqlens_q_cpu[i + 1]] = lse_i.squeeze(-1)  # -> [q_seq_len, n_q_heads]
 
     o = o_f32.to(q.dtype)
     if output_f32:
@@ -107,8 +109,8 @@ def swa_torch_backward(
     v: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
     o: torch.Tensor,  # [total_q_len, n_q_heads, head_dim]
     softmax_lse: torch.Tensor,  # [n_q_heads, total_q_len]
-    cu_seqlens_q: torch.Tensor,  # [bsz + 1]
-    cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
+    cu_seqlens_q_cpu: torch.Tensor,  # [bsz + 1]
+    cu_seqlens_kv_cpu: torch.Tensor,  # [bsz + 1]
     is_causal: bool = True,
     local_window_size: Optional[int] = None,
     global_window_size: Optional[int] = None,
@@ -124,15 +126,15 @@ def swa_torch_backward(
     dk = torch.zeros_like(k)
     dv = torch.zeros_like(v)
     delta = torch.sum(o.float() * do.float(), dim=-1)  # -> [total_q_len, n_q_heads]
-    bsz = cu_seqlens_q.shape[0] - 1
+    bsz = cu_seqlens_q_cpu.shape[0] - 1
     for i in range(bsz):
 
         # Step 1: recompute p_i
-        q_i = q[cu_seqlens_q[i] : cu_seqlens_q[i + 1]]
+        q_i = q[cu_seqlens_q_cpu[i] : cu_seqlens_q_cpu[i + 1]]
         q_seq_len = q_i.shape[0]
         q_i = q_i.permute(1, 0, 2)  # -> [n_q_heads, q_seq_len, head_dim]
 
-        k_i = k[cu_seqlens_kv[i] : cu_seqlens_kv[i + 1]]
+        k_i = k[cu_seqlens_kv_cpu[i] : cu_seqlens_kv_cpu[i + 1]]
         kv_seq_len = k_i.shape[0]
         k_i = k_i.permute(1, 0, 2)  # -> [n_kv_heads, kv_seq_len, head_dim]
         if n_q_heads != n_kv_heads:
@@ -152,12 +154,12 @@ def swa_torch_backward(
             ).to(s_i.device)
             s_i = torch.where(s_mask, s_i, float("-inf"))
 
-        lse_i = softmax_lse[:, cu_seqlens_q[i] : cu_seqlens_q[i + 1]]  # -> [n_q_heads, q_seq_len]
+        lse_i = softmax_lse[:, cu_seqlens_q_cpu[i] : cu_seqlens_q_cpu[i + 1]]  # -> [n_q_heads, q_seq_len]
         p_i = torch.exp(s_i - lse_i.unsqueeze(-1))  # -> [n_q_heads, q_seq_len, kv_seq_len]
 
         # Step 2: compute dv_i
         assert p_i.dtype == torch.float32
-        v_i = v[cu_seqlens_kv[i] : cu_seqlens_kv[i + 1]]
+        v_i = v[cu_seqlens_kv_cpu[i] : cu_seqlens_kv_cpu[i + 1]]
         v_i = v_i.permute(1, 0, 2)  # -> [n_kv_heads, kv_seq_len, head_dim]
         if n_q_heads != n_kv_heads:
             if gqa_interleave:
@@ -165,13 +167,15 @@ def swa_torch_backward(
             else:
                 v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, kv_seq_len, head_dim]
 
-        do_i = do[cu_seqlens_q[i] : cu_seqlens_q[i + 1]]
+        do_i = do[cu_seqlens_q_cpu[i] : cu_seqlens_q_cpu[i + 1]]
         do_i = do_i.permute(1, 0, 2)  # -> [n_q_heads, q_seq_len, head_dim]
 
         dp_i = torch.bmm(do_i, v_i.mT).float()  # -> [n_q_heads, q_seq_len, kv_seq_len]
         assert dp_i.dtype == torch.float32
         # Note: rowsum(P * dP) => rowsum(P * (dO @ V_T)) => rowsum(dO * (P @ V)) => rowsum(dO * O)
-        delta_i = delta[cu_seqlens_q[i] : cu_seqlens_q[i + 1]].permute(1, 0).unsqueeze(-1)  # -> [n_q_heads, q_seq_len]
+        delta_i = (
+            delta[cu_seqlens_q_cpu[i] : cu_seqlens_q_cpu[i + 1]].permute(1, 0).unsqueeze(-1)
+        )  # -> [n_q_heads, q_seq_len]
         # print(f"{p_i.shape=} {do_i.shape=}")
         # delta_i_ref = torch.sum(p_i * dp_i, dim=-1, keepdim=True)
         # torch.testing.assert_close(delta_i, delta_i_ref)
@@ -184,7 +188,7 @@ def swa_torch_backward(
         p_i = p_i.to(do_i.dtype)
 
         dq_i = torch.bmm(ds_i, k_i)  # -> [n_q_heads, q_seq_len, head_dim]
-        dq[cu_seqlens_q[i] : cu_seqlens_q[i + 1]] = dq_i.permute(1, 0, 2)  # -> [q_seq_len, n_q_heads, head_dim]
+        dq[cu_seqlens_q_cpu[i] : cu_seqlens_q_cpu[i + 1]] = dq_i.permute(1, 0, 2)  # -> [q_seq_len, n_q_heads, head_dim]
 
         if n_q_heads != n_kv_heads:
             if gqa_interleave:
@@ -206,7 +210,9 @@ def swa_torch_backward(
             q_i = q_i.flatten(1, 2)  # -> [n_kv_heads, n_q_heads // n_kv_heads * q_seq_len, head_dim]
 
         dk_i = torch.bmm(ds_i.mT, q_i)  # -> [n_kv_heads, kv_seq_len, head_dim]
-        dk[cu_seqlens_kv[i] : cu_seqlens_kv[i + 1]] = dk_i.permute(1, 0, 2)  # -> [kv_seq_len, n_kv_heads, head_dim]
+        dk[cu_seqlens_kv_cpu[i] : cu_seqlens_kv_cpu[i + 1]] = dk_i.permute(
+            1, 0, 2
+        )  # -> [kv_seq_len, n_kv_heads, head_dim]
 
         if n_q_heads != n_kv_heads:
             if gqa_interleave:
@@ -228,7 +234,9 @@ def swa_torch_backward(
             do_i = do_i.flatten(1, 2)  # -> [n_kv_heads, n_q_heads // n_kv_heads * q_seq_len, head_dim]
 
         dv_i = torch.bmm(p_i.mT, do_i)  # -> [n_q_heads, kv_seq_len, head_dim]
-        dv[cu_seqlens_kv[i] : cu_seqlens_kv[i + 1]] = dv_i.permute(1, 0, 2)  # -> [kv_seq_len, n_kv_heads, head_dim]
+        dv[cu_seqlens_kv_cpu[i] : cu_seqlens_kv_cpu[i + 1]] = dv_i.permute(
+            1, 0, 2
+        )  # -> [kv_seq_len, n_kv_heads, head_dim]
     return dq, dk, dv
 
 
@@ -240,8 +248,8 @@ class MojoSWAFunction(MojoFunction):
         q: torch.Tensor,  # [total_q_len, n_q_heads, head_dim]
         k: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
         v: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
-        cu_seqlens_q: torch.Tensor,  # [bsz + 1]
-        cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
+        cu_seqlens_q_cpu: torch.Tensor,  # [bsz + 1]
+        cu_seqlens_kv_cpu: torch.Tensor,  # [bsz + 1]
         is_causal: bool = True,
         local_window_size: Optional[int] = None,
         global_window_size: Optional[int] = None,
@@ -255,8 +263,8 @@ class MojoSWAFunction(MojoFunction):
             q,
             k,
             v,
-            cu_seqlens_q,
-            cu_seqlens_kv,
+            cu_seqlens_q_cpu,
+            cu_seqlens_kv_cpu,
             is_causal,
             local_window_size,
             global_window_size,
@@ -266,10 +274,10 @@ class MojoSWAFunction(MojoFunction):
         )
         if output_f32:
             o, softmax_lse, o_f32 = fwd_results
-            ctx.save_for_backward(o_f32, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv)
+            ctx.save_for_backward(o_f32, softmax_lse, q, k, v, cu_seqlens_q_cpu, cu_seqlens_kv_cpu)
         else:
             o, softmax_lse = fwd_results
-            ctx.save_for_backward(o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv)
+            ctx.save_for_backward(o, softmax_lse, q, k, v, cu_seqlens_q_cpu, cu_seqlens_kv_cpu)
         ctx.sm_scale = sm_scale
         ctx.is_causal = is_causal
         ctx.local_window_size = local_window_size
@@ -282,7 +290,7 @@ class MojoSWAFunction(MojoFunction):
         ctx,
         do: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, None, None, None, None, None, None, None, None, None]:
-        o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
+        o, softmax_lse, q, k, v, cu_seqlens_q_cpu, cu_seqlens_kv_cpu = ctx.saved_tensors
         sm_scale = ctx.sm_scale
         is_causal = ctx.is_causal
         local_window_size = ctx.local_window_size
@@ -296,8 +304,8 @@ class MojoSWAFunction(MojoFunction):
             v,
             o,
             softmax_lse,
-            cu_seqlens_q,
-            cu_seqlens_kv,
+            cu_seqlens_q_cpu,
+            cu_seqlens_kv_cpu,
             is_causal,
             local_window_size,
             global_window_size,
@@ -784,8 +792,8 @@ def swa_ttx_forward(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,  # [bsz + 1]
-    cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
+    cu_seqlens_q_cpu: torch.Tensor,  # [bsz + 1]
+    cu_seqlens_kv_cpu: torch.Tensor,  # [bsz + 1]
     is_causal: bool = True,
     local_window_size: Optional[int] = None,
     global_window_size: Optional[int] = None,
@@ -806,7 +814,10 @@ def swa_ttx_forward(
         CHUNK_SIZE = 64
         BLOCK_M = CHUNK_SIZE
         BLOCK_N = 64
-    q_chunk_indices = prepare_chunk_indices(cu_seqlens_q, CHUNK_SIZE)
+    q_chunk_indices = prepare_chunk_indices(cu_seqlens_q_cpu, CHUNK_SIZE).to(q.device)
+    cu_seqlens_q = cu_seqlens_q_cpu.to(q.device)
+    cu_seqlens_kv = cu_seqlens_kv_cpu.to(q.device)
+
     # print(f"{q_chunk_indices=}")
 
     BLOCK_D = head_dim
@@ -1629,8 +1640,8 @@ def swa_ttx_backward(
     v: torch.Tensor,
     o: torch.Tensor,
     softmax_lse: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
-    cu_seqlens_kv: torch.Tensor,
+    cu_seqlens_q_cpu: torch.Tensor,
+    cu_seqlens_kv_cpu: torch.Tensor,
     is_causal: bool,
     local_window_size: Optional[int],
     global_window_size: Optional[int],
@@ -1675,8 +1686,10 @@ def swa_ttx_backward(
     else:
         BLOCK_M = 64
         BLOCK_N = 64
+    cu_seqlens_q = cu_seqlens_q_cpu.to(q.device)
+    cu_seqlens_kv = cu_seqlens_kv_cpu.to(q.device)
     CHUNK_SIZE = BLOCK_N
-    kv_chunk_indices = prepare_chunk_indices(cu_seqlens_kv, CHUNK_SIZE)
+    kv_chunk_indices = prepare_chunk_indices(cu_seqlens_kv_cpu, CHUNK_SIZE).to(q.device)
     # print(f"{kv_chunk_indices=}")
 
     BLOCK_D = head_dim
@@ -1738,7 +1751,7 @@ def swa_ttx_backward(
     )
 
     CHUNK_SIZE = BLOCK_M
-    q_chunk_indices = prepare_chunk_indices(cu_seqlens_q, CHUNK_SIZE)
+    q_chunk_indices = prepare_chunk_indices(cu_seqlens_q_cpu, CHUNK_SIZE).to(q.device)
     # print(f"{q_chunk_indices=}")
     dq = torch.zeros_like(q)
     _sdpa_bwd_dq_kernel[grid](
@@ -1800,8 +1813,8 @@ class TTXSWAFunction(MojoSWAFunction):
         q: torch.Tensor,  # [total_q_len, n_q_heads, head_dim]
         k: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
         v: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
-        cu_seqlens_q: torch.Tensor,  # [bsz + 1]
-        cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
+        cu_seqlens_q_cpu: torch.Tensor,  # [bsz + 1]
+        cu_seqlens_kv_cpu: torch.Tensor,  # [bsz + 1]
         is_causal: bool = True,
         local_window_size: Optional[int] = None,
         global_window_size: Optional[int] = None,
@@ -1814,8 +1827,8 @@ class TTXSWAFunction(MojoSWAFunction):
             q,
             k,
             v,
-            cu_seqlens_q,
-            cu_seqlens_kv,
+            cu_seqlens_q_cpu,
+            cu_seqlens_kv_cpu,
             is_causal,
             local_window_size,
             global_window_size,
@@ -1825,10 +1838,10 @@ class TTXSWAFunction(MojoSWAFunction):
         )
         if output_f32:
             o, softmax_lse, o_f32 = fwd_results
-            ctx.save_for_backward(o_f32, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv)
+            ctx.save_for_backward(o_f32, softmax_lse, q, k, v, cu_seqlens_q_cpu, cu_seqlens_kv_cpu)
         else:
             o, softmax_lse = fwd_results
-            ctx.save_for_backward(o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv)
+            ctx.save_for_backward(o, softmax_lse, q, k, v, cu_seqlens_q_cpu, cu_seqlens_kv_cpu)
         ctx.sm_scale = sm_scale
         ctx.is_causal = is_causal
         ctx.local_window_size = local_window_size
@@ -1841,7 +1854,7 @@ class TTXSWAFunction(MojoSWAFunction):
     def backward(
         ctx, do: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, None, None, None, None, None, None, None, None, None]:
-        o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
+        o, softmax_lse, q, k, v, cu_seqlens_q_cpu, cu_seqlens_kv_cpu = ctx.saved_tensors
         sm_scale = ctx.sm_scale
         is_causal = ctx.is_causal
         local_window_size = ctx.local_window_size
@@ -1855,8 +1868,8 @@ class TTXSWAFunction(MojoSWAFunction):
             v,
             o,
             softmax_lse,
-            cu_seqlens_q,
-            cu_seqlens_kv,
+            cu_seqlens_q_cpu,
+            cu_seqlens_kv_cpu,
             is_causal,
             local_window_size,
             global_window_size,
@@ -1870,7 +1883,7 @@ def flash_attn_sparse_torch(
     q,
     k,
     v,
-    cu_seqlens,
+    cu_seqlens_cpu,
     gqa_interleave: bool = False,
     softmax_scale=None,
     local_window_size=0,
@@ -1884,12 +1897,12 @@ def flash_attn_sparse_torch(
     if softmax_scale == None:
         softmax_scale = Dq ** (-0.5)
 
-    bz = len(cu_seqlens) - 1
+    bz = len(cu_seqlens_cpu) - 1
 
     for b in range(bz):
         for h in range(H):
-            seq_start = cu_seqlens[b]
-            seq_end = cu_seqlens[b + 1]
+            seq_start = cu_seqlens_cpu[b].item()
+            seq_end = cu_seqlens_cpu[b + 1].item()
             seq_len = seq_end - seq_start
             if gqa_interleave:
                 hk = h % Hk
@@ -1937,23 +1950,23 @@ def generate_test_data(
     dtype: torch.dtype = torch.bfloat16,
     device: torch.device = "npu",
 ):
-    q_lens = torch.randint(max_q_len // 2, max_q_len, (bsz,), dtype=torch.int32, device=device)
+    q_lens_cpu = torch.randint(max_q_len // 2, max_q_len, (bsz,), dtype=torch.int32, device="cpu")
     if max_kv_prefix_len > 0:
-        kv_prefix_lens = torch.randint(
-            max_kv_prefix_len // 2, max_kv_prefix_len, (bsz,), dtype=torch.int32, device=device
+        kv_prefix_lens_cpu = torch.randint(
+            max_kv_prefix_len // 2, max_kv_prefix_len, (bsz,), dtype=torch.int32, device="cpu"
         )
     else:
-        kv_prefix_lens = torch.zeros(bsz, dtype=torch.int32, device=device)
-    kv_lens = kv_prefix_lens + q_lens
-    cu_seqlens_q = torch.cat([torch.zeros(1, dtype=torch.int32, device=device), q_lens.cumsum(0)])
-    cu_seqlens_kv = torch.cat([torch.zeros(1, dtype=torch.int32, device=device), kv_lens.cumsum(0)])
+        kv_prefix_lens_cpu = torch.zeros(bsz, dtype=torch.int32, device="cpu")
+    kv_lens_cpu = kv_prefix_lens_cpu + q_lens_cpu
+    cu_seqlens_q_cpu = torch.cat([torch.zeros(1, dtype=torch.int32, device="cpu"), q_lens_cpu.cumsum(0)])
+    cu_seqlens_kv_cpu = torch.cat([torch.zeros(1, dtype=torch.int32, device="cpu"), kv_lens_cpu.cumsum(0)])
 
-    query = torch.randn(cu_seqlens_q[-1].item(), q_head_num, head_dim, dtype=dtype, device=device)
-    key = torch.randn(cu_seqlens_kv[-1].item(), kv_head_num, head_dim, dtype=dtype, device=device)
-    value = torch.randn(cu_seqlens_kv[-1].item(), kv_head_num, head_dim, dtype=dtype, device=device)
+    query = torch.randn(cu_seqlens_q_cpu[-1].item(), q_head_num, head_dim, dtype=dtype, device=device)
+    key = torch.randn(cu_seqlens_kv_cpu[-1].item(), kv_head_num, head_dim, dtype=dtype, device=device)
+    value = torch.randn(cu_seqlens_kv_cpu[-1].item(), kv_head_num, head_dim, dtype=dtype, device=device)
 
     # blockwise_diffusion_attn_mask = torch.ones(seq_length * 2, seq_length * 2, dtype=torch.bool)
-    return query, key, value, cu_seqlens_q, cu_seqlens_kv
+    return query, key, value, cu_seqlens_q_cpu, cu_seqlens_kv_cpu
 
 
 def test_swa_function():
@@ -1978,13 +1991,13 @@ def test_swa_function():
             print(bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_q_len, max_kv_prefix_len, dtype)
         scale = 1.0 / head_dim**0.5
         for i in range(5):
-            query, key, value, cu_seqlens_q, cu_seqlens_kv = generate_test_data(
+            query, key, value, cu_seqlens_q_cpu, cu_seqlens_kv_cpu = generate_test_data(
                 bsz, q_head_num, kv_head_num, head_dim, max_q_len, max_kv_prefix_len, dtype
             )
             torch.distributed.barrier()
             time = datetime.datetime.now()
             if local_rank == 0:
-                print(i, cu_seqlens_q, cu_seqlens_kv)
+                print(i, cu_seqlens_q_cpu, cu_seqlens_kv_cpu)
             q_ref = query.clone().detach().requires_grad_(True)
             k_ref = key.clone().detach().requires_grad_(True)
             v_ref = value.clone().detach().requires_grad_(True)
@@ -1994,15 +2007,15 @@ def test_swa_function():
             v_mojo = value.clone().detach().requires_grad_(True)
 
             o_ref = flash_attn_sparse_torch(
-                q_ref, k_ref, v_ref, cu_seqlens_q, gqa_interleave, scale, local_window, global_window
+                q_ref, k_ref, v_ref, cu_seqlens_q_cpu, gqa_interleave, scale, local_window, global_window
             )
 
             o_mojo = MojoSWAFunction._registry.get("ttx").apply(
                 q_mojo,
                 k_mojo,
                 v_mojo,
-                cu_seqlens_q,
-                cu_seqlens_kv,
+                cu_seqlens_q_cpu,
+                cu_seqlens_kv_cpu,
                 True,
                 local_window,
                 global_window,
