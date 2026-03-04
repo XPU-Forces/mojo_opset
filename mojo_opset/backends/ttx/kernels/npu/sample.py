@@ -1,50 +1,207 @@
 import torch
 import triton
+import math
 import triton.language as tl
+import triton.language.core as core
+from triton.runtime.libentry import libentry
+from triton.language.standard import _log2, zeros_like
+
 
 @triton.jit
-def _top_k_sample_kernel(
-    sorted_logits_ptr,
-    sorted_indices_ptr,
-    rand_data_ptr,
-    output_ptr,
-    output_probs_ptr,
-    filter_value,
-    min_tokens_to_keep,
-    stride_logits_b,
-    stride_logits_k,
-    stride_indices_b,
-    stride_indices_k,
-    stride_rand_b,
-    stride_rand_k,
-    stride_out0_b,
-    stride_out0_k,
-    stride_out1_b,
-    stride_out1_k,
-    B0: tl.constexpr,
+def _compare_and_swap(x, ids, flip, i: core.constexpr, n_dims: core.constexpr):
+    n_outer: core.constexpr = x.numel >> n_dims
+    shape: core.constexpr = [n_outer * 2**i, 2, 2 ** (n_dims - i - 1)]
+
+    y = core.reshape(x, shape)
+    y_idx = core.reshape(ids, shape)
+
+    mask = core.arange(0, 2)[None, :, None]
+    left = core.broadcast_to(tl.sum(y * (1 - mask), 1)[:, None, :], shape).to(x.dtype)
+    right = core.broadcast_to(tl.sum(y * mask, 1)[:, None, :], shape).to(x.dtype)
+    left = core.reshape(left, x.shape)
+    right = core.reshape(right, x.shape)
+
+    left_idx = core.broadcast_to(tl.sum(y_idx * (1 - mask), 1)[:, None, :], shape).to(
+        ids.dtype
+    )
+    right_idx = core.broadcast_to(tl.sum(y_idx * mask, 1)[:, None, :], shape).to(
+        ids.dtype
+    )
+    left_idx = core.reshape(left_idx, ids.shape)
+    right_idx = core.reshape(right_idx, ids.shape)
+
+    # actual compare-and-swap
+    if core.constexpr(x.dtype.primitive_bitwidth) == 8:
+        idtype = core.int8
+    elif core.constexpr(x.dtype.primitive_bitwidth) == 16:
+        idtype = core.int16
+    elif core.constexpr(x.dtype.primitive_bitwidth) == 32:
+        idtype = core.int32
+    elif core.constexpr(x.dtype.primitive_bitwidth) == 64:
+        idtype = core.int64
+    else:
+        raise ValueError("Unsupported dtype")
+
+    ileft = left.to(idtype, bitcast=True)
+    iright = right.to(idtype, bitcast=True)
+    ix = x.to(idtype, bitcast=True)
+
+    cond = (left > right) ^ flip
+    ret = ix ^ core.where(cond, ileft ^ iright, zeros_like(ix))
+
+    if core.constexpr(ids.dtype.primitive_bitwidth) == 8:
+        idx_dtype = core.int8
+    elif core.constexpr(ids.dtype.primitive_bitwidth) == 16:
+        idx_dtype = core.int16
+    elif core.constexpr(ids.dtype.primitive_bitwidth) == 32:
+        idx_dtype = core.int32
+    elif core.constexpr(ids.dtype.primitive_bitwidth) == 64:
+        idx_dtype = core.int64
+    else:
+        raise ValueError("Unsupported dtype")
+
+    ileft_idx = left_idx.to(idx_dtype, bitcast=True)
+    iright_idx = right_idx.to(idx_dtype, bitcast=True)
+    ix_idx = ids.to(idx_dtype, bitcast=True)
+    ret_idx = ix_idx ^ core.where(cond, ileft_idx ^ iright_idx, zeros_like(ix_idx))
+
+    return ret.to(x.dtype, bitcast=True), ret_idx.to(ids.dtype, bitcast=True)
+
+@triton.jit
+def _bitonic_merge(
+    x, ids, stage: core.constexpr, order: core.constexpr, n_dims: core.constexpr
 ):
-    pid = tl.program_id(0)
+    """
+    order_type 0 == ascending
+    order_type 1 == descending
+    order_type 2 == alternating
+    """
+    n_outer: core.constexpr = x.numel >> n_dims
+    core.static_assert(stage <= n_dims)
+    # flip denotes whether to re-arrange sub-sequences of elements in ascending or
+    # descending order.
+    # if flip = 00000000... then all elements will be re-arranged ascendingly at this stage
+    # if flip = 00110011... then all the elements will be re-arranged alternatingly (with
+    # a stride of 2) at this stage
+    if order == 2:
+        shape: core.constexpr = [n_outer * 2 ** (n_dims - 1 - stage), 2, 2**stage]
+        flip = core.reshape(
+            core.broadcast_to(core.arange(0, 2)[None, :, None], shape), x.shape
+        )
+    else:
+        flip = order
+    # perform `stage` rounds of `compare-and-swap`
+    for i in core.static_range(stage):
+        x, ids = _compare_and_swap(x, ids, flip, i + (n_dims - stage), n_dims)
+    return x, ids
 
-    row_logits_ptr = sorted_logits_ptr + pid * stride_logits_b
-    offsets = tl.arange(0, B0)
-    mask = offsets < B0
 
-    logits = tl.load(row_logits_ptr + offsets * stride_logits_k, mask=mask)
+@triton.jit
+def argsort(x, ids, dim: tl.constexpr, descending: core.constexpr):
+    # handle default dimension or check that it is the most minor dim
+    _dim: core.constexpr = dim
+    n_dims: core.constexpr = _log2(x.shape[_dim])
+    for i in core.static_range(1, n_dims + 1):
+        x, ids = _bitonic_merge(x, ids, i, 2 if i < n_dims else descending, n_dims)
+    return x, ids
 
-    logits_max = tl.max(logits, 0)
-    numerator = tl.exp(logits - logits_max)
-    probs = numerator / tl.sum(numerator, 0)
+@libentry()
+@triton.jit
+def _topk_stage1_kernel(
+    y_ptr,
+    y_index_ptr,
+    x_ptr,
+    filter_value: tl.constexpr,
+    k: tl.constexpr,
+    VOCAB_SIZE: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+    DESCENDING: tl.constexpr,
+):
+    cur_batch = tl.program_id(0)
+    cur_chunk_idx = tl.program_id(1)
+    chunk_num = tl.num_programs(1)
+    chunk_offset = cur_chunk_idx * CHUNK_SIZE
+    off_col = chunk_offset + tl.arange(0, CHUNK_SIZE)
+    off_x = cur_batch * VOCAB_SIZE + off_col
+    y_ptr += cur_batch * chunk_num * k + cur_chunk_idx * k
+    y_index_ptr += cur_batch * chunk_num * k + cur_chunk_idx * k
     
-    row_rand_ptr = rand_data_ptr + pid * stride_rand_b
-    row_scores_ptr = output_ptr + pid * stride_out0_b
-    row_probs_ptr = output_probs_ptr + pid * stride_out1_b
+    mask_x = off_col < VOCAB_SIZE
+    x = tl.load(x_ptr + off_x, mask=mask_x, other=filter_value)
+    for k_idx in range(k):
+        if DESCENDING:
+            chunk_select_val = tl.max(x)
+            chunk_select_idx = tl.argmax(x, axis=0)
+        else:
+            chunk_select_val = tl.min(x)
+            chunk_select_idx = tl.argmin(x, axis=0)
 
-    noise = tl.load(row_rand_ptr + offsets * stride_rand_k)
-    eps = 1e-9
-    scores = probs / (noise + eps)
+        tl.store(y_ptr + k_idx, chunk_select_val)
+        tl.store(y_index_ptr + k_idx, chunk_select_idx + chunk_offset)
 
-    tl.store(row_scores_ptr + offsets * stride_out0_k, scores)
-    tl.store(row_probs_ptr + offsets * stride_out1_k, probs)
+        cols = tl.arange(0, CHUNK_SIZE)
+        if DESCENDING:
+            x = tl.where(
+                cols == chunk_select_idx,
+                filter_value,
+                x,
+            )
+        else:
+            x = tl.where(
+                cols == chunk_select_idx,
+                -filter_value,
+                x,
+            )
+
+@libentry()
+@triton.jit
+def _topk_stage2_kernel(
+    y_ptr,
+    y_index_ptr,
+    x_ptr,
+    x_index_ptr,
+    random_seed: tl.int,
+    random_offset: tl.int,
+    filter_value: tl.constexpr,
+    k: tl.constexpr,
+    N: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    DESCENDING: tl.constexpr,
+):
+    cur_batch = tl.program_id(0)
+    y_ptr += cur_batch
+    y_index_ptr += cur_batch
+    
+    off_col = tl.arange(0, BLOCK_SIZE)
+    off_x = cur_batch * N + off_col
+    mask_x = off_col < N
+    
+    chunk_x = tl.load(x_ptr + off_x, mask=mask_x, other=filter_value)
+    chunk_index = tl.load(x_index_ptr + off_x, mask=mask_x, other=0)
+    
+    sorted_logits, sorted_index = argsort(chunk_x, chunk_index, 0, descending=DESCENDING)
+    
+    k_mask = off_col < k
+    k_logits = tl.where(k_mask, sorted_logits, filter_value)
+    k_index = tl.where(k_mask, sorted_index, 0)
+    
+    max_logit = tl.max(k_logits)
+    exp_logits = tl.exp(k_logits - max_logit)
+    sum_exp = tl.sum(exp_logits, axis=0)
+    
+    cdf_unorm = tl.cumsum(exp_logits, axis=0)
+    rand_val = tl.rand(random_seed, random_offset + cur_batch * 12345) * sum_exp
+    sample_mask = cdf_unorm >= rand_val
+    sample_idx = tl.argmax(sample_mask, axis=0)
+    
+    one_hot = (off_col == sample_idx)
+    
+    sampled_token = tl.sum(tl.where(one_hot, k_index, tl.zeros_like(k_index)), axis=0)
+    sampled_exp = tl.sum(tl.where(one_hot, exp_logits, 0.0), axis=0)
+    sampled_prob = sampled_exp / sum_exp
+    
+    tl.store(y_ptr, sampled_prob)
+    tl.store(y_index_ptr, sampled_token)
     
 
 def top_k_sampling_impl(
@@ -52,47 +209,68 @@ def top_k_sampling_impl(
     top_k: int = 50,
     filter_value: float = -float("Inf"),
     min_tokens_to_keep: int = 1,
+    largest = True
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    device = logits.device
-    logits = logits.to(torch.float32)
-    batch_size, _ = logits.shape
-
-    sorted_logits, sorted_topk_indices = torch.topk(logits, top_k)
-
-    rand_data = torch.rand_like(sorted_logits, device=device)
-
-    output_scores = torch.empty_like(sorted_logits)
-    output_final_probs = torch.empty_like(sorted_logits)
-
-    grid = (batch_size,)
-    _top_k_sample_kernel[grid](
-        sorted_logits,
-        sorted_topk_indices,
-        rand_data,
-        output_scores,
-        output_final_probs,
-        filter_value,
-        min_tokens_to_keep,
-        sorted_logits.stride(0),
-        sorted_logits.stride(1),
-        sorted_topk_indices.stride(0),
-        sorted_topk_indices.stride(1),
-        rand_data.stride(0),
-        rand_data.stride(1),
-        output_scores.stride(0),
-        output_scores.stride(1),
-        output_final_probs.stride(0),
-        output_final_probs.stride(1),
-        TOP_K=top_k,
+    device = logits.device 
+    logits = logits.to(torch.float32)    
+    
+    vocab_size = logits.size(-1)
+    batch_size = logits.numel() // vocab_size
+    
+    logits_2d = logits.reshape(batch_size, vocab_size).contiguous()
+    
+    top_k = min(top_k, vocab_size)
+    top_k = max(top_k, min_tokens_to_keep)
+    
+    descending = True
+    if not largest:
+        descending = False
+    
+    chunk_size = 1024
+    if chunk_size < top_k:
+        chunk_size = triton.next_power_of_2(top_k)
+    chunk_num = triton.cdiv(vocab_size, chunk_size)
+    
+    stage1_out = torch.empty(batch_size * chunk_num * top_k, device=device, dtype=logits.dtype)
+    stage1_out_index = torch.empty(
+        batch_size * chunk_num * top_k, device=device, dtype=torch.int32
     )
-
-    sampled_index_in_topk = torch.argmax(output_scores, dim=-1, keepdim=True)
-
-    output_tokens = torch.gather(sorted_topk_indices, -1, sampled_index_in_topk)
-
-    output_probs = torch.gather(output_final_probs, -1, sampled_index_in_topk)
-
-    return output_probs, output_tokens
+    
+    _topk_stage1_kernel[batch_size, chunk_num](
+        stage1_out, 
+        stage1_out_index,
+        logits_2d,
+        filter_value,
+        top_k,
+        vocab_size,
+        chunk_size,
+        descending,
+    )
+    
+    out_shape = logits.shape[:-1] + (1,)
+    stage2_out_prob = torch.empty(out_shape, device=device, dtype=logits.dtype)
+    stage2_out_token = torch.empty(out_shape, device=device, dtype=torch.int32)
+    stage2_elem_cnt = chunk_num * top_k
+    BLOCK_SIZE = triton.next_power_of_2(stage2_elem_cnt)
+    
+    random_seed = int(torch.randint(0, 2**31 - 1, (), device="cpu").item())
+    random_offset = int(torch.randint(0, 2**31 - 1, (), device="cpu").item())
+    
+    _topk_stage2_kernel[batch_size,](
+        stage2_out_prob,
+        stage2_out_token,
+        stage1_out, 
+        stage1_out_index,
+        random_seed, 
+        random_offset,
+        filter_value,
+        top_k,
+        stage2_elem_cnt,
+        BLOCK_SIZE,
+        descending,
+    )
+    
+    return stage2_out_prob, stage2_out_token
 
 
 @triton.jit
