@@ -1,5 +1,4 @@
 from typing import List
-
 import torch
 
 try:
@@ -16,11 +15,13 @@ dtype_mapping = {
     "float32": torch.float32,
 }
 
+# TODO(liuyuan):  get the common configuration fields for all LLM models, add them here as static fields and add conversion functions to convert from different configs.
+class MojoDynamicConfig(BaseModel):
+    class Config:
+        arbitrary_types_allowed = True
+        extra = 'allow'
 
-class MojoModelConfig(BaseModel):
-    def __init__(self, **data):
-        super().__init__(**data)
-
+class MojoModelConfig(MojoDynamicConfig):
     model_name: str = ""
 
     hidden_size: int
@@ -62,11 +63,6 @@ class MojoModelConfig(BaseModel):
 
     is_meta: bool = False
 
-    class Config:
-        # Enable support for arbitrary types
-        arbitrary_types_allowed = True
-        extra = "allow"
-
     @validator("dtype", pre=True)
     def validate_dtype(cls, value):
         if isinstance(value, str):
@@ -78,9 +74,6 @@ class MojoModelConfig(BaseModel):
 
 
 class MojoRunTimeConfig(BaseModel):
-    def __init__(self, **data):
-        super().__init__(**data)
-
     preshard_only: bool = False
 
     is_deterministic: bool = False
@@ -102,38 +95,24 @@ class MojoRunTimeConfig(BaseModel):
     vanilla_checkpoint_path: str = None
     preshard_checkpoint_path: str = None
 
-    class Config:
-        # Enable support for arbitrary types
-        arbitrary_types_allowed = True
-        extra = "allow"
-
-    @validator("dtype", pre=True)
-    def validate_dtype(cls, value):
-        if isinstance(value, str):
-            if value in dtype_mapping:
-                return dtype_mapping[value]
-            else:
-                raise ValueError(f"unsupported dtype: {value}")
-        return value
-
-
-class MojoParallelismConfig(BaseModel):
-    dp_size: int = 1
-    pp_size: int = 1
-    ep_size: int = 1
-    tp_size: int = 1
-    dp_rank: int = 1
-    pp_rank: int = 1
-    ep_rank: int = 1
-    tp_rank: int = 1
-    dp_group: list = []
-    pp_group: list = []
-    ep_group: list = []
-    tp_group: list = []
-    world_size: int = 1
+class MojoParallelConfig(BaseModel):
+    dp_size:int = 1
+    pp_size:int = 1
+    ep_size:int = 1
+    tp_size:int = 1
+    dp_rank:int = 0
+    pp_rank:int = 0
+    ep_rank:int = 0
+    tp_rank:int = 0
+    dp_group:list = []
+    pp_group:list = []
+    ep_group:list = []
+    tp_group:list = []
+    world_size:int = 1
 
 
 class MojoConfig(BaseModel):
-    model_config: MojoModelConfig = None
-    parallelism_config: MojoParallelismConfig = None
-    runtime_config: MojoRunTimeConfig = None
+    # TODO(liuyuan): use MojoModelConfig when it is ready for all models.
+    model_config: MojoDynamicConfig = None
+    parallel_config: MojoParallelConfig = MojoParallelConfig()
+    runtime_config: MojoRunTimeConfig = MojoRunTimeConfig()
