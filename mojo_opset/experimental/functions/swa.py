@@ -814,7 +814,7 @@ def swa_ttx_forward(
     gqa_interleave: bool = False,
     output_f32: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    AUX_MASK_SIZE, AUX_MASK = get_aux_mask()
+    mask_size, mask = get_aux_mask()
     tot_q_toks, num_q_heads, head_dim = q.shape
     tot_kv_toks, num_kv_heads, _ = k.shape
     o = torch.zeros_like(q)
@@ -874,10 +874,10 @@ def swa_ttx_forward(
         v.stride(0),
         v.stride(1),
         v.stride(2),
-        AUX_MASK,
-        AUX_MASK_SIZE,
-        AUX_MASK.stride(0),
-        AUX_MASK.stride(1),
+        mask,
+        mask_size,
+        mask.stride(0),
+        mask.stride(1),
         is_causal,
         global_window_size,
         local_window_size,
@@ -1661,6 +1661,8 @@ def swa_ttx_backward(
     sm_scale: Optional[float],
     gqa_interleave: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    mask_size, mask = get_aux_mask()
+
     tot_q_toks, num_q_heads, head_dim = q.shape
 
     delta = torch.zeros((num_q_heads, tot_q_toks), dtype=torch.float32, device=q.device)
@@ -1746,10 +1748,10 @@ def swa_ttx_backward(
         v.stride(0),
         v.stride(1),
         v.stride(2),
-        AUX_MASK,
-        AUX_MASK_SIZE,
-        AUX_MASK.stride(0),
-        AUX_MASK.stride(1),
+        mask,
+        mask_size,
+        mask.stride(0),
+        mask.stride(1),
         is_causal,
         global_window_size,
         local_window_size,
@@ -1799,10 +1801,10 @@ def swa_ttx_backward(
         v.stride(0),
         v.stride(1),
         v.stride(2),
-        AUX_MASK,
-        AUX_MASK_SIZE,
-        AUX_MASK.stride(0),
-        AUX_MASK.stride(1),
+        mask,
+        mask_size,
+        mask.stride(0),
+        mask.stride(1),
         is_causal,
         global_window_size,
         local_window_size,
