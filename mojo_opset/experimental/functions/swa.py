@@ -1,8 +1,21 @@
 import torch
 from mojo_opset.core.function import MojoFunction
 from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
-from mojo_opset.backends.ttx.kernels.utils import prepare_chunk_indices
 from typing import Optional, Tuple
+
+
+def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
+    return cu_seqlens[1:] - cu_seqlens[:-1]
+
+
+def prepare_chunk_indices(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
+    lens = triton.cdiv(prepare_lens(cu_seqlens), chunk_size)
+    total = lens.sum()
+    flat = torch.arange(total, device=cu_seqlens.device)
+    seq_ids = torch.repeat_interleave(torch.arange(lens.numel(), device=cu_seqlens.device), lens)
+    offsets = torch.cumsum(lens, 0) - lens
+    indices = flat - offsets[seq_ids]
+    return torch.stack([indices.eq(0).cumsum(0) - 1, indices], dim=1)
 
 
 def generate_swa_mask(
