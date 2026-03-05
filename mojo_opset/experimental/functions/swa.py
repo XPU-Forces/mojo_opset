@@ -2010,7 +2010,6 @@ def test_swa_function():
                 bsz, q_head_num, kv_head_num, head_dim, max_q_len, max_kv_prefix_len, dtype
             )
             torch.distributed.barrier()
-            time = datetime.datetime.now()
             if local_rank == 0:
                 print(i, cu_seqlens_q_cpu, cu_seqlens_kv_cpu)
             q_ref = query.clone().detach().requires_grad_(True)
@@ -2025,6 +2024,13 @@ def test_swa_function():
                 q_ref, k_ref, v_ref, cu_seqlens_q_cpu, gqa_interleave, scale, local_window, global_window
             )
 
+            grad_out = torch.randn_like(o_ref)
+            o_ref.backward(grad_out)
+
+            torch.distributed.barrier()
+            torch.npu.synchronize()
+
+            time = datetime.datetime.now()
             o_mojo = MojoSWAFunction._registry.get("ttx").apply(
                 q_mojo,
                 k_mojo,
@@ -2040,15 +2046,13 @@ def test_swa_function():
             )
 
             assert_close(o_ref, o_mojo)
-            grad_out = torch.randn_like(o_ref)
-            o_ref.backward(grad_out)
             o_mojo.backward(grad_out)
             assert_close(q_ref.grad, q_mojo.grad)
             assert_close(k_ref.grad, k_mojo.grad)
             assert_close(v_ref.grad, v_mojo.grad)
             torch.distributed.barrier()
             if local_rank == 0:
-                print("time cost:", datetime.datetime.now() - time)
+                print("time cost:", (datetime.datetime.now() - time).microseconds / 1000, "ms")
 
 
 def assert_close(
