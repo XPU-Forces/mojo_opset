@@ -1984,59 +1984,52 @@ def generate_test_data(
     return query, key, value, cu_seqlens_q_cpu, cu_seqlens_kv_cpu
 
 
-def test_swa_function():
+def test_swa_function(profiler=None):
     import datetime
     import os
 
-    torch.distributed.init_process_group(backend="hccl")
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.npu.set_device(local_rank)
 
-    test_configs = [
-        (1, 1, 1, False, 128, 256, 0, torch.float32),
-        (4, 4, 2, True, 128, 512, 0, torch.float32),
-        (4, 4, 2, False, 128, 256, 0, torch.bfloat16),
-        (4, 16, 4, False, 128, 4096, 0, torch.bfloat16),
-    ]
+    if profiler is None:
+        test_configs = [
+            (1, 1, 1, False, 128, 256, 0, torch.float32),
+            (4, 4, 2, True, 128, 512, 0, torch.float32),
+            (4, 4, 2, False, 128, 256, 0, torch.bfloat16),
+            (4, 16, 4, False, 128, 4096, 0, torch.bfloat16),
+        ]
+    else:
+        test_configs = [
+            (4, 16, 4, False, 128, 4096, 0, torch.bfloat16),
+        ]
 
     local_window = 1023
-    global_window = 0
+    global_window = 4
     for bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_q_len, max_kv_prefix_len, dtype in test_configs:
         if local_rank == 0:
             print(bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_q_len, max_kv_prefix_len, dtype)
         scale = 1.0 / head_dim**0.5
-        for i in range(5):
-            query, key, value, cu_seqlens_q_cpu, cu_seqlens_kv_cpu = generate_test_data(
-                bsz, q_head_num, kv_head_num, head_dim, max_q_len, max_kv_prefix_len, dtype
-            )
-            torch.distributed.barrier()
-            if local_rank == 0:
-                print(i, cu_seqlens_q_cpu, cu_seqlens_kv_cpu)
-            q_ref = query.clone().detach().requires_grad_(True)
-            k_ref = key.clone().detach().requires_grad_(True)
-            v_ref = value.clone().detach().requires_grad_(True)
+        query, key, value, cu_seqlens_q_cpu, cu_seqlens_kv_cpu = generate_test_data(
+            bsz, q_head_num, kv_head_num, head_dim, max_q_len, max_kv_prefix_len, dtype
+        )
+        cu_seqlens_q = cu_seqlens_q_cpu  # .to(device=query.device)
+        cu_seqlens_kv = cu_seqlens_kv_cpu  # .to(device=key.device)
+        grad_out = torch.randn_like(query)
+        if local_rank == 0:
+            print(cu_seqlens_q_cpu, cu_seqlens_kv_cpu)
 
+        for _ in range(5):
             q_mojo = query.clone().detach().requires_grad_(True)
             k_mojo = key.clone().detach().requires_grad_(True)
             v_mojo = value.clone().detach().requires_grad_(True)
-
-            o_ref = flash_attn_sparse_torch(
-                q_ref, k_ref, v_ref, cu_seqlens_q_cpu, gqa_interleave, scale, local_window, global_window
-            )
-
-            grad_out = torch.randn_like(o_ref)
-            o_ref.backward(grad_out)
-
-            torch.distributed.barrier()
-            torch.npu.synchronize()
 
             time = datetime.datetime.now()
             o_mojo = MojoSWAFunction._registry.get("ttx").apply(
                 q_mojo,
                 k_mojo,
                 v_mojo,
-                cu_seqlens_q_cpu,
-                cu_seqlens_kv_cpu,
+                cu_seqlens_q,
+                cu_seqlens_kv,
                 True,
                 local_window,
                 global_window,
@@ -2045,14 +2038,25 @@ def test_swa_function():
                 True,
             )
 
-            assert_close(o_ref, o_mojo)
             o_mojo.backward(grad_out)
-            assert_close(q_ref.grad, q_mojo.grad)
-            assert_close(k_ref.grad, k_mojo.grad)
-            assert_close(v_ref.grad, v_mojo.grad)
-            torch.distributed.barrier()
             if local_rank == 0:
                 print("time cost:", (datetime.datetime.now() - time).microseconds / 1000, "ms")
+
+            if profiler is not None:
+                profiler.step()
+            else:
+                q_ref = query.clone().detach().requires_grad_(True)
+                k_ref = key.clone().detach().requires_grad_(True)
+                v_ref = value.clone().detach().requires_grad_(True)
+                o_ref = flash_attn_sparse_torch(
+                    q_ref, k_ref, v_ref, cu_seqlens_q_cpu, gqa_interleave, scale, local_window, global_window
+                )
+                o_ref.backward(grad_out)
+                assert_close(o_ref, o_mojo)
+                assert_close(q_ref.grad, q_mojo.grad)
+                assert_close(k_ref.grad, k_mojo.grad)
+                assert_close(v_ref.grad, v_mojo.grad)
+                torch.distributed.barrier()
 
 
 def assert_close(
@@ -2108,4 +2112,49 @@ def assert_close(
 
 
 if __name__ == "__main__":
+    torch.manual_seed(42)
+    torch.npu.manual_seed(42)
+    import numpy
+
+    numpy.random.seed(42)
+    torch.distributed.init_process_group(backend="hccl")
+
     test_swa_function()
+
+    import torch_npu
+
+    # 添加Profiling采集扩展配置参数，详细参数介绍可参考下文的参数说明
+    experimental_config = torch_npu.profiler._ExperimentalConfig(
+        export_type=[torch_npu.profiler.ExportType.Text],
+        profiler_level=torch_npu.profiler.ProfilerLevel.Level0,
+        mstx=False,  # 原参数名msprof_tx改为mstx，新版本依旧兼容原参数名msprof_tx
+        mstx_domain_include=[],
+        mstx_domain_exclude=[],
+        aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
+        l2_cache=False,
+        op_attr=False,
+        data_simplification=False,
+        record_op_args=False,
+        gc_detect_threshold=None,
+        host_sys=[],
+        sys_io=False,
+        sys_interconnection=False,
+    )
+
+    # 添加Profiling采集基础配置参数，详细参数介绍可参考下文的参数说明
+    with torch_npu.profiler.profile(
+        activities=[torch_npu.profiler.ProfilerActivity.CPU, torch_npu.profiler.ProfilerActivity.NPU],
+        schedule=torch_npu.profiler.schedule(
+            wait=1, warmup=0, active=5, repeat=1, skip_first=0
+        ),  # 与prof.step()配套使用
+        on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./result"),
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=True,
+        with_modules=False,
+        with_flops=False,
+        experimental_config=experimental_config,
+    ) as prof:
+
+        # 启动性能数据采集
+        test_swa_function(prof)
