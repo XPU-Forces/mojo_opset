@@ -6,8 +6,8 @@ import torch
 import triton
 import triton.language as tl
 
-from mojo_opset.backends.ttx.kernels.utils import prepare_chunk_indices
 from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
+from mojo_opset.backends.ttx.kernels.utils import prepare_chunk_indices
 
 
 @triton.jit

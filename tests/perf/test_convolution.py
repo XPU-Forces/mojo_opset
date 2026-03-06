@@ -1,14 +1,10 @@
-from typing import Optional
 
 import pytest
 import torch
-import torch.nn.functional as F
-
-from tests.utils import auto_switch_platform
-from tests.utils import bypass_not_implemented
-from tests.utils import assert_close
 
 from mojo_opset import MojoCausalConv1dUpdateState
+from tests.utils import auto_switch_platform
+from tests.utils import bypass_not_implemented
 
 
 @pytest.mark.parametrize(

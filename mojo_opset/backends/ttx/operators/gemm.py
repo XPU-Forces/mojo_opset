@@ -4,7 +4,7 @@ from torch.distributed.tensor import DTensor
 
 from mojo_opset.backends.ttx.kernels import m_grouped_matmul
 from mojo_opset.core import MojoGroupGemm
-from torch.distributed.tensor import DTensor
+
 
 class TTXGroupGemm(MojoGroupGemm):
     supported_platforms_list = ["npu"]

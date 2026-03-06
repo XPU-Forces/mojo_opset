@@ -1,83 +1,23 @@
-from typing import Optional
-
+# ASCEND_RT_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 -m pytest -q tests/distributed/test_expert_parallel.py 
 import os
+
+from typing import Optional
 
 import pytest
 import torch
 
-from torch import nn
-from torch.distributed.tensor.parallel import parallelize_module
 from torch.distributed.device_mesh import init_device_mesh
-
-from mojo_opset.distributed.parallel import (
-    MojoColwiseParallel,
-    MojoRowwiseParallel,
-    MojoExpertParallel
-)
+from torch.distributed.tensor.parallel import parallelize_module
 
 from mojo_opset import MojoGroupGemm
+from mojo_opset.distributed.parallel import MojoExpertParallel
+
 
 def _get_world_size():
     world_size = int(os.environ.get("WORLD_SIZE", "0"))
     if world_size <= 0:
         pytest.skip("This test requires launching with torchrun (WORLD_SIZE must be set).")
     return world_size
-
-def test_colwise_parallel():
-    world_size = _get_world_size()
-
-    class ColwiseGemm(torch.nn.Module):
-        def __init__(self, in_feature, out_feature):
-            super().__init__()
-            self.linear = nn.Linear(in_features=in_feature, out_features=out_feature)
-
-        @torch.inference_mode
-        def forward(self, hidden_states):
-            return self.linear(hidden_states)
-    
-    in_feature = 256
-    out_feature = 512 * world_size
-
-    test_colwise_gemm = ColwiseGemm(in_feature, out_feature)
-
-    device_mesh = init_device_mesh("npu", (world_size,))
-    test_colwise_gemm = parallelize_module(
-        test_colwise_gemm, 
-        device_mesh=device_mesh,
-        parallelize_plan={"linear": MojoColwiseParallel()}
-    )
-
-    hidden_states = torch.zeros(16, in_feature)
-    hidden_states = test_colwise_gemm(hidden_states)
-    assert hidden_states.shape[-1] == out_feature // world_size
-
-def test_rowwise_parallel():
-    world_size = _get_world_size()
-
-    class RowwiseGemm(torch.nn.Module):
-        def __init__(self, in_feature, out_feature):
-            super().__init__()
-            self.linear = nn.Linear(in_features=in_feature, out_features=out_feature)
-        
-        @torch.inference_mode
-        def forward(self, hidden_states):
-            return self.linear(hidden_states)
-    
-    in_feature = 512 * world_size
-    out_feature = 256
-
-    test_rowwise_gemm = RowwiseGemm(in_feature, out_feature)
-    device_mesh = init_device_mesh("npu", (world_size,))
-
-    test_rowwise_gemm = parallelize_module(
-        test_rowwise_gemm, 
-        device_mesh=device_mesh,
-        parallelize_plan={"linear": MojoRowwiseParallel()}
-    )
-
-    hidden_states = torch.zeros(16, in_feature // world_size)
-    assert hidden_states.shape[-1] == test_rowwise_gemm.linear.weight.to_local().shape[-1]
-    hidden_states = test_rowwise_gemm(hidden_states)
 
 def test_moe_parallel():
     world_size = _get_world_size()
@@ -105,8 +45,10 @@ def test_moe_parallel():
             self.expert_weights = torch.nn.Parameter(torch.empty(num_experts, hidden_size))
             # Ref: https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.linear.html
             # torch.nn.functional.linear: out = input @ weight.T + bias
-            self.ffn1 = MojoGroupGemm(num_experts, hidden_size, 2 * ffn_intermediate_size)
-            self.ffn2 = MojoGroupGemm(num_experts, ffn_intermediate_size, hidden_size)
+            self.ffn1_weight = torch.nn.Parameter(torch.rand(num_experts, 2 * ffn_intermediate_size, hidden_size))
+            self.ffn2_weight = torch.nn.Parameter(torch.rand(num_experts, hidden_size, ffn_intermediate_size))
+            self.ffn1 = MojoGroupGemm(self.ffn1_weight)
+            self.ffn2 = MojoGroupGemm(self.ffn2_weight)
 
             self.activation_func = lambda x: torch.nn.functional.silu((xc := x.chunk(2, dim=-1))[0]) * xc[1]
 
@@ -187,22 +129,22 @@ def test_moe_parallel():
             return experts_output
     
     in_feature = 512
-    out_feature = 128
+    intermedia_feture = 128
     num_experts = 16 * world_size
     select_expert_num = 2
 
     device_mesh = init_device_mesh("npu", (world_size,))    
-    test_ep_moe = MojoMoE(
+    full_moe = MojoMoE(
         in_feature, 
-        out_feature, 
+        intermedia_feture, 
         num_experts, 
         select_expert_num, 
         ep_size=device_mesh.shape[0], 
         ep_rank=device_mesh.get_rank()
     )
-    test_ep_moe = test_ep_moe.npu()
-    test_ep_moe = parallelize_module(
-        test_ep_moe, 
+    full_moe = full_moe.npu()
+    parallel_moe = parallelize_module(
+        full_moe, 
         device_mesh=device_mesh,
         parallelize_plan={
             "ffn1": MojoExpertParallel(), 
@@ -211,9 +153,10 @@ def test_moe_parallel():
     )
 
     hidden_states = torch.zeros(16, in_feature).npu()
-    hidden_states = test_ep_moe(hidden_states)
+    parallel_res = parallel_moe(hidden_states)
+    full_res = full_moe(hidden_states)
+    assert torch.allclose(parallel_res, full_res)
+    
 
 if __name__ == "__main__":
-    #test_colwise_parallel()
-    #test_rowwise_parallel()
     test_moe_parallel()

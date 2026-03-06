@@ -4,7 +4,6 @@ import math
 import pytest
 import torch
 
-from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoPagedDecodeGQA
