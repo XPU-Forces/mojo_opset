@@ -26,7 +26,7 @@ from tests.utils import bypass_not_implemented
 @bypass_not_implemented
 def test_residual_add_rmsnorm(x, residual, weight, norm_pos, eps):
     add_norm = MojoResidualAddRMSNorm(
-        hidden_size=weight.size(0),
+        norm_size=weight.size(0),
         eps=eps,
         norm_pos=norm_pos,
     ).to(x.device)
@@ -53,7 +53,7 @@ def test_residual_add_rmsnorm(x, residual, weight, norm_pos, eps):
 @bypass_not_implemented
 def test_residual_add_layernorm(x, residual, weight, bias, norm_pos, eps):
     add_norm = MojoResidualAddLayerNorm(
-        hidden_size=weight.size(0),
+        norm_size=weight.size(0),
         eps=eps,
         norm_pos=norm_pos,
     )
@@ -104,7 +104,7 @@ def test_rmsnorm(x, weight, eps):
 @bypass_not_implemented
 def test_layernorm(x, weight, bias, eps):
     layernorm = MojoLayerNorm(
-        hidden_size=weight.size(0),
+        norm_size=weight.size(0),
         eps=eps,
     ).to(x.device)
 

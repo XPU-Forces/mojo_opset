@@ -203,7 +203,6 @@ def test_residual_add_layernorm(shape, dtype, norm_pos, eps):
         for dtype in [torch.float32, torch.float16, torch.bfloat16]
     ],
 )
-@auto_switch_platform()
 @bypass_not_implemented
 def test_channel_rmsnorm(x, norm_size, channel_first, images):
     norm = MojoChannelRMSNorm(
