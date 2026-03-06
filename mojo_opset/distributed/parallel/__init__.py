@@ -1,1 +1,2 @@
 from .expert_parallel import MojoExpertParallel
+from .expert_parallel import MojoMoEExpertParallel
