@@ -106,6 +106,7 @@ def test_layernorm(x, weight, bias, eps):
     layernorm = MojoLayerNorm(
         norm_size=weight.size(0),
         eps=eps,
+        norm_size=weight.size(0),
     ).to(x.device)
 
     with torch.no_grad():
