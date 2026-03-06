@@ -7,6 +7,7 @@ from mojo_opset import MojoLayerNorm
 from mojo_opset import MojoResidualAddLayerNorm
 from mojo_opset import MojoResidualAddRMSNorm
 from mojo_opset import MojoRMSNorm
+from mojo_opset import MojoChannelRMSNorm
 
 torch.manual_seed(43)
 
@@ -181,3 +182,53 @@ def test_residual_add_layernorm(shape, dtype, norm_pos, eps):
         atol=atol,
         rtol=rtol,
     )
+
+
+@pytest.mark.parametrize(
+    "x, norm_size, channel_first, images",
+    [
+        (torch.randn(size=(1, 1024, 30, 52), dtype=dtype), 1024, True, True)
+        for dtype in [torch.float32, torch.float16, torch.bfloat16]
+    ]
+    + [
+        (torch.randn(size=(1, 256, 4, 240, 416), dtype=dtype), 256, True, False)
+        for dtype in [torch.float32, torch.float16, torch.bfloat16]
+    ]
+    + [
+        (torch.randn(size=(1, 1024, 30, 52), dtype=dtype), 52, False, True)
+        for dtype in [torch.float32, torch.float16, torch.bfloat16]
+    ]
+    + [
+        (torch.randn(size=(1, 512, 4, 120, 208), dtype=dtype), 208, False, False)
+        for dtype in [torch.float32, torch.float16, torch.bfloat16]
+    ],
+)
+@bypass_not_implemented
+def test_channel_rmsnorm(x, norm_size, channel_first, images):
+    norm = MojoChannelRMSNorm(
+        norm_size=norm_size,
+        channel_first=channel_first,
+        images=images,
+        device=x.device,
+        dtype=torch.float32,
+    )
+    norm_ref = (
+        MojoChannelRMSNorm._registry.get("torch")(
+            norm_size=norm_size,
+            channel_first=channel_first,
+            images=images,
+        )
+        .to(x.device)
+        .to(torch.float32)
+    )
+
+    with torch.no_grad():
+        weight_data = torch.randn(norm.weight.shape, dtype=torch.float32, device=x.device)
+        norm.weight.copy_(weight_data)
+        norm_ref.weight.copy_(weight_data)
+
+    if x.dtype == torch.float32:
+        atol, rtol = 1e-5, 1e-6
+    else:
+        atol, rtol = 3e-2, 6e-3
+    norm.forward_diff_with(norm_ref, x, atol=atol, rtol=rtol)

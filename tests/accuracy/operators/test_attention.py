@@ -279,9 +279,9 @@ def test_sdpa(
         bsz, q_head_num, kv_head_num, head_dim, seq_length, block_size
     )
     diffusion_attn_ref = MojoSdpa._registry.get("torch")(
-        mask=blockwise_diffusion_attn_mask, scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
+        scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
     )
     diffusion_attn = MojoSdpa(
-        mask=blockwise_diffusion_attn_mask, scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
+        scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
     )
-    diffusion_attn_ref.forward_diff_with(diffusion_attn, query, key, value)
+    diffusion_attn_ref.forward_diff_with(diffusion_attn, query, key, value, blockwise_diffusion_attn_mask)

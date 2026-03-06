@@ -93,12 +93,13 @@ class TTXSdpa(MojoSdpa):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
     ):
         output = sdpa_infer(
             q=query,
             k=key,
             v=value,
-            mask=self.mask,
+            mask=attn_mask,
             scale=self.scale,
             enable_gqa=self.enable_gqa,
         )

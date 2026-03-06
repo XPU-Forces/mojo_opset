@@ -272,6 +272,6 @@ def test_sdpa(
     enable_gqa: bool,
 ):
     diffusion_attn = MojoSdpa(
-        mask=blockwise_diffusion_attn_mask, scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
+        scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
     )
-    perf(lambda: diffusion_attn(query, key, value))  # noqa: F821
+    perf(lambda: diffusion_attn(query, key, value, blockwise_diffusion_attn_mask))  # noqa: F821

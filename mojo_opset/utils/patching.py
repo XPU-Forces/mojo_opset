@@ -131,3 +131,30 @@ def rewrite_assertion(module_name):
     finally:
         for func in __dummy_cfg._cleanup_stack:
             func()
+
+
+def apply_mojo_to_wan2_2(
+    wan_model: bool = True,
+    t5: bool = True,
+    vae: bool = True,
+    model=None,
+) -> None:
+    """
+    Apply mojo op to replace original implementation in GitHub Wan2.2 models.
+    """
+    from wan import textimage2video
+
+    if wan_model:
+        from mojo_opset.modeling.wan2_2 import mojo_wan_model
+
+        textimage2video.WanModel = mojo_wan_model.WanModel
+
+    if t5:
+        from mojo_opset.modeling.wan2_2 import mojo_t5
+
+        textimage2video.T5EncoderModel = mojo_t5.T5EncoderModel
+
+    if vae:
+        from mojo_opset.modeling.wan2_2 import mojo_vae2_2
+
+        textimage2video.Wan2_2_VAE = mojo_vae2_2.Wan2_2_VAE
