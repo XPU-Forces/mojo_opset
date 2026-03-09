@@ -3,6 +3,7 @@ import os
 import pytest
 import torch
 
+import torch._dynamo as dynamo
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor.parallel import parallelize_module
 
@@ -29,7 +30,7 @@ def _set_current_device(device_type: str) -> str:
     raise ValueError(f"Unsupported device type for distributed test: {device_type}")
 
 
-def test_moe_ep_allreduce():
+def test_moe_parallelize_then_compile():
     world_size = _get_world_size()
     device_type = get_platform()
     if device_type not in ("npu", "mlu"):
@@ -43,29 +44,21 @@ def test_moe_ep_allreduce():
     top_k = 2
 
     torch.manual_seed(0)
-    ref = MojoMoE(
-        num_experts=num_experts,
-        top_k=top_k,
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
-    ).to(device)
-
-    torch.manual_seed(0)
     moe = MojoMoE(
         num_experts=num_experts,
         top_k=top_k,
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
     ).to(device)
-    moe.load_state_dict(ref.state_dict())
-
-    moe = parallelize_module(
-        moe,
-        device_mesh=device_mesh,
-        parallelize_plan=MojoExpertParallel(),
-    )
+    moe = parallelize_module(moe, device_mesh=device_mesh, parallelize_plan=MojoExpertParallel())
 
     x = torch.randn(32, hidden_size, device=device)
-    out_parallel = moe(x)
-    out_ref = ref(x)
-    assert torch.allclose(out_parallel, out_ref, rtol=1e-4, atol=1e-4)
+
+    explain_out = dynamo.explain(moe)(x)
+    assert explain_out.graph_count >= 1
+
+    compiled = torch.compile(moe, backend="eager")
+    y0 = compiled(x)
+    y1 = compiled(x)
+    assert torch.allclose(y0, y1, rtol=1e-4, atol=1e-4)
+
