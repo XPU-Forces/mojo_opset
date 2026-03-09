@@ -15,10 +15,9 @@ def causal_mask_fn(
     mask_ptr, mask_size, mask_stride_m, mask_stride_n, q_start, kv_start, q_end, kv_end, Q_BLOCK, KV_BLOCK
 ):
     offset_causal = min(max(kv_start - q_start, -mask_size), mask_size)
-    offsets_mask_causal = (
-        (tl.arange(0, Q_BLOCK)[:, None]) * mask_stride_m
-        + (mask_size + offset_causal + tl.arange(0, KV_BLOCK)[None, :]) * mask_stride_n
-    )
+    offsets_mask_causal = (tl.arange(0, Q_BLOCK)[:, None]) * mask_stride_m + (
+        mask_size + offset_causal + tl.arange(0, KV_BLOCK)[None, :]
+    ) * mask_stride_n
     mask_causal = tl.load(mask_ptr + offsets_mask_causal).to(tl.int1)
 
     return mask_causal
@@ -201,51 +200,105 @@ def paged_prefill_kernel(
 
         tl.static_assert(PAGE_SIZE == BLOCK_SIZE_N, "Currently only BLOCK_SIZE_N==PAGE_SIZE supported")
 
-        for logical_block_idx in range(0, num_logical_blocks):
-            physical_block_id = tl.load(block_tables_ptr + b_id * stride_bt_batch + logical_block_idx * stride_bt_block)
+        num_full_blocks = (kv_cache_len + q_block_start_in_seq) // PAGE_SIZE
 
-            kv_block_start_in_seq = logical_block_idx * PAGE_SIZE
-            kv_block_end_in_seq = min(kv_block_start_in_seq + PAGE_SIZE, kv_seq_len)
-            kv_block_len = kv_block_end_in_seq - kv_block_start_in_seq
-            K_T_block_ptr = tl.make_block_ptr(
-                base=k_cache_ptr + physical_block_id * stride_k_block + kv_head_id * stride_k_head,
-                shape=(HEAD_DIM, kv_block_len),
-                strides=(stride_k_dim, stride_k_blksz),
-                offsets=(0, 0),
-                block_shape=(BLOCK_SIZE_D, BLOCK_SIZE_N),
-                order=(0, 1),
-            )
-            V_block_ptr = tl.make_block_ptr(
-                base=v_cache_ptr + physical_block_id * stride_v_block + kv_head_id * stride_v_head,
-                shape=(kv_block_len, HEAD_DIM),
-                strides=(stride_v_blksz, stride_v_dim),
-                offsets=(0, 0),
-                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
-                order=(1, 0),
-            )
+        if num_full_blocks > 0:
+            for logical_block_idx in range(0, num_full_blocks):
+                physical_block_id = tl.load(
+                    block_tables_ptr + b_id * stride_bt_batch + logical_block_idx * stride_bt_block
+                )
 
-            acc, l_i, m_i = _sdpa_infer_single_block(
-                acc,
-                l_i,
-                m_i,
-                q,
-                K_T_block_ptr,
-                V_block_ptr,
-                aux_mask_ptr,
-                stride_mask_m,
-                stride_mask_n,
-                AUX_MASK_SIZE,
-                sm_scale,
-                kv_cache_len + q_block_start_in_seq,
-                kv_block_start_in_seq,
-                kv_cache_len + q_block_end_in_seq,
-                kv_block_end_in_seq,
-                HEAD_DIM,
-                BLOCK_SIZE_M,
-                BLOCK_SIZE_N,
-                BLOCK_SIZE_D,
-                v_cache_ptr.dtype.element_ty == tl.float8e5,
-            )
+                kv_block_start_in_seq = logical_block_idx * PAGE_SIZE
+                kv_block_end_in_seq = min(kv_block_start_in_seq + PAGE_SIZE, kv_seq_len)
+                kv_block_len = kv_block_end_in_seq - kv_block_start_in_seq
+                K_T_block_ptr = tl.make_block_ptr(
+                    base=k_cache_ptr + physical_block_id * stride_k_block + kv_head_id * stride_k_head,
+                    shape=(HEAD_DIM, kv_block_len),
+                    strides=(stride_k_dim, stride_k_blksz),
+                    offsets=(0, 0),
+                    block_shape=(BLOCK_SIZE_D, BLOCK_SIZE_N),
+                    order=(0, 1),
+                )
+                V_block_ptr = tl.make_block_ptr(
+                    base=v_cache_ptr + physical_block_id * stride_v_block + kv_head_id * stride_v_head,
+                    shape=(kv_block_len, HEAD_DIM),
+                    strides=(stride_v_blksz, stride_v_dim),
+                    offsets=(0, 0),
+                    block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                    order=(1, 0),
+                )
+
+                acc, l_i, m_i = _sdpa_infer_single_block(
+                    acc,
+                    l_i,
+                    m_i,
+                    q,
+                    K_T_block_ptr,
+                    V_block_ptr,
+                    None,  # Note(chenyifan): main optimization, do not load mask if the current attn block is full
+                    stride_mask_m,
+                    stride_mask_n,
+                    AUX_MASK_SIZE,
+                    sm_scale,
+                    kv_cache_len + q_block_start_in_seq,
+                    kv_block_start_in_seq,
+                    kv_cache_len + q_block_end_in_seq,
+                    kv_block_end_in_seq,
+                    HEAD_DIM,
+                    BLOCK_SIZE_M,
+                    BLOCK_SIZE_N,
+                    BLOCK_SIZE_D,
+                    v_cache_ptr.dtype.element_ty == tl.float8e5,
+                )
+
+        if num_logical_blocks > num_full_blocks:
+            for logical_block_idx in range(num_full_blocks, num_logical_blocks):
+                physical_block_id = tl.load(
+                    block_tables_ptr + b_id * stride_bt_batch + logical_block_idx * stride_bt_block
+                )
+
+                kv_block_start_in_seq = logical_block_idx * PAGE_SIZE
+                kv_block_end_in_seq = min(kv_block_start_in_seq + PAGE_SIZE, kv_seq_len)
+                kv_block_len = kv_block_end_in_seq - kv_block_start_in_seq
+                K_T_block_ptr = tl.make_block_ptr(
+                    base=k_cache_ptr + physical_block_id * stride_k_block + kv_head_id * stride_k_head,
+                    shape=(HEAD_DIM, kv_block_len),
+                    strides=(stride_k_dim, stride_k_blksz),
+                    offsets=(0, 0),
+                    block_shape=(BLOCK_SIZE_D, BLOCK_SIZE_N),
+                    order=(0, 1),
+                )
+                V_block_ptr = tl.make_block_ptr(
+                    base=v_cache_ptr + physical_block_id * stride_v_block + kv_head_id * stride_v_head,
+                    shape=(kv_block_len, HEAD_DIM),
+                    strides=(stride_v_blksz, stride_v_dim),
+                    offsets=(0, 0),
+                    block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                    order=(1, 0),
+                )
+
+                acc, l_i, m_i = _sdpa_infer_single_block(
+                    acc,
+                    l_i,
+                    m_i,
+                    q,
+                    K_T_block_ptr,
+                    V_block_ptr,
+                    aux_mask_ptr,
+                    stride_mask_m,
+                    stride_mask_n,
+                    AUX_MASK_SIZE,
+                    sm_scale,
+                    kv_cache_len + q_block_start_in_seq,
+                    kv_block_start_in_seq,
+                    kv_cache_len + q_block_end_in_seq,
+                    kv_block_end_in_seq,
+                    HEAD_DIM,
+                    BLOCK_SIZE_M,
+                    BLOCK_SIZE_N,
+                    BLOCK_SIZE_D,
+                    v_cache_ptr.dtype.element_ty == tl.float8e5,
+                )
 
         m_i += tl.math.log(l_i)
         accumulator = acc / l_i[:, None]
