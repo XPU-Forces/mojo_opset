@@ -298,12 +298,13 @@ def _sdpa_infer_kernel(
 
 @triton.autotune(
     configs=[
-        triton.Config({"multibuffer": True, "BLOCK_R": 128, "BLOCK_C": 128}),
-        triton.Config({"multibuffer": True, "BLOCK_R": 64, "BLOCK_C": 128}),
-        triton.Config({"multibuffer": True, "BLOCK_R": 128, "BLOCK_C": 64}),
-        triton.Config({"multibuffer": False, "BLOCK_R": 128, "BLOCK_C": 256}),
-        triton.Config({"multibuffer": False, "BLOCK_R": 256, "BLOCK_C": 128}),
-        triton.Config({"multibuffer": False, "BLOCK_R": 128, "BLOCK_C": 128}),
+        triton.Config({"multibuffer": True, "BLOCK_R": 64, "BLOCK_C": 64}),
+        # triton.Config({"multibuffer": True, "BLOCK_R": 128, "BLOCK_C": 128}),
+        # triton.Config({"multibuffer": True, "BLOCK_R": 64, "BLOCK_C": 128}),
+        # triton.Config({"multibuffer": True, "BLOCK_R": 128, "BLOCK_C": 64}),
+        # triton.Config({"multibuffer": False, "BLOCK_R": 128, "BLOCK_C": 256}),
+        # triton.Config({"multibuffer": False, "BLOCK_R": 256, "BLOCK_C": 128}),
+        # triton.Config({"multibuffer": False, "BLOCK_R": 128, "BLOCK_C": 128}),
     ],
     key=["N", "S", "H"],
 )
@@ -314,7 +315,7 @@ def kernel_sdpa_fwd(
     v,
     o,
     lse,
-    mask,
+    # mask,
     scale: tl.constexpr,
     num_group: tl.constexpr,
     B: tl.constexpr,
@@ -391,23 +392,23 @@ def kernel_sdpa_fwd(
                 + (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] * STRIDE_V_S
                 + idx_h[None, :] * STRIDE_V_H
             )
-            ptr_mask = (
-                mask
-                + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * S
-                + (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[None, :]
-            )
+            # ptr_mask = (
+            #     mask
+            #     + (idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] * S
+            #     + (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[None, :]
+            # )
 
             mask_kv = (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[:, None] < S
-            mask_mask = ((idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < S) & (
-                (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[None, :] < S
-            )
+            # mask_mask = ((idx_r * BLOCK_R + tl.arange(0, BLOCK_R))[:, None] < S) & (
+            #     (idx_c * BLOCK_C + tl.arange(0, BLOCK_C))[None, :] < S
+            # )
 
-            block_mask = tl.load(ptr_mask, mask=mask_mask, other=False)
+            # block_mask = tl.load(ptr_mask, mask=mask_mask, other=False)
             block_k = tl.load(ptr_k, mask=mask_kv, other=0.0)
             block_v = tl.load(ptr_v, mask=mask_kv, other=0.0)
 
             block_s = tl.dot(block_q, tl.trans(block_k)) * scale
-            block_s -= (1.0 - block_mask.to(HIGH_TYPE)) * 1e6
+            # block_s -= (1.0 - block_mask.to(HIGH_TYPE)) * 1e6
             block_m_1 = tl.maximum(block_m, tl.max(block_s, axis=1))
             block_s = tl.exp(block_s - block_m_1[:, None])
             block_l_1 = tl.exp(block_m - block_m_1) * block_l + tl.sum(block_s, axis=1)
@@ -420,6 +421,7 @@ def kernel_sdpa_fwd(
         block_o = block_o / block_l[:, None]
         block_lse = tl.log(block_l) + block_m
         tl.store(ptr_o, block_o.to(LOW_TYPE), mask=mask_q)
+        # block_lse = block_l
         tl.store(ptr_lse, block_lse, mask=mask_lse)
 
 
@@ -902,7 +904,7 @@ def sdpa_fwd_impl(
         v,
         o,
         lse,
-        mask,
+        # mask,
         scale,
         k.shape[1],
         q.shape[0],
@@ -924,6 +926,7 @@ def sdpa_fwd_impl(
         lse.stride(0),
         lse.stride(1),
         lse.stride(2),
+        dyn_scope_dims=(24, 1)
     )
 
     return o, lse
@@ -1055,3 +1058,49 @@ def sdpa_bwd_impl(
     )
 
     return dq, dk, dv
+
+
+def compare(res, ref, print_cnt=10):
+    cnt = 0
+    if res.dim() == 3:
+        if not torch.allclose(res, ref, atol=1e-2, rtol=1e-2):
+            print(f"res: {res[0, 0, :5]}, ref: {ref[0, 0, :5]}")
+            raise AssertionError(f"sdpa_fwd_impl output is not close to torch.nn.functional.scaled_dot_product_attention")
+    else:
+        for i in range(res.shape[-2]):
+            if cnt >= print_cnt:
+                break
+            if not torch.allclose(res[0, 0, i, :], ref[0, 0, i, :], atol=1e-2, rtol=1e-2):
+                print(f"i:{i}, res: {res[0, 0, i, :5]}, ref: {ref[0, 0, i, :5]}")
+                cnt +=1
+        if cnt > 0:
+            raise AssertionError(f"sdpa_fwd_impl output is not close to torch.nn.functional.scaled_dot_product_attention")
+
+
+if __name__ == '__main__':
+    import math
+    torch.manual_seed(0)
+    B, N, S, H = 1, 1, 4096, 128
+    dtype = torch.bfloat16
+    q = torch.randn(B, N, S, H, dtype=dtype, device='npu')
+    k = torch.randn(B, N, S, H, dtype=dtype, device='npu')
+    v = torch.randn(B, N, S, H, dtype=dtype, device='npu')
+    mask = torch.ones(S, S, dtype=torch.bool, device='npu')
+    o, lse = sdpa_fwd_impl(q, k, v, mask, scale=1.0 / math.sqrt(H))
+    o_ref = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+    # s = q @ k.transpose(-2, -1) * 1.0 / math.sqrt(H)
+    # o_ref = torch.exp(s - torch.max(s, dim=-1, keepdim=True).values)
+
+    # lse_ref = torch.sum(o_ref.to(torch.float32), dim=-1)
+
+    # print(lse)
+    # print(lse_ref)
+    # print(o[0, 0, :5, :])
+    # print(o_ref[0, 0, :5, :])
+
+    compare(o, o_ref)
+    # compare(lse, lse_ref)
+
+
+
+
