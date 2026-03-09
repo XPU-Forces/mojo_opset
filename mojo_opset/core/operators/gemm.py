@@ -38,25 +38,17 @@ class MojoGroupGemm(MojoOperator):
             - Each group's output is computed as `input_g @ weight_g`.
         """
 
-        if isinstance(input, DTensor):
-            input = input.to_local()
-
-        if isinstance(self.weight, DTensor):
-            weight = self.weight.to_local()
-        else:
-            weight = self.weight
-
         if group_list.device.type != "cpu":
             group_list = group_list.to("cpu")
 
         assert input.dim() == 2, "input must be 2D"
-        assert weight.dim() == 3, "weight must be 3D"
+        assert self.weight.dim() == 3, "weight must be 3D"
 
         num_groups = group_list.numel()
-        assert weight.size(0) == num_groups, "weight group count must match group_list length"
+        assert self.weight.size(0) == num_groups, "weight group count must match group_list length"
 
         if self.trans_weight:
-            weight = weight.transpose(1, 2).contiguous()
+            weight = self.weight.transpose(1, 2).contiguous()
 
         group_start = group_list.cumsum(0) - group_list
         group_end = group_list.cumsum(0)
