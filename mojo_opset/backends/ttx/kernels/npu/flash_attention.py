@@ -6,19 +6,15 @@ import torch
 import triton
 import triton.language as tl
 
-from mojo_opset.backends.ttx.kernels.utils import prepare_chunk_indices
 from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 
 
 @triton.jit
-def causal_mask_fn(
-    mask_ptr, mask_size, mask_stride_m, mask_stride_n, q_start, kv_start, q_end, kv_end, Q_BLOCK, KV_BLOCK
-):
+def causal_mask_fn(mask_ptr, mask_size, mask_stride_m, mask_stride_n, q_start, kv_start, Q_BLOCK, KV_BLOCK):
     offset_causal = min(max(kv_start - q_start, -mask_size), mask_size)
-    offsets_mask_causal = (
-        (tl.arange(0, Q_BLOCK)[:, None]) * mask_stride_m
-        + (mask_size + offset_causal + tl.arange(0, KV_BLOCK)[None, :]) * mask_stride_n
-    )
+    offsets_mask_causal = (tl.arange(0, Q_BLOCK)[:, None]) * mask_stride_m + (
+        mask_size + offset_causal + tl.arange(0, KV_BLOCK)[None, :]
+    ) * mask_stride_n
     mask_causal = tl.load(mask_ptr + offsets_mask_causal).to(tl.int1)
 
     return mask_causal
@@ -32,15 +28,8 @@ def _sdpa_infer_single_block(
     q,  # Accumulator, local l, local m, query vector
     K_T_block_ptr,
     V_block_ptr,  # Key and value block pointers for current stage
-    mask_base_ptr,
-    stride_mask_base_ptr_m,
-    stride_mask_base_ptr_n,
-    mask_size,
     qk_scale,
-    offs_m,
-    offs_n,
-    seq_m,
-    seq_n,
+    mask,
     HEAD_DIM: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -56,19 +45,7 @@ def _sdpa_infer_single_block(
     # tl.compile_hint(qk, "tile_cube_loop")
 
     qk = qk * qk_scale
-    if mask_base_ptr is not None:
-        mask = causal_mask_fn(
-            mask_base_ptr,
-            mask_size,
-            stride_mask_base_ptr_m,
-            stride_mask_base_ptr_n,
-            offs_m,
-            offs_n,
-            offs_m + seq_m,
-            offs_n + seq_n,
-            BLOCK_M,
-            BLOCK_N,
-        )
+    if mask is not None:
         qk = tl.where(mask, qk, float("-inf"))  # 32B # bool
 
     m_ij = tl.maximum(m_i, tl.max(qk, 1))  # Scaled max
@@ -107,12 +84,10 @@ def paged_prefill_kernel(
     v_cache_ptr,
     o_ptr,
     aux_mask_ptr,
+    batch_size,
     cu_seqlens_q_ptr,
-    q_chunk_indices_ptr,
-    num_q_chunks,
     seqlens_kv_ptr,
     block_tables_ptr,
-    batch_size,
     stride_qt,
     stride_qh,
     stride_qd,
@@ -133,7 +108,6 @@ def paged_prefill_kernel(
     stride_mask_n,
     sm_scale,
     AUX_MASK_SIZE: tl.constexpr,
-    CHUNK_SIZE: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     NUM_Q_HEADS: tl.constexpr,
     NUM_KV_HEADS: tl.constexpr,
@@ -143,25 +117,14 @@ def paged_prefill_kernel(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
 ):
-    tl.static_assert(CHUNK_SIZE == BLOCK_SIZE_M, "Currently only support CHUNK_SIZE == BLOCK_SIZE_M")
     pid = tl.program_id(0)
     n_progs = tl.num_programs(0)
 
-    num_tasks = num_q_chunks * NUM_Q_HEADS
+    prev_q_chunks = 0
 
-    for task_id in range(pid, num_tasks, n_progs):
-        chunk_id = task_id // NUM_Q_HEADS
-        q_head_id = task_id % NUM_Q_HEADS
-        if GQA_INTERLEAVE:
-            kv_head_id = q_head_id % NUM_KV_HEADS
-        else:
-            kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
-
-        b_id = tl.load(q_chunk_indices_ptr + chunk_id * 2)
-        q_block_id = tl.load(q_chunk_indices_ptr + chunk_id * 2 + 1)
-
-        q_start_loc = tl.load(cu_seqlens_q_ptr + b_id)
-        q_end_loc = tl.load(cu_seqlens_q_ptr + b_id + 1)
+    for b_id in range(batch_size):
+        q_start_loc = tl.load(cu_seqlens_q_ptr + b_id).to(tl.int32)
+        q_end_loc = tl.load(cu_seqlens_q_ptr + b_id + 1).to(tl.int32)
         q_seq_len = q_end_loc - q_start_loc
 
         if seqlens_kv_ptr is None:
@@ -170,90 +133,109 @@ def paged_prefill_kernel(
             kv_seq_len = tl.load(seqlens_kv_ptr + b_id)
         kv_cache_len = kv_seq_len - q_seq_len
 
-        q_block_start_in_seq = q_block_id * BLOCK_SIZE_M
-        q_block_end_in_seq = min(q_block_start_in_seq + BLOCK_SIZE_M, q_seq_len)
-        q_block_len = q_block_end_in_seq - q_block_start_in_seq
+        cur_q_chunks = tl.cdiv(q_seq_len, BLOCK_SIZE_M)
+        cur_q_tasks = cur_q_chunks * NUM_Q_HEADS
+        prev_q_tasks = prev_q_chunks * NUM_Q_HEADS
+        prev_q_chunks += cur_q_chunks
+        for q_task_id in range((prev_q_tasks + pid) % n_progs, cur_q_tasks, n_progs):
+            q_block_id = q_task_id // NUM_Q_HEADS
+            q_head_id = q_task_id % NUM_Q_HEADS
 
-        Q_block_ptr = tl.make_block_ptr(
-            base=q_ptr + (q_start_loc + q_block_start_in_seq) * stride_qt + q_head_id * stride_qh,
-            shape=(q_block_len, HEAD_DIM),
-            strides=(stride_qt, stride_qd),
-            offsets=(0, 0),
-            block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_D),
-            order=(1, 0),
-        )
-        O_block_ptr = tl.make_block_ptr(
-            base=o_ptr + (q_start_loc + q_block_start_in_seq) * stride_ot + q_head_id * stride_oh,
-            shape=(q_block_len, HEAD_DIM),
-            strides=(stride_ot, stride_od),
-            offsets=(0, 0),
-            block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_D),
-            order=(1, 0),
-        )
+            if GQA_INTERLEAVE:
+                kv_head_id = q_head_id % NUM_KV_HEADS
+            else:
+                kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
 
-        q = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero")
+            q_block_start_in_seq = q_block_id * BLOCK_SIZE_M
+            q_block_end_in_seq = min(q_block_start_in_seq + BLOCK_SIZE_M, q_seq_len)
+            q_block_len = q_block_end_in_seq - q_block_start_in_seq
 
-        m_i = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32) - float("inf")
-        l_i = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
-        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_D), dtype=tl.float32)
-
-        num_logical_blocks = tl.cdiv(kv_cache_len + q_block_end_in_seq, PAGE_SIZE)
-
-        tl.static_assert(PAGE_SIZE == BLOCK_SIZE_N, "Currently only BLOCK_SIZE_N==PAGE_SIZE supported")
-
-        for logical_block_idx in range(0, num_logical_blocks):
-            physical_block_id = tl.load(block_tables_ptr + b_id * stride_bt_batch + logical_block_idx * stride_bt_block)
-
-            kv_block_start_in_seq = logical_block_idx * PAGE_SIZE
-            kv_block_end_in_seq = min(kv_block_start_in_seq + PAGE_SIZE, kv_seq_len)
-            kv_block_len = kv_block_end_in_seq - kv_block_start_in_seq
-            K_T_block_ptr = tl.make_block_ptr(
-                base=k_cache_ptr + physical_block_id * stride_k_block + kv_head_id * stride_k_head,
-                shape=(HEAD_DIM, kv_block_len),
-                strides=(stride_k_dim, stride_k_blksz),
+            Q_block_ptr = tl.make_block_ptr(
+                base=q_ptr + (q_start_loc + q_block_start_in_seq) * stride_qt + q_head_id * stride_qh,
+                shape=(q_block_len, HEAD_DIM),
+                strides=(stride_qt, stride_qd),
                 offsets=(0, 0),
-                block_shape=(BLOCK_SIZE_D, BLOCK_SIZE_N),
-                order=(0, 1),
+                block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_D),
+                order=(1, 0),
             )
-            V_block_ptr = tl.make_block_ptr(
-                base=v_cache_ptr + physical_block_id * stride_v_block + kv_head_id * stride_v_head,
-                shape=(kv_block_len, HEAD_DIM),
-                strides=(stride_v_blksz, stride_v_dim),
+            O_block_ptr = tl.make_block_ptr(
+                base=o_ptr + (q_start_loc + q_block_start_in_seq) * stride_ot + q_head_id * stride_oh,
+                shape=(q_block_len, HEAD_DIM),
+                strides=(stride_ot, stride_od),
                 offsets=(0, 0),
-                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_D),
                 order=(1, 0),
             )
 
-            acc, l_i, m_i = _sdpa_infer_single_block(
-                acc,
-                l_i,
-                m_i,
-                q,
-                K_T_block_ptr,
-                V_block_ptr,
-                aux_mask_ptr,
-                stride_mask_m,
-                stride_mask_n,
-                AUX_MASK_SIZE,
-                sm_scale,
-                kv_cache_len + q_block_start_in_seq,
-                kv_block_start_in_seq,
-                kv_cache_len + q_block_end_in_seq,
-                kv_block_end_in_seq,
-                HEAD_DIM,
-                BLOCK_SIZE_M,
-                BLOCK_SIZE_N,
-                BLOCK_SIZE_D,
-                v_cache_ptr.dtype.element_ty == tl.float8e5,
-            )
+            q = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
-        m_i += tl.math.log(l_i)
-        accumulator = acc / l_i[:, None]
+            m_i = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32) - float("inf")
+            l_i = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+            acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_D), dtype=tl.float32)
 
-        # NOTE(zhangjihang): for training
-        # m_ptrs = M + task_bn_idx * sub_kv_len + offs_m
-        # tl.store(m_ptrs, m_i)
-        tl.store(O_block_ptr, accumulator.to(o_ptr.type.element_ty), boundary_check=(0, 1))
+            num_logical_blocks = tl.cdiv(kv_cache_len + q_block_end_in_seq, PAGE_SIZE)
+
+            tl.static_assert(PAGE_SIZE == BLOCK_SIZE_N, "Currently only BLOCK_SIZE_N==PAGE_SIZE supported")
+
+            for logical_block_idx in range(0, num_logical_blocks):
+                physical_block_id = tl.load(
+                    block_tables_ptr + b_id * stride_bt_batch + logical_block_idx * stride_bt_block
+                )
+
+                kv_block_start_in_seq = logical_block_idx * PAGE_SIZE
+                kv_block_end_in_seq = min(kv_block_start_in_seq + PAGE_SIZE, kv_seq_len)
+                kv_block_len = kv_block_end_in_seq - kv_block_start_in_seq
+                K_T_block_ptr = tl.make_block_ptr(
+                    base=k_cache_ptr + physical_block_id * stride_k_block + kv_head_id * stride_k_head,
+                    shape=(HEAD_DIM, kv_block_len),
+                    strides=(stride_k_dim, stride_k_blksz),
+                    offsets=(0, 0),
+                    block_shape=(BLOCK_SIZE_D, BLOCK_SIZE_N),
+                    order=(0, 1),
+                )
+                V_block_ptr = tl.make_block_ptr(
+                    base=v_cache_ptr + physical_block_id * stride_v_block + kv_head_id * stride_v_head,
+                    shape=(kv_block_len, HEAD_DIM),
+                    strides=(stride_v_blksz, stride_v_dim),
+                    offsets=(0, 0),
+                    block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                    order=(1, 0),
+                )
+
+                mask = causal_mask_fn(
+                    aux_mask_ptr,
+                    AUX_MASK_SIZE,
+                    stride_mask_m,
+                    stride_mask_n,
+                    kv_cache_len + q_block_start_in_seq,
+                    kv_block_start_in_seq,
+                    BLOCK_SIZE_M,
+                    BLOCK_SIZE_N,
+                )
+
+                acc, l_i, m_i = _sdpa_infer_single_block(
+                    acc,
+                    l_i,
+                    m_i,
+                    q,
+                    K_T_block_ptr,
+                    V_block_ptr,
+                    sm_scale,
+                    mask,
+                    HEAD_DIM,
+                    BLOCK_SIZE_M,
+                    BLOCK_SIZE_N,
+                    BLOCK_SIZE_D,
+                    v_cache_ptr.dtype.element_ty == tl.float8e5,
+                )
+
+            m_i += tl.math.log(l_i)
+            accumulator = acc / l_i[:, None]
+
+            # NOTE(zhangjihang): for training
+            # m_ptrs = M + task_bn_idx * sub_kv_len + offs_m
+            # tl.store(m_ptrs, m_i)
+            tl.store(O_block_ptr, accumulator.to(o_ptr.type.element_ty), boundary_check=(0, 1))
 
 
 def paged_attention_prefill_impl(
@@ -269,7 +251,7 @@ def paged_attention_prefill_impl(
 ) -> torch.Tensor:
     _, num_q_heads, head_dim = q.shape
     _, num_kv_heads, block_size, _ = k_cache.shape
-    batch_size = block_tables.shape[0]
+    batch_size = cu_seqlens_q.shape[0] - 1
 
     if sm_scale is None:
         sm_scale = 1.0 / math.sqrt(head_dim)
@@ -284,10 +266,10 @@ def paged_attention_prefill_impl(
     #
     #   Currently, we chunk the queries manually according to a magic CHUNK_SIZE to split queries
     #   It should be better with a autotuned BLOCK_SIZE_M and a pre-configured max_seq_len
-    CHUNK_SIZE = 128
-    q_chunk_indices = prepare_chunk_indices(cu_seqlens_q, CHUNK_SIZE)
 
     o = torch.empty_like(q)
+
+    CHUNK_SIZE = 128
     cube_num = get_num_cores("cube")
     grid = (cube_num,)
 
@@ -297,12 +279,10 @@ def paged_attention_prefill_impl(
         v_cache,
         o,
         aux_mask,
+        batch_size,
         cu_seqlens_q,
-        q_chunk_indices,
-        q_chunk_indices.shape[0],
         seqlens_kv,
         block_tables.to(torch.int32),
-        batch_size,
         q.stride(0),
         q.stride(1),
         q.stride(2),
@@ -323,7 +303,6 @@ def paged_attention_prefill_impl(
         aux_mask.stride(1),
         sm_scale,
         aux_mask.shape[0],
-        CHUNK_SIZE,
         block_size,
         num_q_heads,
         num_kv_heads,
