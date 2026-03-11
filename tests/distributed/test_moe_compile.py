@@ -1,0 +1,64 @@
+import os
+
+import pytest
+import torch
+
+import torch._dynamo as dynamo
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor.parallel import parallelize_module
+
+from mojo_opset.core.operators.moe import MojoMoE
+from mojo_opset.distributed.parallel import MojoExpertParallel
+from mojo_opset.utils.platform import get_platform
+
+
+def _get_world_size():
+    world_size = int(os.environ.get("WORLD_SIZE", "0"))
+    if world_size <= 0:
+        pytest.skip("This test requires launching with torchrun (WORLD_SIZE must be set).")
+    return world_size
+
+
+def _set_current_device(device_type: str) -> str:
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if device_type == "npu":
+        torch.npu.set_device(local_rank)
+        return f"npu:{local_rank}"
+    if device_type == "mlu":
+        torch.mlu.set_device(local_rank)
+        return f"mlu:{local_rank}"
+    raise ValueError(f"Unsupported device type for distributed test: {device_type}")
+
+
+def test_moe_parallelize_then_compile():
+    world_size = _get_world_size()
+    device_type = get_platform()
+    if device_type not in ("npu", "mlu"):
+        pytest.skip(f"Only npu/mlu are supported for this test, got {device_type}.")
+    device = _set_current_device(device_type)
+    device_mesh = init_device_mesh(device_type, (world_size,))
+
+    hidden_size = 512
+    intermediate_size = 128
+    num_experts = 16 * world_size
+    top_k = 2
+
+    torch.manual_seed(0)
+    moe = MojoMoE(
+        num_experts=num_experts,
+        top_k=top_k,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+    ).to(device)
+    moe = parallelize_module(moe, device_mesh=device_mesh, parallelize_plan=MojoExpertParallel())
+
+    x = torch.randn(32, hidden_size, device=device)
+
+    explain_out = dynamo.explain(moe)(x)
+    assert explain_out.graph_count >= 1
+
+    compiled = torch.compile(moe, backend="eager")
+    y0 = compiled(x)
+    y1 = compiled(x)
+    assert torch.allclose(y0, y1, rtol=1e-4, atol=1e-4)
+
