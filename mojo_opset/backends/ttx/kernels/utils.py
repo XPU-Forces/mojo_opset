@@ -9,7 +9,12 @@ from typing import Optional
 from typing import Tuple
 
 import torch
-import torch_npu
+
+try:
+    import torch_npu
+except Exception:
+    torch_npu = None
+
 import triton
 import triton.language as tl
 
