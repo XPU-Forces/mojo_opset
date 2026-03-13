@@ -43,9 +43,9 @@ class MojoMoE(MojoOperator):
         self.ffn_hidden_size = intermediate_size
         self.activation_func = lambda x: torch.nn.functional.silu((xc := x.chunk(2, dim=-1))[0]) * xc[1]
 
-        self.fc1 = nn.Parameter(torch.empty(self.num_experts_per_partion, self.ffn_hidden_size * 2, self.hidden_size))
-        self.fc2 = nn.Parameter(torch.empty(self.num_experts_per_partion, self.hidden_size, self.ffn_hidden_size))
-        self.gating_weight = nn.Parameter(torch.empty(self.hidden_size, self.num_experts))
+        self.fc1 = nn.Parameter(torch.empty(self.num_experts_per_partion, self.ffn_hidden_size * 2, self.hidden_size, **self.tensor_factory_kwargs))
+        self.fc2 = nn.Parameter(torch.empty(self.num_experts_per_partion, self.hidden_size, self.ffn_hidden_size, **self.tensor_factory_kwargs))
+        self.gating_weight = nn.Parameter(torch.empty(self.hidden_size, self.num_experts, **self.tensor_factory_kwargs))
         setattr(self.gating_weight, "force_dtype", torch.float32)
 
     def _gating(self, x):

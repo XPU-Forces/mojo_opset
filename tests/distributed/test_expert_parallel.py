@@ -17,6 +17,12 @@ def _get_world_size():
         pytest.skip("This test requires launching with torchrun (WORLD_SIZE must be set).")
     return world_size
 
+def _get_local_rank():
+    local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
+    if local_rank < 0:
+        pytest.skip("This test requires launching with torchrun (LOCAL_RANK must be set).")
+    return local_rank
+
 
 def _set_current_device(device_type: str) -> str:
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -61,6 +67,7 @@ def test_moe_ep_allreduce():
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
     ).to(device)
+    ref.init_parameters_()
 
     torch.manual_seed(0)
     moe = MojoMoE(
@@ -107,6 +114,7 @@ def test_moe_ep_allreduce_compile_fx_contains_allreduce():
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
     ).to(device)
+    ref.init_parameters_()
 
     torch.manual_seed(0)
     moe = MojoMoE(
@@ -124,3 +132,92 @@ def test_moe_ep_allreduce_compile_fx_contains_allreduce():
     out_compiled, graph_texts = _compile_capture_fx_and_run(moe, (x,))
     assert torch.allclose(out_compiled, out_eager, rtol=1e-4, atol=1e-4)
     assert _fx_graph_contains(graph_texts, "_c10d_functional.all_reduce")
+
+
+def test_moe_ep_all2all():
+    world_size = _get_world_size()
+    rank = _get_local_rank()
+    device_type = get_platform()
+    device = _set_current_device(device_type)
+    device_mesh = init_device_mesh(device_type, (world_size,))
+
+    hidden_size = 512
+    intermediate_size = 128
+    num_experts = 16 * world_size
+    top_k = 2
+
+    torch.manual_seed(0)
+    ref = MojoMoE(
+        num_experts=num_experts,
+        top_k=top_k,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+    ).to(device)
+    ref.init_parameters_()
+
+    torch.manual_seed(0)
+    moe = MojoMoE(
+        num_experts=num_experts,
+        top_k=top_k,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+    ).to(device)
+    moe.load_state_dict(ref.state_dict())
+
+    moe = parallelize_module(
+        moe,
+        device_mesh=device_mesh,
+        parallelize_plan=MojoExpertParallel(replicate_input=False),
+    )
+
+    x = torch.randn(world_size, 32, hidden_size, device=device)[rank]
+    out_parallel = moe(x)
+    out_ref = ref(x)
+    assert torch.allclose(out_parallel, out_ref, rtol=1e-4, atol=1e-4)
+
+
+def test_moe_ep_all2all_compile_fx_contains_all2all():
+    if not hasattr(torch, "compile"):
+        pytest.skip("torch.compile is not available.")
+
+    world_size = _get_world_size()
+    rank = _get_local_rank()
+    device_type = get_platform()
+    if device_type not in ("npu", "mlu"):
+        pytest.skip(f"Only npu/mlu are supported for this test, got {device_type}.")
+
+    device = _set_current_device(device_type)
+    device_mesh = init_device_mesh(device_type, (world_size,))
+
+    hidden_size = 512
+    intermediate_size = 128
+    num_experts = 16 * world_size
+    top_k = 2
+
+    torch.manual_seed(0)
+    ref = MojoMoE(
+        num_experts=num_experts,
+        top_k=top_k,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        device="meta",
+    ).to(device)
+    ref.init_parameters_()
+
+    torch.manual_seed(0)
+    moe = MojoMoE(
+        num_experts=num_experts,
+        top_k=top_k,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+    ).to(device)
+    moe.load_state_dict(ref.state_dict())
+    moe = parallelize_module(moe, device_mesh=device_mesh, parallelize_plan=MojoExpertParallel(replicate_input=False))
+
+    x = torch.randn(world_size, 32, hidden_size, device=device)[rank]
+    x = torch.layer_norm(x, (hidden_size,))
+    out_eager = moe(x)
+
+    out_compiled, graph_texts = _compile_capture_fx_and_run(moe, (x,))
+    assert torch.allclose(out_compiled, out_eager, rtol=1e-4, atol=1e-4)
+    assert _fx_graph_contains(graph_texts, "reduce_scatter")
