@@ -8,7 +8,7 @@ from mojo_opset.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-class TorchNpuGroupLinear(MojoGroupLinear):
+class TorchNpuGroupGemm(MojoGroupLinear):
     def forward(
         self,
         input: torch.Tensor,
@@ -26,7 +26,12 @@ class TorchNpuGroupLinear(MojoGroupLinear):
 
         weight_list = [weight[g].contiguous() for g in range(num_groups)]
         group_list_values = [int(x) for x in group_list.cumsum(0).tolist()]
-        outputs = torch_npu.npu_grouped_matmul([input], weight_list, group_type=0, group_list=group_list_values)
+        outputs = torch_npu.npu_grouped_matmul(
+            [input],
+            weight_list,
+            group_type=0,
+            group_list=group_list_values,
+        )
         return torch.cat(outputs, dim=0)
 
 
@@ -55,4 +60,4 @@ class TorchNpuQuantGroupLinearReduceSum(MojoQuantGroupLinearReduceSum):
         else:
             x2_nz = weight
 
-        return torch_npu.npu_quant_matmul_reduce_sum(input, x2_nz, x1_scale, x2_scale)
+        return torch_npu.npu_quant_matmul_reduce_sum(input, x2_nz, x1_scale=x1_scale, x2_scale=x2_scale)

@@ -74,13 +74,15 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
         cu_seqlens_q: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
+        seqlens_kv: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         _, num_q_heads, head_dim = query.shape
         _, num_kv_heads, block_size, _ = k_cache.shape
 
         if block_size % 128 != 0 or block_size > 512:
             # high performance attention kernel only supports block_size % 128 == 0 and block_size <= 512
-            return super().forward(query, k_cache, v_cache, cu_seqlens_q, block_tables, softmax_scale)
+            return super().forward(query, k_cache, v_cache, cu_seqlens_q, block_tables, softmax_scale, seqlens_kv, mask)
 
         if softmax_scale is None:
             softmax_scale = head_dim**-0.5
@@ -95,7 +97,7 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
             input_layout="TND",
             block_size=block_size,
             actual_seq_lengths=cu_seqlens_q[1:],
-            actual_seq_lengths_kv=cu_seqlens_q[1:] - cu_seqlens_q[:-1],
+            actual_seq_lengths_kv=seqlens_kv if seqlens_kv is not None else (cu_seqlens_q[1:] - cu_seqlens_q[:-1]),
             num_key_value_heads=num_kv_heads,
             num_heads=num_q_heads,
             scale=softmax_scale,
@@ -133,8 +135,14 @@ class TorchNpuPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
         if softmax_scale is None:
             softmax_scale = 1.0 / (head_dim**0.5)
 
+        is_unsqueezed = False
         if input_layout is None:
-            input_layout = "BND" if query.dim() == 3 else "BSND"
+            if query.dim() == 3:
+                query = query.unsqueeze(2)
+                input_layout = "BNSD"
+                is_unsqueezed = True
+            else:
+                input_layout = "BNSD"
 
         actual_seq_lengths_q = torch.arange(1, batch_size + 1, dtype=torch.int32, device=query.device)
         kv_seq_lens = cu_seq_lens if cu_seq_lens is not None else seqlens
@@ -152,4 +160,6 @@ class TorchNpuPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
             scale=softmax_scale,
         )
 
+        if is_unsqueezed:
+            out = out.squeeze(2)
         return out

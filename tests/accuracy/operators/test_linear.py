@@ -5,6 +5,7 @@ import torch
 
 from tests.utils import bypass_not_implemented
 from tests.utils import get_platform
+from tests.utils import auto_switch_platform
 
 from mojo_opset import MojoGroupLinear
 from mojo_opset import MojoQuantGroupLinearReduceSum
@@ -102,21 +103,18 @@ def generate_quant_group_linear_data(
         for dtype in [torch.float16, torch.bfloat16]
     ],
 )
-@bypass_not_implemented
-def test_group_gemm(group_size, token_num, hidden_dim, dtype):
-    input = torch.randn(size=(token_num, hidden_dim), dtype=dtype)
-    weight = torch.randn(size=(group_size, hidden_dim, hidden_dim), dtype=dtype)
-    group_list = generate_random_list(group_size, token_num).to(input.device)
-
-    group_gemm = MojoGroupGemm(
-        trans_weight=False,
+@auto_switch_platform()
+def test_group_gemm(input, weight, group_list, trans_weight):
+    group_gemm = MojoGroupLinear(
+        trans_weight=trans_weight,
         weight=weight,
     )
 
-    group_gemm_ref = MojoGroupGemm._registry.get("torch")(
-        trans_weight=False,
+    group_gemm_ref = MojoGroupLinear._registry.get("torch")(
+        trans_weight=trans_weight,
         weight=weight,
     )
+    group_gemm.forward_diff_with(group_gemm_ref, input, group_list, mixed_tol=True)
     group_gemm.forward_diff_with(group_gemm_ref, input, group_list, mixed_tol=True)
 
 
@@ -160,6 +158,7 @@ def test_group_gemm(group_size, token_num, hidden_dim, dtype):
         ),
     ],
 )
+@pytest.mark.skipif(get_platform() == "npu", reason="Skipped on NPU due to CANN 8.2 issue")
 @auto_switch_platform()
 @bypass_not_implemented
 def test_quant_group_linear_reduce_sum(x1, weight, x1_scale, x2_scale, trans_weight, atol, rtol):
@@ -201,6 +200,8 @@ _test_grouped_matmul_cases = [
 @bypass_not_implemented
 def test_grouped_matmul_cases_via_group_linear(inputs, weights, bias, dtype):
     device = get_platform()
+    if device == "npu" and dtype == torch.float32:
+        pytest.skip("NPU grouped matmul does not support float32")
 
     input_tensors = [t.to(device=device) for t in inputs]
     weight_tensors = [t.to(device=device) for t in weights]

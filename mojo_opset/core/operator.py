@@ -18,6 +18,7 @@ class MojoOperator(ABC, torch.nn.Module):
     supported_platforms_list = ["npu", "mlu", "meta_device"]
 
     def __init_subclass__(cls, **kwargs):
+        kwargs.pop("default_priority", None)
         super().__init_subclass__(**kwargs)
 
         is_mojo_core_op_cls = MojoOperator in cls.__bases__

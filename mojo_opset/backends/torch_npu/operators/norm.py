@@ -11,10 +11,11 @@ from mojo_opset.core import MojoRMSNorm
 class TorchNpuRMSNorm(MojoRMSNorm, default_priority=0):
     def __init__(
         self,
-        weight: torch.Tensor,
+        norm_size: int,
         eps: float = 1e-05,
+        **kwargs,
     ):
-        super().__init__(weight, eps)
+        super().__init__(norm_size, eps, **kwargs)
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         return torch_npu.npu_rms_norm(hidden_state, self.weight, epsilon=self.variance_epsilon)[0]
@@ -23,11 +24,12 @@ class TorchNpuRMSNorm(MojoRMSNorm, default_priority=0):
 class TorchNpuResidualAddRMSNorm(MojoResidualAddRMSNorm, default_priority=0):
     def __init__(
         self,
-        weight: torch.Tensor,
+        norm_size: int,
         eps: float = 1e-05,
         norm_pos: str = "post",
+        **kwargs,
     ):
-        super().__init__(weight, eps, norm_pos)
+        super().__init__(norm_size, eps, norm_pos, **kwargs)
 
     def forward(
         self,

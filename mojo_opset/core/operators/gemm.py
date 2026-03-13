@@ -119,6 +119,9 @@ class MojoQuantGroupLinearReduceSum(MojoOperator):
         assert b == b_w, "input and weight must have same batch size"
         assert k == k_w, "K of input should be equal to K of weight"
 
+        if x2_scale.dtype != torch.bfloat16:
+            x2_scale = x2_scale.to(torch.bfloat16)
+
         out = torch.bmm(input.float(), weight.float()).to(torch.float32)
         out = x2_scale[None, None, :] * out
         out = x1_scale[:, :, None] * out
