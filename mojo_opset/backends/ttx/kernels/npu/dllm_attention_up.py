@@ -1,6 +1,7 @@
 from functools import cache
 from typing import Any
 from typing import Dict
+from typing import Optional
 from typing import Tuple
 
 import torch
@@ -44,6 +45,7 @@ def micro_kernel_fwd(
     BLOCK_C: tl.constexpr,
     LOW_TYPE,
     HIGH_TYPE,
+    len_mask=None,
 ):
     ptr_k = (
         k
@@ -63,12 +65,15 @@ def micro_kernel_fwd(
     block_k = tl.trans(block_k)
     block_s = tl.dot(block_q, block_k) * scale
     block_v = tl.load(ptr_v, mask=mask_kv, other=0.0)
+    if len_mask is not None:
+        block_s += ((len_mask.to(LOW_TYPE) - 1.0) * 1e6)
     if block_mask is not None:
-        block_s += block_mask
+        block_s = tl.where(block_mask, block_s, -1.0e6)
+        tl.compile_hint(block_s, "bitwise_mask")
     block_m_1 = tl.maximum(block_m, tl.max(block_s, axis=1))
     block_s = tl.exp(block_s - block_m_1[:, None])
     block_l_1 = tl.exp(block_m - block_m_1) * block_l + tl.sum(block_s, axis=1)
-    block_o = tl.exp(block_m - block_m_1)[:, None].to(LOW_TYPE) * block_o 
+    block_o = tl.exp(block_m - block_m_1)[:, None].to(LOW_TYPE) * block_o
     block_o = block_o + tl.dot(block_s.to(LOW_TYPE), block_v).to(
         LOW_TYPE
     )
@@ -101,6 +106,7 @@ def micro_kernel_bwd_q(
     BLOCK_C: tl.constexpr,
     LOW_TYPE,
     HIGH_TYPE,
+    len_mask=None,
 ):
     ptr_k = (
         k
@@ -118,8 +124,11 @@ def micro_kernel_bwd_q(
     mask_kv = (offset_c + tl.arange(0, BLOCK_C))[:, None] < offset_c_ed
     block_k = tl.load(ptr_k, mask=mask_kv, other=0.0)
     block_s = tl.dot(block_q, block_k.T).to(HIGH_TYPE) * scale
+    if len_mask is not None:
+        block_s += ((len_mask.to(HIGH_TYPE) - 1.0) * 1e6)
     if block_mask is not None:
-        block_s += block_mask
+        block_s = tl.where(block_mask, block_s, -1.0e6)
+        tl.compile_hint(block_s, "bitwise_mask")
     block_p = tl.exp(block_s - block_lse[:, None])
     block_v = tl.load(ptr_v, mask=mask_kv, other=0.0)
     block_dp = tl.dot(block_do, block_v.T).to(HIGH_TYPE)
@@ -152,6 +161,7 @@ def micro_kernel_bwd_kv(
     BLOCK_R: tl.constexpr,
     LOW_TYPE,
     HIGH_TYPE,
+    len_mask=None,
 ):
     ptr_q = (
         q + idx_n * STRIDE_Q_N + (offset_r + tl.arange(0, BLOCK_R))[:, None] * STRIDE_Q_S + idx_h[None, :] * STRIDE_Q_H
@@ -168,8 +178,11 @@ def micro_kernel_bwd_kv(
     block_q = tl.load(ptr_q, mask=mask_q, other=0.0)
     block_lse = tl.load(ptr_lse, mask=mask_d, other=0.0)
     block_s = tl.dot(block_q, block_k).to(HIGH_TYPE) * scale
+    if len_mask is not None:
+        block_s += ((len_mask.to(HIGH_TYPE) - 1.0) * 1e6)
     if block_mask is not None:
-        block_s += block_mask
+        block_s = tl.where(block_mask, block_s, -1.0e6)
+        tl.compile_hint(block_s, "bitwise_mask")
     block_do = tl.load(ptr_do, mask=mask_q, other=0.0)
     block_p = tl.exp(block_s - block_lse[:, None])
     block_dv += tl.dot(block_p.to(LOW_TYPE).T, block_do).to(HIGH_TYPE)
@@ -184,11 +197,7 @@ def micro_kernel_bwd_kv(
 @triton.autotune(
     configs=[
         triton.Config(
-           {"BLOCK_R": 64, "BLOCK_C": 256},
-            limit_auto_multi_buffer_only_for_local_buffer=False,
-            set_workspace_multibuffer=2, 
-            tile_mix_vector_loop=2, 
-            tile_mix_cube_loop=4
+            {"BLOCK_R": 64, "BLOCK_C": 256},
         )
     ],
     key=["N", "H"],
@@ -224,9 +233,9 @@ def kernel_da_fwd_u(
     STRIDE_MASK,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
     LOW_TYPE: tl.constexpr = tl.bfloat16,
     HIGH_TYPE: tl.constexpr = tl.float32,
-    # MAX_NUM_SEQ: tl.constexpr = 1024,
 ):
     pid = tl.program_id(axis=0)
     pnum = tl.num_programs(axis=0)
@@ -279,14 +288,10 @@ def kernel_da_fwd_u(
             block_l = tl.full([BLOCK_R], 0.0, dtype=HIGH_TYPE)
             block_m = tl.full([BLOCK_R], -1e6, dtype=HIGH_TYPE)
 
-            block_mask_shape = (
+            len_mask = (
                 (seq_st + idx_r * BLOCK_R + offset_r_local < seq_ed) &
                 (seq_st + idx_r * BLOCK_R + offset_c_local < seq_ed)
             )
-            block_mask_bool = (
-                block_mask_full_ul & block_mask_shape
-            )
-            block_mask = (block_mask_bool.to(HIGH_TYPE) - 1.0) * 1e6
 
             block_o, block_m, block_l = micro_kernel_fwd(
                 block_q,
@@ -298,7 +303,7 @@ def kernel_da_fwd_u(
                 scale,
                 seq_st + idx_r * BLOCK_R,
                 seq_ed,
-                block_mask,
+                block_mask_full_ul,
                 idx_n,
                 idx_h,
                 STRIDE_K_S,
@@ -311,12 +316,8 @@ def kernel_da_fwd_u(
                 BLOCK_R,
                 LOW_TYPE,
                 HIGH_TYPE,
+                len_mask=len_mask,
             )
-
-            block_mask_bool = (
-                block_mask_full_ur & block_mask_shape
-            )
-            block_mask = (block_mask_bool.to(LOW_TYPE) - 1.0) * 1e6
 
             block_o, block_m, block_l = micro_kernel_fwd(
                 block_q,
@@ -328,7 +329,7 @@ def kernel_da_fwd_u(
                 scale,
                 S + seq_st + idx_r * BLOCK_R,
                 S + seq_ed,
-                block_mask,
+                block_mask_full_ur,
                 idx_n,
                 idx_h,
                 STRIDE_K_S,
@@ -341,6 +342,7 @@ def kernel_da_fwd_u(
                 BLOCK_R,
                 LOW_TYPE,
                 HIGH_TYPE,
+                len_mask=len_mask,
             )
 
             for idx_tile_r in range(idx_r * BLOCK_R // BLOCK_C * BLOCK_C // BLOCK_R, idx_r):
@@ -409,10 +411,6 @@ def kernel_da_fwd_u(
     configs=[
         triton.Config(
             {"BLOCK_R": 64},
-            limit_auto_multi_buffer_only_for_local_buffer=False,
-            set_workspace_multibuffer=2, 
-            tile_mix_vector_loop=2, 
-            tile_mix_cube_loop=4
         ),
     ],
     key=["N", "H"],
@@ -482,8 +480,8 @@ def kernel_da_bwd_q_u(
     cu_seqlens,
     num_seqs,
     scale,
-    mask_ul,
     mask_ur,
+    mask_ul,
     GROUP_SIZE: tl.constexpr,
     S,
     N: tl.constexpr,
@@ -502,6 +500,7 @@ def kernel_da_bwd_q_u(
     STRIDE_MASK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
     LOW_TYPE: tl.constexpr = tl.bfloat16,
     HIGH_TYPE: tl.constexpr = tl.float32,
 ):
@@ -556,14 +555,11 @@ def kernel_da_bwd_q_u(
             block_lse = tl.load(ptr_lse, mask=mask_d, other=0.0)
             block_d = tl.load(ptr_d, mask=mask_d, other=0.0)
             block_dq = tl.full([BLOCK_R, H], 0.0, dtype=HIGH_TYPE)
-            block_mask_shape = (
+
+            len_mask = (
                 (seq_st + idx_r * BLOCK_R + offset_r_local < seq_ed) &
                 (seq_st + idx_r * BLOCK_R + offset_c_local < seq_ed)
             )
-            block_mask_bool = (
-                block_mask_full_ul & block_mask_shape
-            )
-            block_mask = (block_mask_bool.to(LOW_TYPE) - 1.0) * 1e6
 
             block_dq = micro_kernel_bwd_q(
                 block_q,
@@ -576,7 +572,7 @@ def kernel_da_bwd_q_u(
                 scale,
                 seq_st + idx_r * BLOCK_R,
                 seq_ed,
-                block_mask,
+                block_mask_full_ul,
                 idx_n,
                 idx_h,
                 STRIDE_K_S,
@@ -589,12 +585,9 @@ def kernel_da_bwd_q_u(
                 BLOCK_R,
                 LOW_TYPE,
                 HIGH_TYPE,
+                len_mask=len_mask,
             )
 
-            block_mask_bool = (
-                block_mask_full_ur & block_mask_shape
-            )
-            block_mask = (block_mask_bool.to(LOW_TYPE) - 1.0) * 1e6
             block_dq = micro_kernel_bwd_q(
                 block_q,
                 k,
@@ -606,7 +599,7 @@ def kernel_da_bwd_q_u(
                 scale,
                 S + seq_st + idx_r * BLOCK_R,
                 S + seq_ed,
-                block_mask,
+                block_mask_full_ur,
                 idx_n,
                 idx_h,
                 STRIDE_K_S,
@@ -619,6 +612,7 @@ def kernel_da_bwd_q_u(
                 BLOCK_R,
                 LOW_TYPE,
                 HIGH_TYPE,
+                len_mask=len_mask,
             )
 
             for idx_tile_r in range(idx_r * BLOCK_R // BLOCK_C * BLOCK_C // BLOCK_R, idx_r):
@@ -720,6 +714,7 @@ def kernel_da_bwd_kv_ul(
     STRIDE_MASK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
     LOW_TYPE: tl.constexpr = tl.bfloat16,
     HIGH_TYPE: tl.constexpr = tl.float32,
 ):
@@ -783,12 +778,10 @@ def kernel_da_bwd_kv_ul(
             for idx_ingroup in range(GROUP_SIZE):
                 idx_n = idx_group * GROUP_SIZE + idx_ingroup
 
-                block_mask_bool = (
-                    block_mask_full_ul
-                    & (seq_st + idx_c * BLOCK_C + offs_r_local < seq_ed)
+                len_mask = (
+                    (seq_st + idx_c * BLOCK_C + offs_r_local < seq_ed)
                     & (seq_st + idx_c * BLOCK_C + offs_c_local < seq_ed)
                 )
-                block_mask = (block_mask_bool.to(LOW_TYPE) - 1.0) * 1e6
 
                 block_dk, block_dv = micro_kernel_bwd_kv(
                     q,
@@ -802,7 +795,7 @@ def kernel_da_bwd_kv_ul(
                     scale,
                     seq_st + idx_c * BLOCK_C,
                     seq_ed,
-                    block_mask,
+                    block_mask_full_ul,
                     idx_n,
                     idx_h,
                     STRIDE_Q_S,
@@ -813,6 +806,7 @@ def kernel_da_bwd_kv_ul(
                     BLOCK_C,
                     LOW_TYPE,
                     HIGH_TYPE,
+                    len_mask=len_mask,
                 )
 
             tl.store(ptr_dk, block_dk.to(LOW_TYPE), mask=mask_kv)
@@ -861,6 +855,7 @@ def kernel_da_bwd_kv_ur(
     STRIDE_MASK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
     LOW_TYPE: tl.constexpr = tl.bfloat16,
     HIGH_TYPE: tl.constexpr = tl.float32,
 ):
@@ -874,7 +869,7 @@ def kernel_da_bwd_kv_ur(
     offs_r_local = tl.arange(0, BLOCK_C)[:, None]
     offs_c_local = tl.arange(0, BLOCK_C)[None, :]
     block_mask_full_ur = tl.load(mask_ur + offs_r_local * STRIDE_MASK + offs_c_local)
-    
+
     for idx_seq in range(num_seqs):
         seq_ed = tl.load(cu_seqlens + idx_seq)
         offset_block_c_ed = offset_block_c_st + tl.cdiv(seq_ed - seq_st, BLOCK_C)
@@ -924,12 +919,10 @@ def kernel_da_bwd_kv_ur(
             for idx_ingroup in range(GROUP_SIZE):
                 idx_n = idx_group * GROUP_SIZE + idx_ingroup
 
-                block_mask_bool = (
-                    block_mask_full_ur
-                    & (seq_st + idx_c * BLOCK_C + offs_r_local < seq_ed)
+                len_mask = (
+                    (seq_st + idx_c * BLOCK_C + offs_r_local < seq_ed)
                     & (seq_st + idx_c * BLOCK_C + offs_c_local < seq_ed)
                 )
-                block_mask = (block_mask_bool.to(LOW_TYPE) - 1.0) * 1e6
 
                 block_dk, block_dv = micro_kernel_bwd_kv(
                     q,
@@ -943,7 +936,7 @@ def kernel_da_bwd_kv_ur(
                     scale,
                     seq_st + idx_c * BLOCK_C,
                     seq_ed,
-                    block_mask,
+                    block_mask_full_ur,
                     idx_n,
                     idx_h,
                     STRIDE_Q_S,
@@ -954,6 +947,7 @@ def kernel_da_bwd_kv_ur(
                     BLOCK_C,
                     LOW_TYPE,
                     HIGH_TYPE,
+                    len_mask=len_mask,
                 )
 
                 for idx_tile_r in range(idx_c + 1, (idx_c * BLOCK_C // BLOCK_R + 1) * BLOCK_R // BLOCK_C):
@@ -1014,6 +1008,41 @@ def kernel_da_bwd_kv_ur(
         offset_block_c_st = offset_block_c_ed
 
 
+def packed_bool_to_i8(
+        bool_mask: torch.Tensor,
+        block_num: Optional[int] = 1
+) -> torch.Tensor:
+    orig_shape = bool_mask.shape
+    assert orig_shape[-1] % 8 == 0
+
+    assert (bool_mask.numel() // orig_shape[-1]) % block_num == 0, f"{bool_mask.numel() = } {orig_shape=}"
+    bool_mask_blocked = bool_mask.reshape(block_num, -1, orig_shape[-1])
+
+    result = []
+    for i in range(block_num):
+        flat_mask = bool_mask_blocked[i].flatten()
+
+        flat_len = flat_mask.numel()
+        num_packed = flat_len // 8
+        mask_8group = flat_mask.reshape(num_packed, 8)
+
+        weights = torch.tensor(
+            [1 << i for i in range(0, 8)],
+            dtype=torch.uint8,
+            device=bool_mask.device
+        )
+        packed_vals = (mask_8group.to(torch.uint8) * weights).sum(dim=-1, dtype=torch.uint8)
+
+        padded_flat = torch.cat([
+            packed_vals,
+            torch.zeros(flat_len - num_packed, dtype=torch.uint8, device=bool_mask.device)
+        ], dim=0)
+        result.append(padded_flat)
+    padded_flat = torch.cat(result, dim=0)
+
+    return padded_flat.reshape(orig_shape)
+
+
 def dllm_attention_up_fwd_impl(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1048,7 +1077,7 @@ def dllm_attention_up_fwd_impl(
 
     o = torch.zeros_like(q)
     o_f32 = torch.zeros_like(q, dtype=torch.float32)
-    lse = torch.zeros((q.shape[0], q.shape[1]), device=q.device, dtype=torch.float32)
+    lse = torch.zeros((q.shape[1], q.shape[0]), device=q.device, dtype=torch.float32)
     num_cores, _ = get_device_properties()
 
     if (not hasattr(dllm_attention_up_fwd_impl, "masks")):
@@ -1059,12 +1088,10 @@ def dllm_attention_up_fwd_impl(
         offset_c_local = torch.arange(0, BLOCK_MASK)[None, :]
         chunk_idx_r = offset_r_local // BLOCK_SIZE
         chunk_idx_c = offset_c_local // BLOCK_SIZE
-        mask_ul = (chunk_idx_r == chunk_idx_c).to(q.device)
-        mask_ur = (chunk_idx_r > chunk_idx_c).to(q.device)
-        dllm_attention_up_fwd_impl.masks[BLOCK_SIZE] = (mask_ul, mask_ur)
-    else:
-        mask_ul, mask_ur = dllm_attention_up_fwd_impl.masks[BLOCK_SIZE]
-
+        mask_ul_i8 = packed_bool_to_i8((chunk_idx_r == chunk_idx_c))
+        mask_ur_i8 = packed_bool_to_i8((chunk_idx_r > chunk_idx_c))
+        dllm_attention_up_fwd_impl.masks[BLOCK_SIZE] = (mask_ul_i8.to(q.device), mask_ur_i8.to(q.device))
+    mask_ul, mask_ur = dllm_attention_up_fwd_impl.masks[BLOCK_SIZE]
 
     kernel_da_fwd_u[(num_cores,)](
         q,
@@ -1091,10 +1118,12 @@ def dllm_attention_up_fwd_impl(
         v.stride(0),
         v.stride(1),
         v.stride(2),
-        lse.stride(0),
         lse.stride(1),
+        lse.stride(0),
         mask_ul.stride(0),
+        BLOCK_SIZE=BLOCK_SIZE,
     )
+    lse = lse.permute(1, 0)
 
     return o, o_f32, lse
 
@@ -1139,6 +1168,7 @@ def dllm_attention_up_bwd_impl(
     assert q.shape[0] == lse.shape[0] and q.shape[1] == lse.shape[1]
 
     num_cores, num_vectorcore = get_device_properties()
+    lse = lse.permute(1, 0).contiguous()
     d = torch.empty_like(lse)
     dq = torch.empty_like(q)
     dk = torch.empty_like(k)
@@ -1152,12 +1182,11 @@ def dllm_attention_up_bwd_impl(
         offset_c_local = torch.arange(0, BLOCK_MASK)[None, :]
         chunk_idx_r = offset_r_local // BLOCK_SIZE
         chunk_idx_c = offset_c_local // BLOCK_SIZE
-        mask_ul = (chunk_idx_r == chunk_idx_c).to(q.device)
-        mask_ur = (chunk_idx_r > chunk_idx_c).to(q.device)
-        dllm_attention_up_bwd_impl.masks[BLOCK_SIZE] = (mask_ul, mask_ur)
-    else:
-        mask_ul, mask_ur = dllm_attention_up_bwd_impl.masks[BLOCK_SIZE]
-    
+        mask_ul_i8 = packed_bool_to_i8((chunk_idx_r == chunk_idx_c))
+        mask_ur_i8 = packed_bool_to_i8((chunk_idx_r > chunk_idx_c))
+        dllm_attention_up_bwd_impl.masks[BLOCK_SIZE] = (mask_ul_i8.to(q.device), mask_ur_i8.to(q.device))
+    mask_ul, mask_ur = dllm_attention_up_bwd_impl.masks[BLOCK_SIZE]
+
     kernel_da_bwd_d[(num_vectorcore,)](
         fp32o,
         do,
@@ -1168,8 +1197,8 @@ def dllm_attention_up_bwd_impl(
         fp32o.stride(0),
         fp32o.stride(1),
         fp32o.stride(2),
-        d.stride(0),
         d.stride(1),
+        d.stride(0),
     )
     kernel_da_bwd_q_u[(num_cores,)](
         q,
@@ -1182,8 +1211,8 @@ def dllm_attention_up_bwd_impl(
         cu_seqlen,
         cu_seqlen.shape[0],
         scale,
-        mask_ul,
         mask_ur,
+        mask_ul,
         q.shape[1] // k.shape[1],
         q.shape[0] // 2,
         q.shape[1],
@@ -1197,9 +1226,10 @@ def dllm_attention_up_bwd_impl(
         v.stride(0),
         v.stride(1),
         v.stride(2),
-        d.stride(0),
         d.stride(1),
+        d.stride(0),
         mask_ul.stride(0),
+        BLOCK_SIZE=BLOCK_SIZE,
     )
     kernel_da_bwd_kv_ul[(num_cores,)](
         q,
@@ -1227,9 +1257,10 @@ def dllm_attention_up_bwd_impl(
         v.stride(0),
         v.stride(1),
         v.stride(2),
-        d.stride(0),
         d.stride(1),
+        d.stride(0),
         mask_ul.stride(0),
+        BLOCK_SIZE=BLOCK_SIZE,
     )
     kernel_da_bwd_kv_ur[(num_cores,)](
         q,
@@ -1257,9 +1288,10 @@ def dllm_attention_up_bwd_impl(
         v.stride(0),
         v.stride(1),
         v.stride(2),
-        d.stride(0),
         d.stride(1),
+        d.stride(0),
         mask_ur.stride(0),
+        BLOCK_SIZE=BLOCK_SIZE,
     )
 
     return dq, dk, dv
