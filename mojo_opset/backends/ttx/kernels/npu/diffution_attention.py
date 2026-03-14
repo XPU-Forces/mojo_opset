@@ -8,18 +8,6 @@ import torch
 import triton
 import triton.language as tl
 
-def make_triton_config(meta: dict, **kwargs):
-    """
-    Wrapper around triton.Config to be compatible with different Triton versions.
-    Filters out keyword arguments that are not supported by the installed Triton.
-    """
-    try:
-        sig = inspect.signature(triton.Config)
-        supported = {k: v for k, v in kwargs.items() if k in sig.parameters}
-    except (TypeError, ValueError):
-        # Fallback: if we can't introspect, just drop extra kwargs
-        supported = {}
-    return triton.Config(meta, **supported)
 
 @cache
 def get_device_properties() -> Tuple[int, int]:
@@ -694,16 +682,6 @@ def kernel_sda_bwd_d(
 
 @triton.autotune(
     configs=[
-<<<<<<< HEAD
-        make_triton_config(
-            {"BLOCK_R": 64, "BLOCK_C": 128},
-            multibuffer=True,
-            unit_flag=True,
-            set_workspace_multibuffer=2,
-            enable_hivm_auto_cv_balance=True,
-            tile_mix_vector_loop=2,
-            tile_mix_cube_loop=2,
-=======
         triton.Config(
             {
                 "BLOCK_R": 64,
@@ -715,7 +693,6 @@ def kernel_sda_bwd_d(
                 "tile_mix_vector_loop": 2,
                 "tile_mix_cube_loop": 2,
             }
->>>>>>> upstream/master
         )
     ],
     key=["N", "S", "H"],
@@ -935,16 +912,6 @@ def kernel_sda_bwd_q_up(
 
 @triton.autotune(
     configs=[
-<<<<<<< HEAD
-        make_triton_config(
-            {"BLOCK_R": 64, "BLOCK_C": 128},
-            multibuffer=True,
-            unit_flag=True,
-            set_workspace_multibuffer=2,
-            enable_hivm_auto_cv_balance=True,
-            tile_mix_vector_loop=2,
-            tile_mix_cube_loop=2,
-=======
         triton.Config(
             {
                 "BLOCK_R": 64,
@@ -956,7 +923,6 @@ def kernel_sda_bwd_q_up(
                 "tile_mix_vector_loop": 2,
                 "tile_mix_cube_loop": 2,
             }
->>>>>>> upstream/master
         )
     ],
     key=["N", "S", "H"],
@@ -1141,16 +1107,6 @@ def kernel_sda_bwd_q_down(
 
 @triton.autotune(
     configs=[
-<<<<<<< HEAD
-        make_triton_config(
-            {"BLOCK_R": 256, "BLOCK_C": 64},
-            multibuffer=True,
-            unit_flag=True,
-            set_workspace_multibuffer=2,
-            enable_hivm_auto_cv_balance=True,
-            tile_mix_vector_loop=2,
-            tile_mix_cube_loop=2,
-=======
         triton.Config(
             {
                 "BLOCK_R": 256,
@@ -1162,7 +1118,6 @@ def kernel_sda_bwd_q_down(
                 "tile_mix_vector_loop": 2,
                 "tile_mix_cube_loop": 2,
             }
->>>>>>> upstream/master
         )
     ],
     key=["N", "S", "H"],
@@ -1293,16 +1248,6 @@ def kernel_sda_bwd_kv_left(
 
 @triton.autotune(
     configs=[
-<<<<<<< HEAD
-        make_triton_config(
-            {"BLOCK_R": 128, "BLOCK_C": 64},
-            multibuffer=True,
-            unit_flag=True,
-            set_workspace_multibuffer=2,
-            enable_hivm_auto_cv_balance=True,
-            tile_mix_vector_loop=2,
-            tile_mix_cube_loop=2,
-=======
         triton.Config(
             {
                 "BLOCK_R": 128,
@@ -1314,7 +1259,6 @@ def kernel_sda_bwd_kv_left(
                 "tile_mix_vector_loop": 2,
                 "tile_mix_cube_loop": 2,
             }
->>>>>>> upstream/master
         )
     ],
     key=["N", "S", "H"],
