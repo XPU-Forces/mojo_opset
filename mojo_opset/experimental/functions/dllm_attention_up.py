@@ -27,15 +27,15 @@ class MojoDllmAttentionUpFunction(MojoFunction):
 
         Args:
             ctx: Context object for the backward.
-            query (torch.Tensor): Query tensor. shape [BSZ, Q_HEAD_NUM, SEQ, HEAD_DIM]
-            key (torch.Tensor): Key tensor. shape [BSZ, K_HEAD_NUM, SEQ, HEAD_DIM]
-            value (torch.Tensor): Value tensor. shape [BSZ, V_HEAD_NUM, SEQ, HEAD_DIM]
-            cu_seqlen (torch.Tensor): Cumulative sequence lengths tensor without leading zero. shape [BSZ]
+            query (torch.Tensor): Query tensor, shape [TOTAL_SEQ, Q_HEAD_NUM, HEAD_DIM], bf16
+            key (torch.Tensor): Key tensor, shape [TOTAL_SEQ, K_HEAD_NUM, HEAD_DIM], bf16
+            value (torch.Tensor): Value tensor, shape [TOTAL_SEQ, V_HEAD_NUM, HEAD_DIM], bf16
+            cu_seqlen (torch.Tensor): Cumulative sequence lengths tensor without leading zero, shape [BSZ]
             scale (float, optional): Scale factor for attention. Defaults to 1.0.
             BLOCK_SIZE (int, optional): Block size for block diffusion attention. Defaults to 8.
 
         Returns:
-            torch.Tensor: Output tensor after attention.
+            torch.Tensor: Output tensor in fp32, shape [TOTAL_SEQ, Q_HEAD_NUM, HEAD_DIM]
         """
 
         q = query
@@ -44,7 +44,7 @@ class MojoDllmAttentionUpFunction(MojoFunction):
         o = torch.zeros_like(query)
         lse = torch.zeros([query.shape[0], query.shape[1]], device=query.device, dtype=torch.float32)
 
-        idx = torch.arange(8192, device="npu:0") // BLOCK_SIZE
+        idx = torch.arange(8192, device=query.device) // BLOCK_SIZE
         mask_ul = idx[:, None] == idx[None, :]
         mask_ur = idx[:, None] > idx[None, :]
         S = q.shape[0] // 2
@@ -82,13 +82,10 @@ class MojoDllmAttentionUpFunction(MojoFunction):
 
         Args:
             ctx: Context object for the backward.
-            grad_output (torch.Tensor): Gradient of the output tensor. shape [BSZ, V_HEAD_NUM, SEQ, HEAD_DIM]
+            grad_output (torch.Tensor): Gradient tensor, shape [TOTAL_SEQ, Q_HEAD_NUM, HEAD_DIM]
 
         Returns:
             tuple: Gradients of query, key, value, None, None, None.
-                grad_query: shape [BSZ, Q_HEAD_NUM, SEQ, HEAD_DIM]
-                grad_key: shape [BSZ, K_HEAD_NUM, SEQ, HEAD_DIM]
-                grad_value: shape [BSZ, V_HEAD_NUM, SEQ, HEAD_DIM]
         """
         query, key, value, o, lse, cu_seqlen, scale, BLOCK_SIZE = ctx.saved_tensors
 
@@ -99,7 +96,7 @@ class MojoDllmAttentionUpFunction(MojoFunction):
         k = key.repeat_interleave(query.shape[1] // key.shape[1], dim=1)
         v = value.repeat_interleave(query.shape[1] // value.shape[1], dim=1)
 
-        idx = torch.arange(8192, device="npu:0") // BLOCK_SIZE
+        idx = torch.arange(8192, device=query.device) // BLOCK_SIZE
         mask_ul = idx[:, None] == idx[None, :]
         mask_ur = idx[:, None] > idx[None, :]
         S = q.shape[0] // 2
@@ -116,13 +113,11 @@ class MojoDllmAttentionUpFunction(MojoFunction):
             tile_v = torch.concat([v[st:ed, :, :], v[S + st : S + ed, :, :]], dim=0).permute(1, 0, 2)
             tile_do = grad_output[st:ed, :, :].permute(1, 0, 2)
             tile_o = o[st:ed, :, :].permute(1, 0, 2)
-            # tile_mask = mask_ul[: ed - st, : ed - st]
             tile_mask = torch.concat([mask_ul[: ed - st, : ed - st], mask_ur[: ed - st, : ed - st]], dim=1)
 
             s = torch.matmul(tile_q, tile_k.transpose(-1, -2)).to(torch.float32) * scale
             s.masked_fill_(tile_mask == 0, float("-inf"))
             p = torch.exp(s - tile_lse[:, :, None])
-            # p = F.softmax(s - torch.max(s, dim=-1, keepdim=True).values, dim=-1)
             tile_dv = torch.matmul(p.transpose(-1, -2).to(torch.bfloat16), tile_do)
             dp = torch.matmul(tile_do, tile_v.transpose(-1, -2))
             ds = p * (dp - torch.sum(tile_do * tile_o, dim=-1, keepdim=True))

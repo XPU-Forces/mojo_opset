@@ -62,7 +62,7 @@ class TTXDllmAttentionUpFunction(MojoDllmAttentionUpFunction):
         scale: float = 1.0,
         BLOCK_SIZE: int = 8,
     ) -> torch.Tensor:
-        output, output_fp32, lse = dllm_attention_up_fwd(
+        output, lse = dllm_attention_up_fwd(
             query,
             key,
             value,
@@ -70,8 +70,8 @@ class TTXDllmAttentionUpFunction(MojoDllmAttentionUpFunction):
             scale,
             BLOCK_SIZE,
         )
-        ctx.save_for_backward(query, key, value, output_fp32, lse, cu_seqlen, scale, BLOCK_SIZE)
-        return output
+        ctx.save_for_backward(query, key, value, output, lse, cu_seqlen, scale, BLOCK_SIZE)
+        return output.to(query.dtype)
 
     @staticmethod
     def backward(
