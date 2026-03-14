@@ -224,7 +224,6 @@ def kernel_da_fwd_u(
     STRIDE_MASK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     pnum = tl.num_programs(axis=0)
@@ -472,7 +471,6 @@ def kernel_da_bwd_q_u(
     STRIDE_MASK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     pnum = tl.num_programs(axis=0)
@@ -676,7 +674,6 @@ def kernel_da_bwd_kv_ul(
     STRIDE_MASK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     pnum = tl.num_programs(axis=0)
@@ -813,7 +810,6 @@ def kernel_da_bwd_kv_ur(
     STRIDE_MASK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_C: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     pnum = tl.num_programs(axis=0)
@@ -1070,7 +1066,6 @@ def dllm_attention_up_fwd_impl(
         lse.stride(0),
         lse.stride(1),
         mask_ul.stride(0),
-        BLOCK_SIZE=BLOCK_SIZE,
     )
 
     return o, lse
@@ -1179,7 +1174,6 @@ def dllm_attention_up_bwd_impl(
         d.stride(0),
         d.stride(1),
         mask_ul.stride(0),
-        BLOCK_SIZE=BLOCK_SIZE,
     )
     kernel_da_bwd_kv_ul[(num_cores,)](
         q,
@@ -1210,7 +1204,6 @@ def dllm_attention_up_bwd_impl(
         d.stride(0),
         d.stride(1),
         mask_ul.stride(0),
-        BLOCK_SIZE=BLOCK_SIZE,
     )
     kernel_da_bwd_kv_ur[(num_cores,)](
         q,
@@ -1241,7 +1234,6 @@ def dllm_attention_up_bwd_impl(
         d.stride(0),
         d.stride(1),
         mask_ur.stride(0),
-        BLOCK_SIZE=BLOCK_SIZE,
     )
 
     return dq, dk, dv
