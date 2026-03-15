@@ -36,11 +36,11 @@ from .operators.kv_cache import MojoStorePagedMLAKVCache
 
 """ linear """
 from .operators.gemm import MojoAllGatherGemm
-from .operators.gemm import MojoLinear
 from .operators.gemm import MojoGemmAll2All
 from .operators.gemm import MojoGemmAllReduce
 from .operators.gemm import MojoGemmReduceScatter
 from .operators.gemm import MojoGroupGemm
+from .operators.linear import MojoLinear
 
 """ embedding """
 from .operators.embedding import MojoEmbedding
