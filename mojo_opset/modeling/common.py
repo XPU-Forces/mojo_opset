@@ -1,18 +1,21 @@
 from abc import abstractmethod
+from pathlib import Path
+
 import torch
-from mojo_opset.modeling.config import MojoConfig
+
+
 class MojoSession:
     @property
     @abstractmethod
-    def kv_cache(self):
-        ...
+    def kv_cache(self): ...
+
 
 class MojoSampler(torch.nn.Module):
     @abstractmethod
     def forward(self, logits, session: MojoSession = None): ...
 
-class MojoGenerator(torch.nn.Module):
 
+class MojoGenerator(torch.nn.Module):
     def __init__(
         self,
         model: torch.nn.Module,
@@ -22,6 +25,8 @@ class MojoGenerator(torch.nn.Module):
         max_new_tokens=128,
         enable_typewriter=False,
         typewriter_buffer=4,
+        dump_dir: str | None = None,
+        dump_decode_steps: int = 20,
     ):
         super().__init__()
         self.model = model.to(device)
@@ -31,8 +36,14 @@ class MojoGenerator(torch.nn.Module):
         self.sampler = sampler
         self._enable_typewriter = enable_typewriter
         self._typewriter_buffer = typewriter_buffer
+        self._dump_dir = Path(dump_dir) if dump_dir else None
+        self._dump_decode_steps = dump_decode_steps
+        if self._dump_dir:
+            self._dump_dir.mkdir(parents=True, exist_ok=True)
         if self._enable_typewriter:
-            from multiprocessing import Process, Pipe
+            from multiprocessing import Pipe
+            from multiprocessing import Process
+
             self._producer_conn, self._consumer_conn = Pipe()
             self._daemon_process = Process(target=self.typewriter, args=(self.tokenizer, self._consumer_conn))
             self._daemon_process.start()
@@ -50,16 +61,16 @@ class MojoGenerator(torch.nn.Module):
     @staticmethod
     def typewriter(tokenizer, conn):
         print("-" * 40)
-        print(f"Generated text: ")
+        print("Generated text: ")
         try:
             full_output = None
-            while (generated_ids := conn.recv()):
+            while generated_ids := conn.recv():
                 output = tokenizer.decode(torch.cat(generated_ids, dim=1))
                 if full_output is None:
                     full_output = [f"[{idx}] " + msg for idx, msg in enumerate(output)]
                 else:
                     for idx in range(len(full_output)):
-                        full_output[idx] = ''.join((full_output[idx], output[idx]))
+                        full_output[idx] = "".join((full_output[idx], output[idx]))
 
                 str2print = "\n".join(full_output)
                 print(
@@ -72,9 +83,7 @@ class MojoGenerator(torch.nn.Module):
 
     def forward(self, prompts):
         input_ids = self.tokenizer(prompts, return_tensors=None).input_ids
-        context_input_len = torch.tensor(
-            [len(seq) for seq in input_ids], dtype=torch.int64, device=self.device
-        )
+        context_input_len = torch.tensor([len(seq) for seq in input_ids], dtype=torch.int64, device=self.device)
         input_ids = (
             torch.cat(
                 list(
@@ -98,6 +107,9 @@ class MojoGenerator(torch.nn.Module):
                 context_input_len=context_input_len,
             )
 
+        if self._dump_dir:
+            torch.save(logits.cpu(), self._dump_dir / "prefill_logits.pt")
+
         next_token_id = self.sampler(logits, session)
 
         generated_ids = [next_token_id.cpu()]
@@ -106,12 +118,15 @@ class MojoGenerator(torch.nn.Module):
         input_ids = next_token_id
         should_end = next_token_id == self.tokenizer.eos_token_id
 
-        for _ in range(1, self.max_new_tokens):
+        for step in range(1, self.max_new_tokens):
             with torch.inference_mode():
                 logits, session = self.model(
                     input_ids,
                     session=session,
                 )
+
+            if self._dump_dir and step <= self._dump_decode_steps:
+                torch.save(logits.cpu(), self._dump_dir / f"decode_step_{step:03d}_logits.pt")
 
             next_token_id = self.sampler(logits, session)
 

@@ -12,9 +12,10 @@ from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 @triton.jit
 def causal_mask_fn(mask_ptr, mask_size, mask_stride_m, mask_stride_n, q_start, kv_start, Q_BLOCK, KV_BLOCK):
     offset_causal = min(max(kv_start - q_start, -mask_size), mask_size)
-    offsets_mask_causal = (tl.arange(0, Q_BLOCK)[:, None]) * mask_stride_m + (
-        mask_size + offset_causal + tl.arange(0, KV_BLOCK)[None, :]
-    ) * mask_stride_n
+    offsets_mask_causal = (
+        (tl.arange(0, Q_BLOCK)[:, None]) * mask_stride_m
+        + (mask_size + offset_causal + tl.arange(0, KV_BLOCK)[None, :]) * mask_stride_n
+    )
     mask_causal = tl.load(mask_ptr + offsets_mask_causal).to(tl.int1)
 
     return mask_causal
@@ -448,6 +449,8 @@ def paged_attention_decode_impl(
 ) -> torch.Tensor:
     batch_size, num_q_heads, head_dim = q.shape
     num_total_blocks, num_kv_heads, block_size, head_dim_cache = k_cache.shape
+
+    assert block_size <= 128, f"temp: only support block_size <= 128, but got {block_size}"
     max_num_blocks_per_seq = block_tables.shape[1]
 
     assert head_dim == head_dim_cache
