@@ -54,6 +54,15 @@ class MojoOperator(ABC, torch.nn.Module):
         ABC.__init__(self)
         self.tensor_factory_kwargs = get_tensor_factory_kwargs(**kwargs)
 
+    def init_parameters_(self, initializer = None):
+        if initializer is None:
+            initializer = torch.nn.init.kaiming_uniform_
+        for param in self.parameters():
+            if param.device == "meta":
+                param.data = initializer(torch.empty_like(param.data, **self.tensor_factory_kwargs))
+            else:
+                param.data = initializer(param.data)
+
     @abstractmethod
     def forward(self, *args, **kwargs) -> Tuple[Any]:
         raise NotImplementedError

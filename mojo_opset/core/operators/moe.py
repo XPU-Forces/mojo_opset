@@ -12,6 +12,7 @@ class MojoMoE(MojoOperator):
     def __init__(
         self,
         num_experts,
+        # num_experts_share,
         top_k,
         hidden_size,
         intermediate_size=None,
@@ -19,176 +20,238 @@ class MojoMoE(MojoOperator):
         activation: str = "swiglu",
         **kwargs,
     ):
-        super().__init__()
-        if activation != "swiglu":
-            raise NotImplementedError(f"MojoMoe: Activation {activation} is not supported.")
-
+        super().__init__(**kwargs)
         for k in ("ep_rank", "ep_size"):
             if k in kwargs:
                 raise ValueError(f"MojoMoE: {k} is not supported; use ParallelStyle to set expert partition.")
 
+        if activation != "swiglu":
+            raise NotImplementedError(f"MojoMoe: Activation {activation} is not supported.")
+
         # NOTE: in some cases, branches may have different expert num or topk
         self.num_experts = num_experts
+        # self.num_experts_share = num_experts_share
         if intermediate_size is None:
             intermediate_size = ffn_intermediate_size
         if intermediate_size is None:
             raise ValueError("MojoMoE: intermediate_size must be provided.")
 
-        self.num_experts_per_partion = self.num_experts
-        self.experts_start_idx = 0
-        self.experts_end_idx = self.num_experts
-
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.ffn_hidden_size = intermediate_size
-        self.activation_func = lambda x: torch.nn.functional.silu((xc := x.chunk(2, dim=-1))[0]) * xc[1]
 
-        self.fc1 = nn.Parameter(torch.empty(self.num_experts_per_partion, self.ffn_hidden_size * 2, self.hidden_size))
-        self.fc2 = nn.Parameter(torch.empty(self.num_experts_per_partion, self.hidden_size, self.ffn_hidden_size))
-        self.gating_weight = nn.Parameter(torch.empty(self.hidden_size, self.num_experts))
-        setattr(self.gating_weight, "force_dtype", torch.float32)
-
-    def _gating(self, x):
-        gate_logits = torch.matmul(x.float(), self.gating_weight.float())
-        top_k_logits, top_k_indices = torch.topk(gate_logits, self.top_k, dim=-1)
-        expert_weights = torch.softmax(top_k_logits, dim=-1)
-        return top_k_indices, expert_weights.to(x.dtype)
-
-    def _dispatch_ep(self, inp, top_k_gates, top_k_indices):
-        token_idx = (
-            torch.arange(0, inp.shape[0], device=inp.device, dtype=top_k_indices.dtype)
-            .unsqueeze(1)
-            .repeat(1, top_k_indices.shape[-1])
-            .flatten()
+        self.gating = MojoMoEGating(hidden_size=self.hidden_size, num_experts=self.num_experts, top_k=self.top_k, **kwargs)
+        self.dispatch = MojoMoEDispatch(num_experts=self.num_experts, **kwargs)
+        self.experts = MojoExperts(
+            num_experts=self.num_experts,
+            hidden_size=self.hidden_size,
+            ffn_hidden_size=self.ffn_hidden_size,
+            activation=activation,
+            **kwargs,
         )
-        top_k_gates_flatten = top_k_gates.reshape(-1, 1)
-        top_k_indices_flatten = top_k_indices.flatten()
+        self.combine = MojoMoECombine(multiply_by_gates=True, **kwargs)
 
-        sorted_experts, index_sorted_experts = top_k_indices_flatten.sort()
-        start_idx = torch.searchsorted(sorted_experts, self.experts_start_idx, side="left")
-        end_idx = torch.searchsorted(sorted_experts, self.experts_end_idx, side="left")
-        index_sorted_experts = index_sorted_experts[start_idx:end_idx]
-        pack_index = token_idx[index_sorted_experts]
+        if self.gating.gate_weight is not None:
+            setattr(self.gating.gate_weight, "force_dtype", torch.float32)
 
-        counts = torch.bincount(top_k_indices.flatten(), minlength=self.num_experts).tolist()
-        counts = counts[self.experts_start_idx : self.experts_end_idx]
+    def forward(self, hidden_states, dp_rank_input_len=None):
+        # hidden_states: [BS, H]
+        top_k_indices, top_k_gates = self.gating(hidden_states)
+        # top_k_indices, top_k_gates: [BS, top_k]
+        sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = self.dispatch(hidden_states, top_k_gates, top_k_indices)
+        # sorted_hidden_states: [local_toks, H]
+        # tokens_per_expert: [num_experts]
+        # sorted_gates: [local_toks]
+        # token_indices: [local_toks]
+        expert_outputs = self.experts(sorted_hidden_states, tokens_per_expert)
+        # expert_outputs: [local_toks, H]
+        # placeholder: shared_experts?
+        # Note: do not use hidden_states.shape as output_buffer.shape, as it may change after dispatch
+        output_buffer = torch.zeros(hidden_states.size(0), hidden_states.size(1), device=hidden_states.device, dtype=hidden_states.dtype)
 
-        pack_gates = top_k_gates_flatten[index_sorted_experts, :]
-
-        inp_exp = inp[pack_index].squeeze(1)
-
-        return torch.split(inp_exp, counts, dim=0), pack_gates, pack_index
-
-    def _experts(self, expert_inputs):
-        fc1_out = [F.linear(expert_inputs[i], self.fc1[i]) for i in range(len(expert_inputs))]
-        fc1_out = [self.activation_func(x) for x in fc1_out]
-        fc2_out = [F.linear(fc1_out[i], self.fc2[i]) for i in range(len(fc1_out))]
-        return fc2_out
-
-    def _combine(self, expert_out, x, pack_gates, pack_index, multiply_by_gates=True):
-        dtype = expert_out[0].dtype
-        stitched = torch.cat(expert_out, 0).float()
-
-        if multiply_by_gates:
-            stitched = stitched.mul(pack_gates).to(dtype=dtype)
-
-        combined = torch.zeros(x.size(0), expert_out[-1].size(1), device=stitched.device, dtype=stitched.dtype)
-        # combine samples that have been processed by the same k experts
-        scatter_indices = pack_index.unsqueeze(-1).expand(-1, combined.size(1))
-        combined = combined.scatter_reduce(0, scatter_indices, stitched, reduce="sum", include_self=True)
-
-        return combined.to(dtype=dtype)
-
-    def forward(self, input, dp_rank_input_len=None):
-        top_k_indices, top_k_gates = self._gating(input)
-
-        expert_inputs, pack_gates, pack_index = self._dispatch_ep(input, top_k_gates, top_k_indices)
-
-        experts_outputs = self._experts(expert_inputs)
-
-        experts_output = self._combine(experts_outputs, input, pack_gates, pack_index)
-
-        return experts_output
+        combined = self.combine(output_buffer, expert_outputs, sorted_gates, token_indices)
+        # combined: [BS, H]
+        return combined
 
 
 class MojoMoEGating(MojoOperator):
     def __init__(
         self,
-        hidden_size: int,
-        num_experts: int,
-        top_k: int,
+        hidden_size: Optional[int] = None,
+        num_experts: Optional[int] = None,
+        top_k: int = 2,
+        in_features: Optional[int] = None,
         **kwargs,
     ):
-        """
-        Common parameter definitions for MoE Gating operator.
-
-        Init parameters:
-        - gate_weight (torch.Tensor): Gating weight, common shape [hidden_dim, num_experts].
-        - top_k (int): Number of experts to select, positive integer.
-
-        Scope: Only covers common parameters, does not involve backend specialization or quantization implementation.
-        """
-        super().__init__()
-        self.gate_weight = torch.nn.Parameter(torch.empty(hidden_size, num_experts, **self.tensor_factory_kwargs))
+        super().__init__(**kwargs)
         self.top_k = top_k
+        if hidden_size is None:
+            hidden_size = in_features
+        if hidden_size is not None and num_experts is not None:
+            self.gate_weight = torch.nn.Parameter(torch.empty(hidden_size, num_experts, **self.tensor_factory_kwargs))
+        else:
+            self.gate_weight = None
 
     def forward(
         self,
         hidden_states: torch.Tensor,
+        gating_weight: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass for MoE Gating operator.
+        if gating_weight is None:
+            if self.gate_weight is None:
+                raise ValueError("MojoMoEGating: gating_weight must be provided when gate_weight is not initialized.")
+            gating_weight = self.gate_weight
 
-        Input:
-        - hidden_states (torch.Tensor): Input tensor of shape [batch_size, seq_len, hidden_size].
-
-        Output:
-        - torch.Tensor: Output tensor of shape [batch_size, seq_len, num_experts].
-        """
-        gate_logits = torch.matmul(hidden_states, self.gate_weight)
-        gate_logits = torch.softmax(gate_logits, dim=-1)
-        top_k_logits, indices = torch.topk(gate_logits, self.top_k, dim=-1)
-        expert_weights = top_k_logits / torch.sum(top_k_logits, dim=-1, keepdim=True)
-        return indices, expert_weights
+        gate_logits = torch.matmul(hidden_states.float(), gating_weight.float())
+        top_k_logits, top_k_indices = torch.topk(gate_logits, self.top_k, dim=-1)
+        expert_weights = torch.softmax(top_k_logits, dim=-1)
+        return top_k_indices, expert_weights.to(hidden_states.dtype)
 
 
 class MojoMoEDispatch(MojoOperator):
     def __init__(
         self,
-        ep_group: Optional[object] = None,
-        tp_group: Optional[object] = None,
+        num_experts: int,
+        **kwargs,
     ):
         """
         Common parameter definitions for MoE Dispatch operator.
 
         Init parameters:
-        - ep_group: Expert parallel process group (torch.distributed.ProcessGroup placeholder), optional.
-        - tp_group: Tensor parallel process group (torch.distributed.ProcessGroup placeholder), optional.
+        - num_experts (int): Number of experts.
 
         Scope: Only covers common semantics, does not involve backend communication implementation or core partitioning details.
         """
-        super().__init__()
-        self.ep_group = ep_group
-        self.tp_group = tp_group
+        super().__init__(**kwargs)
+        self.num_experts = num_experts
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        top_k_gates: torch.Tensor,
+        top_k_indices: torch.Tensor,
+    ):
+        """
+        Forward pass for MoE Dispatch operator.
+
+        Input:
+        - hidden_states (torch.Tensor): Input tensor.
+        - top_k_gates (torch.Tensor): Top-k gating weights.
+        - top_k_indices (torch.Tensor): Top-k expert indices.
+
+        Output:
+        - sorted_hidden_states: Sorted inputs for experts.
+        - tokens_per_expert: Count of tokens for each expert.
+        - sorted_gates: Packed gating weights.
+        - token_indices: Indices for packing/unpacking.
+        """
+        batch_token_indices = (
+            torch.arange(0, hidden_states.shape[0], device=hidden_states.device, dtype=top_k_indices.dtype)
+            .unsqueeze(1)
+            .repeat(1, top_k_indices.shape[-1])
+            .flatten()
+        )
+        # batch_token_indices: [BS * top_k]
+        flat_top_k_gates = top_k_gates.reshape(-1, 1)
+        flat_top_k_indices = top_k_indices.flatten()
+        sorted_experts, expert_sort_indices = flat_top_k_indices.sort()
+
+        token_indices = batch_token_indices[expert_sort_indices]
+        tokens_per_expert = torch.bincount(flat_top_k_indices, minlength=self.num_experts)
+
+        sorted_gates = flat_top_k_gates[expert_sort_indices, :]
+        sorted_hidden_states = hidden_states[token_indices].squeeze(1)
+        return sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices
+
+
+class MojoExperts(MojoOperator):
+    def __init__(
+        self,
+        num_experts: int,
+        hidden_size: int,
+        ffn_hidden_size: int,
+        activation: str = "swiglu",
+        **kwargs,
+    ):
+        """
+        Common parameter definitions for MoE Experts operator.
+
+        Init parameters:
+        - num_experts (int): Number of experts.
+        - hidden_size (int): Hidden size of the model.
+        - ffn_hidden_size (int): Hidden size of the feed-forward network within each expert.
+        - activation (str): Activation function to use.
+
+        Scope: Only covers common parameters, does not involve backend specialization.
+        """
+        super().__init__(**kwargs)
+        if activation != "swiglu":
+            raise NotImplementedError(f"MojoExperts: Activation {activation} is not supported.")
+        self.activation = activation
+
+        self.fc1 = nn.Parameter(torch.empty(num_experts, ffn_hidden_size * 2, hidden_size, **self.tensor_factory_kwargs))
+        self.fc2 = nn.Parameter(torch.empty(num_experts, hidden_size, ffn_hidden_size, **self.tensor_factory_kwargs))
+
+    def forward(
+        self,
+        sorted_hidden_states: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+    ):
+        # Mocked GroupGemm
+        expert_inputs = torch.split(sorted_hidden_states, tokens_per_expert.tolist(), dim=0)
+        num_experts = len(expert_inputs)
+        
+        fc1_outs = [F.linear(expert_inputs[i], self.fc1[i]) for i in range(num_experts)]
+        activated_outs = []
+        for fc1_out in fc1_outs:
+            gate_proj, up_proj = fc1_out.chunk(2, dim=-1)
+            activated_outs.append(F.silu(gate_proj) * up_proj)
+            
+        fc2_outs = [F.linear(activated_outs[i], self.fc2[i]) for i in range(num_experts)]
+        return torch.cat(fc2_outs, dim=0)
 
 
 class MojoMoECombine(MojoOperator):
     def __init__(
         self,
-        ep_group: Optional[object] = None,
-        tp_group: Optional[object] = None,
+        multiply_by_gates: bool = True,
+        **kwargs,
     ):
         """
         Common parameter definitions for MoE Combine operator.
 
         Init parameters:
-        - ep_group: Expert parallel process group (torch.distributed.ProcessGroup placeholder), optional.
-        - tp_group: Tensor parallel process group (torch.distributed.ProcessGroup placeholder), optional.
-        - is_varlen (bool): When True, prioritize TND (per token) aggregation; when False, use BSND; default True.
-        - op_name: Operator name placeholder.
+        - multiply_by_gates (bool): Whether to multiply the expert output by the gating weights.
 
         Scope: Only covers common semantics, does not involve backend communication or core partitioning details.
         """
-        super().__init__()
-        self.ep_group = ep_group
-        self.tp_group = tp_group
+        super().__init__(**kwargs)
+        self.multiply_by_gates = multiply_by_gates  
+
+    def forward(
+        self,
+        output_buffer: torch.Tensor,
+        expert_outputs: torch.Tensor,
+        sorted_gates: torch.Tensor,
+        token_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Forward pass for MoE Combine operator.
+
+        Input:
+        - output_buffer (torch.Tensor): Initial tensor to combine results into.
+        - expert_outputs (torch.Tensor): Output from experts.
+        - sorted_gates (torch.Tensor): Packed gating weights.
+        - token_indices (torch.Tensor): Indices for packing/unpacking.
+
+        Output:
+        - combined: Combined output tensor.
+        """
+        dtype = expert_outputs.dtype
+        combined_expert_outputs = expert_outputs.float()
+        if self.multiply_by_gates:
+            combined_expert_outputs = combined_expert_outputs.mul(sorted_gates).to(dtype=dtype)
+
+        scatter_indices = token_indices.unsqueeze(-1).expand(-1, output_buffer.size(1))
+        combined = output_buffer.scatter_reduce(0, scatter_indices, combined_expert_outputs, reduce="sum", include_self=True)
+        return combined.to(dtype=dtype)
