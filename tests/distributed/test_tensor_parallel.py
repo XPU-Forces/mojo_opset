@@ -2,6 +2,7 @@ import os
 os.environ['TORCH_DEVICE_BACKEND_AUTOLOAD'] = '0'
 
 import torch
+import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from mojo_opset.distributed.parallel import MojoRowwiseParallel, MojoColwiseParallel
 from torch.distributed.tensor.placement_types import Shard, Replicate, Partial
@@ -34,7 +35,7 @@ def verify_dp_consistency(dist, output_data, mesh, test_name):
 
 
 @dist_test(world_size=TP_SIZE * DP_SIZE, backend="gloo")
-def test_basic(dist=None):
+def test_basic():
     mesh = init_device_mesh(
         device_type="cpu", mesh_shape=(TP_SIZE, DP_SIZE), mesh_dim_names=["tp", "dp"]
     )
@@ -50,7 +51,7 @@ def test_basic(dist=None):
 
 
 @dist_test(world_size=TP_SIZE * DP_SIZE, backend="gloo")
-def test_multi_layer(dist=None):
+def test_multi_layer():
     mesh = init_device_mesh(
         device_type="cpu", mesh_shape=(TP_SIZE, DP_SIZE), mesh_dim_names=["tp", "dp"]
     )

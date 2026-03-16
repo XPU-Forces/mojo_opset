@@ -24,7 +24,7 @@ def _dist_worker(rank, world_size, backend, port, fn, error_queue, args, kwargs)
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = str(port)
         dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
-        actual_fn(*args, **kwargs, dist=dist)
+        actual_fn(*args, **kwargs)
     except Exception:
         error_queue.put((rank, traceback.format_exc()))
     finally:
@@ -39,8 +39,7 @@ def dist_test(world_size=8, backend="gloo", start_process="spawn"):
     Usage::
 
         @dist_test(world_size=8)
-        # NOTE(liuyuan): dist is the initialized torch distributed module. It MUST be keyword-only argument under pytest, otherwise it will be considered as a pytest.fixture argument.
-        def test_tensor_parallel(dist=None):
+        def test_tensor_parallel():
             rank = dist.get_rank()
             mesh = init_device_mesh(...)
             ...
