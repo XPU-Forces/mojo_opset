@@ -14,32 +14,28 @@ class MojoMoE(MojoOperator):
         num_experts,
         top_k,
         hidden_size,
-        intermediate_size,
-        ep_rank,
-        ep_size,
+        intermediate_size=None,
+        ffn_intermediate_size=None,
         activation: str = "swiglu",
+        **kwargs,
     ):
         super().__init__()
         if activation != "swiglu":
             raise NotImplementedError(f"MojoMoe: Activation {activation} is not supported.")
 
-        self.ep_rank = ep_rank
-        self.ep_size = ep_size
+        for k in ("ep_rank", "ep_size"):
+            if k in kwargs:
+                raise ValueError(f"MojoMoE: {k} is not supported; use ParallelStyle to set expert partition.")
 
-        # NOTE: in some cases, branches may have different expert num or topk
         self.num_experts = num_experts
+        if intermediate_size is None:
+            intermediate_size = ffn_intermediate_size
+        if intermediate_size is None:
+            raise ValueError("MojoMoE: intermediate_size must be provided.")
 
-        # support undivisible expert num
-        base_num_experts = self.num_experts // self.ep_size
-        remainder_experts = self.num_experts % self.ep_size
-
-        if self.ep_rank < remainder_experts:
-            self.num_experts_per_partion = base_num_experts + 1
-        else:
-            self.num_experts_per_partion = base_num_experts
-
-        self.experts_start_idx = base_num_experts * self.ep_rank + min(self.ep_rank, remainder_experts)
-        self.experts_end_idx = self.experts_start_idx + self.num_experts_per_partion
+        self.num_experts_per_partion = self.num_experts
+        self.experts_start_idx = 0
+        self.experts_end_idx = self.num_experts
 
         self.top_k = top_k
         self.hidden_size = hidden_size
