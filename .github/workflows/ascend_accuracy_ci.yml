@@ -3,6 +3,9 @@ on:
   pull_request:
     branches:
     - master
+    - feat/*
+    - dev/*
+    - release/*
     types: [ opened, synchronize, reopened ]
     paths-ignore:
     - 'CHANGELOG.md'
