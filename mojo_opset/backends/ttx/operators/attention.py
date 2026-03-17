@@ -39,7 +39,7 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         output = paged_attention_prefill(
             q=query,
             key_cache=key_cache,
-            v_cache=value_cache,
+            value_cache=value_cache,
             cu_seqlens_q=cu_seqlens_q,
             seqlens_kv=seqlens_kv,
             block_tables=block_tables,
