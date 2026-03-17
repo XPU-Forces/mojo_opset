@@ -174,8 +174,8 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     @torch.library.custom_op("ttx::paged_attention_prefill", mutates_args={})
     def paged_attention_prefill(
         q: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
         seqlens_kv: torch.Tensor,
         block_tables: torch.Tensor,
@@ -184,14 +184,14 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         aux_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return paged_attention_prefill_impl(
-            q, k_cache, v_cache, cu_seqlens_q, seqlens_kv, block_tables, gqa_interleave, sm_scale, aux_mask
+            q, key_cache, value_cache, cu_seqlens_q, seqlens_kv, block_tables, gqa_interleave, sm_scale, aux_mask
         )
 
     @paged_attention_prefill.register_fake
     def paged_attention_prefill_fake(
         q: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
         seqlens_kv: torch.Tensor,
         block_tables: torch.Tensor,
@@ -204,20 +204,20 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     @torch.library.custom_op("ttx::paged_attention_decode", mutates_args={})
     def paged_attention_decode(
         q: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
         gqa_interleave: bool,
         sm_scale: Optional[float] = None,
     ) -> torch.Tensor:
-        return paged_attention_decode_impl(q, k_cache, v_cache, seqlens, block_tables, gqa_interleave, sm_scale)
+        return paged_attention_decode_impl(q, key_cache, value_cache, seqlens, block_tables, gqa_interleave, sm_scale)
 
     @paged_attention_decode.register_fake
     def paged_attention_decode_fake(
         q: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
         gqa_interleave: bool,

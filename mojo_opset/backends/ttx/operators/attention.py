@@ -38,7 +38,7 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         assert mask is None, f"[TTXPagedPrefillGQA] TTX does not support mask, but got mask={mask}"
         output = paged_attention_prefill(
             q=query,
-            k_cache=key_cache,
+            key_cache=key_cache,
             v_cache=value_cache,
             cu_seqlens_q=cu_seqlens_q,
             seqlens_kv=seqlens_kv,
@@ -74,8 +74,8 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
 
         output = paged_attention_decode(
             q=query,
-            k_cache=key_cache,
-            v_cache=value_cache,
+            key_cache=key_cache,
+            value_cache=value_cache,
             seqlens=seqlens,
             block_tables=block_tables,
             gqa_interleave=self.gqa_layout == "ABAB",
