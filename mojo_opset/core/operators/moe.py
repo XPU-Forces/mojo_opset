@@ -40,6 +40,7 @@ class MojoMoE(MojoOperator):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.ffn_hidden_size = intermediate_size
+        self.activation = activation
         self.activation_func = lambda x: torch.nn.functional.silu((xc := x.chunk(2, dim=-1))[0]) * xc[1]
 
         self.fc1 = nn.Parameter(torch.empty(self.num_experts_per_partion, self.ffn_hidden_size * 2, self.hidden_size))
@@ -109,6 +110,13 @@ class MojoMoE(MojoOperator):
 
         return experts_output
 
+    def extra_repr(self) -> str:
+        return (
+            f"{self.num_experts=}, {self.top_k=}, {self.hidden_size=}, {self.ffn_hidden_size=}, {self.activation=}".replace(
+                "self.", ""
+            )
+        )
+
 
 class MojoMoEGating(MojoOperator):
     def __init__(
@@ -150,6 +158,11 @@ class MojoMoEGating(MojoOperator):
         expert_weights = top_k_logits / torch.sum(top_k_logits, dim=-1, keepdim=True)
         return indices, expert_weights
 
+    def extra_repr(self) -> str:
+        hidden_size = self.gate_weight.size(0)
+        num_experts = self.gate_weight.size(1)
+        return f"{hidden_size=}, {num_experts=}, {self.top_k=}".replace("self.", "")
+
 
 class MojoMoEDispatch(MojoOperator):
     def __init__(
@@ -169,6 +182,11 @@ class MojoMoEDispatch(MojoOperator):
         super().__init__()
         self.ep_group = ep_group
         self.tp_group = tp_group
+
+    def extra_repr(self) -> str:
+        ep_group_set = self.ep_group is not None
+        tp_group_set = self.tp_group is not None
+        return f"{ep_group_set=}, {tp_group_set=}"
 
 
 class MojoMoECombine(MojoOperator):
@@ -191,3 +209,8 @@ class MojoMoECombine(MojoOperator):
         super().__init__()
         self.ep_group = ep_group
         self.tp_group = tp_group
+
+    def extra_repr(self) -> str:
+        ep_group_set = self.ep_group is not None
+        tp_group_set = self.tp_group is not None
+        return f"{ep_group_set=}, {tp_group_set=}"
