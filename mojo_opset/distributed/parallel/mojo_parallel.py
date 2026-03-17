@@ -56,7 +56,7 @@ class MojoRegisterableParallelStyle(ParallelStyle):
                     tensor, device_mesh, input_layouts, run_check=False
                 )
 
-            if desired_input_layouts and input_layouts != desired_input_layouts:
+            if desired_input_layouts and tensor.placements != desired_input_layouts:
                 tensor = tensor.redistribute(
                     placements=desired_input_layouts, async_op=True
                 )
