@@ -1,13 +1,15 @@
-from numpy import isin
+import warnings
+from fnmatch import fnmatch
+from typing import Callable, Any, Tuple, List, Dict, Optional, Union
+
 import torch
-from typing import Callable, Any, Tuple, List, Dict
-from torch.distributed.tensor import (
-    DeviceMesh,
-    DTensor,
-)
+import torch.nn as nn
+from torch.distributed.device_mesh import _mesh_resources, DeviceMesh
+from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed._functional_collectives import AsyncCollectiveTensor
 from torch.distributed.tensor.placement_types import Placement
+from torch.distributed.tensor.parallel._utils import _validate_tp_mesh_dim
 
 
 class MojoRegisterableParallelStyle(ParallelStyle):
@@ -129,3 +131,76 @@ class MojoDistributedModule(torch.nn.Module):
         if self._prepare_output_fn:
             output = self._prepare_output_fn(self._device_mesh, output)
         return output
+
+
+# NOTE(liuyuan): MojoDistributedModule is a wrapper around nn.Module without using forward_hook that
+# MojoRegisterableParallelStyle can apply to but cannot modify the original module in-place.
+# NOTE(liuyuan): ported from torch.distributed.tensor.parallel.parallelize_module
+def mojo_parallelize_module(  # type: ignore[return]
+    module: nn.Module,
+    device_mesh: Optional[DeviceMesh] = None,
+    parallelize_plan: Optional[Union[ParallelStyle, dict[str, ParallelStyle]]] = None,
+    *,
+    src_data_rank: Optional[int] = 0,
+) -> nn.Module:
+    device_mesh = device_mesh or _mesh_resources.get_current_mesh()
+    _validate_tp_mesh_dim(device_mesh)
+
+    if parallelize_plan is None:
+        warnings.warn(
+            "No parallelize_plan is provided and auto-parallel is not supported "
+            "at the moment, so this parallelize_module call will do nothing."
+        )
+        return module
+
+    # note: The RNG tracker will be initialized in distribute_tensor() call if it hasn't
+    # been initialized.
+
+    if isinstance(parallelize_plan, ParallelStyle):
+        parallelize_plan.src_data_rank = src_data_rank
+        return parallelize_plan._apply(module, device_mesh)
+    elif isinstance(parallelize_plan, dict):
+        for module_path, parallelize_style in parallelize_plan.items():
+            path_splits = module_path.split(".")
+            if len(path_splits) == 0:
+                raise ValueError(
+                    "Expect module path to be non-empty, but got empty string!"
+                )
+            while path_splits:
+                atom = path_splits.pop(0)
+                matched_children = filter(
+                    # `t[0]` is child name
+                    lambda t: fnmatch(t[0], atom),
+                    module.named_children(),
+                )
+                # apply the plan to all matched submodules
+                for name, submodule in matched_children:
+                    if path_splits:
+                        # we haven't reached the leaf, apply in dict style
+                        leaf_path = ".".join(
+                            path_splits
+                        )  # rest of the path after `atom`
+                        mojo_parallelize_module(
+                            submodule,
+                            device_mesh,
+                            {leaf_path: parallelize_style},
+                            src_data_rank=src_data_rank,
+                        )
+                    else:
+                        # otherwise, directly apply style to this submodule
+                        # NOTE(liuyuan): key change here.
+                        module.set_submodule(
+                            name,
+                            mojo_parallelize_module(
+                                submodule,
+                                device_mesh,
+                                parallelize_style,
+                                src_data_rank=src_data_rank,
+                            ),
+                        )
+        return module
+    else:
+        raise TypeError(  # pyre-ignore[7]
+            "Expect Union[ParallelStyle, Dict[str, ParallelStyle]] for"
+            f" parallelize_plan, {type(parallelize_plan)} found!"
+        )
