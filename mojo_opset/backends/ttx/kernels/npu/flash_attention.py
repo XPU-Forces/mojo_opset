@@ -403,7 +403,7 @@ def paged_decode_kernel(
         k = tl.reshape(k, (BLOCK_SIZE_N, BLOCK_SIZE_D))
         v = tl.reshape(v, (BLOCK_SIZE_N, BLOCK_SIZE_D))
 
-        qk = tl.sum(q[None, :] * k, axis=1)
+        qk = tl.sum((q[None, :] * k).to(tl.float32), axis=1)
 
         current_logical_offset = logical_block_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         mask = current_logical_offset < kv_len
@@ -426,7 +426,7 @@ def paged_decode_kernel(
 
         p = p.to(v.dtype)
 
-        acc_o += tl.sum(p[:, None] * v, axis=0)
+        acc_o += tl.sum((p[:, None] * v).to(tl.float32), axis=0)
 
         l_i = l_new
         m_i = m_new
