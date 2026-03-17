@@ -1,16 +1,32 @@
 import warnings
 from fnmatch import fnmatch
-from typing import Callable, Any, Tuple, List, Dict, Optional, Union
+
+from typing import Any
+from typing import Callable
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Tuple
+from typing import Union
 
 import torch
 import torch.nn as nn
-from torch.distributed.device_mesh import _mesh_resources, DeviceMesh
+from torch.distributed._functional_collectives import AsyncCollectiveTensor
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.device_mesh import _mesh_resources
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.parallel import ParallelStyle
-from torch.distributed._functional_collectives import AsyncCollectiveTensor
-from torch.distributed.tensor.placement_types import Placement
 from torch.distributed.tensor.parallel._utils import _validate_tp_mesh_dim
+from torch.distributed.tensor.placement_types import Placement
 
+# class ShortcutDispatcher(type):
+#     def __call__(cls, *args, **kwargs):
+#         obj = cls.__new__(*args, **kwargs)
+#         if getattr(obj, "_short_cut_initialized", False):
+#             return obj
+#         else:
+#             obj.__init__(*args, **kwargs)
+#             return obj
 
 class MojoRegisterableParallelStyle(ParallelStyle):
     def __init_subclass__(cls, *args, **kwargs):
@@ -29,8 +45,10 @@ class MojoRegisterableParallelStyle(ParallelStyle):
         prepare_output_fn: Callable[
             [List[Placement], List[Placement], bool, DeviceMesh, Any], Any
         ] = None,
-        desired_input_layouts: Tuple = None,
-        desired_output_layouts: Tuple = None,
+        desired_input_layouts: Tuple = None,  # This layout is the placement used to convert the local tensor output
+        # by the operator into the corresponding DTensor according to the distributed semantics required by the operator
+        desired_output_layouts: Tuple = None,  # This layout is the placement used to convert the local tensor output
+        # by the operator into the corresponding DTensor according to the distributed semantics required by the operator
     ):
         module_clses = (module_clses,) if not isinstance(module_clses, tuple) else module_clses
         for module_cls in module_clses:
@@ -44,11 +62,22 @@ class MojoRegisterableParallelStyle(ParallelStyle):
 
     @classmethod
     def get_dist_info(cls, module: torch.nn.Module):
-        return cls.dist_info_map.get(type(module), (None,) * 5)
+        module_type = type(module)
+
+        if module_type not in cls.dist_info_map:
+            # NOTE(liuyuan): fallback to parent class, specially designed for TorchXXX.
+            module_type = module_type.__base__
+        
+        return cls.dist_info_map.get(module_type, (None,) * 5)
 
     @staticmethod
     def prepare_input_fn(
-        desired_input_layouts, input_layouts, device_mesh, *args, **kwargs
+        desired_input_layouts,  # This layout is the placement used to convert the local tensor output by the operator
+        # into the corresponding DTensor according to the distributed semantics required by the operator
+        input_layouts,  # Requires the user to provide the distributed semantics information of the local tensor to reconstruct the DTensor
+        device_mesh,
+        *args,
+        **kwargs,
     ):
         def mapping(tensor):
             if not isinstance(tensor, torch.Tensor):
@@ -74,7 +103,12 @@ class MojoRegisterableParallelStyle(ParallelStyle):
 
     @staticmethod
     def prepare_output_fn(
-        desired_output_layouts, output_layouts, use_local_output, device_mesh, outputs
+        desired_output_layouts,  # This layout is the placement used to convert the local tensor output by the operator
+        # into the corresponding DTensor according to the distributed semantics required by the operator
+        output_layouts,  # Requires the user to provide the distributed semantics information of the local tensor to reconstruct the DTensor
+        use_local_output,
+        device_mesh,
+        outputs,
     ):
         is_single = False
         is_tuple = False
@@ -102,9 +136,20 @@ class MojoRegisterableParallelStyle(ParallelStyle):
 
     def __call__(self, module: torch.nn.Module, device_mesh: DeviceMesh):
         return self._apply(module, device_mesh)
+    
+    def __new__(cls, *args, **kwargs):
+        obj = super().__new__(cls)
+        if 'module' in kwargs and 'device_mesh' in kwargs:
+            module = kwargs.pop('module')
+            device_mesh = kwargs.pop('device_mesh')
+            obj.__init__(*args, **kwargs)
+            # NOTE(liuyuan): Maybe we should use ShortcutDispatcher as metaclass, but it seems like Python has already
+            # known the MojoDistributedModule object is initialized.
+            # So we can just return the MojoDistributedModule object here.
+            return obj._apply(module, device_mesh)
+        return obj
 
 class MojoDistributedModule(torch.nn.Module):
-
     def __init__(
         self,
         mod: torch.nn.Module,
@@ -121,6 +166,12 @@ class MojoDistributedModule(torch.nn.Module):
         if partition_fn is not None:
             for name, submod in self._mod.named_modules():
                 partition_fn(name, submod, self._device_mesh)
+    
+    def __getattr__(self, name):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self._mod, name)
 
     def forward(self, *args, **kwargs):
         if self._prepare_input_fn:

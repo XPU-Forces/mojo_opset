@@ -1,22 +1,24 @@
 from functools import partial
-import torch
-from torch.distributed.tensor.placement_types import Placement, Shard, Replicate, Partial
-from torch.distributed.tensor import (
-    DeviceMesh,
-    DTensor,
-)
-from torch.distributed._functional_collectives import AsyncCollectiveTensor
 
-from mojo_opset.distributed.parallel.utils import stat_dict_rename_hook, shard_tensor
-from mojo_opset.distributed.parallel.tensor_parallel import (
-    MojoRowwiseParallel,
-    MojoColwiseParallel,
-    MojoTensorParallel,
-)
+import torch
+
+from torch.distributed.tensor import DeviceMesh
+from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.placement_types import Partial
+from torch.distributed.tensor.placement_types import Replicate
+from torch.distributed.tensor.placement_types import Shard
+
+from mojo_opset.core.operators.attention import MojoPagedDecodeGQA
+from mojo_opset.core.operators.attention import MojoPagedPrefillGQA
+from mojo_opset.distributed.parallel.tensor_parallel import MojoColwiseParallel
+from mojo_opset.distributed.parallel.tensor_parallel import MojoRowwiseParallel
+from mojo_opset.distributed.parallel.tensor_parallel import MojoTensorParallel
+from mojo_opset.distributed.parallel.utils import shard_tensor
+from mojo_opset.distributed.parallel.utils import stat_dict_rename_hook
 
 __DUMMY_NODE__ = "this is the partitions file."
 
-def _simple_partition(src_data_rank, module_name, module: torch.nn.Module, device_mesh: DeviceMesh, sharding_dim=-1):
+def __torch_nn_linear_partition(src_data_rank, module_name, module: torch.nn.Module, device_mesh: DeviceMesh, sharding_dim=-1):
     module.register_parameter(
         "weight",
         torch.nn.Parameter(
@@ -35,31 +37,23 @@ def _simple_partition(src_data_rank, module_name, module: torch.nn.Module, devic
 
 MojoRowwiseParallel.register_dist_info(
     torch.nn.Linear,
-    _simple_partition,
+    __torch_nn_linear_partition,
     desired_input_layouts=[Shard(-1)],
     desired_output_layouts=[Partial()],
 )
 
 MojoColwiseParallel.register_dist_info(
     torch.nn.Linear,
-    partial(_simple_partition, sharding_dim=0),
+    partial(__torch_nn_linear_partition, sharding_dim=0),
     desired_input_layouts=[Replicate()],
-    desired_output_layouts=[Shard(-1)]
-)
-
-from mojo_opset.core.operators.normalization import MojoLayerNorm
-MojoTensorParallel.register_dist_info(
-    MojoLayerNorm,
-    partial(_simple_partition),
-    desired_input_layouts=[Shard(-1)],
-    desired_output_layouts=[Shard(-1)]
+    desired_output_layouts=[Shard(-1)],
 )
 
 
 def __attn_prepare_input_fn(
-    args_desired_input_layouts,
-    kwargs_desired_input_layouts,
-    input_layouts,
+    args_desired_input_layouts,  # Layouts used only for non-DTensor inputs
+    kwargs_desired_input_layouts,  # Layouts used only for non-DTensor inputs
+    input_layouts,  # Requires the user to provide the distributed semantics information of the local tensor to reconstruct the DTensor
     device_mesh,
     *args,
     **kwargs,
@@ -87,8 +81,6 @@ def __attn_prepare_input_fn(
 
     return (tuple(args), kwargs)
 
-
-from mojo_opset.core.operators.attention import MojoPagedDecodeGQA, MojoPagedPrefillGQA
 MojoTensorParallel.register_dist_info(
     (MojoPagedPrefillGQA, MojoPagedDecodeGQA),
     prepare_input_fn=partial(
