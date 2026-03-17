@@ -37,3 +37,14 @@ def stat_dict_rename_hook(
             if n in name_list:
                 new_key = get_coordinate_str_with_dim_names(device_mesh) + n
                 state_dict[prefix + new_key] = state_dict.pop(prefix + n)
+
+def compute_local_shard_size_and_offset(full_size: int, num_chunks: int, rank: int) -> Tuple[int, int]:
+    if full_size % num_chunks == 0:
+        full_chunk_size = full_size // num_chunks
+        return full_chunk_size, rank * full_chunk_size
+
+    full_chunk_size = (full_size + num_chunks - 1) // num_chunks
+    shard_start_idx = min(rank * full_chunk_size, full_size)
+    shard_end_idx = min((rank + 1) * full_chunk_size, full_size)
+    shard_size = shard_end_idx - shard_start_idx
+    return shard_size, shard_start_idx
