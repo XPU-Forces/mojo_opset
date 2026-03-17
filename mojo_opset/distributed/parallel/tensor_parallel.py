@@ -1,18 +1,22 @@
+from functools import partial
 import inspect
 from typing import List
+
 import torch
 from torch.distributed.tensor import DeviceMesh
-from functools import partial
-from torch.distributed.tensor.placement_types import Placement, Shard, Replicate
+from torch.distributed.tensor.placement_types import Placement
+from torch.distributed.tensor.placement_types import Replicate
+from torch.distributed.tensor.placement_types import Shard
 
-from mojo_opset.distributed.parallel.mojo_parallel import MojoRegisterableParallelStyle, MojoDistributedModule
+from mojo_opset.distributed.parallel.mojo_parallel import MojoDistributedModule
+from mojo_opset.distributed.parallel.mojo_parallel import MojoRegisterableParallelStyle
 
 class MojoTensorParallel(MojoRegisterableParallelStyle):
     def __init__(
         self,
         *,
-        input_layouts: Placement,
-        output_layouts: Placement,
+        input_layouts: Placement,  # Requires the user to provide the distributed semantics information of the local tensor to reconstruct the DTensor
+        output_layouts: Placement,  # Requires the user to provide the distributed semantics information of the local tensor to reconstruct the DTensor
         use_local_output: bool = True,
     ):
         super().__init__()
@@ -71,8 +75,8 @@ class MojoRowwiseParallel(MojoTensorParallel):
     def __init__(
         self,
         *,
-        input_layouts: List[Placement] | None = None,
-        output_layouts: List[Placement] | None = None,
+        input_layouts: List[Placement] | None = None,  # Requires the user to provide the distributed semantics information of the local tensor to reconstruct the DTensor
+        output_layouts: List[Placement] | None = None,  # Requires the user to provide the distributed semantics information of the local tensor to reconstruct the DTensor
         use_local_output: bool = True,
     ):
         super().__init__(
@@ -86,12 +90,26 @@ class MojoColwiseParallel(MojoTensorParallel):
     def __init__(
         self,
         *,
-        input_layouts: List[Placement] | None = None,
-        output_layouts: List[Placement] | None = None,
+        input_layouts: List[Placement] | None = None,  # Requires the user to provide the distributed semantics information of the local tensor to reconstruct the DTensor
+        output_layouts: List[Placement] | None = None,  # Requires the user to provide the distributed semantics information of the local tensor to reconstruct the DTensor
         use_local_output: bool = True,
     ):
         super().__init__(
             input_layouts=input_layouts or (Replicate(),),
             output_layouts=output_layouts or (Shard(-1),),
+            use_local_output=use_local_output,
+        )
+
+class MojoAttnHeadParallel(MojoTensorParallel):
+    def __init__(
+        self,
+        *,
+        input_layouts: List[Placement] | None = None,  # Requires the user to provide the distributed semantics information of the local tensor to reconstruct the DTensor
+        output_layouts: List[Placement] | None = None,  # Requires the user to provide the distributed semantics information of the local tensor to reconstruct the DTensor
+        use_local_output: bool = True,
+    ):
+        super().__init__(
+            input_layouts=input_layouts or (Shard(-1),),
+            output_layouts=output_layouts or (Shard(-2),),
             use_local_output=use_local_output,
         )
