@@ -68,6 +68,7 @@ class MojoTensorParallel(MojoRegisterableParallelStyle):
             partial(partition_fn, self.src_data_rank) if partition_fn else None,
             prepare_input_fn,
             prepare_output_fn,
+            parallel_style_name=self.__class__.__name__,
         )
 
 
