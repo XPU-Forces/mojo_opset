@@ -11,6 +11,8 @@ from tests.utils import bypass_not_implemented
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoSdpa
+from mojo_opset import MojoFusionAttention
+from mojo_opset import MojoFusedInferAttentionScore
 from mojo_opset import MojoAttentionDecodeMTP
 
 
@@ -346,3 +348,130 @@ def test_FAMTP_attention(
         kv_head_num,
         window_size
     )
+
+
+
+def generate_infer_data(
+    bsz: int,
+    q_head_num: int,
+    kv_head_num: int,
+    head_dim: int,
+    seq_length: int,
+    dtype: torch.dtype,
+):
+    query = torch.randn(bsz, q_head_num, seq_length * 2, head_dim, dtype=dtype)
+    key = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=dtype)
+    value = torch.randn(bsz, kv_head_num, seq_length * 2, head_dim, dtype=dtype)
+    return query, key, value, q_head_num != kv_head_num
+    
+@pytest.mark.parametrize(
+    "bsz, q_head_num, kv_head_num, head_dim, seq_length",
+    [(1, 4, 4, 128, 2048,)],
+)
+def test_fusion_attention(
+    bsz,
+    q_head_num,
+    kv_head_num,
+    head_dim,
+    seq_length,
+):
+    query, key, value, enable_gqa = generate_infer_data(
+        bsz, q_head_num, kv_head_num, head_dim, seq_length, torch.bfloat16
+    )
+    diffusion_attn_ref = MojoSdpa._registry.get("torch")(
+        scale=1.0 / math.sqrt(query.shape[-1]), 
+        enable_gqa=enable_gqa
+    )
+    diffusion_attn = MojoFusionAttention(
+        head_num=q_head_num,
+        scale=1.0 / math.sqrt(query.shape[-1]), 
+        enable_gqa=enable_gqa
+    )
+    diffusion_attn_ref.forward_diff_with(diffusion_attn, query, key, value)
+
+
+@pytest.mark.parametrize(
+    "bsz, q_head_num, kv_head_num, head_dim, seq_length",
+    [(1, 4, 4, 128, 2048,)],
+)
+def test_fia_attention(
+    bsz,
+    q_head_num,
+    kv_head_num,
+    head_dim,
+    seq_length,
+):
+    query, key, value, enable_gqa = generate_infer_data(
+        bsz, q_head_num, kv_head_num, head_dim, seq_length, torch.float16
+    )
+    # npu_mask, torch_mask = get_atten_mask(query, key)
+    diffusion_attn_ref = MojoSdpa._registry.get("torch")(
+        scale=1.0 / math.sqrt(query.shape[-1]), 
+        enable_gqa=enable_gqa
+    )
+    diffusion_attn = MojoFusedInferAttentionScore(
+        head_num=q_head_num,
+        scale=1.0 / math.sqrt(query.shape[-1]), 
+        enable_gqa=enable_gqa
+    )
+    diffusion_attn_ref.forward_diff_with(diffusion_attn, query, key, value)
+
+
+def generate_fa_mtp_data(
+    bsz: int,
+    q_head_num: int,
+    kv_head_num: int,
+    head_dim: int,
+    seq_length: int,
+    block_size: int,
+    max_kv_seq: int,
+    dtype: torch.dtype,
+):
+    query = torch.randn(bsz, seq_length, q_head_num * head_dim, dtype=dtype)  #BSH
+    key = torch.randn(math.ceil(max_kv_seq / block_size), kv_head_num, seq_length, head_dim, dtype=dtype)    #BNSD
+    value = torch.randn_like(key)  #BNSD
+    kv_block_table = torch.arange(0, math.ceil(max_kv_seq / block_size)).repeat(bsz, 1)
+    return query, key, value, kv_block_table
+    
+@pytest.mark.parametrize(
+    "bsz, q_head_num, kv_head_num, head_dim, window_size, block_size, max_kv_seq, q_seq",
+    [(2, 8, 2, 128, 2048, 128, 1024, 1)],
+)
+def test_FAMTP_attention(
+    bsz,
+    q_head_num,
+    kv_head_num,
+    head_dim,
+    block_size,
+    max_kv_seq,
+    q_seq,
+    window_size,
+):
+    casual_mask = torch.ones(window_size, window_size, dtype=torch.bool)  
+    qkv_len: List[int] = [max_kv_seq] * bsz
+    query, key, value, kv_block_table = generate_fa_mtp_data(
+        bsz, 
+        q_head_num, 
+        kv_head_num, 
+        head_dim, 
+        q_seq, 
+        block_size, 
+        max_kv_seq, 
+        torch.bfloat16
+    )
+    
+    mtp_attn = MojoAttentionDecodeMTP._registry.get("xops")()
+    mtp_attn_ref = MojoAttentionDecodeMTP._registry.get("torch")(head_dim=head_dim, block_size=block_size)
+
+    mtp_attn_ref.forward_diff_with(
+        mtp_attn,
+        query, 
+        casual_mask, 
+        key, 
+        value,
+        qkv_len, 
+        kv_block_table,
+        kv_head_num,
+        window_size
+    )
+

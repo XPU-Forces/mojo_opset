@@ -191,3 +191,10 @@ class MojoMoECombine(MojoOperator):
         super().__init__()
         self.ep_group = ep_group
         self.tp_group = tp_group
+
+class MojoMoeTopkGatingDispatchDynamicQuant(MojoOperator):
+    pass
+
+
+class MojoMoeScaleDynamicQuant(MojoOperator):
+    pass

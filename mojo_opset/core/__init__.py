@@ -28,6 +28,8 @@ from .operators.attention import MojoPrefillGQA
 from .operators.attention import MojoPrefillMLA
 from .operators.attention import MojoPrefillNSA
 from .operators.attention import MojoSdpa
+from .operators.attention import MojoFusionAttention
+from .operators.attention import MojoFusedInferAttentionScore
 from .operators.attention import MojoAttentionDecodeMTP
 
 """ kvcache """
@@ -42,6 +44,9 @@ from .operators.gemm import MojoGemmAllReduce
 from .operators.gemm import MojoGemmReduceScatter
 from .operators.gemm import MojoGroupGemm
 from .operators.linear import MojoLinear
+from .operators.gemm import MojoQuantGroupLinearReduceSum
+from .operators.gemm import MojoQuantGroupGemmCombineEP
+from .operators.gemm import MojoQuantMatmul
 
 """ embedding """
 from .operators.embedding import MojoEmbedding
@@ -120,6 +125,8 @@ __all__ = [
     "MojoPagedDecodeNSA",
     "MojoSdpa",
     "MojoAttentionDecodeMTP",
+    "MojoFusionAttention",
+    "MojoFusedInferAttentionScore",
 
     "MojoStorePagedKVCache",
     "MojoStoreMLAKVCache",
@@ -131,6 +138,9 @@ __all__ = [
     "MojoGemmAll2All",
     "MojoAllGatherGemm",
     "MojoGemmReduceScatter",
+    "MojoQuantGroupLinearReduceSum",
+    "MojoQuantGroupGemmCombineEP",
+    "MojoQuantMatmul",  
 
     "MojoQuant",
     "MojoDequant",
