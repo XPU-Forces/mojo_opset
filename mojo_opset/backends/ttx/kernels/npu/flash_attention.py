@@ -466,8 +466,8 @@ def paged_attention_decode_impl(
 
     o = torch.empty_like(q)
     
-    num_cubes = get_num_cores("cube")
-    grid = (num_cubes, )
+    num_vectors = get_num_cores("vector")
+    grid = (num_vectors, )
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
 
     paged_decode_kernel[grid](
