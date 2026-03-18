@@ -22,6 +22,8 @@ class MojoLayerNorm(MojoOperator):
             **kwargs: The keyword arguments of torch.empty, such as device, dtype and so on to create the weight and bias.
         """
         super().__init__(**kwargs)
+        self.norm_size = norm_size
+        self.elementwise_affine = elementwise_affine
         if elementwise_affine:
             self.weight = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
             self.bias = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
@@ -50,6 +52,9 @@ class MojoLayerNorm(MojoOperator):
             eps=self.variance_epsilon,
         )
 
+    def extra_repr(self) -> str:
+        return f"{self.norm_size=}, {self.variance_epsilon=}, {self.elementwise_affine=}".replace("self.", "")
+
 
 class MojoRMSNorm(MojoOperator):
     def __init__(
@@ -67,6 +72,7 @@ class MojoRMSNorm(MojoOperator):
             **kwargs: The keyword arguments of torch.empty, such as device, dtype and so on to create the weight and bias.
         """
         super().__init__(**kwargs)
+        self.norm_size = norm_size
         self.weight = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
         self.variance_epsilon = eps
 
@@ -88,6 +94,9 @@ class MojoRMSNorm(MojoOperator):
             weight=self.weight,
             eps=self.variance_epsilon,
         )
+
+    def extra_repr(self) -> str:
+        return f"{self.norm_size=}, {self.variance_epsilon=}".replace("self.", "")
 
 
 class MojoNormQuant(MojoOperator):
@@ -120,6 +129,7 @@ class MojoResidualAddRMSNorm(MojoOperator):
         if norm_pos not in ["pre", "post"]:
             raise ValueError("norm_pos should be 'pre' or 'post'")
 
+        self.norm_size = norm_size
         self.variance_epsilon = float(eps)
         self.weight = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
 
@@ -145,6 +155,9 @@ class MojoResidualAddRMSNorm(MojoOperator):
             residual = hidden_state
 
         return hidden_state, residual
+
+    def extra_repr(self) -> str:
+        return f"{self.norm_size=}, {self.variance_epsilon=}, {self.norm_pos=}".replace("self.", "")
 
 
 class MojoResidualAddLayerNorm(MojoOperator):
@@ -173,6 +186,7 @@ class MojoResidualAddLayerNorm(MojoOperator):
         if norm_pos not in ["pre", "post"]:
             raise ValueError("norm_pos should be 'pre' or 'post'")
 
+        self.norm_size = norm_size
         self.variance_epsilon = float(eps)
         self.weight = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
         self.bias = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
@@ -212,6 +226,9 @@ class MojoResidualAddLayerNorm(MojoOperator):
 
         return hidden_state, residual
 
+    def extra_repr(self) -> str:
+        return f"{self.norm_size=}, {self.variance_epsilon=}, {self.norm_pos=}, {self.affine=}".replace("self.", "")
+
 
 class MojoChannelRMSNorm(MojoOperator):
     def __init__(
@@ -235,6 +252,9 @@ class MojoChannelRMSNorm(MojoOperator):
             **kwargs: Additional tensor factory kwargs (device, dtype, etc.).
         """
         super().__init__(**kwargs)
+        self.norm_size = norm_size
+        self.images = images
+        self.has_bias = bias
         b_dims = (1, 1) if images else (1, 1, 1)
         shape = (norm_size, *b_dims) if channel_first else (norm_size,)
         self.scale = norm_size**0.5
@@ -266,6 +286,11 @@ class MojoChannelRMSNorm(MojoOperator):
         if self.bias is not None:
             hidden_state = hidden_state + self.bias
         return hidden_state
+
+    def extra_repr(self) -> str:
+        return f"{self.norm_size=}, {self.channel_first=}, {self.images=}, {self.has_bias=}, {self.scale=}".replace(
+            "self.", ""
+        )
 
 
 class MojoResidualAddNormQuant(MojoOperator):

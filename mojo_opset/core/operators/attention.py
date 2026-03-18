@@ -135,6 +135,9 @@ class MojoPagedDecodeGQA(MojoOperator):
             outputs[i] = torch.einsum("hk,khd->hd", attn_probs, v_ref)
         return outputs
 
+    def extra_repr(self) -> str:
+        return f"{self.is_causal=}, {self.gqa_layout=}, {self.window_size=}".replace("self.", "")
+
 
 class MojoPrefillGQA(MojoOperator):
     pass
@@ -275,6 +278,9 @@ class MojoPagedPrefillGQA(MojoOperator):
             outputs[start_loc:end_loc] = torch.einsum("thk,khd->thd", attn_probs, v_expanded)
         return outputs
 
+    def extra_repr(self) -> str:
+        return f"{self.is_causal=}, {self.gqa_layout=}, {self.window_size=}".replace("self.", "")
+
 
 class MojoDecodeMLA(MojoOperator):
     pass
@@ -354,3 +360,6 @@ class MojoSdpa(MojoOperator):
         )
 
         return output
+
+    def extra_repr(self) -> str:
+        return f"{self.scale=}, {self.enable_gqa=}".replace("self.", "")

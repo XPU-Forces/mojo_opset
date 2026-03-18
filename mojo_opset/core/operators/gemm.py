@@ -59,6 +59,14 @@ class MojoGroupGemm(MojoOperator):
 
         return torch.cat(out_list, dim=0)
 
+    def extra_repr(self) -> str:
+        weight_shape = tuple(self.weight.shape) if isinstance(self.weight, torch.Tensor) else None
+        weight_dtype = self.weight.dtype if isinstance(self.weight, torch.Tensor) else None
+        weight_device = self.weight.device if isinstance(self.weight, torch.Tensor) else None
+        return (
+            f"{weight_shape=}, {weight_dtype=}, {weight_device=}".replace("self.", "")
+        )
+
 
 class MojoGemmAllReduce(MojoOperator):
     pass

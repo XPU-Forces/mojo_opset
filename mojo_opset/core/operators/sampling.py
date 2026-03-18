@@ -80,6 +80,11 @@ class MojoTopPSampling(MojoOperator):
 
         return next_probs, next_tokens
 
+    def extra_repr(self) -> str:
+        return f"{self.top_p=}, {self.filter_value=}, {self.min_tokens_to_keep=}, {self.rand_top_k=}".replace(
+            "self.", ""
+        )
+
 
 class MojoTopPFilter(MojoOperator):
     def __init__(
@@ -140,6 +145,9 @@ class MojoTopPFilter(MojoOperator):
         final_probs_dist = torch.nn.functional.softmax(filtered_logits, dim=-1).to(dtype)
 
         return final_probs_dist, sorted_topk_indices
+
+    def extra_repr(self) -> str:
+        return f"{self.filter_value=}".replace("self.", "")
 
 
 class MojoRejectSampling(MojoOperator):

@@ -35,3 +35,8 @@ class MojoSwiGLUMLP(MojoOperator):
 
         return out
 
+    def extra_repr(self) -> str:
+        input_size = self.fc1.in_features
+        hidden_size = self.fc2.in_features
+        output_size = self.fc2.out_features
+        return f"{input_size=}, {output_size=}, {hidden_size=}"
