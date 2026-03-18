@@ -800,6 +800,9 @@ def swa_ttx_forward(
     softmax_lse = torch.zeros((num_q_heads, tot_q_toks), dtype=torch.float32, device=q.device) + float("-inf")
     bsz = cu_seqlens_q.shape[0] - 1
 
+    if sm_scale is None:
+        sm_scale = 1.0 / (head_dim**0.5)
+
     if output_f32:
         o_f32 = torch.zeros_like(q, dtype=torch.float32)
         of32_stride_t, of32_stride_h, of32_stride_d = o_f32.stride(0), o_f32.stride(1), o_f32.stride(2)
