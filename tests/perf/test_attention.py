@@ -55,6 +55,7 @@ def generate_paged_decode_data(
 
 test_configs_decode = [
     (8, 16, 4, 128, 1024, 32, torch.bfloat16, "M_BF16"),
+    (8, 16, 4, 96, 1024, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (8, 8, 1, 128, 8192, 128, torch.bfloat16, "M_BF16_LONG"),
 ]
 
@@ -179,6 +180,7 @@ def generate_paged_prefill_data(
 
 test_configs = [
     (2, 16, 4, 128, 1024, 0, 32, torch.bfloat16, "M_BF16"),
+    (2, 16, 4, 96, 1024, 0, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (2, 8, 1, 128, 4096, 8192, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
 ]
 

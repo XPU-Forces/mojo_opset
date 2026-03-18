@@ -1,15 +1,15 @@
 import functools
 import math
+from typing import Optional
 
 import pytest
 import torch
 
-from tests.utils import auto_switch_platform
-from tests.utils import bypass_not_implemented
-
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoSdpa
+from tests.utils import auto_switch_platform
+from tests.utils import bypass_not_implemented
 
 
 def generate_paged_decode_data(
@@ -56,30 +56,40 @@ def generate_paged_decode_data(
 
 test_configs_decode = [
     (8, 16, 4, 128, 1024, 32, torch.bfloat16, "M_BF16"),
+    (8, 16, 4, 96, 1024, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (8, 8, 1, 128, 8192, 128, torch.bfloat16, "M_BF16_LONG"),
 ]
 
 
 @pytest.mark.parametrize(
-    "B, Q_H, KV_H, D, S_LEN, BLK_S, dtype",
+    "query, k_cache, v_cache, seqlens, block_tables",
     [
-        (8, 16, 4, 128, 1024, 32, torch.bfloat16),
-        (8, 8, 1, 128, 8192, 128, torch.bfloat16),
+        pytest.param(
+            *generate_paged_decode_data(
+                batch_size=B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_seq_len=S_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            id=ID,
+        )
+        for B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, ID in test_configs_decode
     ],
 )
 @pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
+@auto_switch_platform()
 @bypass_not_implemented
-def test_paged_decode_gqa(B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, gqa_layout):
-    query, k_cache, v_cache, seqlens, block_tables = generate_paged_decode_data(
-        batch_size=B,
-        num_q_heads=Q_H,
-        num_kv_heads=KV_H,
-        head_dim=D,
-        max_seq_len=S_LEN,
-        block_size=BLK_S,
-        dtype=dtype,
-    )
-
+def test_paged_decode_gqa(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    seqlens: torch.Tensor,
+    block_tables: torch.Tensor,
+    gqa_layout: str,
+):
     head_dim = query.shape[-1]
     sm_scale = 1.0 / math.sqrt(head_dim)
 
@@ -92,8 +102,8 @@ def test_paged_decode_gqa(B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, gqa_layout):
         gqa_layout=gqa_layout,
     )
 
-    atol = 2e-2 if dtype != torch.float32 else 1e-5
-    rtol = 2e-2 if dtype != torch.float32 else 1e-6
+    atol = 2e-2 if query.dtype != torch.float32 else 1e-5
+    rtol = 2e-2 if query.dtype != torch.float32 else 1e-6
 
     paged_decode_attn.forward_diff_with(
         paged_decode_attn_ref,
@@ -174,31 +184,50 @@ def generate_paged_prefill_data(
             k_cache[physical_block_id, :, :tokens_in_block, :] = k_slice
             v_cache[physical_block_id, :, :tokens_in_block, :] = v_slice
 
-    return query, k_cache, v_cache, cu_seqlens_q, block_tables, kv_lens
+    return query, k_cache, v_cache, cu_seqlens_q, block_tables, None if kv_cache_lens is None else kv_lens
+
+
+test_configs = [
+    (2, 16, 4, 128, 1024, 0, 32, torch.bfloat16, "M_BF16"),
+    (2, 16, 4, 96, 1024, 0, 128, torch.bfloat16, "M_BF16_PADDIM"),
+    (2, 8, 1, 128, 4096, 8192, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
+]
+
 
 @pytest.mark.parametrize(
-    "B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype",
+    "query, k_cache, v_cache, cu_seqlens_q, block_tables, seqlens_kv",
     [
-        (2, 16, 4, 128, 1024, 0, 32, torch.bfloat16),
-        (2, 8, 1, 128, 4096, 8192, 128, torch.bfloat16),
+        pytest.param(
+            *generate_paged_prefill_data(
+                batch_size=B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_q_len=Q_LEN,
+                max_kv_computed_len=KV_COMPUTED_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            id=ID,
+        )
+        for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs
     ],
 )
 @pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
+@auto_switch_platform()
 @bypass_not_implemented
-def test_paged_prefill_gqa(B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, gqa_layout):
-    query, k_cache, v_cache, cu_seqlens_q, block_tables, seqlens_kv = generate_paged_prefill_data(
-        batch_size=B,
-        num_q_heads=Q_H,
-        num_kv_heads=KV_H,
-        head_dim=D,
-        max_q_len=Q_LEN,
-        max_kv_computed_len=KV_COMPUTED_LEN,
-        block_size=BLK_S,
-        dtype=dtype,
-    )
+def test_paged_prefill_gqa(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    block_tables: torch.Tensor,
+    gqa_layout: str,
+    seqlens_kv: Optional[torch.Tensor],
+):
     paged_prefill_attn = MojoPagedPrefillGQA(
         is_causal=True,
-        gqa_layout=gqa_layout,
+        gqa_layout=gqa_layout
     )
 
     paged_prefill_attn_ref = MojoPagedPrefillGQA._registry.get("torch")(
@@ -218,8 +247,8 @@ def test_paged_prefill_gqa(B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype
         block_tables,
         softmax_scale=sm_scale,
         seqlens_kv=seqlens_kv,
-        atol=2e-2 if dtype != torch.float32 else 1e-5,
-        rtol=2e-2 if dtype != torch.float32 else 1e-6,
+        atol=2e-2 if query.dtype != torch.float32 else 1e-5,
+        rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
     )
 
 
