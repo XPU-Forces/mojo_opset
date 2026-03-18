@@ -157,12 +157,14 @@ class MojoDistributedModule(torch.nn.Module):
         partition_fn: Callable[[str, torch.nn.Module, DeviceMesh], None] | None = None,
         prepare_input_fn: Callable[[torch.nn.Module, Any, DeviceMesh], Any] | None = None,
         prepare_output_fn: Callable[[torch.nn.Module, Any, DeviceMesh], Any] | None = None,
+        parallel_style_name: str | None = None,
     ):
         super().__init__()
         self._mod = mod
         self._device_mesh = device_mesh
         self._prepare_input_fn = prepare_input_fn
         self._prepare_output_fn = prepare_output_fn
+        self._parallel_style_name = parallel_style_name
         if partition_fn is not None:
             for name, submod in self._mod.named_modules():
                 partition_fn(name, submod, self._device_mesh)
@@ -183,6 +185,9 @@ class MojoDistributedModule(torch.nn.Module):
             output = self._prepare_output_fn(self._device_mesh, output)
         return output
 
+    def extra_repr(self):
+        if self._parallel_style_name:
+            return f"parallel_style_name={self._parallel_style_name}"
 
 # NOTE(liuyuan): MojoDistributedModule is a wrapper around nn.Module without using forward_hook that
 # MojoRegisterableParallelStyle can apply to but cannot modify the original module in-place.
