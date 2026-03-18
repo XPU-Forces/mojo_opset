@@ -6,7 +6,9 @@ from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 from mojo_opset.backends.ttx.kernels.utils import prepare_lens
 
 
-def prepare_kv_chunk_indices(cu_seqlens: torch.Tensor, kv_lens: torch.Tensor, chunk_size: int) -> torch.Tensor:
+def prepare_kv_chunk_indices(
+    cu_seqlens: torch.Tensor, kv_lens: torch.Tensor, chunk_size: int, is_decode: bool = False
+) -> torch.Tensor:
     """
     Generates metadata for each chunk to support arbitrary KV start positions.
 
@@ -16,6 +18,14 @@ def prepare_kv_chunk_indices(cu_seqlens: torch.Tensor, kv_lens: torch.Tensor, ch
         1: token_offset_in_seq (Offset of this chunk in the current K/V sequence)
         2: logical_kv_start_index (Logical KV position = kv_lens[batch] + token_offset)
     """
+    if is_decode:
+        batch_size = kv_lens.shape[0]
+        seq_ids = torch.arange(batch_size, device=cu_seqlens.device, dtype=torch.int32)
+        token_offset_in_qkv = torch.zeros(batch_size, device=cu_seqlens.device, dtype=torch.int32)
+        logical_kv_start = kv_lens.to(torch.int32)
+        indices = torch.stack([seq_ids, token_offset_in_qkv, logical_kv_start], dim=1)
+        return indices
+
     seqlens = prepare_lens(cu_seqlens)
 
     chunks_per_seq = triton.cdiv(seqlens, chunk_size)
@@ -161,6 +171,7 @@ def store_paged_kv_impl(
 ):
     assert k_states.is_contiguous() and v_states.is_contiguous()
 
+    is_decode = cu_seqlens is None
     if cu_seqlens is None:
         cu_seqlens = torch.arange(k_states.shape[0] + 1, device=k_states.device)
 
@@ -169,7 +180,7 @@ def store_paged_kv_impl(
 
     block_size = key_cache.shape[2]
 
-    chunk_indices = prepare_kv_chunk_indices(cu_seqlens, kv_lens, block_size)
+    chunk_indices = prepare_kv_chunk_indices(cu_seqlens, kv_lens, block_size, is_decode=is_decode)
     total_chunks = chunk_indices.shape[0]
 
     num_programs = get_num_cores("vector")

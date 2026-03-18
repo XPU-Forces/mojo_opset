@@ -16,6 +16,48 @@ class MojoSession:
     def kv_cache(self): ...
 
 
+class NPUGraphRunner:
+    def __init__(self, model):
+        self.model = model
+        self.graph = None
+        self.static_input_ids = None
+        self.static_logits = None
+        self.session = None
+
+    def capture(self, input_ids, session):
+        import torch_npu
+
+        self.static_input_ids = input_ids.clone()
+        self.session = session
+
+        if hasattr(self.session, "backup_state"):
+            self.session.backup_state()
+
+        with torch.inference_mode():
+            # Warmup
+            s = torch_npu.npu.Stream()
+            s.wait_stream(torch_npu.npu.current_stream())
+            with torch_npu.npu.stream(s):
+                self.static_logits, _ = self.model(self.static_input_ids, session=self.session)
+            torch_npu.npu.current_stream().wait_stream(s)
+
+            if hasattr(self.session, "restore_state"):
+                self.session.restore_state()
+
+            # Capture
+            self.graph = torch_npu.npu.NPUGraph()
+            with torch_npu.npu.graph(self.graph):
+                self.static_logits, _ = self.model(self.static_input_ids, session=self.session)
+
+            if hasattr(self.session, "restore_state"):
+                self.session.restore_state()
+
+    def replay(self, input_ids, session):
+        self.static_input_ids.copy_(input_ids)
+        self.graph.replay()
+        return self.static_logits, session
+
+
 class MojoSampler(torch.nn.Module):
     @abstractmethod
     def forward(self, logits, session: MojoSession = None): ...
@@ -99,6 +141,7 @@ class MojoGenerator(torch.nn.Module):
         enable_typewriter=False,
         typewriter_buffer=4,
         hooks: list[GeneratorHook] | None = None,
+        use_npu_graph=False,
     ):
         super().__init__()
         self.model = model.to(device)
@@ -109,6 +152,10 @@ class MojoGenerator(torch.nn.Module):
         self._enable_typewriter = enable_typewriter
         self._typewriter_buffer = typewriter_buffer
         self._hooks = hooks or []
+        self.use_npu_graph = use_npu_graph
+        if hasattr(model, "config") and hasattr(model.config, "runtime_config"):
+            if getattr(model.config.runtime_config, "use_npu_graph", False):
+                self.use_npu_graph = True
         if self._enable_typewriter:
             from multiprocessing import Pipe
             from multiprocessing import Process
@@ -182,6 +229,9 @@ class MojoGenerator(torch.nn.Module):
                 context_input_len=context_input_len,
             )
 
+            if hasattr(session, "pre_allocate"):
+                session.pre_allocate(self.max_new_tokens)
+
         self._run_hooks("after_prefill", logits=logits, session=session)
 
         next_token_id = self.sampler(logits, session)
@@ -195,17 +245,30 @@ class MojoGenerator(torch.nn.Module):
 
         self._run_hooks("before_decode")
 
+        graph_runner = None
+        if self.use_npu_graph:
+            graph_runner = NPUGraphRunner(self.model)
+            graph_runner.capture(input_ids, session)
+
         for step in range(1, self.max_new_tokens):
             with torch.inference_mode():
-                logits, session = self.model(
-                    input_ids,
-                    session=session,
-                )
+                if graph_runner is not None:
+                    logits, session = graph_runner.replay(input_ids, session)
+                else:
+                    logits, session = self.model(
+                        input_ids,
+                        session=session,
+                    )
 
             next_token_id = self.sampler(logits, session)
             decode_steps += 1
 
-            self._run_hooks("after_decode_step", step=step, logits=logits, next_token_id=next_token_id)
+            self._run_hooks(
+                "after_decode_step",
+                step=step,
+                logits=logits,
+                next_token_id=next_token_id,
+            )
 
             should_end = should_end | (next_token_id == self.tokenizer.eos_token_id)
             if all(should_end):
