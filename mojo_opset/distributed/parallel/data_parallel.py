@@ -105,4 +105,5 @@ class MojoDataParallel(MojoRegisterableParallelStyle):
             None,
             self.prepare_input_fn,
             self.prepare_output_fn,
+            parallel_style_name=self.__class__.__name__,
         )
