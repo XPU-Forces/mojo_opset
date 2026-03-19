@@ -15,8 +15,8 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        AUX_MASK_SIZE = 1024
-        self.aux_mask = torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE * 3, dtype=torch.bool).tril(AUX_MASK_SIZE).npu()
+        self.AUX_MASK_SIZE = 1024
+        self.aux_mask = None
 
     def forward(
         self,
@@ -36,6 +36,9 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
             f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
         assert mask is None, f"[TTXPagedPrefillGQA] TTX does not support mask, but got mask={mask}"
+        if self.aux_mask is None:
+            self.aux_mask = torch.ones(self.AUX_MASK_SIZE, self.AUX_MASK_SIZE * 3, dtype=torch.bool).tril(self.AUX_MASK_SIZE).npu()
+
         output = paged_attention_prefill(
             q=query,
             key_cache=key_cache,
