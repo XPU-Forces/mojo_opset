@@ -449,7 +449,6 @@ def paged_flash_decode_partial_kernel(
     k_cache_ptr,
     v_cache_ptr,
     partial_o_ptr,
-    partial_m_ptr,
     partial_l_ptr,
     seqlens_ptr,
     block_tables_ptr,
@@ -470,8 +469,6 @@ def paged_flash_decode_partial_kernel(
     stride_po_head,
     stride_po_block,
     stride_po_dim,
-    stride_pm_head,
-    stride_pm_block,
     stride_pl_head,
     stride_pl_block,
     stride_bt_batch,
@@ -550,22 +547,22 @@ def paged_flash_decode_partial_kernel(
 
 
             acc = tl.sum((p_cast[:, None] * v).to(tl.float32), axis=0)
-            l_ij = tl.sum(p, axis=0)
+            s_ij = tl.sum(p, axis=0)
+            acc = acc / s_ij
 
-            pm_ptr = partial_m_ptr + q_head_id * stride_pm_head + physical_block_id * stride_pm_block
-            tl.store(pm_ptr, m_ij)
+            l_ij = m_ij + tl.math.log(s_ij)
 
-            pl_ptr = partial_l_ptr + q_head_id * stride_pl_head + physical_block_id * stride_pl_block
-            tl.store(pl_ptr, l_ij)
 
             po_ptrs = partial_o_ptr + q_head_id * stride_po_head + physical_block_id * stride_po_block + offs_d * stride_po_dim
             tl.store(po_ptrs, acc, mask=offs_d < HEAD_DIM)
+
+            pl_ptr = partial_l_ptr + q_head_id * stride_pl_head + physical_block_id * stride_pl_block
+            tl.store(pl_ptr, l_ij)
             
 @triton.jit
 def paged_flash_decode_reduce_kernel(
     o_ptr,
     partial_o_ptr,
-    partial_m_ptr,
     partial_l_ptr,
     seqlens_ptr,
     block_tables_ptr,
@@ -578,8 +575,6 @@ def paged_flash_decode_reduce_kernel(
     stride_po_head,
     stride_po_block,
     stride_po_dim,
-    stride_pm_head,
-    stride_pm_block,
     stride_pl_head,
     stride_pl_block,
     stride_bt_batch,
@@ -605,20 +600,17 @@ def paged_flash_decode_reduce_kernel(
         acc = tl.zeros((BLOCK_SIZE_D,), dtype=tl.float32)
         for logical_block_idx in range(num_logical_blocks):
             physical_block_id = tl.load(block_tables_ptr + b_id * stride_bt_batch + logical_block_idx * stride_bt_block)
-            pm_ptr = partial_m_ptr + q_head_id * stride_pm_head + physical_block_id * stride_pm_block
-            m_j = tl.load(pm_ptr)
-            m_ij = tl.maximum(m_i, m_j)
-
-            alpha = tl.math.exp(m_i - m_ij)
-            beta = tl.math.exp(m_j - m_ij)
 
             pl_ptr = partial_l_ptr + q_head_id * stride_pl_head + physical_block_id * stride_pl_block
             l_ij = tl.load(pl_ptr)
 
-            l_i = l_i * alpha + l_ij * beta
-
             po_ptrs = partial_o_ptr + q_head_id * stride_po_head + physical_block_id * stride_po_block + offs_d * stride_po_dim
             partial_o = tl.load(po_ptrs, offs_d < HEAD_DIM, other = 0.0)
+
+            m_ij = tl.maximum(m_i, l_ij)
+            alpha = tl.math.exp(m_i - m_ij)
+            beta = tl.math.exp(l_ij - m_ij)
+            l_i = l_i * alpha + beta
 
             acc = acc * alpha + partial_o * beta
             m_i = m_ij
@@ -649,13 +641,18 @@ def paged_attention_decode_impl(
         sm_scale = 1.0 / math.sqrt(head_dim)
 
 
+    o = torch.empty_like(q)
+
     num_vectors = get_num_cores("vector")
     grid = (num_vectors, )
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     
-    if not use_flash_decode:
+    split_kv = False
+    # MAGIC number, need bench to find the best split-kv threshold
+    if use_flash_decode and batch_size * num_q_heads < num_vectors * 2:
+        split_kv = True
+    if not split_kv:
 
-        o = torch.empty_like(q)
 
         paged_decode_kernel[grid](
             q,
@@ -697,7 +694,6 @@ def paged_attention_decode_impl(
     else:
 
         partial_o = torch.empty(num_q_heads, num_total_blocks, head_dim, device=q.device, dtype=torch.float32)
-        partial_m = torch.empty(num_q_heads, num_total_blocks, device=q.device, dtype=torch.float32)
         partial_l = torch.empty(num_q_heads, num_total_blocks, device=q.device, dtype=torch.float32)
 
         paged_flash_decode_partial_kernel[grid](
@@ -705,7 +701,6 @@ def paged_attention_decode_impl(
             key_cache,
             value_cache,
             partial_o,
-            partial_m,
             partial_l,
             seqlens,
             block_tables,
@@ -726,8 +721,6 @@ def paged_attention_decode_impl(
             partial_o.stride(0),
             partial_o.stride(1),
             partial_o.stride(2),
-            partial_m.stride(0),
-            partial_m.stride(1),
             partial_l.stride(0),
             partial_l.stride(1),
             block_tables.stride(0),
@@ -742,11 +735,9 @@ def paged_attention_decode_impl(
             BLOCK_SIZE_N=block_size,
         )
 
-        o = torch.empty_like(q)
         paged_flash_decode_reduce_kernel[grid](
             o,
             partial_o,
-            partial_m,
             partial_l,
             seqlens,
             block_tables,
@@ -759,8 +750,6 @@ def paged_attention_decode_impl(
             partial_o.stride(0),
             partial_o.stride(1),
             partial_o.stride(2),
-            partial_m.stride(0),
-            partial_m.stride(1),
             partial_l.stride(0),
             partial_l.stride(1),
             block_tables.stride(0),
