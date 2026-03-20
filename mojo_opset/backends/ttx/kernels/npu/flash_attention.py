@@ -467,10 +467,12 @@ def paged_flash_decode_partial_kernel(
     stride_v_blksz,
     stride_v_dim,
     stride_po_head,
-    stride_po_block,
+    stride_po_batch,
+    stride_po_split,
     stride_po_dim,
     stride_pl_head,
-    stride_pl_block,
+    stride_pl_batch,
+    stride_pl_split,
     stride_bt_batch,
     stride_bt_block,
     sm_scale,
@@ -481,22 +483,24 @@ def paged_flash_decode_partial_kernel(
     PAGE_SIZE: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
+    NUM_BLOCKS_PER_SPLIT: tl.constexpr,
 ):
     tl.static_assert(HEAD_DIM <= BLOCK_SIZE_D, "HEAD_DIM should be less than BLOCK_SIZE_D")
+    tl.static_assert(PAGE_SIZE == BLOCK_SIZE_N, "PAGE_SIZE should be equal to BLOCK_SIZE_N")
     pid = tl.program_id(0)
     n_progs = tl.num_programs(0)
 
-    cu_logical_blocks = 0
+    cu_num_splits = 0
     for b_id in range(BATCH_SIZE):
         kv_seq_len = tl.load(seqlens_ptr + b_id)
         num_logical_blocks = tl.cdiv(kv_seq_len, PAGE_SIZE)
-        tl.static_assert(PAGE_SIZE == BLOCK_SIZE_N, "PAGE_SIZE should be equal to BLOCK_SIZE_N")
-        num_tasks = NUM_Q_HEADS * num_logical_blocks
-        prev_logical_blocks = cu_logical_blocks
-        cu_logical_blocks += num_logical_blocks
-        for q_task_id in range((pid + prev_logical_blocks * NUM_Q_HEADS) % n_progs, num_tasks, n_progs):
+        num_splits = tl.cdiv(num_logical_blocks, NUM_BLOCKS_PER_SPLIT)
+        num_tasks = NUM_Q_HEADS * num_splits
+        prev_num_splits = cu_num_splits
+        cu_num_splits += num_splits
+        for q_task_id in range((pid + prev_num_splits * NUM_Q_HEADS) % n_progs, num_tasks, n_progs):
             q_head_id = q_task_id % NUM_Q_HEADS
-            logical_block_idx = q_task_id // NUM_Q_HEADS
+            split_id = q_task_id // NUM_Q_HEADS
             if GQA_INTERLEAVE:
                 kv_head_id = q_head_id % NUM_KV_HEADS
             else:
@@ -504,60 +508,85 @@ def paged_flash_decode_partial_kernel(
 
             offs_d = tl.arange(0, BLOCK_SIZE_D)
             q_ptrs = q_ptr + b_id * stride_qb + q_head_id * stride_qh + offs_d * stride_qd
-            q = tl.load(q_ptrs, mask = offs_d < HEAD_DIM, other = 0.0)
-            
-            physical_block_id = tl.load(block_tables_ptr + b_id * stride_bt_batch + logical_block_idx * stride_bt_block)
-            
-            kv_block_start_in_seq = logical_block_idx * PAGE_SIZE
-            kv_block_end_in_seq = min(kv_block_start_in_seq + PAGE_SIZE, kv_seq_len)
-            kv_block_len = kv_block_end_in_seq - kv_block_start_in_seq
-            k_block_ptr = tl.make_block_ptr(
-                base=k_cache_ptr + physical_block_id * stride_k_block + kv_head_id * stride_k_head,
-                shape=(kv_block_len, HEAD_DIM),
-                strides=(stride_k_blksz, stride_k_dim),
-                offsets=(0, 0),
-                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
-                order=(1, 0),
+            q = tl.load(q_ptrs, mask=offs_d < HEAD_DIM, other=0.0)
+
+            m_i = -float("inf")
+            l_i = 0.0
+            acc = tl.zeros((BLOCK_SIZE_D,), dtype=tl.float32)
+
+            block_start = split_id * NUM_BLOCKS_PER_SPLIT
+            block_end = min(block_start + NUM_BLOCKS_PER_SPLIT, num_logical_blocks)
+
+            for logical_block_idx in range(block_start, block_end):
+                physical_block_id = tl.load(
+                    block_tables_ptr + b_id * stride_bt_batch + logical_block_idx * stride_bt_block
+                )
+
+                kv_block_start_in_seq = logical_block_idx * PAGE_SIZE
+                kv_block_end_in_seq = min(kv_block_start_in_seq + PAGE_SIZE, kv_seq_len)
+                kv_block_len = kv_block_end_in_seq - kv_block_start_in_seq
+
+                k_block_ptr = tl.make_block_ptr(
+                    base=k_cache_ptr + physical_block_id * stride_k_block + kv_head_id * stride_k_head,
+                    shape=(kv_block_len, HEAD_DIM),
+                    strides=(stride_k_blksz, stride_k_dim),
+                    offsets=(0, 0),
+                    block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                    order=(1, 0),
+                )
+                v_block_ptr = tl.make_block_ptr(
+                    base=v_cache_ptr + physical_block_id * stride_v_block + kv_head_id * stride_v_head,
+                    shape=(kv_block_len, HEAD_DIM),
+                    strides=(stride_v_blksz, stride_v_dim),
+                    offsets=(0, 0),
+                    block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                    order=(1, 0),
+                )
+
+                mask = tl.arange(0, BLOCK_SIZE_N) < kv_block_len
+
+                k = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option="zero")
+
+                qk = tl.sum((q[None, :] * k).to(tl.float32), axis=1)
+                qk *= sm_scale
+                qk = tl.where(mask, qk, float("-inf"))
+
+                m_j = tl.max(qk, axis=0)
+                m_ij = tl.maximum(m_i, m_j)
+                qk = qk - m_ij
+
+                p = tl.math.exp(qk)
+                p_cast = p.to(k.dtype)
+
+                v = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero")
+
+                l_ij = tl.sum(p, axis=0)
+                alpha = tl.math.exp(m_i - m_ij)
+                l_i = l_i * alpha + l_ij
+                acc = acc * alpha + tl.sum((p_cast[:, None] * v).to(tl.float32), axis=0)
+
+                m_i = m_ij
+
+            # log-sum-exp for this split, used by the reduce kernel
+            lse_ij = m_i + tl.math.log(l_i)
+            acc = acc / l_i
+
+            po_ptrs = (
+                partial_o_ptr
+                + q_head_id * stride_po_head
+                + b_id * stride_po_batch
+                + split_id * stride_po_split
+                + offs_d * stride_po_dim
             )
-            v_block_ptr = tl.make_block_ptr(
-                base=v_cache_ptr + physical_block_id * stride_v_block + kv_head_id * stride_v_head,
-                shape=(kv_block_len, HEAD_DIM),
-                strides=(stride_v_blksz, stride_v_dim),
-                offsets=(0, 0),
-                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
-                order=(1, 0),
-            )
-
-            mask = tl.arange(0, BLOCK_SIZE_N) < kv_block_len
-
-            k = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option="zero")
-
-            qk = tl.sum((q[None, :] * k).to(tl.float32), axis=1)
-            qk *= sm_scale
-            qk = tl.where(mask, qk, float("-inf"))
-
-            m_ij = tl.max(qk, axis=0)
-            qk = qk - m_ij
-
-            p = tl.math.exp(qk)
-
-            p_cast = p.to(k.dtype)
-            
-            v = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero")
-
-
-            acc = tl.sum((p_cast[:, None] * v).to(tl.float32), axis=0)
-            s_ij = tl.sum(p, axis=0)
-            acc = acc / s_ij
-
-            l_ij = m_ij + tl.math.log(s_ij)
-
-
-            po_ptrs = partial_o_ptr + q_head_id * stride_po_head + physical_block_id * stride_po_block + offs_d * stride_po_dim
             tl.store(po_ptrs, acc, mask=offs_d < HEAD_DIM)
 
-            pl_ptr = partial_l_ptr + q_head_id * stride_pl_head + physical_block_id * stride_pl_block
-            tl.store(pl_ptr, l_ij)
+            pl_ptr = (
+                partial_l_ptr
+                + q_head_id * stride_pl_head
+                + b_id * stride_pl_batch
+                + split_id * stride_pl_split
+            )
+            tl.store(pl_ptr, lse_ij)
             
 @triton.jit
 def paged_flash_decode_reduce_kernel(
@@ -565,27 +594,27 @@ def paged_flash_decode_reduce_kernel(
     partial_o_ptr,
     partial_l_ptr,
     seqlens_ptr,
-    block_tables_ptr,
     BATCH_SIZE,
-    NUM_TOTAL_BLOCKS,
-    MAX_NUM_BLOCKS_PER_SEQ,
-    stride_qb,
-    stride_qh,
-    stride_qd,
+    stride_ob,
+    stride_oh,
+    stride_od,
     stride_po_head,
-    stride_po_block,
+    stride_po_batch,
+    stride_po_split,
     stride_po_dim,
     stride_pl_head,
-    stride_pl_block,
-    stride_bt_batch,
-    stride_bt_block,
+    stride_pl_batch,
+    stride_pl_split,
     NUM_Q_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
+    NUM_BLOCKS_PER_SPLIT: tl.constexpr,
+    RBLOCK_SIZE_S: tl.constexpr,
 ):
     tl.static_assert(HEAD_DIM <= BLOCK_SIZE_D, "HEAD_DIM should be less than BLOCK_SIZE_D")
     offs_d = tl.arange(0, BLOCK_SIZE_D)
+    offs_s = tl.arange(0, RBLOCK_SIZE_S)
     pid = tl.program_id(0)
     n_progs = tl.num_programs(0)
 
@@ -595,30 +624,50 @@ def paged_flash_decode_reduce_kernel(
         b_id = q_task_id // NUM_Q_HEADS
         kv_seq_len = tl.load(seqlens_ptr + b_id)
         num_logical_blocks = tl.cdiv(kv_seq_len, PAGE_SIZE)
+        num_splits = tl.cdiv(num_logical_blocks, NUM_BLOCKS_PER_SPLIT)
         m_i = float("-inf")
         l_i = 0.0
         acc = tl.zeros((BLOCK_SIZE_D,), dtype=tl.float32)
-        for logical_block_idx in range(num_logical_blocks):
-            physical_block_id = tl.load(block_tables_ptr + b_id * stride_bt_batch + logical_block_idx * stride_bt_block)
 
-            pl_ptr = partial_l_ptr + q_head_id * stride_pl_head + physical_block_id * stride_pl_block
-            l_ij = tl.load(pl_ptr)
+        po_base = partial_o_ptr + q_head_id * stride_po_head + b_id * stride_po_batch
+        pl_base = partial_l_ptr + q_head_id * stride_pl_head + b_id * stride_pl_batch
 
-            po_ptrs = partial_o_ptr + q_head_id * stride_po_head + physical_block_id * stride_po_block + offs_d * stride_po_dim
-            partial_o = tl.load(po_ptrs, offs_d < HEAD_DIM, other = 0.0)
+        for block_start in range(0, num_splits, RBLOCK_SIZE_S):
+            cur_offs_s = block_start + offs_s                          # [RBLOCK_SIZE_S]
+            valid_s = cur_offs_s < num_splits                          # [RBLOCK_SIZE_S]
 
-            m_ij = tl.maximum(m_i, l_ij)
+            # Load RBLOCK_SIZE_S LSE values at once: [RBLOCK_SIZE_S]
+            pl_ptrs = pl_base + cur_offs_s * stride_pl_split
+            lse_block = tl.load(pl_ptrs, mask=valid_s, other=float("-inf"))
+
+            # Load RBLOCK_SIZE_S partial outputs at once: [RBLOCK_SIZE_S, BLOCK_SIZE_D]
+            po_block_ptr = tl.make_block_ptr(
+                base=po_base,
+                shape=(num_splits, HEAD_DIM),
+                strides=(stride_po_split, stride_po_dim),
+                offsets=(block_start, 0),
+                block_shape=(RBLOCK_SIZE_S, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            po_block = tl.load(po_block_ptr, boundary_check=(0, 1), padding_option="zero")
+
+            # Reduce within this block
+            m_block = tl.max(lse_block, axis=0)                        # scalar
+            m_ij = tl.maximum(m_i, m_block)
+
+            # exp(-inf - m_ij) = 0, so invalid splits contribute nothing
+            beta = tl.math.exp(lse_block - m_ij)                       # [RBLOCK_SIZE_S]
             alpha = tl.math.exp(m_i - m_ij)
-            beta = tl.math.exp(l_ij - m_ij)
-            l_i = l_i * alpha + beta
 
-            acc = acc * alpha + partial_o * beta
+            l_i = l_i * alpha + tl.sum(beta, axis=0)
+            # [1, RBLOCK_SIZE_S] x [RBLOCK_SIZE_S, BLOCK_SIZE_D] -> [1, BLOCK_SIZE_D]
+            acc = acc * alpha + tl.sum(po_block * beta[:, None], axis=0)
             m_i = m_ij
 
         acc = acc / l_i
 
-        o_ptrs = o_ptr + b_id * stride_qb + q_head_id * stride_qh + offs_d * stride_qd
-        tl.store(o_ptrs, acc, mask = offs_d < HEAD_DIM)
+        o_ptrs = o_ptr + b_id * stride_ob + q_head_id * stride_oh + offs_d * stride_od
+        tl.store(o_ptrs, acc, mask=offs_d < HEAD_DIM)
 
 def paged_attention_decode_impl(
     q: torch.Tensor,
@@ -651,9 +700,9 @@ def paged_attention_decode_impl(
     # MAGIC number, need bench to find the best split-kv threshold
     if use_flash_decode and batch_size * num_q_heads < num_vectors * 2:
         split_kv = True
+
+    split_kv=True
     if not split_kv:
-
-
         paged_decode_kernel[grid](
             q,
             key_cache,
@@ -692,9 +741,13 @@ def paged_attention_decode_impl(
         )
         return o
     else:
+        NUM_BLOCKS_PER_SPLIT = 4
+        max_num_splits = triton.cdiv(max_num_blocks_per_seq, NUM_BLOCKS_PER_SPLIT)
 
-        partial_o = torch.empty(num_q_heads, num_total_blocks, head_dim, device=q.device, dtype=torch.float32)
-        partial_l = torch.empty(num_q_heads, num_total_blocks, device=q.device, dtype=torch.float32)
+        # partial_o: [num_q_heads, batch_size, max_num_splits, head_dim]
+        # partial_l: [num_q_heads, batch_size, max_num_splits]  (stores log-sum-exp per split)
+        partial_o = torch.empty(num_q_heads, batch_size, max_num_splits, head_dim, device=q.device, dtype=torch.float32)
+        partial_l = torch.empty(num_q_heads, batch_size, max_num_splits, device=q.device, dtype=torch.float32)
 
         paged_flash_decode_partial_kernel[grid](
             q,
@@ -721,8 +774,10 @@ def paged_attention_decode_impl(
             partial_o.stride(0),
             partial_o.stride(1),
             partial_o.stride(2),
+            partial_o.stride(3),
             partial_l.stride(0),
             partial_l.stride(1),
+            partial_l.stride(2),
             block_tables.stride(0),
             block_tables.stride(1),
             sm_scale,
@@ -733,31 +788,32 @@ def paged_attention_decode_impl(
             block_size,
             BLOCK_SIZE_D=BLOCK_SIZE_D,
             BLOCK_SIZE_N=block_size,
+            NUM_BLOCKS_PER_SPLIT=NUM_BLOCKS_PER_SPLIT,
         )
 
+        RBLOCK_SIZE_S = 4
         paged_flash_decode_reduce_kernel[grid](
             o,
             partial_o,
             partial_l,
             seqlens,
-            block_tables,
             batch_size,
-            num_total_blocks,
-            max_num_blocks_per_seq,
             o.stride(0),
             o.stride(1),
             o.stride(2),
             partial_o.stride(0),
             partial_o.stride(1),
             partial_o.stride(2),
+            partial_o.stride(3),
             partial_l.stride(0),
             partial_l.stride(1),
-            block_tables.stride(0),
-            block_tables.stride(1),
+            partial_l.stride(2),
             num_q_heads,
             head_dim,
             block_size,
             BLOCK_SIZE_D=BLOCK_SIZE_D,
+            NUM_BLOCKS_PER_SPLIT=NUM_BLOCKS_PER_SPLIT,
+            RBLOCK_SIZE_S=RBLOCK_SIZE_S,
         )
         return o
 
