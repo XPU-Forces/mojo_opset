@@ -2,4 +2,5 @@ from .mojo_parallel import MojoRegisterableParallelStyle, MojoDistributedModule,
 from .expert_parallel import MojoExpertParallel
 from .tensor_parallel import MojoTensorParallel, MojoRowwiseParallel, MojoColwiseParallel
 from .data_parallel import MojoDataParallel
+from .utils import mojo_parallel_save_state_dict_naive, mojo_parallel_load_state_dict_naive
 from .partitions import __DUMMY_NODE__
