@@ -173,6 +173,75 @@ class MojoPagedPrefillSWA(MojoOperator):
         return o
 
 
+class MojoPagedDecodeSWA(MojoOperator):
+
+    def forward(
+        self,
+        q: torch.Tensor,  # [bsz, n_q_heads, head_dim]
+        k_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
+        v_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
+        kv_lens: torch.Tensor,  # [bsz]
+        block_table: torch.Tensor,  # [bsz, max_num_blocks]
+        is_causal: bool = True,
+        local_window_size: Optional[int] = None,
+        global_window_size: Optional[int] = None,
+        sm_scale: Optional[float] = None,
+        gqa_interleave: bool = False,
+    ) -> torch.Tensor:
+        # Note: if is_causal = False, local_window_size and global_window_size are not used.
+
+        bsz, n_q_heads, head_dim = q.shape
+        _, n_kv_heads, page_size, _ = k_cache.shape
+        if sm_scale is None:
+            sm_scale = 1.0 / (head_dim**0.5)
+
+        o = torch.empty_like(q)
+        for i in range(bsz):
+            q_i = q[i].unsqueeze(1) # -> [n_q_heads, 1, head_dim]
+
+            kv_seq_len = kv_lens[i].item()
+            kv_blocks = (kv_seq_len + page_size - 1) // page_size
+            k_i = k_cache[block_table[i, :kv_blocks]]  # [kv_blocks, n_kv_heads, page_size, head_dim]
+            k_i = k_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
+            k_i_T = k_i.permute(0, 2, 1)  # -> [n_kv_heads, head_dim, kv_seq_len]
+            if n_q_heads != n_kv_heads:
+                if gqa_interleave:
+                    k_i_T = k_i_T.repeat((n_q_heads // n_kv_heads, 1, 1))
+                else:
+                    k_i_T = k_i_T.repeat_interleave(
+                        n_q_heads // n_kv_heads, dim=0
+                    )  # -> [n_q_heads, head_dim, kv_seq_len]
+            s_i = torch.bmm(q_i, k_i_T).float() * sm_scale  # -> [n_q_heads, 1, kv_seq_len]
+
+            if is_causal:
+                s_mask = generate_swa_mask(
+                    1,
+                    kv_seq_len,
+                    local_window_size,
+                    global_window_size,
+                ).to(s_i.device)
+                s_i = torch.where(s_mask, s_i, float("-inf"))
+            m_i = torch.max(s_i, dim=-1, keepdim=True).values  # -> [n_q_heads, 1, 1]
+            s_i = s_i - m_i  # -> [n_q_heads, 1, kv_seq_len]
+            p_i = torch.exp(s_i)
+            l_i = torch.sum(p_i, dim=-1, keepdim=True)  # -> [n_q_heads, 1, 1]
+            p_i = p_i.to(q.dtype)
+
+            v_i = v_cache[block_table[i, :kv_blocks]]
+            v_i = v_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[
+                :, :kv_seq_len
+            ]  # -> [n_kv_heads, kv_seq_len, head_dim]
+            if n_q_heads != n_kv_heads:
+                if gqa_interleave:
+                    v_i = v_i.repeat((n_q_heads // n_kv_heads, 1, 1))
+                else:
+                    v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, kv_seq_len, head_dim]
+            o_i = torch.bmm(p_i, v_i).float()  # -> [n_q_heads, 1, head_dim]
+            o_i = o_i / l_i  # -> [n_q_heads, 1, head_dim]
+            o_i = o_i.squeeze(1)  # -> [n_q_heads, head_dim]
+            o[i] = o_i.to(o.dtype)
+        return o
+
 AUX_MASK_SIZE = 256
 AUX_MASK = None
 
@@ -1274,7 +1343,7 @@ def generate_test_data(
     dtype: torch.dtype = torch.bfloat16,
     device: torch.device = "npu",
 ):
-    q_lens = torch.randint(max_q_len // 2, max_q_len, (bsz,), dtype=torch.int32, device=device)
+    q_lens = torch.randint(max(max_q_len // 2, 1), max_q_len + 1, (bsz,), dtype=torch.int32, device=device)
     if max_kv_prefix_len > 0:
         kv_prefix_lens = torch.randint(
             max_kv_prefix_len // 2, max_kv_prefix_len, (bsz,), dtype=torch.int32, device=device
@@ -1307,7 +1376,7 @@ def generate_paged_prefill_test_data(
         page_size = 64
     else:
         page_size = 128
-    q_lens = torch.randint(max_q_len // 2, max_q_len, (bsz,), dtype=torch.int32, device=device)
+    q_lens = torch.randint(max(max_q_len // 2, 1), max_q_len + 1, (bsz,), dtype=torch.int32, device=device)
     if max_kv_prefix_len > 0:
         kv_prefix_lens = torch.randint(
             max_kv_prefix_len // 2, max_kv_prefix_len, (bsz,), dtype=torch.int32, device=device
@@ -1332,6 +1401,23 @@ def generate_paged_prefill_test_data(
 
     # blockwise_diffusion_attn_mask = torch.ones(seq_length * 2, seq_length * 2, dtype=torch.bool)
     return query, key_cache, value_cache, cu_seqlens_q, kv_lens, block_table
+
+
+def generate_paged_decode_test_data(
+    bsz: int,
+    q_head_num: int,
+    kv_head_num: int,
+    head_dim: int,
+    max_kv_len: int,
+    dtype: torch.dtype = torch.bfloat16,
+    device: torch.device = "npu",
+):
+    query, key_cache, value_cache, cu_seqlens_q, kv_lens, block_table = generate_paged_prefill_test_data(
+        bsz, q_head_num, kv_head_num, head_dim, 1, max_kv_len-1, dtype, device
+    )
+    print(cu_seqlens_q)
+    torch.testing.assert_close(cu_seqlens_q.to(torch.int32), torch.arange(bsz+1, dtype=torch.int32, device=device))
+    return query, key_cache, value_cache, kv_lens, block_table
 
 
 @torch.no_grad
@@ -1393,7 +1479,7 @@ def test_swa_function(profiler=None):
 
 
 @torch.no_grad
-def test_page_swa_function(profiler=None):
+def test_paged_prefill_swa_function(profiler=None):
     import datetime
 
     test_configs = [
@@ -1433,8 +1519,6 @@ def test_page_swa_function(profiler=None):
                 gqa_interleave,
             )
 
-            print("time cost:", (datetime.datetime.now() - time).microseconds / 1000, "ms")
-
             if profiler is not None:
                 profiler.step()
             else:
@@ -1455,6 +1539,69 @@ def test_page_swa_function(profiler=None):
                 )
                 assert_close(o_ref, o_mojo)
                 print("Pass", i)
+                print("time cost:", (datetime.datetime.now() - time).microseconds / 1000, "ms")
+
+@torch.no_grad
+def test_paged_decode_swa_function(profiler=None):
+    import datetime
+
+    test_configs = [
+        # (1, 1, 1, False, 128, 256, 0, torch.float32),
+        (4, 4, 2, True, 128, 1024, torch.float32),
+        # (4, 4, 2, False, 128, 256, 0, torch.bfloat16),
+        (4, 16, 4, False, 128, 8192, torch.bfloat16),
+    ]
+
+    local_window = 1023
+    global_window = 4
+    for bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_kv_len, dtype in test_configs:
+        print(bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_kv_len, dtype)
+        scale = 1.0 / head_dim**0.5
+        for i in range(5):
+            query, key, value, kvlens, block_table = generate_paged_decode_test_data(
+                bsz, q_head_num, kv_head_num, head_dim, max_kv_len, dtype
+            )
+            print(i, kvlens)
+
+            q_mojo = query.clone()
+            k_mojo = key.clone()
+            v_mojo = value.clone()
+
+            time = datetime.datetime.now()
+            o_mojo = MojoPagedDecodeSWA._registry.get("torch")()(
+                q_mojo,
+                k_mojo,
+                v_mojo,
+                kvlens,
+                block_table,
+                True,
+                local_window,
+                global_window,
+                scale,
+                gqa_interleave,
+            )
+
+            if profiler is not None:
+                profiler.step()
+            else:
+                q_ref = query.clone()
+                k_ref = key.clone()
+                v_ref = value.clone()
+                o_ref = paged_prefill_attn_sparse_torch(
+                    q_ref,
+                    k_ref,
+                    v_ref,
+                    torch.arange(bsz+1, dtype=torch.int32),
+                    kvlens,
+                    block_table,
+                    gqa_interleave,
+                    scale,
+                    local_window,
+                    global_window,
+                )
+                assert_close(o_ref, o_mojo)
+                print("Pass", i)
+                print("time cost:", (datetime.datetime.now() - time).microseconds / 1000, "ms")
 
 
 def assert_close(
@@ -1510,8 +1657,15 @@ def assert_close(
 
 
 if __name__ == "__main__":
-    test_swa_function()
-    test_page_swa_function()
+    test_func_map = {
+        "infer": test_swa_function,
+        "prefill": test_paged_prefill_swa_function,
+        "decode": test_paged_decode_swa_function,
+    }
+    
+    import sys
+    test_func = test_func_map[sys.argv[1]]
+    test_func()
 
     import torch_npu
 
@@ -1546,20 +1700,4 @@ if __name__ == "__main__":
         with_flops=False,
         experimental_config=experimental_config,
     ) as prof:
-        test_swa_function(prof)
-
-    # 添加Profiling采集基础配置参数，详细参数介绍可参考下文的参数说明
-    with torch_npu.profiler.profile(
-        activities=[torch_npu.profiler.ProfilerActivity.CPU, torch_npu.profiler.ProfilerActivity.NPU],
-        schedule=torch_npu.profiler.schedule(
-            wait=1, warmup=0, active=5, repeat=1, skip_first=0
-        ),  # 与prof.step()配套使用
-        on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./npu_profiling"),
-        record_shapes=False,
-        profile_memory=False,
-        with_stack=True,
-        with_modules=False,
-        with_flops=False,
-        experimental_config=experimental_config,
-    ) as prof:
-        test_page_swa_function(prof)
+        test_func(prof)
