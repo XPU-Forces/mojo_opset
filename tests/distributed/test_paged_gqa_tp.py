@@ -15,9 +15,11 @@ from mojo_opset.distributed.parallel import (
     MojoTensorParallel,
     MojoDataParallel,
     mojo_parallelize_module,
+    mojo_parallel_save_state_dict_naive,
+    mojo_parallel_load_state_dict_naive,
 )
 from torch.distributed.tensor.placement_types import Shard, Replicate, Partial
-from torch.distributed import dist_breakpoint
+from torch.distributed import breakpoint as dist_breakpoint
 from mojo_opset.modeling.config import MojoConfig, BaseModel
 from typing import Optional
 from tests.dist_common import dist_test
@@ -314,132 +316,153 @@ class SimpleModelConfig(BaseModel):
     node_layers: list = []
     use_context_groupnorm: bool = True
 
+class TestMojoParallel:
+    TP_SIZE=2
 
-TP_SIZE=2
-@dist_test(world_size=TP_SIZE, backend="gloo")
-def test_paged_gqa_tp():
-    config = MojoConfig(model_config=SimpleModelConfig())
-    config.parallel_config.tp_size = TP_SIZE
+    @staticmethod
+    def make():
+        config = MojoConfig(model_config=SimpleModelConfig())
+        config.parallel_config.tp_size = TestMojoParallel.TP_SIZE
 
-    device_mesh = init_device_mesh(
-        "cpu", (config.parallel_config.tp_size,), mesh_dim_names=["tp"]
-    )
-    parallel_plan = {
-        "projs.qkv": MojoColwiseParallel(use_local_output=False),
-        "rms_norms.query": MojoDataParallel(
-            desired_args_input_layouts=[Shard(-2)],
-            desired_output_layouts=[Shard(-2)],
-            use_local_output=False,
-        ),
-        "rms_norms.key": MojoDataParallel(
-            desired_args_input_layouts=[Shard(-2)],
-            desired_output_layouts=[Shard(-2)],
-            use_local_output=False,
-        ),
-        "attentions.prefill": MojoTensorParallel(
-            input_layouts=[Replicate()],
-            output_layouts=[Shard(-2)],
-            use_local_output=False,
-        ),
-        "attentions.decode": MojoTensorParallel(
-            input_layouts=[Replicate()],
-            output_layouts=[Shard(-2)],
-            use_local_output=False,
-        ),
-        "rms_norms.context": MojoDataParallel(
-            desired_args_input_layouts=[Shard(-2)],
-            desired_output_layouts=[Shard(-2)],
-            use_local_output=False,
-        ),
-        "projs.output": MojoRowwiseParallel(
-            input_layouts=[Shard(-1)],
-            output_layouts=[Replicate()],
-        ),
-    }
+        device_mesh = init_device_mesh(
+            "cpu", (config.parallel_config.tp_size,), mesh_dim_names=["tp"]
+        )
+        parallel_plan = {
+            "projs.qkv": MojoColwiseParallel(use_local_output=False),
+            "rms_norms.query": MojoDataParallel(
+                desired_args_input_layouts=[Shard(-2)],
+                desired_output_layouts=[Shard(-2)],
+                use_local_output=False,
+            ),
+            "rms_norms.key": MojoDataParallel(
+                desired_args_input_layouts=[Shard(-2)],
+                desired_output_layouts=[Shard(-2)],
+                use_local_output=False,
+            ),
+            "attentions.prefill": MojoTensorParallel(
+                input_layouts=[Replicate()],
+                output_layouts=[Shard(-2)],
+                use_local_output=False,
+            ),
+            "attentions.decode": MojoTensorParallel(
+                input_layouts=[Replicate()],
+                output_layouts=[Shard(-2)],
+                use_local_output=False,
+            ),
+            "rms_norms.context": MojoDataParallel(
+                desired_args_input_layouts=[Shard(-2)],
+                desired_output_layouts=[Shard(-2)],
+                use_local_output=False,
+            ),
+            "projs.output": MojoRowwiseParallel(
+                input_layouts=[Shard(-1)],
+                output_layouts=[Replicate()],
+            ),
+        }
 
-    block = FlashAttentionBlock(config, layer_id=0)
+        block = FlashAttentionBlock(config, layer_id=0)
+        block.apply(TestMojoParallel._init_weight)
+
+        parallel_block = mojo_parallelize_module(
+            block,
+            device_mesh=device_mesh,
+            parallelize_plan=parallel_plan,
+        )
+
+        if device_mesh.get_rank() == 0:
+            print(parallel_block)
+        
+        return(config, parallel_block, device_mesh)
+
+    @staticmethod
     def _init_weight(module):
         for p in module.parameters():
             if torch.is_floating_point(p):
                 torch.nn.init.ones_(p)
-    block.apply(_init_weight)
 
-    parallel_block = mojo_parallelize_module(
-        block,
-        device_mesh=device_mesh,
-        parallelize_plan=parallel_plan,
-    )
 
-    if device_mesh.get_rank() == 0:
-        print(parallel_block)
-
-    # NOTE(liuyuan): We have to make replicate input here because we have already sharded the kv_cache by head  mannually.
-    # TODO(liuyuan): Use DTensor for k_cache and v_cache in SimplePagedKVCache as well. Register the Partition func for it.
-    kv_cache_tp = MojoDataParallel(
-        desired_args_input_layouts=[Replicate(), Replicate(), Replicate()],
-        desired_kwargs_input_layouts={
-            "input_len": Replicate(),
-            "cu_seqlens": Replicate(),
-        },
-        desired_output_layouts=[],
-        module=SimplePagedKVCache(
-            batch_size=1,
-            num_layers=1,
-            num_kv_heads=config.model_config.flash_attn_num_kvheads,
-            head_dim=config.model_config.hidden_size
-            // config.model_config.num_attention_heads,
-        ),
-        device_mesh=device_mesh,
-    )
-
-    input_tensor_decode = torch.ones(1, config.model_config.hidden_size)
-    output_decode = parallel_block(
-        input_tensor_decode,
-        kv_cache=kv_cache_tp,
-        decode_kv_len=torch.ones(1, dtype=torch.int64),
-    )
-
-    input_tensor_prefill = torch.ones(128, config.model_config.hidden_size)
-    context_input_len = torch.tensor([128], dtype=torch.int64)
-    context_shifts = torch.zeros(1, dtype=torch.int64)
-    context_cu_seqs = torch.tensor([0, 128], dtype=torch.int64)
-
-    output_prefill = parallel_block(
-        input_tensor_prefill,
-        kv_cache=kv_cache_tp,
-        context_input_len=context_input_len,
-        context_shifts=context_shifts,
-        context_cu_seqs=context_cu_seqs,
-    )
-
-    if device_mesh.get_local_rank("tp") == 0:
-        kv_cache_ref = SimplePagedKVCache(
-            batch_size=1,
-            num_layers=1,
-            num_kv_heads=config.model_config.flash_attn_num_kvheads,
-            head_dim=config.model_config.hidden_size
-            // config.model_config.num_attention_heads,
+    @dist_test(world_size=TP_SIZE, backend="gloo")
+    def test_paged_gqa_tp(self):
+        config, parallel_block, device_mesh = self.make()
+        # NOTE(liuyuan): We have to make replicate input here because we have already sharded the kv_cache by head  mannually.
+        # TODO(liuyuan): Use DTensor for k_cache and v_cache in SimplePagedKVCache as well. Register the Partition func for it.
+        kv_cache_tp = MojoDataParallel(
+            desired_args_input_layouts=[Replicate(), Replicate(), Replicate()],
+            desired_kwargs_input_layouts={
+                "input_len": Replicate(),
+                "cu_seqlens": Replicate(),
+            },
+            desired_output_layouts=[],
+            module=SimplePagedKVCache(
+                batch_size=1,
+                num_layers=1,
+                num_kv_heads=config.model_config.flash_attn_num_kvheads,
+                head_dim=config.model_config.hidden_size
+                // config.model_config.num_attention_heads,
+            ),
+            device_mesh=device_mesh,
         )
-        ref_block = FlashAttentionBlock(config, layer_id=0)
-        ref_block.apply(_init_weight)
 
-        output_decode_ref = ref_block(
+        input_tensor_decode = torch.ones(1, config.model_config.hidden_size)
+        output_decode = parallel_block(
             input_tensor_decode,
-            kv_cache=kv_cache_ref,
+            kv_cache=kv_cache_tp,
             decode_kv_len=torch.ones(1, dtype=torch.int64),
         )
-        output_prefill_ref = ref_block(
+
+        input_tensor_prefill = torch.ones(128, config.model_config.hidden_size)
+        context_input_len = torch.tensor([128], dtype=torch.int64)
+        context_shifts = torch.zeros(1, dtype=torch.int64)
+        context_cu_seqs = torch.tensor([0, 128], dtype=torch.int64)
+
+        output_prefill = parallel_block(
             input_tensor_prefill,
-            kv_cache=kv_cache_ref,
+            kv_cache=kv_cache_tp,
             context_input_len=context_input_len,
             context_shifts=context_shifts,
             context_cu_seqs=context_cu_seqs,
         )
 
-        from triton.testing import assert_close
-        assert_close(output_decode, output_decode_ref)
-        assert_close(output_prefill, output_prefill_ref)
+        if device_mesh.get_local_rank("tp") == 0:
+            kv_cache_ref = SimplePagedKVCache(
+                batch_size=1,
+                num_layers=1,
+                num_kv_heads=config.model_config.flash_attn_num_kvheads,
+                head_dim=config.model_config.hidden_size
+                // config.model_config.num_attention_heads,
+            )
+            ref_block = FlashAttentionBlock(config, layer_id=0)
+            ref_block.apply(self._init_weight)
+
+            output_decode_ref = ref_block(
+                input_tensor_decode,
+                kv_cache=kv_cache_ref,
+                decode_kv_len=torch.ones(1, dtype=torch.int64),
+            )
+            output_prefill_ref = ref_block(
+                input_tensor_prefill,
+                kv_cache=kv_cache_ref,
+                context_input_len=context_input_len,
+                context_shifts=context_shifts,
+                context_cu_seqs=context_cu_seqs,
+            )
+
+            from triton.testing import assert_close
+            assert_close(output_decode, output_decode_ref)
+            assert_close(output_prefill, output_prefill_ref)
+    
+    @dist_test(world_size=TP_SIZE, backend="gloo")
+    def test_save_and_load(self):
+        _, parallel_block, device_mesh = self.make()
+        from tempfile import NamedTemporaryFile
+        import os
+        with NamedTemporaryFile(mode="w+b") as f:
+            weight = mojo_parallel_save_state_dict_naive(parallel_block, f)
+            print(f"file size: {os.path.getsize(weight)}")
+            mojo_parallel_load_state_dict_naive(parallel_block, weight, device_mesh)
+            dist.barrier()
 
 
 if __name__ == "__main__":
-    test_paged_gqa_tp()
+    test = TestMojoParallel()
+    test.test_save_and_load()
