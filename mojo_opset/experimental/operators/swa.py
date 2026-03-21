@@ -355,7 +355,7 @@ def gen_mask_triu(mask_ptr_triu, mask_size, mask_stride_m, mask_stride_n, M_BLOC
 
 
 @triton.jit
-def _sdpa_single_block_fwd(
+def _sdpa_acc_fwd_MxN(
     acc_ptr,
     l_i,
     m_i,
@@ -411,6 +411,30 @@ def _sdpa_single_block_fwd(
     # NOTE(zhangjihang): for training
     # Return accumulated output acc_ptr, softmax denominator l_i, and max value m_i
     return acc_ptr, l_i, m_i
+
+@triton.jit
+def _swa_split_blocks(q_block_start_id, q_block_len, kv_seq_len, BLOCK_SIZE_N, IS_CAUSAL, GLOBAL_WINDOW_SIZE, LOCAL_WINDOW_SIZE):
+    if not IS_CAUSAL:
+        return 0, 0, tl.cdiv(kv_seq_len, BLOCK_SIZE_N)
+
+    num_total_blocks = tl.cdiv(q_block_start_id + q_block_len, BLOCK_SIZE_N)
+    if GLOBAL_WINDOW_SIZE is None and LOCAL_WINDOW_SIZE is None:
+        return 0, 0, num_total_blocks
+    
+    if GLOBAL_WINDOW_SIZE is not None:
+        num_global_window_blocks = min(tl.cdiv(GLOBAL_WINDOW_SIZE, BLOCK_SIZE_N), num_total_blocks)
+    else:
+        num_global_window_blocks = 0
+    
+    if LOCAL_WINDOW_SIZE is not None:
+        local_window_start_id = max(q_block_start_id - LOCAL_WINDOW_SIZE, 0)
+        local_window_start_block = local_window_start_id // BLOCK_SIZE_N
+    else:
+        local_window_start_block = num_total_blocks
+    
+    non_global_window_start_block = max(num_global_window_blocks, local_window_start_block)
+    
+    return num_global_window_blocks, non_global_window_start_block, num_total_blocks
 
 
 @triton.jit
@@ -531,6 +555,9 @@ def _sdpa_infer_kernel(
                 q_seq_len,
             )
             q_block_start = q_block_id * BLOCK_M
+            q_block_end = min(q_block_start + BLOCK_M, q_seq_len)
+            q_block_len = q_block_end - q_block_start
+
             cur_q_block_ptr = tl.advance(q_block_ptr, (q_block_start.to(tl.int32), 0))
             cur_q_block = tl.load(cur_q_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
@@ -538,97 +565,18 @@ def _sdpa_infer_kernel(
             l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
             acc = tl.zeros((BLOCK_M, HEAD_DIM), dtype=tl.float32)
 
-            if IS_CAUSAL:
-                cur_kv_end = min(kv_computed_len + q_block_start + BLOCK_M, kv_seq_len)
-                if GLOBAL_WINDOW is not None:
-                    num_global_window_blocks = tl.cdiv(min(GLOBAL_WINDOW, cur_kv_end), BLOCK_N)
-                    for kv_block_id in range(num_global_window_blocks):
-                        kv_block_start = kv_block_id * BLOCK_N
-                        kv_mask = gen_mask_n_right_bound(
-                            aux_mask_ptr_10,
-                            aux_mask_size,
-                            stride_mask_m,
-                            stride_mask_n,
-                            BLOCK_M,
-                            BLOCK_N,
-                            kv_block_start,
-                            cur_kv_end,
-                        )
+            num_global_window_blocks, non_global_window_start_block, num_total_blocks = _swa_split_blocks(
+                q_block_start + kv_computed_len,
+                q_block_len,
+                kv_seq_len,
+                BLOCK_N,
+                IS_CAUSAL,
+                GLOBAL_WINDOW,
+                LOCAL_WINDOW,
+            )
 
-                        mask_gw = gen_mask_n_right_bound(
-                            aux_mask_ptr_10,
-                            aux_mask_size,
-                            stride_mask_m,
-                            stride_mask_n,
-                            BLOCK_M,
-                            BLOCK_N,
-                            kv_block_start,
-                            GLOBAL_WINDOW,
-                        )
-                        if LOCAL_WINDOW is not None:
-                            mask_sw = gen_mask_triu(
-                                aux_mask_ptr_triu,
-                                aux_mask_size,
-                                stride_mask_m,
-                                stride_mask_n,
-                                BLOCK_M,
-                                BLOCK_N,
-                                q_block_start + kv_computed_len,
-                                kv_block_start + LOCAL_WINDOW,
-                            )
-                            mask_gw = mask_gw | mask_sw
-                        mask_causal = gen_mask_tril(
-                            aux_mask_ptr_tril,
-                            aux_mask_size,
-                            stride_mask_m,
-                            stride_mask_n,
-                            BLOCK_M,
-                            BLOCK_N,
-                            q_block_start + kv_computed_len,
-                            kv_block_start,
-                        )
-                        mask_causal = mask_gw & mask_causal
-                        mask = mask_causal & q_mask & kv_mask
-                        cur_k_block_ptr = tl.advance(k_block_ptr, (kv_block_start.to(tl.int32), 0))
-                        cur_v_block_ptr = tl.advance(v_block_ptr, (kv_block_start.to(tl.int32), 0))
-                        acc, l_i, m_i = _sdpa_single_block_fwd(
-                            acc,
-                            l_i,
-                            m_i,
-                            cur_q_block,
-                            cur_k_block_ptr,
-                            cur_v_block_ptr,
-                            mask,
-                            scale,
-                            HEAD_DIM,
-                            BLOCK_M,
-                            BLOCK_N,
-                            BLOCK_D,
-                            v_ptr.dtype.element_ty == tl.float8e5,
-                        )
-                else:
-                    num_global_window_blocks = 0
-            else:
-                cur_kv_end = kv_seq_len
-                num_global_window_blocks = 0
-
-            if IS_CAUSAL:
-                if LOCAL_WINDOW is not None:
-                    cur_kv_start = max(
-                        q_block_start + kv_computed_len - LOCAL_WINDOW, num_global_window_blocks * BLOCK_N
-                    )
-                elif GLOBAL_WINDOW is None:
-                    # vanilla causal attention
-                    cur_kv_start = 0
-                else:
-                    # Global window has been computed, but local window is None, so no more kvblocks
-                    cur_kv_start = cur_kv_end
-            else:
-                # full attn, start from 0
-                cur_kv_start = 0
-            num_non_global_window_blocks = tl.cdiv(cur_kv_end - cur_kv_start, BLOCK_N)
-            for kv_block_id in range(num_non_global_window_blocks):
-                kv_block_start = cur_kv_start + kv_block_id * BLOCK_N
+            for kv_block_id in range(num_global_window_blocks):
+                kv_block_start = kv_block_id * BLOCK_N
                 kv_mask = gen_mask_n_right_bound(
                     aux_mask_ptr_10,
                     aux_mask_size,
@@ -637,7 +585,75 @@ def _sdpa_infer_kernel(
                     BLOCK_M,
                     BLOCK_N,
                     kv_block_start,
-                    cur_kv_end,
+                    kv_seq_len,
+                )
+                if IS_CAUSAL:
+                    # actually, it must be true for global window blocks
+                    mask_gw = gen_mask_n_right_bound(
+                        aux_mask_ptr_10,
+                        aux_mask_size,
+                        stride_mask_m,
+                        stride_mask_n,
+                        BLOCK_M,
+                        BLOCK_N,
+                        kv_block_start,
+                        GLOBAL_WINDOW,
+                    )
+                    if LOCAL_WINDOW is not None:
+                        mask_sw = gen_mask_triu(
+                            aux_mask_ptr_triu,
+                            aux_mask_size,
+                            stride_mask_m,
+                            stride_mask_n,
+                            BLOCK_M,
+                            BLOCK_N,
+                            q_block_start + kv_computed_len,
+                            kv_block_start + LOCAL_WINDOW,
+                        )
+                        mask_gw = mask_gw | mask_sw
+                    mask_causal = gen_mask_tril(
+                        aux_mask_ptr_tril,
+                        aux_mask_size,
+                        stride_mask_m,
+                        stride_mask_n,
+                        BLOCK_M,
+                        BLOCK_N,
+                        q_block_start + kv_computed_len,
+                        kv_block_start,
+                    )
+                    mask_causal = mask_gw & mask_causal
+                    mask = mask_causal & q_mask & kv_mask
+                else:
+                    mask = q_mask & kv_mask
+                cur_k_block_ptr = tl.advance(k_block_ptr, (kv_block_start.to(tl.int32), 0))
+                cur_v_block_ptr = tl.advance(v_block_ptr, (kv_block_start.to(tl.int32), 0))
+                acc, l_i, m_i = _sdpa_acc_fwd_MxN(
+                    acc,
+                    l_i,
+                    m_i,
+                    cur_q_block,
+                    cur_k_block_ptr,
+                    cur_v_block_ptr,
+                    mask,
+                    scale,
+                    HEAD_DIM,
+                    BLOCK_M,
+                    BLOCK_N,
+                    BLOCK_D,
+                    v_ptr.dtype.element_ty == tl.float8e5,
+                )
+
+            for kv_block_id in range(non_global_window_start_block, num_total_blocks):
+                kv_block_start = kv_block_id * BLOCK_N
+                kv_mask = gen_mask_n_right_bound(
+                    aux_mask_ptr_10,
+                    aux_mask_size,
+                    stride_mask_m,
+                    stride_mask_n,
+                    BLOCK_M,
+                    BLOCK_N,
+                    kv_block_start,
+                    kv_seq_len,
                 )
                 if IS_CAUSAL:
                     mask_causal = gen_mask_tril(
@@ -668,7 +684,7 @@ def _sdpa_infer_kernel(
                     mask = q_mask & kv_mask
                 cur_k_block_ptr = tl.advance(k_block_ptr, (kv_block_start.to(tl.int32), 0))
                 cur_v_block_ptr = tl.advance(v_block_ptr, (kv_block_start.to(tl.int32), 0))
-                acc, l_i, m_i = _sdpa_single_block_fwd(
+                acc, l_i, m_i = _sdpa_acc_fwd_MxN(
                     acc,
                     l_i,
                     m_i,
@@ -894,6 +910,8 @@ def _paged_prefill_kernel(
                 q_seq_len,
             )
             q_block_start = q_block_id * BLOCK_M
+            q_block_end = min(q_block_start + BLOCK_M, q_seq_len)
+            q_block_len = q_block_end - q_block_start
             cur_q_block_ptr = tl.advance(q_block_ptr, (q_block_start.to(tl.int32), 0))
             cur_q_block = tl.load(cur_q_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
@@ -901,114 +919,103 @@ def _paged_prefill_kernel(
             l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
             acc = tl.zeros((BLOCK_M, HEAD_DIM), dtype=tl.float32)
 
-            if IS_CAUSAL:
-                cur_kv_end = min(kv_computed_len + q_block_start + BLOCK_M, kv_seq_len)
-                if GLOBAL_WINDOW is not None:
-                    num_global_window_blocks = tl.cdiv(min(GLOBAL_WINDOW, cur_kv_end), BLOCK_N)
-                    for logical_page_id in range(num_global_window_blocks):
-                        kv_block_start = logical_page_id * BLOCK_N
-                        physical_page_id = tl.load(
-                            block_table_ptr + b_id * stride_block_table_b + logical_page_id * stride_block_table_p
-                        )
-                        kv_mask = gen_mask_n_right_bound(
-                            aux_mask_ptr_10,
-                            aux_mask_size,
-                            stride_mask_m,
-                            stride_mask_n,
-                            BLOCK_M,
-                            BLOCK_N,
-                            kv_block_start,
-                            kv_seq_len,
-                        )
-                        mask_gw = gen_mask_n_right_bound(
-                            aux_mask_ptr_10,
-                            aux_mask_size,
-                            stride_mask_m,
-                            stride_mask_n,
-                            BLOCK_M,
-                            BLOCK_N,
-                            kv_block_start,
-                            GLOBAL_WINDOW,
-                        )
-                        if LOCAL_WINDOW is not None:
-                            mask_sw = gen_mask_triu(
-                                aux_mask_ptr_triu,
-                                aux_mask_size,
-                                stride_mask_m,
-                                stride_mask_n,
-                                BLOCK_M,
-                                BLOCK_N,
-                                q_block_start + kv_computed_len,
-                                kv_block_start + LOCAL_WINDOW,
-                            )
-                            mask_gw = mask_gw | mask_sw
-                        mask_causal = gen_mask_tril(
-                            aux_mask_ptr_tril,
+            num_global_window_blocks, non_global_window_start_block, num_total_blocks = _swa_split_blocks(
+                q_block_start + kv_computed_len,
+                q_block_len,
+                kv_seq_len,
+                PAGE_SIZE,
+                IS_CAUSAL,
+                GLOBAL_WINDOW,
+                LOCAL_WINDOW,
+            )
+
+            for logical_page_id in range(num_global_window_blocks):
+                kv_block_start = logical_page_id * PAGE_SIZE
+                physical_page_id = tl.load(
+                    block_table_ptr + b_id * stride_block_table_b + logical_page_id * stride_block_table_p
+                )
+                kv_mask = gen_mask_n_right_bound(
+                    aux_mask_ptr_10,
+                    aux_mask_size,
+                    stride_mask_m,
+                    stride_mask_n,
+                    BLOCK_M,
+                    BLOCK_N,
+                    kv_block_start,
+                    kv_seq_len,
+                )
+                if IS_CAUSAL:
+                    # actually, it must be true for global window blocks
+                    mask_gw = gen_mask_n_right_bound(
+                        aux_mask_ptr_10,
+                        aux_mask_size,
+                        stride_mask_m,
+                        stride_mask_n,
+                        BLOCK_M,
+                        BLOCK_N,
+                        kv_block_start,
+                        GLOBAL_WINDOW,
+                    )
+                    if LOCAL_WINDOW is not None:
+                        mask_sw = gen_mask_triu(
+                            aux_mask_ptr_triu,
                             aux_mask_size,
                             stride_mask_m,
                             stride_mask_n,
                             BLOCK_M,
                             BLOCK_N,
                             q_block_start + kv_computed_len,
-                            kv_block_start,
+                            kv_block_start + LOCAL_WINDOW,
                         )
-                        mask_causal = mask_gw & mask_causal
-                        mask = mask_causal & q_mask & kv_mask
-                        cur_k_block_ptr = tl.make_block_ptr(
-                            base=k_ptr + physical_page_id * stride_kp + kv_head_id * stride_kh,
-                            shape=(kv_seq_len, HEAD_DIM),
-                            strides=(stride_kt, stride_kd),
-                            offsets=(0, 0),
-                            block_shape=(BLOCK_N, BLOCK_D),
-                            order=(1, 0),
-                        )
-                        cur_v_block_ptr = tl.make_block_ptr(
-                            base=v_ptr + physical_page_id * stride_vp + kv_head_id * stride_vh,
-                            shape=(kv_seq_len, HEAD_DIM),
-                            strides=(stride_vt, stride_vd),
-                            offsets=(0, 0),
-                            block_shape=(BLOCK_N, BLOCK_D),
-                            order=(1, 0),
-                        )
-                        acc, l_i, m_i = _sdpa_single_block_fwd(
-                            acc,
-                            l_i,
-                            m_i,
-                            cur_q_block,
-                            cur_k_block_ptr,
-                            cur_v_block_ptr,
-                            mask,
-                            scale,
-                            HEAD_DIM,
-                            BLOCK_M,
-                            BLOCK_N,
-                            BLOCK_D,
-                            v_ptr.dtype.element_ty == tl.float8e5,
-                        )
-                else:
-                    num_global_window_blocks = 0
-            else:
-                cur_kv_end = kv_seq_len
-                num_global_window_blocks = 0
-
-            if IS_CAUSAL:
-                if LOCAL_WINDOW is not None:
-                    cur_kv_start = max(
-                        q_block_start + kv_computed_len - LOCAL_WINDOW, num_global_window_blocks * BLOCK_N
+                        mask_gw = mask_gw | mask_sw
+                    mask_causal = gen_mask_tril(
+                        aux_mask_ptr_tril,
+                        aux_mask_size,
+                        stride_mask_m,
+                        stride_mask_n,
+                        BLOCK_M,
+                        BLOCK_N,
+                        q_block_start + kv_computed_len,
+                        kv_block_start,
                     )
-                elif GLOBAL_WINDOW is None:
-                    # vanilla causal attention
-                    cur_kv_start = 0
+                    mask_causal = mask_gw & mask_causal
+                    mask = mask_causal & q_mask & kv_mask
                 else:
-                    # Global window has been computed, but local window is None, so no more kvblocks
-                    cur_kv_start = cur_kv_end
-            else:
-                cur_kv_start = 0
+                    mask = q_mask & kv_mask
+                cur_k_block_ptr = tl.make_block_ptr(
+                    base=k_ptr + physical_page_id * stride_kp + kv_head_id * stride_kh,
+                    shape=(kv_seq_len, HEAD_DIM),
+                    strides=(stride_kt, stride_kd),
+                    offsets=(0, 0),
+                    block_shape=(BLOCK_N, BLOCK_D),
+                    order=(1, 0),
+                )
+                cur_v_block_ptr = tl.make_block_ptr(
+                    base=v_ptr + physical_page_id * stride_vp + kv_head_id * stride_vh,
+                    shape=(kv_seq_len, HEAD_DIM),
+                    strides=(stride_vt, stride_vd),
+                    offsets=(0, 0),
+                    block_shape=(BLOCK_N, BLOCK_D),
+                    order=(1, 0),
+                )
+                acc, l_i, m_i = _sdpa_acc_fwd_MxN(
+                    acc,
+                    l_i,
+                    m_i,
+                    cur_q_block,
+                    cur_k_block_ptr,
+                    cur_v_block_ptr,
+                    mask,
+                    scale,
+                    HEAD_DIM,
+                    BLOCK_M,
+                    BLOCK_N,
+                    BLOCK_D,
+                    v_ptr.dtype.element_ty == tl.float8e5,
+                )
 
-            non_global_window_start_page = cur_kv_start // BLOCK_N
-            non_global_window_end_page = tl.cdiv(cur_kv_end, BLOCK_N)
-            for logical_page_id in range(non_global_window_start_page, non_global_window_end_page):
-                kv_block_start = logical_page_id * BLOCK_N
+            for logical_page_id in range(non_global_window_start_block, num_total_blocks):
+                kv_block_start = logical_page_id * PAGE_SIZE
                 physical_page_id = tl.load(
                     block_table_ptr + b_id * stride_block_table_b + logical_page_id * stride_block_table_p
                 )
@@ -1065,7 +1072,7 @@ def _paged_prefill_kernel(
                     block_shape=(BLOCK_N, BLOCK_D),
                     order=(1, 0),
                 )
-                acc, l_i, m_i = _sdpa_single_block_fwd(
+                acc, l_i, m_i = _sdpa_acc_fwd_MxN(
                     acc,
                     l_i,
                     m_i,
@@ -1194,7 +1201,7 @@ class TTXPagedPrefillSWA(MojoPagedPrefillSWA):
         return o
 
 @triton.jit
-def _sdpa_single_batch_fwd(
+def _sdpa_acc_fwd_1xN(
     acc_ptr,
     l_i,
     m_i,
@@ -1312,79 +1319,27 @@ def _paged_decode_kernel(
         l_i = 0.0
         acc = tl.zeros((BLOCK_SIZE_D,), dtype=tl.float32)
 
-        num_logical_blocks = tl.cdiv(kv_seq_len, PAGE_SIZE)
+        num_global_window_blocks, non_global_window_start_block, num_total_blocks = _swa_split_blocks(
+            kv_seq_len - 1,
+            1,
+            kv_seq_len,
+            PAGE_SIZE,
+            True,
+            GLOBAL_WINDOW,
+            LOCAL_WINDOW,
+        )
         
         tl.static_assert(PAGE_SIZE == BLOCK_SIZE_N, "PAGE_SIZE should be equal to BLOCK_SIZE_N")
 
-        if GLOBAL_WINDOW is not None:
-            if GLOBAL_WINDOW > 0:
-                num_global_window_blocks = tl.cdiv(GLOBAL_WINDOW, BLOCK_SIZE_N)
-                for logical_block_idx in range(0, num_global_window_blocks):
-                    physical_block_id = tl.load(block_tables_ptr + b_id * stride_bt_batch + logical_block_idx * stride_bt_block)
-                    kv_block_start_in_seq = logical_block_idx * BLOCK_SIZE_N
-                    kv_block_end_in_seq = min(kv_block_start_in_seq + BLOCK_SIZE_N, kv_seq_len)
-                    kv_block_len = kv_block_end_in_seq - kv_block_start_in_seq
-                    k_block_ptr = tl.make_block_ptr(
-                        base=k_cache_ptr + physical_block_id * stride_k_block + kv_head_id * stride_k_head,
-                        shape=(kv_block_len, HEAD_DIM),
-                        strides=(stride_k_blksz, stride_k_dim),
-                        offsets=(0, 0),
-                        block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
-                        order=(1, 0),
-                    )
-                    v_block_ptr = tl.make_block_ptr(
-                        base=v_cache_ptr + physical_block_id * stride_v_block + kv_head_id * stride_v_head,
-                        shape=(kv_block_len, HEAD_DIM),
-                        strides=(stride_v_blksz, stride_v_dim),
-                        offsets=(0, 0),
-                        block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
-                        order=(1, 0),
-                    )
-                    gw_mask = (kv_block_start_in_seq + tl.arange(0, BLOCK_SIZE_N)) < GLOBAL_WINDOW
-                    if LOCAL_WINDOW is not None:
-                        sw_mask = (kv_block_start_in_seq + tl.arange(0, BLOCK_SIZE_N) + LOCAL_WINDOW) >= (kv_seq_len - 1)
-                        gw_mask = gw_mask | sw_mask
-                    kv_mask = tl.arange(0, BLOCK_SIZE_N) < kv_block_len
-                    mask = gw_mask & kv_mask
-                    
-                    acc, l_i, m_i = _sdpa_single_batch_fwd(
-                        acc, 
-                        l_i, 
-                        m_i, 
-                        q, 
-                        k_block_ptr, 
-                        v_block_ptr, 
-                        mask, 
-                        sm_scale, 
-                        HEAD_DIM, 
-                        BLOCK_SIZE_D, 
-                        BLOCK_SIZE_N, 
-                        BLOCK_SIZE_D, 
-                        v_cache_ptr.dtype.element_ty == tl.float8e5,
-                    )
-            else:
-                num_global_window_blocks = 0
-        else:
-            num_global_window_blocks = 0
-
-        if LOCAL_WINDOW is not None:
-            cur_kv_start = max(kv_seq_len - 1 - LOCAL_WINDOW, num_global_window_blocks * BLOCK_SIZE_N)
-        elif GLOBAL_WINDOW is None:
-            # vanilla causal attention
-            cur_kv_start = 0
-        else:
-            # Global window has been computed, but local window is None, so no more kvblocks
-            cur_kv_start = tl.cdiv(kv_seq_len, BLOCK_SIZE_N) * BLOCK_SIZE_N
-
-        non_global_window_start_page = cur_kv_start // BLOCK_SIZE_N
-        non_global_window_end_page = num_logical_blocks
-        for logical_block_idx in range(non_global_window_start_page, non_global_window_end_page):
-            physical_block_id = tl.load(block_tables_ptr + b_id * stride_bt_batch + logical_block_idx * stride_bt_block)
-            kv_block_start_in_seq = logical_block_idx * PAGE_SIZE
-            kv_block_end_in_seq = min(kv_block_start_in_seq + PAGE_SIZE, kv_seq_len)
-            kv_block_len = kv_block_end_in_seq - kv_block_start_in_seq
+        for logical_page_id in range(num_global_window_blocks):
+            kv_block_start = logical_page_id * PAGE_SIZE
+            kv_block_end = min(kv_block_start + PAGE_SIZE, kv_seq_len)
+            kv_block_len = kv_block_end - kv_block_start
+            physical_page_id = tl.load(
+                block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
+            )
             k_block_ptr = tl.make_block_ptr(
-                base=k_cache_ptr + physical_block_id * stride_k_block + kv_head_id * stride_k_head,
+                base=k_cache_ptr + physical_page_id * stride_k_block + kv_head_id * stride_k_head,
                 shape=(kv_block_len, HEAD_DIM),
                 strides=(stride_k_blksz, stride_k_dim),
                 offsets=(0, 0),
@@ -1392,7 +1347,53 @@ def _paged_decode_kernel(
                 order=(1, 0),
             )
             v_block_ptr = tl.make_block_ptr(
-                base=v_cache_ptr + physical_block_id * stride_v_block + kv_head_id * stride_v_head,
+                base=v_cache_ptr + physical_page_id * stride_v_block + kv_head_id * stride_v_head,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_v_blksz, stride_v_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            gw_mask = (kv_block_start + tl.arange(0, BLOCK_SIZE_N)) < GLOBAL_WINDOW
+            if LOCAL_WINDOW is not None:
+                sw_mask = (kv_block_start + tl.arange(0, BLOCK_SIZE_N) + LOCAL_WINDOW) >= (kv_seq_len - 1)
+                gw_mask = gw_mask | sw_mask
+            kv_mask = tl.arange(0, BLOCK_SIZE_N) < kv_block_len
+            mask = gw_mask & kv_mask
+            
+            acc, l_i, m_i = _sdpa_acc_fwd_1xN(
+                acc, 
+                l_i, 
+                m_i, 
+                q, 
+                k_block_ptr, 
+                v_block_ptr, 
+                mask, 
+                sm_scale, 
+                HEAD_DIM, 
+                BLOCK_SIZE_D, 
+                BLOCK_SIZE_N, 
+                BLOCK_SIZE_D, 
+                v_cache_ptr.dtype.element_ty == tl.float8e5,
+            )
+
+        for logical_page_id in range(non_global_window_start_block, num_total_blocks):
+            kv_block_start = logical_page_id * PAGE_SIZE
+            kv_block_end = min(kv_block_start + PAGE_SIZE, kv_seq_len)
+            kv_block_len = kv_block_end - kv_block_start
+            physical_page_id = tl.load(
+                block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
+            )
+            k_block_ptr = tl.make_block_ptr(
+                base=k_cache_ptr + physical_page_id * stride_k_block + kv_head_id * stride_k_head,
+                shape=(PAGE_SIZE, HEAD_DIM),
+                strides=(stride_k_blksz, stride_k_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            v_block_ptr = tl.make_block_ptr(
+                base=v_cache_ptr + physical_page_id * stride_v_block + kv_head_id * stride_v_head,
                 shape=(kv_block_len, HEAD_DIM),
                 strides=(stride_v_blksz, stride_v_dim),
                 offsets=(0, 0),
@@ -1400,12 +1401,14 @@ def _paged_decode_kernel(
                 order=(1, 0),
             )
             
-            mask = tl.arange(0, BLOCK_SIZE_N) < kv_block_len
+            kv_mask = tl.arange(0, BLOCK_SIZE_N) < kv_block_len
             if LOCAL_WINDOW is not None:
-                sw_mask = (kv_block_start_in_seq + tl.arange(0, BLOCK_SIZE_N) + LOCAL_WINDOW) >= (kv_seq_len - 1)
-                mask = mask & sw_mask
+                sw_mask = (kv_block_start + tl.arange(0, BLOCK_SIZE_N) + LOCAL_WINDOW) >= (kv_seq_len - 1)
+                mask = kv_mask & sw_mask
+            else:
+                mask = kv_mask
             
-            acc, l_i, m_i = _sdpa_single_batch_fwd(
+            acc, l_i, m_i = _sdpa_acc_fwd_1xN(
                 acc,
                 l_i, 
                 m_i, 
@@ -1453,6 +1456,10 @@ def swa_ttx_paged_decode(
     num_vectors = get_num_cores("vector")
     grid = (num_vectors, )
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
+
+    # Note(chenyifan): 
+    #   under swa, the kv workload is rather evenly across diffrent queries,
+    #   so we have low necessity to apply split-kv strategy             
 
     _paged_decode_kernel[grid](
         q,
