@@ -1193,6 +1193,340 @@ class TTXPagedPrefillSWA(MojoPagedPrefillSWA):
         )
         return o
 
+@triton.jit
+def _sdpa_single_batch_fwd(
+    acc_ptr,
+    l_i,
+    m_i,
+    q,  # Accumulator, local l, local m, query vector
+    K_block_ptr,
+    V_block_ptr,  # Key and value block pointers for current stage
+    mask,
+    qk_scale,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    fp8_v: tl.constexpr,
+):
+    if mask is False:
+        return acc_ptr, l_i, m_i
+    # -- Compute qk ----
+                    
+    # Load K block
+    k = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
+    qk = tl.sum((q[None, :] * k).to(tl.float32), axis=1)
+
+    qk = qk * qk_scale
+    if mask is not None and mask is not True:
+        qk = tl.where(mask, qk, float("-inf"))  # 32B # bool
+
+    m_ij = tl.maximum(m_i, tl.max(qk, 0))  # Scaled max
+    qk = qk - m_ij  # Stabilize
+
+    # Softmax weights p = exp(qk)
+    p = tl.math.exp(qk)
+
+    p_cast = p.to(k.dtype)
+
+    # Load corresponding V block
+    v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
+
+    # Softmax denominator (sum of each row)
+    l_ij = tl.sum(p, axis=0)
+    # -- Update m_i and l_i
+    alpha = tl.math.exp(m_i - m_ij)  # Update factor: exp difference between old and new max
+    l_i = l_i * alpha + l_ij  # Update softmax denominator
+    # -- Update output accumulator --
+    acc_ptr = acc_ptr * alpha
+    acc_ptr += tl.sum((p_cast[:, None] * v).to(tl.float32), axis=0)
+
+    # Update current block max
+    m_i = m_ij
+
+    # NOTE(zhangjihang): for training
+    return acc_ptr, l_i, m_i
+
+
+
+@triton.jit
+def _paged_decode_kernel(
+    q_ptr,
+    k_cache_ptr,
+    v_cache_ptr,
+    o_ptr,
+    seqlens_ptr,
+    block_tables_ptr,
+    BATCH_SIZE,
+    NUM_TOTAL_BLOCKS,
+    MAX_NUM_BLOCKS_PER_SEQ,
+    stride_qb,
+    stride_qh,
+    stride_qd,
+    stride_k_block,
+    stride_k_head,
+    stride_k_blksz,
+    stride_k_dim,
+    stride_v_block,
+    stride_v_head,
+    stride_v_blksz,
+    stride_v_dim,
+    stride_ob,
+    stride_oh,
+    stride_od,
+    stride_bt_batch,
+    stride_bt_block,
+    sm_scale,
+    GLOBAL_WINDOW: tl.constexpr,
+    LOCAL_WINDOW: tl.constexpr,
+    NUM_Q_HEADS: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
+    GQA_INTERLEAVE: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    BLOCK_SIZE_D: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+):
+    tl.static_assert(HEAD_DIM <= BLOCK_SIZE_D, "HEAD_DIM should be less than BLOCK_SIZE_D")
+    pid = tl.program_id(0)
+    n_progs = tl.num_programs(0)
+
+    num_tasks = BATCH_SIZE * NUM_Q_HEADS
+
+    for q_task_id in range(pid, num_tasks, n_progs):
+        q_head_id = q_task_id % NUM_Q_HEADS
+        b_id = q_task_id // NUM_Q_HEADS
+        if GQA_INTERLEAVE:
+            kv_head_id = q_head_id % NUM_KV_HEADS
+        else:
+            kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
+
+        kv_seq_len = tl.load(seqlens_ptr + b_id)
+
+
+        offs_d = tl.arange(0, BLOCK_SIZE_D)
+        q_ptrs = q_ptr + b_id * stride_qb + q_head_id * stride_qh + offs_d * stride_qd
+        q = tl.load(q_ptrs, mask = offs_d < HEAD_DIM, other = 0.0)
+
+        m_i = -float("inf")
+        l_i = 0.0
+        acc = tl.zeros((BLOCK_SIZE_D,), dtype=tl.float32)
+
+        num_logical_blocks = tl.cdiv(kv_seq_len, PAGE_SIZE)
+        
+        tl.static_assert(PAGE_SIZE == BLOCK_SIZE_N, "PAGE_SIZE should be equal to BLOCK_SIZE_N")
+
+        if GLOBAL_WINDOW is not None:
+            if GLOBAL_WINDOW > 0:
+                num_global_window_blocks = tl.cdiv(GLOBAL_WINDOW, BLOCK_SIZE_N)
+                for logical_block_idx in range(0, num_global_window_blocks):
+                    physical_block_id = tl.load(block_tables_ptr + b_id * stride_bt_batch + logical_block_idx * stride_bt_block)
+                    kv_block_start_in_seq = logical_block_idx * BLOCK_SIZE_N
+                    kv_block_end_in_seq = min(kv_block_start_in_seq + BLOCK_SIZE_N, kv_seq_len)
+                    kv_block_len = kv_block_end_in_seq - kv_block_start_in_seq
+                    k_block_ptr = tl.make_block_ptr(
+                        base=k_cache_ptr + physical_block_id * stride_k_block + kv_head_id * stride_k_head,
+                        shape=(kv_block_len, HEAD_DIM),
+                        strides=(stride_k_blksz, stride_k_dim),
+                        offsets=(0, 0),
+                        block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                        order=(1, 0),
+                    )
+                    v_block_ptr = tl.make_block_ptr(
+                        base=v_cache_ptr + physical_block_id * stride_v_block + kv_head_id * stride_v_head,
+                        shape=(kv_block_len, HEAD_DIM),
+                        strides=(stride_v_blksz, stride_v_dim),
+                        offsets=(0, 0),
+                        block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                        order=(1, 0),
+                    )
+                    gw_mask = (kv_block_start_in_seq + tl.arange(0, BLOCK_SIZE_N)) < GLOBAL_WINDOW
+                    if LOCAL_WINDOW is not None:
+                        sw_mask = (kv_block_start_in_seq + tl.arange(0, BLOCK_SIZE_N) + LOCAL_WINDOW) >= (kv_seq_len - 1)
+                        gw_mask = gw_mask | sw_mask
+                    kv_mask = tl.arange(0, BLOCK_SIZE_N) < kv_block_len
+                    mask = gw_mask & kv_mask
+                    
+                    acc, l_i, m_i = _sdpa_single_batch_fwd(
+                        acc, 
+                        l_i, 
+                        m_i, 
+                        q, 
+                        k_block_ptr, 
+                        v_block_ptr, 
+                        mask, 
+                        sm_scale, 
+                        HEAD_DIM, 
+                        BLOCK_SIZE_D, 
+                        BLOCK_SIZE_N, 
+                        BLOCK_SIZE_D, 
+                        v_cache_ptr.dtype.element_ty == tl.float8e5,
+                    )
+            else:
+                num_global_window_blocks = 0
+        else:
+            num_global_window_blocks = 0
+
+        if LOCAL_WINDOW is not None:
+            cur_kv_start = max(kv_seq_len - 1 - LOCAL_WINDOW, num_global_window_blocks * BLOCK_SIZE_N)
+        elif GLOBAL_WINDOW is None:
+            # vanilla causal attention
+            cur_kv_start = 0
+        else:
+            # Global window has been computed, but local window is None, so no more kvblocks
+            cur_kv_start = tl.cdiv(kv_seq_len, BLOCK_SIZE_N) * BLOCK_SIZE_N
+
+        non_global_window_start_page = cur_kv_start // BLOCK_SIZE_N
+        non_global_window_end_page = num_logical_blocks
+        for logical_block_idx in range(non_global_window_start_page, non_global_window_end_page):
+            physical_block_id = tl.load(block_tables_ptr + b_id * stride_bt_batch + logical_block_idx * stride_bt_block)
+            kv_block_start_in_seq = logical_block_idx * PAGE_SIZE
+            kv_block_end_in_seq = min(kv_block_start_in_seq + PAGE_SIZE, kv_seq_len)
+            kv_block_len = kv_block_end_in_seq - kv_block_start_in_seq
+            k_block_ptr = tl.make_block_ptr(
+                base=k_cache_ptr + physical_block_id * stride_k_block + kv_head_id * stride_k_head,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_k_blksz, stride_k_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            v_block_ptr = tl.make_block_ptr(
+                base=v_cache_ptr + physical_block_id * stride_v_block + kv_head_id * stride_v_head,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_v_blksz, stride_v_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            
+            mask = tl.arange(0, BLOCK_SIZE_N) < kv_block_len
+            if LOCAL_WINDOW is not None:
+                sw_mask = (kv_block_start_in_seq + tl.arange(0, BLOCK_SIZE_N) + LOCAL_WINDOW) >= (kv_seq_len - 1)
+                mask = mask & sw_mask
+            
+            acc, l_i, m_i = _sdpa_single_batch_fwd(
+                acc,
+                l_i, 
+                m_i, 
+                q, 
+                k_block_ptr, 
+                v_block_ptr, 
+                mask, 
+                sm_scale, 
+                HEAD_DIM,
+                BLOCK_SIZE_D,
+                BLOCK_SIZE_N, 
+                BLOCK_SIZE_D,
+                v_cache_ptr.dtype.element_ty == tl.float8e5,
+            )
+
+        acc = acc / l_i
+
+        o_ptrs = o_ptr + b_id * stride_ob + q_head_id * stride_oh + offs_d * stride_od
+        tl.store(o_ptrs, acc.to(o_ptr.dtype.element_ty), mask=offs_d < HEAD_DIM)
+
+
+def swa_ttx_paged_decode(
+    q: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    seqlens: torch.Tensor,
+    block_tables: torch.Tensor,
+    local_window_size: Optional[int] = None,
+    global_window_size: Optional[int] = None,
+    gqa_interleave: bool = False,
+    sm_scale: Optional[float] = None,
+) -> torch.Tensor:
+    batch_size, num_q_heads, head_dim = q.shape
+    num_total_blocks, num_kv_heads, block_size, head_dim_cache = key_cache.shape
+
+    assert block_size <= 128, f"temp: only support block_size <= 128, but got {block_size}"
+    max_num_blocks_per_seq = block_tables.shape[1]
+
+    assert head_dim == head_dim_cache
+    if sm_scale is None:
+        sm_scale = 1.0 / (head_dim**0.5)
+
+    o = torch.empty_like(q)
+    
+    num_vectors = get_num_cores("vector")
+    grid = (num_vectors, )
+    BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
+
+    _paged_decode_kernel[grid](
+        q,
+        key_cache,
+        value_cache,
+        o,
+        seqlens,
+        block_tables,
+        batch_size,
+        num_total_blocks,
+        max_num_blocks_per_seq,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        key_cache.stride(0),
+        key_cache.stride(1),
+        key_cache.stride(2),
+        key_cache.stride(3),
+        value_cache.stride(0),
+        value_cache.stride(1),
+        value_cache.stride(2),
+        value_cache.stride(3),
+        o.stride(0),
+        o.stride(1),
+        o.stride(2),
+        block_tables.stride(0),
+        block_tables.stride(1),
+        sm_scale,
+        global_window_size,
+        local_window_size,
+        num_q_heads,
+        num_kv_heads,
+        gqa_interleave,
+        head_dim,
+        block_size,
+        BLOCK_SIZE_D=BLOCK_SIZE_D,
+        BLOCK_SIZE_N=block_size,
+        multibuffer=False,
+    )
+    return o
+
+
+
+class TTXPagedDecodeSWA(MojoPagedDecodeSWA):
+
+    def forward(
+        self,
+        q: torch.Tensor,  # [bsz, n_q_heads, head_dim]
+        k_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
+        v_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
+        kv_lens: torch.Tensor,  # [bsz]
+        block_table: torch.Tensor,  # [bsz, max_num_blocks]
+        is_causal: bool = True,
+        local_window_size: Optional[int] = None,
+        global_window_size: Optional[int] = None,
+        sm_scale: Optional[float] = None,
+        gqa_interleave: bool = False,
+    ) -> torch.Tensor:
+        # Note: if is_causal = False, local_window_size and global_window_size are not used.
+
+        o = swa_ttx_paged_decode(
+            q,
+            k_cache,
+            v_cache,
+            kv_lens,
+            block_table,
+            local_window_size,
+            global_window_size,
+            gqa_interleave,
+            sm_scale,
+        )
+        
+        return o
+
 
 def flash_attn_sparse_torch(
     q,
@@ -1546,9 +1880,9 @@ def test_paged_decode_swa_function(profiler=None):
     import datetime
 
     test_configs = [
-        # (1, 1, 1, False, 128, 256, 0, torch.float32),
+        (1, 1, 1, False, 128, 256, torch.float32),
         (4, 4, 2, True, 128, 1024, torch.float32),
-        # (4, 4, 2, False, 128, 256, 0, torch.bfloat16),
+        (4, 4, 2, False, 128, 256, torch.bfloat16),
         (4, 16, 4, False, 128, 8192, torch.bfloat16),
     ]
 
@@ -1568,7 +1902,7 @@ def test_paged_decode_swa_function(profiler=None):
             v_mojo = value.clone()
 
             time = datetime.datetime.now()
-            o_mojo = MojoPagedDecodeSWA._registry.get("torch")()(
+            o_mojo = MojoPagedDecodeSWA._registry.get("ttx")()(
                 q_mojo,
                 k_mojo,
                 v_mojo,

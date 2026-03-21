@@ -476,7 +476,7 @@ def paged_attention_decode_impl(
         value_cache,
         o,
         seqlens,
-        block_tables.to(torch.int32),
+        block_tables,
         batch_size,
         num_total_blocks,
         max_num_blocks_per_seq,
