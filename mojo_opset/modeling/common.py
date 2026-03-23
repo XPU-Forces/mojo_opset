@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 
+from mojo_opset.compile.device_graph import DeviceGraphPool
 from mojo_opset.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -14,48 +15,6 @@ class MojoSession:
     @property
     @abstractmethod
     def kv_cache(self): ...
-
-
-class NPUGraphRunner:
-    def __init__(self, model):
-        self.model = model
-        self.graph = None
-        self.static_input_ids = None
-        self.static_logits = None
-        self.session = None
-
-    def capture(self, input_ids, session):
-        import torch_npu
-
-        self.static_input_ids = input_ids.clone()
-        self.session = session
-
-        if hasattr(self.session, "backup_state"):
-            self.session.backup_state()
-
-        with torch.inference_mode():
-            # Warmup
-            s = torch_npu.npu.Stream()
-            s.wait_stream(torch_npu.npu.current_stream())
-            with torch_npu.npu.stream(s):
-                self.static_logits, _ = self.model(self.static_input_ids, session=self.session)
-            torch_npu.npu.current_stream().wait_stream(s)
-
-            if hasattr(self.session, "restore_state"):
-                self.session.restore_state()
-
-            # Capture
-            self.graph = torch_npu.npu.NPUGraph()
-            with torch_npu.npu.graph(self.graph):
-                self.static_logits, _ = self.model(self.static_input_ids, session=self.session)
-
-            if hasattr(self.session, "restore_state"):
-                self.session.restore_state()
-
-    def replay(self, input_ids, session):
-        self.static_input_ids.copy_(input_ids)
-        self.graph.replay()
-        return self.static_logits, session
 
 
 class MojoSampler(torch.nn.Module):
@@ -167,10 +126,11 @@ class MojoGenerator(torch.nn.Module):
         self._enable_typewriter = enable_typewriter
         self._typewriter_buffer = typewriter_buffer
         self._hooks = hooks or []
-        self.use_npu_graph = False
+        self.use_device_graph = False
         if hasattr(model, "config") and hasattr(model.config, "runtime_config"):
-            if getattr(model.config.runtime_config, "use_npu_graph", False):
-                self.use_npu_graph = True
+            if getattr(model.config.runtime_config, "use_device_graph", False):
+                self.use_device_graph = True
+        self._graph_pool = DeviceGraphPool(model, device=device) if self.use_device_graph else None
         if self._enable_typewriter:
             from multiprocessing import Pipe
             from multiprocessing import Process
@@ -274,9 +234,8 @@ class MojoGenerator(torch.nn.Module):
         self._run_hooks("before_decode")
 
         graph_runner = None
-        if self.use_npu_graph:
-            graph_runner = NPUGraphRunner(self.model)
-            graph_runner.capture(input_ids, session)
+        if self._graph_pool is not None:
+            graph_runner = self._graph_pool.get_runner(input_ids, session)
 
         for step in range(1, max_decode_steps):
             with torch.inference_mode():
