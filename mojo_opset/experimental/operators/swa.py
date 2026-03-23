@@ -242,6 +242,7 @@ class MojoPagedDecodeSWA(MojoOperator):
             o[i] = o_i.to(o.dtype)
         return o
 
+
 AUX_MASK_SIZE = 256
 AUX_MASK = None
 
@@ -280,6 +281,31 @@ def get_aux_mask():
 
 import triton
 import triton.language as tl
+
+
+@triton.jit
+def _swa_split_blocks(q_block_start_id, q_block_len, kv_seq_len, BLOCK_SIZE_N, IS_CAUSAL, GLOBAL_WINDOW_SIZE, LOCAL_WINDOW_SIZE):
+    if not IS_CAUSAL:
+        return 0, 0, tl.cdiv(kv_seq_len, BLOCK_SIZE_N)
+
+    num_total_blocks = tl.cdiv(q_block_start_id + q_block_len, BLOCK_SIZE_N)
+    if GLOBAL_WINDOW_SIZE is None and LOCAL_WINDOW_SIZE is None:
+        return 0, 0, num_total_blocks
+    
+    if GLOBAL_WINDOW_SIZE is not None:
+        num_global_window_blocks = min(tl.cdiv(GLOBAL_WINDOW_SIZE, BLOCK_SIZE_N), num_total_blocks)
+    else:
+        num_global_window_blocks = 0
+    
+    if LOCAL_WINDOW_SIZE is not None:
+        local_window_start_id = max(q_block_start_id - LOCAL_WINDOW_SIZE, 0)
+        local_window_start_block = local_window_start_id // BLOCK_SIZE_N
+    else:
+        local_window_start_block = num_total_blocks
+    
+    non_global_window_start_block = max(num_global_window_blocks, local_window_start_block)
+    
+    return num_global_window_blocks, non_global_window_start_block, num_total_blocks
 
 
 @triton.jit
@@ -413,31 +439,6 @@ def _sdpa_acc_fwd_MxN(
     return acc_ptr, l_i, m_i
 
 @triton.jit
-def _swa_split_blocks(q_block_start_id, q_block_len, kv_seq_len, BLOCK_SIZE_N, IS_CAUSAL, GLOBAL_WINDOW_SIZE, LOCAL_WINDOW_SIZE):
-    if not IS_CAUSAL:
-        return 0, 0, tl.cdiv(kv_seq_len, BLOCK_SIZE_N)
-
-    num_total_blocks = tl.cdiv(q_block_start_id + q_block_len, BLOCK_SIZE_N)
-    if GLOBAL_WINDOW_SIZE is None and LOCAL_WINDOW_SIZE is None:
-        return 0, 0, num_total_blocks
-    
-    if GLOBAL_WINDOW_SIZE is not None:
-        num_global_window_blocks = min(tl.cdiv(GLOBAL_WINDOW_SIZE, BLOCK_SIZE_N), num_total_blocks)
-    else:
-        num_global_window_blocks = 0
-    
-    if LOCAL_WINDOW_SIZE is not None:
-        local_window_start_id = max(q_block_start_id - LOCAL_WINDOW_SIZE, 0)
-        local_window_start_block = local_window_start_id // BLOCK_SIZE_N
-    else:
-        local_window_start_block = num_total_blocks
-    
-    non_global_window_start_block = max(num_global_window_blocks, local_window_start_block)
-    
-    return num_global_window_blocks, non_global_window_start_block, num_total_blocks
-
-
-@triton.jit
 def _sdpa_infer_kernel(
     o_ptr,
     q_ptr,
@@ -512,38 +513,38 @@ def _sdpa_infer_kernel(
             else:
                 kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
 
-            q_block_ptr = tl.make_block_ptr(
-                base=q_ptr + q_start * stride_qt + q_head_id * stride_qh,
-                shape=(q_seq_len, HEAD_DIM),
-                strides=(stride_qt, stride_qd),
-                offsets=(0, 0),
-                block_shape=(BLOCK_M, BLOCK_D),
-                order=(1, 0),
-            )
-            o_block_ptr = tl.make_block_ptr(
-                base=o_ptr + q_start * stride_ot + q_head_id * stride_oh,
-                shape=(q_seq_len, HEAD_DIM),
-                strides=(stride_ot, stride_od),
-                offsets=(0, 0),
-                block_shape=(BLOCK_M, BLOCK_D),
-                order=(1, 0),
-            )
-            k_block_ptr = tl.make_block_ptr(
-                base=k_ptr + kv_start * stride_kt + kv_head_id * stride_kh,
-                shape=(kv_seq_len, HEAD_DIM),
-                strides=(stride_kt, stride_kd),
-                offsets=(0, 0),
-                block_shape=(BLOCK_N, BLOCK_D),
-                order=(1, 0),
-            )
-            v_block_ptr = tl.make_block_ptr(
-                base=v_ptr + kv_start * stride_vt + kv_head_id * stride_vh,
-                shape=(kv_seq_len, HEAD_DIM),
-                strides=(stride_vt, stride_vd),
-                offsets=(0, 0),
-                block_shape=(BLOCK_N, BLOCK_D),
-                order=(1, 0),
-            )
+            # q_block_ptr = tl.make_block_ptr(
+            #     base=q_ptr + q_start * stride_qt + q_head_id * stride_qh,
+            #     shape=(q_seq_len, HEAD_DIM),
+            #     strides=(stride_qt, stride_qd),
+            #     offsets=(0, 0),
+            #     block_shape=(BLOCK_M, BLOCK_D),
+            #     order=(1, 0),
+            # )
+            # o_block_ptr = tl.make_block_ptr(
+            #     base=o_ptr + q_start * stride_ot + q_head_id * stride_oh,
+            #     shape=(q_seq_len, HEAD_DIM),
+            #     strides=(stride_ot, stride_od),
+            #     offsets=(0, 0),
+            #     block_shape=(BLOCK_M, BLOCK_D),
+            #     order=(1, 0),
+            # )
+            # k_block_ptr = tl.make_block_ptr(
+            #     base=k_ptr + kv_start * stride_kt + kv_head_id * stride_kh,
+            #     shape=(kv_seq_len, HEAD_DIM),
+            #     strides=(stride_kt, stride_kd),
+            #     offsets=(0, 0),
+            #     block_shape=(BLOCK_N, BLOCK_D),
+            #     order=(1, 0),
+            # )
+            # v_block_ptr = tl.make_block_ptr(
+            #     base=v_ptr + kv_start * stride_vt + kv_head_id * stride_vh,
+            #     shape=(kv_seq_len, HEAD_DIM),
+            #     strides=(stride_vt, stride_vd),
+            #     offsets=(0, 0),
+            #     block_shape=(BLOCK_N, BLOCK_D),
+            #     order=(1, 0),
+            # )
             q_mask = gen_mask_m_right_bound(
                 aux_mask_ptr_10t,
                 aux_mask_size,
@@ -558,7 +559,15 @@ def _sdpa_infer_kernel(
             q_block_end = min(q_block_start + BLOCK_M, q_seq_len)
             q_block_len = q_block_end - q_block_start
 
-            cur_q_block_ptr = tl.advance(q_block_ptr, (q_block_start.to(tl.int32), 0))
+            # cur_q_block_ptr = tl.advance(q_block_ptr, (q_block_start.to(tl.int32), 0))
+            cur_q_block_ptr = tl.make_block_ptr(
+                base=q_ptr + q_start * stride_qt + q_head_id * stride_qh,
+                shape=(q_seq_len, HEAD_DIM),
+                strides=(stride_qt, stride_qd),
+                offsets=(q_block_start.to(tl.int32), 0),
+                block_shape=(BLOCK_M, BLOCK_D),
+                order=(1, 0),
+            )
             cur_q_block = tl.load(cur_q_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
             m_i = tl.zeros((BLOCK_M,), dtype=tl.float32) - float("inf")
@@ -625,8 +634,25 @@ def _sdpa_infer_kernel(
                     mask = mask_causal & q_mask & kv_mask
                 else:
                     mask = q_mask & kv_mask
-                cur_k_block_ptr = tl.advance(k_block_ptr, (kv_block_start.to(tl.int32), 0))
-                cur_v_block_ptr = tl.advance(v_block_ptr, (kv_block_start.to(tl.int32), 0))
+                # cur_k_block_ptr = tl.advance(k_block_ptr, (kv_block_start.to(tl.int32), 0))
+                cur_k_block_ptr = tl.make_block_ptr(
+                    base=k_ptr + kv_start * stride_kt + kv_head_id * stride_kh,
+                    shape=(kv_seq_len, HEAD_DIM),
+                    strides=(stride_kt, stride_kd),
+                    offsets=(kv_block_start.to(tl.int32), 0),
+                    block_shape=(BLOCK_N, BLOCK_D),
+                    order=(1, 0),
+                )
+                # cur_v_block_ptr = tl.advance(v_block_ptr, (kv_block_start.to(tl.int32), 0))
+                cur_v_block_ptr = tl.make_block_ptr(
+                    base=v_ptr + kv_start * stride_vt + kv_head_id * stride_vh,
+                    shape=(kv_seq_len, HEAD_DIM),
+                    strides=(stride_vt, stride_vd),
+                    offsets=(kv_block_start.to(tl.int32), 0),
+                    block_shape=(BLOCK_N, BLOCK_D),
+                    order=(1, 0),
+                )
+
                 acc, l_i, m_i = _sdpa_acc_fwd_MxN(
                     acc,
                     l_i,
@@ -682,8 +708,24 @@ def _sdpa_infer_kernel(
                     mask = mask_causal & q_mask & kv_mask
                 else:
                     mask = q_mask & kv_mask
-                cur_k_block_ptr = tl.advance(k_block_ptr, (kv_block_start.to(tl.int32), 0))
-                cur_v_block_ptr = tl.advance(v_block_ptr, (kv_block_start.to(tl.int32), 0))
+                # cur_k_block_ptr = tl.advance(k_block_ptr, (kv_block_start.to(tl.int32), 0))
+                cur_k_block_ptr = tl.make_block_ptr(
+                    base=k_ptr + kv_start * stride_kt + kv_head_id * stride_kh,
+                    shape=(kv_seq_len, HEAD_DIM),
+                    strides=(stride_kt, stride_kd),
+                    offsets=(kv_block_start.to(tl.int32), 0),
+                    block_shape=(BLOCK_N, BLOCK_D),
+                    order=(1, 0),
+                )
+                # cur_v_block_ptr = tl.advance(v_block_ptr, (kv_block_start.to(tl.int32), 0))
+                cur_v_block_ptr = tl.make_block_ptr(
+                    base=v_ptr + kv_start * stride_vt + kv_head_id * stride_vh,
+                    shape=(kv_seq_len, HEAD_DIM),
+                    strides=(stride_vt, stride_vd),
+                    offsets=(kv_block_start.to(tl.int32), 0),
+                    block_shape=(BLOCK_N, BLOCK_D),
+                    order=(1, 0),
+                )
                 acc, l_i, m_i = _sdpa_acc_fwd_MxN(
                     acc,
                     l_i,
@@ -700,7 +742,15 @@ def _sdpa_infer_kernel(
                     v_ptr.dtype.element_ty == tl.float8e5,
                 )
 
-            cur_o_block_ptr = tl.advance(o_block_ptr, (q_block_start.to(tl.int32), 0))
+            # cur_o_block_ptr = tl.advance(o_block_ptr, (q_block_start.to(tl.int32), 0))
+            cur_o_block_ptr = tl.make_block_ptr(
+                base=o_ptr + q_start * stride_ot + q_head_id * stride_oh,
+                shape=(q_seq_len, HEAD_DIM),
+                strides=(stride_ot, stride_od),
+                offsets=(q_block_start.to(tl.int32), 0),
+                block_shape=(BLOCK_M, BLOCK_D),
+                order=(1, 0),
+            )
             accumulator = acc / l_i[:, None]
             tl.store(cur_o_block_ptr, accumulator.to(o_ptr.type.element_ty), boundary_check=(0, 1))
 
@@ -883,22 +933,22 @@ def _paged_prefill_kernel(
             else:
                 kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
 
-            q_block_ptr = tl.make_block_ptr(
-                base=q_ptr + q_start * stride_qt + q_head_id * stride_qh,
-                shape=(q_seq_len, HEAD_DIM),
-                strides=(stride_qt, stride_qd),
-                offsets=(0, 0),
-                block_shape=(BLOCK_M, BLOCK_D),
-                order=(1, 0),
-            )
-            o_block_ptr = tl.make_block_ptr(
-                base=o_ptr + q_start * stride_ot + q_head_id * stride_oh,
-                shape=(q_seq_len, HEAD_DIM),
-                strides=(stride_ot, stride_od),
-                offsets=(0, 0),
-                block_shape=(BLOCK_M, BLOCK_D),
-                order=(1, 0),
-            )
+            # q_block_ptr = tl.make_block_ptr(
+            #     base=q_ptr + q_start * stride_qt + q_head_id * stride_qh,
+            #     shape=(q_seq_len, HEAD_DIM),
+            #     strides=(stride_qt, stride_qd),
+            #     offsets=(0, 0),
+            #     block_shape=(BLOCK_M, BLOCK_D),
+            #     order=(1, 0),
+            # )
+            # o_block_ptr = tl.make_block_ptr(
+            #     base=o_ptr + q_start * stride_ot + q_head_id * stride_oh,
+            #     shape=(q_seq_len, HEAD_DIM),
+            #     strides=(stride_ot, stride_od),
+            #     offsets=(0, 0),
+            #     block_shape=(BLOCK_M, BLOCK_D),
+            #     order=(1, 0),
+            # )
             q_mask = gen_mask_m_right_bound(
                 aux_mask_ptr_10t,
                 aux_mask_size,
@@ -912,7 +962,15 @@ def _paged_prefill_kernel(
             q_block_start = q_block_id * BLOCK_M
             q_block_end = min(q_block_start + BLOCK_M, q_seq_len)
             q_block_len = q_block_end - q_block_start
-            cur_q_block_ptr = tl.advance(q_block_ptr, (q_block_start.to(tl.int32), 0))
+            # cur_q_block_ptr = tl.advance(q_block_ptr, (q_block_start.to(tl.int32), 0))
+            cur_q_block_ptr = tl.make_block_ptr(
+                base=q_ptr + q_start * stride_qt + q_head_id * stride_qh,
+                shape=(q_seq_len, HEAD_DIM),
+                strides=(stride_qt, stride_qd),
+                offsets=(q_block_start.to(tl.int32), 0),
+                block_shape=(BLOCK_M, BLOCK_D),
+                order=(1, 0),
+            )
             cur_q_block = tl.load(cur_q_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
             m_i = tl.zeros((BLOCK_M,), dtype=tl.float32) - float("inf")
@@ -1088,7 +1146,15 @@ def _paged_prefill_kernel(
                     v_ptr.dtype.element_ty == tl.float8e5,
                 )
 
-            cur_o_block_ptr = tl.advance(o_block_ptr, (q_block_start.to(tl.int32), 0))
+            # cur_o_block_ptr = tl.advance(o_block_ptr, (q_block_start.to(tl.int32), 0))
+            cur_o_block_ptr = tl.make_block_ptr(
+                base=o_ptr + q_start * stride_ot + q_head_id * stride_oh,
+                shape=(q_seq_len, HEAD_DIM),
+                strides=(stride_ot, stride_od),
+                offsets=(q_block_start.to(tl.int32), 0),
+                block_shape=(BLOCK_M, BLOCK_D),
+                order=(1, 0),
+            )
             accumulator = acc / l_i[:, None]
             tl.store(cur_o_block_ptr, accumulator.to(o_ptr.type.element_ty), boundary_check=(0, 1))
 
@@ -1678,12 +1744,16 @@ def generate_test_data(
     bsz: int,
     q_head_num: int,
     kv_head_num: int,
+    gqa_interleave: bool,
     head_dim: int,
     max_q_len: int,
     max_kv_prefix_len: int,
     dtype: torch.dtype = torch.bfloat16,
     device: torch.device = "npu",
+    random_seed: Optional[int] = None,
 ):
+    if random_seed is not None:
+        set_seed(random_seed)
     q_lens = torch.randint(max(max_q_len // 2, 1), max_q_len + 1, (bsz,), dtype=torch.int32, device=device)
     if max_kv_prefix_len > 0:
         kv_prefix_lens = torch.randint(
@@ -1700,19 +1770,23 @@ def generate_test_data(
     value = torch.randn(cu_seqlens_kv[-1].item(), kv_head_num, head_dim, dtype=dtype, device=device)
 
     # blockwise_diffusion_attn_mask = torch.ones(seq_length * 2, seq_length * 2, dtype=torch.bool)
-    return query, key, value, cu_seqlens_q, cu_seqlens_kv
+    return query, gqa_interleave, key, value, cu_seqlens_q, cu_seqlens_kv
 
 
 def generate_paged_prefill_test_data(
     bsz: int,
     q_head_num: int,
     kv_head_num: int,
+    gqa_interleave: bool,
     head_dim: int,
     max_q_len: int,
     max_kv_prefix_len: int,
     dtype: torch.dtype = torch.bfloat16,
     device: torch.device = "npu",
+    random_seed: Optional[int] = None,
 ):
+    if random_seed is not None:
+        set_seed(random_seed)
     if dtype == torch.float32:
         page_size = 64
     else:
@@ -1741,209 +1815,175 @@ def generate_paged_prefill_test_data(
     value_cache = torch.randn(max_num_pages, kv_head_num, page_size, head_dim, dtype=dtype, device=device)
 
     # blockwise_diffusion_attn_mask = torch.ones(seq_length * 2, seq_length * 2, dtype=torch.bool)
-    return query, key_cache, value_cache, cu_seqlens_q, kv_lens, block_table
+    return query, gqa_interleave, key_cache, value_cache, cu_seqlens_q, kv_lens, block_table
 
 
 def generate_paged_decode_test_data(
     bsz: int,
     q_head_num: int,
     kv_head_num: int,
+    gqa_interleave: bool,
     head_dim: int,
     max_kv_len: int,
     dtype: torch.dtype = torch.bfloat16,
     device: torch.device = "npu",
+    random_seed: Optional[int] = None,
 ):
-    query, key_cache, value_cache, cu_seqlens_q, kv_lens, block_table = generate_paged_prefill_test_data(
-        bsz, q_head_num, kv_head_num, head_dim, 1, max_kv_len-1, dtype, device
+    query, gqa_interleave, key_cache, value_cache, cu_seqlens_q, kv_lens, block_table = generate_paged_prefill_test_data(
+        bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, 1, max_kv_len-1, dtype, device, random_seed,
     )
-    print(cu_seqlens_q)
     torch.testing.assert_close(cu_seqlens_q.to(torch.int32), torch.arange(bsz+1, dtype=torch.int32, device=device))
-    return query, key_cache, value_cache, kv_lens, block_table
+    return query, gqa_interleave, key_cache, value_cache, kv_lens, block_table
 
 
 @torch.no_grad
-def test_swa_function(profiler=None):
+def test_swa_function(query, gqa_interleave, key, value, cu_seqlens_q, cu_seqlens_kv, profiler=None):
     import datetime
-
-    test_configs = [
-        (1, 1, 1, False, 128, 256, 0, torch.float32),
-        (4, 4, 2, True, 128, 512, 0, torch.float32),
-        (4, 4, 2, False, 128, 256, 0, torch.bfloat16),
-        (4, 16, 4, False, 128, 4096, 0, torch.bfloat16),
-    ]
 
     local_window = 1023
     global_window = 4
-    for bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_q_len, max_kv_prefix_len, dtype in test_configs:
-        print(bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_q_len, max_kv_prefix_len, dtype)
-        scale = 1.0 / head_dim**0.5
-        for i in range(5):
-            query, key, value, cu_seqlens_q, cu_seqlens_kv = generate_test_data(
-                bsz, q_head_num, kv_head_num, head_dim, max_q_len, max_kv_prefix_len, dtype
-            )
-            print(i, cu_seqlens_q, cu_seqlens_kv)
+    head_dim = query.shape[-1]
+    scale = 1.0 / head_dim**0.5
 
-            q_mojo = query.clone()
-            k_mojo = key.clone()
-            v_mojo = value.clone()
+    q_mojo = query
+    k_mojo = key
+    v_mojo = value
+    torch.npu.synchronize()
+    time = datetime.datetime.now()
+    o_mojo = MojoSWA._registry.get("ttx")()(
+        q_mojo,
+        k_mojo,
+        v_mojo,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        True,
+        local_window,
+        global_window,
+        scale,
+        gqa_interleave,
+    )
 
-            torch.npu.synchronize()
+    elapsed_time = datetime.datetime.now() - time
 
-            time = datetime.datetime.now()
-            o_mojo = MojoSWA._registry.get("ttx")()(
-                q_mojo,
-                k_mojo,
-                v_mojo,
-                cu_seqlens_q,
-                cu_seqlens_kv,
-                True,
-                local_window,
-                global_window,
-                scale,
-                gqa_interleave,
-            )
-
-            print("time cost:", (datetime.datetime.now() - time).microseconds / 1000, "ms")
-
-            if profiler is not None:
-                profiler.step()
-            else:
-                q_ref = query.clone()
-                k_ref = key.clone()
-                v_ref = value.clone()
-                o_ref = flash_attn_sparse_torch(
-                    q_ref, k_ref, v_ref, cu_seqlens_q, cu_seqlens_kv, gqa_interleave, scale, local_window, global_window
-                )
-
-                assert_close(o_ref, o_mojo)
-                print("Pass", i)
-
+    if profiler is not None:
+        profiler.step()
+    else:
+        q_ref = query.clone()
+        k_ref = key.clone()
+        v_ref = value.clone()
+        o_ref = flash_attn_sparse_torch(
+            q_ref, k_ref, v_ref, cu_seqlens_q, cu_seqlens_kv, gqa_interleave, scale, local_window, global_window
+        )
+        assert_close(o_ref, o_mojo)
+    return elapsed_time
 
 @torch.no_grad
-def test_paged_prefill_swa_function(profiler=None):
+def test_paged_prefill_swa_function(query, gqa_interleave, key, value, cu_seqlens_q, kvlens, block_table, profiler=None):
     import datetime
-
-    test_configs = [
-        # (1, 1, 1, False, 128, 256, 0, torch.float32),
-        (4, 4, 2, True, 128, 512, 1024, torch.float32),
-        # (4, 4, 2, False, 128, 256, 0, torch.bfloat16),
-        (4, 16, 4, False, 128, 4096, 8192, torch.bfloat16),
-    ]
 
     local_window = 1023
     global_window = 4
-    for bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_q_len, max_kv_prefix_len, dtype in test_configs:
-        print(bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_q_len, max_kv_prefix_len, dtype)
-        scale = 1.0 / head_dim**0.5
-        for i in range(5):
-            query, key, value, cu_seqlens_q, kvlens, block_table = generate_paged_prefill_test_data(
-                bsz, q_head_num, kv_head_num, head_dim, max_q_len, max_kv_prefix_len, dtype
-            )
-            print(i, cu_seqlens_q, kvlens)
+    head_dim = query.shape[-1]
+    scale = 1.0 / head_dim**0.5
+    q_mojo = query
+    k_mojo = key
+    v_mojo = value
+    torch.npu.synchronize()
+    time = datetime.datetime.now()
+    o_mojo = MojoPagedPrefillSWA._registry.get("ttx")()(
+        q_mojo,
+        k_mojo,
+        v_mojo,
+        cu_seqlens_q,
+        kvlens,
+        block_table,
+        True,
+        local_window,
+        global_window,
+        scale,
+        gqa_interleave,
+    )
+    torch.npu.synchronize()
+    elapsed_time = datetime.datetime.now() - time
 
-            q_mojo = query.clone()
-            k_mojo = key.clone()
-            v_mojo = value.clone()
-
-            time = datetime.datetime.now()
-            o_mojo = MojoPagedPrefillSWA._registry.get("ttx")()(
-                q_mojo,
-                k_mojo,
-                v_mojo,
-                cu_seqlens_q,
-                kvlens,
-                block_table,
-                True,
-                local_window,
-                global_window,
-                scale,
-                gqa_interleave,
-            )
-
-            if profiler is not None:
-                profiler.step()
-            else:
-                q_ref = query.clone()
-                k_ref = key.clone()
-                v_ref = value.clone()
-                o_ref = paged_prefill_attn_sparse_torch(
-                    q_ref,
-                    k_ref,
-                    v_ref,
-                    cu_seqlens_q,
-                    kvlens,
-                    block_table,
-                    gqa_interleave,
-                    scale,
-                    local_window,
-                    global_window,
-                )
-                assert_close(o_ref, o_mojo)
-                print("Pass", i)
-                print("time cost:", (datetime.datetime.now() - time).microseconds / 1000, "ms")
+    if profiler is not None:
+        profiler.step()
+    else:
+        q_ref = query.clone()
+        k_ref = key.clone()
+        v_ref = value.clone()
+        o_ref = paged_prefill_attn_sparse_torch(
+            q_ref,
+            k_ref,
+            v_ref,
+            cu_seqlens_q,
+            kvlens,
+            block_table,
+            gqa_interleave,
+            scale,
+            local_window,
+            global_window,
+        )
+        assert_close(o_ref, o_mojo)
+    return elapsed_time
 
 @torch.no_grad
-def test_paged_decode_swa_function(profiler=None):
+def test_paged_decode_swa_function(query, gqa_interleave, key, value, kvlens, block_table, profiler=None):
     import datetime
 
-    test_configs = [
-        (1, 1, 1, False, 128, 256, torch.float32),
-        (4, 4, 2, True, 128, 1024, torch.float32),
-        (4, 4, 2, False, 128, 256, torch.bfloat16),
-        (4, 16, 4, False, 128, 8192, torch.bfloat16),
-    ]
-
+    head_dim = query.shape[-1]
     local_window = 1023
     global_window = 4
-    for bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_kv_len, dtype in test_configs:
-        print(bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_kv_len, dtype)
-        scale = 1.0 / head_dim**0.5
-        for i in range(5):
-            query, key, value, kvlens, block_table = generate_paged_decode_test_data(
-                bsz, q_head_num, kv_head_num, head_dim, max_kv_len, dtype
-            )
-            print(i, kvlens)
+    scale = 1.0 / head_dim**0.5
 
-            q_mojo = query.clone()
-            k_mojo = key.clone()
-            v_mojo = value.clone()
+    q_mojo = query
+    k_mojo = key
+    v_mojo = value
+    torch.npu.synchronize()
+    time = datetime.datetime.now()
+    o_mojo = MojoPagedDecodeSWA._registry.get("ttx")()(
+        q_mojo,
+        k_mojo,
+        v_mojo,
+        kvlens,
+        block_table,
+        True,
+        local_window,
+        global_window,
+        scale,
+        gqa_interleave,
+    )
+    torch.npu.synchronize()
+    elapsed_time = datetime.datetime.now() - time
 
-            time = datetime.datetime.now()
-            o_mojo = MojoPagedDecodeSWA._registry.get("ttx")()(
-                q_mojo,
-                k_mojo,
-                v_mojo,
-                kvlens,
-                block_table,
-                True,
-                local_window,
-                global_window,
-                scale,
-                gqa_interleave,
-            )
+    if profiler is not None:
+        profiler.step()
+    else:
+        q_ref = query.clone()
+        k_ref = key.clone()
+        v_ref = value.clone()
+        bsz = block_table.shape[0]
+        o_ref = paged_prefill_attn_sparse_torch(
+            q_ref,
+            k_ref,
+            v_ref,
+            torch.arange(bsz+1, dtype=torch.int32),
+            kvlens,
+            block_table,
+            gqa_interleave,
+            scale,
+            local_window,
+            global_window,
+        )
+        assert_close(o_ref, o_mojo)
+    return elapsed_time
 
-            if profiler is not None:
-                profiler.step()
-            else:
-                q_ref = query.clone()
-                k_ref = key.clone()
-                v_ref = value.clone()
-                o_ref = paged_prefill_attn_sparse_torch(
-                    q_ref,
-                    k_ref,
-                    v_ref,
-                    torch.arange(bsz+1, dtype=torch.int32),
-                    kvlens,
-                    block_table,
-                    gqa_interleave,
-                    scale,
-                    local_window,
-                    global_window,
-                )
-                assert_close(o_ref, o_mojo)
-                print("Pass", i)
-                print("time cost:", (datetime.datetime.now() - time).microseconds / 1000, "ms")
+def set_seed(seed: int):
+    torch.manual_seed(seed)
+    torch.npu.manual_seed(seed)
+    import numpy
 
+    numpy.random.seed(seed)
 
 def assert_close(
     results,
@@ -2003,42 +2043,107 @@ if __name__ == "__main__":
         "prefill": test_paged_prefill_swa_function,
         "decode": test_paged_decode_swa_function,
     }
+
+    generate_test_data_func_map = {
+        "infer": generate_test_data,
+        "prefill": generate_paged_prefill_test_data,
+        "decode": generate_paged_decode_test_data,
+    }
+
+    test_configs_map = {
+        "infer": [
+            # (1, 1, 1, False, 128, 256, 0, torch.float32),
+            # (4, 4, 2, True, 128, 512, 0, torch.float32),
+            # (4, 4, 2, False, 128, 256, 0, torch.bfloat16),
+            (4, 16, 4, False, 128, 1024, 8192, torch.bfloat16),
+        ],
+        "prefill":[
+            # (1, 1, 1, False, 128, 256, 0, torch.float32),
+            # (4, 4, 2, True, 128, 512, 1024, torch.float32),
+            # (4, 4, 2, False, 128, 256, 0, torch.bfloat16),
+            (4, 16, 4, False, 128, 1024, 8192, torch.bfloat16),
+        ],
+        "decode": [
+            # (1, 1, 1, False, 128, 256, torch.float32),
+            # (4, 4, 2, True, 128, 1024, torch.float32),
+            # (4, 4, 2, False, 128, 256, torch.bfloat16),
+            (4, 16, 4, False, 128, 8192, torch.bfloat16),
+        ],
+    }
     
     import sys
     test_func = test_func_map[sys.argv[1]]
-    test_func()
+    generate_test_data_func = generate_test_data_func_map[sys.argv[1]]
+    test_configs = test_configs_map[sys.argv[1]]
 
-    import torch_npu
+    for test_config in test_configs:
+        print(*test_config)
 
-    # 添加Profiling采集扩展配置参数，详细参数介绍可参考下文的参数说明
-    experimental_config = torch_npu.profiler._ExperimentalConfig(
-        export_type=[torch_npu.profiler.ExportType.Text],
-        profiler_level=torch_npu.profiler.ProfilerLevel.Level0,
-        mstx=False,  # 原参数名msprof_tx改为mstx，新版本依旧兼容原参数名msprof_tx
-        mstx_domain_include=[],
-        mstx_domain_exclude=[],
-        aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
-        l2_cache=False,
-        op_attr=False,
-        data_simplification=False,
-        record_op_args=False,
-        gc_detect_threshold=None,
-        host_sys=[],
-        sys_io=False,
-        sys_interconnection=False,
-    )
+        test_inputs = generate_test_data_func(
+            *test_config, random_seed=42
+        )
 
-    with torch_npu.profiler.profile(
-        activities=[torch_npu.profiler.ProfilerActivity.CPU, torch_npu.profiler.ProfilerActivity.NPU],
-        schedule=torch_npu.profiler.schedule(
-            wait=1, warmup=0, active=5, repeat=1, skip_first=0
-        ),  # 与prof.step()配套使用
-        on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./npu_profiling"),
-        record_shapes=False,
-        profile_memory=False,
-        with_stack=True,
-        with_modules=False,
-        with_flops=False,
-        experimental_config=experimental_config,
-    ) as prof:
-        test_func(prof)
+        e2e_times = []
+        total_runs = 10
+        for i in range(total_runs):
+            e2e_times.append(test_func(*test_inputs))
+            # torch.distributed.barrier()
+        print("Avg E2E time:", sum((t.microseconds / 1000) for t in e2e_times[1:]) / (total_runs - 1), "ms")
+
+        import torch_npu
+
+        profiling_dir = "./npu_profiling"
+        active = 5
+        # 添加Profiling采集基础配置参数，详细参数介绍可参考下文的参数说明
+        experimental_config = torch_npu.profiler._ExperimentalConfig(
+            aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
+            profiler_level=torch_npu.profiler.ProfilerLevel.Level2,
+            l2_cache=False,
+            data_simplification=False,
+        )
+
+        with torch_npu.profiler.profile(
+            activities=[torch_npu.profiler.ProfilerActivity.CPU, torch_npu.profiler.ProfilerActivity.NPU],
+            schedule=torch_npu.profiler.schedule(wait=0, warmup=5, active=active, repeat=1, skip_first=0),
+            on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(profiling_dir),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+            with_flops=False,
+            with_modules=False,
+            experimental_config=experimental_config,
+        ) as prof:
+            for _ in range(total_runs):
+                # 启动性能数据采集
+                test_func(*test_inputs, prof)
+        
+        import os
+        import csv
+
+        try:
+            kernel_profiling_path = max(
+                [
+                    os.path.join(profiling_dir, d)
+                    for d in os.listdir(profiling_dir)
+                    if os.path.isdir(os.path.join(profiling_dir, d))
+                ],
+                key=os.path.getmtime,
+            )
+            csv_file_path = os.path.join(kernel_profiling_path, "ASCEND_PROFILER_OUTPUT", "op_statistic.csv")
+
+            if not os.path.exists(csv_file_path):
+                raise ValueError(f"File not found: {csv_file_path}")
+
+        except Exception as e:
+            raise ValueError(f"Failed to get Profiling folder name: {e}")
+
+        total_avg_time_us = 0.0
+
+        with open(csv_file_path, mode="r", newline="", encoding="utf-8") as file:
+            reader = csv.DictReader(file)
+
+            for row in reader:
+                avg_time = float(row["Total Time(us)"])
+                total_avg_time_us += avg_time
+
+        print("Avg device time:", total_avg_time_us / active, "us")
