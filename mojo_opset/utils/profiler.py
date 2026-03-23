@@ -1,7 +1,6 @@
 import datetime
 import gzip
 import os
-import subprocess
 
 from mojo_opset.modeling.common import GeneratorHook
 from mojo_opset.utils.logging import get_logger
@@ -41,13 +40,6 @@ def create_npu_profiler(
         os.remove(trace_file)
         trace_file = gz_path
         logger.info(f"Profiling result compressed to {trace_file}.")
-
-        try:
-            logger.info(f"upload trace file {trace_file} to merlin")
-            command2 = f"/opt/tiger/mlx_deploy/bin/mlx asset upload {trace_file}"
-            subprocess.run(command2, shell=True, check=True, executable="/bin/bash")
-        except Exception as e:
-            logger.warning(f"failed to upload trace file {trace_file} to merlin, error: {e}")
 
     profiler_module = torch_npu.profiler
     activities = [profiler_module.ProfilerActivity.CPU, profiler_module.ProfilerActivity.NPU]
