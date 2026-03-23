@@ -157,7 +157,6 @@ class MojoGenerator(torch.nn.Module):
         enable_typewriter=False,
         typewriter_buffer=4,
         hooks: list[GeneratorHook] | None = None,
-        use_npu_graph=False,
     ):
         super().__init__()
         self.model = model.to(device)
@@ -168,7 +167,7 @@ class MojoGenerator(torch.nn.Module):
         self._enable_typewriter = enable_typewriter
         self._typewriter_buffer = typewriter_buffer
         self._hooks = hooks or []
-        self.use_npu_graph = use_npu_graph
+        self.use_npu_graph = False
         if hasattr(model, "config") and hasattr(model.config, "runtime_config"):
             if getattr(model.config.runtime_config, "use_npu_graph", False):
                 self.use_npu_graph = True
@@ -322,7 +321,7 @@ class MojoGenerator(torch.nn.Module):
                 print(generated_ids)
 
 
-class MojoPerfGenerator(MojoGenerator):
+class PerfMojoGenerator(MojoGenerator):
     def __init__(
         self,
         model: torch.nn.Module,
@@ -333,7 +332,6 @@ class MojoPerfGenerator(MojoGenerator):
         enable_typewriter=False,
         typewriter_buffer=4,
         hooks: list[GeneratorHook] | None = None,
-        use_npu_graph=False,
     ):
         from mojo_opset.utils.platform import get_platform
 
@@ -349,7 +347,6 @@ class MojoPerfGenerator(MojoGenerator):
             enable_typewriter=False,
             typewriter_buffer=typewriter_buffer,
             hooks=hooks,
-            use_npu_graph=use_npu_graph,
         )
 
     def _run_perf_case(self, batch_size, seqlen, max_decode_steps):
