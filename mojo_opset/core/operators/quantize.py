@@ -27,14 +27,14 @@ class MojoQuant(MojoOperator):
         self.symmetric = symmetric
         self.group_size = group_size
 
-        if quant_dtype not in [torch.int8, torch.float8_e4m3fn]:
+        if quant_dtype == torch.int8:
             self.q_max = 127
             self.q_min = -128 if symmetric else 0
         elif quant_dtype == torch.float8_e4m3fn:
             self.q_max = torch.finfo(torch.float8_e4m3fn).max
             self.q_min = -torch.finfo(torch.float8_e4m3fn).max
         else:
-            raise ValueError(f"Unsupported quant_dtype: {quant_dtype}, expected torch.int8 or torch.float8_e4m3fn")
+            raise NotImplementedError(f"Unsupported quant_dtype: {quant_dtype}, expected torch.int8 or torch.float8_e4m3fn")
 
     def forward(
         self,

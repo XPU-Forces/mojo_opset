@@ -1,13 +1,18 @@
 import pytest
 import torch
+import torch.nn.functional as F
 
 from tests.utils import bypass_not_implemented
 
-from mojo_opset import MojoLayerNorm
-from mojo_opset import MojoResidualAddLayerNorm
-from mojo_opset import MojoResidualAddRMSNorm
-from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoChannelRMSNorm
+from mojo_opset import MojoLayerNorm
+from mojo_opset import MojoLayerNormQuant
+from mojo_opset import MojoResidualAddLayerNorm
+from mojo_opset import MojoResidualAddLayerNormQuant
+from mojo_opset import MojoResidualAddRMSNorm
+from mojo_opset import MojoResidualAddRMSNormQuant
+from mojo_opset import MojoRMSNorm
+from mojo_opset import MojoRMSNormQuant
 
 torch.manual_seed(43)
 
@@ -232,3 +237,112 @@ def test_channel_rmsnorm(x, norm_size, channel_first, images):
     else:
         atol, rtol = 3e-2, 6e-3
     norm.forward_diff_with(norm_ref, x, atol=atol, rtol=rtol)
+
+
+# ===========================================================================
+# NormQuant tests
+# ===========================================================================
+
+norm_quant_shapes = [
+    (32, 1024),
+    (64, 8192),
+    (2, 256),
+]
+
+
+@pytest.mark.parametrize("shape", norm_quant_shapes)
+@pytest.mark.parametrize("dtype", dtypes)
+@bypass_not_implemented
+def test_rmsnorm_quant(shape, dtype):
+    x = torch.randn(size=shape, dtype=dtype)
+    weight = torch.randn(size=(shape[-1],), dtype=torch.float32)
+
+    op = MojoRMSNormQuant(norm_size=shape[-1])
+    op_ref = MojoRMSNormQuant._registry.get("torch")(norm_size=shape[-1])
+    with torch.no_grad():
+        op.weight.copy_(weight)
+        op_ref.weight.copy_(weight)
+
+    op.forward_diff_with(op_ref, x, atol=0, rtol=0)
+
+    # Semantic check: compare with manual rms_norm + quant
+    normed = F.rms_norm(x, [x.shape[-1]], weight=weight, eps=1e-5)
+    normed_fp = normed.float()
+    scale = normed_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / 127
+    expected = torch.clamp(torch.round(normed_fp / scale), -128, 127).to(torch.int8)
+    out, out_scale = op_ref(x)
+    torch.testing.assert_close(out, expected, atol=0, rtol=0)
+    torch.testing.assert_close(out_scale, scale, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("shape", norm_quant_shapes)
+@pytest.mark.parametrize("dtype", dtypes)
+@bypass_not_implemented
+def test_layernorm_quant(shape, dtype):
+    x = torch.randn(size=shape, dtype=dtype)
+    weight = torch.randn(size=(shape[-1],), dtype=torch.float32)
+    bias = torch.randn(size=(shape[-1],), dtype=torch.float32)
+
+    op = MojoLayerNormQuant(norm_size=shape[-1])
+    op_ref = MojoLayerNormQuant._registry.get("torch")(norm_size=shape[-1])
+    with torch.no_grad():
+        op.weight.copy_(weight)
+        op.bias.copy_(bias)
+        op_ref.weight.copy_(weight)
+        op_ref.bias.copy_(bias)
+
+    op.forward_diff_with(op_ref, x, atol=0, rtol=0)
+
+    # Semantic check
+    normed = F.layer_norm(x, [x.shape[-1]], weight=weight, bias=bias, eps=1e-5)
+    normed_fp = normed.float()
+    scale = normed_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / 127
+    expected = torch.clamp(torch.round(normed_fp / scale), -128, 127).to(torch.int8)
+    out, out_scale = op_ref(x)
+    torch.testing.assert_close(out, expected, atol=0, rtol=0)
+    torch.testing.assert_close(out_scale, scale, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("shape", norm_quant_shapes)
+@pytest.mark.parametrize("dtype", dtypes)
+@pytest.mark.parametrize("norm_pos", ["pre", "post"])
+@bypass_not_implemented
+def test_residual_add_rmsnorm_quant(shape, dtype, norm_pos):
+    x = torch.randn(size=shape, dtype=dtype)
+    residual = torch.randn(size=shape, dtype=dtype)
+    weight = torch.randn(size=(shape[-1],), dtype=torch.float32)
+
+    op = MojoResidualAddRMSNormQuant(norm_size=shape[-1], norm_pos=norm_pos)
+    op_ref = MojoResidualAddRMSNormQuant._registry.get("torch")(
+        norm_size=shape[-1], norm_pos=norm_pos
+    )
+    with torch.no_grad():
+        op.weight.copy_(weight)
+        op_ref.weight.copy_(weight)
+
+    op.forward_diff_with(op_ref, x, residual, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("shape", norm_quant_shapes)
+@pytest.mark.parametrize("dtype", dtypes)
+@pytest.mark.parametrize("norm_pos", ["pre", "post"])
+@bypass_not_implemented
+def test_residual_add_layernorm_quant(shape, dtype, norm_pos):
+    x = torch.randn(size=shape, dtype=dtype)
+    residual = torch.randn(size=shape, dtype=dtype)
+    weight = torch.randn(size=(shape[-1],), dtype=torch.float32)
+    bias = torch.randn(size=(shape[-1],), dtype=torch.float32)
+
+    op = MojoResidualAddLayerNormQuant(
+        norm_size=shape[-1], norm_pos=norm_pos
+    )
+    op_ref = MojoResidualAddLayerNormQuant._registry.get("torch")(
+        norm_size=shape[-1], norm_pos=norm_pos
+    )
+    with torch.no_grad():
+        op.weight.copy_(weight)
+        op.bias.copy_(bias)
+        op_ref.weight.copy_(weight)
+        op_ref.bias.copy_(bias)
+
+    op.forward_diff_with(op_ref, x, residual, atol=0, rtol=0)
