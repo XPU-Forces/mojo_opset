@@ -94,7 +94,7 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | PositionEmb | MojoRoPE                    | ✅                | ✅             |
 | PositionEmb | MojoGridRoPE                | ✅                | TBD            |
 | KVCache     | MojoStorePagedKVCache       | ✅                | ✅             |
-| KVCache     | MojoStorePagedMLAKVCache    | TBD               | TBD           |
+| KVCache     | MojoStorePagedMLAKVCache    | ✅                | TBD           |
 | Embedding   | MojoEmbedding               | ✅                | TBD           |
 | Embedding   | MojoParallelEmbedding       | ✅                | TBD           |
 | Embedding   | MojoRelativeEmbedding       | ✅                | TBD           |
