@@ -16,17 +16,15 @@ moe_configs = [
 ]
 
 def generate_moe_weights_and_inputs(max_num_tokens, num_experts, hidden_size, intermediate_size, activation, dtype):
-    std = 0.01
-    gating_weight = torch.randn(size=(hidden_size, num_experts), dtype=torch.float32)
-    gating_weight.normal_(mean=0.0, std=std)
+    gating_weight = torch.randn(size=(hidden_size, num_experts), dtype=torch.float32) / (hidden_size ** 0.5)
+    # gating_weight.normal_(mean=0.0, std=std)
     if activation == "swiglu":
         up_proj_weight = torch.randn(size=(num_experts, intermediate_size*2, hidden_size), dtype=dtype)
     else:
         up_proj_weight = torch.randn(size=(num_experts, intermediate_size, hidden_size), dtype=dtype)
-    up_proj_weight.normal_(mean=0.0, std=std)
+    up_proj_weight = up_proj_weight / (hidden_size ** 0.5)
 
-    down_proj_weight = torch.randn(size=(num_experts, hidden_size, intermediate_size), dtype=dtype)
-    down_proj_weight.normal_(mean=0.0, std=std/20)
+    down_proj_weight = torch.randn(size=(num_experts, hidden_size, intermediate_size), dtype=dtype) / (hidden_size ** 0.5)
     num_tokens = random.randint((max_num_tokens + 1)// 2, max_num_tokens)
     input_hidden = torch.randn(size=(num_tokens, hidden_size), dtype=dtype)
     return input_hidden, gating_weight, up_proj_weight, down_proj_weight
