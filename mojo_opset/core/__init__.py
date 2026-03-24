@@ -35,14 +35,16 @@ from .operators.kv_cache import MojoStorePagedKVCache
 from .operators.kv_cache import MojoStorePagedMLAKVCache
 
 """ linear """
-from .operators.gemm import MojoAllGatherGemm
-from .operators.gemm import MojoGemmAll2All
-from .operators.gemm import MojoGemmAllReduce
-from .operators.gemm import MojoGemmReduceScatter
 from .operators.gemm import MojoGroupGemm
 from .operators.gemm import MojoQuantGroupLinearReduceSum
 from .operators.gemm import MojoGroupGemm as MojoGroupLinear
 from .operators.linear import MojoLinear
+
+""" compute + comm """
+from .operators.compute_with_comm import MojoAllGatherGemm
+from .operators.compute_with_comm import MojoGemmAll2All
+from .operators.compute_with_comm import MojoGemmAllReduce
+from .operators.compute_with_comm import MojoGemmReduceScatter
 
 """ matmul """
 # Aliases for backward compatibility

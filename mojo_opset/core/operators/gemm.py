@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
 
@@ -131,23 +133,3 @@ class MojoQuantGroupLinearReduceSum(MojoOperator):
             reduced_out += out[i, ...].to(torch.bfloat16)
 
         return reduced_out
-
-
-class MojoGemmAllReduce(MojoOperator):
-    pass
-
-
-class MojoAllGatherGemm(MojoOperator):
-    pass
-
-
-class MojoAllGatherGemm(MojoOperator):
-    pass
-
-
-class MojoGemmAll2All(MojoOperator):
-    pass
-
-
-class MojoGemmReduceScatter(MojoOperator):
-    pass
