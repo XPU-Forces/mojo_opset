@@ -39,18 +39,22 @@ def grouped_launch_diagonal(pid, num_pid_m, num_pid_n, BLOCK_TRESHHOLD: tl.const
 
 def get_autotune_config():
     return [
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 4}),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 5}),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 6}),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 7}),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 8}),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 9}),
-        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 4}),
-        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 5}),
-        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 6}),
-        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 7}),
-        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 8}),
-        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 256, "BLOCK_TRESHHOLD": 9}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 4}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 5}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 6}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 7}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 8}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 9}),
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 4}),
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 5}),
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 6}),
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 7}),
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 8}),
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 9}),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "BLOCK_TRESHHOLD": 4}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 4}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 4}),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 4}),
     ]
 
 

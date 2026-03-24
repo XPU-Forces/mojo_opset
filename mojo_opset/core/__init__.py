@@ -40,7 +40,16 @@ from .operators.gemm import MojoGemmAll2All
 from .operators.gemm import MojoGemmAllReduce
 from .operators.gemm import MojoGemmReduceScatter
 from .operators.gemm import MojoGroupGemm
+from .operators.gemm import MojoQuantGroupLinearReduceSum
+from .operators.gemm import MojoGroupGemm as MojoGroupLinear
 from .operators.linear import MojoLinear
+
+""" matmul """
+# Aliases for backward compatibility
+from .operators.gemm import MojoGroupGemm as MojoGroupedMatmul
+from .operators.gemm import MojoQuantGroupLinearReduceSum
+from .operators.gemm import MojoGroupGemm as MojoGroupLinear
+from .operators.gemm import MojoQuantGroupLinearReduceSum as MojoGroupQuantMatmulReduceSum
 
 """ embedding """
 from .operators.embedding import MojoEmbedding
@@ -102,6 +111,9 @@ __all__ = [
     "MojoOperator",
 
     "MojoGelu",
+    "MojoGroupedMatmul",
+    "MojoGroupLinear",
+    "MojoGroupQuantMatmulReduceSum",
     "MojoSilu",
     "MojoSwiGLU",
 
@@ -129,6 +141,7 @@ __all__ = [
     "MojoGemmAll2All",
     "MojoAllGatherGemm",
     "MojoGemmReduceScatter",
+    "MojoQuantGroupLinearReduceSum",
 
     "MojoQuant",
     "MojoDequant",
