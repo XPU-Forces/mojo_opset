@@ -217,7 +217,6 @@ class MojoPrefillGQA(MojoOperator):
         gqa_layout (str): Layout for GQA attention.
         rm_padding (bool): Whether to remove padding from attention computation.
         window_size (int): Window size for attention computation, -1 means full attention.
-        op_name (str): Name of the operator.
     """
 
     def __init__(
@@ -226,10 +225,8 @@ class MojoPrefillGQA(MojoOperator):
         gqa_layout: str = "ABAB",
         rm_padding: bool = False,
         window_size: int = -1,
-        op_name: str = "",
-        layer_idx: int = 0,
     ):
-        super().__init__(op_name, layer_idx)
+        super().__init__()
 
         self.is_causal = is_causal
         self.gqa_layout = gqa_layout

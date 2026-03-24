@@ -346,3 +346,76 @@ def test_residual_add_layernorm_quant(shape, dtype, norm_pos):
         op_ref.bias.copy_(bias)
 
     op.forward_diff_with(op_ref, x, residual, atol=0, rtol=0)
+
+
+# ===========================================================================
+# NormQuant: float8_e4m3fn quantization dtype
+# ===========================================================================
+
+@pytest.mark.parametrize("shape", [(32, 1024), (64, 8192)])
+@pytest.mark.parametrize("dtype", dtypes)
+@bypass_not_implemented
+def test_rmsnorm_quant_fp8(shape, dtype):
+    x = torch.randn(size=shape, dtype=dtype, device="cpu")
+    op = MojoRMSNormQuant(norm_size=shape[-1], quant_dtype=torch.float8_e4m3fn).cpu()
+    op_ref = MojoRMSNormQuant._registry.get("torch")(norm_size=shape[-1], quant_dtype=torch.float8_e4m3fn).cpu()
+    with torch.no_grad():
+        op_ref.weight.copy_(op.weight)
+    op.forward_diff_with(op_ref, x, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("shape", [(32, 1024), (64, 8192)])
+@pytest.mark.parametrize("dtype", dtypes)
+@bypass_not_implemented
+def test_layernorm_quant_fp8(shape, dtype):
+    x = torch.randn(size=shape, dtype=dtype, device="cpu")
+    op = MojoLayerNormQuant(norm_size=shape[-1], quant_dtype=torch.float8_e4m3fn).cpu()
+    op_ref = MojoLayerNormQuant._registry.get("torch")(norm_size=shape[-1], quant_dtype=torch.float8_e4m3fn).cpu()
+    with torch.no_grad():
+        op_ref.weight.copy_(op.weight)
+        op_ref.bias.copy_(op.bias)
+    op.forward_diff_with(op_ref, x, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("shape", [(32, 1024)])
+@pytest.mark.parametrize("dtype", dtypes)
+@pytest.mark.parametrize("norm_pos", ["pre", "post"])
+@bypass_not_implemented
+def test_residual_add_rmsnorm_quant_fp8(shape, dtype, norm_pos):
+    x = torch.randn(size=shape, dtype=dtype, device="cpu")
+    residual = torch.randn(size=shape, dtype=dtype, device="cpu")
+    op = MojoResidualAddRMSNormQuant(norm_size=shape[-1], norm_pos=norm_pos, quant_dtype=torch.float8_e4m3fn).cpu()
+    op_ref = MojoResidualAddRMSNormQuant._registry.get("torch")(norm_size=shape[-1], norm_pos=norm_pos, quant_dtype=torch.float8_e4m3fn).cpu()
+    with torch.no_grad():
+        op_ref.weight.copy_(op.weight)
+    op.forward_diff_with(op_ref, x, residual, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("shape", [(32, 1024)])
+@pytest.mark.parametrize("dtype", dtypes)
+@pytest.mark.parametrize("norm_pos", ["pre", "post"])
+@bypass_not_implemented
+def test_residual_add_layernorm_quant_fp8(shape, dtype, norm_pos):
+    x = torch.randn(size=shape, dtype=dtype, device="cpu")
+    residual = torch.randn(size=shape, dtype=dtype, device="cpu")
+    op = MojoResidualAddLayerNormQuant(norm_size=shape[-1], norm_pos=norm_pos, quant_dtype=torch.float8_e4m3fn).cpu()
+    op_ref = MojoResidualAddLayerNormQuant._registry.get("torch")(norm_size=shape[-1], norm_pos=norm_pos, quant_dtype=torch.float8_e4m3fn).cpu()
+    with torch.no_grad():
+        op_ref.weight.copy_(op.weight)
+        op_ref.bias.copy_(op.bias)
+    op.forward_diff_with(op_ref, x, residual, atol=0, rtol=0)
+
+
+# ===========================================================================
+# NormQuant: unsupported quant_dtype → NotImplementedError
+# ===========================================================================
+
+def test_normquant_unsupported_dtype_raises():
+    with pytest.raises(NotImplementedError, match="Unsupported quant_dtype"):
+        MojoRMSNormQuant._registry.get("torch")(norm_size=64, quant_dtype=torch.float32)
+    with pytest.raises(NotImplementedError, match="Unsupported quant_dtype"):
+        MojoLayerNormQuant._registry.get("torch")(norm_size=64, quant_dtype=torch.float32)
+    with pytest.raises(NotImplementedError, match="Unsupported quant_dtype"):
+        MojoResidualAddRMSNormQuant._registry.get("torch")(norm_size=64, quant_dtype=torch.float32)
+    with pytest.raises(NotImplementedError, match="Unsupported quant_dtype"):
+        MojoResidualAddLayerNormQuant._registry.get("torch")(norm_size=64, quant_dtype=torch.float32)

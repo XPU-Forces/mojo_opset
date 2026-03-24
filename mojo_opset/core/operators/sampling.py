@@ -96,8 +96,6 @@ class MojoTopPFilter(MojoOperator):
 
         Args:
             filter_value (float, default=-inf): Logit value used to mask filtered tokens.
-            op_name (str, default=""): Operator name metadata.
-            layer_idx (int, default=0): Layer index metadata.
 
         Notes:
             Stores configuration only; actual sampling/masking is handled in `forward`.

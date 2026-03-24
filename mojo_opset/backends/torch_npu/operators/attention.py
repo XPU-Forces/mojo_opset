@@ -17,10 +17,8 @@ class TorchNpuPrefillGQA(MojoPrefillGQA, default_priority=0):
         is_causal: bool = True,
         gqa_layout: str = "ABAB",
         window_size: int = -1,
-        op_name: str = "",
-        layer_idx: int = 0,
     ):
-        super().__init__(is_causal, gqa_layout, False, window_size, op_name, layer_idx)
+        super().__init__(is_causal=is_causal, gqa_layout=gqa_layout, rm_padding=False, window_size=window_size)
 
     def forward(
         self,
