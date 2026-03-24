@@ -5,8 +5,12 @@ from typing import Optional
 import pytest
 import torch
 
+from mojo_opset import MojoDecodeGQA
+from mojo_opset import MojoDecodeMLA
+from mojo_opset import MojoDecodeNSA
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
+from mojo_opset import MojoPrefillMLA
 from mojo_opset import MojoSdpa
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
@@ -330,3 +334,115 @@ def test_sdpa(
         scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
     )
     diffusion_attn_ref.forward_diff_with(diffusion_attn, query, key, value, blockwise_diffusion_attn_mask)
+
+
+# ===========================================================================
+# MojoDecodeGQA (non-paged)
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "B, Hq, Hkv, D, S",
+    [(4, 16, 4, 128, 256), (2, 8, 1, 64, 512)],
+)
+@pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
+@bypass_not_implemented
+def test_decode_gqa(B, Hq, Hkv, D, S, gqa_layout):
+    query = torch.randn(B, Hq, D, dtype=torch.bfloat16)
+    key = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)
+    value = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)
+    seqlens = torch.randint(S // 2, S + 1, (B,), dtype=torch.int32)
+
+    op = MojoDecodeGQA(gqa_layout=gqa_layout)
+    op_ref = MojoDecodeGQA._registry.get("torch")(gqa_layout=gqa_layout)
+    op.forward_diff_with(
+        op_ref, query, key, value, seqlens,
+        softmax_scale=1.0 / math.sqrt(D),
+        atol=0, rtol=0,
+    )
+
+
+# ===========================================================================
+# MojoDecodeMLA
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "B, H, d_nope, d_rope, d_v, d_c, S",
+    [(4, 16, 96, 32, 128, 64, 256)],
+)
+@bypass_not_implemented
+def test_decode_mla(B, H, d_nope, d_rope, d_v, d_c, S):
+    query = torch.randn(B, H, d_nope + d_rope, dtype=torch.bfloat16)
+    compressed_kv = torch.randn(B, S, d_c, dtype=torch.bfloat16)
+    k_pe = torch.randn(B, S, 1, d_rope, dtype=torch.bfloat16)
+    seqlens = torch.randint(S // 2, S + 1, (B,), dtype=torch.int32)
+
+    op = MojoDecodeMLA(H, d_nope, d_rope, d_v, d_c)
+    op_ref = MojoDecodeMLA._registry.get("torch")(H, d_nope, d_rope, d_v, d_c)
+    with torch.no_grad():
+        w = torch.randn_like(op.kv_b_proj)
+        op.kv_b_proj.copy_(w)
+        op_ref.kv_b_proj.copy_(w)
+
+    op.forward_diff_with(
+        op_ref, query, compressed_kv, k_pe, seqlens,
+        atol=1e-2, rtol=1e-2,
+    )
+
+
+# ===========================================================================
+# MojoPrefillMLA
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "H, d_nope, d_rope, d_v, d_c",
+    [(8, 64, 32, 64, 32)],
+)
+@bypass_not_implemented
+def test_prefill_mla(H, d_nope, d_rope, d_v, d_c):
+    seqlens = torch.tensor([32, 48], dtype=torch.int32)
+    cu = torch.cat([torch.tensor([0], dtype=torch.int32), seqlens.cumsum(0)])
+    T = cu[-1].item()
+
+    query = torch.randn(T, H, d_nope + d_rope, dtype=torch.bfloat16)
+    compressed_kv = torch.randn(T, d_c, dtype=torch.bfloat16)
+    k_pe = torch.randn(T, 1, d_rope, dtype=torch.bfloat16)
+
+    op = MojoPrefillMLA(H, d_nope, d_rope, d_v, d_c, is_causal=True)
+    op_ref = MojoPrefillMLA._registry.get("torch")(H, d_nope, d_rope, d_v, d_c, is_causal=True)
+    with torch.no_grad():
+        w = torch.randn_like(op.kv_b_proj)
+        op.kv_b_proj.copy_(w)
+        op_ref.kv_b_proj.copy_(w)
+
+    op.forward_diff_with(
+        op_ref, query, compressed_kv, k_pe, cu,
+        atol=1e-2, rtol=1e-2,
+    )
+
+
+# ===========================================================================
+# MojoDecodeNSA
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "B, H, D, S",
+    [(2, 8, 64, 256)],
+)
+@bypass_not_implemented
+def test_decode_nsa(B, H, D, S):
+    query = torch.randn(B, H, D, dtype=torch.bfloat16)
+    key = torch.randn(B, S, H, D, dtype=torch.bfloat16)
+    value = torch.randn(B, S, H, D, dtype=torch.bfloat16)
+    seqlens = torch.full((B,), S, dtype=torch.int32)
+
+    op = MojoDecodeNSA(H, D, compress_ratio=4, num_selected_blocks=4, window_size=64)
+    op_ref = MojoDecodeNSA._registry.get("torch")(H, D, compress_ratio=4, num_selected_blocks=4, window_size=64)
+    with torch.no_grad():
+        g = torch.randn_like(op.gate_proj)
+        op.gate_proj.copy_(g)
+        op_ref.gate_proj.copy_(g)
+
+    op.forward_diff_with(
+        op_ref, query, key, value, seqlens,
+        atol=1e-2, rtol=1e-2,
+    )
