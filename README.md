@@ -51,7 +51,6 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Activation  | MojoGelu                    | ✅                | ✅             |
 | Activation  | MojoSilu                    | ✅                | ✅             |
 | Activation  | MojoSwiGlu                  | ✅                | ✅             |
-| Activation  | MojoSwiGluQuant             | TBD               | TBD           |
 | Linear      | MojoLinear                  | ✅                | TBD           |
 | Gemm        | MojoGroupGemm               | ✅                | ✅             |
 | Gemm        | MojoGemmAllReduce           | TBD               | TBD           |
@@ -70,14 +69,13 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | MoE         | MojoMoEGating               | ✅                | TBD           |
 | MoE         | MojoMoEDispatch             | 🚧                | TBD           |
 | MoE         | MojoMoECombine              | 🚧                | TBD           |
-| MoE         | MojoMoeDispatchQuant        | TBD               | TBD           |
 | Sampling    | MojoTopKSampling            | TBD               | TBD           |
 | Sampling    | MojoTopPSampling            | ✅                | ✅             |
 | Sampling    | MojoTopPSampling            | ✅                | ✅             |
 | Sampling    | MojoRejectSampling          | ✅                | ✅             |
 | Sampling    | MojoApplyPenaltiesTempurate | ✅                | ✅             |
-| Quantize    | MojoQuant                   | ✅                | ✅             |
-| Quantize    | MojoDequant                 | ✅                | ✅             |
+| Quantize    | MojoQuant                   | ✅                | TBD           |
+| Quantize    | MojoDequant                 | ✅                | TBD           |
 | Norm        | MojoRMSNorm                 | ✅                | ✅             |
 | Norm        | MojoLayerNorm               | ✅                | ✅             |
 | Norm        | MojoResidualAddRMSNorm      | ✅                | ✅             |
@@ -90,8 +88,6 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | PositionEmb | MojoGridRoPE                | ✅                | TBD            |
 | KVCache     | MojoStorePagedKVCache       | ✅                | ✅             |
 | KVCache     | MojoStorePagedMLAKVCache    | TBD               | TBD           |
-| Quantize    | MojoQuant                   | TBD               | TBD           |
-| Quantize    | MojoDequant                 | TBD               | TBD           |
 | Embedding   | MojoEmbedding               | TBD               | TBD           |
 | Embedding   | MojoParallelEmbedding       | TBD               | TBD           |
 | Embedding   | MojoRelativeEmbedding       | ✅                | TBD           |
