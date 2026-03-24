@@ -82,14 +82,13 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Norm        | MojoResidualAddLayerNorm    | ✅                | ✅             |
 | Norm        | MojoNormQuant               | TBD               | TBD           |
 | Norm        | MojoResidualAddNormQuant    | TBD               | TBD           |
-| Norm        | MojoResidualAddNormCast     | TBD               | TBD           |
 | Norm        | MojoChannelRMSNorm          | ✅                | TBD           |
 | PositionEmb | MojoRoPE                    | ✅                | ✅             |
 | PositionEmb | MojoGridRoPE                | ✅                | TBD            |
 | KVCache     | MojoStorePagedKVCache       | ✅                | ✅             |
 | KVCache     | MojoStorePagedMLAKVCache    | TBD               | TBD           |
-| Embedding   | MojoEmbedding               | TBD               | TBD           |
-| Embedding   | MojoParallelEmbedding       | TBD               | TBD           |
+| Embedding   | MojoEmbedding               | ✅                | TBD           |
+| Embedding   | MojoParallelEmbedding       | ✅                | TBD           |
 | Embedding   | MojoRelativeEmbedding       | ✅                | TBD           |
 
 

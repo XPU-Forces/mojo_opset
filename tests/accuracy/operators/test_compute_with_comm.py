@@ -26,6 +26,7 @@ from mojo_opset import MojoAllGatherGemm
 from mojo_opset import MojoGemmAll2All
 from mojo_opset import MojoGemmAllReduce
 from mojo_opset import MojoGemmReduceScatter
+from mojo_opset import MojoParallelEmbedding
 from mojo_opset.utils.platform import get_dist_backend, get_platform
 
 torch.manual_seed(42)
@@ -356,6 +357,53 @@ def test_gemm_all2all_comm(master_port):
     mp.spawn(
         _worker_gemm_all2all,
         args=(WORLD_SIZE, master_port, x_shards, w, b, expected),
+        nprocs=WORLD_SIZE,
+        join=True,
+    )
+
+
+# --- ParallelEmbedding (vocab-parallel) ---
+# Full embedding table is split along num_embeddings.  Each rank stores
+# rows [start, end).  all_reduce(sum) reassembles the full lookup.
+
+def _worker_parallel_embedding(rank, world_size, port, full_weight, ids, ref):
+    _init_pg(rank, world_size, port)
+    try:
+        import math
+        V, D = full_weight.shape
+        local_size = math.ceil(V / world_size)
+        start = rank * local_size
+        end = min(start + local_size, V)
+        local_weight = full_weight[start:end].contiguous()
+
+        op = MojoParallelEmbedding._registry.get("torch")(
+            num_embeddings=V,
+            embedding_dim=D,
+        )
+        op.vocab_start_index = start
+        op.vocab_end_index = end
+        op.local_num_embeddings = end - start
+        with torch.no_grad():
+            op.weight = torch.nn.Parameter(local_weight)
+
+        if DEVICE != "cpu":
+            op = op.to(DEVICE)
+        ids_dev = _to_dev(ids)
+
+        out = op(ids_dev).cpu()
+        torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)
+    finally:
+        _destroy_pg()
+
+
+def test_parallel_embedding_comm(master_port):
+    V, D = 128, 64
+    full_weight = torch.randn(V, D, device="cpu")
+    ids = torch.randint(0, V, (8, 16), device="cpu")
+    ref = F.embedding(ids, full_weight)
+    mp.spawn(
+        _worker_parallel_embedding,
+        args=(WORLD_SIZE, master_port, full_weight, ids, ref),
         nprocs=WORLD_SIZE,
         join=True,
     )
