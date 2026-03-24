@@ -6,10 +6,9 @@ logger = get_logger(__name__)
 
 
 class DeviceGraphRunner:
-    """Graph capture/replay runner backed by xpu_graph's GraphRunner.
-
-    Replaces the raw NPUGraphRunner with a multi-device abstraction
-    that supports NPU, MLU, and any target registered in xpu_graph.
+    """
+    Graph capture/replay runner backed by xpu_graph's GraphRunner.
+    Supports NPU, MLU, and any target registered in xpu_graph.
     """
 
     def __init__(self, model, device=None):
