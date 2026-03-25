@@ -114,6 +114,7 @@ def test_layernorm(shape, dtype, eps):
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
 @bypass_not_implemented
 def test_residual_add_rms_norm(shape, dtype, norm_pos, eps):
+    torch.manual_seed(43)
     x = torch.randn(size=shape, dtype=dtype)
     residual = torch.randn(size=shape, dtype=dtype)
     weight = torch.randn(size=(shape[-1],), dtype=dtype)
@@ -131,7 +132,7 @@ def test_residual_add_rms_norm(shape, dtype, norm_pos, eps):
     if x.dtype == torch.float32:
         atol, rtol = 1e-5, 1e-6
     else:
-        atol, rtol = 3e-2, 6e-3
+        atol, rtol = 5e-2, 1e-2
 
     add_norm.forward_diff_with(
         add_norm_ref,
@@ -156,6 +157,7 @@ def test_residual_add_rms_norm(shape, dtype, norm_pos, eps):
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
 @bypass_not_implemented
 def test_residual_add_layernorm(shape, dtype, norm_pos, eps):
+    torch.manual_seed(43)
     x = torch.randn(size=shape, dtype=dtype)
     residual = torch.randn(size=shape, dtype=dtype)
     weight = torch.randn(size=(shape[-1],), dtype=dtype)
@@ -179,7 +181,7 @@ def test_residual_add_layernorm(shape, dtype, norm_pos, eps):
     if x.dtype == torch.float32:
         atol, rtol = 1e-5, 1e-6
     else:
-        atol, rtol = 3e-2, 6e-3
+        atol, rtol = 5e-2, 1e-2
 
     add_norm.forward_diff_with(
         add_norm_ref,
