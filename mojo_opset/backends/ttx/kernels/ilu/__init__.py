@@ -36,7 +36,7 @@ from .rmsnorm import rmsnorm_infer_impl
 # from .silu import silu_fwd_impl
 # from .store_lowrank import store_label_cache_infer_impl
 # from .swiglu import swiglu_bwd_impl
-# from .swiglu import swiglu_fwd_impl
+from .swiglu import swiglu_fwd_impl
 
 __all__ = [
     # "causal_conv1d_update_bdt_impl",
@@ -63,7 +63,7 @@ __all__ = [
     # "silu_bwd_impl",
     # "silu_fwd_impl",
     # "swiglu_bwd_impl",
-    # "swiglu_fwd_impl",
+    "swiglu_fwd_impl",
     # "sdpa_infer_impl",
     # "sdpa_fwd_impl",
     # "sdpa_bwd_impl",

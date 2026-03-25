@@ -4,9 +4,8 @@ import torch
 import triton
 import triton.language as tl
 
-from triton.runtime.libentry import libentry
-
-from mojo_opset.backends.ttx.kernels.ilu.utils import VEC_ALIGN_BYTES
+from .utils import VEC_ALIGN_BYTES
+from .utils import libentry
 from mojo_opset.backends.ttx.kernels.utils import align
 from mojo_opset.backends.ttx.kernels.utils import ceil_div
 from mojo_opset.backends.ttx.kernels.utils import torch_to_triton_dtype

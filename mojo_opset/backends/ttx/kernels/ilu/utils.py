@@ -3,6 +3,19 @@ from functools import lru_cache
 import triton
 import triton.language as tl
 
+try:
+    from triton.runtime.libentry import libentry as _libentry_impl
+except ImportError:
+
+    def _libentry_impl():
+        def _decorator(fn):
+            return fn
+
+        return _decorator
+
+
+libentry = _libentry_impl
+
 VEC_ALIGN_BYTES = 256
 
 
@@ -16,9 +29,7 @@ def get_num_cores(op_type="vector"):
     )
 
 
-# npu triton only
 exp = tl.exp
 exp2 = tl.math.exp2
 log = tl.log
 log2 = tl.log2
-gather = tl.gather
