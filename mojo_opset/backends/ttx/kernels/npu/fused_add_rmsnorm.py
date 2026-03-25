@@ -253,7 +253,7 @@ def fused_add_rmsnorm_infer_impl(
         offset,
         casting_mode=_casting_mode,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
-        sync_solve=True,
+        sync_solver=True,
     )
 
     if add_mode == "pre":
