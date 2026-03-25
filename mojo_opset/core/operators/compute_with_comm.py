@@ -1,8 +1,10 @@
 from typing import List, Optional
 
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
+import torch.distributed as dist
+from torch.distributed.distributed_c10d import _get_default_group
+import torch.distributed._functional_collectives as fc  
 
 from ..operator import MojoOperator
 
@@ -78,7 +80,8 @@ class MojoGemmAllReduce(MojoOperator):
         """
         output = _gemm(input, self.weight, self.bias, self.trans_weight)
         if _is_dist_initialized():
-            dist.all_reduce(output, op=dist.ReduceOp.SUM, group=self.process_group)
+            process_group = self.process_group or _get_default_group()
+            output = fc.all_reduce(output, reduceOp="sum", group=process_group)
         return output
 
     def extra_repr(self) -> str:
@@ -141,12 +144,8 @@ class MojoAllGatherGemm(MojoOperator):
                 extent is ``world_size × local_extent`` (single-rank: unchanged).
         """
         if _is_dist_initialized():
-            world_size = dist.get_world_size(group=self.process_group)
-            gathered_list: List[torch.Tensor] = [
-                torch.empty_like(input) for _ in range(world_size)
-            ]
-            dist.all_gather(gathered_list, input, group=self.process_group)
-            input = torch.cat(gathered_list, dim=self.gather_dim)
+            process_group = self.process_group or _get_default_group()
+            input = fc.all_gather_tensor(input, gather_dim=self.gather_dim, group=process_group)
         output = _gemm(input, self.weight, self.bias, self.trans_weight)
         return output
 
@@ -217,25 +216,13 @@ class MojoGemmAll2All(MojoOperator):
         """
         output = _gemm(input, self.weight, self.bias, self.trans_weight)
         if _is_dist_initialized():
-            world_size = dist.get_world_size(group=self.process_group)
-            rank = dist.get_rank(group=self.process_group)
-            try:
-                send_chunks = list(output.chunk(world_size, dim=self.scatter_dim))
-                recv_chunks: List[torch.Tensor] = [
-                    torch.empty_like(c) for c in send_chunks
-                ]
-                dist.all_to_all(recv_chunks, send_chunks, group=self.process_group)
-            except RuntimeError:
-                all_outputs: List[torch.Tensor] = [
-                    torch.empty_like(output) for _ in range(world_size)
-                ]
-                dist.all_gather(
-                    all_outputs, output.contiguous(), group=self.process_group
-                )
-                recv_chunks = [
-                    all_outputs[src].chunk(world_size, dim=self.scatter_dim)[rank]
-                    for src in range(world_size)
-                ]
+            process_group = self.process_group or _get_default_group()
+            world_size = dist.get_world_size(group=process_group)
+            send_chunks = list(output.chunk(world_size, dim=self.scatter_dim))
+            recv_chunks: List[torch.Tensor] = [
+                torch.empty_like(c) for c in send_chunks
+            ]
+            dist.all_to_all(recv_chunks, send_chunks, group=process_group)
             output = torch.cat(recv_chunks, dim=self.gather_dim)
         return output
 
@@ -305,18 +292,17 @@ class MojoGemmReduceScatter(MojoOperator):
         """
         output = _gemm(input, self.weight, self.bias, self.trans_weight)
         if _is_dist_initialized():
-            world_size = dist.get_world_size(group=self.process_group)
-            rank = dist.get_rank(group=self.process_group)
+
+            process_group = self.process_group or _get_default_group()
+            world_size = dist.get_world_size(group=process_group)
+            rank = dist.get_rank(group=process_group)
             chunks = list(output.chunk(world_size, dim=self.scatter_dim))
-            try:
-                reduced = torch.empty_like(chunks[0])
-                dist.reduce_scatter(
-                    reduced, chunks, op=dist.ReduceOp.SUM, group=self.process_group
-                )
-                output = reduced
-            except RuntimeError:
-                dist.all_reduce(output, op=dist.ReduceOp.SUM, group=self.process_group)
-                output = output.chunk(world_size, dim=self.scatter_dim)[rank].contiguous()
+
+            reduced = torch.empty_like(chunks[rank])
+            dist.reduce_scatter(
+                reduced, chunks, op=dist.ReduceOp.SUM, group=process_group
+            )
+            output = reduced
         return output
 
     def extra_repr(self) -> str:
