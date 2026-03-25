@@ -83,6 +83,7 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Sampling    | MojoApplyPenaltiesTempurate | ✅                | ✅             |
 | Quantize    | MojoQuant                   | ✅                | TBD           |
 | Quantize    | MojoDequant                 | ✅                | TBD           |
+| Quantize    | MojoGemmDequant             | ✅                | TBD           |
 | Norm        | MojoRMSNorm                 | ✅                | ✅             |
 | Norm        | MojoLayerNorm               | ✅                | ✅             |
 | Norm        | MojoResidualAddRMSNorm      | ✅                | ✅             |

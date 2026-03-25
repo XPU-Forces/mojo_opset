@@ -35,6 +35,7 @@ from .operators.kv_cache import MojoStorePagedKVCache
 from .operators.kv_cache import MojoStorePagedMLAKVCache
 
 """ linear """
+from .operators.gemm import MojoGemmDequant
 from .operators.gemm import MojoGroupGemm
 from .operators.gemm import MojoQuantGroupLinearReduceSum
 from .operators.gemm import MojoGroupGemm as MojoGroupLinear
@@ -140,6 +141,7 @@ __all__ = [
     "MojoStorePagedMLAKVCache",
 
     "MojoLinear",
+    "MojoGemmDequant",
     "MojoGroupGemm",
     "MojoGemmAllReduce",
     "MojoGemmAll2All",
