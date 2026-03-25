@@ -73,8 +73,9 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Attention   | MojoSlidingWindowAttention  | TBD               | TBD           |
 | MoE         | MojoMoE                     | ✅                | TBD           |
 | MoE         | MojoMoEGating               | ✅                | TBD           |
-| MoE         | MojoMoEDispatch             | 🚧                | TBD           |
-| MoE         | MojoMoECombine              | 🚧                | TBD           |
+| MoE         | MojoMoEDispatch             | ✅                | TBD           |
+| MoE         | MojoExperts                 | ✅                | TBD           |
+| MoE         | MojoMoECombine              | ✅                | TBD           |
 | Sampling    | MojoTopKSampling            | TBD               | TBD           |
 | Sampling    | MojoTopPSampling            | ✅                | ✅             |
 | Sampling    | MojoTopPSampling            | ✅                | ✅             |
