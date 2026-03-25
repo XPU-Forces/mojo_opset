@@ -100,9 +100,8 @@ def test_paged_decode_gqa(
     block_tables: torch.Tensor,
     gqa_layout: str,
 ):
-    import os
     from mojo_opset.utils.platform import get_platform
-    if get_platform() == "npu" and os.environ.get("MOJO_BACKEND", "torch_npu") == "torch_npu":
+    if get_platform() == "npu":
         head_dim = query.shape[-1]
         if head_dim % 128 != 0:
             pytest.skip(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
@@ -242,9 +241,8 @@ def test_paged_prefill_gqa(
     gqa_layout: str,
     seqlens_kv: Optional[torch.Tensor],
 ):
-    import os
     from mojo_opset.utils.platform import get_platform
-    if get_platform() == "npu" and os.environ.get("MOJO_BACKEND", "torch_npu") == "torch_npu":
+    if get_platform() == "npu":
         head_dim = query.shape[-1]
         if head_dim % 128 != 0:
             pytest.skip(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
@@ -485,11 +483,9 @@ def test_decode_nsa(B, H, D, S):
 @bypass_not_implemented
 def test_prefill_gqa(B, Hq, Hkv, D, S, gqa_layout):
     """Non-paged prefill GQA — query/key/value are batched 4-D tensors."""
-    import os
     from mojo_opset.utils.platform import get_platform
-    if get_platform() == "npu" and os.environ.get("MOJO_BACKEND", "torch_npu") == "torch_npu":
-        if D % 128 != 0:
-            pytest.skip(f"NPU kernel requires head_dim % 128 == 0, got {D}")
+    if get_platform() == "npu" and D % 128 != 0:
+        pytest.skip(f"NPU kernel requires head_dim % 128 == 0, got {D}")
 
     query = torch.randn(B, Hq, S, D, dtype=torch.bfloat16)
     key = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)

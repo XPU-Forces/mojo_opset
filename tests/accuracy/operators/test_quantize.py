@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+from mojo_opset.utils.platform import get_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoDequant
@@ -136,17 +137,24 @@ def test_quant_symmetric_per_group(shape, group_size, dtype):
 # ---------------------------------------------------------------------------
 # MojoQuant: float8_e4m3fn symmetric
 # ---------------------------------------------------------------------------
+_requires_cpu = pytest.mark.skipif(
+    get_platform() != "cpu",
+    reason="float8_e4m3fn not supported on NPU; reference-only test requires CPU",
+)
+
+
+@_requires_cpu
 @pytest.mark.parametrize("shape", [(32, 128), (64, 1024)])
 @pytest.mark.parametrize("dtype", dtypes)
-@bypass_not_implemented
 def test_quant_float8_symmetric(shape, dtype):
-    x = torch.randn(size=shape, dtype=dtype, device="cpu")
+    x = torch.randn(size=shape, dtype=dtype)
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
     scale = (x.float().abs().amax(dim=-1, keepdim=True) / fp8_max).clamp(min=1e-10)
 
-    quant = MojoQuant(quant_dtype=torch.float8_e4m3fn, symmetric=True)
-    quant_ref = MojoQuant._registry.get("torch")(quant_dtype=torch.float8_e4m3fn, symmetric=True)
-    quant.forward_diff_with(quant_ref, x, scale, atol=0, rtol=0)
+    quant = MojoQuant._registry.get("torch")(quant_dtype=torch.float8_e4m3fn, symmetric=True)
+    out = quant(x, scale)
+    expected = torch.clamp(torch.round(x.float() / scale.float()), -fp8_max, fp8_max).to(torch.float8_e4m3fn)
+    torch.testing.assert_close(out.float(), expected.float(), atol=0, rtol=0)
 
 
 # ---------------------------------------------------------------------------

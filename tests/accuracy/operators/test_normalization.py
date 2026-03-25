@@ -2,6 +2,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from mojo_opset.utils.platform import get_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoChannelRMSNorm
@@ -352,58 +353,70 @@ def test_residual_add_layernorm_quant(shape, dtype, norm_pos):
 # NormQuant: float8_e4m3fn quantization dtype
 # ===========================================================================
 
+_requires_cpu = pytest.mark.skipif(
+    get_platform() != "cpu",
+    reason="float8_e4m3fn not supported on NPU; reference-only test requires CPU",
+)
+
+
+@_requires_cpu
 @pytest.mark.parametrize("shape", [(32, 1024), (64, 8192)])
 @pytest.mark.parametrize("dtype", dtypes)
-@bypass_not_implemented
 def test_rmsnorm_quant_fp8(shape, dtype):
-    x = torch.randn(size=shape, dtype=dtype, device="cpu")
-    op = MojoRMSNormQuant(norm_size=shape[-1], quant_dtype=torch.float8_e4m3fn).cpu()
-    op_ref = MojoRMSNormQuant._registry.get("torch")(norm_size=shape[-1], quant_dtype=torch.float8_e4m3fn).cpu()
-    with torch.no_grad():
-        op_ref.weight.copy_(op.weight)
-    op.forward_diff_with(op_ref, x, atol=0, rtol=0)
+    x = torch.randn(size=shape, dtype=dtype)
+    op = MojoRMSNormQuant._registry.get("torch")(norm_size=shape[-1], quant_dtype=torch.float8_e4m3fn)
+    out, scale = op(x)
+    assert out.dtype == torch.float8_e4m3fn
+    assert out.shape == x.shape
+    assert scale.shape == (*x.shape[:-1], 1)
+    out2, scale2 = op(x)
+    torch.testing.assert_close(out.float(), out2.float(), atol=0, rtol=0)
+    torch.testing.assert_close(scale, scale2, atol=0, rtol=0)
 
 
+@_requires_cpu
 @pytest.mark.parametrize("shape", [(32, 1024), (64, 8192)])
 @pytest.mark.parametrize("dtype", dtypes)
-@bypass_not_implemented
 def test_layernorm_quant_fp8(shape, dtype):
-    x = torch.randn(size=shape, dtype=dtype, device="cpu")
-    op = MojoLayerNormQuant(norm_size=shape[-1], quant_dtype=torch.float8_e4m3fn).cpu()
-    op_ref = MojoLayerNormQuant._registry.get("torch")(norm_size=shape[-1], quant_dtype=torch.float8_e4m3fn).cpu()
-    with torch.no_grad():
-        op_ref.weight.copy_(op.weight)
-        op_ref.bias.copy_(op.bias)
-    op.forward_diff_with(op_ref, x, atol=0, rtol=0)
+    x = torch.randn(size=shape, dtype=dtype)
+    op = MojoLayerNormQuant._registry.get("torch")(norm_size=shape[-1], quant_dtype=torch.float8_e4m3fn)
+    out, scale = op(x)
+    assert out.dtype == torch.float8_e4m3fn
+    assert out.shape == x.shape
+    assert scale.shape == (*x.shape[:-1], 1)
+    out2, scale2 = op(x)
+    torch.testing.assert_close(out.float(), out2.float(), atol=0, rtol=0)
+    torch.testing.assert_close(scale, scale2, atol=0, rtol=0)
 
 
+@_requires_cpu
 @pytest.mark.parametrize("shape", [(32, 1024)])
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
-@bypass_not_implemented
 def test_residual_add_rmsnorm_quant_fp8(shape, dtype, norm_pos):
-    x = torch.randn(size=shape, dtype=dtype, device="cpu")
-    residual = torch.randn(size=shape, dtype=dtype, device="cpu")
-    op = MojoResidualAddRMSNormQuant(norm_size=shape[-1], norm_pos=norm_pos, quant_dtype=torch.float8_e4m3fn).cpu()
-    op_ref = MojoResidualAddRMSNormQuant._registry.get("torch")(norm_size=shape[-1], norm_pos=norm_pos, quant_dtype=torch.float8_e4m3fn).cpu()
-    with torch.no_grad():
-        op_ref.weight.copy_(op.weight)
-    op.forward_diff_with(op_ref, x, residual, atol=0, rtol=0)
+    x = torch.randn(size=shape, dtype=dtype)
+    residual = torch.randn(size=shape, dtype=dtype)
+    op = MojoResidualAddRMSNormQuant._registry.get("torch")(
+        norm_size=shape[-1], norm_pos=norm_pos, quant_dtype=torch.float8_e4m3fn
+    )
+    out, updated_residual, scale = op(x, residual)
+    assert out.dtype == torch.float8_e4m3fn
+    assert scale.shape[-1] == 1
 
 
+@_requires_cpu
 @pytest.mark.parametrize("shape", [(32, 1024)])
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
-@bypass_not_implemented
 def test_residual_add_layernorm_quant_fp8(shape, dtype, norm_pos):
-    x = torch.randn(size=shape, dtype=dtype, device="cpu")
-    residual = torch.randn(size=shape, dtype=dtype, device="cpu")
-    op = MojoResidualAddLayerNormQuant(norm_size=shape[-1], norm_pos=norm_pos, quant_dtype=torch.float8_e4m3fn).cpu()
-    op_ref = MojoResidualAddLayerNormQuant._registry.get("torch")(norm_size=shape[-1], norm_pos=norm_pos, quant_dtype=torch.float8_e4m3fn).cpu()
-    with torch.no_grad():
-        op_ref.weight.copy_(op.weight)
-        op_ref.bias.copy_(op.bias)
-    op.forward_diff_with(op_ref, x, residual, atol=0, rtol=0)
+    x = torch.randn(size=shape, dtype=dtype)
+    residual = torch.randn(size=shape, dtype=dtype)
+    op = MojoResidualAddLayerNormQuant._registry.get("torch")(
+        norm_size=shape[-1], norm_pos=norm_pos, quant_dtype=torch.float8_e4m3fn
+    )
+    out, updated_residual, scale = op(x, residual)
+    assert out.dtype == torch.float8_e4m3fn
+    assert scale.shape[-1] == 1
 
 
 # ===========================================================================
