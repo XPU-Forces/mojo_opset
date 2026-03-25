@@ -610,23 +610,40 @@ def _nsa_compress_kv(k, v, compress_ratio):
     return k_t, v_t
 
 
-def _nsa_select_blocks(query, comp_k, k_full, v_full, sl, softmax_scale,
-                        compress_ratio, num_selected_blocks):
-    """Select top-k blocks by compressed attention score."""
-    scores = torch.einsum("hd,chd->hc", query, comp_k) * softmax_scale
-    avg_scores = scores.mean(dim=0)
-    num_blocks = min(num_selected_blocks, avg_scores.shape[0])
-    topk_idx = avg_scores.topk(num_blocks).indices.sort().values
-
-    parts_k, parts_v = [], []
-    for bid in topk_idx:
-        start = bid.item() * compress_ratio
-        end = min(start + compress_ratio, sl)
-        parts_k.append(k_full[start:end])
-        parts_v.append(v_full[start:end])
-    if parts_k:
-        return torch.cat(parts_k, dim=0), torch.cat(parts_v, dim=0)
-    return k_full[:0], v_full[:0]
+def _nsa_select_blocks(query, comp_k, sl, softmax_scale,
+                        compress_ratio, block_size, num_selected_blocks):
+    """Select top-k blocks by compressed attention score, returning a mask."""
+    H, D = query.shape
+    C = comp_k.shape[0]
+    
+    # 1. Compute softmax probabilities for compressed tokens
+    qk = torch.einsum("hd,chd->hc", query, comp_k) * softmax_scale
+    qk = qk.softmax(dim=-1, dtype=torch.float32) # [H, C]
+    
+    # 2. Aggregate into blocks of size `block_size`
+    tokens_per_block = block_size // compress_ratio
+    num_blocks = math.ceil(sl / block_size)
+    
+    block_score = torch.zeros(H, num_blocks, dtype=torch.float32, device=query.device)
+    for b in range(num_blocks):
+        start_c = b * tokens_per_block
+        end_c = min((b + 1) * tokens_per_block, C)
+        if start_c < C:
+            block_score[:, b] = qk[:, start_c:end_c].sum(dim=-1)
+            
+    # 3. Select topk blocks per head
+    num_sel = min(num_selected_blocks, num_blocks)
+    topk_idx = block_score.topk(num_sel, dim=-1).indices # [H, num_sel]
+    
+    # 4. Create mask
+    mask = torch.zeros(H, sl, dtype=torch.bool, device=query.device)
+    for h in range(H):
+        for b in topk_idx[h]:
+            start = b.item() * block_size
+            end = min(start + block_size, sl)
+            mask[h, start:end] = True
+            
+    return mask
 
 
 def _nsa_window_kv(k, v, sl, window_size):
@@ -634,10 +651,15 @@ def _nsa_window_kv(k, v, sl, window_size):
     return k[start:sl], v[start:sl]
 
 
-def _nsa_attend(q, k, v, softmax_scale):
+def _nsa_attend(q, k, v, softmax_scale, mask=None):
     """q: (Tq, H, D), k/v: (Tk, H, D) → (Tq, H, D)"""
     scores = torch.einsum("thd,shd->ths", q, k).float() * softmax_scale
+    if mask is not None:
+        # mask shape: [H, Tk] -> [1, H, Tk]
+        scores.masked_fill_(~mask.unsqueeze(0), float("-inf"))
     probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
+    if mask is not None:
+        probs = torch.nan_to_num(probs, nan=0.0)
     return torch.einsum("ths,shd->thd", probs, v)
 
 
@@ -672,19 +694,15 @@ def _nsa_decode_core(self, q_i, k_i, v_i, sl, softmax_scale):
     """Shared per-sample decode logic for NSA."""
     H, D = q_i.shape
     comp_k, comp_v = _nsa_compress_kv(k_i, v_i, self.compress_ratio)
-    sel_k, sel_v = _nsa_select_blocks(
-        q_i, comp_k, k_i, v_i, sl, softmax_scale,
-        self.compress_ratio, self.num_selected_blocks,
+    sel_mask = _nsa_select_blocks(
+        q_i, comp_k, sl, softmax_scale,
+        self.compress_ratio, self.block_size, self.num_selected_blocks,
     )
     win_k, win_v = _nsa_window_kv(k_i, v_i, sl, self.window_size)
 
     q_u = q_i.unsqueeze(0)
     out_comp = _nsa_attend(q_u, comp_k, comp_v, softmax_scale).squeeze(0)
-    out_sel = (
-        _nsa_attend(q_u, sel_k, sel_v, softmax_scale).squeeze(0)
-        if sel_k.shape[0] > 0
-        else torch.zeros(H, D, dtype=q_i.dtype, device=q_i.device)
-    )
+    out_sel = _nsa_attend(q_u, k_i, v_i, softmax_scale, mask=sel_mask).squeeze(0)
     out_win = _nsa_attend(q_u, win_k, win_v, softmax_scale).squeeze(0)
 
     g = _nsa_gate(q_i, self.gate_proj)  # (H, 3)
@@ -1018,19 +1036,15 @@ class MojoPrefillNSA(MojoOperator):
                 k_ctx, v_ctx = k_seq[:t_sl], v_seq[:t_sl]
 
                 ck, cv = _nsa_compress_kv(k_ctx, v_ctx, cr) if t_sl >= cr else (k_ctx, v_ctx)
-                sel_k, sel_v = _nsa_select_blocks(
-                    q_seq[t], ck, k_ctx, v_ctx, t_sl, softmax_scale,
-                    cr, self.num_selected_blocks,
+                sel_mask = _nsa_select_blocks(
+                    q_seq[t], ck, t_sl, softmax_scale,
+                    cr, self.block_size, self.num_selected_blocks,
                 )
                 win_k, win_v = _nsa_window_kv(k_ctx, v_ctx, t_sl, self.window_size)
 
                 q_t = q_seq[t:t + 1]
                 out_comp = _nsa_attend(q_t, ck, cv, softmax_scale).squeeze(0)
-                out_sel = (
-                    _nsa_attend(q_t, sel_k, sel_v, softmax_scale).squeeze(0)
-                    if sel_k.shape[0] > 0
-                    else torch.zeros(H, D, dtype=query.dtype, device=query.device)
-                )
+                out_sel = _nsa_attend(q_t, k_ctx, v_ctx, softmax_scale, mask=sel_mask).squeeze(0)
                 out_win = _nsa_attend(q_t, win_k, win_v, softmax_scale).squeeze(0)
 
                 g = _nsa_gate(q_seq[t], self.gate_proj)
@@ -1102,19 +1116,15 @@ class MojoPagedPrefillNSA(MojoOperator):
                 k_ctx, v_ctx = k_seq[:t_kv], v_seq[:t_kv]
 
                 ck, cv = _nsa_compress_kv(k_ctx, v_ctx, cr) if t_kv >= cr else (k_ctx, v_ctx)
-                sel_k, sel_v = _nsa_select_blocks(
-                    q_seq[t_idx], ck, k_ctx, v_ctx, t_kv, softmax_scale,
-                    cr, self.num_selected_blocks,
+                sel_mask = _nsa_select_blocks(
+                    q_seq[t_idx], ck, t_kv, softmax_scale,
+                    cr, self.block_size, self.num_selected_blocks,
                 )
                 win_k, win_v = _nsa_window_kv(k_ctx, v_ctx, t_kv, self.window_size)
 
                 q_t = q_seq[t_idx:t_idx + 1]
                 out_comp = _nsa_attend(q_t, ck, cv, softmax_scale).squeeze(0)
-                out_sel = (
-                    _nsa_attend(q_t, sel_k, sel_v, softmax_scale).squeeze(0)
-                    if sel_k.shape[0] > 0
-                    else torch.zeros(H, D, dtype=query.dtype, device=query.device)
-                )
+                out_sel = _nsa_attend(q_t, k_ctx, v_ctx, softmax_scale, mask=sel_mask).squeeze(0)
                 out_win = _nsa_attend(q_t, win_k, win_v, softmax_scale).squeeze(0)
 
                 g = _nsa_gate(q_seq[t_idx], self.gate_proj)
