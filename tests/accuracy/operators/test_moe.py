@@ -17,7 +17,6 @@ moe_configs = [
 
 def generate_moe_weights_and_inputs(max_num_tokens, num_experts, hidden_size, intermediate_size, activation, dtype):
     gating_weight = torch.randn(size=(hidden_size, num_experts), dtype=torch.float32) / (hidden_size ** 0.5)
-    # gating_weight.normal_(mean=0.0, std=std)
     if activation == "swiglu":
         up_proj_weight = torch.randn(size=(num_experts, intermediate_size*2, hidden_size), dtype=dtype)
     else:
@@ -62,7 +61,7 @@ def test_moe(input_hidden, gating_weight, up_proj_weight, down_proj_weight, num_
 
     mojo_output = mojo_moe(input_hidden)
 
-    # placeholder for comparison
+    # placeholder for comparison with other backends
     def naive_moe(input_hidden):
         router_logits = input_hidden.float() @ gating_weight.float()
         router_scores = torch.softmax(router_logits, dim=-1) # [num_tokens, num_experts]
