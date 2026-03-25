@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
 
@@ -68,6 +70,81 @@ class MojoGroupGemm(MojoOperator):
         )
 
 
+class MojoGemmDequant(MojoOperator):
+    """Fused int8 GEMM + dequantization.
+
+    Performs int8 matrix multiplication with int32 accumulation, then applies
+    per-token × per-channel scale factors to dequantize the result, adds an
+    optional bias, and casts to ``output_dtype``.
+
+    The reference uses float32 matmul to emulate int8 GEMM because
+    ``torch.matmul`` does not natively support int8 → int32 accumulation.
+    float32 is exact for all int8 partial sums at practical ``K`` dimensions.
+
+    Computation:
+        ``output = (input_i8 @ weight_i8) * input_scale * weight_scale + bias``
+    """
+
+    def __init__(
+        self,
+        output_dtype: torch.dtype = torch.bfloat16,
+        trans_weight: bool = False,
+    ):
+        """
+        Args:
+            output_dtype (torch.dtype): Target dtype for the dequantized output.
+                Supported: ``torch.float32``, ``torch.float16``, ``torch.bfloat16``.
+            trans_weight (bool): If True, the weight tensor is provided as
+                ``(N, K)`` and will be transposed to ``(K, N)`` internally.
+        """
+        super().__init__()
+        self.output_dtype = output_dtype
+        self.trans_weight = trans_weight
+
+    def forward(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        input_scale: torch.Tensor,
+        weight_scale: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            input (torch.Tensor): Quantised activation ``(M, K)`` in int8.
+            weight (torch.Tensor): Quantised weight ``(K, N)`` in int8, or
+                ``(N, K)`` when ``trans_weight=True``.
+            input_scale (torch.Tensor): Per-token activation scale ``(M, 1)``
+                or ``(M,)``.
+            weight_scale (torch.Tensor): Per-channel weight scale ``(1, N)``
+                or ``(N,)``.
+            bias (Optional[torch.Tensor]): Optional bias ``(N,)`` in
+                ``output_dtype``.
+
+        Returns:
+            torch.Tensor: Dequantized result ``(M, N)`` in ``output_dtype``.
+        """
+        if self.trans_weight:
+            weight = weight.t()
+
+        out = torch.matmul(input.float(), weight.float())
+
+        if input_scale.dim() == 1:
+            input_scale = input_scale.unsqueeze(-1)
+        if weight_scale.dim() == 1:
+            weight_scale = weight_scale.unsqueeze(0)
+
+        out = out * input_scale.float() * weight_scale.float()
+
+        if bias is not None:
+            out = out + bias.float()
+
+        return out.to(self.output_dtype)
+
+    def extra_repr(self) -> str:
+        return f"output_dtype={self.output_dtype}, trans_weight={self.trans_weight}"
+
+
 class MojoQuantGroupLinearReduceSum(MojoOperator):
     def __init__(
         self,
@@ -131,23 +208,3 @@ class MojoQuantGroupLinearReduceSum(MojoOperator):
             reduced_out += out[i, ...].to(torch.bfloat16)
 
         return reduced_out
-
-
-class MojoGemmAllReduce(MojoOperator):
-    pass
-
-
-class MojoAllGatherGemm(MojoOperator):
-    pass
-
-
-class MojoAllGatherGemm(MojoOperator):
-    pass
-
-
-class MojoGemmAll2All(MojoOperator):
-    pass
-
-
-class MojoGemmReduceScatter(MojoOperator):
-    pass

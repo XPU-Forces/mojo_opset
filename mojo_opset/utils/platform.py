@@ -35,6 +35,25 @@ def get_platform() -> Literal["npu", "mlu", "meta_device"]:
     return "meta_device"
 
 
+_PLATFORM_TO_DIST_BACKEND = {
+    "npu": "hccl",
+    "mlu": "gloo",
+    "meta_device": "gloo",
+}
+
+
+@functools.lru_cache
+def get_dist_backend() -> str:
+    """Return the distributed communication backend for the current platform.
+
+    Mapping:
+        npu  → hccl
+        mlu  → gloo   (placeholder, update when cncl is available)
+        else → gloo
+    """
+    return _PLATFORM_TO_DIST_BACKEND.get(get_platform(), "gloo")
+
+
 def get_impl_by_platform():
     import_op_map = {}
     from mojo_opset.core.function import MojoFunction

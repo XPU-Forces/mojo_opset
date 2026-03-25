@@ -35,14 +35,17 @@ from .operators.kv_cache import MojoStorePagedKVCache
 from .operators.kv_cache import MojoStorePagedMLAKVCache
 
 """ linear """
-from .operators.gemm import MojoAllGatherGemm
-from .operators.gemm import MojoGemmAll2All
-from .operators.gemm import MojoGemmAllReduce
-from .operators.gemm import MojoGemmReduceScatter
+from .operators.gemm import MojoGemmDequant
 from .operators.gemm import MojoGroupGemm
 from .operators.gemm import MojoQuantGroupLinearReduceSum
 from .operators.gemm import MojoGroupGemm as MojoGroupLinear
 from .operators.linear import MojoLinear
+
+""" compute + comm """
+from .operators.compute_with_comm import MojoAllGatherGemm
+from .operators.compute_with_comm import MojoGemmAll2All
+from .operators.compute_with_comm import MojoGemmAllReduce
+from .operators.compute_with_comm import MojoGemmReduceScatter
 
 """ matmul """
 # Aliases for backward compatibility
@@ -67,14 +70,16 @@ from .operators.moe import MojoMoEDispatch
 from .operators.moe import MojoMoEGating
 
 """ normalization """
-from .operators.normalization import MojoLayerNorm
-from .operators.normalization import MojoNormQuant
-from .operators.normalization import MojoResidualAddLayerNorm
-from .operators.normalization import MojoResidualAddNormCast
-from .operators.normalization import MojoResidualAddNormQuant
-from .operators.normalization import MojoResidualAddRMSNorm
-from .operators.normalization import MojoRMSNorm
 from .operators.normalization import MojoChannelRMSNorm
+from .operators.normalization import MojoLayerNorm
+from .operators.normalization import MojoLayerNormQuant
+from .operators.normalization import MojoResidualAddLayerNorm
+from .operators.normalization import MojoResidualAddLayerNormQuant
+from .operators.normalization import MojoResidualAddNormCast
+from .operators.normalization import MojoResidualAddRMSNorm
+from .operators.normalization import MojoResidualAddRMSNormQuant
+from .operators.normalization import MojoRMSNorm
+from .operators.normalization import MojoRMSNormQuant
 
 """ position_embedding """
 from .operators.position_embedding import MojoNormRoPE
@@ -136,6 +141,7 @@ __all__ = [
     "MojoStorePagedMLAKVCache",
 
     "MojoLinear",
+    "MojoGemmDequant",
     "MojoGroupGemm",
     "MojoGemmAllReduce",
     "MojoGemmAll2All",
@@ -158,10 +164,12 @@ __all__ = [
     "MojoLayerNorm",
     "MojoRMSNorm",
     "MojoChannelRMSNorm",
+    "MojoRMSNormQuant",
+    "MojoLayerNormQuant",
     "MojoResidualAddRMSNorm",
     "MojoResidualAddLayerNorm",
-    "MojoNormQuant",
-    "MojoResidualAddNormQuant",
+    "MojoResidualAddRMSNormQuant",
+    "MojoResidualAddLayerNormQuant",
     "MojoResidualAddNormCast",
 
     "MojoRoPE",
