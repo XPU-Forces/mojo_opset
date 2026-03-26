@@ -156,13 +156,14 @@ class MojoRMSNormQuant(MojoOperator):
                 - ``quant_output`` in ``quant_dtype``, same shape as input.
                 - ``scale`` of shape ``(*, 1)`` (per-token).
         """
+        # Float32 RMSNorm matches fp32 parameters and test reference (see test_rmsnorm_quant).
         normed = F.rms_norm(
-            hidden_state,
+            hidden_state.float(),
             [hidden_state.shape[-1]],
             weight=self.weight,
             eps=self.variance_epsilon,
         )
-        normed_fp = normed.float()
+        normed_fp = normed
         scale = normed_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
         output = torch.clamp(torch.round(normed_fp / scale), self.q_min, self.q_max)
         return output.to(self.quant_dtype), scale
@@ -240,14 +241,16 @@ class MojoLayerNormQuant(MojoOperator):
                 - ``quant_output`` in ``quant_dtype``, same shape as input.
                 - ``scale`` of shape ``(*, 1)`` (per-token).
         """
+        # Float32 LN avoids dtype mismatch between activations (fp16/bf16) and fp32 parameters on
+        # strict backends; quantization still uses float32 normed values.
         normed = F.layer_norm(
-            hidden_state,
+            hidden_state.float(),
             [hidden_state.shape[-1]],
             weight=self.weight,
             bias=self.bias,
             eps=self.variance_epsilon,
         )
-        normed_fp = normed.float()
+        normed_fp = normed
         scale = normed_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
         output = torch.clamp(torch.round(normed_fp / scale), self.q_min, self.q_max)
         return output.to(self.quant_dtype), scale
@@ -519,18 +522,22 @@ class MojoResidualAddRMSNormQuant(MojoOperator):
         if self.norm_pos == "pre":
             residual = hidden_state + residual
             normed = F.rms_norm(
-                residual, (residual.shape[-1],),
-                weight=self.weight, eps=self.variance_epsilon,
+                residual.float(),
+                (residual.shape[-1],),
+                weight=self.weight,
+                eps=self.variance_epsilon,
             )
         else:
             hidden_state = hidden_state + residual
             normed = F.rms_norm(
-                hidden_state, (hidden_state.shape[-1],),
-                weight=self.weight, eps=self.variance_epsilon,
+                hidden_state.float(),
+                (hidden_state.shape[-1],),
+                weight=self.weight,
+                eps=self.variance_epsilon,
             )
             residual = hidden_state
 
-        normed_fp = normed.float()
+        normed_fp = normed
         scale = normed_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
         output = torch.clamp(torch.round(normed_fp / scale), self.q_min, self.q_max)
         return output.to(self.quant_dtype), residual, scale
@@ -621,20 +628,24 @@ class MojoResidualAddLayerNormQuant(MojoOperator):
         if self.norm_pos == "pre":
             residual = hidden_state + residual
             normed = F.layer_norm(
-                residual, [residual.shape[-1]],
-                weight=self.weight, bias=self.bias,
+                residual.float(),
+                [residual.shape[-1]],
+                weight=self.weight,
+                bias=self.bias,
                 eps=self.variance_epsilon,
             )
         else:
             hidden_state = hidden_state + residual
             normed = F.layer_norm(
-                hidden_state, [hidden_state.shape[-1]],
-                weight=self.weight, bias=self.bias,
+                hidden_state.float(),
+                [hidden_state.shape[-1]],
+                weight=self.weight,
+                bias=self.bias,
                 eps=self.variance_epsilon,
             )
             residual = hidden_state
 
-        normed_fp = normed.float()
+        normed_fp = normed
         scale = normed_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
         output = torch.clamp(torch.round(normed_fp / scale), self.q_min, self.q_max)
         return output.to(self.quant_dtype), residual, scale

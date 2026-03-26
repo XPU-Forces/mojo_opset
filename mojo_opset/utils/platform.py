@@ -19,7 +19,7 @@ def get_platform() -> Literal["npu", "mlu", "meta_device", "ilu"]:
     Detect whether the system has NPU or MLU, fallback device is meta_device.
     """
     try:
-        if torch.cuda.is_available():
+        if torch.cuda.get_device_name().startswith("Iluvatar"):
             logger.info("Iluvatar GPU detected")
             return "ilu"
     except Exception as e:
