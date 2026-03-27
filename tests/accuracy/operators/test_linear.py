@@ -1,3 +1,4 @@
+import os
 import random
 
 import pytest
@@ -9,6 +10,8 @@ from tests.utils import auto_switch_platform
 
 from mojo_opset import MojoGroupLinear
 from mojo_opset import MojoQuantGroupLinearReduceSum
+
+_SKIP_NPU_QUANT_GROUP_LINEAR = get_platform() == "npu" and os.environ.get("MOJO_BACKEND") != "xops"
 
 
 def generate_random_list(length, total_sum):
@@ -158,7 +161,7 @@ def test_group_gemm(input, weight, group_list, trans_weight):
         ),
     ],
 )
-@pytest.mark.skipif(get_platform() == "npu", reason="Skipped on NPU due to CANN 8.2 issue")
+@pytest.mark.skipif(_SKIP_NPU_QUANT_GROUP_LINEAR, reason="Skipped on NPU for non-xops backends due to CANN 8.2 issue")
 @auto_switch_platform()
 @bypass_not_implemented
 def test_quant_group_linear_reduce_sum(x1, weight, x1_scale, x2_scale, trans_weight, atol, rtol):

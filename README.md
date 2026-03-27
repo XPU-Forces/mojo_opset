@@ -38,6 +38,7 @@ source code: mojo_opset/backends/ttx/kernels
 You can control the backend you want to use via the `MOJO_BACKEND` environment variable; the currently supported backends are list as below:
 
 - "ttx"
+- "torch_npu"
 - "torch"
 
 When multiple backends are added, Mojo Opset selects the backend implementation according to its internal priority order (We plan to add a tuner feature later to automatically choose the optimal implementation for the current scenario).
@@ -83,6 +84,8 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Sampling    | MojoApplyPenaltiesTempurate | ✅                | ✅             |
 | Quantize    | MojoQuant                   | ✅                | TBD           |
 | Quantize    | MojoDequant                 | ✅                | TBD           |
+| Quantize    | MojoDynamicQuant            | ✅                | TBD           |
+| Quantize    | MojoDequantSwiGLUQuant      | ✅                | TBD           |
 | Quantize    | MojoGemmDequant             | ✅                | TBD           |
 | Norm        | MojoRMSNorm                 | ✅                | ✅             |
 | Norm        | MojoLayerNorm               | ✅                | ✅             |

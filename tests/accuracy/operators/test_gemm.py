@@ -135,4 +135,5 @@ def test_gemm_dequant_backend(m, k, n, output_dtype, trans_weight, has_bias):
     op_ref = MojoGemmDequant._registry.get("torch")(
         output_dtype=output_dtype, trans_weight=trans_weight,
     )
-    op.forward_diff_with(op_ref, x_i8, w_i8, x_scale, w_scale, bias, mixed_tol=True)
+    tol = 3e-2 if output_dtype == torch.bfloat16 else 2e-2
+    op.forward_diff_with(op_ref, x_i8, w_i8, x_scale, w_scale, bias, atol=tol, rtol=tol)

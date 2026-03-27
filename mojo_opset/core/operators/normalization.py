@@ -1,7 +1,19 @@
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
 
 from ..operator import MojoOperator
+
+
+def _apply_optional_smooth_scale(input_fp: torch.Tensor, smooth_scale: Optional[torch.Tensor]) -> torch.Tensor:
+    if smooth_scale is None:
+        return input_fp
+
+    scale_fp = smooth_scale.float()
+    while scale_fp.dim() < input_fp.dim():
+        scale_fp = scale_fp.unsqueeze(0)
+    return input_fp * scale_fp
 
 
 class MojoLayerNorm(MojoOperator):
@@ -146,7 +158,11 @@ class MojoRMSNormQuant(MojoOperator):
                 f"expected torch.int8 or torch.float8_e4m3fn"
             )
 
-    def forward(self, hidden_state: torch.Tensor):
+    def forward(
+        self,
+        hidden_state: torch.Tensor,
+        smooth_scale: Optional[torch.Tensor] = None,
+    ):
         """
         Args:
             hidden_state (torch.Tensor): ``(*, D)`` input.
@@ -163,7 +179,7 @@ class MojoRMSNormQuant(MojoOperator):
             weight=self.weight,
             eps=self.variance_epsilon,
         )
-        normed_fp = normed
+        normed_fp = _apply_optional_smooth_scale(normed, smooth_scale)
         scale = normed_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
         output = torch.clamp(torch.round(normed_fp / scale), self.q_min, self.q_max)
         return output.to(self.quant_dtype), scale
@@ -231,7 +247,11 @@ class MojoLayerNormQuant(MojoOperator):
                 f"expected torch.int8 or torch.float8_e4m3fn"
             )
 
-    def forward(self, hidden_state: torch.Tensor):
+    def forward(
+        self,
+        hidden_state: torch.Tensor,
+        smooth_scale: Optional[torch.Tensor] = None,
+    ):
         """
         Args:
             hidden_state (torch.Tensor): ``(*, D)`` input.
@@ -250,7 +270,7 @@ class MojoLayerNormQuant(MojoOperator):
             bias=self.bias,
             eps=self.variance_epsilon,
         )
-        normed_fp = normed
+        normed_fp = _apply_optional_smooth_scale(normed, smooth_scale)
         scale = normed_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
         output = torch.clamp(torch.round(normed_fp / scale), self.q_min, self.q_max)
         return output.to(self.quant_dtype), scale
@@ -507,7 +527,12 @@ class MojoResidualAddRMSNormQuant(MojoOperator):
                 f"expected torch.int8 or torch.float8_e4m3fn"
             )
 
-    def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor):
+    def forward(
+        self,
+        hidden_state: torch.Tensor,
+        residual: torch.Tensor,
+        smooth_scale: Optional[torch.Tensor] = None,
+    ):
         """
         Args:
             hidden_state (torch.Tensor): ``(*, D)`` input.
@@ -537,7 +562,7 @@ class MojoResidualAddRMSNormQuant(MojoOperator):
             )
             residual = hidden_state
 
-        normed_fp = normed
+        normed_fp = _apply_optional_smooth_scale(normed, smooth_scale)
         scale = normed_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
         output = torch.clamp(torch.round(normed_fp / scale), self.q_min, self.q_max)
         return output.to(self.quant_dtype), residual, scale
@@ -613,7 +638,12 @@ class MojoResidualAddLayerNormQuant(MojoOperator):
                 f"expected torch.int8 or torch.float8_e4m3fn"
             )
 
-    def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor):
+    def forward(
+        self,
+        hidden_state: torch.Tensor,
+        residual: torch.Tensor,
+        smooth_scale: Optional[torch.Tensor] = None,
+    ):
         """
         Args:
             hidden_state (torch.Tensor): ``(*, D)`` input.
@@ -645,7 +675,7 @@ class MojoResidualAddLayerNormQuant(MojoOperator):
             )
             residual = hidden_state
 
-        normed_fp = normed
+        normed_fp = _apply_optional_smooth_scale(normed, smooth_scale)
         scale = normed_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
         output = torch.clamp(torch.round(normed_fp / scale), self.q_min, self.q_max)
         return output.to(self.quant_dtype), residual, scale

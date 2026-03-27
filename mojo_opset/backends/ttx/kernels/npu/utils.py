@@ -21,4 +21,4 @@ exp = tl.exp
 exp2 = tl.math.exp2
 log = tl.log
 log2 = tl.log2
-gather = tl.gather
+# gather = tl.gather
