@@ -771,7 +771,7 @@ def swa_ttx_infer(
     bsz = cu_seqlens_q.shape[0] - 1
     tot_q_toks, num_q_heads, head_dim = q.shape
     tot_kv_toks, num_kv_heads, _ = k.shape
-    o = torch.zeros_like(q)
+    o = torch.zeros_like(q, memory_format=torch.contiguous_format)
 
     if q.dtype == torch.float32:
         BLOCK_M = 64
@@ -1176,12 +1176,12 @@ def swa_ttx_paged_prefill(
     bsz = cu_seqlens_q.shape[0] - 1
     tot_q_toks, num_q_heads, head_dim = q.shape
     _, num_kv_heads, page_size, _ = k_cache.shape
-    o = torch.zeros_like(q)
+    o = torch.zeros_like(q, memory_format=torch.contiguous_format)
     if q.dtype == torch.float32:
         BLOCK_M = 64
         BLOCK_N = 64
     else:
-        BLOCK_M = 64
+        BLOCK_M = 128
         BLOCK_N = 128
     assert page_size == BLOCK_N
 
@@ -1517,7 +1517,7 @@ def swa_ttx_paged_decode(
     if sm_scale is None:
         sm_scale = 1.0 / (head_dim**0.5)
 
-    o = torch.empty_like(q)
+    o = torch.empty_like(q, memory_format=torch.contiguous_format)
     
     num_vectors = get_num_cores("vector")
     grid = (num_vectors, )

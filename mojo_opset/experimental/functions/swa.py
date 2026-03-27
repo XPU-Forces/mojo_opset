@@ -914,14 +914,14 @@ def swa_ttx_forward(
     bsz = cu_seqlens_q.shape[0] - 1
     tot_q_toks, num_q_heads, head_dim = q.shape
     tot_kv_toks, num_kv_heads, _ = k.shape
-    o = torch.zeros_like(q)
-    softmax_lse = torch.zeros((num_q_heads, tot_q_toks), dtype=torch.float32, device=q.device) + float("-inf")
+    o = torch.zeros_like(q, memory_format=torch.contiguous_format)
+    softmax_lse = torch.zeros((num_q_heads, tot_q_toks), dtype=torch.float32, device=q.device, memory_format=torch.contiguous_format) + float("-inf")
 
     if sm_scale is None:
         sm_scale = 1.0 / (head_dim**0.5)
 
     if output_f32:
-        o_f32 = torch.zeros_like(q, dtype=torch.float32)
+        o_f32 = torch.zeros_like(q, dtype=torch.float32, memory_format=torch.contiguous_format)
         of32_stride_t, of32_stride_h, of32_stride_d = o_f32.stride(0), o_f32.stride(1), o_f32.stride(2)
     else:
         o_f32 = None
@@ -1866,8 +1866,9 @@ def swa_ttx_backward(
     if sm_scale is None:
         sm_scale = 1.0 / (head_dim**0.5)
 
-    dk = torch.zeros_like(k).contiguous()
-    dv = torch.zeros_like(v).contiguous()
+    dq = torch.zeros_like(q, memory_format=torch.contiguous_format)
+    dk = torch.zeros_like(k, memory_format=torch.contiguous_format)
+    dv = torch.zeros_like(v, memory_format=torch.contiguous_format)
 
     if q.dtype == torch.float32:
         BLOCK_M = 64
@@ -1931,8 +1932,6 @@ def swa_ttx_backward(
         BLOCK_N,
         BLOCK_D,
     )
-
-    dq = torch.zeros_like(q)
     _sdpa_bwd_dq_kernel[grid](
         dq,
         do,
@@ -2277,15 +2276,15 @@ if __name__ == "__main__":
     # torch.npu.set_device(local_rank)
 
 
-    # test_configs = [
-    #     (1, 1, 1, False, 128, 256, 0, torch.float32),
-    #     (4, 4, 2, True, 128, 512, 0, torch.float32),
-    #     (4, 4, 2, False, 128, 256, 0, torch.bfloat16),
-    #     (4, 16, 4, False, 128, 4096, 0, torch.bfloat16),
-    # ]
     test_configs = [
+        (1, 1, 1, False, 128, 256, 0, torch.float32),
+        # (4, 4, 2, True, 128, 512, 0, torch.float32),
+        # (4, 4, 2, False, 128, 256, 0, torch.bfloat16),
         (4, 16, 4, False, 128, 8192, 0, torch.bfloat16),
     ]
+    # test_configs = [
+    #     (4, 16, 4, False, 128, 8192, 0, torch.bfloat16),
+    # ]
 
 
     for bsz, q_head_num, kv_head_num, gqa_interleave, head_dim, max_q_len, max_kv_prefix_len, dtype in test_configs:
