@@ -41,6 +41,21 @@ def get_platform() -> Literal["npu", "mlu", "meta_device", "ilu"]:
     return "meta_device"
 
 
+_PLATFORM_TO_TORCH_DEVICE = {
+    "npu": "npu",
+    "mlu": "mlu",
+    "ilu": "cuda",
+    "meta_device": "meta",
+}
+
+
+@functools.lru_cache
+def get_torch_device() -> str:
+    """Map the internal platform identifier to a PyTorch-recognised device string."""
+    platform = get_platform()
+    return _PLATFORM_TO_TORCH_DEVICE.get(platform, platform)
+
+
 _PLATFORM_TO_DIST_BACKEND = {
     "npu": "hccl",
     "mlu": "gloo",

@@ -1,4 +1,5 @@
 from typing import List
+
 import torch
 
 try:
@@ -15,11 +16,13 @@ dtype_mapping = {
     "float32": torch.float32,
 }
 
+
 # TODO(liuyuan):  get the common configuration fields for all LLM models, add them here as static fields and add conversion functions to convert from different configs.
 class MojoDynamicConfig(BaseModel):
     class Config:
         arbitrary_types_allowed = True
-        extra = 'allow'
+        extra = "allow"
+
 
 class MojoModelConfig(MojoDynamicConfig):
     model_name: str = ""
@@ -78,8 +81,7 @@ class MojoRunTimeConfig(BaseModel):
 
     is_deterministic: bool = False
 
-    use_npu_graph: bool = False
-    npu_graph_capture_range: List[int] = []
+    use_device_graph: bool = False
     use_paged_attention: bool = False
     use_mtp: bool = False
     mtp_draft_recurrent: bool = False
@@ -95,20 +97,21 @@ class MojoRunTimeConfig(BaseModel):
     vanilla_checkpoint_path: str = None
     preshard_checkpoint_path: str = None
 
+
 class MojoParallelConfig(BaseModel):
-    dp_size:int = 1
-    pp_size:int = 1
-    ep_size:int = 1
-    tp_size:int = 1
-    dp_rank:int = 0
-    pp_rank:int = 0
-    ep_rank:int = 0
-    tp_rank:int = 0
-    dp_group:list = []
-    pp_group:list = []
-    ep_group:list = []
-    tp_group:list = []
-    world_size:int = 1
+    dp_size: int = 1
+    pp_size: int = 1
+    ep_size: int = 1
+    tp_size: int = 1
+    dp_rank: int = 0
+    pp_rank: int = 0
+    ep_rank: int = 0
+    tp_rank: int = 0
+    dp_group: list = []
+    pp_group: list = []
+    ep_group: list = []
+    tp_group: list = []
+    world_size: int = 1
 
 
 class MojoConfig(BaseModel):

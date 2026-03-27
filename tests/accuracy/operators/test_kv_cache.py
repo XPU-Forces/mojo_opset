@@ -69,6 +69,11 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, kv_lens_val,
     store_paged_kv_ref = MojoStorePagedKVCache._registry.get("torch")()
     store_paged_kv = MojoStorePagedKVCache()
 
+    if type(store_paged_kv_ref) is type(store_paged_kv):
+        raise NotImplementedError(
+            f"both operands resolve to the same implementation, skipping comparison."
+        )
+
     k_cache_ref, v_cache_ref = store_paged_kv_ref(
         key_states,
         value_states,

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 
+from mojo_opset.compile.device_graph import DeviceGraphPool
 from mojo_opset.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -30,13 +31,15 @@ class GeneratorHook:
 
 
 class PerfHook(GeneratorHook):
-    def __init__(self, device):
+    def __init__(self, device, silent=False):
         self._device = device
+        self._silent = silent
         self._prefill_start = 0.0
         self._prefill_ms = 0.0
         self._decode_start = 0.0
         self._batch_size = 0
         self._total_input_tokens = 0
+        self.records = []
 
     def _sync(self):
         if self._device == "npu":
@@ -65,11 +68,25 @@ class PerfHook(GeneratorHook):
         decode_total_ms = (time.perf_counter() - self._decode_start) * 1000
         decode_avg_ms = decode_total_ms / decode_steps if decode_steps > 0 else 0
         throughput = self._batch_size / (decode_avg_ms / 1000) if decode_avg_ms > 0 else 0
-        logger.info(
-            f"[Perf] bs={self._batch_size} in_tok={self._total_input_tokens} | "
-            f"prefill={self._prefill_ms:.1f}ms | "
-            f"decode={decode_steps}steps {decode_total_ms:.1f}ms avg={decode_avg_ms:.1f}ms/step {throughput:.1f}tok/s"
+
+        self.records.append(
+            {
+                "batch_size": self._batch_size,
+                "in_tok": self._total_input_tokens,
+                "prefill_ms": self._prefill_ms,
+                "decode_steps": decode_steps,
+                "decode_total_ms": decode_total_ms,
+                "decode_avg_ms": decode_avg_ms,
+                "throughput": throughput,
+            }
         )
+
+        if not self._silent:
+            logger.info(
+                f"[Perf] bs={self._batch_size} in_tok={self._total_input_tokens} | "
+                f"prefill={self._prefill_ms:.1f}ms | "
+                f"decode={decode_steps}steps {decode_total_ms:.1f}ms avg={decode_avg_ms:.1f}ms/step {throughput:.1f}tok/s"
+            )
 
 
 class DumpHook(GeneratorHook):
@@ -109,6 +126,11 @@ class MojoGenerator(torch.nn.Module):
         self._enable_typewriter = enable_typewriter
         self._typewriter_buffer = typewriter_buffer
         self._hooks = hooks or []
+        self.use_device_graph = False
+        if hasattr(model, "config") and hasattr(model.config, "runtime_config"):
+            if getattr(model.config.runtime_config, "use_device_graph", False):
+                self.use_device_graph = True
+        self._graph_pool = DeviceGraphPool(model, device=device) if self.use_device_graph else None
         if self._enable_typewriter:
             from multiprocessing import Pipe
             from multiprocessing import Process
@@ -174,6 +196,19 @@ class MojoGenerator(torch.nn.Module):
         print(f"Prompt: {prompts}")
         print("-" * 40)
 
+        self.generate_from_ids(input_ids, context_input_len)
+
+    def generate_from_ids(
+        self,
+        input_ids,
+        context_input_len,
+        max_decode_steps=None,
+        ignore_eos=False,
+        silent=False,
+    ):
+        if max_decode_steps is None:
+            max_decode_steps = self.max_new_tokens
+
         self._run_hooks("before_prefill", input_ids=input_ids, context_input_len=context_input_len)
 
         with torch.inference_mode():
@@ -181,6 +216,9 @@ class MojoGenerator(torch.nn.Module):
                 input_ids,
                 context_input_len=context_input_len,
             )
+
+            if hasattr(session, "pre_allocate"):
+                session.pre_allocate(max_decode_steps)
 
         self._run_hooks("after_prefill", logits=logits, session=session)
 
@@ -195,34 +233,141 @@ class MojoGenerator(torch.nn.Module):
 
         self._run_hooks("before_decode")
 
-        for step in range(1, self.max_new_tokens):
+        graph_runner = None
+        if self._graph_pool is not None:
+            graph_runner = self._graph_pool.get_runner(input_ids, session)
+
+        for step in range(1, max_decode_steps):
             with torch.inference_mode():
-                logits, session = self.model(
-                    input_ids,
-                    session=session,
-                )
+                if graph_runner is not None:
+                    logits, session = graph_runner.replay(input_ids, session)
+                else:
+                    logits, session = self.model(
+                        input_ids,
+                        session=session,
+                    )
 
             next_token_id = self.sampler(logits, session)
             decode_steps += 1
 
-            self._run_hooks("after_decode_step", step=step, logits=logits, next_token_id=next_token_id)
+            self._run_hooks(
+                "after_decode_step",
+                step=step,
+                logits=logits,
+                next_token_id=next_token_id,
+            )
 
             should_end = should_end | (next_token_id == self.tokenizer.eos_token_id)
-            if all(should_end):
+            if not ignore_eos and all(should_end):
                 break
 
-            next_token_id[should_end] = self.tokenizer.eos_token_id
+            if not ignore_eos:
+                next_token_id[should_end] = self.tokenizer.eos_token_id
             generated_ids.append(next_token_id.cpu())
             input_ids = next_token_id
 
-            if self._enable_typewriter and len(generated_ids) >= self._typewriter_buffer:
+            if not silent and self._enable_typewriter and len(generated_ids) >= self._typewriter_buffer:
                 self._producer_conn.send(generated_ids)
                 generated_ids.clear()
 
         self._run_hooks("after_decode", decode_steps=decode_steps, generated_ids=generated_ids)
 
-        if self._enable_typewriter:
-            generated_ids and self._producer_conn.send(generated_ids)
-            self._producer_conn.close()
-        else:
-            print(generated_ids)
+        if not silent:
+            if self._enable_typewriter:
+                generated_ids and self._producer_conn.send(generated_ids)
+                self._producer_conn.close()
+            else:
+                print(generated_ids)
+
+
+class PerfMojoGenerator(MojoGenerator):
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        tokenizer,
+        sampler: MojoSampler,
+        device: torch.device,
+        max_new_tokens=128,
+        enable_typewriter=False,
+        typewriter_buffer=4,
+        hooks: list[GeneratorHook] | None = None,
+    ):
+        from mojo_opset.utils.platform import get_platform
+
+        hooks = hooks or []
+        self.perf_hook = PerfHook(get_platform(), silent=True)
+        hooks.append(self.perf_hook)
+        super().__init__(
+            model=model,
+            tokenizer=tokenizer,
+            sampler=sampler,
+            device=device,
+            max_new_tokens=max_new_tokens,
+            enable_typewriter=False,
+            typewriter_buffer=typewriter_buffer,
+            hooks=hooks,
+        )
+
+    def _run_perf_case(self, batch_size, seqlen, max_decode_steps):
+        vocab_size = getattr(self.model.config, "vocab_size", 32000) if hasattr(self.model, "config") else 32000
+        input_ids = torch.randint(0, vocab_size, (batch_size * seqlen,), dtype=torch.int64, device=self.device)
+        context_input_len = torch.full((batch_size,), seqlen, dtype=torch.int64, device=self.device)
+
+        self.generate_from_ids(
+            input_ids=input_ids,
+            context_input_len=context_input_len,
+            max_decode_steps=max_decode_steps,
+            ignore_eos=True,
+            silent=True,
+        )
+
+    def forward(self, prompts=None):
+        logger.info("Starting Prefill Latency Tests...")
+        prefill_seqlens = [512, 1024, 2048, 4096, 8192]
+        self.perf_hook.records.clear()
+        for seqlen in prefill_seqlens:
+            self._run_perf_case(batch_size=1, seqlen=seqlen, max_decode_steps=1)
+
+        logger.info("\n" + "=" * 60, extra={"clean": True})
+        logger.info(f"{'Prefill Latency Tests':^60}", extra={"clean": True})
+        logger.info("=" * 60, extra={"clean": True})
+        logger.info(
+            f"{'SeqLen':<15} | {'Batch Size':<15} | {'Prefill Latency (ms)':<20}",
+            extra={"clean": True},
+        )
+        logger.info("-" * 60, extra={"clean": True})
+        for r in self.perf_hook.records:
+            logger.info(
+                f"{r['in_tok']:<15} | {r['batch_size']:<15} | {r['prefill_ms']:<20.2f}",
+                extra={"clean": True},
+            )
+        logger.info("=" * 60 + "\n", extra={"clean": True})
+
+        logger.info("Starting Decode Throughput Tests...")
+        decode_batch_sizes = [1, 2, 4, 8, 16, 24]
+        decode_seqlen = 4000
+        self.perf_hook.records.clear()
+        for bs in decode_batch_sizes:
+            self._run_perf_case(
+                batch_size=bs,
+                seqlen=decode_seqlen,
+                max_decode_steps=self.max_new_tokens,
+            )
+
+        logger.info("\n" + "=" * 80, extra={"clean": True})
+        logger.info(
+            f"{'Decode Throughput Tests (Context Len = 4000)':^80}",
+            extra={"clean": True},
+        )
+        logger.info("=" * 80, extra={"clean": True})
+        logger.info(
+            f"{'Batch Size':<12} | {'Decode Steps':<15} | {'Avg Latency (ms/step)':<22} | {'Throughput (tok/s)':<20}",
+            extra={"clean": True},
+        )
+        logger.info("-" * 80, extra={"clean": True})
+        for r in self.perf_hook.records:
+            logger.info(
+                f"{r['batch_size']:<12} | {r['decode_steps']:<15} | {r['decode_avg_ms']:<22.2f} | {r['throughput']:<20.2f}",
+                extra={"clean": True},
+            )
+        logger.info("=" * 80 + "\n", extra={"clean": True})
