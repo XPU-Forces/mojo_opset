@@ -43,7 +43,7 @@ class MojoLightningIndexer(MojoOperator):
 
         # Handle key_scale: validate and broadcast if needed
         if key_scale is None:
-            # If no key_scale provided, use all ones
+
             key_scale = torch.ones(
                 (batch_size, k_seq_len, head_dim),
                 dtype=torch.float32,
@@ -73,24 +73,17 @@ class MojoLightningIndexer(MojoOperator):
             key_scaled = key_batch * key_scale_batch
 
             for i in range(q_seq_len):
-                # Get query slice: [H, K]
                 q_slice = query[batch_id, i].to(torch.float32)
 
-                # Calculate dot product: Q @ K_scaled^T = [H, N]
                 dot_product = torch.matmul(q_slice, key_scaled.transpose(0, 1))
 
-                # Apply ReLU
                 relu_out = torch.maximum(dot_product, torch.tensor(0.0))
 
-                # Get query scale for this position: [H] -> [H, 1]
                 q_scale_slice = query_scale[batch_id, i].unsqueeze(-1)  # [H, 1]
 
-                # Apply query scaling: [H, N] * [H, 1] = [H, N] (broadcast along N dimension)
                 scaled_out = relu_out * q_scale_slice
 
-                # Sum over heads: [N]
                 reduce_out = torch.sum(scaled_out, dim=0)
 
-                # Store result
                 index_score[batch_id, i] = reduce_out
         return index_score

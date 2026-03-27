@@ -35,7 +35,6 @@ silu_fwd_impl = _get_kernel_impl(ttx_backend_module, "silu_fwd_impl")
 silu_bwd_impl = _get_kernel_impl(ttx_backend_module, "silu_bwd_impl")
 
 indexer_rotate_activation_impl = _get_kernel_impl(ttx_backend_module, "indexer_rotate_activation_impl")
-indexer_rope_impl = _get_kernel_impl(ttx_backend_module, "indexer_rope_impl")
 quant_infer_impl = _get_kernel_impl(ttx_backend_module, "quant_infer_impl")
 lightning_indexer_impl = _get_kernel_impl(ttx_backend_module, "lightning_indexer_impl")
 
@@ -183,21 +182,6 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     @indexer_rotate_activation.register_fake
     def indexer_rotate_activation(x: torch.Tensor) -> torch.Tensor:
         return torch.empty_like(x)
-
-
-    # ====================================
-    # Register Indexer_rope
-    # ====================================
-
-    @torch.library.custom_op("ttx::indexer_rope", mutates_args={})
-    def indexer_rope(
-        q: torch.Tensor,  # [BNSD]
-        k: torch.Tensor,  # [BSD]
-        cos: torch.Tensor,  # [BSD]
-        sin: torch.Tensor,  # [BSD]
-        rope_head_dim: int = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:  # [BNSD]
-        return indexer_rope_impl(q, k, cos, sin, rope_head_dim)
 
 
     # ====================================
@@ -357,20 +341,6 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         batch, seqlen, _ = input_tensor.shape
 
         return torch.empty_like(input_tensor, dtype=torch.int8), torch.empty(batch, seqlen, dtype=torch.float32)
-
-    # ====================================
-    # Register Indexer_rope
-    # ====================================
-
-    @torch.library.custom_op("ttx::indexer_rope", mutates_args={})
-    def indexer_rope(
-        q: torch.Tensor,  # [BNSD]
-        k: torch.Tensor,  # [BSD]
-        cos: torch.Tensor,  # [BSD]
-        sin: torch.Tensor,  # [BSD]
-        rope_head_dim: int = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:  # [BNSD]
-        return indexer_rope_impl(q, k, cos, sin, rope_head_dim)
 
     # ====================================
     # Register rmsnorm
@@ -772,7 +742,7 @@ else:
     paged_attention_decode = paged_attention_decode_impl
     rope_fwd = rope_fwd_impl
     rope_bwd = rope_bwd_impl
-    indexer_rope = indexer_rope_impl
+
     rmsnorm_fwd = rmsnorm_fwd_impl
     rmsnorm_bwd = rmsnorm_bwd_impl
     rmsnorm_infer = rmsnorm_infer_impl
@@ -800,6 +770,5 @@ else:
     top_p_filter = top_p_filter_impl
     top_p_sampling = top_p_sampling_impl
     indexer_rotate_activation = indexer_rotate_activation_impl
-    indexer_rope = indexer_rope_impl
     quant_infer = quant_infer_impl
     lightning_indexer = lightning_indexer_impl

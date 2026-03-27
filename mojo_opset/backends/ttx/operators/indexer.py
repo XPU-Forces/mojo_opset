@@ -1,16 +1,15 @@
 from typing import Optional
 
 import torch
+from torch import nn
 
 from mojo_opset.backends.ttx.kernels import lightning_indexer_impl
 from mojo_opset.backends.ttx.operators.activation import TTXIndexerRotateActivation
-from mojo_opset.backends.ttx.operators.indexer_rope import TTXIndexerRoPE
-from mojo_opset.backends.ttx.operators.misc import TTXQuantIndexer  # noqa: F401 — register TTXQuantIndexer
+
 from mojo_opset.backends.ttx.operators.normalization import TTXLayerNorm
-from mojo_opset.core import MojoLightningIndexer, MojoQuantIndexer
-from mojo_opset.core.operator import MojoOperator
+from mojo_opset.core import MojoLightningIndexer, MojoQuantIndexer, MojoRoPE
 from mojo_opset.experimental.operators.indexer import MojoIndexer
-from torch import nn
+
 
 class TTXLightningIndexer(MojoLightningIndexer):
     supported_platforms_list = ["npu"]
@@ -112,7 +111,7 @@ class TTXIndexer(MojoIndexer):
         )
 
         # Replace with TTX-specific components
-        self.rope = TTXIndexerRoPE()
+        self.rope = MojoRoPE()
         self.activation = TTXIndexerRotateActivation()
 
         self.quant = MojoQuantIndexer()

@@ -89,7 +89,6 @@ from .operators.position_embedding import MojoNormRoPEStoreKV
 from .operators.position_embedding import MojoRoPE
 from .operators.position_embedding import MojoRoPEStoreKV
 from .operators.position_embedding import MojoGridRoPE
-from .operators.position_embedding import MojoIndexerRoPE
 
 """ sampling """
 from .operators.sampling import MojoApplyPenaltiesTempurate
@@ -185,7 +184,6 @@ __all__ = [
     "MojoNormRoPE",
     "MojoNormRoPEStoreKV",
     "MojoGridRoPE",
-    "MojoIndexerRoPE",
 
     "MojoTopPSampling",
     "MojoTopKSampling",

@@ -27,7 +27,6 @@ from .rope import rope_bwd_impl
 from .indexer_rotate_activation import indexer_rotate_activation_impl
 from .rope import rope_fwd_impl
 from .indexer_rotate_activation import indexer_rotate_activation_impl
-from .indexer_rope import indexer_rope_impl
 from .lightning_indexer import lightning_indexer_impl
 from .sample import fused_penalties_temp_impl
 from .sample import join_prob_reject_sampling_impl
@@ -78,7 +77,6 @@ __all__ = [
     "indexer_rotate_activation_impl",
     "lightning_indexer_impl",
     "quant_infer_impl",
-    "indexer_rope_impl",
     "diffusion_attention_fwd_impl",
     "diffusion_attention_bwd_impl",
     "m_grouped_matmul_impl",

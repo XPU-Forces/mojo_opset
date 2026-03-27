@@ -5,11 +5,11 @@ import torch
 import torch.nn as nn
 
 from mojo_opset.core import (
-    MojoIndexerRoPE,
     MojoIndexerRotateActivation,
     MojoLayerNorm,
     MojoLightningIndexer,
     MojoQuantIndexer,
+    MojoRoPE,
 )
 from mojo_opset.core.operator import MojoOperator
 
@@ -53,7 +53,7 @@ class MojoIndexer(MojoOperator):
             persistent=False,
         )
 
-        self.rope = MojoIndexerRoPE()
+        self.rope = MojoRoPE()
         self.activation = MojoIndexerRotateActivation()
         self.quant = MojoQuantIndexer()
 
@@ -73,7 +73,7 @@ class MojoIndexer(MojoOperator):
         cos = freqs_cis.real.unsqueeze(0).expand(bsz, -1, -1)
         sin = freqs_cis.imag.unsqueeze(0).expand(bsz, -1, -1)
 
-        q, k = self.rope(q, k, cos, sin, rope_head_dim=self.rope_head_dim)
+        q, k = self.rope._apply_rope(q, k, cos, sin, rope_percentage=self.rope_head_dim / self.head_dim)
 
         q = self.activation(q)
         k = self.activation(k)
