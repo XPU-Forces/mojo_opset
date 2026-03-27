@@ -70,10 +70,21 @@ class MojoIndexer(MojoOperator):
         with torch.no_grad():
             k = self.k_norm(self.wk(x.detach()))
 
-        cos = freqs_cis.real.unsqueeze(0).expand(bsz, -1, -1)
-        sin = freqs_cis.imag.unsqueeze(0).expand(bsz, -1, -1)
+        cos_half, sin_half = freqs_cis.real, freqs_cis.imag
+        cos = torch.cat((cos_half, cos_half), dim=-1).unsqueeze(0).expand(bsz, -1, -1)
+        sin = torch.cat((sin_half, sin_half), dim=-1).unsqueeze(0).expand(bsz, -1, -1)
+        k = k.unsqueeze(2)
 
-        q, k = self.rope._apply_rope(q, k, cos, sin, rope_percentage=self.rope_head_dim / self.head_dim)
+        q, k = self.rope.forward(
+            q,
+            k,
+            cos,
+            sin,
+            head_first=False,
+            rope_percentage=self.rope_head_dim / self.head_dim,
+        )
+
+        k = k.squeeze(2)
 
         q = self.activation(q)
         k = self.activation(k)

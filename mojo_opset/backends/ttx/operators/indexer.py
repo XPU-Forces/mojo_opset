@@ -127,10 +127,24 @@ class TTXIndexer(MojoIndexer):
         with torch.no_grad():
             k = self.k_norm(self.wk(x.detach()))
 
-        cos = freqs_cis.real.unsqueeze(0).expand(bsz, -1, -1)
-        sin = freqs_cis.imag.unsqueeze(0).expand(bsz, -1, -1)
+        # freqs_cis: [S, rope/2] complex -> pair-duplicate for rotate_half; cos/sin [B,S, rope_head_dim].
+        # q [B,S,N,D] + head_first=False -> MojoRoPE.forward unsqueeze cos/sin on dim 2.
+        # k stays [B,S,D] unless unsqueeze(2): 3D k does not broadcast with 4D cos inside _apply_rope.
+        cos_half, sin_half = freqs_cis.real, freqs_cis.imag
+        cos = torch.cat((cos_half, cos_half), dim=-1).unsqueeze(0).expand(bsz, -1, -1)
+        sin = torch.cat((sin_half, sin_half), dim=-1).unsqueeze(0).expand(bsz, -1, -1)
+        k = k.unsqueeze(2)
 
-        q, k = self.rope._apply_rope(q, k, cos, sin, rope_percentage=self.rope_head_dim / self.head_dim)
+        q, k = self.rope.forward(
+            q,
+            k,
+            cos,
+            sin,
+            head_first=False,
+            rope_percentage=self.rope_head_dim / self.head_dim,
+        )
+
+        k = k.squeeze(2)
 
         q = self.activation(q)
         k = self.activation(k)

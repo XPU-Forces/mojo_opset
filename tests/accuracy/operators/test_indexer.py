@@ -134,3 +134,7 @@ def precompute_freqs_cis(seqlen, dim, device) -> torch.Tensor:
     freqs = torch.outer(t, freqs)
     freqs_cis = torch.polar(torch.ones_like(freqs, device=device), freqs)
     return freqs_cis
+
+
+if __name__ == "__main__":
+    pytest.main([__file__ + "::test_indexer"])
