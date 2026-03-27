@@ -1184,3 +1184,305 @@ class MojoSdpa(MojoOperator):
 
     def extra_repr(self) -> str:
         return f"{self.scale=}, {self.enable_gqa=}".replace("self.", "")
+
+
+def _generate_window_mask(
+    q_seq_len: int,
+    kv_seq_len: int,
+    local_window_size: Optional[int] = None,
+    global_window_size: Optional[int] = None,
+) -> torch.Tensor:
+    kv_computed_len = kv_seq_len - q_seq_len
+    causal_mask = (torch.arange(0, q_seq_len)[:, None] + kv_computed_len) >= torch.arange(0, kv_seq_len)[None, :]
+    if local_window_size is not None or global_window_size is not None:
+        local_window_mask = (
+            (
+                torch.arange(kv_computed_len, kv_computed_len + q_seq_len)[:, None]
+                <= torch.arange(0, kv_seq_len)[None, :] + local_window_size
+            )
+            if local_window_size is not None
+            else False
+        )
+        global_window_mask = (
+            (torch.arange(0, kv_seq_len) < global_window_size)[None, :] if global_window_size is not None else False
+        )
+        mask = causal_mask & (local_window_mask | global_window_mask)
+    else:
+        mask = causal_mask
+
+    return mask
+
+class MojoPagedPrefillSWA(MojoOperator):
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+        global_window_size: Optional[int] = None,
+        local_window_size: Optional[int] = None,
+    ):
+        """
+        Initialize the Paged Prefill GQA attention operator with common parameters.
+        Parameter descriptions:
+        - gqa_layout (str): GQA head grouping layout, values {"ABAB","AABB"}, default "ABAB".
+        - is_causal (bool): Whether to enable causal masking, default True.
+        - global_window_size (Optional[int]): Global attention window length; None means no global window, default None. Only effective when is_causal=True.
+        - local_window_size (Optional[int]): Local attention window length; None means no local window, default None. Only effective when is_causal=True.
+        """
+        super().__init__()
+
+        if gqa_layout not in ["ABAB", "AABB"]:
+            raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
+
+        self.is_causal = is_causal
+        self.gqa_interleave = gqa_layout == "ABAB"
+        self.global_window_size = global_window_size
+        self.local_window_size = local_window_size
+
+    def forward(
+        self,
+        q: torch.Tensor,  # [total_q_len, n_q_heads, head_dim]
+        k_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
+        v_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
+        cu_seqlens_q: torch.Tensor,  # [bsz + 1]
+        block_table: torch.Tensor,  # [bsz, max_num_blocks]
+        softmax_scale: Optional[float] = None,
+        seqlens_kv: Optional[torch.Tensor] = None,  # [bsz]
+    ) -> torch.Tensor:
+        # Note: if is_causal = False, local_window_size and global_window_size are not used.
+
+        total_q_len, n_q_heads, head_dim = q.shape
+        _, n_kv_heads, page_size, _ = k_cache.shape
+        if softmax_scale is None:
+            softmax_scale = 1.0 / (head_dim**0.5)
+
+        if seqlens_kv is None:
+            seqlens_kv = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+
+        o = torch.empty_like(q)
+        bsz = cu_seqlens_q.shape[0] - 1
+        for i in range(bsz):
+            q_i = q[cu_seqlens_q[i] : cu_seqlens_q[i + 1]]
+            q_seq_len = q_i.shape[0]
+            q_i = q_i.permute(1, 0, 2)  # -> [n_q_heads, q_seq_len, head_dim]
+
+            kv_seq_len = seqlens_kv[i].item()
+            kv_blocks = (kv_seq_len + page_size - 1) // page_size
+            k_i = k_cache[block_table[i, :kv_blocks]]  # [kv_blocks, n_kv_heads, page_size, head_dim]
+            k_i = k_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
+            k_i_T = k_i.permute(0, 2, 1)  # -> [n_kv_heads, head_dim, kv_seq_len]
+            if n_q_heads != n_kv_heads:
+                if self.gqa_interleave:
+                    k_i_T = k_i_T.repeat((n_q_heads // n_kv_heads, 1, 1))
+                else:
+                    k_i_T = k_i_T.repeat_interleave(
+                        n_q_heads // n_kv_heads, dim=0
+                    )  # -> [n_q_heads, head_dim, kv_seq_len]
+            s_i = torch.bmm(q_i, k_i_T).float() * softmax_scale  # -> [n_q_heads, q_seq_len, kv_seq_len]
+
+            if self.is_causal:
+                s_mask = _generate_window_mask(
+                    q_seq_len,
+                    kv_seq_len,
+                    self.local_window_size,
+                    self.global_window_size,
+                ).to(s_i.device)
+                s_i = torch.where(s_mask, s_i, float("-inf"))
+            m_i = torch.max(s_i, dim=-1, keepdim=True).values  # -> [n_q_heads, q_seq_len, 1]
+            s_i = s_i - m_i  # -> [n_q_heads, q_seq_len, kv_seq_len]
+            p_i = torch.exp(s_i)
+            l_i = torch.sum(p_i, dim=-1, keepdim=True)  # -> [n_q_heads, q_seq_len, 1]
+            p_i = p_i.to(q.dtype)
+
+            v_i = v_cache[block_table[i, :kv_blocks]]
+            v_i = v_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[
+                :, :kv_seq_len
+            ]  # -> [n_kv_heads, kv_seq_len, head_dim]
+            if n_q_heads != n_kv_heads:
+                if self.gqa_interleave:
+                    v_i = v_i.repeat((n_q_heads // n_kv_heads, 1, 1))
+                else:
+                    v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, kv_seq_len, head_dim]
+            o_i = torch.bmm(p_i, v_i).float()  # -> [n_q_heads, q_seq_len, head_dim]
+            o_i = o_i / l_i  # -> [n_q_heads, q_seq_len, head_dim]
+            o_i = o_i.permute(1, 0, 2)  # -> [q_seq_len, n_q_heads, head_dim]
+            o[cu_seqlens_q[i] : cu_seqlens_q[i + 1]] = o_i.to(o.dtype)
+        return o
+
+
+class MojoPagedDecodeSWA(MojoOperator):
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+        global_window_size: Optional[int] = None,
+        local_window_size: Optional[int] = None,
+    ):
+        """
+        Initialize the Paged Prefill GQA attention operator with common parameters.
+        Parameter descriptions:
+        - gqa_layout (str): GQA head grouping layout, values {"ABAB","AABB"}, default "ABAB".
+        - is_causal (bool): Whether to enable causal masking, default True.
+        - global_window_size (Optional[int]): Global attention window length; None means no global window, default None. Only effective when is_causal=True.
+        - local_window_size (Optional[int]): Local attention window length; None means no local window, default None. Only effective when is_causal=True.
+        """
+        super().__init__()
+
+        if gqa_layout not in ["ABAB", "AABB"]:
+            raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
+
+        self.is_causal = is_causal
+        self.gqa_interleave = gqa_layout == "ABAB"
+        self.global_window_size = global_window_size
+        self.local_window_size = local_window_size
+
+    def forward(
+        self,
+        q: torch.Tensor,  # [bsz, n_q_heads, head_dim]
+        k_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
+        v_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
+        seq_lens: torch.Tensor,  # [bsz]
+        block_table: torch.Tensor,  # [bsz, max_num_blocks]
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        # Note: for decode kernel, is_causal = False should never happen
+
+        bsz, n_q_heads, head_dim = q.shape
+        _, n_kv_heads, page_size, _ = k_cache.shape
+        if softmax_scale is None:
+            softmax_scale = 1.0 / (head_dim**0.5)
+
+        o = torch.empty_like(q)
+        for i in range(bsz):
+            q_i = q[i].unsqueeze(1) # -> [n_q_heads, 1, head_dim]
+
+            kv_seq_len = seq_lens[i].item()
+            kv_blocks = (kv_seq_len + page_size - 1) // page_size
+            k_i = k_cache[block_table[i, :kv_blocks]]  # [kv_blocks, n_kv_heads, page_size, head_dim]
+            k_i = k_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
+            k_i_T = k_i.permute(0, 2, 1)  # -> [n_kv_heads, head_dim, kv_seq_len]
+            if n_q_heads != n_kv_heads:
+                if self.gqa_interleave:
+                    k_i_T = k_i_T.repeat((n_q_heads // n_kv_heads, 1, 1))
+                else:
+                    k_i_T = k_i_T.repeat_interleave(
+                        n_q_heads // n_kv_heads, dim=0
+                    )  # -> [n_q_heads, head_dim, kv_seq_len]
+            s_i = torch.bmm(q_i, k_i_T).float() * softmax_scale  # -> [n_q_heads, 1, kv_seq_len]
+
+            if self.is_causal:
+                s_mask = _generate_window_mask(
+                    1,
+                    kv_seq_len,
+                    self.local_window_size,
+                    self.global_window_size,
+                ).to(s_i.device)
+                s_i = torch.where(s_mask, s_i, float("-inf"))
+            m_i = torch.max(s_i, dim=-1, keepdim=True).values  # -> [n_q_heads, 1, 1]
+            s_i = s_i - m_i  # -> [n_q_heads, 1, kv_seq_len]
+            p_i = torch.exp(s_i)
+            l_i = torch.sum(p_i, dim=-1, keepdim=True)  # -> [n_q_heads, 1, 1]
+            p_i = p_i.to(q.dtype)
+
+            v_i = v_cache[block_table[i, :kv_blocks]]
+            v_i = v_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[
+                :, :kv_seq_len
+            ]  # -> [n_kv_heads, kv_seq_len, head_dim]
+            if n_q_heads != n_kv_heads:
+                if self.gqa_interleave:
+                    v_i = v_i.repeat((n_q_heads // n_kv_heads, 1, 1))
+                else:
+                    v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, kv_seq_len, head_dim]
+            o_i = torch.bmm(p_i, v_i).float()  # -> [n_q_heads, 1, head_dim]
+            o_i = o_i / l_i  # -> [n_q_heads, 1, head_dim]
+            o_i = o_i.squeeze(1)  # -> [n_q_heads, head_dim]
+            o[i] = o_i.to(o.dtype)
+        return o
+
+
+class MojoSWA(MojoOperator):
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+        global_window_size: Optional[int] = None,
+        local_window_size: Optional[int] = None,
+    ):
+        """
+        Initialize the Paged Prefill GQA attention operator with common parameters.
+        Parameter descriptions:
+        - gqa_layout (str): GQA head grouping layout, values {"ABAB","AABB"}, default "ABAB".
+        - is_causal (bool): Whether to enable causal masking, default True.
+        - global_window_size (Optional[int]): Global attention window length; None means no global window, default None. Only effective when is_causal=True.
+        - local_window_size (Optional[int]): Local attention window length; None means no local window, default None. Only effective when is_causal=True.
+        """
+        super().__init__()
+
+        if gqa_layout not in ["ABAB", "AABB"]:
+            raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
+
+        self.is_causal = is_causal
+        self.gqa_interleave = gqa_layout == "ABAB"
+        self.global_window_size = global_window_size
+        self.local_window_size = local_window_size
+
+    def forward(
+        self,
+        q: torch.Tensor,  # [total_q_len, n_q_heads, head_dim]
+        k: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
+        v: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
+        cu_seqlens_q: torch.Tensor,  # [bsz + 1]
+        cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        # Note: if is_causal = False, local_window_size and global_window_size are not used.
+
+        total_q_len, n_q_heads, head_dim = q.shape
+        n_kv_heads = k.shape[1]
+        if softmax_scale is None:
+            softmax_scale = 1.0 / (head_dim**0.5)
+
+        o = torch.empty_like(q)
+        bsz = cu_seqlens_q.shape[0] - 1
+        for i in range(bsz):
+            q_i = q[cu_seqlens_q[i] : cu_seqlens_q[i + 1]]
+            q_seq_len = q_i.shape[0]
+            q_i = q_i.permute(1, 0, 2)  # -> [n_q_heads, q_seq_len, head_dim]
+
+            k_i = k[cu_seqlens_kv[i] : cu_seqlens_kv[i + 1]]
+            kv_seq_len = k_i.shape[0]
+            k_i_T = k_i.permute(1, 2, 0)
+            if n_q_heads != n_kv_heads:
+                if self.gqa_interleave:
+                    k_i_T = k_i_T.repeat((n_q_heads // n_kv_heads, 1, 1))
+                else:
+                    k_i_T = k_i_T.repeat_interleave(
+                        n_q_heads // n_kv_heads, dim=0
+                    )  # -> [n_q_heads, head_dim, kv_seq_len]
+            s_i = torch.bmm(q_i, k_i_T).float() * softmax_scale  # -> [n_q_heads, q_seq_len, kv_seq_len]
+
+            if self.is_causal:
+                s_mask = _generate_window_mask(
+                    q_seq_len,
+                    kv_seq_len,
+                    self.local_window_size,
+                    self.global_window_size,
+                ).to(s_i.device)
+                s_i = torch.where(s_mask, s_i, float("-inf"))
+            m_i = torch.max(s_i, dim=-1, keepdim=True).values  # -> [n_q_heads, q_seq_len, 1]
+            s_i = s_i - m_i  # -> [n_q_heads, q_seq_len, kv_seq_len]
+            p_i = torch.exp(s_i)
+            l_i = torch.sum(p_i, dim=-1, keepdim=True)  # -> [n_q_heads, q_seq_len, 1]
+            p_i = p_i.to(v.dtype)
+
+            v_i = v[cu_seqlens_kv[i] : cu_seqlens_kv[i + 1]].permute(1, 0, 2)  # -> [n_kv_heads, kv_seq_len, head_dim]
+            if n_q_heads != n_kv_heads:
+                if self.gqa_interleave:
+                    v_i = v_i.repeat((n_q_heads // n_kv_heads, 1, 1))
+                else:
+                    v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, kv_seq_len, head_dim]
+            o_i = torch.bmm(p_i, v_i).float()  # -> [n_q_heads, q_seq_len, head_dim]
+            o_i = o_i / l_i  # -> [n_q_heads, q_seq_len, head_dim]
+            o_i = o_i.permute(1, 0, 2)  # -> [q_seq_len, n_q_heads, head_dim]
+            o[cu_seqlens_q[i] : cu_seqlens_q[i + 1]] = o_i.to(o.dtype)
+        return o
+
