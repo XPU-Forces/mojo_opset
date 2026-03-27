@@ -71,6 +71,13 @@ def _get_library_root_logger() -> "logging.Logger":
     return logging.getLogger(_get_library_name())
 
 
+class _Formatter(logging.Formatter):
+    def format(self, record):
+        if getattr(record, "clean", False):
+            return record.getMessage()
+        return super().format(record)
+
+
 def _configure_library_root_logger() -> None:
     """
     Configures root logger using a stdout stream handler with an explicit format.
@@ -81,7 +88,7 @@ def _configure_library_root_logger() -> None:
         if _default_handler:
             return
 
-        formatter = logging.Formatter(
+        formatter = _Formatter(
             fmt="[%(levelname)s] %(asctime)s %(pathname)s:%(lineno)d >> %(message)s",
             datefmt="%m/%d/%Y %H:%M:%S",
         )
