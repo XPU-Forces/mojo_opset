@@ -13,6 +13,20 @@ from mojo_opset import MojoJoinProbRejectSampling
 from mojo_opset import MojoRejectSampling
 from mojo_opset import MojoTopPFilter
 from mojo_opset import MojoTopPSampling
+from mojo_opset import MojoTopKSampling
+
+
+@pytest.mark.parametrize(
+    "logits, topk, min_tokens_to_keep",
+    [(torch.randn(20, 151936), 10, 1),],
+)
+@bypass_not_implemented
+def test_topk_sampling(logits, topk, min_tokens_to_keep):
+    logits = logits.to("npu")
+    top_k_sampling = MojoTopKSampling(top_k=topk, min_tokens_to_keep=min_tokens_to_keep)
+    top_k_sampling_ref = MojoTopKSampling._registry.get("torch")(top_k=topk, min_tokens_to_keep=min_tokens_to_keep)
+
+    top_k_sampling.forward_diff_with(top_k_sampling_ref, logits)
 
 
 @pytest.mark.parametrize(
@@ -21,13 +35,13 @@ from mojo_opset import MojoTopPSampling
 )
 @bypass_not_implemented
 def test_topp_sampling(shape, topk, topp, min_tokens_to_keep):
-    logits = torch.randn(shape, dtype=torch.float32)
-    top_p_sampling = MojoTopPSampling(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk)
+    logits = torch.randn(shape, dtype=torch.float32).to("npu")
+    top_p_sampling_impl = MojoTopPSampling(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk)
     top_p_sampling_ref = MojoTopPSampling._registry.get("torch")(
         top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk
     )
 
-    top_p_sampling.forward_diff_with(top_p_sampling_ref, logits)
+    top_p_sampling_impl.forward_diff_with(top_p_sampling_ref, logits)
 
 
 @pytest.mark.parametrize(
@@ -36,11 +50,11 @@ def test_topp_sampling(shape, topk, topp, min_tokens_to_keep):
 )
 @bypass_not_implemented
 def test_topp_filter(shape, topk, topp, min_tokens_to_keep):
-    logits = torch.randn(shape, dtype=torch.float32)
-    top_p_filter = MojoTopPFilter()
+    logits = torch.randn(shape, dtype=torch.float32).to("npu")
+    top_p_filter_impl = MojoTopPFilter()
     top_p_filter_ref = MojoTopPFilter._registry.get("torch")()
 
-    top_p_filter.forward_diff_with(
+    top_p_filter_impl.forward_diff_with(
         top_p_filter_ref,
         logits=logits,
         top_p=topp,
@@ -56,17 +70,17 @@ def test_topp_filter(shape, topk, topp, min_tokens_to_keep):
 @bypass_not_implemented
 def test_reject_sampler(batch_size, vocab_size, spec_step):
     torch.manual_seed(42)
-    target_logits = torch.randn((batch_size, 1 + spec_step, vocab_size), dtype=torch.float32)
-    draft_tokens = torch.randint(0, vocab_size, (batch_size, spec_step))
-    draft_probs = torch.ones((batch_size, spec_step), dtype=torch.float32)
+    target_logits = torch.randn((batch_size, 1 + spec_step, vocab_size), dtype=torch.float32).to("npu")
+    draft_tokens = torch.randint(0, vocab_size, (batch_size, spec_step)).to("npu")
+    draft_probs = torch.ones((batch_size, spec_step), dtype=torch.float32).to("npu")
 
-    reject_sampling = MojoRejectSampling()
+    reject_sampling_impl = MojoRejectSampling()
     ref_reject_sampling = MojoRejectSampling._registry.get("torch")()
 
     batch_size = target_logits.shape[0]
 
     ref_token_ids, ref_accept_len = ref_reject_sampling(target_logits, draft_tokens, draft_probs, 42)
-    ttx_token_ids, ttx_accept_len = reject_sampling(target_logits, draft_tokens, draft_probs, 42)
+    ttx_token_ids, ttx_accept_len = reject_sampling_impl(target_logits, draft_tokens, draft_probs, 42)
 
     range_mask = torch.arange(spec_step + 1).expand(batch_size, -1).to(ref_accept_len.device)
 
@@ -88,17 +102,17 @@ def test_reject_sampler(batch_size, vocab_size, spec_step):
 @bypass_not_implemented
 def test_join_prob_reject_sampler(batch_size, vocab_size, spec_step):
     torch.manual_seed(42)
-    target_logits = torch.randn((batch_size, 1 + spec_step, vocab_size), dtype=torch.float32)
-    draft_tokens = torch.randint(0, vocab_size, (batch_size, spec_step))
-    draft_probs = torch.ones((batch_size, spec_step), dtype=torch.float32)
+    target_logits = torch.randn((batch_size, 1 + spec_step, vocab_size), dtype=torch.float32).to("npu")
+    draft_tokens = torch.randint(0, vocab_size, (batch_size, spec_step)).to("npu")
+    draft_probs = torch.ones((batch_size, spec_step), dtype=torch.float32).to("npu")
 
-    reject_join_prob_sampling = MojoJoinProbRejectSampling()
+    reject_join_prob_sampling_impl = MojoJoinProbRejectSampling()
     ref_join_prob_sampling = MojoJoinProbRejectSampling._registry.get("torch")()
 
     batch_size = target_logits.shape[0]
 
     ref_token_ids, ref_accept_len = ref_join_prob_sampling(target_logits, draft_tokens, draft_probs, 42)
-    ttx_token_ids, ttx_accept_len = reject_join_prob_sampling(target_logits, draft_tokens, draft_probs, 42)
+    ttx_token_ids, ttx_accept_len = reject_join_prob_sampling_impl(target_logits, draft_tokens, draft_probs, 42)
 
     range_mask = torch.arange(spec_step + 1).expand(batch_size, -1).to(ref_accept_len.device)
 
@@ -134,10 +148,10 @@ def split_batch_to_list(x: torch.Tensor) -> List[Union[None, torch.Tensor]]:
 )
 @bypass_not_implemented
 def test_apply_penalties_temp(shape):
-    logits = torch.randn(shape, dtype=torch.float32)
+    logits = torch.randn(shape, dtype=torch.float32).to("npu")
     BATCH_SIZE = logits.shape[0]
     VOCAB_SIZE = logits.shape[1]
-    token_freqs = torch.randint(0, 5, (BATCH_SIZE, VOCAB_SIZE), device=logits.device, dtype=torch.int32)
+    token_freqs = torch.randint(0, 5, (BATCH_SIZE, VOCAB_SIZE), device=logits.device, dtype=torch.int32).to("npu")
     mask = torch.rand((BATCH_SIZE, VOCAB_SIZE), device=logits.device) > 0.05
     token_freqs[mask] = 0
     token_freqs = split_batch_to_list(token_freqs)
