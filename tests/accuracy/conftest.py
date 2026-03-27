@@ -4,13 +4,13 @@ import pytest
 import torch
 
 # from tests.utils import get_platform
-from mojo_opset.utils.platform import get_platform
+from mojo_opset.utils.platform import get_platform, get_torch_device
 
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_session_device(request):
     platform = get_platform()
-    torch.set_default_device("cuda" if platform == "ilu" else platform)
+    torch.set_default_device(get_torch_device())
 
     worker_id = 0
     if hasattr(request.config, "workerinput"):

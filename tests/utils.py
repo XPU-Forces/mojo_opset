@@ -275,8 +275,8 @@ def bypass_not_implemented(func: Callable) -> Callable:
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
-        except NotImplementedError:
-            pytest.skip("Not implemented on this backend, skipped.")
+        except NotImplementedError as e:
+            pytest.skip(str(e) or "Not implemented on this backend, skipped.")
             return None
 
     return wrapper

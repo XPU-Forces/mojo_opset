@@ -3,7 +3,7 @@ import triton
 import triton.language as tl
 
 from triton.language.math import rsqrt
-from triton.runtime.libentry import libentry
+# from triton.runtime.libentry import libentry
 
 from mojo_opset.backends.ttx.kernels.ilu.utils import VEC_ALIGN_BYTES
 from mojo_opset.backends.ttx.kernels.utils import align
@@ -36,7 +36,7 @@ def layer_norm_fwd_heuristics(args):
 
 
 @triton.heuristics({"BLOCK_SIZE_M": layer_norm_fwd_heuristics})
-@libentry()
+# @libentry()
 @triton.jit
 def _layernorm_fwd_kernel(
     X_ptr,
@@ -126,7 +126,7 @@ def _layernorm_fwd_kernel(
 
 
 @triton.heuristics({"BLOCK_SIZE_M": lambda args: ceil_div(4096, args["n_cols"])})
-@libentry()
+# @libentry()
 @triton.jit
 def _layernorm_bwd_kernel(
     DY_ptr,
@@ -192,7 +192,7 @@ def _layernorm_bwd_kernel(
     tl.atomic_add(DB_ptr + cols_off, dB_acc, mask=cols_mask)
 
 
-@libentry()
+# @libentry()
 @triton.jit
 def _layernorm_bwd_large_cols_kernel(
     DY_ptr,

@@ -4,7 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
-from triton.runtime.libentry import libentry
+# from triton.runtime.libentry import libentry
 
 from mojo_opset.backends.ttx.kernels.ilu.utils import VEC_ALIGN_BYTES
 from mojo_opset.backends.ttx.kernels.utils import align
@@ -43,7 +43,7 @@ def rms_norm_fwd_heuristics(args):
 
 
 @triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
-@libentry()
+# @libentry()
 @triton.jit
 def _rmsnorm_infer_kernel(
     X_ptr,
@@ -150,7 +150,7 @@ def rmsnorm_infer_impl(
 
 
 @triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
-@libentry()
+# @libentry()
 @triton.jit
 def _rmsnorm_fwd_kernel(
     Y_ptr,
@@ -222,7 +222,7 @@ def _rmsnorm_fwd_kernel(
 
 
 @triton.heuristics({"BLOCK_SIZE_M": lambda args: ceil_div(4096, args["n_cols"])})
-@libentry()
+# @libentry()
 @triton.jit
 def _rmsnorm_bwd_kernel(
     dY_ptr,
@@ -297,7 +297,7 @@ def _rmsnorm_bwd_kernel(
     tl.store(dW_ptr_prog, dW_acc, mask=cols_mask)
 
 
-@libentry()
+# @libentry()
 @triton.jit
 def _rmsnorm_bwd_large_cols_kernel(
     dY_ptr,
