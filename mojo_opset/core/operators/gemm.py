@@ -1,7 +1,6 @@
 from typing import Optional
 
 import torch
-from torch.nn import functional as F
 from torch.distributed.tensor import DTensor
 
 from ..operator import MojoOperator
@@ -60,7 +59,7 @@ class MojoGroupGemm(MojoOperator):
         for g, (start, end) in enumerate(zip(group_start.tolist(), group_end.tolist())):
             a_g = input[start:end, :]
             b_g = weight[g, :, :]
-            out_g = F.linear(a_g, b_g)
+            out_g = a_g @ b_g
             out_list.append(out_g)
 
         return torch.cat(out_list, dim=0)

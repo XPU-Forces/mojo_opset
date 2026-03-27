@@ -23,11 +23,11 @@ class TTXGroupGemm(MojoGroupGemm):
             weight = self.weight
 
         if not self.trans_weight:
-            num_groups, N, BK = weight.shape
-            strideBN, strideBK = weight.stride(1), weight.stride(2)
-        else:
             num_groups, BK, N = weight.shape
             strideBK, strideBN = weight.stride(1), weight.stride(2)
+        else:
+            num_groups, N, BK = weight.shape
+            strideBN, strideBK = weight.stride(1), weight.stride(2)
 
         assert BK == K, "Input K must be equal to weight K."
 
@@ -39,6 +39,6 @@ class TTXGroupGemm(MojoGroupGemm):
         if isinstance(C, DTensor):
             C = C.to_local()
 
-        m_grouped_matmul(input, weight, C, group_list, num_groups, M, N, K, strideBN, strideBK, self.trans_weight)
+        m_grouped_matmul(input, weight, C, group_list, num_groups, M, N, K, strideBN, strideBK, not self.trans_weight)
 
         return C
