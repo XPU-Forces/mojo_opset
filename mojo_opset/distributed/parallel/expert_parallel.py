@@ -1,56 +1,69 @@
+from functools import partial
+
 import torch
 from torch import nn
 from torch.distributed.tensor import DeviceMesh
 from torch.distributed.tensor import Shard
-from torch.distributed.tensor import distribute_tensor
-from torch.distributed.tensor.parallel import ParallelStyle
 import torch.distributed._functional_collectives as fc
 
 from mojo_opset.core.operators.moe import MojoMoE
+from mojo_opset.distributed.parallel.mojo_parallel import MojoDistributedModule
+from mojo_opset.distributed.parallel.mojo_parallel import MojoRegisterableParallelStyle
+from mojo_opset.distributed.parallel.utils import shard_tensor
 
 
-class _MojoEPAllReduceWrapper(nn.Module):
-    def __init__(self, inner: nn.Module, group):
-        super().__init__()
-        self.inner = inner
-        self.group = group
+def _ep_partition_fn(src_data_rank, name, module, device_mesh):
+    ep_size = device_mesh.size()
+    ep_rank = device_mesh.get_rank()
 
-    def forward(self, x, *args, **kwargs):
-        y = self.inner(x, *args, **kwargs)
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            y = fc.all_reduce(y, "sum", self.group)
-        return y
+    base_num_experts = module.num_experts // ep_size
+    remainder_experts = module.num_experts % ep_size
+
+    if ep_rank < remainder_experts:
+        local_num_experts = base_num_experts + 1
+    else:
+        local_num_experts = base_num_experts
+
+    experts_start_idx = base_num_experts * ep_rank + min(ep_rank, remainder_experts)
+    experts_end_idx = experts_start_idx + local_num_experts
+
+    module.register_parameter(
+        "fc1", nn.Parameter(shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.fc1))
+    )
+    module.register_parameter(
+        "fc2", nn.Parameter(shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.fc2))
+    )
+
+    module.num_experts_per_partion = local_num_experts
+    module.experts_start_idx = experts_start_idx
+    module.experts_end_idx = experts_end_idx
 
 
-class MojoExpertParallel(ParallelStyle):
+def _ep_prepare_output_fn(device_mesh, output):
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return fc.all_reduce(output, "sum", (device_mesh, 0))
+    return output
+
+
+class MojoExpertParallel(MojoRegisterableParallelStyle):
     def __init__(self):
         super().__init__()
-        self._parallel_style_map = {(MojoMoE): self._partition_fn}
-
-    def _partition_fn(self, name: str, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        ep_size = device_mesh.size()
-        ep_rank = device_mesh.get_rank()
-
-        base_num_experts = module.num_experts // ep_size
-        remainder_experts = module.num_experts % ep_size
-
-        if ep_rank < remainder_experts:
-            local_num_experts = base_num_experts + 1
-        else:
-            local_num_experts = base_num_experts
-
-        experts_start_idx = base_num_experts * ep_rank + min(ep_rank, remainder_experts)
-        experts_end_idx = experts_start_idx + local_num_experts
-
-        fc1_dt = distribute_tensor(module.fc1, device_mesh, [Shard(0)], src_data_rank=self.src_data_rank)
-        module.register_parameter("fc1", nn.Parameter(fc1_dt.to_local()))
-        fc2_dt = distribute_tensor(module.fc2, device_mesh, [Shard(0)], src_data_rank=self.src_data_rank)
-        module.register_parameter("fc2", nn.Parameter(fc2_dt.to_local()))
-
-        module.num_experts_per_partion = local_num_experts
-        module.experts_start_idx = experts_start_idx
-        module.experts_end_idx = experts_end_idx
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        self._partition_fn("", module, device_mesh)
-        return _MojoEPAllReduceWrapper(module, (device_mesh, 0))
+        partition_fn, _, prepare_output_fn, _, _ = self.get_dist_info(module)
+
+        return MojoDistributedModule(
+            module,
+            device_mesh,
+            partial(partition_fn, self.src_data_rank) if partition_fn else None,
+            None,
+            prepare_output_fn,
+            parallel_style_name=self.__class__.__name__,
+        )
+
+
+MojoExpertParallel.register_dist_info(
+    MojoMoE,
+    partiton_fn=_ep_partition_fn,
+    prepare_output_fn=_ep_prepare_output_fn,
+)

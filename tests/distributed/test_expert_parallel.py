@@ -18,15 +18,33 @@ def _get_world_size():
     return world_size
 
 
-def _set_current_device(device_type: str) -> str:
+def _set_current_device(device_type: str, world_size: int) -> str:
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     if device_type == "npu":
+        n_devices = torch.npu.device_count()
+        if n_devices < world_size:
+            pytest.skip(
+                f"Not enough NPU devices: need {world_size}, but only {n_devices} visible. "
+                f"Set ASCEND_RT_VISIBLE_DEVICES to expose more devices "
+                f"(e.g. ASCEND_RT_VISIBLE_DEVICES=0,1)."
+            )
         torch.npu.set_device(local_rank)
         return f"npu:{local_rank}"
     if device_type == "mlu":
+        n_devices = torch.mlu.device_count()
+        if n_devices < world_size:
+            pytest.skip(
+                f"Not enough MLU devices: need {world_size}, but only {n_devices} visible."
+            )
         torch.mlu.set_device(local_rank)
         return f"mlu:{local_rank}"
     raise ValueError(f"Unsupported device type for distributed test: {device_type}")
+
+
+def _init_weights(module):
+    for p in module.parameters():
+        torch.nn.init.normal_(p, std=0.02)
+
 
 def _fx_graph_contains(graph_texts, needle: str) -> bool:
     return any(needle in g for g in graph_texts)
@@ -46,7 +64,7 @@ def _compile_capture_fx_and_run(module, example_inputs):
 def test_moe_ep_allreduce():
     world_size = _get_world_size()
     device_type = get_platform()
-    device = _set_current_device(device_type)
+    device = _set_current_device(device_type, world_size)
     device_mesh = init_device_mesh(device_type, (world_size,))
 
     hidden_size = 512
@@ -61,8 +79,8 @@ def test_moe_ep_allreduce():
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
     ).to(device)
+    _init_weights(ref)
 
-    torch.manual_seed(0)
     moe = MojoMoE(
         num_experts=num_experts,
         top_k=top_k,
@@ -92,7 +110,7 @@ def test_moe_ep_allreduce_compile_fx_contains_allreduce():
     if device_type not in ("npu", "mlu"):
         pytest.skip(f"Only npu/mlu are supported for this test, got {device_type}.")
 
-    device = _set_current_device(device_type)
+    device = _set_current_device(device_type, world_size)
     device_mesh = init_device_mesh(device_type, (world_size,))
 
     hidden_size = 512
@@ -107,8 +125,8 @@ def test_moe_ep_allreduce_compile_fx_contains_allreduce():
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
     ).to(device)
+    _init_weights(ref)
 
-    torch.manual_seed(0)
     moe = MojoMoE(
         num_experts=num_experts,
         top_k=top_k,
