@@ -1,0 +1,58 @@
+name: Run test case on ilu
+on:
+  pull_request:
+    branches:
+    - master
+    types: [ opened, synchronize, reopened ]
+    paths-ignore:
+    - 'CHANGELOG.md'
+    - 'README.md'
+    - 'mojo_opset/backends/ttx/kernels/npu/**'
+    - 'mojo_opset/backends/torch_npu/**'
+    - '.github/workflows/ascend_accuracy_ci.yml'
+  push:
+    branches:
+    - master
+    paths-ignore:
+    - 'CHANGELOG.md'
+    - 'README.md'
+    - 'mojo_opset/backends/ttx/kernels/npu/**'
+    - 'mojo_opset/backends/torch_npu/**'
+    - '.github/workflows/ascend_accuracy_ci.yml'
+  workflow_dispatch:
+env:
+  MOJO_OPSET_PROXY: ${{ secrets.MOJO_OPSET_PROXY }}
+defaults:
+  run:
+    shell: bash
+jobs:
+  run-tests:
+    name: Run ilu tests
+    runs-on: ILU
+    container:
+      image: corex:4.4.0
+      volumes:
+      - /data:/data
+      - /data1:/data1
+      - /lib/modules:/lib/modules
+      - /usr/src:/usr/src
+      - /dev:/dev
+      options: --privileged --cap-add=ALL --pid=host --ipc=host --network=host
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build And Install Wheel Artifact
+        shell: bash
+        run: |
+          export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
+          pip install -U pip setuptools wheel build pytest-xdist
+          pip install -e .\[ilu\] --index-url https://bytedpypi.byted.org/simple
+          python3 -m build .
+          pip install dist/*.whl --force-reinstall --no-deps
+
+      - name: test-TTX
+        shell: bash
+        run: |
+          echo "Running ttx kernels tests on Iluvatar GPU..."
+          MOJO_BACKEND="ttx" python3 -m pytest tests/accuracy/operators/ \
+            --ignore=tests/accuracy/operators/test_compute_with_comm.py
