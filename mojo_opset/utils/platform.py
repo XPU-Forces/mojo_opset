@@ -14,10 +14,16 @@ logger = get_logger(__name__)
 
 
 @functools.lru_cache
-def get_platform() -> Literal["npu", "mlu", "meta_device"]:
+def get_platform() -> Literal["npu", "mlu", "meta_device", "ilu"]:
     """
     Detect whether the system has NPU or MLU, fallback device is meta_device.
     """
+    try:
+        if torch.cuda.get_device_name().startswith("Iluvatar"):
+            logger.info("Iluvatar GPU detected")
+            return "ilu"
+    except Exception as e:
+        logger.debug(f"Failed to check Iluvatar GPU availability: {e}")
     try:
         if torch.npu.is_available():
             logger.info("Ascend NPU detected")

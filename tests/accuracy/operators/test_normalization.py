@@ -268,9 +268,9 @@ def test_rmsnorm_quant(shape, dtype):
 
     op.forward_diff_with(op_ref, x, atol=0, rtol=0)
 
-    # Semantic check: compare with manual rms_norm + quant
-    normed = F.rms_norm(x, [x.shape[-1]], weight=weight, eps=1e-5)
-    normed_fp = normed.float()
+    # Semantic check: fp32 RMSNorm matches MojoRMSNormQuant forward
+    normed = F.rms_norm(x.float(), [x.shape[-1]], weight=weight, eps=1e-5)
+    normed_fp = normed
     scale = normed_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / 127
     expected = torch.clamp(torch.round(normed_fp / scale), -128, 127).to(torch.int8)
     out, out_scale = op_ref(x)
@@ -296,9 +296,9 @@ def test_layernorm_quant(shape, dtype):
 
     op.forward_diff_with(op_ref, x, atol=0, rtol=0)
 
-    # Semantic check
-    normed = F.layer_norm(x, [x.shape[-1]], weight=weight, bias=bias, eps=1e-5)
-    normed_fp = normed.float()
+    # Semantic check (fp32 LN matches MojoLayerNormQuant forward)
+    normed = F.layer_norm(x.float(), [x.shape[-1]], weight=weight, bias=bias, eps=1e-5)
+    normed_fp = normed
     scale = normed_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / 127
     expected = torch.clamp(torch.round(normed_fp / scale), -128, 127).to(torch.int8)
     out, out_scale = op_ref(x)

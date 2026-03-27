@@ -11,21 +11,21 @@ from mojo_opset.core import MojoRMSNorm
 
 
 class TTXLayerNorm(MojoLayerNorm):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         return layernorm_infer(hidden_state, self.weight, self.bias, self.variance_epsilon)
 
 
 class TTXRMSNorm(MojoRMSNorm):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         return rmsnorm_infer(hidden_state, self.weight, self.variance_epsilon)
 
 
 class TTXResidualAddRMSNorm(MojoResidualAddRMSNorm):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor = None):
         output, res = fused_add_rmsnorm_infer(
@@ -40,7 +40,7 @@ class TTXResidualAddRMSNorm(MojoResidualAddRMSNorm):
 
 
 class TTXResidualAddLayerNorm(MojoResidualAddLayerNorm):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor = None):
         output, res = fused_add_layernorm_infer(
