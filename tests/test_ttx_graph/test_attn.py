@@ -108,11 +108,11 @@ def test_paged_attention_prefill(
     block_tables: torch.Tensor,
 ):
     head_dim = query.shape[-1]
-    sm_scale = 1.0 / math.sqrt(head_dim)
+    softmax_scale = 1.0 / math.sqrt(head_dim)
 
     torch.library.opcheck(
         torch.ops.ttx.paged_attention_prefill,
-        (query, k_cache, v_cache, cu_seqlens_q, seqlens_kv, block_tables, sm_scale),
+        (query, k_cache, v_cache, cu_seqlens_q, seqlens_kv, block_tables, softmax_scale),
     )
 
 
@@ -190,7 +190,7 @@ def test_paged_attention_decode(
     block_tables: torch.Tensor,
 ):
     head_dim = query.shape[-1]
-    sm_scale = 1.0 / math.sqrt(head_dim)
+    softmax_scale = 1.0 / math.sqrt(head_dim)
 
     torch.library.opcheck(
         torch.ops.ttx.paged_attention_decode,
@@ -200,6 +200,6 @@ def test_paged_attention_decode(
             v_cache,
             seqlens,
             block_tables,
-            sm_scale,
+            softmax_scale,
         ),
     )
