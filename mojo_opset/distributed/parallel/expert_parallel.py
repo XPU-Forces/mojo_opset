@@ -12,31 +12,53 @@ from mojo_opset.distributed.parallel.mojo_parallel import MojoRegisterableParall
 from mojo_opset.distributed.parallel.utils import shard_tensor
 
 
+class _EPDispatchWrapper(nn.Module):
+    """Wraps MojoMoEDispatch to slice dispatch output to a local expert partition."""
+
+    def __init__(self, dispatch: nn.Module, ep_start: int, ep_end: int):
+        super().__init__()
+        self._dispatch = dispatch
+        self.ep_start = ep_start
+        self.ep_end = ep_end
+
+    def forward(self, hidden_states, top_k_gates, top_k_indices):
+        sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = (
+            self._dispatch(hidden_states, top_k_gates, top_k_indices)
+        )
+        cumsum = tokens_per_expert.cumsum(0)
+        tok_start = 0 if self.ep_start == 0 else cumsum[self.ep_start - 1].item()
+        tok_end = cumsum[self.ep_end - 1].item()
+        return (
+            sorted_hidden_states[tok_start:tok_end],
+            tokens_per_expert[self.ep_start : self.ep_end],
+            sorted_gates[tok_start:tok_end],
+            token_indices[tok_start:tok_end],
+        )
+
+
 def _ep_partition_fn(src_data_rank, name, module, device_mesh):
+    from mojo_opset.core.operators.moe import MojoMoE, MojoExperts
+
     ep_size = device_mesh.size()
     ep_rank = device_mesh.get_rank()
 
-    base_num_experts = module.num_experts // ep_size
-    remainder_experts = module.num_experts % ep_size
+    if isinstance(module, MojoMoE):
+        base = module.num_experts // ep_size
+        rem = module.num_experts % ep_size
+        local = base + 1 if ep_rank < rem else base
+        start = base * ep_rank + min(ep_rank, rem)
+        end = start + local
+        module.dispatch = _EPDispatchWrapper(module.dispatch, start, end)
 
-    if ep_rank < remainder_experts:
-        local_num_experts = base_num_experts + 1
-    else:
-        local_num_experts = base_num_experts
-
-    experts_start_idx = base_num_experts * ep_rank + min(ep_rank, remainder_experts)
-    experts_end_idx = experts_start_idx + local_num_experts
-
-    module.register_parameter(
-        "fc1", nn.Parameter(shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.fc1))
-    )
-    module.register_parameter(
-        "fc2", nn.Parameter(shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.fc2))
-    )
-
-    module.num_experts_per_partion = local_num_experts
-    module.experts_start_idx = experts_start_idx
-    module.experts_end_idx = experts_end_idx
+    elif isinstance(module, MojoExperts):
+        module.register_parameter(
+            "up_proj_weight",
+            nn.Parameter(shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.up_proj_weight)),
+        )
+        module.register_parameter(
+            "down_proj_weight",
+            nn.Parameter(shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.down_proj_weight)),
+        )
 
 
 def _ep_prepare_output_fn(device_mesh, output):

@@ -33,10 +33,6 @@ class MojoMoE(MojoOperator):
         if intermediate_size is None:
             raise ValueError("MojoMoE: intermediate_size must be provided.")
 
-        self.num_experts_per_partion = self.num_experts
-        self.experts_start_idx = 0
-        self.experts_end_idx = self.num_experts
-
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
@@ -60,15 +56,13 @@ class MojoMoE(MojoOperator):
         top_k_indices, top_k_gates = self.gating(hidden_states)
         # top_k_indices, top_k_gates: [BS, top_k]
         sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = self.dispatch(hidden_states, top_k_gates, top_k_indices)
-        # sorted_hidden_states: [local_toks, H]
+        # sorted_hidden_states: [total_toks, H]
         # tokens_per_expert: [num_experts]
-        # sorted_gates: [local_toks]
-        # token_indices: [local_toks]
+        # sorted_gates: [total_toks, 1]
+        # token_indices: [total_toks]
         expert_outputs = self.experts(sorted_hidden_states, tokens_per_expert)
-        # expert_outputs: [local_toks, H]
-        # placeholder: shared_experts?
+        # expert_outputs: [total_toks, H]
         output_buffer = torch.zeros_like(hidden_states, memory_format=torch.contiguous_format)
-
         combined = self.combine(output_buffer, expert_outputs, sorted_gates, token_indices)
         # combined: [BS, H]
         return combined
