@@ -1,4 +1,5 @@
 import math
+
 from typing import Optional
 
 import pytest

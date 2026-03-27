@@ -13,18 +13,25 @@ class MojoMoE(MojoOperator):
         num_experts,
         top_k,
         hidden_size,
-        intermediate_size,
+        intermediate_size=None,
+        ffn_intermediate_size=None,
         activation: str = "swiglu",
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__()
+        if activation != "swiglu":
+            raise NotImplementedError(f"MojoMoe: Activation {activation} is not supported.")
+
         for k in ("ep_rank", "ep_size"):
             if k in kwargs:
                 raise ValueError(f"MojoMoE: {k} is not supported; use ParallelStyle to set expert partition.")
 
         # NOTE: in some cases, branches may have different expert num or topk
         self.num_experts = num_experts
-        # self.num_experts_share = num_experts_share
+        if intermediate_size is None:
+            intermediate_size = ffn_intermediate_size
+        if intermediate_size is None:
+            raise ValueError("MojoMoE: intermediate_size must be provided.")
 
         self.top_k = top_k
         self.hidden_size = hidden_size
@@ -49,15 +56,13 @@ class MojoMoE(MojoOperator):
         top_k_indices, top_k_gates = self.gating(hidden_states)
         # top_k_indices, top_k_gates: [BS, top_k]
         sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = self.dispatch(hidden_states, top_k_gates, top_k_indices)
-        # sorted_hidden_states: [local_toks, H]
+        # sorted_hidden_states: [total_toks, H]
         # tokens_per_expert: [num_experts]
-        # sorted_gates: [local_toks]
-        # token_indices: [local_toks]
+        # sorted_gates: [total_toks, 1]
+        # token_indices: [total_toks]
         expert_outputs = self.experts(sorted_hidden_states, tokens_per_expert)
-        # expert_outputs: [local_toks, H]
-        # placeholder: shared_experts?
+        # expert_outputs: [total_toks, H]
         output_buffer = torch.zeros_like(hidden_states, memory_format=torch.contiguous_format)
-
         combined = self.combine(output_buffer, expert_outputs, sorted_gates, token_indices)
         # combined: [BS, H]
         return combined

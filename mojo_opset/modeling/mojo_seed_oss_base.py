@@ -1,16 +1,18 @@
-from typing import Callable, Optional, Union
+from typing import Optional
+from typing import Union
 
 import torch
 import torch.nn as nn
 
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from mojo_opset import MojoRMSNorm
-from mojo_opset import MojoSilu
-from mojo_opset import MojoRoPE
-from mojo_opset import MojoStorePagedKVCache
-from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoPagedDecodeGQA
+from mojo_opset import MojoPagedPrefillGQA
+from mojo_opset import MojoRMSNorm
+from mojo_opset import MojoRoPE
+from mojo_opset import MojoSilu
+from mojo_opset import MojoStorePagedKVCache
 
 
 class SeedOssConfig:

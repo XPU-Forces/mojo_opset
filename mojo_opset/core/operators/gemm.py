@@ -1,7 +1,7 @@
 from typing import Optional
 
 import torch
-import torch.nn.functional as F
+from torch.distributed.tensor import DTensor
 
 from ..operator import MojoOperator
 
@@ -9,15 +9,12 @@ from ..operator import MojoOperator
 class MojoGroupGemm(MojoOperator):
     def __init__(
         self,
-        weight: torch.Tensor,
+        weight,
         trans_weight=False,
     ):
         super().__init__()
-
-        if not isinstance(trans_weight, bool):
-            raise TypeError("trans_weight must be bool.")
-        self.trans_weight = trans_weight
         self.weight = weight
+        self.trans_weight = trans_weight
 
     def forward(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:
         """
@@ -39,10 +36,15 @@ class MojoGroupGemm(MojoOperator):
             weights are transposed from (G, Dout, Din) to (G, Din, Dout).
             - Each group's output is computed as `input_g @ weight_g`.
         """
+
+        if group_list.device.type != "cpu":
+            group_list = group_list.to("cpu")
+
         assert input.dim() == 2, "input must be 2D"
         assert self.weight.dim() == 3, "weight must be 3D"
+
         num_groups = group_list.numel()
-        assert self.weight.size(0) == num_groups, "self.weight must have same group count as group_list"
+        assert self.weight.size(0) == num_groups, "weight group count must match group_list length"
 
         if self.trans_weight:
             weight = self.weight.transpose(1, 2).contiguous()
@@ -53,6 +55,7 @@ class MojoGroupGemm(MojoOperator):
         group_end = group_list.cumsum(0)
 
         out_list = []
+
         for g, (start, end) in enumerate(zip(group_start.tolist(), group_end.tolist())):
             a_g = input[start:end, :]
             b_g = weight[g, :, :]

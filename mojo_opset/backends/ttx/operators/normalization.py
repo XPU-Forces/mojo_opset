@@ -1,9 +1,9 @@
 import torch
 
+from mojo_opset.backends.ttx.kernels import fused_add_layernorm_infer
+from mojo_opset.backends.ttx.kernels import fused_add_rmsnorm_infer
 from mojo_opset.backends.ttx.kernels import layernorm_infer
 from mojo_opset.backends.ttx.kernels import rmsnorm_infer
-from mojo_opset.backends.ttx.kernels import fused_add_rmsnorm_infer
-from mojo_opset.backends.ttx.kernels import fused_add_layernorm_infer
 from mojo_opset.core import MojoLayerNorm
 from mojo_opset.core import MojoResidualAddLayerNorm
 from mojo_opset.core import MojoResidualAddRMSNorm

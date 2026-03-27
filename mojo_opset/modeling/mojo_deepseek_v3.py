@@ -8,23 +8,22 @@ This module implements the DeepSeek V3 architecture with support for:
 - RoPE positional embeddings
 """
 
-import math
-from typing import Optional, Tuple, Union
+from typing import Optional
+from typing import Tuple
 
 import torch
 import torch.nn.functional as F
+
 from torch import nn
 
-from mojo_opset import (
-    MojoLinear,
-    MojoRMSNorm,
-    MojoMoE,
-    MojoPagedDecodeMLA,
-    MojoPagedPrefillMLA,
-    MojoRoPE,
-    MojoSilu,
-    MojoStorePagedKVCache,
-)
+from mojo_opset import MojoLinear
+from mojo_opset import MojoMoE
+from mojo_opset import MojoPagedDecodeMLA
+from mojo_opset import MojoPagedPrefillMLA
+from mojo_opset import MojoRMSNorm
+from mojo_opset import MojoRoPE
+from mojo_opset import MojoSilu
+from mojo_opset import MojoStorePagedKVCache
 
 
 class DeepseekV3Config:

@@ -1,8 +1,7 @@
 import torch
-from mojo_opset.utils.hf_utils import (
-    create_renaming_by_dict,
-    load_weights_with_renaming_and_converter,
-)
+
+from mojo_opset.utils.hf_utils import create_renaming_by_dict
+from mojo_opset.utils.hf_utils import load_weights_with_renaming_and_converter
 
 
 class SimpleModel(torch.nn.Module):
@@ -36,7 +35,8 @@ def test_weight_loading():
     name_mapping = {"fc_list\.(.*)\.": "fc(\1)."}
     weight_renaming = create_renaming_by_dict(name_mapping)
 
-    from transformers.core_model_loading import Concatenate, WeightConverter
+    from transformers.core_model_loading import Concatenate
+    from transformers.core_model_loading import WeightConverter
 
     weight_converter = WeightConverter(["param1", "param2"], ["concat_param"], operations=[Concatenate(dim=0)])
 

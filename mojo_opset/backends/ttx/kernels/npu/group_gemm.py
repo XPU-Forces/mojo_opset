@@ -2,8 +2,6 @@ import torch
 import triton
 import triton.language as tl
 
-from torch import Tensor
-
 from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 
 
@@ -37,7 +35,7 @@ def grouped_launch_diagonal(pid, num_pid_m, num_pid_n, BLOCK_TRESHHOLD: tl.const
     return task_m_idx, task_n_idx
 
 
-def get_autotune_config():
+def get_autotune_config():  
     return [
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 4}),
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 5}),
@@ -51,10 +49,6 @@ def get_autotune_config():
         triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 7}),
         triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 8}),
         triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 9}),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "BLOCK_TRESHHOLD": 4}),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 4}),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 4}),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_TRESHHOLD": 4}),
     ]
 
 
@@ -217,7 +211,7 @@ def m_grouped_matmul_impl(
     trans_b: bool = False,
 ) -> torch.Tensor:
     num_cores = get_num_cores("cube")
-    m_grouped_matmul_kernel = _m_grouped_matmul_bKmajor_kernel if trans_b else _m_grouped_matmul_bNmajor_kernel
+    m_grouped_matmul_kernel = _m_grouped_matmul_bKmajor_kernel if not trans_b else _m_grouped_matmul_bNmajor_kernel
     m_grouped_matmul_kernel[(num_cores,)](
         A,
         B,
