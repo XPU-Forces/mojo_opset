@@ -1,0 +1,99 @@
+name: Update tracked .testmondata
+on:
+  push:
+    branches:
+    - master
+    paths-ignore:
+    - '.testmondata'
+    - 'CHANGELOG.md'
+    - 'README.md'
+    - 'mojo_opset/backends/ttx/kernels/ilu/**'
+    - '.github/workflows/iluvatar_accuracy_ci.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+env:
+  MOJO_OPSET_PROXY: ${{ secrets.MOJO_OPSET_PROXY }}
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: update-testmondata-master
+  cancel-in-progress: true
+jobs:
+  update-testmondata:
+    name: Refresh tracked .testmondata
+    runs-on: NPU
+    container:
+      image: hub.byted.org/aicompiler/npu.ci.debian12:cann8.2.rc1_py3.11_th27
+      volumes:
+      - /etc/localtime:/etc/localtime
+      - /usr/local/Ascend/driver:/usr/local/Ascend/driver
+      - /usr/local/dcmi:/usr/local/dcmi
+      - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
+      options: --privileged=true --ipc=host --pid=host --user root --shm-size=300g --network=host
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Build And Install Wheel Artifact
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
+          pip install -U pip setuptools wheel build pytest-xdist pytest-testmon==2.2.0
+          pip install -e .\[npu\] --index-url https://bytedpypi.byted.org/simple
+          python3 -m build .
+          pip install dist/*.whl --force-reinstall --no-deps
+
+      - name: Refresh testmon data
+        shell: bash
+        run: |
+          echo "Refreshing tracked .testmondata..."
+          pip install transformers==5.1.0
+          python3 -m pytest --testmon-noselect --testmon-env=base tests/base
+
+          unset ASCEND_VISIBLE_DEVICES
+          unset ASCEND_RT_VISIBLE_DEVICES
+          MOJO_BACKEND="ttx" python3 -m pytest -n 8 --testmon-noselect --testmon-env=ttx tests/accuracy/operators/ \
+            --ignore=tests/accuracy/operators/test_compute_with_comm.py
+          MOJO_BACKEND="ttx" python3 -m pytest -n 8 --testmon-noselect --testmon-env=ttx tests/accuracy/functions/
+
+          MOJO_DETERMINISTIC=1 MOJO_BACKEND="ttx" python3 -m pytest --testmon-noselect --testmon-env=ttx-deterministic tests/accuracy/functions/test_normalization.py
+          MOJO_BACKEND="torch_npu" python3 -m pytest -n 8 --testmon-noselect --testmon-env=torch-npu tests/accuracy/operators/ \
+            --ignore=tests/accuracy/operators/test_compute_with_comm.py
+          python3 -m pytest -v --testmon-noselect --testmon-env=compute-with-comm tests/accuracy/operators/test_compute_with_comm.py
+          MOJO_RUN_MODE="COMPILE" python3 -m pytest -n 8 --testmon-noselect --testmon-env=ttx-graph tests/test_ttx_graph/
+
+      - name: Normalize tracked testmon database
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import sqlite3
+
+          path = ".testmondata"
+          if not os.path.exists(path):
+              raise SystemExit(f"{path} was not generated")
+
+          con = sqlite3.connect(path)
+          con.execute("PRAGMA wal_checkpoint(FULL)")
+          con.execute("VACUUM")
+          con.close()
+          PY
+          rm -f .testmondata-shm .testmondata-wal
+
+      - name: Commit refreshed .testmondata
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .testmondata
+          if git diff --cached --quiet -- .testmondata; then
+            echo "No .testmondata changes to commit."
+            exit 0
+          fi
+          git commit -m "ci: refresh tracked .testmondata"
+          git push origin HEAD:master

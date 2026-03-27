@@ -5,6 +5,7 @@ on:
     - master
     types: [ opened, synchronize, reopened ]
     paths-ignore:
+    - '.testmondata'
     - 'CHANGELOG.md'
     - 'README.md'
     - 'mojo_opset/backends/ttx/kernels/ilu/**'
@@ -13,6 +14,7 @@ on:
     branches:
     - master
     paths-ignore:
+    - '.testmondata'
     - 'CHANGELOG.md'
     - 'README.md'
     - 'mojo_opset/backends/ttx/kernels/ilu/**'
@@ -43,17 +45,50 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
-          pip install -U pip setuptools wheel build pytest-xdist
+          pip install -U pip setuptools wheel build pytest-xdist pytest-testmon==2.2.0
           pip install -e .\[npu\] --index-url https://bytedpypi.byted.org/simple
           python3 -m build .
           pip install dist/*.whl --force-reinstall --no-deps
+
+      - name: Enable pytest-testmon
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("pytest.ini")
+          lines = path.read_text().splitlines()
+
+          try:
+              section_idx = lines.index("[pytest]")
+          except ValueError as exc:
+              raise SystemExit("pytest.ini is missing [pytest] section") from exc
+
+          insert_at = len(lines)
+          addopts_idx = None
+          for idx in range(section_idx + 1, len(lines)):
+              line = lines[idx]
+              if line.startswith("[") and line.endswith("]"):
+                  insert_at = idx
+                  break
+              if line.startswith("addopts"):
+                  addopts_idx = idx
+                  break
+
+          if addopts_idx is None:
+              lines.insert(insert_at, "addopts = --testmon")
+          elif "--testmon" not in lines[addopts_idx].split("=", 1)[1]:
+              lines[addopts_idx] = f"{lines[addopts_idx].rstrip()} --testmon"
+
+          path.write_text("\n".join(lines) + "\n")
+          PY
 
       - name: test-Base
         shell: bash
         run: |
           echo "Running base tests..."
           pip install transformers==5.1.0
-          python3 -m pytest tests/base
+          python3 -m pytest --testmon-env=base tests/base
     
       - name: test-TTX
         shell: bash
@@ -61,21 +96,21 @@ jobs:
           echo "Running ttx kernels tests..."
           unset ASCEND_VISIBLE_DEVICES
           unset ASCEND_RT_VISIBLE_DEVICES
-          MOJO_BACKEND="ttx" python3 -m pytest -n 8 tests/accuracy/operators/ \
+          MOJO_BACKEND="ttx" python3 -m pytest -n 8 --testmon-env=ttx tests/accuracy/operators/ \
             --ignore=tests/accuracy/operators/test_compute_with_comm.py
-          MOJO_BACKEND="ttx" python3 -m pytest -n 8 tests/accuracy/functions/
+          MOJO_BACKEND="ttx" python3 -m pytest -n 8 --testmon-env=ttx tests/accuracy/functions/
       - name: test-TTX-DETERMINISTIC
         shell: bash
         run: |
           echo "Running ttx kernels deterministic tests..."
-          MOJO_DETERMINISTIC=1 MOJO_BACKEND="ttx" python3 -m pytest tests/accuracy/functions/test_normalization.py
+          MOJO_DETERMINISTIC=1 MOJO_BACKEND="ttx" python3 -m pytest --testmon-env=ttx-deterministic tests/accuracy/functions/test_normalization.py
       - name: test-torch-npu
         shell: bash
         run: |
           echo "Running torch_npu base tests..."
           unset ASCEND_VISIBLE_DEVICES
           unset ASCEND_RT_VISIBLE_DEVICES
-          MOJO_BACKEND="torch_npu" python3 -m pytest -n 8 tests/accuracy/operators/ \
+          MOJO_BACKEND="torch_npu" python3 -m pytest -n 8 --testmon-env=torch-npu tests/accuracy/operators/ \
             --ignore=tests/accuracy/operators/test_compute_with_comm.py
       - name: test-compute-with-comm
         shell: bash
@@ -83,9 +118,9 @@ jobs:
           echo "Running compute+comm distributed tests..."
           unset ASCEND_VISIBLE_DEVICES
           unset ASCEND_RT_VISIBLE_DEVICES
-          python3 -m pytest -v tests/accuracy/operators/test_compute_with_comm.py
+          python3 -m pytest -v --testmon-env=compute-with-comm tests/accuracy/operators/test_compute_with_comm.py
       - name: test-TTX-graph
         shell: bash
         run: |
           echo "Running ttx graph tests..."
-          MOJO_RUN_MODE="COMPILE" python3 -m pytest -n 8 tests/test_ttx_graph/
+          MOJO_RUN_MODE="COMPILE" python3 -m pytest -n 8 --testmon-env=ttx-graph tests/test_ttx_graph/
