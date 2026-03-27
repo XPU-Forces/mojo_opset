@@ -1,14 +1,21 @@
 import random
-
+import os
 import pytest
 import torch
 
+from mojo_opset.utils.platform import get_platform
 from tests.utils import bypass_not_implemented
 from tests.utils import get_platform
 from tests.utils import auto_switch_platform
 
-from mojo_opset import MojoGroupLinear
+from mojo_opset import MojoLinear, MojoGroupLinear
 from mojo_opset import MojoQuantGroupLinearReduceSum
+
+dtype_str_map = {
+    "bfloat16": torch.bfloat16,
+    "float32": torch.float32,
+    "float16": torch.float16,
+}
 
 
 def generate_random_list(length, total_sum):
@@ -41,6 +48,7 @@ def generate_quant_group_linear_data(
     x1_scale = torch.randn(b, m, dtype=torch.float32)
     x2_scale = torch.randn(n, dtype=torch.float32).to(x2_scale_dtype)
     return x1, weight, x1_scale, x2_scale
+
 
 
 @pytest.mark.parametrize(

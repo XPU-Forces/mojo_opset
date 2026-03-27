@@ -13,6 +13,7 @@ from .operator import MojoOperator
 from .operators.activation import MojoGelu
 from .operators.activation import MojoSilu
 from .operators.activation import MojoSwiGLU
+from .operators.activation import MojoIndexerRotateActivation
 
 """ attention """
 from .operators.attention import MojoDecodeGQA
@@ -62,6 +63,7 @@ from .operators.embedding import MojoRelativeEmbedding
 """ quantize """
 from .operators.quantize import MojoDequant
 from .operators.quantize import MojoQuant
+from .operators.quantize import MojoQuantIndexer
 
 """ moe """
 from .operators.moe import MojoMoE
@@ -87,6 +89,7 @@ from .operators.position_embedding import MojoNormRoPEStoreKV
 from .operators.position_embedding import MojoRoPE
 from .operators.position_embedding import MojoRoPEStoreKV
 from .operators.position_embedding import MojoGridRoPE
+from .operators.position_embedding import MojoIndexerRoPE
 
 """ sampling """
 from .operators.sampling import MojoApplyPenaltiesTempurate
@@ -101,6 +104,9 @@ from .operators.convolution import MojoCausalConv1dUpdateState
 
 """ mlp"""
 from .operators.mlp import MojoSwiGLUMLP
+
+""" indexer """
+from .operators.indexer import MojoLightningIndexer
 
 """ functions """
 from .functions.activation import MojoSiluFunction
@@ -121,6 +127,7 @@ __all__ = [
     "MojoGroupQuantMatmulReduceSum",
     "MojoSilu",
     "MojoSwiGLU",
+    "MojoIndexerRotateActivation",
 
     "MojoPrefillGQA",
     "MojoPagedPrefillGQA",
@@ -150,6 +157,7 @@ __all__ = [
     "MojoQuantGroupLinearReduceSum",
 
     "MojoQuant",
+    "MojoQuantIndexer",
     "MojoDequant",
 
     "MojoEmbedding",
@@ -177,6 +185,7 @@ __all__ = [
     "MojoNormRoPE",
     "MojoNormRoPEStoreKV",
     "MojoGridRoPE",
+    "MojoIndexerRoPE",
 
     "MojoTopPSampling",
     "MojoTopKSampling",
@@ -194,6 +203,8 @@ __all__ = [
     "MojoRoPEFunction",
     "MojoFusedLinearCrossEntropyFunction",
     "MojoCausalConv1dFunction",
+
+    "MojoLightningIndexer",
 
     "MojoFusedLinearCrossEntropyLoss",
 ]
