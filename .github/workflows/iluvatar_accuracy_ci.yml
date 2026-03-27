@@ -22,6 +22,7 @@ on:
   workflow_dispatch:
 env:
   MOJO_OPSET_PROXY: ${{ secrets.MOJO_OPSET_PROXY }}
+  CONTAINER_NAME: ci-ilu-${{ github.run_id }}
 defaults:
   run:
     shell: bash
@@ -29,31 +30,44 @@ jobs:
   run-tests:
     name: Run ilu tests
     runs-on: ILU
-    container:
-      image: corex:4.4.0
-      volumes:
-      - /data:/data
-      - /data1:/data1
-      - /lib/modules:/lib/modules
-      - /usr/src:/usr/src
-      - /dev:/dev
-      options: --privileged --cap-add=ALL --pid=host --ipc=host --network=host
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build And Install Wheel Artifact
-        shell: bash
+      - name: Start container
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
-          pip install -U pip setuptools wheel build pytest-xdist
-          pip install -e .\[ilu\] --index-url https://bytedpypi.byted.org/simple
-          python3 -m build .
-          pip install dist/*.whl --force-reinstall --no-deps
+          docker run -d --rm \
+            --name ${{ env.CONTAINER_NAME }} \
+            --privileged --cap-add=ALL --pid=host --ipc=host --network=host \
+            -v ${{ github.workspace }}:/workspace \
+            -v /data:/data \
+            -v /data1:/data1 \
+            -v /lib/modules:/lib/modules \
+            -v /usr/src:/usr/src \
+            -v /dev:/dev \
+            corex:4.4.0 \
+            tail -f /dev/null
+
+      - name: Build And Install Wheel Artifact
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            cd /workspace
+            git config --global --add safe.directory /workspace
+            export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
+            pip install -U pip setuptools wheel build pytest-xdist
+            pip install -e .[ilu] --index-url https://bytedpypi.byted.org/simple
+            python3 -m build .
+            pip install dist/*.whl --force-reinstall --no-deps
+          "
 
       - name: test-TTX
-        shell: bash
         run: |
-          echo "Running ttx kernels tests on Iluvatar GPU..."
-          MOJO_BACKEND="ttx" python3 -m pytest tests/accuracy/operators/ \
-            --ignore=tests/accuracy/operators/test_compute_with_comm.py
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            cd /workspace
+            echo 'Running ttx kernels tests on Iluvatar GPU...'
+            MOJO_BACKEND=ttx python3 -m pytest tests/accuracy/operators/ \
+              --ignore=tests/accuracy/operators/test_compute_with_comm.py
+          "
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f ${{ env.CONTAINER_NAME }} || true
