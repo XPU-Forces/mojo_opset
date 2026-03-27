@@ -673,6 +673,11 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
 
     # TODO(zhangjihang): Support compile mode
     sdpa_infer = sdpa_infer_impl
+    swa_paged_prefill = swa_paged_prefill_impl
+    swa_paged_decode = swa_paged_decode_impl
+    swa_infer = swa_infer_impl
+    swa_fwd = swa_fwd_impl
+    swa_bwd = swa_bwd_impl
 
 else:
     causal_conv1d_fwd = causal_conv1d_fwd_impl
