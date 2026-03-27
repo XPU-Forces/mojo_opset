@@ -130,7 +130,7 @@ class TTXIndexer(MojoIndexer):
         cos = freqs_cis.real.unsqueeze(0).expand(bsz, -1, -1)
         sin = freqs_cis.imag.unsqueeze(0).expand(bsz, -1, -1)
 
-        q, k = self.rope(q, k, cos, sin, rope_head_dim=self.rope_head_dim)
+        q, k = self.rope._apply_rope(q, k, cos, sin, rope_percentage=self.rope_head_dim / self.head_dim)
 
         q = self.activation(q)
         k = self.activation(k)
