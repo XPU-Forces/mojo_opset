@@ -49,6 +49,8 @@ class MojoGroupGemm(MojoOperator):
 
         if self.trans_weight:
             weight = self.weight.transpose(1, 2).contiguous()
+        else:
+            weight = self.weight
 
         group_start = group_list.cumsum(0) - group_list
         group_end = group_list.cumsum(0)
