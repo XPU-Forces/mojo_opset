@@ -34,6 +34,10 @@ gelu_bwd_impl = _get_kernel_impl(ttx_backend_module, "gelu_bwd_impl")
 silu_fwd_impl = _get_kernel_impl(ttx_backend_module, "silu_fwd_impl")
 silu_bwd_impl = _get_kernel_impl(ttx_backend_module, "silu_bwd_impl")
 
+indexer_rotate_activation_impl = _get_kernel_impl(ttx_backend_module, "indexer_rotate_activation_impl")
+quant_infer_impl = _get_kernel_impl(ttx_backend_module, "quant_infer_impl")
+lightning_indexer_impl = _get_kernel_impl(ttx_backend_module, "lightning_indexer_impl")
+
 rope_fwd_impl = _get_kernel_impl(ttx_backend_module, "rope_fwd_impl")
 rope_bwd_impl = _get_kernel_impl(ttx_backend_module, "rope_bwd_impl")
 
@@ -168,6 +172,43 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         return torch.empty_like(dc), torch.empty_like(dc)
 
     # ====================================
+    # Register indexer_rotate_activation
+    # ====================================
+
+    @torch.library.custom_op("ttx::indexer_rotate_activation", mutates_args={})
+    def indexer_rotate_activation(x: torch.Tensor) -> torch.Tensor:
+        return indexer_rotate_activation_impl(x)
+
+    @indexer_rotate_activation.register_fake
+    def indexer_rotate_activation(x: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(x)
+
+
+    # ====================================
+    # Register lightning_indexer
+    # ====================================
+
+    @torch.library.custom_op("ttx::lightning_indexer", mutates_args={})
+    def lightning_indexer(
+        query: torch.Tensor,
+        query_scale: torch.Tensor,
+        key: torch.Tensor,
+        key_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return lightning_indexer_impl(query, query_scale, key, key_scale)
+
+    @lightning_indexer.register_fake
+    def lightning_indexer_fake(
+        query: torch.Tensor,
+        query_scale: torch.Tensor,
+        key: torch.Tensor,
+        key_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        batch_size, q_seq_len, _, _ = query.shape
+        k_seq_len = key.shape[1]
+        return torch.empty(batch_size, q_seq_len, k_seq_len, dtype=torch.float32, device=query.device)
+
+    # ====================================
     # Register Attention
     # ====================================
 
@@ -280,6 +321,26 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(dq), torch.empty_like(dk)
+
+    # ====================================
+    # Register Quant
+    # ====================================
+
+    @torch.library.custom_op("ttx::quant_infer", mutates_args={})
+    def quant_infer(
+        input_tensor: torch.Tensor,
+        scale_tensor: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return quant_infer_impl(input_tensor, scale_tensor)
+
+    @quant_infer.register_fake
+    def quant_infer_fake(
+        input_tensor: torch.Tensor,
+        scale_tensor: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch, seqlen, _ = input_tensor.shape
+
+        return torch.empty_like(input_tensor, dtype=torch.int8), torch.empty(batch, seqlen, dtype=torch.float32)
 
     # ====================================
     # Register rmsnorm
@@ -422,9 +483,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     # NOTE: Since custom_op does not support input/output aliasing, we register the
     # operator manually using torch.library.impl.
     fused_linear_cross_entropy_bwd_schema = (
-        "(Tensor grad_output, Tensor(a!) grad_input, "
-        "Tensor(a!)? grad_weight=None, Tensor(a!)? grad_bias=None) -> "
-        "(Tensor(a) grad_input, Tensor(a)? grad_weight, Tensor(a)? grad_bias)"
+        "(Tensor grad_output, Tensor(a!) grad_input, " "Tensor(a!)? grad_weight=None, Tensor(a!)? grad_bias=None) -> " "(Tensor(a) grad_input, Tensor(a)? grad_weight, Tensor(a)? grad_bias)"
     )
     torch.library.define("ttx::fused_linear_cross_entropy_bwd", fused_linear_cross_entropy_bwd_schema)
 
@@ -678,10 +737,12 @@ else:
     silu_bwd = silu_bwd_impl
     swiglu_fwd = swiglu_fwd_impl
     swiglu_bwd = swiglu_bwd_impl
+    indexer_rotate_activation = indexer_rotate_activation_impl
     paged_attention_prefill = paged_attention_prefill_impl
     paged_attention_decode = paged_attention_decode_impl
     rope_fwd = rope_fwd_impl
     rope_bwd = rope_bwd_impl
+
     rmsnorm_fwd = rmsnorm_fwd_impl
     rmsnorm_bwd = rmsnorm_bwd_impl
     rmsnorm_infer = rmsnorm_infer_impl
@@ -708,3 +769,6 @@ else:
     reject_sampling = reject_sampling_impl
     top_p_filter = top_p_filter_impl
     top_p_sampling = top_p_sampling_impl
+    indexer_rotate_activation = indexer_rotate_activation_impl
+    quant_infer = quant_infer_impl
+    lightning_indexer = lightning_indexer_impl

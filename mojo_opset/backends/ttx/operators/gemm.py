@@ -27,6 +27,18 @@ class TTXGroupGemm(MojoGroupGemm):
 
         C = input.new_empty(M, N)
 
-        m_grouped_matmul(input, self.weight, C, group_list, num_groups, M, N, K, strideBN, strideBK, self.trans_weight)
+        m_grouped_matmul(
+            input,
+            self.weight,
+            C,
+            group_list,
+            num_groups,
+            M,
+            N,
+            K,
+            strideBN,
+            strideBK,
+            self.trans_weight,
+        )
 
         return C

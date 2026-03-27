@@ -1,7 +1,8 @@
 import pytest
 import torch
+import os
 
-from tests.utils import bypass_not_implemented
+from tests.utils import auto_switch_platform, bypass_not_implemented
 
 from mojo_opset import MojoRoPE
 from mojo_opset import MojoGridRoPE
@@ -139,3 +140,20 @@ def test_grid_pos_emb(bs, grid, heads, head_dim, pad, dtype):
     rope_ref = MojoGridRoPE._registry.get("torch")()
 
     rope.forward_diff_with(rope_ref, x, grid_sizes, freqs_list, atol=1e-3, rtol=1e-3)
+
+
+dtype_str_map = {
+    "bfloat16": torch.bfloat16,
+    "float32": torch.float32,
+    "float16": torch.float16,
+}
+
+def precompute_freqs_cis(seqlen, dim, device="npu") -> torch.Tensor:
+    base = 10000.0
+    freqs = 1.0 / (
+        base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim)
+    )
+    t = torch.arange(seqlen, device=device)
+    freqs = torch.outer(t, freqs)
+    freqs_cis = torch.polar(torch.ones_like(freqs, device=device), freqs)
+    return freqs_cis

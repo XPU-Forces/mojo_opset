@@ -92,6 +92,26 @@ class MojoQuant(MojoOperator):
         )
 
 
+class MojoQuantIndexer(MojoOperator):
+    """Per-token dynamic int8 (last dim), optional per-channel ``scale_tensor`` on input; returns (q_int8, quant_scale)."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def forward(self, input_tensor: torch.Tensor, scale_tensor: Optional[torch.Tensor] = None):
+        # Golden in fp64 for numerical agreement with kernel reference.
+        if scale_tensor is None:
+            scaled_fp = input_tensor.to(torch.float64)
+        else:
+            scaled_fp = input_tensor.to(torch.float64) * scale_tensor.to(torch.float64)
+
+        max_abs = scaled_fp.abs().amax(dim=-1).clamp(min=1e-10)
+        quant_vals = 127.0 * (scaled_fp / max_abs.unsqueeze(-1))
+        q = torch.trunc(quant_vals + 0.5 * torch.sign(quant_vals))
+        return q.to(torch.int8), (max_abs / 127.0).to(input_tensor.dtype)
+
+
+
 class MojoDequant(MojoOperator):
     def __init__(
         self,

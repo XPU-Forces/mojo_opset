@@ -19,11 +19,15 @@ from .kv_cache import store_paged_kv_impl
 from .layernorm import layernorm_bwd_impl
 from .layernorm import layernorm_fwd_impl
 from .layernorm import layernorm_infer_impl
+from .quant import quant_infer_impl
 from .rmsnorm import rmsnorm_bwd_impl
 from .rmsnorm import rmsnorm_fwd_impl
 from .rmsnorm import rmsnorm_infer_impl
 from .rope import rope_bwd_impl
+from .indexer_rotate_activation import indexer_rotate_activation_impl
 from .rope import rope_fwd_impl
+from .indexer_rotate_activation import indexer_rotate_activation_impl
+from .lightning_indexer import lightning_indexer_impl
 from .sample import fused_penalties_temp_impl
 from .sample import join_prob_reject_sampling_impl
 from .sample import reject_sampling_impl
@@ -37,6 +41,7 @@ from .silu import silu_fwd_impl
 from .store_lowrank import store_label_cache_infer_impl
 from .swiglu import swiglu_bwd_impl
 from .swiglu import swiglu_fwd_impl
+from .lightning_indexer import lightning_indexer_impl
 
 __all__ = [
     "causal_conv1d_update_bdt_impl",
@@ -50,6 +55,7 @@ __all__ = [
     "fused_linear_cross_entropy_1d_fwd_impl",
     "gelu_bwd_impl",
     "gelu_fwd_impl",
+    "quant_int8_impl",
     "rmsnorm_bwd_impl",
     "rmsnorm_fwd_impl",
     "rmsnorm_infer_impl",
@@ -62,11 +68,15 @@ __all__ = [
     "rope_fwd_impl",
     "silu_bwd_impl",
     "silu_fwd_impl",
+    "indexer_rotate_activation_impl",
     "swiglu_bwd_impl",
     "swiglu_fwd_impl",
     "sdpa_infer_impl",
     "sdpa_fwd_impl",
     "sdpa_bwd_impl",
+    "indexer_rotate_activation_impl",
+    "lightning_indexer_impl",
+    "quant_infer_impl",
     "diffusion_attention_fwd_impl",
     "diffusion_attention_bwd_impl",
     "m_grouped_matmul_impl",
