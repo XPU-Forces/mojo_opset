@@ -63,7 +63,9 @@ from .operators.embedding import MojoParallelEmbedding
 from .operators.embedding import MojoRelativeEmbedding
 
 """ quantize """
+from .operators.quantize import MojoDequantSwiGLUQuant
 from .operators.quantize import MojoDequant
+from .operators.quantize import MojoDynamicQuant
 from .operators.quantize import MojoQuant
 
 """ moe """
@@ -160,6 +162,8 @@ __all__ = [
 
     "MojoQuant",
     "MojoDequant",
+    "MojoDynamicQuant",
+    "MojoDequantSwiGLUQuant",
 
     "MojoEmbedding",
     "MojoParallelEmbedding",

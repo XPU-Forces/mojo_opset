@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 
 from mojo_opset.utils.platform import get_platform
-from tests.utils import bypass_not_implemented
+from tests.utils import auto_switch_platform, bypass_not_implemented
 
 from mojo_opset import MojoChannelRMSNorm
 from mojo_opset import MojoLayerNorm
@@ -341,6 +341,7 @@ norm_quant_shapes = [
 
 @pytest.mark.parametrize("shape", norm_quant_shapes)
 @pytest.mark.parametrize("dtype", dtypes)
+@auto_switch_platform()
 @bypass_not_implemented
 def test_rmsnorm_quant(shape, dtype):
     x = torch.randn(size=shape, dtype=dtype)
@@ -352,7 +353,8 @@ def test_rmsnorm_quant(shape, dtype):
         op.weight.copy_(weight)
         op_ref.weight.copy_(weight)
 
-    op.forward_diff_with(op_ref, x, atol=0, rtol=0)
+    # NOTE(liuyuan): The difference between torch_npu and torch natvie is caused by the computation of normalization, leading to -1.3342->32 (torch natvie) and -1.3340->31 (torch_npu).
+    op.forward_diff_with(op_ref, x, atol=(1, 1e-3), rtol=(0, 1e-3))
 
     # Semantic check: fp32 RMSNorm matches MojoRMSNormQuant forward
     normed = F.rms_norm(x.float(), [x.shape[-1]], weight=weight, eps=1e-5)
@@ -366,6 +368,7 @@ def test_rmsnorm_quant(shape, dtype):
 
 @pytest.mark.parametrize("shape", norm_quant_shapes)
 @pytest.mark.parametrize("dtype", dtypes)
+@auto_switch_platform()
 @bypass_not_implemented
 def test_layernorm_quant(shape, dtype):
     x = torch.randn(size=shape, dtype=dtype)
@@ -380,7 +383,8 @@ def test_layernorm_quant(shape, dtype):
         op_ref.weight.copy_(weight)
         op_ref.bias.copy_(bias)
 
-    op.forward_diff_with(op_ref, x, atol=0, rtol=0)
+    # NOTE(liuyuan): The difference between torch_npu and torch natvie is caused by the computation of normalization.
+    op.forward_diff_with(op_ref, x, atol=(1, 1e-3), rtol=(0, 1e-3))
 
     # Semantic check (fp32 LN matches MojoLayerNormQuant forward)
     normed = F.layer_norm(x.float(), [x.shape[-1]], weight=weight, bias=bias, eps=1e-5)
@@ -395,6 +399,7 @@ def test_layernorm_quant(shape, dtype):
 @pytest.mark.parametrize("shape", norm_quant_shapes)
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
+@auto_switch_platform()
 @bypass_not_implemented
 def test_residual_add_rmsnorm_quant(shape, dtype, norm_pos):
     x = torch.randn(size=shape, dtype=dtype)
@@ -409,12 +414,19 @@ def test_residual_add_rmsnorm_quant(shape, dtype, norm_pos):
         op.weight.copy_(weight)
         op_ref.weight.copy_(weight)
 
-    op.forward_diff_with(op_ref, x, residual, atol=0, rtol=0)
+    op.forward_diff_with(
+        op_ref,
+        x,
+        residual,
+        atol=(2, 1e-3, 1e-3),
+        rtol=(0, 1e-3, 1e-3),
+    )
 
 
 @pytest.mark.parametrize("shape", norm_quant_shapes)
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
+@auto_switch_platform()
 @bypass_not_implemented
 def test_residual_add_layernorm_quant(shape, dtype, norm_pos):
     x = torch.randn(size=shape, dtype=dtype)
@@ -434,7 +446,14 @@ def test_residual_add_layernorm_quant(shape, dtype, norm_pos):
         op_ref.weight.copy_(weight)
         op_ref.bias.copy_(bias)
 
-    op.forward_diff_with(op_ref, x, residual, atol=0, rtol=0)
+    # NOTE(liuyuan): The difference between torch_npu and torch natvie is caused by the computation of normalization.
+    op.forward_diff_with(
+        op_ref,
+        x,
+        residual,
+        atol=(1, 1e-3, 1e-3),
+        rtol=(0, 1e-3, 1e-3),
+    )
 
 
 # ===========================================================================
