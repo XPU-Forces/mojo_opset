@@ -1,4 +1,5 @@
 import os
+
 from mojo_opset.utils.platform import get_platform
 
 platform = get_platform()

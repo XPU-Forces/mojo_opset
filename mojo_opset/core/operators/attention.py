@@ -10,7 +10,76 @@ from ..operator import MojoOperator
 
 
 class MojoDecodeGQA(MojoOperator):
-    pass
+    """Non-paged GQA decode attention (single query token per batch)."""
+
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+        window_size: int = -1,
+    ):
+        super().__init__()
+        if gqa_layout not in ("ABAB", "AABB"):
+            raise ValueError(f"gqa_layout must be 'ABAB' or 'AABB', got {gqa_layout}")
+        if not isinstance(window_size, int) or (window_size != -1 and window_size < 1):
+            raise ValueError(f"window_size must be -1 or >= 1, got {window_size}")
+        self.is_causal = is_causal
+        self.gqa_layout = gqa_layout
+        self.window_size = window_size
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        seqlens: Optional[torch.Tensor] = None,
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            query: ``(B, Hq, D)`` — one token per batch.
+            key:   ``(B, Hkv, S, D)`` — full key cache.
+            value: ``(B, Hkv, S, D)`` — full value cache.
+            seqlens: ``(B,)`` actual sequence lengths. ``None`` → use full S.
+            softmax_scale: scaling factor; defaults to ``1/sqrt(D)``.
+
+        Returns:
+            ``(B, Hq, D)``
+        """
+        B, Hq, D = query.shape
+        _, Hkv, S, _ = key.shape
+        group = Hq // Hkv
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(D)
+
+        outputs = torch.zeros(B, Hq, D, dtype=query.dtype, device=query.device)
+        for i in range(B):
+            sl = seqlens[i].item() if seqlens is not None else S
+            q_i = query[i]                         # (Hq, D)
+            k_i = key[i, :, :sl, :]                # (Hkv, sl, D)
+            v_i = value[i, :, :sl, :]              # (Hkv, sl, D)
+
+            if group > 1:
+                if self.gqa_layout == "AABB":
+                    k_i = k_i.repeat_interleave(group, dim=0)
+                    v_i = v_i.repeat_interleave(group, dim=0)
+                else:
+                    k_i = k_i.repeat(group, 1, 1)
+                    v_i = v_i.repeat(group, 1, 1)
+
+            scores = torch.einsum("hd,hsd->hs", q_i, k_i) * softmax_scale
+
+            if self.window_size > 0:
+                mask = torch.zeros(sl, dtype=torch.bool, device=query.device)
+                mask[max(0, sl - self.window_size):] = True
+                scores.masked_fill_(~mask.unsqueeze(0), float("-inf"))
+
+            probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
+            outputs[i] = torch.einsum("hs,hsd->hd", probs, v_i)
+        return outputs
+
+    def extra_repr(self) -> str:
+        return f"{self.is_causal=}, {self.gqa_layout=}, {self.window_size=}".replace("self.", "")
 
 
 class MojoPagedDecodeGQA(MojoOperator):
@@ -140,7 +209,90 @@ class MojoPagedDecodeGQA(MojoOperator):
 
 
 class MojoPrefillGQA(MojoOperator):
-    pass
+    """
+    GQA attention operator.
+    Args:
+        is_causal (bool): Whether to apply causal masking.
+        softmax_scale (float): Scaling factor for the softmax operation.
+        gqa_layout (str): Layout for GQA attention.
+        rm_padding (bool): Whether to remove padding from attention computation.
+        window_size (int): Window size for attention computation, -1 means full attention.
+    """
+
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "ABAB",
+        rm_padding: bool = False,
+        window_size: int = -1,
+    ):
+        super().__init__()
+
+        self.is_causal = is_causal
+        self.gqa_layout = gqa_layout
+        self.rm_padding = rm_padding
+        self.window_size = window_size
+
+    """
+    Forward pass of the Mojo GQA attention operator, reference for backend.
+    Args:
+        query (torch.Tensor): Query tensor, in shape [B, Q_H, S, D].
+        key (torch.Tensor): Key tensor, in shape [B, K_H, S, D].
+        value (torch.Tensor): Value tensor, inshape [B, V_H, S, D].
+
+    Returns:
+        torch.Tensor: Output tensor.
+    """
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        if self.window_size != -1:
+            raise NotImplementedError
+
+        batch_size, num_attn_heads, seq_len, head_dim = query.size()
+
+        num_kv_heads = k_cache.shape[1]
+
+        group = num_attn_heads // num_kv_heads
+
+        query = query.reshape(-1, seq_len, head_dim)
+        k_cache = torch.transpose(k_cache, -2, -1)
+
+        if self.gqa_layout == "ABAB":
+            k_cache = torch.cat([k_cache] * group, axis=1).reshape(-1, head_dim, seq_len)
+            v_cache = torch.cat([v_cache] * group, axis=1).reshape(-1, seq_len, head_dim)
+        elif self.gqa_layout == "AABB":
+            k_cache = k_cache.repeat_interleave(group, dim=1).reshape(-1, head_dim, seq_len)
+            v_cache = v_cache.repeat_interleave(group, dim=1).reshape(-1, seq_len, head_dim)
+        else:
+            raise NotImplementedError
+
+        score = torch.bmm(query, k_cache).float()
+
+        if softmax_scale is None:
+            score *= 1 / (head_dim**0.5)
+        else:
+            score *= softmax_scale
+
+        if self.is_causal:
+            mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool, device=query.device))
+            score.masked_fill_(~mask, float("-inf"))
+        else:
+            raise NotImplementedError
+
+        score = torch.softmax(score, -1).to(query.dtype)
+
+        attn_output = torch.bmm(score, v_cache)
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(batch_size, seq_len, num_attn_heads, head_dim)
+
+        return attn_output
 
 
 class MojoPagedPrefillGQA(MojoOperator):
@@ -283,35 +435,704 @@ class MojoPagedPrefillGQA(MojoOperator):
 
 
 class MojoDecodeMLA(MojoOperator):
-    pass
+    """Non-paged MLA (Multi-head Latent Attention) decode.
+
+    KV cache stores compressed latent ``c_kv`` (shape ``kv_lora_rank``) and
+    positional key ``k_pe`` (shape ``qk_rope_head_dim``).  During attention the
+    latent is decompressed via ``kv_b_proj`` to recover ``k_nope`` and ``v``.
+    """
+
+    def __init__(
+        self,
+        num_heads: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        kv_lora_rank: int,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.num_heads = num_heads
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.v_head_dim = v_head_dim
+        self.kv_lora_rank = kv_lora_rank
+        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+
+        self.kv_b_proj = torch.nn.Parameter(
+            torch.empty(num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank)
+        )
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        seqlens: Optional[torch.Tensor] = None,
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            query: ``(B, H, qk_nope_head_dim + qk_rope_head_dim)``
+            compressed_kv: ``(B, S, kv_lora_rank)``
+            k_pe: ``(B, S, 1, qk_rope_head_dim)``
+            seqlens: ``(B,)`` actual KV lengths.
+            softmax_scale: defaults to ``1/sqrt(qk_head_dim)``.
+
+        Returns:
+            ``(B, H, v_head_dim)``
+        """
+        B, H, _ = query.shape
+        S = compressed_kv.shape[1]
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(self.qk_head_dim)
+
+        # Decompress → (B, S, H, qk_nope + v)
+        kv = (compressed_kv @ self.kv_b_proj.T).view(
+            B, S, H, self.qk_nope_head_dim + self.v_head_dim
+        )
+        k_nope = kv[..., : self.qk_nope_head_dim]           # (B, S, H, d_nope)
+        v = kv[..., self.qk_nope_head_dim :]                 # (B, S, H, d_v)
+        k = torch.cat([k_nope, k_pe.expand(-1, -1, H, -1)], dim=-1)  # (B, S, H, d_qk)
+
+        scores = torch.einsum("bhd,bshd->bhs", query, k) * softmax_scale
+
+        if seqlens is not None:
+            for i in range(B):
+                scores[i, :, seqlens[i].item() :] = float("-inf")
+
+        probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
+        return torch.einsum("bhs,bshd->bhd", probs, v)
+
+    def extra_repr(self) -> str:
+        return (
+            f"num_heads={self.num_heads}, qk_nope_head_dim={self.qk_nope_head_dim}, "
+            f"qk_rope_head_dim={self.qk_rope_head_dim}, v_head_dim={self.v_head_dim}, "
+            f"kv_lora_rank={self.kv_lora_rank}"
+        )
 
 
 class MojoPagedDecodeMLA(MojoOperator):
-    pass
+    """Paged MLA decode — compressed KV and k_pe are stored in block caches."""
+
+    def __init__(
+        self,
+        num_heads: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        kv_lora_rank: int,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.num_heads = num_heads
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.v_head_dim = v_head_dim
+        self.kv_lora_rank = kv_lora_rank
+        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+
+        self.kv_b_proj = torch.nn.Parameter(
+            torch.empty(num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank)
+        )
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        compressed_kv_cache: torch.Tensor,
+        k_pe_cache: torch.Tensor,
+        seqlens: torch.Tensor,
+        block_tables: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            query: ``(B, H, qk_nope + qk_rope)``
+            compressed_kv_cache: ``(N_blocks, 1, block_size, kv_lora_rank)``
+            k_pe_cache: ``(N_blocks, 1, block_size, qk_rope_head_dim)``
+            seqlens: ``(B,)``
+            block_tables: ``(B, max_num_blocks)``
+            softmax_scale: defaults to ``1/sqrt(qk_head_dim)``.
+
+        Returns:
+            ``(B, H, v_head_dim)``
+        """
+        B, H, _ = query.shape
+        block_size = compressed_kv_cache.shape[2]
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(self.qk_head_dim)
+
+        outputs = torch.zeros(B, H, self.v_head_dim, dtype=query.dtype, device=query.device)
+        for i in range(B):
+            sl = seqlens[i].item()
+            num_blocks = (sl + block_size - 1) // block_size
+
+            # Reconstruct compressed_kv and k_pe from paged cache
+            c_parts, pe_parts = [], []
+            for j in range(num_blocks):
+                bid = block_tables[i, j].item()
+                tokens = min(block_size, sl - j * block_size)
+                c_parts.append(compressed_kv_cache[bid, 0, :tokens])
+                pe_parts.append(k_pe_cache[bid, 0, :tokens])
+            c_kv = torch.cat(c_parts, dim=0)       # (sl, kv_lora_rank)
+            k_pe = torch.cat(pe_parts, dim=0)       # (sl, qk_rope)
+
+            # Decompress
+            kv = (c_kv @ self.kv_b_proj.T).view(sl, H, self.qk_nope_head_dim + self.v_head_dim)
+            k_nope = kv[..., : self.qk_nope_head_dim]
+            v = kv[..., self.qk_nope_head_dim :]
+            k = torch.cat([k_nope, k_pe.unsqueeze(1).expand(-1, H, -1)], dim=-1)
+
+            scores = torch.einsum("hd,shd->hs", query[i], k) * softmax_scale
+            probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
+            outputs[i] = torch.einsum("hs,shd->hd", probs, v)
+        return outputs
+
+    def extra_repr(self) -> str:
+        return (
+            f"num_heads={self.num_heads}, qk_nope_head_dim={self.qk_nope_head_dim}, "
+            f"qk_rope_head_dim={self.qk_rope_head_dim}, v_head_dim={self.v_head_dim}, "
+            f"kv_lora_rank={self.kv_lora_rank}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# NSA (Native Sparse Attention) helpers  — module-level to avoid triggering
+# MojoOperator.__init_subclass__ registration.
+# ---------------------------------------------------------------------------
+
+def _nsa_compress_kv(k, v, compress_ratio):
+    """Average-pool K/V in blocks of ``compress_ratio`` along sequence dim."""
+    S, H, D = k.shape
+    n = (S // compress_ratio) * compress_ratio
+    k_t = k[:n].view(-1, compress_ratio, H, D).mean(dim=1)
+    v_t = v[:n].view(-1, compress_ratio, H, D).mean(dim=1)
+    return k_t, v_t
+
+
+def _nsa_select_blocks(query, comp_k, sl, softmax_scale,
+                        compress_ratio, block_size, num_selected_blocks):
+    """Select top-k blocks by compressed attention score, returning a mask."""
+    H, D = query.shape
+    C = comp_k.shape[0]
+    
+    # 1. Compute softmax probabilities for compressed tokens
+    qk = torch.einsum("hd,chd->hc", query, comp_k) * softmax_scale
+    qk = qk.softmax(dim=-1, dtype=torch.float32) # [H, C]
+    
+    # 2. Aggregate into blocks of size `block_size`
+    tokens_per_block = block_size // compress_ratio
+    num_blocks = math.ceil(sl / block_size)
+    
+    block_score = torch.zeros(H, num_blocks, dtype=torch.float32, device=query.device)
+    for b in range(num_blocks):
+        start_c = b * tokens_per_block
+        end_c = min((b + 1) * tokens_per_block, C)
+        if start_c < C:
+            block_score[:, b] = qk[:, start_c:end_c].sum(dim=-1)
+            
+    # 3. Select topk blocks per head
+    num_sel = min(num_selected_blocks, num_blocks)
+    topk_idx = block_score.topk(num_sel, dim=-1).indices # [H, num_sel]
+    
+    # 4. Create mask
+    mask = torch.zeros(H, sl, dtype=torch.bool, device=query.device)
+    for h in range(H):
+        for b in topk_idx[h]:
+            start = b.item() * block_size
+            end = min(start + block_size, sl)
+            mask[h, start:end] = True
+            
+    return mask
+
+
+def _nsa_window_kv(k, v, sl, window_size):
+    start = max(0, sl - window_size)
+    return k[start:sl], v[start:sl]
+
+
+def _nsa_attend(q, k, v, softmax_scale, mask=None):
+    """q: (Tq, H, D), k/v: (Tk, H, D) → (Tq, H, D)"""
+    scores = torch.einsum("thd,shd->ths", q, k).float() * softmax_scale
+    if mask is not None:
+        # mask shape: [H, Tk] -> [1, H, Tk]
+        scores.masked_fill_(~mask.unsqueeze(0), float("-inf"))
+    probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
+    if mask is not None:
+        probs = torch.nan_to_num(probs, nan=0.0)
+    return torch.einsum("ths,shd->thd", probs, v)
+
+
+def _nsa_gate(query, gate_proj):
+    return torch.sigmoid(torch.einsum("...hd,hdc->...hc", query, gate_proj))
+
+
+def _nsa_init(self, num_heads, head_dim, compress_ratio, num_selected_blocks,
+              block_size, window_size, is_causal, **kwargs):
+    MojoOperator.__init__(self, **kwargs)
+    self.num_heads = num_heads
+    self.head_dim = head_dim
+    self.compress_ratio = compress_ratio
+    self.num_selected_blocks = num_selected_blocks
+    self.block_size = block_size
+    self.window_size = window_size
+    self.is_causal = is_causal
+    self.gate_proj = torch.nn.Parameter(torch.empty(num_heads, head_dim, 3))
+
+
+def _nsa_extra_repr(self):
+    return (
+        f"num_heads={self.num_heads}, head_dim={self.head_dim}, "
+        f"compress_ratio={self.compress_ratio}, "
+        f"num_selected_blocks={self.num_selected_blocks}, "
+        f"block_size={self.block_size}, window_size={self.window_size}, "
+        f"is_causal={self.is_causal}"
+    )
+
+
+def _nsa_decode_core(self, q_i, k_i, v_i, sl, softmax_scale):
+    """Shared per-sample decode logic for NSA."""
+    H, D = q_i.shape
+    comp_k, comp_v = _nsa_compress_kv(k_i, v_i, self.compress_ratio)
+    sel_mask = _nsa_select_blocks(
+        q_i, comp_k, sl, softmax_scale,
+        self.compress_ratio, self.block_size, self.num_selected_blocks,
+    )
+    win_k, win_v = _nsa_window_kv(k_i, v_i, sl, self.window_size)
+
+    q_u = q_i.unsqueeze(0)
+    out_comp = _nsa_attend(q_u, comp_k, comp_v, softmax_scale).squeeze(0)
+    out_sel = _nsa_attend(q_u, k_i, v_i, softmax_scale, mask=sel_mask).squeeze(0)
+    out_win = _nsa_attend(q_u, win_k, win_v, softmax_scale).squeeze(0)
+
+    g = _nsa_gate(q_i, self.gate_proj)  # (H, 3)
+    return g[..., 0:1] * out_comp + g[..., 1:2] * out_sel + g[..., 2:3] * out_win
 
 
 class MojoDecodeNSA(MojoOperator):
-    pass
+    """Non-paged NSA decode (single query token per batch).
+
+    Three attention branches — compressed (global), selected (top-k blocks),
+    and sliding window (local) — blended by a per-head sigmoid gate.
+    """
+
+    def __init__(self, num_heads, head_dim, compress_ratio=4,
+                 num_selected_blocks=16, block_size=64, window_size=512,
+                 is_causal=True, **kwargs):
+        _nsa_init(self, num_heads, head_dim, compress_ratio,
+                  num_selected_blocks, block_size, window_size, is_causal, **kwargs)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        seqlens: Optional[torch.Tensor] = None,
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            query: ``(B, H, D)``
+            key / value: ``(B, S, H, D)``
+            seqlens: ``(B,)``
+
+        Returns:
+            ``(B, H, D)``
+        """
+        B, H, D = query.shape
+        S = key.shape[1]
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(D)
+
+        outputs = torch.zeros_like(query)
+        for i in range(B):
+            sl = seqlens[i].item() if seqlens is not None else S
+            outputs[i] = _nsa_decode_core(self, query[i], key[i, :sl], value[i, :sl], sl, softmax_scale)
+        return outputs
+
+    extra_repr = _nsa_extra_repr
 
 
 class MojoPagedDecodeNSA(MojoOperator):
-    pass
+    """Paged NSA decode with blocked KV caches."""
+
+    def __init__(self, num_heads, head_dim, compress_ratio=4,
+                 num_selected_blocks=16, block_size=64, window_size=512,
+                 is_causal=True, **kwargs):
+        _nsa_init(self, num_heads, head_dim, compress_ratio,
+                  num_selected_blocks, block_size, window_size, is_causal, **kwargs)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        seqlens: torch.Tensor,
+        block_tables: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            query: ``(B, H, D)``
+            key_cache / value_cache: ``(N_blocks, H, block_size, D)``
+            seqlens: ``(B,)``
+            block_tables: ``(B, max_num_blocks)``
+
+        Returns:
+            ``(B, H, D)``
+        """
+        B, H, D = query.shape
+        blk = key_cache.shape[2]
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(D)
+
+        outputs = torch.zeros_like(query)
+        for i in range(B):
+            sl = seqlens[i].item()
+            nb = (sl + blk - 1) // blk
+            k_parts, v_parts = [], []
+            for j in range(nb):
+                bid = block_tables[i, j].item()
+                t = min(blk, sl - j * blk)
+                k_parts.append(key_cache[bid, :, :t].permute(1, 0, 2))
+                v_parts.append(value_cache[bid, :, :t].permute(1, 0, 2))
+            k_i = torch.cat(k_parts, dim=0)
+            v_i = torch.cat(v_parts, dim=0)
+            outputs[i] = _nsa_decode_core(self, query[i], k_i, v_i, sl, softmax_scale)
+        return outputs
+
+    extra_repr = _nsa_extra_repr
 
 
 class MojoPrefillMLA(MojoOperator):
-    pass
+    """Non-paged MLA prefill — variable-length sequences."""
+
+    def __init__(
+        self,
+        num_heads: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        kv_lora_rank: int,
+        is_causal: bool = True,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.num_heads = num_heads
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.v_head_dim = v_head_dim
+        self.kv_lora_rank = kv_lora_rank
+        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        self.is_causal = is_causal
+
+        self.kv_b_proj = torch.nn.Parameter(
+            torch.empty(num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank)
+        )
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            query: ``(T, H, qk_nope + qk_rope)`` packed queries.
+            compressed_kv: ``(T, kv_lora_rank)`` packed compressed KV.
+            k_pe: ``(T, 1, qk_rope_head_dim)`` packed positional keys.
+            cu_seqlens_q: ``(B+1,)`` cumulative query lengths.
+            softmax_scale: defaults to ``1/sqrt(qk_head_dim)``.
+
+        Returns:
+            ``(T, H, v_head_dim)``
+        """
+        T, H, _ = query.shape
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(self.qk_head_dim)
+
+        # Decompress all at once → (T, H, d_nope + d_v)
+        kv = (compressed_kv @ self.kv_b_proj.T).view(T, H, self.qk_nope_head_dim + self.v_head_dim)
+        k_nope = kv[..., : self.qk_nope_head_dim]
+        v_all = kv[..., self.qk_nope_head_dim :]
+        k_all = torch.cat([k_nope, k_pe.expand(-1, H, -1)], dim=-1)  # (T, H, d_qk)
+
+        outputs = torch.zeros(T, H, self.v_head_dim, dtype=query.dtype, device=query.device)
+        batch_size = cu_seqlens_q.shape[0] - 1
+
+        for i in range(batch_size):
+            s = cu_seqlens_q[i].item()
+            e = cu_seqlens_q[i + 1].item()
+            q_i = query[s:e]       # (L, H, d_qk)
+            k_i = k_all[s:e]       # (L, H, d_qk)
+            v_i = v_all[s:e]       # (L, H, d_v)
+
+            scores = torch.einsum("thd,shd->ths", q_i, k_i) * softmax_scale
+
+            if self.is_causal:
+                L = e - s
+                causal_mask = torch.tril(torch.ones(L, L, device=query.device, dtype=torch.bool))
+                scores.masked_fill_(~causal_mask.unsqueeze(1), float("-inf"))
+
+            probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
+            outputs[s:e] = torch.einsum("ths,shd->thd", probs, v_i)
+
+        return outputs
+
+    def extra_repr(self) -> str:
+        return (
+            f"num_heads={self.num_heads}, qk_nope_head_dim={self.qk_nope_head_dim}, "
+            f"qk_rope_head_dim={self.qk_rope_head_dim}, v_head_dim={self.v_head_dim}, "
+            f"kv_lora_rank={self.kv_lora_rank}, is_causal={self.is_causal}"
+        )
 
 
 class MojoPagedPrefillMLA(MojoOperator):
-    pass
+    """Paged MLA prefill with blocked compressed KV and k_pe caches."""
+
+    def __init__(
+        self,
+        num_heads: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        kv_lora_rank: int,
+        is_causal: bool = True,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.num_heads = num_heads
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.v_head_dim = v_head_dim
+        self.kv_lora_rank = kv_lora_rank
+        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        self.is_causal = is_causal
+
+        self.kv_b_proj = torch.nn.Parameter(
+            torch.empty(num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank)
+        )
+
+    def _unpage(self, cache, block_tables_i, sl, block_size):
+        """Reconstruct contiguous sequence from paged blocks for one batch."""
+        num_blocks = (sl + block_size - 1) // block_size
+        parts = []
+        for j in range(num_blocks):
+            bid = block_tables_i[j].item()
+            tokens = min(block_size, sl - j * block_size)
+            parts.append(cache[bid, 0, :tokens])
+        return torch.cat(parts, dim=0)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        compressed_kv_cache: torch.Tensor,
+        k_pe_cache: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        block_tables: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+        seqlens_kv: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            query: ``(T, H, qk_nope + qk_rope)``
+            compressed_kv_cache: ``(N_blocks, 1, block_size, kv_lora_rank)``
+            k_pe_cache: ``(N_blocks, 1, block_size, qk_rope_head_dim)``
+            cu_seqlens_q: ``(B+1,)``
+            block_tables: ``(B, max_num_blocks)``
+            softmax_scale: defaults to ``1/sqrt(qk_head_dim)``.
+            seqlens_kv: ``(B,)`` KV lengths. ``None`` → same as query lengths.
+
+        Returns:
+            ``(T, H, v_head_dim)``
+        """
+        T, H, _ = query.shape
+        block_size = compressed_kv_cache.shape[2]
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(self.qk_head_dim)
+
+        q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        batch_size = len(q_lens)
+        outputs = torch.zeros(T, H, self.v_head_dim, dtype=query.dtype, device=query.device)
+
+        for i in range(batch_size):
+            qs = cu_seqlens_q[i].item()
+            qe = cu_seqlens_q[i + 1].item()
+            q_i = query[qs:qe]
+            kv_len = seqlens_kv[i].item() if seqlens_kv is not None else (qe - qs)
+
+            c_kv = self._unpage(compressed_kv_cache, block_tables[i], kv_len, block_size)
+            kpe = self._unpage(k_pe_cache, block_tables[i], kv_len, block_size)
+
+            kv = (c_kv @ self.kv_b_proj.T).view(kv_len, H, self.qk_nope_head_dim + self.v_head_dim)
+            k_nope = kv[..., : self.qk_nope_head_dim]
+            v = kv[..., self.qk_nope_head_dim :]
+            k = torch.cat([k_nope, kpe.unsqueeze(1).expand(-1, H, -1)], dim=-1)
+
+            scores = torch.einsum("thd,shd->ths", q_i, k).float() * softmax_scale
+
+            if self.is_causal:
+                q_len = qe - qs
+                causal_mask = torch.ones(q_len, kv_len, device=query.device, dtype=torch.bool).tril(
+                    kv_len - q_len
+                )
+                scores.masked_fill_(~causal_mask.unsqueeze(1), float("-inf"))
+
+            probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
+            outputs[qs:qe] = torch.einsum("ths,shd->thd", probs, v)
+
+        return outputs
+
+    def extra_repr(self) -> str:
+        return (
+            f"num_heads={self.num_heads}, qk_nope_head_dim={self.qk_nope_head_dim}, "
+            f"qk_rope_head_dim={self.qk_rope_head_dim}, v_head_dim={self.v_head_dim}, "
+            f"kv_lora_rank={self.kv_lora_rank}, is_causal={self.is_causal}"
+        )
 
 
 class MojoPrefillNSA(MojoOperator):
-    pass
+    """Non-paged NSA prefill — variable-length packed sequences."""
+
+    def __init__(self, num_heads, head_dim, compress_ratio=4,
+                 num_selected_blocks=16, block_size=64, window_size=512,
+                 is_causal=True, **kwargs):
+        _nsa_init(self, num_heads, head_dim, compress_ratio,
+                  num_selected_blocks, block_size, window_size, is_causal, **kwargs)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            query / key / value: ``(T, H, D)``
+            cu_seqlens_q: ``(B+1,)``
+
+        Returns:
+            ``(T, H, D)``
+        """
+        T, H, D = query.shape
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(D)
+
+        outputs = torch.zeros_like(query)
+        batch_size = cu_seqlens_q.shape[0] - 1
+        cr = self.compress_ratio
+
+        for i in range(batch_size):
+            s = cu_seqlens_q[i].item()
+            e = cu_seqlens_q[i + 1].item()
+            q_seq, k_seq, v_seq = query[s:e], key[s:e], value[s:e]
+
+            for t in range(e - s):
+                t_sl = t + 1 if self.is_causal else (e - s)
+                k_ctx, v_ctx = k_seq[:t_sl], v_seq[:t_sl]
+
+                ck, cv = _nsa_compress_kv(k_ctx, v_ctx, cr) if t_sl >= cr else (k_ctx, v_ctx)
+                sel_mask = _nsa_select_blocks(
+                    q_seq[t], ck, t_sl, softmax_scale,
+                    cr, self.block_size, self.num_selected_blocks,
+                )
+                win_k, win_v = _nsa_window_kv(k_ctx, v_ctx, t_sl, self.window_size)
+
+                q_t = q_seq[t:t + 1]
+                out_comp = _nsa_attend(q_t, ck, cv, softmax_scale).squeeze(0)
+                out_sel = _nsa_attend(q_t, k_ctx, v_ctx, softmax_scale, mask=sel_mask).squeeze(0)
+                out_win = _nsa_attend(q_t, win_k, win_v, softmax_scale).squeeze(0)
+
+                g = _nsa_gate(q_seq[t], self.gate_proj)
+                outputs[s + t] = g[..., 0:1] * out_comp + g[..., 1:2] * out_sel + g[..., 2:3] * out_win
+
+        return outputs
+
+    extra_repr = _nsa_extra_repr
 
 
 class MojoPagedPrefillNSA(MojoOperator):
-    pass
+    """Paged NSA prefill with blocked KV caches."""
+
+    def __init__(self, num_heads, head_dim, compress_ratio=4,
+                 num_selected_blocks=16, block_size=64, window_size=512,
+                 is_causal=True, **kwargs):
+        _nsa_init(self, num_heads, head_dim, compress_ratio,
+                  num_selected_blocks, block_size, window_size, is_causal, **kwargs)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        block_tables: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+        seqlens_kv: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            query: ``(T, H, D)``
+            key_cache / value_cache: ``(N_blocks, H, block_size, D)``
+            cu_seqlens_q: ``(B+1,)``
+            block_tables: ``(B, max_num_blocks)``
+            seqlens_kv: ``(B,)``
+
+        Returns:
+            ``(T, H, D)``
+        """
+        T, H, D = query.shape
+        blk = key_cache.shape[2]
+        cr = self.compress_ratio
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(D)
+
+        q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        batch_size = len(q_lens)
+        outputs = torch.zeros_like(query)
+
+        for i in range(batch_size):
+            qs, qe = cu_seqlens_q[i].item(), cu_seqlens_q[i + 1].item()
+            q_seq = query[qs:qe]
+            kv_len = seqlens_kv[i].item() if seqlens_kv is not None else (qe - qs)
+
+            nb = (kv_len + blk - 1) // blk
+            k_parts, v_parts = [], []
+            for j in range(nb):
+                bid = block_tables[i, j].item()
+                t = min(blk, kv_len - j * blk)
+                k_parts.append(key_cache[bid, :, :t].permute(1, 0, 2))
+                v_parts.append(value_cache[bid, :, :t].permute(1, 0, 2))
+            k_seq = torch.cat(k_parts, dim=0)
+            v_seq = torch.cat(v_parts, dim=0)
+
+            q_len = qe - qs
+            for t_idx in range(q_len):
+                t_kv = (kv_len - q_len + t_idx + 1) if self.is_causal else kv_len
+                k_ctx, v_ctx = k_seq[:t_kv], v_seq[:t_kv]
+
+                ck, cv = _nsa_compress_kv(k_ctx, v_ctx, cr) if t_kv >= cr else (k_ctx, v_ctx)
+                sel_mask = _nsa_select_blocks(
+                    q_seq[t_idx], ck, t_kv, softmax_scale,
+                    cr, self.block_size, self.num_selected_blocks,
+                )
+                win_k, win_v = _nsa_window_kv(k_ctx, v_ctx, t_kv, self.window_size)
+
+                q_t = q_seq[t_idx:t_idx + 1]
+                out_comp = _nsa_attend(q_t, ck, cv, softmax_scale).squeeze(0)
+                out_sel = _nsa_attend(q_t, k_ctx, v_ctx, softmax_scale, mask=sel_mask).squeeze(0)
+                out_win = _nsa_attend(q_t, win_k, win_v, softmax_scale).squeeze(0)
+
+                g = _nsa_gate(q_seq[t_idx], self.gate_proj)
+                outputs[qs + t_idx] = g[..., 0:1] * out_comp + g[..., 1:2] * out_sel + g[..., 2:3] * out_win
+
+        return outputs
+
+    extra_repr = _nsa_extra_repr
 
 
 class MojoSdpa(MojoOperator):

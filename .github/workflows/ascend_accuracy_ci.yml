@@ -56,22 +56,29 @@ jobs:
           echo "Running ttx kernels tests..."
           unset ASCEND_VISIBLE_DEVICES
           unset ASCEND_RT_VISIBLE_DEVICES
-          echo "ASCEND_VISIBLE_DEVICES: $ASCEND_VISIBLE_DEVICES"
-          echo "ASCEND_RT_VISIBLE_DEVICES: $ASCEND_RT_VISIBLE_DEVICES"
-          MOJO_BACKEND="ttx" python3 -m pytest -n 8 tests/accuracy/operators/
+          MOJO_BACKEND="ttx" python3 -m pytest -n 8 tests/accuracy/operators/ \
+            --ignore=tests/accuracy/operators/test_compute_with_comm.py
           MOJO_BACKEND="ttx" python3 -m pytest -n 8 tests/accuracy/functions/
       - name: test-TTX-DETERMINISTIC
         shell: bash
         run: |
           echo "Running ttx kernels deterministic tests..."
-          MOJO_DETERMINISTIC=1 MOJO_BACKEND="ttx" python3 -m pytest tests/accuracy/functions/test_normalization.py 
+          MOJO_DETERMINISTIC=1 MOJO_BACKEND="ttx" python3 -m pytest tests/accuracy/functions/test_normalization.py
       - name: test-torch-npu
         shell: bash
         run: |
           echo "Running torch_npu base tests..."
           unset ASCEND_VISIBLE_DEVICES
           unset ASCEND_RT_VISIBLE_DEVICES
-          MOJO_BACKEND="torch_npu" python3 -m pytest -n 8 tests/accuracy/operators/
+          MOJO_BACKEND="torch_npu" python3 -m pytest -n 8 tests/accuracy/operators/ \
+            --ignore=tests/accuracy/operators/test_compute_with_comm.py
+      - name: test-compute-with-comm
+        shell: bash
+        run: |
+          echo "Running compute+comm distributed tests..."
+          unset ASCEND_VISIBLE_DEVICES
+          unset ASCEND_RT_VISIBLE_DEVICES
+          python3 -m pytest -v tests/accuracy/operators/test_compute_with_comm.py
       - name: test-TTX-graph
         shell: bash
         run: |

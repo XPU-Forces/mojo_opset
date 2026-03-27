@@ -5,8 +5,18 @@ from typing import Optional
 import pytest
 import torch
 
+from mojo_opset import MojoDecodeGQA
+from mojo_opset import MojoDecodeMLA
+from mojo_opset import MojoDecodeNSA
 from mojo_opset import MojoPagedDecodeGQA
+from mojo_opset import MojoPagedDecodeMLA
+from mojo_opset import MojoPagedDecodeNSA
 from mojo_opset import MojoPagedPrefillGQA
+from mojo_opset import MojoPagedPrefillMLA
+from mojo_opset import MojoPagedPrefillNSA
+from mojo_opset import MojoPrefillGQA
+from mojo_opset import MojoPrefillMLA
+from mojo_opset import MojoPrefillNSA
 from mojo_opset import MojoSdpa
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
@@ -90,6 +100,12 @@ def test_paged_decode_gqa(
     block_tables: torch.Tensor,
     gqa_layout: str,
 ):
+    from mojo_opset.utils.platform import get_platform
+    if get_platform() == "npu":
+        head_dim = query.shape[-1]
+        if head_dim % 128 != 0:
+            pytest.skip(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
+
     head_dim = query.shape[-1]
     sm_scale = 1.0 / math.sqrt(head_dim)
 
@@ -225,6 +241,14 @@ def test_paged_prefill_gqa(
     gqa_layout: str,
     seqlens_kv: Optional[torch.Tensor],
 ):
+    from mojo_opset.utils.platform import get_platform
+    if get_platform() == "npu":
+        head_dim = query.shape[-1]
+        if head_dim % 128 != 0:
+            pytest.skip(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
+        if seqlens_kv is not None:
+            pytest.skip("NPU kernel npu_fused_infer_attention_score currently does not support TND layout with sparse_mode=3 (Page Attention), raising RuntimeError: call aclnnFusedInferAttentionScoreV3 failed.")
+
     paged_prefill_attn = MojoPagedPrefillGQA(
         is_causal=True,
         gqa_layout=gqa_layout
@@ -314,3 +338,371 @@ def test_sdpa(
         scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
     )
     diffusion_attn_ref.forward_diff_with(diffusion_attn, query, key, value, blockwise_diffusion_attn_mask)
+
+
+# ===========================================================================
+# MojoDecodeGQA (non-paged)
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "B, Hq, Hkv, D, S",
+    [(4, 16, 4, 128, 256), (2, 8, 1, 64, 512)],
+)
+@pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
+@bypass_not_implemented
+def test_decode_gqa(B, Hq, Hkv, D, S, gqa_layout):
+    query = torch.randn(B, Hq, D, dtype=torch.bfloat16)
+    key = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)
+    value = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)
+    seqlens = torch.randint(S // 2, S + 1, (B,), dtype=torch.int32)
+
+    op = MojoDecodeGQA(gqa_layout=gqa_layout)
+    op_ref = MojoDecodeGQA._registry.get("torch")(gqa_layout=gqa_layout)
+    op.forward_diff_with(
+        op_ref, query, key, value, seqlens,
+        softmax_scale=1.0 / math.sqrt(D),
+        atol=0, rtol=0,
+    )
+
+
+@pytest.mark.parametrize("window_size", [64, 128])
+@bypass_not_implemented
+def test_decode_gqa_sliding_window(window_size):
+    B, Hq, Hkv, D, S = 2, 8, 2, 128, 256
+    query = torch.randn(B, Hq, D, dtype=torch.bfloat16)
+    key = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)
+    value = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)
+    seqlens = torch.full((B,), S, dtype=torch.int32)
+
+    op = MojoDecodeGQA(gqa_layout="AABB", window_size=window_size)
+    op_ref = MojoDecodeGQA._registry.get("torch")(gqa_layout="AABB", window_size=window_size)
+    op.forward_diff_with(
+        op_ref, query, key, value, seqlens,
+        softmax_scale=1.0 / math.sqrt(D),
+        atol=0, rtol=0,
+    )
+
+
+# ===========================================================================
+# MojoDecodeMLA
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "B, H, d_nope, d_rope, d_v, d_c, S",
+    [(4, 16, 96, 32, 128, 64, 256)],
+)
+@bypass_not_implemented
+def test_decode_mla(B, H, d_nope, d_rope, d_v, d_c, S):
+    query = torch.randn(B, H, d_nope + d_rope, dtype=torch.bfloat16)
+    compressed_kv = torch.randn(B, S, d_c, dtype=torch.bfloat16)
+    k_pe = torch.randn(B, S, 1, d_rope, dtype=torch.bfloat16)
+    seqlens = torch.randint(S // 2, S + 1, (B,), dtype=torch.int32)
+
+    op = MojoDecodeMLA(H, d_nope, d_rope, d_v, d_c)
+    op_ref = MojoDecodeMLA._registry.get("torch")(H, d_nope, d_rope, d_v, d_c)
+    with torch.no_grad():
+        w = torch.randn_like(op.kv_b_proj)
+        op.kv_b_proj.copy_(w)
+        op_ref.kv_b_proj.copy_(w)
+
+    op.forward_diff_with(
+        op_ref, query, compressed_kv, k_pe, seqlens,
+        atol=1e-2, rtol=1e-2,
+    )
+
+
+# ===========================================================================
+# MojoPrefillMLA
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "H, d_nope, d_rope, d_v, d_c",
+    [(8, 64, 32, 64, 32)],
+)
+@bypass_not_implemented
+def test_prefill_mla(H, d_nope, d_rope, d_v, d_c):
+    seqlens = torch.tensor([32, 48], dtype=torch.int32)
+    cu = torch.cat([torch.tensor([0], dtype=torch.int32), seqlens.cumsum(0)])
+    T = cu[-1].item()
+
+    query = torch.randn(T, H, d_nope + d_rope, dtype=torch.bfloat16)
+    compressed_kv = torch.randn(T, d_c, dtype=torch.bfloat16)
+    k_pe = torch.randn(T, 1, d_rope, dtype=torch.bfloat16)
+
+    op = MojoPrefillMLA(H, d_nope, d_rope, d_v, d_c, is_causal=True)
+    op_ref = MojoPrefillMLA._registry.get("torch")(H, d_nope, d_rope, d_v, d_c, is_causal=True)
+    with torch.no_grad():
+        w = torch.randn_like(op.kv_b_proj)
+        op.kv_b_proj.copy_(w)
+        op_ref.kv_b_proj.copy_(w)
+
+    op.forward_diff_with(
+        op_ref, query, compressed_kv, k_pe, cu,
+        atol=1e-2, rtol=1e-2,
+    )
+
+
+# ===========================================================================
+# MojoDecodeNSA
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "B, H, D, S",
+    [(2, 8, 64, 256)],
+)
+@bypass_not_implemented
+def test_decode_nsa(B, H, D, S):
+    query = torch.randn(B, H, D, dtype=torch.bfloat16)
+    key = torch.randn(B, S, H, D, dtype=torch.bfloat16)
+    value = torch.randn(B, S, H, D, dtype=torch.bfloat16)
+    seqlens = torch.full((B,), S, dtype=torch.int32)
+
+    op = MojoDecodeNSA(H, D, compress_ratio=4, num_selected_blocks=4, window_size=64)
+    op_ref = MojoDecodeNSA._registry.get("torch")(H, D, compress_ratio=4, num_selected_blocks=4, window_size=64)
+    with torch.no_grad():
+        g = torch.randn_like(op.gate_proj)
+        op.gate_proj.copy_(g)
+        op_ref.gate_proj.copy_(g)
+
+    op.forward_diff_with(
+        op_ref, query, key, value, seqlens,
+        atol=1e-2, rtol=1e-2,
+    )
+
+
+# ===========================================================================
+# MojoPrefillGQA (non-paged)
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "B, Hq, Hkv, D, S",
+    [(2, 16, 4, 128, 64), (1, 8, 1, 64, 128)],
+)
+@pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
+@auto_switch_platform()
+@bypass_not_implemented
+def test_prefill_gqa(B, Hq, Hkv, D, S, gqa_layout):
+    """Non-paged prefill GQA — query/key/value are batched 4-D tensors."""
+    from mojo_opset.utils.platform import get_platform
+    if get_platform() == "npu" and D % 128 != 0:
+        pytest.skip(f"NPU kernel requires head_dim % 128 == 0, got {D}")
+
+    query = torch.randn(B, Hq, S, D, dtype=torch.bfloat16)
+    key = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)
+    value = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)
+    cu = torch.arange(0, (B + 1) * S, S, dtype=torch.int32)
+
+    op = MojoPrefillGQA(is_causal=True, gqa_layout=gqa_layout)
+    op_ref = MojoPrefillGQA._registry.get("torch")(is_causal=True, gqa_layout=gqa_layout)
+    op.forward_diff_with(
+        op_ref, query, key, value, cu,
+        softmax_scale=1.0 / math.sqrt(D),
+        atol=2e-2, rtol=2e-2,
+    )
+
+
+# ===========================================================================
+# MojoPagedDecodeMLA
+# ===========================================================================
+
+def _generate_paged_mla_decode_data(batch_size, num_heads, d_nope, d_rope, d_v,
+                                     kv_lora_rank, max_seq_len, block_size, dtype):
+    query = torch.randn(batch_size, num_heads, d_nope + d_rope, dtype=dtype)
+    seqlens = torch.randint(max_seq_len // 2, max_seq_len, (batch_size,), dtype=torch.int32).clamp(min=1)
+
+    max_nb = (seqlens.max().item() + block_size - 1) // block_size
+    total_blocks = int(torch.div(seqlens + block_size - 1, block_size, rounding_mode="floor").sum().item()) + 10
+
+    ckv_cache = torch.randn(total_blocks, 1, block_size, kv_lora_rank, dtype=dtype)
+    kpe_cache = torch.randn(total_blocks, 1, block_size, d_rope, dtype=dtype)
+
+    block_tables = torch.zeros(batch_size, max_nb, dtype=torch.long)
+    free = torch.randperm(total_blocks)
+    off = 0
+    for i in range(batch_size):
+        n = (seqlens[i].item() + block_size - 1) // block_size
+        block_tables[i, :n] = free[off:off + n]
+        off += n
+
+    return query, ckv_cache, kpe_cache, seqlens, block_tables
+
+
+@pytest.mark.parametrize(
+    "B, H, d_nope, d_rope, d_v, d_c, S, blk",
+    [
+        (4, 16, 96, 32, 128, 64, 256, 64),
+        (2, 8, 64, 32, 64, 32, 128, 32),
+    ],
+)
+@bypass_not_implemented
+def test_paged_decode_mla(B, H, d_nope, d_rope, d_v, d_c, S, blk):
+    query, ckv_cache, kpe_cache, seqlens, bt = _generate_paged_mla_decode_data(
+        B, H, d_nope, d_rope, d_v, d_c, S, blk, torch.bfloat16,
+    )
+    op = MojoPagedDecodeMLA(H, d_nope, d_rope, d_v, d_c)
+    op_ref = MojoPagedDecodeMLA._registry.get("torch")(H, d_nope, d_rope, d_v, d_c)
+    with torch.no_grad():
+        w = torch.randn_like(op.kv_b_proj)
+        op.kv_b_proj.copy_(w)
+        op_ref.kv_b_proj.copy_(w)
+
+    op.forward_diff_with(
+        op_ref, query, ckv_cache, kpe_cache, seqlens, bt,
+        atol=1e-2, rtol=1e-2,
+    )
+
+
+# ===========================================================================
+# MojoPagedPrefillMLA
+# ===========================================================================
+
+def _generate_paged_mla_prefill_data(batch_size, num_heads, d_nope, d_rope, d_v,
+                                      kv_lora_rank, max_q_len, block_size, dtype):
+    q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32).clamp(min=1)
+    cu = torch.cat([torch.tensor([0], dtype=torch.int32), q_lens.cumsum(0)])
+    T = cu[-1].item()
+
+    query = torch.randn(T, num_heads, d_nope + d_rope, dtype=dtype)
+
+    kv_lens = q_lens
+    max_nb = (kv_lens.max().item() + block_size - 1) // block_size
+    total_blocks = int(torch.div(kv_lens + block_size - 1, block_size, rounding_mode="floor").sum().item()) + 10
+
+    ckv_cache = torch.zeros(total_blocks, 1, block_size, kv_lora_rank, dtype=dtype)
+    kpe_cache = torch.zeros(total_blocks, 1, block_size, d_rope, dtype=dtype)
+
+    block_tables = torch.zeros(batch_size, max_nb, dtype=torch.long)
+    free = torch.randperm(total_blocks)
+    off = 0
+
+    for i in range(batch_size):
+        kl = kv_lens[i].item()
+        nb = (kl + block_size - 1) // block_size
+        blocks = free[off:off + nb]
+        block_tables[i, :nb] = blocks
+        off += nb
+
+        ckv_data = torch.randn(kl, kv_lora_rank, dtype=dtype)
+        kpe_data = torch.randn(kl, d_rope, dtype=dtype)
+        for j in range(nb):
+            bid = blocks[j].item()
+            s = j * block_size
+            e = min(s + block_size, kl)
+            ckv_cache[bid, 0, : e - s] = ckv_data[s:e]
+            kpe_cache[bid, 0, : e - s] = kpe_data[s:e]
+
+    return query, ckv_cache, kpe_cache, cu, block_tables
+
+
+@pytest.mark.parametrize(
+    "B, H, d_nope, d_rope, d_v, d_c, max_q, blk",
+    [
+        (2, 8, 64, 32, 64, 32, 48, 32),
+    ],
+)
+@bypass_not_implemented
+def test_paged_prefill_mla(B, H, d_nope, d_rope, d_v, d_c, max_q, blk):
+    query, ckv_cache, kpe_cache, cu, bt = _generate_paged_mla_prefill_data(
+        B, H, d_nope, d_rope, d_v, d_c, max_q, blk, torch.bfloat16,
+    )
+    op = MojoPagedPrefillMLA(H, d_nope, d_rope, d_v, d_c, is_causal=True)
+    op_ref = MojoPagedPrefillMLA._registry.get("torch")(H, d_nope, d_rope, d_v, d_c, is_causal=True)
+    with torch.no_grad():
+        w = torch.randn_like(op.kv_b_proj)
+        op.kv_b_proj.copy_(w)
+        op_ref.kv_b_proj.copy_(w)
+
+    op.forward_diff_with(
+        op_ref, query, ckv_cache, kpe_cache, cu, bt,
+        atol=1e-2, rtol=1e-2,
+    )
+
+
+# ===========================================================================
+# MojoPagedDecodeNSA
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "B, H, D, S, blk",
+    [(2, 8, 64, 256, 64)],
+)
+@bypass_not_implemented
+def test_paged_decode_nsa(B, H, D, S, blk):
+    query, k_cache, v_cache, seqlens, bt = generate_paged_decode_data(
+        batch_size=B, num_q_heads=H, num_kv_heads=H,
+        head_dim=D, max_seq_len=S, block_size=blk, dtype=torch.bfloat16,
+    )
+    cr, nsb, ws = 4, 4, 64
+    op = MojoPagedDecodeNSA(H, D, compress_ratio=cr, num_selected_blocks=nsb, window_size=ws)
+    op_ref = MojoPagedDecodeNSA._registry.get("torch")(H, D, compress_ratio=cr, num_selected_blocks=nsb, window_size=ws)
+    with torch.no_grad():
+        g = torch.randn_like(op.gate_proj)
+        op.gate_proj.copy_(g)
+        op_ref.gate_proj.copy_(g)
+
+    op.forward_diff_with(
+        op_ref, query, k_cache, v_cache, seqlens, bt,
+        atol=1e-2, rtol=1e-2,
+    )
+
+
+# ===========================================================================
+# MojoPrefillNSA (non-paged) — small seqlens to keep runtime manageable
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "H, D",
+    [(4, 64)],
+)
+@bypass_not_implemented
+def test_prefill_nsa(H, D):
+    seqlens = torch.tensor([32, 24], dtype=torch.int32)
+    cu = torch.cat([torch.tensor([0], dtype=torch.int32), seqlens.cumsum(0)])
+    T = cu[-1].item()
+
+    query = torch.randn(T, H, D, dtype=torch.bfloat16)
+    key = torch.randn(T, H, D, dtype=torch.bfloat16)
+    value = torch.randn(T, H, D, dtype=torch.bfloat16)
+
+    cr, nsb, ws = 4, 2, 16
+    op = MojoPrefillNSA(H, D, compress_ratio=cr, num_selected_blocks=nsb, window_size=ws, is_causal=True)
+    op_ref = MojoPrefillNSA._registry.get("torch")(H, D, compress_ratio=cr, num_selected_blocks=nsb, window_size=ws, is_causal=True)
+    with torch.no_grad():
+        g = torch.randn_like(op.gate_proj)
+        op.gate_proj.copy_(g)
+        op_ref.gate_proj.copy_(g)
+
+    op.forward_diff_with(
+        op_ref, query, key, value, cu,
+        atol=1e-2, rtol=1e-2,
+    )
+
+
+# ===========================================================================
+# MojoPagedPrefillNSA — small seqlens to keep runtime manageable
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "H, D, blk",
+    [(4, 64, 32)],
+)
+@bypass_not_implemented
+def test_paged_prefill_nsa(H, D, blk):
+    B = 2
+    query, k_cache, v_cache, cu, bt, _ = generate_paged_prefill_data(
+        batch_size=B, num_q_heads=H, num_kv_heads=H,
+        head_dim=D, max_q_len=32, max_kv_computed_len=0,
+        block_size=blk, dtype=torch.bfloat16,
+    )
+    cr, nsb, ws = 4, 2, 16
+    op = MojoPagedPrefillNSA(H, D, compress_ratio=cr, num_selected_blocks=nsb, window_size=ws, is_causal=True)
+    op_ref = MojoPagedPrefillNSA._registry.get("torch")(H, D, compress_ratio=cr, num_selected_blocks=nsb, window_size=ws, is_causal=True)
+    with torch.no_grad():
+        g = torch.randn_like(op.gate_proj)
+        op.gate_proj.copy_(g)
+        op_ref.gate_proj.copy_(g)
+
+    op.forward_diff_with(
+        op_ref, query, k_cache, v_cache, cu, bt,
+        atol=1e-2, rtol=1e-2,
+    )
