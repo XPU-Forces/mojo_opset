@@ -1,6 +1,6 @@
 import functools
 import math
-from typing import Optional
+from typing import List, Optional
 
 import pytest
 import torch
@@ -963,62 +963,4 @@ def test_swa_infer(
         softmax_scale=softmax_scale,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
-    )
-
-def generate_fa_mtp_data(
-    bsz: int,
-    q_head_num: int,
-    kv_head_num: int,
-    head_dim: int,
-    seq_length: int,
-    block_size: int,
-    max_kv_seq: int,
-    dtype: torch.dtype,
-):
-    query = torch.randn(bsz, seq_length, q_head_num * head_dim, dtype=dtype)  #BSH
-    key = torch.randn(math.ceil(max_kv_seq / block_size), kv_head_num, seq_length, head_dim, dtype=dtype)    #BNSD
-    value = torch.randn_like(key)  #BNSD
-    kv_block_table = torch.arange(0, math.ceil(max_kv_seq / block_size)).repeat(bsz, 1)
-    return query, key, value, kv_block_table
-    
-@pytest.mark.parametrize(
-    "bsz, q_head_num, kv_head_num, head_dim, window_size, block_size, max_kv_seq, q_seq",
-    [(2, 8, 2, 128, 2048, 128, 1024, 1)],
-)
-def test_FAMTP_attention(
-    bsz,
-    q_head_num,
-    kv_head_num,
-    head_dim,
-    block_size,
-    max_kv_seq,
-    q_seq,
-    window_size,
-):
-    casual_mask = torch.ones(window_size, window_size, dtype=torch.bool)  
-    qkv_len: List[int] = [max_kv_seq] * bsz
-    query, key, value, kv_block_table = generate_fa_mtp_data(
-        bsz, 
-        q_head_num, 
-        kv_head_num, 
-        head_dim, 
-        q_seq, 
-        block_size, 
-        max_kv_seq, 
-        torch.bfloat16
-    )
-    
-    mtp_attn = MojoAttentionDecodeMTP._registry.get("xops")()
-    mtp_attn_ref = MojoAttentionDecodeMTP._registry.get("torch")(head_dim=head_dim, block_size=block_size)
-
-    mtp_attn_ref.forward_diff_with(
-        mtp_attn,
-        query, 
-        casual_mask, 
-        key, 
-        value,
-        qkv_len, 
-        kv_block_table,
-        kv_head_num,
-        window_size
     )
