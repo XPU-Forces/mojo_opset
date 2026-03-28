@@ -14,10 +14,16 @@ logger = get_logger(__name__)
 
 
 @functools.lru_cache
-def get_platform() -> Literal["npu", "mlu", "meta_device"]:
+def get_platform() -> Literal["npu", "mlu", "meta_device", "ilu"]:
     """
     Detect whether the system has NPU or MLU, fallback device is meta_device.
     """
+    try:
+        if torch.cuda.get_device_name().startswith("Iluvatar"):
+            logger.info("Iluvatar GPU detected")
+            return "ilu"
+    except Exception as e:
+        logger.debug(f"Failed to check Iluvatar GPU availability: {e}")
     try:
         if torch.npu.is_available():
             logger.info("Ascend NPU detected")
@@ -33,6 +39,40 @@ def get_platform() -> Literal["npu", "mlu", "meta_device"]:
 
     logger.warning("No accelerator detected")
     return "meta_device"
+
+
+_PLATFORM_TO_TORCH_DEVICE = {
+    "npu": "npu",
+    "mlu": "mlu",
+    "ilu": "cuda",
+    "meta_device": "meta",
+}
+
+
+@functools.lru_cache
+def get_torch_device() -> str:
+    """Map the internal platform identifier to a PyTorch-recognised device string."""
+    platform = get_platform()
+    return _PLATFORM_TO_TORCH_DEVICE.get(platform, platform)
+
+
+_PLATFORM_TO_DIST_BACKEND = {
+    "npu": "hccl",
+    "mlu": "gloo",
+    "meta_device": "gloo",
+}
+
+
+@functools.lru_cache
+def get_dist_backend() -> str:
+    """Return the distributed communication backend for the current platform.
+
+    Mapping:
+        npu  → hccl
+        mlu  → gloo   (placeholder, update when cncl is available)
+        else → gloo
+    """
+    return _PLATFORM_TO_DIST_BACKEND.get(get_platform(), "gloo")
 
 
 def get_impl_by_platform():

@@ -55,6 +55,9 @@ class MojoRoPE(MojoOperator):
         assert not interleaved, "interleaved impl is not supported yet."
         self.interleaved = interleaved
 
+    def extra_repr(self) -> str:
+        return f"{self.interleaved=}".replace("self.", "")
+
     @staticmethod
     def _rotate_half(x: torch.Tensor) -> torch.Tensor:
         x1 = x[..., : x.shape[-1] // 2]

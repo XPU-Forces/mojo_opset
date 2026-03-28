@@ -80,6 +80,11 @@ class MojoTopPSampling(MojoOperator):
 
         return next_probs, next_tokens
 
+    def extra_repr(self) -> str:
+        return f"{self.top_p=}, {self.filter_value=}, {self.min_tokens_to_keep=}, {self.rand_top_k=}".replace(
+            "self.", ""
+        )
+
 
 class MojoTopPFilter(MojoOperator):
     def __init__(
@@ -91,8 +96,6 @@ class MojoTopPFilter(MojoOperator):
 
         Args:
             filter_value (float, default=-inf): Logit value used to mask filtered tokens.
-            op_name (str, default=""): Operator name metadata.
-            layer_idx (int, default=0): Layer index metadata.
 
         Notes:
             Stores configuration only; actual sampling/masking is handled in `forward`.
@@ -140,6 +143,9 @@ class MojoTopPFilter(MojoOperator):
         final_probs_dist = torch.nn.functional.softmax(filtered_logits, dim=-1).to(dtype)
 
         return final_probs_dist, sorted_topk_indices
+
+    def extra_repr(self) -> str:
+        return f"{self.filter_value=}".replace("self.", "")
 
 
 class MojoRejectSampling(MojoOperator):

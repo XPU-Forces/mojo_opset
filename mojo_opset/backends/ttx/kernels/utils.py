@@ -9,7 +9,6 @@ from typing import Optional
 from typing import Tuple
 
 import torch
-import torch_npu
 import triton
 import triton.language as tl
 
@@ -139,11 +138,15 @@ def tensor_device_guard_for_triton_kernel(path, name, device="npu"):
     if disable:
         return
 
-    import pkgutil
     import importlib
+    import pkgutil
+
     from inspect import getmembers
+
     import torch.utils._pytree as pytree
-    from triton.runtime.jit import JITFunction, KernelInterface
+
+    from triton.runtime.jit import JITFunction
+    from triton.runtime.jit import KernelInterface
 
     def device_guard(*args, **kwargs):
         if not pytree.tree_all_only(torch.Tensor, lambda x: x.device.type == device, (args, kwargs)):

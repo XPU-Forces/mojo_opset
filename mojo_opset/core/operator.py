@@ -15,9 +15,10 @@ logger = get_logger(__name__)
 
 
 class MojoOperator(ABC, torch.nn.Module):
-    supported_platforms_list = ["npu", "mlu", "meta_device"]
+    supported_platforms_list = ["npu", "mlu", "meta_device", "ilu"]
 
     def __init_subclass__(cls, **kwargs):
+        kwargs.pop("default_priority", None)
         super().__init_subclass__(**kwargs)
 
         is_mojo_core_op_cls = MojoOperator in cls.__bases__
@@ -80,6 +81,12 @@ class MojoOperator(ABC, torch.nn.Module):
             mixed_tol: if true, atol, rtol and ptol are ignored.
             **kwargs: The keyword arguments to pass to self.forward.
         """
+        if type(self) is type(other_op):
+            raise NotImplementedError(
+                f"No dedicated backend for {type(self).__name__}; "
+                f"both operands resolve to the same implementation, skipping comparison."
+            )
+
         # for some cases, we expect std & ref impl share the same random seed init state, i.e. sampling.
         os.environ["PYTHONHASHSEED"] = str(random_seed)
         torch.manual_seed(random_seed)

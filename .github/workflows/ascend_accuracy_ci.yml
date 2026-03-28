@@ -3,16 +3,23 @@ on:
   pull_request:
     branches:
     - master
+    - feat/*
+    - dev/*
+    - release/*
     types: [ opened, synchronize, reopened ]
     paths-ignore:
     - 'CHANGELOG.md'
     - 'README.md'
+    - 'mojo_opset/backends/ttx/kernels/ilu/**'
+    - '.github/workflows/iluvatar_accuracy_ci.yml'
   push:
     branches:
     - master
     paths-ignore:
     - 'CHANGELOG.md'
     - 'README.md'
+    - 'mojo_opset/backends/ttx/kernels/ilu/**'
+    - '.github/workflows/iluvatar_accuracy_ci.yml'
   workflow_dispatch:
 env:
   MOJO_OPSET_PROXY: ${{ secrets.MOJO_OPSET_PROXY }}
@@ -33,45 +40,60 @@ jobs:
       options: --privileged=true --ipc=host --pid=host --user root --shm-size=300g --network=host
     steps:
       - uses: actions/checkout@v4
-    
+
+      - name: Configure git safe directory
+        run: |
+          git config --global --add safe.directory /__w/mojo_opset/mojo_opset
+  
       - name: Build And Install Wheel Artifact
         shell: bash
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
           pip install -U pip setuptools wheel build pytest-xdist
           pip install -e .\[npu\] --index-url https://bytedpypi.byted.org/simple
           python3 -m build .
           pip install dist/*.whl --force-reinstall --no-deps
-
       - name: test-Base
         shell: bash
         run: |
           echo "Running base tests..."
           pip install transformers==5.1.0
           python3 -m pytest tests/base
-    
+      - name: test-distributed
+        shell: bash
+        run: |
+          echo "Running distributed tests..."
+          torchrun --nproc_per_node=2 -m pytest -q tests/distributed/test_expert_parallel.py
       - name: test-TTX
         shell: bash
         run: |
           echo "Running ttx kernels tests..."
           unset ASCEND_VISIBLE_DEVICES
           unset ASCEND_RT_VISIBLE_DEVICES
-          echo "ASCEND_VISIBLE_DEVICES: $ASCEND_VISIBLE_DEVICES"
-          echo "ASCEND_RT_VISIBLE_DEVICES: $ASCEND_RT_VISIBLE_DEVICES"
-          MOJO_BACKEND="ttx" python3 -m pytest -n 8 tests/accuracy/operators/
+          MOJO_BACKEND="ttx" python3 -m pytest -n 8 tests/accuracy/operators/ \
+            --ignore=tests/accuracy/operators/test_compute_with_comm.py
           MOJO_BACKEND="ttx" python3 -m pytest -n 8 tests/accuracy/functions/
       - name: test-TTX-DETERMINISTIC
         shell: bash
         run: |
           echo "Running ttx kernels deterministic tests..."
-          MOJO_DETERMINISTIC=1 MOJO_BACKEND="ttx" python3 -m pytest tests/accuracy/functions/test_normalization.py 
+          MOJO_DETERMINISTIC=1 MOJO_BACKEND="ttx" python3 -m pytest tests/accuracy/functions/test_normalization.py
       - name: test-torch-npu
         shell: bash
         run: |
           echo "Running torch_npu base tests..."
           unset ASCEND_VISIBLE_DEVICES
           unset ASCEND_RT_VISIBLE_DEVICES
-          MOJO_BACKEND="torch_npu" python3 -m pytest -n 8 tests/accuracy/operators/
+          MOJO_BACKEND="torch_npu" python3 -m pytest -n 8 tests/accuracy/operators/ \
+            --ignore=tests/accuracy/operators/test_compute_with_comm.py
+      - name: test-compute-with-comm
+        shell: bash
+        run: |
+          echo "Running compute+comm distributed tests..."
+          unset ASCEND_VISIBLE_DEVICES
+          unset ASCEND_RT_VISIBLE_DEVICES
+          python3 -m pytest -v tests/accuracy/operators/test_compute_with_comm.py
       - name: test-TTX-graph
         shell: bash
         run: |
