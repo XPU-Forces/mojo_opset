@@ -31,6 +31,13 @@ jobs:
     name: Run ilu tests
     runs-on: ILU
     steps:
+      - name: Pre-cleanup workspace
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            corex:4.4.0 \
+            bash -c "rm -rf /workspace/.pytest_cache /workspace/dist /workspace/build /workspace/*.egg-info" || true
+
       - uses: actions/checkout@v4
 
       - name: Start container
@@ -70,4 +77,6 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: docker rm -f ${{ env.CONTAINER_NAME }} || true
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "rm -rf /workspace/.pytest_cache /workspace/dist /workspace/build /workspace/*.egg-info" || true
+          docker rm -f ${{ env.CONTAINER_NAME }} || true

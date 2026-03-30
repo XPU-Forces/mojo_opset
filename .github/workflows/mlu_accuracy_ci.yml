@@ -1,0 +1,66 @@
+name: Run test case on mlu
+on:
+  pull_request:
+    branches:
+    - master
+    types: [ opened, synchronize, reopened ]
+    paths-ignore:
+    - 'CHANGELOG.md'
+    - 'README.md'
+    - 'mojo_opset/backends/ttx/kernels/npu/**'
+    - 'mojo_opset/backends/ttx/kernels/ilu/**'
+    - 'mojo_opset/backends/torch_npu/**'
+    - '.github/workflows/ascend_accuracy_ci.yml'
+    - '.github/workflows/iluvatar_accuracy_ci.yml'
+  push:
+    branches:
+    - master
+    paths-ignore:
+    - 'CHANGELOG.md'
+    - 'README.md'
+    - 'mojo_opset/backends/ttx/kernels/npu/**'
+    - 'mojo_opset/backends/ttx/kernels/ilu/**'
+    - 'mojo_opset/backends/torch_npu/**'
+    - '.github/workflows/ascend_accuracy_ci.yml'
+    - '.github/workflows/iluvatar_accuracy_ci.yml'
+  workflow_dispatch:
+env:
+  MOJO_OPSET_PROXY: ${{ secrets.MOJO_OPSET_PROXY }}
+defaults:
+  run:
+    shell: bash
+jobs:
+  run-tests:
+    name: Run mlu tests
+    runs-on: MLU
+    container:
+      image: hub.byted.org/base/data.aml.mlu-th27-py310-base:55f18d2289b543237202ccfb95144d09
+      volumes:
+      - /usr/bin/cnmon:/usr/bin/cnmon
+      - /data01:/data01
+      - /data02:/data02
+      - /opt/tmp/sock:/opt/tmp/sock
+      - /opt/tmp/consul_agent:/opt/tmp/consul_agent
+      options: --privileged=true --ipc=host --pid=host --user root --network=host
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure git safe directory
+        run: |
+          git config --global --add safe.directory /__w/mojo_opset/mojo_opset
+
+      - name: Build And Install Wheel Artifact
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
+          pip install -U pip setuptools wheel build pytest-xdist
+          pip install -e .\[mlu\] --index-url https://bytedpypi.byted.org/simple
+          python3 -m build .
+          pip install dist/*.whl --force-reinstall --no-deps
+      - name: test-TTX
+        shell: bash
+        run: |
+          echo "Running ttx kernels tests on MLU..."
+          MOJO_BACKEND="ttx" python3 -m pytest -n 8 tests/accuracy/operators/ \
+            --ignore=tests/accuracy/operators/test_compute_with_comm.py
