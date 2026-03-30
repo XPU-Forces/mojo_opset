@@ -26,6 +26,7 @@ on:
   workflow_dispatch:
 env:
   MOJO_OPSET_PROXY: ${{ secrets.MOJO_OPSET_PROXY }}
+  CONTAINER_NAME: ci-mlu-${{ github.run_id }}
 defaults:
   run:
     shell: bash
@@ -33,34 +34,54 @@ jobs:
   run-tests:
     name: Run mlu tests
     runs-on: MLU
-    container:
-      image: hub.byted.org/base/data.aml.mlu-th27-py310-base:55f18d2289b543237202ccfb95144d09
-      volumes:
-      - /usr/bin/cnmon:/usr/bin/cnmon
-      - /data01:/data01
-      - /data02:/data02
-      - /opt/tmp/sock:/opt/tmp/sock
-      - /opt/tmp/consul_agent:/opt/tmp/consul_agent
-      options: --privileged=true --ipc=host --pid=host --user root
     steps:
+      - name: Pre-cleanup workspace
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            hub.byted.org/base/data.aml.mlu-th27-py310-base:55f18d2289b543237202ccfb95144d09 \
+            bash -c "find /workspace -mindepth 1 -delete" || true
+
       - uses: actions/checkout@v4
 
-      - name: Configure git safe directory
+      - name: Start container
         run: |
-          git config --global --add safe.directory /__w/mojo_opset/mojo_opset
+          docker run -d --rm \
+            --name ${{ env.CONTAINER_NAME }} \
+            --privileged --pid=host --ipc=host --network=host \
+            -v ${{ github.workspace }}:/workspace \
+            -v /usr/bin/cnmon:/usr/bin/cnmon \
+            -v /data01:/data01 \
+            -v /data02:/data02 \
+            -v /opt/tmp/sock:/opt/tmp/sock \
+            -v /opt/tmp/consul_agent:/opt/tmp/consul_agent \
+            hub.byted.org/base/data.aml.mlu-th27-py310-base:55f18d2289b543237202ccfb95144d09 \
+            tail -f /dev/null
 
       - name: Build And Install Wheel Artifact
-        shell: bash
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
-          pip install -U pip setuptools wheel build pytest-xdist
-          pip install -e .\[mlu\] --index-url https://bytedpypi.byted.org/simple
-          python3 -m build .
-          pip install dist/*.whl --force-reinstall --no-deps
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            cd /workspace
+            git config --global --add safe.directory /workspace
+            export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
+            pip install -U pip setuptools wheel build pytest-xdist
+            pip install -e .[mlu] --index-url https://bytedpypi.byted.org/simple
+            python3 -m build .
+            pip install dist/*.whl --force-reinstall --no-deps
+          "
+
       - name: test-TTX
-        shell: bash
         run: |
-          echo "Running ttx kernels tests on MLU..."
-          MOJO_BACKEND="ttx" python3 -m pytest -n 8 tests/accuracy/operators/ \
-            --ignore=tests/accuracy/operators/test_compute_with_comm.py
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            cd /workspace
+            echo 'Running ttx kernels tests on MLU...'
+            MOJO_BACKEND=ttx python3 -m pytest -n 8 tests/accuracy/operators/ \
+              --ignore=tests/accuracy/operators/test_compute_with_comm.py
+            MOJO_BACKEND=ttx python3 -m pytest -n 8 tests/accuracy/functions/
+          "
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "find /workspace -mindepth 1 -delete" || true
+          docker rm -f ${{ env.CONTAINER_NAME }} || true
