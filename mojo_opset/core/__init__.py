@@ -29,6 +29,9 @@ from .operators.attention import MojoPrefillGQA
 from .operators.attention import MojoPrefillMLA
 from .operators.attention import MojoPrefillNSA
 from .operators.attention import MojoSdpa
+from .operators.attention import MojoPagedPrefillSWA
+from .operators.attention import MojoPagedDecodeSWA
+from .operators.attention import MojoSWA
 
 """ kvcache """
 from .operators.kv_cache import MojoStoreMLAKVCache
@@ -114,6 +117,7 @@ from .functions.loss_function import MojoFusedLinearCrossEntropyFunction
 from .functions.loss_function import MojoFusedLinearCrossEntropyLoss
 from .functions.normalization import MojoRMSNormFunction
 from .functions.position_embedding import MojoRoPEFunction
+from .functions.attention import MojoSWAFunction
 
 # fmt: off
 __all__ = [
@@ -141,6 +145,9 @@ __all__ = [
     "MojoDecodeNSA",
     "MojoPagedDecodeNSA",
     "MojoSdpa",
+    "MojoPagedPrefillSWA",
+    "MojoPagedDecodeSWA",
+    "MojoSWA",
 
     "MojoStorePagedKVCache",
     "MojoStoreMLAKVCache",
@@ -149,11 +156,11 @@ __all__ = [
     "MojoLinear",
     "MojoGemmDequant",
     "MojoGroupGemm",
-    "MojoGemmAllReduce",
-    "MojoGemmAll2All",
-    "MojoAllGatherGemm",
-    "MojoGemmReduceScatter",
     "MojoQuantGroupLinearReduceSum",
+    "MojoAllGatherGemm",
+    "MojoGemmAll2All",
+    "MojoGemmAllReduce",
+    "MojoGemmReduceScatter",
 
     "MojoQuant",
     "MojoQuantIndexer",
@@ -205,5 +212,7 @@ __all__ = [
     "MojoLightningIndexer",
 
     "MojoFusedLinearCrossEntropyLoss",
+
+    "MojoSWAFunction",
 ]
 # fmt: on

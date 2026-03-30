@@ -65,6 +65,12 @@ sdpa_infer_impl = _get_kernel_impl(ttx_backend_module, "sdpa_infer_impl")
 sdpa_fwd_impl = _get_kernel_impl(ttx_backend_module, "sdpa_fwd_impl")
 sdpa_bwd_impl = _get_kernel_impl(ttx_backend_module, "sdpa_bwd_impl")
 
+swa_paged_prefill_impl = _get_kernel_impl(ttx_backend_module, "swa_paged_prefill_impl")
+swa_paged_decode_impl = _get_kernel_impl(ttx_backend_module, "swa_paged_decode_impl")
+swa_infer_impl = _get_kernel_impl(ttx_backend_module, "swa_infer_impl")
+swa_fwd_impl = _get_kernel_impl(ttx_backend_module, "swa_fwd_impl")
+swa_bwd_impl = _get_kernel_impl(ttx_backend_module, "swa_bwd_impl")
+
 diffusion_attention_fwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_attention_fwd_impl")
 diffusion_attention_bwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_attention_bwd_impl")
 
@@ -221,11 +227,11 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         seqlens_kv: torch.Tensor,
         block_tables: torch.Tensor,
         gqa_interleave: bool,
-        sm_scale: Optional[float] = None,
+        softmax_scale: Optional[float] = None,
         aux_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return paged_attention_prefill_impl(
-            q, key_cache, value_cache, cu_seqlens_q, seqlens_kv, block_tables, gqa_interleave, sm_scale, aux_mask
+            q, key_cache, value_cache, cu_seqlens_q, seqlens_kv, block_tables, gqa_interleave, softmax_scale, aux_mask
         )
 
     @paged_attention_prefill.register_fake
@@ -237,7 +243,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         seqlens_kv: torch.Tensor,
         block_tables: torch.Tensor,
         gqa_interleave: bool,
-        sm_scale: Optional[float] = None,
+        softmax_scale: Optional[float] = None,
         aux_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return torch.empty_like(q)
@@ -250,9 +256,9 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
         gqa_interleave: bool,
-        sm_scale: Optional[float] = None,
+        softmax_scale: Optional[float] = None,
     ) -> torch.Tensor:
-        return paged_attention_decode_impl(q, key_cache, value_cache, seqlens, block_tables, gqa_interleave, sm_scale)
+        return paged_attention_decode_impl(q, key_cache, value_cache, seqlens, block_tables, gqa_interleave, softmax_scale)
 
     @paged_attention_decode.register_fake
     def paged_attention_decode_fake(
@@ -262,7 +268,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
         gqa_interleave: bool,
-        sm_scale: Optional[float] = None,
+        softmax_scale: Optional[float] = None,
     ) -> torch.Tensor:
         return torch.empty_like(q)
 
@@ -726,6 +732,11 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
 
     # TODO(zhangjihang): Support compile mode
     sdpa_infer = sdpa_infer_impl
+    swa_paged_prefill = swa_paged_prefill_impl
+    swa_paged_decode = swa_paged_decode_impl
+    swa_infer = swa_infer_impl
+    swa_fwd = swa_fwd_impl
+    swa_bwd = swa_bwd_impl
 
 else:
     causal_conv1d_fwd = causal_conv1d_fwd_impl
@@ -758,6 +769,11 @@ else:
     sdpa_infer = sdpa_infer_impl
     sdpa_fwd = sdpa_fwd_impl
     sdpa_bwd = sdpa_bwd_impl
+    swa_paged_prefill = swa_paged_prefill_impl
+    swa_paged_decode = swa_paged_decode_impl
+    swa_infer = swa_infer_impl
+    swa_fwd = swa_fwd_impl
+    swa_bwd = swa_bwd_impl
     diffusion_attention_fwd = diffusion_attention_fwd_impl
     diffusion_attention_bwd = diffusion_attention_bwd_impl
     m_grouped_matmul = m_grouped_matmul_impl
