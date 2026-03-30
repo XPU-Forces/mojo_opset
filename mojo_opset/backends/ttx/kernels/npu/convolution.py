@@ -706,30 +706,41 @@ def causal_conv1d_update_kernel_bdt_fwd(
         x_b = tl.trans(x_b, (1, 0))
         w = tl.trans(w, (1, 0))
 
-        new_state_start_off = seq_len - state_len
-        t_start_off = ti * T_CHK_SIZE - (width - 1)
-        t_end_off = (ti + 1) * T_CHK_SIZE
-        if t_end_off >= new_state_start_off:
-            t_off = t_start_off - new_state_start_off
-            if t_off < -(width - 1):
-                # NOTE: In order to avoid use tl.maximum for negative offset,
-                #       we pre-compute a fix head tile size (ST_STORE_HEAD_TILE_SIZE)
-                #       to store the scene of negative address
-                x_new_h = tl.extract_slice(x_b, (-t_off, 0), (ST_STORE_HEAD_TILE_SIZE, D_CHK_SIZE), (1, 1))
-                x_new_h = tl.trans(x_new_h, (1, 0))
+        if seq_len < state_len:
+            if ti == 0:
+                # Keep the last `state_len` values of cat([conv_state, x]) in-kernel.
+                x_new_all = tl.extract_slice(x_b, (seq_len - 1, 0), (state_len, D_CHK_SIZE), (1, 1))
+                x_new_all = tl.trans(x_new_all, (1, 0))
                 nst_off_y0 = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)[:, None]
-                nst_off_y1_h = tl.arange(0, ST_STORE_HEAD_TILE_SIZE)[None, :]
-                nst_mask_h = (nst_off_y0 < dim) & (nst_off_y1_h >= 0) & (nst_off_y1_h < state_len)
-                block_ptr_h = bi * dim * state_len + nst_off_y0 * state_len + nst_off_y1_h
-                tl.store(conv_state_update_ptr + block_ptr_h, x_new_h, mask=nst_mask_h)
-            else:
-                x_new_s = tl.extract_slice(x_b, (width - 1, 0), (T_CHK_SIZE, D_CHK_SIZE), (1, 1))
-                x_new_s = tl.trans(x_new_s, (1, 0))
-                nst_off_y0 = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)[:, None]
-                nst_off_y1 = width - 1 + t_off + tl.arange(0, T_CHK_SIZE)[None, :]
-                nst_mask = (nst_off_y0 < dim) & (nst_off_y1 >= 0) & (nst_off_y1 < state_len)
+                nst_off_y1 = tl.arange(0, state_len)[None, :]
+                nst_mask = (nst_off_y0 < dim) & (nst_off_y1 < state_len)
                 block_ptr = bi * dim * state_len + nst_off_y0 * state_len + nst_off_y1
-                tl.store(conv_state_update_ptr + block_ptr, x_new_s, mask=nst_mask)
+                tl.store(conv_state_update_ptr + block_ptr, x_new_all, mask=nst_mask)
+        else:
+            new_state_start_off = seq_len - state_len
+            t_start_off = ti * T_CHK_SIZE - (width - 1)
+            t_end_off = (ti + 1) * T_CHK_SIZE
+            if t_end_off >= new_state_start_off:
+                t_off = t_start_off - new_state_start_off
+                if t_off < -(width - 1):
+                    # NOTE: In order to avoid use tl.maximum for negative offset,
+                    #       we pre-compute a fix head tile size (ST_STORE_HEAD_TILE_SIZE)
+                    #       to store the scene of negative address
+                    x_new_h = tl.extract_slice(x_b, (-t_off, 0), (ST_STORE_HEAD_TILE_SIZE, D_CHK_SIZE), (1, 1))
+                    x_new_h = tl.trans(x_new_h, (1, 0))
+                    nst_off_y0 = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)[:, None]
+                    nst_off_y1_h = tl.arange(0, ST_STORE_HEAD_TILE_SIZE)[None, :]
+                    nst_mask_h = (nst_off_y0 < dim) & (nst_off_y1_h >= 0) & (nst_off_y1_h < state_len)
+                    block_ptr_h = bi * dim * state_len + nst_off_y0 * state_len + nst_off_y1_h
+                    tl.store(conv_state_update_ptr + block_ptr_h, x_new_h, mask=nst_mask_h)
+                else:
+                    x_new_s = tl.extract_slice(x_b, (width - 1, 0), (T_CHK_SIZE, D_CHK_SIZE), (1, 1))
+                    x_new_s = tl.trans(x_new_s, (1, 0))
+                    nst_off_y0 = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)[:, None]
+                    nst_off_y1 = width - 1 + t_off + tl.arange(0, T_CHK_SIZE)[None, :]
+                    nst_mask = (nst_off_y0 < dim) & (nst_off_y1 >= 0) & (nst_off_y1 < state_len)
+                    block_ptr = bi * dim * state_len + nst_off_y0 * state_len + nst_off_y1
+                    tl.store(conv_state_update_ptr + block_ptr, x_new_s, mask=nst_mask)
 
         for owi in tl.range(0, width):
             new_x = tl.extract_slice(x_b, (owi, 0), (T_CHK_SIZE, D_CHK_SIZE), (1, 1))
@@ -771,11 +782,12 @@ def causal_conv1d_update_bdt_impl(
     if unsqueeze:
         x = x.unsqueeze(-1)
     batch, dim, seqlen = x.shape
+    state_len = conv_state.shape[-1]
     _, width = weight.shape
     out = torch.empty_like(x)
     NUM_CORES = get_num_cores()
 
-    T_CHK_SIZE = 256
+    T_CHK_SIZE = 8 if seqlen <= 8 else (16 if seqlen <= 16 else 256)
     D_CHK_SIZE = 16
 
     assert T_CHK_SIZE >= width
@@ -796,7 +808,7 @@ def causal_conv1d_update_bdt_impl(
         out,
         batch=int(batch),
         dim=int(dim),
-        state_len=int(conv_state.shape[-1]),
+        state_len=int(state_len),
         seq_len=int(x.shape[-1]),
         width=int(width),
         out_len=int(out.shape[-1]),
