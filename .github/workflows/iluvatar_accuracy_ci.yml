@@ -36,7 +36,7 @@ jobs:
           docker run --rm \
             -v ${{ github.workspace }}:/workspace \
             corex:4.4.0 \
-            bash -c "rm -rf /workspace/.pytest_cache /workspace/dist /workspace/build /workspace/*.egg-info" || true
+            bash -c "find /workspace -mindepth 1 -delete" || true
 
       - uses: actions/checkout@v4
 
@@ -78,5 +78,5 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          docker exec ${{ env.CONTAINER_NAME }} bash -c "rm -rf /workspace/.pytest_cache /workspace/dist /workspace/build /workspace/*.egg-info" || true
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "find /workspace -mindepth 1 -delete" || true
           docker rm -f ${{ env.CONTAINER_NAME }} || true
