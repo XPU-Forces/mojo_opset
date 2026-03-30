@@ -41,7 +41,7 @@ jobs:
       - /data02:/data02
       - /opt/tmp/sock:/opt/tmp/sock
       - /opt/tmp/consul_agent:/opt/tmp/consul_agent
-      options: --privileged=true --ipc=host --pid=host --user root --network=host
+      options: --privileged=true --ipc=host --pid=host --user root
     steps:
       - uses: actions/checkout@v4
 
