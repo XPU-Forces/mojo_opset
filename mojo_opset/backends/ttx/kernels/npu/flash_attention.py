@@ -7,6 +7,7 @@ import triton
 import triton.language as tl
 
 from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
+from mojo_opset.backends.ttx.kernels.utils import prepare_chunk_indices
 
 
 @triton.jit
@@ -107,7 +108,7 @@ def paged_prefill_kernel(
     stride_bt_block,
     stride_mask_m,
     stride_mask_n,
-    sm_scale,
+    softmax_scale,
     AUX_MASK_SIZE: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     NUM_Q_HEADS: tl.constexpr,
@@ -221,7 +222,7 @@ def paged_prefill_kernel(
                     q,
                     K_T_block_ptr,
                     V_block_ptr,
-                    sm_scale,
+                    softmax_scale,
                     mask,
                     HEAD_DIM,
                     BLOCK_SIZE_M,
@@ -247,15 +248,15 @@ def paged_attention_prefill_impl(
     seqlens_kv: Optional[torch.Tensor],
     block_tables: torch.Tensor,
     gqa_interleave: bool,
-    sm_scale: Optional[float] = None,
+    softmax_scale: Optional[float] = None,
     aux_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     _, num_q_heads, head_dim = q.shape
     _, num_kv_heads, block_size, _ = key_cache.shape
     batch_size = cu_seqlens_q.shape[0] - 1
 
-    if sm_scale is None:
-        sm_scale = 1.0 / math.sqrt(head_dim)
+    if softmax_scale is None:
+        softmax_scale = 1.0 / math.sqrt(head_dim)
 
     if aux_mask is None:
         aux_mask = torch.ones(1024, 1024 * 3, dtype=torch.bool).tril(1024).npu()
@@ -302,7 +303,7 @@ def paged_attention_prefill_impl(
         block_tables.stride(1),
         aux_mask.stride(0),
         aux_mask.stride(1),
-        sm_scale,
+        softmax_scale,
         aux_mask.shape[0],
         block_size,
         num_q_heads,
@@ -345,7 +346,7 @@ def paged_decode_kernel(
     stride_od,
     stride_bt_batch,
     stride_bt_block,
-    sm_scale,
+    softmax_scale,
     NUM_Q_HEADS: tl.constexpr,
     NUM_KV_HEADS: tl.constexpr,
     GQA_INTERLEAVE: tl.constexpr,
@@ -411,7 +412,7 @@ def paged_decode_kernel(
             k = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
             qk = tl.sum((q[None, :] * k).to(tl.float32), axis=1)
-            qk *= sm_scale
+            qk *= softmax_scale
             qk = tl.where(mask, qk, float("-inf"))
 
             m_j = tl.max(qk, axis=0)
@@ -452,7 +453,7 @@ def paged_attention_decode_impl(
     seqlens: torch.Tensor,
     block_tables: torch.Tensor,
     gqa_interleave: bool,
-    sm_scale: Optional[float] = None,
+    softmax_scale: Optional[float] = None,
 ) -> torch.Tensor:
     batch_size, num_q_heads, head_dim = q.shape
     num_total_blocks, num_kv_heads, block_size, head_dim_cache = key_cache.shape
@@ -461,8 +462,8 @@ def paged_attention_decode_impl(
     max_num_blocks_per_seq = block_tables.shape[1]
 
     assert head_dim == head_dim_cache
-    if sm_scale is None:
-        sm_scale = 1.0 / math.sqrt(head_dim)
+    if softmax_scale is None:
+        softmax_scale = 1.0 / math.sqrt(head_dim)
 
     o = torch.empty_like(q)
     
@@ -476,7 +477,7 @@ def paged_attention_decode_impl(
         value_cache,
         o,
         seqlens,
-        block_tables.to(torch.int32),
+        block_tables,
         batch_size,
         num_total_blocks,
         max_num_blocks_per_seq,
@@ -496,7 +497,7 @@ def paged_attention_decode_impl(
         o.stride(2),
         block_tables.stride(0),
         block_tables.stride(1),
-        sm_scale,
+        softmax_scale,
         num_q_heads,
         num_kv_heads,
         gqa_interleave,

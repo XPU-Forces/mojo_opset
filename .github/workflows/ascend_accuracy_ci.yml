@@ -3,16 +3,23 @@ on:
   pull_request:
     branches:
     - master
+    - feat/*
+    - dev/*
+    - release/*
     types: [ opened, synchronize, reopened ]
     paths-ignore:
     - 'CHANGELOG.md'
     - 'README.md'
+    - 'mojo_opset/backends/ttx/kernels/ilu/**'
+    - '.github/workflows/iluvatar_accuracy_ci.yml'
   push:
     branches:
     - master
     paths-ignore:
     - 'CHANGELOG.md'
     - 'README.md'
+    - 'mojo_opset/backends/ttx/kernels/ilu/**'
+    - '.github/workflows/iluvatar_accuracy_ci.yml'
   workflow_dispatch:
 env:
   MOJO_OPSET_PROXY: ${{ secrets.MOJO_OPSET_PROXY }}
@@ -33,23 +40,31 @@ jobs:
       options: --privileged=true --ipc=host --pid=host --user root --shm-size=300g --network=host
     steps:
       - uses: actions/checkout@v4
-    
+
+      - name: Configure git safe directory
+        run: |
+          git config --global --add safe.directory /__w/mojo_opset/mojo_opset
+  
       - name: Build And Install Wheel Artifact
         shell: bash
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
           pip install -U pip setuptools wheel build pytest-xdist
           pip install -e .\[npu\] --index-url https://bytedpypi.byted.org/simple
           python3 -m build .
           pip install dist/*.whl --force-reinstall --no-deps
-
       - name: test-Base
         shell: bash
         run: |
           echo "Running base tests..."
           pip install transformers==5.1.0
           python3 -m pytest tests/base
-    
+      - name: test-distributed
+        shell: bash
+        run: |
+          echo "Running distributed tests..."
+          torchrun --nproc_per_node=2 -m pytest -q tests/distributed/test_expert_parallel.py
       - name: test-TTX
         shell: bash
         run: |

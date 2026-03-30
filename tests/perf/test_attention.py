@@ -1,4 +1,5 @@
 import math
+
 from typing import Optional
 
 import pytest
@@ -7,6 +8,9 @@ import torch
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoSdpa
+from mojo_opset import MojoPagedPrefillSWA
+from mojo_opset import MojoPagedDecodeSWA
+from mojo_opset import MojoSWA
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
@@ -90,7 +94,7 @@ def test_paged_decode_gqa(
     gqa_layout: str,
 ):
     head_dim = query.shape[-1]
-    sm_scale = 1.0 / math.sqrt(head_dim)
+    softmax_scale = 1.0 / math.sqrt(head_dim)
 
     paged_attn_decode = MojoPagedDecodeGQA(
         is_causal=True,
@@ -104,7 +108,7 @@ def test_paged_decode_gqa(
             v_cache,
             seqlens,
             block_tables,
-            softmax_scale=sm_scale,
+            softmax_scale=softmax_scale,
         )
     )
 
@@ -178,7 +182,7 @@ def generate_paged_prefill_data(
     return query, k_cache, v_cache, cu_seqlens_q, block_tables, None if kv_cache_lens is None else kv_lens
 
 
-test_configs = [
+test_configs_prefill = [
     (2, 16, 4, 128, 1024, 0, 32, torch.bfloat16, "M_BF16"),
     (2, 16, 4, 96, 1024, 0, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (2, 8, 1, 128, 4096, 8192, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
@@ -201,7 +205,7 @@ test_configs = [
             ),
             id=ID,
         )
-        for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs
+        for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_prefill
     ],
 )
 @pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
@@ -222,7 +226,7 @@ def test_paged_prefill_gqa(
     )
 
     head_dim = query.shape[-1]
-    sm_scale = 1.0 / math.sqrt(head_dim)
+    softmax_scale = 1.0 / math.sqrt(head_dim)
 
     perf(  # noqa: F821
         lambda: paged_attn_prefill(
@@ -231,7 +235,7 @@ def test_paged_prefill_gqa(
             v_cache,
             cu_seqlens_q,
             block_tables,
-            softmax_scale=sm_scale,
+            softmax_scale=softmax_scale,
             seqlens_kv=seqlens_kv,
         )
     )
@@ -277,3 +281,226 @@ def test_sdpa(
         scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
     )
     perf(lambda: diffusion_attn(query, key, value, blockwise_diffusion_attn_mask))  # noqa: F821
+
+
+test_configs_swa_prefill = [
+    (2, 16, 4, 128, 1024, 0, 32, torch.bfloat16, "M_BF16"),
+    (2, 16, 4, 96, 1024, 0, 128, torch.bfloat16, "M_BF16_PADDIM"),
+    (2, 16, 4, 128, 1024, 8192, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
+]
+
+
+@pytest.mark.parametrize(
+    "query, k_cache, v_cache, cu_seqlens_q, block_tables, seqlens_kv",
+    [
+        pytest.param(
+            *generate_paged_prefill_data(
+                batch_size=B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_q_len=Q_LEN,
+                max_kv_computed_len=KV_COMPUTED_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            id=ID,
+        )
+        for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_swa_prefill
+    ],
+)
+@pytest.mark.parametrize("gqa_layout, global_window, local_window", [
+    ("AABB", 4, 1023),
+])
+@auto_switch_platform(set_perf=True)
+@bypass_not_implemented
+def test_paged_prefill_swa(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    block_tables: torch.Tensor,
+    gqa_layout: str,
+    seqlens_kv: Optional[torch.Tensor],
+    global_window: int,
+    local_window: int,
+):
+    swa_prefill = MojoPagedPrefillSWA(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+        global_window_size=global_window,
+        local_window_size=local_window,
+    )
+
+    head_dim = query.shape[-1]
+    softmax_scale = 1.0 / math.sqrt(head_dim)
+
+    perf(  # noqa: F821
+        lambda: swa_prefill(
+            query,
+            k_cache,
+            v_cache,
+            cu_seqlens_q,
+            block_tables,
+            softmax_scale=softmax_scale,
+            seqlens_kv=seqlens_kv,
+        )
+    )
+
+
+
+
+test_configs_swa_decode = [
+    (8, 16, 4, 128, 1024, 32, torch.bfloat16, "M_BF16"),
+    (8, 16, 4, 96, 1024, 128, torch.bfloat16, "M_BF16_PADDIM"),
+    (8, 16, 4, 128, 8192, 128, torch.bfloat16, "M_BF16_LONG"),
+]
+
+
+@pytest.mark.parametrize(
+    "query, k_cache, v_cache, seqlens, block_tables",
+    [
+        pytest.param(
+            *generate_paged_decode_data(
+                batch_size=B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_seq_len=S_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            id=ID,
+        )
+        for B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, ID in test_configs_swa_decode
+    ],
+)
+@pytest.mark.parametrize("gqa_layout, global_window, local_window", [
+    ("AABB", 4, 1023),
+])
+@auto_switch_platform(set_perf=True)
+@bypass_not_implemented
+def test_paged_decode_swa(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    seqlens: torch.Tensor,
+    block_tables: torch.Tensor,
+    gqa_layout: str,
+    global_window: int,
+    local_window: int,
+):
+    head_dim = query.shape[-1]
+    softmax_scale = 1.0 / math.sqrt(head_dim)
+
+    swa_decode = MojoPagedDecodeSWA(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+        global_window_size=global_window,
+        local_window_size=local_window,
+    )
+
+    perf(  # noqa: F821
+        lambda: swa_decode(
+            query,
+            k_cache,
+            v_cache,
+            seqlens,
+            block_tables,
+            softmax_scale=softmax_scale,
+        )
+    )
+
+
+def generate_sdpa_data(
+    batch_size: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    max_q_len: int,
+    max_kv_computed_len: int,
+    dtype: torch.dtype,
+):
+    q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
+    q_lens = torch.clamp(q_lens, min=1)
+    cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0)])
+
+    if max_kv_computed_len <= 0:
+        kv_cache_lens = None
+        kv_lens = q_lens
+    else:
+        kv_cache_lens = torch.randint(max_kv_computed_len // 2, max_kv_computed_len, (batch_size,), dtype=torch.int32)
+        kv_lens = q_lens + kv_cache_lens
+    cu_seqlens_kv = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0)])
+
+    total_q_tokens = cu_seqlens_q[-1].item()
+    total_kv_tokens = cu_seqlens_kv[-1].item()
+
+    query = torch.randn(total_q_tokens, num_q_heads, head_dim, dtype=dtype)
+    key = torch.randn(total_kv_tokens, num_kv_heads, head_dim, dtype=dtype)
+    value = torch.randn(total_kv_tokens, num_kv_heads, head_dim, dtype=dtype)
+
+    return query, key, value, cu_seqlens_q, cu_seqlens_kv
+
+test_configs_swa_infer = [
+    (2, 16, 4, 128, 1024, 0, torch.bfloat16, "M_BF16"),
+    (2, 16, 4, 96, 1024, 0, torch.bfloat16, "M_BF16_PADDIM"),
+    (2, 16, 4, 128, 1024, 8192, torch.bfloat16, "M_BF16_WITH_CACHE"),
+]
+
+
+@pytest.mark.parametrize(
+    "query, key, value, cu_seqlens_q, cu_seqlens_kv",
+    [
+        pytest.param(
+            *generate_sdpa_data(
+                batch_size=B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_q_len=Q_LEN,
+                max_kv_computed_len=KV_COMPUTED_LEN,
+                dtype=dtype,
+            ),
+            id=ID,
+        )
+        for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, dtype, ID in test_configs_swa_infer
+    ],
+)
+@pytest.mark.parametrize("gqa_layout, global_window, local_window", [
+    ("AABB", 4, 1023),
+])
+@auto_switch_platform(set_perf=True)
+@bypass_not_implemented
+def test_swa_infer(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_kv: torch.Tensor,
+    gqa_layout: str,
+    global_window: int,
+    local_window: int,
+):
+    swa_infer = MojoSWA(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+        global_window_size=global_window,
+        local_window_size=local_window,
+    )
+
+    head_dim = query.shape[-1]
+    softmax_scale = 1.0 / math.sqrt(head_dim)
+
+    perf(  # noqa: F821
+        lambda: swa_infer(
+            query,
+            key,
+            value,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            softmax_scale=softmax_scale,
+        )
+    )
+
+
