@@ -1,8 +1,9 @@
 import pytest
 import torch
+import random
 
 from mojo_opset.utils.platform import get_platform
-from tests.utils import bypass_not_implemented
+from tests.utils import auto_switch_platform, bypass_not_implemented
 
 from mojo_opset import MojoDequant
 from mojo_opset import MojoQuant
