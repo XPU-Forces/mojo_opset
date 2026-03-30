@@ -11,11 +11,24 @@ from mojo_opset.backends.ttx.kernels import join_prob_reject_sampling
 from mojo_opset.backends.ttx.kernels import reject_sampling
 from mojo_opset.backends.ttx.kernels import top_p_filter
 from mojo_opset.backends.ttx.kernels import top_p_sampling
+from mojo_opset.backends.ttx.kernels import top_k_sampling
 from mojo_opset.core import MojoApplyPenaltiesTempurate
 from mojo_opset.core import MojoJoinProbRejectSampling
 from mojo_opset.core import MojoRejectSampling
 from mojo_opset.core import MojoTopPFilter
 from mojo_opset.core import MojoTopPSampling
+from mojo_opset.core import MojoTopKSampling
+
+class TTXTopKSampling(MojoTopKSampling):
+    supported_platforms_list = ["npu"]
+    
+    def forward(self, logits: torch.Tensor) -> Tuple[Any]:
+        return top_k_sampling(
+            logits=logits,
+            top_k=self.top_k,
+            filter_value=self.filter_value,
+            min_tokens_to_keep=self.min_tokens_to_keep,
+        )
 
 
 class TTXTopPSampling(MojoTopPSampling):

@@ -84,6 +84,10 @@ top_p_filter_impl = _get_kernel_impl(ttx_backend_module, "top_p_filter_impl")
 top_p_sampling_impl = _get_kernel_impl(ttx_backend_module, "top_p_sampling_impl")
 
 
+top_k_sampling_impl = getattr(ttx_backend_module, "top_k_sampling_impl")
+
+top_k_sampling_impl = getattr(ttx_backend_module, "top_k_sampling_impl")
+
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
 
@@ -724,3 +728,4 @@ else:
     reject_sampling = reject_sampling_impl
     top_p_filter = top_p_filter_impl
     top_p_sampling = top_p_sampling_impl
+    top_k_sampling = top_k_sampling_impl

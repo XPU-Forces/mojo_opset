@@ -35,6 +35,7 @@ from .sdpa import sdpa_infer_impl
 from .silu import silu_bwd_impl
 from .silu import silu_fwd_impl
 from .store_lowrank import store_label_cache_infer_impl
+from .sample import top_k_sampling_impl
 from .swiglu import swiglu_bwd_impl
 from .swiglu import swiglu_fwd_impl
 from .swa import swa_paged_prefill_impl
@@ -83,6 +84,7 @@ __all__ = [
     "reject_sampling_impl",
     "top_p_filter_impl",
     "top_p_sampling_impl",
+    "top_k_sampling_impl",
     "swa_paged_prefill_impl",
     "swa_paged_decode_impl",
     "swa_infer_impl",

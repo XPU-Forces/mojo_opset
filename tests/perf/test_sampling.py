@@ -4,8 +4,25 @@ import torch
 from mojo_opset import MojoJoinProbRejectSampling
 from mojo_opset import MojoRejectSampling
 from mojo_opset import MojoTopPFilter
+from mojo_opset import MojoTopKSampling
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
+
+@pytest.mark.parametrize(
+    "logits, topk, min_tokens_to_keep",
+    [
+        (torch.randn(120, 151936), 20, 1),
+        (torch.randn(15, 155136), 50, 1),
+        (torch.randn(18, 155136), 100, 1),
+    ],
+)
+@auto_switch_platform(set_perf=True)
+@bypass_not_implemented
+def test_topk_sampling(logits, topk, min_tokens_to_keep):
+    top_k_sampling = MojoTopKSampling(top_k=topk, min_tokens_to_keep=min_tokens_to_keep)
+    top_k_sampling_ref = MojoTopKSampling._registry.get("torch")(top_k=topk, min_tokens_to_keep=min_tokens_to_keep)
+
+    perf(lambda: top_k_sampling(logits))  # noqa: F821
 
 
 @pytest.mark.parametrize(
