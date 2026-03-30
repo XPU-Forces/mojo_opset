@@ -28,17 +28,17 @@ def _get_autotune_configs():
     return [
         # Large tiles — best for M≥2048, K≥4096
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 512}),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 512}, **_vmix),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 512}, _vmix),
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 256}),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 256}, **_vmix),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 256}, _vmix),
         # Medium tiles — vmix2 gives +17% here at M=4096 by interleaving
         # vector epilogue (scale, bias, cast) with cube drain
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 256}),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 256}, **_vmix),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 256}, _vmix),
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 512}),
         # Small M tiles
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 256}, **_vmix),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256}, **_vmix),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 256}, _vmix),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256}, _vmix),
     ]
 
 
