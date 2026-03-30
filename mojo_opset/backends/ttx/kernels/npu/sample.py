@@ -12,9 +12,6 @@ from triton.language.standard import _log2, zeros_like
 # triton_patch_topk = importlib.import_module("triton.triton_patch.language.standard").topk
 # triton_patch_sort = importlib.import_module("triton.triton_patch.language.standard").sort_impl
 
-
-# _MAX_ASCEND_TRITON_TOPK = 256
-
 # @triton.jit
 # def _float_to_sortable_int(x):
 #     if x.dtype == tl.float32:
@@ -331,6 +328,8 @@ def _compare_and_swap(x, ids, flip, i: core.constexpr, n_dims: core.constexpr):
 
     return ret.to(x.dtype, bitcast=True), ret_idx.to(ids.dtype, bitcast=True)
 
+# We do not use triton_patch.language.standard sort_impl / topk here: that stack only supports signed-number
+# sorting and only descending order; this file keeps a custom bitonic argsort with packed keys instead.
 @triton.jit
 def _bitonic_merge(
     x, ids, stage: core.constexpr, order: core.constexpr, n_dims: core.constexpr
