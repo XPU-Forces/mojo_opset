@@ -76,8 +76,7 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | MoE         | MojoMoEDispatch             | ✅                | TBD           |
 | MoE         | MojoExperts                 | ✅                | TBD           |
 | MoE         | MojoMoECombine              | ✅                | TBD           |
-| Sampling    | MojoTopKSampling            | TBD               | TBD           |
-| Sampling    | MojoTopPSampling            | ✅                | ✅             |
+| Sampling    | MojoTopKSampling            | ✅                | ✅             |
 | Sampling    | MojoTopPSampling            | ✅                | ✅             |
 | Sampling    | MojoRejectSampling          | ✅                | ✅             |
 | Sampling    | MojoApplyPenaltiesTempurate | ✅                | ✅             |
