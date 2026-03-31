@@ -535,6 +535,7 @@ class MojoGroupQuantGemmMoE(MojoOperator):
         batch_size, top_k, hidden_dim = input.shape
         route_count = batch_size * top_k
         token_count_i64 = _validate_moe_token_count(token_count, route_count)
+        # TODO(liuyuan): Refactor this implementation to first perform integer tiled matrix computation, then execute dequantization using the quantization parameters (scale and bias) of the weight, and finally run dequantization with the quantization parameters of the input.
         input_fp = _dequant_grouped_input(input, input_scale, self.quant_block_size).reshape(route_count, hidden_dim)
 
         outputs = []
