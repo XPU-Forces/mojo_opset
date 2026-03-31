@@ -44,8 +44,9 @@ if [ ! -d "$MODEL_PATH" ]; then
 fi
 
 echo "Running inference with model at: ${MODEL_PATH}"
-# Run the inference script using absolute path
-python3 "${PROJECT_ROOT}/examples/wan2_2_patch.py" --ckpt_dir "${MODEL_PATH}"
+# Run the inference script as a module from project root
+cd "$PROJECT_ROOT" || exit 1
+python3 -m examples.dit_inference --ckpt_dir "${MODEL_PATH}"
 
 # Cleanup
 pkill -9 python*

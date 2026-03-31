@@ -1,6 +1,7 @@
 import argparse
-import sys
 import random
+import sys
+
 import torch
 
 from mojo_opset.utils.platform import get_platform
@@ -8,10 +9,8 @@ from mojo_opset.utils.platform import get_platform
 if get_platform() == "npu":
     from torch_npu.contrib import transfer_to_npu
 
-# wan
-from wan.configs import WAN_CONFIGS
 from generate import generate
-
+from wan.configs import WAN_CONFIGS
 
 EXAMPLE_PROMPT = {
     "ti2v-5B": {
@@ -30,7 +29,6 @@ SIZE_CONFIGS = {
 
 
 def _validate_args(args):
-    # Basic check
     assert args.ckpt_dir is not None, "Please specify the checkpoint directory."
     assert args.task in EXAMPLE_PROMPT, f"Unsupport task: {args.task}"
 
@@ -55,14 +53,13 @@ def _validate_args(args):
 
     args.base_seed = args.base_seed if args.base_seed >= 0 else random.randint(0, sys.maxsize)
 
-    # Size check
     assert args.size in SUPPORTED_SIZES[args.task], (
         f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
     )
 
 
 def _parse_args():
-    parser = argparse.ArgumentParser(description="Generate a image or video from a text prompt or image using Wan")
+    parser = argparse.ArgumentParser(description="Generate an image or video from a text prompt or image using Wan")
     parser.add_argument(
         "--task", type=str, default="ti2v-5B", choices=list(WAN_CONFIGS.keys()), help="The task to run."
     )
@@ -124,10 +121,14 @@ def _parse_args():
     return args
 
 
-if __name__ == "__main__":
+def main():
     from mojo_opset.utils.patching import apply_mojo_to_wan2_2
 
     apply_mojo_to_wan2_2()
 
     args = _parse_args()
     generate(args)
+
+
+if __name__ == "__main__":
+    main()
