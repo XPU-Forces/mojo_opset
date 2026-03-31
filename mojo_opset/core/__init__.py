@@ -97,6 +97,8 @@ from .operators.normalization import MojoGroupRMSNorm
 from .operators.normalization import MojoGroupLayerNorm
 
 """ position_embedding """
+from .operators.position_embedding import MojoGeneratePosEmbs
+from .operators.position_embedding import MojoApplyRoPE
 from .operators.position_embedding import MojoNormRoPE
 from .operators.position_embedding import MojoNormRoPEStoreKV
 from .operators.position_embedding import MojoRoPE
@@ -206,6 +208,8 @@ __all__ = [
     "MojoResidualAddLayerNormQuant",
     "MojoResidualAddNormCast",
 
+    "MojoGeneratePosEmbs",
+    "MojoApplyRoPE",
     "MojoRoPE",
     "MojoRoPEStoreKV",
     "MojoNormRoPE",

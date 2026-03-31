@@ -6,6 +6,59 @@ import torch
 from ..operator import MojoOperator
 
 
+class MojoGeneratePosEmbs(MojoOperator):
+    def __init__(self, rope_theta: float = 10000.0, head_dim: int = 1024, device: str = "cpu"):
+        super().__init__()
+        self.rope_theta = rope_theta
+        inv_freq = 1.0 / (
+            self.rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)
+        )
+        self.attention_scaling = 1.0
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def forward(
+        self,
+        position_ids: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        freqs = position_ids[..., None] * self.inv_freq[None, :]
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos() * self.attention_scaling
+        sin = emb.sin() * self.attention_scaling
+        return cos, sin
+
+
+class MojoApplyRoPE(MojoOperator):
+
+    @staticmethod
+    def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        rope_dim = cos.shape[-1]
+        assert rope_dim < q.shape[-1], "rope_dim must be less than q.shape[-1]"
+        nope_dim = q.shape[-1] - rope_dim
+
+        if nope_dim > 0:
+            q_nope, q = torch.split(q, [nope_dim, rope_dim], dim=-1)
+            k_nope, k = torch.split(k, [nope_dim, rope_dim], dim=-1)
+
+        q_rot = (q * cos + self._rotate_half(q) * sin).to(q.dtype)
+        k_rot = (k * cos + self._rotate_half(k) * sin).to(k.dtype)
+
+        if nope_dim > 0:
+            q_rot = torch.cat([q_nope, q_rot], dim=-1)
+            k_rot = torch.cat([k_nope, k_rot], dim=-1)
+
+        return q_rot, k_rot
+
 def generate_pos_embs(
     sin: torch.Tensor,
     cos: torch.Tensor,
