@@ -5,8 +5,8 @@ import torch
 from torch.distributed.tensor import DTensor
 
 from mojo_opset.backends.ttx.kernels import m_grouped_matmul
-from mojo_opset.backends.ttx.kernels.npu.int8_gemm import int8_gemm_dequant_impl
-from mojo_opset.backends.ttx.kernels.npu.int8_gemm import prepare_b
+from mojo_opset.backends.ttx.kernels import int8_gemm_dequant
+from mojo_opset.backends.ttx.kernels import prepare_b
 from mojo_opset.core import MojoGemmDequant
 from mojo_opset.core import MojoGroupGemm
 
@@ -42,7 +42,7 @@ class TTXGemmDequant(MojoGemmDequant):
         if not input.is_contiguous():
             input = input.contiguous()
 
-        return int8_gemm_dequant_impl(
+        return int8_gemm_dequant(
             input, bt,
             input_scale.flatten().float(),
             weight_scale.flatten().float(),

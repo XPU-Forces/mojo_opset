@@ -7,6 +7,7 @@ from typing import Tuple
 import torch
 
 from mojo_opset.utils.platform import get_platform
+from mojo_opset_dev.mojo_opset.mojo_opset.backends.ttx.kernels.npu.int8_gemm import int8_gemm_dequant_impl
 
 platform = get_platform()
 
@@ -72,6 +73,9 @@ diffusion_attention_bwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_a
 
 m_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "m_grouped_matmul_impl")
 k_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "k_grouped_matmul_impl")
+
+int8_gemm_dequant_impl = _get_kernel_impl(ttx_backend_module, "int8_gemm_dequant_impl")
+prepare_b_impl = _get_kernel_impl(ttx_backend_module, "prepare_b_impl")
 
 store_paged_kv_impl = _get_kernel_impl(ttx_backend_module, "store_paged_kv_impl")
 
@@ -636,6 +640,58 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         return torch.empty_like(C)
 
     # ====================================
+    # Register int8 gemm dequant
+    # ====================================
+    @torch.library.custom_op("ttx::int8_gemm_dequant", mutates_args={})
+    def int8_gemm_dequant(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        input_scale: torch.Tensor,
+        weight_scale: torch.Tensor,
+        bias: torch.Tensor,
+        M: int,
+        N: int,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return int8_gemm_dequant_impl(
+            a,
+            b,
+            input_scale,
+            weight_scale,
+            bias,
+            M,
+            N,
+            output_dtype,
+        )
+
+    @int8_gemm_dequant.register_fake
+    def int8_gemm_dequant_fake(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        input_scale: torch.Tensor,
+        weight_scale: torch.Tensor,
+        bias: torch.Tensor,
+        M: int,
+        N: int,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return torch.zeros((M, N), dtype=output_dtype, device=a.device)
+
+    @torch.library.custom_op("ttx::prepare_b", mutates_args={})
+    def prepare_b(
+        b: torch.Tensor,
+    ) -> torch.Tensor:
+        return prepare_b_impl(
+            b,
+        )
+
+    @prepare_b.register_fake
+    def prepare_b_fake(
+        b: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.empty_like(b.T)
+
+    # ====================================
     # Register Store KV
     # ====================================
 
@@ -717,6 +773,8 @@ else:
     diffusion_attention_bwd = diffusion_attention_bwd_impl
     m_grouped_matmul = m_grouped_matmul_impl
     k_grouped_matmul = k_grouped_matmul_impl
+    int8_gemm_dequant = int8_gemm_dequant_impl
+    prepare_b = prepare_b_impl
     store_paged_kv = store_paged_kv_impl
     store_label_cache_infer = store_label_cache_infer_impl
     fused_penalties_temp = fused_penalties_temp_impl
@@ -724,4 +782,3 @@ else:
     reject_sampling = reject_sampling_impl
     top_p_filter = top_p_filter_impl
     top_p_sampling = top_p_sampling_impl
-    top_k_sampling = top_k_sampling_impl
