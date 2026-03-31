@@ -14,6 +14,8 @@ from mojo_opset import MojoResidualAddRMSNorm
 from mojo_opset import MojoResidualAddRMSNormQuant
 from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoRMSNormQuant
+from mojo_opset import MojoGroupRMSNorm
+from mojo_opset import MojoGroupLayerNorm
 
 torch.manual_seed(43)
 
@@ -98,6 +100,90 @@ def test_layernorm(shape, dtype, eps):
     else:
         atol, rtol = 5e-2, 1e-2
     layernorm.forward_diff_with(layernorm_ref, x, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize(
+    "bsz,group_dims,hidden_size",
+    [
+        (1024, (16, 4), 96),
+        (798, (16, 4, 8, 2), 128),
+        (8000, (48, 8, 16, 4), 128),
+    ],
+)
+@pytest.mark.parametrize("dtype", dtypes)
+@pytest.mark.parametrize("eps", [1e-5])
+@bypass_not_implemented
+def test_grouprmsnorm(bsz, group_dims, hidden_size, dtype, eps):
+    x = torch.randn(size=(bsz, sum(group_dims), hidden_size), dtype=dtype)
+    x_groups = torch.split(x, group_dims, dim=1)
+    weight = torch.randn(size=(len(group_dims), hidden_size), dtype=dtype)
+    rmsnorm = MojoGroupRMSNorm(num_groups = len(group_dims), eps=eps, norm_size=hidden_size, device=x.device, dtype=x.dtype)
+
+    rmsnorm_ref = (
+        MojoGroupRMSNorm._registry.get("torch")(
+            num_groups = len(group_dims), 
+            eps=eps,
+            norm_size=hidden_size,
+        )
+        .to(x.device)
+        .to(weight.dtype)
+    )
+
+    with torch.no_grad():
+        rmsnorm.weight.copy_(weight.to(torch.float32))
+        rmsnorm_ref.weight.copy_(weight.to(torch.float32))
+
+    if x.dtype == torch.float32:
+        atol, rtol = 1e-5, 1e-6
+    else:
+        atol, rtol = 3e-2, 6e-3
+
+    # Placeholder for ttx implementation
+    x_normed_outputs = rmsnorm(x_groups)
+    # rmsnorm.forward_diff_with(rmsnorm_ref, x_groups, atol=atol, rtol=rtol)
+
+@pytest.mark.parametrize(
+    "bsz,group_dims,hidden_size",
+    [
+        (1024, (16, 4), 96),
+        (798, (16, 4, 8, 2), 128),
+        (8000, (48, 8, 16, 4), 128),
+    ],
+)
+@pytest.mark.parametrize("dtype", dtypes)
+@pytest.mark.parametrize("eps", [1e-5])
+@bypass_not_implemented
+def test_grouplayernorm(bsz, group_dims, hidden_size, dtype, eps):
+    x = torch.randn(size=(bsz, sum(group_dims), hidden_size), dtype=dtype)
+    x_groups = torch.split(x, group_dims, dim=1)
+    weight = torch.randn(size=(len(group_dims), hidden_size), dtype=dtype)
+    bias = torch.randn(size=(len(group_dims), hidden_size), dtype=dtype)
+    # Placeholder for ttx implementation
+    layernorm = MojoGroupLayerNorm(num_groups = len(group_dims), eps=eps, norm_size=hidden_size, device=x.device, dtype=x.dtype)
+
+    layernorm_ref = (
+        MojoGroupLayerNorm._registry.get("torch")(
+            num_groups = len(group_dims), 
+            eps=eps,
+            norm_size=hidden_size,
+        )
+        .to(x.device)
+        .to(weight.dtype)
+    )
+
+    with torch.no_grad():
+        layernorm.weight.copy_(weight.to(torch.float32))
+        layernorm_ref.weight.copy_(weight.to(torch.float32))
+        layernorm.bias.copy_(bias.to(torch.float32))
+        layernorm_ref.bias.copy_(bias.to(torch.float32))
+
+    if x.dtype == torch.float32:
+        atol, rtol = 1e-5, 1e-6
+    else:
+        atol, rtol = 3e-2, 6e-3
+    x_normed_outputs = layernorm(x_groups)
+    # layernorm.forward_diff_with(layernorm_ref, x_groups, atol=atol, rtol=rtol)
+
 
 
 @pytest.mark.parametrize(

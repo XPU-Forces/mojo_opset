@@ -99,6 +99,52 @@ class MojoRMSNorm(MojoOperator):
         return f"{self.norm_size=}, {self.variance_epsilon=}".replace("self.", "")
 
 
+class MojoGroupRMSNorm(MojoOperator):
+    def __init__(self, num_groups, norm_size, eps, elementwise_affine=True, **kwargs):
+        super().__init__(**kwargs)
+        self.num_groups = num_groups
+        self.norm_size = norm_size
+        self.elementwise_affine = elementwise_affine
+        if elementwise_affine:
+            self.weight = torch.nn.Parameter(torch.empty((num_groups, norm_size), **self.tensor_factory_kwargs))
+        else:
+            self.weight = None
+        self.variance_epsilon = eps
+
+    def forward(self, input_groups):
+        # Note: input_groups is a list of tensors, each tensor has compatible shapes for norm
+        output_groups = []
+        for group_id in range(self.num_groups):
+            output_groups.append(F.rms_norm(input_groups[group_id], (self.norm_size,), weight=self.weight[group_id], eps=self.variance_epsilon))
+        return output_groups
+
+    def extra_expr(self) -> str:
+        return f"{self.num_groups=}, {self.norm_size=}, {self.variance_epsilon=} {self.elementwise_affine=}".replace("self.", "")
+
+class MojoGroupLayerNorm(MojoOperator):
+    def __init__(self, num_groups, norm_size, eps, elementwise_affine=True, **kwargs):
+        super().__init__(**kwargs)
+        self.num_groups = num_groups
+        self.norm_size = norm_size
+        self.elementwise_affine = elementwise_affine
+        if elementwise_affine:
+            self.weight = torch.nn.Parameter(torch.empty((num_groups, norm_size), **self.tensor_factory_kwargs))
+            self.bias = torch.nn.Parameter(torch.empty((num_groups, norm_size), **self.tensor_factory_kwargs))
+        else:
+            self.weight = None
+            self.bias = None
+        self.variance_epsilon = eps
+
+    def forward(self, input_groups):
+        # Note: input_groups is a list of tensors, each tensor has compatible shapes for norm
+        output_groups = []
+        for group_id in range(self.num_groups):
+            output_groups.append(F.layer_norm(input_groups[group_id], (self.norm_size,), weight=self.weight[group_id], bias=self.bias[group_id], eps=self.variance_epsilon))
+        return output_groups
+
+    def extra_repr(self) -> str:
+        return f"{self.num_groups=}, {self.norm_size=}, {self.variance_epsilon=} {self.elementwise_affine=}".replace("self.", "")
+
 class MojoRMSNormQuant(MojoOperator):
     """Fused RMSNorm + dynamic per-token quantization.
 
