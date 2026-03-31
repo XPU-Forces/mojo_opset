@@ -7,7 +7,6 @@ from typing import Tuple
 import torch
 
 from mojo_opset.utils.platform import get_platform
-from mojo_opset_dev.mojo_opset.mojo_opset.backends.ttx.kernels.npu.int8_gemm import int8_gemm_dequant_impl
 
 platform = get_platform()
 
