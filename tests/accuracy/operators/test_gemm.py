@@ -141,6 +141,40 @@ def test_gemm_dequant_backend(m, k, n, output_dtype, trans_weight, has_bias):
 
 
 # ===========================================================================
+# MojoGemmDequant — TTX backend vs torch reference
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "m, k, n",
+    [
+        (1, 4096, 4096),
+        (32, 4096, 11008),
+        (128, 2048, 4096),
+        (256, 4096, 4096),
+        (1024, 4096, 4096),
+        (4096, 4096, 4096),
+    ],
+)
+@pytest.mark.parametrize("output_dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("trans_weight", [False, True])
+@pytest.mark.parametrize("has_bias", [False, True])
+@bypass_not_implemented
+@auto_switch_platform()
+def test_gemm_dequant_ttx(m, k, n, output_dtype, trans_weight, has_bias):
+    """Compare TTX (Triton) backend explicitly against the torch reference."""
+    x_i8, w_i8, x_scale, w_scale, bias = _make_int8_gemm_data(
+        m, k, n, output_dtype, trans_weight, has_bias,
+    )
+
+    op = MojoGemmDequant._registry.get("ttx")(
+        output_dtype=output_dtype, trans_weight=trans_weight,
+    )
+    op_ref = MojoGemmDequant._registry.get("torch")(
+        output_dtype=output_dtype, trans_weight=trans_weight,
+    )
+    op.forward_diff_with(op_ref, x_i8, w_i8, x_scale, w_scale, bias, mixed_tol=True)
+
+# ===========================================================================
 # MojoGroupLinear
 # ===========================================================================
 
