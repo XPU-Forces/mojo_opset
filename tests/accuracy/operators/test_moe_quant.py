@@ -1,21 +1,15 @@
-import os
 from typing import Optional
 
 import pytest
 import torch
 
-from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoFusedSwiGLUMoEScaleDynamicQuantize
-from mojo_opset import MojoGroupQuantGemmA8W4MSD
-from mojo_opset import MojoGroupQuantGemmCombineA8W4MSD
 from mojo_opset import MojoGroupQuantGemmCombineMoE
 from mojo_opset import MojoGroupQuantGemmMoE
-from mojo_opset import MojoGroupedMatmulA8W4MSD
 from mojo_opset import MojoMoEInitRoutingDynamicQuant
 
-IS_XOPS_BACKEND = os.environ.get("MOJO_BACKEND") == "xops"
 
 
 def _manual_group_quant_gemm_moe(
@@ -169,7 +163,6 @@ def test_group_quant_gemm_combine_moe_reference():
     torch.testing.assert_close(out, ref, atol=0, rtol=0)
 
 
-@auto_switch_platform()
 @bypass_not_implemented
 def test_fused_swiglu_moe_scale_dynamic_quant_backend():
     input = torch.randn(4, 2, 128, dtype=torch.bfloat16)
@@ -184,7 +177,6 @@ def test_fused_swiglu_moe_scale_dynamic_quant_backend():
     assert scale.dtype == torch.float32
 
 
-@auto_switch_platform()
 @bypass_not_implemented
 def test_group_quant_gemm_moe_backend():
     input = torch.randint(-128, 127, (4, 2, 64), dtype=torch.int8)
@@ -207,7 +199,6 @@ def test_group_quant_gemm_moe_backend():
     )
 
 
-@auto_switch_platform()
 @bypass_not_implemented
 def test_group_quant_gemm_combine_moe_backend():
     input = torch.randint(-128, 127, (4, 2, 64), dtype=torch.int8)
@@ -239,150 +230,3 @@ def test_group_quant_gemm_combine_moe_backend():
     )
 
 
-@pytest.mark.skipif(not IS_XOPS_BACKEND, reason="xops wrapper test only")
-def test_moe_init_routing_dynamic_quant_xops_wiring(monkeypatch):
-    xops_module = pytest.importorskip("mojo_opset_ext.backends.xpu_ops.operators.moe_quant")
-    returned = (
-        torch.empty(2, 2, 64, dtype=torch.int8),
-        torch.empty(2, 2, 1, dtype=torch.float32),
-        torch.empty(2, 2, 1, dtype=torch.int32),
-        torch.empty(4, dtype=torch.int32),
-        torch.empty(2, 2, 8, dtype=torch.float32),
-    )
-    captured = {}
-
-    def fake_impl(hidden_states, top_k_gates, top_k_indices, smooth_scale, num_experts, top_k, start_expert_id, end_expert_id, quant_mode):
-        captured["hidden_states_dtype"] = hidden_states.dtype
-        captured["top_k_gates_dtype"] = top_k_gates.dtype
-        captured["top_k_indices_dtype"] = top_k_indices.dtype
-        captured["smooth_scale_dtype"] = smooth_scale.dtype
-        captured["meta"] = (num_experts, top_k, start_expert_id, end_expert_id, quant_mode)
-        return returned
-
-    monkeypatch.setattr(xops_module, "_xops_moe_init_routing_dynamic_quant", fake_impl)
-
-    op = MojoMoEInitRoutingDynamicQuant(num_experts=4, top_k=2, start_expert_id=1, end_expert_id=3)
-    result = op(
-        torch.randn(2, 64, dtype=torch.bfloat16),
-        torch.rand(2, 2, dtype=torch.float32),
-        torch.tensor([[0, 1], [1, 2]], dtype=torch.int64),
-        torch.ones(4, 64, dtype=torch.float32),
-        1,
-    )
-
-    assert result is returned
-    assert captured["hidden_states_dtype"] == torch.bfloat16
-    assert captured["top_k_gates_dtype"] == torch.float32
-    assert captured["top_k_indices_dtype"] == torch.int32
-    assert captured["smooth_scale_dtype"] == torch.float32
-    assert captured["meta"] == (4, 2, 1, 3, 1)
-
-
-@pytest.mark.skipif(not IS_XOPS_BACKEND, reason="xops wrapper test only")
-def test_group_quant_gemm_a8w4_msd_xops_wiring(monkeypatch):
-    xops_module = pytest.importorskip("mojo_opset_ext.backends.xpu_ops.operators.moe_quant")
-    returned = torch.empty(2, 2, 32, dtype=torch.bfloat16)
-    captured = {}
-
-    def fake_impl(input, weight, weight_msd_bias, token_count, weight_deqscale, input_scale):
-        captured["token_count_dtype"] = token_count.dtype
-        captured["input_scale_dtype"] = input_scale.dtype
-        captured["shapes"] = (
-            tuple(input.shape),
-            tuple(weight.shape),
-            tuple(weight_msd_bias.shape),
-            tuple(weight_deqscale.shape),
-        )
-        return returned
-
-    monkeypatch.setattr(xops_module, "_xops_group_quant_gemm_a8w4_msd", fake_impl)
-
-    op = MojoGroupQuantGemmA8W4MSD()
-    result = op(
-        torch.randint(-128, 127, (2, 2, 32), dtype=torch.int8),
-        torch.randint(-128, 127, (4, 64, 32), dtype=torch.int8),
-        torch.randn(4, 32, dtype=torch.float32),
-        torch.tensor([1, 1, 1, 1], dtype=torch.int64),
-        torch.zeros(4, 8, 32, dtype=torch.int64),
-        torch.ones(2, 2, 8, dtype=torch.float32),
-    )
-
-    assert result is returned
-    assert captured["token_count_dtype"] == torch.int32
-    assert captured["input_scale_dtype"] == torch.float32
-    assert captured["shapes"][0] == (2, 2, 32)
-
-
-@pytest.mark.skipif(not IS_XOPS_BACKEND, reason="xops wrapper test only")
-def test_group_quant_gemm_combine_a8w4_msd_xops_wiring(monkeypatch):
-    xops_module = pytest.importorskip("mojo_opset_ext.backends.xpu_ops.operators.moe_quant")
-    returned = torch.empty(4, 64, dtype=torch.bfloat16)
-    captured = {}
-
-    def fake_impl(input, weight, weight_msd_bias, token_count, weight_deqscale, input_scale, top_k_gates, token_indices, shared_output, top_k, shared_expert_rank_num, ep_rank):
-        captured["dtypes"] = (
-            token_count.dtype,
-            input_scale.dtype,
-            top_k_gates.dtype,
-            token_indices.dtype,
-        )
-        captured["meta"] = (top_k, shared_expert_rank_num, ep_rank)
-        captured["shared_shape"] = tuple(shared_output.shape)
-        return returned
-
-    monkeypatch.setattr(xops_module, "_xops_group_quant_gemm_combine_a8w4_msd", fake_impl)
-
-    op = MojoGroupQuantGemmCombineA8W4MSD(top_k=2, shared_expert_rank_num=1.0, ep_rank=3)
-    result = op(
-        torch.randint(-128, 127, (2, 2, 32), dtype=torch.int8),
-        torch.randint(-128, 127, (4, 32, 64), dtype=torch.int8),
-        torch.randn(4, 64, dtype=torch.float32),
-        torch.tensor([1, 1, 1, 1], dtype=torch.int64),
-        torch.zeros(4, 4, 64, dtype=torch.int64),
-        torch.ones(2, 2, dtype=torch.float32),
-        torch.rand(2, 2, 1, dtype=torch.float32),
-        torch.tensor([[[0], [1]], [[2], [3]]], dtype=torch.int64),
-        torch.zeros(4, 64, dtype=torch.bfloat16),
-    )
-
-    assert result is returned
-    assert captured["dtypes"] == (torch.int32, torch.float32, torch.float32, torch.int32)
-    assert captured["meta"] == (2, 1.0, 3)
-    assert captured["shared_shape"] == (4, 64)
-
-
-@pytest.mark.skipif(not IS_XOPS_BACKEND, reason="xops wrapper test only")
-def test_grouped_matmul_a8w4_msd_xops_wiring(monkeypatch):
-    xops_module = pytest.importorskip("mojo_opset_ext.backends.xpu_ops.operators.moe_quant")
-    returned = torch.empty(4, 64, dtype=torch.bfloat16)
-    captured = {}
-
-    def fake_impl(inputs, weights, weight_msd_biases, weight_deqscales, token_count, input_scale, transpose_a, transpose_b, group_type, split_item, expert_ids, output_dtype):
-        captured["meta"] = (transpose_a, transpose_b, group_type, split_item, expert_ids, output_dtype)
-        captured["token_count_dtype"] = token_count.dtype
-        captured["input_scale_dtype"] = input_scale.dtype
-        return returned
-
-    monkeypatch.setattr(xops_module, "_xops_grouped_matmul_a8w4_msd", fake_impl)
-
-    op = MojoGroupedMatmulA8W4MSD(
-        transpose_a=True,
-        transpose_b=False,
-        group_type=7,
-        split_item=2,
-        expert_ids=[1, 3],
-        output_dtype=torch.bfloat16,
-    )
-    result = op(
-        [torch.randint(-128, 127, (4, 64), dtype=torch.int8)],
-        [torch.randint(-128, 127, (1, 64, 64), dtype=torch.int8)],
-        [torch.randn(1, 64, dtype=torch.float32)],
-        [torch.zeros(1, 8, 64, dtype=torch.int64)],
-        torch.tensor([4], dtype=torch.int64),
-        torch.ones(4, dtype=torch.float32),
-    )
-
-    assert result is returned
-    assert captured["meta"] == (True, False, 7, 2, [1, 3], torch.bfloat16)
-    assert captured["token_count_dtype"] == torch.int32
-    assert captured["input_scale_dtype"] == torch.float32

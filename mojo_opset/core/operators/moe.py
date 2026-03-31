@@ -166,7 +166,7 @@ class MojoMoEDispatch(MojoOperator):
         sorted_experts, expert_sort_indices = flat_top_k_indices.sort()
 
         token_indices = batch_token_indices[expert_sort_indices]
-        tokens_per_expert = torch.bincount(flat_top_k_indices, minlength=self.num_experts)
+        tokens_per_expert = _count_expert_tokens(flat_top_k_indices, self.num_experts)
 
         sorted_gates = flat_top_k_gates[expert_sort_indices, :]
         sorted_hidden_states = hidden_states[token_indices].squeeze(1)
@@ -277,6 +277,11 @@ def _validate_moe_token_count(token_count: torch.Tensor, route_count: int) -> to
             f"but got {token_count_i64.sum().item()}."
         )
     return token_count_i64
+
+
+def _count_expert_tokens(top_k_indices: torch.Tensor, num_experts: int) -> torch.Tensor:
+    flat_indices = top_k_indices.reshape(-1).to(dtype=torch.int64, device=top_k_indices.device)
+    return torch.bincount(flat_indices, minlength=num_experts).to(dtype=torch.int32, device=top_k_indices.device)
 
 
 def _expand_grouped_route_param(
@@ -443,10 +448,7 @@ class MojoMoEInitRoutingDynamicQuant(MojoOperator):
             route_hidden = route_hidden * route_scale.float()
 
         quantized, scale = _block_dynamic_quant(route_hidden, self.quant_block_size)
-        token_count = torch.bincount(
-            top_k_indices.reshape(-1).to(dtype=torch.int64),
-            minlength=self.num_experts,
-        ).to(dtype=torch.int32, device=top_k_indices.device)
+        token_count = _count_expert_tokens(top_k_indices, self.num_experts)
         return (
             quantized.to(self.quant_dtype),
             sorted_gates.float(),

@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 
 from mojo_opset.utils.platform import get_platform
-from tests.utils import auto_switch_platform, bypass_not_implemented
+from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoChannelRMSNorm
 from mojo_opset import MojoLayerNorm
@@ -341,7 +341,6 @@ norm_quant_shapes = [
 
 @pytest.mark.parametrize("shape", norm_quant_shapes)
 @pytest.mark.parametrize("dtype", dtypes)
-@auto_switch_platform()
 @bypass_not_implemented
 def test_rmsnorm_quant(shape, dtype):
     x = torch.randn(size=shape, dtype=dtype)
@@ -368,7 +367,6 @@ def test_rmsnorm_quant(shape, dtype):
 
 @pytest.mark.parametrize("shape", norm_quant_shapes)
 @pytest.mark.parametrize("dtype", dtypes)
-@auto_switch_platform()
 @bypass_not_implemented
 def test_layernorm_quant(shape, dtype):
     x = torch.randn(size=shape, dtype=dtype)
@@ -399,7 +397,6 @@ def test_layernorm_quant(shape, dtype):
 @pytest.mark.parametrize("shape", norm_quant_shapes)
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
-@auto_switch_platform()
 @bypass_not_implemented
 def test_residual_add_rmsnorm_quant(shape, dtype, norm_pos):
     x = torch.randn(size=shape, dtype=dtype)
@@ -426,7 +423,6 @@ def test_residual_add_rmsnorm_quant(shape, dtype, norm_pos):
 @pytest.mark.parametrize("shape", norm_quant_shapes)
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
-@auto_switch_platform()
 @bypass_not_implemented
 def test_residual_add_layernorm_quant(shape, dtype, norm_pos):
     x = torch.randn(size=shape, dtype=dtype)

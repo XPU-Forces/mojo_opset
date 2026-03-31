@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from mojo_opset.utils.platform import get_platform
-from tests.utils import auto_switch_platform, bypass_not_implemented
+from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoDequantSwiGLUQuant
 from mojo_opset import MojoDequant
@@ -302,7 +302,6 @@ def test_dynamic_quant_reference(dtype):
 
 
 @pytest.mark.parametrize("dtype", dtypes)
-@auto_switch_platform()
 @bypass_not_implemented
 def test_dynamic_quant_backend(dtype):
     x = torch.randn(24, 128, dtype=dtype)
@@ -314,7 +313,6 @@ def test_dynamic_quant_backend(dtype):
 
 
 @pytest.mark.parametrize("dtype", dtypes)
-@auto_switch_platform()
 @bypass_not_implemented
 def test_dynamic_quant_backend_moe(dtype):
     x = torch.randn(12, 128, dtype=dtype)
@@ -336,7 +334,6 @@ def test_dynamic_quant_backend_moe(dtype):
 # ---------------------------------------------------------------------------
 # MojoDequantSwiGLUQuant
 # ---------------------------------------------------------------------------
-@auto_switch_platform()
 @bypass_not_implemented
 def test_dequant_swiglu_quant_backend():
     tokens = 12
