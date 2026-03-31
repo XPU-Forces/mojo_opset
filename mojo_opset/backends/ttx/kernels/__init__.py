@@ -781,3 +781,4 @@ else:
     reject_sampling = reject_sampling_impl
     top_p_filter = top_p_filter_impl
     top_p_sampling = top_p_sampling_impl
+    top_k_sampling = top_k_sampling_impl
