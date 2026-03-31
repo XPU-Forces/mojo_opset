@@ -88,6 +88,7 @@ from .operators.sampling import MojoApplyPenaltiesTempurate
 from .operators.sampling import MojoJoinProbRejectSampling
 from .operators.sampling import MojoRejectSampling
 from .operators.sampling import MojoTopKSampling
+from .operators.sampling import MojoTopKSoftmax
 from .operators.sampling import MojoTopPFilter
 from .operators.sampling import MojoTopPSampling
 
@@ -174,6 +175,7 @@ __all__ = [
 
     "MojoTopPSampling",
     "MojoTopKSampling",
+    "MojoTopKSoftmax",
     "MojoRejectSampling",
     "MojoJoinProbRejectSampling",
     "MojoApplyPenaltiesTempurate",
