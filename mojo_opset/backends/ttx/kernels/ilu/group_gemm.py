@@ -257,14 +257,17 @@ def m_grouped_matmul_impl(
     strideBK: int,
     trans_b: bool = False,
 ) -> torch.Tensor:
+    """Per-group matmul via ``_group_matmul_kernel`` (Triton).
+
+    ``trans_b`` matches ``TTXGroupGemm`` (``not trans_weight``): weight storage is ``(G, K, N)``
+    when True and ``(G, N, K)`` when False. Each group uses ``B_g`` with shape ``(K, N)``.
+    ``strideBN`` / ``strideBK`` match the NPU/TTX custom-op signature but are unused here
+    (strides come from ``A_g`` / ``B_g`` slices).
+    """
+    _ = (strideBN, strideBK, num_groups, M)
     BLOCK_M = 64
     BLOCK_N = 64
     BLOCK_K = 32
-
-    if trans_b:
-        B_work = B.transpose(1, 2).contiguous()
-    else:
-        B_work = B
 
     group_start = size_per_group.cumsum(0) - size_per_group
     group_end = size_per_group.cumsum(0)
@@ -274,7 +277,10 @@ def m_grouped_matmul_impl(
             continue
 
         A_g = A.narrow(0, start, m_g)
-        B_g = B_work[g]
+        if trans_b:
+            B_g = B[g]
+        else:
+            B_g = B[g].transpose(0, 1).contiguous()
         C_g = C.narrow(0, start, m_g)
         grid = (triton.cdiv(m_g, BLOCK_M) * triton.cdiv(N, BLOCK_N),)
         _group_matmul_kernel[grid](

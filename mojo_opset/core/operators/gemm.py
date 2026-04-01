@@ -74,7 +74,7 @@ class MojoGroupGemm(MojoOperator):
                 k,
                 strideBN,
                 strideBK,
-                self.trans_weight,
+                not self.trans_weight,
             )
             return out
 
