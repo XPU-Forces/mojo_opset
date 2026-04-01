@@ -13,14 +13,29 @@ COL_BLOCKING_THRESHOLD = 2048
 TOKEN_BLOCK_SIZE_TABLE = {
     2048: 4,
     1024: 8,
-    512: 10,
+    # NOTE: tl.arange range must be power-of-2 on some backends.
+    512: 16,
     256: 16,
-    128: 24,
+    128: 32,
 }
+
+def _block_size_n_pow2(n_cols: int) -> int:
+    # ILU backend requires tl.arange range to be power-of-2.
+    if n_cols <= 128:
+        return 128
+    if n_cols <= 256:
+        return 256
+    if n_cols <= 512:
+        return 512
+    if n_cols <= 1024:
+        return 1024
+    return 2048
 
 
 def layer_norm_fwd_heuristics(args):
-    hidden_dim = args["n_cols"]
+    hidden_dim = args.get("n_cols", args.get("N_COLS"))
+    if hidden_dim is None:
+        raise KeyError("n_cols")
     if hidden_dim <= COL_BLOCKING_THRESHOLD:
         if hidden_dim in TOKEN_BLOCK_SIZE_TABLE:
             return TOKEN_BLOCK_SIZE_TABLE[hidden_dim]
@@ -58,58 +73,59 @@ def _fused_add_layernorm_fwd_kernel(
     RSTD_ptr,
     RSTD_row_stride,
     n_rows,
-    n_cols,
     eps,
+    N_COLS: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
-    grid_size = tl.num_programs(axis=0)
     num_row_tasks = (n_rows + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
 
-    for row_task_id in range(pid, num_row_tasks, grid_size):
-        block_start_row = row_task_id * BLOCK_SIZE_M
-        rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
-        rows_mask = rows_off < n_rows
+    task_mask = pid < num_row_tasks
 
-        X_ptr_row_block = X_ptr + rows_off[:, None] * X_row_stride
-        R_ptr_row_block = R_ptr + rows_off[:, None] * R_row_stride
-        S_ptr_row_block = S_ptr + rows_off[:, None] * S_row_stride
-        Y_ptr_row_block = Y_ptr + rows_off[:, None] * Y_row_stride
+    block_start_row = pid * BLOCK_SIZE_M
+    rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
+    rows_mask = task_mask & (rows_off < n_rows)
 
-        mean_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
-        var_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
-        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
-            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
-            block_mask = rows_mask[:, None] & (cols_off[None, :] < n_cols)
+    X_ptr_row_block = X_ptr + rows_off[:, None] * X_row_stride
+    R_ptr_row_block = R_ptr + rows_off[:, None] * R_row_stride
+    S_ptr_row_block = S_ptr + rows_off[:, None] * S_row_stride
+    Y_ptr_row_block = Y_ptr + rows_off[:, None] * Y_row_stride
 
-            X_chunk = tl.load(X_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
-            R_chunk = tl.load(R_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
-            S_chunk = X_chunk + R_chunk
-            tl.store(S_ptr_row_block + cols_off[None, :], S_chunk, mask=block_mask)
+    mean_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+    var_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+    for col_offset in range(0, N_COLS, BLOCK_SIZE_N):
+        cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+        cols_mask = cols_off < N_COLS
+        block_mask = rows_mask[:, None] & cols_mask[None, :]
 
-            S_chunk_f32 = S_chunk.to(tl.float32)
-            mean_acc += tl.sum(S_chunk_f32, axis=1)
-            var_acc += tl.sum(S_chunk_f32 * S_chunk_f32, axis=1)
+        X_chunk = tl.load(X_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
+        R_chunk = tl.load(R_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
+        S_chunk = X_chunk + R_chunk
+        tl.store(S_ptr_row_block + cols_off[None, :], S_chunk, mask=block_mask)
 
-        mean_vec = mean_acc / n_cols
-        var_vec = (var_acc / n_cols) - (mean_vec * mean_vec)
-        rstd_vec = tl.rsqrt(var_vec + eps)
-        tl.store(Mean_ptr + rows_off * Mean_row_stride, mean_vec, mask=rows_mask)
-        tl.store(RSTD_ptr + rows_off * RSTD_row_stride, rstd_vec, mask=rows_mask)
+        S_chunk_f32 = S_chunk.to(tl.float32)
+        mean_acc += tl.sum(S_chunk_f32, axis=1)
+        var_acc += tl.sum(S_chunk_f32 * S_chunk_f32, axis=1)
 
-        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
-            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
-            cols_mask = cols_off < n_cols
-            block_mask = rows_mask[:, None] & cols_mask[None, :]
+    mean_vec = mean_acc / N_COLS
+    var_vec = (var_acc / N_COLS) - (mean_vec * mean_vec)
+    rstd_vec = tl.rsqrt(var_vec + eps)
+    tl.store(Mean_ptr + rows_off * Mean_row_stride, mean_vec, mask=rows_mask)
+    tl.store(RSTD_ptr + rows_off * RSTD_row_stride, rstd_vec, mask=rows_mask)
 
-            S_chunk = tl.load(S_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0).to(tl.float32)
-            W_chunk = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0)
-            B_chunk = tl.load(B_ptr + cols_off, mask=cols_mask, other=0.0)
+    for col_offset in range(0, N_COLS, BLOCK_SIZE_N):
+        cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+        cols_mask = cols_off < N_COLS
+        block_mask = rows_mask[:, None] & cols_mask[None, :]
 
-            normed_S_chunk = (S_chunk - mean_vec[:, None]) * rstd_vec[:, None]
-            Y_chunk = normed_S_chunk * W_chunk[None, :] + B_chunk[None, :]
-            tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk.to(Y_ptr.dtype.element_ty), mask=block_mask)
+        S_chunk = tl.load(S_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0).to(tl.float32)
+        W_chunk = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0)
+        B_chunk = tl.load(B_ptr + cols_off, mask=cols_mask, other=0.0)
+
+        normed_S_chunk = (S_chunk - mean_vec[:, None]) * rstd_vec[:, None]
+        Y_chunk = normed_S_chunk * W_chunk[None, :] + B_chunk[None, :]
+        tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk, mask=block_mask)
 
 
 def fused_add_layernorm_infer_impl(
@@ -126,10 +142,7 @@ def fused_add_layernorm_infer_impl(
     R_2d = residual.reshape(-1, dim)
     n_rows, n_cols = X_2d.shape
 
-    if n_cols > COL_BLOCKING_THRESHOLD:
-        BLOCK_SIZE_N = COL_BLOCKING_THRESHOLD
-    else:
-        BLOCK_SIZE_N = align(X_2d, n_cols, VEC_ALIGN_BYTES)
+    BLOCK_SIZE_N = _block_size_n_pow2(n_cols)
 
     grid = (_fused_add_layernorm_fwd_grid_n_programs(n_rows, n_cols),)
 
@@ -155,8 +168,8 @@ def fused_add_layernorm_infer_impl(
         RSTD,
         RSTD.stride(0),
         n_rows,
-        n_cols,
         eps,
+        N_COLS=n_cols,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
     )
 

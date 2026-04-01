@@ -8,24 +8,36 @@ from .utils import VEC_ALIGN_BYTES
 from .utils import ilu_grid_dim_from_row_tasks
 from .utils import libentry
 from mojo_opset.backends.ttx.kernels.utils import align
+from mojo_opset.backends.ttx.kernels.utils import torch_to_triton_dtype
 
 COL_BLOCKING_THRESHOLD = 2048
-
-_CASTING_MODE_NONE: tl.constexpr = tl.constexpr(-1)
-_CASTING_MODE_LLAMA: tl.constexpr = tl.constexpr(0)
-_CASTING_MODE_GEMMA: tl.constexpr = tl.constexpr(1)
 
 TOKEN_BLOCK_SIZE_TABLE = {
     2048: 4,
     1024: 8,
-    512: 10,
+    # NOTE: tl.arange range must be power-of-2 on some backends.
+    512: 16,
     256: 16,
-    128: 24,
+    128: 32,
 }
+
+def _block_size_n_pow2(n_cols: int) -> int:
+    # ILU backend requires tl.arange range to be power-of-2.
+    if n_cols <= 128:
+        return 128
+    if n_cols <= 256:
+        return 256
+    if n_cols <= 512:
+        return 512
+    if n_cols <= 1024:
+        return 1024
+    return 2048
 
 
 def rms_norm_fwd_heuristics(args):
-    hidden_dim = args["n_cols"]
+    hidden_dim = args.get("n_cols", args.get("N_COLS"))
+    if hidden_dim is None:
+        raise KeyError("n_cols")
     if hidden_dim <= COL_BLOCKING_THRESHOLD:
         if hidden_dim in TOKEN_BLOCK_SIZE_TABLE:
             return TOKEN_BLOCK_SIZE_TABLE[hidden_dim]
@@ -60,69 +72,70 @@ def _fused_add_rmsnorm_fwd_kernel(
     RSTD_ptr,
     RSTD_row_stride,
     n_rows,
-    n_cols,
     eps,
+    N_COLS: tl.constexpr,
     offset,
     casting_mode: tl.constexpr,
+    S_dtype: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
-    grid_size = tl.num_programs(axis=0)
     num_row_tasks = (n_rows + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+    task_mask = pid < num_row_tasks
 
-    for row_task_id in range(pid, num_row_tasks, grid_size):
-        block_start_row = row_task_id * BLOCK_SIZE_M
-        rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
-        rows_mask = rows_off < n_rows
+    block_start_row = pid * BLOCK_SIZE_M
+    rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
+    rows_mask = task_mask & (rows_off < n_rows)
 
-        X_ptr_row_block = X_ptr + rows_off[:, None] * X_row_stride
-        R_ptr_row_block = R_ptr + rows_off[:, None] * R_row_stride
-        S_ptr_row_block = S_ptr + rows_off[:, None] * S_row_stride
-        Y_ptr_row_block = Y_ptr + rows_off[:, None] * Y_row_stride
+    X_ptr_row_block = X_ptr + rows_off[:, None] * X_row_stride
+    R_ptr_row_block = R_ptr + rows_off[:, None] * R_row_stride
+    S_ptr_row_block = S_ptr + rows_off[:, None] * S_row_stride
+    Y_ptr_row_block = Y_ptr + rows_off[:, None] * Y_row_stride
 
-        var_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
-        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
-            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
-            block_mask = rows_mask[:, None] & (cols_off[None, :] < n_cols)
+    var_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+    for col_offset in range(0, N_COLS, BLOCK_SIZE_N):
+        cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+        cols_mask = cols_off < N_COLS
+        block_mask = rows_mask[:, None] & cols_mask[None, :]
 
-            X_chunk = tl.load(X_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
-            R_chunk = tl.load(R_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
-            S_chunk = X_chunk + R_chunk
-            tl.store(S_ptr_row_block + cols_off[None, :], S_chunk, mask=block_mask)
+        X_chunk = tl.load(X_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
+        R_chunk = tl.load(R_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
+        S_chunk = X_chunk + R_chunk
+        tl.store(S_ptr_row_block + cols_off[None, :], S_chunk, mask=block_mask)
 
-            S_chunk_f32 = S_chunk.to(tl.float32)
-            var_acc += tl.sum(S_chunk_f32 * S_chunk_f32, axis=1)
+        S_chunk_f32 = S_chunk.to(tl.float32)
+        var_acc += tl.sum(S_chunk_f32 * S_chunk_f32, axis=1)
 
-        var = var_acc / n_cols
-        rstd_vec = tl.rsqrt(var + eps)
-        tl.store(RSTD_ptr + rows_off * RSTD_row_stride, rstd_vec, mask=rows_mask)
+    var = var_acc / N_COLS
+    rstd_vec = tl.rsqrt(var + eps)
+    tl.store(RSTD_ptr + rows_off * RSTD_row_stride, rstd_vec, mask=rows_mask)
 
-        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
-            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
-            cols_mask = cols_off < n_cols
-            block_mask = rows_mask[:, None] & cols_mask[None, :]
+    for col_offset in range(0, N_COLS, BLOCK_SIZE_N):
+        cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+        cols_mask = cols_off < N_COLS
+        block_mask = rows_mask[:, None] & cols_mask[None, :]
 
-            S_chunk = tl.load(S_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
-            W_chunk = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0)
+        S_chunk = tl.load(S_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
+        W_chunk = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0)
 
-            if casting_mode == _CASTING_MODE_GEMMA:
-                S_chunk = S_chunk.to(tl.float32)
-                W_chunk = W_chunk.to(tl.float32)
-            elif casting_mode == _CASTING_MODE_LLAMA:
-                S_chunk = S_chunk.to(tl.float32)
+        if casting_mode == 1:  # GEMMA
+            S_chunk = S_chunk.to(tl.float32)
+            W_chunk = W_chunk.to(tl.float32)
+        elif casting_mode == 0:  # LLAMA
+            S_chunk = S_chunk.to(tl.float32)
 
-            if casting_mode == _CASTING_MODE_LLAMA:
-                normed_S_chunk = (S_chunk * rstd_vec[:, None]).to(S_ptr.dtype.element_ty)
-            else:
-                normed_S_chunk = S_chunk * rstd_vec[:, None]
+        if casting_mode == 0:  # LLAMA
+            normed_S_chunk = (S_chunk * rstd_vec[:, None]).to(S_dtype)
+        else:
+            normed_S_chunk = S_chunk * rstd_vec[:, None]
 
-            Y_chunk = normed_S_chunk * (W_chunk[None, :] + offset)
+        Y_chunk = normed_S_chunk * (W_chunk[None, :] + offset)
 
-            if casting_mode == _CASTING_MODE_GEMMA:
-                Y_chunk = Y_chunk.to(S_ptr.dtype.element_ty)
+        if casting_mode == 1:  # GEMMA
+            Y_chunk = Y_chunk.to(S_dtype)
 
-            tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk, mask=block_mask)
+        tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk, mask=block_mask)
 
 
 def fused_add_rmsnorm_infer_impl(
@@ -140,10 +153,7 @@ def fused_add_rmsnorm_infer_impl(
     residual_2d = residual.reshape(-1, dim)
     n_rows, n_cols = hidden_states_2d.shape
 
-    if n_cols > COL_BLOCKING_THRESHOLD:
-        BLOCK_SIZE_N = 2048
-    else:
-        BLOCK_SIZE_N = align(hidden_states, n_cols, VEC_ALIGN_BYTES)
+    BLOCK_SIZE_N = _block_size_n_pow2(n_cols)
 
     grid = (_fused_add_rmsnorm_fwd_grid_n_programs(n_rows, n_cols),)
 
@@ -169,10 +179,11 @@ def fused_add_rmsnorm_infer_impl(
         RSTD,
         RSTD.stride(0),
         n_rows,
-        n_cols,
         eps,
-        offset,
+        N_COLS=n_cols,
+        offset=offset,
         casting_mode=_casting_mode,
+        S_dtype=torch_to_triton_dtype[hidden_states.dtype],
         BLOCK_SIZE_N=BLOCK_SIZE_N,
     )
 

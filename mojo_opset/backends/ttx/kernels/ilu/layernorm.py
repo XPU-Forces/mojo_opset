@@ -2,8 +2,6 @@ import torch
 import triton
 import triton.language as tl
 
-from triton.language.math import rsqrt
-
 from .utils import VEC_ALIGN_BYTES
 from .utils import ilu_grid_dim_from_row_tasks
 from .utils import libentry
@@ -16,14 +14,17 @@ COL_BLOCKING_THRESHOLD = 2048
 TOKEN_BLOCK_SIZE_TABLE = {
     2048: 4,
     1024: 8,
-    512: 10,
-    256: 18,
-    128: 24,
+    # NOTE: tl.arange range must be power-of-2 on some backends.
+    512: 16,
+    256: 16,
+    128: 32,
 }
 
 
 def layer_norm_fwd_heuristics(args):
-    hidden_dim = args["n_cols"]
+    hidden_dim = args.get("n_cols", args.get("N_COLS"))
+    if hidden_dim is None:
+        raise KeyError("n_cols")
     if hidden_dim <= COL_BLOCKING_THRESHOLD:
         if hidden_dim in TOKEN_BLOCK_SIZE_TABLE:
             return TOKEN_BLOCK_SIZE_TABLE[hidden_dim]
@@ -55,84 +56,79 @@ def _layernorm_fwd_kernel(
     stride_x_row,
     stride_y_row,
     n_rows,
-    n_cols,
     eps,
+    N_COLS: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    num_programs = tl.num_programs(0)
-
     num_row_tasks = (n_rows + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+    task_mask = pid < num_row_tasks
 
-    for row_task_id in range(pid, num_row_tasks, num_programs):
-        block_start_row = row_task_id * BLOCK_SIZE_M
-        rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
-        rows_mask = rows_off < n_rows
+    block_start_row = pid * BLOCK_SIZE_M
+    rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
+    rows_mask = task_mask & (rows_off < n_rows)
 
-        sum_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+    sum_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
 
-        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
-            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
-            cols_mask = cols_off < n_cols
-            block_mask = rows_mask[:, None] & cols_mask[None, :]
+    for col_offset in range(0, N_COLS, BLOCK_SIZE_N):
+        cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+        cols_mask = cols_off < N_COLS
+        block_mask = rows_mask[:, None] & cols_mask[None, :]
 
-            x_chunk = tl.load(
-                X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0
-            ).to(tl.float32)
+        x_chunk = tl.load(
+            X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0
+        ).to(tl.float32)
 
-            sum_acc += tl.sum(x_chunk, axis=1)
+        sum_acc += tl.sum(x_chunk, axis=1)
 
-        mean = sum_acc / n_cols
+    mean = sum_acc / N_COLS
 
-        tl.store(Mean_ptr + rows_off, mean, mask=rows_mask)
+    tl.store(Mean_ptr + rows_off, mean, mask=rows_mask)
 
-        var_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+    var_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
 
-        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
-            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
-            cols_mask = cols_off < n_cols
-            block_mask = rows_mask[:, None] & cols_mask[None, :]
+    for col_offset in range(0, N_COLS, BLOCK_SIZE_N):
+        cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+        cols_mask = cols_off < N_COLS
+        block_mask = rows_mask[:, None] & cols_mask[None, :]
 
-            x_chunk = tl.load(
-                X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0
-            ).to(tl.float32)
+        x_chunk = tl.load(
+            X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0
+        ).to(tl.float32)
 
-            w_chunk = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
-            b_chunk = tl.load(B_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
+        x_centered = x_chunk - mean[:, None]
 
-            x_centered = x_chunk - mean[:, None]
+        var_acc += tl.sum(x_centered * x_centered, axis=1)
 
-            var_acc += tl.sum(x_centered * x_centered, axis=1)
+    var = var_acc / N_COLS
+    rstd = tl.rsqrt(var + eps)
 
-        var = var_acc / n_cols
-        rstd = rsqrt(var + eps)
+    tl.store(RSTD_ptr + rows_off, rstd, mask=rows_mask)
 
-        tl.store(RSTD_ptr + rows_off, rstd, mask=rows_mask)
+    for col_offset in range(0, N_COLS, BLOCK_SIZE_N):
+        cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+        cols_mask = cols_off < N_COLS
+        block_mask = rows_mask[:, None] & cols_mask[None, :]
 
-        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
-            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
-            cols_mask = cols_off < n_cols
-            block_mask = rows_mask[:, None] & cols_mask[None, :]
+        x_chunk = tl.load(
+            X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0
+        ).to(tl.float32)
 
-            x_chunk = tl.load(
-                X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0
-            ).to(tl.float32)
+        w_chunk = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
+        b_chunk = tl.load(B_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
 
-            w_chunk = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
-            b_chunk = tl.load(B_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
+        x_centered = x_chunk - mean[:, None]
+        y_chunk = x_centered * rstd[:, None] * w_chunk[None, :] + b_chunk[None, :]
 
-            x_centered = x_chunk - mean[:, None]
-            y_chunk = x_centered * rstd[:, None] * w_chunk[None, :] + b_chunk[None, :]
-
-            tl.store(
-                Y_ptr + rows_off[:, None] * stride_y_row + cols_off[None, :],
-                y_chunk.to(Y_ptr.dtype.element_ty),
-                mask=block_mask,
-            )
+        tl.store(
+            Y_ptr + rows_off[:, None] * stride_y_row + cols_off[None, :],
+            y_chunk,
+            mask=block_mask,
+        )
 
 
-@triton.heuristics({"BLOCK_SIZE_M": lambda args: ceil_div(4096, args["n_cols"])})
+@triton.heuristics({"BLOCK_SIZE_M": lambda args: ceil_div(4096, args.get("n_cols", args.get("N_COLS")))})
 # @libentry()
 @triton.jit
 def _layernorm_bwd_kernel(
@@ -154,9 +150,8 @@ def _layernorm_bwd_kernel(
     BLOCK_SIZE_M: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    num_programs = tl.num_programs(0)
-
     num_row_tasks = (n_rows + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+    task_mask = pid < num_row_tasks
 
     cols_off = tl.arange(0, BLOCK_SIZE_N)
     cols_mask = cols_off < n_cols
@@ -166,34 +161,33 @@ def _layernorm_bwd_kernel(
 
     w = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
 
-    for row_task_id in range(pid, num_row_tasks, num_programs):
-        block_start_row = row_task_id * BLOCK_SIZE_M
-        rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
-        rows_mask = rows_off < n_rows
-        block_mask = rows_mask[:, None] & cols_mask[None, :]
+    block_start_row = pid * BLOCK_SIZE_M
+    rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
+    rows_mask = task_mask & (rows_off < n_rows)
+    block_mask = rows_mask[:, None] & cols_mask[None, :]
 
-        mean = tl.load(Mean_ptr + rows_off, mask=rows_mask, other=0.0).to(tl.float32)
-        rstd = tl.load(RSTD_ptr + rows_off, mask=rows_mask, other=0.0).to(tl.float32)
+    mean = tl.load(Mean_ptr + rows_off, mask=rows_mask, other=0.0).to(tl.float32)
+    rstd = tl.load(RSTD_ptr + rows_off, mask=rows_mask, other=0.0).to(tl.float32)
 
-        dy = tl.load(DY_ptr + rows_off[:, None] * stride_dy_row + cols_off[None, :], mask=block_mask, other=0.0).to(
-            tl.float32
-        )
+    dy = tl.load(DY_ptr + rows_off[:, None] * stride_dy_row + cols_off[None, :], mask=block_mask, other=0.0).to(
+        tl.float32
+    )
 
-        x = tl.load(X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0).to(
-            tl.float32
-        )
+    x = tl.load(X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0).to(
+        tl.float32
+    )
 
-        x_hat = (x - mean[:, None]) * rstd[:, None]
+    x_hat = (x - mean[:, None]) * rstd[:, None]
 
-        dW_acc += tl.sum(dy * x_hat, axis=0)
-        dB_acc += tl.sum(dy, axis=0)
+    dW_acc += tl.sum(dy * x_hat, axis=0)
+    dB_acc += tl.sum(dy, axis=0)
 
-        wdy = w[None, :] * dy
-        c1 = tl.sum(x_hat * wdy, axis=1) / n_cols
-        c2 = tl.sum(wdy, axis=1) / n_cols
-        dx = (wdy - (x_hat * c1[:, None] + c2[:, None])) * rstd[:, None]
+    wdy = w[None, :] * dy
+    c1 = tl.sum(x_hat * wdy, axis=1) / n_cols
+    c2 = tl.sum(wdy, axis=1) / n_cols
+    dx = (wdy - (x_hat * c1[:, None] + c2[:, None])) * rstd[:, None]
 
-        tl.store(DX_ptr + rows_off[:, None] * stride_dx_row + cols_off[None, :], dx.to(X_dtype), mask=block_mask)
+    tl.store(DX_ptr + rows_off[:, None] * stride_dx_row + cols_off[None, :], dx.to(X_dtype), mask=block_mask)
 
     tl.atomic_add(DW_ptr + cols_off, dW_acc, mask=cols_mask)
     tl.atomic_add(DB_ptr + cols_off, dB_acc, mask=cols_mask)
@@ -214,78 +208,76 @@ def _layernorm_bwd_large_cols_kernel(
     stride_dx_row,
     stride_x_row,
     n_rows,
-    n_cols,
     X_dtype: tl.constexpr,
+    N_COLS: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    num_programs = tl.num_programs(0)
-
     num_row_tasks = (n_rows + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+    task_mask = pid < num_row_tasks
 
-    for row_task_id in range(pid, num_row_tasks, num_programs):
-        block_start_row = row_task_id * BLOCK_SIZE_M
-        rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
-        rows_mask = rows_off < n_rows
+    block_start_row = pid * BLOCK_SIZE_M
+    rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
+    rows_mask = task_mask & (rows_off < n_rows)
 
-        mean = tl.load(Mean_ptr + rows_off, mask=rows_mask, other=0.0).to(tl.float32)
-        rstd = tl.load(RSTD_ptr + rows_off, mask=rows_mask, other=0.0).to(tl.float32)
+    mean = tl.load(Mean_ptr + rows_off, mask=rows_mask, other=0.0).to(tl.float32)
+    rstd = tl.load(RSTD_ptr + rows_off, mask=rows_mask, other=0.0).to(tl.float32)
 
-        c1_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
-        c2_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+    c1_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+    c2_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
 
-        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
-            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
-            cols_mask = cols_off < n_cols
-            block_mask = rows_mask[:, None] & cols_mask[None, :]
+    for col_offset in range(0, N_COLS, BLOCK_SIZE_N):
+        cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+        cols_mask = cols_off < N_COLS
+        block_mask = rows_mask[:, None] & cols_mask[None, :]
 
-            dy = tl.load(DY_ptr + rows_off[:, None] * stride_dy_row + cols_off[None, :], mask=block_mask, other=0.0).to(
-                tl.float32
-            )
+        dy = tl.load(DY_ptr + rows_off[:, None] * stride_dy_row + cols_off[None, :], mask=block_mask, other=0.0).to(
+            tl.float32
+        )
 
-            x = tl.load(X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0).to(
-                tl.float32
-            )
+        x = tl.load(X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0).to(
+            tl.float32
+        )
 
-            w = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
+        w = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
 
-            x_hat = (x - mean[:, None]) * rstd[:, None]
-            wdy = w[None, :] * dy
+        x_hat = (x - mean[:, None]) * rstd[:, None]
+        wdy = w[None, :] * dy
 
-            c1_acc += tl.sum(x_hat * wdy, axis=1)
-            c2_acc += tl.sum(wdy, axis=1)
+        c1_acc += tl.sum(x_hat * wdy, axis=1)
+        c2_acc += tl.sum(wdy, axis=1)
 
-        c1 = c1_acc / n_cols
-        c2 = c2_acc / n_cols
+    c1 = c1_acc / N_COLS
+    c2 = c2_acc / N_COLS
 
-        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
-            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
-            cols_mask = cols_off < n_cols
-            block_mask = rows_mask[:, None] & cols_mask[None, :]
+    for col_offset in range(0, N_COLS, BLOCK_SIZE_N):
+        cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+        cols_mask = cols_off < N_COLS
+        block_mask = rows_mask[:, None] & cols_mask[None, :]
 
-            dy = tl.load(DY_ptr + rows_off[:, None] * stride_dy_row + cols_off[None, :], mask=block_mask, other=0.0).to(
-                tl.float32
-            )
+        dy = tl.load(DY_ptr + rows_off[:, None] * stride_dy_row + cols_off[None, :], mask=block_mask, other=0.0).to(
+            tl.float32
+        )
 
-            x = tl.load(X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0).to(
-                tl.float32
-            )
+        x = tl.load(X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0).to(
+            tl.float32
+        )
 
-            w = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
+        w = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
 
-            x_hat = (x - mean[:, None]) * rstd[:, None]
-            wdy = w[None, :] * dy
+        x_hat = (x - mean[:, None]) * rstd[:, None]
+        wdy = w[None, :] * dy
 
-            dW_chunk = tl.sum(dy * x_hat, axis=0)
-            dB_chunk = tl.sum(dy, axis=0)
+        dW_chunk = tl.sum(dy * x_hat, axis=0)
+        dB_chunk = tl.sum(dy, axis=0)
 
-            dx = (wdy - (x_hat * c1[:, None] + c2[:, None])) * rstd[:, None]
+        dx = (wdy - (x_hat * c1[:, None] + c2[:, None])) * rstd[:, None]
 
-            tl.store(DX_ptr + rows_off[:, None] * stride_dx_row + cols_off[None, :], dx.to(X_dtype), mask=block_mask)
+        tl.store(DX_ptr + rows_off[:, None] * stride_dx_row + cols_off[None, :], dx.to(X_dtype), mask=block_mask)
 
-            tl.atomic_add(DW_ptr + cols_off, dW_chunk, mask=cols_mask)
-            tl.atomic_add(DB_ptr + cols_off, dB_chunk, mask=cols_mask)
+        tl.atomic_add(DW_ptr + cols_off, dW_chunk, mask=cols_mask)
+        tl.atomic_add(DB_ptr + cols_off, dB_chunk, mask=cols_mask)
 
 
 def layernorm_infer_impl(
@@ -320,8 +312,8 @@ def layernorm_infer_impl(
         x_2d.stride(0),
         y.stride(0),
         n_rows,
-        n_cols,
         eps,
+        N_COLS=n_cols,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
     )
 
@@ -416,8 +408,8 @@ def layernorm_bwd_impl(dy, x_2d, w, b, mean, rstd):
             dx.stride(0),
             x_2d.stride(0),
             n_rows,
-            n_cols,
             torch_to_triton_dtype[x_2d.dtype],
+            N_COLS=n_cols,
             BLOCK_SIZE_N=BLOCK_SIZE_N,
             BLOCK_SIZE_M=2,
         )
