@@ -3,7 +3,6 @@ import torch
 
 from tests.utils import auto_switch_platform
 
-
 @pytest.mark.parametrize(
     "input_tensor, weight, target, bias, grad_input",
     [

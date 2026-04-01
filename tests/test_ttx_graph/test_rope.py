@@ -3,7 +3,6 @@ import torch
 
 from tests.utils import auto_switch_platform
 
-
 @pytest.mark.parametrize(
     "q, k",
     [

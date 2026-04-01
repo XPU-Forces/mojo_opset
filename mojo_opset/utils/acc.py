@@ -1,6 +1,14 @@
 import torch
 
 
+def _pick_nested_tol(value, index: int):
+    if isinstance(value, (tuple, list)):
+        if len(value) <= index:
+            raise IndexError(f"Tolerance tuple/list index {index} out of range for value {value}.")
+        return value[index]
+    return value
+
+
 def check_tol_diff(
     norm: torch.Tensor,
     ref: torch.Tensor,
@@ -19,8 +27,15 @@ def check_tol_diff(
         mixed_tol: If true, atol, rtol and ptol are ignored.
     """
     if isinstance(norm, tuple) or isinstance(norm, list):
-        for norm_i, ref_i in zip(norm, ref):
-            check_tol_diff(norm_i, ref_i, atol, rtol, ptol, mixed_tol)
+        for idx, (norm_i, ref_i) in enumerate(zip(norm, ref)):
+            check_tol_diff(
+                norm_i,
+                ref_i,
+                _pick_nested_tol(atol, idx),
+                _pick_nested_tol(rtol, idx),
+                _pick_nested_tol(ptol, idx),
+                _pick_nested_tol(mixed_tol, idx),
+            )
         return
 
     if mixed_tol:

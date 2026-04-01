@@ -4,7 +4,9 @@ import torch
 from mojo_opset.utils.platform import get_platform
 from tests.utils import bypass_not_implemented
 
+from mojo_opset import MojoDequantSwiGLUQuant
 from mojo_opset import MojoDequant
+from mojo_opset import MojoDynamicQuant
 from mojo_opset import MojoQuant
 
 torch.manual_seed(42)
@@ -273,3 +275,87 @@ def test_quant_dequant_roundtrip(shape, dtype):
     recovered = dequant_op(quantized, scale)
 
     torch.testing.assert_close(recovered.to(torch.float32), x.to(torch.float32), atol=5e-2, rtol=5e-2)
+
+
+# ---------------------------------------------------------------------------
+# MojoDynamicQuant
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("dtype", dtypes)
+@bypass_not_implemented
+def test_dynamic_quant_reference(dtype):
+    x = torch.randn(32, 128, dtype=dtype)
+    smooth_scale = torch.randn(128, dtype=torch.float32)
+
+    op = MojoDynamicQuant._registry.get("torch")(quant_dtype=torch.int8, smooth_input=True)
+    out, scale = op(x, smooth_scale)
+
+    expected_input = x.float() * smooth_scale.float().unsqueeze(0)
+    expected_scale = expected_input.abs().amax(dim=-1).clamp(min=1e-12) / 127
+    expected_out = torch.clamp(
+        torch.round(expected_input / expected_scale.unsqueeze(-1)),
+        -128,
+        127,
+    ).to(torch.int8)
+
+    torch.testing.assert_close(out, expected_out, atol=0, rtol=0)
+    torch.testing.assert_close(scale, expected_scale, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("dtype", dtypes)
+@bypass_not_implemented
+def test_dynamic_quant_backend(dtype):
+    x = torch.randn(24, 128, dtype=dtype)
+    smooth_scale = torch.randn(128, dtype=torch.float32)
+
+    op = MojoDynamicQuant(quant_dtype=torch.int8, smooth_input=True)
+    op_ref = MojoDynamicQuant._registry.get("torch")(quant_dtype=torch.int8, smooth_input=True)
+    op.forward_diff_with(op_ref, x, smooth_scale, atol=(1, 2e-4), rtol=(0, 2e-4))
+
+
+@pytest.mark.parametrize("dtype", dtypes)
+@bypass_not_implemented
+def test_dynamic_quant_backend_moe(dtype):
+    x = torch.randn(12, 128, dtype=dtype)
+    smooth_scale = torch.randn(3, 128, dtype=torch.float32)
+    token_count = torch.tensor([4, 3, 5], dtype=torch.int64)
+
+    op = MojoDynamicQuant(quant_dtype=torch.int8, smooth_input=True, moe_mode=True)
+    op_ref = MojoDynamicQuant._registry.get("torch")(quant_dtype=torch.int8, smooth_input=True, moe_mode=True)
+    op.forward_diff_with(
+        op_ref,
+        x,
+        smooth_scale,
+        token_count,
+        atol=(1, 2e-4),
+        rtol=(0, 2e-4),
+    )
+
+
+# ---------------------------------------------------------------------------
+# MojoDequantSwiGLUQuant
+# ---------------------------------------------------------------------------
+@bypass_not_implemented
+def test_dequant_swiglu_quant_backend():
+    tokens = 12
+    hidden = 64
+    token_count = torch.tensor([5, 7], dtype=torch.int64)
+
+    x = torch.randint(-1024, 1024, (tokens, hidden * 2), dtype=torch.int32)
+    weight_scale = torch.rand(2, hidden * 2, dtype=torch.float32)
+    activation_scale = torch.rand(tokens, dtype=torch.float32)
+    quant_scale = torch.rand(2, hidden, dtype=torch.float32)
+
+    op = MojoDequantSwiGLUQuant(activate_left=False, quant_mode=1)
+    op_ref = MojoDequantSwiGLUQuant._registry.get("torch")(activate_left=False, quant_mode=1)
+    op.forward_diff_with(
+        op_ref,
+        x,
+        weight_scale,
+        activation_scale,
+        None,
+        quant_scale,
+        None,
+        token_count,
+        atol=(0, 1e-4),
+        rtol=(0, 1e-4),
+    )

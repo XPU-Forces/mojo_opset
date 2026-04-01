@@ -430,22 +430,33 @@ def perf_npu(executor, profiling_dir="./npu_profiling", active=5):
     Returns:
         None: Logs and writes benchmark results to a file.
     """
-    device_latency, kernel_profiling_path = device_perf_npu(executor, profiling_dir, active)
+    device_result = device_perf_npu(executor, profiling_dir, active)
     host_latency = host_perf(executor, "npu")
+
+    if device_result is None:
+        device_latency = None
+        kernel_profiling_path = "unavailable"
+        logger.warning("NPU profiler output is unavailable, falling back to host-latency-only benchmark logging.")
+    else:
+        device_latency, kernel_profiling_path = device_result
 
     func_name, para_list = get_executor_info(executor)
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    device_latency_str = f"{device_latency:.4f} us" if device_latency is not None else "N/A"
 
     logger.info(
         f"[{func_name}] | "
         f"{', '.join(para_list)} | "
-        f"Device latency = {device_latency:.4f} us | "
+        f"Device latency = {device_latency_str} | "
         f"Host latency = {host_latency:.4f} ms | "
         f"Profile dir = {kernel_profiling_path}"
     )
 
-    plain_log_file = f"| {timestamp} | {func_name} | {format_executor_info(para_list)} | {device_latency:.4f} us | {host_latency:.4f} ms |"
+    plain_log_file = (
+        f"| {timestamp} | {func_name} | {format_executor_info(para_list)} | "
+        f"{device_latency_str} | {host_latency:.4f} ms |"
+    )
     log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf/benchmark.md")
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 

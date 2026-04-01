@@ -5,7 +5,6 @@ import torch
 
 from tests.utils import auto_switch_platform
 
-
 def generate_paged_prefill_data(
     batch_size: int,
     num_q_heads: int,
