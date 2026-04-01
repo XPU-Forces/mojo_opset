@@ -116,8 +116,6 @@ def _compute_rope_separated(
     return roped_x1, roped_x2
 
 
-
-
 @triton.jit
 def _rot_pos_embed_kernel(
     cos_table_ptr,
