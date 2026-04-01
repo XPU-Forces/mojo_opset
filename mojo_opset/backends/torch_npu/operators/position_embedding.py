@@ -31,12 +31,8 @@ class TorchNpuRoPE(MojoRoPE, default_priority=0):
             q_rope = q_rope.unsqueeze(0)
             k_rope = k_rope.unsqueeze(0)
             
-        if cos.dim() == 3:
-            cos = cos.unsqueeze(0)
-            sin = sin.unsqueeze(0)
-        elif cos.dim() == 2:
-            cos = cos.unsqueeze(0).unsqueeze(0)
-            sin = sin.unsqueeze(0).unsqueeze(0)
+        cos = cos.unsqueeze(0)
+        sin = sin.unsqueeze(0)
             
         print(q_rope.shape, cos.shape)
 

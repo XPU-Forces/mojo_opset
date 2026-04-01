@@ -132,7 +132,10 @@ class MojoRoPE(MojoOperator):
         Returns:
             (q_rot, k_rot) with same shape as input
         """
-        if not head_first:
+        if head_first:
+            cos = cos.unsqueeze(0)
+            sin = sin.unsqueeze(0)
+        else:
             cos = cos.unsqueeze(1)
             sin = sin.unsqueeze(1)
         return self._apply_rope(q, k, cos, sin)

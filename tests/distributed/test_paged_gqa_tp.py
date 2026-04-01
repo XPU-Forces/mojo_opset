@@ -6,6 +6,7 @@ from mojo_opset import (
     MojoPagedPrefillGQA,
     MojoPagedDecodeGQA,
     MojoStorePagedKVCache,
+    MojoRotaryEmbedding,
     MojoRoPE,
     MojoRMSNorm,
 )
@@ -124,17 +125,10 @@ class RotaryEmbedding(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        @lru_cache
-        def generate_freqs(max_position_embeddings, inv_freq_fp32):
-            t = torch.arange(max_position_embeddings).to(inv_freq_fp32)
-            freqs = torch.einsum("i,j->ij", t, inv_freq_fp32)  # T, D/2
-            freqs = torch.cat([freqs, freqs], dim=1)  # T,D/2 -> T,D
-            return freqs.cos(), freqs.sin()
-
         head_dim = config.model_config.hidden_size // config.model_config.num_attention_heads
 
         self.rope_percentage = getattr(config.model_config, "rope_percentage", 1.0)
-        self.rope_dim = config.model_config.head_dim * self.rope_percentage
+        self.rope_dim = int(head_dim * self.rope_percentage)
 
         base = getattr(config.model_config, "rope_base", 10000.0)
         if getattr(config.model_config, "rope_mode", "default") == "ntk":
@@ -142,49 +136,29 @@ class RotaryEmbedding(torch.nn.Module):
                 self.rope_dim / (self.rope_dim - 2)
             )
 
-        self.register_buffer(
-            "inv_freq",
-            1.0 / (base ** (torch.arange(0, self.rope_dim, 2).float() / self.rope_dim)),
+        max_pos = getattr(config.model_config, "max_position_embeddings", 2048)
+        self.rot_pos_emb = MojoRotaryEmbedding(
+            rope_theta=base, rope_dim=self.rope_dim, init_max_length=max_pos,
         )
-
-        cos, sin = generate_freqs(
-            config.model_config.max_position_embeddings, self.inv_freq
-        )
-        self.register_buffer("cos", cos)
-        self.register_buffer("sin", sin)
         self.rope = MojoRoPE()
 
         def load_state_dict_post_hook(module, incompatible_keys) -> None:
-            key2ignroe = []
+            key2ignore = []
             for miss in incompatible_keys.missing_keys:
                 if miss.split('.')[-1] in ("inv_freq", "cos", "sin"):
-                    key2ignroe.append(miss)
-            # NOTE(liuyuan): incompatible_keys DOES NOT allow to set attribute.
-            for key in key2ignroe:
+                    key2ignore.append(miss)
+            for key in key2ignore:
                 incompatible_keys.missing_keys.remove(key)
         self.register_load_state_dict_post_hook(load_state_dict_post_hook)
 
-    def _get_pos_embeddings(self, context_input_len, shift):
-        bs = shift.size(0)
-        kv_len = torch.ones_like(shift) if context_input_len is None else context_input_len
-        cos_embeddings = []
-        sin_embeddings = []
-        for i in range(bs):
-            cos_embeddings.append(self.cos[shift[i] : shift[i] + kv_len[i]])
-            sin_embeddings.append(self.sin[shift[i] : shift[i] + kv_len[i]])
-        return torch.stack(cos_embeddings, dim=0), torch.stack(sin_embeddings, dim=0)
-
     def forward(self, q, k, cu_seqlens=None, shift=None):
-        return self.rope(
-            q,
-            k,
-            self.cos,
-            self.sin,
-            cu_seqlens=cu_seqlens,
-            kv_lens=shift,
-            rope_percentage=self.rope_percentage,
-            head_first=False,
-        )
+        if cu_seqlens is not None:
+            seqlens_q = cu_seqlens[1:] - cu_seqlens[:-1]
+            seqlens_kv = shift + seqlens_q if shift is not None else None
+            cos, sin = self.rot_pos_emb(cu_seqlens_q=cu_seqlens, seqlens_kv=seqlens_kv)
+        else:
+            cos, sin = self.rot_pos_emb(position_ids=shift)
+        return self.rope(q, k, cos, sin, head_first=False)
 
 class FlashAttentionBlock(torch.nn.Module):
 
