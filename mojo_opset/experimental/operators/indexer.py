@@ -83,7 +83,6 @@ class MojoIndexer(MojoOperator):
             cos,
             sin,
             head_first=False,
-            rope_percentage=self.rope_head_dim / self.head_dim,
         )
         k = k.squeeze(2)
 
