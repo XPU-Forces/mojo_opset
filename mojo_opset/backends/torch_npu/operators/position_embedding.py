@@ -1,8 +1,9 @@
+from typing import Tuple
 import torch
 import torch_npu
 
 from mojo_opset.core import MojoRoPE
-
+from mojo_opset.core import MojoMRoPE
 
 class TorchNpuRoPE(MojoRoPE, default_priority=0):
     def __init__(self, rotary_offset=0, interleaved=False, dynamic_ntk=False, max_seq_len=None, is_varlen=True):
@@ -60,3 +61,32 @@ class TorchNpuRoPE(MojoRoPE, default_priority=0):
             k_rot = torch.cat([k_nope, k_rot], dim=-1)
 
         return q_rot, k_rot
+
+class TorchNpuMRoPE(MojoMRoPE):
+    supported_platforms_list = ["npu"]
+    def __init__(self):
+        super().__init__(head_size, mrope_section) # type: ignore
+        self.head_size = head_size  # type: ignore
+        self.mrope_section = mrope_section  # type: ignore
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        rotary_mode: str = "half",
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        assert rotary_mode in ["half", "full"], "rotary_mode must be 'half' or 'full'"
+        mrope_section = [0, 0, 0] if positions.ndim == 1 else self.mrope_section
+        query, key = torch_npu.npu_mrope(
+                positions,
+                query,
+                key,
+                cos_sin_cache,
+                self.head_size,
+                mrope_section=mrope_section,
+                rotary_mode=rotary_mode,
+            )
+        return query, key

@@ -1486,3 +1486,205 @@ class MojoSWA(MojoOperator):
             o[cu_seqlens_q[i] : cu_seqlens_q[i + 1]] = o_i.to(o.dtype)
         return o
 
+class MojoFusionAttention(MojoOperator):
+    def __init__(
+        self,
+        head_num: int,
+        mask: Optional[torch.Tensor] = None,
+        scale: float = 1.0,
+        enable_gqa: bool = False,
+    ):
+        super().__init__()
+        self.head_num = head_num
+        self.mask = mask
+        self.scale = scale
+        self.enable_gqa = enable_gqa
+        
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ):
+        """
+        Fusion Attention operator.
+        """
+        pass
+
+class MojoFusedInferAttentionScore(MojoOperator):
+    def __init__(
+        self,
+        head_num: int,
+        mask: Optional[torch.Tensor] = None,
+        scale: float = 1.0,
+        enable_gqa: bool = False,
+    ):
+        super().__init__()
+        self.head_num = head_num
+        self.mask = mask
+        self.scale = scale
+        self.enable_gqa = enable_gqa
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ):
+        """
+        Fused Infer Attention Score operator.
+        """
+        pass
+
+
+
+class MojoAttentionDecodeMTP(MojoOperator):
+    def __init__(
+        self, 
+        head_dim=128, 
+        block_size=128
+    ):
+        """
+        Flash attention decode with multi query heads and kv heads.
+
+        Args:
+            query (Tensor): The query tensor with shape (batch_size, q_seq, q_head_num * head_dim).
+        """
+        super().__init__()
+
+        self.head_dim = head_dim  # 显式定义head维度
+        self.block_size = block_size  # 定义block大小
+        self.scale = 1.0 / math.sqrt(head_dim)  # 缩放因子（1/√128）
+        
+    def forward(
+        self, 
+        query, 
+        casual_mask, 
+        key_cache, 
+        value_cache, 
+        qkv_len, 
+        kv_block_table,
+        kv_head,
+        window_size
+    ):
+        """
+        Args:
+            query (Tensor): The query tensor with shape (batch_size, q_seq, q_head_num * head_dim).
+            casual_mask (Tensor): The casual mask tensor with shape (q_seq, q_seq).
+            key_cache (Tensor): The key cache tensor with shape (batch_size, kv_head_num, max_kv_seq_length, head_dim).
+            value_cache (Tensor): The value cache tensor with shape (batch_size, kv_head_num, max_kv_seq_length, head_dim).
+            qkv_len (List[int]): The length of each query, key, and value sequence.
+            kv_block_table (Tensor): Block table for MTP with shape (batch_size, max_block_num)
+        """
+        if len(query.shape) != 3:
+            raise ValueError(f"query shape must be (batch_size, q_seq, q_head_num * head_dim), got {query.shape}")
+        
+        batch_size, q_seq, q_total_dim = query.shape
+        
+        
+        if q_total_dim % self.head_dim != 0:
+            raise ValueError(f"query total dim {q_total_dim} not divisible by head_dim {self.head_dim}")
+        
+        q_head_num = q_total_dim // self.head_dim
+        group = q_head_num // kv_head
+        
+        if q_head_num % kv_head != 0:
+            raise ValueError(f"q_head_num {q_head_num} not divisible by kv_head {kv_head}")
+        
+        if key_cache.shape != value_cache.shape:
+            raise ValueError(f"key_cache shape {key_cache.shape} != value_cache shape {value_cache.shape}")
+        
+        max_kv_seq_length = qkv_len[0] # max(qkv_len) if qkv_len else 0
+        max_block_num = kv_block_table.shape[1] if kv_block_table is not None else 0
+        
+
+        key_cache_nd = self.transfer_nz_to_nd(key_cache)
+        value_cache_nd = self.transfer_nz_to_nd(value_cache)
+
+        key_all = torch.zeros(   # BNSD
+            batch_size, kv_head, max_kv_seq_length, self.head_dim,
+            dtype=query.dtype, device=query.device
+        )
+        value_all = torch.zeros_like(key_all)
+
+        for b in range(batch_size):
+            cur_kv_len = qkv_len[b]
+            if cur_kv_len <= 0:
+                continue
+                
+            cur_block_num = math.ceil(cur_kv_len / self.block_size)
+            
+            if cur_block_num > kv_block_table.shape[1]:
+                raise ValueError(f"cur_block_num {cur_block_num} exceeds kv_block_table width {kv_block_table.shape[1]}")
+            
+            cur_block_indices = kv_block_table[b, :cur_block_num].long()
+            
+            for i, block_idx in enumerate(cur_block_indices):
+                start_idx = i * self.block_size
+                end_idx = min(start_idx + self.block_size, cur_kv_len)
+                block_len = end_idx - start_idx
+
+                key_block = key_cache_nd[block_idx, :, :block_len, :]
+                value_block = value_cache_nd[block_idx, :, :block_len, :]
+
+                key_all[b, :, start_idx:end_idx, :] = key_block
+                value_all[b, :, start_idx:end_idx, :] = value_block
+        
+        key_all = key_all.repeat(1, group, 1, 1)  # (B, q_head, S, D)
+        value_all = value_all.repeat(1, group, 1, 1)
+
+        q = query.view(batch_size, q_seq, q_head_num, self.head_dim).transpose(1, 2)  # (B, q_head, q_seq, D)
+        k = key_all.transpose(2, 3)  # (B, q_head, D, S)
+        v = value_all  # (B, q_head, S, D)
+
+        attn_scores = torch.matmul(q, k) * self.scale  # (B, q_head, q_seq, S)
+
+        for b in range(batch_size):
+            cur_len = qkv_len[b]
+            if cur_len > window_size:
+                raise ValueError(f"KV长度{cur_len}超过MTP窗口大小{window_size}")
+            
+            if cur_len > 0 and q_seq > 0:
+
+                cur_mask = torch.triu(
+                    torch.ones(q_seq, cur_len, dtype=torch.bool, device=attn_scores.device),
+                    diagonal=1
+                )
+                
+                if casual_mask is not None and casual_mask.shape[0] >= q_seq and casual_mask.shape[1] >= cur_len:
+                    cur_mask = cur_mask | casual_mask[:q_seq, :cur_len].to(attn_scores.device)
+                
+                cur_mask = cur_mask.unsqueeze(0)  # (1, q_seq, cur_len)
+                
+
+                attn_scores[b, :, :, :cur_len] = attn_scores[b, :, :, :cur_len].masked_fill(
+                    cur_mask, -10000.0
+                )
+
+
+        attn_weights = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
+
+        output = torch.matmul(attn_weights, v)  # (B, q_head, q_seq, D)
+
+        output = output.transpose(1, 2).contiguous()  # (B, q_seq, q_head, D)
+        output = output.view(batch_size, q_seq, q_head_num * self.head_dim)  # (B, q_seq, total_dim)
+
+        return output
+        
+    def transfer_nz_to_nd(
+        self,
+        cache: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Transfer non-zero cache to non-dense cache.
+
+        Args:
+            cache (Tensor): The non-zero cache tensor with shape (block_num, kv_head_num, block_size, 8, 16).
+
+        Returns:
+            Tensor: The non-dense cache tensor with shape (block_num, kv_head_num, block_size, head_dim).
+        """
+        if cache.ndim == 5:
+            cache = cache.permute(0, 1, 3, 2, 4).contiguous()  # (block_num, kv_head, block_size, 8, 16)
+            cache = cache.view(cache.shape[0], cache.shape[1], cache.shape[2], -1)  # 8*16=128
+        return cache

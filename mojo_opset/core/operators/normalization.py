@@ -659,4 +659,47 @@ class MojoResidualAddLayerNormQuant(MojoOperator):
 
 
 class MojoResidualAddNormCast(MojoOperator):
-    pass
+    def __init__(
+        self,
+        norm_size: int,
+        eps: float = 1e-5,
+        norm_pos: str = "pre",
+        out_dtype: torch.dtype | None = None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        if norm_pos not in ["pre", "post"]:
+            raise ValueError("norm_pos should be 'pre' or 'post'")
+
+        self.variance_epsilon = float(eps)
+        self.weight = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
+
+        self.norm_pos = norm_pos
+        self.out_dtype = out_dtype
+    
+    def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor):
+        orig_dtype = hidden_state.dtype
+
+        if hidden_state.dtype in (torch.float16, torch.bfloat16):
+            compute_dtype = hidden_state.dtype
+        else:
+            raise ValueError(f"unsupported dtype {hidden_state.dtype}")
+
+        residual = residual.to(compute_dtype)
+        self.weight = self.weight.to(compute_dtype)
+        # add rmsnorm + cast to compute_dtype
+        residual = hidden_state + residual
+        hidden_state = F.rms_norm(
+                residual,
+                (residual.size(-1),),
+                weight=self.weight,
+                eps=self.variance_epsilon,
+            )
+        if self.norm_pos != "pre":
+            residual = hidden_state
+
+        target_dtype = self.out_dtype if self.out_dtype is not None else orig_dtype
+        hidden_state = hidden_state.to(target_dtype)
+        residual = residual.to(target_dtype)
+
+        return hidden_state, residual

@@ -193,3 +193,138 @@ class MojoGridRoPE(MojoOperator):
             output.append(x_i)
         y = torch.stack(output)
         return y.type_as(x)
+
+
+class MojoMRoPE(MojoOperator):
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: float = 10000.0,
+        mrope_section: Optional[List[int]] = None,
+        mrope_interleaved: bool = False,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        super().__init__()
+        self.head_size = head_size
+        self.rotary_dim = rotary_dim
+        self.max_position_embeddings = max_position_embeddings
+        self.mrope_section = mrope_section
+        self.mrope_interleaved = mrope_interleaved
+
+        assert rotary_dim % 2 == 0, "rotary_dim must be even for RoPE"
+        if mrope_section is not None:
+            assert len(mrope_section) == 3, "mrope_section must be [t, h, w]"
+            assert sum(mrope_section) == rotary_dim, "sum(mrope_section) must equal rotary_dim"
+
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=device) / rotary_dim)
+        )
+        self.register_buffer("inv_freq", inv_freq)
+
+        # 预计算cos/sin缓存
+        t = torch.arange(max_position_embeddings, device=device, dtype=torch.float32)
+        freqs = torch.einsum("i,j->ij", t, inv_freq)  # [max_pos, rotary_dim//2]
+        emb = torch.cat([freqs, freqs], dim=-1)       # [max_pos, rotary_dim]
+        cos = emb.cos()
+        sin = emb.sin()
+        self.register_buffer(
+            "cos_sin_cache",
+            torch.cat([cos, sin], dim=-1),
+            persistent=False,
+        )
+
+    def _get_cos_sin(
+        self,
+        positions: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        assert (positions < self.max_position_embeddings).all(), "positions exceed max_position_embeddings"
+        cos_sin = self.cos_sin_cache[positions]  # 1D: [num_tokens, 2*rotary_dim]; 2D: [3, num_tokens, 2*rotary_dim]
+        cos, sin = cos_sin.chunk(2, dim=-1)      # 拆分cos/sin: 1D->[num_tokens, rotary_dim]; 2D->[3, num_tokens, rotary_dim]
+        return cos, sin
+    
+    def apply_interleaved_mrope(self, x: torch.Tensor, mrope_section: List[int]) -> torch.Tensor:
+        t_dim, h_dim, w_dim = mrope_section
+        num_tokens = x.shape[0]
+        
+        x_t = x[..., :t_dim]    # [num_tokens, 3, t_dim] -> 仅保留t维度分配的长度
+        x_h = x[..., t_dim:t_dim+h_dim]  # [num_tokens, 3, h_dim]
+        x_w = x[..., t_dim+h_dim:]       # [num_tokens, 3, w_dim]
+        
+        x_t = x_t[:, 0, :]  # [num_tokens, t_dim] - 时间/序列维度
+        x_h = x_h[:, 1, :]  # [num_tokens, h_dim] - 高度维度
+        x_w = x_w[:, 2, :]  # [num_tokens, w_dim] - 宽度维度
+        
+        interleaved = torch.stack([
+            x_t.reshape(num_tokens, -1, 1),
+            x_h.reshape(num_tokens, -1, 1),
+            x_w.reshape(num_tokens, -1, 1)
+        ], dim=-1).flatten(-2)  # [num_tokens, rotary_dim]
+        
+        return interleaved
+
+    def _rotate_half(self, x: torch.Tensor) -> torch.Tensor:
+        """RoPE核心旋转操作：旋转最后一维的前半部分和后半部分"""
+        x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
+        return torch.cat([-x2, x1], dim=-1)
+
+    def _apply_mrope_cos_sin(
+        self,
+        cos: torch.Tensor,    # 输入形状: [num_tokens, 3, rotary_dim]
+        sin: torch.Tensor,    # 输入形状: [num_tokens, 3, rotary_dim]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """应用3D MRoPE的cos/sin维度重排"""
+        t, h, w = self.mrope_section
+
+        if self.mrope_interleaved:
+            cos = self.apply_interleaved_mrope(cos, self.mrope_section)
+            sin = self.apply_interleaved_mrope(sin, self.mrope_section)
+        else:
+            cos_t = cos[:, 0, :t]    # [num_tokens, t]
+            cos_h = cos[:, 1, t:t+h] # [num_tokens, h]
+            cos_w = cos[:, 2, t+h:]  # [num_tokens, w]
+            cos = torch.cat([cos_t, cos_h, cos_w], dim=-1)  # [num_tokens, rotary_dim]
+            
+            sin_t = sin[:, 0, :t]
+            sin_h = sin[:, 1, t:t+h]
+            sin_w = sin[:, 2, t+h:]
+            sin = torch.cat([sin_t, sin_h, sin_w], dim=-1)
+
+        return cos, sin
+
+    def forward(
+        self,
+        positions: torch.Tensor,        # 1D: [num_tokens]; 2D: [3, num_tokens]
+        query: torch.Tensor,            # [batch_size, num_heads, num_tokens, head_size]
+        key: torch.Tensor,              # [batch_size, num_heads, num_tokens, head_size]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    
+        assert positions.ndim in (1, 2), "positions must be 1D (num_tokens) or 2D (3, num_tokens)"
+        assert query.shape == key.shape, "query and key must have the same shape"
+        assert query.shape[-1] == self.head_size, f"query head size must be {self.head_size}"
+        assert self.rotary_dim <= self.head_size, "rotary_dim cannot exceed head_size"
+
+        cos, sin = self._get_cos_sin(positions.to(self.cos_sin_cache.device, non_blocking=True))
+
+        if positions.ndim == 2:
+            assert self.mrope_section is not None, "mrope_section must be set for 2D positions (3D MRoPE)"
+            cos = cos.transpose(0, 1)
+            sin = sin.transpose(0, 1)
+            cos, sin = self._apply_mrope_cos_sin(cos, sin)  # 输出: [num_tokens, rotary_dim]
+
+        batch_size, num_heads, num_tokens, head_size = query.shape
+        cos = cos.unsqueeze(0).unsqueeze(0)  # 扩展batch和head维度
+        sin = sin.unsqueeze(0).unsqueeze(0)
+
+        q_rot, q_pass = query[..., :self.rotary_dim], query[..., self.rotary_dim:]
+        k_rot, k_pass = key[..., :self.rotary_dim], key[..., self.rotary_dim:]
+
+        q_rot = q_rot * cos + self._rotate_half(q_rot) * sin
+        k_rot = k_rot * cos + self._rotate_half(k_rot) * sin
+
+        q = torch.cat([q_rot, q_pass], dim=-1)
+        k = torch.cat([k_rot, k_pass], dim=-1)
+
+        return q, k

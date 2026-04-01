@@ -263,3 +263,60 @@ class MojoMoECombine(MojoOperator):
         output_buffer = output_buffer.float()
         combined = output_buffer.scatter_reduce(0, scatter_indices, combined_expert_outputs, reduce="sum", include_self=True)
         return combined.to(expert_outputs.dtype)
+
+class MojoMoeTopkGatingDispatchDynamicQuant(MojoOperator):
+    def __init__(self):
+        super().__init__()
+    
+    @staticmethod
+    def forward(
+        x,
+        finished=None,
+        k=1,
+    ) -> torch.Tensor:
+        """
+        Forward pass with MOE top-k gating dispatch dynamic quantization.
+
+        Args:
+            x (torch.Tensor): Input tensor of any shape.
+            finished (torch.Tensor): Finished tensor of shape (batch_size,).
+            k (int): Top-k value.
+
+        Returns:
+            torch.Tensor: Same shape as input with element-wise MOE top-k gating dispatch dynamic quantization applied.
+        """
+
+        y, expert_idx = torch.topk(torch.softmax(x, dim=-1), k, dim=-1)
+
+        batch_shape = x.shape[:-1]  
+        batch_dim_count = len(batch_shape) 
+        
+        row_idx_base = torch.arange(
+            torch.prod(torch.tensor(batch_shape)).item(),
+            device=x.device
+        ).reshape(batch_shape)
+        
+        expand_sizes = list(batch_shape) + [k]  
+        row_idx = row_idx_base.unsqueeze(-1).expand(expand_sizes)
+        
+        # process finished mask
+        if finished is not None:
+            finished_expanded = finished
+            for _ in range(batch_dim_count - 1):
+                finished_expanded = finished_expanded.unsqueeze(1)
+            finished_expanded = finished_expanded.unsqueeze(-1).expand(expand_sizes)
+            
+            y = y.masked_fill(finished_expanded, 0.0)
+            expert_idx = expert_idx.masked_fill(finished_expanded, 0)
+            row_idx = row_idx.masked_fill(finished_expanded, 0)
+        
+        return y, expert_idx, row_idx
+
+
+
+class MojoMoeScaleDynamicQuant(MojoOperator):
+    pass
+
+
+class MojoMoeGatingTopk(MojoOperator):
+    pass

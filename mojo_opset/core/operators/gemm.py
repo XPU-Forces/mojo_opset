@@ -211,3 +211,7 @@ class MojoQuantGroupLinearReduceSum(MojoOperator):
             reduced_out += out[i, ...].to(torch.bfloat16)
 
         return reduced_out
+
+
+class MojoQuantMatmul(MojoOperator):
+    pass

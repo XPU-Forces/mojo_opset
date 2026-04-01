@@ -14,6 +14,7 @@ from mojo_opset import MojoResidualAddRMSNorm
 from mojo_opset import MojoResidualAddRMSNormQuant
 from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoRMSNormQuant
+from mojo_opset import MojoResidualAddNormCast
 
 torch.manual_seed(43)
 
@@ -241,6 +242,51 @@ def test_channel_rmsnorm(x, norm_size, channel_first, images):
         atol, rtol = 3e-2, 6e-3
     norm.forward_diff_with(norm_ref, x, atol=atol, rtol=rtol)
 
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (32, 1024),
+        (64, 8192),
+        (57, 7338),
+        (2, 256),
+    ],
+)
+@pytest.mark.parametrize("dtype", dtypes)
+@pytest.mark.parametrize("eps", [1e-5])
+@pytest.mark.parametrize("norm_pos", ["pre", "post"])
+@bypass_not_implemented
+def test_residual_add_rms_norm_cast(shape, dtype, norm_pos, eps):
+    x = torch.randn(size=shape, dtype=dtype)
+    residual = torch.randn(size=shape, dtype=dtype)
+    weight = torch.randn(size=(shape[-1],), dtype=dtype)
+    add_norm = MojoResidualAddNormCast(
+        norm_size=weight.size(0), 
+        eps=eps, norm_pos=norm_pos, 
+        device=x.device, 
+        dtype=weight.dtype
+    )
+    add_norm_ref = MojoResidualAddNormCast._registry.get("torch")(
+        norm_size=weight.size(0),
+        eps=eps,
+        norm_pos=norm_pos,
+    )
+
+    add_norm_ref.weight = add_norm.weight = torch.nn.Parameter(weight)
+
+    if dtype == torch.bfloat16:
+        atol, rtol = 3e-2, 6e-3   
+        ptol = 0.90
+    elif dtype == torch.float16:
+        atol, rtol = 3e-2, 6e-3  
+        ptol = 1.0
+
+    add_norm.forward_diff_with(
+        add_norm_ref,
+        x,
+        residual,
+        atol=atol,
+        rtol=rtol,
+    )
 
 # ===========================================================================
 # NormQuant tests

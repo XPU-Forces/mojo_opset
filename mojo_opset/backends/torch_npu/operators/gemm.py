@@ -6,6 +6,7 @@ import torch_npu
 from mojo_opset.core import MojoGemmDequant
 from mojo_opset.core import MojoGroupLinear
 from mojo_opset.core import MojoQuantGroupLinearReduceSum
+from mojo_opset.core import MojoQuantMatmul
 from mojo_opset.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -95,3 +96,24 @@ class TorchNpuQuantGroupLinearReduceSum(MojoQuantGroupLinearReduceSum):
             x2_nz = weight
 
         return torch_npu.npu_quant_matmul_reduce_sum(input, x2_nz, x1_scale=x1_scale, x2_scale=x2_scale)
+
+class TorchNpuQuantMatmul(MojoQuantMatmul):
+    supported_platforms_list = ["npu"]
+
+    def forward(
+        x1,
+        x2,
+        scale,
+        offset: torch.Tensor = None,
+        pre_scale: torch.Tensor = None,
+        bias: torch.Tensor = None,
+        output_dtype: int = None,
+    ) -> torch.Tensor:
+
+        if scale.dim() == 2:
+            assert offset is not None, "offset must be provided when scale is 2D"
+            assert pre_scale is not None, "pre_scale must be provided when scale is 2D"
+        
+        assert output_dtype in [torch.float16, torch.bfloat16, torch.int8, torch.int32], "output_dtype must be float16, bfloat16, int8 or int32"
+
+        return torch_npu.npu_quant_matmul(x1, x2, scale, offset=offset, pre_scale=pre_scale, bias=bias, output_dtype=output_dtype)
