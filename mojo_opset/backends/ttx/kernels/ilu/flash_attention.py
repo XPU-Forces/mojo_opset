@@ -152,15 +152,15 @@ def paged_attention_prefill_impl(
     seqlens_kv: Optional[torch.Tensor],
     block_tables: torch.Tensor,
     gqa_interleave: bool,
-    sm_scale: Optional[float] = None,
+    softmax_scale: Optional[float] = None,
     aux_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     del aux_mask
 
     total_q_tokens, num_q_heads, head_dim = q.shape
     _, num_kv_heads, block_size, _ = key_cache.shape
-    if sm_scale is None:
-        sm_scale = 1.0 / math.sqrt(head_dim)
+    if softmax_scale is None:
+        softmax_scale = 1.0 / math.sqrt(head_dim)
 
     outputs = torch.zeros(total_q_tokens, num_q_heads, head_dim, dtype=q.dtype, device=q.device)
 
@@ -208,7 +208,7 @@ def paged_attention_prefill_impl(
         k_expanded = k_expanded.contiguous()
         v_expanded = v_expanded.contiguous()
         out_slice = torch.empty_like(q_batch)
-        _launch_causal_attn_triton(q_batch, k_expanded, v_expanded, out_slice, sm_scale, q_seq_len, kv_seq_len)
+        _launch_causal_attn_triton(q_batch, k_expanded, v_expanded, out_slice, softmax_scale, q_seq_len, kv_seq_len)
         outputs[start_loc:end_loc] = out_slice
 
     return outputs
@@ -347,7 +347,7 @@ def paged_attention_decode_impl(
     seqlens: torch.Tensor,
     block_tables: torch.Tensor,
     gqa_interleave: bool,
-    sm_scale: Optional[float] = None,
+    softmax_scale: Optional[float] = None,
 ) -> torch.Tensor:
     batch_size, num_q_heads, head_dim = q.shape
     num_total_blocks, num_kv_heads, block_size, head_dim_cache = key_cache.shape
@@ -356,8 +356,8 @@ def paged_attention_decode_impl(
     max_num_blocks_per_seq = block_tables.shape[1]
 
     assert head_dim == head_dim_cache
-    if sm_scale is None:
-        sm_scale = 1.0 / math.sqrt(head_dim)
+    if softmax_scale is None:
+        softmax_scale = 1.0 / math.sqrt(head_dim)
 
     o = torch.empty_like(q)
 
@@ -398,7 +398,7 @@ def paged_attention_decode_impl(
         o.stride(2),
         block_tables.stride(0),
         block_tables.stride(1),
-        sm_scale,
+        softmax_scale,
         num_q_heads,
         num_kv_heads,
         gqa_interleave,
