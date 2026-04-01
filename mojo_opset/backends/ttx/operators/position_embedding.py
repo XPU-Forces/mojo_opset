@@ -20,7 +20,6 @@ class TTXRotaryEmbedding(MojoRotaryEmbedding):
     def forward(
         self,
         x: torch.Tensor,
-        *,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         seqlens_kv: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
