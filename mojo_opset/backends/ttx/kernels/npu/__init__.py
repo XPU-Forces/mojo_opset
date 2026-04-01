@@ -19,6 +19,8 @@ from .kv_cache import store_paged_kv_impl
 from .layernorm import layernorm_bwd_impl
 from .layernorm import layernorm_fwd_impl
 from .layernorm import layernorm_infer_impl
+from .lightning_indexer import lightning_indexer_impl
+from .quant import dynamic_quant_impl
 from .rmsnorm import rmsnorm_bwd_impl
 from .rmsnorm import rmsnorm_fwd_impl
 from .rmsnorm import rmsnorm_infer_impl
@@ -27,6 +29,7 @@ from .rope import rope_fwd_impl
 from .sample import fused_penalties_temp_impl
 from .sample import join_prob_reject_sampling_impl
 from .sample import reject_sampling_impl
+from .sample import top_k_sampling_impl
 from .sample import top_p_filter_impl
 from .sample import top_p_sampling_impl
 from .sdpa import sdpa_bwd_impl
@@ -35,14 +38,13 @@ from .sdpa import sdpa_infer_impl
 from .silu import silu_bwd_impl
 from .silu import silu_fwd_impl
 from .store_lowrank import store_label_cache_infer_impl
-from .sample import top_k_sampling_impl
+from .swa import swa_bwd_impl
+from .swa import swa_fwd_impl
+from .swa import swa_infer_impl
+from .swa import swa_paged_decode_impl
+from .swa import swa_paged_prefill_impl
 from .swiglu import swiglu_bwd_impl
 from .swiglu import swiglu_fwd_impl
-from .swa import swa_paged_prefill_impl
-from .swa import swa_paged_decode_impl
-from .swa import swa_infer_impl
-from .swa import swa_fwd_impl
-from .swa import swa_bwd_impl
 
 __all__ = [
     "causal_conv1d_update_bdt_impl",
@@ -73,6 +75,8 @@ __all__ = [
     "sdpa_infer_impl",
     "sdpa_fwd_impl",
     "sdpa_bwd_impl",
+    "lightning_indexer_impl",
+    "dynamic_quant_impl",
     "diffusion_attention_fwd_impl",
     "diffusion_attention_bwd_impl",
     "m_grouped_matmul_impl",
