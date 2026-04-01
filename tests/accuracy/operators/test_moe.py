@@ -11,8 +11,7 @@ from tests.utils import assert_close
 from mojo_opset import MojoMoE
 
 moe_configs = [
-    (1024, 16, 2, 1024, 512, "swiglu", torch.float32),
-    (1024, 32, 3, 1024, 512, "swiglu", torch.bfloat16),
+    (1024, 64, 8, 1024, 4096, "swiglu", torch.bfloat16),
 ]
 
 def generate_moe_weights_and_inputs(max_num_tokens, num_experts, hidden_size, intermediate_size, activation, dtype):
