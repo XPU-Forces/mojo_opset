@@ -3,11 +3,63 @@ import torch
 
 from tests.utils import bypass_not_implemented
 
+from mojo_opset import MojoRotaryEmbedding
 from mojo_opset import MojoRoPE
 from mojo_opset import MojoGridRoPE
 from mojo_opset.utils.platform import get_platform, get_torch_device
 
 torch.random.manual_seed(42)
+
+
+@pytest.mark.parametrize("bs", [1, 6])
+@pytest.mark.parametrize("seqlen", [2048])
+@pytest.mark.parametrize(
+    "rope_dim", [32, 48, 64, 88, 96, 128],
+)
+@bypass_not_implemented
+def test_rotary_embedding(bs, seqlen, rope_dim):
+    """Test MojoRotaryEmbedding (position embedding extraction) independently."""
+    device = get_torch_device()
+    max_seq_len = 32768
+
+    rot_pos_emb_ref_nocache = MojoRotaryEmbedding._registry.get("torch")(rope_theta=10000.0, rope_dim=rope_dim).to(device)
+    rot_pos_emb_ref = MojoRotaryEmbedding._registry.get("torch")(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
+    rot_pos_emb = MojoRotaryEmbedding(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
+
+    position_ids = torch.randint(0, max_seq_len, (bs,), dtype=torch.int32, device=device)
+    torch.testing.assert_close(
+        rot_pos_emb_ref(position_ids=position_ids), 
+        rot_pos_emb_ref_nocache(position_ids=position_ids), 
+        atol=1e-5, 
+        rtol=1e-5,
+    )
+
+    rot_pos_emb.forward_diff_with(
+        rot_pos_emb_ref,
+        cu_seqlens_q=None,
+        position_ids=position_ids,
+        atol=1e-5,
+        rtol=1e-5,
+    )
+
+    seq_lens = torch.randint((seqlen+1) // 2, seqlen + 1, (bs,), device=device, dtype=torch.int32)
+    cu_seqlens = torch.zeros(bs + 1, device=device, dtype=torch.int32)
+    cu_seqlens[1:] = torch.cumsum(seq_lens, dim=0)
+    kv_lens = torch.randint(0, max_seq_len - seqlen, (bs,), device=device, dtype=torch.int32) + seq_lens
+
+    torch.testing.assert_close(
+        rot_pos_emb_ref(cu_seqlens_q=cu_seqlens, seqlens_kv=kv_lens),
+        rot_pos_emb(cu_seqlens_q=cu_seqlens, seqlens_kv=kv_lens),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    rot_pos_emb.forward_diff_with(
+        rot_pos_emb_ref,
+        cu_seqlens_q=cu_seqlens,
+        seqlens_kv=kv_lens,
+        atol=1e-5,
+        rtol=1e-5,
+    )
 
 
 @pytest.mark.parametrize("bs", [1, 6])
@@ -35,33 +87,24 @@ torch.random.manual_seed(42)
 @pytest.mark.parametrize("mode", ["padding_prefill", "varlen_prefill", "decode"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @bypass_not_implemented
-def test_pos_emb(bs, seqlen, q_heads, k_heads, head_dim, rope_percentage, mode, dtype):
+def test_apply_rope(bs, seqlen, q_heads, k_heads, head_dim, rope_percentage, mode, dtype):
+    """Test MojoRoPE (apply rotary position embedding) with pre-extracted cos/sin."""
     platform = get_platform()
     device = get_torch_device()
     max_seq_len = 32768
 
     rope_dim = int(head_dim * rope_percentage)
 
-    inv_freq = 1.0 / (10000.0 ** (torch.arange(0, rope_dim, 2, device=device, dtype=torch.float32) / rope_dim))
-    t = torch.arange(max_seq_len, device=device, dtype=inv_freq.dtype)
-    freqs = torch.einsum("i,j->ij", t, inv_freq)
-    emb = torch.cat((freqs, freqs), dim=-1)
-    cos = emb.cos()[None, :, :]
-    sin = emb.sin()[None, :, :]
-
-    head_first = True
+    rot_pos_emb = MojoRotaryEmbedding(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
 
     if mode == "padding_prefill":
+        position_ids = torch.arange(seqlen, dtype=torch.int32, device=device)
+        cos, sin = rot_pos_emb(position_ids=position_ids)
         q = torch.randn(bs, seqlen, q_heads, head_dim, device=device, dtype=dtype)
         k = torch.randn(bs, seqlen, k_heads, head_dim, device=device, dtype=dtype)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
-
-        cos = cos[:, :seqlen, :]
-        sin = sin[:, :seqlen, :]
-
-        cu_seqlens = None
-        kv_lens = None
+        head_first = True
 
     elif mode == "varlen_prefill":
         seq_lens = torch.randint(1, seqlen + 1, (bs,), device=device, dtype=torch.int32)
@@ -73,13 +116,14 @@ def test_pos_emb(bs, seqlen, q_heads, k_heads, head_dim, rope_percentage, mode, 
         k = torch.randn(total_seq_len, k_heads, head_dim, device=device, dtype=dtype)
 
         kv_lens = torch.randint(0, max_seq_len - seqlen, (bs,), device=device, dtype=torch.int32)
+        cos, sin = rot_pos_emb(cu_seqlens_q=cu_seqlens, seqlens_kv=kv_lens)
         head_first = False
 
     elif mode == "decode":
         q = torch.randn(bs, q_heads, head_dim, device=device, dtype=dtype)
         k = torch.randn(bs, k_heads, head_dim, device=device, dtype=dtype)
-        cu_seqlens = None
         kv_lens = torch.randint(0, max_seq_len - 1, (bs,), device=device, dtype=torch.int32)
+        cos, sin = rot_pos_emb(position_ids=kv_lens)
         head_first = False
 
     rope = MojoRoPE()
@@ -98,10 +142,7 @@ def test_pos_emb(bs, seqlen, q_heads, k_heads, head_dim, rope_percentage, mode, 
         k,
         cos,
         sin,
-        cu_seqlens,
-        kv_lens,
         head_first,
-        rope_percentage,
         atol=5e-2,
         rtol=5e-2,
     )

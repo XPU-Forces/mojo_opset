@@ -6,101 +6,67 @@ import torch
 from ..operator import MojoOperator
 
 
-class MojoGeneratePosEmbs(MojoOperator):
-    def __init__(self, rope_theta: float = 10000.0, head_dim: int = 1024, device: str = "cpu"):
-        super().__init__()
+class MojoRotaryEmbedding(MojoOperator):
+    def __init__(self, rope_theta, rope_dim, init_max_length: Optional[int] = None, **kwargs):
+        super().__init__(**kwargs)
         self.rope_theta = rope_theta
         inv_freq = 1.0 / (
-            self.rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)
+            self.rope_theta ** (torch.arange(0, rope_dim, 2, dtype=torch.float32, device = self.tensor_factory_kwargs.get("device")) / rope_dim)
         )
         self.attention_scaling = 1.0
+        self.init_max_length = init_max_length
         self.register_buffer("inv_freq", inv_freq, persistent=False)
+        if init_max_length is not None:
+            self._rope_init(init_max_length)
 
-    def forward(
-        self,
-        position_ids: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _rope_init(self, max_length: Optional[int]) -> Tuple[torch.Tensor, torch.Tensor]:
+        position_ids = torch.arange(max_length, device = self.tensor_factory_kwargs.get("device"))
         freqs = position_ids[..., None] * self.inv_freq[None, :]
         emb = torch.cat((freqs, freqs), dim=-1)
         cos = emb.cos() * self.attention_scaling
         sin = emb.sin() * self.attention_scaling
-        return cos, sin
-
-
-class MojoApplyRoPE(MojoOperator):
-
-    @staticmethod
-    def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-        x1 = x[..., : x.shape[-1] // 2]
-        x2 = x[..., x.shape[-1] // 2 :]
-        return torch.cat((-x2, x1), dim=-1)
+        self.register_buffer("cos", cos, persistent=False)
+        self.register_buffer("sin", sin, persistent=False)
 
     def forward(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        *,
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        seqlens_kv: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        rope_dim = cos.shape[-1]
-        assert rope_dim < q.shape[-1], "rope_dim must be less than q.shape[-1]"
-        nope_dim = q.shape[-1] - rope_dim
+        assert cu_seqlens_q is None or position_ids is None, "Exactly one of cu_seqlens_q or position_ids should be provided"
+        if cu_seqlens_q is not None:
+            position_ids_list = []
+            seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+            bsz = seqlens_q.size(0)
+            for i in range(bsz):
+                q_len = seqlens_q[i].item()
+                context_len = 0 if seqlens_kv is None else seqlens_kv[i].item() - q_len
+                position_ids_list.append(torch.arange(context_len, context_len + q_len, device = cu_seqlens_q.device))
+            position_ids = torch.cat(position_ids_list, dim=0)
+        else:
+            assert position_ids is not None, "Exactly one of cu_seqlens_q or position_ids should be provided"
 
-        if nope_dim > 0:
-            q_nope, q = torch.split(q, [nope_dim, rope_dim], dim=-1)
-            k_nope, k = torch.split(k, [nope_dim, rope_dim], dim=-1)
-
-        q_rot = (q * cos + self._rotate_half(q) * sin).to(q.dtype)
-        k_rot = (k * cos + self._rotate_half(k) * sin).to(k.dtype)
-
-        if nope_dim > 0:
-            q_rot = torch.cat([q_nope, q_rot], dim=-1)
-            k_rot = torch.cat([k_nope, k_rot], dim=-1)
-
-        return q_rot, k_rot
-
-def generate_pos_embs(
-    sin: torch.Tensor,
-    cos: torch.Tensor,
-    kv_lens: torch.Tensor,
-    cu_seqlens: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Extract required position embeddings from full sin/cos tensors.
-
-    Args:
-        sin: Full sine embeddings [1, max_seq, d] or [max_seq, d]
-        cos: Full cosine embeddings, same shape as sin
-        kv_lens: KV cache lengths [bs]
-        cu_seqlens: Cumulative sequence lengths for varlen scenario [bs+1]
-
-    Returns:
-        varlen: (cos_embs, sin_embs) shape [T, d]
-        decode: (cos_embs, sin_embs) shape [B, d]
-    """
-    sin = sin.squeeze(0)
-    cos = cos.squeeze(0)
-
-    if cu_seqlens is not None:
-        num_seqs = cu_seqlens.size(0) - 1
-        seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-        cos_embs, sin_embs = [], []
-        for i in range(num_seqs):
-            qlen = seq_lens[i].item()
-            shift = kv_lens[i].item()
-            cos_embs.append(cos[shift : shift + qlen])
-            sin_embs.append(sin[shift : shift + qlen])
-        return torch.cat(cos_embs, dim=0), torch.cat(sin_embs, dim=0)
-
-    return cos[kv_lens], sin[kv_lens]
+        if self.init_max_length is None:
+            freqs = position_ids[..., None] * self.inv_freq[None, :]
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos() * self.attention_scaling
+            sin = emb.sin() * self.attention_scaling
+        else:
+            cos = self.cos[position_ids]
+            sin = self.sin[position_ids]
+        
+        return cos, sin
 
 
 class MojoRoPE(MojoOperator):
     """Rotary Position Embedding (RoPE) operator.
 
     Supports three scenarios:
-    1. Varlen prefill: input [T, N, D], cos/sin [max_seq, d].
-    2. Padded prefill: input [B, S, N, D] or [B, N, S, D], cos/sin [S, d](already split).
-    3. Decode: input [B, N, D], cos/sin [max_seq, d].
+    1. Varlen prefill: input [T, N, D] or [N, T, D], cos/sin [T, d].
+    2. Padded prefill: input [B, S, N, D] or [B, N, S, D], cos/sin [S, d].
+    3. Decode: input [B, N, D] or [N, B, D], cos/sin [B, d].
     """
 
     def __init__(self, interleaved: bool = False):
@@ -123,9 +89,8 @@ class MojoRoPE(MojoOperator):
         k: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        rope_percentage: float,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        rope_dim = int(q.shape[-1] * rope_percentage)
+        rope_dim = cos.shape[-1]
         nope_dim = q.shape[-1] - rope_dim
 
         if nope_dim > 0:
@@ -147,10 +112,7 @@ class MojoRoPE(MojoOperator):
         k: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None,
-        kv_lens: Optional[torch.Tensor] = None,
         head_first: bool = True,
-        rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Apply Rotary Position Embedding (RoPE).
@@ -165,34 +127,15 @@ class MojoRoPE(MojoOperator):
             k: Key tensor
             cos: Cosine position embeddings
             sin: Sine position embeddings
-            cu_seqlens: Cumulative sequence lengths for varlen scenario
-            kv_lens: Historical KV cache lengths(NOT include the tokens from the current decode step).
-            head_first: True for padded input [B, N, S, D], False for [B, S, N, D], only used for padded input(as 'Scenario descriptions' above)
-            rope_percentage: Percentage of head dim to apply RoPE (default: 1.0)
+            unsqueeze_dim: Unsqueeze dimension for cos and sin for multi-heads
 
         Returns:
             (q_rot, k_rot) with same shape as input
         """
-        # Varlen prefill: [T, N, D]
-        if cu_seqlens is not None:
-            num_seqs = cu_seqlens.size(0) - 1
-            if kv_lens is None:
-                kv_lens = torch.zeros(num_seqs, device=q.device, dtype=torch.long)
-            cos, sin = generate_pos_embs(sin, cos, kv_lens, cu_seqlens=cu_seqlens)
-            return self._apply_rope(q, k, cos.unsqueeze(1), sin.unsqueeze(1), rope_percentage)
-
-        # Decode: [B, N, D]
-        if q.dim() == 3:
-            bsz = q.shape[0]
-            if kv_lens is None:
-                kv_lens = torch.zeros(bsz, device=q.device, dtype=torch.long)
-            cos, sin = generate_pos_embs(sin, cos, kv_lens)
-            return self._apply_rope(q, k, cos.unsqueeze(1), sin.unsqueeze(1), rope_percentage)
-
-        # Padded prefill: [B, S, N, D] or [B, N, S, D]
-        if head_first:
-            return self._apply_rope(q, k, cos.unsqueeze(1), sin.unsqueeze(1), rope_percentage)
-        return self._apply_rope(q, k, cos.unsqueeze(2), sin.unsqueeze(2), rope_percentage)
+        if not head_first:
+            cos = cos.unsqueeze(1)
+            sin = sin.unsqueeze(1)
+        return self._apply_rope(q, k, cos, sin)
 
 
 class MojoRoPEStoreKV(MojoOperator):

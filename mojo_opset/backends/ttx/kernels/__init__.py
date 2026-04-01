@@ -34,6 +34,7 @@ gelu_bwd_impl = _get_kernel_impl(ttx_backend_module, "gelu_bwd_impl")
 silu_fwd_impl = _get_kernel_impl(ttx_backend_module, "silu_fwd_impl")
 silu_bwd_impl = _get_kernel_impl(ttx_backend_module, "silu_bwd_impl")
 
+rot_pos_embed_impl = _get_kernel_impl(ttx_backend_module, "rot_pos_embed_impl")
 rope_fwd_impl = _get_kernel_impl(ttx_backend_module, "rope_fwd_impl")
 rope_bwd_impl = _get_kernel_impl(ttx_backend_module, "rope_bwd_impl")
 
@@ -241,12 +242,9 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         k: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None,
-        kv_lens: Optional[torch.Tensor] = None,
         head_first: bool = True,
-        rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return rope_fwd_impl(q, k, cos, sin, cu_seqlens, kv_lens, head_first, rope_percentage)
+        return rope_fwd_impl(q, k, cos, sin, head_first)
 
     @rope_fwd.register_fake
     def rope_fwd_fake(
@@ -254,10 +252,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         k: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None,
-        kv_lens: Optional[torch.Tensor] = None,
         head_first: bool = True,
-        rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(q), torch.empty_like(k)
 
@@ -267,12 +262,9 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         dk: torch.Tensor,
         sin: torch.Tensor,
         cos: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None,
-        kv_lens: Optional[torch.Tensor] = None,
         head_first: bool = True,
-        rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return rope_bwd_impl(dq, dk, cos, sin, cu_seqlens, kv_lens, head_first, rope_percentage)
+        return rope_bwd_impl(dq, dk, cos, sin, head_first)
 
     @rope_bwd.register_fake
     def rope_bwd_fake(
@@ -280,10 +272,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         dk: torch.Tensor,
         sin: torch.Tensor,
         cos: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None,
-        kv_lens: Optional[torch.Tensor] = None,
         head_first: bool = True,
-        rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(dq), torch.empty_like(dk)
 
@@ -672,6 +661,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         return torch.empty_like(key_cache), torch.empty_like(value_cache)
 
     # TODO(zhangjihang): Support compile mode
+    rot_pos_embed = rot_pos_embed_impl
     sdpa_infer = sdpa_infer_impl
     swa_paged_prefill = swa_paged_prefill_impl
     swa_paged_decode = swa_paged_decode_impl
@@ -691,8 +681,11 @@ else:
     swiglu_bwd = swiglu_bwd_impl
     paged_attention_prefill = paged_attention_prefill_impl
     paged_attention_decode = paged_attention_decode_impl
+    rot_pos_embed = rot_pos_embed_impl
     rope_fwd = rope_fwd_impl
-    rope_bwd = rope_bwd_impl
+
+    def rope_bwd(dq, dk, sin, cos, head_first=True):
+        return rope_bwd_impl(dq, dk, cos, sin, head_first)
     rmsnorm_fwd = rmsnorm_fwd_impl
     rmsnorm_bwd = rmsnorm_bwd_impl
     rmsnorm_infer = rmsnorm_infer_impl
