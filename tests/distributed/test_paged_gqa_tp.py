@@ -120,46 +120,6 @@ class SimplePagedKVCache(torch.nn.Module):
         max_blocks = (self.seq_lens[layer_idx].max().item() + self.block_size - 1) // self.block_size
         return self.block_tables[layer_idx, :, :max_blocks]
 
-class RotaryEmbedding(torch.nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-
-        head_dim = config.model_config.hidden_size // config.model_config.num_attention_heads
-
-        self.rope_percentage = getattr(config.model_config, "rope_percentage", 1.0)
-        self.rope_dim = int(head_dim * self.rope_percentage)
-
-        base = getattr(config.model_config, "rope_base", 10000.0)
-        if getattr(config.model_config, "rope_mode", "default") == "ntk":
-            base = base * config.model_config.rope_scale ** (
-                self.rope_dim / (self.rope_dim - 2)
-            )
-
-        max_pos = getattr(config.model_config, "max_position_embeddings", 2048)
-        self.rot_pos_emb = MojoRotaryEmbedding(
-            rope_theta=base, rope_dim=self.rope_dim, init_max_length=max_pos,
-        )
-        self.rope = MojoRoPE()
-
-        def load_state_dict_post_hook(module, incompatible_keys) -> None:
-            key2ignore = []
-            for miss in incompatible_keys.missing_keys:
-                if miss.split('.')[-1] in ("inv_freq", "cos", "sin"):
-                    key2ignore.append(miss)
-            for key in key2ignore:
-                incompatible_keys.missing_keys.remove(key)
-        self.register_load_state_dict_post_hook(load_state_dict_post_hook)
-
-    def forward(self, q, k, cu_seqlens=None, shift=None):
-        if cu_seqlens is not None:
-            seqlens_q = cu_seqlens[1:] - cu_seqlens[:-1]
-            seqlens_kv = shift + seqlens_q if shift is not None else None
-            cos, sin = self.rot_pos_emb(cu_seqlens_q=cu_seqlens, seqlens_kv=seqlens_kv)
-        else:
-            cos, sin = self.rot_pos_emb(position_ids=shift)
-        return self.rope(q, k, cos, sin, head_first=False)
-
 class FlashAttentionBlock(torch.nn.Module):
 
     def __init__(self, config, layer_id, *args, **kwargs):
@@ -208,8 +168,12 @@ class FlashAttentionBlock(torch.nn.Module):
         )
 
         self.rope = None
+        self.rot_pos_emb = None
         if self.layer_id + 1 in getattr(config.model_config, "nope_layers", []):
-            self.rope = RotaryEmbedding(config)
+            self.rot_pos_emb = MojoRotaryEmbedding(
+                rope_theta=config.model_config.rope_base, rope_dim=self.rope_dim, init_max_length=config.model_config.max_position_embeddings,
+            )
+            self.rope = MojoRoPE()
 
     def forward(
         self,
@@ -235,11 +199,13 @@ class FlashAttentionBlock(torch.nn.Module):
         k = self.rms_norms.key(k)
 
         if self.rope:
+            cos, sin = self.rot_pos_emb(hidden_states, cu_seqlens_q=context_cu_seqs, seqlens_kv=context_shifts + context_input_len)
             q, k = self.rope(
                 q,
                 k,
-                context_cu_seqs,
-                decode_kv_len - 1 if decode_kv_len is not None else context_shifts,
+                cos,
+                sin,
+                head_first=False,
             )
         
         # dist_breakpoint()

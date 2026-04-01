@@ -24,12 +24,11 @@ from tests.utils import bypass_not_implemented
 @bypass_not_implemented
 def test_pos_emb(bs, seqlen, q_heads, k_heads, head_dim, dtype):
     device = get_torch_device()
-
+    x = torch.randn(bs, seqlen, q_heads * head_dim, device=device, dtype=dtype)
     rot_pos_emb = MojoRotaryEmbedding(
         rope_theta=10000.0, rope_dim=head_dim, init_max_length=seqlen,
     ).to(device)
-    position_ids = torch.arange(seqlen, dtype=torch.int32, device=device)
-    cos, sin = rot_pos_emb(position_ids=position_ids)
+    cos, sin = rot_pos_emb(x)
 
     # [B, S, N, D] -> [B, N, S, D]
     q = torch.randn(bs, seqlen, q_heads, head_dim, device=device, dtype=dtype).transpose(1, 2)

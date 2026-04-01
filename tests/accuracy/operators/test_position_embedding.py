@@ -16,49 +16,70 @@ torch.random.manual_seed(42)
 @pytest.mark.parametrize(
     "rope_dim", [32, 48, 64, 88, 96, 128],
 )
+@pytest.mark.parametrize("mode", ["padding_prefill", "varlen_prefill", "decode"])
 @bypass_not_implemented
-def test_rotary_embedding(bs, seqlen, rope_dim):
+def test_rotary_embedding(bs, seqlen, rope_dim, mode):
     """Test MojoRotaryEmbedding (position embedding extraction) independently."""
     device = get_torch_device()
     max_seq_len = 32768
+    hidden_size = 256
 
     rot_pos_emb_ref_nocache = MojoRotaryEmbedding._registry.get("torch")(rope_theta=10000.0, rope_dim=rope_dim).to(device)
     rot_pos_emb_ref = MojoRotaryEmbedding._registry.get("torch")(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
     rot_pos_emb = MojoRotaryEmbedding(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
 
-    position_ids = torch.randint(0, max_seq_len, (bs,), dtype=torch.int32, device=device)
-    torch.testing.assert_close(
-        rot_pos_emb_ref(position_ids=position_ids), 
-        rot_pos_emb_ref_nocache(position_ids=position_ids), 
-        atol=1e-5, 
-        rtol=1e-5,
-    )
+    if mode == "padding_prefill":
+        x = torch.randn(bs, seqlen, hidden_size, device=device, dtype=torch.float32)
+        torch.testing.assert_close(
+            rot_pos_emb_ref(x), 
+            rot_pos_emb_ref_nocache(x), 
+            atol=1e-5, 
+            rtol=1e-5,
+        )
 
-    rot_pos_emb.forward_diff_with(
-        rot_pos_emb_ref,
-        cu_seqlens_q=None,
-        position_ids=position_ids,
-        atol=1e-5,
-        rtol=1e-5,
-    )
+        rot_pos_emb.forward_diff_with(
+            rot_pos_emb_ref,
+            x,
+            atol=1e-5,
+            rtol=1e-5,
+        )
+    elif mode == "decode":
+        x = torch.randn(bs, hidden_size, device=device, dtype=torch.float32)
+        position_ids = torch.randint(0, max_seq_len, (bs,), dtype=torch.int32, device=device)
+        torch.testing.assert_close(
+            rot_pos_emb_ref(x, position_ids=position_ids), 
+            rot_pos_emb_ref_nocache(x, position_ids=position_ids), 
+            atol=1e-5, 
+            rtol=1e-5,
+        )
 
-    seq_lens = torch.randint((seqlen+1) // 2, seqlen + 1, (bs,), device=device, dtype=torch.int32)
-    cu_seqlens = torch.zeros(bs + 1, device=device, dtype=torch.int32)
-    cu_seqlens[1:] = torch.cumsum(seq_lens, dim=0)
-    kv_lens = torch.randint(0, max_seq_len - seqlen, (bs,), device=device, dtype=torch.int32) + seq_lens
+        rot_pos_emb.forward_diff_with(
+            rot_pos_emb_ref,
+            x,
+            position_ids=position_ids,
+            atol=1e-5,
+            rtol=1e-5,
+        )
+    else:
+        seq_lens = torch.randint((seqlen+1) // 2, seqlen + 1, (bs,), device=device, dtype=torch.int32)
+        cu_seqlens = torch.zeros(bs + 1, device=device, dtype=torch.int32)
+        cu_seqlens[1:] = torch.cumsum(seq_lens, dim=0)
+        kv_lens = torch.randint(0, max_seq_len - seqlen, (bs,), device=device, dtype=torch.int32) + seq_lens
+        x = torch.randn(cu_seqlens[-1].item(), hidden_size, device=device, dtype=torch.float32)
 
-    torch.testing.assert_close(
-        rot_pos_emb_ref(cu_seqlens_q=cu_seqlens, seqlens_kv=kv_lens),
-        rot_pos_emb(cu_seqlens_q=cu_seqlens, seqlens_kv=kv_lens),
-        atol=1e-5,
-        rtol=1e-5,
-    )
-    rot_pos_emb.forward_diff_with(
-        rot_pos_emb_ref,
-        cu_seqlens_q=cu_seqlens,
-        seqlens_kv=kv_lens,
-        atol=1e-5,
-        rtol=1e-5,
+        torch.testing.assert_close(
+            rot_pos_emb_ref(x, cu_seqlens_q=cu_seqlens, seqlens_kv=kv_lens),
+            rot_pos_emb(x, cu_seqlens_q=cu_seqlens, seqlens_kv=kv_lens),
+            atol=1e-5,
+            rtol=1e-5,
+        )
+        rot_pos_emb.forward_diff_with(
+            rot_pos_emb_ref,
+            x,
+            cu_seqlens_q=cu_seqlens,
+            seqlens_kv=kv_lens,
+            atol=1e-5,
+            rtol=1e-5,
     )
 
 
@@ -94,12 +115,14 @@ def test_apply_rope(bs, seqlen, q_heads, k_heads, head_dim, rope_percentage, mod
     max_seq_len = 32768
 
     rope_dim = int(head_dim * rope_percentage)
+    hidden_size = q_heads * head_dim
 
     rot_pos_emb = MojoRotaryEmbedding(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
 
     if mode == "padding_prefill":
         position_ids = torch.arange(seqlen, dtype=torch.int32, device=device)
-        cos, sin = rot_pos_emb(position_ids=position_ids)
+        x = torch.randn(seqlen, hidden_size, device=device, dtype=dtype)
+        cos, sin = rot_pos_emb(x, position_ids=position_ids)
         q = torch.randn(bs, seqlen, q_heads, head_dim, device=device, dtype=dtype)
         k = torch.randn(bs, seqlen, k_heads, head_dim, device=device, dtype=dtype)
         q = q.transpose(1, 2)
@@ -112,18 +135,20 @@ def test_apply_rope(bs, seqlen, q_heads, k_heads, head_dim, rope_percentage, mod
         cu_seqlens = torch.zeros(bs + 1, device=device, dtype=torch.int32)
         cu_seqlens[1:] = torch.cumsum(seq_lens, dim=0)
 
+        x = torch.randn(total_seq_len, hidden_size, device=device, dtype=dtype)
         q = torch.randn(total_seq_len, q_heads, head_dim, device=device, dtype=dtype)
         k = torch.randn(total_seq_len, k_heads, head_dim, device=device, dtype=dtype)
 
         kv_lens = torch.randint(0, max_seq_len - seqlen, (bs,), device=device, dtype=torch.int32)
-        cos, sin = rot_pos_emb(cu_seqlens_q=cu_seqlens, seqlens_kv=kv_lens)
+        cos, sin = rot_pos_emb(x, cu_seqlens_q=cu_seqlens, seqlens_kv=kv_lens)
         head_first = False
 
     elif mode == "decode":
+        x = torch.randn(bs, hidden_size, device=device, dtype=dtype)
         q = torch.randn(bs, q_heads, head_dim, device=device, dtype=dtype)
         k = torch.randn(bs, k_heads, head_dim, device=device, dtype=dtype)
         kv_lens = torch.randint(0, max_seq_len - 1, (bs,), device=device, dtype=torch.int32)
-        cos, sin = rot_pos_emb(position_ids=kv_lens)
+        cos, sin = rot_pos_emb(x, position_ids=kv_lens)
         head_first = False
 
     rope = MojoRoPE()

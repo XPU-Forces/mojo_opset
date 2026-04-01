@@ -46,7 +46,9 @@ def test_rope_function(bs, seqlen, q_heads, k_heads, head_dim, rope_percentage, 
 
     rot_pos_emb = MojoRotaryEmbedding(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
     position_ids = torch.arange(seqlen, dtype=torch.int32, device=device)
-    cos, sin = rot_pos_emb(position_ids=position_ids)
+    hidden_size = q_heads * head_dim
+    x = torch.randn(seqlen, hidden_size, device=device, dtype=dtype)
+    cos, sin = rot_pos_emb(x, position_ids=position_ids)
 
     if head_first:
         q = torch.randn(bs, q_heads, seqlen, head_dim, device=device, dtype=dtype)

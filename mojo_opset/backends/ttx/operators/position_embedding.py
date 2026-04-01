@@ -19,19 +19,18 @@ class TTXRotaryEmbedding(MojoRotaryEmbedding):
 
     def forward(
         self,
+        x: torch.Tensor,
         *,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         seqlens_kv: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        assert cu_seqlens_q is None or position_ids is None, (
-            "Exactly one of cu_seqlens_q or position_ids should be provided"
-        )
 
         return rot_pos_embed(
+            x,
             self.cos,
             self.sin,
-            cu_seqlens=cu_seqlens_q,
+            cu_seqlens_q=cu_seqlens_q,
             seqlens_kv=seqlens_kv,
             position_ids=position_ids,
         )

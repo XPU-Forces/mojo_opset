@@ -368,49 +368,51 @@ def _normalize_to_bsnd(
 
 
 def rot_pos_embed_impl(
+    x: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    *,
+    cu_seqlens_q: Optional[torch.Tensor] = None,
     seqlens_kv: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Extract position-specific cos/sin from the full embedding table.
 
-    Either cu_seqlens or position_ids must be provided.
     When cu_seqlens is given, a Triton kernel gathers cos/sin for each token
     using per-batch context offsets derived from seqlens_kv.
     """
-    if cu_seqlens is not None:
-        seqlens_q = cu_seqlens[1:] - cu_seqlens[:-1]
-        if seqlens_kv is not None:
-            context_lens = seqlens_kv - seqlens_q
-        else:
-            context_lens = None
+    if position_ids is not None:
+        return cos[position_ids], sin[position_ids]
+    if cu_seqlens_q is None:
+        return cos[:x.shape[1]], sin[:x.shape[1]]
 
-        token_block_size = _get_token_block_size(1, 1)
-        chunk_indices = prepare_chunk_indices(cu_seqlens, token_block_size, context_lens)
-        total_blocks = chunk_indices.shape[0]
-        total_len = cu_seqlens[-1].item()
-        rope_dim = cos.shape[-1]
+    seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    if seqlens_kv is not None:
+        context_lens = seqlens_kv - seqlens_q
+    else:
+        context_lens = None
 
-        cos_out = torch.empty(total_len, rope_dim, device=cos.device, dtype=cos.dtype)
-        sin_out = torch.empty(total_len, rope_dim, device=sin.device, dtype=sin.dtype)
+    token_block_size = _get_token_block_size(1, 1)
+    chunk_indices = prepare_chunk_indices(cu_seqlens_q, token_block_size, context_lens)
+    total_blocks = chunk_indices.shape[0]
+    rope_dim = cos.shape[-1]
 
-        num_programs = min(total_blocks, get_num_cores())
-        grid = (num_programs,)
+    cos_out = torch.empty(x.shape[0], rope_dim, device=cos.device, dtype=cos.dtype)
+    sin_out = torch.empty(x.shape[0], rope_dim, device=sin.device, dtype=sin.dtype)
 
-        _rot_pos_embed_kernel[grid](
-            cos, cos.stride(0),
-            sin, sin.stride(0),
-            cos_out, cos_out.stride(0),
-            sin_out, sin_out.stride(0),
-            chunk_indices, total_blocks,
-            rope_dim, token_block_size,
-        )
-        return cos_out, sin_out
+    num_programs = min(total_blocks, get_num_cores())
+    grid = (num_programs,)
+    assert cos.dtype == torch.float32, "cos must be float32"
 
-    assert position_ids is not None, "Either cu_seqlens or position_ids must be provided."
-    return cos[position_ids], sin[position_ids]
+    _rot_pos_embed_kernel[grid](
+        cos, cos.stride(0),
+        sin, sin.stride(0),
+        cos_out, cos_out.stride(0),
+        sin_out, sin_out.stride(0),
+        chunk_indices, total_blocks,
+        rope_dim, token_block_size,
+    )
+    return cos_out, sin_out
 
 
 def rope_fwd_impl(

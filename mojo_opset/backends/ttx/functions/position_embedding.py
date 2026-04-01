@@ -32,6 +32,6 @@ class TTXRoPEFunction(MojoRoPEFunction):
     ) -> tuple[torch.Tensor, torch.Tensor, None, None, None]:
         cos, sin = ctx.saved_tensors
 
-        grad_q, grad_k = rope_bwd(grad_output_q, grad_output_k, sin, cos, ctx.head_first)
+        grad_q, grad_k = rope_bwd(grad_output_q, grad_output_k, cos, sin, ctx.head_first)
 
         return grad_q, grad_k, None, None, None

@@ -19,6 +19,16 @@ class MojoRotaryEmbedding(MojoOperator):
         if init_max_length is not None:
             self._rope_init(init_max_length)
 
+        def load_state_dict_post_hook(module, incompatible_keys) -> None:
+            key2ignore = []
+            for miss in incompatible_keys.missing_keys:
+                if miss.split('.')[-1] in ("inv_freq", "cos", "sin"):
+                    key2ignore.append(miss)
+            for key in key2ignore:
+                incompatible_keys.missing_keys.remove(key)
+        self.register_load_state_dict_post_hook(load_state_dict_post_hook)
+
+
     def _rope_init(self, max_length: Optional[int]) -> Tuple[torch.Tensor, torch.Tensor]:
         position_ids = torch.arange(max_length, device = self.tensor_factory_kwargs.get("device"))
         freqs = position_ids[..., None] * self.inv_freq[None, :]
@@ -30,23 +40,40 @@ class MojoRotaryEmbedding(MojoOperator):
 
     def forward(
         self,
+        x: torch.Tensor,
         *,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         seqlens_kv: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        assert cu_seqlens_q is None or position_ids is None, "Exactly one of cu_seqlens_q or position_ids should be provided"
+        """
+        Generate cos/sin for Rotary Position Embedding (RoPE).
+        x is necessary for the kernel to determine the output shape.
+
+        Scenario descriptions:
+        1. Varlen prefill: input [T, H], cu_seqlens_q [T+1] or position_ids [T].
+        2. Padded prefill: input [B, S, H], cu_seqlens_q None, position_ids None.
+        3. Decode: input [B, H], cu_seqlens_q None, position_ids [B].
+        """
         if cu_seqlens_q is not None:
-            position_ids_list = []
+            assert x.dim() == 2, "x must be 2D: [T, D]"
+            position_ids = torch.full((x.shape[0],), -1, device = x.device, dtype = torch.int32)
             seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
             bsz = seqlens_q.size(0)
             for i in range(bsz):
                 q_len = seqlens_q[i].item()
                 context_len = 0 if seqlens_kv is None else seqlens_kv[i].item() - q_len
-                position_ids_list.append(torch.arange(context_len, context_len + q_len, device = cu_seqlens_q.device))
-            position_ids = torch.cat(position_ids_list, dim=0)
-        else:
+                position_ids[cu_seqlens_q[i]:cu_seqlens_q[i+1]] = torch.arange(
+                    context_len,
+                    context_len + q_len, 
+                    device = cu_seqlens_q.device,
+                    dtype = torch.int32,
+                )
+        elif position_ids is not None:
             assert position_ids is not None, "Exactly one of cu_seqlens_q or position_ids should be provided"
+            assert position_ids.shape == x.shape[:-1], "position_ids must have the same shape as x except the hidden dimension"
+        else:
+            position_ids = torch.arange(x.shape[1], device = x.device, dtype = torch.int32)
 
         if self.init_max_length is None:
             freqs = position_ids[..., None] * self.inv_freq[None, :]
