@@ -35,9 +35,7 @@ def _expand_group_param(
 
     expanded = param_fp.repeat_interleave(token_count_i64, dim=0)
     if expanded.size(0) != row_count:
-        raise ValueError(
-            f"Expanded grouped tensor row count mismatch: expected {row_count}, got {expanded.size(0)}."
-        )
+        raise ValueError(f"Expanded grouped tensor row count mismatch: expected {row_count}, got {expanded.size(0)}.")
     return expanded
 
 
@@ -89,7 +87,9 @@ class MojoQuant(MojoOperator):
             self.q_max = torch.finfo(torch.float8_e4m3fn).max
             self.q_min = -torch.finfo(torch.float8_e4m3fn).max
         else:
-            raise NotImplementedError(f"Unsupported quant_dtype: {quant_dtype}, expected torch.int8 or torch.float8_e4m3fn")
+            raise NotImplementedError(
+                f"Unsupported quant_dtype: {quant_dtype}, expected torch.int8 or torch.float8_e4m3fn"
+            )
 
     def forward(
         self,
@@ -145,6 +145,25 @@ class MojoQuant(MojoOperator):
             f"quant_dtype={self.quant_dtype}, symmetric={self.symmetric}, "
             f"group_size={self.group_size}, q_max={self.q_max}, q_min={self.q_min}"
         )
+
+
+class MojoDynamicQuant(MojoOperator):
+    """Per-token dynamic int8 quantization on the last dimension.
+
+    Optionally applies a per-channel ``scale_tensor`` before quantizing.
+    Returns ``(q_int8, quant_scale)``.
+    """
+
+    def forward(self, input_tensor: torch.Tensor, scale_tensor: Optional[torch.Tensor] = None):
+        if scale_tensor is None:
+            scaled_fp = input_tensor.to(torch.float64)
+        else:
+            scaled_fp = input_tensor.to(torch.float64) * scale_tensor.to(torch.float64)
+
+        max_abs = scaled_fp.abs().amax(dim=-1).clamp(min=1e-10)
+        quant_vals = 127.0 * (scaled_fp / max_abs.unsqueeze(-1))
+        q = torch.trunc(quant_vals + 0.5 * torch.sign(quant_vals))
+        return q.to(torch.int8), (max_abs / 127.0).to(input_tensor.dtype)
 
 
 class MojoDequant(MojoOperator):
@@ -215,10 +234,7 @@ class MojoDequant(MojoOperator):
         return output.to(self.output_dtype)
 
     def extra_repr(self) -> str:
-        return (
-            f"output_dtype={self.output_dtype}, symmetric={self.symmetric}, "
-            f"group_size={self.group_size}"
-        )
+        return f"output_dtype={self.output_dtype}, symmetric={self.symmetric}, group_size={self.group_size}"
 
 
 class MojoDynamicQuant(MojoOperator):
@@ -246,9 +262,7 @@ class MojoDynamicQuant(MojoOperator):
         self.moe_mode = moe_mode
 
         if quant_dtype != torch.int8:
-            raise NotImplementedError(
-                f"Unsupported quant_dtype: {quant_dtype}, expected torch.int8."
-            )
+            raise NotImplementedError(f"Unsupported quant_dtype: {quant_dtype}, expected torch.int8.")
 
         self.q_max = 127
         self.q_min = -128
@@ -285,10 +299,7 @@ class MojoDynamicQuant(MojoOperator):
         return output.to(self.quant_dtype), scale
 
     def extra_repr(self) -> str:
-        return (
-            f"quant_dtype={self.quant_dtype}, smooth_input={self.smooth_input}, "
-            f"moe_mode={self.moe_mode}"
-        )
+        return f"quant_dtype={self.quant_dtype}, smooth_input={self.smooth_input}, moe_mode={self.moe_mode}"
 
 
 class MojoDequantSwiGLUQuant(MojoOperator):
@@ -317,9 +328,7 @@ class MojoDequantSwiGLUQuant(MojoOperator):
         self.quant_mode = quant_mode
 
         if quant_dtype != torch.int8:
-            raise NotImplementedError(
-                f"Unsupported quant_dtype: {quant_dtype}, expected torch.int8."
-            )
+            raise NotImplementedError(f"Unsupported quant_dtype: {quant_dtype}, expected torch.int8.")
         if quant_mode != 1:
             raise NotImplementedError("Only dynamic quant_mode=1 is currently supported.")
 
@@ -401,7 +410,4 @@ class MojoDequantSwiGLUQuant(MojoOperator):
         return output.to(self.quant_dtype), scale
 
     def extra_repr(self) -> str:
-        return (
-            f"quant_dtype={self.quant_dtype}, activate_left={self.activate_left}, "
-            f"quant_mode={self.quant_mode}"
-        )
+        return f"quant_dtype={self.quant_dtype}, activate_left={self.activate_left}, quant_mode={self.quant_mode}"

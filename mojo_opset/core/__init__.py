@@ -13,6 +13,7 @@ from .operator import MojoOperator
 from .operators.activation import MojoGelu
 from .operators.activation import MojoSilu
 from .operators.activation import MojoSwiGLU
+from .operators.activation import MojoRotateActivation
 
 """ attention """
 from .operators.attention import MojoDecodeGQA
@@ -116,6 +117,9 @@ from .operators.convolution import MojoCausalConv1dUpdateState
 """ mlp"""
 from .operators.mlp import MojoSwiGLUMLP
 
+""" indexer """
+from .operators.indexer import MojoLightningIndexer
+
 """ functions """
 from .functions.activation import MojoSiluFunction
 from .functions.convolution import MojoCausalConv1dFunction
@@ -136,6 +140,7 @@ __all__ = [
     "MojoGroupQuantMatmulReduceSum",
     "MojoSilu",
     "MojoSwiGLU",
+    "MojoRotateActivation",
 
     "MojoPrefillGQA",
     "MojoPagedPrefillGQA",
@@ -223,6 +228,8 @@ __all__ = [
     "MojoRoPEFunction",
     "MojoFusedLinearCrossEntropyFunction",
     "MojoCausalConv1dFunction",
+
+    "MojoLightningIndexer",
 
     "MojoFusedLinearCrossEntropyLoss",
 
