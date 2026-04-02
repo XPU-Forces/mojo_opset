@@ -70,7 +70,8 @@ def generate_paged_decode_data(
 test_configs_decode = [
     (8, 16, 4, 128, 1024, 32, torch.bfloat16, "M_BF16"),
     (8, 16, 4, 96, 1024, 128, torch.bfloat16, "M_BF16_PADDIM"),
-    (8, 8, 1, 128, 8192, 128, torch.bfloat16, "M_BF16_LONG"),
+    (8, 8, 1, 128, 8192, 1024, torch.bfloat16, "M_BF16_LONG"),
+    (8, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
 ]
 
 
@@ -103,12 +104,6 @@ def test_paged_decode_gqa(
     block_tables: torch.Tensor,
     gqa_layout: str,
 ):
-    from mojo_opset.utils.platform import get_platform
-    if get_platform() == "npu":
-        head_dim = query.shape[-1]
-        if head_dim % 128 != 0:
-            pytest.skip(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
-
     head_dim = query.shape[-1]
     softmax_scale = 1.0 / math.sqrt(head_dim)
 
@@ -210,6 +205,7 @@ test_configs_prefill = [
     (2, 16, 4, 128, 1024, 0, 32, torch.bfloat16, "M_BF16"),
     (2, 16, 4, 96, 1024, 0, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (2, 8, 1, 128, 4096, 8192, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
+    (2, 8, 1, 128, 1024, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
 ]
 
 
@@ -244,14 +240,6 @@ def test_paged_prefill_gqa(
     gqa_layout: str,
     seqlens_kv: Optional[torch.Tensor],
 ):
-    from mojo_opset.utils.platform import get_platform
-    if get_platform() == "npu":
-        head_dim = query.shape[-1]
-        if head_dim % 128 != 0:
-            pytest.skip(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
-        if seqlens_kv is not None:
-            pytest.skip("NPU kernel npu_fused_infer_attention_score currently does not support TND layout with sparse_mode=3 (Page Attention), raising RuntimeError: call aclnnFusedInferAttentionScoreV3 failed.")
-
     paged_prefill_attn = MojoPagedPrefillGQA(
         is_causal=True,
         gqa_layout=gqa_layout
@@ -721,6 +709,7 @@ test_configs_swa_prefill = [
     (2, 16, 4, 128, 1024, 0, 32, torch.bfloat16, "M_BF16"),
     (2, 16, 4, 96, 2048, 0, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (2, 8, 1, 128, 256, 1024, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
+    (2, 8, 1, 128, 1024, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
 ]
 
 
@@ -796,6 +785,7 @@ test_configs_swa_decode = [
     (8, 16, 4, 128, 1024, 32, torch.bfloat16, "M_BF16"),
     (8, 16, 4, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (8, 8, 1, 128, 4096, 128, torch.bfloat16, "M_BF16_LONG"),
+    (2, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
 ]
 
 @pytest.mark.parametrize(
