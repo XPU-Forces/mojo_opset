@@ -961,6 +961,8 @@ def swa_paged_prefill_impl(
     tot_q_toks, num_q_heads, head_dim = q.shape
     _, num_kv_heads, page_size, _ = k_cache.shape
     print("**** bsz: ", bsz)
+    import pdb
+    pdb.set_trace()
 
     if softmax_scale is None:
         softmax_scale = 1.0 / (head_dim**0.5)
