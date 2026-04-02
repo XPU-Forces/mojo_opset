@@ -2,10 +2,10 @@ import torch
 
 from mojo_opset.backends.ttx.kernels import rope_bwd
 from mojo_opset.backends.ttx.kernels import rope_fwd
-from mojo_opset.core import MojoRoPEFunction
+from mojo_opset.core import MojoApplyRoPEFunction
 
 
-class TTXRoPEFunction(MojoRoPEFunction):
+class TTXApplyRoPEFunction(MojoApplyRoPEFunction):
     @staticmethod
     def forward(
         ctx,

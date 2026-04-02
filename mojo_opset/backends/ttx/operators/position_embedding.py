@@ -6,7 +6,7 @@ import torch
 from mojo_opset.backends.ttx.kernels import rot_pos_embed
 from mojo_opset.backends.ttx.kernels import rope_fwd
 from mojo_opset.core import MojoRotaryEmbedding
-from mojo_opset.core import MojoRoPE
+from mojo_opset.core import MojoApplyRoPE
 
 
 class TTXRotaryEmbedding(MojoRotaryEmbedding):
@@ -35,7 +35,7 @@ class TTXRotaryEmbedding(MojoRotaryEmbedding):
         )
 
 
-class TTXRoPE(MojoRoPE):
+class TTXApplyRoPE(MojoApplyRoPE):
     supported_platforms_list = ["npu"]
 
     def forward(

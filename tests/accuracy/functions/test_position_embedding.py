@@ -5,7 +5,7 @@ from tests.utils import MockFunctionCtx
 from tests.utils import assert_close
 from tests.utils import bypass_not_implemented
 
-from mojo_opset import MojoRoPEFunction
+from mojo_opset import MojoApplyRoPEFunction
 from mojo_opset import MojoRotaryEmbedding
 from mojo_opset.utils.platform import get_platform, get_torch_device
 
@@ -39,7 +39,7 @@ from mojo_opset.utils.platform import get_platform, get_torch_device
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @bypass_not_implemented
 def test_rope_function(bs, seqlen, q_heads, k_heads, head_dim, rope_percentage, head_first, dtype):
-    """Test MojoRoPEFunction with pre-extracted cos/sin, head_first, and nope_dim support."""
+    """Test MojoApplyRoPEFunction with pre-extracted cos/sin, head_first, and nope_dim support."""
     device = get_torch_device()
     rope_dim = int(head_dim * rope_percentage)
     max_seq_len = 32768
@@ -58,10 +58,10 @@ def test_rope_function(bs, seqlen, q_heads, k_heads, head_dim, rope_percentage, 
         k = torch.randn(bs, seqlen, k_heads, head_dim, device=device, dtype=dtype)
 
     ctx = MockFunctionCtx()
-    q_rot, k_rot = MojoRoPEFunction.forward(ctx, q.clone(), k.clone(), cos, sin, head_first)
+    q_rot, k_rot = MojoApplyRoPEFunction.forward(ctx, q.clone(), k.clone(), cos, sin, head_first)
 
     ctx_ref = MockFunctionCtx()
-    q_rot_ref, k_rot_ref = MojoRoPEFunction._registry.get("torch").forward(
+    q_rot_ref, k_rot_ref = MojoApplyRoPEFunction._registry.get("torch").forward(
         ctx_ref, q.clone(), k.clone(), cos, sin, head_first,
     )
 
@@ -71,7 +71,7 @@ def test_rope_function(bs, seqlen, q_heads, k_heads, head_dim, rope_percentage, 
     grad_q_out = torch.rand_like(q_rot)
     grad_k_out = torch.rand_like(k_rot)
 
-    grads = MojoRoPEFunction.backward(ctx, grad_q_out.clone(), grad_k_out.clone())
-    grads_ref = MojoRoPEFunction._registry.get("torch").backward(ctx_ref, grad_q_out.clone(), grad_k_out.clone())
+    grads = MojoApplyRoPEFunction.backward(ctx, grad_q_out.clone(), grad_k_out.clone())
+    grads_ref = MojoApplyRoPEFunction._registry.get("torch").backward(ctx_ref, grad_q_out.clone(), grad_k_out.clone())
 
     assert_close(grads, grads_ref)

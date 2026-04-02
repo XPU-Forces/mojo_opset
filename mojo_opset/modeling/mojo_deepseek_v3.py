@@ -21,7 +21,7 @@ from mojo_opset import MojoMoE
 from mojo_opset import MojoPagedDecodeMLA
 from mojo_opset import MojoPagedPrefillMLA
 from mojo_opset import MojoRMSNorm
-from mojo_opset import MojoRoPE
+from mojo_opset import MojoApplyRoPE
 from mojo_opset import MojoSilu
 from mojo_opset import MojoStorePagedKVCache
 
@@ -476,7 +476,7 @@ class DeepseekV3Attention(nn.Module):
 
         # Attention operators
         self.scaling = self.qk_head_dim ** (-0.5)
-        self.rope = MojoRoPE()
+        self.rope = MojoApplyRoPE()
         #TODO MLA算子实现
         self.attn_prefill = MojoPagedPrefillMLA()
         self.attn_decode = MojoPagedDecodeMLA()

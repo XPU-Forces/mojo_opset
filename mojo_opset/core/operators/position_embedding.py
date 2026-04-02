@@ -87,7 +87,7 @@ class MojoRotaryEmbedding(MojoOperator):
         return cos, sin
 
 
-class MojoRoPE(MojoOperator):
+class MojoApplyRoPE(MojoOperator):
     """Rotary Position Embedding (RoPE) operator.
 
     Supports three scenarios:

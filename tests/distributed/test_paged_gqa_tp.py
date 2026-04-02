@@ -7,7 +7,7 @@ from mojo_opset import (
     MojoPagedDecodeGQA,
     MojoStorePagedKVCache,
     MojoRotaryEmbedding,
-    MojoRoPE,
+    MojoApplyRoPE,
     MojoRMSNorm,
 )
 from mojo_opset.distributed.parallel import (
@@ -173,7 +173,7 @@ class FlashAttentionBlock(torch.nn.Module):
             self.rot_pos_emb = MojoRotaryEmbedding(
                 rope_theta=config.model_config.rope_base, rope_dim=self.rope_dim, init_max_length=config.model_config.max_position_embeddings,
             )
-            self.rope = MojoRoPE()
+            self.rope = MojoApplyRoPE()
 
     def forward(
         self,

@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from mojo_opset import MojoRotaryEmbedding
-from mojo_opset import MojoRoPE
+from mojo_opset import MojoApplyRoPE
 from mojo_opset.utils.platform import get_platform
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
@@ -34,6 +34,6 @@ def test_pos_emb(bs, seqlen, q_heads, k_heads, head_dim, dtype):
     q = torch.randn(bs, seqlen, q_heads, head_dim, device=device, dtype=dtype).transpose(1, 2)
     k = torch.randn(bs, seqlen, k_heads, head_dim, device=device, dtype=dtype).transpose(1, 2)
 
-    rope = MojoRoPE()
+    rope = MojoApplyRoPE()
 
     perf(lambda: rope(q, k, cos, sin, head_first=True))  # noqa: F821
