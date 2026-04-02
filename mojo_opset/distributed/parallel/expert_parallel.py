@@ -1,15 +1,19 @@
 from functools import partial
 
 import torch
+import torch.distributed._functional_collectives as fc
+
 from torch import nn
 from torch.distributed.tensor import DeviceMesh
 from torch.distributed.tensor import Shard
-import torch.distributed._functional_collectives as fc
 
-from mojo_opset.core.operators.moe import MojoMoE, MojoMoECombine, MojoMoEDispatch
+from mojo_opset.core.operators.moe import MojoMoE
+from mojo_opset.core.operators.moe import MojoMoECombine
+from mojo_opset.core.operators.moe import MojoMoEDispatch
 from mojo_opset.distributed.parallel.mojo_parallel import MojoDistributedModule
 from mojo_opset.distributed.parallel.mojo_parallel import MojoRegisterableParallelStyle
 from mojo_opset.distributed.parallel.utils import shard_tensor
+from mojo_opset.distributed.parallel.utils import stat_dict_rename_hook
 
 
 class _EPDispatchWrapper(nn.Module):
@@ -28,8 +32,8 @@ class _EPDispatchWrapper(nn.Module):
         self.ep_end = self.ep_start + local
 
     def forward(self, hidden_states, top_k_gates, top_k_indices):
-        sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = (
-            self._dispatch(hidden_states, top_k_gates, top_k_indices)
+        sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = self._dispatch(
+            hidden_states, top_k_gates, top_k_indices
         )
         cumsum = tokens_per_expert.cumsum(0)
         tok_start = 0 if self.ep_start == 0 else cumsum[self.ep_start - 1].item()
@@ -59,7 +63,8 @@ class _EPCombineWrapper(nn.Module):
 
 
 def _ep_partition_fn(src_data_rank, name, module, device_mesh):
-    from mojo_opset.core.operators.moe import MojoMoE, MojoExperts
+    from mojo_opset.core.operators.moe import MojoExperts
+    from mojo_opset.core.operators.moe import MojoMoE
 
     if isinstance(module, MojoMoE):
         module.dispatch = _EPDispatchWrapper(module.dispatch, device_mesh)
@@ -73,6 +78,9 @@ def _ep_partition_fn(src_data_rank, name, module, device_mesh):
         module.register_parameter(
             "down_proj_weight",
             nn.Parameter(shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.down_proj_weight)),
+        )
+        module.register_state_dict_post_hook(
+            partial(stat_dict_rename_hook, ("up_proj_weight", "down_proj_weight"), device_mesh)
         )
 
 
