@@ -186,12 +186,10 @@ def paged_prefill_kernel(
                 
                 logical_page_id = kv_block_start_in_seq // PAGE_SIZE
                 kv_block_start_in_page = kv_block_start_in_seq % PAGE_SIZE
-
                 physical_page_id = tl.load(
                     block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
                 )
 
-                kv_block_len = kv_block_end_in_seq - kv_block_start_in_seq
                 K_T_block_ptr = tl.make_block_ptr(
                     base=key_cache_ptr + physical_page_id * stride_k_block + kv_head_id * stride_k_head + kv_block_start_in_page * stride_k_blksz,
                     shape=(HEAD_DIM, kv_block_len),
@@ -392,12 +390,12 @@ def paged_decode_kernel(
         for kv_block_id in range(0, num_kv_blocks):
             kv_block_start_in_seq = kv_block_id * BLOCK_SIZE_N
             kv_block_end_in_seq = min(kv_block_start_in_seq + BLOCK_SIZE_N, kv_seq_len)
+            kv_block_len = kv_block_end_in_seq - kv_block_start_in_seq
             
             logical_page_id = kv_block_start_in_seq // PAGE_SIZE
             kv_block_start_in_page = kv_block_start_in_seq % PAGE_SIZE
             physical_page_id = tl.load(block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block)
             
-            kv_block_len = kv_block_end_in_seq - kv_block_start_in_seq
             k_block_ptr = tl.make_block_ptr(
                 base=k_cache_ptr + physical_page_id * stride_k_block + kv_head_id * stride_k_head + kv_block_start_in_page * stride_k_blksz,
                 shape=(kv_block_len, HEAD_DIM),
