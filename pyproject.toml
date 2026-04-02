@@ -13,7 +13,6 @@ authors = [{name="SeedXPU", email='yuminghui.exp@bytedance.com'}]
 dependencies = [
     "einops",
     "pytest >= 8.4.0",
-    "byted-xpu-graph @ https://luban-source.byted.org/repository/scm/Seed.Foundation.xpu_graph_1.0.0.20.tar.gz"
 ]
 
 [project.optional-dependencies]
@@ -27,6 +26,9 @@ amd = [
 ilu = [
 ]
 xpu = [
+]
+graph = [
+    "byted-xpu-graph @ https://luban-source.byted.org/repository/scm/Seed.Foundation.xpu_graph_1.0.0.20.tar.gz"
 ]
 
 [tool.setuptools.packages.find]

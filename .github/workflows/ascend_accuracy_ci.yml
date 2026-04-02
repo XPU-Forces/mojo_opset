@@ -51,7 +51,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
           pip install -U pip setuptools wheel build pytest-xdist
-          pip install -e .\[npu\] --index-url https://bytedpypi.byted.org/simple
+          pip install -e .\[npu,graph\] --index-url https://bytedpypi.byted.org/simple
           python3 -m build .
           pip install dist/*.whl --force-reinstall --no-deps
       - name: test-Base
