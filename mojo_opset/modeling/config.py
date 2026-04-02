@@ -1,3 +1,6 @@
+from dataclasses import dataclass
+from enum import Enum
+from enum import auto
 from typing import List
 
 import torch
@@ -98,20 +101,97 @@ class MojoRunTimeConfig(BaseModel):
     preshard_checkpoint_path: str = None
 
 
-class MojoParallelConfig(BaseModel):
-    dp_size: int = 1
-    pp_size: int = 1
-    ep_size: int = 1
-    tp_size: int = 1
-    dp_rank: int = 0
-    pp_rank: int = 0
-    ep_rank: int = 0
-    tp_rank: int = 0
-    dp_group: list = []
-    pp_group: list = []
-    ep_group: list = []
-    tp_group: list = []
-    world_size: int = 1
+class AFDRole(Enum):
+    """Enum for AFD roles."""
+
+    ATTN = auto()
+    FFN = auto()
+
+    def __str__(self):
+        return self.name
+
+
+@dataclass
+class MojoParallelConfig:
+    """
+    Configuration for distributed parallelism.
+    """
+
+    AFD_ENABLED: bool = False
+    AFD_ROLE: AFDRole = AFDRole.FFN
+
+    PP_SIZE: int = 1
+
+    ATTN_DP_SIZE: int = 1
+    ATTN_SP_SIZE: int = 1
+    ATTN_TP_SIZE: int = 1
+    ATTN_PP_SIZE: int = 1  # for AFD_ATTN only
+
+    FFN_EP_SIZE: int = 1
+    FFN_TP_SIZE: int = 1
+    FFN_PP_SIZE: int = 1  # for AFD_FFN only
+
+    USE_ULISSES: bool = True  # Ulysses
+
+    def __post_init__(self):
+        """Validate configuration values."""
+
+        if (
+            self.PP_SIZE <= 0
+            or self.ATTN_DP_SIZE <= 0
+            or self.ATTN_SP_SIZE <= 0
+            or self.ATTN_TP_SIZE <= 0
+            or self.ATTN_PP_SIZE <= 0
+            or self.FFN_EP_SIZE <= 0
+            or self.FFN_TP_SIZE <= 0
+            or self.FFN_PP_SIZE <= 0
+        ):
+            raise ValueError("All parallel sizes must be positive integers")
+
+        # TODO(minghui): necessary to support FFN TP & EP at the same time?
+        # (wens) yes, e.g. m8 shard expert vs MoE.
+
+        # if self.FFN_EP_SIZE > 1 and self.FFN_TP_SIZE > 1:
+        #     raise ValueError("FFN TP and FFN EP can not be enabled at the same time")
+
+        # if not self.AFD_ENABLED:
+        #     # In non-AFD mode, FFN and Attention share the same resources.
+        #     # We assume FFN EP/TP dimensions cover the same total parallelism as Attn DP/SP/TP.
+        #     # Note: PP_SIZE is shared in non-AFD mode.
+        #     if (
+        #         self.FFN_EP_SIZE * self.FFN_TP_SIZE
+        #         != self.ATTN_DP_SIZE * self.ATTN_SP_SIZE * self.ATTN_TP_SIZE
+        #     ):
+        #         raise ValueError(
+        #             "FFN EP size * FFN TP size must be equal to ATTN DP size * ATTN SP size * ATTN TP size"
+        #         )
+
+    @property
+    def world_size(self) -> int:
+        """Total number of processes in the distributed system."""
+        if not self.AFD_ENABLED:
+            return self.ATTN_DP_SIZE * self.ATTN_SP_SIZE * self.ATTN_TP_SIZE * self.PP_SIZE
+        else:
+            return (
+                self.ATTN_DP_SIZE * self.ATTN_SP_SIZE * self.ATTN_TP_SIZE * self.ATTN_PP_SIZE
+                + self.FFN_EP_SIZE * self.FFN_TP_SIZE * self.FFN_PP_SIZE
+            )
+
+    @property
+    def attn_world_size(self) -> int:
+        """Total number of processes in non-PP dimensions."""
+        if not self.AFD_ENABLED:
+            raise ValueError("ATTN world size is not defined when AFD is disabled")
+        else:
+            return self.ATTN_DP_SIZE * self.ATTN_SP_SIZE * self.ATTN_TP_SIZE * self.ATTN_PP_SIZE
+
+    @property
+    def ffn_world_size(self) -> int:
+        """Total number of processes in non-PP dimensions."""
+        if not self.AFD_ENABLED:
+            raise ValueError("FFN world size is not defined when AFD is disabled")
+        else:
+            return self.FFN_EP_SIZE * self.FFN_TP_SIZE * self.FFN_PP_SIZE
 
 
 class MojoConfig(BaseModel):
