@@ -35,7 +35,10 @@ class TorchNpuSilu(MojoSilu):
 class TorchNpuSwiGLU(MojoSwiGLU):
     supported_platforms_list = ["npu"]
 
-    def forward(self, gate_out: torch.Tensor, up_out: torch.Tensor):
+    def forward(
+        self, gate_out: torch.Tensor, 
+        up_out: torch.Tensor=None
+    ) -> torch.Tensor:
         if up_out is not None:
             merged = torch.cat([gate_out, up_out], dim=-1)
         else:
