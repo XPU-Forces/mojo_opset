@@ -36,16 +36,16 @@ class MojoMoE(MojoOperator):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
 
-        self.gating = MojoMoEGating(hidden_size=self.hidden_size, num_experts=self.num_experts, top_k=self.top_k, **kwargs)
-        self.dispatch = MojoMoEDispatch(num_experts=self.num_experts, **kwargs)
-        self.experts = MojoExperts(
+        self.gating = MojoMoEGating._registry.get(self._backend)(hidden_size=self.hidden_size, num_experts=self.num_experts, top_k=self.top_k, **kwargs)
+        self.dispatch = MojoMoEDispatch._registry.get(self._backend)(num_experts=self.num_experts, **kwargs)
+        self.experts = MojoExperts._registry.get(self._backend)(
             num_experts=self.num_experts,
             hidden_size=self.hidden_size,
             intermediate_size=self.intermediate_size,
             activation=activation,
             **kwargs,
         )
-        self.combine = MojoMoECombine(multiply_by_gates=True, **kwargs)
+        self.combine = MojoMoECombine._registry.get(self._backend)(multiply_by_gates=True, **kwargs)
 
         if self.gating.gate_weight is not None:
             setattr(self.gating.gate_weight, "force_dtype", torch.float32)
