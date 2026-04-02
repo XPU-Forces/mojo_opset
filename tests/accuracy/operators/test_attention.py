@@ -116,12 +116,6 @@ def test_paged_decode_gqa(
         gqa_layout=gqa_layout,
     )
 
-    from mojo_opset.utils.platform import get_platform
-    if get_platform() == "npu" and paged_decode_attn.__class__.__name__ == "TorchNpuPagedDecodeGQA":
-        if head_dim % 128 != 0:
-            pytest.skip(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
-
-
     atol = 2e-2 if query.dtype != torch.float32 else 1e-5
     rtol = 2e-2 if query.dtype != torch.float32 else 1e-6
 
@@ -258,14 +252,6 @@ def test_paged_prefill_gqa(
 
     head_dim = query.shape[-1]
     softmax_scale = 1.0 / math.sqrt(head_dim)
-
-    from mojo_opset.utils.platform import get_platform
-    if get_platform() == "npu" and paged_prefill_attn.__class__.__name__ == "TorchNpuPagedPrefillGQA":
-        if head_dim % 128 != 0:
-            pytest.skip(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
-        if seqlens_kv is not None:
-            pytest.skip("NPU kernel npu_fused_infer_attention_score currently does not support TND layout with sparse_mode=3 (Page Attention), raising RuntimeError: call aclnnFusedInferAttentionScoreV3 failed.")
-
 
     paged_prefill_attn.forward_diff_with(
         paged_prefill_attn_ref,

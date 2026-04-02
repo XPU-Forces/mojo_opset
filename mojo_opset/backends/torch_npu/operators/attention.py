@@ -77,6 +77,12 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
     ) -> torch.Tensor:
         _, num_q_heads, head_dim = query.shape
         _, num_kv_heads, block_size, _ = key_cache.shape
+        
+        if head_dim % 128 != 0:
+            raise NotImplementedError(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
+        if seqlens_kv is not None:
+            raise NotImplementedError("NPU kernel npu_fused_infer_attention_score currently does not support TND layout with sparse_mode=3 (Page Attention), raising RuntimeError: call aclnnFusedInferAttentionScoreV3 failed.")
+
 
         if block_size % 128 != 0 or block_size > 512:
             # high performance attention kernel only supports block_size % 128 == 0 and block_size <= 512
@@ -126,6 +132,8 @@ class TorchNpuPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
     ) -> Tuple[Any]:
         batch_size, num_q_heads, head_dim = query.shape
         _, head_nums, block_size, _ = k_cache.shape
+        if head_dim % 128 != 0:
+            raise NotImplementedError(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
 
         if block_size % 128 != 0 or block_size > 512:
             return super().forward(query, k_cache, v_cache, seqlens, block_tables, softmax_scale, cu_seq_lens)
