@@ -54,6 +54,8 @@ class MojoRotaryEmbedding(MojoOperator):
         2. Padded prefill: input [B, S, H], cu_seqlens_q None, position_ids None.
         3. Decode: input [B, H], cu_seqlens_q None, position_ids [B].
         """
+        assert position_ids is None or cu_seqlens_q is None, "At most one of cu_seqlens_q or position_ids should be provided"
+
         if cu_seqlens_q is not None:
             assert x.dim() == 2, "x must be 2D: [T, D]"
             position_ids = torch.full((x.shape[0],), -1, device = x.device, dtype = torch.int32)
@@ -69,7 +71,6 @@ class MojoRotaryEmbedding(MojoOperator):
                     dtype = torch.int32,
                 )
         elif position_ids is not None:
-            assert position_ids is not None, "Exactly one of cu_seqlens_q or position_ids should be provided"
             assert position_ids.shape == x.shape[:-1], "position_ids must have the same shape as x except the hidden dimension"
         else:
             position_ids = torch.arange(x.shape[1], device = x.device, dtype = torch.int32)

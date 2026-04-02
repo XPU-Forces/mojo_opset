@@ -33,8 +33,6 @@ class TorchNpuRoPE(MojoRoPE, default_priority=0):
             
         cos = cos.unsqueeze(0)
         sin = sin.unsqueeze(0)
-            
-        print(q_rope.shape, cos.shape)
 
         q_rot = torch_npu.npu_rotary_mul(q_rope, cos, sin)
         k_rot = torch_npu.npu_rotary_mul(k_rope, cos, sin)

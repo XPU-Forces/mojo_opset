@@ -328,7 +328,7 @@ def _normalize_to_bsnd(
     q: torch.Tensor,
     k: torch.Tensor,
     head_first: bool,
-) -> Tuple[torch.Tensor, torch.Tensor, int, int, int, int, int, bool, bool]:
+) -> Tuple[torch.Tensor, torch.Tensor, int, int, int, int, int, int, int, int, int]:
     """Normalize q/k to [B, S, N, D] layout, returning strides and metadata."""
 
     if q.dim() == 3:
