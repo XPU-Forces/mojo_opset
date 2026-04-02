@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from mojo_opset import MojoRoPE
-from mojo_opset.utils.platform import get_platform
+from mojo_opset.utils.platform import get_torch_device
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
@@ -22,7 +22,7 @@ from tests.utils import bypass_not_implemented
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_pos_emb(bs, seqlen, q_heads, k_heads, head_dim, dtype):
-    device = get_platform()
+    device = get_torch_device()
     # [B, S, N, D]
     q = torch.randn(bs, seqlen, q_heads, head_dim, device=device, dtype=dtype)
     k = torch.randn(bs, seqlen, k_heads, head_dim, device=device, dtype=dtype)

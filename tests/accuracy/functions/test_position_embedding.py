@@ -6,7 +6,7 @@ from tests.utils import assert_close
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoRoPEFunction
-from mojo_opset.utils.platform import get_platform
+from mojo_opset.utils.platform import get_torch_device
 
 
 @pytest.mark.parametrize("bs", [1, 6])
@@ -28,7 +28,7 @@ from mojo_opset.utils.platform import get_platform
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @bypass_not_implemented
 def test_pos_emb(bs, seqlen, q_heads, k_heads, head_dim, dtype):
-    device = get_platform()
+    device = get_torch_device()
     # [B, S, N, D]
     q = torch.randn(bs, seqlen, q_heads, head_dim, device=device, dtype=dtype)
     k = torch.randn(bs, seqlen, k_heads, head_dim, device=device, dtype=dtype)

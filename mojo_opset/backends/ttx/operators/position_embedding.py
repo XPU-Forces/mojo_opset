@@ -8,7 +8,7 @@ from mojo_opset.core import MojoRoPE
 
 
 class TTXRoPE(MojoRoPE):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(
         self,
