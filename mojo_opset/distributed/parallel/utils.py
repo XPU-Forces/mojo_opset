@@ -21,6 +21,17 @@ def get_coordinate_str_with_dim_names(mesh: DeviceMesh):
 
 
 def shard_tensor(device_mesh, placements: List[Placement], src_data_rank, tensor: torch.Tensor):
+    if tensor.is_meta:
+        from torch.distributed.tensor.placement_types import Shard
+
+        rank = device_mesh.get_local_rank()
+        size = device_mesh.size()
+        for p in placements:
+            if isinstance(p, Shard):
+                chunk_size = tensor.shape[p.dim] // size
+                tensor = tensor.narrow(p.dim, rank * chunk_size, chunk_size).contiguous()
+        return tensor
+
     new_tensor = distribute_tensor(
         tensor,
         device_mesh,

@@ -2,6 +2,7 @@ from .data_parallel import MojoDataParallel
 from .expert_parallel import MojoExpertParallel
 from .mojo_parallel import MojoDistributedModule
 from .mojo_parallel import MojoRegisterableParallelStyle
+from .mojo_parallel import get_unmanaged_params
 from .mojo_parallel import mojo_parallelize_module
 from .partitions import __DUMMY_NODE__
 from .tensor_parallel import MojoColwiseParallel

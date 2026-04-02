@@ -220,6 +220,50 @@ An example to create a WeightConverter with custom ConversionOps.
 """
 
 
+def convert_hf_state_dict(
+    hf_state_dict: dict | OrderedDict,
+    target_keys: set[str] | dict[str, ...],
+    renamings: List["WeightRenaming"] = [],
+    converters: List["WeightConverter"] = [],
+) -> dict[str, torch.Tensor]:
+    """Rename and convert an HF state dict to model-native keys.
+
+    Returns the converted state dict without loading it into any model.
+    This is the shared core used by both ``load_weights_with_renaming_and_converter``
+    (single-device) and distributed layer-by-layer loading.
+    """
+    from copy import deepcopy
+
+    import transformers
+
+    from transformers.core_model_loading import WeightRenaming
+    from transformers.core_model_loading import rename_source_key
+
+    pattern_to_converter = {k: c for c in converters for k in c.source_patterns}
+    param_name_to_load: dict = {}
+
+    for key in hf_state_dict.keys():
+        renamed_key, src_pat = rename_source_key(key, renamings, converters)
+        if renamed_key in target_keys:
+            logger.debug("Renaming\033[1;31m %s \033[0m as\033[1;32m %s \033[0m", key, renamed_key)
+            if src_pat is not None:
+                mapping = param_name_to_load.setdefault(renamed_key, deepcopy(pattern_to_converter[src_pat]))
+            else:
+                mapping = param_name_to_load.setdefault(renamed_key, WeightRenaming(key, renamed_key))
+                src_pat = key
+            mapping.add_tensor(renamed_key, key, src_pat, hf_state_dict[key])
+
+    new_state_dict = {}
+    for k, mapping in param_name_to_load.items():
+        if transformers.__version__ >= "5.1.0":
+            converted = mapping.convert(k)
+        else:
+            converted, _ = mapping.convert(k)
+        for ck, cv in converted.items():
+            new_state_dict[ck] = cv[0] if isinstance(cv, list) else cv
+    return new_state_dict
+
+
 def load_weights_with_renaming_and_converter(
     model: torch.nn.Module,
     hf_dir_or_preload_state_dict: str | dict | OrderedDict,
@@ -227,52 +271,15 @@ def load_weights_with_renaming_and_converter(
     renamings: List["WeightRenaming"] = [],
     converters: List["WeightConverter"] = [],
 ):
-    # TODO(liuyuan): Once we model with transformers.modeling_utils.PreTrainedModel and transformers.configuration_utils.PretrainedConfig, we should use convert_and_load_state_dict_in_model directly.
-    # TODO(liuyuan): If partial weight-loading is required, perharps we could use the index json (aka. transformers.utils.SAFE_WEIGHTS_INDEX_NAME) to do the key renaming ahead of time.
-    from copy import deepcopy
-
-    import transformers
-
-    from transformers.core_model_loading import WeightConverter
-    from transformers.core_model_loading import WeightRenaming
-    from transformers.core_model_loading import rename_source_key
-
     if isinstance(hf_dir_or_preload_state_dict, str):
         state_dict = load_hf_weights(hf_dir_or_preload_state_dict)
     elif isinstance(hf_dir_or_preload_state_dict, (OrderedDict, dict)):
         state_dict = hf_dir_or_preload_state_dict
     else:
         raise TypeError(
-            f"hf_dir_or_preload_state_dict is supposed to be string or OrderedDict, but found {type(hf_dir_or_preload_state_dict)}"
+            f"hf_dir_or_preload_state_dict is supposed to be string or OrderedDict, "
+            f"but found {type(hf_dir_or_preload_state_dict)}"
         )
 
-    model_state_dict = model.state_dict()
-    param_name_to_load: dict[str, WeightRenaming | WeightConverter] = {}
-    pattern_to_converter = {k: converter for converter in converters for k in converter.source_patterns}
-
-    for key in state_dict.keys():
-        renamed_key, src_pat = rename_source_key(key, renamings, converters)
-        logger.debug("%s is supposed to be renamed as %s", key, renamed_key)
-        if renamed_key in model_state_dict:
-            logger.debug("Renaming\033[1;31m %s \033[0m as\033[1;32m %s \033[0m", key, renamed_key)
-            if src_pat is not None:
-                new_converter = deepcopy(pattern_to_converter[src_pat])
-                mapping = param_name_to_load.setdefault(renamed_key, new_converter)
-            else:
-                mapping = param_name_to_load.setdefault(renamed_key, WeightRenaming(key, renamed_key))
-                src_pat = key
-            mapping.add_tensor(renamed_key, key, src_pat, state_dict[key])
-
-    new_state_dict = {}
-    for k, mapping in param_name_to_load.items():
-        if transformers.__version__ >= "5.1.0":
-            converted_tensor = mapping.convert(k)
-        else:
-            converted_tensor, _ = mapping.convert(k)
-
-        for k, v in converted_tensor.items():
-            if isinstance(v, list):
-                converted_tensor[k] = v[0]
-        new_state_dict.update(converted_tensor)
-
+    new_state_dict = convert_hf_state_dict(state_dict, model.state_dict(), renamings, converters)
     return model.load_state_dict(new_state_dict, strict=strict_loading)
