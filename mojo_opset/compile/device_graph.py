@@ -45,7 +45,7 @@ class DeviceGraphRunner:
         )
         self.session = None
 
-    def capture(self, input_ids, session):
+    def capture(self, input_ids, session, memory_pool=None):
         self.session = session
 
         if hasattr(session, "backup_state"):
@@ -61,7 +61,7 @@ class DeviceGraphRunner:
             if hasattr(session, "restore_state"):
                 session.restore_state()
 
-            self._runner.capture(input_ids, session=session)
+            self._runner.capture(input_ids, memory_pool=memory_pool, session=session)
 
             if hasattr(session, "restore_state"):
                 session.restore_state()
@@ -72,18 +72,22 @@ class DeviceGraphRunner:
 
 
 class DeviceGraphPool:
-    """Batch-size-keyed cache of DeviceGraphRunners.
+    """Batch-size-keyed cache of DeviceGraphRunners with a shared memory pool.
 
-    Memory pools are NOT managed here — each GraphRunner internally calls
-    torch.{npu,mlu}.graph_pool_handle() to get its own pool, which is the
-    standard torch behavior. We only handle:
-      - batch_size → runner mapping
-      - session binding (invalidate cache on session change)
+    All runners share a single device memory pool (via graph_pool_handle()),
+    so intermediate tensors from different batch-size graphs can reuse the
+    same memory — only one graph runs at a time during decode.
+
+    Bucket range: bs ∈ [1, 16].
     """
+
+    BATCH_SIZES = list(range(1, 17))
 
     def __init__(self, model, device):
         self._model = model
         self._device = device
+        self._device_mod = getattr(torch, device)
+        self._pool = self._device_mod.graph_pool_handle()
         self._runners: dict[int, DeviceGraphRunner] = {}
         self._bound_session_id: int | None = None
 
@@ -95,9 +99,9 @@ class DeviceGraphPool:
         bs = input_ids.shape[0]
         if bs not in self._runners:
             runner = DeviceGraphRunner(self._model, device=self._device)
-            runner.capture(input_ids, session)
+            runner.capture(input_ids, session, memory_pool=self._pool)
             self._runners[bs] = runner
-            logger.debug(f"[DeviceGraphPool] Lazily captured graph for bs={bs}")
+            logger.debug(f"[DeviceGraphPool] Captured graph for bs={bs}")
         return self._runners[bs]
 
     @property
