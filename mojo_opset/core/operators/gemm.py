@@ -212,6 +212,8 @@ class MojoQuantGroupLinearReduceSum(MojoOperator):
 
         return reduced_out
 
+class MojoQuantGroupGemmCombineEP(MojoOperator):
+    pass
 
 class MojoQuantMatmul(MojoOperator):
     pass
