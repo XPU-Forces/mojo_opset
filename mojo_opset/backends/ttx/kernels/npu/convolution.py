@@ -787,7 +787,17 @@ def causal_conv1d_update_bdt_impl(
     out = torch.empty_like(x)
     NUM_CORES = get_num_cores()
 
-    T_CHK_SIZE = 8 if seqlen <= 8 else (16 if seqlen <= 16 else 256)
+    if seqlen <= 8:
+        T_CHK_SIZE = 8
+    elif seqlen <= 16:
+        T_CHK_SIZE = 16
+    elif seqlen <= 64:
+        T_CHK_SIZE = 64
+    elif seqlen <= 128:
+        T_CHK_SIZE = 128
+    else:
+        T_CHK_SIZE = 256
+
     D_CHK_SIZE = 16
 
     assert T_CHK_SIZE >= width
@@ -796,8 +806,12 @@ def causal_conv1d_update_bdt_impl(
     NUM_D_CHK = triton.cdiv(dim, D_CHK_SIZE)
     conv_state_update = torch.empty_like(conv_state)
 
-    # A const tile size variable to update negative address of conv state
-    ST_STORE_HEAD_TILE_SIZE = width if (seqlen % T_CHK_SIZE) > width else (width - seqlen % T_CHK_SIZE) % T_CHK_SIZE
+    # A const tile size variable to update negative address of conv state.
+    # Guard against 0 when seqlen % T_CHK_SIZE == width (boundary alignment edge case).
+    rem = seqlen % T_CHK_SIZE
+    ST_STORE_HEAD_TILE_SIZE = width if rem > width else (width - rem) % T_CHK_SIZE
+    if ST_STORE_HEAD_TILE_SIZE == 0:
+        ST_STORE_HEAD_TILE_SIZE = width
     causal_conv1d_update_kernel_bdt_fwd[(NUM_CORES, 1)](
         x,
         conv_state,
