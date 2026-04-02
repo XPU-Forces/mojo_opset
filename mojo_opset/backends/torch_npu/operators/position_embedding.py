@@ -3,10 +3,10 @@ from typing import Tuple
 import torch
 import torch_npu
 
-from mojo_opset.core import MojoRoPE
+from mojo_opset.core import MojoApplyRoPE
 
 
-class TorchNpuRoPE(MojoRoPE, default_priority=0):
+class TorchNpuApplyRoPE(MojoApplyRoPE, default_priority=0):
     supported_platforms_list = ["npu"]
 
     def _apply_rope(

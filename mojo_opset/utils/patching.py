@@ -13,7 +13,7 @@ def apply_mojo_to_qwen3(
     import torch.nn as nn
 
     from mojo_opset import MojoRMSNorm
-    from mojo_opset import MojoRoPE
+    from mojo_opset import MojoApplyRoPE
     from mojo_opset import MojoSwiGLU
 
     assert not (cross_entropy and fused_linear_cross_entropy), (
@@ -23,7 +23,7 @@ def apply_mojo_to_qwen3(
     from transformers.models.qwen3 import modeling_qwen3
 
     if rope:
-        modeling_qwen3.apply_rotary_pos_emb = MojoRoPE()
+        modeling_qwen3.apply_rotary_pos_emb = MojoApplyRoPE()
 
     # TODO(zhangjihang): need to discuss here, patch module seems a little bit tricky.
     # Better ways is that mojo_opset provide a functional api.

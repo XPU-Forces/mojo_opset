@@ -3,7 +3,7 @@ import torch
 from ..function import MojoFunction
 
 
-class MojoRoPEFunction(MojoFunction):
+class MojoApplyRoPEFunction(MojoFunction):
     """
     Apply Rotary Position Embedding to q/k with pre-extracted cos/sin.
 
@@ -45,8 +45,8 @@ class MojoRoPEFunction(MojoFunction):
         else:
             q_rope, k_rope = q, k
 
-        q_rot = (q_rope * cos + MojoRoPEFunction._rotate_half(q_rope) * sin).to(q.dtype)
-        k_rot = (k_rope * cos + MojoRoPEFunction._rotate_half(k_rope) * sin).to(k.dtype)
+        q_rot = (q_rope * cos + MojoApplyRoPEFunction._rotate_half(q_rope) * sin).to(q.dtype)
+        k_rot = (k_rope * cos + MojoApplyRoPEFunction._rotate_half(k_rope) * sin).to(k.dtype)
 
         if nope_dim > 0:
             q_rot = torch.cat([q_nope, q_rot], dim=-1)
@@ -73,10 +73,10 @@ class MojoRoPEFunction(MojoFunction):
             grad_q_rope, grad_k_rope = grad_output_q, grad_output_k
 
         grad_q = (
-            grad_q_rope * cos + MojoRoPEFunction._inverse_rotate_half(grad_q_rope * sin)
+            grad_q_rope * cos + MojoApplyRoPEFunction._inverse_rotate_half(grad_q_rope * sin)
         ).to(grad_output_q.dtype)
         grad_k = (
-            grad_k_rope * cos + MojoRoPEFunction._inverse_rotate_half(grad_k_rope * sin)
+            grad_k_rope * cos + MojoApplyRoPEFunction._inverse_rotate_half(grad_k_rope * sin)
         ).to(grad_output_k.dtype)
 
         if nope_dim > 0:

@@ -4,7 +4,7 @@ import torch
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoRotaryEmbedding
-from mojo_opset import MojoRoPE
+from mojo_opset import MojoApplyRoPE
 from mojo_opset import MojoGridRoPE
 from mojo_opset.utils.platform import get_platform, get_torch_device
 
@@ -109,7 +109,7 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @bypass_not_implemented
 def test_apply_rope(bs, seqlen, q_heads, k_heads, head_dim, rope_percentage, mode, dtype):
-    """Test MojoRoPE (apply rotary position embedding) with pre-extracted cos/sin."""
+    """Test MojoApplyRoPE (apply rotary position embedding) with pre-extracted cos/sin."""
     platform = get_platform()
     device = get_torch_device()
     max_seq_len = 32768
@@ -151,8 +151,8 @@ def test_apply_rope(bs, seqlen, q_heads, k_heads, head_dim, rope_percentage, mod
         cos, sin = rot_pos_emb(x, position_ids=kv_lens)
         head_first = False
 
-    rope = MojoRoPE()
-    rope_ref = MojoRoPE._registry.get("torch")()
+    rope = MojoApplyRoPE()
+    rope_ref = MojoApplyRoPE._registry.get("torch")()
 
     if (
         platform == "npu"

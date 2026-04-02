@@ -7,7 +7,7 @@ from mojo_opset.core import (
     MojoLayerNorm,
     MojoLightningIndexer,
     MojoDynamicQuant,
-    MojoRoPE,
+    MojoApplyRoPE,
     MojoRotateActivation,
 )
 from mojo_opset.core.operator import MojoOperator
@@ -50,7 +50,7 @@ class MojoIndexer(MojoOperator):
             persistent=False,
         )
 
-        self.rope = MojoRoPE()
+        self.rope = MojoApplyRoPE()
         self.activation = MojoRotateActivation()
         self.quant = MojoDynamicQuant()
         self.lightning_indexer = MojoLightningIndexer()

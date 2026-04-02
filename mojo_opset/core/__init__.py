@@ -100,7 +100,7 @@ from .operators.normalization import MojoGroupLayerNorm
 from .operators.position_embedding import MojoRotaryEmbedding
 from .operators.position_embedding import MojoNormRoPE
 from .operators.position_embedding import MojoNormRoPEStoreKV
-from .operators.position_embedding import MojoRoPE
+from .operators.position_embedding import MojoApplyRoPE
 from .operators.position_embedding import MojoRoPEStoreKV
 from .operators.position_embedding import MojoGridRoPE
 
@@ -127,7 +127,7 @@ from .functions.convolution import MojoCausalConv1dFunction
 from .functions.loss_function import MojoFusedLinearCrossEntropyFunction
 from .functions.loss_function import MojoFusedLinearCrossEntropyLoss
 from .functions.normalization import MojoRMSNormFunction
-from .functions.position_embedding import MojoRoPEFunction
+from .functions.position_embedding import MojoApplyRoPEFunction
 from .functions.attention import MojoSWAFunction
 
 # fmt: off
@@ -208,7 +208,7 @@ __all__ = [
     "MojoResidualAddNormCast",
 
     "MojoRotaryEmbedding",
-    "MojoRoPE",
+    "MojoApplyRoPE",
     "MojoRoPEStoreKV",
     "MojoNormRoPE",
     "MojoNormRoPEStoreKV",
@@ -227,7 +227,7 @@ __all__ = [
 
     "MojoSiluFunction",
     "MojoRMSNormFunction",
-    "MojoRoPEFunction",
+    "MojoApplyRoPEFunction",
     "MojoFusedLinearCrossEntropyFunction",
     "MojoCausalConv1dFunction",
 
