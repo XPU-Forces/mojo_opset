@@ -55,3 +55,40 @@ def test_moe(num_experts, top_k, hidden_size, intermediate_size, num_tokens, dty
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device=device)
     moe.forward_diff_with(moe_ref, x, mixed_tol=True)
+
+
+@pytest.mark.parametrize(
+    "num_experts, top_k, hidden_size, num_tokens",
+    [
+        (16, 4, 1024, 64),
+        (32, 8, 1024, 128),
+        (64, 8, 1024, 256),
+        (64, 8, 1024, 1024),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@bypass_not_implemented
+def test_moe_gating(num_experts, top_k, hidden_size, num_tokens, dtype):
+    device = get_platform()
+    torch.manual_seed(0)
+
+    moe_gating = MojoMoEGating(
+        hidden_size=hidden_size,
+        num_experts=num_experts,
+        top_k=top_k,
+    )
+    for p in moe_gating.parameters():
+        nn.init.normal_(p, std=0.02)
+
+    moe_gating_ref = MojoMoEGating._registry.get("torch")(
+        hidden_size=hidden_size,
+        num_experts=num_experts,
+        top_k=top_k,
+    )
+
+    moe_gating = moe_gating.to(device)
+    moe_gating_ref = moe_gating_ref.to(device)
+    moe_gating_ref.load_state_dict(moe_gating.state_dict())
+
+    x = torch.rand(num_tokens, hidden_size, dtype=dtype, device=device)
+    moe_gating.forward_diff_with(moe_gating_ref, x, mixed_tol=True)
