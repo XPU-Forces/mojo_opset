@@ -1,7 +1,8 @@
 import pytest
 import torch
 
-from mojo_opset import MojoRoPE
+from mojo_opset import MojoRotaryEmbedding
+from mojo_opset import MojoApplyRoPE
 from mojo_opset.utils.platform import get_platform
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
@@ -23,23 +24,16 @@ from tests.utils import bypass_not_implemented
 @bypass_not_implemented
 def test_pos_emb(bs, seqlen, q_heads, k_heads, head_dim, dtype):
     device = get_platform()
-    # [B, S, N, D]
-    q = torch.randn(bs, seqlen, q_heads, head_dim, device=device, dtype=dtype)
-    k = torch.randn(bs, seqlen, k_heads, head_dim, device=device, dtype=dtype)
+    x = torch.randn(bs, seqlen, q_heads*head_dim, device=device, dtype=dtype)
+    rot_pos_emb = MojoRotaryEmbedding(
+        rope_theta=10000.0, rope_dim=head_dim, init_max_length=seqlen,
+    ).to(device)
+    cos, sin = rot_pos_emb(x)
 
-    rope = MojoRoPE()
+    # [B, S, N, D] -> [B, N, S, D]
+    q = torch.randn(bs, seqlen, q_heads, head_dim, device=device, dtype=dtype).transpose(1, 2)
+    k = torch.randn(bs, seqlen, k_heads, head_dim, device=device, dtype=dtype).transpose(1, 2)
 
-    # Mock real inference memory layout: [B, N, S, D]
-    q = q.transpose(1, 2)
-    k = k.transpose(1, 2)
+    rope = MojoApplyRoPE()
 
-    inv_freq = 1.0 / (10000.0 ** (torch.arange(0, head_dim, 2, device=q.device, dtype=torch.float32) / head_dim))
-    t = torch.arange(seqlen, device=q.device, dtype=inv_freq.dtype)
-    freqs = torch.einsum("i,j->ij", t, inv_freq)
-    emb = torch.cat((freqs, freqs), dim=-1)
-
-    # [1, 1, S, D]
-    cos = emb.cos()[None, None, :, :]
-    sin = emb.sin()[None, None, :, :]
-
-    perf(lambda: rope(q, k, cos, sin))  # noqa: F821
+    perf(lambda: rope(q, k, cos, sin, head_first=True))  # noqa: F821

@@ -10,7 +10,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoRMSNorm
-from mojo_opset import MojoRoPE
+from mojo_opset import MojoApplyRoPE
 from mojo_opset import MojoSilu
 from mojo_opset import MojoStorePagedKVCache
 
@@ -162,7 +162,7 @@ class SeedOssAttention(nn.Module):
         self.o_proj = nn.Linear(
             self.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_out_bias
         )
-        self.rope = MojoRoPE()
+        self.rope = MojoApplyRoPE()
         self.attn_prefill = MojoPagedPrefillGQA()
         self.attn_decode = MojoPagedDecodeGQA()
 

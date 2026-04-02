@@ -8,7 +8,7 @@ from torch import nn
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoRMSNorm
-from mojo_opset import MojoRoPE
+from mojo_opset import MojoApplyRoPE
 from mojo_opset import MojoSilu
 from mojo_opset import MojoStorePagedKVCache
 
@@ -199,7 +199,7 @@ class Qwen3Attention(nn.Module):
             norm_size=self.head_dim,
             eps=config.rms_norm_eps,
         )
-        self.rope = MojoRoPE()
+        self.rope = MojoApplyRoPE()
         self.attn_prefill = MojoPagedPrefillGQA()
         self.attn_decode = MojoPagedDecodeGQA()
 
