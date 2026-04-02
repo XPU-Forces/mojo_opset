@@ -16,7 +16,6 @@ class MojoMoE(MojoOperator):
         top_k,
         hidden_size,
         intermediate_size=None,
-        ffn_intermediate_size=None,
         activation: str = "swiglu",
         **kwargs,
     ):
@@ -30,8 +29,6 @@ class MojoMoE(MojoOperator):
 
         # NOTE: in some cases, branches may have different expert num or topk
         self.num_experts = num_experts
-        if intermediate_size is None:
-            intermediate_size = ffn_intermediate_size
         if intermediate_size is None:
             raise ValueError("MojoMoE: intermediate_size must be provided.")
 

@@ -356,7 +356,7 @@ class DeepseekV3MoE(nn.Module):
         
         self.routed_experts = MojoMoE(
             hidden_size=config.hidden_size,
-            ffn_intermediate_size=config.moe_intermediate_size,
+            intermediate_size=config.moe_intermediate_size,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
         )
