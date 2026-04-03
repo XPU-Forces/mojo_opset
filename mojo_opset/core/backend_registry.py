@@ -69,6 +69,7 @@ class MojoBackendRegistry:
                 )
 
             self._registry[impl_backend_name] = cls
+            cls._backend = impl_backend_name
             self.sort()
         else:
             logger.warning(f"Operator {cls.__name__} is not supported on {curr_platform} platform.")
