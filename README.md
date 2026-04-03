@@ -137,12 +137,12 @@ You can build the model using Mojo Opset in the following ways:
 
 1. Build model from mojo opset
 
-    You can also build your modeling by mojo opset directly, [Mojo qwen3 dense modeling](./mojo_opset/modeling/mojo_qwen3_dense.py) is an example.
+    You can also build your modeling by mojo opset directly, [Mojo qwen3 dense modeling](./mojo_opset/modeling/qwen3/mojo_qwen3_dense.py) is an example.
 
-    And you can try the example by running the following command:
+    And you can try the LLM inference demo by running the following command:
 
     ```bash
-    bash ./examples/run_model.sh
+    bash ./examples/run_llm.sh
 
     Prompt: 你好，请介绍一下你自己。
     ----------------------------------------
@@ -165,7 +165,15 @@ You can build the model using Mojo Opset in the following ways:
     And you can try the example by running the following command:
 
     ```python
-    python ./examples/qwen3_patch.py
+    python -m examples.qwen3_patch
+    ```
+
+3. Run a DiT inference demo.
+
+    For Wan2.2-based image or video generation demos, you can run:
+
+    ```bash
+    bash ./examples/run_dit.sh
     ```
 
 ## Environment Variables

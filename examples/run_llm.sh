@@ -30,8 +30,9 @@ if [ ! -d "$MODEL_PATH" ]; then
 fi
 
 echo "Running inference with model at: ${MODEL_PATH}"
-# Run the inference script using absolute path
-python3 "${PROJECT_ROOT}/mojo_opset/modeling/inference_demo.py" --model_path "${MODEL_PATH}" --device npu --max_new_tokens 100
+# Run the inference script as a module from project root
+cd "$PROJECT_ROOT" || exit 1
+python3 -m examples.llm_inference --model_path "${MODEL_PATH}" --device npu --max_new_tokens 100
 
 # Cleanup
 pkill -9 python*
