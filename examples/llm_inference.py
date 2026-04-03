@@ -11,8 +11,8 @@ from mojo_opset.utils.hf_utils import _resolve_local_files_only
 from mojo_opset.utils.hf_utils import build_model_from_hf
 
 ARCH_MAP = {
-    "Qwen3ForCausalLM": ("mojo_qwen3_dense", "Qwen3ForCausalLM"),
-    "SeedOssForCausalLM": ("mojo_seed_oss_base", "SeedOssForCausalLM"),
+    "Qwen3ForCausalLM": ("mojo_opset.modeling.qwen3.mojo_qwen3_dense", "Qwen3ForCausalLM"),
+    "SeedOssForCausalLM": ("mojo_opset.modeling.seed_oss.mojo_seed_oss_base", "SeedOssForCausalLM"),
 }
 
 
@@ -29,8 +29,8 @@ def resolve_model_class(model_path: str):
     arch = arch_list[0] if isinstance(arch_list, list) and len(arch_list) > 0 else None
     if arch not in ARCH_MAP:
         raise ValueError(f"Unsupported architecture: {arch}")
-    mod_name, cls_name = ARCH_MAP[arch]
-    module = importlib.import_module(mod_name)
+    module_path, cls_name = ARCH_MAP[arch]
+    module = importlib.import_module(module_path)
 
     return getattr(module, cls_name)
 
@@ -41,7 +41,6 @@ def generate(model, tokenizer, prompt, max_new_tokens, device):
         messages, tokenize=True, add_generation_prompt=True, return_tensors="pt", thinking_budget=-1
     ).to(device)
 
-    # Prefill
     print(f"\nPrompt: {prompt}")
     print("-" * 40)
     with torch.no_grad():
@@ -52,16 +51,13 @@ def generate(model, tokenizer, prompt, max_new_tokens, device):
         else:
             logits, past_key_values = outputs
 
-    # Greedy sampling for the first token
     next_token_logits = logits[:, -1, :]
     next_token_id = torch.argmax(next_token_logits, dim=-1).unsqueeze(-1)
 
     generated_ids = [next_token_id.item()]
-
-    # Decode loop
     input_ids = next_token_id
 
-    for i in range(max_new_tokens - 1):
+    for _ in range(max_new_tokens - 1):
         with torch.no_grad():
             outputs = model(input_ids, past_key_values=past_key_values, use_cache=True)
             if hasattr(outputs, "logits"):
@@ -72,9 +68,7 @@ def generate(model, tokenizer, prompt, max_new_tokens, device):
 
         next_token_logits = logits[:, -1, :]
         next_token_id = torch.argmax(next_token_logits, dim=-1).unsqueeze(-1)
-
         generated_ids.append(next_token_id.item())
-
         input_ids = next_token_id
 
         if next_token_id.item() == tokenizer.eos_token_id:
@@ -86,7 +80,7 @@ def generate(model, tokenizer, prompt, max_new_tokens, device):
     print(f"Generated text: {full_output}")
 
 
-if __name__ == "__main__":
+def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, default=os.getenv("QWEN3_MODEL_PATH", ""))
     parser.add_argument("--device", type=str, default=os.getenv("QWEN3_DEVICE", "npu"))
@@ -94,15 +88,14 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str, default="今天天气怎么样？")
     parser.add_argument("--max_new_tokens", type=int, default=100)
     parser.add_argument("--transformers", action="store_true", help="Use Transformers model")
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    if not args.model_path:
-        print("Warning: No model_path provided. Using default from env or failing.")
-        if not os.getenv("QWEN3_MODEL_PATH"):
-            # For testing purposes, if no model path, we might fail or mock.
-            # But the user asked to "realize demo", presumably they will run it with path.
-            # I will raise error if not found.
-            raise ValueError("Please pass --model_path or set QWEN3_MODEL_PATH")
+
+def main():
+    args = parse_args()
+
+    if not args.model_path and not os.getenv("QWEN3_MODEL_PATH"):
+        raise ValueError("Please pass --model_path or set QWEN3_MODEL_PATH")
 
     local_files_only = _resolve_local_files_only(args.model_path)
 
@@ -131,3 +124,7 @@ if __name__ == "__main__":
         raise ValueError("Tokenizer not found")
 
     generate(model, tokenizer, args.prompt, args.max_new_tokens, args.device)
+
+
+if __name__ == "__main__":
+    main()

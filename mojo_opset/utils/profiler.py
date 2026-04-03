@@ -2,7 +2,7 @@ import datetime
 import gzip
 import os
 
-from mojo_opset.modeling.common import GeneratorHook
+from mojo_opset.runtime.generation import GeneratorHook
 from mojo_opset.utils.logging import get_logger
 
 logger = get_logger(__name__)

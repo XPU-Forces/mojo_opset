@@ -21,7 +21,7 @@ from mojo_opset.distributed.parallel import (
 )
 from torch.distributed.tensor.placement_types import Shard, Replicate, Partial
 from torch.distributed import breakpoint as dist_breakpoint
-from mojo_opset.modeling.config import MojoConfig, BaseModel
+from mojo_opset.runtime.config import MojoConfig, BaseModel
 from typing import Optional
 from tests.dist_common import dist_test
 
