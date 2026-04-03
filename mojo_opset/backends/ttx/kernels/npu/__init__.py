@@ -24,6 +24,7 @@ from .quant import dynamic_quant_impl
 from .rmsnorm import rmsnorm_bwd_impl
 from .rmsnorm import rmsnorm_fwd_impl
 from .rmsnorm import rmsnorm_infer_impl
+from .rope import rot_pos_embed_impl
 from .rope import rope_bwd_impl
 from .rope import rope_fwd_impl
 from .sample import fused_penalties_temp_impl
@@ -66,6 +67,7 @@ __all__ = [
     "layernorm_fwd_impl",
     "fused_add_rmsnorm_infer_impl",
     "fused_add_layernorm_infer_impl",
+    "rot_pos_embed_impl",
     "rope_bwd_impl",
     "rope_fwd_impl",
     "silu_bwd_impl",

@@ -37,6 +37,7 @@ silu_bwd_impl = _get_kernel_impl(ttx_backend_module, "silu_bwd_impl")
 dynamic_quant_impl = _get_kernel_impl(ttx_backend_module, "dynamic_quant_impl")
 lightning_indexer_impl = _get_kernel_impl(ttx_backend_module, "lightning_indexer_impl")
 
+rot_pos_embed_impl = _get_kernel_impl(ttx_backend_module, "rot_pos_embed_impl")
 rope_fwd_impl = _get_kernel_impl(ttx_backend_module, "rope_fwd_impl")
 rope_bwd_impl = _get_kernel_impl(ttx_backend_module, "rope_bwd_impl")
 
@@ -266,6 +267,33 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     # ====================================
     # Register Rope
     # ====================================
+    @torch.library.custom_op("ttx::rot_pos_embed", mutates_args={})
+    def rot_pos_embed(
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        seqlens_kv: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return rot_pos_embed_impl(x, cos, sin, cu_seqlens_q, seqlens_kv, position_ids)
+
+    @rot_pos_embed.register_fake
+    def rot_pos_embed_fake(
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        seqlens_kv: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if cu_seqlens_q is None and position_ids is None:
+            # padded prefill scenario
+            seq_dim = x.shape[1]
+        else:
+            seq_dim = x.shape[0]
+        rope_dim = cos.shape[-1]
+        return torch.empty((seq_dim, rope_dim), device=x.device, dtype=torch.float32), torch.empty((seq_dim, rope_dim), device=x.device, dtype=torch.float32)
 
     @torch.library.custom_op("ttx::rope", mutates_args={})
     def rope_fwd(
@@ -273,12 +301,9 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         k: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None,
-        kv_lens: Optional[torch.Tensor] = None,
         head_first: bool = True,
-        rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return rope_fwd_impl(q, k, cos, sin, cu_seqlens, kv_lens, head_first, rope_percentage)
+        return rope_fwd_impl(q, k, cos, sin, head_first)
 
     @rope_fwd.register_fake
     def rope_fwd_fake(
@@ -286,10 +311,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         k: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None,
-        kv_lens: Optional[torch.Tensor] = None,
         head_first: bool = True,
-        rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(q), torch.empty_like(k)
 
@@ -297,25 +319,19 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     def rope_bwd(
         dq: torch.Tensor,
         dk: torch.Tensor,
-        sin: torch.Tensor,
         cos: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None,
-        kv_lens: Optional[torch.Tensor] = None,
+        sin: torch.Tensor,
         head_first: bool = True,
-        rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return rope_bwd_impl(dq, dk, cos, sin, cu_seqlens, kv_lens, head_first, rope_percentage)
+        return rope_bwd_impl(dq, dk, cos, sin, head_first)
 
     @rope_bwd.register_fake
     def rope_bwd_fake(
         dq: torch.Tensor,
         dk: torch.Tensor,
-        sin: torch.Tensor,
         cos: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None,
-        kv_lens: Optional[torch.Tensor] = None,
+        sin: torch.Tensor,
         head_first: bool = True,
-        rope_percentage: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(dq), torch.empty_like(dk)
 
@@ -796,6 +812,7 @@ else:
     swiglu_bwd = swiglu_bwd_impl
     paged_attention_prefill = paged_attention_prefill_impl
     paged_attention_decode = paged_attention_decode_impl
+    rot_pos_embed = rot_pos_embed_impl
     rope_fwd = rope_fwd_impl
     rope_bwd = rope_bwd_impl
     rmsnorm_fwd = rmsnorm_fwd_impl
