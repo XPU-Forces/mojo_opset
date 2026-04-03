@@ -94,10 +94,8 @@ def parse_args():
 def main():
     args = parse_args()
 
-    if not args.model_path:
-        print("Warning: No model_path provided. Using default from env or failing.")
-        if not os.getenv("QWEN3_MODEL_PATH"):
-            raise ValueError("Please pass --model_path or set QWEN3_MODEL_PATH")
+    if not args.model_path and not os.getenv("QWEN3_MODEL_PATH"):
+        raise ValueError("Please pass --model_path or set QWEN3_MODEL_PATH")
 
     local_files_only = _resolve_local_files_only(args.model_path)
 

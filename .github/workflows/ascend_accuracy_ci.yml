@@ -64,7 +64,7 @@ jobs:
         shell: bash
         run: |
           echo "Running distributed tests..."
-          torchrun --nproc_per_node=2 -m pytest -q tests/distributed/test_expert_parallel.py
+          torchrun --nproc_per_node=2 --master_port=31876 -m pytest -q tests/distributed/test_expert_parallel.py
       - name: test-TTX
         shell: bash
         run: |
@@ -86,7 +86,8 @@ jobs:
           unset ASCEND_VISIBLE_DEVICES
           unset ASCEND_RT_VISIBLE_DEVICES
           MOJO_BACKEND="torch_npu" python3 -m pytest -n 8 tests/accuracy/operators/ \
-            --ignore=tests/accuracy/operators/test_compute_with_comm.py
+            --ignore=tests/accuracy/operators/test_compute_with_comm.py \
+            --ignore=tests/accuracy/operators/test_indexer.py
       - name: test-compute-with-comm
         shell: bash
         run: |

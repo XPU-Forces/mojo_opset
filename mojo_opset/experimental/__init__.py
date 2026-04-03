@@ -6,9 +6,11 @@ Once we find the operators of contrib become more and more stable in community, 
 from .functions.diffusion_attention import MojoDiffusionAttentionFunction
 from .functions.diffusion_attention import mojo_diffusion_attention
 from .operators.store_lowrank import MojoStoreLowrank
+from .operators.indexer import MojoIndexer
 
 all = [
     "MojoDiffusionAttentionFunction",
     "mojo_diffusion_attention",
     "MojoStoreLowrank",
+    "MojoIndexer",
 ]

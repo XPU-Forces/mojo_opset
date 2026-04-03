@@ -38,6 +38,7 @@ source code: mojo_opset/backends/ttx/kernels
 You can control the backend you want to use via the `MOJO_BACKEND` environment variable; the currently supported backends are list as below:
 
 - "ttx"
+- "torch_npu"
 - "torch"
 
 When multiple backends are added, Mojo Opset selects the backend implementation according to its internal priority order (We plan to add a tuner feature later to automatically choose the optimal implementation for the current scenario).
@@ -46,59 +47,62 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 
 ### Mojo Operator List
 
-| Op Category | Op Name                     | torch native      | ttx           |
-| :---------- | :-------------------------- | :---------------- | :------------ |
-| Activation  | MojoGelu                    | ✅                | ✅             |
-| Activation  | MojoSilu                    | ✅                | ✅             |
-| Activation  | MojoSwiGlu                  | ✅                | ✅             |
-| Linear      | MojoLinear                  | ✅                | TBD           |
-| Gemm        | MojoGroupGemm               | ✅                | ✅             |
-| ComputeComm | MojoGemmAllReduce           | ✅                | TBD           |
-| ComputeComm | MojoAllGatherGemm           | ✅                | TBD           |
-| ComputeComm | MojoGemmAll2All             | ✅                | TBD           |
-| ComputeComm | MojoGemmReduceScatter       | ✅                | TBD           |
-| Attention   | MojoSdpa                    | ✅                | ✅             |
-| Attention   | MojoPrefillGQA              | ✅                | ✅             |
-| Attention   | MojoPagedPrefillGQA         | ✅                | ✅             |
-| Attention   | MojoDecodeGQA               | ✅                | TBD           |
-| Attention   | MojoPagedDecodeGQA          | ✅                | 🚧             |
-| Attention   | MojoDecodeMLA               | ✅                | TBD           |
-| Attention   | MojoPagedDecodeMLA          | ✅                | TBD           |
-| Attention   | MojoPrefillMLA              | ✅                | TBD           |
-| Attention   | MojoPagedPrefillMLA         | ✅                | TBD           |
-| Attention   | MojoDecodeNSA               | ✅                | TBD           |
-| Attention   | MojoPagedDecodeNSA          | ✅                | TBD           |
-| Attention   | MojoPrefillNSA              | ✅                | TBD           |
-| Attention   | MojoPagedPrefillNSA         | ✅                | TBD           |
-| Attention   | MojoSlidingWindowAttention  | TBD               | TBD           |
-| MoE         | MojoMoE                     | ✅                | TBD           |
-| MoE         | MojoMoEGating               | ✅                | TBD           |
-| MoE         | MojoMoEDispatch             | ✅                | TBD           |
-| MoE         | MojoExperts                 | ✅                | TBD           |
-| MoE         | MojoMoECombine              | ✅                | TBD           |
-| Sampling    | MojoTopKSampling            | ✅                | ✅             |
-| Sampling    | MojoTopPSampling            | ✅                | ✅             |
-| Sampling    | MojoRejectSampling          | ✅                | ✅             |
-| Sampling    | MojoApplyPenaltiesTempurate | ✅                | ✅             |
-| Quantize    | MojoQuant                   | ✅                | TBD           |
-| Quantize    | MojoDequant                 | ✅                | TBD           |
-| Quantize    | MojoGemmDequant             | ✅                | TBD           |
-| Norm        | MojoRMSNorm                 | ✅                | ✅             |
-| Norm        | MojoLayerNorm               | ✅                | ✅             |
-| Norm        | MojoResidualAddRMSNorm      | ✅                | ✅             |
-| Norm        | MojoResidualAddLayerNorm    | ✅                | ✅             |
-| Norm        | MojoRMSNormQuant            | ✅                | TBD           |
-| Norm        | MojoLayerNormQuant          | ✅                | TBD           |
-| Norm        | MojoResidualAddRMSNormQuant | ✅                | TBD           |
-| Norm        | MojoResidualAddLayerNormQuant | ✅              | TBD           |
-| Norm        | MojoChannelRMSNorm          | ✅                | TBD           |
-| PositionEmb | MojoRoPE                    | ✅                | ✅             |
-| PositionEmb | MojoGridRoPE                | ✅                | TBD            |
-| KVCache     | MojoStorePagedKVCache       | ✅                | ✅             |
-| KVCache     | MojoStorePagedMLAKVCache    | ✅                | TBD           |
-| Embedding   | MojoEmbedding               | ✅                | TBD           |
-| Embedding   | MojoParallelEmbedding       | ✅                | TBD           |
-| Embedding   | MojoRelativeEmbedding       | ✅                | TBD           |
+| Op Category | Op Name                       | torch native | torch_npu | ttx |
+| :---------- | :---------------------------- | :----------- | :-------- | :-- |
+| Activation  | MojoGelu                      | ✅           | ✅        | ✅  |
+| Activation  | MojoSilu                      | ✅           | ✅        | ✅  |
+| Activation  | MojoSwiGlu                    | ✅           | ✅        | ✅  |
+| Linear      | MojoLinear                    | ✅           | TBD       | TBD |
+| Gemm        | MojoGroupGemm                 | ✅           | ✅        | ✅  |
+| Gemm        | MojoQuantGroupLinearReduceSum | ✅           | ✅        | TBD |
+| ComputeComm | MojoGemmAllReduce             | ✅           | TBD       | TBD |
+| ComputeComm | MojoAllGatherGemm             | ✅           | TBD       | TBD |
+| ComputeComm | MojoGemmAll2All               | ✅           | TBD       | TBD |
+| ComputeComm | MojoGemmReduceScatter         | ✅           | TBD       | TBD |
+| Attention   | MojoSdpa                      | ✅           | TBD       | ✅  |
+| Attention   | MojoPrefillGQA                | ✅           | ✅        | ✅  |
+| Attention   | MojoPagedPrefillGQA           | ✅           | ✅        | ✅  |
+| Attention   | MojoDecodeGQA                 | ✅           | TBD       | TBD |
+| Attention   | MojoPagedDecodeGQA            | ✅           | ✅        | 🚧  |
+| Attention   | MojoDecodeMLA                 | ✅           | TBD       | TBD |
+| Attention   | MojoPagedDecodeMLA            | ✅           | TBD       | TBD |
+| Attention   | MojoPrefillMLA                | ✅           | TBD       | TBD |
+| Attention   | MojoPagedPrefillMLA           | ✅           | TBD       | TBD |
+| Attention   | MojoDecodeNSA                 | ✅           | TBD       | TBD |
+| Attention   | MojoPagedDecodeNSA            | ✅           | TBD       | TBD |
+| Attention   | MojoPrefillNSA                | ✅           | TBD       | TBD |
+| Attention   | MojoPagedPrefillNSA           | ✅           | TBD       | TBD |
+| Attention   | MojoSlidingWindowAttention    | TBD          | TBD       | TBD |
+| MoE         | MojoMoE                       | ✅           | TBD       | TBD |
+| MoE         | MojoMoEGating                 | ✅           | TBD       | TBD |
+| MoE         | MojoMoEDispatch               | ✅           | TBD       | TBD |
+| MoE         | MojoExperts                   | ✅           | TBD       | TBD |
+| MoE         | MojoMoECombine                | ✅           | TBD       | TBD |
+| Sampling    | MojoTopKSampling              | TBD          | TBD       | TBD |
+| Sampling    | MojoTopPSampling              | ✅           | TBD       | ✅  |
+| Sampling    | MojoRejectSampling            | ✅           | TBD       | ✅  |
+| Sampling    | MojoApplyPenaltiesTempurate   | ✅           | TBD       | ✅  |
+| Quantize    | MojoQuant                     | ✅           | TBD       | TBD |
+| Quantize    | MojoDequant                   | ✅           | TBD       | TBD |
+| Quantize    | MojoDynamicQuant              | ✅           | ✅        | TBD |
+| Quantize    | MojoDequantSwiGLUQuant        | ✅           | ✅        | TBD |
+| Quantize    | MojoGemmDequant               | ✅           | ✅        | TBD |
+| Norm        | MojoRMSNorm                   | ✅           | ✅        | ✅  |
+| Norm        | MojoLayerNorm                 | ✅           | TBD       | ✅  |
+| Norm        | MojoResidualAddRMSNorm        | ✅           | ✅        | ✅  |
+| Norm        | MojoResidualAddLayerNorm      | ✅           | TBD       | ✅  |
+| Norm        | MojoRMSNormQuant              | ✅           | ✅        | TBD |
+| Norm        | MojoLayerNormQuant            | ✅           | ✅        | TBD |
+| Norm        | MojoResidualAddRMSNormQuant   | ✅           | ✅        | TBD |
+| Norm        | MojoResidualAddLayerNormQuant | ✅           | ✅        | TBD |
+| Norm        | MojoChannelRMSNorm            | ✅           | TBD       | TBD |
+| PositionEmb | MojoRoPE                      | ✅           | ✅        | ✅  |
+| PositionEmb | MojoGridRoPE                  | ✅           | TBD       | TBD |
+| KVCache     | MojoStorePagedKVCache         | ✅           | TBD       | ✅  |
+| KVCache     | MojoStorePagedMLAKVCache      | ✅           | TBD       | TBD |
+| Embedding   | MojoEmbedding                 | ✅           | TBD       | TBD |
+| Embedding   | MojoParallelEmbedding         | ✅           | TBD       | TBD |
+| Embedding   | MojoRelativeEmbedding         | ✅           | TBD       | TBD |
 
 
 ### Mojo Function List
