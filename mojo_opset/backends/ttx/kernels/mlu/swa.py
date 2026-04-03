@@ -580,9 +580,9 @@ def swa_paged_prefill_impl(
         BLOCK_N = triton.next_power_of_2(page_size)
 
     BLOCK_D = head_dim
-    cube_num = get_num_cores()
+    job_num = get_num_cores()
 
-    grid = (cube_num,)
+    grid = (job_num,)
 
     _paged_prefill_kernel[grid](
         o,

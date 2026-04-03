@@ -735,7 +735,7 @@ test_configs_swa_prefill = [
     ],
 )
 @pytest.mark.parametrize("gqa_layout, global_window, local_window", [
-    ("ABAB", 4, 255), 
+    ("ABAB", 4, 255),
     ("AABB", 4, 1023),
 ])
 @auto_switch_platform()
@@ -785,9 +785,9 @@ def test_paged_prefill_swa(
 
 test_configs_swa_decode = [
     (8, 16, 4, 128, 1024, 32, torch.bfloat16, "M_BF16"),
-    # (8, 16, 4, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
-    # (8, 8, 1, 128, 4096, 128, torch.bfloat16, "M_BF16_LONG"),
-    # (2, 8, 1, 128, 2048, 128, torch.bfloat16, "M_BF16_BIGPAGE"),
+    (8, 16, 4, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
+    (8, 8, 1, 128, 4096, 128, torch.bfloat16, "M_BF16_LONG"),
+    (2, 8, 1, 128, 2048, 128, torch.bfloat16, "M_BF16_BIGPAGE"),
 ]
 
 @pytest.mark.parametrize(
@@ -809,7 +809,7 @@ test_configs_swa_decode = [
     ],
 )
 @pytest.mark.parametrize("gqa_layout, global_window, local_window", [
-    # ("ABAB", 4, 255), 
+    ("ABAB", 4, 255),
     ("AABB", 4, 1023),
 ])
 @auto_switch_platform()
