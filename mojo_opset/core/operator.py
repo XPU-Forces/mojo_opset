@@ -16,6 +16,7 @@ logger = get_logger(__name__)
 
 class MojoOperator(ABC, torch.nn.Module):
     supported_platforms_list = ["npu", "mlu", "meta_device", "ilu"]
+    _backend = None
 
     def __init_subclass__(cls, **kwargs):
         kwargs.pop("default_priority", None)

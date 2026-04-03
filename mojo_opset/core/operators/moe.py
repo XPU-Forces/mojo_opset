@@ -16,7 +16,6 @@ class MojoMoE(MojoOperator):
         top_k,
         hidden_size,
         intermediate_size=None,
-        ffn_intermediate_size=None,
         activation: str = "swiglu",
         **kwargs,
     ):
@@ -31,24 +30,22 @@ class MojoMoE(MojoOperator):
         # NOTE: in some cases, branches may have different expert num or topk
         self.num_experts = num_experts
         if intermediate_size is None:
-            intermediate_size = ffn_intermediate_size
-        if intermediate_size is None:
             raise ValueError("MojoMoE: intermediate_size must be provided.")
 
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
 
-        self.gating = MojoMoEGating(hidden_size=self.hidden_size, num_experts=self.num_experts, top_k=self.top_k, **kwargs)
-        self.dispatch = MojoMoEDispatch(num_experts=self.num_experts, **kwargs)
-        self.experts = MojoExperts(
+        self.gating = MojoMoEGating._registry.get(self._backend)(hidden_size=self.hidden_size, num_experts=self.num_experts, top_k=self.top_k, **kwargs)
+        self.dispatch = MojoMoEDispatch._registry.get(self._backend)(num_experts=self.num_experts, **kwargs)
+        self.experts = MojoExperts._registry.get(self._backend)(
             num_experts=self.num_experts,
             hidden_size=self.hidden_size,
             intermediate_size=self.intermediate_size,
             activation=activation,
             **kwargs,
         )
-        self.combine = MojoMoECombine(multiply_by_gates=True, **kwargs)
+        self.combine = MojoMoECombine._registry.get(self._backend)(multiply_by_gates=True, **kwargs)
 
         if self.gating.gate_weight is not None:
             setattr(self.gating.gate_weight, "force_dtype", torch.float32)
