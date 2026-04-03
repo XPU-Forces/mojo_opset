@@ -25,6 +25,7 @@ from tests.utils import bypass_not_implemented
             (2, 64, 128, 3, None),
             (3, 1446, 256, 4, None),
             (1, 32, 32, 4, None),
+            (1, 1, 32, 4, None),
         ]
     ],
 )
