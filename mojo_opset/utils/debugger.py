@@ -71,6 +71,28 @@ def _infer_core_cls_from_mro(module):
     return None
 
 
+def _infer_device(module) -> torch.device:
+    """Determine the device of a module from its parameters or buffers.
+
+    For stateless modules (no parameters/buffers), fall back to the device
+    recorded from pre-hook inputs, then to CPU.
+    """
+    try:
+        return next(module.parameters()).device
+    except StopIteration:
+        pass
+    try:
+        return next(module.buffers()).device
+    except StopIteration:
+        pass
+    pre_inputs = getattr(module, "_debug_pre_inputs", None)
+    if pre_inputs is not None:
+        for inp in pre_inputs:
+            if isinstance(inp, torch.Tensor):
+                return inp.device
+    return torch.device("cpu")
+
+
 def _parse_rules(rule_str: str) -> List[_Rule]:
     """Parse ``'layer_idx:op_name;...'`` into a list of :class:`_Rule`.
 
@@ -280,8 +302,9 @@ class MojoDebugger:
 
         for name, module in model.named_modules():
             if isinstance(module, MojoOperator):
-                handle = module.register_forward_hook(self._make_hook())
-                self._hook_handles.append(handle)
+                pre_h = module.register_forward_pre_hook(self._make_pre_hook())
+                post_h = module.register_forward_hook(self._make_hook())
+                self._hook_handles.extend([pre_h, post_h])
                 layer_idx = getattr(module, "_debug_layer_idx", None)
                 op_name = getattr(module, "_debug_op_name", name)
                 self._op_map[(layer_idx, op_name)] = module
@@ -306,6 +329,7 @@ class MojoDebugger:
                         "_debug_torch_ref",
                         "_debug_ref_forward",
                         "_debug_torch_ref_ready",
+                        "_debug_pre_inputs",
                     ):
                         try:
                             delattr(module, attr)
@@ -471,6 +495,31 @@ class MojoDebugger:
     # Hook factory
     # ------------------------------------------------------------------
 
+    def _make_pre_hook(self):
+        """Capture a snapshot of inputs *before* forward to handle in-place ops."""
+        debugger = self
+
+        def pre_hook(module, inputs):
+            try:
+                compare_rules = debugger._get_active_rules("compare")
+                dump_rules = debugger._get_active_rules("dump")
+                if not compare_rules and not dump_rules:
+                    return
+
+                layer_idx = getattr(module, "_debug_layer_idx", None)
+                op_name = getattr(module, "_debug_op_name", "")
+
+                need_snapshot = (
+                    _match(layer_idx, op_name, module, dump_rules) is not None
+                    or _match(layer_idx, op_name, module, compare_rules) is not None
+                )
+                if need_snapshot:
+                    module._debug_pre_inputs = _deep_clone(inputs)
+            except Exception:
+                pass
+
+        return pre_hook
+
     def _make_hook(self):
         debugger = self
 
@@ -491,17 +540,21 @@ class MojoDebugger:
                 if matched_dump is None and matched_compare is None:
                     return
 
+                safe_inputs = getattr(module, "_debug_pre_inputs", inputs)
+
                 if matched_dump is not None:
-                    debugger._do_dump(layer_idx, op_name, module, inputs, output)
+                    debugger._do_dump(layer_idx, op_name, module, safe_inputs, output)
 
                 if matched_compare is not None:
-                    debugger._do_compare(layer_idx, op_name, module, inputs, output)
+                    debugger._do_compare(layer_idx, op_name, module, safe_inputs, output)
 
             except Exception as e:
                 logger.warning_once(
                     f"{_PREFIX} Unexpected error in hook for '{op_name}': {e}. "
                     f"Debug skipped, inference unaffected."
                 )
+            finally:
+                module._debug_pre_inputs = None
 
         return hook
 
@@ -709,10 +762,7 @@ class MojoDebugger:
                         f"{_PREFIX} Shadow unexpected keys: {result.unexpected_keys}"
                     )
 
-                try:
-                    device = next(module.parameters()).device
-                except StopIteration:
-                    device = torch.device("cpu")
+                device = _infer_device(module)
                 shadow = shadow.to(device)
                 shadow.eval()
 

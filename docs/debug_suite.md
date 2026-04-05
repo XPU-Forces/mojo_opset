@@ -196,6 +196,8 @@ model(input_ids_2)
 
 ### Dump 输出
 
+> **性能提示**：Dump 通过 `torch.save` 在 forward hook 中同步写入磁盘。对少量算子做偶尔 dump 是可接受的，但如果同时对大量算子启用 dump，同步 I/O 会显著阻塞执行流水线。建议配合 `max_steps` 限制写入次数，或一次只 dump 少量目标算子。
+
 Dump 将输入和输出张量保存为 `.pt` 文件，路径格式为 `{dump_dir}/rank{LOCAL_RANK}/`：
 
 ```
