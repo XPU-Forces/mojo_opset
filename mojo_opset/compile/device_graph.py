@@ -78,10 +78,7 @@ class DeviceGraphPool:
     so intermediate tensors from different batch-size graphs can reuse the
     same memory — only one graph runs at a time during decode.
 
-    Bucket range: bs ∈ [1, 16].
     """
-
-    BATCH_SIZES = list(range(1, 17))
 
     def __init__(self, model, device):
         self._model = model
