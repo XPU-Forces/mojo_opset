@@ -2,13 +2,7 @@ import torch
 
 import triton
 import triton.language as tl
-import triton.backends.mlu.driver as driver
-
-
-_devprob = driver.BangUtils().get_device_properties(torch.mlu.current_device())
-
-TOTAL_CORE_NUM = _devprob.get('cluster_num') * _devprob.get("core_num_per_cluster")
-
+from mojo_opset.backends.ttx.kernels.mlu.utils import get_mlu_total_cores_cached
 
 def cfggen1():
     block_m = [1, 2, 4, 6, 8]
@@ -155,7 +149,7 @@ def layernorm_infer_impl(
     rstd = torch.empty((M, ), dtype=torch.float32, device='mlu')
     num_warps = 1
     # enqueue kernel
-    _layer_norm_fwd[(TOTAL_CORE_NUM, )](x_arg,
+    _layer_norm_fwd[(get_mlu_total_cores_cached(), )](x_arg,
                                         y,
                                         weight,
                                         bias,
@@ -177,7 +171,7 @@ def layernorm_fwd_impl(x, w, b, eps):
     rstd = torch.empty((M, ), dtype=torch.float32, device='mlu')
     num_warps = 1
     # enqueue kernel
-    _layer_norm_fwd[(TOTAL_CORE_NUM, )](x_arg,
+    _layer_norm_fwd[(get_mlu_total_cores_cached(), )](x_arg,
                                         y,
                                         w,
                                         b,
@@ -199,7 +193,7 @@ def layernorm_bwd_impl(dy, x, w, b, m, v):
     # also compute partial sums for DW and DB
     x_arg = x.reshape(-1, x.shape[-1])
     M, N = x_arg.shape
-    _layer_norm_bwd[(TOTAL_CORE_NUM, )](dx,
+    _layer_norm_bwd[(get_mlu_total_cores_cached(), )](dx,
                                         dy,
                                         dw,
                                         db,
