@@ -15,6 +15,32 @@ from mojo_opset.backends.ttx.kernels.utils import torch_to_triton_dtype
 from mojo_opset.utils.misc import get_bool_env
 
 IS_DETERMINISTIC = get_bool_env("MOJO_DETERMINISTIC", default=False)
+COL_BLOCKING_THRESHOLD = 2048
+
+TOKEN_BLOCK_SIZE_TABLE = {
+    2048: 4,
+    1024: 8,
+    # NOTE: tl.arange range must be power-of-2 on some backends.
+    512: 16,
+    256: 16,
+    128: 32,
+}
+
+
+def rms_norm_fwd_heuristics(args):
+    hidden_dim = args.get("n_cols", args.get("N_COLS"))
+    if hidden_dim is None:
+        raise KeyError("n_cols")
+    if hidden_dim <= COL_BLOCKING_THRESHOLD:
+        if hidden_dim in TOKEN_BLOCK_SIZE_TABLE:
+            return TOKEN_BLOCK_SIZE_TABLE[hidden_dim]
+
+        for dim_thresh, block_size in sorted(TOKEN_BLOCK_SIZE_TABLE.items()):
+            if hidden_dim <= dim_thresh:
+                return block_size
+        return 1
+    else:
+        return 4
 
 
 def _rmsnorm_fwd_grid_n_programs(n_rows: int, n_cols: int) -> int:
