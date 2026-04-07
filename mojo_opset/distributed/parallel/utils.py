@@ -1,12 +1,17 @@
 import io
-from typing import List, Tuple
+
 from functools import reduce
-from numpy import isin
+from typing import List
+from typing import Tuple
+
 import torch
 import torch.distributed as dist
-from torch.distributed.tensor import DeviceMesh, distribute_tensor
-from torch.distributed.tensor.placement_types import Placement
+
 from torch.distributed._functional_collectives import AsyncCollectiveTensor
+from torch.distributed.tensor import DeviceMesh
+from torch.distributed.tensor import distribute_tensor
+from torch.distributed.tensor.placement_types import Placement
+
 
 def get_coordinate_str_with_dim_names(mesh: DeviceMesh):
     coordinate_str = []
@@ -14,7 +19,19 @@ def get_coordinate_str_with_dim_names(mesh: DeviceMesh):
         coordinate_str.append(f"{dim}{mesh.get_local_rank(dim)}")
     return "_".join(coordinate_str)
 
-def shard_tensor(device_mesh, placements:List[Placement], src_data_rank, tensor:torch.Tensor):
+
+def shard_tensor(device_mesh, placements: List[Placement], src_data_rank, tensor: torch.Tensor):
+    if tensor.is_meta:
+        from torch.distributed.tensor.placement_types import Shard
+
+        rank = device_mesh.get_local_rank()
+        size = device_mesh.size()
+        for p in placements:
+            if isinstance(p, Shard):
+                chunk_size = tensor.shape[p.dim] // size
+                tensor = tensor.narrow(p.dim, rank * chunk_size, chunk_size).contiguous()
+        return tensor
+
     new_tensor = distribute_tensor(
         tensor,
         device_mesh,
@@ -41,6 +58,7 @@ def stat_dict_rename_hook(
                 new_key = get_coordinate_str_with_dim_names(device_mesh) + n
                 state_dict[prefix + new_key] = state_dict.pop(prefix + n)
 
+
 def mojo_parallel_save_state_dict_naive(module: torch.nn.Module, f: str | io.BytesIO):
     state_dict = module.state_dict()
     fname = [f if isinstance(f, str) else f.name]
@@ -56,9 +74,7 @@ def mojo_parallel_save_state_dict_naive(module: torch.nn.Module, f: str | io.Byt
     return fname[0]
 
 
-def mojo_parallel_load_state_dict_naive(
-    module: torch.nn.Module, f: str | io.BytesIO, device_mesh: DeviceMesh
-):
+def mojo_parallel_load_state_dict_naive(module: torch.nn.Module, f: str | io.BytesIO, device_mesh: DeviceMesh):
     # NOTE(liuyuan): mmap is necessary for us to avoid loading the entire state_dict into memory.
     dist_state_dict = torch.load(f, mmap=True)
     named_rank = get_coordinate_str_with_dim_names(device_mesh)

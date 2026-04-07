@@ -1,6 +1,6 @@
 import warnings
-from fnmatch import fnmatch
 
+from fnmatch import fnmatch
 from typing import Any
 from typing import Callable
 from typing import Dict
@@ -11,6 +11,7 @@ from typing import Union
 
 import torch
 import torch.nn as nn
+
 from torch.distributed._functional_collectives import AsyncCollectiveTensor
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.device_mesh import _mesh_resources
@@ -28,6 +29,7 @@ from torch.distributed.tensor.placement_types import Placement
 #             obj.__init__(*args, **kwargs)
 #             return obj
 
+
 class MojoRegisterableParallelStyle(ParallelStyle):
     def __init_subclass__(cls, *args, **kwargs):
         super().__init_subclass__(*args, **kwargs)
@@ -42,9 +44,7 @@ class MojoRegisterableParallelStyle(ParallelStyle):
             [List[Placement], List[Placement], DeviceMesh, Tuple, Dict[str, Any]],
             Tuple[tuple, Dict[str, Any]],
         ] = None,
-        prepare_output_fn: Callable[
-            [List[Placement], List[Placement], bool, DeviceMesh, Any], Any
-        ] = None,
+        prepare_output_fn: Callable[[List[Placement], List[Placement], bool, DeviceMesh, Any], Any] = None,
         desired_input_layouts: Tuple = None,  # This layout is the placement used to convert the local tensor output
         # by the operator into the corresponding DTensor according to the distributed semantics required by the operator
         desired_output_layouts: Tuple = None,  # This layout is the placement used to convert the local tensor output
@@ -67,7 +67,7 @@ class MojoRegisterableParallelStyle(ParallelStyle):
         if module_type not in cls.dist_info_map:
             # NOTE(liuyuan): fallback to parent class, specially designed for TorchXXX.
             module_type = module_type.__base__
-        
+
         return cls.dist_info_map.get(module_type, (None,) * 5)
 
     @staticmethod
@@ -83,14 +83,10 @@ class MojoRegisterableParallelStyle(ParallelStyle):
             if not isinstance(tensor, torch.Tensor):
                 return tensor
             if not isinstance(tensor, DTensor):
-                tensor = DTensor.from_local(
-                    tensor, device_mesh, input_layouts, run_check=False
-                )
+                tensor = DTensor.from_local(tensor, device_mesh, input_layouts, run_check=False)
 
             if desired_input_layouts and tensor.placements != desired_input_layouts:
-                tensor = tensor.redistribute(
-                    placements=desired_input_layouts, async_op=True
-                )
+                tensor = tensor.redistribute(placements=desired_input_layouts, async_op=True)
             return tensor.to_local()
 
         args = list(args)
@@ -112,20 +108,18 @@ class MojoRegisterableParallelStyle(ParallelStyle):
     ):
         is_single = False
         is_tuple = False
-        if isinstance(outputs, (list, tuple)): 
+        if isinstance(outputs, (list, tuple)):
             is_tuple = isinstance(outputs, tuple)
-            outputs=list(outputs)
+            outputs = list(outputs)
         else:
             outputs = [outputs]
-            is_single=True
+            is_single = True
 
         for idx, output_tensor in enumerate(outputs):
             if not isinstance(output_tensor, torch.Tensor):
                 continue
             if not isinstance(output_tensor, DTensor):
-                output_tensor = DTensor.from_local(
-                    output_tensor, device_mesh, desired_output_layouts, run_check=False
-                )
+                output_tensor = DTensor.from_local(output_tensor, device_mesh, desired_output_layouts, run_check=False)
             if output_tensor.placements != output_layouts:
                 output_tensor = output_tensor.redistribute(placements=output_layouts, async_op=True)
             outputs[idx] = output_tensor.to_local() if use_local_output else output_tensor
@@ -136,18 +130,19 @@ class MojoRegisterableParallelStyle(ParallelStyle):
 
     def __call__(self, module: torch.nn.Module, device_mesh: DeviceMesh):
         return self._apply(module, device_mesh)
-    
+
     def __new__(cls, *args, **kwargs):
         obj = super().__new__(cls)
-        if 'module' in kwargs and 'device_mesh' in kwargs:
-            module = kwargs.pop('module')
-            device_mesh = kwargs.pop('device_mesh')
+        if "module" in kwargs and "device_mesh" in kwargs:
+            module = kwargs.pop("module")
+            device_mesh = kwargs.pop("device_mesh")
             obj.__init__(*args, **kwargs)
             # NOTE(liuyuan): Maybe we should use ShortcutDispatcher as metaclass, but it seems like Python has already
             # known the MojoDistributedModule object is initialized.
             # So we can just return the MojoDistributedModule object here.
             return obj._apply(module, device_mesh)
         return obj
+
 
 class MojoDistributedModule(torch.nn.Module):
     def __init__(
@@ -165,10 +160,16 @@ class MojoDistributedModule(torch.nn.Module):
         self._prepare_input_fn = prepare_input_fn
         self._prepare_output_fn = prepare_output_fn
         self._parallel_style_name = parallel_style_name
+        self._managed_params: set[str] = set()
         if partition_fn is not None:
+            before = {id(p): p for _, p in self._mod.named_parameters()}
             for name, submod in self._mod.named_modules():
                 partition_fn(name, submod, self._device_mesh)
-    
+            for pname, p in self._mod.named_parameters():
+                if id(p) not in before:
+                    self._managed_params.add(pname)
+            del before
+
     def __getattr__(self, name):
         try:
             return super().__getattr__(name)
@@ -188,6 +189,19 @@ class MojoDistributedModule(torch.nn.Module):
     def extra_repr(self):
         if self._parallel_style_name:
             return f"parallel_style_name={self._parallel_style_name}"
+
+
+def get_unmanaged_params(module: nn.Module):
+    managed: set[str] = set()
+    for mod_name, submod in module.named_modules():
+        if isinstance(submod, MojoDistributedModule) and submod._managed_params:
+            prefix = f"{mod_name}._mod." if mod_name else "_mod."
+            for pname in submod._managed_params:
+                managed.add(prefix + pname)
+    for n, p in module.named_parameters():
+        if n not in managed:
+            yield n, p
+
 
 # NOTE(liuyuan): MojoDistributedModule is a wrapper around nn.Module without using forward_hook that
 # MojoRegisterableParallelStyle can apply to but cannot modify the original module in-place.
@@ -219,9 +233,7 @@ def mojo_parallelize_module(  # type: ignore[return]
         for module_path, parallelize_style in parallelize_plan.items():
             path_splits = module_path.split(".")
             if len(path_splits) == 0:
-                raise ValueError(
-                    "Expect module path to be non-empty, but got empty string!"
-                )
+                raise ValueError("Expect module path to be non-empty, but got empty string!")
             while path_splits:
                 atom = path_splits.pop(0)
                 matched_children = filter(
@@ -233,9 +245,7 @@ def mojo_parallelize_module(  # type: ignore[return]
                 for name, submodule in matched_children:
                     if path_splits:
                         # we haven't reached the leaf, apply in dict style
-                        leaf_path = ".".join(
-                            path_splits
-                        )  # rest of the path after `atom`
+                        leaf_path = ".".join(path_splits)  # rest of the path after `atom`
                         mojo_parallelize_module(
                             submodule,
                             device_mesh,
