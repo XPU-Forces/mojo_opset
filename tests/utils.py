@@ -526,8 +526,15 @@ def perf_mlu(executor, profiling_dir="./mlu_profiling", active=5):
     Returns:
         None: Logs and writes benchmark results to a file.
     """
-    device_latency, kernel_profiling_path = device_perf_mlu(executor, profiling_dir, active)
+    device_result = device_perf_mlu(executor, profiling_dir, active)
     host_latency = host_perf(executor, "mlu")
+
+    if device_result is None:
+        device_latency = None
+        kernel_profiling_path = "unavailable"
+        logger.warning("MLU profiler output is unavailable, falling back to host-latency-only benchmark logging.")
+    else:
+        device_latency, kernel_profiling_path = device_result
 
     func_name, para_list = get_executor_info(executor)
 

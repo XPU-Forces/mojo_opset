@@ -42,34 +42,30 @@ def _layer_norm_fwd(
 ):
     pid_m = tl.program_id(0)
     pnum = tl.num_programs(axis=0)
-    split_m = tl.cdiv(M, pnum)
-    m_start = pid_m * split_m
+
     n_offset = tl.arange(0, BLOCK_N)
     gamma = tl.load(W + n_offset)
     beta = tl.load(B + n_offset)
-    for m_idx in range(0, split_m, BLOCK_M):
-        m_offset = m_start + m_idx + tl.arange(0, BLOCK_M)
+
+    for m_idx in range(pid_m * BLOCK_M, M, pnum * BLOCK_M):
+        m_offset = m_idx + tl.arange(0, BLOCK_M)
+        mask = m_offset < M
+        
         offset = m_offset[:, None] * N + n_offset[None, :]
-        mask = m_offset[:, None] < M
-        inp = tl.load(X + offset, mask=mask, other=0.0).to(tl.float32)
+        inp = tl.load(X + offset, mask=mask[:, None], other=0.0).to(tl.float32)
 
         alpha = 1.0 / N
         sum = tl.sum(inp, 1)
-        # X, 1
         mean = sum * alpha
         var = tl.sum(inp * inp, 1) * alpha - mean * mean
 
-        # X, R
         rstd = tl.rsqrt(var + eps)
-        # Write mean / rstd
-        tl.store(Mean + m_offset, mean, mask=m_offset < M)
-        tl.store(Rstd + m_offset, rstd, mask=m_offset < M)
+        tl.store(Mean + m_offset, mean, mask=mask)
+        tl.store(Rstd + m_offset, rstd, mask=mask)
 
         out = (inp - mean[:, None]) * rstd[:, None]
         opt_out = out * gamma + beta
-        # Write output
-        tl.store(Y + offset, opt_out, mask=mask)
-
+        tl.store(Y + offset, opt_out, mask=mask[:, None])
 
 def cfggen2():
     block_m = [1, 2, 3, 4, 5, 6, 8]
@@ -113,7 +109,7 @@ def _layer_norm_bwd(
     DY += cols[None, :]
     W += cols[None, :]
     DX += cols[None, :]
-    w = tl.load(W).to(tl.float32)
+    w = tl.load(W, mask=cols[None, :] < N, other=0.0).to(tl.float32)
     alpha = 1 / N
     partial_dw = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
     partial_db = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
@@ -141,8 +137,8 @@ def _layer_norm_bwd(
 
     dw = tl.sum(partial_dw, axis=0)
     db = tl.sum(partial_db, axis=0)
-    tl.atomic_add(DW + cols, dw)
-    tl.atomic_add(DB + cols, db)
+    tl.atomic_add(DW + cols, dw, mask=cols < N)
+    tl.atomic_add(DB + cols, db, mask=cols < N)
 
 def layernorm_infer_impl(
     hidden_states: torch.Tensor,
