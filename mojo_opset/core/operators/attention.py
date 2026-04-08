@@ -1264,6 +1264,9 @@ class MojoPagedPrefillSWA(MojoOperator):
         for i in range(bsz):
             q_i = q[cu_seqlens_q[i] : cu_seqlens_q[i + 1]]
             q_seq_len = q_i.shape[0]
+            if q_seq_len == 0:
+                # skip padded query
+                continue
             q_i = q_i.permute(1, 0, 2)  # -> [n_q_heads, q_seq_len, head_dim]
 
             kv_seq_len = seqlens_kv[i].item()
