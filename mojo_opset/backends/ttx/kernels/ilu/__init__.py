@@ -28,6 +28,7 @@ from .relative_embedding import relative_embedding_fwd_impl
 from .rmsnorm import rmsnorm_infer_impl
 from .rope import rope_bwd_impl
 from .rope import rope_fwd_impl
+from .rope import rot_pos_embed_impl
 from .sample import fused_penalties_temp_impl
 from .sample import join_prob_reject_sampling_impl
 from .sample import reject_sampling_impl
@@ -71,6 +72,7 @@ __all__ = [
     "fused_add_layernorm_infer_impl",
     "rope_bwd_impl",
     "rope_fwd_impl",
+    "rot_pos_embed_impl",
     "fused_penalties_temp_impl",
     "join_prob_reject_sampling_impl",
     "reject_sampling_impl",

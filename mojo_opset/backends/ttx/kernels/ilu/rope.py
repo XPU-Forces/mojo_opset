@@ -21,6 +21,55 @@ ROPE_TOKEN_BLOCK_SIZE_TABLE = {
 }
 
 
+def _normalize_to_bsnd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    head_first: bool,
+) -> Tuple[torch.Tensor, torch.Tensor, int, int, int, int, int, int, int, int, int]:
+    """Normalize q/k to [B, S, N, D] layout, returning strides and metadata (same contract as NPU rope)."""
+
+    if q.dim() == 3:
+        assert k.dim() == 3
+        if head_first:
+            q = q.transpose(0, 1).clone(memory_format=torch.contiguous_format)
+            k = k.transpose(0, 1).clone(memory_format=torch.contiguous_format)
+        else:
+            q = q.clone(memory_format=torch.contiguous_format)
+            k = k.clone(memory_format=torch.contiguous_format)
+        batch_size = 1
+        seq_len, n_q_head, head_dim = q.shape
+        n_kv_head = k.shape[1]
+        q_batch_stride, q_seq_stride = 0, q.stride(0)
+        k_batch_stride, k_seq_stride = 0, k.stride(0)
+    else:
+        assert q.dim() == 4 and k.dim() == 4
+        if head_first:
+            q = q.transpose(1, 2).clone(memory_format=torch.contiguous_format)
+            k = k.transpose(1, 2).clone(memory_format=torch.contiguous_format)
+        else:
+            q = q.clone(memory_format=torch.contiguous_format)
+            k = k.clone(memory_format=torch.contiguous_format)
+
+        batch_size, seq_len, n_q_head, head_dim = q.shape
+        n_kv_head = k.shape[2]
+        q_batch_stride, q_seq_stride = q.stride(0), q.stride(1)
+        k_batch_stride, k_seq_stride = k.stride(0), k.stride(1)
+
+    return (
+        q,
+        k,
+        batch_size,
+        seq_len,
+        n_q_head,
+        n_kv_head,
+        head_dim,
+        q_batch_stride,
+        q_seq_stride,
+        k_batch_stride,
+        k_seq_stride,
+    )
+
+
 def _ilu_cos_batch_size(cos: torch.Tensor, q_like: torch.Tensor, *, is_varlen: bool) -> int:
     """How many cos/sin rows exist along the batch-like leading dim for offset math in the kernel.
 
@@ -400,40 +449,29 @@ def rope_fwd_impl(
     cu_seqlens: Optional[torch.Tensor] = None,
     kv_lens: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Same 5-arg prefix as NPU ``rope_fwd_impl``; optional ``cu_seqlens``/``kv_lens`` for varlen."""
+
     is_varlen = cu_seqlens is not None
     has_kv_lens = kv_lens is not None
-    is_decode = False
+
+    orig_q_shape = q.shape
+    orig_k_shape = k.shape
+    (
+        q,
+        k,
+        batch_size,
+        seq_len,
+        n_q_head,
+        n_kv_head,
+        head_dim,
+        q_batch_stride,
+        q_seq_stride,
+        k_batch_stride,
+        k_seq_stride,
+    ) = _normalize_to_bsnd(q, k, head_first)
     q_for_cos_bs = q
 
     if is_varlen:
-        assert q.dim() == 3 and k.dim() == 3, "q and k must be [total_seq_len, n_head, head_dim]."
-        seq_len = q.shape[0]
-        n_q_head, n_kv_head = q.shape[1], k.shape[1]
-        head_dim = q.shape[2]
-        batch_size = 1
-        q_batch_stride, q_seq_stride = 0, q.stride(0)
-        k_batch_stride, k_seq_stride = 0, k.stride(0)
-    elif q.dim() == 3:
-        batch_size = q.shape[0]
-        n_q_head, n_kv_head = q.shape[1], k.shape[1]
-        head_dim = q.shape[2]
-        seq_len = 1
-        is_decode = True
-        q_batch_stride, q_seq_stride = q.stride(0), 0
-        k_batch_stride, k_seq_stride = k.stride(0), 0
-    else:
-        assert q.dim() == 4 and k.dim() == 4, (
-            "q and k must be [bs, n_head, seq_len, head_dim] if head_first else [bs, seq_len, n_head, head_dim]."
-        )
-        if head_first:
-            q = q.transpose(1, 2).contiguous()
-            k = k.transpose(1, 2).contiguous()
-        batch_size, seq_len, n_q_head, head_dim = q.shape
-        n_kv_head = k.shape[2]
-        q_batch_stride, q_seq_stride = q.stride(0), q.stride(1)
-        k_batch_stride, k_seq_stride = k.stride(0), k.stride(1)
-        q_for_cos_bs = q
+        assert q.dim() == 3 and k.dim() == 3, "q and k must be [total_seq_len, n_head, head_dim] after normalize."
 
     rope_dim = cos.shape[-1]
     nope_dim = head_dim - rope_dim
@@ -491,12 +529,12 @@ def rope_fwd_impl(
         has_kv_lens,
     )
 
-    if is_varlen or is_decode:
-        return q, k
-    elif head_first:
-        return q.transpose(1, 2), k.transpose(1, 2)
-    else:
-        return q, k
+    if head_first:
+        q = q.transpose(-2, -3).contiguous()
+        k = k.transpose(-2, -3).contiguous()
+    q = q.reshape(*orig_q_shape)
+    k = k.reshape(*orig_k_shape)
+    return q, k
 
 
 def rope_bwd_impl(
@@ -511,40 +549,26 @@ def rope_bwd_impl(
     """Same argument order as NPU ``rope_bwd_impl`` (dq, dk, cos, sin, head_first, ...)."""
     is_varlen = cu_seqlens is not None
     has_kv_lens = kv_lens is not None
-    is_decode = False
+
+    orig_dq_shape = dq.shape
+    orig_dk_shape = dk.shape
+    (
+        dq,
+        dk,
+        batch_size,
+        seq_len,
+        n_q_head,
+        n_kv_head,
+        head_dim,
+        dq_batch_stride,
+        dq_seq_stride,
+        dk_batch_stride,
+        dk_seq_stride,
+    ) = _normalize_to_bsnd(dq, dk, head_first)
     dq_for_cos_bs = dq
 
     if is_varlen:
-        assert dq.dim() == 3 and dk.dim() == 3, "dq and dk must be [total_seq_len, n_head, head_dim]."
-        seq_len = dq.shape[0]
-        n_q_head, n_kv_head = dq.shape[1], dk.shape[1]
-        head_dim = dq.shape[2]
-        batch_size = 1
-        dq_batch_stride, dq_seq_stride = 0, dq.stride(0)
-        dk_batch_stride, dk_seq_stride = 0, dk.stride(0)
-    elif dq.dim() == 3:
-        batch_size = dq.shape[0]
-        n_q_head, n_kv_head = dq.shape[1], dk.shape[1]
-        head_dim = dq.shape[2]
-        seq_len = 1
-        is_decode = True
-        dq_batch_stride, dq_seq_stride = dq.stride(0), 0
-        dk_batch_stride, dk_seq_stride = dk.stride(0), 0
-    else:
-        assert dq.dim() == 4 and dk.dim() == 4, (
-            "dq and dk must be [bs, seq_len, n_head, head_dim]/[bs, n_head, seq_len, head_dim]."
-        )
-        if head_first:
-            dq = dq.transpose(1, 2).contiguous()
-            dk = dk.transpose(1, 2).contiguous()
-        else:
-            dq = dq.contiguous()
-            dk = dk.contiguous()
-        batch_size, seq_len, n_q_head, head_dim = dq.shape
-        n_kv_head = dk.shape[2]
-        dq_batch_stride, dq_seq_stride = dq.stride(0), dq.stride(1)
-        dk_batch_stride, dk_seq_stride = dk.stride(0), dk.stride(1)
-        dq_for_cos_bs = dq
+        assert dq.dim() == 3 and dk.dim() == 3, "dq and dk must be [total_seq_len, n_head, head_dim] after normalize."
 
     rope_dim = cos.shape[-1]
     nope_dim = head_dim - rope_dim
@@ -599,9 +623,53 @@ def rope_bwd_impl(
         has_kv_lens,
     )
 
-    if is_varlen or is_decode:
-        return dq, dk
-    elif head_first:
-        return dq.transpose(1, 2).contiguous(), dk.transpose(1, 2).contiguous()
+    if head_first:
+        dq = dq.transpose(-2, -3).contiguous()
+        dk = dk.transpose(-2, -3).contiguous()
+    dq = dq.reshape(*orig_dq_shape)
+    dk = dk.reshape(*orig_dk_shape)
+    return dq, dk
+
+
+def rot_pos_embed_impl(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    *,
+    cu_seqlens_q: Optional[torch.Tensor] = None,
+    seqlens_kv: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Gather cos/sin from the RoPE table (ILU).
+
+    Mirrors NPU behavior: ``position_ids`` may be 1D ``[S]`` or 2D ``[B, S]`` (pos3d), so
+    ``x`` can stay ``[S, H]`` while indices are batched — no need to match core
+    ``MojoRotaryEmbedding`` shape checks when using ``TTXRotaryEmbedding`` on ILU.
+    """
+    if position_ids is not None:
+        return cos[position_ids], sin[position_ids]
+    if cu_seqlens_q is None:
+        seq_len = x.shape[-2]
+        return cos[:seq_len], sin[:seq_len]
+
+    seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    if seqlens_kv is not None:
+        context_lens = seqlens_kv - seqlens_q
     else:
-        return dq, dk
+        context_lens = torch.zeros_like(seqlens_q, dtype=seqlens_q.dtype, device=seqlens_q.device)
+
+    total = x.shape[0]
+    rope_dim = cos.shape[-1]
+    device = x.device
+    dtype = cos.dtype
+    cos_out = torch.empty((total, rope_dim), device=device, dtype=dtype)
+    sin_out = torch.empty((total, rope_dim), device=device, dtype=dtype)
+    for i in range(seqlens_q.numel()):
+        start = int(cu_seqlens_q[i].item())
+        end = int(cu_seqlens_q[i + 1].item())
+        q_len = end - start
+        ctx = int(context_lens[i].item())
+        positions = torch.arange(ctx, ctx + q_len, device=device, dtype=torch.int64)
+        cos_out[start:end] = cos[positions.to(cos.device)]
+        sin_out[start:end] = sin[positions.to(sin.device)]
+    return cos_out, sin_out
