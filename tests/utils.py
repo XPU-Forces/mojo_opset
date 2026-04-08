@@ -241,12 +241,15 @@ def auto_switch_platform(set_perf: bool = False):
         Callable: The decorated function.
     """
     device = get_torch_device()
+    platform = get_platform()
 
     if set_perf:
         if device == "npu":
             perf_fn = perf_npu
         elif device == 'mlu':
             perf_fn = perf_mlu
+        elif platform == "ilu":
+            perf_fn = perf_ilu
         else:
             raise NotImplementedError(f"Performance test is not implemented on {device}")
 
@@ -416,19 +419,84 @@ def device_perf_mlu(executor, profiling_dir="./mlu_profiling", active=5):
         return None
 
 
-def device_perf_ilu(executor, profiling_dir="./mlu_profiling", active=5):
+def device_perf_ilu(executor, profiling_dir="./ilu_profiling", active=5):
     """
-    Profiles the ILU kernel execution time (Not Implemented).
+    CUDA device timing + optional torch.profiler trace for ILU / NVIDIA runs.
 
     Args:
-        executor (Callable): The function to profile.
+        executor (Callable): The function to profile (should run CUDA work on the current device).
         profiling_dir (str): Directory to save profiling results.
-        active (int): Number of active steps.
+        active (int): Iterations for CUDA event averaging and for the profiler loop.
 
-    Raises:
-        NotImplementedError: This function is not yet implemented.
+    Returns:
+        Tuple[float, str] or None: Mean elapsed time in **microseconds** per ``executor()`` from
+        CUDA events, and directory containing the latest trace (or ``profiling_dir`` if none found);
+        or None if CUDA is unavailable.
     """
-    raise NotImplementedError
+    if not torch.cuda.is_available():
+        logger.error("CUDA is not available for ILU profiling")
+        return None
+
+    if not os.path.exists(profiling_dir):
+        os.makedirs(profiling_dir)
+
+    wait = 0
+    schedule_warmup = 0
+    repeat = 1
+    pre_profile_warmup = 5
+
+    for _ in range(pre_profile_warmup):
+        executor()
+        torch.cuda.synchronize()
+
+    torch.cuda.synchronize()
+    ev_start = torch.cuda.Event(enable_timing=True)
+    ev_end = torch.cuda.Event(enable_timing=True)
+    elapsed_ms: list[float] = []
+    for _ in range(active):
+        ev_start.record()
+        executor()
+        ev_end.record()
+        torch.cuda.synchronize()
+        elapsed_ms.append(ev_start.elapsed_time(ev_end))
+    avg_device_us = sum(elapsed_ms) / len(elapsed_ms) * 1000.0
+
+    schedule_fn = torch.profiler.schedule(
+        wait=wait, warmup=schedule_warmup, active=active, repeat=repeat
+    )
+    total_steps = (wait + schedule_warmup + active) * repeat
+
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+        schedule=schedule_fn,
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(profiling_dir),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+        with_flops=False,
+        with_modules=False,
+    ) as prof:
+        for _ in range(total_steps):
+            executor()
+            prof.step()
+            torch.cuda.synchronize()
+
+    kernel_profiling_path = profiling_dir
+    try:
+        trace_candidates = []
+        for root, _, files in os.walk(profiling_dir):
+            for f in files:
+                if f.endswith(".pt.trace.json") or f.endswith(".json.gz"):
+                    trace_candidates.append(os.path.join(root, f))
+        if trace_candidates:
+            trace_path = max(trace_candidates, key=os.path.getmtime)
+            kernel_profiling_path = os.path.dirname(trace_path)
+        else:
+            logger.warning(f"No trace file found under {profiling_dir}; using profiling_dir as path")
+    except Exception as e:
+        logger.error(f"Failed to locate profiling trace: {e}")
+
+    return avg_device_us, kernel_profiling_path
 
 
 def host_perf(func, device, warmup=3, repeat=10):
@@ -535,6 +603,44 @@ def perf_mlu(executor, profiling_dir="./mlu_profiling", active=5):
         logger.warning("MLU profiler output is unavailable, falling back to host-latency-only benchmark logging.")
     else:
         device_latency, kernel_profiling_path = device_result
+
+    func_name, para_list = get_executor_info(executor)
+
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    logger.info(
+        f"[{func_name}] | "
+        f"{', '.join(para_list)} | "
+        f"Device latency = {device_latency:.4f} us | "
+        f"Host latency = {host_latency:.4f} ms | "
+        f"Profile dir = {kernel_profiling_path}"
+    )
+
+    plain_log_file = f"| {timestamp} | {func_name} | {format_executor_info(para_list)} | {device_latency:.4f} us | {host_latency:.4f} ms |"
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf/benchmark.md")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    with open(log_path, "a", encoding="utf-8") as f:
+        if not (os.path.exists(log_path) and os.path.getsize(log_path) > 1):
+            f.write("| Timestamp | Op Name | Parameters | Device Latency (us) | Host Latency (ms) |\n")
+            f.write("|-----------|---------|------------|---------------------|-------------------|\n")
+        f.write(plain_log_file + "\n")
+
+
+def perf_ilu(executor, profiling_dir="./ilu_profiling", active=5):
+    """
+    Performs comprehensive ILU performance testing including device and host latency.
+
+    Args:
+        executor (Callable): The function to benchmark.
+        profiling_dir (str): Directory for NPU profiling data.
+        active (int): Number of active profiling steps.
+
+    Returns:
+        None: Logs and writes benchmark results to a file.
+    """
+    device_latency, kernel_profiling_path = device_perf_ilu(executor, profiling_dir, active)
+    host_latency = host_perf(executor, "cuda")
 
     func_name, para_list = get_executor_info(executor)
 
