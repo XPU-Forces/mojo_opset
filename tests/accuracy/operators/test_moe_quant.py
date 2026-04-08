@@ -229,4 +229,57 @@ def test_group_quant_gemm_combine_moe_backend():
         rtol=5e-3,
     )
 
+@pytest.mark.ci
+@pytest.mark.parametrize("seqlen", [2 , 11, 16, 128, 256, 311, 1024, 1025, 3072, 3071, 8192, 16384])
+@pytest.mark.parametrize("num_experts, hidden_size", [(128, 4096), (128, 5120)])
+@pytest.mark.parametrize("top_k", [2, 4, 8])
+@bypass_not_implemented
+def test_moe_init_routing_dynamic_quant_backend(seqlen: int, num_experts: int, hidden_size: int, top_k: int):
+    hidden_states = torch.randn(seqlen, hidden_size, dtype=torch.bfloat16)
+    # top_k_gates = torch.softmax(torch.randn(seqlen, top_k, dtype=torch.float32), dim=-1)
+    # top_k_indices = torch.stack([torch.randperm(4)[:2] for _ in range(8)])
+    smooth_scale = torch.rand(num_experts, hidden_size, dtype=torch.float32)
 
+    top_k_gates = torch.randn([seqlen, top_k], dtype=torch.float32)
+    top_k_indices = torch.randint(0, num_experts, (seqlen, top_k,), dtype=torch.int32)
+    quant_mode = 0
+
+    op = MojoMoEInitRoutingDynamicQuant(num_experts=num_experts, top_k=top_k, quant_block_size=hidden_size)
+    op_ref = MojoMoEInitRoutingDynamicQuant._registry.get("torch")(num_experts=num_experts, top_k=top_k, quant_block_size=hidden_size)
+    op.forward_diff_with(
+        op_ref,
+        hidden_states,
+        top_k_gates,
+        top_k_indices,
+        smooth_scale,
+        quant_mode,
+        atol=(1, 1e-4, 0, 0, 1e-4),
+        rtol=(0, 1e-4, 0, 0, 1e-4),
+    )
+
+
+def generate_random_list(M, N):
+    """
+    生成一个长度为M，总和为N，所有元素>=0的随机列表
+    使用均匀分布方法
+    """
+    points = torch.cat([torch.tensor([0, N]), torch.randint(0, N + 1, (M - 1,))])
+    points, _ = torch.sort(points)
+    result = (points[1:] - points[:-1]).tolist()
+
+    return result
+
+@pytest.mark.ci
+@pytest.mark.parametrize("seq_len", [2, 64, 128, 1024, 4096])
+@pytest.mark.parametrize("last_dim", [1280, 3584, 4096])
+@pytest.mark.parametrize("EXPERT_NUM", [8, 32, 48, 64])
+@pytest.mark.parametrize("TOPK", [2, 4, 8])
+@bypass_not_implemented
+def test_fused_swiglu_moe_scale_dynamic_quant_backend(seq_len, last_dim, EXPERT_NUM, TOPK):
+    input = torch.randn(seq_len, TOPK, last_dim, dtype=torch.bfloat16)
+    smooth_scale = torch.rand(EXPERT_NUM, last_dim//2, dtype=torch.float32)
+    token_count = torch.tensor(generate_random_list(EXPERT_NUM, seq_len * TOPK), dtype=torch.int32)
+
+    op = MojoFusedSwiGLUMoEScaleDynamicQuantize()
+    op_ref = MojoFusedSwiGLUMoEScaleDynamicQuantize._registry.get("torch")()
+    op.forward_diff_with(op_ref, input, smooth_scale, token_count, 1.0, 0, atol=(1, 1e-4), rtol=(0, 1e-4))

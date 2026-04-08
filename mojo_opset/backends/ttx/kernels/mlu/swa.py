@@ -634,6 +634,7 @@ def swa_paged_prefill_impl(
         BLOCK_N,
         BLOCK_D,
         page_size,
+        num_warps=1, num_stages=1, force_use_shared_memory=True, bottleneck="simd",
     )
     return o
 
@@ -941,5 +942,6 @@ def swa_paged_decode_impl(
         page_size,
         BLOCK_SIZE_D=BLOCK_SIZE_D,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
+        num_warps=1, num_stages=1, force_use_shared_memory=True, bottleneck="simd",
     )
     return o
