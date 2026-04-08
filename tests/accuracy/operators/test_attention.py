@@ -21,6 +21,8 @@ from mojo_opset import MojoSdpa
 from mojo_opset import MojoPagedPrefillSWA
 from mojo_opset import MojoPagedDecodeSWA
 from mojo_opset import MojoSWA
+import sys
+sys.path.insert(0, sys.path[0]+"/../../")
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
@@ -743,7 +745,7 @@ test_configs_swa_prefill = [
     ],
 )
 @pytest.mark.parametrize("gqa_layout, global_window, local_window", [
-    ("ABAB", 4, 255), 
+    ("ABAB", 4, 255),
     ("AABB", 4, 1023),
 ])
 @auto_switch_platform()
@@ -818,7 +820,7 @@ test_configs_swa_decode = [
     ],
 )
 @pytest.mark.parametrize("gqa_layout, global_window, local_window", [
-    ("ABAB", 4, 255), 
+    ("ABAB", 4, 255),
     ("AABB", 4, 1023),
 ])
 @auto_switch_platform()
