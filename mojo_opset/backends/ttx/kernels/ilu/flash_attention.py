@@ -91,7 +91,10 @@ def _paged_prefill_causal_attn_kernel(
             denom = denom + p
             acc = acc + p * v_vec
 
-        out_vec = acc / denom
+        if Tk > 0:
+            out_vec = acc / denom
+        else:
+            out_vec = acc
         o_base = t_i * stride_o_t + h * stride_o_h
         tl.store(out_ptr + o_base + offs_d * stride_o_d, out_vec.to(OUT_T), mask=mask_d)
 
