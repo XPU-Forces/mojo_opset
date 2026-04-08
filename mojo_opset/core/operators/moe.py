@@ -51,19 +51,19 @@ class MojoMoE(MojoOperator):
             setattr(self.gating.gate_weight, "force_dtype", torch.float32)
 
     def forward(self, hidden_states):
-        # hidden_states: [BS, H]
+        # hidden_states: [num_tokens, H]
         top_k_indices, top_k_gates = self.gating(hidden_states)
-        # top_k_indices, top_k_gates: [BS, top_k]
+        # top_k_indices, top_k_gates: [num_tokens, top_k]
         sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = self.dispatch(hidden_states, top_k_gates, top_k_indices)
-        # sorted_hidden_states: [total_toks, H]
+        # sorted_hidden_states: [local_tokens, H]
         # tokens_per_expert: [num_experts]
-        # sorted_gates: [total_toks, 1]
-        # token_indices: [total_toks]
+        # sorted_gates: [local_tokens, 1]
+        # token_indices: [local_tokens]
         expert_outputs = self.experts(sorted_hidden_states, tokens_per_expert)
-        # expert_outputs: [total_toks, H]
+        # expert_outputs: [local_tokens, H]
         output_buffer = torch.zeros_like(hidden_states, memory_format=torch.contiguous_format)
         combined = self.combine(output_buffer, expert_outputs, sorted_gates, token_indices)
-        # combined: [BS, H]
+        # combined: [num_tokens, H]
         return combined
 
 
@@ -96,17 +96,18 @@ class MojoMoEGating(MojoOperator):
         Forward pass for MoE Gating operator.
 
         Input:
-        - hidden_states (torch.Tensor): Input tensor of shape [batch_size, seq_len, hidden_size].
+        - hidden_states (torch.Tensor): Input tensor of shape [num_tokens, hidden_size].
 
         Output:
-        - torch.Tensor: Output tensor of shape [batch_size, seq_len, num_experts].
+        - top_k_indices (torch.Tensor): Output tensor of shape [num_tokens, top_k].
+        - top_k_gates (torch.Tensor): Output tensor of shape [num_tokens, top_k].
         """
         assert self.gate_weight.dtype == torch.float32
         gate_logits = torch.matmul(hidden_states.float(), self.gate_weight)
         gate_logits = torch.softmax(gate_logits, dim=-1)
         top_k_logits, top_k_indices = torch.topk(gate_logits, self.top_k, dim=-1)
-        expert_weights = top_k_logits / torch.sum(top_k_logits, dim=-1, keepdim=True)
-        return top_k_indices, expert_weights
+        top_k_gates = top_k_logits / torch.sum(top_k_logits, dim=-1, keepdim=True)
+        return top_k_indices, top_k_gates
 
     def extra_repr(self) -> str:
         hidden_size = self.gate_weight.size(0)
