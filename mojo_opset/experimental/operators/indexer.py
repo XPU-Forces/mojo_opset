@@ -73,8 +73,8 @@ class MojoIndexer(MojoOperator):
             k = self.k_norm(self.wk(x.detach()))
 
         cos_half, sin_half = freqs_cis.real, freqs_cis.imag
-        cos = torch.cat((cos_half, cos_half), dim=-1).unsqueeze(0).expand(bsz, -1, -1)
-        sin = torch.cat((sin_half, sin_half), dim=-1).unsqueeze(0).expand(bsz, -1, -1)
+        cos = torch.cat((cos_half, cos_half), dim=-1)
+        sin = torch.cat((sin_half, sin_half), dim=-1)
         k = k.unsqueeze(2)
 
         q, k = self.rope.forward(

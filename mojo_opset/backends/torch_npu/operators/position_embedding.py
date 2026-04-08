@@ -31,8 +31,12 @@ class TorchNpuApplyRoPE(MojoApplyRoPE, default_priority=0):
             q_rope = q_rope.unsqueeze(0)
             k_rope = k_rope.unsqueeze(0)
             
-        cos = cos.unsqueeze(0)
-        sin = sin.unsqueeze(0)
+        # npu_rotary_mul requires cos/sin to be 4D
+        if cos.dim() < 4:
+            cos = cos.unsqueeze(0)
+            sin = sin.unsqueeze(0)
+        if q_rope.shape[0] > 1 and cos.shape[1] == 1 and rope_dim // 2 * q_rope.element_size() % 32 != 0:
+            raise NotImplementedError(f"TorchNpuApplyRoPE is not supported for q/k input layout [B, N, S, D] when rope_dim is not aligned with 32 bytes, but got rope_dim={rope_dim}")
 
         q_rot = torch_npu.npu_rotary_mul(q_rope, cos, sin)
         k_rot = torch_npu.npu_rotary_mul(k_rope, cos, sin)
