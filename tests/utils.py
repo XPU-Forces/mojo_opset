@@ -14,11 +14,17 @@ from typing import Union
 
 import pytest
 import torch
+from torch.autograd import DeviceType
 
 try:
     import torch_npu
 except Exception:
     torch_npu = None
+
+try:
+    import torch_mlu
+except Exception:
+    torch_mlu = None
 
 from mojo_opset.utils.logging import get_logger
 from mojo_opset.utils.platform import get_platform
@@ -239,6 +245,8 @@ def auto_switch_platform(set_perf: bool = False):
     if set_perf:
         if device == "npu":
             perf_fn = perf_npu
+        elif device == 'mlu':
+            perf_fn = perf_mlu
         else:
             raise NotImplementedError(f"Performance test is not implemented on {device}")
 
@@ -358,17 +366,54 @@ def device_perf_npu(executor, profiling_dir="./npu_profiling", active=5):
 
 def device_perf_mlu(executor, profiling_dir="./mlu_profiling", active=5):
     """
-    Profiles the MLU kernel execution time (Not Implemented).
+    Profiles the MLU kernel execution time.
 
     Args:
         executor (Callable): The function to profile.
         profiling_dir (str): Directory to save profiling results.
         active (int): Number of active steps.
 
-    Raises:
-        NotImplementedError: This function is not yet implemented.
+    Returns:
+        Tuple[float, str] or None: Average kernel time in us and path to the profiling logic, or None on failure.
     """
-    raise NotImplementedError
+    if not os.path.exists(profiling_dir):
+        os.makedirs(profiling_dir)
+
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.MLU,
+        ],
+        schedule=torch.profiler.schedule(
+            wait=1,
+            warmup=5,
+            active=active),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(profiling_dir)
+    ) as prof:
+        for _ in range(1 + 5 + active):
+            executor()
+            prof.step()
+            torch.mlu.synchronize()
+
+    try:
+        mlu_total = 0.0
+        stats = prof.key_averages()
+        for item in stats:
+            if item.device_type == DeviceType.PrivateUse1 and not item.is_user_annotation:
+                mlu_total += item.self_device_time_total
+
+        trace_files = [
+            os.path.join(profiling_dir, f) 
+            for f in os.listdir(profiling_dir) 
+            if f.endswith('.json')
+        ]
+        latest_trace = max(trace_files, key=os.path.getmtime) if trace_files else profiling_dir
+
+        return mlu_total / active, latest_trace
+
+    except Exception as e:
+        logger.error(f"Failed to extract MLU profiling data: {e}")
+        return None
 
 
 def device_perf_ilu(executor, profiling_dir="./mlu_profiling", active=5):
@@ -401,6 +446,8 @@ def host_perf(func, device, warmup=3, repeat=10):
     """
     if device.lower() == "npu":
         sync = torch.npu.synchronize
+    elif device.lower() == "mlu":
+        sync = torch.mlu.synchronize
     else:
         sync = lambda: None
 
@@ -457,6 +504,51 @@ def perf_npu(executor, profiling_dir="./npu_profiling", active=5):
         f"| {timestamp} | {func_name} | {format_executor_info(para_list)} | "
         f"{device_latency_str} | {host_latency:.4f} ms |"
     )
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf/benchmark.md")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    with open(log_path, "a", encoding="utf-8") as f:
+        if not (os.path.exists(log_path) and os.path.getsize(log_path) > 1):
+            f.write("| Timestamp | Op Name | Parameters | Device Latency (us) | Host Latency (ms) |\n")
+            f.write("|-----------|---------|------------|---------------------|-------------------|\n")
+        f.write(plain_log_file + "\n")
+
+
+def perf_mlu(executor, profiling_dir="./mlu_profiling", active=5):
+    """
+    Performs comprehensive MLU performance testing including device and host latency.
+
+    Args:
+        executor (Callable): The function to benchmark.
+        profiling_dir (str): Directory for MLU profiling data.
+        active (int): Number of active profiling steps.
+
+    Returns:
+        None: Logs and writes benchmark results to a file.
+    """
+    device_result = device_perf_mlu(executor, profiling_dir, active)
+    host_latency = host_perf(executor, "mlu")
+
+    if device_result is None:
+        device_latency = None
+        kernel_profiling_path = "unavailable"
+        logger.warning("MLU profiler output is unavailable, falling back to host-latency-only benchmark logging.")
+    else:
+        device_latency, kernel_profiling_path = device_result
+
+    func_name, para_list = get_executor_info(executor)
+
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    logger.info(
+        f"[{func_name}] | "
+        f"{', '.join(para_list)} | "
+        f"Device latency = {device_latency:.4f} us | "
+        f"Host latency = {host_latency:.4f} ms | "
+        f"Profile dir = {kernel_profiling_path}"
+    )
+
+    plain_log_file = f"| {timestamp} | {func_name} | {format_executor_info(para_list)} | {device_latency:.4f} us | {host_latency:.4f} ms |"
     log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf/benchmark.md")
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 

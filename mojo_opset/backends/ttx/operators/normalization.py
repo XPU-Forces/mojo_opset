@@ -11,7 +11,7 @@ from mojo_opset.core import MojoRMSNorm
 
 
 class TTXLayerNorm(MojoLayerNorm):
-    supported_platforms_list = ["npu", "ilu"]
+    supported_platforms_list = ["npu", "ilu", "mlu"]
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         return layernorm_infer(hidden_state, self.weight, self.bias, self.variance_epsilon)

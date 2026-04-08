@@ -4,7 +4,7 @@ from mojo_opset.utils.platform import get_platform
 
 platform = get_platform()
 
-_SUPPORT_TTX_PLATFROM = ["npu", "ilu"]
+_SUPPORT_TTX_PLATFROM = ["npu", "ilu", "mlu"]
 _SUPPORT_TORCH_NPU_PLATFROM = ["npu"]
 
 if platform in _SUPPORT_TTX_PLATFROM:
