@@ -6,7 +6,6 @@ import torch
 from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoFusedSwiGLUMoEScaleDynamicQuantize
-from mojo_opset import MojoMoEGating
 from mojo_opset import MojoGroupQuantGemmCombineMoE
 from mojo_opset import MojoGroupQuantGemmMoE
 from mojo_opset import MojoMoEInitRoutingDynamicQuant
