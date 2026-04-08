@@ -50,9 +50,9 @@ class MojoRotaryEmbedding(MojoOperator):
         x is necessary for the kernel to determine the output shape.
 
         Scenario descriptions:
-        1. Varlen prefill: input [T, H], cu_seqlens_q [T+1] or position_ids [T].
-        2. Padded prefill: input [B, S, H], cu_seqlens_q None, position_ids None.
-        3. Decode: input [B, H], cu_seqlens_q None, position_ids [B].
+        1. Varlen prefill: input [T, H], cu_seqlens_q [T+1] or position_ids [T] -> cos/sin [T, D].
+        2. Padded prefill: input [B, S, H], cu_seqlens_q None, position_ids None -> cos/sin [S, D].
+        3. Decode: input [B, H], cu_seqlens_q None, position_ids [B] -> cos/sin [B, D].
         """
         assert position_ids is None or cu_seqlens_q is None, "At most one of cu_seqlens_q or position_ids should be provided"
 
@@ -88,13 +88,6 @@ class MojoRotaryEmbedding(MojoOperator):
 
 
 class MojoApplyRoPE(MojoOperator):
-    """Rotary Position Embedding (RoPE) operator.
-
-    Supports three scenarios:
-    1. Varlen prefill: input [T, N, D] or [N, T, D], cos/sin [T, d].
-    2. Padded prefill: input [B, S, N, D] or [B, N, S, D], cos/sin [S, d].
-    3. Decode: input [B, N, D] or [N, B, D], cos/sin [B, d].
-    """
 
     def __init__(self, interleaved: bool = False):
         super().__init__()
@@ -145,9 +138,9 @@ class MojoApplyRoPE(MojoOperator):
         Apply Rotary Position Embedding (RoPE).
 
         Scenario descriptions:
-        1. Varlen prefill: q/k [T, N, D], requires cu_seqlens, sin/cos are full
-        2. Padded prefill: q/k [B, S, N, D] or [B, N, S, D], sin/cos pre-sliced [B, S, d]
-        3. Decode: q/k [B, N, D], requires kv_lens, sin/cos are full
+        1. Varlen prefill: q/k [T, N, D], cos/sin [T, d]
+        2. Padded prefill: q/k [B, S, N, D] or [B, N, S, D], cos/sin [S, d] or [B, S, d]
+        3. Decode: q/k [B, N, D], cos/sin [B, d]
 
         Args:
             q: Query tensor
@@ -159,12 +152,18 @@ class MojoApplyRoPE(MojoOperator):
         Returns:
             (q_rot, k_rot) with same shape as input
         """
+        assert q.ndim == k.ndim, "q and k must have the same dimension"
+        assert q.ndim == 3 or q.ndim == 4, "q and k must be 3D or 4D"
+        assert cos.shape == sin.shape, "cos and sin must have the same shape"
+        if q.ndim == 3:
+            assert cos.ndim == 2, "rotary position embedding (cos/sin) must be of shape [num_tokens, rope_dim] for varlen prefill or decode"
+        
         if head_first:
-            cos = cos.unsqueeze(0)
-            sin = sin.unsqueeze(0)
+            cos = cos.unsqueeze(-3)
+            sin = sin.unsqueeze(-3)
         else:
-            cos = cos.unsqueeze(1)
-            sin = sin.unsqueeze(1)
+            cos = cos.unsqueeze(-2)
+            sin = sin.unsqueeze(-2)
         return self._apply_rope(q, k, cos, sin)
 
 
