@@ -1255,7 +1255,9 @@ def _paged_decode_kernel(
                 v_cache_ptr.dtype.element_ty == tl.float8e5,
             )
 
-        acc = acc / l_i
+        if kv_seq_len > 0:
+            # avoid division by zero
+            acc = acc / l_i
 
         o_ptrs = o_ptr + b_id * stride_ob + q_head_id * stride_oh + offs_d * stride_od
         tl.store(o_ptrs, acc.to(o_ptr.dtype.element_ty), mask=offs_d < HEAD_DIM)
