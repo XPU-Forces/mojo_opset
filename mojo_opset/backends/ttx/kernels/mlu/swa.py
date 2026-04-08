@@ -1,7 +1,7 @@
 import torch
 from typing import Optional, Tuple
 
-from .utils import get_num_cores
+from .utils import get_mlu_total_cores
 
 AUX_MASK_SIZE = 256
 AUX_MASK = None
@@ -289,9 +289,14 @@ def _paged_prefill_kernel(
 ):
     tl.static_assert(HEAD_DIM <= BLOCK_D, "BLOCK_SIZE_D should not be less than HEAD_DIM")
     tl.static_assert(PAGE_SIZE % BLOCK_N == 0, "BLOCK_N must be a divisor of PAGE_SIZE")
+
     pid = tl.program_id(0)
     n_programs = tl.num_programs(0)
 
+    # Hint(chenyifan):
+    #   the prepared aux_mask is [[empty, triu, full, tril, empty],
+    #                             [full, empty, empty, full, empty]]
+    #   every mask [BLOCK_M, BLOCK_N] can be sliced from the aux_mask and further combined
     aux_mask_ptr_01 = aux_mask_ptr + aux_mask_size * 1 * stride_mask_m + aux_mask_size * 3 * stride_mask_n
     aux_mask_ptr_10 = aux_mask_ptr + aux_mask_size * 1 * stride_mask_m + aux_mask_size * 1 * stride_mask_n
     aux_mask_ptr_triu = aux_mask_ptr + aux_mask_size * 1 * stride_mask_n
@@ -374,7 +379,6 @@ def _paged_prefill_kernel(
                 LOCAL_WINDOW,
             )
 
-
             for kv_block_id in range(num_global_window_blocks):
                 kv_block_start = kv_block_id * BLOCK_N
                 kv_block_end = min(kv_block_start + BLOCK_N, kv_seq_len)
@@ -384,7 +388,6 @@ def _paged_prefill_kernel(
                 physical_page_id = tl.load(
                     block_table_ptr + b_id * stride_block_table_b + logical_page_id * stride_block_table_p
                 )
-
                 kv_mask = gen_mask_n_right_bound(
                     aux_mask_ptr_10,
                     aux_mask_size,
@@ -464,7 +467,6 @@ def _paged_prefill_kernel(
                     BLOCK_D,
                     v_ptr.dtype.element_ty == tl.float8e5,
                 )
-
 
             for kv_block_id in range(non_global_window_start_block, num_total_blocks):
                 kv_block_start = kv_block_id * BLOCK_N
@@ -556,6 +558,7 @@ def _paged_prefill_kernel(
             accumulator = acc / l_i[:, None]
             tl.store(cur_o_block_ptr, accumulator.to(o_ptr.type.element_ty), boundary_check=(0, 1))
 
+
 def swa_paged_prefill_impl(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -586,7 +589,7 @@ def swa_paged_prefill_impl(
         BLOCK_N = min(128, triton.next_power_of_2(page_size))
 
     BLOCK_D = head_dim
-    job_num = get_num_cores()
+    job_num = get_mlu_total_cores()
 
     grid = (job_num,)
 
@@ -633,7 +636,6 @@ def swa_paged_prefill_impl(
         page_size,
         num_warps=1, num_stages=1, force_use_shared_memory=True, bottleneck="simd",
     )
-
     return o
 
 
@@ -732,6 +734,7 @@ def _paged_decode_kernel(
 ):
     tl.static_assert(HEAD_DIM <= BLOCK_SIZE_D, "HEAD_DIM should be <= BLOCK_SIZE_D")
     tl.static_assert(PAGE_SIZE % BLOCK_SIZE_N == 0, "BLOCK_SIZE_N must be a divisor of PAGE_SIZE")
+
     pid = tl.program_id(0)
     n_progs = tl.num_programs(0)
 
@@ -864,7 +867,9 @@ def _paged_decode_kernel(
                 v_cache_ptr.dtype.element_ty == tl.float8e5,
             )
 
-        acc = acc / l_i
+        if kv_seq_len > 0:
+            # avoid division by zero
+            acc = acc / l_i
 
         o_ptrs = o_ptr + b_id * stride_ob + q_head_id * stride_oh + offs_d * stride_od
         tl.store(o_ptrs, acc.to(o_ptr.dtype.element_ty), mask=offs_d < HEAD_DIM)
@@ -892,10 +897,14 @@ def swa_paged_decode_impl(
 
     o = torch.empty_like(q, memory_format=torch.contiguous_format)
     
-    num_vectors = get_num_cores()
-    grid = (num_vectors, )
+    job_num = get_mlu_total_cores()
+    grid = (job_num, )
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     BLOCK_SIZE_N = min(128, triton.next_power_of_2(page_size))
+
+    # Note(chenyifan): 
+    #   under swa, the kv workload is rather evenly across diffrent queries,
+    #   so we have low necessity to apply split-kv strategy             
 
     _paged_decode_kernel[grid](
         q,
