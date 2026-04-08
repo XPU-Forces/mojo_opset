@@ -446,7 +446,9 @@ def paged_decode_kernel(
             m_i = m_ij
 
         m_i += tl.math.log(l_i)
-        acc = acc / l_i
+        if kv_seq_len > 0:
+            # avoid division by zero
+            acc = acc / l_i
 
         o_ptrs = o_ptr + b_id * stride_ob + q_head_id * stride_oh + offs_d * stride_od
         tl.store(o_ptrs, acc.to(o_ptr.dtype.element_ty), mask=offs_d < HEAD_DIM)
