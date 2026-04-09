@@ -138,9 +138,7 @@ def test_grouprmsnorm(bsz, group_dims, hidden_size, dtype, eps):
     else:
         atol, rtol = 3e-2, 6e-3
 
-    # Placeholder for ttx implementation
-    x_normed_outputs = rmsnorm(x_groups)
-    # rmsnorm.forward_diff_with(rmsnorm_ref, x_groups, atol=atol, rtol=rtol)
+    rmsnorm.forward_diff_with(rmsnorm_ref, x_groups, atol=atol, rtol=rtol)
 
 @pytest.mark.parametrize(
     "bsz,group_dims,hidden_size",

@@ -94,6 +94,8 @@ top_p_filter_impl = _get_kernel_impl(ttx_backend_module, "top_p_filter_impl")
 top_p_sampling_impl = _get_kernel_impl(ttx_backend_module, "top_p_sampling_impl")
 top_k_sampling_impl = _get_kernel_impl(ttx_backend_module, "top_k_sampling_impl")
 
+group_rmsnorm_impl = _get_kernel_impl(ttx_backend_module, "group_rmsnorm_impl")
+
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
 
@@ -802,6 +804,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     swa_infer = swa_infer_impl
     swa_fwd = swa_fwd_impl
     swa_bwd = swa_bwd_impl
+    group_rmsnorm = group_rmsnorm_impl
 
 else:
     causal_conv1d_fwd = causal_conv1d_fwd_impl
@@ -854,3 +857,4 @@ else:
     top_k_sampling = top_k_sampling_impl
     dynamic_quant = dynamic_quant_impl
     lightning_indexer = lightning_indexer_impl
+    group_rmsnorm = group_rmsnorm_impl
