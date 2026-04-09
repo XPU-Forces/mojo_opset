@@ -87,6 +87,7 @@ class MojoOperator(ABC, torch.nn.Module):
             raise NotImplementedError(
                 f"No dedicated backend for {type(self).__name__}; "
                 f"both operands resolve to the same implementation, skipping comparison."
+                f"If you are running tests, check whether the tests are decorated with @bypass_not_implemented."
             )
 
         # for some cases, we expect std & ref impl share the same random seed init state, i.e. sampling.

@@ -48,6 +48,8 @@ class TorchNpuGroupGemm(MojoGroupLinear):
         input: torch.Tensor,
         group_list: torch.Tensor,
     ) -> torch.Tensor:
+        if input.dtype == torch.float32:
+            raise NotImplementedError("NPU grouped matmul does not support float32")
         assert input.dim() == 2, "input must be 2D"
         assert self.weight.dim() == 3, "weight must be 3D"
         num_groups = group_list.numel()

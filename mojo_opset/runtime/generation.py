@@ -7,6 +7,7 @@ import torch
 
 from mojo_opset.compile.device_graph import DeviceGraphPool
 from mojo_opset.utils.logging import get_logger
+from mojo_opset.utils.platform import get_platform
 
 logger = get_logger(__name__)
 
@@ -31,8 +32,8 @@ class GeneratorHook:
 
 
 class PerfHook(GeneratorHook):
-    def __init__(self, device, silent=False):
-        self._device = device
+    def __init__(self, silent=False):
+        self._platform = get_platform()
         self._silent = silent
         self._prefill_start = 0.0
         self._prefill_ms = 0.0
@@ -42,12 +43,12 @@ class PerfHook(GeneratorHook):
         self.records = []
 
     def _sync(self):
-        if self._device == "npu":
+        if self._platform == "npu":
             torch.npu.synchronize()
-        elif self._device == "mlu":
+        elif self._platform == "mlu":
             torch.mlu.synchronize()
         else:
-            raise ValueError(f"Unsupported device: {self._device}")
+            raise ValueError(f"Unsupported platform: {self._platform}")
 
     def before_prefill(self, *, input_ids, context_input_len):
         self._batch_size = context_input_len.shape[0]
@@ -292,10 +293,9 @@ class PerfMojoGenerator(MojoGenerator):
         typewriter_buffer=4,
         hooks: list[GeneratorHook] | None = None,
     ):
-        from mojo_opset.utils.platform import get_platform
 
         hooks = hooks or []
-        self.perf_hook = PerfHook(get_platform(), silent=True)
+        self.perf_hook = PerfHook(silent=True)
         hooks.append(self.perf_hook)
         super().__init__(
             model=model,

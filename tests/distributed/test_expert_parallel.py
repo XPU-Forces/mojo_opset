@@ -8,7 +8,7 @@ from torch.distributed.tensor.parallel import parallelize_module
 
 from mojo_opset.core.operators.moe import MojoMoE
 from mojo_opset.distributed.parallel import MojoExpertParallel
-from mojo_opset.utils.platform import get_platform
+from mojo_opset.utils.platform import get_torch_device
 
 
 def _get_world_size():
@@ -63,7 +63,7 @@ def _compile_capture_fx_and_run(module, example_inputs):
 
 def test_moe_ep_allreduce():
     world_size = _get_world_size()
-    device_type = get_platform()
+    device_type = get_torch_device()
     device = _set_current_device(device_type, world_size)
     device_mesh = init_device_mesh(device_type, (world_size,))
 
@@ -106,7 +106,7 @@ def test_moe_ep_allreduce_compile_fx_contains_allreduce():
         pytest.skip("torch.compile is not available.")
 
     world_size = _get_world_size()
-    device_type = get_platform()
+    device_type = get_torch_device()
     if device_type not in ("npu", "mlu"):
         pytest.skip(f"Only npu/mlu are supported for this test, got {device_type}.")
 

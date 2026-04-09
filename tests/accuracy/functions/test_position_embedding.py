@@ -7,7 +7,7 @@ from tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoApplyRoPEFunction
 from mojo_opset import MojoRotaryEmbedding
-from mojo_opset.utils.platform import get_platform, get_torch_device
+from mojo_opset.utils.platform import get_torch_device
 
 
 @pytest.mark.parametrize("bs, seqlen", [

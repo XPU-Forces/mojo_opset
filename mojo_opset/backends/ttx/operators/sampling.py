@@ -6,8 +6,6 @@ from typing import Union
 
 import torch
 
-from mojo_opset.utils.platform import get_platform
-
 from mojo_opset.backends.ttx.kernels import fused_penalties_temp
 from mojo_opset.backends.ttx.kernels import join_prob_reject_sampling
 from mojo_opset.backends.ttx.kernels import reject_sampling

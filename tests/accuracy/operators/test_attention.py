@@ -320,6 +320,7 @@ def generate_diffusion_attn_test_data(
     "bsz, q_head_num, kv_head_num, head_dim, seq_length, block_size",
     [(1, 5, 1, 128, 2048, 32,)],
 )
+@bypass_not_implemented
 def test_sdpa(
     bsz,
     q_head_num,
@@ -483,9 +484,6 @@ def test_decode_nsa(B, H, D, S):
 @bypass_not_implemented
 def test_prefill_gqa(B, Hq, Hkv, D, S, gqa_layout):
     """Non-paged prefill GQA — query/key/value are batched 4-D tensors."""
-    from mojo_opset.utils.platform import get_platform
-    if get_platform() == "npu" and D % 128 != 0:
-        pytest.skip(f"NPU kernel requires head_dim % 128 == 0, got {D}")
 
     query = torch.randn(B, Hq, S, D, dtype=torch.bfloat16)
     key = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)

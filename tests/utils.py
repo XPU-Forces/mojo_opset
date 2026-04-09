@@ -16,16 +16,6 @@ import pytest
 import torch
 from torch.autograd import DeviceType
 
-try:
-    import torch_npu
-except Exception:
-    torch_npu = None
-
-try:
-    import torch_mlu
-except Exception:
-    torch_mlu = None
-
 from mojo_opset.utils.logging import get_logger
 from mojo_opset.utils.platform import get_platform, get_torch_device
 
@@ -244,14 +234,14 @@ def auto_switch_platform(set_perf: bool = False):
     platform = get_platform()
 
     if set_perf:
-        if device == "npu":
+        if platform == "npu":
             perf_fn = perf_npu
-        elif device == 'mlu':
+        elif platform == 'mlu':
             perf_fn = perf_mlu
         elif platform == "ilu":
             perf_fn = perf_ilu
         else:
-            raise NotImplementedError(f"Performance test is not implemented on {device}")
+            raise NotImplementedError(f"Performance test is not implemented on {platform}")
 
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
@@ -307,6 +297,8 @@ def device_perf_npu(executor, profiling_dir="./npu_profiling", active=5):
     """
     if not os.path.exists(profiling_dir):
         os.makedirs(profiling_dir)
+    
+    import torch_npu
 
     experimental_config = torch_npu.profiler._ExperimentalConfig(
         aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
@@ -381,6 +373,8 @@ def device_perf_mlu(executor, profiling_dir="./mlu_profiling", active=5):
     """
     if not os.path.exists(profiling_dir):
         os.makedirs(profiling_dir)
+
+    import torch_mlu
 
     with torch.profiler.profile(
         activities=[

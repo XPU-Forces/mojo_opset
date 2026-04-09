@@ -7,7 +7,7 @@ from mojo_opset import MojoGelu
 from mojo_opset import MojoSilu
 from mojo_opset import MojoSwiGLU
 from mojo_opset import MojoRotateActivation
-from mojo_opset.utils.platform import get_platform, get_torch_device
+from mojo_opset.utils.platform import get_torch_device
 from tests.utils import auto_switch_platform, bypass_not_implemented
 
 dtype_str_map = {
@@ -86,8 +86,6 @@ def test_rotate_activation(batch_size, seq_len, num_head, head_dim, dtype):
         "float16": (1e-3, 1e-5),
         "float32": (1.3e-6, 1e-5),
     }
-    if get_platform() == "npu":
-        os.environ["CLOSE_MATMUL_K_SHIFT"] = "1"
     atol, rtol = map_tol[dtype]
     dtype = dtype_str_map[dtype]
 

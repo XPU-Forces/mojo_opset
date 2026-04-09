@@ -28,8 +28,13 @@ class TorchNpuPrefillGQA(MojoPrefillGQA, default_priority=0):
         cu_seqlens_q: torch.Tensor,
         softmax_scale: Optional[float] = None,
     ) -> torch.Tensor:
+        
         batch_size, num_q_heads, seq_len, head_dim = query.shape
         _, num_kv_heads, block_size, _ = k_cache.shape
+
+
+        if head_dim % 128 != 0:
+            raise NotImplementedError(f"NPU kernel requires head_dim % 128 == 0, got {query.shape[-1]}")
 
         if block_size % 128 != 0 or block_size > 512:
             # high performance attention kernel only supports block_size % 128 == 0 and block_size <= 512

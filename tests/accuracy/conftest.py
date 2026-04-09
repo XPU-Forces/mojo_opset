@@ -3,7 +3,6 @@ import logging
 import pytest
 import torch
 
-# from tests.utils import get_platform
 from mojo_opset.utils.platform import get_platform, get_torch_device
 
 

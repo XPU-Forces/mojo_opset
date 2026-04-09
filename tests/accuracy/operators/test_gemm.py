@@ -270,6 +270,7 @@ def generate_quant_group_linear_data(
         for dtype in [torch.float16, torch.bfloat16]
     ],
 )
+@bypass_not_implemented
 @auto_switch_platform()
 def test_group_gemm(input, weight, group_list, trans_weight):
     group_gemm = MojoGroupLinear(
@@ -366,10 +367,7 @@ _test_grouped_matmul_cases = [
 @auto_switch_platform()
 @bypass_not_implemented
 def test_grouped_matmul_cases_via_group_linear(inputs, weights, bias, dtype):
-    platform = get_platform()
     device = get_torch_device()
-    if platform == "npu" and dtype == torch.float32:
-        pytest.skip("NPU grouped matmul does not support float32")
 
     input_tensors = [t.to(device=device) for t in inputs]
     weight_tensors = [t.to(device=device) for t in weights]

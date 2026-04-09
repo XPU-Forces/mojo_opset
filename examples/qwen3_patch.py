@@ -68,11 +68,11 @@ def main():
         **extra,
     )
 
-    from mojo_opset.utils.platform import get_platform
+    from mojo_opset.utils.platform import get_torch_device
 
-    platform = get_platform()
+    device = get_torch_device()
 
-    model.to(platform)
+    model.to(device)
     model.eval()
 
     # Build input; prefer chat template when available

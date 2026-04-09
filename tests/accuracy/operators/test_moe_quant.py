@@ -109,7 +109,7 @@ def test_group_quant_gemm_moe_reference():
         ],
         dtype=torch.int8,
     )
-    weight = torch.randint(-3, 4, (2, 6, 8), dtype=torch.int8)
+    weight = torch.randint(-3, 4, (2, 6, 8)).to(dtype=torch.int8)
     token_count = torch.tensor([2, 2], dtype=torch.int32)
     weight_scale = torch.ones(2, 6, dtype=torch.float32)
     input_scale = torch.ones(2, 2, 1, dtype=torch.float32)
@@ -135,7 +135,7 @@ def test_group_quant_gemm_combine_moe_reference():
         ],
         dtype=torch.int8,
     )
-    weight = torch.randint(-2, 3, (2, 4, 3), dtype=torch.int8)
+    weight = torch.randint(-2, 3, (2, 4, 3)).to(dtype=torch.int8)
     token_count = torch.tensor([2, 2], dtype=torch.int32)
     top_k_gates = torch.tensor([[[0.2], [0.8]], [[0.6], [0.4]]], dtype=torch.float32)
     token_indices = torch.tensor([[[0], [1]], [[0], [1]]], dtype=torch.int32)
@@ -179,8 +179,8 @@ def test_fused_swiglu_moe_scale_dynamic_quant_backend():
 
 @bypass_not_implemented
 def test_group_quant_gemm_moe_backend():
-    input = torch.randint(-128, 127, (4, 2, 64), dtype=torch.int8)
-    weight = torch.randint(-128, 127, (4, 128, 64), dtype=torch.int8)
+    input = torch.randint(-128, 127, (4, 2, 64)).to(dtype=torch.int8)
+    weight = torch.randint(-128, 127, (4, 128, 64)).to(dtype=torch.int8)
     token_count = torch.tensor([2, 2, 2, 2], dtype=torch.int32)
     weight_scale = torch.ones(4, 128, dtype=torch.float32)
     input_scale = torch.ones(4, 2, 8, dtype=torch.float32)
@@ -201,8 +201,8 @@ def test_group_quant_gemm_moe_backend():
 
 @bypass_not_implemented
 def test_group_quant_gemm_combine_moe_backend():
-    input = torch.randint(-128, 127, (4, 2, 64), dtype=torch.int8)
-    weight = torch.randint(-128, 127, (4, 64, 48), dtype=torch.int8)
+    input = torch.randint(-128, 127, (4, 2, 64)).to(dtype=torch.int8)
+    weight = torch.randint(-128, 127, (4, 64, 48)).to(dtype=torch.int8)
     token_count = torch.tensor([2, 2, 2, 2], dtype=torch.int32)
     top_k_gates = torch.rand(4, 2, 1, dtype=torch.float32)
     token_indices = torch.tensor(
