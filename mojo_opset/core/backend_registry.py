@@ -9,10 +9,23 @@ from .operator import MojoOperator
 
 logger = get_logger(__name__)
 
-BACKEND_PRIORITY_LIST = ["ttx", "torch_npu", "torch"]
+# All known backend name prefixes (used for registration validation).
+BACKEND_PRIORITY_LIST = ["ixformer", "ttx", "torch_npu", "torch"]
 BACKEND_PRIORITY_MAP = {
     "torchnpu": "torch_npu"
 }  ## Avoid the issue of failed identification of underscore "_" in the torch_npu backend name
+
+
+def get_backend_priority_list() -> list:
+    """Ordered backends for default selection when ``MOJO_BACKEND`` is unset.
+
+    On Iluvatar (``ilu``), prefer ixformer over Triton (ttx) over PyTorch.
+    ``torch_npu`` is not used on ilu.
+    """
+    p = get_platform()
+    if p == "ilu":
+        return ["ixformer", "ttx", "torch"]
+    return ["ttx", "torch_npu", "torch", "ixformer"]
 
 
 class MojoBackendRegistry:
@@ -100,4 +113,10 @@ class MojoBackendRegistry:
             return list(self._registry.values())[0]
 
     def sort(self):
-        self._registry = dict(sorted(self._registry.items(), key=lambda x: BACKEND_PRIORITY_LIST.index(x[0])))
+        priority = get_backend_priority_list()
+
+        def _prio_key(item):
+            name = item[0]
+            return priority.index(name) if name in priority else len(priority)
+
+        self._registry = dict(sorted(self._registry.items(), key=_prio_key))

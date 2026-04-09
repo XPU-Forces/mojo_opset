@@ -35,7 +35,8 @@ class MojoFunction(Function):
             cls._registry.register(cls)
             cls._registry.sort()
 
-            target_backend = os.environ.get("MOJO_BACKEND", None)
+            _raw = os.environ.get("MOJO_BACKEND")
+            target_backend = _raw.strip().lower() if _raw else None
             core_op_cls = cls._registry.get_core_op_cls()
 
             core_op_cls.forward = cls._registry.get(target_backend).forward
