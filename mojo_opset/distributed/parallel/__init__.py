@@ -5,6 +5,7 @@ from .mojo_parallel import MojoRegisterableParallelStyle
 from .mojo_parallel import get_unmanaged_params
 from .mojo_parallel import mojo_parallelize_module
 from .partitions import __DUMMY_NODE__
+from .pipeline_parallel import PipelineStageInfo
 from .tensor_parallel import MojoColwiseParallel
 from .tensor_parallel import MojoQKVColwiseParallel
 from .tensor_parallel import MojoRowwiseParallel
