@@ -23,5 +23,7 @@ if platform in _SUPPORT_TORCH_NPU_PLATFROM:
     from .torch_npu import *
 
 if platform == "npu" and get_bool_env("MOJO_DETERMINISTIC", default=False):
+    import os
+    
     # special setting for npu deterministic matmul
     os.environ["CLOSE_MATMUL_K_SHIFT"] = "1"
