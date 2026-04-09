@@ -6,7 +6,7 @@ from tests.utils import bypass_not_implemented
 from mojo_opset import MojoRotaryEmbedding
 from mojo_opset import MojoApplyRoPE
 from mojo_opset import MojoGridRoPE
-from mojo_opset.utils.platform import get_platform, get_torch_device
+from mojo_opset.utils.platform import get_torch_device
 
 torch.random.manual_seed(42)
 
@@ -110,7 +110,6 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
 @bypass_not_implemented
 def test_apply_rope(bs, seqlen, q_heads, k_heads, head_first, head_dim, rope_percentage, mode, dtype):
     """Test MojoApplyRoPE (apply rotary position embedding) with pre-extracted cos/sin."""
-    platform = get_platform()
     device = get_torch_device()
     max_seq_len = 32768
 
@@ -123,7 +122,7 @@ def test_apply_rope(bs, seqlen, q_heads, k_heads, head_first, head_dim, rope_per
         offsets = torch.randint(0, max_seq_len - seqlen - 1, (bs,), device=device, dtype=torch.int32)
         position_ids = torch.arange(seqlen, dtype=torch.int32, device=device)
         position_ids = position_ids[None, :] + offsets[:, None]
-        x = torch.randn(seqlen, hidden_size, device=device, dtype=dtype)
+        x = torch.randn(bs, seqlen, hidden_size, device=device, dtype=dtype)
         cos, sin = rot_pos_emb(x, position_ids=position_ids)
         q = torch.randn(bs, seqlen, q_heads, head_dim, device=device, dtype=dtype)
         k = torch.randn(bs, seqlen, k_heads, head_dim, device=device, dtype=dtype)
@@ -132,9 +131,8 @@ def test_apply_rope(bs, seqlen, q_heads, k_heads, head_first, head_dim, rope_per
             k = k.transpose(1, 2)
 
     elif mode == "padding_prefill_pos2d":
-        position_ids = torch.arange(seqlen, dtype=torch.int32, device=device)
-        x = torch.randn(seqlen, hidden_size, device=device, dtype=dtype)
-        cos, sin = rot_pos_emb(x, position_ids=position_ids)
+        x = torch.randn(bs, seqlen, hidden_size, device=device, dtype=dtype)
+        cos, sin = rot_pos_emb(x)
         q = torch.randn(bs, seqlen, q_heads, head_dim, device=device, dtype=dtype)
         k = torch.randn(bs, seqlen, k_heads, head_dim, device=device, dtype=dtype)
         if head_first:
