@@ -80,6 +80,7 @@ jobs:
       - name: test-Ixformer
         run: |
           docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            set -euo pipefail
             cd /workspace
             echo 'Running ixformer tests on Iluvatar GPU...'
             MOJO_BACKEND=ixformer python3 -m pytest tests/accuracy/operators/test_normalization.py
