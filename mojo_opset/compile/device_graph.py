@@ -16,9 +16,9 @@ class DeviceGraphRunner:
         from xpu_graph.device_graph_runner import GraphRunner
 
         if device is None:
-            from mojo_opset.utils.platform import get_platform
+            from mojo_opset.utils.platform import get_torch_device
 
-            device = get_platform()
+            device = get_torch_device()
 
         self.model = model
         self._device = device

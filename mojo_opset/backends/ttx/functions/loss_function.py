@@ -7,9 +7,9 @@ from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_1d_fwd
 from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_bwd
 from mojo_opset.backends.ttx.kernels import fused_linear_cross_entropy_fwd
 from mojo_opset.core import MojoFusedLinearCrossEntropyFunction
-from mojo_opset.utils.platform import get_platform
+from mojo_opset.utils.platform import get_torch_device
 
-device = get_platform()
+device = get_torch_device()
 
 
 class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):

@@ -47,9 +47,6 @@ class MojoMoE(MojoOperator):
         )
         self.combine = MojoMoECombine._registry.get(self._backend)(multiply_by_gates=True, **kwargs)
 
-        if self.gating.gate_weight is not None:
-            setattr(self.gating.gate_weight, "force_dtype", torch.float32)
-
     def forward(self, hidden_states):
         # hidden_states: [num_tokens, H]
         top_k_indices, top_k_gates = self.gating(hidden_states)
@@ -87,6 +84,7 @@ class MojoMoEGating(MojoOperator):
         super().__init__(**kwargs)
         self.gate_weight = torch.nn.Parameter(torch.empty(hidden_size, num_experts, **self.tensor_factory_kwargs))
         self.top_k = top_k
+        setattr(self.gate_weight, "force_dtype", torch.float32)
 
     def forward(
         self,
@@ -254,7 +252,6 @@ class MojoMoECombine(MojoOperator):
         Output:
         - combined: Combined output tensor.
         """
-        dtype = expert_outputs.dtype
         combined_expert_outputs = expert_outputs.float()
         if self.multiply_by_gates:
             combined_expert_outputs = combined_expert_outputs * sorted_gates.float()

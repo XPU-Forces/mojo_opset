@@ -7,14 +7,14 @@ from ..operator import MojoOperator
 
 
 class MojoRotaryEmbedding(MojoOperator):
-    def __init__(self, rope_theta, rope_dim, init_max_length: Optional[int] = None, **kwargs):
+    def __init__(self, rope_theta, rope_dim, attention_scaling: float = 1.0, init_max_length: Optional[int] = None, **kwargs):
         super().__init__(**kwargs)
         self.rope_theta = rope_theta
         inv_freq = 1.0 / (
             self.rope_theta ** (torch.arange(0, rope_dim, 2, dtype=torch.float32, device = self.tensor_factory_kwargs.get("device")) / rope_dim)
         )
-        self.attention_scaling = 1.0
-        self.init_max_length = init_max_length
+        self.attention_scaling = attention_scaling
+        self.init_max_length = None
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         if init_max_length is not None:
             self._rope_init(init_max_length)
@@ -30,6 +30,7 @@ class MojoRotaryEmbedding(MojoOperator):
 
 
     def _rope_init(self, max_length: Optional[int]) -> Tuple[torch.Tensor, torch.Tensor]:
+        self.init_max_length = max_length
         position_ids = torch.arange(max_length, device = self.tensor_factory_kwargs.get("device"))
         freqs = position_ids[..., None] * self.inv_freq[None, :]
         emb = torch.cat((freqs, freqs), dim=-1)

@@ -57,6 +57,7 @@ jobs:
       - name: Build And Install Wheel Artifact
         run: |
           docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            set -euo pipefail
             cd /workspace
             git config --global --add safe.directory /workspace
             export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
@@ -69,6 +70,7 @@ jobs:
       - name: test-TTX
         run: |
           docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            set -euo pipefail
             cd /workspace
             echo 'Running ttx kernels tests on Iluvatar GPU...'
             MOJO_BACKEND=ttx python3 -m pytest tests/accuracy/operators/ \
@@ -78,6 +80,7 @@ jobs:
       - name: test-Ixformer
         run: |
           docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            set -euo pipefail
             cd /workspace
             echo 'Running ixformer tests on Iluvatar GPU...'
             MOJO_BACKEND=ixformer python3 -m pytest tests/accuracy/operators/test_normalization.py
