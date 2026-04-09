@@ -75,6 +75,14 @@ jobs:
               --ignore=tests/accuracy/operators/test_compute_with_comm.py
           "
 
+      - name: test-Ixformer
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            cd /workspace
+            echo 'Running ixformer tests on Iluvatar GPU...'
+            MOJO_BACKEND=ixformer python3 -m pytest tests/accuracy/operators/test_normalization.py
+          "
+
       - name: Cleanup
         if: always()
         run: |

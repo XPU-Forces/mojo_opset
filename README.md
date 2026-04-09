@@ -33,10 +33,21 @@ export MOJO_RUN_MODE="EAGER"
 
 source code: mojo_opset/backends/ttx/kernels
 
+### Ixformer
+
+Ixformer is a backend powered by the [ixformer](https://github.com/AIsoftwareFactory/ixformer) library, providing high-performance fused operator implementations for Iluvatar GPUs.
+
+Supported Hardware:
+
+- Iluvatar GPU (MR/BI series)
+
+source code: mojo_opset/backends/ixformer
+
 ### Backend Selection
 
 You can control the backend you want to use via the `MOJO_BACKEND` environment variable; the currently supported backends are list as below:
 
+- "ixformer"
 - "ttx"
 - "torch_npu"
 - "torch"
@@ -47,62 +58,62 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 
 ### Mojo Operator List
 
-| Op Category | Op Name                       | torch native | torch_npu | ttx |
-| :---------- | :---------------------------- | :----------- | :-------- | :-- |
-| Activation  | MojoGelu                      | ✅           | ✅        | ✅  |
-| Activation  | MojoSilu                      | ✅           | ✅        | ✅  |
-| Activation  | MojoSwiGlu                    | ✅           | ✅        | ✅  |
-| Linear      | MojoLinear                    | ✅           | TBD       | TBD |
-| Gemm        | MojoGroupGemm                 | ✅           | ✅        | ✅  |
-| Gemm        | MojoQuantGroupLinearReduceSum | ✅           | ✅        | TBD |
-| ComputeComm | MojoGemmAllReduce             | ✅           | TBD       | TBD |
-| ComputeComm | MojoAllGatherGemm             | ✅           | TBD       | TBD |
-| ComputeComm | MojoGemmAll2All               | ✅           | TBD       | TBD |
-| ComputeComm | MojoGemmReduceScatter         | ✅           | TBD       | TBD |
-| Attention   | MojoSdpa                      | ✅           | TBD       | ✅  |
-| Attention   | MojoPrefillGQA                | ✅           | ✅        | ✅  |
-| Attention   | MojoPagedPrefillGQA           | ✅           | ✅        | ✅  |
-| Attention   | MojoDecodeGQA                 | ✅           | TBD       | TBD |
-| Attention   | MojoPagedDecodeGQA            | ✅           | ✅        | 🚧  |
-| Attention   | MojoDecodeMLA                 | ✅           | TBD       | TBD |
-| Attention   | MojoPagedDecodeMLA            | ✅           | TBD       | TBD |
-| Attention   | MojoPrefillMLA                | ✅           | TBD       | TBD |
-| Attention   | MojoPagedPrefillMLA           | ✅           | TBD       | TBD |
-| Attention   | MojoDecodeNSA                 | ✅           | TBD       | TBD |
-| Attention   | MojoPagedDecodeNSA            | ✅           | TBD       | TBD |
-| Attention   | MojoPrefillNSA                | ✅           | TBD       | TBD |
-| Attention   | MojoPagedPrefillNSA           | ✅           | TBD       | TBD |
-| Attention   | MojoSlidingWindowAttention    | TBD          | TBD       | TBD |
-| MoE         | MojoMoE                       | ✅           | TBD       | TBD |
-| MoE         | MojoMoEGating                 | ✅           | TBD       | TBD |
-| MoE         | MojoMoEDispatch               | ✅           | TBD       | TBD |
-| MoE         | MojoExperts                   | ✅           | TBD       | TBD |
-| MoE         | MojoMoECombine                | ✅           | TBD       | TBD |
-| Sampling    | MojoTopKSampling              | TBD          | TBD       | TBD |
-| Sampling    | MojoTopPSampling              | ✅           | TBD       | ✅  |
-| Sampling    | MojoRejectSampling            | ✅           | TBD       | ✅  |
-| Sampling    | MojoApplyPenaltiesTempurate   | ✅           | TBD       | ✅  |
-| Quantize    | MojoQuant                     | ✅           | TBD       | TBD |
-| Quantize    | MojoDequant                   | ✅           | TBD       | TBD |
-| Quantize    | MojoDynamicQuant              | ✅           | ✅        | TBD |
-| Quantize    | MojoDequantSwiGLUQuant        | ✅           | ✅        | TBD |
-| Quantize    | MojoGemmDequant               | ✅           | ✅        | TBD |
-| Norm        | MojoRMSNorm                   | ✅           | ✅        | ✅  |
-| Norm        | MojoLayerNorm                 | ✅           | TBD       | ✅  |
-| Norm        | MojoResidualAddRMSNorm        | ✅           | ✅        | ✅  |
-| Norm        | MojoResidualAddLayerNorm      | ✅           | TBD       | ✅  |
-| Norm        | MojoRMSNormQuant              | ✅           | ✅        | TBD |
-| Norm        | MojoLayerNormQuant            | ✅           | ✅        | TBD |
-| Norm        | MojoResidualAddRMSNormQuant   | ✅           | ✅        | TBD |
-| Norm        | MojoResidualAddLayerNormQuant | ✅           | ✅        | TBD |
-| Norm        | MojoChannelRMSNorm            | ✅           | TBD       | TBD |
-| PositionEmb | MojoRoPE                      | ✅           | ✅        | ✅  |
-| PositionEmb | MojoGridRoPE                  | ✅           | TBD       | TBD |
-| KVCache     | MojoStorePagedKVCache         | ✅           | TBD       | ✅  |
-| KVCache     | MojoStorePagedMLAKVCache      | ✅           | TBD       | TBD |
-| Embedding   | MojoEmbedding                 | ✅           | TBD       | TBD |
-| Embedding   | MojoParallelEmbedding         | ✅           | TBD       | TBD |
-| Embedding   | MojoRelativeEmbedding         | ✅           | TBD       | TBD |
+| Op Category | Op Name                       | torch native | torch_npu | ttx | ixformer |
+| :---------- | :---------------------------- | :----------- | :-------- | :-- | :------- |
+| Activation  | MojoGelu                      | ✅           | ✅        | ✅  | TBD      |
+| Activation  | MojoSilu                      | ✅           | ✅        | ✅  | TBD      |
+| Activation  | MojoSwiGlu                    | ✅           | ✅        | ✅  | TBD      |
+| Linear      | MojoLinear                    | ✅           | TBD       | TBD | TBD      |
+| Gemm        | MojoGroupGemm                 | ✅           | ✅        | ✅  | TBD      |
+| Gemm        | MojoQuantGroupLinearReduceSum | ✅           | ✅        | TBD | TBD      |
+| ComputeComm | MojoGemmAllReduce             | ✅           | TBD       | TBD | TBD      |
+| ComputeComm | MojoAllGatherGemm             | ✅           | TBD       | TBD | TBD      |
+| ComputeComm | MojoGemmAll2All               | ✅           | TBD       | TBD | TBD      |
+| ComputeComm | MojoGemmReduceScatter         | ✅           | TBD       | TBD | TBD      |
+| Attention   | MojoSdpa                      | ✅           | TBD       | ✅  | TBD      |
+| Attention   | MojoPrefillGQA                | ✅           | ✅        | ✅  | TBD      |
+| Attention   | MojoPagedPrefillGQA           | ✅           | ✅        | ✅  | TBD      |
+| Attention   | MojoDecodeGQA                 | ✅           | TBD       | TBD | TBD      |
+| Attention   | MojoPagedDecodeGQA            | ✅           | ✅        | 🚧  | TBD      |
+| Attention   | MojoDecodeMLA                 | ✅           | TBD       | TBD | TBD      |
+| Attention   | MojoPagedDecodeMLA            | ✅           | TBD       | TBD | TBD      |
+| Attention   | MojoPrefillMLA                | ✅           | TBD       | TBD | TBD      |
+| Attention   | MojoPagedPrefillMLA           | ✅           | TBD       | TBD | TBD      |
+| Attention   | MojoDecodeNSA                 | ✅           | TBD       | TBD | TBD      |
+| Attention   | MojoPagedDecodeNSA            | ✅           | TBD       | TBD | TBD      |
+| Attention   | MojoPrefillNSA                | ✅           | TBD       | TBD | TBD      |
+| Attention   | MojoPagedPrefillNSA           | ✅           | TBD       | TBD | TBD      |
+| Attention   | MojoSlidingWindowAttention    | TBD          | TBD       | TBD | TBD      |
+| MoE         | MojoMoE                       | ✅           | TBD       | TBD | TBD      |
+| MoE         | MojoMoEGating                 | ✅           | TBD       | TBD | TBD      |
+| MoE         | MojoMoEDispatch               | ✅           | TBD       | TBD | TBD      |
+| MoE         | MojoExperts                   | ✅           | TBD       | TBD | TBD      |
+| MoE         | MojoMoECombine                | ✅           | TBD       | TBD | TBD      |
+| Sampling    | MojoTopKSampling              | TBD          | TBD       | TBD | TBD      |
+| Sampling    | MojoTopPSampling              | ✅           | TBD       | ✅  | TBD      |
+| Sampling    | MojoRejectSampling            | ✅           | TBD       | ✅  | TBD      |
+| Sampling    | MojoApplyPenaltiesTempurate   | ✅           | TBD       | ✅  | TBD      |
+| Quantize    | MojoQuant                     | ✅           | TBD       | TBD | TBD      |
+| Quantize    | MojoDequant                   | ✅           | TBD       | TBD | TBD      |
+| Quantize    | MojoDynamicQuant              | ✅           | ✅        | TBD | TBD      |
+| Quantize    | MojoDequantSwiGLUQuant        | ✅           | ✅        | TBD | TBD      |
+| Quantize    | MojoGemmDequant               | ✅           | ✅        | TBD | TBD      |
+| Norm        | MojoRMSNorm                   | ✅           | ✅        | ✅  | ✅       |
+| Norm        | MojoLayerNorm                 | ✅           | TBD       | ✅  | ✅       |
+| Norm        | MojoResidualAddRMSNorm        | ✅           | ✅        | ✅  | ✅       |
+| Norm        | MojoResidualAddLayerNorm      | ✅           | TBD       | ✅  | ✅       |
+| Norm        | MojoRMSNormQuant              | ✅           | ✅        | TBD | TBD      |
+| Norm        | MojoLayerNormQuant            | ✅           | ✅        | TBD | TBD      |
+| Norm        | MojoResidualAddRMSNormQuant   | ✅           | ✅        | TBD | TBD      |
+| Norm        | MojoResidualAddLayerNormQuant | ✅           | ✅        | TBD | TBD      |
+| Norm        | MojoChannelRMSNorm            | ✅           | TBD       | TBD | TBD      |
+| PositionEmb | MojoRoPE                      | ✅           | ✅        | ✅  | TBD      |
+| PositionEmb | MojoGridRoPE                  | ✅           | TBD       | TBD | TBD      |
+| KVCache     | MojoStorePagedKVCache         | ✅           | TBD       | ✅  | TBD      |
+| KVCache     | MojoStorePagedMLAKVCache      | ✅           | TBD       | TBD | TBD      |
+| Embedding   | MojoEmbedding                 | ✅           | TBD       | TBD | TBD      |
+| Embedding   | MojoParallelEmbedding         | ✅           | TBD       | TBD | TBD      |
+| Embedding   | MojoRelativeEmbedding         | ✅           | TBD       | TBD | TBD      |
 
 
 ### Mojo Function List
@@ -214,6 +225,7 @@ Controls the backend implementation to use.
 
 | Value | Description |
 |-------|-------------|
+| `ixformer` | Use ixformer implementation (Iluvatar GPU only). |
 | `ttx` | Use Triton-x implementation. |
 | `torch` | Use PyTorch native implementation. |
 
