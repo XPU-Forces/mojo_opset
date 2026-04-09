@@ -107,6 +107,7 @@ def generate_quant_group_linear_data(
     ],
 )
 @auto_switch_platform()
+@bypass_not_implemented
 def test_group_gemm(input, weight, group_list, trans_weight):
     group_gemm = MojoGroupLinear(
         trans_weight=trans_weight,

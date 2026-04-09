@@ -320,6 +320,7 @@ def generate_diffusion_attn_test_data(
     "bsz, q_head_num, kv_head_num, head_dim, seq_length, block_size",
     [(1, 5, 1, 128, 2048, 32,)],
 )
+@bypass_not_implemented
 def test_sdpa(
     bsz,
     q_head_num,

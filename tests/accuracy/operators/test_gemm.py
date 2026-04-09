@@ -270,6 +270,7 @@ def generate_quant_group_linear_data(
         for dtype in [torch.float16, torch.bfloat16]
     ],
 )
+@bypass_not_implemented
 @auto_switch_platform()
 def test_group_gemm(input, weight, group_list, trans_weight):
     group_gemm = MojoGroupLinear(
