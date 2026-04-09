@@ -6,7 +6,7 @@ from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoSwiGLUMLP
 from mojo_opset.compile.device_graph import DeviceGraphRunner
-from mojo_opset.utils.platform import get_platform
+from mojo_opset.utils.platform import get_platform, get_torch_device
 
 
 class SimpleAttention(nn.Module):
@@ -84,9 +84,11 @@ class DummySession:
 
 
 def test_device_graph_m8_dense_layer():
-    device = get_platform()
-    if device not in ["npu"]:
-        pytest.skip(f"DeviceGraphRunner not supported on {device}")
+    platform = get_platform()
+    if platform not in ["npu"]:
+        pytest.skip(f"DeviceGraphRunner not supported on {platform}")
+    
+    device = get_torch_device()
 
     hidden_size = 256
     seq_len = 128

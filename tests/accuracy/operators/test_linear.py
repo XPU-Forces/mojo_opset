@@ -202,9 +202,6 @@ _test_grouped_matmul_cases = [
 @auto_switch_platform()
 @bypass_not_implemented
 def test_grouped_matmul_cases_via_group_linear(inputs, weights, bias, dtype):
-    if get_platform() == "npu" and dtype == torch.float32:
-        pytest.skip("NPU grouped matmul does not support float32")
-
     device = get_torch_device()
     input_tensors = [t.to(device=device) for t in inputs]
     weight_tensors = [t.to(device=device) for t in weights]
