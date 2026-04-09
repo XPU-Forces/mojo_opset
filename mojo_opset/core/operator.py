@@ -43,7 +43,8 @@ class MojoOperator(ABC, torch.nn.Module):
 
             import os
 
-            target_backend = os.environ.get("MOJO_BACKEND")
+            _raw = os.environ.get("MOJO_BACKEND")
+            target_backend = _raw.strip().lower() if _raw else None
 
             target_class = cls._registry.get(target_backend)
             instance = target_class.__new__(target_class, *args, **kwargs)
