@@ -630,6 +630,7 @@ def swa_infer_impl(
         BLOCK_M,
         BLOCK_N,
         BLOCK_D,
+        enable_ubuf_saving=True,
     )
     return o
 

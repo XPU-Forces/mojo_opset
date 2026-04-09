@@ -47,7 +47,6 @@ def assert_close(
 
     for result, ref in zip(results, refs):
         if isinstance(result, torch.Tensor) and isinstance(ref, torch.Tensor):
-            print(f"result shape {result.shape} ref.shape {ref.shape} result.dtype {result.dtype} ref.dtype {ref.dtype}")
             assert result.shape == ref.shape
             assert result.dtype == ref.dtype
             dtype = result.dtype

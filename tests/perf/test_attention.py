@@ -277,18 +277,6 @@ def test_sdpa(
     blockwise_diffusion_attn_mask: torch.Tensor,
     enable_gqa: bool,
 ):
-    import torch_npu
-    perf(lambda:torch_npu.npu_fusion_attention(
-                query, key, value, 8,
-                padding_mask=None,
-                atten_mask=blockwise_diffusion_attn_mask,
-                scale=1.0 / math.sqrt(query.shape[-1]),
-                keep_prob=1.0,
-                input_layout='BNSD',
-                pre_tockens=65535,
-                next_tockens=65535,
-                sparse_mode=0,
-                )[0])
     diffusion_attn = MojoSdpa(
         scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
     )

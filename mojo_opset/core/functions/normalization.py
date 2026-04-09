@@ -36,7 +36,6 @@ class MojoRMSNormFunction(MojoFunction):
         ctx.save_for_backward(input, weight)
         ctx.normalized_shape = normalized_shape
         ctx.eps = eps
-        print(f"y dtype {y.dtype}")
         return y
 
     @staticmethod
