@@ -804,6 +804,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     swa_infer = swa_infer_impl
     swa_fwd = swa_fwd_impl
     swa_bwd = swa_bwd_impl
+    group_rmsnorm = group_rmsnorm_impl
 
 else:
     causal_conv1d_fwd = causal_conv1d_fwd_impl
