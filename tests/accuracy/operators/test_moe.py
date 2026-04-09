@@ -4,8 +4,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from mojo_opset import MojoMoE, MojoMoEGating
-from mojo_opset.utils.platform import get_platform
+from mojo_opset import MojoMoE
+from mojo_opset import MojoMoEGating
+from mojo_opset.utils.platform import get_torch_device
 from tests.utils import bypass_not_implemented
 
 
@@ -21,7 +22,7 @@ from tests.utils import bypass_not_implemented
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @bypass_not_implemented
 def test_moe(num_experts, top_k, hidden_size, intermediate_size, num_tokens, dtype):
-    device = get_platform()
+    device = get_torch_device()
     torch.manual_seed(0)
 
     moe = MojoMoE(
@@ -64,7 +65,7 @@ def test_moe(num_experts, top_k, hidden_size, intermediate_size, num_tokens, dty
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @bypass_not_implemented
 def test_moe_gating(num_experts, top_k, hidden_size, num_tokens, dtype):
-    device = get_platform()
+    device = get_torch_device()
     torch.manual_seed(0)
 
     moe_gating = MojoMoEGating(

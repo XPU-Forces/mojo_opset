@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from tests.utils import auto_switch_platform, bypass_not_implemented, get_platform
+from tests.utils import auto_switch_platform, bypass_not_implemented, get_platform, get_torch_device
 
 from mojo_opset import MojoGemmDequant, MojoLinear, MojoGroupLinear, MojoQuantGroupLinearReduceSum
 
@@ -366,8 +366,9 @@ _test_grouped_matmul_cases = [
 @auto_switch_platform()
 @bypass_not_implemented
 def test_grouped_matmul_cases_via_group_linear(inputs, weights, bias, dtype):
-    device = get_platform()
-    if device == "npu" and dtype == torch.float32:
+    platform = get_platform()
+    device = get_torch_device()
+    if platform == "npu" and dtype == torch.float32:
         pytest.skip("NPU grouped matmul does not support float32")
 
     input_tensors = [t.to(device=device) for t in inputs]
@@ -398,7 +399,7 @@ def test_grouped_matmul_cases_via_group_linear(inputs, weights, bias, dtype):
 @auto_switch_platform()
 @bypass_not_implemented
 def test_group_linear_two_groups_single_call(dtype, trans_weight):
-    device = get_platform()
+    device = get_torch_device()
 
     m0, m1 = 64, 128
     k, n = 128, 96

@@ -6,6 +6,8 @@ from typing import Union
 
 import torch
 
+from mojo_opset.utils.platform import get_platform
+
 from mojo_opset.backends.ttx.kernels import fused_penalties_temp
 from mojo_opset.backends.ttx.kernels import join_prob_reject_sampling
 from mojo_opset.backends.ttx.kernels import reject_sampling
@@ -32,7 +34,7 @@ class TTXTopKSampling(MojoTopKSampling):
 
 
 class TTXTopPSampling(MojoTopPSampling):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(self, logits: torch.Tensor) -> Tuple[Any]:
         return top_p_sampling(
@@ -45,7 +47,7 @@ class TTXTopPSampling(MojoTopPSampling):
 
 
 class TTXTopPFilter(MojoTopPFilter):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(self, logits: torch.Tensor, top_p: float, min_tokens_to_keep: int, rand_top_k: int) -> Tuple[Any]:
         return top_p_filter(
@@ -58,6 +60,8 @@ class TTXTopPFilter(MojoTopPFilter):
 
 
 class TTXRejectSampling(MojoRejectSampling):
+    supported_platforms_list = ["npu", "ilu"]
+
     def forward(
         self,
         target_logits: torch.Tensor,  # [batch, spec_step + 1, vocab_size]
@@ -74,6 +78,8 @@ class TTXRejectSampling(MojoRejectSampling):
 
 
 class TTXJoinProbRejectSampling(MojoJoinProbRejectSampling):
+    supported_platforms_list = ["npu", "ilu"]
+
     def forward(
         self,
         target_logits: torch.Tensor,  # [batch, spec_step + 1, vocab_size]
@@ -90,7 +96,7 @@ class TTXJoinProbRejectSampling(MojoJoinProbRejectSampling):
 
 
 class TTXApplyPenaltiesTempurate(MojoApplyPenaltiesTempurate):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(
         self,
@@ -101,7 +107,7 @@ class TTXApplyPenaltiesTempurate(MojoApplyPenaltiesTempurate):
         repetition_penalties: List[float],
         temps: Optional[List[Optional[float]]] = None,
     ) -> torch.Tensor:
-        if len(temps) == 0:
+        if temps is not None and len(temps) == 0:
             temps = None
         return fused_penalties_temp(
             logits, token_freqs, frequency_penalties, presence_penalties, repetition_penalties, temps
