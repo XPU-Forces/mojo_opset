@@ -65,8 +65,8 @@ def _sdpa_infer_inner(
         # qk += (1 - mask.to(tl.float32)) * (-1e6)
         # qk = tl.where(mask, qk, float("-inf"))
         qk = tl.where(mask, qk, -1e6)
-
-        m_ij = tl.maximum(m_i, tl.max(qk, 1))  # Scaled max
+        m_ij = tl.maximum(m_i, tl.max(qk, 1, propagate_nan=tl.PropagateNan.ALL), propagate_nan=tl.PropagateNan.ALL)
+        #m_ij = tl.maximum(m_i, tl.max(qk, 1))  # Scaled max
         qk = qk - m_ij[:, None]  # Stabilize
 
         # Softmax weights p = exp(qk)
@@ -82,7 +82,7 @@ def _sdpa_infer_inner(
         # -- Update output accumulator --
         acc_ptr = acc_ptr * alpha[:, None]
         acc_ptr = tl.dot(p_cast, v, acc_ptr)
-        tl.compile_hint(acc_ptr, "tile_cube_loop", 2)
+        tl.extra.cann.extension.compile_hint(acc_ptr, "hivm.tile_mix_cube_num",2)
 
         m_i = m_ij  # Update current block max
         # Advance V and K block pointers to next BLOCK_N range
@@ -408,7 +408,8 @@ def kernel_sdpa_fwd(
 
             block_s = tl.dot(block_q, tl.trans(block_k)) * scale
             block_s -= (1.0 - block_mask.to(HIGH_TYPE)) * 1e6
-            block_m_1 = tl.maximum(block_m, tl.max(block_s, axis=1))
+            block_m_1 = tl.maximum(block_m, tl.max(block_s, axis=1,
+                                   propagate_nan=tl.PropagateNan.ALL),propagate_nan=tl.PropagateNan.ALL)
             block_s = tl.exp(block_s - block_m_1[:, None])
             block_l_1 = tl.exp(block_m - block_m_1) * block_l + tl.sum(block_s, axis=1)
             block_o = tl.exp(block_m - block_m_1)[:, None] * block_o + tl.dot(block_s.to(LOW_TYPE), block_v).to(
@@ -802,7 +803,7 @@ def sdpa_infer_impl(
 
     if scale is None:
         scale = 1.0
-
+    print(f"mask {mask}")
     o = torch.empty_like(q)
 
     extra_kern_args = {}

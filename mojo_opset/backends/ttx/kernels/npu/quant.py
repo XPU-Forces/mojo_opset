@@ -112,9 +112,9 @@ def scale_dynamic_quant_kernel(
             scale_vals = tl.load(scale_ptr, mask=dims_mask, other=0.0).to(tl.float32)
             scaled_vals = input_vals * scale_vals
 
-            current_max = tl.max(tl.abs(scaled_vals), axis=1)
+            current_max = tl.max(tl.abs(scaled_vals), axis=1,propagate_nan=tl.PropagateNan.ALL)
 
-            max_abs_accumulator = tl.maximum(max_abs_accumulator, current_max)
+            max_abs_accumulator = tl.maximum(max_abs_accumulator, current_max,propagate_nan=tl.PropagateNan.ALL)
 
         final_max_abs = max_abs_accumulator
         current_quant_scale = final_max_abs / 127.0
@@ -141,6 +141,6 @@ def scale_dynamic_quant_kernel(
             scaled_vals = input_vals * scale_vals
             quant_vals = scaled_vals / current_quant_scale[:, None]
             quant_vals = tl.where(quant_vals < 0, quant_vals - 0.5, quant_vals + 0.5)
-            quant_vals_int8 = tl.cast(quant_vals, dtype=tl.int8, overflow_mode="saturate")
+            quant_vals_int8 = tl.cast(quant_vals, dtype=tl.int8)
 
             tl.store(output_ptr, quant_vals_int8, mask=block_mask)

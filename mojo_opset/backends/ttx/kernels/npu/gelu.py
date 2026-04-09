@@ -28,7 +28,7 @@ def gelu_tanh_approx(x):
     sqrt_2_over_pi = 0.7978845608028654  # sqrt(2 / π)
     x_cubed = x * x * x
     tanh_arg = sqrt_2_over_pi * (x + 0.044715 * x_cubed)
-    return 0.5 * x * (1 + tl.tanh(tanh_arg))
+    return 0.5 * x * (1 + tl.extra.cann.math.tanh(tanh_arg))
 
 
 @triton.autotune(
@@ -137,7 +137,7 @@ def _gelu_bwd_kernel(
             sqrt_2_over_pi = 0.7978845608028654
             x_cubed = x_f32 * x_f32 * x_f32
             tanh_arg = sqrt_2_over_pi * (x_f32 + 0.044715 * x_cubed)
-            tanh_result = tl.tanh(tanh_arg)
+            tanh_result = tl.extra.cann.math.tanh(tanh_arg)
 
             term1 = 0.5 * (1 + tanh_result)
             tanh_sq = tanh_result * tanh_result

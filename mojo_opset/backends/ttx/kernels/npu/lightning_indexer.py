@@ -154,7 +154,7 @@ def lightning_indexer_kernel(
         )
         q = tl.load(query_ptrs)
 
-        relu_qk = tl.maximum(tl.dot(q.to(k.dtype), tl.trans(k)), 0.0)
+        relu_qk = tl.maximum(tl.dot(q.to(k.dtype), tl.trans(k)), 0.0,propagate_nan=tl.PropagateNan.ALL)
 
         query_scale_ptrs = (
             query_scale_ptr
