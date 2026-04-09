@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from mojo_opset import MojoStorePagedKVCache
-from mojo_opset.utils.platform import get_platform
+from mojo_opset.utils.platform import get_torch_device
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
@@ -23,7 +23,7 @@ from tests.utils import bypass_not_implemented
 @bypass_not_implemented
 @auto_switch_platform(set_perf=True)
 def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, kv_lens_val, seq_lens_val):
-    device = get_platform()
+    device = get_torch_device()
 
     kv_lens = torch.tensor(kv_lens_val, dtype=torch.long, device=device)
     seq_lens = torch.tensor(seq_lens_val, dtype=torch.long, device=device)

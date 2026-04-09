@@ -3,7 +3,7 @@ import torch
 
 from mojo_opset import MojoRotaryEmbedding
 from mojo_opset import MojoApplyRoPE
-from mojo_opset.utils.platform import get_platform
+from mojo_opset.utils.platform import get_torch_device
 from tests.utils import auto_switch_platform
 from tests.utils import bypass_not_implemented
 
@@ -23,8 +23,8 @@ from tests.utils import bypass_not_implemented
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_pos_emb(bs, seqlen, q_heads, k_heads, head_dim, dtype):
-    device = get_platform()
-    x = torch.randn(bs, seqlen, q_heads*head_dim, device=device, dtype=dtype)
+    device = get_torch_device()
+    x = torch.randn(bs, seqlen, q_heads * head_dim, device=device, dtype=dtype)
     rot_pos_emb = MojoRotaryEmbedding(
         rope_theta=10000.0, rope_dim=head_dim, init_max_length=seqlen,
     ).to(device)

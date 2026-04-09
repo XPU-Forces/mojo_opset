@@ -6,7 +6,7 @@ from mojo_opset.core import MojoSiluFunction
 
 
 class TTXSiluFunction(MojoSiluFunction):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     @staticmethod
     def forward(

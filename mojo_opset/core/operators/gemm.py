@@ -47,21 +47,26 @@ class MojoGroupGemm(MojoOperator):
         assert self.weight.size(0) == num_groups, "weight group count must match group_list length"
 
         if self.trans_weight:
+            num_groups_w, n, bk = self.weight.shape
+            strideBN, strideBK = self.weight.stride(1), self.weight.stride(2)
+        else:
+            num_groups_w, bk, n = self.weight.shape
+            strideBK, strideBN = self.weight.stride(1), self.weight.stride(2)
+
+        m, k = input.shape
+        assert bk == k, "K of input should be equal to K of self.weight."
+        assert num_groups_w == num_groups
+
+        if self.trans_weight:
             weight = self.weight.transpose(1, 2).contiguous()
         else:
             weight = self.weight
-
         group_start = group_list.cumsum(0) - group_list
         group_end = group_list.cumsum(0)
-
         out_list = []
 
         for g, (start, end) in enumerate(zip(group_start.tolist(), group_end.tolist())):
-            a_g = input[start:end, :]
-            b_g = weight[g, :, :]
-            out_g = a_g @ b_g
-            out_list.append(out_g)
-
+            out_list.append(input[start:end, :] @ weight[g, :, :])
         return torch.cat(out_list, dim=0)
 
     def extra_repr(self) -> str:

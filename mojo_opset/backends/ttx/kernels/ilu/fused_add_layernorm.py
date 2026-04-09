@@ -1,0 +1,141 @@
+import torch
+import triton
+import triton.language as tl
+
+from .utils import _block_size_n_pow2
+from .utils import ilu_grid_dim_from_row_tasks
+from .utils import layer_norm_fwd_heuristics
+from .utils import libentry
+
+
+def _fused_add_layernorm_fwd_grid_n_programs(n_rows: int, n_cols: int) -> int:
+    block_m = layer_norm_fwd_heuristics({"n_cols": n_cols})
+    n_tasks = triton.cdiv(n_rows, block_m)
+    return ilu_grid_dim_from_row_tasks(n_tasks)
+
+
+@triton.heuristics({"BLOCK_SIZE_M": layer_norm_fwd_heuristics})
+@libentry()
+@triton.jit
+def _fused_add_layernorm_fwd_kernel(
+    Y_ptr,
+    Y_row_stride,
+    S_ptr,
+    S_row_stride,
+    X_ptr,
+    X_row_stride,
+    R_ptr,
+    R_row_stride,
+    W_ptr,
+    B_ptr,
+    Mean_ptr,
+    Mean_row_stride,
+    RSTD_ptr,
+    RSTD_row_stride,
+    n_rows,
+    eps,
+    N_COLS: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    num_row_tasks = (n_rows + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+
+    task_mask = pid < num_row_tasks
+
+    block_start_row = pid * BLOCK_SIZE_M
+    rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
+    rows_mask = task_mask & (rows_off < n_rows)
+
+    X_ptr_row_block = X_ptr + rows_off[:, None] * X_row_stride
+    R_ptr_row_block = R_ptr + rows_off[:, None] * R_row_stride
+    S_ptr_row_block = S_ptr + rows_off[:, None] * S_row_stride
+    Y_ptr_row_block = Y_ptr + rows_off[:, None] * Y_row_stride
+
+    mean_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+    var_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+    for col_offset in range(0, N_COLS, BLOCK_SIZE_N):
+        cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+        cols_mask = cols_off < N_COLS
+        block_mask = rows_mask[:, None] & cols_mask[None, :]
+
+        X_chunk = tl.load(X_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
+        R_chunk = tl.load(R_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
+        S_chunk = X_chunk + R_chunk
+        tl.store(S_ptr_row_block + cols_off[None, :], S_chunk, mask=block_mask)
+
+        S_chunk_f32 = S_chunk.to(tl.float32)
+        mean_acc += tl.sum(S_chunk_f32, axis=1)
+        var_acc += tl.sum(S_chunk_f32 * S_chunk_f32, axis=1)
+
+    mean_vec = mean_acc / N_COLS
+    var_vec = (var_acc / N_COLS) - (mean_vec * mean_vec)
+    rstd_vec = tl.rsqrt(var_vec + eps)
+    tl.store(Mean_ptr + rows_off * Mean_row_stride, mean_vec, mask=rows_mask)
+    tl.store(RSTD_ptr + rows_off * RSTD_row_stride, rstd_vec, mask=rows_mask)
+
+    for col_offset in range(0, N_COLS, BLOCK_SIZE_N):
+        cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+        cols_mask = cols_off < N_COLS
+        block_mask = rows_mask[:, None] & cols_mask[None, :]
+
+        S_chunk = tl.load(S_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0).to(tl.float32)
+        W_chunk = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0)
+        B_chunk = tl.load(B_ptr + cols_off, mask=cols_mask, other=0.0)
+
+        normed_S_chunk = (S_chunk - mean_vec[:, None]) * rstd_vec[:, None]
+        Y_chunk = normed_S_chunk * W_chunk[None, :] + B_chunk[None, :]
+        tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk, mask=block_mask)
+
+
+def fused_add_layernorm_infer_impl(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    add_mode: str = "pre",
+    eps: float = 1e-6,
+):
+    shape = hidden_states.shape
+    dim = shape[-1]
+    X_2d = hidden_states.reshape(-1, dim)
+    R_2d = residual.reshape(-1, dim)
+    n_rows, n_cols = X_2d.shape
+
+    BLOCK_SIZE_N = _block_size_n_pow2(n_cols)
+
+    grid = (_fused_add_layernorm_fwd_grid_n_programs(n_rows, n_cols),)
+
+    Mean = torch.empty(n_rows, dtype=torch.float32, device=hidden_states.device)
+    RSTD = torch.empty(n_rows, dtype=torch.float32, device=hidden_states.device)
+
+    Y = torch.empty_like(X_2d)
+    S = torch.empty_like(X_2d)
+
+    _fused_add_layernorm_fwd_kernel[grid](
+        Y,
+        Y.stride(0),
+        S,
+        S.stride(0),
+        X_2d,
+        X_2d.stride(0),
+        R_2d,
+        R_2d.stride(0),
+        weight,
+        bias,
+        Mean,
+        Mean.stride(0),
+        RSTD,
+        RSTD.stride(0),
+        n_rows,
+        eps,
+        N_COLS=n_cols,
+        BLOCK_SIZE_N=BLOCK_SIZE_N,
+    )
+
+    if add_mode == "pre":
+        return Y.reshape(*shape), S.reshape(*shape)
+    elif add_mode == "post":
+        return Y.reshape(*shape), Y.reshape(*shape)
+    else:
+        raise ValueError(f"Invalid add_mode: '{add_mode}'. Must be 'pre' or 'post'.")

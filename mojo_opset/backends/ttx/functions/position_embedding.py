@@ -6,6 +6,7 @@ from mojo_opset.core import MojoApplyRoPEFunction
 
 
 class TTXApplyRoPEFunction(MojoApplyRoPEFunction):
+    supported_platforms_list = ["npu", "ilu"]
     @staticmethod
     def forward(
         ctx,

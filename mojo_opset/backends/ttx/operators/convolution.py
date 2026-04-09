@@ -7,7 +7,7 @@ from mojo_opset.core.operators.convolution import MojoCausalConv1dUpdateState
 
 
 class TTXCausalConv1dUpdateState(MojoCausalConv1dUpdateState):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(
         self,

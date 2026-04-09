@@ -3,7 +3,7 @@ import torch
 
 from mojo_opset import MojoLightningIndexer
 from mojo_opset.experimental.operators.indexer import MojoIndexer
-from mojo_opset.utils.platform import get_platform
+from mojo_opset.utils.platform import get_torch_device
 from tests.utils import auto_switch_platform, bypass_not_implemented
 
 TEST_SHAPES = [
@@ -26,7 +26,7 @@ dtype_str_map = {
 @auto_switch_platform()
 @bypass_not_implemented
 def test_lightning_indexer(B, M, N, H, K, dtype):
-    device = get_platform()
+    device = get_torch_device()
     dtype = dtype_str_map[dtype]
     query = torch.randn(B, M, H, K, dtype=dtype, device=device)
     query_scale = torch.randn(B, M, H, dtype=torch.float32, device=device)
@@ -51,7 +51,7 @@ def test_lightning_indexer(B, M, N, H, K, dtype):
 @auto_switch_platform()
 @bypass_not_implemented
 def test_indexer(batch, q_seq_len, head_dim, dim, q_lora_rank, dtype):
-    device = get_platform()
+    device = get_torch_device()
     map_tol = {
         "bfloat16": (1.6e-2, 1e-5, 1.0),
         "float16": (1e-3, 1e-5, 1.0),
