@@ -1,4 +1,3 @@
-import logging
 import math
 
 import torch
@@ -12,6 +11,9 @@ from mojo_opset import MojoGelu
 from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoRelativeEmbedding
 from mojo_opset import MojoSdpa
+from mojo_opset.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 __all__ = [
     "T5Model",
@@ -394,7 +396,7 @@ class T5EncoderModel:
         model = (
             umt5_xxl(encoder_only=True, return_tokenizer=False, dtype=dtype, device=device).eval().requires_grad_(False)
         )
-        logging.info(f"loading {checkpoint_path}")
+        logger.info(f"loading {checkpoint_path}")
         model.load_state_dict(torch.load(checkpoint_path, map_location="cpu"))
         self.model = model
         if shard_fn is not None:

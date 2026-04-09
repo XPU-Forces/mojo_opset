@@ -1,6 +1,10 @@
 import json
 import time
 
+from mojo_opset.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
 
 class MojoTracingGenerator:
     def __init__(self, trace_name="Custom Timeline"):
@@ -131,7 +135,7 @@ class MojoTracingGenerator:
         with open(filename, "w") as f:
             json.dump(trace_data, f, indent=2)
 
-        print(f"Timeline '{self.trace_name}' 已保存到 {filename}")
+        logger.info(f"Timeline '{self.trace_name}' 已保存到 {filename}")
 
 
 # 使用示例
@@ -217,8 +221,8 @@ if __name__ == "__main__":
     # 保存到文件
     tracer.save_to_file("custom_process_thread_timeline.json")
 
-    print("\n使用说明：")
-    print("1. 在 Chrome 浏览器中打开 chrome://tracing")
-    print("2. 点击 'Load' 按钮")
-    print("3. 选择生成的 custom_process_thread_timeline.json 文件")
-    print("4. 在时间线中可以看到自定义的进程和线程名称")
+    logger.info("使用说明：")
+    logger.info("1. 在 Chrome 浏览器中打开 chrome://tracing")
+    logger.info("2. 点击 'Load' 按钮")
+    logger.info("3. 选择生成的 custom_process_thread_timeline.json 文件")
+    logger.info("4. 在时间线中可以看到自定义的进程和线程名称")

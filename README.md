@@ -223,6 +223,24 @@ Controls the backend implementation to use.
 export MOJO_BACKEND="ttx"
 ```
 
+### MOJO_OPSET_VERBOSITY
+
+Controls the logging verbosity level. Uses standard Python logging levels.
+
+| Value | Description |
+|-------|-------------|
+| `DEBUG` | Show all messages including debug details. |
+| `INFO` (default) | Show informational messages and above. |
+| `WARNING` | Show warnings and errors only. |
+| `ERROR` | Show errors only. |
+| `CRITICAL` | Show critical errors only. |
+
+**Usage:**
+
+```bash
+export MOJO_OPSET_VERBOSITY="DEBUG"
+```
+
 ## 🚧 Future Work
 
 - Add more mojo ops.
