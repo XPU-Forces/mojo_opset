@@ -30,7 +30,6 @@ from .rope import rope_fwd_impl
 from .sample import fused_penalties_temp_impl
 from .sample import join_prob_reject_sampling_impl
 from .sample import reject_sampling_impl
-from .sample import top_k_sampling_impl
 from .sample import top_p_filter_impl
 from .sample import top_p_sampling_impl
 from .sdpa import sdpa_bwd_impl
