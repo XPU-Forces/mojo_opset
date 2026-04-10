@@ -392,7 +392,8 @@ def _swa_infer_kernel(
                 )
 
             l_safe = tl.where(q_valid, l_i, 1.0)
-            out_block = acc / l_safe[:, None]
+            out_block = acc / tl.where(l_safe[:, None] > 0, l_safe[:, None], 1.0)
+            out_block = tl.where(l_i[:, None] > 0, out_block, 0.0)
             out_block = tl.where(q_valid[:, None], out_block, 0.0)
             o_block_ptr = tl.make_block_ptr(
                 base=o_ptr + q_start * stride_ot + q_head_id * stride_oh,
