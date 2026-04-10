@@ -212,6 +212,11 @@ class MojoQuantGroupLinearReduceSum(MojoOperator):
 
         return reduced_out
 
+class MojoQuantGroupGemmCombineEP(MojoOperator):
+    """
+    Quantized grouped GEMM with expert parallel combination.
+    """
+    pass
 
 class MojoQuantMatmul(MojoOperator):
     pass
