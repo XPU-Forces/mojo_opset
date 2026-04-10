@@ -16,8 +16,12 @@ def get_aux_mask():
                 torch.cat(
                     [
                         torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).triu().bool(),
                         torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                    ],
+                    dim=1,
+                ),
+                torch.cat(
+                    [
                         torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).tril().bool(),
                         torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
                     ],
@@ -27,8 +31,19 @@ def get_aux_mask():
                     [
                         torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
                         torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                    ],
+                    dim=1,
+                ),
+                torch.cat(
+                    [
+                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).triu().bool(),
                         torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                    ],
+                    dim=1,
+                ),
+                torch.cat(
+                    [
+                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
                         torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
                     ],
                     dim=1,
@@ -120,8 +135,8 @@ def gen_mask_n_right_bound(mask_10_ptr, mask_size, mask_stride_m, mask_stride_n,
     offset = min(max(n_start - right, -mask_size), 0)
     mask = tl.load(
         mask_10_ptr
-        + tl.arange(0, M_BLOCK)[:, None] * mask_stride_m
-        + (offset + tl.arange(0, N_BLOCK))[None, :] * mask_stride_n
+        + tl.arange(0, M_BLOCK)[None, :] * mask_stride_m
+        + (offset + tl.arange(0, N_BLOCK))[:, None] * mask_stride_n
     )
     return mask.to(tl.int1)
 
@@ -132,8 +147,8 @@ def gen_mask_n_left_bound(mask_01_ptr, mask_size, mask_stride_m, mask_stride_n, 
     offset = min(max(n_start - left, -mask_size), 0)
     mask = tl.load(
         mask_01_ptr
-        + tl.arange(0, M_BLOCK)[:, None] * mask_stride_m
-        + (offset + tl.arange(0, N_BLOCK))[None, :] * mask_stride_n
+        + tl.arange(0, M_BLOCK)[None, :] * mask_stride_m
+        + (offset + tl.arange(0, N_BLOCK))[:, None] * mask_stride_n
     )
     return mask.to(tl.int1)
 
@@ -144,8 +159,8 @@ def gen_mask_m_right_bound(mask_10t_ptr, mask_size, mask_stride_m, mask_stride_n
     offset = min(max(m_start - right, -mask_size), 0)
     mask = tl.load(
         mask_10t_ptr
-        + (offset + tl.arange(0, M_BLOCK)[:, None]) * mask_stride_m
-        + tl.arange(0, N_BLOCK)[None, :] * mask_stride_n
+        + (offset + tl.arange(0, M_BLOCK)[None, :]) * mask_stride_m
+        + tl.arange(0, N_BLOCK)[:, None] * mask_stride_n
     )
     return mask.to(tl.int1)
 
@@ -156,8 +171,8 @@ def gen_mask_m_left_bound(mask_01t_ptr, mask_size, mask_stride_m, mask_stride_n,
     offset = min(max(m_start - left, -mask_size), 0)
     mask = tl.load(
         mask_01t_ptr
-        + (offset + tl.arange(0, M_BLOCK)[:, None]) * mask_stride_m
-        + tl.arange(0, N_BLOCK)[None, :] * mask_stride_n
+        + (offset + tl.arange(0, M_BLOCK)[None, :]) * mask_stride_m
+        + tl.arange(0, N_BLOCK)[:, None] * mask_stride_n
     )
     return mask.to(tl.int1)
 
@@ -168,8 +183,8 @@ def gen_mask_tril(mask_ptr_tril, mask_size, mask_stride_m, mask_stride_n, M_BLOC
     offset = min(max(n_start - m_start, -mask_size), mask_size)
     mask = tl.load(
         mask_ptr_tril
-        + tl.arange(0, M_BLOCK)[:, None] * mask_stride_m
-        + (offset + tl.arange(0, N_BLOCK))[None, :] * mask_stride_n
+        + tl.arange(0, M_BLOCK)[None, :] * mask_stride_m
+        + (offset + tl.arange(0, N_BLOCK))[:, None] * mask_stride_n
     )
     return mask.to(tl.int1)
 
@@ -180,8 +195,8 @@ def gen_mask_triu(mask_ptr_triu, mask_size, mask_stride_m, mask_stride_n, M_BLOC
     len_offset = min(max(n_start - m_start, -mask_size), mask_size)
     mask = tl.load(
         mask_ptr_triu
-        + tl.arange(0, M_BLOCK)[:, None] * mask_stride_m
-        + (len_offset + tl.arange(0, N_BLOCK))[None, :] * mask_stride_n
+        + tl.arange(0, M_BLOCK)[None, :] * mask_stride_m
+        + (len_offset + tl.arange(0, N_BLOCK))[:, None] * mask_stride_n
     )
     return mask.to(tl.int1)
 
@@ -208,33 +223,32 @@ def _sdpa_acc_fwd_MxN(
 
     # Load (transposed) K block
     k = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
-    k_T = tl.trans(k)
-    qk = tl.dot(q, k_T)
+    qk = tl.dot(k, q)
     # tl.compile_hint(qk, "tile_cube_loop")
 
     qk = qk * qk_scale
     if mask is not None and mask is not True:
         qk = tl.where(mask, qk, -1e6)  # 32B # bool
 
-    m_ij = tl.maximum(m_i, tl.max(qk, 1))  # Scaled max
-    qk = qk - m_ij[:, None]  # Stabilize
+    m_ij = tl.maximum(m_i, tl.max(qk, 0))  # Scaled max
+    qk = qk - m_ij[None, :]  # Stabilize
 
     # Softmax weights p = exp(qk)
     p = tl.math.exp(qk)
 
-    p_cast = p.to(k_T.dtype)
+    p_cast = p.to(k.dtype)
 
     # Load corresponding V block
     v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
     # Softmax denominator (sum of each row)
-    l_ij = tl.sum(p, 1)
+    l_ij = tl.sum(p, 0)
     # -- Update m_i and l_i
     alpha = tl.math.exp(m_i - m_ij)  # Update factor: exp difference between old and new max
     l_i = l_i * alpha + l_ij  # Update softmax denominator
     # -- Update output accumulator --
-    acc_ptr = acc_ptr * alpha[:, None]
-    acc_ptr = tl.dot(p_cast, v, acc_ptr)
+    acc_ptr = acc_ptr * alpha[None, :]
+    acc_ptr = tl.dot(v, p_cast, acc_ptr)
     # tl.compile_hint(acc_ptr, "tile_cube_loop")
 
     # Update current block max
@@ -357,17 +371,17 @@ def _paged_prefill_kernel(
             # cur_q_block_ptr = tl.advance(q_block_ptr, (q_block_start.to(tl.int32), 0))
             cur_q_block_ptr = tl.make_block_ptr(
                 base=q_ptr + q_start * stride_qt + q_head_id * stride_qh,
-                shape=(q_seq_len, HEAD_DIM),
-                strides=(stride_qt, stride_qd),
-                offsets=(q_block_start.to(tl.int32), 0),
-                block_shape=(BLOCK_M, BLOCK_D),
-                order=(1, 0),
+                shape=(HEAD_DIM, q_seq_len),
+                strides=(stride_qd, stride_qt),
+                offsets=(0, q_block_start.to(tl.int32)),
+                block_shape=(BLOCK_D, BLOCK_M),
+                order=(0, 1),
             )
             cur_q_block = tl.load(cur_q_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
             m_i = tl.zeros((BLOCK_M,), dtype=tl.float32) - float("inf")
             l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
-            acc = tl.zeros((BLOCK_M, HEAD_DIM), dtype=tl.float32)
+            acc = tl.zeros((HEAD_DIM, BLOCK_M), dtype=tl.float32)
 
             num_global_window_blocks, non_global_window_start_block, num_total_blocks = _swa_split_blocks(
                 q_block_start + kv_computed_len,
@@ -446,11 +460,11 @@ def _paged_prefill_kernel(
                 )
                 cur_v_block_ptr = tl.make_block_ptr(
                     base=v_ptr + physical_page_id * stride_vp + kv_head_id * stride_vh + kv_block_start_in_page * stride_vt,
-                    shape=(kv_block_len, HEAD_DIM),
-                    strides=(stride_vt, stride_vd),
+                    shape=(HEAD_DIM, kv_block_len),
+                    strides=(stride_vd, stride_vt),
                     offsets=(0, 0),
-                    block_shape=(BLOCK_N, BLOCK_D),
-                    order=(1, 0),
+                    block_shape=(BLOCK_D, BLOCK_N),
+                    order=(0, 1),
                 )
                 acc, l_i, m_i = _sdpa_acc_fwd_MxN(
                     acc,
@@ -524,11 +538,11 @@ def _paged_prefill_kernel(
                 )
                 cur_v_block_ptr = tl.make_block_ptr(
                     base=v_ptr + physical_page_id * stride_vp + kv_head_id * stride_vh + kv_block_start_in_page * stride_vt,
-                    shape=(kv_block_len, HEAD_DIM),
-                    strides=(stride_vt, stride_vd),
+                    shape=(HEAD_DIM, kv_block_len),
+                    strides=(stride_vd, stride_vt),
                     offsets=(0, 0),
-                    block_shape=(BLOCK_N, BLOCK_D),
-                    order=(1, 0),
+                    block_shape=(BLOCK_D, BLOCK_N),
+                    order=(0, 1),
                 )
                 acc, l_i, m_i = _sdpa_acc_fwd_MxN(
                     acc,
@@ -555,7 +569,8 @@ def _paged_prefill_kernel(
                 block_shape=(BLOCK_M, BLOCK_D),
                 order=(1, 0),
             )
-            accumulator = acc / l_i[:, None]
+            accumulator = acc / l_i[None, :]
+            accumulator = tl.trans(accumulator)
             tl.store(cur_o_block_ptr, accumulator.to(o_ptr.type.element_ty), boundary_check=(0, 1))
 
 
@@ -621,26 +636,25 @@ def swa_paged_prefill_impl(
         block_table.stride(1),
         mask,
         mask_size,
-        mask.stride(0),
         mask.stride(1),
-        is_causal,
-        global_window_size,
-        local_window_size,
-        num_q_heads,
-        num_kv_heads,
-        gqa_interleave,
-        head_dim,
-        BLOCK_M,
-        BLOCK_N,
-        BLOCK_D,
-        page_size,
-        num_warps=1, num_stages=1, force_use_shared_memory=True, bottleneck="simd",
+        mask.stride(0),
+        IS_CAUSAL=is_causal,
+        GLOBAL_WINDOW=global_window_size,
+        LOCAL_WINDOW=local_window_size,
+        NUM_Q_HEADS=num_q_heads,
+        NUM_KV_HEADS=num_kv_heads,
+        GQA_INTERLEAVE=gqa_interleave,
+        HEAD_DIM=head_dim,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_D=BLOCK_D,
+        PAGE_SIZE=page_size,
+        num_warps=1, num_stages=5, force_use_shared_memory=True, bottleneck="simd",
     )
     return o
 
-
 @triton.jit
-def _sdpa_acc_fwd_1xN(
+def _decode_acc_fwd_MxN(
     acc_ptr,
     l_i,
     m_i,
@@ -658,39 +672,43 @@ def _sdpa_acc_fwd_1xN(
     if mask is False:
         return acc_ptr, l_i, m_i
     # -- Compute qk ----
-                    
-    # Load K block
+
+    # Load (transposed) K block
     k = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
-    qk = tl.sum((q[None, :] * k).to(tl.float32), axis=1)
+    k_T = tl.trans(k)
+    qk = tl.dot(q, k_T)
+    # tl.compile_hint(qk, "tile_cube_loop")
 
     qk = qk * qk_scale
     if mask is not None and mask is not True:
-        qk = tl.where(mask, qk, float("-inf"))  # 32B # bool
+        qk = tl.where(mask, qk, -1e6)  # 32B # bool
 
-    m_ij = tl.maximum(m_i, tl.max(qk, 0))  # Scaled max
-    qk = qk - m_ij  # Stabilize
+    m_ij = tl.maximum(m_i, tl.max(qk, 1))  # Scaled max
+    qk = qk - m_ij[:, None]  # Stabilize
 
     # Softmax weights p = exp(qk)
     p = tl.math.exp(qk)
 
-    p_cast = p.to(k.dtype)
+    p_cast = p.to(k_T.dtype)
 
     # Load corresponding V block
     v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
     # Softmax denominator (sum of each row)
-    l_ij = tl.sum(p, axis=0)
+    l_ij = tl.sum(p, 1)
     # -- Update m_i and l_i
     alpha = tl.math.exp(m_i - m_ij)  # Update factor: exp difference between old and new max
     l_i = l_i * alpha + l_ij  # Update softmax denominator
     # -- Update output accumulator --
-    acc_ptr = acc_ptr * alpha
-    acc_ptr += tl.sum((p_cast[:, None] * v).to(tl.float32), axis=0)
+    acc_ptr = acc_ptr * alpha[:, None]
+    acc_ptr = tl.dot(p_cast, v, acc_ptr)
+    # tl.compile_hint(acc_ptr, "tile_cube_loop")
 
     # Update current block max
     m_i = m_ij
 
     # NOTE(zhangjihang): for training
+    # Return accumulated output acc_ptr, softmax denominator l_i, and max value m_i
     return acc_ptr, l_i, m_i
 
 
@@ -731,33 +749,38 @@ def _paged_decode_kernel(
     PAGE_SIZE: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_Q_HEADS: tl.constexpr,
 ):
     tl.static_assert(HEAD_DIM <= BLOCK_SIZE_D, "HEAD_DIM should be <= BLOCK_SIZE_D")
     tl.static_assert(PAGE_SIZE % BLOCK_SIZE_N == 0, "BLOCK_SIZE_N must be a divisor of PAGE_SIZE")
+    tl.static_assert(NUM_Q_HEADS % BLOCK_SIZE_Q_HEADS == 0, "BLOCK_SIZE_Q_HEADS must be a divisor of NUM_Q_HEADS")
 
     pid = tl.program_id(0)
     n_progs = tl.num_programs(0)
 
-    num_tasks = BATCH_SIZE * NUM_Q_HEADS
+    Q_HEAD_REPEATS: tl.constexpr = NUM_Q_HEADS // BLOCK_SIZE_Q_HEADS
+    num_tasks = BATCH_SIZE * Q_HEAD_REPEATS
 
     for q_task_id in range(pid, num_tasks, n_progs):
-        q_head_id = q_task_id % NUM_Q_HEADS
-        b_id = q_task_id // NUM_Q_HEADS
+        q_head_id = q_task_id % Q_HEAD_REPEATS
+        b_id = q_task_id // Q_HEAD_REPEATS
         if GQA_INTERLEAVE:
-            kv_head_id = q_head_id % NUM_KV_HEADS
+            kv_head_id = q_head_id * BLOCK_SIZE_Q_HEADS % NUM_KV_HEADS
         else:
-            kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
+            kv_head_id = q_head_id * BLOCK_SIZE_Q_HEADS // (NUM_Q_HEADS // NUM_KV_HEADS)
 
         kv_seq_len = tl.load(seqlens_ptr + b_id)
 
 
         offs_d = tl.arange(0, BLOCK_SIZE_D)
-        q_ptrs = q_ptr + b_id * stride_qb + q_head_id * stride_qh + offs_d * stride_qd
-        q = tl.load(q_ptrs, mask = offs_d < HEAD_DIM, other = 0.0)
+        offs_head_block = q_head_id * BLOCK_SIZE_Q_HEADS + tl.arange(0, BLOCK_SIZE_Q_HEADS)
+        q_ptrs = q_ptr + b_id * stride_qb + offs_head_block[:, None] * stride_qh + offs_d[None, :] * stride_qd
 
-        m_i = -float("inf")
-        l_i = 0.0
-        acc = tl.zeros((BLOCK_SIZE_D,), dtype=tl.float32)
+        q = tl.load(q_ptrs, mask = (offs_d[None, :] < HEAD_DIM) & (offs_head_block[:, None] < NUM_Q_HEADS), other = 0.0)
+
+        m_i = tl.zeros((BLOCK_SIZE_Q_HEADS,), dtype=tl.float32) - float("inf")
+        l_i = tl.zeros((BLOCK_SIZE_Q_HEADS,), dtype=tl.float32)
+        acc = tl.zeros((BLOCK_SIZE_Q_HEADS, BLOCK_SIZE_D), dtype=tl.float32)
 
         num_global_window_blocks, non_global_window_start_block, num_total_blocks = _swa_split_blocks(
             kv_seq_len - 1,
@@ -802,7 +825,7 @@ def _paged_decode_kernel(
             kv_mask = tl.arange(0, BLOCK_SIZE_N) < kv_block_len
             mask = gw_mask & kv_mask
             
-            acc, l_i, m_i = _sdpa_acc_fwd_1xN(
+            acc, l_i, m_i = _decode_acc_fwd_MxN(
                 acc, 
                 l_i, 
                 m_i, 
@@ -851,7 +874,7 @@ def _paged_decode_kernel(
             else:
                 mask = kv_mask
             
-            acc, l_i, m_i = _sdpa_acc_fwd_1xN(
+            acc, l_i, m_i = _decode_acc_fwd_MxN(
                 acc,
                 l_i, 
                 m_i, 
@@ -869,10 +892,10 @@ def _paged_decode_kernel(
 
         if kv_seq_len > 0:
             # avoid division by zero
-            acc = acc / l_i
+            acc = acc / l_i[:, None]
 
-        o_ptrs = o_ptr + b_id * stride_ob + q_head_id * stride_oh + offs_d * stride_od
-        tl.store(o_ptrs, acc.to(o_ptr.dtype.element_ty), mask=offs_d < HEAD_DIM)
+        o_ptrs = o_ptr + b_id * stride_ob + offs_head_block[:, None] * stride_oh + offs_d[None, :] * stride_od
+        tl.store(o_ptrs, acc.to(o_ptr.dtype.element_ty), mask=(offs_d[None, :] < HEAD_DIM) & (offs_head_block[:, None] < NUM_Q_HEADS))
 
 
 def swa_paged_decode_impl(
@@ -900,11 +923,8 @@ def swa_paged_decode_impl(
     job_num = get_mlu_total_cores()
     grid = (job_num, )
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
-    BLOCK_SIZE_N = min(128, triton.next_power_of_2(page_size))
-
-    # Note(chenyifan): 
-    #   under swa, the kv workload is rather evenly across diffrent queries,
-    #   so we have low necessity to apply split-kv strategy             
+    BLOCK_SIZE_N = min(256, triton.next_power_of_2(page_size))
+    BLOCK_SIZE_Q_HEADS = 1 if gqa_interleave else num_kv_heads
 
     _paged_decode_kernel[grid](
         q,
@@ -942,6 +962,7 @@ def swa_paged_decode_impl(
         page_size,
         BLOCK_SIZE_D=BLOCK_SIZE_D,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
-        num_warps=1, num_stages=1, force_use_shared_memory=True, bottleneck="simd",
+        BLOCK_SIZE_Q_HEADS=BLOCK_SIZE_Q_HEADS,
+        num_warps=1, num_stages=3, #force_use_shared_memory=True, bottleneck="simd",
     )
     return o
