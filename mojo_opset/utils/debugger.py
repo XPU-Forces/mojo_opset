@@ -44,6 +44,8 @@ def _deep_clone(value):
         return value.detach().clone()
     if isinstance(value, (tuple, list)):
         cloned = [_deep_clone(v) for v in value]
+        if hasattr(type(value), "_fields"):  # namedtuple
+            return type(value)(*cloned)
         return type(value)(cloned)
     if isinstance(value, dict):
         return {k: _deep_clone(v) for k, v in value.items()}
@@ -55,7 +57,10 @@ def _to_cpu(value):
     if isinstance(value, torch.Tensor):
         return value.detach().cpu()
     if isinstance(value, (tuple, list)):
-        return type(value)(_to_cpu(v) for v in value)
+        converted = [_to_cpu(v) for v in value]
+        if hasattr(type(value), "_fields"):  # namedtuple
+            return type(value)(*converted)
+        return type(value)(converted)
     if isinstance(value, dict):
         return {k: _to_cpu(v) for k, v in value.items()}
     return value
