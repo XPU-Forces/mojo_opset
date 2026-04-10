@@ -33,6 +33,7 @@ from .operators.attention import MojoPagedDecodeSWA
 from .operators.attention import MojoSWA
 from .operators.attention import MojoFusedInferAttentionScore
 from .operators.attention import MojoFusionAttention
+from .operators.attention import MojoAttentionDecodeMTP
 
 
 """ kvcache """
@@ -153,6 +154,7 @@ __all__ = [
     "MojoSWA",
     "MojoFusedInferAttentionScore",
     "MojoFusionAttention",
+    "MojoAttentionDecodeMTP",
 
     "MojoStorePagedKVCache",
     "MojoStoreMLAKVCache",
