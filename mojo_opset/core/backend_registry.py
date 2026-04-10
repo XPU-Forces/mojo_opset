@@ -9,11 +9,18 @@ from .operator import MojoOperator
 
 logger = get_logger(__name__)
 
-BACKEND_PRIORITY_LIST = ["ttx", "torch_npu", "torch"]
+PLATFORM_BACKEND_PRIORITY = {
+    "npu": ["ttx", "torch_npu", "torch"],
+    "ilu": ["ixformer", "ttx", "torch"],
+    "mlu": ["ttx", "torch"],
+}
+
+# All known backend name prefixes (used for registration validation).
+BACKEND_PRIORITY_LIST = PLATFORM_BACKEND_PRIORITY[get_platform()]
+
 BACKEND_PRIORITY_MAP = {
     "torchnpu": "torch_npu"
 }  ## Avoid the issue of failed identification of underscore "_" in the torch_npu backend name
-
 
 class MojoBackendRegistry:
     def __init__(self, core_op_cls: Union[MojoOperator, MojoFunction]):
@@ -35,6 +42,8 @@ class MojoBackendRegistry:
         )
         impl_backend_name = cls.__name__[:idx].lower()
 
+        curr_platform = get_platform()
+
         if impl_backend_name not in BACKEND_PRIORITY_LIST and impl_backend_name in BACKEND_PRIORITY_MAP:
             impl_backend_name = BACKEND_PRIORITY_MAP[impl_backend_name]
 
@@ -53,11 +62,10 @@ class MojoBackendRegistry:
                         f"are you wish to named {target_backend.upper()}{self._operator_name} ?"
                     )
             raise AssertionError(
-                f"Operator {cls.__name__} backend[{impl_backend_name}] is not supported, "
+                f"Operator {cls.__name__} backend[{impl_backend_name}] is not supported for platform[{curr_platform}], "
                 f"please choose from {BACKEND_PRIORITY_LIST}."
             )
 
-        curr_platform = get_platform()
         if curr_platform in cls.supported_platforms_list:
             logger.debug(
                 f"Register {cls.__name__} as {self._core_op_cls.__name__} implementation with backend[{impl_backend_name}]"
@@ -100,4 +108,8 @@ class MojoBackendRegistry:
             return list(self._registry.values())[0]
 
     def sort(self):
-        self._registry = dict(sorted(self._registry.items(), key=lambda x: BACKEND_PRIORITY_LIST.index(x[0])))
+        def _prio_key(item):
+            name = item[0]
+            return BACKEND_PRIORITY_LIST.index(name) if name in BACKEND_PRIORITY_LIST else len(BACKEND_PRIORITY_LIST)
+
+        self._registry = dict(sorted(self._registry.items(), key=_prio_key))

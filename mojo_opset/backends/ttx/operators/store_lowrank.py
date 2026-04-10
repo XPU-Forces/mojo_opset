@@ -5,7 +5,7 @@ from mojo_opset.experimental import MojoStoreLowrank
 
 
 class TTXStoreLowrank(MojoStoreLowrank):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(
         self,

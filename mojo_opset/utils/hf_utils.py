@@ -49,11 +49,11 @@ def load_weights_direct(model_path: str, torch_model: nn.Module) -> None:
     loaded_keys = set()
     unexpected_keys = set()
 
-    print(f"Loading weights from {len(files)} files...")
+    logger.info(f"Loading weights from {len(files)} files...")
 
     # 3. Load each file
     for f in files:
-        print(f"  Processing {os.path.basename(f)} ...")
+        logger.info(f"  Processing {os.path.basename(f)} ...")
         if f.endswith(".safetensors"):
             if load_safetensors is None:
                 raise ImportError("safetensors is not installed. Please install it to load .safetensors files.")
@@ -71,8 +71,8 @@ def load_weights_direct(model_path: str, torch_model: nn.Module) -> None:
                 # Check shape
                 target_shape = model_state_dict[key].shape
                 if target_shape != tensor.shape:
-                    print(
-                        f"    WARNING: Shape mismatch for {key}. Expected {target_shape}, got {tensor.shape}. Skipping."
+                    logger.warning(
+                        f"Shape mismatch for {key}. Expected {target_shape}, got {tensor.shape}. Skipping."
                     )
                     continue
 
@@ -89,21 +89,21 @@ def load_weights_direct(model_path: str, torch_model: nn.Module) -> None:
     # 4. Report
     missing_keys = expected_keys - loaded_keys
 
-    print("\nWeight Loading Report:")
-    print(f"  Total Expected Keys: {len(expected_keys)}")
-    print(f"  Successfully Loaded: {len(loaded_keys)}")
-    print(f"  Missing Keys: {len(missing_keys)}")
-    print(f"  Unexpected Keys: {len(unexpected_keys)}")
+    logger.info("Weight Loading Report:")
+    logger.info(f"  Total Expected Keys: {len(expected_keys)}")
+    logger.info(f"  Successfully Loaded: {len(loaded_keys)}")
+    logger.info(f"  Missing Keys: {len(missing_keys)}")
+    logger.info(f"  Unexpected Keys: {len(unexpected_keys)}")
 
     if missing_keys:
-        print("\n  Missing Keys:")
+        logger.warning("Missing Keys:")
         for k in sorted(list(missing_keys)):
-            print(f"    - {k}")
+            logger.warning(f"  - {k}")
 
     if unexpected_keys:
-        print("\n  Unexpected Keys:")
+        logger.warning("Unexpected Keys:")
         for k in sorted(list(unexpected_keys)):
-            print(f"    - {k}")
+            logger.warning(f"  - {k}")
 
 
 def build_model_from_hf(

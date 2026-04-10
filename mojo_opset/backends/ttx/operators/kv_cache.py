@@ -7,7 +7,7 @@ from mojo_opset.core import MojoStorePagedKVCache
 
 
 class TTXStorePagedKVCache(MojoStorePagedKVCache):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(
         self,

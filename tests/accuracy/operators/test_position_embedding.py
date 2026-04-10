@@ -6,7 +6,7 @@ from tests.utils import bypass_not_implemented
 from mojo_opset import MojoRotaryEmbedding
 from mojo_opset import MojoApplyRoPE
 from mojo_opset import MojoGridRoPE
-from mojo_opset.utils.platform import get_platform, get_torch_device
+from mojo_opset.utils.platform import get_torch_device
 
 torch.random.manual_seed(42)
 
@@ -83,34 +83,28 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
     )
 
 
-@pytest.mark.parametrize("bs", [1, 6])
-@pytest.mark.parametrize("seqlen", [124, 555, 2048])
 @pytest.mark.parametrize(
-    "q_heads, k_heads",
+    "bs, seqlen",
     [
-        (32, 8),
-        (8, 2),
-        (16, 8),
-        (64, 8),
-        (64, 4),
+        (1, 124),
+        (6, 555),
+        (2, 2048),
     ],
 )
 @pytest.mark.parametrize(
-    "head_dim, rope_percentage",
+    "dtype, q_heads, k_heads, head_first, head_dim, rope_percentage", 
     [
-        (96, 1.0),
-        (96, 0.3333333333333333333333),
-        (128, 1.0),
-        (88, 1.0),
-        (128, 0.375),
+        (torch.float16, 32, 8, True, 96, 1.0),
+        (torch.bfloat16, 8, 2, False, 96, 0.3333333333333333333333),
+        (torch.float16, 16, 8, True, 128, 1.0),
+        (torch.bfloat16, 64, 8, False, 88, 1.0),
+        (torch.float16, 64, 4, True, 128, 0.375),
     ],
 )
-@pytest.mark.parametrize("mode", ["padding_prefill", "varlen_prefill", "decode"])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("mode", ["padding_prefill_pos2d", "padding_prefill_pos3d", "varlen_prefill", "decode"])
 @bypass_not_implemented
-def test_apply_rope(bs, seqlen, q_heads, k_heads, head_dim, rope_percentage, mode, dtype):
+def test_apply_rope(bs, seqlen, q_heads, k_heads, head_first, head_dim, rope_percentage, mode, dtype):
     """Test MojoApplyRoPE (apply rotary position embedding) with pre-extracted cos/sin."""
-    platform = get_platform()
     device = get_torch_device()
     max_seq_len = 32768
 
@@ -119,15 +113,26 @@ def test_apply_rope(bs, seqlen, q_heads, k_heads, head_dim, rope_percentage, mod
 
     rot_pos_emb = MojoRotaryEmbedding(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
 
-    if mode == "padding_prefill":
+    if mode == "padding_prefill_pos3d":
+        offsets = torch.randint(0, max_seq_len - seqlen - 1, (bs,), device=device, dtype=torch.int32)
         position_ids = torch.arange(seqlen, dtype=torch.int32, device=device)
-        x = torch.randn(seqlen, hidden_size, device=device, dtype=dtype)
+        position_ids = position_ids[None, :] + offsets[:, None]
+        x = torch.randn(bs, seqlen, hidden_size, device=device, dtype=dtype)
         cos, sin = rot_pos_emb(x, position_ids=position_ids)
         q = torch.randn(bs, seqlen, q_heads, head_dim, device=device, dtype=dtype)
         k = torch.randn(bs, seqlen, k_heads, head_dim, device=device, dtype=dtype)
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        head_first = True
+        if head_first:
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
+
+    elif mode == "padding_prefill_pos2d":
+        x = torch.randn(bs, seqlen, hidden_size, device=device, dtype=dtype)
+        cos, sin = rot_pos_emb(x)
+        q = torch.randn(bs, seqlen, q_heads, head_dim, device=device, dtype=dtype)
+        k = torch.randn(bs, seqlen, k_heads, head_dim, device=device, dtype=dtype)
+        if head_first:
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
 
     elif mode == "varlen_prefill":
         seq_lens = torch.randint(1, seqlen + 1, (bs,), device=device, dtype=torch.int32)
@@ -141,25 +146,21 @@ def test_apply_rope(bs, seqlen, q_heads, k_heads, head_dim, rope_percentage, mod
 
         kv_lens = torch.randint(0, max_seq_len - seqlen, (bs,), device=device, dtype=torch.int32)
         cos, sin = rot_pos_emb(x, cu_seqlens_q=cu_seqlens, seqlens_kv=kv_lens)
-        head_first = False
-
+        if head_first:
+            q = q.transpose(0, 1)
+            k = k.transpose(0, 1)
     elif mode == "decode":
         x = torch.randn(bs, hidden_size, device=device, dtype=dtype)
         q = torch.randn(bs, q_heads, head_dim, device=device, dtype=dtype)
         k = torch.randn(bs, k_heads, head_dim, device=device, dtype=dtype)
         kv_lens = torch.randint(0, max_seq_len - 1, (bs,), device=device, dtype=torch.int32)
         cos, sin = rot_pos_emb(x, position_ids=kv_lens)
-        head_first = False
+        if head_first:
+            q = q.transpose(0, 1)
+            k = k.transpose(0, 1)
 
     rope = MojoApplyRoPE()
     rope_ref = MojoApplyRoPE._registry.get("torch")()
-
-    if (
-        platform == "npu"
-        and mode == "padding_prefill"
-        and rope_percentage == 0.375
-    ):
-        pytest.skip("Skipped on NPU due to RotaryPositionEmbedding fusion operator limitation: D is not aligned")
 
     rope.forward_diff_with(
         rope_ref,

@@ -75,7 +75,8 @@ class MojoDecodeGQA(MojoOperator):
                 scores.masked_fill_(~mask.unsqueeze(0), float("-inf"))
 
             probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
-            outputs[i] = torch.einsum("hs,hsd->hd", probs, v_i)
+            o_i = torch.einsum("hs,hsd->hd", probs, v_i)
+            outputs[i] = o_i
         return outputs
 
     def extra_repr(self) -> str:
@@ -1263,6 +1264,9 @@ class MojoPagedPrefillSWA(MojoOperator):
         for i in range(bsz):
             q_i = q[cu_seqlens_q[i] : cu_seqlens_q[i + 1]]
             q_seq_len = q_i.shape[0]
+            if q_seq_len == 0:
+                # skip padded query
+                continue
             q_i = q_i.permute(1, 0, 2)  # -> [n_q_heads, q_seq_len, head_dim]
 
             kv_seq_len = seqlens_kv[i].item()
@@ -1351,11 +1355,14 @@ class MojoPagedDecodeSWA(MojoOperator):
         if softmax_scale is None:
             softmax_scale = 1.0 / (head_dim**0.5)
 
-        o = torch.empty_like(q)
+        o = torch.zeros_like(q)
         for i in range(bsz):
             q_i = q[i].unsqueeze(1) # -> [n_q_heads, 1, head_dim]
 
             kv_seq_len = seq_lens[i].item()
+            if kv_seq_len == 0:
+                # skip padded tokens
+                continue
             kv_blocks = (kv_seq_len + page_size - 1) // page_size
             k_i = k_cache[block_table[i, :kv_blocks]]  # [kv_blocks, n_kv_heads, page_size, head_dim]
             k_i = k_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]

@@ -36,7 +36,11 @@ def generate_paged_decode_data(
 ):
     query = torch.randn(batch_size, num_q_heads, head_dim, dtype=dtype)
 
-    seqlens = torch.randint(1, max_seq_len, (batch_size,), dtype=torch.int32)
+    if max_seq_len > 0:
+        seqlens = torch.randint(0, max_seq_len, (batch_size,), dtype=torch.int32)
+        seqlens = torch.clamp(seqlens, min=1)
+    else:
+        seqlens = torch.zeros(batch_size, dtype=torch.int32)
 
     max_num_blocks_per_seq = (seqlens.max().item() + block_size - 1) // block_size
     total_blocks_needed = int(torch.div(seqlens + block_size - 1, block_size, rounding_mode="floor").sum().item())
@@ -72,6 +76,7 @@ test_configs_decode = [
     (8, 16, 4, 96, 1024, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (8, 8, 1, 128, 8192, 1024, torch.bfloat16, "M_BF16_LONG"),
     (8, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
+    (8, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ")
 ]
 
 
@@ -142,8 +147,11 @@ def generate_paged_prefill_data(
     block_size: int,
     dtype: torch.dtype,
 ):
-    q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
-    q_lens = torch.clamp(q_lens, min=1)
+    if max_q_len > 0:
+        q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
+        q_lens = torch.clamp(q_lens, min=1)
+    else:
+        q_lens = torch.zeros(batch_size, dtype=torch.int32)
     cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0)])
 
     if max_kv_computed_len <= 0:
@@ -206,6 +214,7 @@ test_configs_prefill = [
     (2, 16, 4, 96, 1024, 0, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (2, 8, 1, 128, 4096, 8192, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
     (2, 8, 1, 128, 1024, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
+    (2, 8, 1, 128, 0, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ")
 ]
 
 
@@ -311,6 +320,7 @@ def generate_diffusion_attn_test_data(
     "bsz, q_head_num, kv_head_num, head_dim, seq_length, block_size",
     [(1, 5, 1, 128, 2048, 32,)],
 )
+@bypass_not_implemented
 def test_sdpa(
     bsz,
     q_head_num,
@@ -474,9 +484,6 @@ def test_decode_nsa(B, H, D, S):
 @bypass_not_implemented
 def test_prefill_gqa(B, Hq, Hkv, D, S, gqa_layout):
     """Non-paged prefill GQA — query/key/value are batched 4-D tensors."""
-    from mojo_opset.utils.platform import get_platform
-    if get_platform() == "npu" and D % 128 != 0:
-        pytest.skip(f"NPU kernel requires head_dim % 128 == 0, got {D}")
 
     query = torch.randn(B, Hq, S, D, dtype=torch.bfloat16)
     key = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)
@@ -710,6 +717,7 @@ test_configs_swa_prefill = [
     (2, 16, 4, 96, 2048, 0, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (2, 8, 1, 128, 256, 1024, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
     (2, 8, 1, 128, 1024, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
+    (2, 8, 1, 128, 0, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ")
 ]
 
 
@@ -733,7 +741,7 @@ test_configs_swa_prefill = [
     ],
 )
 @pytest.mark.parametrize("gqa_layout, global_window, local_window", [
-    ("ABAB", 4, 255), 
+    ("ABAB", 4, 255),
     ("AABB", 4, 1023),
 ])
 @auto_switch_platform()
@@ -786,6 +794,7 @@ test_configs_swa_decode = [
     (8, 16, 4, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (8, 8, 1, 128, 4096, 128, torch.bfloat16, "M_BF16_LONG"),
     (2, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
+    (2, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ")
 ]
 
 @pytest.mark.parametrize(
@@ -807,7 +816,7 @@ test_configs_swa_decode = [
     ],
 )
 @pytest.mark.parametrize("gqa_layout, global_window, local_window", [
-    ("ABAB", 4, 255), 
+    ("ABAB", 4, 255),
     ("AABB", 4, 1023),
 ])
 @auto_switch_platform()

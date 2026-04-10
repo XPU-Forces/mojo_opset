@@ -1,5 +1,3 @@
-import logging
-
 import torch
 import torch.cuda.amp as amp
 import torch.nn as nn
@@ -8,6 +6,9 @@ from einops import rearrange
 
 from mojo_opset import MojoChannelRMSNorm
 from mojo_opset import MojoSilu
+from mojo_opset.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 __all__ = [
     "Wan2_2_VAE",
@@ -811,7 +812,7 @@ def _video_vae(pretrained_path=None, z_dim=16, dim=160, device="cpu", **kwargs):
         model = WanVAE_(**cfg)
 
     # load checkpoint
-    logging.info(f"loading {pretrained_path}")
+    logger.info(f"loading {pretrained_path}")
     _sd = torch.load(pretrained_path, map_location=device)
     _expected = set(model.state_dict().keys())
     for _k in list(_sd.keys()):
@@ -970,7 +971,7 @@ class Wan2_2_VAE:
             with amp.autocast(dtype=self.dtype):
                 return [self.model.encode(u.unsqueeze(0), self.scale).float().squeeze(0) for u in videos]
         except TypeError as e:
-            logging.info(e)
+            logger.info(e)
             return None
 
     def decode(self, zs):
@@ -980,5 +981,5 @@ class Wan2_2_VAE:
             with amp.autocast(dtype=self.dtype):
                 return [self.model.decode(u.unsqueeze(0), self.scale).float().clamp_(-1, 1).squeeze(0) for u in zs]
         except TypeError as e:
-            logging.info(e)
+            logger.info(e)
             return None
