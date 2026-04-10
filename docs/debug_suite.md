@@ -240,6 +240,33 @@ Compare 在日志中逐算子打印精度指标：
 
 > **注意**：Compare 仅报告数值差异，不做 pass/fail 判定。开发者可根据自身精度要求自行判断。
 
+### Compare 模式：observe vs replace
+
+Compare 支持两种模式，通过 `compare_mode` 参数或 `MOJO_DEBUG_COMPARE_MODE` 环境变量指定：
+
+| 模式 | 行为 | 适用场景 |
+|---|---|---|
+| `observe`（默认） | 对比后不修改输出，加速后端结果原样传给下游 | 观察每个算子的累积误差 |
+| `replace` | 对比后将加速后端输出**替换**为 torch 参考输出 | 逐层隔离误差，定位误差来源 |
+
+**observe 模式**下，如果 Layer 0 引入了误差 `e0`，Layer 1 的 compare 看到的输入已经包含 `e0`，其报告的是累积误差。
+
+**replace 模式**下，每个 compare 命中的算子的输出都被 torch 参考结果替换，后续算子的输入是"干净"的。每个算子的 compare 报告仅反映该算子自身引入的误差。
+
+```python
+# 逐层误差隔离
+dbg = MojoDebugger(compare_mode="replace")
+dbg.attach(model)
+dbg.set_compare("*:input_layernorm;*:mlp.act_fn")
+model(input_ids)  # 每个算子的 diff 仅反映自身误差
+
+# 运行时切换
+dbg.set_compare_mode("observe")   # 切回观察模式
+model(input_ids)
+```
+
+> **提示**：建议先用 `observe` 模式粗略定位误差较大的层，再用 `replace` 模式逐层隔离，确认误差的具体来源。
+
 ---
 
 ## API 参考
@@ -255,11 +282,12 @@ Compare 在日志中逐算子打印精度指标：
 
 | 方法 | 说明 |
 |---|---|
-| `__init__(dump_dir=None, max_steps=None)` | 创建调试器。`dump_dir` 依次取：参数 → `MOJO_DEBUG_DUMP_DIR` → `./mojo_debug_dump`。 |
+| `__init__(dump_dir=None, max_steps=None, compare_mode=None)` | 创建调试器。`dump_dir` 依次取：参数 → `MOJO_DEBUG_DUMP_DIR` → `./mojo_debug_dump`。`compare_mode` 默认 `"observe"`。 |
 | `attach(model)` | 遍历模型，传播 `layer_idx`，在所有 `MojoOperator` 上注册 hook。 |
 | `detach()` | 移除 hook，释放影子实例，清理调试属性。 |
 | `set_compare(rules)` | 设置 compare 规则，如 `"5:input_layernorm;*:mlp.act_fn"`。传入空字符串清除。 |
 | `set_dump(rules)` | 设置 dump 规则。传入空字符串清除。 |
+| `set_compare_mode(mode)` | 切换 compare 模式：`"observe"` 或 `"replace"`。 |
 | `clear_rules()` | 清除所有通过 API 设置的规则。 |
 | `set_dump_dir(path)` | 运行时更改 dump 目录。 |
 | `set_max_steps(n)` | 设置每个算子的最大 dump/compare 步数。 |
@@ -274,6 +302,7 @@ Compare 在日志中逐算子打印精度指标：
 | `MOJO_DEBUG_DUMP` | Dump 规则字符串（格式同 `set_dump`） | — |
 | `MOJO_DEBUG_DUMP_DIR` | Dump 输出目录 | `./mojo_debug_dump` |
 | `MOJO_DEBUG_MAX_STEPS` | 每个算子的最大 dump/compare 步数 | 无限制 |
+| `MOJO_DEBUG_COMPARE_MODE` | Compare 模式：`observe` 或 `replace` | `observe` |
 
 ---
 
@@ -285,7 +314,7 @@ Compare 在日志中逐算子打印精度指标：
 
 **Q：调试器会影响推理输出吗？**
 
-不会。Hook 仅读取输入/输出。Compare 在传入参考 forward 前会深拷贝输入。原始计算不受任何影响。
+在默认的 `observe` 模式下不会。Hook 仅读取输入/输出，Compare 在传入参考 forward 前会深拷贝输入，原始计算不受任何影响。在 `replace` 模式下，compare 命中的算子的输出会被 torch 参考结果替换——这是有意为之的行为，用于逐层隔离误差。
 
 **Q：分布式训练如何使用？**
 

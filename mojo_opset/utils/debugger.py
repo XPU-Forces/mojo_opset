@@ -236,10 +236,13 @@ class MojoDebugger:
     # Instance-level
     # ------------------------------------------------------------------
 
+    _VALID_COMPARE_MODES = ("observe", "replace")
+
     def __init__(
         self,
         dump_dir: Optional[str] = None,
         max_steps: Optional[int] = None,
+        compare_mode: Optional[str] = None,
     ):
         self._dump_dir = (
             dump_dir
@@ -255,6 +258,15 @@ class MojoDebugger:
                     self._max_steps = int(env_max)
                 except ValueError:
                     logger.warning(f"{_PREFIX} Invalid MOJO_DEBUG_MAX_STEPS='{env_max}', ignored.")
+
+        if compare_mode is None:
+            compare_mode = os.environ.get("MOJO_DEBUG_COMPARE_MODE", "observe")
+        if compare_mode not in self._VALID_COMPARE_MODES:
+            logger.warning(
+                f"{_PREFIX} Invalid compare_mode='{compare_mode}', falling back to 'observe'."
+            )
+            compare_mode = "observe"
+        self._compare_mode = compare_mode
 
         self._model: Optional[torch.nn.Module] = None
         self._hook_handles: List = []
@@ -361,6 +373,14 @@ class MojoDebugger:
         self._api_rules["dump"] = parsed
         if self._attached and parsed:
             self._validate_rules(parsed, "dump")
+
+    def set_compare_mode(self, mode: str):
+        """Switch compare mode at runtime.  ``"observe"`` or ``"replace"``."""
+        if mode not in self._VALID_COMPARE_MODES:
+            raise ValueError(
+                f"Unknown compare_mode '{mode}'. Must be one of {self._VALID_COMPARE_MODES}."
+            )
+        self._compare_mode = mode
 
     def clear_rules(self):
         self._api_rules = {"compare": None, "dump": None}
@@ -546,7 +566,11 @@ class MojoDebugger:
                     debugger._do_dump(layer_idx, op_name, module, safe_inputs, output)
 
                 if matched_compare is not None:
-                    debugger._do_compare(layer_idx, op_name, module, safe_inputs, output)
+                    ref_output = debugger._do_compare(
+                        layer_idx, op_name, module, safe_inputs, output,
+                    )
+                    if debugger._compare_mode == "replace" and ref_output is not None:
+                        return ref_output
 
             except Exception as e:
                 logger.warning_once(
@@ -629,10 +653,16 @@ class MojoDebugger:
     # ------------------------------------------------------------------
 
     def _do_compare(self, layer_idx, op_name, module, inputs, output):
+        """Run torch reference forward and report diff.
+
+        Returns the reference output so the caller can decide whether to
+        replace the accelerator output (``replace`` mode).  Returns ``None``
+        on any failure or when the step limit has been reached.
+        """
         counter_key = ("cmp", layer_idx, op_name)
         step = self._step_counters[counter_key]
         if self._max_steps is not None and step >= self._max_steps:
-            return
+            return None
         self._step_counters[counter_key] = step + 1
 
         tag = self._make_tag(layer_idx, op_name)
@@ -643,7 +673,7 @@ class MojoDebugger:
             logger.warning_once(
                 f"{_PREFIX} Cannot build torch ref for {tag}: {e}. Compare skipped."
             )
-            return
+            return None
 
         ref_inputs = _deep_clone(inputs)
 
@@ -657,9 +687,10 @@ class MojoDebugger:
             logger.warning_once(
                 f"{_PREFIX} Torch ref forward failed for {tag}: {e}. Compare skipped."
             )
-            return
+            return None
 
         self._compare_and_report(tag, step, output, ref_output)
+        return ref_output
 
     def _compare_and_report(
         self,

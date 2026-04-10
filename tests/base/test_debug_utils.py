@@ -607,7 +607,91 @@ class TestDynamicSwitching:
 
 
 # ---------------------------------------------------------------------------
-# 5. Edge cases
+# 5. Compare replace mode
+# ---------------------------------------------------------------------------
+
+
+class TestCompareReplaceMode:
+
+    def test_compare_replace_mode_changes_output(self):
+        """In replace mode, matched ops' outputs are replaced with torch ref.
+
+        Verify that:
+        1. The model runs without error in replace mode.
+        2. The compare step counters are incremented (proving the code path
+           was exercised).
+        3. Running replace mode twice with the same input produces the same
+           output (deterministic replacement).
+        """
+        device = _get_test_device()
+        MojoDebugger.enable()
+        model = _build_mini_transformer(device)
+        inp = _random_input(device)
+
+        dbg = MojoDebugger(compare_mode="replace")
+        dbg.attach(model)
+        dbg.set_compare("*:MojoRMSNorm")
+
+        with torch.no_grad():
+            out1 = model(inp).clone()
+        with torch.no_grad():
+            out2 = model(inp).clone()
+
+        # Step counters should have been incremented twice
+        cmp_keys = [k for k in dbg._step_counters if k[0] == "cmp"]
+        assert len(cmp_keys) == NUM_LAYERS * 2 + 1  # 5 layers * 2 norms + 1 global
+        for k in cmp_keys:
+            assert dbg._step_counters[k] == 2
+
+        assert torch.equal(out1, out2), (
+            "replace mode should produce deterministic output"
+        )
+        dbg.detach()
+
+    def test_compare_replace_mode_switchable(self):
+        """set_compare_mode switches behaviour between forward passes."""
+        device = _get_test_device()
+        MojoDebugger.enable()
+        model = _build_mini_transformer(device)
+        inp = _random_input(device)
+
+        dbg = MojoDebugger()
+        dbg.attach(model)
+        dbg.set_compare("*:MojoRMSNorm")
+
+        # Forward 1: observe (default)
+        assert dbg._compare_mode == "observe"
+        with torch.no_grad():
+            out_obs = model(inp).clone()
+
+        # Forward 2: switch to replace
+        dbg.set_compare_mode("replace")
+        assert dbg._compare_mode == "replace"
+        with torch.no_grad():
+            out_rep = model(inp).clone()
+
+        # Forward 3: switch back to observe
+        dbg.set_compare_mode("observe")
+        assert dbg._compare_mode == "observe"
+        with torch.no_grad():
+            out_obs2 = model(inp).clone()
+
+        # Observe mode should always produce the same output
+        assert torch.equal(out_obs, out_obs2), (
+            "observe mode should produce consistent output"
+        )
+
+        # Replace mode must complete without error and increment counters
+        cmp_keys = [k for k in dbg._step_counters if k[0] == "cmp"]
+        assert all(dbg._step_counters[k] == 3 for k in cmp_keys), (
+            "all 3 forwards should have triggered compare"
+        )
+
+        dbg.detach()
+
+
+# ---------------------------------------------------------------------------
+# 6. Edge cases
 # ---------------------------------------------------------------------------
 
 
