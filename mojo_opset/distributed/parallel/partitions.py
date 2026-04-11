@@ -136,15 +136,19 @@ def __qkv_partition_fn(src_data_rank, name, mod, mesh, *, num_q_heads, num_kv_he
     q_end = q_start + q_per_rank * head_dim
     local_q = weight[q_start:q_end, :]
 
-    replicate = max(1, size // num_kv_heads)
-    kv_idx = rank // replicate
     k_offset = q_total_dim
-    k_start = k_offset + kv_idx * head_dim
-    local_k = weight[k_start : k_start + head_dim, :]
-
     v_offset = q_total_dim + kv_total_dim
-    v_start = v_offset + kv_idx * head_dim
-    local_v = weight[v_start : v_start + head_dim, :]
+
+    if size >= num_kv_heads:
+        replicate = size // num_kv_heads
+        kv_idx = rank // replicate
+        local_kv_heads = 1
+    else:
+        local_kv_heads = num_kv_heads // size
+        kv_idx = rank * local_kv_heads
+
+    local_k = weight[k_offset + kv_idx * head_dim : k_offset + (kv_idx + local_kv_heads) * head_dim, :]
+    local_v = weight[v_offset + kv_idx * head_dim : v_offset + (kv_idx + local_kv_heads) * head_dim, :]
 
     new_weight = torch.cat([local_q, local_k, local_v], dim=0)
     mod.register_parameter("weight", nn.Parameter(new_weight))
@@ -152,8 +156,8 @@ def __qkv_partition_fn(src_data_rank, name, mod, mesh, *, num_q_heads, num_kv_he
     if mod.bias is not None:
         bias = shard_tensor(mesh, [Replicate()], src_data_rank, mod.bias)
         local_q_bias = bias[q_start:q_end]
-        local_k_bias = bias[k_offset + kv_idx * head_dim : k_offset + kv_idx * head_dim + head_dim]
-        local_v_bias = bias[v_offset + kv_idx * head_dim : v_offset + kv_idx * head_dim + head_dim]
+        local_k_bias = bias[k_offset + kv_idx * head_dim : k_offset + (kv_idx + local_kv_heads) * head_dim]
+        local_v_bias = bias[v_offset + kv_idx * head_dim : v_offset + (kv_idx + local_kv_heads) * head_dim]
         new_bias = torch.cat([local_q_bias, local_k_bias, local_v_bias], dim=0)
         mod.register_parameter("bias", nn.Parameter(new_bias))
 
