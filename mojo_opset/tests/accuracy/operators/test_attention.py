@@ -897,7 +897,7 @@ def generate_sdpa_data(
     key = torch.randn(total_kv_tokens, num_kv_heads, head_dim, dtype=dtype)
     value = torch.randn(total_kv_tokens, num_kv_heads, head_dim, dtype=dtype)
 
-    
+
     return query, key, value, cu_seqlens_q, cu_seqlens_kv
 
 
@@ -926,7 +926,7 @@ test_configs_swa_infer = [
     ],
 )
 @pytest.mark.parametrize("gqa_layout, global_window, local_window", [
-    ("ABAB", 4, 255), 
+    ("ABAB", 4, 255),
     ("AABB", 4, 1023),
 ])
 @auto_switch_platform()
