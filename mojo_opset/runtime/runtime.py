@@ -45,6 +45,7 @@ class PagedAttentionRuntimeState(MojoSession):
 
         self.max_blocks_per_seq = (config.model_config.max_position_embeddings + block_size - 1) // block_size
         total_blocks = batch_size * self.max_blocks_per_seq
+        self.offsets = torch.arange(self.block_size, dtype=torch.int64, device=self.device)
 
         self.block_tables = torch.full(
             (batch_size, self.max_blocks_per_seq),
@@ -153,17 +154,21 @@ class PagedAttentionRuntimeState(MojoSession):
         return torch.cat(positions, dim=0)
 
     def _build_slot_mapping(self, kv_lens_before_store: torch.Tensor, query_lengths: torch.Tensor) -> torch.Tensor:
-        block_start = (self.block_tables.to(torch.int64) * self.block_size).unsqueeze(-1)
-        offsets = torch.arange(self.block_size, dtype=torch.int64, device=self.device)
-        slot_mapping = (block_start + offsets).flatten(-2, -1)
-
         slot_mapping_chunks = []
         for batch_idx in range(self.batch_size):
-            start = int(kv_lens_before_store[batch_idx].item())
-            query_len = int(query_lengths[batch_idx].item())
+            query_len = query_lengths[batch_idx]
             if query_len <= 0:
                 continue
-            slot_mapping_chunks.append(slot_mapping[batch_idx, start : start + query_len])
+
+            curr_block_tables = self.block_tables[batch_idx]
+            first_pad_index = torch.nonzero(curr_block_tables == -1)[0]
+            curr_block_tables = curr_block_tables[:first_pad_index]
+
+            block_start = curr_block_tables * self.block_size
+            slot_mapping = (block_start.unsqueeze(-1) + self.offsets.unsqueeze(0)).flatten()
+
+            start = kv_lens_before_store[batch_idx]
+            slot_mapping_chunks.append(slot_mapping[start:start+query_len])
 
         if not slot_mapping_chunks:
             return torch.empty((0,), dtype=torch.int64, device=self.device)
