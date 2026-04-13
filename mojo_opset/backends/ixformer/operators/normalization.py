@@ -1,16 +1,10 @@
 import torch
 
+from mojo_opset.backends.ixformer.utils import _get_ixf_and_check_device
 from mojo_opset.core import MojoLayerNorm
 from mojo_opset.core import MojoResidualAddLayerNorm
 from mojo_opset.core import MojoResidualAddRMSNorm
 from mojo_opset.core import MojoRMSNorm
-
-def _get_ixf_and_check_device(tensor: torch.Tensor, class_name: str):
-    """Helper to import ixformer and check for CUDA device."""
-    if not tensor.is_cuda:
-        raise RuntimeError(f"{class_name} expects CUDA tensors on Iluvatar.")
-    from ixformer import functions as ixf_f
-    return ixf_f
 
 
 class IxformerResidualAddRMSNorm(MojoResidualAddRMSNorm):
