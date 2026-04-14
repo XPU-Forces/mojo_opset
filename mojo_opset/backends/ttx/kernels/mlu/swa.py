@@ -259,7 +259,7 @@ def _sdpa_acc_fwd_MxN(
     return acc_ptr, l_i, m_i
 
 @triton.jit
-def _paged_prefill_kernel(
+def _swa_paged_prefill_kernel(
     o_ptr,
     q_ptr,
     k_ptr,
@@ -608,7 +608,7 @@ def swa_paged_prefill_impl(
 
     grid = (job_num,)
 
-    _paged_prefill_kernel[grid](
+    _swa_paged_prefill_kernel[grid](
         o,
         q,
         k_cache,
@@ -713,7 +713,7 @@ def _decode_acc_fwd_MxN(
 
 
 @triton.jit
-def _paged_decode_kernel(
+def _swa_paged_decode_kernel(
     q_ptr,
     k_cache_ptr,
     v_cache_ptr,
@@ -926,7 +926,7 @@ def swa_paged_decode_impl(
     BLOCK_SIZE_N = min(256, triton.next_power_of_2(page_size))
     BLOCK_SIZE_Q_HEADS = 1 if gqa_interleave else num_kv_heads
 
-    _paged_decode_kernel[grid](
+    _swa_paged_decode_kernel[grid](
         q,
         key_cache,
         value_cache,
