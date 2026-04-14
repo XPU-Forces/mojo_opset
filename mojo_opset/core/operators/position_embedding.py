@@ -139,9 +139,9 @@ class MojoApplyRoPE(MojoOperator):
         Apply Rotary Position Embedding (RoPE).
 
         Scenario descriptions:
-        1. Varlen prefill: q/k [T, N, D], cos/sin [T, d]
+        1. Varlen prefill: q/k [T, N, D] or [N, T, D], cos/sin [T, d]
         2. Padded prefill: q/k [B, S, N, D] or [B, N, S, D], cos/sin [S, d] or [B, S, d]
-        3. Decode: q/k [B, N, D], cos/sin [B, d]
+        3. Decode: q/k [B, N, D] or [N, B, D], cos/sin [B, d]
 
         Args:
             q: Query tensor

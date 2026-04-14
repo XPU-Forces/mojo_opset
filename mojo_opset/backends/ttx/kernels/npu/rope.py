@@ -449,7 +449,7 @@ def rope_fwd_impl(
 
     cos = cos.contiguous()
     sin = sin.contiguous()
-    if cos.dim() == 3:
+    if cos.dim() == 3 and cos.shape[0] > 1:
         cos_batch_stride = cos.stride(0)
         sin_batch_stride = sin.stride(0)
     else:

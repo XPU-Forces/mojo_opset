@@ -35,6 +35,9 @@ class MojoApplyRoPEFunction(MojoFunction):
         if not head_first:
             cos = cos.unsqueeze(-2)
             sin = sin.unsqueeze(-2)
+        else:
+            cos = cos.unsqueeze(-3)
+            sin = sin.unsqueeze(-3)
 
         rope_dim = cos.shape[-1]
         nope_dim = q.shape[-1] - rope_dim
