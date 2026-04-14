@@ -42,6 +42,9 @@ from .silu import silu_fwd_impl
 from .store_lowrank import store_label_cache_infer_impl
 # from .swiglu import swiglu_bwd_impl
 from .swiglu import swiglu_fwd_impl
+from .swa import swa_infer_impl
+from .swa import swa_paged_prefill_impl
+from .swa import swa_paged_decode_impl
 
 __all__ = [
     "causal_conv1d_update_bdt_impl",
@@ -81,6 +84,8 @@ __all__ = [
     "sdpa_infer_impl",
     "sdpa_fwd_impl",
     "sdpa_bwd_impl",
+    "swa_infer_impl",
+    "swa_paged_prefill_impl",
     "silu_bwd_impl",
     "silu_fwd_impl",
     # "swiglu_bwd_impl",
@@ -88,4 +93,5 @@ __all__ = [
     "store_label_cache_infer_impl",
     # "diffusion_attention_fwd_impl",
     # "diffusion_attention_bwd_impl",
+    "swa_paged_decode_impl",
 ]
