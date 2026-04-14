@@ -24,7 +24,7 @@ class _EPDispatchWrapper(nn.Module):
         assert isinstance(dispatch, MojoMoEDispatch)
         self._dispatch = dispatch
         ep_size = ep_mesh.size()
-        ep_rank = ep_mesh.get_rank()
+        ep_rank = ep_mesh.get_local_rank()
         base = dispatch.num_experts // ep_size
         rem = dispatch.num_experts % ep_size
         local = base + 1 if ep_rank < rem else base
