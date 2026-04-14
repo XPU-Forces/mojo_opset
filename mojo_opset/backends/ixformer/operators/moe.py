@@ -3,10 +3,6 @@ from typing import Optional
 import torch
 
 from mojo_opset.core import MojoMoEGating
-from mojo_opset.core import MojoMoEInitRoutingDynamicQuant
-from mojo_opset.core import MojoFusedSwiGLUMoEScaleDynamicQuantize
-from mojo_opset.core import MojoGroupQuantGemmMoE
-from mojo_opset.core import MojoGroupQuantGemmCombineMoE
 
 from ..utils import _get_ixf_and_check_device
 
@@ -19,10 +15,28 @@ class IxformerMoEGating(MojoMoEGating):
         gate_logits = ixf_f.mixed_type_linear(hidden_states, self.gate_weight.T.contiguous())
         top_k_gates, top_k_indices = ixf_f.moe_topk_softmax(gate_logits, self.top_k, renormalize=True)
 
-        return top_k_indices.to(torch.int64), top_k_gates
+        return top_k_indices, top_k_gates
 
-class IxformerMoEInitRoutingDynamicQuant(MojoMoEInitRoutingDynamicQuant):
+class IxformerMoEInitRoutingDynamicQuant(torch.nn.Module):
     supported_platforms_list = ["ilu"]
+    def __init__(
+        self,
+        num_experts: int,
+        top_k: int,
+        quant_block_size: int = 8,
+        quant_dtype: torch.dtype = torch.int8,
+        start_expert_id: int = 0,
+        end_expert_id: Optional[int] = None,
+    ):
+        super().__init__()
+        if quant_dtype != torch.int8:
+            raise NotImplementedError(f"Unsupported quant_dtype: {quant_dtype}, expected torch.int8.")
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.quant_block_size = quant_block_size
+        self.quant_dtype = quant_dtype
+        self.start_expert_id = start_expert_id
+        self.end_expert_id = num_experts if end_expert_id is None else end_expert_id
 
     def forward(self,
                 hidden_states: torch.Tensor,
@@ -31,7 +45,6 @@ class IxformerMoEInitRoutingDynamicQuant(MojoMoEInitRoutingDynamicQuant):
                 smooth_scale: Optional[torch.Tensor] = None,
                 quant_mode: int = 0):
         ixf_f = _get_ixf_and_check_device(hidden_states, self.__class__.__name__)
-        top_k_indices = top_k_indices.to(torch.int32).contiguous()
 
         bs, seq_len, dim = hidden_states.shape
         hidden_states = hidden_states.view(bs * seq_len, -1)
@@ -57,8 +70,16 @@ class IxformerMoEInitRoutingDynamicQuant(MojoMoEInitRoutingDynamicQuant):
                                                topk_ids=top_k_indices,
                                                smooth_scales=smooth_scale)
         return i8_hidden_states.view(-1, dim), top_k_gates, sorted_token_ids, src_to_dst, expert_sizes_cpu, quant_scale
-class IxformerFusedSwiGLUMoEScaleDynamicQuantize(MojoFusedSwiGLUMoEScaleDynamicQuantize):
+class IxformerFusedSwiGLUMoEScaleDynamicQuantize(torch.nn.Module):
     supported_platforms_list = ["ilu"]
+    def __init__(
+        self,
+        quant_dtype: torch.dtype = torch.int8,
+    ):
+        super().__init__()
+        if quant_dtype != torch.int8:
+            raise NotImplementedError(f"Unsupported quant_dtype: {quant_dtype}, expected torch.int8.")
+        self.quant_dtype = quant_dtype
 
     def forward(
         self,
@@ -79,8 +100,24 @@ class IxformerFusedSwiGLUMoEScaleDynamicQuantize(MojoFusedSwiGLUMoEScaleDynamicQ
                 act_type="swiglu",)
         return quantized_output, quant_scale
 
-class IxformerGroupQuantGemmMoE(MojoGroupQuantGemmMoE):
+class IxformerGroupQuantGemmMoE(torch.nn.Module):
     supported_platforms_list = ["ilu"]
+    def __init__(
+        self,
+        output_dtype: torch.dtype = torch.bfloat16,
+        trans_weight: bool = True,
+        quant_block_size: int = 8,
+        quant_algo: str = "none",
+        top_k: Optional[int] = None,
+        use_splitk: bool = False,
+    ):
+        super().__init__()
+        self.output_dtype = output_dtype
+        self.trans_weight = trans_weight
+        self.quant_block_size = quant_block_size
+        self.quant_algo = quant_algo
+        self.top_k = top_k
+        self.use_splitk = use_splitk
 
     def forward(self,
                 input: torch.Tensor,
@@ -102,8 +139,28 @@ class IxformerGroupQuantGemmMoE(MojoGroupQuantGemmMoE):
                                     format="TN",)
         return quant_gemm_output
 
-class IxformerGroupQuantGemmCombineMoE(MojoGroupQuantGemmCombineMoE):
+class IxformerGroupQuantGemmCombineMoE(torch.nn.Module):
     supported_platforms_list = ["ilu"]
+    def __init__(
+        self,
+        output_dtype: torch.dtype = torch.bfloat16,
+        trans_weight: bool = False,
+        quant_block_size: int = 8,
+        shared_expert_rank_num: float = 1.0,
+        num_experts_per_rank: Optional[int] = None,
+        normalize_top_k_gates: bool = False,
+        top_k: Optional[int] = None,
+        ep_rank: int = 0,
+    ):
+        super().__init__()
+        self.output_dtype = output_dtype
+        self.trans_weight = trans_weight
+        self.quant_block_size = quant_block_size
+        self.shared_expert_rank_num = shared_expert_rank_num
+        self.num_experts_per_rank = num_experts_per_rank
+        self.normalize_top_k_gates = normalize_top_k_gates
+        self.top_k = top_k
+        self.ep_rank = ep_rank
 
     def forward(self,
                 input: torch.Tensor,
@@ -243,16 +300,12 @@ class IxformerQuantMoe(torch.nn.Module):
 
         if self.gating.gate_weight is not None:
             setattr(self.gating.gate_weight, "force_dtype", torch.float32)
-
-    @staticmethod
-    def _pad_last_dim(x: torch.Tensor, target_last_dim: int) -> torch.Tensor:
-        if x.shape[-1] == target_last_dim:
-            return x
-        if x.shape[-1] > target_last_dim:
-            raise ValueError(
-                f"Input last dim {x.shape[-1]} exceeds target dim {target_last_dim}."
-            )
-        return torch.nn.functional.pad(x, (0, target_last_dim - x.shape[-1]))
+            
+        self.register_buffer(
+            "_default_w13_input_scale",
+            torch.ones((num_experts, hidden_size), dtype=torch.float32),
+            persistent=False,
+        )
 
     def forward(
         self,
@@ -295,11 +348,16 @@ class IxformerQuantMoe(torch.nn.Module):
 
         route_smooth_scale = self.w13_input_scale
         if route_smooth_scale is None:
-            route_smooth_scale = torch.ones(
-                (self.num_experts, self.hidden_size),
-                dtype=torch.float32,
-                device=flatten_hidden_states.device,
+            route_smooth_scale = self._default_w13_input_scale
+        if route_smooth_scale.shape != (self.num_experts, self.hidden_size):
+            raise ValueError(
+                f"w13_input_scale shape must be {(self.num_experts, self.hidden_size)}, "
+                f"but got {tuple(route_smooth_scale.shape)}"
             )
+        route_smooth_scale = route_smooth_scale.to(
+            device=flatten_hidden_states.device,
+            dtype=torch.float32,
+        )
 
         (
             routed_input_i8,
@@ -325,9 +383,6 @@ class IxformerQuantMoe(torch.nn.Module):
                 device=hidden_states.device,
             )
 
-        routed_input_i8 = self._pad_last_dim(
-            routed_input_i8, self.w13_weight.shape[-1]
-        )
         fc1_output = self.fc1(
             input=routed_input_i8,
             weight=self.w13_weight,
@@ -346,7 +401,6 @@ class IxformerQuantMoe(torch.nn.Module):
             beta=beta,
             quant_mode=quant_mode,
         )
-        act_i8 = self._pad_last_dim(act_i8, self.w2_weight.shape[-1])
 
         shared_output_2d = None
         if shared_output is not None:

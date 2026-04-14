@@ -51,7 +51,7 @@ class MojoMoE(MojoOperator):
         # hidden_states: [num_tokens, H]
         top_k_indices, top_k_gates = self.gating(hidden_states)
         # top_k_indices, top_k_gates: [num_tokens, top_k]
-        sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = self.dispatch(hidden_states, top_k_gates, top_k_indices)
+        sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = self.dispatch(hidden_states, top_k_gates, top_k_indices.to(torch.int64))
         # sorted_hidden_states: [local_tokens, H]
         # tokens_per_expert: [num_experts]
         # sorted_gates: [local_tokens, 1]
@@ -105,7 +105,7 @@ class MojoMoEGating(MojoOperator):
         gate_logits = torch.softmax(gate_logits, dim=-1)
         top_k_logits, top_k_indices = torch.topk(gate_logits, self.top_k, dim=-1)
         top_k_gates = top_k_logits / torch.sum(top_k_logits, dim=-1, keepdim=True)
-        return top_k_indices, top_k_gates
+        return top_k_indices.to(torch.int32), top_k_gates
 
     def extra_repr(self) -> str:
         hidden_size = self.gate_weight.size(0)

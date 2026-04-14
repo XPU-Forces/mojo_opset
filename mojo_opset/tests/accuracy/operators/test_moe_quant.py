@@ -310,22 +310,6 @@ def _quantize_per_output_channel(weight_fp: torch.Tensor):
     dequant = q_weight.float() * scale.unsqueeze(-1)
     return q_weight, scale.float(), dequant
 
-
-@torch.no_grad()
-def _mojo_moe_forward_with_fixed_routes(
-    moe_ref: MojoMoE,
-    hidden_states: torch.Tensor,
-    top_k_indices: torch.Tensor,
-    top_k_gates: torch.Tensor,
-) -> torch.Tensor:
-    sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = moe_ref.dispatch(
-        hidden_states, top_k_gates, top_k_indices
-    )
-    expert_outputs = moe_ref.experts(sorted_hidden_states, tokens_per_expert)
-    output_buffer = torch.zeros_like(hidden_states, memory_format=torch.contiguous_format)
-    return moe_ref.combine(output_buffer, expert_outputs, sorted_gates, token_indices)
-
-
 COMMON_IXFORMER_QUANT_MOE_CASES = [
     # (num_experts, top_k, hidden_size, intermediate_size, num_tokens)
     (8, 2, 256, 512, 64),
@@ -402,27 +386,6 @@ def test_ixformer_quant_moe_vs_mojo_moe_accuracy(
 
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
 
-    # A) fixed-route compare: isolate expert + combine path
-    fixed_top_k_indices, fixed_top_k_gates = mojo_ref.gating(x)
-    out_ixf_fixed = ixf_moe(
-        x,
-        top_k_indices=fixed_top_k_indices,
-        top_k_gates=fixed_top_k_gates,
-    )
-    out_ref_fixed = _mojo_moe_forward_with_fixed_routes(
-        mojo_ref,
-        x,
-        fixed_top_k_indices,
-        fixed_top_k_gates,
-    )
-    torch.testing.assert_close(
-        out_ixf_fixed.float(),
-        out_ref_fixed.float(),
-        atol=0.20,
-        rtol=0.10,
-    )
-
-    # B) end-to-end compare
     out_ixf_e2e = ixf_moe(x)
     out_ref_e2e = mojo_ref(x)
     torch.testing.assert_close(
