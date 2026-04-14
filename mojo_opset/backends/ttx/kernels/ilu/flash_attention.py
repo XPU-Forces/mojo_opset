@@ -108,8 +108,71 @@ def _paged_prefill_fav2_kernel(
         kv_loop_end = kv_seq_len
 
     num_kv_pages = tl.cdiv(kv_loop_end, PAGE_SIZE)
+    num_full_pages = kv_seq_len // PAGE_SIZE
+    num_full_pages = tl.minimum(num_full_pages, num_kv_pages)
 
-    for page_idx in tl.range(0, num_kv_pages):
+    qk_scale = sm_scale * 1.4426950408889634
+
+    for page_idx in tl.range(0, num_full_pages):
+        kv_blk_start = page_idx * PAGE_SIZE
+
+        physical_block = tl.load(
+            block_tables_ptr + b_id * stride_bt_batch + page_idx * stride_bt_block
+        )
+
+        K_T_blk_ptr = tl.make_block_ptr(
+            base=K_cache + physical_block * stride_kb + kv_head_id * stride_kh,
+            shape=(HEAD_DIM, PAGE_SIZE),
+            strides=(stride_kd, stride_kn),
+            offsets=(0, 0),
+            block_shape=(BLOCK_D, PAGE_SIZE),
+            order=(0, 1),
+        )
+        V_blk_ptr = tl.make_block_ptr(
+            base=V_cache + physical_block * stride_vb + kv_head_id * stride_vh,
+            shape=(PAGE_SIZE, HEAD_DIM),
+            strides=(stride_vn, stride_vd),
+            offsets=(0, 0),
+            block_shape=(PAGE_SIZE, BLOCK_D),
+            order=(1, 0),
+        )
+
+        k_T = tl.load(K_T_blk_ptr)
+        v = tl.load(V_blk_ptr)
+
+        qk = tl.dot(q, k_T)
+        qk = qk * qk_scale
+
+        if IS_CAUSAL:
+            if USE_AUX_MASK:
+                mask = causal_mask_fn(
+                    aux_mask_ptr,
+                    AUX_MASK_SIZE,
+                    stride_mask_m,
+                    stride_mask_n,
+                    kv_cache_len + q_blk_start,
+                    kv_blk_start,
+                    BLOCK_M,
+                    PAGE_SIZE,
+                )
+                qk = tl.where(mask, qk, float("-inf"))
+            else:
+                offs_m = q_blk_start + tl.arange(0, BLOCK_M)
+                offs_n = kv_blk_start + tl.arange(0, PAGE_SIZE)
+                causal_mask = (offs_m[:, None] + kv_cache_len) >= offs_n[None, :]
+                qk = tl.where(causal_mask, qk, float("-inf"))
+
+        m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        alpha = tl.math.exp2(m_i - m_ij)
+        p = tl.math.exp2(qk - m_ij[:, None])
+
+        acc = acc * alpha[:, None]
+        acc = tl.dot(p.to(K_cache.dtype.element_ty), v, acc=acc)
+
+        l_i = l_i * alpha + tl.sum(p, 1)
+        m_i = m_ij
+
+    for page_idx in tl.range(num_full_pages, num_kv_pages):
         kv_blk_start = page_idx * PAGE_SIZE
         kv_blk_end = tl.minimum(kv_blk_start + PAGE_SIZE, kv_seq_len)
         kv_blk_len = kv_blk_end - kv_blk_start
@@ -139,7 +202,7 @@ def _paged_prefill_fav2_kernel(
         v = tl.load(V_blk_ptr, boundary_check=(0, 1), padding_option="zero")
 
         qk = tl.dot(q, k_T)
-        qk = qk * sm_scale
+        qk = qk * qk_scale
 
         if IS_CAUSAL:
             if USE_AUX_MASK:
@@ -161,8 +224,8 @@ def _paged_prefill_fav2_kernel(
                 qk = tl.where(causal_mask, qk, float("-inf"))
 
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
-        alpha = tl.math.exp(m_i - m_ij)
-        p = tl.math.exp(qk - m_ij[:, None])
+        alpha = tl.math.exp2(m_i - m_ij)
+        p = tl.math.exp2(qk - m_ij[:, None])
 
         acc = acc * alpha[:, None]
         acc = tl.dot(p.to(K_cache.dtype.element_ty), v, acc=acc)
