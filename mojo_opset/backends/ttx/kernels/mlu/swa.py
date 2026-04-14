@@ -753,30 +753,30 @@ def _swa_paged_decode_kernel(
 ):
     tl.static_assert(HEAD_DIM <= BLOCK_SIZE_D, "HEAD_DIM should be <= BLOCK_SIZE_D")
     tl.static_assert(PAGE_SIZE % BLOCK_SIZE_N == 0, "BLOCK_SIZE_N must be a divisor of PAGE_SIZE")
-    tl.static_assert(NUM_Q_HEADS % BLOCK_SIZE_Q_HEADS == 0, "BLOCK_SIZE_Q_HEADS must be a divisor of NUM_Q_HEADS")
+    GQA_GROUP_SIZE: tl.constexpr = NUM_Q_HEADS // NUM_KV_HEADS
+    GQA_GROUP_STRIDE: tl.constexpr = 1 if GQA_INTERLEAVE else GQA_GROUP_SIZE
+    GQA_HEAD_STRIDE: tl.constexpr = NUM_KV_HEADS if GQA_INTERLEAVE else 1
+    NUM_Q_HEAD_BLOCKS_PER_KV_HEAD: tl.constexpr = tl.cdiv(GQA_GROUP_SIZE, BLOCK_SIZE_Q_HEADS)
+
 
     pid = tl.program_id(0)
     n_progs = tl.num_programs(0)
 
-    Q_HEAD_REPEATS: tl.constexpr = NUM_Q_HEADS // BLOCK_SIZE_Q_HEADS
-    num_tasks = BATCH_SIZE * Q_HEAD_REPEATS
+    num_tasks = BATCH_SIZE * NUM_KV_HEADS * NUM_Q_HEAD_BLOCKS_PER_KV_HEAD
 
     for q_task_id in range(pid, num_tasks, n_progs):
-        q_head_id = q_task_id % Q_HEAD_REPEATS
-        b_id = q_task_id // Q_HEAD_REPEATS
-        if GQA_INTERLEAVE:
-            kv_head_id = q_head_id * BLOCK_SIZE_Q_HEADS % NUM_KV_HEADS
-        else:
-            kv_head_id = q_head_id * BLOCK_SIZE_Q_HEADS // (NUM_Q_HEADS // NUM_KV_HEADS)
+        b_id = q_task_id // NUM_Q_HEAD_BLOCKS_PER_KV_HEAD // NUM_KV_HEADS
+        kv_head_id = q_task_id // NUM_Q_HEAD_BLOCKS_PER_KV_HEAD % NUM_KV_HEADS
+        q_head_block_id = q_task_id % NUM_Q_HEAD_BLOCKS_PER_KV_HEAD
 
         kv_seq_len = tl.load(seqlens_ptr + b_id)
 
-
         offs_d = tl.arange(0, BLOCK_SIZE_D)
-        offs_head_block = q_head_id * BLOCK_SIZE_Q_HEADS + tl.arange(0, BLOCK_SIZE_Q_HEADS)
+        offs_gqa_block = q_head_block_id * BLOCK_SIZE_Q_HEADS + tl.arange(0, BLOCK_SIZE_Q_HEADS)
+        offs_head_block = kv_head_id * GQA_GROUP_STRIDE + offs_gqa_block * GQA_HEAD_STRIDE
         q_ptrs = q_ptr + b_id * stride_qb + offs_head_block[:, None] * stride_qh + offs_d[None, :] * stride_qd
 
-        q = tl.load(q_ptrs, mask = (offs_d[None, :] < HEAD_DIM) & (offs_head_block[:, None] < NUM_Q_HEADS), other = 0.0)
+        q = tl.load(q_ptrs, mask = (offs_d[None, :] < HEAD_DIM) & (offs_gqa_block[:, None] < GQA_GROUP_SIZE), other = 0.0)
 
         m_i = tl.zeros((BLOCK_SIZE_Q_HEADS,), dtype=tl.float32) - float("inf")
         l_i = tl.zeros((BLOCK_SIZE_Q_HEADS,), dtype=tl.float32)
@@ -895,7 +895,7 @@ def _swa_paged_decode_kernel(
             acc = acc / l_i[:, None]
 
         o_ptrs = o_ptr + b_id * stride_ob + offs_head_block[:, None] * stride_oh + offs_d[None, :] * stride_od
-        tl.store(o_ptrs, acc.to(o_ptr.dtype.element_ty), mask=(offs_d[None, :] < HEAD_DIM) & (offs_head_block[:, None] < NUM_Q_HEADS))
+        tl.store(o_ptrs, acc.to(o_ptr.dtype.element_ty), mask=(offs_d[None, :] < HEAD_DIM) & (offs_gqa_block[:, None] < GQA_GROUP_SIZE))
 
 
 def swa_paged_decode_impl(
@@ -924,7 +924,7 @@ def swa_paged_decode_impl(
     grid = (job_num, )
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     BLOCK_SIZE_N = min(256, triton.next_power_of_2(page_size))
-    BLOCK_SIZE_Q_HEADS = 1 if gqa_interleave else num_kv_heads
+    BLOCK_SIZE_Q_HEADS = 1 if gqa_interleave else (num_q_heads // num_kv_heads)
 
     _swa_paged_decode_kernel[grid](
         q,
