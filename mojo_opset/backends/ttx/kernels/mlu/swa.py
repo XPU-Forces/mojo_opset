@@ -755,6 +755,7 @@ def _swa_paged_decode_kernel(
     tl.static_assert(HEAD_DIM <= BLOCK_SIZE_D, "HEAD_DIM should be <= BLOCK_SIZE_D")
     tl.static_assert(PAGE_SIZE % BLOCK_SIZE_N == 0, "BLOCK_SIZE_N must be a divisor of PAGE_SIZE")
     GQA_GROUP_SIZE: tl.constexpr = NUM_Q_HEADS // NUM_KV_HEADS
+    tl.static_assert(GQA_GROUP_SIZE % BLOCK_SIZE_Q_HEADS == 0, "BLOCK_SIZE_Q_HEADS must be a divisor of GQA_GROUP_SIZE")
     GQA_GROUP_STRIDE: tl.constexpr = 1 if GQA_INTERLEAVE else GQA_GROUP_SIZE
     GQA_HEAD_STRIDE: tl.constexpr = NUM_KV_HEADS if GQA_INTERLEAVE else 1
     NUM_Q_HEAD_BLOCKS_PER_KV_HEAD: tl.constexpr = tl.cdiv(GQA_GROUP_SIZE, BLOCK_SIZE_Q_HEADS)
@@ -965,7 +966,7 @@ def swa_paged_decode_impl(
         BLOCK_SIZE_D=BLOCK_SIZE_D,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
         BLOCK_SIZE_Q_HEADS=BLOCK_SIZE_Q_HEADS,
-        num_warps=1, num_stages=3, #force_use_shared_memory=True, bottleneck="simd",
+        num_warps=1, num_stages=3,
         pipeline_strategies=["reduce_delay"],
     )
     return o
