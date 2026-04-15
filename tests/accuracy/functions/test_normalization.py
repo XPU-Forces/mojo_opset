@@ -39,7 +39,6 @@ dtypes = [torch.float32, torch.bfloat16]
 def test_rmsnorm_forward_backward_diff(x, weight):
     ctx = MockFunctionCtx()
     y = MojoRMSNormFunction.forward(ctx, x, weight, 1e-6)
-    print(f"x type is {x.dtype}")
     ctx_ref = MockFunctionCtx()
     y_ref = MojoRMSNormFunction._registry.get("torch").forward(ctx_ref, x, weight, 1e-6)
     assert_close(y, y_ref)

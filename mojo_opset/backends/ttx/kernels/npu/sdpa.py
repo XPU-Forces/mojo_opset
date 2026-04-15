@@ -803,7 +803,6 @@ def sdpa_infer_impl(
 
     if scale is None:
         scale = 1.0
-    print(f"mask {mask}")
     o = torch.empty_like(q)
 
     extra_kern_args = {}
