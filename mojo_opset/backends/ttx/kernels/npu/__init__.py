@@ -43,7 +43,8 @@ from .swa import swa_fwd_impl
 from .swa import swa_infer_impl
 from .swa import swa_paged_decode_impl
 from .swa import swa_paged_prefill_impl
-from .topk_impl import top_k_impl
+# FIXME: The current TTX implementation of the TopK Triton kernel has suboptimal performance and is temporarily disabled. Pending future improvements.
+# from .topk_impl import top_k_impl
 from .swiglu import swiglu_bwd_impl
 from .swiglu import swiglu_fwd_impl
 
@@ -90,7 +91,8 @@ __all__ = [
     "reject_sampling_impl",
     "top_p_filter_impl",
     "top_p_sampling_impl",
-    "top_k_impl",
+    # # FIXME: The current TTX implementation of the TopK Triton kernel has suboptimal performance and is temporarily disabled. Pending future improvements.
+    # "top_k_impl",
     "swa_paged_prefill_impl",
     "swa_paged_decode_impl",
     "swa_infer_impl",
