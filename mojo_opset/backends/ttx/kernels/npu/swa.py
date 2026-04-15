@@ -1136,7 +1136,7 @@ def _paged_decode_kernel(
         else:
             kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
 
-        kv_seq_len = tl.load(seqlens_ptr + b_id)
+        kv_seq_len = tl.load(seqlens_ptr + b_id).to(tl.int32)
 
 
         offs_d = tl.arange(0, BLOCK_SIZE_D)

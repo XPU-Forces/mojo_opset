@@ -89,7 +89,7 @@ def generate_quant_group_linear_data(
         pytest.param(
             torch.randn(size=(192, 64), dtype=dtype),
             torch.randn(size=(4, 64, 96), dtype=dtype),
-            torch.tensor([16, 64, 32, 80], dtype=torch.int64),
+            torch.tensor([16, 64, 32, 80], dtype=torch.int32),
             False,
             id=f"uneven_groups_fp={'bf16' if dtype is torch.bfloat16 else 'fp16'}",
         )
@@ -252,7 +252,7 @@ def test_group_linear_two_groups_single_call(dtype, trans_weight):
         weight = torch.stack([w0, w1], dim=0)
         ref = torch.cat([x0 @ w0, x1 @ w1], dim=0)
 
-    group_list = torch.tensor([m0, m1], device=device, dtype=torch.int64)
+    group_list = torch.tensor([m0, m1], device=device, dtype=torch.int32)
 
     op = MojoGroupLinear(weight=weight, trans_weight=trans_weight)
     out = op(x, group_list)

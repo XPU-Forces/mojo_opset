@@ -58,6 +58,7 @@ class TTXGroupGemm(MojoGroupGemm):
     supported_platforms_list = ["npu", "ilu"]
 
     def forward(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:
+        group_list = group_list.to(torch.int32)
         assert input.dim() == 2
         assert self.weight.dim() == 3
 

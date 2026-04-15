@@ -253,7 +253,7 @@ def generate_quant_group_linear_data(
         pytest.param(
             torch.randn(size=(192, 64), dtype=dtype),
             torch.randn(size=(4, 64, 96), dtype=dtype),
-            torch.tensor([16, 64, 32, 80], dtype=torch.int64),
+            torch.tensor([16, 64, 32, 80], dtype=torch.int32),
             False,
             id=f"uneven_groups_fp={'bf16' if dtype is torch.bfloat16 else 'fp16'}",
         )
@@ -374,7 +374,7 @@ def test_grouped_matmul_cases_via_group_linear(inputs, weights, bias, dtype):
 
     outputs = []
     for x, w in zip(input_tensors, weight_tensors):
-        group_list = torch.tensor([x.shape[0]], device=device, dtype=torch.int64)
+        group_list = torch.tensor([x.shape[0]], device=device, dtype=torch.int32)
         weight_group = w.unsqueeze(0)
         op = MojoGroupLinear(weight=weight_group, trans_weight=False)
         out = op(x, group_list)

@@ -55,6 +55,12 @@ class MojoRotaryEmbedding(MojoOperator):
         2. Padded prefill: input [B, S, H], cu_seqlens_q None, position_ids None -> cos/sin [S, D].
         3. Decode: input [B, H], cu_seqlens_q None, position_ids [B] -> cos/sin [B, D].
         """
+        if cu_seqlens_q is not None:
+            cu_seqlens_q = cu_seqlens_q.to(torch.int32)
+        if seqlens_kv is not None:
+            seqlens_kv = seqlens_kv.to(torch.int32)
+        if position_ids is not None:
+            position_ids = position_ids.to(torch.int32)
         assert position_ids is None or cu_seqlens_q is None, "At most one of cu_seqlens_q or position_ids should be provided"
 
         if cu_seqlens_q is not None:

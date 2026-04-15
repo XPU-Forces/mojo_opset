@@ -53,7 +53,7 @@ def generate_paged_decode_data(
     k_cache = torch.randn(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
     v_cache = torch.randn(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
 
-    block_tables = torch.zeros(batch_size, max_num_blocks_per_seq, dtype=torch.long)
+    block_tables = torch.zeros(batch_size, max_num_blocks_per_seq, dtype=torch.int32)
     free_blocks = torch.randperm(num_total_blocks)
 
     current_block_offset = 0
@@ -180,7 +180,7 @@ def generate_paged_prefill_data(
     k_cache = torch.zeros(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
     v_cache = torch.zeros(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
 
-    block_tables = torch.zeros(batch_size, max_num_blocks_per_seq, dtype=torch.long)
+    block_tables = torch.zeros(batch_size, max_num_blocks_per_seq, dtype=torch.int32)
     free_blocks = torch.randperm(num_total_blocks)
 
     current_block_offset = 0
@@ -514,7 +514,7 @@ def _generate_paged_mla_decode_data(batch_size, num_heads, d_nope, d_rope, d_v,
     ckv_cache = torch.randn(total_blocks, 1, block_size, kv_lora_rank, dtype=dtype)
     kpe_cache = torch.randn(total_blocks, 1, block_size, d_rope, dtype=dtype)
 
-    block_tables = torch.zeros(batch_size, max_nb, dtype=torch.long)
+    block_tables = torch.zeros(batch_size, max_nb, dtype=torch.int32)
     free = torch.randperm(total_blocks)
     off = 0
     for i in range(batch_size):
@@ -569,7 +569,7 @@ def _generate_paged_mla_prefill_data(batch_size, num_heads, d_nope, d_rope, d_v,
     ckv_cache = torch.zeros(total_blocks, 1, block_size, kv_lora_rank, dtype=dtype)
     kpe_cache = torch.zeros(total_blocks, 1, block_size, d_rope, dtype=dtype)
 
-    block_tables = torch.zeros(batch_size, max_nb, dtype=torch.long)
+    block_tables = torch.zeros(batch_size, max_nb, dtype=torch.int32)
     free = torch.randperm(total_blocks)
     off = 0
 

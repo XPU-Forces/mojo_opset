@@ -21,6 +21,8 @@ class TTXDynamicQuant(MojoDynamicQuant):
         smooth_scale: Optional[torch.Tensor] = None,
         token_count: Optional[torch.Tensor] = None,
     ):
+        if token_count is not None:
+            token_count = token_count.to(torch.int32)
         if self.smooth_input and smooth_scale is None:
             raise ValueError("smooth_scale is required when smooth_input=True")
         if self.moe_mode and token_count is None:

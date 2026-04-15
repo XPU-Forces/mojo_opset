@@ -35,6 +35,10 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         seqlens_kv: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
     ):
+        cu_seqlens_q = cu_seqlens_q.to(torch.int32)
+        block_tables = block_tables.to(torch.int32)
+        if seqlens_kv is not None:
+            seqlens_kv = seqlens_kv.to(torch.int32)
         assert self.window_size == -1, (
             f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
         )
@@ -78,6 +82,8 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         softmax_scale: Optional[float] = None,
         mask: Optional[torch.Tensor] = None,
     ):
+        seqlens = seqlens.to(torch.int32)
+        block_tables = block_tables.to(torch.int32)
         assert self.window_size == -1, (
             f"[TTXPagedDecodeGQA] TTX does not support sliding window, but got window_size={self.window_size}"
         )
@@ -132,6 +138,10 @@ class TTXPagedPrefillSWA(MojoPagedPrefillSWA):
         softmax_scale: Optional[float] = None,
         seqlens_kv: Optional[torch.Tensor] = None,  # [bsz]
     ) -> torch.Tensor:
+        cu_seqlens_q = cu_seqlens_q.to(torch.int32)
+        block_table = block_table.to(torch.int32)
+        if seqlens_kv is not None:
+            seqlens_kv = seqlens_kv.to(torch.int32)
         if seqlens_kv is None:
             seqlens_kv = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
 
@@ -165,6 +175,8 @@ class TTXPagedDecodeSWA(MojoPagedDecodeSWA):
     ) -> torch.Tensor:
         # Note: is_causal = False should never happen
 
+        seq_lens = seq_lens.to(torch.int32)
+        block_table = block_table.to(torch.int32)
         o = swa_paged_decode(
             q,
             k_cache,
@@ -193,6 +205,8 @@ class TTXSWA(MojoSWA):
         softmax_scale: Optional[float] = None,
     ) -> torch.Tensor:
 
+        cu_seqlens_q = cu_seqlens_q.to(torch.int32)
+        cu_seqlens_kv = cu_seqlens_kv.to(torch.int32)
         o = swa_infer(
             q,
             k,

@@ -17,6 +17,8 @@ class MojoStoreLowrank(MojoOperator):
         token_idxs: torch.Tensor,
         token_num: int,
     ) -> torch.Tensor:
+        block_idxs = block_idxs.to(torch.int32)
+        token_idxs = token_idxs.to(torch.int32)
         assert label_cache.dim() == 4, "Expected label_cache is BNSD"
         assert key_lr.dim() == 3, "Expected key_lr is SND"
 

@@ -134,7 +134,7 @@ def paged_prefill_kernel(
         if seqlens_kv_ptr is None:
             kv_seq_len = q_seq_len
         else:
-            kv_seq_len = tl.load(seqlens_kv_ptr + b_id)
+            kv_seq_len = tl.load(seqlens_kv_ptr + b_id).to(tl.int32)
         kv_cache_len = kv_seq_len - q_seq_len
 
         cur_q_chunks = tl.cdiv(q_seq_len, BLOCK_SIZE_M)

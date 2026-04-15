@@ -252,6 +252,7 @@ class MojoMoECombine(MojoOperator):
         Output:
         - combined: Combined output tensor.
         """
+        token_indices = token_indices.to(torch.int32)
         combined_expert_outputs = expert_outputs.float()
         if self.multiply_by_gates:
             combined_expert_outputs = combined_expert_outputs * sorted_gates.float()
@@ -263,6 +264,7 @@ class MojoMoECombine(MojoOperator):
 
 
 def _validate_moe_token_count(token_count: torch.Tensor, route_count: int) -> torch.Tensor:
+    token_count = token_count.to(torch.int32)
     token_count_i64 = token_count.to(dtype=torch.int64, device=token_count.device)
     if token_count_i64.dim() != 1:
         raise ValueError(f"token_count must be 1D, but got shape {tuple(token_count.shape)}")
@@ -704,4 +706,6 @@ class MojoGroupedMatmulA8W4MSD(MojoOperator):
         token_count: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ):
+        if token_count is not None:
+            token_count = token_count.to(torch.int32)
         raise NotImplementedError("Torch reference for MSD-packed grouped_matmul_a8w4 is not available.")

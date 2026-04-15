@@ -44,10 +44,10 @@ def _get_token_block_size(n_qh: int, n_kh: int) -> int:
 
 @tensor_cache
 def prepare_chunk_indices(
-    cu_seqlens: torch.LongTensor,
+    cu_seqlens: torch.Tensor,
     chunk_size: int,
-    kv_lens: Optional[torch.LongTensor] = None,
-) -> torch.LongTensor:
+    kv_lens: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     lens = prepare_lens(cu_seqlens)
     num_chunks = triton.cdiv(lens, chunk_size)
     total = num_chunks.sum()
@@ -386,8 +386,10 @@ def rot_pos_embed_impl(
     if cu_seqlens_q is None:
         return cos[:x.shape[1]], sin[:x.shape[1]]
 
+    cu_seqlens_q = cu_seqlens_q.to(torch.int32)
     seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
     if seqlens_kv is not None:
+        seqlens_kv = seqlens_kv.to(torch.int32)
         context_lens = seqlens_kv - seqlens_q
     else:
         context_lens = None
