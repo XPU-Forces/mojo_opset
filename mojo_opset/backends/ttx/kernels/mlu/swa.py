@@ -1,4 +1,5 @@
 import torch
+import math
 from typing import Optional, Tuple
 
 from .utils import get_mlu_total_cores
@@ -924,7 +925,8 @@ def swa_paged_decode_impl(
     grid = (job_num, )
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     BLOCK_SIZE_N = min(256, triton.next_power_of_2(page_size))
-    BLOCK_SIZE_Q_HEADS = 1 if gqa_interleave else (num_q_heads // num_kv_heads)
+    BLOCK_SIZE_Q_HEADS = 1 if gqa_interleave else min(16, num_q_heads // num_kv_heads)
+    BLOCK_SIZE_Q_HEADS = math.gcd(BLOCK_SIZE_Q_HEADS, num_q_heads // num_kv_heads)
 
     _swa_paged_decode_kernel[grid](
         q,
