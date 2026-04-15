@@ -70,7 +70,7 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
 
 
 class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
-    supported_platforms_list = ["npu", "ilu"]
+    supported_platforms_list = ["npu", "ilu", "mlu"]
 
     def forward(
         self,
