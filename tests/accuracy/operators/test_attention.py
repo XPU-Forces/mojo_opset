@@ -34,6 +34,7 @@ def generate_paged_decode_data(
     block_size: int,
     dtype: torch.dtype,
 ):
+    torch.manual_seed(23)
     query = torch.randn(batch_size, num_q_heads, head_dim, dtype=dtype)
 
     if max_seq_len > 0:
@@ -717,7 +718,9 @@ test_configs_swa_prefill = [
     (2, 16, 4, 96, 2048, 0, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (2, 8, 1, 128, 256, 1024, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
     (2, 8, 1, 128, 1024, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
-    (2, 8, 1, 128, 0, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ")
+    (2, 8, 1, 128, 0, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
+    (2, 8, 2, 128, 2048, 0, 1024, torch.bfloat16, "M_BF16_GROUP1"),
+    (2, 24, 8, 128, 1024, 1024, 1024, torch.bfloat16, "M_BF16_GROUP2"),
 ]
 
 
@@ -790,11 +793,13 @@ def test_paged_prefill_swa(
 
 
 test_configs_swa_decode = [
-    (8, 16, 4, 128, 1024, 32, torch.bfloat16, "M_BF16"),
+    (4, 16, 4, 128, 1024, 512, torch.bfloat16, "M_BF16"),
     (8, 16, 4, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (8, 8, 1, 128, 4096, 128, torch.bfloat16, "M_BF16_LONG"),
     (2, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
-    (2, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ")
+    (2, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
+    (2, 8, 2, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP1"),
+    (2, 24, 8, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP2"),
 ]
 
 @pytest.mark.parametrize(
