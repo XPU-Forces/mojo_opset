@@ -51,7 +51,7 @@ jobs:
             -v /lib/modules:/lib/modules \
             -v /usr/src:/usr/src \
             -v /dev:/dev \
-            corex:4.4.0 \
+            corex:4.5.0rc \
             tail -f /dev/null
 
       - name: Build And Install Wheel Artifact
