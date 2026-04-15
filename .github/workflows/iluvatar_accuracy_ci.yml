@@ -35,7 +35,7 @@ jobs:
         run: |
           docker run --rm \
             -v ${{ github.workspace }}:/workspace \
-            corex:4.4.0 \
+            corex:4.5.0rc \
             bash -c "find /workspace -mindepth 1 -delete" || true
 
       - uses: actions/checkout@v4
