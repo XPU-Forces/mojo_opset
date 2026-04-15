@@ -136,15 +136,24 @@ def __qkv_partition_fn(src_data_rank, name, mod, mesh, *, num_q_heads, num_kv_he
     q_end = q_start + q_per_rank * head_dim
     local_q = weight[q_start:q_end, :]
 
+    # number of KV heads assigned to each rank.
+    # when num_kv_heads >= size: each rank gets num_kv_heads // size heads.
+    # when num_kv_heads < size: multiple ranks share the same head (GQA replication).
+    assert num_q_heads % size == 0, f"num_q_heads ({num_q_heads}) must be divisible by size ({size})"
+    assert (num_kv_heads >= size and num_kv_heads % size == 0) or (size > num_kv_heads and size % num_kv_heads == 0), \
+        f"num_kv_heads ({num_kv_heads}) and size ({size}) must have a divisibility relationship"
+    kv_per_rank = max(1, num_kv_heads // size)
     replicate = max(1, size // num_kv_heads)
-    kv_idx = rank // replicate
+    kv_start_idx = (rank // replicate) * kv_per_rank
+    kv_local_dim = kv_per_rank * head_dim
+
     k_offset = q_total_dim
-    k_start = k_offset + kv_idx * head_dim
-    local_k = weight[k_start : k_start + head_dim, :]
+    k_start = k_offset + kv_start_idx * head_dim
+    local_k = weight[k_start : k_start + kv_local_dim, :]
 
     v_offset = q_total_dim + kv_total_dim
-    v_start = v_offset + kv_idx * head_dim
-    local_v = weight[v_start : v_start + head_dim, :]
+    v_start = v_offset + kv_start_idx * head_dim
+    local_v = weight[v_start : v_start + kv_local_dim, :]
 
     new_weight = torch.cat([local_q, local_k, local_v], dim=0)
     mod.register_parameter("weight", nn.Parameter(new_weight))
@@ -152,8 +161,8 @@ def __qkv_partition_fn(src_data_rank, name, mod, mesh, *, num_q_heads, num_kv_he
     if mod.bias is not None:
         bias = shard_tensor(mesh, [Replicate()], src_data_rank, mod.bias)
         local_q_bias = bias[q_start:q_end]
-        local_k_bias = bias[k_offset + kv_idx * head_dim : k_offset + kv_idx * head_dim + head_dim]
-        local_v_bias = bias[v_offset + kv_idx * head_dim : v_offset + kv_idx * head_dim + head_dim]
+        local_k_bias = bias[k_start : k_start + kv_local_dim]
+        local_v_bias = bias[v_start : v_start + kv_local_dim]
         new_bias = torch.cat([local_q_bias, local_k_bias, local_v_bias], dim=0)
         mod.register_parameter("bias", nn.Parameter(new_bias))
 
