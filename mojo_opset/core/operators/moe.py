@@ -252,7 +252,7 @@ class MojoMoECombine(MojoOperator):
         Output:
         - combined: Combined output tensor.
         """
-        token_indices = token_indices.to(torch.int32)
+        token_indices = token_indices.to(torch.int64) # scatter_reduce requires int64 indices
         combined_expert_outputs = expert_outputs.float()
         if self.multiply_by_gates:
             combined_expert_outputs = combined_expert_outputs * sorted_gates.float()
