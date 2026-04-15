@@ -593,7 +593,7 @@ def swa_paged_prefill_impl(
     if softmax_scale is None:
         softmax_scale = 1.0 / (head_dim**0.5)
 
-    o = torch.zeros_like(q, memory_format=torch.contiguous_format)
+    o = torch.empty_like(q, memory_format=torch.contiguous_format)
     if q.dtype == torch.float32:
         BLOCK_M = 64
         BLOCK_N = min(64, triton.next_power_of_2(page_size))
