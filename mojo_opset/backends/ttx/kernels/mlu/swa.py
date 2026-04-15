@@ -966,5 +966,6 @@ def swa_paged_decode_impl(
         BLOCK_SIZE_N=BLOCK_SIZE_N,
         BLOCK_SIZE_Q_HEADS=BLOCK_SIZE_Q_HEADS,
         num_warps=1, num_stages=3, #force_use_shared_memory=True, bottleneck="simd",
+        pipeline_strategies=["reduce_delay"],
     )
     return o
