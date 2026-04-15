@@ -87,8 +87,9 @@ from .operators.position_embedding import MojoVisionRotaryEmbedding2D
 from .operators.sampling import MojoApplyPenaltiesTempurate
 from .operators.sampling import MojoJoinProbRejectSampling
 from .operators.sampling import MojoRejectSampling
-from .operators.sampling import MojoTopKSampling
-from .operators.sampling import MojoTopKSoftmax
+# FIXME: The current TTX implementation of the TopK Triton kernel has suboptimal performance and is temporarily disabled. Pending future improvements.
+# from .operators.sampling import MojoTopKSampling
+# from .operators.sampling import MojoTopKSoftmax
 from .operators.sampling import MojoTopPFilter
 from .operators.sampling import MojoTopPSampling
 
@@ -174,8 +175,9 @@ __all__ = [
     "MojoMRoPE",
 
     "MojoTopPSampling",
-    "MojoTopKSampling",
-    "MojoTopKSoftmax",
+    # FIXME: The current TTX implementation of the TopK Triton kernel has suboptimal performance and is temporarily disabled. Pending future improvements.
+    # "MojoTopKSampling",
+    # "MojoTopKSoftmax",
     "MojoRejectSampling",
     "MojoJoinProbRejectSampling",
     "MojoApplyPenaltiesTempurate",

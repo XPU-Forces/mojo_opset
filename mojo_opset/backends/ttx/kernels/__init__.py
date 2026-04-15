@@ -117,8 +117,8 @@ reject_sampling_impl = _get_kernel_impl(ttx_backend_module, "reject_sampling_imp
 top_p_filter_impl = _get_kernel_impl(ttx_backend_module, "top_p_filter_impl")
 top_p_sampling_impl = _get_kernel_impl(ttx_backend_module, "top_p_sampling_impl")
 
-
-top_k_impl = _get_kernel_impl(ttx_backend_module, "top_k_impl")
+# FIXME: The current TTX implementation of the TopK Triton kernel has suboptimal performance and is temporarily disabled. Pending future improvements.
+# top_k_impl = _get_kernel_impl(ttx_backend_module, "top_k_impl")
 
 group_rmsnorm_impl = _get_kernel_impl(ttx_backend_module, "group_rmsnorm_impl")
 
@@ -1060,7 +1060,8 @@ else:
     reject_sampling = reject_sampling_impl
     top_p_filter = top_p_filter_impl
     top_p_sampling = top_p_sampling_impl
-    top_k = top_k_impl
+    # FIXME: The current TTX implementation of the TopK Triton kernel has suboptimal performance and is temporarily disabled. Pending future improvements.
+    # top_k = top_k_impl
     dynamic_quant = dynamic_quant_impl
     static_quant = static_quant_impl
     dequant = dequant_impl
