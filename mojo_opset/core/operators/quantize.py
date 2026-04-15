@@ -14,8 +14,6 @@ def _expand_group_param(
     if param is None:
         return None
 
-    token_count = token_count.to(torch.int32)
-
     param_fp = param.float()
     if token_count is None:
         if param_fp.dim() == 1:
@@ -24,18 +22,17 @@ def _expand_group_param(
             return param_fp.expand(row_count, -1)
         return param_fp
 
-    token_count_i64 = token_count.to(dtype=torch.int64, device=param.device)
     if param_fp.dim() == 1:
         return param_fp.unsqueeze(0).expand(row_count, -1)
     if param_fp.dim() == 2 and param_fp.size(0) == 1:
         return param_fp.expand(row_count, -1)
-    if param_fp.dim() != 2 or param_fp.size(0) != token_count_i64.numel():
+    if param_fp.dim() != 2 or param_fp.size(0) != token_count.numel():
         raise ValueError(
             "Grouped tensor must be 2D with the first dimension equal to token_count length, "
-            f"but got shape {tuple(param.shape)} and token_count length {token_count_i64.numel()}."
+            f"but got shape {tuple(param.shape)} and token_count length {token_count.numel()}."
         )
 
-    expanded = param_fp.repeat_interleave(token_count_i64, dim=0)
+    expanded = param_fp.repeat_interleave(token_count, dim=0)
     if expanded.size(0) != row_count:
         raise ValueError(f"Expanded grouped tensor row count mismatch: expected {row_count}, got {expanded.size(0)}.")
     return expanded
@@ -288,6 +285,8 @@ class MojoDynamicQuant(MojoOperator):
                 - Quantized int8 tensor with the same shape as ``input``.
                 - Per-token dynamic scale of shape ``input.shape[:-1]``.
         """
+        if token_count is not None:
+            token_count = token_count.to(torch.int32)
         if self.smooth_input and smooth_scale is None:
             raise ValueError("smooth_scale is required when smooth_input=True")
         if self.moe_mode and token_count is None:
@@ -375,10 +374,9 @@ class MojoDequantSwiGLUQuant(MojoOperator):
 
         token_num = x.shape[0]
         if token_count is not None:
-            token_count_i64 = token_count.to(dtype=torch.int64, device=x.device)
-            if token_count_i64.sum().item() != token_num:
+            if token_count.sum().item() != token_num:
                 raise ValueError(
-                    f"token_count sum must equal token number {token_num}, got {token_count_i64.sum().item()}."
+                    f"token_count sum must equal token number {token_num}, got {token_count.sum().item()}."
                 )
 
         x_fp = x.float()
