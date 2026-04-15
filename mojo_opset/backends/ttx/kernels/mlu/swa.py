@@ -225,7 +225,6 @@ def _sdpa_acc_fwd_MxN(
     # Load (transposed) K block
     k = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
     qk = tl.dot(k, q)
-    # tl.compile_hint(qk, "tile_cube_loop")
 
     qk = qk * qk_scale
     if mask is not None and mask is not True:
@@ -250,12 +249,10 @@ def _sdpa_acc_fwd_MxN(
     # -- Update output accumulator --
     acc_ptr = acc_ptr * alpha[None, :]
     acc_ptr = tl.dot(v, p_cast, acc_ptr)
-    # tl.compile_hint(acc_ptr, "tile_cube_loop")
 
     # Update current block max
     m_i = m_ij
 
-    # NOTE(zhangjihang): for training
     # Return accumulated output acc_ptr, softmax denominator l_i, and max value m_i
     return acc_ptr, l_i, m_i
 
@@ -678,7 +675,6 @@ def _decode_acc_fwd_MxN(
     k = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
     k_T = tl.trans(k)
     qk = tl.dot(q, k_T)
-    # tl.compile_hint(qk, "tile_cube_loop")
 
     qk = qk * qk_scale
     if mask is not None and mask is not True:
@@ -703,12 +699,10 @@ def _decode_acc_fwd_MxN(
     # -- Update output accumulator --
     acc_ptr = acc_ptr * alpha[:, None]
     acc_ptr = tl.dot(p_cast, v, acc_ptr)
-    # tl.compile_hint(acc_ptr, "tile_cube_loop")
 
     # Update current block max
     m_i = m_ij
 
-    # NOTE(zhangjihang): for training
     # Return accumulated output acc_ptr, softmax denominator l_i, and max value m_i
     return acc_ptr, l_i, m_i
 
