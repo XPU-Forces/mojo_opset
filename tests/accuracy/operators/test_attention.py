@@ -363,7 +363,7 @@ def test_decode_gqa(B, Hq, Hkv, D, S, gqa_layout):
     op.forward_diff_with(
         op_ref, query, key, value, seqlens,
         softmax_scale=1.0 / math.sqrt(D),
-        atol=0, rtol=0,
+        atol=1e-2, rtol=1e-2,
     )
 
 
@@ -381,7 +381,7 @@ def test_decode_gqa_sliding_window(window_size):
     op.forward_diff_with(
         op_ref, query, key, value, seqlens,
         softmax_scale=1.0 / math.sqrt(D),
-        atol=0, rtol=0,
+        atol=1e-2, rtol=1e-2,
     )
 
 

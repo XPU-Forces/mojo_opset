@@ -290,7 +290,7 @@ class MojoPrefillGQA(MojoOperator):
         score = torch.softmax(score, -1).to(query.dtype)
 
         attn_output = torch.bmm(score, v_cache)
-        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, num_attn_heads, seq_len, head_dim).transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, seq_len, num_attn_heads, head_dim)
 
         return attn_output

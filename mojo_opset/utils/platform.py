@@ -58,7 +58,7 @@ def get_torch_device() -> str:
 
 _PLATFORM_TO_DIST_BACKEND = {
     "npu": "hccl",
-    "mlu": "gloo",
+    "mlu": "cncl",
     "meta_device": "gloo",
 }
 
@@ -69,7 +69,7 @@ def get_dist_backend() -> str:
 
     Mapping:
         npu  → hccl
-        mlu  → gloo   (placeholder, update when cncl is available)
+        mlu  → cncl
         else → gloo
     """
     return _PLATFORM_TO_DIST_BACKEND.get(get_platform(), "gloo")
