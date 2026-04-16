@@ -12,7 +12,7 @@ class IxformerMoEGating(MojoMoEGating):
     def forward(self, hidden_states: torch.Tensor):
         ixf_f = _get_ixf_and_check_device(hidden_states, self.__class__.__name__)
         assert self.gate_weight.dtype == torch.float32
-        gate_logits = ixf_f.mixed_type_linear(hidden_states, self.gate_weight.T.contiguous())
+        gate_logits = ixf_f.mixed_type_linear(hidden_states, self.gate_weight, format="NN")
         top_k_gates, top_k_indices = ixf_f.moe_topk_softmax(gate_logits, self.top_k, renormalize=True)
 
         return top_k_indices, top_k_gates
@@ -127,6 +127,10 @@ class IxformerGroupQuantGemmMoE(torch.nn.Module):
                 input_scale: Optional[torch.Tensor] = None,
                 bias: Optional[torch.Tensor] = None):
         ixf_f = _get_ixf_and_check_device(input, self.__class__.__name__)
+        if not self.trans_weight and (weight.shape[1] % 64 != 0 or weight.shape[2] % 64 != 0):
+            raise NotImplementedError(f"N, K must be divisible by 64, but got {weight.shape[1]}, {weight.shape[2]}")
+        if self.trans_weight and weight.shape[2] % 64 != 0:
+            raise NotImplementedError(f"K must be divisible by 64, but got {weight.shape[2]}")
         quant_gemm_output = ixf_f.moe_w8a8_group_gemm(
                                     input=input,
                                     weight=weight,
@@ -136,7 +140,7 @@ class IxformerGroupQuantGemmMoE(torch.nn.Module):
                                     tokens_per_experts=token_count,
                                     dst_to_src=None,
                                     bias=bias,
-                                    format="TN",)
+                                    format="TN" if self.trans_weight else "NN",)
         return quant_gemm_output
 
 class IxformerGroupQuantGemmCombineMoE(torch.nn.Module):
@@ -172,10 +176,17 @@ class IxformerGroupQuantGemmCombineMoE(torch.nn.Module):
                 shared_output: Optional[torch.Tensor],
                 weight_scale: torch.Tensor,
                 input_scale: Optional[torch.Tensor] = None,
-                bias: Optional[torch.Tensor] = None,):
+                bias: Optional[torch.Tensor] = None,
+                routed_scaling_factor: float = 1.0,):
         ixf_f = _get_ixf_and_check_device(input, self.__class__.__name__)
         num_tokens, top_k = top_k_gates.shape
-        dim = weight.shape[1]
+        if self.top_k is not None and self.top_k != top_k:
+            raise ValueError(f"top_k mismatch: got {top_k}, expected {self.top_k}")
+        dim = weight.shape[1] if self.trans_weight else weight.shape[2]
+        if not self.trans_weight and (weight.shape[1] % 64 != 0 or weight.shape[2] % 64 != 0):
+            raise NotImplementedError(f"N, K must be divisible by 64, but got {weight.shape[1]}, {weight.shape[2]}")
+        if self.trans_weight and weight.shape[2] % 64 != 0:
+            raise NotImplementedError(f"K must be divisible by 64, but got {weight.shape[2]}")
         quant_gemm_output = torch.empty(
             (num_tokens * self.top_k, dim),
             device=input.device,
@@ -190,15 +201,19 @@ class IxformerGroupQuantGemmCombineMoE(torch.nn.Module):
                     tokens_per_experts=token_count,
                     dst_to_src=token_indices,
                     bias=bias,
-                    format="TN",
+                    format="TN" if self.trans_weight else "NN",
                     output=quant_gemm_output)
+        
+        if self.normalize_top_k_gates:
+            top_k_gates = top_k_gates / top_k_gates.sum(dim=-1, keepdim=True).clamp(min=1e-12)
         
         reduce_mask = src_to_dst == -1
         combined_output = ixf_f.moe_output_reduce_sum(
-            input=quant_gemm_output.view(-1, self.top_k, dim),
+            input=quant_gemm_output.view(num_tokens, top_k, -1),
             topk_weight=top_k_gates,
             mask=reduce_mask,
-            extra_residual=shared_output
+            extra_residual=shared_output,
+            scaling_factor=routed_scaling_factor,
         )
         return combined_output
 
@@ -215,7 +230,6 @@ class IxformerQuantMoe(torch.nn.Module):
         *,
         output_dtype: torch.dtype = torch.bfloat16,
         quant_block_size: int = 8,
-        normalize_top_k_gates: bool = False,
         routed_scaling_factor: float = 1.0,
         start_expert_id: int = 0,
         end_expert_id: Optional[int] = None,
@@ -242,16 +256,16 @@ class IxformerQuantMoe(torch.nn.Module):
         )
         self.fc1 = IxformerGroupQuantGemmMoE(
             output_dtype=output_dtype,
-            trans_weight=False,
+            trans_weight=True,
             quant_block_size=quant_block_size,
             top_k=top_k,
         )
         self.act_quant = IxformerFusedSwiGLUMoEScaleDynamicQuantize()
         self.fc2 = IxformerGroupQuantGemmCombineMoE(
             output_dtype=output_dtype,
-            trans_weight=False,
+            trans_weight=True,
             quant_block_size=quant_block_size,
-            normalize_top_k_gates=normalize_top_k_gates,
+            normalize_top_k_gates=False,
             top_k=top_k,
         )
 
@@ -421,14 +435,7 @@ class IxformerQuantMoe(torch.nn.Module):
             weight_scale=self.w2_weight_scale,
             input_scale=act_scale,
             bias=self.w2_bias,
+            routed_scaling_factor=self.routed_scaling_factor,
         )
-
-        if self.routed_scaling_factor != 1.0:
-            if shared_output_2d is None:
-                combined_output = combined_output * self.routed_scaling_factor
-            else:
-                combined_output = shared_output_2d + (
-                    combined_output - shared_output_2d
-                ) * self.routed_scaling_factor
 
         return combined_output.reshape(*token_shape, self.hidden_size)

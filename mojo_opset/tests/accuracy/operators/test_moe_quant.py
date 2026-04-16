@@ -487,10 +487,9 @@ def test_ixformer_group_quant_gemm_combine_moe():
     src_to_dst = torch.zeros_like(token_indices_ixf)
     input_scale_ixf = input_scale.reshape(-1).contiguous()
 
-    weight_ixf = weight.transpose(-1, -2).contiguous()
     out = op(
         input=input_ixf,
-        weight=weight_ixf,
+        weight=weight,
         top_k_gates=top_k_gates_ixf,
         token_indices=token_indices_ixf,
         src_to_dst=src_to_dst,
