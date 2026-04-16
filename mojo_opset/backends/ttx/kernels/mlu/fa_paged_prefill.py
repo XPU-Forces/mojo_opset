@@ -69,17 +69,50 @@ def _infer_single_block(
     return acc_ptr, l_i, m_i
 
 
+def cfggen():
+    block_m = [64, 128, 256, 512]
+    num_stages = [1, 3]
+    configs = [
+        triton.Config(
+            {
+                "BLOCK_M": m,
+            },
+            num_stages=s,
+        )
+        for m in block_m
+        for s in num_stages
+    ]
+    return configs
+
+
+@triton.autotune(
+    configs=cfggen(),
+    key=["HEAD_SIZE", "PAGE_SIZE"],
+)
+@triton.heuristics(
+    {
+        "BLOCK_N": lambda args: min(512, triton.next_power_of_2(args["PAGE_SIZE"])),
+        "BLOCK_D": lambda args: args["HEAD_SIZE"],
+        "num_warps": lambda args: 1,
+        "bottleneck": lambda args: "simd",
+        "force_use_shared_memory": lambda args: True,
+    }
+)
 @triton.jit
 def paged_prefill_kernel(
     o_ptr,
     q_ptr,
     k_ptr,
     v_ptr,
-    bsz,
     cu_seqlens_q_ptr,
     kv_lens_ptr,
     block_table_ptr,
+    aux_mask_ptr,
     scale,
+    bsz,
+    num_q_heads,
+    num_kv_heads,
+    aux_mask_size,
     stride_ot,
     stride_oh,
     stride_od,
@@ -96,22 +129,18 @@ def paged_prefill_kernel(
     stride_vd,
     stride_block_table_b,
     stride_block_table_p,
-    aux_mask_ptr,
     stride_mask_m,
     stride_mask_n,
-    AUX_MASK_SIZE: tl.constexpr,
-    NUM_Q_HEADS: tl.constexpr,
-    NUM_KV_HEADS: tl.constexpr,
-    GQA_INTERLEAVE: tl.constexpr,
-    HEAD_DIM: tl.constexpr,
+    gqa_interleave,
+    HEAD_SIZE: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
-    PAGE_SIZE: tl.constexpr,
 ):
     tl.static_assert(PAGE_SIZE % BLOCK_N == 0, "BLOCK_N must be a divisor of PAGE_SIZE")
     tl.static_assert(
-        HEAD_DIM <= BLOCK_D, "BLOCK_SIZE_D should not be less than HEAD_DIM"
+        HEAD_SIZE <= BLOCK_D, "BLOCK_SIZE_D should not be less than HEAD_SIZE"
     )
 
     pid = tl.program_id(0)
@@ -130,19 +159,19 @@ def paged_prefill_kernel(
         kv_extra_len = kv_seq_len - q_seq_len
 
         num_q_chunks = tl.cdiv(q_seq_len, BLOCK_M)
-        new_q_tasks = num_q_chunks * NUM_Q_HEADS
-        prev_q_tasks = cu_q_chunks * NUM_Q_HEADS
+        new_q_tasks = num_q_chunks * num_q_heads
+        prev_q_tasks = cu_q_chunks * num_q_heads
         cu_q_chunks += num_q_chunks
 
         for q_task_id in range(
             (prev_q_tasks + pid) % n_programs, new_q_tasks, n_programs
         ):
-            q_block_id = q_task_id // NUM_Q_HEADS
-            q_head_id = q_task_id % NUM_Q_HEADS
-            if GQA_INTERLEAVE:
-                kv_head_id = q_head_id % NUM_KV_HEADS
+            q_block_id = q_task_id // num_q_heads
+            q_head_id = q_task_id % num_q_heads
+            if gqa_interleave:
+                kv_head_id = q_head_id % num_kv_heads
             else:
-                kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
+                kv_head_id = q_head_id // (num_q_heads // num_kv_heads)
 
             q_block_start = q_block_id * BLOCK_M
             q_block_end = min(q_block_start + BLOCK_M, q_seq_len)
@@ -152,7 +181,7 @@ def paged_prefill_kernel(
                 base=q_ptr
                 + (q_start + q_block_start) * stride_qt
                 + q_head_id * stride_qh,
-                shape=(q_block_len, HEAD_DIM),
+                shape=(q_block_len, HEAD_SIZE),
                 strides=(stride_qt, stride_qd),
                 offsets=(0, 0),
                 block_shape=(BLOCK_M, BLOCK_D),
@@ -164,7 +193,7 @@ def paged_prefill_kernel(
 
             m_i = tl.zeros((BLOCK_M,), dtype=tl.float32) - float("inf")
             l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
-            acc = tl.zeros((BLOCK_M, HEAD_DIM), dtype=tl.float32)
+            acc = tl.zeros((BLOCK_M, HEAD_SIZE), dtype=tl.float32)
 
             num_kv_blocks = tl.cdiv(kv_extra_len + q_block_end, BLOCK_N)
 
@@ -185,7 +214,7 @@ def paged_prefill_kernel(
                     + physical_page_id * stride_kp
                     + kv_head_id * stride_kh
                     + kv_block_start_in_page * stride_kt,
-                    shape=(kv_block_len, HEAD_DIM),
+                    shape=(kv_block_len, HEAD_SIZE),
                     strides=(stride_kt, stride_kd),
                     offsets=(0, 0),
                     block_shape=(BLOCK_N, BLOCK_D),
@@ -196,7 +225,7 @@ def paged_prefill_kernel(
                     + physical_page_id * stride_vp
                     + kv_head_id * stride_vh
                     + kv_block_start_in_page * stride_vt,
-                    shape=(kv_block_len, HEAD_DIM),
+                    shape=(kv_block_len, HEAD_SIZE),
                     strides=(stride_vt, stride_vd),
                     offsets=(0, 0),
                     block_shape=(BLOCK_N, BLOCK_D),
@@ -205,7 +234,7 @@ def paged_prefill_kernel(
 
                 mask = causal_mask_fn(
                     aux_mask_ptr,
-                    AUX_MASK_SIZE,
+                    aux_mask_size,
                     stride_mask_m,
                     stride_mask_n,
                     kv_extra_len + q_block_start,
@@ -229,7 +258,7 @@ def paged_prefill_kernel(
                 base=o_ptr
                 + (q_start + q_block_start) * stride_ot
                 + q_head_id * stride_oh,
-                shape=(q_block_len, HEAD_DIM),
+                shape=(q_block_len, HEAD_SIZE),
                 strides=(stride_ot, stride_od),
                 offsets=(0, 0),
                 block_shape=(BLOCK_M, BLOCK_D),
@@ -244,49 +273,42 @@ def paged_prefill_kernel(
 
 
 def paged_attention_prefill_impl(
-    q: torch.Tensor,             # [total_q, num_q_heads, head_size]
-    key_cache: torch.Tensor,     # [num_blocks, num_kv_heads, page_size, head_size]
-    value_cache: torch.Tensor,   # [num_blocks, num_kv_heads, page_size, head_size]
+    q: torch.Tensor,  # [total_q, num_q_heads, head_size]
+    key_cache: torch.Tensor,  # [num_blocks, num_kv_heads, page_size, head_size]
+    value_cache: torch.Tensor,  # [num_blocks, num_kv_heads, page_size, head_size]
     cu_seqlens_q: torch.Tensor,  # [bsz + 1]
-    seqlens_kv: torch.Tensor,    # [bsz + 1]
+    seqlens_kv: torch.Tensor,  # [bsz + 1]
     block_tables: torch.Tensor,  # [bsz, num_kv_blocks]
     gqa_interleave: bool,
     softmax_scale: Optional[float] = None,
     aux_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     bsz = cu_seqlens_q.shape[0] - 1
-    _, num_q_heads, head_dim = q.shape
+    _, num_q_heads, head_size = q.shape
     _, num_kv_heads, page_size, _ = key_cache.shape
 
     if softmax_scale is None:
-        softmax_scale = 1.0 / (head_dim**0.5)
+        softmax_scale = 1.0 / (head_size**0.5)
 
     if aux_mask is None:
         aux_mask = torch.ones(1024, 1024 * 3, dtype=torch.bool).tril(1024).mlu()
 
     o = torch.empty_like(q, memory_format=torch.contiguous_format)
 
-    if q.dtype == torch.float32:
-        BLOCK_M = 64
-        BLOCK_N = min(64, triton.next_power_of_2(page_size))
-    else:
-        BLOCK_M = 128
-        BLOCK_N = min(128, triton.next_power_of_2(page_size))
-    BLOCK_D = head_dim
-
-    job_num = get_mlu_total_cores()
-    grid = (job_num,)
-
-    paged_prefill_kernel[grid](
+    paged_prefill_kernel[(get_mlu_total_cores(),)](
         o,
         q,
         key_cache,
         value_cache,
-        bsz,
         cu_seqlens_q,
         seqlens_kv,
         block_tables,
+        aux_mask,
         softmax_scale,
+        bsz,
+        num_q_heads,
+        num_kv_heads,
+        aux_mask.shape[0],
         o.stride(0),
         o.stride(1),
         o.stride(2),
@@ -303,21 +325,10 @@ def paged_attention_prefill_impl(
         value_cache.stride(3),
         block_tables.stride(0),
         block_tables.stride(1),
-        aux_mask,
         aux_mask.stride(0),
         aux_mask.stride(1),
-        aux_mask.shape[0],
-        num_q_heads,
-        num_kv_heads,
         gqa_interleave,
-        head_dim,
-        BLOCK_M,
-        BLOCK_N,
-        BLOCK_D,
+        head_size,
         page_size,
-        num_warps=1,
-        num_stages=1,
-        force_use_shared_memory=True,
-        bottleneck="simd",
     )
     return o
