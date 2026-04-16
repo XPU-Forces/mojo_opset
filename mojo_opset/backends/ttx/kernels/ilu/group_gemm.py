@@ -1,5 +1,4 @@
 # Copyright (c) 2025, Shanghai Iluvatar CoreX Semiconductor Co., Ltd.
-# ILU Triton grouped matmul (aligned with NPU group_gemm; launch uses ILU vector cores).
 
 import torch
 import triton

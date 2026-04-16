@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Dense KV cache write from fused QKV (aligned with trike store_kv_cache).
 
 from typing import Tuple
 

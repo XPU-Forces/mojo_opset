@@ -1,16 +1,10 @@
 import torch
 
+from ixformer import functions as ixf_f
 from mojo_opset.core import MojoLayerNorm
 from mojo_opset.core import MojoResidualAddLayerNorm
 from mojo_opset.core import MojoResidualAddRMSNorm
 from mojo_opset.core import MojoRMSNorm
-
-def _get_ixf_and_check_device(tensor: torch.Tensor, class_name: str):
-    """Helper to import ixformer and check for CUDA device."""
-    if not tensor.is_cuda:
-        raise RuntimeError(f"{class_name} expects CUDA tensors on Iluvatar.")
-    from ixformer import functions as ixf_f
-    return ixf_f
 
 
 class IxformerResidualAddRMSNorm(MojoResidualAddRMSNorm):
@@ -19,8 +13,6 @@ class IxformerResidualAddRMSNorm(MojoResidualAddRMSNorm):
     supported_platforms_list = ["ilu"]
 
     def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor):
-        ixf_f = _get_ixf_and_check_device(hidden_state, self.__class__.__name__)
-
         is_post = self.norm_pos == "post"
         out, res_out = ixf_f.residual_rms_norm(
             hidden_state,
@@ -44,8 +36,6 @@ class IxformerResidualAddLayerNorm(MojoResidualAddLayerNorm):
     supported_platforms_list = ["ilu"]
 
     def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor):
-        ixf_f = _get_ixf_and_check_device(hidden_state, self.__class__.__name__)
-
         if self.norm_pos == "pre":
             out, res_out = ixf_f.residual_layer_norm(
                 hidden_state,
@@ -80,8 +70,6 @@ class IxformerLayerNorm(MojoLayerNorm):
                 "IxformerLayerNorm requires elementwise_affine=True with weight and bias (ixformer infer kernel)."
             )
 
-        ixf_f = _get_ixf_and_check_device(hidden_state, self.__class__.__name__)
-
         out, _ = ixf_f.residual_layer_norm(
             hidden_state,
             self.weight,
@@ -99,8 +87,6 @@ class IxformerRMSNorm(MojoRMSNorm):
     supported_platforms_list = ["ilu"]
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
-        ixf_f = _get_ixf_and_check_device(hidden_state, self.__class__.__name__)
-
         # Aligns with ixformer tests: plain RMSNorm uses residual_rms_norm with residual=None
         # (dispatches to ops.infer.rms_norm); optional fused bias is unused by MojoRMSNorm.
         out, _ = ixf_f.residual_rms_norm(

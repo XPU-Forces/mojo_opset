@@ -159,9 +159,6 @@ def fused_penalties_temp_impl(
     return logits
 
 
-# --- Top-p sampling / filter, reject sampling (aligned with NPU Triton; ILU uses @libentry) ---
-
-
 @libentry()
 @triton.jit
 def _top_p_filter_kernel(
