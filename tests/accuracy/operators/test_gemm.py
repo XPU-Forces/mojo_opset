@@ -368,8 +368,6 @@ _test_grouped_matmul_cases = [
 @bypass_not_implemented
 def test_grouped_matmul_cases_via_group_linear(inputs, weights, bias, dtype):
     device = get_torch_device()
-    if get_platform() in ["mlu"] and dtype == torch.float32:
-        pytest.skip("MLU grouped matmul does not support float32")
 
     input_tensors = [t.to(device=device) for t in inputs]
     weight_tensors = [t.to(device=device) for t in weights]
