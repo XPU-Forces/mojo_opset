@@ -26,11 +26,11 @@ class TTXRotaryEmbedding(MojoRotaryEmbedding):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
         if cu_seqlens_q is not None:
-            cu_seqlens_q = cu_seqlens_q.to(torch.int32)
+            assert cu_seqlens_q.dtype == torch.int32
         if seqlens_kv is not None:
-            seqlens_kv = seqlens_kv.to(torch.int32)
+            assert seqlens_kv.dtype == torch.int32
         if position_ids is not None:
-            position_ids = position_ids.to(torch.int32)
+            assert position_ids.dtype == torch.int32
         return rot_pos_embed(
             x,
             self.cos,

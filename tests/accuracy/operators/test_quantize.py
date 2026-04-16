@@ -317,7 +317,7 @@ def test_dynamic_quant_backend(dtype):
 def test_dynamic_quant_backend_moe(dtype):
     x = torch.randn(12, 128, dtype=dtype)
     smooth_scale = torch.randn(3, 128, dtype=torch.float32)
-    token_count = torch.tensor([4, 3, 5], dtype=torch.int32)
+    token_count = torch.tensor([4, 3, 5], dtype=torch.int64)
 
     op = MojoDynamicQuant(quant_dtype=torch.int8, smooth_input=True, moe_mode=True)
     op_ref = MojoDynamicQuant._registry.get("torch")(quant_dtype=torch.int8, smooth_input=True, moe_mode=True)

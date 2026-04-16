@@ -386,10 +386,10 @@ def rot_pos_embed_impl(
     if cu_seqlens_q is None:
         return cos[:x.shape[1]], sin[:x.shape[1]]
 
-    cu_seqlens_q = cu_seqlens_q.to(torch.int32)
+    assert cu_seqlens_q.dtype == torch.int32
     seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
     if seqlens_kv is not None:
-        seqlens_kv = seqlens_kv.to(torch.int32)
+        assert seqlens_kv.dtype == torch.int32
         context_lens = seqlens_kv - seqlens_q
     else:
         context_lens = None

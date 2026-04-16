@@ -363,8 +363,6 @@ class MojoDequantSwiGLUQuant(MojoOperator):
                 - Quantized int8 output of shape ``(tokens, H)``.
                 - Per-token dynamic scale of shape ``(tokens,)``.
         """
-        if token_count is not None:
-            token_count = token_count.to(torch.int32)
         if x.dim() != 2:
             raise ValueError(f"x must be 2D with shape (tokens, 2H), but got {tuple(x.shape)}")
         if x.shape[-1] % 2 != 0:

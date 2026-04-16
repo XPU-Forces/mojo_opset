@@ -47,7 +47,7 @@ class MojoDecodeGQA(MojoOperator):
             ``(B, Hq, D)``
         """
         if seqlens is not None:
-            seqlens = seqlens.to(torch.int32)
+            assert seqlens.dtype == torch.int32
         B, Hq, D = query.shape
         _, Hkv, S, _ = key.shape
         group = Hq // Hkv
@@ -153,10 +153,10 @@ class MojoPagedDecodeGQA(MojoOperator):
             - This implementation references variables `query` and `seqlens`; ensure they
               correspond to `query` and the sequence-lengths tensor in the caller.
         """
-        seqlens = seqlens.to(torch.int32)
-        block_tables = block_tables.to(torch.int32)
+        assert seqlens.dtype == torch.int32
+        assert block_tables.dtype == torch.int32
         if cu_seq_lens is not None:
-            cu_seq_lens = cu_seq_lens.to(torch.int32)
+            assert cu_seq_lens.dtype == torch.int32
         assert not cu_seq_lens, "varlen is not supported"
 
         batch_size, num_q_heads, head_dim = query.shape
@@ -262,7 +262,7 @@ class MojoPrefillGQA(MojoOperator):
         if self.window_size != -1:
             raise NotImplementedError
 
-        cu_seqlens_q = cu_seqlens_q.to(torch.int32)
+        assert cu_seqlens_q.dtype == torch.int32
         batch_size, num_attn_heads, seq_len, head_dim = query.size()
 
         num_kv_heads = k_cache.shape[1]
@@ -371,10 +371,10 @@ class MojoPagedPrefillGQA(MojoOperator):
             - Softmax is computed in float32 and cast back to the input dtype.
             - Despite the type annotation Tuple[Any], this implementation returns a single tensor.
         """
-        cu_seqlens_q = cu_seqlens_q.to(torch.int32)
-        block_tables = block_tables.to(torch.int32)
+        assert cu_seqlens_q.dtype == torch.int32
+        assert block_tables.dtype == torch.int32
         if seqlens_kv is not None:
-            seqlens_kv = seqlens_kv.to(torch.int32)
+            assert seqlens_kv.dtype == torch.int32
         total_q_tokens, num_q_heads, head_dim = query.shape
         _, num_kv_heads, block_size, _ = key_cache.shape
         if softmax_scale is None:
@@ -495,7 +495,7 @@ class MojoDecodeMLA(MojoOperator):
             ``(B, H, v_head_dim)``
         """
         if seqlens is not None:
-            seqlens = seqlens.to(torch.int32)
+            assert seqlens.dtype == torch.int32
         B, H, _ = query.shape
         S = compressed_kv.shape[1]
         if softmax_scale is None:
@@ -571,8 +571,8 @@ class MojoPagedDecodeMLA(MojoOperator):
         Returns:
             ``(B, H, v_head_dim)``
         """
-        seqlens = seqlens.to(torch.int32)
-        block_tables = block_tables.to(torch.int32)
+        assert seqlens.dtype == torch.int32
+        assert block_tables.dtype == torch.int32
         B, H, _ = query.shape
         block_size = compressed_kv_cache.shape[2]
         if softmax_scale is None:
@@ -756,7 +756,7 @@ class MojoDecodeNSA(MojoOperator):
             ``(B, H, D)``
         """
         if seqlens is not None:
-            seqlens = seqlens.to(torch.int32)
+            assert seqlens.dtype == torch.int32
         B, H, D = query.shape
         S = key.shape[1]
         if softmax_scale is None:
@@ -799,8 +799,8 @@ class MojoPagedDecodeNSA(MojoOperator):
         Returns:
             ``(B, H, D)``
         """
-        seqlens = seqlens.to(torch.int32)
-        block_tables = block_tables.to(torch.int32)
+        assert seqlens.dtype == torch.int32
+        assert block_tables.dtype == torch.int32
         B, H, D = query.shape
         blk = key_cache.shape[2]
         if softmax_scale is None:
@@ -869,7 +869,7 @@ class MojoPrefillMLA(MojoOperator):
         Returns:
             ``(T, H, v_head_dim)``
         """
-        cu_seqlens_q = cu_seqlens_q.to(torch.int32)
+        assert cu_seqlens_q.dtype == torch.int32
         T, H, _ = query.shape
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(self.qk_head_dim)
@@ -969,10 +969,10 @@ class MojoPagedPrefillMLA(MojoOperator):
         Returns:
             ``(T, H, v_head_dim)``
         """
-        cu_seqlens_q = cu_seqlens_q.to(torch.int32)
-        block_tables = block_tables.to(torch.int32)
+        assert cu_seqlens_q.dtype == torch.int32
+        assert block_tables.dtype == torch.int32
         if seqlens_kv is not None:
-            seqlens_kv = seqlens_kv.to(torch.int32)
+            assert seqlens_kv.dtype == torch.int32
         T, H, _ = query.shape
         block_size = compressed_kv_cache.shape[2]
         if softmax_scale is None:
@@ -1043,7 +1043,7 @@ class MojoPrefillNSA(MojoOperator):
         Returns:
             ``(T, H, D)``
         """
-        cu_seqlens_q = cu_seqlens_q.to(torch.int32)
+        assert cu_seqlens_q.dtype == torch.int32
         T, H, D = query.shape
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(D)
@@ -1111,10 +1111,10 @@ class MojoPagedPrefillNSA(MojoOperator):
         Returns:
             ``(T, H, D)``
         """
-        cu_seqlens_q = cu_seqlens_q.to(torch.int32)
-        block_tables = block_tables.to(torch.int32)
+        assert cu_seqlens_q.dtype == torch.int32
+        assert block_tables.dtype == torch.int32
         if seqlens_kv is not None:
-            seqlens_kv = seqlens_kv.to(torch.int32)
+            assert seqlens_kv.dtype == torch.int32
         T, H, D = query.shape
         blk = key_cache.shape[2]
         cr = self.compress_ratio
@@ -1280,10 +1280,10 @@ class MojoPagedPrefillSWA(MojoOperator):
     ) -> torch.Tensor:
         # Note: if is_causal = False, local_window_size and global_window_size are not used.
 
-        cu_seqlens_q = cu_seqlens_q.to(torch.int32)
-        block_table = block_table.to(torch.int32)
+        assert cu_seqlens_q.dtype == torch.int32
+        assert block_table.dtype == torch.int32
         if seqlens_kv is not None:
-            seqlens_kv = seqlens_kv.to(torch.int32)
+            assert seqlens_kv.dtype == torch.int32
         total_q_len, n_q_heads, head_dim = q.shape
         _, n_kv_heads, page_size, _ = k_cache.shape
         if softmax_scale is None:
@@ -1383,8 +1383,8 @@ class MojoPagedDecodeSWA(MojoOperator):
     ) -> torch.Tensor:
         # Note: for decode kernel, is_causal = False should never happen
 
-        seq_lens = seq_lens.to(torch.int32)
-        block_table = block_table.to(torch.int32)
+        assert seq_lens.dtype == torch.int32
+        assert block_table.dtype == torch.int32
         bsz, n_q_heads, head_dim = q.shape
         _, n_kv_heads, page_size, _ = k_cache.shape
         if softmax_scale is None:
@@ -1478,8 +1478,8 @@ class MojoSWA(MojoOperator):
     ) -> torch.Tensor:
         # Note: if is_causal = False, local_window_size and global_window_size are not used.
 
-        cu_seqlens_q = cu_seqlens_q.to(torch.int32)
-        cu_seqlens_kv = cu_seqlens_kv.to(torch.int32)
+        assert cu_seqlens_q.dtype == torch.int32
+        assert cu_seqlens_kv.dtype == torch.int32
         total_q_len, n_q_heads, head_dim = q.shape
         n_kv_heads = k.shape[1]
         if softmax_scale is None:

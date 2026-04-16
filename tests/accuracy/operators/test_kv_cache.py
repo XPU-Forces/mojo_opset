@@ -55,7 +55,7 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, kv_lens_val,
     k_cache = torch.zeros(cache_shape, dtype=torch.bfloat16)
     v_cache = torch.zeros(cache_shape, dtype=torch.bfloat16)
 
-    block_table = torch.full((batch_size, max_blocks_per_seq), -1, dtype=torch.long)
+    block_table = torch.full((batch_size, max_blocks_per_seq), -1, dtype=torch.int32)
     curr = 0
     for i in range(batch_size):
         needed = (kv_lens_val[i] + seq_lens_val[i] + block_size - 1) // block_size
@@ -117,15 +117,15 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, kv_lens_val,
 @bypass_not_implemented
 def test_store_paged_mla_kv(batch_size, kv_lora_rank, qk_rope_head_dim, block_size,
                             kv_lens_val, seq_lens_val):
-    kv_lens = torch.tensor(kv_lens_val, dtype=torch.long)
-    seq_lens = torch.tensor(seq_lens_val, dtype=torch.long)
+    kv_lens = torch.tensor(kv_lens_val, dtype=torch.int32)
+    seq_lens = torch.tensor(seq_lens_val, dtype=torch.int32)
 
     is_decode = torch.all(seq_lens == 1)
     cu_seqlens = (
         torch.cat([
             torch.zeros(1, dtype=torch.int32),
             torch.cumsum(seq_lens, dim=0, dtype=torch.int32),
-        ]).to(torch.long)
+        ])
         if not is_decode
         else None
     )
