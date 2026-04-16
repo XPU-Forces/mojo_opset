@@ -4,7 +4,7 @@ import torch
 
 from mojo_opset.core import MojoMoEGating
 
-from ..utils import _get_ixf_and_check_device
+from mojo_opset.backends.ixformer.utils import _get_ixf_and_check_device
 
 class IxformerMoEGating(MojoMoEGating):
     supported_platforms_list = ["ilu"]
@@ -16,6 +16,7 @@ class IxformerMoEGating(MojoMoEGating):
         top_k_gates, top_k_indices = ixf_f.moe_topk_softmax(gate_logits, self.top_k, renormalize=True)
 
         return top_k_indices, top_k_gates
+
 
 class IxformerMoEInitRoutingDynamicQuant(torch.nn.Module):
     supported_platforms_list = ["ilu"]
@@ -40,7 +41,7 @@ class IxformerMoEInitRoutingDynamicQuant(torch.nn.Module):
 
     def forward(self,
                 hidden_states: torch.Tensor,
-                top_k_gates: torch.Tensor,
+                # top_k_gates: torch.Tensor,
                 top_k_indices: torch.Tensor,
                 smooth_scale: Optional[torch.Tensor] = None,
                 quant_mode: int = 0):
@@ -69,7 +70,9 @@ class IxformerMoEInitRoutingDynamicQuant(torch.nn.Module):
                                                src_to_dst=src_to_dst,
                                                topk_ids=top_k_indices,
                                                smooth_scales=smooth_scale)
-        return i8_hidden_states.view(-1, dim), top_k_gates, sorted_token_ids, src_to_dst, expert_sizes_cpu, quant_scale
+        return i8_hidden_states.view(-1, dim), sorted_token_ids, src_to_dst, expert_sizes_cpu, quant_scale
+
+
 class IxformerFusedSwiGLUMoEScaleDynamicQuantize(torch.nn.Module):
     supported_platforms_list = ["ilu"]
     def __init__(
@@ -99,6 +102,7 @@ class IxformerFusedSwiGLUMoEScaleDynamicQuantize(torch.nn.Module):
                 topk_ids=topk_indices,
                 act_type="swiglu",)
         return quantized_output, quant_scale
+
 
 class IxformerGroupQuantGemmMoE(torch.nn.Module):
     supported_platforms_list = ["ilu"]
@@ -142,6 +146,7 @@ class IxformerGroupQuantGemmMoE(torch.nn.Module):
                                     bias=bias,
                                     format="TN" if self.trans_weight else "NN",)
         return quant_gemm_output
+
 
 class IxformerGroupQuantGemmCombineMoE(torch.nn.Module):
     supported_platforms_list = ["ilu"]
@@ -346,7 +351,7 @@ class IxformerQuantMoe(torch.nn.Module):
             token_shape = hidden_states.shape[:-1]
         else:
             token_shape = hidden_states.shape[:-1]
-            flatten_hidden_states = hidden_states.reshape(-1, self.hidden_size)
+            flatten_hidden_states = hidden_states.view(-1, self.hidden_size)
             hidden_states_3d = hidden_states
 
         if (top_k_indices is None) != (top_k_gates is None):
@@ -357,8 +362,8 @@ class IxformerQuantMoe(torch.nn.Module):
         if top_k_indices is None:
             top_k_indices, top_k_gates = self.gating(flatten_hidden_states)
         else:
-            top_k_indices = top_k_indices.reshape(-1, self.top_k)
-            top_k_gates = top_k_gates.reshape(-1, self.top_k)
+            top_k_indices = top_k_indices.view(-1, self.top_k)
+            top_k_gates = top_k_gates.view(-1, self.top_k)
 
         route_smooth_scale = self.w13_input_scale
         if route_smooth_scale is None:
@@ -368,21 +373,17 @@ class IxformerQuantMoe(torch.nn.Module):
                 f"w13_input_scale shape must be {(self.num_experts, self.hidden_size)}, "
                 f"but got {tuple(route_smooth_scale.shape)}"
             )
-        route_smooth_scale = route_smooth_scale.to(
-            device=flatten_hidden_states.device,
-            dtype=torch.float32,
-        )
 
         (
             routed_input_i8,
-            routed_gates,
+            # routed_gates,
             sorted_token_ids,
             src_to_dst,
             token_count,
             input_scale,
         ) = self.init_routing(
             hidden_states_3d,
-            top_k_gates,
+            # top_k_gates,
             top_k_indices,
             smooth_scale=route_smooth_scale,
             quant_mode=quant_mode,
@@ -422,12 +423,12 @@ class IxformerQuantMoe(torch.nn.Module):
                 raise ValueError(
                     f"shared_output shape {tuple(shared_output.shape)} does not match token shape {tuple(token_shape)}."
                 )
-            shared_output_2d = shared_output.reshape(-1, shared_output.shape[-1])
+            shared_output_2d = shared_output.view(-1, shared_output.shape[-1])
 
         combined_output = self.fc2(
             input=act_i8,
             weight=self.w2_weight,
-            top_k_gates=routed_gates,
+            top_k_gates=top_k_gates,
             token_indices=sorted_token_ids,
             src_to_dst=src_to_dst,
             token_count=token_count,
@@ -438,4 +439,4 @@ class IxformerQuantMoe(torch.nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
         )
 
-        return combined_output.reshape(*token_shape, self.hidden_size)
+        return combined_output.view(*token_shape, self.hidden_size)

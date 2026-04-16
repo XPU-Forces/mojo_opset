@@ -544,7 +544,7 @@ def test_ixformer_moe_init_routing_dynamic_quant(
 
     out = op(
         hidden_states=hidden_states.unsqueeze(0),
-        top_k_gates=top_k_gates,
+        # top_k_gates=top_k_gates,
         top_k_indices=top_k_indices,
         smooth_scale=smooth_scale,
         quant_mode=quant_mode,
@@ -557,7 +557,7 @@ def test_ixformer_moe_init_routing_dynamic_quant(
         quant_mode=quant_mode,
     )
 
-    i8_hidden_states, _, sorted_token_ids, _, expert_sizes_cpu, quant_scale = out
+    i8_hidden_states, sorted_token_ids, _, expert_sizes_cpu, quant_scale = out
     i8_ref, _, _sorted_token_indices_ref, token_count_ref, scale_ref = out_ref
 
     # Align both outputs to source-route order before comparing.

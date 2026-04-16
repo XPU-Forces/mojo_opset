@@ -4,8 +4,6 @@ from mojo_opset.utils.misc import get_bool_env
 
 logger = get_logger(__name__)
 
-logger = get_logger(__name__)
-
 platform = get_platform()
 
 _SUPPORT_TTX_PLATFROM = ["npu", "ilu", "mlu"]
