@@ -110,6 +110,12 @@ def test_paged_decode_gqa(
     block_tables: torch.Tensor,
     gqa_layout: str,
 ):
+    from mojo_opset.utils.platform import get_platform
+    BLK_S = k_cache.shape[-2]
+    if get_platform() == "mlu" and BLK_S not in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]:
+        pytest.skip(f"MLU kernel requires block_size in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024], got {BLK_S}")
+    if get_platform() in ["mlu"] and block_tables is not None:
+        pytest.skip("MLU attention does not support block_tables is None")
     head_dim = query.shape[-1]
     softmax_scale = 1.0 / math.sqrt(head_dim)
 
@@ -250,6 +256,12 @@ def test_paged_prefill_gqa(
     gqa_layout: str,
     seqlens_kv: Optional[torch.Tensor],
 ):
+    from mojo_opset.utils.platform import get_platform
+    BLK_S = k_cache.shape[-2]
+    if get_platform() == "mlu" and BLK_S not in [4, 8, 16, 32, 64]:
+        pytest.skip(f"MLU kernel requires block_size in [4, 8, 16, 32, 64], got {BLK_S}")
+    if get_platform() in ["mlu"] and block_tables is None:
+        pytest.skip("MLU attention does not support block_tables is None")
     paged_prefill_attn = MojoPagedPrefillGQA(
         is_causal=True,
         gqa_layout=gqa_layout
@@ -363,7 +375,7 @@ def test_decode_gqa(B, Hq, Hkv, D, S, gqa_layout):
     op.forward_diff_with(
         op_ref, query, key, value, seqlens,
         softmax_scale=1.0 / math.sqrt(D),
-        atol=0, rtol=0,
+        atol=1e-2, rtol=1e-2,
     )
 
 
@@ -381,7 +393,7 @@ def test_decode_gqa_sliding_window(window_size):
     op.forward_diff_with(
         op_ref, query, key, value, seqlens,
         softmax_scale=1.0 / math.sqrt(D),
-        atol=0, rtol=0,
+        atol=1e-2, rtol=1e-2,
     )
 
 

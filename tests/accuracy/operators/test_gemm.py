@@ -205,8 +205,8 @@ def generate_quant_group_linear_data(
     else:
         weight = torch.randint(-128, 128, (b, k, n), dtype=torch.int8)
 
-    x1_scale = torch.randn(b, m, dtype=torch.float32)
-    x2_scale = torch.randn(n, dtype=torch.float32).to(x2_scale_dtype)
+    x1_scale = torch.randn(b, m, dtype=torch.float32) / 127.0
+    x2_scale = torch.randn(n, dtype=torch.float32).to(x2_scale_dtype) / 127.0
     return x1, weight, x1_scale, x2_scale
 
 
@@ -368,6 +368,8 @@ _test_grouped_matmul_cases = [
 @bypass_not_implemented
 def test_grouped_matmul_cases_via_group_linear(inputs, weights, bias, dtype):
     device = get_torch_device()
+    if get_platform() in ["mlu"] and dtype == torch.float32:
+        pytest.skip("MLU grouped matmul does not support float32")
 
     input_tensors = [t.to(device=device) for t in inputs]
     weight_tensors = [t.to(device=device) for t in weights]
