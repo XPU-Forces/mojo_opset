@@ -286,7 +286,7 @@ class MojoDynamicQuant(MojoOperator):
                 - Per-token dynamic scale of shape ``input.shape[:-1]``.
         """
         if token_count is not None:
-            token_count = token_count.to(torch.int32)
+            assert token_count.dtype == torch.int32
         if self.smooth_input and smooth_scale is None:
             raise ValueError("smooth_scale is required when smooth_input=True")
         if self.moe_mode and token_count is None:
