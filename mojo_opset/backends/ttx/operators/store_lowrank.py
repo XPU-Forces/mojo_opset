@@ -15,6 +15,8 @@ class TTXStoreLowrank(MojoStoreLowrank):
         token_idxs: torch.Tensor,
         token_num: int,
     ):
+        assert block_idxs.dtype == torch.int32
+        assert token_idxs.dtype == torch.int32
         return store_label_cache_infer(
             label_cache,
             key_lr,

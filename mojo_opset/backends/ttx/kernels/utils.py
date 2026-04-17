@@ -227,7 +227,7 @@ def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
 
 
 @tensor_cache
-def prepare_chunk_indices(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
+def prepare_chunk_indices(cu_seqlens: torch.Tensor, chunk_size: int) -> torch.Tensor:
     lens = triton.cdiv(prepare_lens(cu_seqlens), chunk_size)
     total = lens.sum()
     flat = torch.arange(total, device=cu_seqlens.device)

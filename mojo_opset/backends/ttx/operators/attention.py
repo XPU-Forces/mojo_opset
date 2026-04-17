@@ -35,6 +35,10 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         seqlens_kv: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
     ):
+        assert cu_seqlens_q.dtype == torch.int32
+        assert block_tables.dtype == torch.int32
+        if seqlens_kv is not None:
+            assert seqlens_kv.dtype == torch.int32
         assert self.window_size == -1, (
             f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
         )
@@ -78,6 +82,8 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         softmax_scale: Optional[float] = None,
         mask: Optional[torch.Tensor] = None,
     ):
+        assert seqlens.dtype == torch.int32
+        assert block_tables.dtype == torch.int32
         assert self.window_size == -1, (
             f"[TTXPagedDecodeGQA] TTX does not support sliding window, but got window_size={self.window_size}"
         )
@@ -132,6 +138,11 @@ class TTXPagedPrefillSWA(MojoPagedPrefillSWA):
         softmax_scale: Optional[float] = None,
         seqlens_kv: Optional[torch.Tensor] = None,  # [bsz]
     ) -> torch.Tensor:
+        assert cu_seqlens_q.dtype == torch.int32
+        assert block_table.dtype == torch.int32
+
+        if seqlens_kv is not None:
+            assert seqlens_kv.dtype == torch.int32
         if seqlens_kv is None:
             seqlens_kv = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
 
@@ -164,7 +175,8 @@ class TTXPagedDecodeSWA(MojoPagedDecodeSWA):
         softmax_scale: Optional[float] = None,
     ) -> torch.Tensor:
         # Note: is_causal = False should never happen
-
+        assert seq_lens.dtype == torch.int32
+        assert block_table.dtype == torch.int32
         o = swa_paged_decode(
             q,
             k_cache,
@@ -192,7 +204,8 @@ class TTXSWA(MojoSWA):
         cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
         softmax_scale: Optional[float] = None,
     ) -> torch.Tensor:
-
+        assert cu_seqlens_q.dtype == torch.int32
+        assert cu_seqlens_kv.dtype == torch.int32
         o = swa_infer(
             q,
             k,

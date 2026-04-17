@@ -19,7 +19,7 @@ def generate_sdpa_data(
 ):
     q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
     q_lens = torch.clamp(q_lens, min=1)
-    cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0)])
+    cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0).to(torch.int32)])
 
     if max_kv_computed_len <= 0:
         kv_cache_lens = None
@@ -27,7 +27,7 @@ def generate_sdpa_data(
     else:
         kv_cache_lens = torch.randint(max_kv_computed_len // 2, max_kv_computed_len, (batch_size,), dtype=torch.int32)
         kv_lens = q_lens + kv_cache_lens
-    cu_seqlens_kv = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0)])
+    cu_seqlens_kv = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0).to(torch.int32)])
 
     total_q_tokens = cu_seqlens_q[-1].item()
     total_kv_tokens = cu_seqlens_kv[-1].item()

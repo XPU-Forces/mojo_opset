@@ -69,6 +69,8 @@ def store_label_cache_infer_impl(
     """
     block_num, head_num, block_size, head_dim = label_cache.shape
     assert label_cache.dtype == key_lr.dtype, "label_cache and key_lr must have the same dtype"
+    assert block_idxs.dtype == torch.int32
+    assert token_idxs.dtype == torch.int32
 
     ub_buffer = 192
 
