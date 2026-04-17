@@ -6,72 +6,86 @@ from .utils import get_mlu_total_cores
 
 
 @triton.jit
+def _infer_single_block(
+    acc,
+    l_i,
+    m_i,
+    q,
+    k_block_ptr,
+    v_block_ptr,
+    mask,
+    qk_scale,
+):
+    # load K block
+    k = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option="zero")
+
+    # load V block
+    v = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero")
+
+    # compute qk
+    qk = tl.dot(k, q)
+    qk = qk * qk_scale
+    if mask is not None:
+        qk = tl.where(mask, qk, float("-inf"))
+
+    m_ij = tl.maximum(m_i, tl.max(qk, 0))
+    qk = qk - m_ij[None, :]
+    p = tl.math.exp(qk)
+    p_cast = p.to(k.dtype)
+
+    # Update m_i and l_i
+    l_ij = tl.sum(p, 0)
+    alpha = tl.math.exp(m_i - m_ij)
+    l_i = l_i * alpha + l_ij
+
+    # update output accumulator --
+    acc = acc * alpha[None, :]
+    acc = tl.dot(v, p_cast, acc)
+
+    # update current block max
+    m_i = m_ij
+
+    return acc, l_i, m_i
+
+
+# Return True if the mask was computed and applied, False if mask was all True (no masking needed)
+@triton.jit
 def causal_mask_fn(
-    mask_ptr,
-    mask_size,
-    mask_stride_m,
-    mask_stride_n,
     q_start,
     kv_start,
     Q_BLOCK,
     KV_BLOCK,
 ):
-    offset_causal = min(max(kv_start - q_start, -mask_size), mask_size)
-    offsets_mask_causal = (tl.arange(0, Q_BLOCK)[:, None]) * mask_stride_m + (
-        mask_size + offset_causal + tl.arange(0, KV_BLOCK)[None, :]
-    ) * mask_stride_n
-    mask_causal = tl.load(mask_ptr + offsets_mask_causal).to(tl.int1)
+    # Fast path: check if the entire block is causal (all positions valid)
+    # Block is fully causal if: max(kv_pos) <= min(query_pos)
+    # min(query_pos) = q_start + 0
+    # max(kv_pos) = kv_start + KV_BLOCK - 1
+    no_mask = (kv_start + KV_BLOCK - 1) <= q_start
 
-    return mask_causal
+    if no_mask:
+        # All positions in this block are valid, return all True mask (no masking effect)
+        mask_causal = tl.full((KV_BLOCK, Q_BLOCK), True, dtype=tl.int1)
+    else:
+        # Need causal mask for partial block
+        # Generate position indices
+        q_offsets = tl.arange(0, Q_BLOCK)[None, :]  # [1, Q_BLOCK]
+        kv_offsets = tl.arange(0, KV_BLOCK)[:, None]  # [KV_BLOCK, 1]
 
+        # Compute relative positions for causality check
+        # query_pos = q_start + q_offsets[i]
+        # kv_pos = kv_start + kv_offsets[j]
+        # Causal: kv_pos <= query_pos
+        relative_pos = (kv_start + kv_offsets) - (q_start + q_offsets)
 
-@triton.jit
-def _infer_single_block(
-    acc_ptr,
-    l_i,
-    m_i,
-    q,
-    K_block_ptr,
-    V_block_ptr,
-    mask,
-    qk_scale,
-):
-    # load and transpose K block
-    k = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
-    k_T = tl.trans(k)
+        # Causal mask: True where kv_pos <= query_pos
+        mask_causal = relative_pos <= 0
 
-    # load V block
-    v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
-
-    # compute qk
-    qk = tl.dot(q, k_T)
-    qk = qk * qk_scale
-    if mask is not None:
-        qk = tl.where(mask, qk, float("-inf"))
-
-    m_ij = tl.maximum(m_i, tl.max(qk, 1))
-    qk = qk - m_ij[:, None]
-    p = tl.math.exp(qk)
-    p_cast = p.to(k_T.dtype)
-
-    # Update m_i and l_i
-    l_ij = tl.sum(p, 1)
-    alpha = tl.math.exp(m_i - m_ij)
-    l_i = l_i * alpha + l_ij
-
-    # update output accumulator --
-    acc_ptr = acc_ptr * alpha[:, None]
-    acc_ptr = tl.dot(p_cast, v, acc_ptr)
-
-    # update current block max
-    m_i = m_ij
-
-    return acc_ptr, l_i, m_i
+    return mask_causal.to(tl.int1)
 
 
 def cfggen():
-    block_m = [64, 128, 256, 512]
-    num_stages = [1, 3]
+    block_m = [64, 128]
+    num_stages = [1, 3, 4]
     configs = [
         triton.Config(
             {
@@ -91,11 +105,12 @@ def cfggen():
 )
 @triton.heuristics(
     {
-        "BLOCK_N": lambda args: min(512, triton.next_power_of_2(args["PAGE_SIZE"])),
+        "BLOCK_N": lambda args: min(128, triton.next_power_of_2(args["PAGE_SIZE"])),
         "BLOCK_D": lambda args: args["HEAD_SIZE"],
         "num_warps": lambda args: 1,
         "bottleneck": lambda args: "simd",
         "force_use_shared_memory": lambda args: True,
+        "pipeline_strategies": lambda args: ["reduce_delay"],
     }
 )
 @triton.jit
@@ -107,12 +122,10 @@ def paged_prefill_kernel(
     cu_seqlens_q_ptr,
     kv_lens_ptr,
     block_table_ptr,
-    aux_mask_ptr,
     scale,
     bsz,
     num_q_heads,
     num_kv_heads,
-    aux_mask_size,
     stride_ot,
     stride_oh,
     stride_od,
@@ -129,8 +142,6 @@ def paged_prefill_kernel(
     stride_vd,
     stride_block_table_b,
     stride_block_table_p,
-    stride_mask_m,
-    stride_mask_n,
     gqa_interleave,
     HEAD_SIZE: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
@@ -181,11 +192,11 @@ def paged_prefill_kernel(
                 base=q_ptr
                 + (q_start + q_block_start) * stride_qt
                 + q_head_id * stride_qh,
-                shape=(q_block_len, HEAD_SIZE),
-                strides=(stride_qt, stride_qd),
+                shape=(HEAD_SIZE, q_block_len),
+                strides=(stride_qd, stride_qt),
                 offsets=(0, 0),
-                block_shape=(BLOCK_M, BLOCK_D),
-                order=(1, 0),
+                block_shape=(BLOCK_D, BLOCK_M),
+                order=(0, 1),
             )
             cur_q_block = tl.load(
                 cur_q_block_ptr, boundary_check=(0, 1), padding_option="zero"
@@ -193,7 +204,7 @@ def paged_prefill_kernel(
 
             m_i = tl.zeros((BLOCK_M,), dtype=tl.float32) - float("inf")
             l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
-            acc = tl.zeros((BLOCK_M, HEAD_SIZE), dtype=tl.float32)
+            acc = tl.zeros((HEAD_SIZE, BLOCK_M), dtype=tl.float32)
 
             num_kv_blocks = tl.cdiv(kv_extra_len + q_block_end, BLOCK_N)
 
@@ -225,18 +236,14 @@ def paged_prefill_kernel(
                     + physical_page_id * stride_vp
                     + kv_head_id * stride_vh
                     + kv_block_start_in_page * stride_vt,
-                    shape=(kv_block_len, HEAD_SIZE),
-                    strides=(stride_vt, stride_vd),
+                    shape=(HEAD_SIZE, kv_block_len),
+                    strides=(stride_vd, stride_vt),
                     offsets=(0, 0),
-                    block_shape=(BLOCK_N, BLOCK_D),
-                    order=(1, 0),
+                    block_shape=(BLOCK_D, BLOCK_N),
+                    order=(0, 1),
                 )
 
                 mask = causal_mask_fn(
-                    aux_mask_ptr,
-                    aux_mask_size,
-                    stride_mask_m,
-                    stride_mask_n,
                     kv_extra_len + q_block_start,
                     kv_block_start,
                     BLOCK_M,
@@ -264,7 +271,8 @@ def paged_prefill_kernel(
                 block_shape=(BLOCK_M, BLOCK_D),
                 order=(1, 0),
             )
-            accumulator = acc / l_i[:, None]
+            accumulator = acc / l_i[None, :]
+            accumulator = tl.trans(accumulator)
             tl.store(
                 cur_o_block_ptr,
                 accumulator.to(o_ptr.type.element_ty),
@@ -290,9 +298,6 @@ def paged_attention_prefill_impl(
     if softmax_scale is None:
         softmax_scale = 1.0 / (head_size**0.5)
 
-    if aux_mask is None:
-        aux_mask = torch.ones(1024, 1024 * 3, dtype=torch.bool).tril(1024).mlu()
-
     o = torch.empty_like(q, memory_format=torch.contiguous_format)
 
     paged_prefill_kernel[(get_mlu_total_cores(),)](
@@ -303,12 +308,10 @@ def paged_attention_prefill_impl(
         cu_seqlens_q,
         seqlens_kv,
         block_tables,
-        aux_mask,
         softmax_scale,
         bsz,
         num_q_heads,
         num_kv_heads,
-        aux_mask.shape[0],
         o.stride(0),
         o.stride(1),
         o.stride(2),
@@ -325,8 +328,6 @@ def paged_attention_prefill_impl(
         value_cache.stride(3),
         block_tables.stride(0),
         block_tables.stride(1),
-        aux_mask.stride(0),
-        aux_mask.stride(1),
         gqa_interleave,
         head_size,
         page_size,
