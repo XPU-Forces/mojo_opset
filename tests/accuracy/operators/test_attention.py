@@ -34,14 +34,13 @@ def generate_paged_decode_data(
     block_size: int,
     dtype: torch.dtype,
 ):
-    torch.manual_seed(23)
     query = torch.randn(batch_size, num_q_heads, head_dim, dtype=dtype)
 
     if max_seq_len > 0:
         seqlens = torch.randint(0, max_seq_len, (batch_size,), dtype=torch.int32)
         seqlens = torch.clamp(seqlens, min=1)
     else:
-        seqlens = torch.zeros(batch_size, dtype=torch.int32)
+        seqlens = torch.randperm(batch_size, dtype=torch.int32)
 
     max_num_blocks_per_seq = (seqlens.max().item() + block_size - 1) // block_size
     total_blocks_needed = int(torch.div(seqlens + block_size - 1, block_size, rounding_mode="floor").sum().item())
@@ -152,7 +151,8 @@ def generate_paged_prefill_data(
         q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
         q_lens = torch.clamp(q_lens, min=1)
     else:
-        q_lens = torch.zeros(batch_size, dtype=torch.int32)
+        # max_q_len = 0 for testing padding logic, use randperm to generate a list with 0
+        q_lens = torch.randperm(batch_size, dtype=torch.int32)
     cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0).to(torch.int32)])
 
     if max_kv_computed_len <= 0:
@@ -161,6 +161,7 @@ def generate_paged_prefill_data(
     else:
         kv_cache_lens = torch.randint(max_kv_computed_len // 2, max_kv_computed_len, (batch_size,), dtype=torch.int32)
         kv_lens = q_lens + kv_cache_lens
+        kv_lens = torch.where(q_lens > 0, kv_lens, torch.zeros_like(kv_lens))
     cu_seqlens_kv = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0).to(torch.int32)])
 
     total_q_tokens = cu_seqlens_q[-1].item()
