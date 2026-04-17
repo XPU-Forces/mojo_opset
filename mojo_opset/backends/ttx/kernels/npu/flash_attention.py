@@ -30,16 +30,8 @@ def _sdpa_infer_single_block(
     q,  # Accumulator, local l, local m, query vector
     K_T_block_ptr,
     V_block_ptr,  # Key and value block pointers for current stage
-    mask_base_ptr,
-    need_mask,
-    stride_mask_base_ptr_m,
-    stride_mask_base_ptr_n,
-    mask_size,
     qk_scale,
-    offs_m,
-    offs_n,
-    seq_m,
-    seq_n,
+    mask,
     HEAD_DIM: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -55,17 +47,7 @@ def _sdpa_infer_single_block(
     # tl.compile_hint(qk, "tile_cube_loop")
 
     qk = qk * qk_scale
-    if need_mask:
-        mask = causal_mask_fn(
-            mask_base_ptr,
-            mask_size,
-            stride_mask_base_ptr_m,
-            stride_mask_base_ptr_n,
-            offs_m,
-            offs_n,
-            BLOCK_M,
-            BLOCK_N,
-        )
+    if mask is not None:
         qk = tl.where(mask, qk, float("-inf"))  # 32B # bool
 
     m_ij = tl.maximum(m_i, tl.max(qk, 1, propagate_nan=tl.PropagateNan.ALL), propagate_nan=tl.PropagateNan.ALL)  # Scaled max
@@ -196,10 +178,8 @@ def paged_prefill_kernel(
             acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_D), dtype=tl.float32)
 
             num_kv_blocks = tl.cdiv(kv_cache_len + q_block_end_in_seq, BLOCK_SIZE_N)
-            num_full_blocks = (kv_cache_len + q_block_start_in_seq) // PAGE_SIZE
-            has_full_block = num_kv_blocks > 0
+
             for kv_block_id in range(0, num_kv_blocks):
-                need_mask = ~(has_full_block & (kv_block_id < num_full_blocks))
                 kv_block_start_in_seq = kv_block_id * BLOCK_SIZE_N
                 kv_block_end_in_seq = min(kv_block_start_in_seq + BLOCK_SIZE_N, kv_seq_len)
                 kv_block_len = kv_block_end_in_seq - kv_block_start_in_seq
@@ -227,6 +207,17 @@ def paged_prefill_kernel(
                     order=(1, 0),
                 )
 
+                mask = causal_mask_fn(
+                    aux_mask_ptr,
+                    AUX_MASK_SIZE,
+                    stride_mask_m,
+                    stride_mask_n,
+                    kv_cache_len + q_block_start_in_seq,
+                    kv_block_start_in_seq,
+                    BLOCK_SIZE_M,
+                    BLOCK_SIZE_N,
+                )
+
                 acc, l_i, m_i = _sdpa_infer_single_block(
                     acc,
                     l_i,
@@ -234,16 +225,8 @@ def paged_prefill_kernel(
                     q,
                     K_T_block_ptr,
                     V_block_ptr,
-                    aux_mask_ptr,  # Note(chenyifan): main optimization, do not load mask if the current attn block is full
-                    need_mask,
-                    stride_mask_m,
-                    stride_mask_n,
-                    AUX_MASK_SIZE,
                     softmax_scale,
-                    kv_cache_len + q_block_start_in_seq,
-                    kv_block_start_in_seq,
-                    kv_cache_len + q_block_end_in_seq,
-                    kv_block_end_in_seq,
+                    mask,
                     HEAD_DIM,
                     BLOCK_SIZE_M,
                     BLOCK_SIZE_N,
@@ -336,7 +319,6 @@ def paged_attention_prefill_impl(
         BLOCK_SIZE_D=head_dim,
         limit_auto_multi_buffer_only_for_local_buffer=False,
         set_workspace_multibuffer=4,
-        enable_ubuf_saving=True,
     )
     return o
 
@@ -439,8 +421,8 @@ def paged_decode_kernel(
             qk *= softmax_scale
             qk = tl.where(mask, qk, float("-inf"))
 
-            m_j = tl.max(qk, axis=0)
-            m_ij = tl.maximum(m_i, m_j)
+            m_j = tl.max(qk, axis=0,propagate_nan=tl.PropagateNan.ALL)
+            m_ij = tl.maximum(m_i, m_j,propagate_nan=tl.PropagateNan.ALL)
             qk = qk - m_ij
 
             p = tl.math.exp(qk)
