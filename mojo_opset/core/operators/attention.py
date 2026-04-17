@@ -126,6 +126,7 @@ class MojoPagedDecodeGQA(MojoOperator):
         value_cache: torch.Tensor,
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
+        max_context_len: int,
         softmax_scale: Optional[float] = None,
         cu_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
