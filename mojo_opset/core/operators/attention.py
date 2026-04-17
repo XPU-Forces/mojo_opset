@@ -341,6 +341,7 @@ class MojoPagedPrefillGQA(MojoOperator):
         softmax_scale: Optional[float] = None,
         seqlens_kv: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Tuple[Any]:
         """
         Paged prefill attention with grouped query heads (GQA) using a blocked KV cache.
