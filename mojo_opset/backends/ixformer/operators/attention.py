@@ -16,37 +16,65 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
 
     supported_platforms_list = ["ilu"]
 
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+        window_size: int = -1,
+    ):
+        super().__init__(is_causal=is_causal, gqa_layout=gqa_layout, window_size=window_size)
+        
+
+        if self.window_size != -1:
+            raise NotImplementedError("IxformerPagedPrefillGQA only supports window_size == -1")
+         
+
     def forward(
         self,
         query: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
+        cu_seqlens_kv: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
-        seqlens_kv: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> torch.Tensor:
         """
         Paged prefill attention with grouped query heads (GQA) using a blocked KV cache.
 
         Args:
             query (torch.Tensor): Query tokens of shape (T, Hq, D).
-            key_cache (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
-            value_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
+                Hq->q head num , D->head dim.dtype must be fp16 or bf16.
+            key_cache (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D). 
+                HKv-> kv head num , D->head dim.dtype must be fp16 or bf16.
+                block_size must be <= 256 and % 16 == 0.
+            value_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D). 
+                HKv-> kv head num , D->head dim.dtype must be fp16 or bf16.
+                block_size must be <= 256 and % 16 == 0.
             cu_seqlens_q (torch.Tensor): Cumulative query lengths, shape (B+1,);
                 `cu_seqlens_q[i]` is the start offset for query at batch i; `cu_seqlens_q[-1] == T`.
+                dtype must be int32.
+            cu_seqlens_kv (torch.Tensor): Cumulative key/value lengths, shape (B+1,);
+                `cu_seqlens_kv[i]` is the start offset for key/value at batch i; `cu_seqlens_kv[-1] == K`.
+                dtype must be int32.
+            max_seqlen_q (int): Maximum query sequence length across the batch. >0 and must be int.
+            max_seqlen_k (int): Maximum key/value sequence length across the batch. >0 and must be int.
             block_tables (torch.Tensor): Logical-to-physical block IDs per batch,
                 shape (B, num_blocks).
+                dtype must be int32.
             softmax_scale (Optional[float]): Attention scaling factor; defaults to 1/sqrt(D).
             seqlens_kv (Optional[torch.Tensor]): key/value lengths, shape (B,);
                 `seqlens_kv[i]` is the length for key/value in key/value cache at batch i.
                 If None, defaults to `cu_seqlens_q[i+1] - cu_seqlens_q[i]` for each batch i.
+                we do not use this parameter yet.we use cu_seqlens_kv instead.
             mask (Optional[torch.Tensor]): Attention mask; defaults to None.
-                If mask is None, it means a full mask or causal mask based on `is_causal`.
-                If mask is not None, and is_causal=False, applies the mask to the attention scores.
-                Currently we do not constrain the shape of mask, it is recommended be of shape (B, T, T) or (T, T),
-                where B is the block size, and T >= max(max(seqlens_kv), max(seqlens_q)).
+                we do not support custom mask yet.
+                
+            
 
         Returns:
             torch.Tensor: Attention output of shape (T, Hq, D).
@@ -58,35 +86,28 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
             - Despite the type annotation Tuple[Any], this implementation returns a single tensor.
         """
 
+        if query.dtype not in (torch.float16, torch.bfloat16):
+            raise NotImplementedError(f"query dtype must be fp16 or bf16, got {query.dtype}.")
         if mask is not None:
             raise NotImplementedError("IxformerPagedPrefillGQA does not support custom mask yet.")
-        if self.gqa_layout == "ABAB":
-            raise NotImplementedError("IxformerPagedPrefillGQA does not support ABAB layout.")
+        if self.gqa_layout != "AABB":
+            raise NotImplementedError("IxformerPagedPrefillGQA only supports AABB layout.")
         page_block_size = key_cache.shape[2]
-        if page_block_size > 256:
+        if page_block_size > 256 or page_block_size % 16 != 0:
             raise NotImplementedError(
-                f"IxformerPagedPrefillGQA only supports page_block_size <= 256, got {page_block_size}."
+                f"IxformerPagedPrefillGQA only supports page_block_size <= 256 and % 16 == 0, got {page_block_size}."
             )
 
-        if softmax_scale is None:
-            softmax_scale = query.shape[-1] ** -0.5
-        if seqlens_kv is None:
-            seqlens_kv = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-        if self.window_size != -1:
-            raise NotImplementedError(
-                f"IxformerPagedPrefillGQA only supports window_size=-1, got {self.window_size}."
-            )
-
-        # ixformer paged-kernel requires int32 index tensors.
-        cu_seqlens_q = cu_seqlens_q.to(dtype=torch.int32)
-        block_tables = block_tables.to(dtype=torch.int32)
-
-        max_seqlen_q = int((cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item()) if cu_seqlens_q.numel() > 1 else 0
-        max_seqlen_k = int(seqlens_kv.max().item()) if seqlens_kv.numel() > 0 else 0
-        window_size = (-1, -1)
-
-        cu_seqlens_kv = torch.zeros_like(cu_seqlens_q)
-        cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv.to(dtype=cu_seqlens_q.dtype), dim=0)
+        if cu_seqlens_q.dtype != torch.int32:
+            raise ValueError(f"cu_seqlens_q must be int32, got {cu_seqlens_q.dtype}.")
+        if block_tables.dtype != torch.int32:
+            raise ValueError(f"block_tables must be int32, got {block_tables.dtype}.")
+        if cu_seqlens_kv.dtype != torch.int32:
+            raise ValueError(f"cu_seqlens_kv must be int32, got {cu_seqlens_kv.dtype}.")
+        if max_seqlen_q <= 0 or not isinstance(max_seqlen_q, int):
+            raise ValueError(f"max_seqlen_q must be >0 and int, got {max_seqlen_q}.")
+        if max_seqlen_k <= 0 or not isinstance(max_seqlen_k, int):
+            raise ValueError(f"max_seqlen_k must be >0 and int, got {max_seqlen_k}.")
 
         return ix_fa.flash_attn_varlen_func(
             query,
@@ -99,7 +120,6 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
             causal=self.is_causal,
             softmax_scale=softmax_scale,
             block_table=block_tables,
-            window_size=window_size,
         )
 
 class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
