@@ -450,6 +450,263 @@ def test_paged_prefill_gqa(
     )
 
 
+def generate_paged_prefill_data_with_graph(
+    batch_size: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    max_q_len: int,
+    max_kv_computed_len: int,
+    block_size: int,
+    dtype: torch.dtype,
+):
+
+    q_lens = torch.full((batch_size,), max_q_len, dtype=torch.int32)
+    cu_seqlens_q = torch.cat(
+        [torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0, dtype=torch.int32)]
+    )
+
+    kv_cache_lens = torch.full((batch_size,), max_kv_computed_len, dtype=torch.int32)
+    kv_lens = q_lens + kv_cache_lens
+    cu_seqlens_kv = torch.cat(
+        [torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0, dtype=torch.int32)]
+    )
+
+    total_q_tokens = int(cu_seqlens_q[-1].item())
+
+    query = torch.randn(total_q_tokens, num_q_heads, head_dim, dtype=dtype)
+
+    max_num_blocks_per_seq = (int(kv_lens.max().item()) + block_size - 1) // block_size
+    total_blocks_needed = batch_size * max_num_blocks_per_seq
+    num_total_blocks = total_blocks_needed + 10
+
+    k_cache = torch.randn(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
+    v_cache = torch.randn(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
+
+    block_tables = torch.zeros(batch_size, max_num_blocks_per_seq, dtype=torch.int32)
+    free_blocks = torch.randperm(num_total_blocks)
+
+    current_block_offset = 0
+    for i in range(batch_size):
+        seq_len = int(kv_lens[i].item())
+        num_blocks_for_seq = (seq_len + block_size - 1) // block_size
+
+        if current_block_offset + num_blocks_for_seq > num_total_blocks:
+            raise ValueError("Not enough blocks to generate test data.")
+
+        assigned_blocks = free_blocks[current_block_offset : current_block_offset + num_blocks_for_seq]
+        block_tables[i, :num_blocks_for_seq] = assigned_blocks
+        current_block_offset += num_blocks_for_seq
+
+    seqlens_kv = kv_lens.clone()
+    max_seqlen_q = max_q_len
+    max_seqlen_k = int(kv_lens.max().item())
+    return (
+        query,
+        k_cache,
+        v_cache,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        block_tables,
+        seqlens_kv,
+        max_seqlen_q,
+        max_seqlen_k,
+    )
+
+
+test_configs_prefill_with_graph = [
+    (2, 16, 4, 128, 1024, 1024, 32, torch.bfloat16, "M_BF16"),
+    (2, 16, 4, 96, 1024, 1024, 128, torch.bfloat16, "M_BF16_PADDIM"),
+    (2, 8, 1, 128, 4096, 8192, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
+    (2, 8, 1, 128, 1024, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
+]
+
+
+@pytest.mark.parametrize(
+    "query, k_cache, v_cache, cu_seqlens_q, cu_seqlens_kv, block_tables, seqlens_kv, max_seqlen_q, max_seqlen_k",
+    [
+        pytest.param(
+            *generate_paged_prefill_data_with_graph(
+                batch_size=MAX_B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_q_len=MAX_Q_LEN,
+                max_kv_computed_len=MAX_KV_COMPUTED_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            id=ID,
+        )
+        for MAX_B, Q_H, KV_H, D, MAX_Q_LEN, MAX_KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_prefill_with_graph
+    ],
+)
+@pytest.mark.parametrize("gqa_layout", ["AABB"])
+@auto_switch_platform()
+@bypass_not_implemented
+def test_paged_prefill_gqa_with_graph(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_kv: torch.Tensor,
+    block_tables: torch.Tensor,
+    seqlens_kv: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    gqa_layout: str,
+):
+    head_dim = query.shape[-1]
+    softmax_scale = 1.0 / math.sqrt(head_dim)
+
+    with torch.no_grad():
+        paged_prefill_attn = MojoPagedPrefillGQA(
+            is_causal=True,
+            gqa_layout=gqa_layout,
+        )
+        # Warm-up: run once to initialize kernels
+        paged_prefill_attn(
+            query,
+            k_cache,
+            v_cache,
+            cu_seqlens_q,
+            block_tables=block_tables,
+            softmax_scale=softmax_scale,
+            seqlens_kv=seqlens_kv,
+            cu_seqlens_kv=cu_seqlens_kv,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+        )
+        torch.cuda.synchronize()
+
+        # Capture CUDA graph
+        graph = torch.cuda.CUDAGraph()
+        try:
+            with torch.cuda.graph(graph):
+                output = paged_prefill_attn(
+                    query,
+                    k_cache,
+                    v_cache,
+                    cu_seqlens_q,
+                    block_tables=block_tables,
+                    softmax_scale=softmax_scale,
+                    seqlens_kv=seqlens_kv,
+                    cu_seqlens_kv=cu_seqlens_kv,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_k,
+                )
+            torch.cuda.synchronize()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}.")
+            torch.cuda.empty_cache()
+            return
+
+    paged_prefill_attn_ref = MojoPagedPrefillGQA._registry.get("torch")(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+    )
+
+    max_batch_size = cu_seqlens_q.shape[0] - 1
+    max_total_q_tokens, num_q_heads, head_dim = query.shape
+    _, num_kv_heads, block_size, _ = k_cache.shape
+    max_q_len_cfg = max_total_q_tokens // max_batch_size
+    max_kv_len_cfg = int(seqlens_kv.max().item())
+    max_kv_computed_len_cfg = max_kv_len_cfg - max_q_len_cfg
+
+    atol = 2e-2 if query.dtype != torch.float32 else 1e-5
+    rtol = 2e-2 if query.dtype != torch.float32 else 1e-6
+    for test_step in range(5):
+        current_batch_size = torch.randint(1, max_batch_size + 1, ()).item()
+
+        # Generate valid input data for the current batch
+        (
+            cur_q,
+            cur_k,
+            cur_v,
+            cur_cu_q,
+            cur_cu_kv,
+            cur_block_tables,
+            cur_seqlens_kv,
+            cur_max_seqlen_q,
+            cur_max_seqlen_k,
+        ) = generate_paged_prefill_data(
+            batch_size=current_batch_size,
+            num_q_heads=num_q_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            max_q_len=max_q_len_cfg,
+            max_kv_computed_len=max_kv_computed_len_cfg,
+            block_size=block_size,
+            dtype=query.dtype,
+        )
+
+        # generate_paged_prefill_data returns seqlens_kv=None when no cache;
+        # graph always expects a tensor, so derive from cu_seqlens_q in that case.
+        if cur_seqlens_kv is None:
+            cur_seqlens_kv = cur_cu_q[1:] - cur_cu_q[:-1]
+
+        cur_T = int(cur_cu_q[-1].item())
+
+        # --------------------------
+        # In-place update static buffers
+        # --------------------------
+        current_num_blocks = cur_k.shape[0]
+        k_cache[:current_num_blocks].copy_(cur_k)
+        v_cache[:current_num_blocks].copy_(cur_v)
+        query[:cur_T].copy_(cur_q)
+
+        # cu_seqlens_q / cu_seqlens_kv: valid prefix mirrors cur, padded batches
+        # keep the final cumulative value so q_len = kv_len = 0 for them.
+        cu_seqlens_q[: current_batch_size + 1].copy_(cur_cu_q)
+        cu_seqlens_q[current_batch_size + 1 :] = cur_cu_q[-1]
+        cu_seqlens_kv[: current_batch_size + 1].copy_(cur_cu_kv)
+        cu_seqlens_kv[current_batch_size + 1 :] = cur_cu_kv[-1]
+
+        # seqlens_kv: valid batches copied, padded batches set to 0.
+        seqlens_kv[:current_batch_size].copy_(cur_seqlens_kv)
+        seqlens_kv[current_batch_size:] = 0
+
+        # Block tables: fill valid entries, pad unused block with -1
+        for i in range(current_batch_size):
+            num_blocks_per_seq = (int(cur_seqlens_kv[i].item()) + block_size - 1) // block_size
+            block_tables[i, :num_blocks_per_seq].copy_(cur_block_tables[i, :num_blocks_per_seq])
+            block_tables[i, num_blocks_per_seq:] = -1
+        if current_batch_size < max_batch_size:
+            block_tables[current_batch_size:] = -1
+
+        # --------------------------
+        # Compute reference output
+        # --------------------------
+        ref_output = paged_prefill_attn_ref(
+            cur_q,
+            cur_k,
+            cur_v,
+            cur_cu_q,
+            block_tables=cur_block_tables,
+            softmax_scale=softmax_scale,
+            seqlens_kv=cur_seqlens_kv,
+            cu_seqlens_kv=cur_cu_kv,
+            max_seqlen_q=cur_max_seqlen_q,
+            max_seqlen_k=cur_max_seqlen_k,
+        )
+
+        # Save unused tail outputs to check CUDA Graph replay doesn't touch them
+        reserved_unused_output = output[cur_T:].clone()
+
+        # --------------------------
+        # CUDA Graph inference
+        # --------------------------
+        torch.cuda.synchronize()
+        graph.replay()
+        torch.cuda.synchronize()
+
+        # Check valid tokens match reference results
+        check_tol_diff(output[:cur_T], ref_output, atol=atol, rtol=rtol)
+        # Check unused tail remain unchanged
+        check_tol_diff(output[cur_T:], reserved_unused_output, atol=atol, rtol=rtol)
+
+
 @functools.lru_cache()
 def generate_diffusion_attention_mask(
     seq_length: int,
