@@ -114,6 +114,7 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         value_cache: torch.Tensor,
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
+        max_context_len: int,
         softmax_scale: Optional[float] = None,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -124,16 +125,18 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
             query (torch.Tensor): Query of shape (B, Hq, D).
             key_cache (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
             value_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
-            seqlens (torch.Tensor): query lengths (B)
+            seqlens (torch.Tensor): Sequence lengths (B).
             block_tables (torch.Tensor): (B, num_blocks) mapping logical blocks to physical IDs.
+            max_context_len (int): Max sequence length, should be equal to seqlens.max().
             softmax_scale (Optional[float]): Scale factor; defaults to 1/sqrt(D).
 
         Returns:
             torch.Tensor: Attention output of shape (B, Hq, D).
 
         Notes:
+            - Head dim D only support [32, 64, 80, 96, 128, 160, 192, 224, 256].
+            - Block size must be a multiple of 16.
             - If Hq > Hkv, K/V heads are repeated to match query heads.
-            - Causal mask uses per-batch sequence lengths `seqlens`.
             - Softmax is computed in float32 and cast back to the input dtype.
             - This implementation references variables `query` and `seqlens`; ensure they
               correspond to `query` and the sequence-lengths tensor in the caller.
@@ -150,16 +153,19 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         batch_size, num_q_heads, head_dim = query.shape
         _, num_kv_heads, block_size, head_dim = key_cache.shape
 
-        output = torch.zeros(batch_size, num_q_heads, head_dim, dtype=query.dtype, device=query.device)
+        output = torch.empty(batch_size, num_q_heads, head_dim, dtype=query.dtype, device=query.device)
 
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(head_dim)
 
-        block_tables = block_tables.to(dtype=torch.int32)
-        max_context_len=torch.max(seqlens).item()
+        if block_size % 16 != 0:
+            raise NotImplementedError("Block size must be a multiple of 16.")
 
-        if max_context_len == 0:
-            raise NotImplementedError("IxformerPagedDecodeGQA does not support max_context_len = 0.")
+        if block_tables.dtype != torch.int32:
+            raise NotImplementedError("IxformerPagedDecodeGQA only support block_tables dtype = torch.int32.")
+
+        if max_context_len <= 1:
+            raise NotImplementedError("IxformerPagedDecodeGQA only support max_context_len > 1.")
 
         ixf_f.vllm_paged_attention(
             output=output,

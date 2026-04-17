@@ -42,7 +42,8 @@ def generate_paged_decode_data(
     else:
         seqlens = torch.randperm(batch_size, dtype=torch.int32)
 
-    max_num_blocks_per_seq = (seqlens.max().item() + block_size - 1) // block_size
+    max_context_len = seqlens.max().item()
+    max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
     total_blocks_needed = int(torch.div(seqlens + block_size - 1, block_size, rounding_mode="floor").sum().item())
 
     if total_blocks_needed == 0:
@@ -68,7 +69,7 @@ def generate_paged_decode_data(
         block_tables[i, :num_blocks_for_seq] = assigned_blocks
         current_block_offset += num_blocks_for_seq
 
-    return query, k_cache, v_cache, seqlens, block_tables
+    return query, k_cache, v_cache, seqlens, block_tables, max_context_len
 
 
 test_configs_decode = [
@@ -81,7 +82,7 @@ test_configs_decode = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, seqlens, block_tables",
+    "query, k_cache, v_cache, seqlens, block_tables, max_context_len",
     [
         pytest.param(
             *generate_paged_decode_data(
@@ -107,6 +108,7 @@ def test_paged_decode_gqa(
     v_cache: torch.Tensor,
     seqlens: torch.Tensor,
     block_tables: torch.Tensor,
+    max_context_len: int,
     gqa_layout: str,
 ):
     head_dim = query.shape[-1]
@@ -131,6 +133,7 @@ def test_paged_decode_gqa(
         v_cache,
         seqlens,
         block_tables,
+        max_context_len,
         softmax_scale=softmax_scale,
         atol=atol,
         rtol=rtol,
@@ -628,7 +631,7 @@ def test_paged_prefill_mla(B, H, d_nope, d_rope, d_v, d_c, max_q, blk):
 )
 @bypass_not_implemented
 def test_paged_decode_nsa(B, H, D, S, blk):
-    query, k_cache, v_cache, seqlens, bt = generate_paged_decode_data(
+    query, k_cache, v_cache, seqlens, bt, _ = generate_paged_decode_data(
         batch_size=B, num_q_heads=H, num_kv_heads=H,
         head_dim=D, max_seq_len=S, block_size=blk, dtype=torch.bfloat16,
     )
@@ -804,7 +807,7 @@ test_configs_swa_decode = [
 ]
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, seqlens, block_tables",
+    "query, k_cache, v_cache, seqlens, block_tables, max_context_len",
     [
         pytest.param(
             *generate_paged_decode_data(
@@ -833,6 +836,7 @@ def test_paged_decode_swa(
     v_cache: torch.Tensor,
     seqlens: torch.Tensor,
     block_tables: torch.Tensor,
+    max_context_len: int,
     gqa_layout: str,
     global_window: int,
     local_window: int,
