@@ -25,7 +25,7 @@ def _triton_mrope_kernel(
     k_ptr,
     cos_ptr,
     sin_ptr,
-    num_tokens: tl.constexpr,
+    num_tokens,
     n_qh: tl.constexpr,
     n_kh: tl.constexpr,
     hd: tl.constexpr,
@@ -69,13 +69,14 @@ def _triton_mrope_kernel(
 
     half_rope_dim = rope_dim // 2
     half_rd = half_rope_dim
+    stride_token = hd // 2
 
-    t_cos = cos_ptr + pid * half_rd
-    h_cos = t_cos + num_tokens * half_rd
-    w_cos = h_cos + num_tokens * half_rd
-    t_sin = sin_ptr + pid * half_rd
-    h_sin = t_sin + num_tokens * half_rd
-    w_sin = h_sin + num_tokens * half_rd
+    t_cos = cos_ptr + pid * stride_token
+    h_cos = t_cos + num_tokens * stride_token
+    w_cos = h_cos + num_tokens * stride_token
+    t_sin = sin_ptr + pid * stride_token
+    h_sin = t_sin + num_tokens * stride_token
+    w_sin = h_sin + num_tokens * stride_token
 
     cos_offsets = tl.arange(0, pad_hd // 2)
 
@@ -90,12 +91,13 @@ def _triton_mrope_kernel(
         h_mask = (t_end <= cos_offsets) & (cos_offsets < h_end)
         w_mask = (h_end <= cos_offsets) & (cos_offsets < half_rd)
 
-    t_cos_row = tl.load(t_cos + cos_offsets)
-    h_cos_row = tl.load(h_cos + cos_offsets)
-    w_cos_row = tl.load(w_cos + cos_offsets)
-    t_sin_row = tl.load(t_sin + cos_offsets)
-    h_sin_row = tl.load(h_sin + cos_offsets)
-    w_sin_row = tl.load(w_sin + cos_offsets)
+    cos_mask = cos_offsets < (hd // 2)
+    t_cos_row = tl.load(t_cos + cos_offsets, mask=cos_mask, other=0.0)
+    h_cos_row = tl.load(h_cos + cos_offsets, mask=cos_mask, other=0.0)
+    w_cos_row = tl.load(w_cos + cos_offsets, mask=cos_mask, other=0.0)
+    t_sin_row = tl.load(t_sin + cos_offsets, mask=cos_mask, other=0.0)
+    h_sin_row = tl.load(h_sin + cos_offsets, mask=cos_mask, other=0.0)
+    w_sin_row = tl.load(w_sin + cos_offsets, mask=cos_mask, other=0.0)
 
     t_cos_row = tl.where(t_mask, t_cos_row, 0.0)
     h_cos_row = tl.where(h_mask, h_cos_row, 0.0)
@@ -180,7 +182,7 @@ def mrope_fwd_impl(
     pad_n_kh = triton.next_power_of_2(n_kh)
 
     num_programs = _get_num_programs()
-    n_row = min(num_tokens, num_programs)
+    n_row = num_tokens
 
     _triton_mrope_kernel[(n_row,)](
         q,
