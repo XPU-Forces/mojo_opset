@@ -1,4 +1,6 @@
+from typing import Any
 from typing import List
+from typing import Optional
 from typing import Tuple
 
 import torch
@@ -7,6 +9,14 @@ from ..operator import MojoOperator
 
 
 class MojoMRoPE(MojoOperator):
+    """Multimodal Rotary Position Embedding (MRoPE) for Qwen2-VL.
+
+    Applies 3D rotary position embedding over temporal (T), height (H), and width (W)
+    dimensions to query and key tensors. Supports both interleaved and non-interleaved modes.
+
+    Reference: https://qwenlm.github.io/blog/qwen2-vl/
+    """
+
     supported_platforms_list = ["npu"]
 
     def __init__(self, **kwargs):
@@ -16,80 +26,97 @@ class MojoMRoPE(MojoOperator):
         return ""
 
     @staticmethod
-    def apply_interleaved_mrope(x: torch.Tensor, mrope_section: List[int]) -> torch.Tensor:
-        x_t = x[0].clone()
-        x_t[..., 1 : mrope_section[1] * 3 : 3] = x[1, ..., 1 : mrope_section[1] * 3 : 3]
-        x_t[..., 2 : mrope_section[2] * 3 : 3] = x[2, ..., 2 : mrope_section[2] * 3 : 3]
-        return x_t
+    def _rotate_half(hidden_states: torch.Tensor) -> torch.Tensor:
+        """Rotates half the hidden dims of the input."""
+        hidden_size = hidden_states.shape[-1]
+        hidden_states_half = hidden_size // 2
+        left = hidden_states[..., :hidden_states_half]
+        right = hidden_states[..., hidden_states_half:]
+        return torch.cat((-right, left), dim=-1)
+
+    @staticmethod
+    def _apply_interleaved_mrope(
+        cos_table: torch.Tensor,
+        sin_table: torch.Tensor,
+        mrope_section: List[int],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Apply interleaved MRoPE pattern to cos/sin tables."""
+        cos_interleaved = cos_table[0].clone()
+        cos_interleaved[..., 1::3] = cos_table[1, ..., 1::3]
+        cos_interleaved[..., 2::3] = cos_table[2, ..., 2::3]
+
+        sin_interleaved = sin_table[0].clone()
+        sin_interleaved[..., 1::3] = sin_table[1, ..., 1::3]
+        sin_interleaved[..., 2::3] = sin_table[2, ..., 2::3]
+
+        return cos_interleaved, sin_interleaved
 
     def forward(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        cos_table: torch.Tensor,
+        sin_table: torch.Tensor,
         mrope_section: List[int],
         is_interleaved: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Apply Multimodal RoPE to q and k tensors.
+        Apply Multimodal Rotary Position Embedding to query and key tensors.
 
         Args:
-            q: [num_tokens, n_qh * head_dim] tensor
-            k: [num_tokens, n_kh * head_dim] tensor
-            cos: [3, num_tokens, rotary_dim // 2] cos values for T/H/W dimensions
-            sin: [3, num_tokens, rotary_dim // 2] sin values for T/H/W dimensions
-            mrope_section: [t_section, h_section, w_section] - how half rope_dim is split
-            is_interleaved: if True, T/H/W positions are interleaved
+            query: ``(num_tokens, n_qh * head_dim)`` query tensor.
+            key: ``(num_tokens, n_kh * head_dim)`` key tensor.
+            cos_table: ``(3, num_tokens, rotary_dim // 2)`` cos values for T/H/W dimensions.
+            sin_table: ``(3, num_tokens, rotary_dim // 2)`` sin values for T/H/W dimensions.
+            mrope_section: ``[t_section, h_section, w_section]`` - how half rope_dim is split.
+            is_interleaved: if True, T/H/W positions are interleaved.
 
         Returns:
-            (q, k) with RoPE applied
+            ``(query, key)`` with RoPE applied, same shape as input.
         """
-        num_tokens, n_qh_hd = q.shape
-        head_dim = cos.shape[-1] * 2
+        num_tokens, n_qh_head_dim = query.shape
+        num_tokens_k, n_kh_head_dim = key.shape
+
+        head_dim = cos_table.shape[-1] * 2
         rope_dim = sum(mrope_section) * 2
         half_rope_dim = rope_dim // 2
-        n_kh_hd = k.shape[1]
 
-        n_qh = n_qh_hd // head_dim
-        n_kh = n_kh_hd // head_dim
+        n_qh = n_qh_head_dim // head_dim
+        n_kh = n_kh_head_dim // head_dim
 
-        q = q.view(num_tokens, n_qh, head_dim)
-        k = k.view(num_tokens, n_kh, head_dim)
+        query = query.view(num_tokens, n_qh, head_dim)
+        key = key.view(num_tokens_k, n_kh, head_dim)
 
-        q_rot = q[..., :rope_dim]
-        q_pass = q[..., rope_dim:]
-        k_rot = k[..., :rope_dim]
-        k_pass = k[..., rope_dim:]
+        query_rot, query_pass = query.split([rope_dim, head_dim - rope_dim], dim=-1)
+        key_rot, key_pass = key.split([rope_dim, head_dim - rope_dim], dim=-1)
 
-        if cos.dim() == 3:
+        if cos_table.dim() == 3:
             if is_interleaved:
-                cos = self.apply_interleaved_mrope(cos, mrope_section)
-                sin = self.apply_interleaved_mrope(sin, mrope_section)
+                cos_table, sin_table = self._apply_interleaved_mrope(cos_table, sin_table, mrope_section)
             else:
-                cos = torch.cat([m[i] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1)
-                sin = torch.cat([m[i] for i, m in enumerate(sin.split(mrope_section, dim=-1))], dim=-1)
+                cos_table = torch.cat([m[i] for i, m in enumerate(cos_table.split(mrope_section, dim=-1))], dim=-1)
+                sin_table = torch.cat([m[i] for i, m in enumerate(sin_table.split(mrope_section, dim=-1))], dim=-1)
 
-        cos = cos.view(num_tokens, half_rope_dim)
-        sin = sin.view(num_tokens, half_rope_dim)
+        cos_table = cos_table.view(num_tokens, half_rope_dim)
+        sin_table = sin_table.view(num_tokens, half_rope_dim)
 
-        q_rot_half1 = q_rot[..., :half_rope_dim]
-        q_rot_half2 = q_rot[..., half_rope_dim:]
-        k_rot_half1 = k_rot[..., :half_rope_dim]
-        k_rot_half2 = k_rot[..., half_rope_dim:]
+        query_rot_half1 = query_rot[..., :half_rope_dim]
+        query_rot_half2 = query_rot[..., half_rope_dim:]
+        key_rot_half1 = key_rot[..., :half_rope_dim]
+        key_rot_half2 = key_rot[..., half_rope_dim:]
 
-        cos = cos.unsqueeze(1)
-        sin = sin.unsqueeze(1)
+        cos_expanded = cos_table.unsqueeze(1)
+        sin_expanded = sin_table.unsqueeze(1)
 
-        q_rot_new_half1 = q_rot_half1 * cos - q_rot_half2 * sin
-        q_rot_new_half2 = q_rot_half2 * cos + q_rot_half1 * sin
-        k_rot_new_half1 = k_rot_half1 * cos - k_rot_half2 * sin
-        k_rot_new_half2 = k_rot_half2 * cos + k_rot_half1 * sin
+        query_rot_new_half1 = query_rot_half1 * cos_expanded - query_rot_half2 * sin_expanded
+        query_rot_new_half2 = query_rot_half2 * cos_expanded + query_rot_half1 * sin_expanded
+        key_rot_new_half1 = key_rot_half1 * cos_expanded - key_rot_half2 * sin_expanded
+        key_rot_new_half2 = key_rot_half2 * cos_expanded + key_rot_half1 * sin_expanded
 
-        q_rot = torch.cat([q_rot_new_half1, q_rot_new_half2], dim=-1)
-        k_rot = torch.cat([k_rot_new_half1, k_rot_new_half2], dim=-1)
+        query_rot = torch.cat([query_rot_new_half1, query_rot_new_half2], dim=-1)
+        key_rot = torch.cat([key_rot_new_half1, key_rot_new_half2], dim=-1)
 
-        q = torch.cat([q_rot, q_pass], dim=-1).view(num_tokens, -1)
-        k = torch.cat([k_rot, k_pass], dim=-1).view(num_tokens, -1)
+        query = torch.cat([query_rot, query_pass], dim=-1).view(num_tokens, -1)
+        key = torch.cat([key_rot, key_pass], dim=-1).view(num_tokens_k, -1)
 
-        return q, k
+        return query, key

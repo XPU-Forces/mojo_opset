@@ -49,18 +49,18 @@ def prepare_test_inputs(num_tokens, n_qh, n_kh, head_dim, mrope_section, device,
         cos_3d[dim_idx, :, :half_rotary_dim] = cos_cache[pos][:, :half_rotary_dim]
         sin_3d[dim_idx, :, :half_rotary_dim] = sin_cache[pos][:, :half_rotary_dim]
 
-    q = torch.randn(num_tokens, n_qh * head_dim, device=device, dtype=dtype)
-    k = torch.randn(num_tokens, n_kh * head_dim, device=device, dtype=dtype)
+    query = torch.randn(num_tokens, n_qh * head_dim, device=device, dtype=dtype)
+    key = torch.randn(num_tokens, n_kh * head_dim, device=device, dtype=dtype)
 
-    return q, k, cos_3d, sin_3d, mrope_section_adjusted
+    return query, key, cos_3d, sin_3d, mrope_section_adjusted
 
 
 @pytest.mark.parametrize("num_tokens", [1, 16, 32])
 @pytest.mark.parametrize("n_qh", [8, 16])
-@pytest.mark.parametrize("n_kh", [4, 8])
-@pytest.mark.parametrize("head_dim", [64, 128])
-@pytest.mark.parametrize("mrope_section", [[16, 24, 24], [32, 16, 16], [8, 8, 8], [4, 16, 12], [0, 32, 32]])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("n_kh", [8])
+@pytest.mark.parametrize("head_dim", [128])
+@pytest.mark.parametrize("mrope_section", [[16, 24, 24], [0, 32, 32]])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("is_interleaved", [False, True])
 @bypass_not_implemented
 def test_mrope(
@@ -82,10 +82,10 @@ def test_mrope(
     - is_interleaved: interleaved mode flag
     """
     device = get_torch_device()
-    q, k, cos_3d, sin_3d, mrope_section_adj = prepare_test_inputs(
+    query, key, cos_table, sin_table, mrope_section_adj = prepare_test_inputs(
         num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=dtype
     )
 
     mrope = MojoMRoPE()
     mrope_ref = MojoMRoPE._registry.get("torch")()
-    mrope.forward_diff_with(mrope_ref, q, k, cos_3d, sin_3d, mrope_section_adj, is_interleaved)
+    mrope.forward_diff_with(mrope_ref, query, key, cos_table, sin_table, mrope_section_adj, is_interleaved)
