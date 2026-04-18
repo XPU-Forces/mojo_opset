@@ -88,43 +88,4 @@ def test_mrope(
 
     mrope = MojoMRoPE()
     mrope_ref = MojoMRoPE._registry.get("torch")()
-    mrope.forward_diff_with(
-        mrope_ref, query, key, cos_table, sin_table, mrope_section_adj, is_interleaved, head_dim=head_dim
-    )
-
-
-@pytest.mark.parametrize("num_tokens", [16, 32])
-@pytest.mark.parametrize("n_qh, n_kh", [(16, 8), (8, 4)])
-@pytest.mark.parametrize(
-    "mrope_section,head_dim",
-    [
-        ([8, 8, 8], 64),
-        ([4, 16, 12], 128),
-    ],
-)
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("is_interleaved", [False, True])
-@bypass_not_implemented
-def test_mrope_nope_dim(
-    num_tokens,
-    n_qh,
-    n_kh,
-    mrope_section,
-    head_dim,
-    dtype,
-    is_interleaved,
-):
-    """
-    Test MRoPE with nope_dim > 0 (rotary_dim < head_dim).
-    Requires passing head_dim explicitly since it cannot be inferred from cos_table.
-    """
-    device = get_torch_device()
-    query, key, cos_table, sin_table, mrope_section_adj = prepare_test_inputs(
-        num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=dtype
-    )
-
-    mrope = MojoMRoPE()
-    mrope_ref = MojoMRoPE._registry.get("torch")()
-    mrope.forward_diff_with(
-        mrope_ref, query, key, cos_table, sin_table, mrope_section_adj, is_interleaved, head_dim=head_dim
-    )
+    mrope.forward_diff_with(mrope_ref, query, key, cos_table, sin_table, mrope_section_adj, is_interleaved)
