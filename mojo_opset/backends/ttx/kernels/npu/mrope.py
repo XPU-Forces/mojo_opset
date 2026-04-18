@@ -1,4 +1,5 @@
 from typing import List
+from typing import Optional
 from typing import Tuple
 
 import torch
@@ -147,6 +148,7 @@ def mrope_fwd_impl(
     sin: torch.Tensor,
     mrope_section: List[int],
     is_interleaved: bool = False,
+    head_dim: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Apply Multimodal RoPE (MRoPE) to q and k tensors using Triton kernel.
@@ -154,10 +156,11 @@ def mrope_fwd_impl(
     Args:
         q: [num_tokens, n_qh * head_dim] tensor
         k: [num_tokens, n_kh * head_dim] tensor
-        cos: [3, num_tokens, head_dim // 2] cos values for T/H/W dimensions
-        sin: [3, num_tokens, head_dim // 2] sin values for T/H/W dimensions
+        cos: [3, num_tokens, rotary_dim // 2] cos values for T/H/W dimensions
+        sin: [3, num_tokens, rotary_dim // 2] sin values for T/H/W dimensions
         mrope_section: [t_section, h_section, w_section] - how half rope_dim is split
         is_interleaved: if True, T/H/W positions are interleaved
+        head_dim: head dimension. If None, inferred from cos (assumes rope_dim == head_dim).
 
     Returns:
         (q, k) with RoPE applied
@@ -172,10 +175,18 @@ def mrope_fwd_impl(
         sin = sin.contiguous()
 
     num_tokens, n_qh_hd = q.shape
-    head_dim = cos.shape[-1] * 2
+    rope_dim = sum(mrope_section) * 2
+
+    if head_dim is None:
+        head_dim = cos.shape[-1] * 2
+        if head_dim != rope_dim:
+            raise ValueError(
+                f"head_dim ({head_dim}) inferred from cos does not match "
+                f"rope_dim ({rope_dim}). Please pass head_dim explicitly."
+            )
+
     n_qh = n_qh_hd // head_dim
     n_kh = k.shape[1] // head_dim
-    rope_dim = sum(mrope_section) * 2
 
     pad_hd = triton.next_power_of_2(head_dim)
     pad_n_qh = triton.next_power_of_2(n_qh)

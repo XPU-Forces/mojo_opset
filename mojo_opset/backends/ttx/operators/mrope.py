@@ -1,4 +1,5 @@
 from typing import List
+from typing import Optional
 from typing import Tuple
 
 import torch
@@ -18,5 +19,6 @@ class TTXMRoPE(MojoMRoPE):
         sin: torch.Tensor,
         mrope_section: List[int],
         is_interleaved: bool = False,
+        head_dim: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return mrope_fwd_impl(q, k, cos, sin, mrope_section, is_interleaved)
