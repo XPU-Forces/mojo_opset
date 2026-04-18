@@ -317,7 +317,7 @@ def test_dynamic_quant_backend(dtype):
 def test_dynamic_quant_backend_moe(dtype):
     x = torch.randn(12, 128, dtype=dtype)
     smooth_scale = torch.randn(3, 128, dtype=torch.float32)
-    token_count = torch.tensor([4, 3, 5], dtype=torch.int64)
+    token_count = torch.tensor([4, 3, 5], dtype=torch.int32)
 
     op = MojoDynamicQuant(quant_dtype=torch.int8, smooth_input=True, moe_mode=True)
     op_ref = MojoDynamicQuant._registry.get("torch")(quant_dtype=torch.int8, smooth_input=True, moe_mode=True)
@@ -338,6 +338,7 @@ def test_dynamic_quant_backend_moe(dtype):
 def test_dequant_swiglu_quant_backend():
     tokens = 12
     hidden = 64
+    # torch_npu reqires int64
     token_count = torch.tensor([5, 7], dtype=torch.int64)
 
     x = torch.randint(-1024, 1024, (tokens, hidden * 2), dtype=torch.int32)
