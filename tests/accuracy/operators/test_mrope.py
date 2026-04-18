@@ -57,158 +57,35 @@ def prepare_test_inputs(num_tokens, n_qh, n_kh, head_dim, mrope_section, device,
 
 @pytest.mark.parametrize("num_tokens", [1, 16, 32])
 @pytest.mark.parametrize("n_qh", [8, 16])
-@pytest.mark.parametrize("n_kh", [8])
-@pytest.mark.parametrize("head_dim", [128])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@bypass_not_implemented
-def test_mrope_fwd_non_interleaved(num_tokens, n_qh, n_kh, head_dim, dtype):
-    """Test MRoPE forward pass (non-interleaved mode)."""
-    device = get_torch_device()
-    mrope_section = [16, 24, 24]
-
-    q, k, cos_3d, sin_3d, mrope_section_adj = prepare_test_inputs(
-        num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=dtype
-    )
-
-    mrope = MojoMRoPE()
-    mrope_ref = MojoMRoPE._registry.get("torch")()
-    mrope.forward_diff_with(mrope_ref, q, k, cos_3d, sin_3d, mrope_section_adj, False)
-
-
-@pytest.mark.parametrize("num_tokens", [1, 16, 32])
-@pytest.mark.parametrize("n_qh", [8, 16])
-@pytest.mark.parametrize("n_kh", [8])
-@pytest.mark.parametrize("head_dim", [128])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@bypass_not_implemented
-def test_mrope_fwd_interleaved(num_tokens, n_qh, n_kh, head_dim, dtype):
-    """Test MRoPE forward pass (interleaved mode)."""
-    device = get_torch_device()
-    mrope_section = [16, 24, 24]
-
-    q, k, cos_3d, sin_3d, mrope_section_adj = prepare_test_inputs(
-        num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=dtype
-    )
-
-    mrope = MojoMRoPE()
-    mrope_ref = MojoMRoPE._registry.get("torch")()
-    mrope.forward_diff_with(mrope_ref, q, k, cos_3d, sin_3d, mrope_section_adj, True)
-
-
-@pytest.mark.parametrize("num_tokens", [1, 32])
-@pytest.mark.parametrize("n_qh", [16])
-@pytest.mark.parametrize("n_kh", [8])
-@pytest.mark.parametrize("head_dim", [128])
-@pytest.mark.parametrize("mrope_section", [[16, 24, 24], [32, 16, 16]])
-@bypass_not_implemented
-def test_mrope_sections(num_tokens, n_qh, n_kh, head_dim, mrope_section):
-    """Test MRoPE with different section configurations (non-interleaved)."""
-    device = get_torch_device()
-
-    q, k, cos_3d, sin_3d, mrope_section_adj = prepare_test_inputs(
-        num_tokens, n_qh, n_kh, head_dim, mrope_section, device
-    )
-
-    mrope = MojoMRoPE()
-    mrope_ref = MojoMRoPE._registry.get("torch")()
-    mrope.forward_diff_with(mrope_ref, q, k, cos_3d, sin_3d, mrope_section_adj, False)
-
-
-@bypass_not_implemented
-def test_mrope_single_token():
-    """Test MRoPE with single token input."""
-    device = get_torch_device()
-    num_tokens = 1
-    n_qh = 8
-    n_kh = 8
-    head_dim = 128
-    mrope_section = [16, 24, 24]
-
-    q, k, cos_3d, sin_3d, mrope_section_adj = prepare_test_inputs(
-        num_tokens, n_qh, n_kh, head_dim, mrope_section, device
-    )
-
-    mrope = MojoMRoPE()
-    mrope_ref = MojoMRoPE._registry.get("torch")()
-    mrope.forward_diff_with(mrope_ref, q, k, cos_3d, sin_3d, mrope_section_adj, False)
-
-
-@bypass_not_implemented
-def test_mrope_small_head_dim():
-    """Test MRoPE with small head dimension."""
-    device = get_torch_device()
-    num_tokens = 16
-    n_qh = 8
-    n_kh = 4
-    head_dim = 64
-    mrope_section = [8, 16, 8]
-
-    q, k, cos_3d, sin_3d, mrope_section_adj = prepare_test_inputs(
-        num_tokens, n_qh, n_kh, head_dim, mrope_section, device
-    )
-
-    mrope = MojoMRoPE()
-    mrope_ref = MojoMRoPE._registry.get("torch")()
-    mrope.forward_diff_with(mrope_ref, q, k, cos_3d, sin_3d, mrope_section_adj, False)
-
-
-@pytest.mark.parametrize("num_tokens", [16, 32])
-@pytest.mark.parametrize("n_qh, n_kh", [(16, 8), (8, 4)])
-@pytest.mark.parametrize(
-    "mrope_section,head_dim",
-    [
-        ([8, 8, 8], 64),
-        ([4, 16, 12], 128),
-    ],
-)
+@pytest.mark.parametrize("n_kh", [4, 8])
+@pytest.mark.parametrize("head_dim", [64, 128])
+@pytest.mark.parametrize("mrope_section", [[16, 24, 24], [32, 16, 16], [8, 8, 8], [4, 16, 12], [0, 32, 32]])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("is_interleaved", [False, True])
 @bypass_not_implemented
-def test_mrope_nope_dim(num_tokens, n_qh, n_kh, mrope_section, head_dim, dtype):
-    """Test MRoPE with nope_dim > 0 (rotary_dim < head_dim)."""
+def test_mrope(
+    num_tokens,
+    n_qh,
+    n_kh,
+    head_dim,
+    mrope_section,
+    dtype,
+    is_interleaved,
+):
+    """
+    Unified MRoPE test covering all scenarios:
+    - num_tokens: token sequence length
+    - n_qh/n_kh: query/key heads
+    - head_dim: dimension per head
+    - mrope_section: T/H/W section configuration
+    - dtype: data type
+    - is_interleaved: interleaved mode flag
+    """
     device = get_torch_device()
-
     q, k, cos_3d, sin_3d, mrope_section_adj = prepare_test_inputs(
         num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=dtype
     )
 
     mrope = MojoMRoPE()
     mrope_ref = MojoMRoPE._registry.get("torch")()
-    mrope.forward_diff_with(mrope_ref, q, k, cos_3d, sin_3d, mrope_section_adj, False)
-
-
-@pytest.mark.parametrize("mrope_section", [[0, 32, 32]])
-@bypass_not_implemented
-def test_mrope_zero_section(mrope_section):
-    """Test MRoPE with zero sections (2D image only)."""
-    device = get_torch_device()
-    num_tokens = 16
-    n_qh = 8
-    n_kh = 8
-    head_dim = 128
-
-    q, k, cos_3d, sin_3d, mrope_section_adj = prepare_test_inputs(
-        num_tokens, n_qh, n_kh, head_dim, mrope_section, device
-    )
-
-    mrope = MojoMRoPE()
-    mrope_ref = MojoMRoPE._registry.get("torch")()
-    mrope.forward_diff_with(mrope_ref, q, k, cos_3d, sin_3d, mrope_section_adj, False)
-
-
-@pytest.mark.parametrize("num_tokens", [1, 16])
-@pytest.mark.parametrize("n_kh", [1, 4, 8])
-@bypass_not_implemented
-def test_mrope_various_n_kh(num_tokens, n_kh):
-    """Test MRoPE with various n_kh values."""
-    device = get_torch_device()
-    n_qh = 16
-    head_dim = 128
-    mrope_section = [16, 24, 24]
-
-    q, k, cos_3d, sin_3d, mrope_section_adj = prepare_test_inputs(
-        num_tokens, n_qh, n_kh, head_dim, mrope_section, device
-    )
-
-    mrope = MojoMRoPE()
-    mrope_ref = MojoMRoPE._registry.get("torch")()
-    mrope.forward_diff_with(mrope_ref, q, k, cos_3d, sin_3d, mrope_section_adj, False)
+    mrope.forward_diff_with(mrope_ref, q, k, cos_3d, sin_3d, mrope_section_adj, is_interleaved)
