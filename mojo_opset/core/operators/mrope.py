@@ -59,6 +59,7 @@ class MojoMRoPE(MojoOperator):
         sin_table: torch.Tensor,
         mrope_section: List[int],
         is_interleaved: bool = False,
+        head_dim: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Apply Multimodal Rotary Position Embedding to query and key tensors.
@@ -70,6 +71,7 @@ class MojoMRoPE(MojoOperator):
             sin_table: ``(3, num_tokens, rotary_dim // 2)`` sin values for T/H/W dimensions.
             mrope_section: ``[t_section, h_section, w_section]`` - how half rope_dim is split.
             is_interleaved: if True, T/H/W positions are interleaved.
+            head_dim: head dimension. If None, inferred from cos_table (assumes rope_dim == head_dim).
 
         Returns:
             ``(query, key)`` with RoPE applied, same shape as input.
@@ -77,9 +79,16 @@ class MojoMRoPE(MojoOperator):
         num_tokens, n_qh_head_dim = query.shape
         num_tokens_k, n_kh_head_dim = key.shape
 
-        head_dim = cos_table.shape[-1] * 2
         rope_dim = sum(mrope_section) * 2
         half_rope_dim = rope_dim // 2
+
+        if head_dim is None:
+            head_dim = cos_table.shape[-1] * 2
+            if head_dim != rope_dim:
+                raise ValueError(
+                    f"head_dim ({head_dim}) inferred from cos_table does not match "
+                    f"rope_dim ({rope_dim}). Please pass head_dim explicitly."
+                )
 
         n_qh = n_qh_head_dim // head_dim
         n_kh = n_kh_head_dim // head_dim
