@@ -61,9 +61,19 @@ class MojoRotaryEmbedding(MojoOperator):
         2. Padded prefill: input [B, S, H], cu_seqlens_q None, position_ids None -> cos/sin [S, D].
         3. Decode: input [B, H], cu_seqlens_q None, position_ids [B] -> cos/sin [B, D].
         """
+<<<<<<< HEAD
         assert position_ids is None or cu_seqlens_q is None, (
             "At most one of cu_seqlens_q or position_ids should be provided"
         )
+=======
+        if cu_seqlens_q is not None:
+            assert cu_seqlens_q.dtype == torch.int32
+        if seqlens_kv is not None:
+            assert seqlens_kv.dtype == torch.int32
+        if position_ids is not None:
+            assert position_ids.dtype == torch.int32
+        assert position_ids is None or cu_seqlens_q is None, "At most one of cu_seqlens_q or position_ids should be provided"
+>>>>>>> e1ddd14cae5b03384ba0b98607b288002082032a
 
         if cu_seqlens_q is not None:
             assert x.dim() == 2, "x must be 2D: [T, D]"
@@ -148,9 +158,9 @@ class MojoApplyRoPE(MojoOperator):
         Apply Rotary Position Embedding (RoPE).
 
         Scenario descriptions:
-        1. Varlen prefill: q/k [T, N, D], cos/sin [T, d]
+        1. Varlen prefill: q/k [T, N, D] or [N, T, D], cos/sin [T, d]
         2. Padded prefill: q/k [B, S, N, D] or [B, N, S, D], cos/sin [S, d] or [B, S, d]
-        3. Decode: q/k [B, N, D], cos/sin [B, d]
+        3. Decode: q/k [B, N, D] or [N, B, D], cos/sin [B, d]
 
         Args:
             q: Query tensor

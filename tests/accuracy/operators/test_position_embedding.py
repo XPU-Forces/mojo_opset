@@ -245,7 +245,7 @@ def test_grid_pos_emb(bs, grid, heads, head_dim, pad, dtype):
 
     x = torch.randn(bs, L, heads, head_dim, device=device, dtype=dtype)
 
-    grid_sizes = torch.tensor([grid] * bs, device=device, dtype=torch.int64)
+    grid_sizes = torch.tensor([grid] * bs, device=device, dtype=torch.int32)
 
     inv_freq = 1.0 / (10000.0 ** (torch.arange(0, head_dim, 2, device=device, dtype=torch.float32) / head_dim))
     t = torch.arange(seq_len, device=device, dtype=inv_freq.dtype)
