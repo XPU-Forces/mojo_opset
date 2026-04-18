@@ -150,3 +150,73 @@ def test_mrope_small_head_dim():
     mrope = MojoMRoPE()
     mrope_ref = MojoMRoPE._registry.get("torch")()
     mrope.forward_diff_with(mrope_ref, q, k, cos_3d, sin_3d, mrope_section_adj, False)
+
+
+@pytest.mark.parametrize("num_tokens", [16, 32])
+@pytest.mark.parametrize("n_qh, n_kh", [(16, 8), (8, 4)])
+@pytest.mark.parametrize(
+    "mrope_section,head_dim",
+    [
+        ([8, 8, 8], 64),
+        ([4, 16, 12], 128),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@bypass_not_implemented
+def test_mrope_nope_dim(num_tokens, n_qh, n_kh, mrope_section, head_dim, dtype):
+    """Test MRoPE with nope_dim > 0 (rotary_dim < head_dim)."""
+    device = get_torch_device()
+
+    q, k, cos_3d, sin_3d, mrope_section_adj = prepare_test_inputs(
+        num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=dtype
+    )
+
+    mrope = MojoMRoPE()
+    mrope_ref = MojoMRoPE._registry.get("torch")()
+    mrope.forward_diff_with(mrope_ref, q, k, cos_3d, sin_3d, mrope_section_adj, False)
+
+
+@pytest.mark.parametrize(
+    "mrope_section",
+    [
+        [0, 32, 32],
+        [32, 0, 32],
+        [32, 32, 0],
+        [0, 0, 64],
+    ],
+)
+@bypass_not_implemented
+def test_mrope_zero_section(mrope_section):
+    """Test MRoPE with zero sections."""
+    device = get_torch_device()
+    num_tokens = 16
+    n_qh = 8
+    n_kh = 8
+    head_dim = 128
+
+    q, k, cos_3d, sin_3d, mrope_section_adj = prepare_test_inputs(
+        num_tokens, n_qh, n_kh, head_dim, mrope_section, device
+    )
+
+    mrope = MojoMRoPE()
+    mrope_ref = MojoMRoPE._registry.get("torch")()
+    mrope.forward_diff_with(mrope_ref, q, k, cos_3d, sin_3d, mrope_section_adj, False)
+
+
+@pytest.mark.parametrize("num_tokens", [1, 16])
+@pytest.mark.parametrize("n_kh", [1, 4, 8])
+@bypass_not_implemented
+def test_mrope_various_n_kh(num_tokens, n_kh):
+    """Test MRoPE with various n_kh values."""
+    device = get_torch_device()
+    n_qh = 16
+    head_dim = 128
+    mrope_section = [16, 24, 24]
+
+    q, k, cos_3d, sin_3d, mrope_section_adj = prepare_test_inputs(
+        num_tokens, n_qh, n_kh, head_dim, mrope_section, device
+    )
+
+    mrope = MojoMRoPE()
+    mrope_ref = MojoMRoPE._registry.get("torch")()
+    mrope.forward_diff_with(mrope_ref, q, k, cos_3d, sin_3d, mrope_section_adj, False)
