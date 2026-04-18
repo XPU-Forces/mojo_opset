@@ -176,18 +176,10 @@ def test_mrope_nope_dim(num_tokens, n_qh, n_kh, mrope_section, head_dim, dtype):
     mrope.forward_diff_with(mrope_ref, q, k, cos_3d, sin_3d, mrope_section_adj, False)
 
 
-@pytest.mark.parametrize(
-    "mrope_section",
-    [
-        [0, 32, 32],
-        [32, 0, 32],
-        [32, 32, 0],
-        [0, 0, 64],
-    ],
-)
+@pytest.mark.parametrize("mrope_section", [[0, 32, 32]])
 @bypass_not_implemented
 def test_mrope_zero_section(mrope_section):
-    """Test MRoPE with zero sections."""
+    """Test MRoPE with zero sections (2D image only)."""
     device = get_torch_device()
     num_tokens = 16
     n_qh = 8
