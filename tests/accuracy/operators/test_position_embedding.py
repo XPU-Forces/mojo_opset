@@ -6,15 +6,64 @@ from tests.utils import bypass_not_implemented
 from mojo_opset import MojoRotaryEmbedding
 from mojo_opset import MojoApplyRoPE
 from mojo_opset import MojoGridRoPE
+from mojo_opset import MojoMRoPE
 from mojo_opset.utils.platform import get_torch_device
 
 torch.random.manual_seed(42)
 
 
+def compute_cos_sin_cache(head_dim, rotary_dim, max_position, base=10000.0):
+    inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim // 2, 2, dtype=torch.float32) / rotary_dim))
+    t = torch.arange(max_position, dtype=inv_freq.dtype)
+    freqs = torch.einsum("i,j->ij", t, inv_freq)
+    freqs = freqs.repeat_interleave(2, dim=-1)
+    return freqs.cos(), freqs.sin()
+
+
+def adjust_mrope_section(mrope_section, actual_rotary_dim):
+    mrope_section_adjusted = []
+    remaining = actual_rotary_dim // 2
+    for i, s in enumerate(mrope_section):
+        if i == len(mrope_section) - 1:
+            mrope_section_adjusted.append(remaining)
+        else:
+            adj_s = min(s, remaining)
+            mrope_section_adjusted.append(adj_s)
+            remaining -= adj_s
+    return mrope_section_adjusted
+
+
+def prepare_mrope_test_inputs(num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=torch.float32):
+    rotary_dim = sum(mrope_section) * 2
+    rope_percentage = rotary_dim / head_dim
+    actual_rotary_dim = int(head_dim * rope_percentage)
+
+    mrope_section_adjusted = adjust_mrope_section(mrope_section, actual_rotary_dim)
+
+    positions = torch.randint(0, 1000, (3, num_tokens), device=device, dtype=torch.long)
+    cos_cache, sin_cache = compute_cos_sin_cache(head_dim, rotary_dim, 4000, base=10000.0)
+
+    half_head_dim = head_dim // 2
+    cos_3d = torch.zeros(3, num_tokens, half_head_dim, device=device, dtype=torch.float32)
+    sin_3d = torch.zeros(3, num_tokens, half_head_dim, device=device, dtype=torch.float32)
+
+    half_rotary_dim = actual_rotary_dim // 2
+    for dim_idx in range(3):
+        pos = positions[dim_idx]
+        cos_3d[dim_idx, :, :half_rotary_dim] = cos_cache[pos][:, :half_rotary_dim]
+        sin_3d[dim_idx, :, :half_rotary_dim] = sin_cache[pos][:, :half_rotary_dim]
+
+    query = torch.randn(num_tokens, n_qh * head_dim, device=device, dtype=dtype)
+    key = torch.randn(num_tokens, n_kh * head_dim, device=device, dtype=dtype)
+
+    return query, key, cos_3d, sin_3d, mrope_section_adjusted
+
+
 @pytest.mark.parametrize("bs", [1, 6])
 @pytest.mark.parametrize("seqlen", [2048])
 @pytest.mark.parametrize(
-    "rope_dim", [32, 48, 64, 88, 96, 128],
+    "rope_dim",
+    [32, 48, 64, 88, 96, 128],
 )
 @pytest.mark.parametrize("mode", ["padding_prefill", "varlen_prefill", "decode"])
 @bypass_not_implemented
@@ -24,16 +73,20 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
     max_seq_len = 32768
     hidden_size = 256
 
-    rot_pos_emb_ref_nocache = MojoRotaryEmbedding._registry.get("torch")(rope_theta=10000.0, rope_dim=rope_dim).to(device)
-    rot_pos_emb_ref = MojoRotaryEmbedding._registry.get("torch")(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
+    rot_pos_emb_ref_nocache = MojoRotaryEmbedding._registry.get("torch")(rope_theta=10000.0, rope_dim=rope_dim).to(
+        device
+    )
+    rot_pos_emb_ref = MojoRotaryEmbedding._registry.get("torch")(
+        rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len
+    ).to(device)
     rot_pos_emb = MojoRotaryEmbedding(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
 
     if mode == "padding_prefill":
         x = torch.randn(bs, seqlen, hidden_size, device=device, dtype=torch.float32)
         torch.testing.assert_close(
-            rot_pos_emb_ref(x), 
-            rot_pos_emb_ref_nocache(x), 
-            atol=1e-5, 
+            rot_pos_emb_ref(x),
+            rot_pos_emb_ref_nocache(x),
+            atol=1e-5,
             rtol=1e-5,
         )
 
@@ -47,9 +100,9 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
         x = torch.randn(bs, hidden_size, device=device, dtype=torch.float32)
         position_ids = torch.randint(0, max_seq_len, (bs,), dtype=torch.int32, device=device)
         torch.testing.assert_close(
-            rot_pos_emb_ref(x, position_ids=position_ids), 
-            rot_pos_emb_ref_nocache(x, position_ids=position_ids), 
-            atol=1e-5, 
+            rot_pos_emb_ref(x, position_ids=position_ids),
+            rot_pos_emb_ref_nocache(x, position_ids=position_ids),
+            atol=1e-5,
             rtol=1e-5,
         )
 
@@ -61,7 +114,7 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
             rtol=1e-5,
         )
     else:
-        seq_lens = torch.randint((seqlen+1) // 2, seqlen + 1, (bs,), device=device, dtype=torch.int32)
+        seq_lens = torch.randint((seqlen + 1) // 2, seqlen + 1, (bs,), device=device, dtype=torch.int32)
         cu_seqlens = torch.zeros(bs + 1, device=device, dtype=torch.int32)
         cu_seqlens[1:] = torch.cumsum(seq_lens, dim=0)
         kv_lens = torch.randint(0, max_seq_len - seqlen, (bs,), device=device, dtype=torch.int32) + seq_lens
@@ -80,7 +133,7 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
             seqlens_kv=kv_lens,
             atol=1e-5,
             rtol=1e-5,
-    )
+        )
 
 
 @pytest.mark.parametrize(
@@ -92,7 +145,7 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
     ],
 )
 @pytest.mark.parametrize(
-    "dtype, q_heads, k_heads, head_first, head_dim, rope_percentage", 
+    "dtype, q_heads, k_heads, head_first, head_dim, rope_percentage",
     [
         (torch.float16, 32, 8, True, 96, 1.0),
         (torch.bfloat16, 8, 2, False, 96, 0.3333333333333333333333),
@@ -192,7 +245,7 @@ def test_grid_pos_emb(bs, grid, heads, head_dim, pad, dtype):
 
     x = torch.randn(bs, L, heads, head_dim, device=device, dtype=dtype)
 
-    grid_sizes = torch.tensor([grid] * bs, device=device, dtype=torch.int32)
+    grid_sizes = torch.tensor([grid] * bs, device=device, dtype=torch.int64)
 
     inv_freq = 1.0 / (10000.0 ** (torch.arange(0, head_dim, 2, device=device, dtype=torch.float32) / head_dim))
     t = torch.arange(seq_len, device=device, dtype=inv_freq.dtype)
@@ -206,3 +259,39 @@ def test_grid_pos_emb(bs, grid, heads, head_dim, pad, dtype):
     rope_ref = MojoGridRoPE._registry.get("torch")()
 
     rope.forward_diff_with(rope_ref, x, grid_sizes, freqs_list, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize("num_tokens", [1, 16, 32])
+@pytest.mark.parametrize("n_qh", [8, 16])
+@pytest.mark.parametrize("n_kh", [8])
+@pytest.mark.parametrize("head_dim", [128])
+@pytest.mark.parametrize("mrope_section", [[16, 24, 24], [0, 32, 32]])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("is_interleaved", [False, True])
+@bypass_not_implemented
+def test_mrope(
+    num_tokens,
+    n_qh,
+    n_kh,
+    head_dim,
+    mrope_section,
+    dtype,
+    is_interleaved,
+):
+    """
+    Unified MRoPE test covering all scenarios:
+    - num_tokens: token sequence length
+    - n_qh/n_kh: query/key heads
+    - head_dim: dimension per head
+    - mrope_section: T/H/W section configuration
+    - dtype: data type
+    - is_interleaved: interleaved mode flag
+    """
+    device = get_torch_device()
+    query, key, cos_table, sin_table, mrope_section_adj = prepare_mrope_test_inputs(
+        num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=dtype
+    )
+
+    mrope = MojoMRoPE()
+    mrope_ref = MojoMRoPE._registry.get("torch")()
+    mrope.forward_diff_with(mrope_ref, query, key, cos_table, sin_table, mrope_section_adj, is_interleaved)

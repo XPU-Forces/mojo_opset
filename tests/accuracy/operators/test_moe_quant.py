@@ -50,7 +50,7 @@ def _manual_group_quant_gemm_moe(
 def test_moe_init_routing_dynamic_quant_reference():
     hidden_states = torch.arange(1, 17, dtype=torch.float32).reshape(2, 8)
     top_k_gates = torch.tensor([[0.9, 0.1], [0.8, 0.2]], dtype=torch.float32)
-    top_k_indices = torch.tensor([[1, 0], [0, 1]], dtype=torch.int32)
+    top_k_indices = torch.tensor([[1, 0], [0, 1]], dtype=torch.int64)
     smooth_scale = torch.ones(2, 8, dtype=torch.float32)
 
     op = MojoMoEInitRoutingDynamicQuant._registry.get("torch")(num_experts=2, top_k=2, quant_block_size=8)

@@ -24,7 +24,7 @@ def generate_random_list(length, total_sum):
 
     diff = total_sum - sum(lst)
     lst[-1] += diff
-    return torch.Tensor(lst).to(torch.int32)
+    return torch.Tensor(lst).to(torch.int64)
 
 
 def generate_quant_group_linear_data(
@@ -79,7 +79,7 @@ def generate_quant_group_linear_data(
         pytest.param(
             torch.randn(size=(256, 128), dtype=dtype),
             torch.randn(size=(1, 128, 64), dtype=dtype),
-            torch.tensor([256], dtype=torch.int32),
+            torch.tensor([256], dtype=torch.int64),
             False,
             id=f"single_group_fp={'bf16' if dtype is torch.bfloat16 else 'fp16'}",
         )
@@ -89,7 +89,7 @@ def generate_quant_group_linear_data(
         pytest.param(
             torch.randn(size=(192, 64), dtype=dtype),
             torch.randn(size=(4, 64, 96), dtype=dtype),
-            torch.tensor([16, 64, 32, 80], dtype=torch.int32),
+            torch.tensor([16, 64, 32, 80], dtype=torch.int64),
             False,
             id=f"uneven_groups_fp={'bf16' if dtype is torch.bfloat16 else 'fp16'}",
         )
@@ -99,7 +99,7 @@ def generate_quant_group_linear_data(
         pytest.param(
             torch.randn(size=(256, 128), dtype=dtype),
             torch.randn(size=(4, 96, 128), dtype=dtype),
-            torch.tensor([48, 80, 64, 64], dtype=torch.int32),
+            torch.tensor([48, 80, 64, 64], dtype=torch.int64),
             True,
             id=f"trans_weight_uneven_fp={'bf16' if dtype is torch.bfloat16 else 'fp16'}",
         )
@@ -209,7 +209,7 @@ def test_grouped_matmul_cases_via_group_linear(inputs, weights, bias, dtype):
 
     outputs = []
     for x, w in zip(input_tensors, weight_tensors):
-        group_list = torch.tensor([x.shape[0]], device=device, dtype=torch.int32)
+        group_list = torch.tensor([x.shape[0]], device=device, dtype=torch.int64)
         weight_group = w.unsqueeze(0)
         op = MojoGroupLinear(weight=weight_group, trans_weight=False)
         out = op(x, group_list)
@@ -252,7 +252,7 @@ def test_group_linear_two_groups_single_call(dtype, trans_weight):
         weight = torch.stack([w0, w1], dim=0)
         ref = torch.cat([x0 @ w0, x1 @ w1], dim=0)
 
-    group_list = torch.tensor([m0, m1], device=device, dtype=torch.int32)
+    group_list = torch.tensor([m0, m1], device=device, dtype=torch.int64)
 
     op = MojoGroupLinear(weight=weight, trans_weight=trans_weight)
     out = op(x, group_list)
