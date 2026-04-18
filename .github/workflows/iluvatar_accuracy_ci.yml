@@ -35,7 +35,7 @@ jobs:
         run: |
           docker run --rm \
             -v ${{ github.workspace }}:/workspace \
-            corex:4.4.0 \
+            corex:4.5.0rc \
             bash -c "find /workspace -mindepth 1 -delete" || true
 
       - uses: actions/checkout@v4
@@ -51,7 +51,7 @@ jobs:
             -v /lib/modules:/lib/modules \
             -v /usr/src:/usr/src \
             -v /dev:/dev \
-            corex:4.4.0 \
+            corex:4.5.0rc \
             tail -f /dev/null
 
       - name: Build And Install Wheel Artifact
@@ -61,7 +61,8 @@ jobs:
             cd /workspace
             git config --global --add safe.directory /workspace
             export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
-            pip install -U pip setuptools wheel build pytest-xdist
+            pip install -U pip setuptools wheel --no-input --no-cache-dir
+            pip install pytest-xdist build --no-cache-dir --no-build-isolation
             pip install -e .[ilu] --index-url https://bytedpypi.byted.org/simple
             python3 -m build .
             pip install dist/*.whl --force-reinstall --no-deps

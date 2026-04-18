@@ -158,6 +158,10 @@ class MojoStorePagedMLAKVCache(MojoOperator):
         Returns:
             ``(compressed_kv_cache, k_pe_cache)`` after in-place writes.
         """
+        assert block_table.dtype == torch.int32
+        if cu_seq_lens is not None:
+            assert cu_seq_lens.dtype == torch.int32
+        assert kv_lens.dtype == torch.int32
         block_size = compressed_kv_cache.shape[2]
         num_batches = len(kv_lens) if kv_lens is not None else 0
         is_decode = cu_seq_lens is None
