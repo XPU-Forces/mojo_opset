@@ -105,7 +105,7 @@ from .operators.position_embedding import MojoRoPEStoreKV
 from .operators.position_embedding import MojoGridRoPE
 
 """ mrope """
-from .operators.mrope import MojoMRoPE
+from .operators.position_embedding import MojoMRoPE
 
 """ sampling """
 from .operators.sampling import MojoApplyPenaltiesTempurate
