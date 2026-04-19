@@ -67,7 +67,7 @@ class MojoBackendRegistry:
             )
 
         if curr_platform in cls.supported_platforms_list:
-            logger.info(
+            logger.debug(
                 f"Register {cls.__name__} as {self._core_op_cls.__name__} implementation with backend[{impl_backend_name}]"
             )
 
