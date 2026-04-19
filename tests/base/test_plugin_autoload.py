@@ -18,6 +18,8 @@ def test_import_plugins_loads_fake_ext(tmp_path):
         "-m",
         "pip",
         "install",
+        "--no-build-isolation",
+        "--no-deps",
         "--root",
         str(install_root),
         str(PLUGIN_DIR),
