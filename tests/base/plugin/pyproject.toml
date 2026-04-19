@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mojo-opset-test-plugin"
+version = "0.0.0"
+description = "Test plugin for mojo_opset autoload"
+requires-python = ">=3.9"
+
+[project.entry-points."mojo_opset.plugins"]
+fake_ext = "mojo_opset_test_plugin:_autoload"
