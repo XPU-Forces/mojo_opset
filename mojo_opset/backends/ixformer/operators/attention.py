@@ -2,14 +2,15 @@ from __future__ import annotations
 
 from typing import Optional
 
-import torch
 import math
 
-from mojo_opset.backends.ixformer.utils import _get_ixf_and_check_device
+import torch
+
+from ixformer import functions as ixf_f
+from ixformer.contrib import vllm_flash_attn as ix_fa
+
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoPagedDecodeGQA
-
-from ixformer.contrib import vllm_flash_attn as  ix_fa
 
 class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
     """Ixformer implementation for paged prefill GQA."""
@@ -167,8 +168,6 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
 
         if self.gqa_layout == "ABAB":
             raise NotImplementedError("IxformerPagedDecodeGQA does not support ABAB layout.")
-
-        ixf_f = _get_ixf_and_check_device(query, self.__class__.__name__)
 
         batch_size, num_q_heads, head_dim = query.shape
         _, num_kv_heads, block_size, head_dim = key_cache.shape

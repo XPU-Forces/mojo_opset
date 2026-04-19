@@ -271,11 +271,16 @@ def test_paged_decode_gqa_with_graph(
         seqlens[:current_batch_size].copy_(cur_seqlens)
         seqlens[current_batch_size:] = 0
 
-        # Block tables: fill valid entries, pad unused block with -1
+        # Block tables: fill valid entries; pad trailing slots with the last physical block id.
+        # (-1 is unsafe: paged-attention kernels may still load block_table entries and index KV cache.)
         for i in range(current_batch_size):
             num_blocks_per_seq = (cur_seqlens[i] + block_size - 1) // block_size
             block_tables[i, :num_blocks_per_seq].copy_(cur_block_tables[i, :num_blocks_per_seq])
-            block_tables[i, num_blocks_per_seq:] = -1
+            if num_blocks_per_seq < block_tables.shape[1]:
+                pad_id = (
+                    int(block_tables[i, num_blocks_per_seq - 1].item()) if num_blocks_per_seq > 0 else 0
+                )
+                block_tables[i, num_blocks_per_seq:].fill_(pad_id)
 
         # --------------------------
         # Compute reference output
@@ -667,13 +672,23 @@ def test_paged_prefill_gqa_with_graph(
         seqlens_kv[:current_batch_size].copy_(cur_seqlens_kv)
         seqlens_kv[current_batch_size:] = 0
 
-        # Block tables: fill valid entries, pad unused block with -1
+        # Block tables: fill valid entries; pad trailing slots with the last physical block id.
+        # (-1 is unsafe: paged-attention kernels may still load block_table entries and index KV cache.)
         for i in range(current_batch_size):
             num_blocks_per_seq = (int(cur_seqlens_kv[i].item()) + block_size - 1) // block_size
             block_tables[i, :num_blocks_per_seq].copy_(cur_block_tables[i, :num_blocks_per_seq])
-            block_tables[i, num_blocks_per_seq:] = -1
+            if num_blocks_per_seq < block_tables.shape[1]:
+                pad_id = (
+                    int(block_tables[i, num_blocks_per_seq - 1].item()) if num_blocks_per_seq > 0 else 0
+                )
+                block_tables[i, num_blocks_per_seq:].fill_(pad_id)
         if current_batch_size < max_batch_size:
-            block_tables[current_batch_size:] = -1
+            # Duplicate a valid row for padded batch slots (zero-length seqs); avoid -1 row padding.
+            block_tables[current_batch_size:].copy_(
+                block_tables[current_batch_size - 1 : current_batch_size].expand(
+                    max_batch_size - current_batch_size, -1
+                )
+            )
 
         # --------------------------
         # Compute reference output
