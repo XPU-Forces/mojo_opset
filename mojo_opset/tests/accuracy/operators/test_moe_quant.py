@@ -16,7 +16,7 @@ from mojo_opset.backends.ixformer.operators.moe import IxformerGroupQuantGemmCom
 from mojo_opset.backends.ixformer.operators.moe import IxformerGroupQuantGemmMoE
 from mojo_opset.backends.ixformer.operators.moe import IxformerMoEInitRoutingDynamicQuant
 from mojo_opset.backends.ixformer.operators.moe import IxformerQuantMoe
-from mojo_opset.utils.platform import get_torch_device
+from mojo_opset.utils.platform import get_torch_device, get_platform
 
 
 
@@ -173,6 +173,8 @@ def test_group_quant_gemm_combine_moe_reference():
 
 @bypass_not_implemented
 def test_fused_swiglu_moe_scale_dynamic_quant_backend():
+    if get_platform() == "ilu":
+        pytest.skip("fused swiglu moe scale dynamic quant is not tested on ILU")
     input = torch.randn(4, 2, 128, dtype=torch.bfloat16)
     smooth_scale = torch.ones(4, 64, dtype=torch.float32)
     token_count = torch.tensor([2, 2, 2, 2], dtype=torch.int32)
@@ -187,6 +189,8 @@ def test_fused_swiglu_moe_scale_dynamic_quant_backend():
 
 @bypass_not_implemented
 def test_group_quant_gemm_moe_backend():
+    if get_platform() == "ilu":
+        pytest.skip("group quant gemm moe is not tested on ILU")
     input = torch.randint(-128, 127, (4, 2, 64)).to(dtype=torch.int8)
     weight = torch.randint(-128, 127, (4, 128, 64)).to(dtype=torch.int8)
     token_count = torch.tensor([2, 2, 2, 2], dtype=torch.int32)
@@ -209,6 +213,8 @@ def test_group_quant_gemm_moe_backend():
 
 @bypass_not_implemented
 def test_group_quant_gemm_combine_moe_backend():
+    if get_platform() == "ilu":
+        pytest.skip("group quant gemm combine moe is not tested on ILU")
     input = torch.randint(-128, 127, (4, 2, 64)).to(dtype=torch.int8)
     weight = torch.randint(-128, 127, (4, 64, 48)).to(dtype=torch.int8)
     token_count = torch.tensor([2, 2, 2, 2], dtype=torch.int32)
@@ -243,6 +249,8 @@ def test_group_quant_gemm_combine_moe_backend():
 @pytest.mark.parametrize("top_k", [2, 4, 8])
 @bypass_not_implemented
 def test_moe_init_routing_dynamic_quant_backend(seqlen: int, num_experts: int, hidden_size: int, top_k: int):
+    if get_platform() == "ilu":
+        pytest.skip("moe init routing dynamic quant is not tested on ILU")
     hidden_states = torch.randn(seqlen, hidden_size, dtype=torch.bfloat16)
     # top_k_gates = torch.softmax(torch.randn(seqlen, top_k, dtype=torch.float32), dim=-1)
     # top_k_indices = torch.stack([torch.randperm(4)[:2] for _ in range(8)])
@@ -284,6 +292,8 @@ def generate_random_list(M, N):
 @pytest.mark.parametrize("TOPK", [2, 4, 8])
 @bypass_not_implemented
 def test_fused_swiglu_moe_scale_dynamic_quant_backend(seq_len, last_dim, EXPERT_NUM, TOPK):
+    if get_platform() == "ilu":
+        pytest.skip("fused swiglu moe scale dynamic quant is not tested on ILU")
     input = torch.randn(seq_len, TOPK, last_dim, dtype=torch.bfloat16)
     smooth_scale = torch.rand(EXPERT_NUM, last_dim//2, dtype=torch.float32)
     token_count = torch.tensor(generate_random_list(EXPERT_NUM, seq_len * TOPK), dtype=torch.int32)
@@ -332,6 +342,8 @@ def test_ixformer_quant_moe_vs_mojo_moe_accuracy(
     intermediate_size: int,
     num_tokens: int,
 ):
+    if get_platform() != "ilu":
+        pytest.skip("ixformer quant moe is not tested")
     device = get_torch_device()
     dtype = torch.bfloat16
 
@@ -403,6 +415,8 @@ def test_ixformer_quant_moe_vs_mojo_moe_accuracy(
 @pytest.mark.parametrize("TOPK", [2, 4, 8])
 @bypass_not_implemented
 def test_ixformer_fused_swiglu_moe_scale_dynamic_quant(seq_len, last_dim, EXPERT_NUM, TOPK):
+    if get_platform() != "ilu":
+        pytest.skip("ixformer fused swiglu moe scale dynamic quant is not tested")
     device = get_torch_device()
     input = torch.randn(seq_len, TOPK, last_dim, dtype=torch.bfloat16, device=device)
     smooth_scale = torch.rand(EXPERT_NUM, last_dim // 2, dtype=torch.float32, device=device)
@@ -441,6 +455,8 @@ def test_ixformer_fused_swiglu_moe_scale_dynamic_quant(seq_len, last_dim, EXPERT
 
 @bypass_not_implemented
 def test_ixformer_group_quant_gemm_moe():
+    if get_platform() != "ilu":
+        pytest.skip("ixformer group quant gemm moe is not tested")
     device = get_torch_device()
     input = torch.randint(-128, 127, (4, 2, 64), dtype=torch.int8, device=device)
     weight = torch.randint(-128, 127, (4, 128, 64), dtype=torch.int8, device=device)
@@ -460,6 +476,8 @@ def test_ixformer_group_quant_gemm_moe():
 
 @bypass_not_implemented
 def test_ixformer_group_quant_gemm_combine_moe():
+    if get_platform() != "ilu":
+        pytest.skip("ixformer group quant gemm combine moe is not tested")
     device = get_torch_device()
     input = torch.randint(-128, 127, (4, 2, 64), dtype=torch.int8, device=device)
     weight = torch.randint(-128, 127, (4, 64, 48), dtype=torch.int8, device=device)
@@ -526,6 +544,8 @@ def test_ixformer_moe_init_routing_dynamic_quant(
     hidden_size: int,
     top_k: int,
 ):
+    if get_platform() != "ilu":
+        pytest.skip("ixformer moe init routing dynamic quant is not tested")
     # Torch reference path allocates several large route buffers in float32.
     # Skip extreme cases that are prone to OOM and do not add precision signal.
     if seqlen * top_k * hidden_size > 220_000_000:
