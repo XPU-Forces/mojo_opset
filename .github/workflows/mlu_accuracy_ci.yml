@@ -77,9 +77,9 @@ jobs:
             set -euo pipefail
             cd /workspace
             echo 'Running ttx kernels tests on MLU...'
-            MOJO_BACKEND=ttx python3 -m pytest -n 8 tests/accuracy/operators/ \
-              --ignore=tests/accuracy/operators/test_compute_with_comm.py
-            MOJO_BACKEND=ttx python3 -m pytest -n 8 tests/accuracy/functions/
+            MOJO_BACKEND=ttx python3 -m pytest -n 8 mojo_opset/tests/accuracy/operators/ \
+              --ignore=mojo_opset/tests/accuracy/operators/test_compute_with_comm.py
+            MOJO_BACKEND=ttx python3 -m pytest -n 8 mojo_opset/tests/accuracy/functions/
           "
 
       - name: Cleanup
