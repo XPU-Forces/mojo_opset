@@ -11,7 +11,7 @@ if str(REPO_ROOT) not in sys.path:
 
 
 def test_import_plugins_loads_fake_ext(tmp_path):
-    install_root = tmp_path / "install"
+    install_target = tmp_path / "plugin_install"
 
     install_cmd = [
         sys.executable,
@@ -20,19 +20,15 @@ def test_import_plugins_loads_fake_ext(tmp_path):
         "install",
         "--no-build-isolation",
         "--no-deps",
-        "--root",
-        str(install_root),
+        "--target",
+        str(install_target),
         str(PLUGIN_DIR),
     ]
     install_result = subprocess.run(install_cmd, cwd=REPO_ROOT, capture_output=True, text=True)
     assert install_result.returncode == 0, install_result.stderr
 
-    site_packages_dir = next(
-        path for path in install_root.rglob("*") if path.is_dir() and path.name.endswith("site-packages")
-    )
-
     env = os.environ.copy()
-    pythonpath_parts = [str(site_packages_dir), str(REPO_ROOT)]
+    pythonpath_parts = [str(install_target), str(REPO_ROOT)]
     if env.get("PYTHONPATH"):
         pythonpath_parts.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
