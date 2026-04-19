@@ -22,6 +22,39 @@ from mojo_opset.utils.platform import get_platform, get_torch_device
 logger = get_logger(__name__)
 
 
+class BackendNotImplementedForTest(NotImplementedError):
+    """Raised in tests when the requested backend has no implementation."""
+
+
+def resolve_backend_for_accuracy_test(registry: Any, backend_name: str = None) -> Union[str, None]:
+    """Resolve an explicitly requested backend for accuracy tests.
+
+    Returns ``None`` when no backend is explicitly requested so the normal
+    runtime fallback path remains unchanged. Raises a test-only error when a
+    backend is explicitly requested but not implemented for the current op.
+    """
+
+    requested_backend = backend_name
+    if requested_backend is None:
+        raw_backend = os.environ.get("MOJO_BACKEND")
+        requested_backend = raw_backend.strip().lower() if raw_backend else None
+    elif isinstance(requested_backend, str):
+        requested_backend = requested_backend.strip().lower()
+
+    if not requested_backend:
+        return None
+
+    from mojo_opset.core.backend_registry import BACKEND_PRIORITY_MAP
+
+    normalized_backend = BACKEND_PRIORITY_MAP.get(requested_backend, requested_backend)
+    if normalized_backend not in registry._registry:
+        raise BackendNotImplementedForTest(
+            f"{registry._operator_name} has no implementation for requested backend[{normalized_backend}]"
+        )
+
+    return normalized_backend
+
+
 def assert_close(
     results: Union[torch.Tensor, Tuple[Any, ...]],
     refs: Union[torch.Tensor, Tuple[Any, ...]],
