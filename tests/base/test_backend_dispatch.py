@@ -1,6 +1,8 @@
 import pytest
 
+from tests.utils import BackendNotImplementedForTest
 from tests.utils import bypass_not_implemented
+from tests.utils import resolve_backend_for_accuracy_test
 
 from mojo_opset import MojoSilu
 from mojo_opset import MojoSiluFunction
@@ -39,3 +41,10 @@ def test_function_dispatch(MojoFunc):
 
     func_torch = MojoFunc._registry.get("torch")
     assert func_default.forward != func_torch.forward and func_default.backward != func_torch.backward
+
+
+def test_accuracy_helper_raises_when_requested_backend_missing(monkeypatch):
+    monkeypatch.setenv("MOJO_BACKEND", "fake_backend")
+
+    with pytest.raises(BackendNotImplementedForTest, match="Silu"):
+        resolve_backend_for_accuracy_test(MojoSilu._registry)
