@@ -4,12 +4,10 @@ import torch
 from triton.testing import assert_close
 
 from mojo_opset import MojoOverEncoding, MojoOverEncodingNGram
+from mojo_opset.backends.ttx.kernels import embedding_nf4_dequant
 from mojo_opset.core.operators.over_encoding import (
     n_gram_impl_torch,
     dequantize_nf4_rows,
-)
-from mojo_opset.backends.ttx.kernels.npu.over_encoding.embedding import (
-    embedding_nf4_dequant_impl,
 )
 
 
@@ -455,7 +453,7 @@ class TestRefOverEncodingParametrized:
         valid_mask = (input_ids >= 0) & (input_ids < vocab_size)
         expected[valid_mask] = dequant_lut.index_select(0, input_ids[valid_mask])
 
-        output = embedding_nf4_dequant_impl(
+        output = embedding_nf4_dequant(
             input_ids,
             qweight,
             scale,
