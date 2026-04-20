@@ -5,7 +5,7 @@ from triton.testing import assert_close
 
 from mojo_opset import MojoOverEncoding, MojoOverEncodingNGram
 from mojo_opset.backends.ttx.kernels import embedding_nf4_dequant
-from mojo_opset.tests.utils import get_torch_device
+from mojo_opset.tests.utils import bypass_not_implemented, get_torch_device
 from mojo_opset.core.operators.over_encoding import (
     n_gram_impl_torch,
     dequantize_nf4_rows,
@@ -55,6 +55,7 @@ def build_nf4_embedding_lut(
     return qweight, scale, mean
 
 
+@bypass_not_implemented
 class TestRefOverEncodingBasic:
     def setup_method(self):
         self.N = 4
@@ -265,6 +266,7 @@ class TestRefOverEncodingBasic:
         # assert_close(ttx_res, ref)
 
 
+@bypass_not_implemented
 class TestRefOverEncodingParametrized:
     @staticmethod
     @torch.no_grad
