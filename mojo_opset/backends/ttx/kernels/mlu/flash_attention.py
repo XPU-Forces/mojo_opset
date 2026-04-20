@@ -26,10 +26,8 @@ def paged_attention_decode_kernel(
     stride_o_batch,
     stride_o_head,
     stride_bt_batch,
-    stride_bt_nblk,
     batch_size,
     BLOCK_SIZE: tl.constexpr,
-    BLOCKS_PER_SEQ: tl.constexpr,
     Q_HEADS: tl.constexpr,
     KV_HEADS: tl.constexpr,
     HEAD_SIZE_QK: tl.constexpr,
@@ -65,24 +63,27 @@ def paged_attention_decode_kernel(
         rmax, cmax = tl.full((TILE_Q,), -float('inf'), dtype=tl.float32), tl.zeros((TILE_Q,), dtype=tl.float32)
         rsum, csum = tl.zeros((TILE_Q,), dtype=tl.float32), tl.zeros((TILE_Q,), dtype=tl.float32)
 
+        # block table begin
+        block_table_offset = stride_bt_batch * batch_id
+        block_table_seg = tl.arange(0, BLOCKS_ON_CORE)
+        block_table_ptrs = block_table_ptr + block_table_offset + block_table_seg
+
         for k_begin in range(0, context_len, TILE_K):
             seq_k = min(TILE_K, context_len - k_begin)
-            block_begin = k_begin // BLOCK_SIZE
-            block_k_begin = k_begin % BLOCK_SIZE
+            block_k_begin: tl.constexpr = k_begin % BLOCK_SIZE
 
             # load block_table
-            block_table_offset = stride_bt_batch * batch_id
-            block_table_seg = tl.arange(0, BLOCKS_ON_CORE) + block_begin
-            block_table_ptrs = block_table_ptr + block_table_offset + block_table_seg
-            block_ids = tl.load(block_table_ptrs, mask=block_table_seg < BLOCKS_PER_SEQ, other=0)  
+            block_mask = block_table_seg < ((seq_k + BLOCK_SIZE - 1) // BLOCK_SIZE)
+            block_ids = tl.load(block_table_ptrs, mask=block_mask, other=0)
+            block_table_ptrs += BLOCKS_ON_CORE
 
-            # load kcache, tile_k = seg_size * blocks_on_core
+            # load kcache, tile_k = seg_size * blocks_on_core, block_ids is not equidistant
             kcache_offset = block_ids * stride_k_nblk + kv_head_id * stride_k_head + block_k_begin * stride_k_blksz
             kcache_seg = tl.arange(0, SEG_SIZE * HEAD_SIZE_QK)
             kcache_ptrs = kcache_ptr + kcache_offset[:, None] + kcache_seg[None, :]
             kcache_data = tl.load(kcache_ptrs).reshape(TILE_K, HEAD_SIZE_QK)
 
-            qk = tl.dot(q_data, tl.trans(kcache_data), out_dtype=tl.float32) * softmax_scale
+            qk = tl.dot(q_data, kcache_data.T, out_dtype=tl.float32) * softmax_scale
             qk = tl.where(tl.arange(0, TILE_K) < seq_k, qk, -float("inf"))
 
             cmax = tl.maximum(rmax, tl.max(qk, axis=1))
@@ -127,15 +128,14 @@ def paged_attention_decode_impl(
     
     bs, q_heads, head_size_qk = q.shape
     _, kv_heads, block_size, head_size_vo = key_cache.shape
-    _, blocks_per_seq = block_tables.shape
 
     o = torch.empty((bs, q_heads, head_size_vo), dtype=q.dtype)
 
     stride_q_batch, stride_q_head, _ = q.stride()
-    stride_k_nblk, stride_k_head, stride_k_blksz, stride_k_hsz = key_cache.stride()
-    stride_v_nblk, stride_v_head, stride_v_blksz, stride_v_hsz = value_cache.stride()
+    stride_k_nblk, stride_k_head, stride_k_blksz, _ = key_cache.stride()
+    stride_v_nblk, stride_v_head, stride_v_blksz, _ = value_cache.stride()
     stride_o_batch, stride_o_head, _ = o.stride()
-    stride_bt_batch, stride_bt_nblk = block_tables.stride()
+    stride_bt_batch, _ = block_tables.stride()
 
     tile_k = 512
 
@@ -158,10 +158,8 @@ def paged_attention_decode_impl(
         stride_o_batch,
         stride_o_head,
         stride_bt_batch,
-        stride_bt_nblk,
         bs,
         block_size,
-        blocks_per_seq,
         q_heads,
         kv_heads,
         head_size_qk,
