@@ -12,6 +12,11 @@ from ixformer.contrib import vllm_flash_attn as ix_fa
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoPagedDecodeGQA
 
+_IXFORMER_PAGED_DECODE_SUPPORTED_HEAD_DIMS = frozenset(
+    {32, 64, 80, 96, 128, 160, 192, 224, 256}
+)
+
+
 class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
     """Ixformer implementation for paged prefill GQA."""
 
@@ -169,8 +174,50 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         if self.gqa_layout == "ABAB":
             raise NotImplementedError("IxformerPagedDecodeGQA does not support ABAB layout.")
 
-        batch_size, num_q_heads, head_dim = query.shape
-        _, num_kv_heads, block_size, head_dim = key_cache.shape
+        if self.window_size != -1:
+            raise NotImplementedError(
+                "IxformerPagedDecodeGQA only supports window_size == -1 (no sliding window)."
+            )
+
+        batch_size, num_q_heads, head_dim_q = query.shape
+        _, num_kv_heads, block_size, head_dim_kv = key_cache.shape
+
+        if head_dim_q != head_dim_kv:
+            raise ValueError(
+                f"query head_dim ({head_dim_q}) must match key_cache head_dim ({head_dim_kv})."
+            )
+        head_dim = head_dim_q
+
+        if head_dim not in _IXFORMER_PAGED_DECODE_SUPPORTED_HEAD_DIMS:
+            raise NotImplementedError(
+                "IxformerPagedDecodeGQA only supports head_dim in "
+                f"{sorted(_IXFORMER_PAGED_DECODE_SUPPORTED_HEAD_DIMS)}, got {head_dim}."
+            )
+
+        if query.dtype not in (torch.float16, torch.bfloat16):
+            raise NotImplementedError(
+                f"IxformerPagedDecodeGQA only supports fp16/bf16 query, got {query.dtype}."
+            )
+
+        if key_cache.dtype != query.dtype or value_cache.dtype != query.dtype:
+            raise NotImplementedError(
+                "IxformerPagedDecodeGQA requires key_cache/value_cache dtype to match query dtype."
+            )
+
+        if not self.is_causal:
+            raise NotImplementedError("IxformerPagedDecodeGQA only supports causal attention.")
+
+        # vllm_paged_attention expects a positive KV length for every batch row.
+        if bool((seqlens < 1).any().item()):
+            raise NotImplementedError(
+                "IxformerPagedDecodeGQA requires context_lens >= 1 for every batch row."
+            )
+
+        # GQA + small page size is not supported by the fused kernel vs. eager reference parity.
+        if num_q_heads != num_kv_heads and block_size < 128:
+            raise NotImplementedError(
+                "IxformerPagedDecodeGQA does not support GQA (Hq != Hkv) when block_size < 128."
+            )
 
         output = torch.empty(batch_size, num_q_heads, head_dim, dtype=query.dtype, device=query.device)
 
