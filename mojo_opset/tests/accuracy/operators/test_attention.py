@@ -234,15 +234,33 @@ def test_paged_decode_gqa_with_graph(
             logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}.")
             torch.cuda.empty_cache()
 
+    # --------------------------
+    # CUDA Graph inference
+    # --------------------------
+    torch.cuda.synchronize()
+    graph.replay()
+    torch.cuda.synchronize()
+
     paged_decode_attn_ref = MojoPagedDecodeGQA._registry.get("torch")(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
 
-    max_batch_size, num_q_heads, head_dim = query.shape
-    max_blocks, num_kv_heads, block_size, _ = k_cache.shape
+    # --------------------------
+    # Compute reference output
+    # --------------------------
+    ref_output = paged_decode_attn_ref(
+        query, k_cache, v_cache, seqlens, block_tables, max_context_len
+    )
+
     atol = 2e-2 if query.dtype != torch.float32 else 1e-5
     rtol = 2e-2 if query.dtype != torch.float32 else 1e-6
+
+    # Check max batches match reference results
+    check_tol_diff(output, ref_output, atol=atol, rtol=rtol)
+
+    max_batch_size, num_q_heads, head_dim = query.shape
+    max_blocks, num_kv_heads, block_size, _ = k_cache.shape
     for test_step in range(5):
         current_batch_size = torch.randint(1, max_batch_size + 1, ()).item()
 
