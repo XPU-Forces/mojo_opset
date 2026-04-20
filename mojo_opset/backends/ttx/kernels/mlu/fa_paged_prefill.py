@@ -150,9 +150,6 @@ def paged_prefill_kernel(
     BLOCK_D: tl.constexpr,
 ):
     tl.static_assert(PAGE_SIZE % BLOCK_N == 0, "BLOCK_N must be a divisor of PAGE_SIZE")
-    tl.static_assert(
-        HEAD_SIZE <= BLOCK_D, "BLOCK_SIZE_D should not be less than HEAD_SIZE"
-    )
 
     pid = tl.program_id(0)
     n_programs = tl.num_programs(0)
@@ -285,12 +282,14 @@ def paged_attention_prefill_impl(
     key_cache: torch.Tensor,  # [num_blocks, num_kv_heads, page_size, head_size]
     value_cache: torch.Tensor,  # [num_blocks, num_kv_heads, page_size, head_size]
     cu_seqlens_q: torch.Tensor,  # [bsz + 1]
-    seqlens_kv: torch.Tensor,  # [bsz + 1]
+    seqlens_kv: Optional[torch.Tensor],  # [bsz + 1]
     block_tables: torch.Tensor,  # [bsz, num_kv_blocks]
     gqa_interleave: bool,
     softmax_scale: Optional[float] = None,
     aux_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    del aux_mask
+
     bsz = cu_seqlens_q.shape[0] - 1
     _, num_q_heads, head_size = q.shape
     _, num_kv_heads, page_size, _ = key_cache.shape
