@@ -39,9 +39,6 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         assert block_tables.dtype == torch.int32
         if seqlens_kv is not None:
             assert seqlens_kv.dtype == torch.int32
-        assert self.window_size == -1, (
-            f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
-        )
         assert self.is_causal, (
             f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
@@ -84,9 +81,6 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
     ):
         assert seqlens.dtype == torch.int32
         assert block_tables.dtype == torch.int32
-        assert self.window_size == -1, (
-            f"[TTXPagedDecodeGQA] TTX does not support sliding window, but got window_size={self.window_size}"
-        )
         assert self.is_causal, (
             f"[TTXPagedDecodeGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
