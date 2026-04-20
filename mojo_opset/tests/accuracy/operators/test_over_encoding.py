@@ -5,10 +5,13 @@ from triton.testing import assert_close
 
 from mojo_opset import MojoOverEncoding, MojoOverEncodingNGram
 from mojo_opset.backends.ttx.kernels import embedding_nf4_dequant
+from mojo_opset.tests.utils import get_torch_device
 from mojo_opset.core.operators.over_encoding import (
     n_gram_impl_torch,
     dequantize_nf4_rows,
 )
+
+TEST_DEVICE = get_torch_device()
 
 
 def pack_nf4_uint4_to_int8(q_idx: torch.Tensor) -> torch.Tensor:
@@ -106,17 +109,17 @@ class TestRefOverEncodingBasic:
             rtol=0,
         )
 
-        input_ids = input_ids.npu()
-        input_seq_len = torch.Tensor([5]).to(torch.int64).npu()
-        oe_history = oe_history.npu()
+        input_ids = input_ids.to(TEST_DEVICE)
+        input_seq_len = torch.Tensor([5]).to(torch.int64).to(TEST_DEVICE)
+        oe_history = oe_history.to(TEST_DEVICE)
 
-        oe_ngram = oe_ngram.npu()
-        oe_ngram_ref = oe_ngram_ref.npu()
+        oe_ngram = oe_ngram.to(TEST_DEVICE)
+        oe_ngram_ref = oe_ngram_ref.to(TEST_DEVICE)
 
         oe_ngram.forward_diff_with(oe_ngram_ref, input_ids, oe_history[:1], input_seq_len, atol=0, rtol=0)
         oe_history = torch.stack(
             [torch.arange(1, self.N) for _ in range(input_ids.size(0))], dim=0
-        ).npu()
+        ).to(TEST_DEVICE)
         # goldens = torch.Tensor(
         #     [
         #         [31, 31, 231, 231, 1231, 1231],
@@ -125,7 +128,7 @@ class TestRefOverEncodingBasic:
         #         [34, 34, 234, 234, 1234, 1234],
         #         [35, 35, 235, 235, 1235, 1235],
         #     ],
-        # ).npu()
+        # ).to(TEST_DEVICE)
         oe_ngram.forward_diff_with(oe_ngram_ref, input_ids.unsqueeze(-1), oe_history, atol=0, rtol=0)
         oe_history = torch.cat(
             (
@@ -193,21 +196,21 @@ class TestRefOverEncodingBasic:
             rtol=0,
         )
 
-        oe_ngram = oe_ngram.npu()
-        oe_ngram_ref = oe_ngram_ref.npu()
+        oe_ngram = oe_ngram.to(TEST_DEVICE)
+        oe_ngram_ref = oe_ngram_ref.to(TEST_DEVICE)
         oe_ngram.forward_diff_with(
             oe_ngram_ref,
-            input_ids.npu(),
-            oe_history.npu(),
-            input_seq_lens.npu(),
+            input_ids.to(TEST_DEVICE),
+            oe_history.to(TEST_DEVICE),
+            input_seq_lens.to(TEST_DEVICE),
             atol=0,
             rtol=0,
         )
 
     def test_over_encoding(self):
-        input_ids = torch.Tensor([1, 2, 3, 4, 5, 6]).to(torch.int64).npu()
-        input_seq_len = torch.Tensor([3, 3]).to(torch.int64).npu()
-        oe_history = torch.zeros(2, 3, device="npu").to(torch.int64)
+        input_ids = torch.Tensor([1, 2, 3, 4, 5, 6]).to(torch.int64).to(TEST_DEVICE)
+        input_seq_len = torch.Tensor([3, 3]).to(torch.int64).to(TEST_DEVICE)
+        oe_history = torch.zeros(2, 3, device=TEST_DEVICE).to(torch.int64)
 
         @torch.no_grad
         def init_weight(m):
@@ -225,7 +228,7 @@ class TestRefOverEncodingBasic:
             [self.VOCAB_SIZE for _ in range(self.SPLIT_NUM)],
             [i for i in range(2, self.N + 1) for _ in range(self.K)],
             dtype=torch.int64,
-        ).npu()
+        ).to(TEST_DEVICE)
         oe_layer.apply(init_weight)
 
         ttx_oe_layer = MojoOverEncoding(
@@ -235,7 +238,7 @@ class TestRefOverEncodingBasic:
             [self.VOCAB_SIZE for _ in range(self.SPLIT_NUM)],
             [i for i in range(2, self.N + 1) for _ in range(self.K)],
             dtype=torch.int64,
-        ).npu()
+        ).to(TEST_DEVICE)
         ttx_oe_layer.apply(init_weight)
 
         # NOTE(liuyuan): Test Prefill
@@ -245,7 +248,7 @@ class TestRefOverEncodingBasic:
 
         # NOTE(liuyuan): Test Decode
         oe_history = torch.zeros(
-            input_ids.size(0), self.N, device="npu", dtype=torch.int64
+            input_ids.size(0), self.N, device=TEST_DEVICE, dtype=torch.int64
         )
         input_ids = input_ids.reshape(-1, 1)
         ref = oe_layer(input_ids, oe_history)
@@ -255,7 +258,7 @@ class TestRefOverEncodingBasic:
         # FIXME(liuyuan): The Triton kernel still suffers from random partial errors caused by Byted-Triton-X. We will re-run this test case once the fix is complete.
         # input_ids = input_ids.reshape(-1, 2)
         # oe_history = torch.zeros(
-        #     input_ids.size(0), self.N, device="npu", dtype=torch.int64
+        #     input_ids.size(0), self.N, device=TEST_DEVICE, dtype=torch.int64
         # )
         # ttx_res = ttx_oe_layer(input_ids, oe_history)
         # ref = oe_layer(input_ids, oe_history)
@@ -274,14 +277,14 @@ class TestRefOverEncodingParametrized:
         "input_ids,seq_lens,oe_history_inputs",
         (
             (
-                torch.arange(1, 129, dtype=torch.long, device="npu"),
-                torch.tensor([64, 64], dtype=torch.int64, device="npu"),
-                torch.ones(2, 6, device="npu", dtype=torch.int64),
+                torch.arange(1, 129, dtype=torch.long, device=TEST_DEVICE),
+                torch.tensor([64, 64], dtype=torch.int64, device=TEST_DEVICE),
+                torch.ones(2, 6, device=TEST_DEVICE, dtype=torch.int64),
             ),
             (
-                torch.arange(1, 129, dtype=torch.long, device="npu").view(128, 1),
+                torch.arange(1, 129, dtype=torch.long, device=TEST_DEVICE).view(128, 1),
                 None,
-                torch.ones(128, 6, device="npu", dtype=torch.int64),
+                torch.ones(128, 6, device=TEST_DEVICE, dtype=torch.int64),
             ),
         ),
     )
@@ -293,12 +296,12 @@ class TestRefOverEncodingParametrized:
                 torch.tensor(
                     [10086 + 2**i for i in range(12)],
                     dtype=torch.int64,
-                    device="npu",
+                    device=TEST_DEVICE,
                 ),
                 torch.tensor(
                     [i for i in range(2, 8) for _ in range(2)],
                     dtype=torch.int64,
-                    device="npu",
+                    device=TEST_DEVICE,
                 ),
             ),
             # (
@@ -306,12 +309,12 @@ class TestRefOverEncodingParametrized:
             #     torch.tensor(
             #         [2**31 + 2**i for i in range(2)],
             #         dtype=torch.long,
-            #         device="npu",
+            #         device=TEST_DEVICE,
             #     ),
             #     torch.tensor(
             #         [i for i in range(2, 3) for _ in range(2)],
             #         dtype=torch.long,
-            #         device="npu",
+            #         device=TEST_DEVICE,
             #     ),
             # ),
         ),
@@ -333,12 +336,12 @@ class TestRefOverEncodingParametrized:
     ):
         ref_oe_layer = MojoOverEncoding._registry.get("torch")(
             vocab_size, embed_dim, oe_embed_dims, oe_vocab_sizes, n_grams
-        ).npu()
+        ).to(TEST_DEVICE)
         ref_oe_layer.apply(self.init_weight)
 
         ttx_oe_layer = MojoOverEncoding(
             vocab_size, embed_dim, oe_embed_dims, oe_vocab_sizes, n_grams
-        ).npu()
+        ).to(TEST_DEVICE)
         ttx_oe_layer.apply(self.init_weight)
 
         assert_close(
@@ -353,9 +356,9 @@ class TestRefOverEncodingParametrized:
                 torch.tensor(
                     [11, 13, 15, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89],
                     dtype=torch.long,
-                    device="npu",
+                    device=TEST_DEVICE,
                 ),
-                torch.tensor([5, 7, 9], dtype=torch.int64, device="npu"),
+                torch.tensor([5, 7, 9], dtype=torch.int64, device=TEST_DEVICE),
                 torch.tensor(
                     [
                         [3, 5, 7, 9],
@@ -363,31 +366,31 @@ class TestRefOverEncodingParametrized:
                         [11, 13, 17, 19],
                     ],
                     dtype=torch.int64,
-                    device="npu",
+                    device=TEST_DEVICE,
                 ),
                 257,
                 torch.tensor(
                     [263, 269, 271, 277, 281, 283, 293, 307],
                     dtype=torch.int64,
-                    device="npu",
+                    device=TEST_DEVICE,
                 ),
-                torch.tensor([2, 2, 3, 3, 4, 4, 5, 5], dtype=torch.int64, device="npu"),
+                torch.tensor([2, 2, 3, 3, 4, 4, 5, 5], dtype=torch.int64, device=TEST_DEVICE),
                 640,
                 80,
             ),
             (
-                (torch.arange(1, 49, dtype=torch.long, device="npu") % 257).view(48, 1),
+                (torch.arange(1, 49, dtype=torch.long, device=TEST_DEVICE) % 257).view(48, 1),
                 None,
                 (
-                    torch.arange(48 * 4, dtype=torch.int64, device="npu").view(48, 4) % 17
+                    torch.arange(48 * 4, dtype=torch.int64, device=TEST_DEVICE).view(48, 4) % 17
                 ),
                 257,
                 torch.tensor(
                     [263, 269, 271, 277, 281, 283, 293, 307],
                     dtype=torch.int64,
-                    device="npu",
+                    device=TEST_DEVICE,
                 ),
-                torch.tensor([2, 2, 3, 3, 4, 4, 5, 5], dtype=torch.int64, device="npu"),
+                torch.tensor([2, 2, 3, 3, 4, 4, 5, 5], dtype=torch.int64, device=TEST_DEVICE),
                 320,
                 40,
             ),
@@ -407,12 +410,12 @@ class TestRefOverEncodingParametrized:
     ):
         ref_oe_layer = MojoOverEncoding._registry.get("torch")(
             vocab_size, embed_dim, oe_embed_dims, oe_vocab_sizes, n_grams
-        ).npu()
+        ).to(TEST_DEVICE)
         ref_oe_layer.apply(self.init_weight)
 
         ttx_oe_layer = MojoOverEncoding(
             vocab_size, embed_dim, oe_embed_dims, oe_vocab_sizes, n_grams
-        ).npu()
+        ).to(TEST_DEVICE)
         ttx_oe_layer.apply(self.init_weight)
 
         assert_close(
@@ -430,7 +433,7 @@ class TestRefOverEncodingParametrized:
             vocab_size=vocab_size,
             embedding_dim=embedding_dim,
             group_size=group_size,
-            device="npu",
+            device=TEST_DEVICE,
         )
         dequant_lut = dequantize_nf4_rows(
             qweight,
@@ -442,13 +445,13 @@ class TestRefOverEncodingParametrized:
         input_ids = torch.tensor(
             [[0, 17, 32], [128, 256, vocab_size]],
             dtype=torch.long,
-            device="npu",
+            device=TEST_DEVICE,
         )
 
         expected = torch.zeros(
             (*input_ids.shape, embedding_dim),
             dtype=torch.float32,
-            device="npu",
+            device=TEST_DEVICE,
         )
         valid_mask = (input_ids >= 0) & (input_ids < vocab_size)
         expected[valid_mask] = dequant_lut.index_select(0, input_ids[valid_mask])
@@ -471,9 +474,9 @@ class TestRefOverEncodingParametrized:
         oe_vocab_sizes = torch.tensor(
             [vocab_size + 3, vocab_size + 5, vocab_size + 7, vocab_size + 11],
             dtype=torch.int64,
-            device="npu",
+            device=TEST_DEVICE,
         )
-        n_grams = torch.tensor([2, 2, 3, 3], dtype=torch.int64, device="npu")
+        n_grams = torch.tensor([2, 2, 3, 3], dtype=torch.int64, device=TEST_DEVICE)
         embed_dim = 64
         oe_embed_dim = 64
         group_size = 64
@@ -497,7 +500,7 @@ class TestRefOverEncodingParametrized:
             _mega_embedding_scale=scale,
             _mega_embedding_mean=mean,
             _mega_embedding_group_size=group_size,
-        ).npu()
+        ).to(TEST_DEVICE)
         ttx_oe_layer = MojoOverEncoding(
             vocab_size,
             embed_dim,
@@ -509,7 +512,7 @@ class TestRefOverEncodingParametrized:
             _mega_embedding_scale=scale,
             _mega_embedding_mean=mean,
             _mega_embedding_group_size=group_size,
-        ).npu()
+        ).to(TEST_DEVICE)
 
         proj_weight = torch.randn_like(ref_oe_layer.oe_up_proj.weight)
         ref_oe_layer.oe_up_proj.weight.copy_(proj_weight)
@@ -517,21 +520,21 @@ class TestRefOverEncodingParametrized:
 
         SEQ_NUM = 32
         prefill_input_ids = (
-            torch.arange(1, SEQ_NUM + 1, dtype=torch.long, device="npu")
+            torch.arange(1, SEQ_NUM + 1, dtype=torch.long, device=TEST_DEVICE)
             .broadcast_to(SEQ_NUM, SEQ_NUM)
             .flatten()
         )
         prefill_seq_lens = torch.tensor(
-            [SEQ_NUM] * SEQ_NUM, dtype=torch.int64, device="npu"
+            [SEQ_NUM] * SEQ_NUM, dtype=torch.int64, device=TEST_DEVICE
         )
-        prefill_history = torch.zeros(SEQ_NUM, 2, dtype=torch.int64, device="npu")
+        prefill_history = torch.zeros(SEQ_NUM, 2, dtype=torch.int64, device=TEST_DEVICE)
 
-        decode_input_ids = torch.arange(1, 17, dtype=torch.long, device="npu").view(-1, 1)
+        decode_input_ids = torch.arange(1, 17, dtype=torch.long, device=TEST_DEVICE).view(-1, 1)
         decode_history = torch.zeros(
             decode_input_ids.size(0),
             2,
             dtype=torch.int64,
-            device="npu",
+            device=TEST_DEVICE,
         )
 
         assert_close(
@@ -551,14 +554,14 @@ class TestRefOverEncodingParametrized:
         "input_ids,seq_lens,oe_history_inputs",
         (
             (
-                torch.arange(1, 129, dtype=torch.long, device="npu"),
-                torch.tensor([64, 64], dtype=torch.int64, device="npu"),
-                torch.ones(2, 6, device="npu", dtype=torch.int64),
+                torch.arange(1, 129, dtype=torch.long, device=TEST_DEVICE),
+                torch.tensor([64, 64], dtype=torch.int64, device=TEST_DEVICE),
+                torch.ones(2, 6, device=TEST_DEVICE, dtype=torch.int64),
             ),
             (
-                torch.arange(1, 129, dtype=torch.long, device="npu").view(128, 1),
+                torch.arange(1, 129, dtype=torch.long, device=TEST_DEVICE).view(128, 1),
                 None,
-                torch.ones(128, 6, device="npu", dtype=torch.int64),
+                torch.ones(128, 6, device=TEST_DEVICE, dtype=torch.int64),
             ),
         ),
     )
@@ -570,12 +573,12 @@ class TestRefOverEncodingParametrized:
                 torch.tensor(
                     [10086 + 2**i for i in range(12)],
                     dtype=torch.int64,
-                    device="npu",
+                    device=TEST_DEVICE,
                 ),
                 torch.tensor(
                     [i for i in range(2, 8) for _ in range(2)],
                     dtype=torch.int64,
-                    device="npu",
+                    device=TEST_DEVICE,
                 ),
             ),
             # (
@@ -583,12 +586,12 @@ class TestRefOverEncodingParametrized:
             #     torch.tensor(
             #         [2**31 + 2**i for i in range(2)],
             #         dtype=torch.long,
-            #         device="npu",
+            #         device=TEST_DEVICE,
             #     ),
             #     torch.tensor(
             #         [i for i in range(2, 3) for _ in range(2)],
             #         dtype=torch.long,
-            #         device="npu",
+            #         device=TEST_DEVICE,
             #     ),
             # ),
         ),
@@ -626,7 +629,7 @@ class TestRefOverEncodingParametrized:
             n_grams,
             _ori_embedding_weight=ori_embedding_lut,
             _mega_embedding_weight=mega_embedding_lut,
-        ).npu()
+        ).to(TEST_DEVICE)
         ref_oe_layer.apply(init_weight)
 
         ttx_oe_layer = MojoOverEncoding(
@@ -638,7 +641,7 @@ class TestRefOverEncodingParametrized:
             _ori_embedding_weight=ori_embedding_lut,
             _mega_embedding_weight=mega_embedding_lut.cpu(),
             mega_embedding_cpu_only=True,
-        ).npu()
+        ).to(TEST_DEVICE)
         ttx_oe_layer.apply(init_weight)
 
         assert_close(
