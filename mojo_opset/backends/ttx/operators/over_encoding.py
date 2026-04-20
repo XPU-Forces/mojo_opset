@@ -2,12 +2,10 @@ from typing import Optional
 
 import torch
 
-from mojo_opset.backends.ttx.kernels.npu.over_encoding.embedding import (
-    embedding_nf4_dequant_impl,
-)
-from mojo_opset.backends.ttx.kernels.npu.over_encoding.n_gram import n_gram_decode_impl
-from mojo_opset.backends.ttx.kernels.npu.over_encoding.n_gram import n_gram_prefill_impl
-from mojo_opset.backends.ttx.kernels.npu.over_encoding.fused_over_encoding import over_encoding_decode_impl
+from mojo_opset.backends.ttx.kernels import embedding_nf4_dequant
+from mojo_opset.backends.ttx.kernels import n_gram_decode
+from mojo_opset.backends.ttx.kernels import n_gram_prefill
+from mojo_opset.backends.ttx.kernels import over_encoding_decode
 from mojo_opset.core import MojoOverEncoding
 from mojo_opset.core import MojoOverEncodingNGram
 from mojo_opset.core.operators.over_encoding import NF4DequantEmbedding
@@ -19,7 +17,7 @@ class TTXOverEncodingNGram(MojoOverEncodingNGram):
         if input_seq_lens is not None:
             assert input_tensor.dim() == 1  # [total_tokens]
             assert oe_history_input.dim() == 2 and oe_history_input.size(0) == input_seq_lens.size(0) # [batch_size, max_n_gram - 1]
-            oe_ngram_ids = n_gram_prefill_impl(
+            oe_ngram_ids = n_gram_prefill(
                 input_ids=input_tensor,
                 seq_lens=input_seq_lens,
                 oe_history_inputs=oe_history_input,
@@ -31,7 +29,7 @@ class TTXOverEncodingNGram(MojoOverEncodingNGram):
         else:
             assert input_tensor.dim() == 2 # [batch_size, seq_len]
             assert oe_history_input.dim() == 2 and oe_history_input.size(0) == input_tensor.size(0) # [batch_size, max_n_gram - 1]
-            oe_ngram_ids = n_gram_decode_impl(
+            oe_ngram_ids = n_gram_decode(
                 input_ids=input_tensor,
                 oe_history_inputs=oe_history_input,
                 oe_vocab_sizes=self.oe_vocab_sizes,
@@ -107,7 +105,7 @@ class TTXOverEncoding(MojoOverEncoding):
         if input_seq_lens is not None:
             assert input_tensor.dim() == 1  # [total_tokens]
             assert oe_history_input.dim() == 2 and oe_history_input.size(0) == input_seq_lens.size(0) # [batch_size, max_n_gram - 1]
-            oe_result = n_gram_prefill_impl(
+            oe_result = n_gram_prefill(
                 input_ids=input_tensor,
                 seq_lens=input_seq_lens,
                 oe_history_inputs=oe_history_input,
@@ -127,7 +125,7 @@ class TTXOverEncoding(MojoOverEncoding):
             assert input_tensor.dim() == 2 # [batch_size, seq_len]
             assert oe_history_input.dim() == 2 and oe_history_input.size(0) == input_tensor.size(0) # [batch_size, max_n_gram - 1]
             if isinstance(self.oe_mega_embedding, NF4DequantEmbedding):
-                oe_result = over_encoding_decode_impl(
+                oe_result = over_encoding_decode(
                     input_ids=input_tensor,
                     oe_history_inputs=oe_history_input,
                     oe_vocab_sizes=self.oe_vocab_sizes,
@@ -144,7 +142,7 @@ class TTXOverEncoding(MojoOverEncoding):
                     output_dtype=self.oe_mega_embedding.output_dtype,
                 )
             else:
-                oe_result = n_gram_decode_impl(
+                oe_result = n_gram_decode(
                     input_ids=input_tensor,
                     oe_history_inputs=oe_history_input,
                     oe_vocab_sizes=self.oe_vocab_sizes,
@@ -175,7 +173,7 @@ class TTXOverEncoding(MojoOverEncoding):
 ########################################################
 class TTXNF4DequantEmbedding(NF4DequantEmbedding):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        output = embedding_nf4_dequant_impl(
+        output = embedding_nf4_dequant(
             input=input,
             LUT_qweight=self.weight,
             LUT_scale=self.scale,
