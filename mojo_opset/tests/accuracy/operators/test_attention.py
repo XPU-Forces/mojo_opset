@@ -42,7 +42,8 @@ def generate_paged_decode_data(
     else:
         seqlens = torch.randperm(batch_size, dtype=torch.int32)
 
-    max_num_blocks_per_seq = (seqlens.max().item() + block_size - 1) // block_size
+    max_context_len = seqlens.max().item()
+    max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
     total_blocks_needed = int(torch.div(seqlens + block_size - 1, block_size, rounding_mode="floor").sum().item())
 
     if total_blocks_needed == 0:
@@ -68,7 +69,7 @@ def generate_paged_decode_data(
         block_tables[i, :num_blocks_for_seq] = assigned_blocks
         current_block_offset += num_blocks_for_seq
 
-    return query, k_cache, v_cache, seqlens, block_tables
+    return query, k_cache, v_cache, seqlens, block_tables, max_context_len
 
 
 test_configs_decode = [
@@ -81,7 +82,7 @@ test_configs_decode = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, seqlens, block_tables",
+    "query, k_cache, v_cache, seqlens, block_tables, max_context_len",
     [
         pytest.param(
             *generate_paged_decode_data(
@@ -107,6 +108,7 @@ def test_paged_decode_gqa(
     v_cache: torch.Tensor,
     seqlens: torch.Tensor,
     block_tables: torch.Tensor,
+    max_context_len: int,
     gqa_layout: str,
 ):
     head_dim = query.shape[-1]
@@ -131,6 +133,7 @@ def test_paged_decode_gqa(
         v_cache,
         seqlens,
         block_tables,
+        max_context_len,
         softmax_scale=softmax_scale,
         atol=atol,
         rtol=rtol,
@@ -208,7 +211,10 @@ def generate_paged_prefill_data(
             k_cache[physical_block_id, :, :tokens_in_block, :] = k_slice
             v_cache[physical_block_id, :, :tokens_in_block, :] = v_slice
 
-    return query, k_cache, v_cache, cu_seqlens_q, block_tables, None if kv_cache_lens is None else kv_lens
+    seqlens_kv = None if kv_cache_lens is None else kv_lens
+    max_seqlen_q = int((cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item()) if cu_seqlens_q.numel() > 1 else 0
+    max_seqlen_k = int(kv_lens.max().item()) if kv_lens.numel() > 0 else 0
+    return query, k_cache, v_cache, cu_seqlens_q, cu_seqlens_kv, block_tables, seqlens_kv, max_seqlen_q, max_seqlen_k
 
 
 test_configs_prefill = [
@@ -221,7 +227,7 @@ test_configs_prefill = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_seqlens_q, block_tables, seqlens_kv",
+    "query, k_cache, v_cache, cu_seqlens_q, cu_seqlens_kv, block_tables, seqlens_kv, max_seqlen_q, max_seqlen_k",
     [
         pytest.param(
             *generate_paged_prefill_data(
@@ -247,9 +253,12 @@ def test_paged_prefill_gqa(
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
+    cu_seqlens_kv: torch.Tensor,
     block_tables: torch.Tensor,
     gqa_layout: str,
     seqlens_kv: Optional[torch.Tensor],
+    max_seqlen_q: int,
+    max_seqlen_k: int,
 ):
     paged_prefill_attn = MojoPagedPrefillGQA(
         is_causal=True,
@@ -270,9 +279,12 @@ def test_paged_prefill_gqa(
         k_cache,
         v_cache,
         cu_seqlens_q,
-        block_tables,
+        block_tables=block_tables,
         softmax_scale=softmax_scale,
         seqlens_kv=seqlens_kv,
+        cu_seqlens_kv=cu_seqlens_kv,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
     )
@@ -628,7 +640,7 @@ def test_paged_prefill_mla(B, H, d_nope, d_rope, d_v, d_c, max_q, blk):
 )
 @bypass_not_implemented
 def test_paged_decode_nsa(B, H, D, S, blk):
-    query, k_cache, v_cache, seqlens, bt = generate_paged_decode_data(
+    query, k_cache, v_cache, seqlens, bt, _ = generate_paged_decode_data(
         batch_size=B, num_q_heads=H, num_kv_heads=H,
         head_dim=D, max_seq_len=S, block_size=blk, dtype=torch.bfloat16,
     )
@@ -689,7 +701,7 @@ def test_prefill_nsa(H, D):
 @bypass_not_implemented
 def test_paged_prefill_nsa(H, D, blk):
     B = 2
-    query, k_cache, v_cache, cu, bt, _ = generate_paged_prefill_data(
+    query, k_cache, v_cache, cu, _, bt, _, _, _ = generate_paged_prefill_data(
         batch_size=B, num_q_heads=H, num_kv_heads=H,
         head_dim=D, max_q_len=32, max_kv_computed_len=0,
         block_size=blk, dtype=torch.bfloat16,
@@ -729,7 +741,7 @@ test_configs_swa_prefill = [
     "query, k_cache, v_cache, cu_seqlens_q, block_tables, seqlens_kv",
     [
         pytest.param(
-            *generate_paged_prefill_data(
+            *(lambda d: (d[0], d[1], d[2], d[3], d[5], d[6]))(generate_paged_prefill_data(
                 batch_size=B,
                 num_q_heads=Q_H,
                 num_kv_heads=KV_H,
@@ -738,7 +750,7 @@ test_configs_swa_prefill = [
                 max_kv_computed_len=KV_COMPUTED_LEN,
                 block_size=BLK_S,
                 dtype=dtype,
-            ),
+            )),
             id=ID,
         )
         for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_swa_prefill
@@ -804,7 +816,7 @@ test_configs_swa_decode = [
 ]
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, seqlens, block_tables",
+    "query, k_cache, v_cache, seqlens, block_tables, max_context_len",
     [
         pytest.param(
             *generate_paged_decode_data(
@@ -833,6 +845,7 @@ def test_paged_decode_swa(
     v_cache: torch.Tensor,
     seqlens: torch.Tensor,
     block_tables: torch.Tensor,
+    max_context_len: int,
     gqa_layout: str,
     global_window: int,
     local_window: int,
