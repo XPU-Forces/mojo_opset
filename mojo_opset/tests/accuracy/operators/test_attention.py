@@ -1359,6 +1359,7 @@ def test_paged_decode_swa(
         v_cache,
         seqlens,
         block_tables,
+        max_context_len,
         softmax_scale=softmax_scale,
         atol=atol,
         rtol=rtol,

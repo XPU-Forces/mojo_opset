@@ -12,6 +12,7 @@ from ixformer.contrib import vllm_flash_attn as ix_fa
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoPagedPrefillSWA
 from mojo_opset.core import MojoPagedDecodeGQA
+from mojo_opset.core import MojoPagedDecodeSWA
 
 class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
     """Ixformer implementation for paged prefill GQA."""
@@ -307,6 +308,7 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         Notes:
             - Head dim D only support [32, 64, 80, 96, 128, 160, 192, 224, 256].
             - Block size must be a multiple of 16.
+            - Hq: the number of query head; Hkv: the number of kv head.
             - If Hq > Hkv, K/V heads are repeated to match query heads.
             - Softmax is computed in float32 and cast back to the input dtype.
             - This implementation references variables `query` and `seqlens`; ensure they
@@ -333,8 +335,8 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         if block_tables.dtype != torch.int32:
             raise NotImplementedError("IxformerPagedDecodeGQA only support block_tables dtype = torch.int32.")
 
-        if max_context_len <= 1:
-            raise NotImplementedError("IxformerPagedDecodeGQA only support max_context_len > 1.")
+        if max_context_len <= 0:
+            raise NotImplementedError("IxformerPagedDecodeGQA only support max_context_len > 0.")
 
         ixf_f.vllm_paged_attention(
             output=output,
@@ -349,6 +351,83 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
             max_context_len=max_context_len,
             causal=self.is_causal,
             window_left=self.window_size
+        )
+
+        return output
+
+
+class IxformerPagedDecodeSWA(MojoPagedDecodeSWA):
+    """Ixformer implementation for paged decode SWA."""
+
+    supported_platforms_list = ["ilu"]
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        seq_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        max_context_len: int,
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+
+        """
+        Paged decode attention with sliding window (SWA) using a blocked KV cache.
+
+        Args:
+            q (torch.Tensor): Query of shape (B, Hq, D).
+            k_cache (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
+            v_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
+            seq_lens (torch.Tensor): Sequence lengths (B).
+            block_table (torch.Tensor): (B, num_blocks) mapping logical blocks to physical IDs.
+            max_context_len (int): Max sequence length, should be equal to seqlens.max().
+            softmax_scale (Optional[float]): Scale factor; defaults to 1/sqrt(D).
+
+        Returns:
+            torch.Tensor: Attention output of shape (B, Hq, D).
+
+        Notes:
+            - Head dim D only support [32, 64, 80, 96, 128, 160, 192, 224, 256].
+            - Block size must be a multiple of 16.
+            - Hq: the number of query head; Hkv: the number of kv head.
+            - If Hq > Hkv, K/V heads are repeated to match query heads.
+            - Softmax is computed in float32 and cast back to the input dtype.
+            - This implementation references variables `q` and `seq_lens`; ensure they
+              correspond to `q` and the sequence-lengths tensor in the caller.
+        """
+
+        if self.gqa_interleave:
+            raise NotImplementedError("IxformerPagedDecodeSWA does not support ABAB layout.")
+
+        batch_size, num_q_heads, head_dim = q.shape
+        _, num_kv_heads, block_size, head_dim = k_cache.shape
+
+        output = torch.empty(batch_size, num_q_heads, head_dim, dtype=q.dtype, device=q.device)
+
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(head_dim)
+
+        if block_table.dtype != torch.int32:
+            raise NotImplementedError("IxformerPagedDecodeSWA only support block_table dtype = torch.int32.")
+
+        if max_context_len <= 0:
+            raise NotImplementedError("IxformerPagedDecodeSWA only support max_context_len > 0.")
+
+        ixf_f.vllm_paged_attention(
+            output=output,
+            query=q,
+            key_cache=k_cache,
+            value_cache=v_cache,
+            num_kv_heads=num_kv_heads,
+            scale=softmax_scale,
+            block_tables=block_table,
+            context_lens=seq_lens,
+            block_size=block_size,
+            max_context_len=max_context_len,
+            causal=self.is_causal,
+            window_left=self.local_window_size,
+            global_window_size=self.global_window_size
         )
 
         return output

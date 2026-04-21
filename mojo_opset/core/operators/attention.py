@@ -1382,6 +1382,7 @@ class MojoPagedDecodeSWA(MojoOperator):
         v_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
         seq_lens: torch.Tensor,  # [bsz]
         block_table: torch.Tensor,  # [bsz, max_num_blocks]
+        max_context_len: int,
         softmax_scale: Optional[float] = None,
     ) -> torch.Tensor:
         # Note: for decode kernel, is_causal = False should never happen
