@@ -122,6 +122,8 @@ class MojoDynamicQuant(MojoOperator):
             self.register_parameter("smooth_scale", None)
         else:
             self.smooth_scale = torch.nn.Parameter(torch.empty(input_size, **self.tensor_factory_kwargs))
+            setattr(self.smooth_scale, "force_dtype", torch.float32)
+
         self.quant_dtype = quant_dtype
 
         if quant_dtype != torch.int8:
