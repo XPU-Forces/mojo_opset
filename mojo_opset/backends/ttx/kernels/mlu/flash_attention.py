@@ -1,9 +1,8 @@
 import torch
-
-from typing import Optional
-
+import math
 import triton
 import triton.language as tl
+from typing import Optional
 from mojo_opset.backends.ttx.kernels.mlu.utils import get_mlu_total_cores
 
 @triton.jit
@@ -138,6 +137,9 @@ def paged_attention_decode_impl(
     stride_o_batch, stride_o_head, _ = o.stride()
     stride_bt_batch, _ = block_tables.stride()
 
+    if softmax_scale is None:
+        softmax_scale = 1.0 / math.sqrt(head_size_qk)
+
     tile_k = 512
 
     paged_attention_decode_kernel[grid_size](
@@ -167,7 +169,7 @@ def paged_attention_decode_impl(
         head_size_vo,
         tile_k,
         gqa_interleave,
-        num_warps=4,
+        num_warps=1,
         num_stages=3,
     )
 
