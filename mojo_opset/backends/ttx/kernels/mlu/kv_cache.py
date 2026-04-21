@@ -240,8 +240,6 @@ def store_paged_kv_impl(
 
     grid = (grid_chunk, grid_head)
 
-    grid = (grid_chunk, grid_head)
-
     _store_paged_kv_cache_kernel[grid](
         k_states,
         v_states,
