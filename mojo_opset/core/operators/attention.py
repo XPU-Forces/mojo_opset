@@ -1279,6 +1279,7 @@ class MojoPagedPrefillSWA(MojoOperator):
         block_table: torch.Tensor,  # [bsz, max_num_blocks]
         softmax_scale: Optional[float] = None,
         seqlens_kv: Optional[torch.Tensor] = None,  # [bsz]
+        **kwargs,
     ) -> torch.Tensor:
         # Note: if is_causal = False, local_window_size and global_window_size are not used.
 

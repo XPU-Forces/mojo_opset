@@ -1215,10 +1215,10 @@ test_configs_swa_prefill = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_seqlens_q, block_tables, seqlens_kv",
+    "query, k_cache, v_cache, cu_seqlens_q, cu_seqlens_kv, block_table, seqlens_kv, max_seqlen_q, max_seqlen_k",
     [
         pytest.param(
-            *(lambda d: (d[0], d[1], d[2], d[3], d[5], d[6]))(generate_paged_prefill_data(
+            *generate_paged_prefill_data(
                 batch_size=B,
                 num_q_heads=Q_H,
                 num_kv_heads=KV_H,
@@ -1227,7 +1227,7 @@ test_configs_swa_prefill = [
                 max_kv_computed_len=KV_COMPUTED_LEN,
                 block_size=BLK_S,
                 dtype=dtype,
-            )),
+            ),
             id=ID,
         )
         for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_swa_prefill
@@ -1244,9 +1244,12 @@ def test_paged_prefill_swa(
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
-    block_tables: torch.Tensor,
-    gqa_layout: str,
+    cu_seqlens_kv: torch.Tensor,
+    block_table: torch.Tensor,
     seqlens_kv: Optional[torch.Tensor],
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    gqa_layout: str,
     global_window: int,
     local_window: int,
 ):
@@ -1274,9 +1277,12 @@ def test_paged_prefill_swa(
         k_cache,
         v_cache,
         cu_seqlens_q,
-        block_tables,
+        block_table=block_table,
         softmax_scale=softmax_scale,
         seqlens_kv=seqlens_kv,
+        cu_seqlens_kv=cu_seqlens_kv,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
     )
