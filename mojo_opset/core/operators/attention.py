@@ -1620,7 +1620,18 @@ class MojoSWA(MojoOperator):
         return o
 
 
-class MojoPagedPrefillGQAC8(MojoOperator):
+def _dynamic_quantize(tensor, qmax, qmin, quant_dtype):
+    amax = tensor.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)
+    scale = amax / qmax
+    scale = torch.where(scale < 1e-6, 1.0, scale)
+    
+    tensor_scaled = tensor / scale
+    tensor_quant = tensor_scaled.round().clamp(qmin, qmax).to(quant_dtype)
+    
+    scale = scale.view(*tensor.shape[:-1], 1)
+    return tensor_quant, scale
+
+class MojoPagedPrefillQuantGQA(MojoOperator):
     def __init__(
         self,
         is_causal: bool = True,
@@ -1649,7 +1660,6 @@ class MojoPagedPrefillGQAC8(MojoOperator):
         else:
             raise NotImplementedError(f"quant_dtype {self.quant_dtype} is not supported")
 
-
     def forward(
         self,
         query: torch.Tensor,
@@ -1672,8 +1682,6 @@ class MojoPagedPrefillGQAC8(MojoOperator):
             k_qscale (torch.Tensor): per-channel scale of key, shape (Hkv, D)
             value_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
             v_qscale (torch.Tensor): per-channel scale of value, shape (Hkv, D)
-            key_cache (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
-            value_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
             cu_seqlens_q (torch.Tensor): Cumulative query lengths, shape (B+1,);
                 `cu_seqlens_q[i]` is the start offset for query at batch i; `cu_seqlens_q[-1] == T`.
             block_tables (torch.Tensor): Logical-to-physical block IDs per batch,
@@ -1702,9 +1710,17 @@ class MojoPagedPrefillGQAC8(MojoOperator):
         if seqlens_kv is not None:
             assert seqlens_kv.dtype == torch.int32
         total_q_tokens, num_q_heads, head_dim = query.shape
-        _, num_kv_heads, block_size, _ = key_cache.shape
+        _, num_kv_heads, page_size, _ = key_cache.shape
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(head_dim)
+        
+        if num_q_heads != num_kv_heads:
+            if self.gqa_layout == "AABB":
+                k_qscale = k_qscale.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
+                v_qscale = v_qscale.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
+            else:
+                k_qscale = k_qscale.repeat((num_q_heads // num_kv_heads, 1))
+                v_qscale = v_qscale.repeat((num_q_heads // num_kv_heads, 1))
 
         outputs = torch.zeros(total_q_tokens, num_q_heads, head_dim, dtype=query.dtype, device=query.device)
 
@@ -1715,64 +1731,56 @@ class MojoPagedPrefillGQAC8(MojoOperator):
             q_seq_len = q_lens[i].item()
             start_loc = cu_seqlens_q[i].item()
             end_loc = cu_seqlens_q[i + 1].item()
-            q = query[start_loc:end_loc]
+            q = query[start_loc:end_loc].permute(1, 0, 2) # [n_q_heads, q_seq_len, head_dim]
             if seqlens_kv is None:
                 kv_seq_len = q_seq_len
             else:
                 kv_seq_len = seqlens_kv[i].item()
 
-            num_blocks_for_seq = (kv_seq_len + block_size - 1) // block_size
-            k_unpadded = torch.zeros(kv_seq_len, num_kv_heads, head_dim, dtype=query.dtype, device=query.device)
-            v_unpadded = torch.zeros(kv_seq_len, num_kv_heads, head_dim, dtype=query.dtype, device=query.device)
+            q_quant, q_scale = _dynamic_quantize(q * k_qscale.unsqueeze(1), self.qmax, self.qmin, self.quant_dtype)
 
-            for j in range(num_blocks_for_seq):
-                physical_block_id = block_tables[i, j].item()
-
-                start_pos_in_seq = j * block_size
-                end_pos_in_seq = min(start_pos_in_seq + block_size, kv_seq_len)
-                tokens_in_block = end_pos_in_seq - start_pos_in_seq
-
-                k_slice = key_cache[physical_block_id, :, :tokens_in_block, :]
-
-                k_unpadded[start_pos_in_seq:end_pos_in_seq, :, :] = k_slice.permute(1, 0, 2).to(query.dtype) * k_qscale
-
-                v_slice = value_cache[physical_block_id, :, :tokens_in_block, :]
-                v_unpadded[start_pos_in_seq:end_pos_in_seq, :, :] = v_slice.permute(1, 0, 2).to(query.dtype) * v_qscale
+            kv_blocks = (kv_seq_len + page_size - 1) // page_size
+            k_unpadded = key_cache[block_tables[i, :kv_blocks]] # [kv_blocks, n_kv_heads, page_size, head_dim]
+            k_unpadded = k_unpadded.permute(1, 0, 2, 3).reshape(num_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
+            v_unpadded = value_cache[block_tables[i, :kv_blocks]] # [kv_blocks, n_kv_heads, page_size, head_dim]
+            v_unpadded = v_unpadded.permute(1, 0, 2, 3).reshape(num_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
 
             if num_q_heads != num_kv_heads:
                 if self.gqa_layout == "AABB":
-                    k_expanded = k_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=1)
-                    v_expanded = v_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=1)
+                    k_expanded = k_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
+                    v_expanded = v_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
                 else:
-                    k_expanded = k_unpadded.repeat((1, num_q_heads // num_kv_heads, 1))
-                    v_expanded = v_unpadded.repeat((1, num_q_heads // num_kv_heads, 1))
+                    k_expanded = k_unpadded.repeat((num_q_heads // num_kv_heads, 1, 1))
+                    v_expanded = v_unpadded.repeat((num_q_heads // num_kv_heads, 1, 1))
             else:
                 k_expanded = k_unpadded
                 v_expanded = v_unpadded
 
-            attn_scores = torch.einsum("thd,khd->thk", q, k_expanded) * softmax_scale
+            attn_scores = torch.matmul(q_quant.float(), k_expanded.mT.float()) * q_scale * softmax_scale
             if self.is_causal:
                 attn_mask = torch.ones(q_seq_len, kv_seq_len, device=query.device, dtype=torch.bool).tril(
                     kv_seq_len - q_seq_len
                 )
-                attn_scores.masked_fill_(~attn_mask.unsqueeze(1), -torch.inf)
+                attn_scores = torch.where(attn_mask, attn_scores, float("-inf"))
             elif mask is not None:
                 if mask.dim() == 2:
                     attn_mask = mask
                 else:
                     attn_mask = mask[i]
                 attn_mask = attn_mask[kv_seq_len - q_seq_len : kv_seq_len, :kv_seq_len]
-                attn_scores.masked_fill_(~attn_mask.unsqueeze(1), -torch.inf)
+                attn_scores = (attn_mask, attn_scores, float("-inf"))
 
             attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
-            outputs[start_loc:end_loc] = torch.einsum("thk,khd->thd", attn_probs, v_expanded)
+            attn_probs_quant, attn_probs_scale = _dynamic_quantize(attn_probs, self.qmax, self.qmin, self.quant_dtype)
+            o = torch.matmul(attn_probs_quant.float(), v_expanded.float()) * attn_probs_scale * v_qscale.unsqueeze(1)
+            outputs[start_loc:end_loc] = o.permute(1, 0, 2)
         return outputs
 
     def extra_repr(self) -> str:
         return f"{self.is_causal=}, {self.gqa_layout=}, {self.quant_dtype=}".replace("self.", "")
 
 
-class MojoPagedDecodeGQAC8(MojoOperator):
+class MojoPagedDecodeQuantGQA(MojoOperator):
     def __init__(
         self,
         is_causal: bool = True,
@@ -1853,44 +1861,46 @@ class MojoPagedDecodeGQAC8(MojoOperator):
         assert not cu_seq_lens, "varlen is not supported"
 
         batch_size, num_q_heads, head_dim = query.shape
-        _, num_kv_heads, block_size, head_dim = key_cache.shape
+        _, num_kv_heads, page_size, head_dim = key_cache.shape
 
         num_share_q_heads = num_q_heads // num_kv_heads
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(head_dim)
+
+        if num_share_q_heads > 1:
+            if self.gqa_layout == "AABB":
+                k_qscale = k_qscale.repeat_interleave(num_share_q_heads, dim=0)
+                v_qscale = v_qscale.repeat_interleave(num_share_q_heads, dim=0)
+            else:
+                k_qscale = k_qscale.repeat((num_share_q_heads, 1))
+                v_qscale = v_qscale.repeat((num_share_q_heads, 1))
 
         outputs = torch.zeros(batch_size, num_q_heads, head_dim, dtype=query.dtype, device=query.device)
 
         for i in range(batch_size):
             seq_len = seqlens[i].item()
 
-            q = query[i]
+            q = query[i].unsqueeze(1) # [n_q_heads, 1, head_dim]
+            q_quant, q_scale = _dynamic_quantize(q * k_qscale.unsqueeze(1), self.qmax, self.qmin, self.quant_dtype)
 
-            k_ref = torch.zeros(seq_len, num_kv_heads, head_dim, device=query.device, dtype=query.dtype)
-            v_ref = torch.zeros(seq_len, num_kv_heads, head_dim, device=query.device, dtype=query.dtype)
-            num_blocks_for_seq = (seq_len + block_size - 1) // block_size
+            kv_blocks = (seq_len + page_size - 1) // page_size
+            k_unpadded = key_cache[block_tables[i, :kv_blocks]] # [kv_blocks, n_kv_heads, page_size, head_dim]
+            k_unpadded = k_unpadded.permute(1, 0, 2, 3).reshape(num_kv_heads, kv_blocks * page_size, head_dim)[:, :seq_len]
+            v_unpadded = value_cache[block_tables[i, :kv_blocks]] # [kv_blocks, n_kv_heads, page_size, head_dim]
+            v_unpadded = v_unpadded.permute(1, 0, 2, 3).reshape(num_kv_heads, kv_blocks * page_size, head_dim)[:, :seq_len]
 
-            for j in range(num_blocks_for_seq):
-                physical_block_id = block_tables[i, j].item()
-
-                start_pos = j * block_size
-                tokens_in_block = min(block_size, seq_len - start_pos)
-
-                k_slice = key_cache[physical_block_id, :, :tokens_in_block, :]
-                v_slice = value_cache[physical_block_id, :, :tokens_in_block, :]
-
-                k_ref[start_pos : start_pos + tokens_in_block, :, :] = k_slice.permute(1, 0, 2).to(query.dtype) * k_qscale
-                v_ref[start_pos : start_pos + tokens_in_block, :, :] = v_slice.permute(1, 0, 2).to(query.dtype) * v_qscale
-
-            if num_share_q_heads > 1:
+            if num_q_heads != num_kv_heads:
                 if self.gqa_layout == "AABB":
-                    k_ref = k_ref.repeat_interleave(num_share_q_heads, dim=1)
-                    v_ref = v_ref.repeat_interleave(num_share_q_heads, dim=1)
+                    k_expanded = k_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
+                    v_expanded = v_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
                 else:
-                    k_ref = k_ref.repeat((1, num_share_q_heads, 1))
-                    v_ref = v_ref.repeat((1, num_share_q_heads, 1))
+                    k_expanded = k_unpadded.repeat((num_q_heads // num_kv_heads, 1, 1))
+                    v_expanded = v_unpadded.repeat((num_q_heads // num_kv_heads, 1, 1))
+            else:
+                k_expanded = k_unpadded
+                v_expanded = v_unpadded
 
-            attn_scores = torch.einsum("hd,khd->hk", q, k_ref) * softmax_scale
+            attn_scores = torch.matmul(q_quant.float(), k_expanded.mT.float()) * q_scale * softmax_scale
             # Note: if is_causal=True, we just do full attention over 1 query to seq_len key/value
             if not self.is_causal and mask is not None:
                 if mask.dim() == 2:
@@ -1898,17 +1908,19 @@ class MojoPagedDecodeGQAC8(MojoOperator):
                 else:
                     attn_mask = mask[i]
                 attn_mask = attn_mask[seq_len, :seq_len]
-                attn_scores.masked_fill_(attn_mask.unsqueeze(0), -torch.inf)
+                attn_scores = torch.where(attn_mask, attn_scores, float("-inf"))
 
-            attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32)
-            outputs[i] = torch.einsum("hk,khd->hd", attn_probs, v_ref)
+            attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
+            attn_probs_quant, attn_probs_scale = _dynamic_quantize(attn_probs, self.qmax, self.qmin, self.quant_dtype)
+            o = torch.matmul(attn_probs_quant.float(), v_expanded.float()) * attn_probs_scale * v_qscale.unsqueeze(1)
+            outputs[i] = o.squeeze(1)
         return outputs
 
     def extra_repr(self) -> str:
         return f"{self.is_causal=}, {self.gqa_layout=}, {self.quant_dtype=}".replace("self.", "")
 
 
-class MojoPagedPrefillSWAC8(MojoOperator):
+class MojoPagedPrefillQuantSWA(MojoOperator):
     def __init__(
         self,
         is_causal: bool = True,
@@ -1968,6 +1980,14 @@ class MojoPagedPrefillSWAC8(MojoOperator):
         if seqlens_kv is None:
             seqlens_kv = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
 
+        if n_q_heads != n_kv_heads:
+            if self.gqa_interleave:
+                k_qscale = k_qscale.repeat((n_q_heads // n_kv_heads, 1, 1)) # -> [n_q_heads, head_dim]
+                v_qscale = v_qscale.repeat((n_q_heads // n_kv_heads, 1, 1)) # -> [n_q_heads, head_dim]
+            else:                
+                k_qscale = k_qscale.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, head_dim]
+                v_qscale = v_qscale.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, head_dim]
+        
         o = torch.empty_like(q)
         bsz = cu_seqlens_q.shape[0] - 1
         for i in range(bsz):
@@ -1977,12 +1997,12 @@ class MojoPagedPrefillSWAC8(MojoOperator):
                 # skip padded query
                 continue
             q_i = q_i.permute(1, 0, 2)  # -> [n_q_heads, q_seq_len, head_dim]
+            q_i_quant, q_i_scale = _dynamic_quantize(q_i * k_qscale.unsqueeze(1), self.qmax, self.qmin, self.quant_dtype)
 
             kv_seq_len = seqlens_kv[i].item()
             kv_blocks = (kv_seq_len + page_size - 1) // page_size
             k_i = k_cache[block_table[i, :kv_blocks]] # [kv_blocks, n_kv_heads, page_size, head_dim]
             k_i = k_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
-            k_i = k_i.to(q.dtype) * k_qscale.unsqueeze(1)
             k_i_T = k_i.permute(0, 2, 1)  # -> [n_kv_heads, head_dim, kv_seq_len]
             if n_q_heads != n_kv_heads:
                 if self.gqa_interleave:
@@ -1992,8 +2012,7 @@ class MojoPagedPrefillSWAC8(MojoOperator):
                         n_q_heads // n_kv_heads, dim=0
                     )  # -> [n_q_heads, head_dim, kv_seq_len]
 
-            k_i_T = k_i_T
-            s_i = torch.bmm(q_i, k_i_T).float() * softmax_scale  # -> [n_q_heads, q_seq_len, kv_seq_len]
+            s_i = torch.bmm(q_i_quant.float(), k_i_T.float()) * q_i_scale * softmax_scale  # -> [n_q_heads, q_seq_len, kv_seq_len]
 
             if self.is_causal:
                 s_mask = _generate_window_mask(
@@ -2007,26 +2026,23 @@ class MojoPagedPrefillSWAC8(MojoOperator):
             s_i = s_i - m_i  # -> [n_q_heads, q_seq_len, kv_seq_len]
             p_i = torch.exp(s_i)
             l_i = torch.sum(p_i, dim=-1, keepdim=True)  # -> [n_q_heads, q_seq_len, 1]
-            p_i = p_i.to(q.dtype)
+            p_i_quant, p_i_scale = _dynamic_quantize(p_i / l_i, self.qmax, self.qmin, self.quant_dtype)
 
             v_i = v_cache[block_table[i, :kv_blocks]]
             v_i = v_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[
                 :, :kv_seq_len
             ]  # -> [n_kv_heads, kv_seq_len, head_dim]
-            v_i = v_i.to(q.dtype) * v_qscale.unsqueeze(1)
             if n_q_heads != n_kv_heads:
                 if self.gqa_interleave:
                     v_i = v_i.repeat((n_q_heads // n_kv_heads, 1, 1))
                 else:
                     v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, kv_seq_len, head_dim]
-            o_i = torch.bmm(p_i.float(), v_i.float())  # -> [n_q_heads, q_seq_len, head_dim]
-            o_i = o_i / l_i  # -> [n_q_heads, q_seq_len, head_dim]
+            o_i = torch.bmm(p_i_quant.float(), v_i.float()) * p_i_scale * v_qscale.unsqueeze(1)  # -> [n_q_heads, q_seq_len, head_dim]
             o_i = o_i.permute(1, 0, 2)  # -> [q_seq_len, n_q_heads, head_dim]
             o[cu_seqlens_q[i] : cu_seqlens_q[i + 1]] = o_i.to(o.dtype)
         return o
 
-
-class MojoPagedDecodeSWAC8(MojoOperator):
+class MojoPagedDecodeQuantSWA(MojoOperator):
     def __init__(
         self,
         is_causal: bool = True,
@@ -2080,9 +2096,19 @@ class MojoPagedDecodeSWAC8(MojoOperator):
         if softmax_scale is None:
             softmax_scale = 1.0 / (head_dim**0.5)
 
+        if n_q_heads != n_kv_heads:
+            if self.gqa_interleave:
+                k_qscale = k_qscale.repeat((n_q_heads // n_kv_heads, 1, 1)) # -> [n_q_heads, head_dim]
+                v_qscale = v_qscale.repeat((n_q_heads // n_kv_heads, 1, 1)) # -> [n_q_heads, head_dim]
+            else:                
+                k_qscale = k_qscale.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, head_dim]
+                v_qscale = v_qscale.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, head_dim]
+ 
+
         o = torch.zeros_like(q)
         for i in range(bsz):
             q_i = q[i].unsqueeze(1) # -> [n_q_heads, 1, head_dim]
+            q_i_quant, q_i_scale = _dynamic_quantize(q_i * k_qscale.unsqueeze(1), self.qmax, self.qmin, self.quant_dtype)
             kv_seq_len = seq_lens[i].item()
             if kv_seq_len == 0:
                 # skip padded tokens
@@ -2090,7 +2116,6 @@ class MojoPagedDecodeSWAC8(MojoOperator):
             kv_blocks = (kv_seq_len + page_size - 1) // page_size
             k_i = k_cache[block_table[i, :kv_blocks]]  # [kv_blocks, n_kv_heads, page_size, head_dim]
             k_i = k_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
-            k_i = k_i.to(q.dtype) * k_qscale.unsqueeze(1)
             k_i_T = k_i.permute(0, 2, 1)  # -> [n_kv_heads, head_dim, kv_seq_len]
             if n_q_heads != n_kv_heads:
                 if self.gqa_interleave:
@@ -2099,7 +2124,7 @@ class MojoPagedDecodeSWAC8(MojoOperator):
                     k_i_T = k_i_T.repeat_interleave(
                         n_q_heads // n_kv_heads, dim=0
                     )  # -> [n_q_heads, head_dim, kv_seq_len]
-            s_i = torch.bmm(q_i, k_i_T).float() * softmax_scale  # -> [n_q_heads, 1, kv_seq_len]
+            s_i = torch.bmm(q_i_quant.float(), k_i_T.float()) * q_i_scale * softmax_scale  # -> [n_q_heads, 1, kv_seq_len]
 
             if self.is_causal:
                 s_mask = _generate_window_mask(
@@ -2113,20 +2138,18 @@ class MojoPagedDecodeSWAC8(MojoOperator):
             s_i = s_i - m_i  # -> [n_q_heads, 1, kv_seq_len]
             p_i = torch.exp(s_i)
             l_i = torch.sum(p_i, dim=-1, keepdim=True)  # -> [n_q_heads, 1, 1]
-            p_i = p_i.to(q.dtype)
+            p_i_quant, p_i_scale = _dynamic_quantize(p_i / l_i, self.qmax, self.qmin, self.quant_dtype)
 
             v_i = v_cache[block_table[i, :kv_blocks]]
             v_i = v_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[
                 :, :kv_seq_len
             ]  # -> [n_kv_heads, kv_seq_len, head_dim]
-            v_i = v_i.to(q.dtype) * v_qscale.unsqueeze(1)
             if n_q_heads != n_kv_heads:
                 if self.gqa_interleave:
                     v_i = v_i.repeat((n_q_heads // n_kv_heads, 1, 1))
                 else:
                     v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, kv_seq_len, head_dim]
-            o_i = torch.bmm(p_i, v_i)  # -> [n_q_heads, 1, head_dim]
-            o_i = o_i / l_i  # -> [n_q_heads, 1, head_dim]
+            o_i = torch.bmm(p_i_quant.float(), v_i.float()) * p_i_scale * v_qscale.unsqueeze(1)  # -> [n_q_heads, 1, head_dim]
             o_i = o_i.squeeze(1)  # -> [n_q_heads, head_dim]
             o[i] = o_i.to(o.dtype)
         return o
