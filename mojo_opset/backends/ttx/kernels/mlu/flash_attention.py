@@ -38,7 +38,6 @@ def paged_attention_decode_kernel(
     TILE_Q: tl.constexpr = Q_DIV_K
     SEG_SIZE: tl.constexpr = TILE_K if TILE_K < BLOCK_SIZE else BLOCK_SIZE  # block_size is too large ???
     BLOCKS_ON_CORE: tl.constexpr = (TILE_K + BLOCK_SIZE - 1) // BLOCK_SIZE
-    BLOCKS_NEXT: tl.constexpr = TILE_K // BLOCK_SIZE
     
     total_tasks = batch_size * KV_HEADS
     core_nums = tl.num_programs(0)
@@ -70,12 +69,12 @@ def paged_attention_decode_kernel(
 
         for k_begin in range(0, context_len, TILE_K):
             seq_k = min(TILE_K, context_len - k_begin)
+            block_begin: tl.constexpr = k_begin // BLOCK_SIZE
             block_k_begin: tl.constexpr = k_begin % BLOCK_SIZE
 
             # load block_table
             block_mask = block_table_seg < ((seq_k + BLOCK_SIZE - 1) // BLOCK_SIZE)
-            block_ids = tl.load(block_table_ptrs, mask=block_mask, other=0)
-            block_table_ptrs += BLOCKS_NEXT
+            block_ids = tl.load(block_table_ptrs + block_begin, mask=block_mask, other=0)
 
             # load kcache, tile_k = seg_size * blocks_on_core, block_ids is not equidistant
             kcache_offset = block_ids * stride_k_nblk + kv_head_id * stride_k_head + block_k_begin * stride_k_blksz
