@@ -215,7 +215,7 @@ def store_paged_kv_impl(
     head_dim = k_states.shape[2]
     block_size = key_cache.shape[2]
 
-    chunk_indices = prepare_kv_chunk_indices(cu_seqlens, kv_lens, block_size, is_decode=is_decode)
+    chunk_indices = prepare_kv_chunk_indices(cu_seqlens, kv_lens, 128, is_decode=is_decode)
     total_chunks = chunk_indices.shape[0]
 
     # Use large BLOCK_HEADS for better head dimension parallelism
