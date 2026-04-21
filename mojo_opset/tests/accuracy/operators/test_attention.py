@@ -625,10 +625,39 @@ def test_paged_prefill_gqa_with_graph(
             torch.cuda.empty_cache()
             return
 
+    # --------------------------
+    # CUDA Graph inference
+    # --------------------------
+    torch.cuda.synchronize()
+    graph.replay()
+    torch.cuda.synchronize()
+
     paged_prefill_attn_ref = MojoPagedPrefillGQA._registry.get("torch")(
         is_causal=True,
         gqa_layout=gqa_layout,
     )
+
+    # --------------------------
+    # Compute reference output
+    # --------------------------
+    ref_output = paged_prefill_attn_ref(
+        query,
+        k_cache,
+        v_cache,
+        cu_seqlens_q,
+        block_tables=block_tables,
+        softmax_scale=softmax_scale,
+        seqlens_kv=seqlens_kv,
+        cu_seqlens_kv=cu_seqlens_kv,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+    )
+
+    atol = 2e-2 if query.dtype != torch.float32 else 1e-5
+    rtol = 2e-2 if query.dtype != torch.float32 else 1e-6
+
+    # Check max batches match reference results
+    check_tol_diff(output, ref_output, atol=atol, rtol=rtol)
 
     max_batch_size = cu_seqlens_q.shape[0] - 1
     max_total_q_tokens, num_q_heads, head_dim = query.shape
@@ -637,8 +666,6 @@ def test_paged_prefill_gqa_with_graph(
     max_kv_len_cfg = int(seqlens_kv.max().item())
     max_kv_computed_len_cfg = max_kv_len_cfg - max_q_len_cfg
 
-    atol = 2e-2 if query.dtype != torch.float32 else 1e-5
-    rtol = 2e-2 if query.dtype != torch.float32 else 1e-6
     for test_step in range(5):
         current_batch_size = torch.randint(1, max_batch_size + 1, ()).item()
 
