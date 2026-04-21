@@ -8,7 +8,7 @@ from mojo_opset.core.operators.kv_cache import assert_paged_kv_store_contract
 
 
 class TTXStorePagedKVCache(MojoStorePagedKVCache):
-    supported_platforms_list = ["npu", "ilu"]
+    supported_platforms_list = ["npu", "ilu", "mlu"]
 
     def forward(
         self,
