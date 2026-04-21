@@ -29,6 +29,7 @@ class TTXGemmDequant(MojoGemmDequant):
         self,
         input: torch.Tensor,
         weight: torch.Tensor,
+        input_scale: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.trans_weight:
@@ -44,7 +45,7 @@ class TTXGemmDequant(MojoGemmDequant):
 
         return int8_gemm_dequant(
             input, bt,
-            self.input_scale.flatten().float(),
+            input_scale.flatten().float(),
             self.weight_scale.flatten().float(),
             bias,
             M, N,

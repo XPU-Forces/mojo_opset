@@ -48,17 +48,15 @@ def _make_gemm_dequant_perf_data(m, k, n, output_dtype, trans_weight, has_bias):
 @bypass_not_implemented
 def test_gemm_dequant_perf(x_i8, w_i8, x_scale, w_scale, bias, output_dtype, trans_weight):
     op = MojoGemmDequant(
-        input_scale_size=x_scale.numel(),
         weight_scale_size=w_scale.numel(),
         output_dtype=output_dtype,
         trans_weight=trans_weight,
     )
     op.load_state_dict(
         {
-            "input_scale": x_scale,
             "weight_scale": w_scale,
         },
         strict=False,
     )
 
-    perf(lambda: op(x_i8, w_i8, bias))  # noqa: F821
+    perf(lambda: op(x_i8, w_i8, x_scale, bias))  # noqa: F821
