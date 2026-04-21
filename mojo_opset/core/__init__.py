@@ -48,6 +48,7 @@ from .operators.gemm import MojoGroupGemm
 from .operators.gemm import MojoQuantGroupLinearReduceSum
 from .operators.gemm import MojoGroupGemm as MojoGroupLinear
 from .operators.linear import MojoLinear
+from .operators.linear import MojoQuantLinear
 
 """ compute + comm """
 from .operators.compute_with_comm import MojoAllGatherGemm
@@ -173,6 +174,7 @@ __all__ = [
     "MojoStorePagedMLAKVCache",
 
     "MojoLinear",
+    "MojoQuantLinear",
     "MojoGemmDequant",
     "MojoGroupGemm",
     "MojoQuantGroupLinearReduceSum",
