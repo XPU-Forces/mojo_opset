@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 
@@ -24,6 +24,25 @@ class IxformerMoEGating(MojoMoEGating):
 
 class IxformerMoEInitRoutingDynamicQuant(MojoMoEInitRoutingDynamicQuant):
     supported_platforms_list = ["ilu"]
+    def __init__(
+        self,
+        num_experts: int,
+        top_k: int,
+        quant_block_size: int = 8,
+        quant_dtype: torch.dtype = torch.int8,
+        start_expert_id: int = 0,
+        end_expert_id: Optional[int] = None,
+        enable_cuda_graph: bool = False,
+    ):
+        super().__init__(
+            num_experts=num_experts,
+            top_k=top_k,
+            quant_block_size=quant_block_size,
+            quant_dtype=quant_dtype,
+            start_expert_id=start_expert_id,
+            end_expert_id=end_expert_id,
+        )
+        self.enable_cuda_graph = enable_cuda_graph
 
     def forward(self,
                 hidden_states: torch.Tensor,
@@ -36,15 +55,26 @@ class IxformerMoEInitRoutingDynamicQuant(MojoMoEInitRoutingDynamicQuant):
         bs, seq_len, dim = hidden_states.shape
         hidden_states = hidden_states.view(bs * seq_len, -1)
         num_tokens, top_k = top_k_indices.shape
-        (src_to_dst, 
-         sorted_token_ids,
-         expert_sizes_gpu, 
-         expert_sizes_cpu,
-         expand_tokens) = ixf_f.moe_compute_token_index_ep(top_k_indices, 
-                                                           self.num_experts,
-                                                           self.start_expert_id,
-                                                           self.end_expert_id,
-                                                           )
+        if not self.enable_cuda_graph:
+            (src_to_dst, 
+             sorted_token_ids,
+             expert_sizes_gpu, 
+             expert_sizes_cpu,
+             expand_tokens) = ixf_f.moe_compute_token_index_ep(top_k_indices, 
+                                                               self.num_experts,
+                                                               self.start_expert_id,
+                                                               self.end_expert_id,
+                                                              )
+            expert_sizes = expert_sizes_cpu
+        else:
+            (src_to_dst, 
+            sorted_token_ids,
+            expert_sizes_gpu, 
+            expert_sizes_cpu) = ixf_f.moe_compute_token_index(top_k_indices, self.num_experts)
+            
+            expand_tokens = num_tokens * self.top_k
+            expert_sizes = expert_sizes_gpu
+
         if sorted_token_ids.numel() == 0:
             return hidden_states, None, None, None, None
 
@@ -56,8 +86,7 @@ class IxformerMoEInitRoutingDynamicQuant(MojoMoEInitRoutingDynamicQuant):
                                                src_to_dst=src_to_dst,
                                                topk_ids=top_k_indices,
                                                smooth_scales=smooth_scale)
-        return i8_hidden_states.view(-1, dim), sorted_token_ids, src_to_dst, expert_sizes_cpu, quant_scale
-
+        return i8_hidden_states.view(-1, dim), sorted_token_ids, src_to_dst, expert_sizes, quant_scale
 
 class IxformerFusedSwiGLUMoEScaleDynamicQuantize(MojoFusedSwiGLUMoEScaleDynamicQuantize):
     supported_platforms_list = ["ilu"]
@@ -84,6 +113,25 @@ class IxformerFusedSwiGLUMoEScaleDynamicQuantize(MojoFusedSwiGLUMoEScaleDynamicQ
 
 class IxformerGroupQuantGemmMoE(MojoGroupQuantGemmMoE):
     supported_platforms_list = ["ilu"]
+    def __init__(
+        self,
+        output_dtype: torch.dtype = torch.bfloat16,
+        trans_weight: bool = True,
+        quant_block_size: int = 8,
+        quant_algo: str = "none",
+        top_k: Optional[int] = None,
+        use_splitk: bool = False,
+        enable_cuda_graph: bool = False,
+    ):
+        super().__init__(
+            output_dtype=output_dtype,
+            trans_weight=trans_weight,
+            quant_block_size=quant_block_size,
+            quant_algo=quant_algo,
+            top_k=top_k,
+            use_splitk=use_splitk,
+        )
+        self.enable_cuda_graph = enable_cuda_graph
 
     def forward(self,
                 input: torch.Tensor,
@@ -93,25 +141,66 @@ class IxformerGroupQuantGemmMoE(MojoGroupQuantGemmMoE):
                 input_scale: Optional[torch.Tensor] = None,
                 bias: Optional[torch.Tensor] = None):
         ixf_f = _get_ixf_and_check_device(input, self.__class__.__name__)
-        if not self.trans_weight and (weight.shape[1] % 64 != 0 or weight.shape[2] % 64 != 0):
-            raise NotImplementedError(f"N, K must be divisible by 64, but got {weight.shape[1]}, {weight.shape[2]}")
-        if self.trans_weight and weight.shape[2] % 64 != 0:
-            raise NotImplementedError(f"K must be divisible by 64, but got {weight.shape[2]}")
-        quant_gemm_output = ixf_f.moe_w8a8_group_gemm(
-                                    input=input,
-                                    weight=weight,
-                                    i_scales=input_scale,
-                                    w_scales=weight_scale,
-                                    output_dtype=self.output_dtype,
-                                    tokens_per_experts=token_count,
-                                    dst_to_src=None,
-                                    bias=bias,
-                                    format="TN" if self.trans_weight else "NN",)
+        if not self.enable_cuda_graph:
+            if not self.trans_weight and (weight.shape[1] % 64 != 0 or weight.shape[2] % 64 != 0):
+                raise NotImplementedError(f"N, K must be divisible by 64, but got {weight.shape[1]}, {weight.shape[2]}")
+            if self.trans_weight and weight.shape[2] % 64 != 0:
+                raise NotImplementedError(f"K must be divisible by 64, but got {weight.shape[2]}")
+            quant_gemm_output = ixf_f.moe_w8a8_group_gemm(
+                                        input=input,
+                                        weight=weight,
+                                        i_scales=input_scale,
+                                        w_scales=weight_scale,
+                                        output_dtype=self.output_dtype,
+                                        tokens_per_experts=token_count,
+                                        dst_to_src=None,
+                                        bias=bias,
+                                        format="TN" if self.trans_weight else "NN",)
+        else:
+            if self.trans_weight:
+                raise NotImplementedError("Trans weight is not supported for cuda graph.")
+            if weight.shape[1] % 16 != 0 or weight.shape[2] % 64 != 0:
+                raise NotImplementedError(f"N must be divisible by 64, but got {weight.shape[2]}, \
+                                            K must be divisible by 16, but got {weight.shape[1]}")
+
+            quant_gemm_output = ixf_f.moe_w8a8_group_gemv(
+                                        input=input,
+                                        weight=weight,
+                                        i_scales=input_scale,
+                                        w_scales=weight_scale,
+                                        output_dtype=self.output_dtype,
+                                        tokens_per_experts=token_count,
+                                        dst_to_src=None,
+                                        bias=bias,
+                                        format=0,)
         return quant_gemm_output
 
 
 class IxformerGroupQuantGemmCombineMoE(MojoGroupQuantGemmCombineMoE):
     supported_platforms_list = ["ilu"]
+    def __init__(
+        self,
+        output_dtype: torch.dtype = torch.bfloat16,
+        trans_weight: bool = False,
+        quant_block_size: int = 8,
+        shared_expert_rank_num: float = 1.0,
+        num_experts_per_rank: Optional[int] = None,
+        normalize_top_k_gates: bool = False,
+        top_k: Optional[int] = None,
+        ep_rank: int = 0,
+        enable_cuda_graph: bool = False,
+    ):
+        super().__init__(
+            output_dtype=output_dtype,
+            trans_weight=trans_weight,
+            quant_block_size=quant_block_size,
+            shared_expert_rank_num=shared_expert_rank_num,
+            num_experts_per_rank=num_experts_per_rank,
+            normalize_top_k_gates=normalize_top_k_gates,
+            top_k=top_k,
+            ep_rank=ep_rank,
+        )
+        self.enable_cuda_graph = enable_cuda_graph
 
     def forward(self,
                 input: torch.Tensor,
@@ -129,27 +218,44 @@ class IxformerGroupQuantGemmCombineMoE(MojoGroupQuantGemmCombineMoE):
         num_tokens, top_k = top_k_gates.shape
         if self.top_k is not None and self.top_k != top_k:
             raise ValueError(f"top_k mismatch: got {top_k}, expected {self.top_k}")
-        dim = weight.shape[1] if self.trans_weight else weight.shape[2]
-        if not self.trans_weight and (weight.shape[1] % 64 != 0 or weight.shape[2] % 64 != 0):
-            raise NotImplementedError(f"N, K must be divisible by 64, but got {weight.shape[1]}, {weight.shape[2]}")
-        if self.trans_weight and weight.shape[2] % 64 != 0:
-            raise NotImplementedError(f"K must be divisible by 64, but got {weight.shape[2]}")
-        quant_gemm_output = torch.empty(
-            (num_tokens * self.top_k, dim),
-            device=input.device,
-            dtype=torch.bfloat16,
-        )
-        ixf_f.moe_w8a8_group_gemm(
-                    input=input,
-                    weight=weight,
-                    i_scales=input_scale,
-                    w_scales=weight_scale,
-                    output_dtype=torch.bfloat16,
-                    tokens_per_experts=token_count,
-                    dst_to_src=token_indices,
-                    bias=bias,
-                    format="TN" if self.trans_weight else "NN",
-                    output=quant_gemm_output)
+        if not self.enable_cuda_graph:
+            dim = weight.shape[1] if self.trans_weight else weight.shape[2]
+            if not self.trans_weight and (weight.shape[1] % 64 != 0 or weight.shape[2] % 64 != 0):
+                raise NotImplementedError(f"N, K must be divisible by 64, but got {weight.shape[1]}, {weight.shape[2]}")
+            if self.trans_weight and weight.shape[2] % 64 != 0:
+                raise NotImplementedError(f"K must be divisible by 64, but got {weight.shape[2]}")
+            quant_gemm_output = torch.empty(
+                (num_tokens * self.top_k, dim),
+                device=input.device,
+                dtype=self.output_dtype,
+            )
+            ixf_f.moe_w8a8_group_gemm(
+                        input=input,
+                        weight=weight,
+                        i_scales=input_scale,
+                        w_scales=weight_scale,
+                        output_dtype=self.output_dtype,
+                        tokens_per_experts=token_count,
+                        dst_to_src=token_indices,
+                        bias=bias,
+                        format="TN" if self.trans_weight else "NN",
+                        output=quant_gemm_output)
+        else:
+            if self.trans_weight:
+                raise NotImplementedError("Trans weight is not supported for cuda graph.")
+            if weight.shape[1] % 16 != 0 or weight.shape[2] % 64 != 0:
+                raise NotImplementedError(f"N must be divisible by 64, but got {weight.shape[2]}, \
+                                            K must be divisible by 16, but got {weight.shape[1]}")
+            quant_gemm_output = ixf_f.moe_w8a8_group_gemv(
+                                        input=input,
+                                        weight=weight,
+                                        i_scales=input_scale,
+                                        w_scales=weight_scale,
+                                        output_dtype=self.output_dtype,
+                                        tokens_per_experts=token_count,
+                                        dst_to_src=token_indices,
+                                        bias=bias,
+                                        format=0)
         
         if self.normalize_top_k_gates:
             top_k_gates = top_k_gates / top_k_gates.sum(dim=-1, keepdim=True).clamp(min=1e-12)
@@ -174,6 +280,8 @@ class IxformerQuantMoe(torch.nn.Module):
         intermediate_size: int,
         num_experts: int,
         top_k: int,
+        enable_cuda_graph: bool = False,
+        trans_weight: bool = True,
         *,
         output_dtype: torch.dtype = torch.bfloat16,
         quant_block_size: int = 8,
@@ -186,8 +294,12 @@ class IxformerQuantMoe(torch.nn.Module):
         self.intermediate_size = intermediate_size
         self.num_experts = num_experts
         self.top_k = top_k
+        self.enable_cuda_graph = enable_cuda_graph
         self.output_dtype = output_dtype
         self.routed_scaling_factor = routed_scaling_factor
+        
+        if enable_cuda_graph and trans_weight:
+            raise NotImplementedError("Trans weight is not supported for cuda graph.")
 
         self.gating = IxformerMoEGating(
             hidden_size=hidden_size,
@@ -200,57 +312,48 @@ class IxformerQuantMoe(torch.nn.Module):
             quant_block_size=quant_block_size,
             start_expert_id=start_expert_id,
             end_expert_id=end_expert_id,
+            enable_cuda_graph=enable_cuda_graph,
         )
         self.fc1 = IxformerGroupQuantGemmMoE(
             output_dtype=output_dtype,
-            trans_weight=True,
+            trans_weight=trans_weight,
             quant_block_size=quant_block_size,
             top_k=top_k,
+            enable_cuda_graph=enable_cuda_graph,
         )
         self.act_quant = IxformerFusedSwiGLUMoEScaleDynamicQuantize()
         self.fc2 = IxformerGroupQuantGemmCombineMoE(
             output_dtype=output_dtype,
-            trans_weight=True,
+            trans_weight=trans_weight,
             quant_block_size=quant_block_size,
             normalize_top_k_gates=False,
             top_k=top_k,
+            enable_cuda_graph=enable_cuda_graph,
         )
 
-        # W8A8 MoE parameter layout aligned with TN format:
-        # w13: [num_experts, 2 * intermediate_size, hidden_size]
-        # w2:  [num_experts, hidden_size, intermediate_size]
+        if trans_weight:
+            # TN format: weight shape = (E, N, K)
+            w13_shape = (num_experts, 2 * intermediate_size, hidden_size)
+            w2_shape = (num_experts, hidden_size, intermediate_size)
+        else:
+            # NN format: weight shape = (E, K, N)
+            w13_shape = (num_experts, hidden_size, 2 * intermediate_size)
+            w2_shape = (num_experts, intermediate_size, hidden_size)
+        
         self.w13_weight = torch.nn.Parameter(
-            torch.zeros(
-                num_experts,
-                2 * intermediate_size,
-                hidden_size,
-                dtype=torch.int8,
-            ),
+            torch.zeros(*w13_shape, dtype=torch.int8),
             requires_grad=False,
         )
         self.w13_weight_scale = torch.nn.Parameter(
-            torch.ones(
-                num_experts,
-                2 * intermediate_size,
-                dtype=torch.float32,
-            ),
+            torch.ones(num_experts, 2 * intermediate_size, dtype=torch.float32),
             requires_grad=False,
         )
         self.w2_weight = torch.nn.Parameter(
-            torch.zeros(
-                num_experts,
-                hidden_size,
-                intermediate_size,
-                dtype=torch.int8,
-            ),
+            torch.zeros(*w2_shape, dtype=torch.int8),
             requires_grad=False,
         )
         self.w2_weight_scale = torch.nn.Parameter(
-            torch.ones(
-                num_experts,
-                hidden_size,
-                dtype=torch.float32,
-            ),
+            torch.ones(num_experts, hidden_size, dtype=torch.float32),
             requires_grad=False,
         )
 
@@ -315,7 +418,6 @@ class IxformerQuantMoe(torch.nn.Module):
                 f"w13_input_scale shape must be {(self.num_experts, self.hidden_size)}, "
                 f"but got {tuple(route_smooth_scale.shape)}"
             )
-
         (
             routed_input_i8,
             # routed_gates,

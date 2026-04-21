@@ -326,6 +326,8 @@ COMMON_IXFORMER_QUANT_MOE_CASES = [
     (8, 4, 256, 512, 96),
     (16, 4, 512, 1024, 128),
     (8, 8, 512, 1024, 64),
+    (128, 4, 512, 1024, 128),
+    
 ]
 
 
@@ -334,6 +336,14 @@ COMMON_IXFORMER_QUANT_MOE_CASES = [
     "num_experts, top_k, hidden_size, intermediate_size, num_tokens",
     COMMON_IXFORMER_QUANT_MOE_CASES,
 )
+@pytest.mark.parametrize(
+    "enable_cuda_graph, trans_weight",
+    [
+        (False, True),
+        (False, False),
+        (True, False),
+    ],
+)
 @torch.no_grad()
 def test_ixformer_quant_moe_vs_mojo_moe_accuracy(
     num_experts: int,
@@ -341,9 +351,24 @@ def test_ixformer_quant_moe_vs_mojo_moe_accuracy(
     hidden_size: int,
     intermediate_size: int,
     num_tokens: int,
+    enable_cuda_graph: bool,
+    trans_weight: bool,
 ):
     if get_platform() != "ilu":
         pytest.skip("ixformer quant moe is not tested")
+
+    if not trans_weight:
+        if enable_cuda_graph:
+            if hidden_size % 16 != 0 or (2 * intermediate_size) % 64 != 0:
+                pytest.skip("GEMV alignment: K%16==0, N%64==0 required")
+            if intermediate_size % 16 != 0 or hidden_size % 64 != 0:
+                pytest.skip("GEMV alignment: K%16==0, N%64==0 required for w2")
+        else:
+            if hidden_size % 64 != 0 or (2 * intermediate_size) % 64 != 0:
+                pytest.skip("GEMM NN alignment: K%64==0, N%64==0 required")
+            if intermediate_size % 64 != 0 or hidden_size % 64 != 0:
+                pytest.skip("GEMM NN alignment: K%64==0, N%64==0 required for w2")
+
     device = get_torch_device()
     dtype = torch.bfloat16
 
@@ -367,6 +392,8 @@ def test_ixformer_quant_moe_vs_mojo_moe_accuracy(
         intermediate_size=intermediate_size,
         num_experts=num_experts,
         top_k=top_k,
+        enable_cuda_graph=enable_cuda_graph,
+        trans_weight=trans_weight,
         output_dtype=dtype,
         routed_scaling_factor=1.0,
     ).to(device)
@@ -374,19 +401,23 @@ def test_ixformer_quant_moe_vs_mojo_moe_accuracy(
     # Align gating weights
     ixf_moe.gating.gate_weight.data.copy_(mojo_ref.gating.gate_weight.data)
 
-    # Quantize the reference expert weights, then:
-    # - use quantized weights in ixformer path
-    # - use dequantized weights in torch reference path
-    # so the diff mostly reflects implementation path rather than raw quant loss.
+    # Quantize the reference expert weights (always in TN layout from MojoMoE),
+    # then copy into ixformer path with appropriate layout.
     w13_fp = mojo_ref.experts.up_proj_weight.data.float()
     w2_fp = mojo_ref.experts.down_proj_weight.data.float()
 
     w13_q, w13_s, w13_deq = _quantize_per_output_channel(w13_fp)
     w2_q, w2_s, w2_deq = _quantize_per_output_channel(w2_fp)
 
-    ixf_moe.w13_weight.data.copy_(w13_q.to(device))
+    if trans_weight:
+        ixf_moe.w13_weight.data.copy_(w13_q.to(device))
+        ixf_moe.w2_weight.data.copy_(w2_q.to(device))
+    else:
+        # MojoMoE weights are TN (E, N, K) -> transpose to NN (E, K, N)
+        ixf_moe.w13_weight.data.copy_(w13_q.transpose(1, 2).contiguous().to(device))
+        ixf_moe.w2_weight.data.copy_(w2_q.transpose(1, 2).contiguous().to(device))
+
     ixf_moe.w13_weight_scale.data.copy_(w13_s.to(device))
-    ixf_moe.w2_weight.data.copy_(w2_q.to(device))
     ixf_moe.w2_weight_scale.data.copy_(w2_s.to(device))
 
     mojo_ref.experts.up_proj_weight.data.copy_(
@@ -397,8 +428,23 @@ def test_ixformer_quant_moe_vs_mojo_moe_accuracy(
     )
 
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
-
-    out_ixf_e2e = ixf_moe(x)
+    if enable_cuda_graph:
+        x_static = torch.empty(num_tokens, hidden_size, dtype=dtype, device=device)
+        x_static = x_static.copy_(x)
+        graph = torch.cuda.CUDAGraph()
+        try:
+            with torch.cuda.graph(graph):
+                out_ixf_e2e = ixf_moe(x_static)
+            torch.cuda.synchronize()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"CUDA graph capture failed: {e}.")
+            torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        graph.replay()
+        torch.cuda.synchronize()
+    else:
+        out_ixf_e2e = ixf_moe(x)
     out_ref_e2e = mojo_ref(x)
     torch.testing.assert_close(
         out_ixf_e2e.float(),
