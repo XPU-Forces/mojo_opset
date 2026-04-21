@@ -11,12 +11,6 @@ def prepare_kv_chunk_indices(
 ) -> torch.Tensor:
     """
     Generates metadata for each chunk to support arbitrary KV start positions.
-
-    Output Tensor Shape: [Total_Chunks, 3]
-    Columns:
-        0: batch_idx (Sequence ID)
-        1: token_offset_in_seq (Offset of this chunk in the current K/V sequence)
-        2: logical_kv_start_index (Logical KV position = kv_lens[batch] + token_offset)
     """
     if is_decode:
         batch_size = kv_lens.shape[0]
@@ -49,13 +43,11 @@ def prepare_kv_chunk_indices(
     return indices
 
 
-# Heuristics to set BLOCK_D dynamically based on head_dim
 @triton.heuristics({
     'BLOCK_D': lambda args: args['head_dim'],
 })
 @triton.autotune(
     configs=[
-        # Use a single welltested config to avoid autotuner issues
         triton.Config({'BLOCK_HEADS': 2, 'BLOCK_CHUNK': 128}, num_stages=1, num_warps=1),
         triton.Config({'BLOCK_HEADS': 4, 'BLOCK_CHUNK': 128}, num_stages=1, num_warps=1),
         triton.Config({'BLOCK_HEADS': 2, 'BLOCK_CHUNK': 256}, num_stages=1, num_warps=1),
@@ -92,38 +84,31 @@ def _store_paged_kv_cache_kernel(
     head_dim: tl.constexpr,
     block_size: tl.constexpr,
     total_chunks,
-    total_head_chunks,
     BLOCK_HEADS: tl.constexpr,
     BLOCK_CHUNK: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
     """
     Store key/value states into paged KV cache for MLU.
-    Optimized with 2D grid parallelism and aggressive autotuning for maximum IO throughput.
     """
     pid_chunk = tl.program_id(0)
     pid_head_chunk = tl.program_id(1)
 
     total_programs_chunk = tl.num_programs(0)
 
-    # Loop over chunks with stride for load balancing
     for chunk_idx in range(pid_chunk, total_chunks, total_programs_chunk):
-        # Load chunk metadata once
         meta_ptr = chunk_indices_ptr + chunk_idx * 3
         batch_idx = tl.load(meta_ptr)
         token_offset_in_seq = tl.load(meta_ptr + 1)
         logical_kv_start = tl.load(meta_ptr + 2)
-
         seq_start_tok = tl.load(cu_seqlens_ptr + batch_idx)
         global_token_idx = seq_start_tok + token_offset_in_seq
-
         seq_len_curr = tl.load(cu_seqlens_ptr + batch_idx + 1) - seq_start_tok
         valid_len = seq_len_curr - token_offset_in_seq
 
         curr_log_pos = logical_kv_start
         curr_kv_pos = global_token_idx
 
-        # Limit processing to valid_len to avoid overshooting
         max_process = tl.minimum(BLOCK_CHUNK, valid_len)
 
         processed = 0
@@ -144,20 +129,17 @@ def _store_paged_kv_cache_kernel(
                     head_end = tl.minimum(head_start + BLOCK_HEADS, num_kv_heads)
                     num_valid_heads = head_end - head_start
 
-                    # Pre-compute offsets for vectorized memory access
                     offs_d = tl.arange(0, BLOCK_D)
                     offs_h = tl.arange(0, BLOCK_HEADS)
                     mask_h = offs_h < num_valid_heads
                     offs_chunk = tl.arange(0, BLOCK_CHUNK)
                     mask_chunk = offs_chunk < sub_len
 
-                    # Vectorized load of K - use input strides
                     src_k_base = k_ptr + curr_kv_pos * stride_k_tok + head_start * stride_k_head
                     offs_chunk_h_2d_src = offs_chunk[:, None] * stride_k_tok + offs_h[None, :] * stride_k_head
                     k_ptrs = src_k_base + offs_chunk_h_2d_src[:, :, None] + offs_d[None, None, :] * stride_k_dim
                     k_vals = tl.load(k_ptrs, mask=(mask_chunk[:, None, None] & mask_h[None, :, None]), other=0.0)
 
-                    # Vectorized store of K - use cache strides!
                     dst_k_base = (
                         key_cache_ptr
                         + physical_block_id * stride_kc_blk
@@ -168,7 +150,6 @@ def _store_paged_kv_cache_kernel(
                     dst_k_ptrs = dst_k_base + offs_chunk_h_2d_dst[:, :, None] + offs_d[None, None, :] * stride_kc_dim
                     tl.store(dst_k_ptrs, k_vals, mask=(mask_chunk[:, None, None] & mask_h[None, :, None]))
 
-                    # Vectorized load and store of V - use cache strides for dst!
                     src_v_base = v_ptr + curr_kv_pos * stride_v_tok + head_start * stride_v_head
                     offs_chunk_h_2d_v_src = offs_chunk[:, None] * stride_v_tok + offs_h[None, :] * stride_v_head
                     v_ptrs = src_v_base + offs_chunk_h_2d_v_src[:, :, None] + offs_d[None, None, :] * stride_v_dim
@@ -201,8 +182,6 @@ def store_paged_kv_impl(
 ):
     """
     Store key/value states into paged KV cache for MLU.
-    Highly optimized with 2D grid parallelism and aggressive autotuning for maximum IO throughput.
-    Grid[0] processes chunks, Grid[1] processes head chunks.
     """
     assert k_states.is_contiguous() and v_states.is_contiguous()
     assert block_table.is_contiguous()
@@ -218,26 +197,22 @@ def store_paged_kv_impl(
     chunk_indices = prepare_kv_chunk_indices(cu_seqlens, kv_lens, 128, is_decode=is_decode)
     total_chunks = chunk_indices.shape[0]
 
-    # Use large BLOCK_HEADS for better head dimension parallelism
-    default_block_heads = 4
-    total_head_chunks = (num_kv_heads + default_block_heads - 1) // default_block_heads
-
-    # Calculate optimal grid size for 2D parallelism
     total_cores = get_mlu_total_cores()
 
     if total_cores >= 64:
         grid_chunk = min(total_chunks, total_cores // 2)
-        grid_head = min(total_head_chunks, total_cores // max(1, grid_chunk)) if grid_chunk > 0 else total_cores
     else:
         grid_chunk = min(total_chunks, max(4, total_cores // 2))
-        grid_head = min(total_head_chunks, total_cores // max(1, grid_chunk)) if grid_chunk > 0 else total_cores
 
     grid_chunk = max(1, grid_chunk)
-    grid_head = max(1, grid_head)
 
     if grid_chunk < 4 and total_chunks > 1:
         grid_chunk = min(total_chunks, 4)
 
+    # Calculate grid_head based on BLOCK_HEADS=2 (minimum in autotuner)
+    grid_head_min = (num_kv_heads + 1) // 2
+    grid_head_limit = max(1, total_cores // max(1, grid_chunk))
+    grid_head = min(grid_head_min, grid_head_limit)
     grid = (grid_chunk, grid_head)
 
     _store_paged_kv_cache_kernel[grid](
@@ -268,7 +243,6 @@ def store_paged_kv_impl(
         head_dim,
         block_size,
         total_chunks,
-        total_head_chunks,
         opt_level="O3",
     )
 
