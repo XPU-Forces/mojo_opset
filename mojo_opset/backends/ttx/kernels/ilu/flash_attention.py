@@ -5,6 +5,7 @@ ILU Triton attention kernels:
 """
 
 import math
+import os
 from typing import Optional
 
 import torch
@@ -525,6 +526,8 @@ def paged_attention_prefill_impl(
     gqa_interleave: bool,
     softmax_scale: Optional[float] = None,
     aux_mask: Optional[torch.Tensor] = None,
+    max_seqlen_q: Optional[int] = None,
+    max_seqlen_k: Optional[int] = None,
 ) -> torch.Tensor:
     total_q_tokens, num_q_heads, head_dim = q.shape
     _, num_kv_heads, block_size, _ = key_cache.shape
@@ -536,6 +539,12 @@ def paged_attention_prefill_impl(
         seqlens_kv = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(torch.int32)
     else:
         seqlens_kv = seqlens_kv.to(torch.int32)
+
+    if max_seqlen_k is not None and os.environ.get("MOJO_DEBUG") == "1":
+        actual_max_kv = seqlens_kv.max().item()
+        assert actual_max_kv <= max_seqlen_k, (
+            f"seqlens_kv max ({actual_max_kv}) exceeds max_seqlen_k ({max_seqlen_k})"
+        )
 
     use_aux_mask = aux_mask is not None
 
@@ -557,8 +566,11 @@ def paged_attention_prefill_impl(
 
     def grid(META):
         bm = META["BLOCK_M"]
-        q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-        max_q_blocks = ((q_lens + bm - 1) // bm).max().item()
+        if max_seqlen_q is not None:
+            max_q_blocks = (max_seqlen_q + bm - 1) // bm
+        else:
+            q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+            max_q_blocks = ((q_lens + bm - 1) // bm).max().item()
         return (max_q_blocks, num_q_heads, batch_size)
 
     _paged_prefill_fav2_kernel[grid](
