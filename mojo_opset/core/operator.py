@@ -42,10 +42,7 @@ class MojoOperator(ABC, torch.nn.Module):
             if not hasattr(cls, "_registry") or not cls._registry:
                 raise NotImplementedError(f"No {cls.__name__} implementation found, please register at least one.")
 
-            import os
-
-            _raw = os.environ.get("MOJO_BACKEND")
-            target_backend = _raw.strip().lower() if _raw else None
+            target_backend = os.environ.get("MOJO_BACKEND")
 
             target_class = cls._registry.get(target_backend)
             instance = target_class.__new__(target_class, *args, **kwargs)
@@ -63,8 +60,7 @@ class MojoOperator(ABC, torch.nn.Module):
     @classmethod
     def get_backend_impl(cls, backend_name: Optional[str] = None):
         """Return the registered implementation class for the requested backend."""
-        normalized_backend = backend_name.strip().lower() if backend_name else None
-        return cls.get_registry().get(normalized_backend)
+        return cls.get_registry().get(backend_name)
 
     def __init__(self, **kwargs):
         torch.nn.Module.__init__(self)

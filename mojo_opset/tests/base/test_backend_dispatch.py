@@ -27,7 +27,10 @@ def test_operator_dispatch(MojoOpCls):
 
     TorchOpCls = MojoOpCls.get_backend_impl("torch")
     assert TorchOpCls is registry.get("torch")
+    assert registry.get(" Torch ") is TorchOpCls
     assert MojoOpCls.get_backend_impl(" Torch ") is TorchOpCls
+    if "torch_npu" in registry._registry:
+        assert MojoOpCls.get_backend_impl("torchnpu") is registry.get("torch_npu")
     op_torch = TorchOpCls()
     assert (
         type(op_torch) == TorchOpCls
@@ -54,7 +57,10 @@ def test_function_dispatch(MojoFunc):
 
     func_torch = MojoFunc.get_backend_impl("torch")
     assert func_torch is registry.get("torch")
+    assert registry.get(" Torch ") is func_torch
     assert MojoFunc.get_backend_impl(" Torch ") is func_torch
+    if "torch_npu" in registry._registry:
+        assert MojoFunc.get_backend_impl("torchnpu") is registry.get("torch_npu")
     if "ttx" in registry._registry:
         assert func_default.forward != func_torch.forward and func_default.backward != func_torch.backward
     else:

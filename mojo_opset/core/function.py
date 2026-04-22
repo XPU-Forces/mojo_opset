@@ -37,8 +37,7 @@ class MojoFunction(Function):
             cls._registry.register(cls)
             cls._registry.sort()
 
-            _raw = os.environ.get("MOJO_BACKEND")
-            target_backend = _raw.strip().lower() if _raw else None
+            target_backend = os.environ.get("MOJO_BACKEND")
             core_op_cls = cls._registry.get_core_op_cls()
 
             core_op_cls.forward = cls._registry.get(target_backend).forward
@@ -54,8 +53,7 @@ class MojoFunction(Function):
     @classmethod
     def get_backend_impl(cls, backend_name: Optional[str] = None):
         """Return the registered implementation class for the requested backend."""
-        normalized_backend = backend_name.strip().lower() if backend_name else None
-        return cls.get_registry().get(normalized_backend)
+        return cls.get_registry().get(backend_name)
 
     @staticmethod
     def forward(ctx, *args, **kwargs):
