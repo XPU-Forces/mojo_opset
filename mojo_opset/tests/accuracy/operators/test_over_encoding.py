@@ -276,18 +276,34 @@ class TestRefOverEncodingParametrized:
             m.weight.fill_(2.0)
             m.weight.fill_diagonal_(1.0)
 
+    @staticmethod
+    def move_case_to_test_device(
+        input_ids,
+        seq_lens,
+        oe_history_inputs,
+        oe_vocab_sizes,
+        n_grams,
+    ):
+        input_ids = input_ids.to(TEST_DEVICE)
+        if seq_lens is not None:
+            seq_lens = seq_lens.to(TEST_DEVICE)
+        oe_history_inputs = oe_history_inputs.to(TEST_DEVICE)
+        oe_vocab_sizes = oe_vocab_sizes.to(TEST_DEVICE)
+        n_grams = n_grams.to(TEST_DEVICE)
+        return input_ids, seq_lens, oe_history_inputs, oe_vocab_sizes, n_grams
+
     @pytest.mark.parametrize(
         "input_ids,seq_lens,oe_history_inputs",
         (
             (
-                torch.arange(1, 129, dtype=torch.long, device=TEST_DEVICE),
-                torch.tensor([64, 64], dtype=torch.int64, device=TEST_DEVICE),
-                torch.ones(2, 6, device=TEST_DEVICE, dtype=torch.int64),
+                torch.arange(1, 129, dtype=torch.long),
+                torch.tensor([64, 64], dtype=torch.int64),
+                torch.ones(2, 6, dtype=torch.int64),
             ),
             (
-                torch.arange(1, 129, dtype=torch.long, device=TEST_DEVICE).view(128, 1),
+                torch.arange(1, 129, dtype=torch.long).view(128, 1),
                 None,
-                torch.ones(128, 6, device=TEST_DEVICE, dtype=torch.int64),
+                torch.ones(128, 6, dtype=torch.int64),
             ),
         ),
     )
@@ -299,12 +315,10 @@ class TestRefOverEncodingParametrized:
                 torch.tensor(
                     [10086 + 2**i for i in range(12)],
                     dtype=torch.int64,
-                    device=TEST_DEVICE,
                 ),
                 torch.tensor(
                     [i for i in range(2, 8) for _ in range(2)],
                     dtype=torch.int64,
-                    device=TEST_DEVICE,
                 ),
             ),
             # (
@@ -338,6 +352,14 @@ class TestRefOverEncodingParametrized:
         embed_dim,
         oe_embed_dims,
     ):
+        input_ids, seq_lens, oe_history_inputs, oe_vocab_sizes, n_grams = self.move_case_to_test_device(
+            input_ids,
+            seq_lens,
+            oe_history_inputs,
+            oe_vocab_sizes,
+            n_grams,
+        )
+
         ref_oe_layer = MojoOverEncoding._registry.get("torch")(
             vocab_size, embed_dim, oe_embed_dims, oe_vocab_sizes, n_grams
         ).to(TEST_DEVICE)
@@ -360,9 +382,8 @@ class TestRefOverEncodingParametrized:
                 torch.tensor(
                     [11, 13, 15, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89],
                     dtype=torch.long,
-                    device=TEST_DEVICE,
                 ),
-                torch.tensor([5, 7, 9], dtype=torch.int64, device=TEST_DEVICE),
+                torch.tensor([5, 7, 9], dtype=torch.int64),
                 torch.tensor(
                     [
                         [3, 5, 7, 9],
@@ -370,31 +391,28 @@ class TestRefOverEncodingParametrized:
                         [11, 13, 17, 19],
                     ],
                     dtype=torch.int64,
-                    device=TEST_DEVICE,
                 ),
                 257,
                 torch.tensor(
                     [263, 269, 271, 277, 281, 283, 293, 307],
                     dtype=torch.int64,
-                    device=TEST_DEVICE,
                 ),
-                torch.tensor([2, 2, 3, 3, 4, 4, 5, 5], dtype=torch.int64, device=TEST_DEVICE),
+                torch.tensor([2, 2, 3, 3, 4, 4, 5, 5], dtype=torch.int64),
                 640,
                 80,
             ),
             (
-                (torch.arange(1, 49, dtype=torch.long, device=TEST_DEVICE) % 257).view(48, 1),
+                (torch.arange(1, 49, dtype=torch.long) % 257).view(48, 1),
                 None,
                 (
-                    torch.arange(48 * 4, dtype=torch.int64, device=TEST_DEVICE).view(48, 4) % 17
+                    torch.arange(48 * 4, dtype=torch.int64).view(48, 4) % 17
                 ),
                 257,
                 torch.tensor(
                     [263, 269, 271, 277, 281, 283, 293, 307],
                     dtype=torch.int64,
-                    device=TEST_DEVICE,
                 ),
-                torch.tensor([2, 2, 3, 3, 4, 4, 5, 5], dtype=torch.int64, device=TEST_DEVICE),
+                torch.tensor([2, 2, 3, 3, 4, 4, 5, 5], dtype=torch.int64),
                 320,
                 40,
             ),
@@ -413,6 +431,14 @@ class TestRefOverEncodingParametrized:
         embed_dim,
         oe_embed_dims,
     ):
+        input_ids, seq_lens, oe_history_inputs, oe_vocab_sizes, n_grams = self.move_case_to_test_device(
+            input_ids,
+            seq_lens,
+            oe_history_inputs,
+            oe_vocab_sizes,
+            n_grams,
+        )
+
         ref_oe_layer = MojoOverEncoding._registry.get("torch")(
             vocab_size, embed_dim, oe_embed_dims, oe_vocab_sizes, n_grams
         ).to(TEST_DEVICE)
@@ -561,14 +587,14 @@ class TestRefOverEncodingParametrized:
         "input_ids,seq_lens,oe_history_inputs",
         (
             (
-                torch.arange(1, 129, dtype=torch.long, device=TEST_DEVICE),
-                torch.tensor([64, 64], dtype=torch.int64, device=TEST_DEVICE),
-                torch.ones(2, 6, device=TEST_DEVICE, dtype=torch.int64),
+                torch.arange(1, 129, dtype=torch.long),
+                torch.tensor([64, 64], dtype=torch.int64),
+                torch.ones(2, 6, dtype=torch.int64),
             ),
             (
-                torch.arange(1, 129, dtype=torch.long, device=TEST_DEVICE).view(128, 1),
+                torch.arange(1, 129, dtype=torch.long).view(128, 1),
                 None,
-                torch.ones(128, 6, device=TEST_DEVICE, dtype=torch.int64),
+                torch.ones(128, 6, dtype=torch.int64),
             ),
         ),
     )
@@ -580,12 +606,10 @@ class TestRefOverEncodingParametrized:
                 torch.tensor(
                     [10086 + 2**i for i in range(12)],
                     dtype=torch.int64,
-                    device=TEST_DEVICE,
                 ),
                 torch.tensor(
                     [i for i in range(2, 8) for _ in range(2)],
                     dtype=torch.int64,
-                    device=TEST_DEVICE,
                 ),
             ),
             # (
@@ -619,9 +643,16 @@ class TestRefOverEncodingParametrized:
         embed_dim,
         oe_embed_dims,
     ):
+        input_ids, seq_lens, oe_history_inputs, oe_vocab_sizes, n_grams = self.move_case_to_test_device(
+            input_ids,
+            seq_lens,
+            oe_history_inputs,
+            oe_vocab_sizes,
+            n_grams,
+        )
 
         ori_embedding_lut = torch.empty(vocab_size, embed_dim)
-        mega_embedding_lut = torch.empty(sum(oe_vocab_sizes), oe_embed_dims)
+        mega_embedding_lut = torch.empty(int(oe_vocab_sizes.sum().item()), oe_embed_dims)
 
         @torch.no_grad
         def init_weight(m):
