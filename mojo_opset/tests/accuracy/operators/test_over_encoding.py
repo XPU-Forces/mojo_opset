@@ -6,12 +6,17 @@ from triton.testing import assert_close
 from mojo_opset import MojoOverEncoding, MojoOverEncodingNGram
 from mojo_opset.backends.ttx.kernels import embedding_nf4_dequant
 from mojo_opset.tests.utils import bypass_not_implemented, get_torch_device
+from mojo_opset.utils.platform import get_platform
 from mojo_opset.core.operators.over_encoding import (
     n_gram_impl_torch,
     dequantize_nf4_rows,
 )
 
 TEST_DEVICE = get_torch_device()
+_requires_npu_oe = pytest.mark.skipif(
+    get_platform() != "npu",
+    reason="Over-Encoding TTX/NF4 kernels are only implemented on NPU.",
+)
 
 
 def pack_nf4_uint4_to_int8(q_idx: torch.Tensor) -> torch.Tensor:
@@ -38,7 +43,7 @@ def build_nf4_embedding_lut(
             f"`embedding_dim` must be divisible by `group_size`, got {embedding_dim} and {group_size}."
         )
 
-    q_idx = torch.randint(0, 16, (vocab_size, embedding_dim), dtype=torch.uint8)
+    q_idx = torch.randint(0, 16, (vocab_size, embedding_dim), dtype=torch.uint8, device="cpu")
     qweight = pack_nf4_uint4_to_int8(q_idx).to(device)
     scale = torch.randn(
         vocab_size,
@@ -457,6 +462,7 @@ class TestRefOverEncodingParametrized:
         )
 
     @bypass_not_implemented
+    @_requires_npu_oe
     def test_embedding_nf4_dequant_impl(self):
         vocab_size = 257
         embedding_dim = 128
@@ -499,6 +505,7 @@ class TestRefOverEncodingParametrized:
         assert_close(output, expected, atol=1e-6, rtol=0)
 
     @bypass_not_implemented
+    @_requires_npu_oe
     @torch.no_grad
     def test_over_encoding_with_quantized_mega_embedding(self):
         torch.manual_seed(0)
