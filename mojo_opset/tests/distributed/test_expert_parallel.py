@@ -9,7 +9,6 @@ from torch.distributed.tensor.parallel import parallelize_module
 from mojo_opset.core.operators.moe import MojoMoE
 from mojo_opset.core.operators.moe import MojoQuantMoE
 from mojo_opset.distributed.parallel import MojoExpertParallel
-from mojo_opset.tests.dist_common import dist_test
 from mojo_opset.utils.platform import get_torch_device
 
 
@@ -81,12 +80,11 @@ def test_quant_moe_registered_for_expert_parallel():
     assert partition_fn is not None
 
 
-@dist_test(world_size=2, backend="gloo")
 def test_quant_moe_ep_cpu_allreduce():
-    import torch.distributed as dist
-
-    world_size = dist.get_world_size()
-    device_mesh = init_device_mesh("cpu", (world_size,))
+    world_size = _get_world_size()
+    device_type = get_torch_device()
+    device = _set_current_device(device_type, world_size)
+    device_mesh = init_device_mesh(device_type, (world_size,))
 
     hidden_size = 8
     intermediate_size = 8
@@ -101,7 +99,7 @@ def test_quant_moe_ep_cpu_allreduce():
         intermediate_size=intermediate_size,
         output_dtype=torch.float32,
         quant_group_size=4,
-    )
+    ).to(device)
     _init_weights(ref)
     ref.input_quant.smooth_scale.data.abs_().add_(0.5)
     ref.experts.fc2_input_quant.smooth_scale.data.abs_().add_(0.5)
@@ -115,11 +113,11 @@ def test_quant_moe_ep_cpu_allreduce():
         intermediate_size=intermediate_size,
         output_dtype=torch.float32,
         quant_group_size=4,
-    )
+    ).to(device)
     moe.load_state_dict(ref.state_dict())
     moe = parallelize_module(moe, device_mesh=device_mesh, parallelize_plan=MojoExpertParallel())
 
-    x = torch.randn(6, hidden_size)
+    x = torch.randn(6, hidden_size, device=device)
     out_parallel = moe(x)
     out_ref = ref(x)
     torch.testing.assert_close(out_parallel, out_ref, rtol=1e-5, atol=1e-5)

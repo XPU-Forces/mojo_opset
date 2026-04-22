@@ -1,12 +1,12 @@
 import os
 
-os.environ["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
+os.environ["MOJO_BACKEND"] = "torch"
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from mojo_opset.tests.dist_common import dist_test
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor.placement_types import Partial
 from torch.distributed.tensor.placement_types import Replicate
@@ -20,8 +20,17 @@ from mojo_opset.distributed.parallel import MojoSwiGLUParallel
 from mojo_opset.distributed.parallel import mojo_parallelize_module
 
 TP_SIZE = 2
-TP_SIZE = 2
 DP_SIZE = 4
+
+
+def _init_torchrun_gloo(required_world_size: int):
+    world_size = int(os.environ.get("WORLD_SIZE", "0"))
+    if world_size <= 0:
+        pytest.skip("This distributed test must be launched with torchrun.")
+    if world_size != required_world_size:
+        pytest.skip(f"This test requires WORLD_SIZE={required_world_size}, got {world_size}.")
+    if not dist.is_initialized():
+        dist.init_process_group("gloo")
 
 
 def verify_dp_consistency(dist, output_data, mesh, test_name):
@@ -31,21 +40,22 @@ def verify_dp_consistency(dist, output_data, mesh, test_name):
     tp_mesh = mesh["tp"]
     tp_group = tp_mesh.get_group()
     tp_size = tp_mesh.size()
+    dst = dist.get_global_rank(tp_group, 0)
 
     if tp_rank == 0:
         gathered = [torch.zeros_like(output_data) for _ in range(tp_size)]
-        dist.gather(output_data, gathered, group=tp_group, group_dst=0)
+        dist.gather(output_data, gathered, dst=dst, group=tp_group)
         match = all(torch.allclose(gathered[0], gathered[i]) for i in range(1, tp_size))
         if not match:
             for i, o in enumerate(gathered):
                 print(f"  tp_rank={i}: {o}")
         assert match, f"{test_name}: dp_rank={dp_rank} output mismatch across tp ranks!"
     else:
-        dist.gather(output_data, group=tp_group, group_dst=0)
+        dist.gather(output_data, dst=dst, group=tp_group)
 
 
-@dist_test(world_size=TP_SIZE * DP_SIZE, backend="gloo")
 def test_basic():
+    _init_torchrun_gloo(TP_SIZE * DP_SIZE)
     mesh = init_device_mesh(device_type="cpu", mesh_shape=(TP_SIZE, DP_SIZE), mesh_dim_names=["tp", "dp"])
 
     x = MojoRowwiseParallel(input_layouts=(Shard(1),), output_layouts=(Replicate(),))(
@@ -58,8 +68,8 @@ def test_basic():
     verify_dp_consistency(dist, output, mesh, "test_basic")
 
 
-@dist_test(world_size=TP_SIZE * DP_SIZE, backend="gloo")
 def test_multi_layer():
+    _init_torchrun_gloo(TP_SIZE * DP_SIZE)
     mesh = init_device_mesh(device_type="cpu", mesh_shape=(TP_SIZE, DP_SIZE), mesh_dim_names=["tp", "dp"])
 
     torch.manual_seed(42)
@@ -95,8 +105,8 @@ def test_multi_layer():
 # ──────────────────────────────────────────────────
 
 
-@dist_test(world_size=TP_SIZE, backend="gloo")
 def test_swiglu_parallel_basic():
+    _init_torchrun_gloo(TP_SIZE)
     """Apply MojoSwiGLUParallel to MojoSwiGLUMLP and verify output matches the
     non-parallelized reference."""
     mesh = init_device_mesh("cpu", (TP_SIZE,))
@@ -118,8 +128,8 @@ def test_swiglu_parallel_basic():
     )
 
 
-@dist_test(world_size=TP_SIZE, backend="gloo")
 def test_swiglu_parallel_weight_sharding():
+    _init_torchrun_gloo(TP_SIZE)
     """Verify that fc1 and fc2 weights are correctly sharded after
     parallelization."""
     mesh = init_device_mesh("cpu", (TP_SIZE,))
@@ -137,8 +147,8 @@ def test_swiglu_parallel_weight_sharding():
     assert fc2_w.shape == (output_size, hidden_size // TP_SIZE), f"fc2 weight shape mismatch: {fc2_w.shape}"
 
 
-@dist_test(world_size=4, backend="gloo")
 def test_swiglu_parallel_tp4():
+    _init_torchrun_gloo(4)
     """SwiGLU parallel with TP=4."""
     tp = 4
     mesh = init_device_mesh("cpu", (tp,))
@@ -165,8 +175,8 @@ def test_swiglu_parallel_tp4():
 # ──────────────────────────────────────────────────
 
 
-@dist_test(world_size=TP_SIZE, backend="gloo")
 def test_qkv_parallel_basic():
+    _init_torchrun_gloo(TP_SIZE)
     """Apply MojoQKVColwiseParallel and verify per-rank output matches the
     corresponding slice of the reference full output."""
     mesh = init_device_mesh("cpu", (TP_SIZE,))
@@ -218,8 +228,8 @@ def test_qkv_parallel_basic():
     )
 
 
-@dist_test(world_size=TP_SIZE, backend="gloo")
 def test_qkv_parallel_with_bias():
+    _init_torchrun_gloo(TP_SIZE)
     """QKV parallel with bias enabled."""
     mesh = init_device_mesh("cpu", (TP_SIZE,))
     num_q_heads, num_kv_heads, head_dim = 4, 2, 16
@@ -266,8 +276,8 @@ def test_qkv_parallel_with_bias():
     )
 
 
-@dist_test(world_size=4, backend="gloo")
 def test_qkv_parallel_kv_replicate():
+    _init_torchrun_gloo(4)
     """When TP_SIZE > num_kv_heads, KV heads should be replicated across
     multiple ranks."""
     tp = 4
