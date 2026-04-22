@@ -1,3 +1,5 @@
+import os
+
 import pytest
 import torch
 
@@ -16,6 +18,25 @@ TEST_DEVICE = get_torch_device()
 _requires_npu_oe = pytest.mark.skipif(
     get_platform() != "npu",
     reason="Over-Encoding TTX/NF4 kernels are only implemented on NPU.",
+)
+
+
+def _requested_backend() -> str | None:
+    raw_backend = os.environ.get("MOJO_BACKEND")
+    return raw_backend.strip().lower() if raw_backend else None
+
+
+# `embedding_nf4_dequant` is a low-level TTX kernel entrypoint imported directly
+# from `mojo_opset.backends.ttx.kernels`, so this test intentionally does not go
+# through `MojoOperator` backend dispatch. That means the accuracy-test
+# `bypass_not_implemented`/registry path cannot tell that `MOJO_BACKEND=torch_npu`
+# has no OE implementation. Since torch_npu CI also runs on the NPU platform,
+# platform-only gating would accidentally execute this TTX kernel in the
+# torch_npu job. Keep the standalone kernel test visible only to the backend
+# that owns it.
+_requires_ttx_oe_kernel = pytest.mark.skipif(
+    get_platform() != "npu" or _requested_backend() not in (None, "ttx"),
+    reason="embedding_nf4_dequant is a TTX-only OE kernel on NPU.",
 )
 
 
@@ -446,7 +467,7 @@ class TestRefOverEncodingParametrized:
         )
 
     @bypass_not_implemented
-    @_requires_npu_oe
+    @_requires_ttx_oe_kernel
     def test_embedding_nf4_dequant_impl(self):
         vocab_size = 257
         embedding_dim = 128
