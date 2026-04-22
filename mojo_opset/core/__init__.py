@@ -73,12 +73,13 @@ from .operators.quantize import MojoMoEDynamicQuant
 from .operators.quantize import MojoStaticQuant
 
 """ moe """
+from .operators.moe import MojoExperts
 from .operators.moe import MojoMoE
 from .operators.moe import MojoMoECombine
 from .operators.moe import MojoMoEDispatch
 from .operators.moe import MojoMoEGating
-from .operators.moe import MojoW4A8Experts
-from .operators.moe import MojoW4A8MoE
+from .operators.moe import MojoQuantExperts
+from .operators.moe import MojoQuantMoE
 
 """ normalization """
 from .operators.normalization import MojoChannelRMSNorm
@@ -186,9 +187,10 @@ __all__ = [
     "MojoMoE",
     "MojoMoEGating",
     "MojoMoEDispatch",
+    "MojoExperts",
     "MojoMoECombine",
-    "MojoW4A8Experts",
-    "MojoW4A8MoE",
+    "MojoQuantExperts",
+    "MojoQuantMoE",
 
     "MojoLayerNorm",
     "MojoRMSNorm",

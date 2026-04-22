@@ -1,7 +1,7 @@
 import torch
 
-from mojo_opset import MojoW4A8Experts
-from mojo_opset import MojoW4A8MoE
+from mojo_opset import MojoQuantExperts
+from mojo_opset import MojoQuantMoE
 
 
 def _pack_int4_to_int8_along_output(input: torch.Tensor) -> torch.Tensor:
@@ -33,7 +33,7 @@ def _quantize_w4_per_group(weight: torch.Tensor, quant_group_size: int):
     return _pack_int4_to_int8_along_output(quantized), scale
 
 
-def _manual_w4a8_linear(
+def _manual_quant_linear(
     input: torch.Tensor,
     input_scale: torch.Tensor,
     packed_weight: torch.Tensor,
@@ -51,7 +51,7 @@ def _manual_w4a8_linear(
     return (out * input_scale.reshape(-1, 1).float()).to(output_dtype)
 
 
-def _manual_w4a8_experts(
+def _manual_quant_experts(
     input: torch.Tensor,
     input_scale: torch.Tensor,
     token_count: torch.Tensor,
@@ -71,7 +71,7 @@ def _manual_w4a8_experts(
             outputs.append(expert_input.new_empty((0, down_proj_weight.shape[1] * 2), dtype=output_dtype))
             continue
 
-        fc1 = _manual_w4a8_linear(
+        fc1 = _manual_quant_linear(
             expert_input,
             expert_input_scales[expert_idx],
             up_proj_weight[expert_idx],
@@ -86,7 +86,7 @@ def _manual_w4a8_experts(
             torch.int8
         )
 
-        fc2 = _manual_w4a8_linear(
+        fc2 = _manual_quant_linear(
             fc2_input,
             fc2_input_scale,
             down_proj_weight[expert_idx],
@@ -98,7 +98,7 @@ def _manual_w4a8_experts(
     return torch.cat(outputs, dim=0)
 
 
-def _make_w4a8_weights(num_experts: int, hidden_size: int, intermediate_size: int, quant_group_size: int):
+def _make_quant_weights(num_experts: int, hidden_size: int, intermediate_size: int, quant_group_size: int):
     up_weight_fp = torch.randn(num_experts, intermediate_size * 2, hidden_size, dtype=torch.float32)
     down_weight_fp = torch.randn(num_experts, hidden_size, intermediate_size, dtype=torch.float32)
     up_weight, up_weight_scale = _quantize_w4_per_group(up_weight_fp, quant_group_size)
@@ -106,7 +106,7 @@ def _make_w4a8_weights(num_experts: int, hidden_size: int, intermediate_size: in
     return up_weight, up_weight_scale, down_weight, down_weight_scale
 
 
-def test_w4a8_experts_reference():
+def test_quant_experts_reference():
     torch.manual_seed(0)
     num_experts = 3
     hidden_size = 8
@@ -119,7 +119,7 @@ def test_w4a8_experts_reference():
     input_scale = input_fp.float().abs().amax(dim=-1).clamp(min=1e-12) / 127
     input_i8 = torch.clamp(torch.round(input_fp.float() / input_scale.unsqueeze(-1)), -128, 127).to(torch.int8)
 
-    up_weight, up_weight_scale, down_weight, down_weight_scale = _make_w4a8_weights(
+    up_weight, up_weight_scale, down_weight, down_weight_scale = _make_quant_weights(
         num_experts,
         hidden_size,
         intermediate_size,
@@ -127,11 +127,12 @@ def test_w4a8_experts_reference():
     )
     fc2_input_smooth_scale = torch.rand(num_experts, intermediate_size, dtype=torch.float32) + 0.5
 
-    op = MojoW4A8Experts._registry.get("torch")(
+    op = MojoQuantExperts._registry.get("torch")(
         num_experts=num_experts,
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
         output_dtype=torch.bfloat16,
+        quant_type="int4",
         quant_group_size=quant_group_size,
     )
     op.load_state_dict(
@@ -145,7 +146,7 @@ def test_w4a8_experts_reference():
     )
 
     out = op(input_i8, input_scale, token_count)
-    ref = _manual_w4a8_experts(
+    ref = _manual_quant_experts(
         input_i8,
         input_scale,
         token_count,
@@ -175,7 +176,22 @@ def test_w4a8_experts_reference():
     }
 
 
-def test_w4a8_moe_reference():
+def test_quant_experts_rejects_int8_until_implemented():
+    try:
+        MojoQuantExperts._registry.get("torch")(
+            num_experts=1,
+            hidden_size=8,
+            intermediate_size=12,
+            quant_type="int8",
+            quant_group_size=4,
+        )
+    except NotImplementedError as exc:
+        assert "quant_type='int4'" in str(exc)
+    else:
+        raise AssertionError("quant_type='int8' should be rejected until int8 expert weights are implemented.")
+
+
+def test_quant_moe_reference():
     torch.manual_seed(1)
     num_tokens = 5
     num_experts = 4
@@ -188,19 +204,20 @@ def test_w4a8_moe_reference():
     gate_weight = torch.randn(hidden_size, num_experts, dtype=torch.float32) * 0.2
     smooth_scale = torch.rand(num_experts, hidden_size, dtype=torch.float32) + 0.5
     fc2_input_smooth_scale = torch.rand(num_experts, intermediate_size, dtype=torch.float32) + 0.5
-    up_weight, up_weight_scale, down_weight, down_weight_scale = _make_w4a8_weights(
+    up_weight, up_weight_scale, down_weight, down_weight_scale = _make_quant_weights(
         num_experts,
         hidden_size,
         intermediate_size,
         quant_group_size,
     )
 
-    op = MojoW4A8MoE._registry.get("torch")(
+    op = MojoQuantMoE._registry.get("torch")(
         num_experts=num_experts,
         top_k=top_k,
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
         output_dtype=torch.bfloat16,
+        quant_type="int4",
         quant_group_size=quant_group_size,
     )
     op.load_state_dict(
@@ -231,7 +248,7 @@ def test_w4a8_moe_reference():
         127,
     ).to(torch.int8)
 
-    expert_outputs = _manual_w4a8_experts(
+    expert_outputs = _manual_quant_experts(
         quantized_hidden_states,
         input_scale,
         tokens_per_expert,

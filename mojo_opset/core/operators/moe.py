@@ -67,7 +67,7 @@ class MojoMoE(MojoOperator):
         return combined
 
 
-class MojoW4A8MoE(MojoOperator):
+class MojoQuantMoE(MojoOperator):
     def __init__(
         self,
         num_experts,
@@ -76,25 +76,31 @@ class MojoW4A8MoE(MojoOperator):
         intermediate_size=None,
         activation: str = "swiglu",
         output_dtype: torch.dtype = torch.bfloat16,
+        quant_type: str = "int4",
         quant_group_size: int = 128,
         **kwargs,
     ):
         super().__init__()
         if activation != "swiglu":
-            raise NotImplementedError(f"MojoW4A8MoE: Activation {activation} is not supported.")
+            raise NotImplementedError(f"MojoQuantMoE: Activation {activation} is not supported.")
+        if quant_type not in ("int4", "int8"):
+            raise ValueError(f"MojoQuantMoE: quant_type must be 'int4' or 'int8', got {quant_type}.")
+        if quant_type != "int4":
+            raise NotImplementedError("MojoQuantMoE currently only supports quant_type='int4'.")
 
         for k in ("ep_rank", "ep_size"):
             if k in kwargs:
-                raise ValueError(f"MojoW4A8MoE: {k} is not supported; use ParallelStyle to set expert partition.")
+                raise ValueError(f"MojoQuantMoE: {k} is not supported; use ParallelStyle to set expert partition.")
 
         if intermediate_size is None:
-            raise ValueError("MojoW4A8MoE: intermediate_size must be provided.")
+            raise ValueError("MojoQuantMoE: intermediate_size must be provided.")
 
         self.num_experts = num_experts
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.output_dtype = output_dtype
+        self.quant_type = quant_type
         self.quant_group_size = quant_group_size
 
         self.gating = MojoMoEGating._registry.get(self._backend)(
@@ -109,12 +115,13 @@ class MojoW4A8MoE(MojoOperator):
             input_size=self.hidden_size,
             **kwargs,
         )
-        self.experts = MojoW4A8Experts._registry.get(self._backend)(
+        self.experts = MojoQuantExperts._registry.get(self._backend)(
             num_experts=self.num_experts,
             hidden_size=self.hidden_size,
             intermediate_size=self.intermediate_size,
             activation=activation,
             output_dtype=output_dtype,
+            quant_type=self.quant_type,
             quant_group_size=self.quant_group_size,
             **kwargs,
         )
@@ -299,7 +306,7 @@ def _empty_quant_weight(shape: tuple[int, ...], factory_kwargs: dict) -> torch.T
     return torch.empty(shape, dtype=torch.int8, **quant_factory_kwargs)
 
 
-class MojoW4A8Experts(MojoOperator):
+class MojoQuantExperts(MojoOperator):
     def __init__(
         self,
         num_experts: int,
@@ -307,25 +314,31 @@ class MojoW4A8Experts(MojoOperator):
         intermediate_size: int,
         activation: str = "swiglu",
         output_dtype: torch.dtype = torch.bfloat16,
+        quant_type: str = "int4",
         quant_group_size: int = 128,
         **kwargs,
     ):
         """
-        W4A8 quantized MoE Experts reference.
+        Quantized MoE Experts reference.
 
         The input activation is expected to be dynamically quantized before this
-        operator. Expert weights are signed int4 values packed two per int8
-        element along the output/channel dimension, matching checkpoint tensors
-        shaped ``[num_experts, output_dim // 2, input_dim]``. Weight scales use
-        ``[num_experts, output_dim, group_num]`` and are expected to be the
-        offline product of per-channel ``weight_qscale`` and per-group scales;
-        this module only observes the grouped accumulation contract.
+        operator. For ``quant_type="int4"``, expert weights are signed int4
+        values packed two per int8 element along the output/channel dimension,
+        matching checkpoint tensors shaped ``[num_experts, output_dim // 2,
+        input_dim]``. Weight scales use ``[num_experts, output_dim, group_num]``
+        and are expected to be the offline product of per-channel
+        ``weight_qscale`` and per-group scales; this module only observes the
+        grouped accumulation contract.
         """
         super().__init__(**kwargs)
         if activation != "swiglu":
-            raise NotImplementedError(f"MojoW4A8Experts: Activation {activation} is not supported.")
+            raise NotImplementedError(f"MojoQuantExperts: Activation {activation} is not supported.")
+        if quant_type not in ("int4", "int8"):
+            raise ValueError(f"MojoQuantExperts: quant_type must be 'int4' or 'int8', got {quant_type}.")
+        if quant_type != "int4":
+            raise NotImplementedError("MojoQuantExperts currently only supports quant_type='int4'.")
         if hidden_size % 2 != 0 or intermediate_size % 2 != 0:
-            raise ValueError("MojoW4A8Experts requires even hidden_size and intermediate_size for int4 packing.")
+            raise ValueError("MojoQuantExperts requires even hidden_size and intermediate_size for int4 packing.")
         if quant_group_size <= 0:
             raise ValueError(f"quant_group_size must be positive, got {quant_group_size}.")
         self.quant_group_size = quant_group_size
@@ -343,6 +356,7 @@ class MojoW4A8Experts(MojoOperator):
         self.intermediate_size = intermediate_size
         self.activation = activation
         self.output_dtype = output_dtype
+        self.quant_type = quant_type
         self.up_proj_group_num = hidden_size // self.quant_group_size
         self.down_proj_group_num = intermediate_size // self.quant_group_size
 
@@ -382,7 +396,7 @@ class MojoW4A8Experts(MojoOperator):
         output[1::2, :] = high
         return output
 
-    def _w4a8_linear(
+    def _quant_linear(
         self,
         input: torch.Tensor,
         input_scale: torch.Tensor,
@@ -438,7 +452,7 @@ class MojoW4A8Experts(MojoOperator):
                 activated_outs.append(expert_input.new_empty((0, self.intermediate_size), dtype=self.output_dtype))
                 continue
 
-            fc1_out = self._w4a8_linear(
+            fc1_out = self._quant_linear(
                 expert_input,
                 expert_input_scales[expert_idx],
                 self.up_proj_weight[expert_idx],
@@ -458,7 +472,7 @@ class MojoW4A8Experts(MojoOperator):
                 outputs.append(expert_input.new_empty((0, self.hidden_size), dtype=self.output_dtype))
                 continue
 
-            fc2_out = self._w4a8_linear(
+            fc2_out = self._quant_linear(
                 expert_input,
                 expert_fc2_input_scales[expert_idx],
                 self.down_proj_weight[expert_idx],
@@ -471,8 +485,8 @@ class MojoW4A8Experts(MojoOperator):
     def extra_repr(self) -> str:
         return (
             f"num_experts={self.num_experts}, hidden_size={self.hidden_size}, "
-            f"intermediate_size={self.intermediate_size}, quant_group_size={self.quant_group_size}, "
-            f"output_dtype={self.output_dtype}"
+            f"intermediate_size={self.intermediate_size}, quant_type={self.quant_type}, "
+            f"quant_group_size={self.quant_group_size}, output_dtype={self.output_dtype}"
         )
 
 
