@@ -146,25 +146,6 @@ class MojoQuant(MojoOperator):
         )
 
 
-class MojoDynamicQuant(MojoOperator):
-    """Per-token dynamic int8 quantization on the last dimension.
-
-    Optionally applies a per-channel ``scale_tensor`` before quantizing.
-    Returns ``(q_int8, quant_scale)``.
-    """
-
-    def forward(self, input_tensor: torch.Tensor, scale_tensor: Optional[torch.Tensor] = None):
-        if scale_tensor is None:
-            scaled_fp = input_tensor.to(torch.float64)
-        else:
-            scaled_fp = input_tensor.to(torch.float64) * scale_tensor.to(torch.float64)
-
-        max_abs = scaled_fp.abs().amax(dim=-1).clamp(min=1e-10)
-        quant_vals = 127.0 * (scaled_fp / max_abs.unsqueeze(-1))
-        q = torch.trunc(quant_vals + 0.5 * torch.sign(quant_vals))
-        return q.to(torch.int8), (max_abs / 127.0).to(input_tensor.dtype)
-
-
 class MojoDequant(MojoOperator):
     def __init__(
         self,

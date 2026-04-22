@@ -63,6 +63,10 @@ from .operators.embedding import MojoEmbedding
 from .operators.embedding import MojoParallelEmbedding
 from .operators.embedding import MojoRelativeEmbedding
 
+""" over_encoding """
+from .operators.over_encoding import MojoOverEncoding
+from .operators.over_encoding import MojoOverEncodingNGram
+
 """ quantize """
 from .operators.quantize import MojoDequantSwiGLUQuant
 from .operators.quantize import MojoDequant
@@ -181,6 +185,8 @@ __all__ = [
     "MojoEmbedding",
     "MojoParallelEmbedding",
     "MojoRelativeEmbedding",
+    "MojoOverEncoding",
+    "MojoOverEncodingNGram",
 
     "MojoMoE",
     "MojoMoEGating",
