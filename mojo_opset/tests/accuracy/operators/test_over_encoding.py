@@ -55,7 +55,6 @@ def build_nf4_embedding_lut(
     return qweight, scale, mean
 
 
-@bypass_not_implemented
 class TestRefOverEncodingBasic:
     def setup_method(self):
         self.N = 4
@@ -65,6 +64,7 @@ class TestRefOverEncodingBasic:
         self.SPLIT_NUM = (self.N - 1) * self.K
         self.OE_EMBED_DIM = self.EMBED_DIM // self.SPLIT_NUM
 
+    @bypass_not_implemented
     def test_n_gram_encoding(self):
         input_ids = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64)
         oe_history = torch.cat(
@@ -145,6 +145,7 @@ class TestRefOverEncodingBasic:
         )
         oe_ngram.forward_diff_with(oe_ngram_ref, input_ids.unsqueeze(-1), oe_history, atol=0, rtol=0)
 
+    @bypass_not_implemented
     def test_n_gram_encoding_additional_shapes(self):
         vocab_size = 257
         oe_vocab_sizes = torch.tensor(
@@ -208,6 +209,7 @@ class TestRefOverEncodingBasic:
             rtol=0,
         )
 
+    @bypass_not_implemented
     def test_over_encoding(self):
         input_ids = torch.Tensor([1, 2, 3, 4, 5, 6]).to(torch.int64).to(TEST_DEVICE)
         input_seq_len = torch.Tensor([3, 3]).to(torch.int64).to(TEST_DEVICE)
@@ -266,7 +268,6 @@ class TestRefOverEncodingBasic:
         # assert_close(ttx_res, ref)
 
 
-@bypass_not_implemented
 class TestRefOverEncodingParametrized:
     @staticmethod
     @torch.no_grad
@@ -325,6 +326,7 @@ class TestRefOverEncodingParametrized:
         "embed_dim, oe_embed_dims",
         ((1536, 192),),
     )
+    @bypass_not_implemented
     def test_over_encoding_parametrized(
         self,
         input_ids,
@@ -399,6 +401,7 @@ class TestRefOverEncodingParametrized:
         ),
         ids=("prefill-b3-len5-7-9", "decode-b48-s1"),
     )
+    @bypass_not_implemented
     def test_over_encoding_additional_shapes(
         self,
         input_ids,
@@ -427,6 +430,7 @@ class TestRefOverEncodingParametrized:
             rtol=1e-5,
         )
 
+    @bypass_not_implemented
     def test_embedding_nf4_dequant_impl(self):
         vocab_size = 257
         embedding_dim = 128
@@ -468,6 +472,7 @@ class TestRefOverEncodingParametrized:
         )
         assert_close(output, expected, atol=1e-6, rtol=0)
 
+    @bypass_not_implemented
     @torch.no_grad
     def test_over_encoding_with_quantized_mega_embedding(self):
         torch.manual_seed(0)
@@ -602,6 +607,7 @@ class TestRefOverEncodingParametrized:
         "embed_dim, oe_embed_dims",
         ((1536, 192),),
     )
+    @bypass_not_implemented
     def test_over_encoding_with_custom_weight_tensor(
         self,
         input_ids,
