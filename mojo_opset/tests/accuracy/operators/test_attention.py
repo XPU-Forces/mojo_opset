@@ -278,6 +278,74 @@ def test_paged_prefill_gqa(
     )
 
 
+@pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
+@auto_switch_platform()
+@bypass_not_implemented
+def test_paged_prefill_gqa_bucket_padded_varlen(gqa_layout: str):
+    real_batch_size = 4
+    bucket_batch_size = 6
+    real_total_tokens = 4
+    token_bucket_size = 8
+    num_q_heads = 4
+    num_kv_heads = 2
+    head_dim = 128
+    block_size = 16
+    dtype = torch.bfloat16
+
+    query = torch.randn((token_bucket_size, num_q_heads, head_dim), dtype=dtype)
+    cu_seqlens_q = torch.tensor([0, 1, 2, 3, 4, 4, 4], dtype=torch.int32)
+    seqlens_kv = torch.tensor([1, 1, 1, 1, 0, 0], dtype=torch.int32)
+
+    key_cache = torch.zeros((bucket_batch_size, num_kv_heads, block_size, head_dim), dtype=dtype)
+    value_cache = torch.zeros_like(key_cache)
+    key_cache[:real_batch_size, :, 0, :] = torch.randn((real_batch_size, num_kv_heads, head_dim), dtype=dtype)
+    value_cache[:real_batch_size, :, 0, :] = torch.randn((real_batch_size, num_kv_heads, head_dim), dtype=dtype)
+
+    block_tables = torch.zeros((bucket_batch_size, 1), dtype=torch.int32)
+    block_tables[:real_batch_size, 0] = torch.arange(real_batch_size, dtype=torch.int32)
+
+    paged_prefill_attn = MojoPagedPrefillGQA(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+    )
+    paged_prefill_attn_ref = MojoPagedPrefillGQA._registry.get("torch")(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+    )
+
+    if type(paged_prefill_attn_ref) is type(paged_prefill_attn):
+        raise NotImplementedError(
+            f"both operands resolve to the same implementation, skipping comparison."
+        )
+
+    softmax_scale = 1.0 / math.sqrt(head_dim)
+    out_ref = paged_prefill_attn_ref(
+        query,
+        key_cache,
+        value_cache,
+        cu_seqlens_q,
+        block_tables,
+        softmax_scale=softmax_scale,
+        seqlens_kv=seqlens_kv,
+    )
+    out = paged_prefill_attn(
+        query,
+        key_cache,
+        value_cache,
+        cu_seqlens_q,
+        block_tables,
+        softmax_scale=softmax_scale,
+        seqlens_kv=seqlens_kv,
+    )
+
+    torch.testing.assert_close(
+        out[:real_total_tokens].to(torch.float32),
+        out_ref[:real_total_tokens].to(torch.float32),
+        atol=2e-2,
+        rtol=2e-2,
+    )
+
+
 @functools.lru_cache()
 def generate_diffusion_attention_mask(
     seq_length: int,
