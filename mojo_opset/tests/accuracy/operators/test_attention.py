@@ -1288,6 +1288,222 @@ def test_paged_prefill_swa(
     )
 
 
+# ---------------------------------------------------------------------------
+# MojoPagedPrefillSWA + CUDA Graph
+# ---------------------------------------------------------------------------
+# Reuses generate_paged_prefill_data_with_graph (max-shape static buffers)
+# and exercises the per-batch q_len/kv_len<=0 skip guard inside the SWA
+# paged prefill kernel by padding the tail batches with:
+#   * cu_seqlens_q : repeat the last cumulative value -> q_len = 0
+#   * seqlens_kv   : 0
+#   * block_tables : -1 (kernel must not load these entries for padded batches)
+test_configs_swa_prefill_with_graph = [
+    (2, 16, 4, 128, 1024, 1024, 32, 4, 255, "ABAB", torch.bfloat16, "M_BF16"),
+    (2, 16, 4, 96, 1024, 1024, 128, 4, 255, "ABAB", torch.bfloat16, "M_BF16_PADDIM"),
+    (2, 8, 1, 128, 256, 1024, 128, 4, 255, "AABB", torch.bfloat16, "M_BF16_WITH_CACHE"),
+    (2, 8, 1, 128, 1024, 2048, 1024, 4, 1023, "AABB", torch.bfloat16, "M_BF16_BIGPAGE"),
+]
+
+
+@pytest.mark.parametrize(
+    "query, k_cache, v_cache, cu_seqlens_q, cu_seqlens_kv, block_tables, seqlens_kv,"
+    " max_seqlen_q, max_seqlen_k, global_window, local_window, gqa_layout",
+    [
+        pytest.param(
+            *generate_paged_prefill_data_with_graph(
+                batch_size=MAX_B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_q_len=MAX_Q_LEN,
+                max_kv_computed_len=MAX_KV_COMPUTED_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            GW,
+            LW,
+            LAYOUT,
+            id=ID,
+        )
+        for (
+            MAX_B,
+            Q_H,
+            KV_H,
+            D,
+            MAX_Q_LEN,
+            MAX_KV_COMPUTED_LEN,
+            BLK_S,
+            GW,
+            LW,
+            LAYOUT,
+            dtype,
+            ID,
+        ) in test_configs_swa_prefill_with_graph
+    ],
+)
+@auto_switch_platform()
+@bypass_not_implemented
+def test_paged_prefill_swa_with_graph(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_kv: torch.Tensor,
+    block_tables: torch.Tensor,
+    seqlens_kv: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    global_window: int,
+    local_window: int,
+    gqa_layout: str,
+):
+    del cu_seqlens_kv, max_seqlen_q, max_seqlen_k  # SWA paged prefill API does not consume these
+
+    head_dim = query.shape[-1]
+    softmax_scale = 1.0 / math.sqrt(head_dim)
+
+    with torch.no_grad():
+        paged_prefill_swa = MojoPagedPrefillSWA(
+            is_causal=True,
+            gqa_layout=gqa_layout,
+            global_window_size=global_window,
+            local_window_size=local_window,
+        )
+        # Warm-up: trigger autotune / kernel compile before graph capture.
+        paged_prefill_swa(
+            query,
+            k_cache,
+            v_cache,
+            cu_seqlens_q,
+            block_tables,
+            softmax_scale=softmax_scale,
+            seqlens_kv=seqlens_kv,
+        )
+        torch.cuda.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        try:
+            with torch.cuda.graph(graph):
+                output = paged_prefill_swa(
+                    query,
+                    k_cache,
+                    v_cache,
+                    cu_seqlens_q,
+                    block_tables,
+                    softmax_scale=softmax_scale,
+                    seqlens_kv=seqlens_kv,
+                )
+            torch.cuda.synchronize()
+        except Exception as e:
+            import logging
+
+            logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}.")
+            torch.cuda.empty_cache()
+            return
+
+    paged_prefill_swa_ref = MojoPagedPrefillSWA._registry.get("torch")(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+        global_window_size=global_window,
+        local_window_size=local_window,
+    )
+
+    max_batch_size = cu_seqlens_q.shape[0] - 1
+    max_total_q_tokens, num_q_heads, head_dim = query.shape
+    _, num_kv_heads, block_size, _ = k_cache.shape
+    max_q_len_cfg = max_total_q_tokens // max_batch_size
+    max_kv_len_cfg = int(seqlens_kv.max().item())
+    max_kv_computed_len_cfg = max_kv_len_cfg - max_q_len_cfg
+
+    atol = 2e-2 if query.dtype != torch.float32 else 1e-5
+    rtol = 2e-2 if query.dtype != torch.float32 else 1e-6
+
+    for _ in range(5):
+        current_batch_size = torch.randint(1, max_batch_size + 1, ()).item()
+
+        (
+            cur_q,
+            cur_k,
+            cur_v,
+            cur_cu_q,
+            _cur_cu_kv,
+            cur_block_tables,
+            cur_seqlens_kv,
+            _cur_max_seqlen_q,
+            _cur_max_seqlen_k,
+        ) = generate_paged_prefill_data(
+            batch_size=current_batch_size,
+            num_q_heads=num_q_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            max_q_len=max_q_len_cfg,
+            max_kv_computed_len=max_kv_computed_len_cfg,
+            block_size=block_size,
+            dtype=query.dtype,
+        )
+
+        # generate_paged_prefill_data returns seqlens_kv=None when there is no
+        # extra cache (kv_len == q_len); SWA always needs a real tensor.
+        if cur_seqlens_kv is None:
+            cur_seqlens_kv = cur_cu_q[1:] - cur_cu_q[:-1]
+
+        cur_T = int(cur_cu_q[-1].item())
+
+        # In-place update static buffers captured by the graph.
+        current_num_blocks = cur_k.shape[0]
+        k_cache[:current_num_blocks].copy_(cur_k)
+        v_cache[:current_num_blocks].copy_(cur_v)
+        query[:cur_T].copy_(cur_q)
+
+        # cu_seqlens_q: valid prefix mirrors cur, padded batches keep the final
+        # cumulative value so q_len = 0 for them (per spec).
+        cu_seqlens_q[: current_batch_size + 1].copy_(cur_cu_q)
+        cu_seqlens_q[current_batch_size + 1 :] = cur_cu_q[-1]
+
+        # seqlens_kv: valid batches copied, padded batches set to 0 (per spec).
+        seqlens_kv[:current_batch_size].copy_(cur_seqlens_kv)
+        seqlens_kv[current_batch_size:] = 0
+
+        # block_tables: valid entries mirror cur, padded batches use -1 (per
+        # spec). The SWA kernel must not load these entries because the
+        # per-batch q_len>0 && kv_len>0 guard short-circuits computation.
+        block_tables[:current_batch_size, : cur_block_tables.shape[1]].copy_(cur_block_tables)
+        block_tables[:current_batch_size, cur_block_tables.shape[1] :] = -1
+        block_tables[current_batch_size:] = -1
+
+        ref_output = paged_prefill_swa_ref(
+            cur_q,
+            cur_k,
+            cur_v,
+            cur_cu_q,
+            cur_block_tables,
+            softmax_scale=softmax_scale,
+            seqlens_kv=cur_seqlens_kv,
+        )
+
+        # Capture padded-tail outputs to verify CUDA Graph replay does not
+        # touch them (output buffer is reused across replays, padding region
+        # must remain bit-identical).
+        reserved_unused_output = output[cur_T:].clone()
+
+        torch.cuda.synchronize()
+        graph.replay()
+        torch.cuda.synchronize()
+
+        check_tol_diff(output[:cur_T], ref_output, atol=atol, rtol=rtol)
+        # Padding region must remain bit-identical across replays. We compare
+        # raw bytes (not float values) because torch.empty_like in the impl
+        # may seed the buffer with NaN/Inf garbage, which the kernel
+        # legitimately leaves untouched -- a per-element float comparison
+        # would spuriously fail because NaN != NaN.
+        pad_after_bytes = output[cur_T:].view(torch.uint8)
+        pad_before_bytes = reserved_unused_output.view(torch.uint8)
+        assert torch.equal(pad_after_bytes, pad_before_bytes), (
+            "SWA paged prefill kernel modified the padded output region during"
+            f" CUDA Graph replay (cur_T={cur_T})."
+        )
+
+
 test_configs_swa_decode = [
     (4, 16, 4, 128, 1024, 512, torch.bfloat16, "M_BF16"),
     (8, 16, 4, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
