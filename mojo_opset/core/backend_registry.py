@@ -13,6 +13,7 @@ PLATFORM_BACKEND_PRIORITY = {
     "npu": ["ttx", "torch_npu", "torch"],
     "ilu": ["ixformer", "ttx", "torch"],
     "mlu": ["ttx", "torch"],
+    "meta_device": ["torch"],
 }
 
 # All known backend name prefixes (used for registration validation).
