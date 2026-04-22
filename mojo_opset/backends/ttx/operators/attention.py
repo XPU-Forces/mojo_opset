@@ -69,6 +69,8 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
             gqa_interleave=self.gqa_layout == "ABAB",
             softmax_scale=softmax_scale,
             aux_mask=self.aux_mask,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
         )
 
         return output
