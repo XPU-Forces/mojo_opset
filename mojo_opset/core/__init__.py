@@ -73,17 +73,12 @@ from .operators.quantize import MojoMoEDynamicQuant
 from .operators.quantize import MojoStaticQuant
 
 """ moe """
-from .operators.moe import MojoFusedSwiGLUMoEScaleDynamicQuantize
-from .operators.moe import MojoGroupedMatmulA8W4MSD
-from .operators.moe import MojoGroupQuantGemmA8W4MSD
-from .operators.moe import MojoGroupQuantGemmCombineA8W4MSD
-from .operators.moe import MojoGroupQuantGemmCombineMoE
-from .operators.moe import MojoGroupQuantGemmMoE
 from .operators.moe import MojoMoE
 from .operators.moe import MojoMoECombine
 from .operators.moe import MojoMoEDispatch
 from .operators.moe import MojoMoEGating
-from .operators.moe import MojoMoEInitRoutingDynamicQuant
+from .operators.moe import MojoW4A8Experts
+from .operators.moe import MojoW4A8MoE
 
 """ normalization """
 from .operators.normalization import MojoChannelRMSNorm
@@ -192,13 +187,8 @@ __all__ = [
     "MojoMoEGating",
     "MojoMoEDispatch",
     "MojoMoECombine",
-    "MojoMoEInitRoutingDynamicQuant",
-    "MojoFusedSwiGLUMoEScaleDynamicQuantize",
-    "MojoGroupQuantGemmMoE",
-    "MojoGroupQuantGemmCombineMoE",
-    "MojoGroupQuantGemmA8W4MSD",
-    "MojoGroupQuantGemmCombineA8W4MSD",
-    "MojoGroupedMatmulA8W4MSD",
+    "MojoW4A8Experts",
+    "MojoW4A8MoE",
 
     "MojoLayerNorm",
     "MojoRMSNorm",
