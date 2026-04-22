@@ -104,26 +104,27 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
             raise ValueError(f"block_tables must be int32, got {block_tables.dtype}.")
 
         q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-        if cu_seqlens_kv is None:
-            kv_lens = seqlens_kv if seqlens_kv is not None else q_lens
-            if kv_lens.dtype != torch.int32:
-                raise ValueError(f"seqlens_kv must be int32, got {kv_lens.dtype}.")
-            cu_seqlens_kv = torch.cat(
-                [
-                    torch.zeros(1, dtype=torch.int32, device=kv_lens.device),
-                    torch.cumsum(kv_lens, dim=0).to(torch.int32),
-                ]
+        if q_lens.dtype != torch.int32:
+            raise ValueError(f"q_lens must be int32, got {q_lens.dtype}.")
+        if (q_lens <= 0).any():
+            raise NotImplementedError(
+                "IxformerPagedPrefillGQA does not support zero/negative q_lens. "
+                "Please provide cu_seqlens_q such that all sequence lengths are >= 1."
             )
+        if not isinstance(cu_seqlens_kv, torch.Tensor):
+            raise ValueError(f"cu_seqlens_kv must be torch.Tensor, got {type(cu_seqlens_kv)}.")
         if cu_seqlens_kv.dtype != torch.int32:
             raise ValueError(f"cu_seqlens_kv must be int32, got {cu_seqlens_kv.dtype}.")
-        if max_seqlen_q is None:
-            max_seqlen_q = int(q_lens.max().item())
-        if max_seqlen_k is None:
-            max_seqlen_k = int((cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]).max().item())
-        if max_seqlen_q <= 0 or not isinstance(max_seqlen_q, int):
-            raise ValueError(f"max_seqlen_q must be >0 and int, got {max_seqlen_q}.")
-        if max_seqlen_k <= 0 or not isinstance(max_seqlen_k, int):
-            raise ValueError(f"max_seqlen_k must be >0 and int, got {max_seqlen_k}.")
+        if cu_seqlens_kv.ndim != 1:
+            raise ValueError(f"cu_seqlens_kv must be 1D, got shape {tuple(cu_seqlens_kv.shape)}.")
+        if not isinstance(max_seqlen_q, int) or max_seqlen_q <= 0:
+            raise ValueError(
+                f"max_seqlen_q must be a positive int, got {max_seqlen_q} ({type(max_seqlen_q)})."
+            )
+        if not isinstance(max_seqlen_k, int) or max_seqlen_k <= 0:
+            raise ValueError(
+                f"max_seqlen_k must be a positive int, got {max_seqlen_k} ({type(max_seqlen_k)})."
+            )
 
         return ix_fa.flash_attn_varlen_func(
             query,
@@ -246,8 +247,10 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
             raise NotImplementedError("IxformerPagedDecodeGQA does not support varlen decode.")
         if seqlens.dtype != torch.int32:
             raise ValueError(f"seqlens must be int32, got {seqlens.dtype}.")
-        if max_context_len is None:
-            max_context_len = int(seqlens.max().item())
+        if not isinstance(max_context_len, int) or max_context_len <= 0:
+            raise ValueError(f"max_context_len must be > 0 and int, got {max_context_len}.")
+        if (seqlens <= 0).any():
+            raise NotImplementedError("IxformerPagedDecodeGQA does not support zero/negative seqlens.")
         if max_context_len <= 1:
             raise NotImplementedError("IxformerPagedDecodeGQA only support max_context_len > 1.")
 
