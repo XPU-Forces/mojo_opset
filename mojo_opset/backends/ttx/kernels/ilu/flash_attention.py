@@ -455,6 +455,8 @@ def _paged_decode_gqa_kernel(
         return
 
     seq_len = tl.load(seqlens_ptr + pid_b).to(tl.int32)
+    if seq_len <= 0:
+        return
     kv_h = tl.where(GQA_LAYOUT == 0, pid_h % HKV, pid_h // GROUP)
 
     offs_d = tl.arange(0, BLOCK_D)
@@ -608,6 +610,10 @@ def _paged_decode_gather_and_causal(
     o = torch.empty_like(q)
     block_d = triton.next_power_of_2(head_dim)
     layout_id = 0 if gqa_interleave else 1
+
+    # MAX_S_LEN = 0
+    if block_tables.shape[1] == 0:
+        return torch.zeros_like(q)
 
     if q.dtype == torch.float16:
         out_t = tl.float16
