@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import math
+
+from typing import Optional
 
 import torch
 
@@ -29,11 +29,9 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
         window_size: int = -1,
     ):
         super().__init__(is_causal=is_causal, gqa_layout=gqa_layout, window_size=window_size)
-        
 
         if self.window_size != -1:
             raise NotImplementedError("IxformerPagedPrefillGQA only supports window_size == -1")
-         
 
     def forward(
         self,
@@ -41,13 +39,14 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
-        cu_seqlens_kv: torch.Tensor,
-        max_seqlen_q: int,
-        max_seqlen_k: int,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
+        seqlens_kv: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        **kwargs,
+        *,
+        cu_seqlens_kv: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_k: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Paged prefill attention with grouped query heads (GQA) using a blocked KV cache.
@@ -73,15 +72,10 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
                 shape (B, num_blocks).
                 dtype must be int32.
             softmax_scale (Optional[float]): Attention scaling factor; defaults to 1/sqrt(D).
-            seqlens_kv (Optional[torch.Tensor]): key/value lengths, shape (B,);
-                `seqlens_kv[i]` is the length for key/value in key/value cache at batch i.
-                If None, defaults to `cu_seqlens_q[i+1] - cu_seqlens_q[i]` for each batch i.
-                we do not use this parameter yet.we use cu_seqlens_kv instead.
+            seqlens_kv (Optional[torch.Tensor]): key/value lengths, shape (B,). Used to derive
+                cu_seqlens_kv when the cumulative lengths are not provided.
             mask (Optional[torch.Tensor]): Attention mask; defaults to None.
                 we do not support custom mask yet.
-                
-            
-
         Returns:
             torch.Tensor: Attention output of shape (T, Hq, D).
 
@@ -108,8 +102,24 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
             raise ValueError(f"cu_seqlens_q must be int32, got {cu_seqlens_q.dtype}.")
         if block_tables.dtype != torch.int32:
             raise ValueError(f"block_tables must be int32, got {block_tables.dtype}.")
+
+        q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        if cu_seqlens_kv is None:
+            kv_lens = seqlens_kv if seqlens_kv is not None else q_lens
+            if kv_lens.dtype != torch.int32:
+                raise ValueError(f"seqlens_kv must be int32, got {kv_lens.dtype}.")
+            cu_seqlens_kv = torch.cat(
+                [
+                    torch.zeros(1, dtype=torch.int32, device=kv_lens.device),
+                    torch.cumsum(kv_lens, dim=0).to(torch.int32),
+                ]
+            )
         if cu_seqlens_kv.dtype != torch.int32:
             raise ValueError(f"cu_seqlens_kv must be int32, got {cu_seqlens_kv.dtype}.")
+        if max_seqlen_q is None:
+            max_seqlen_q = int(q_lens.max().item())
+        if max_seqlen_k is None:
+            max_seqlen_k = int((cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]).max().item())
         if max_seqlen_q <= 0 or not isinstance(max_seqlen_q, int):
             raise ValueError(f"max_seqlen_q must be >0 and int, got {max_seqlen_q}.")
         if max_seqlen_k <= 0 or not isinstance(max_seqlen_k, int):
@@ -140,9 +150,11 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         value_cache: torch.Tensor,
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
-        max_context_len: int,
         softmax_scale: Optional[float] = None,
+        cu_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
+        *,
+        max_context_len: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Paged decode attention with grouped query heads (GQA) using a blocked KV cache.
@@ -230,6 +242,12 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         if block_tables.dtype != torch.int32:
             raise NotImplementedError("IxformerPagedDecodeGQA only support block_tables dtype = torch.int32.")
 
+        if cu_seq_lens is not None:
+            raise NotImplementedError("IxformerPagedDecodeGQA does not support varlen decode.")
+        if seqlens.dtype != torch.int32:
+            raise ValueError(f"seqlens must be int32, got {seqlens.dtype}.")
+        if max_context_len is None:
+            max_context_len = int(seqlens.max().item())
         if max_context_len <= 1:
             raise NotImplementedError("IxformerPagedDecodeGQA only support max_context_len > 1.")
 
@@ -245,7 +263,7 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
             block_size=block_size,
             max_context_len=max_context_len,
             causal=self.is_causal,
-            window_left=self.window_size
+            window_left=self.window_size,
         )
 
         return output

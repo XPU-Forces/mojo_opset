@@ -133,8 +133,8 @@ def test_paged_decode_gqa(
         v_cache,
         seqlens,
         block_tables,
-        max_context_len,
         softmax_scale=softmax_scale,
+        max_context_len=max_context_len,
         atol=atol,
         rtol=rtol,
     )

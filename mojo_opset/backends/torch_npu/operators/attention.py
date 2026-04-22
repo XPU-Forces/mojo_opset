@@ -79,6 +79,10 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
         softmax_scale: Optional[float] = None,
         seqlens_kv: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
+        *,
+        cu_seqlens_kv: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_k: Optional[int] = None,
     ) -> torch.Tensor:
         _, num_q_heads, head_dim = query.shape
         _, num_kv_heads, block_size, _ = key_cache.shape
@@ -91,7 +95,19 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
 
         if block_size % 128 != 0 or block_size > 512:
             # high performance attention kernel only supports block_size % 128 == 0 and block_size <= 512
-            return super().forward(query, key_cache, value_cache, cu_seqlens_q, block_tables, softmax_scale, seqlens_kv, mask)
+            return super().forward(
+                query,
+                key_cache,
+                value_cache,
+                cu_seqlens_q,
+                block_tables,
+                softmax_scale,
+                seqlens_kv,
+                mask,
+                cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+            )
 
         if softmax_scale is None:
             softmax_scale = head_dim**-0.5
@@ -134,6 +150,9 @@ class TorchNpuPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
         softmax_scale: Optional[float] = None,
         input_layout: Optional[str] = None,
         cu_seq_lens: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
+        *,
+        max_context_len: Optional[int] = None,
     ) -> Tuple[Any]:
         batch_size, num_q_heads, head_dim = query.shape
         _, head_nums, block_size, _ = k_cache.shape
@@ -141,7 +160,17 @@ class TorchNpuPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
             raise NotImplementedError(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
 
         if block_size % 128 != 0 or block_size > 512:
-            return super().forward(query, k_cache, v_cache, seqlens, block_tables, softmax_scale, cu_seq_lens)
+            return super().forward(
+                query,
+                k_cache,
+                v_cache,
+                seqlens,
+                block_tables,
+                softmax_scale,
+                cu_seq_lens,
+                mask,
+                max_context_len=max_context_len,
+            )
 
         if softmax_scale is None:
             softmax_scale = 1.0 / (head_dim**0.5)

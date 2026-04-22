@@ -34,10 +34,10 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         softmax_scale: Optional[float] = None,
         seqlens_kv: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
+        *,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
         max_seqlen_q: Optional[int] = None,
         max_seqlen_k: Optional[int] = None,
-        **kwargs,
     ):
         assert cu_seqlens_q.dtype == torch.int32
         assert block_tables.dtype == torch.int32
@@ -89,10 +89,11 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         value_cache: torch.Tensor,
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
-        max_context_len: int,
         softmax_scale: Optional[float] = None,
         cu_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
+        *,
+        max_context_len: Optional[int] = None,
     ):
         assert seqlens.dtype == torch.int32
         assert block_tables.dtype == torch.int32
@@ -233,4 +234,3 @@ class TTXSWA(MojoSWA):
             self.gqa_interleave,
         )
         return o
-
