@@ -594,8 +594,8 @@ def _swa_infer_kernel(
                         BLOCK_D,
                     )
 
-            l_safe = tl.where(q_valid, l_i, 1.0)
-            out_block = acc / l_safe[:, None]
+            l_i_safe = tl.where(l_i > 0, l_i, 1.0)
+            out_block = tl.where(l_i[:, None] > 0, acc / l_i_safe[:, None], 0.0)
             out_block = tl.where(q_valid[:, None], out_block, 0.0)
             o_block_ptr = tl.make_block_ptr(
                 base=o_ptr + q_start * stride_ot + q_head_id * stride_oh,
@@ -1007,8 +1007,8 @@ def _swa_paged_prefill_kernel(
                         BLOCK_D,
                     )
 
-            l_safe = tl.where(q_valid, l_i, 1.0)
-            out_block = acc / l_safe[:, None]
+            l_i_safe = tl.where(l_i > 0, l_i, 1.0)
+            out_block = tl.where(l_i[:, None] > 0, acc / l_i_safe[:, None], 0.0)
             out_block = tl.where(q_valid[:, None], out_block, 0.0)
             o_block_ptr = tl.make_block_ptr(
                 base=o_ptr + q_start * stride_ot + q_head_id * stride_oh,
@@ -1444,7 +1444,8 @@ def _swa_infer_token_kernel(
                     v_ptr.dtype.element_ty == tl.float8e5,
                 )
 
-            out = acc / l_i
+            l_i_safe = tl.where(l_i > 0, l_i, 1.0)
+            out = tl.where(l_i > 0, acc / l_i_safe, 0.0)
             out_ptrs = o_ptr + (q_start + q_token_id) * stride_ot + q_head_id * stride_oh + offs_d * stride_od
             tl.store(out_ptrs, out.to(o_ptr.dtype.element_ty), mask=offs_d < HEAD_DIM)
 
@@ -1651,7 +1652,8 @@ def _swa_paged_prefill_token_kernel(
                     v_cache_ptr.dtype.element_ty == tl.float8e5,
                 )
 
-            out = acc / l_i
+            l_i_safe = tl.where(l_i > 0, l_i, 1.0)
+            out = tl.where(l_i > 0, acc / l_i_safe, 0.0)
             out_ptrs = o_ptr + (q_start + q_token_id) * stride_ot + q_head_id * stride_oh + offs_d * stride_od
             tl.store(out_ptrs, out.to(o_ptr.dtype.element_ty), mask=offs_d < HEAD_DIM)
 
@@ -1844,8 +1846,8 @@ def _paged_decode_kernel(
                 v_cache_ptr.dtype.element_ty == tl.float8e5,
             )
 
-        if l_i != 0.0:
-            acc = acc / l_i
+        l_i_safe = tl.where(l_i > 0, l_i, 1.0)
+        acc = tl.where(l_i > 0, acc / l_i_safe, 0.0)
 
         o_ptrs = o_ptr + b_id * stride_ob + q_head_id * stride_oh + offs_d * stride_od
         tl.store(o_ptrs, acc.to(OUT_T), mask=offs_d < HEAD_DIM)
@@ -2104,8 +2106,8 @@ def _paged_decode_kernel_tiny_global(
                 v_cache_ptr.dtype.element_ty == tl.float8e5,
             )
 
-        if l_i != 0.0:
-            acc = acc / l_i
+        l_i_safe = tl.where(l_i > 0, l_i, 1.0)
+        acc = tl.where(l_i > 0, acc / l_i_safe, 0.0)
 
         o_ptrs = o_ptr + b_id * stride_ob + q_head_id * stride_oh + offs_d * stride_od
         tl.store(o_ptrs, acc.to(OUT_T), mask=offs_d < HEAD_DIM)
