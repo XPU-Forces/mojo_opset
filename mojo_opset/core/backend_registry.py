@@ -1,4 +1,5 @@
 from typing import Dict
+from typing import Optional
 from typing import Union
 
 from mojo_opset.utils.logging import get_logger
@@ -13,6 +14,7 @@ PLATFORM_BACKEND_PRIORITY = {
     "npu": ["ttx", "torch_npu", "torch"],
     "ilu": ["ixformer", "ttx", "torch"],
     "mlu": ["ttx", "torch"],
+    "meta_device": ["torch"],
 }
 
 # All known backend name prefixes (used for registration validation).
@@ -21,6 +23,15 @@ BACKEND_PRIORITY_LIST = PLATFORM_BACKEND_PRIORITY[get_platform()]
 BACKEND_PRIORITY_MAP = {
     "torchnpu": "torch_npu"
 }  ## Avoid the issue of failed identification of underscore "_" in the torch_npu backend name
+
+
+def _normalize_backend_name(backend_name: Optional[str] = None) -> Optional[str]:
+    if backend_name is None:
+        return None
+
+    normalized_backend_name = backend_name.strip().lower()
+    return BACKEND_PRIORITY_MAP.get(normalized_backend_name, normalized_backend_name)
+
 
 class MojoBackendRegistry:
     def __init__(self, core_op_cls: Union[MojoOperator, MojoFunction]):
@@ -40,12 +51,9 @@ class MojoBackendRegistry:
             f"Operator {cls.__name__} who be a subclass of {self._core_op_cls.__name__} must "
             f"contain {self._operator_name} in its name."
         )
-        impl_backend_name = cls.__name__[:idx].lower()
+        impl_backend_name = _normalize_backend_name(cls.__name__[:idx])
 
         curr_platform = get_platform()
-
-        if impl_backend_name not in BACKEND_PRIORITY_LIST and impl_backend_name in BACKEND_PRIORITY_MAP:
-            impl_backend_name = BACKEND_PRIORITY_MAP[impl_backend_name]
 
         # Hard code for some special cases
         assert impl_backend_name != "mojo", "should not register base backend"
@@ -87,6 +95,8 @@ class MojoBackendRegistry:
         # may lead to missing registrations. To avoid this, we first ensure that all
         # backends are fully registered before accessing or executing the registry
         # of a specific backend.
+        backend_name = _normalize_backend_name(backend_name)
+
         if (backend_name is None) or (backend_name not in self._registry.keys()):  # get first class
             assert len(self._registry) > 0, f"{self._operator_name} does not implement any backend."
             fallback = list(self._registry.values())[0]
@@ -97,15 +107,7 @@ class MojoBackendRegistry:
             )
             return fallback
 
-        try:
-            return self._registry[backend_name]
-        except Exception as e:
-            logger.warning(
-                f"Failed to get backend '{backend_name}' for "
-                f"{self._operator_name}, falling back to '{fallback.__class__.__name__}'. "
-                f"Error: {e}"
-            )
-            return list(self._registry.values())[0]
+        return self._registry[backend_name]
 
     def sort(self):
         def _prio_key(item):
