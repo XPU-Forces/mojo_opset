@@ -7,7 +7,7 @@ from mojo_opset.backends.ttx.kernels.utils import prepare_lens
 
 
 def prepare_kv_chunk_indices(
-    cu_seqlens: torch.Tensor, kv_lens: torch.Tensor, chunk_size: int, is_decode: bool = False
+    cu_seqlens: torch.Tensor, kv_lens_before_store: torch.Tensor, chunk_size: int, is_decode: bool = False
 ) -> torch.Tensor:
     """
     Generates metadata for each chunk to support arbitrary KV start positions.
@@ -16,13 +16,18 @@ def prepare_kv_chunk_indices(
     Columns:
         0: batch_idx (Sequence ID)
         1: token_offset_in_seq (Offset of this chunk in the current K/V sequence)
-        2: logical_kv_start_index (Logical KV position = kv_lens[batch] + token_offset)
+        2: logical_kv_start_index (Logical KV position = kv_lens_before_store[batch] + token_offset)
     """
     if is_decode:
-        batch_size = kv_lens.shape[0]
+        batch_size = kv_lens_before_store.shape[0]
         seq_ids = torch.arange(batch_size, device=cu_seqlens.device, dtype=torch.int32)
+        valid = kv_lens_before_store >= 0
+        seq_ids = seq_ids[valid]
+        if seq_ids.numel() == 0:
+            return torch.empty((0, 3), device=cu_seqlens.device, dtype=torch.int32)
         token_offset_in_qkv = torch.zeros(batch_size, device=cu_seqlens.device, dtype=torch.int32)
-        logical_kv_start = kv_lens.to(torch.int32)
+        token_offset_in_qkv = token_offset_in_qkv[valid]
+        logical_kv_start = kv_lens_before_store[valid].to(torch.int32)
         indices = torch.stack([seq_ids, token_offset_in_qkv, logical_kv_start], dim=1)
         return indices
 
@@ -39,9 +44,15 @@ def prepare_kv_chunk_indices(
 
     token_offset_in_qkv = (chunk_idx_in_seq * chunk_size).to(torch.int32)
 
-    if kv_lens is not None:
-        batch_kv_lens = kv_lens[seq_ids]
-        logical_kv_start = batch_kv_lens.to(torch.int32) + token_offset_in_qkv
+    if kv_lens_before_store is not None:
+        batch_kv_lens_before_store = kv_lens_before_store[seq_ids]
+        valid = batch_kv_lens_before_store >= 0
+        seq_ids = seq_ids[valid]
+        token_offset_in_qkv = token_offset_in_qkv[valid]
+        batch_kv_lens_before_store = batch_kv_lens_before_store[valid]
+        if seq_ids.numel() == 0:
+            return torch.empty((0, 3), device=cu_seqlens.device, dtype=torch.int32)
+        logical_kv_start = batch_kv_lens_before_store.to(torch.int32) + token_offset_in_qkv
     else:
         logical_kv_start = token_offset_in_qkv
 
@@ -167,7 +178,7 @@ def store_paged_kv_impl(
     value_cache: torch.Tensor,
     block_table: torch.Tensor,
     cu_seqlens: torch.Tensor,
-    kv_lens: torch.Tensor,
+    kv_lens_before_store: torch.Tensor,
 ):
     assert k_states.is_contiguous() and v_states.is_contiguous()
 
@@ -180,8 +191,10 @@ def store_paged_kv_impl(
 
     block_size = key_cache.shape[2]
 
-    chunk_indices = prepare_kv_chunk_indices(cu_seqlens, kv_lens, block_size, is_decode=is_decode)
+    chunk_indices = prepare_kv_chunk_indices(cu_seqlens, kv_lens_before_store, block_size, is_decode=is_decode)
     total_chunks = chunk_indices.shape[0]
+    if total_chunks == 0:
+        return key_cache, value_cache
 
     num_programs = get_num_cores("vector")
     grid = (num_programs,)

@@ -127,8 +127,9 @@ class PagedDummyCache:
         )
 
         # Per-layer block tables and sequence lengths
-        self.block_tables = torch.zeros(
+        self.block_tables = torch.full(
             (self.num_layers, self.batch_size, max_blocks_per_seq),
+            -1,
             dtype=torch.long,
             device=self.device,
         )

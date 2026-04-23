@@ -39,7 +39,7 @@ def generate_paged_decode_data(
     k_cache = torch.randn(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
     v_cache = torch.randn(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
 
-    block_tables = torch.zeros(batch_size, max_num_blocks_per_seq, dtype=torch.long)
+    block_tables = torch.full((batch_size, max_num_blocks_per_seq), -1, dtype=torch.long)
     free_blocks = torch.randperm(num_total_blocks)
 
     current_block_offset = 0
@@ -153,7 +153,7 @@ def generate_paged_prefill_data(
     k_cache = torch.zeros(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
     v_cache = torch.zeros(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
 
-    block_tables = torch.zeros(batch_size, max_num_blocks_per_seq, dtype=torch.long)
+    block_tables = torch.full((batch_size, max_num_blocks_per_seq), -1, dtype=torch.long)
     free_blocks = torch.randperm(num_total_blocks)
 
     current_block_offset = 0
@@ -502,5 +502,4 @@ def test_swa_infer(
             softmax_scale=softmax_scale,
         )
     )
-
 

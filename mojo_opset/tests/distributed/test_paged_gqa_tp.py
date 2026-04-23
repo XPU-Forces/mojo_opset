@@ -76,8 +76,9 @@ class SimplePagedKVCache(torch.nn.Module):
             device=self.device,
         )
 
-        self.block_tables = torch.zeros(
+        self.block_tables = torch.full(
             (self.num_layers, self.batch_size, max_blocks_per_seq),
+            -1,
             dtype=torch.int32,
             device=self.device,
         )
