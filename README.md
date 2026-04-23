@@ -88,14 +88,17 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | MoE         | MojoMoEGating                 | ✅           | TBD       | TBD | TBD      |
 | MoE         | MojoMoEDispatch               | ✅           | TBD       | TBD | TBD      |
 | MoE         | MojoExperts                   | ✅           | TBD       | TBD | TBD      |
+| MoE         | MojoQuantMoE                  | ✅           | TBD       | TBD | TBD      |
+| MoE         | MojoQuantExperts              | ✅           | TBD       | TBD | TBD      |
 | MoE         | MojoMoECombine                | ✅           | TBD       | TBD | TBD      |
 | Sampling    | MojoTopKSampling              | TBD          | TBD       | TBD | TBD      |
 | Sampling    | MojoTopPSampling              | ✅           | TBD       | ✅  | TBD      |
 | Sampling    | MojoRejectSampling            | ✅           | TBD       | ✅  | TBD      |
 | Sampling    | MojoApplyPenaltiesTempurate   | ✅           | TBD       | ✅  | TBD      |
-| Quantize    | MojoQuant                     | ✅           | TBD       | TBD | TBD      |
+| Quantize    | MojoStaticQuant               | ✅           | TBD       | ✅  | TBD      |
 | Quantize    | MojoDequant                   | ✅           | TBD       | TBD | TBD      |
-| Quantize    | MojoDynamicQuant              | ✅           | ✅        | TBD | TBD      |
+| Quantize    | MojoDynamicQuant              | ✅           | ✅        | ✅  | TBD      |
+| Quantize    | MojoMoEDynamicQuant           | ✅           | ✅        | ✅  | TBD      |
 | Quantize    | MojoDequantSwiGLUQuant        | ✅           | ✅        | TBD | TBD      |
 | Quantize    | MojoGemmDequant               | ✅           | ✅        | TBD | TBD      |
 | Norm        | MojoRMSNorm                   | ✅           | ✅        | ✅  | ✅       |
@@ -115,7 +118,6 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Embedding   | MojoParallelEmbedding         | ✅           | TBD       | TBD | TBD      |
 | Embedding   | MojoRelativeEmbedding         | ✅           | TBD       | TBD | TBD      |
 
-
 ### Mojo Function List
 
 | Op Category | Op Name                     | torch native      | ttx           |
@@ -128,7 +130,6 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Norm        | MojoRMSNormFunc             | ✅                | ✅             |
 | Gemm        | MojoGemmAllReduce           | TBD               | TBD           |
 | Loss        | MojoLinearCrossEntropyFunc  | ✅                | ✅             |
-
 
 ## Usage
 

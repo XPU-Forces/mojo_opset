@@ -95,17 +95,23 @@ class MojoGemmDequant(MojoOperator):
 
     def __init__(
         self,
+        weight_scale_size: int,
         output_dtype: torch.dtype = torch.bfloat16,
         trans_weight: bool = False,
+        **kwargs,
     ):
         """
         Args:
+            weight_scale_size (int): Size of the per-channel weight scale parameter.
             output_dtype (torch.dtype): Target dtype for the dequantized output.
                 Supported: ``torch.float32``, ``torch.float16``, ``torch.bfloat16``.
             trans_weight (bool): If True, the weight tensor is provided as
                 ``(N, K)`` and will be transposed to ``(K, N)`` internally.
+            **kwargs: Tensor factory kwargs.
         """
-        super().__init__()
+        super().__init__(**kwargs)
+        self.weight_scale_size = weight_scale_size
+        self.weight_scale = torch.nn.Parameter(torch.empty(weight_scale_size, **self.tensor_factory_kwargs))
         self.output_dtype = output_dtype
         self.trans_weight = trans_weight
 
@@ -114,7 +120,6 @@ class MojoGemmDequant(MojoOperator):
         input: torch.Tensor,
         weight: torch.Tensor,
         input_scale: torch.Tensor,
-        weight_scale: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
@@ -122,10 +127,7 @@ class MojoGemmDequant(MojoOperator):
             input (torch.Tensor): Quantised activation ``(M, K)`` in int8.
             weight (torch.Tensor): Quantised weight ``(K, N)`` in int8, or
                 ``(N, K)`` when ``trans_weight=True``.
-            input_scale (torch.Tensor): Per-token activation scale ``(M, 1)``
-                or ``(M,)``.
-            weight_scale (torch.Tensor): Per-channel weight scale ``(1, N)``
-                or ``(N,)``.
+            input_scale (torch.Tensor): Runtime per-token activation scale ``(M,)`` or ``(M, 1)``.
             bias (Optional[torch.Tensor]): Optional bias ``(N,)`` in
                 ``output_dtype``.
 
@@ -137,6 +139,7 @@ class MojoGemmDequant(MojoOperator):
 
         out = torch.matmul(input.float(), weight.float())
 
+        weight_scale = self.weight_scale
         if input_scale.dim() == 1:
             input_scale = input_scale.unsqueeze(-1)
         if weight_scale.dim() == 1:
@@ -150,7 +153,10 @@ class MojoGemmDequant(MojoOperator):
         return out.to(self.output_dtype)
 
     def extra_repr(self) -> str:
-        return f"output_dtype={self.output_dtype}, trans_weight={self.trans_weight}"
+        return (
+            f"weight_scale_size={self.weight_scale_size}, "
+            f"output_dtype={self.output_dtype}, trans_weight={self.trans_weight}"
+        )
 
 
 class MojoQuantGroupLinearReduceSum(MojoOperator):

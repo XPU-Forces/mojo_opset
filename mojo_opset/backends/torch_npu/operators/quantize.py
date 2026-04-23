@@ -1,10 +1,9 @@
-from typing import Optional
-
 import torch
 import torch_npu
 
 from mojo_opset.core import MojoDequantSwiGLUQuant
 from mojo_opset.core import MojoDynamicQuant
+from mojo_opset.core import MojoMoEDynamicQuant
 
 
 class TorchNpuDynamicQuant(MojoDynamicQuant):
@@ -13,18 +12,30 @@ class TorchNpuDynamicQuant(MojoDynamicQuant):
     def forward(
         self,
         input: torch.Tensor,
-        smooth_scale: Optional[torch.Tensor] = None,
-        token_count: Optional[torch.Tensor] = None,
     ):
         kwargs = {"dst_type": self.quant_dtype}
-        if smooth_scale is not None:
-            kwargs["smooth_scales"] = smooth_scale.to(dtype=input.dtype)
-        if token_count is not None:
-            kwargs["group_index"] = torch.cumsum(
+        if self.smooth_scale is not None:
+            kwargs["smooth_scales"] = self.smooth_scale.to(dtype=input.dtype)
+        return torch_npu.npu_dynamic_quant(input, **kwargs)
+
+
+class TorchNpuMoEDynamicQuant(MojoMoEDynamicQuant):
+    supported_platforms_list = ["npu"]
+
+    def forward(
+        self,
+        input: torch.Tensor,
+        token_count: torch.Tensor,
+    ):
+        kwargs = {
+            "dst_type": self.quant_dtype,
+            "group_index": torch.cumsum(
                 token_count.to(dtype=torch.int32, device=input.device),
                 dim=0,
                 dtype=torch.int32,
-            )
+            ),
+        }
+        kwargs["smooth_scales"] = self.smooth_scale.to(dtype=input.dtype)
         return torch_npu.npu_dynamic_quant(input, **kwargs)
 
 
@@ -34,19 +45,17 @@ class TorchNpuDequantSwiGLUQuant(MojoDequantSwiGLUQuant):
     def forward(
         self,
         x: torch.Tensor,
-        weight_scale: Optional[torch.Tensor] = None,
-        activation_scale: Optional[torch.Tensor] = None,
-        bias: Optional[torch.Tensor] = None,
-        quant_scale: Optional[torch.Tensor] = None,
-        quant_offset: Optional[torch.Tensor] = None,
-        token_count: Optional[torch.Tensor] = None,
+        activation_scale: torch.Tensor = None,
+        bias: torch.Tensor = None,
+        quant_offset: torch.Tensor = None,
+        token_count: torch.Tensor = None,
     ):
         return torch_npu.npu_dequant_swiglu_quant(
             x,
-            weight_scale=weight_scale,
+            weight_scale=self.weight_scale,
             activation_scale=activation_scale,
             bias=bias,
-            quant_scale=quant_scale,
+            quant_scale=self.quant_scale,
             quant_offset=quant_offset,
             group_index=token_count,
             activate_left=self.activate_left,

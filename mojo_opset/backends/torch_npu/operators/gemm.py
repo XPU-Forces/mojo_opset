@@ -26,7 +26,6 @@ class TorchNpuGemmDequant(MojoGemmDequant):
         input: torch.Tensor,
         weight: torch.Tensor,
         input_scale: torch.Tensor,
-        weight_scale: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.trans_weight:
@@ -35,7 +34,7 @@ class TorchNpuGemmDequant(MojoGemmDequant):
         return torch_npu.npu_quant_matmul(
             input,
             weight,
-            weight_scale.flatten(),
+            self.weight_scale.flatten(),
             pertoken_scale=input_scale.flatten(),
             bias=bias,
             output_dtype=self.output_dtype,

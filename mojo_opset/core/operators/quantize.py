@@ -6,82 +6,30 @@ import torch.nn.functional as F
 from ..operator import MojoOperator
 
 
-def _expand_group_param(
-    param: Optional[torch.Tensor],
-    token_count: Optional[torch.Tensor],
-    row_count: int,
-) -> Optional[torch.Tensor]:
-    if param is None:
-        return None
-
-    param_fp = param.float()
-    if token_count is None:
-        if param_fp.dim() == 1:
-            return param_fp.unsqueeze(0).expand(row_count, -1)
-        if param_fp.dim() == 2 and param_fp.size(0) == 1:
-            return param_fp.expand(row_count, -1)
-        return param_fp
-
-    if param_fp.dim() == 1:
-        return param_fp.unsqueeze(0).expand(row_count, -1)
-    if param_fp.dim() == 2 and param_fp.size(0) == 1:
-        return param_fp.expand(row_count, -1)
-    if param_fp.dim() != 2 or param_fp.size(0) != token_count.numel():
-        raise ValueError(
-            "Grouped tensor must be 2D with the first dimension equal to token_count length, "
-            f"but got shape {tuple(param.shape)} and token_count length {token_count.numel()}."
-        )
-
-    expanded = param_fp.repeat_interleave(token_count, dim=0)
-    if expanded.size(0) != row_count:
-        raise ValueError(f"Expanded grouped tensor row count mismatch: expected {row_count}, got {expanded.size(0)}.")
-    return expanded
-
-
-def _apply_smooth_scale(
-    input_fp: torch.Tensor,
-    smooth_scale: Optional[torch.Tensor],
-    token_count: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    if smooth_scale is None:
-        return input_fp
-
-    if token_count is None:
-        scale_fp = smooth_scale.float()
-        while scale_fp.dim() < input_fp.dim():
-            scale_fp = scale_fp.unsqueeze(0)
-        return input_fp * scale_fp
-
-    flat_input = input_fp.reshape(-1, input_fp.shape[-1])
-    expanded_scale = _expand_group_param(smooth_scale, token_count, flat_input.size(0))
-    return (flat_input * expanded_scale).reshape_as(input_fp)
-
-
-class MojoQuant(MojoOperator):
+class MojoStaticQuant(MojoOperator):
     def __init__(
         self,
+        input_size: int,
         quant_dtype: torch.dtype = torch.int8,
-        symmetric: bool = True,
-        group_size: int = -1,
+        **kwargs,
     ):
         """
-        Initialize quantization operator.
+        Quantize a floating-point tensor with a one-dimensional scale parameter.
 
         Args:
+            input_size (int): Size of the 1-D scale vector. It is expected to match ``input.shape[-1]``.
             quant_dtype (torch.dtype, default=torch.int8): Target quantization dtype.
                 Supported: torch.int8, torch.float8_e4m3fn.
-            symmetric (bool, default=True): If True, use symmetric quantization (no zero_point).
-            group_size (int, default=-1): Group size for per-group quantization.
-                -1 means no grouping. Must divide the last dimension evenly when > 0.
+            **kwargs: Tensor factory kwargs.
         """
-        super().__init__()
+        super().__init__(**kwargs)
+        self.input_size = input_size
+        self.scale = torch.nn.Parameter(torch.empty(input_size, **self.tensor_factory_kwargs))
         self.quant_dtype = quant_dtype
-        self.symmetric = symmetric
-        self.group_size = group_size
 
         if quant_dtype == torch.int8:
             self.q_max = 127
-            self.q_min = -128 if symmetric else 0
+            self.q_min = -128
         elif quant_dtype == torch.float8_e4m3fn:
             self.q_max = torch.finfo(torch.float8_e4m3fn).max
             self.q_min = -torch.finfo(torch.float8_e4m3fn).max
@@ -93,153 +41,90 @@ class MojoQuant(MojoOperator):
     def forward(
         self,
         input: torch.Tensor,
-        scale: torch.Tensor,
-        zero_point: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Quantize a floating-point tensor with a caller-supplied scale.
 
         Args:
             input (torch.Tensor): Input floating-point tensor of shape (..., K).
-            scale (torch.Tensor): Pre-computed scale tensor. Shape must be
-                broadcastable to ``input``.
-                - per-token: shape (..., 1) or (...,) matching all but the last dim.
-                - per-group: shape (..., K // group_size, 1) after the internal reshape.
-                - per-tensor: scalar or shape (1,).
-            zero_point (Optional[torch.Tensor]): Zero point tensor. Only used when
-                ``symmetric=False``; must be broadcastable to ``input``. Required
-                when ``symmetric=False``.
-
         Returns:
             torch.Tensor: Quantized tensor in ``self.quant_dtype``, same shape as ``input``.
         """
-        if not self.symmetric and zero_point is None:
-            raise ValueError("zero_point is required when symmetric=False")
-
         input_fp = input.float()
-
-        if self.group_size > 0:
-            orig_shape = input.shape
-            assert input.shape[-1] % self.group_size == 0, (
-                f"Last dim {input.shape[-1]} must be divisible by group_size {self.group_size}"
-            )
-            input_fp = input_fp.reshape(*input.shape[:-1], -1, self.group_size)
-
-        if self.symmetric:
-            output = torch.clamp(torch.round(input_fp / scale.float()), self.q_min, self.q_max)
-        else:
-            output = torch.clamp(
-                torch.round(input_fp / scale.float()) + zero_point.float(),
-                self.q_min,
-                self.q_max,
-            )
-
-        if self.group_size > 0:
-            output = output.reshape(orig_shape)
-
+        output = torch.clamp(torch.round(input_fp / self.scale.float()), self.q_min, self.q_max)
         return output.to(self.quant_dtype)
 
     def extra_repr(self) -> str:
-        return (
-            f"quant_dtype={self.quant_dtype}, symmetric={self.symmetric}, "
-            f"group_size={self.group_size}, q_max={self.q_max}, q_min={self.q_min}"
-        )
+        return f"input_size={self.input_size}, quant_dtype={self.quant_dtype}, q_max={self.q_max}, q_min={self.q_min}"
 
 
 class MojoDequant(MojoOperator):
     def __init__(
         self,
+        input_size: int,
         output_dtype: torch.dtype = torch.bfloat16,
-        symmetric: bool = True,
-        group_size: int = -1,
+        **kwargs,
     ):
         """
         Initialize dequantization operator.
 
         Args:
+            input_size (int): Size of the 1-D scale vector. It is expected to match ``input.shape[-1]``.
             output_dtype (torch.dtype, default=torch.bfloat16): Target output dtype
                 after dequantization.
-            symmetric (bool, default=True): Must match the MojoQuant that produced the
-                quantized tensor. If True, dequantize as ``x * scale``; otherwise
-                dequantize as ``(x - zero_point) * scale``.
-            group_size (int, default=-1): Group size used during quantization.
-                -1 means no grouping. Must match the MojoQuant group_size.
+            **kwargs: Tensor factory kwargs.
         """
-        super().__init__()
+        super().__init__(**kwargs)
+        self.input_size = input_size
+        self.scale = torch.nn.Parameter(torch.empty(input_size, **self.tensor_factory_kwargs))
+        if output_dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            raise NotImplementedError(
+                f"Unsupported output_dtype: {output_dtype}, expected torch.float16, torch.bfloat16, or torch.float32."
+            )
         self.output_dtype = output_dtype
-        self.symmetric = symmetric
-        self.group_size = group_size
 
     def forward(
         self,
         input: torch.Tensor,
-        scale: torch.Tensor,
-        zero_point: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Dequantize a quantized tensor back to floating point.
 
         Args:
             input (torch.Tensor): Quantized tensor (e.g., int8 or float8).
-            scale (torch.Tensor): Scale tensor produced by MojoQuant.
-            zero_point (Optional[torch.Tensor]): Zero point tensor, required when
-                ``symmetric=False``.
-
         Returns:
             torch.Tensor: Dequantized tensor in ``self.output_dtype``.
         """
         input_fp = input.float()
-        scale_fp = scale.float()
-        zp_fp = zero_point.float() if zero_point is not None else None
-
-        if self.group_size > 0:
-            orig_shape = input.shape
-            input_fp = input_fp.reshape(*input.shape[:-1], -1, self.group_size)
-        else:
-            while scale_fp.dim() < input_fp.dim():
-                scale_fp = scale_fp.unsqueeze(-1)
-            if zp_fp is not None:
-                while zp_fp.dim() < input_fp.dim():
-                    zp_fp = zp_fp.unsqueeze(-1)
-
-        if self.symmetric:
-            output = input_fp * scale_fp
-        else:
-            assert zp_fp is not None, "zero_point is required for asymmetric dequantization"
-            output = (input_fp - zp_fp) * scale_fp
-
-        if self.group_size > 0:
-            output = output.reshape(orig_shape)
-
+        output = input_fp * self.scale.float()
         return output.to(self.output_dtype)
 
     def extra_repr(self) -> str:
-        return f"output_dtype={self.output_dtype}, symmetric={self.symmetric}, group_size={self.group_size}"
+        return f"input_size={self.input_size}, output_dtype={self.output_dtype}"
 
 
 class MojoDynamicQuant(MojoOperator):
     def __init__(
         self,
+        input_size: Optional[int] = None,
         quant_dtype: torch.dtype = torch.int8,
-        smooth_input: bool = False,
-        moe_mode: bool = False,
         **kwargs,
     ):
         """
         Dynamic per-token symmetric quantization with optional smooth quant scaling.
 
         Args:
+            input_size (Optional[int]): Size of the optional 1-D smooth scale vector.
             quant_dtype (torch.dtype): Target quantized dtype. Currently only ``torch.int8`` is supported.
-            smooth_input (bool): Whether a caller-provided ``smooth_scale`` is expected and applied before
-                computing the dynamic per-token scale.
-            moe_mode (bool): Whether ``token_count`` is interpreted as grouped token counts for MoE-style
-                per-group smooth scaling.
             **kwargs: Tensor factory kwargs.
         """
         super().__init__(**kwargs)
+        self.input_size = input_size
+        if input_size is None:
+            self.register_parameter("smooth_scale", None)
+        else:
+            self.smooth_scale = torch.nn.Parameter(torch.empty(input_size, **self.tensor_factory_kwargs))
         self.quant_dtype = quant_dtype
-        self.smooth_input = smooth_input
-        self.moe_mode = moe_mode
 
         if quant_dtype != torch.int8:
             raise NotImplementedError(f"Unsupported quant_dtype: {quant_dtype}, expected torch.int8.")
@@ -250,43 +135,104 @@ class MojoDynamicQuant(MojoOperator):
     def forward(
         self,
         input: torch.Tensor,
-        smooth_scale: Optional[torch.Tensor] = None,
-        token_count: Optional[torch.Tensor] = None,
     ):
         """
         Args:
             input (torch.Tensor): Floating-point input of shape ``(*, K)``.
-            smooth_scale (Optional[torch.Tensor]): Optional smooth-quant scale.
-                - non-MoE: broadcastable to the last dimension, typically ``(K,)``.
-                - MoE: ``(num_groups, K)`` paired with ``token_count``.
-            token_count (Optional[torch.Tensor]): Optional grouped token counts for MoE mode.
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]:
+                - Quantized int8 tensor with the same shape as ``input``.
+                - Per-token dynamic scale of shape ``input.shape[:-1]``.
+        """
+        if input.dim() < 1:
+            raise ValueError("input must have at least one dimension.")
+
+        input_fp = input.float()
+        if self.smooth_scale is not None:
+            smooth_scale = self.smooth_scale.float()
+            while smooth_scale.dim() < input_fp.dim():
+                smooth_scale = smooth_scale.unsqueeze(0)
+            input_fp = input_fp * smooth_scale
+        scale = input_fp.abs().amax(dim=-1).clamp(min=1e-12) / self.q_max
+        output = torch.clamp(torch.round(input_fp / scale.unsqueeze(-1)), self.q_min, self.q_max)
+        return output.to(self.quant_dtype), scale
+
+    def extra_repr(self) -> str:
+        return f"input_size={self.input_size}, quant_dtype={self.quant_dtype}"
+
+
+class MojoMoEDynamicQuant(MojoOperator):
+    def __init__(
+        self,
+        expert_num: int,
+        input_size: int,
+        quant_dtype: torch.dtype = torch.int8,
+        **kwargs,
+    ):
+        """
+        MoE dynamic per-token int8 quantization with grouped smooth-quant scaling.
+
+        Args:
+            expert_num (int): Number of experts.
+            input_size (int): Last dimension of the input tensor.
+            quant_dtype (torch.dtype): Target quantized dtype. Currently only ``torch.int8`` is supported.
+            **kwargs: Tensor factory kwargs.
+        """
+        super().__init__(**kwargs)
+        self.expert_num = expert_num
+        self.input_size = input_size
+        self.smooth_scale = torch.nn.Parameter(torch.empty((expert_num, input_size), **self.tensor_factory_kwargs))
+        self.quant_dtype = quant_dtype
+
+        if quant_dtype != torch.int8:
+            raise NotImplementedError(f"Unsupported quant_dtype: {quant_dtype}, expected torch.int8.")
+
+        self.q_max = 127
+        self.q_min = -128
+
+    def forward(
+        self,
+        input: torch.Tensor,
+        token_count: torch.Tensor,
+    ):
+        """
+        Args:
+            input (torch.Tensor): Floating-point input of shape ``(tokens, K)`` or ``(*, K)``.
+            token_count (torch.Tensor): int32/int64 token count per group. Sum must equal flattened token count.
 
         Returns:
             Tuple[torch.Tensor, torch.Tensor]:
                 - Quantized int8 tensor with the same shape as ``input``.
                 - Per-token dynamic scale of shape ``input.shape[:-1]``.
         """
-        if token_count is not None:
-            assert token_count.dtype == torch.int32
-        if self.smooth_input and smooth_scale is None:
-            raise ValueError("smooth_scale is required when smooth_input=True")
-        if self.moe_mode and token_count is None:
-            raise ValueError("token_count is required when moe_mode=True")
-        if token_count is not None and not self.moe_mode:
-            raise ValueError("token_count is only supported when moe_mode=True")
-
-        input_fp = _apply_smooth_scale(input.float(), smooth_scale, token_count)
+        if input.dim() < 2:
+            raise ValueError(f"input must have at least 2 dimensions for MoE dynamic quant, got {input.dim()}.")
+        if token_count.dim() != 1:
+            raise ValueError(f"token_count must be 1D, got shape {tuple(token_count.shape)}.")
+        if token_count.dtype not in (torch.int32, torch.int64):
+            raise TypeError(f"token_count must be int32 or int64, got {token_count.dtype}.")
+        if torch.any(token_count < 0):
+            raise ValueError("token_count must be non-negative.")
+        row_count = input.reshape(-1, input.shape[-1]).size(0)
+        if int(token_count.sum().item()) != row_count:
+            raise ValueError(
+                f"token_count sum must equal flattened row count {row_count}, got {token_count.sum().item()}."
+            )
+        expanded_scale = self.smooth_scale.float().repeat_interleave(token_count, dim=0)
+        input_fp = input.float() * expanded_scale
         scale = input_fp.abs().amax(dim=-1).clamp(min=1e-12) / self.q_max
         output = torch.clamp(torch.round(input_fp / scale.unsqueeze(-1)), self.q_min, self.q_max)
         return output.to(self.quant_dtype), scale
 
     def extra_repr(self) -> str:
-        return f"quant_dtype={self.quant_dtype}, smooth_input={self.smooth_input}, moe_mode={self.moe_mode}"
+        return f"expert_num={self.expert_num}, input_size={self.input_size}, quant_dtype={self.quant_dtype}"
 
 
 class MojoDequantSwiGLUQuant(MojoOperator):
     def __init__(
         self,
+        expert_num: int,
+        hidden_size: int,
         quant_dtype: torch.dtype = torch.int8,
         activate_left: bool = False,
         quant_mode: int = 1,
@@ -299,12 +245,18 @@ class MojoDequantSwiGLUQuant(MojoOperator):
         optionally smooth-scaled for FC2, and quantized again.
 
         Args:
+            expert_num (int): Number of experts.
+            hidden_size (int): SwiGLU output hidden size. Input last dimension is expected to be ``2 * hidden_size``.
             quant_dtype (torch.dtype): Target quantized dtype. Currently only ``torch.int8`` is supported.
             activate_left (bool): Whether SwiGLU applies SiLU on the left split instead of the right split.
             quant_mode (int): Quantization mode. Currently only dynamic quantization (``1``) is supported.
             **kwargs: Tensor factory kwargs.
         """
         super().__init__(**kwargs)
+        self.expert_num = expert_num
+        self.hidden_size = hidden_size
+        self.weight_scale = torch.nn.Parameter(torch.empty((expert_num, hidden_size * 2), **self.tensor_factory_kwargs))
+        self.quant_scale = torch.nn.Parameter(torch.empty((expert_num, hidden_size), **self.tensor_factory_kwargs))
         self.quant_dtype = quant_dtype
         self.activate_left = activate_left
         self.quant_mode = quant_mode
@@ -320,22 +272,16 @@ class MojoDequantSwiGLUQuant(MojoOperator):
     def forward(
         self,
         x: torch.Tensor,
-        weight_scale: Optional[torch.Tensor] = None,
         activation_scale: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
-        quant_scale: Optional[torch.Tensor] = None,
         quant_offset: Optional[torch.Tensor] = None,
         token_count: Optional[torch.Tensor] = None,
     ):
         """
         Args:
             x (torch.Tensor): Input tensor of shape ``(tokens, 2H)``.
-            weight_scale (Optional[torch.Tensor]): Optional dequant scale, either ``(2H,)`` or grouped
-                ``(num_groups, 2H)`` with ``token_count``.
-            activation_scale (Optional[torch.Tensor]): Optional per-token activation scale of shape ``(tokens,)``.
+            activation_scale (Optional[torch.Tensor]): Optional runtime per-token activation scale of shape ``(tokens,)``.
             bias (Optional[torch.Tensor]): Optional bias, either ``(2H,)`` or grouped ``(num_groups, 2H)``.
-            quant_scale (Optional[torch.Tensor]): Optional smooth scale applied before the re-quantization stage,
-                either ``(H,)`` or grouped ``(num_groups, H)``.
             quant_offset (Optional[torch.Tensor]): Optional quant offset. Currently unsupported and must be ``None``.
             token_count (Optional[torch.Tensor]): Optional grouped token counts for grouped dequant/smooth-quant.
 
@@ -360,20 +306,17 @@ class MojoDequantSwiGLUQuant(MojoOperator):
 
         x_fp = x.float()
 
-        weight_scale_fp = _expand_group_param(weight_scale, token_count, token_num)
-        if weight_scale_fp is not None:
-            x_fp = x_fp * weight_scale_fp
-
+        weight_scale = self.weight_scale.float()
+        if token_count is not None:
+            weight_scale = weight_scale.repeat_interleave(token_count, dim=0)
+        x_fp = x_fp * weight_scale
         if activation_scale is not None:
-            activation_scale_fp = activation_scale.float()
-            if activation_scale_fp.dim() != 1 or activation_scale_fp.numel() != token_num:
-                raise ValueError(
-                    f"activation_scale must be 1D with {token_num} elements, got shape {tuple(activation_scale.shape)}."
-                )
-            x_fp = x_fp * activation_scale_fp.unsqueeze(-1)
+            x_fp = x_fp * activation_scale.float().unsqueeze(-1)
 
-        bias_fp = _expand_group_param(bias, token_count, token_num)
-        if bias_fp is not None:
+        if bias is not None:
+            bias_fp = bias.float()
+            if token_count is not None and bias_fp.dim() == 2:
+                bias_fp = bias_fp.repeat_interleave(token_count, dim=0)
             x_fp = x_fp + bias_fp
 
         left, right = x_fp.chunk(2, dim=-1)
@@ -382,13 +325,17 @@ class MojoDequantSwiGLUQuant(MojoOperator):
         else:
             out_fp = F.silu(right) * left
 
-        quant_scale_fp = _expand_group_param(quant_scale, token_count, token_num)
-        if quant_scale_fp is not None:
-            out_fp = out_fp * quant_scale_fp
+        quant_scale = self.quant_scale.float()
+        if token_count is not None:
+            quant_scale = quant_scale.repeat_interleave(token_count, dim=0)
+        out_fp = out_fp * quant_scale
 
         scale = out_fp.abs().amax(dim=-1).clamp(min=1e-12) / self.q_max
         output = torch.clamp(torch.round(out_fp / scale.unsqueeze(-1)), self.q_min, self.q_max)
         return output.to(self.quant_dtype), scale
 
     def extra_repr(self) -> str:
-        return f"quant_dtype={self.quant_dtype}, activate_left={self.activate_left}, quant_mode={self.quant_mode}"
+        return (
+            f"expert_num={self.expert_num}, hidden_size={self.hidden_size}, quant_dtype={self.quant_dtype}, "
+            f"activate_left={self.activate_left}, quant_mode={self.quant_mode}"
+        )

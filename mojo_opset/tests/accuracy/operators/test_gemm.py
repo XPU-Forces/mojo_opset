@@ -13,6 +13,16 @@ torch.manual_seed(42)
 dtypes = [torch.float16, torch.bfloat16]
 
 
+def _load_gemm_dequant_params(module, weight_scale):
+    module.load_state_dict(
+        {
+            "weight_scale": weight_scale,
+        },
+        strict=False,
+    )
+    return module
+
+
 @pytest.mark.parametrize(
     "m, k, n",
     [
@@ -82,9 +92,12 @@ def test_gemm_dequant(m, k, n, output_dtype, trans_weight, has_bias):
     )
 
     op = MojoGemmDequant._registry.get("torch")(
-        output_dtype=output_dtype, trans_weight=trans_weight,
+        weight_scale_size=n,
+        output_dtype=output_dtype,
+        trans_weight=trans_weight,
     )
-    out = op(x_i8, w_i8, x_scale, w_scale, bias)
+    op = _load_gemm_dequant_params(op, w_scale)
+    out = op(x_i8, w_i8, x_scale, bias)
 
     w_for_mm = w_i8.t().contiguous() if trans_weight else w_i8
     ref = (x_i8.float() @ w_for_mm.float()) * x_scale.unsqueeze(-1) * w_scale.unsqueeze(0)
@@ -102,12 +115,29 @@ def test_gemm_dequant_no_bias():
         m, k, n, torch.bfloat16, False, False,
     )
 
-    op = MojoGemmDequant._registry.get("torch")(output_dtype=torch.bfloat16)
-    out = op(x_i8, w_i8, x_scale, w_scale)
+    op = MojoGemmDequant._registry.get("torch")(
+        weight_scale_size=n,
+        output_dtype=torch.bfloat16,
+    )
+    op = _load_gemm_dequant_params(op, w_scale)
+    out = op(x_i8, w_i8, x_scale)
 
     ref = (x_i8.float() @ w_i8.float()) * x_scale.unsqueeze(-1) * w_scale.unsqueeze(0)
     ref = ref.to(torch.bfloat16)
     torch.testing.assert_close(out, ref, atol=0, rtol=0)
+
+
+def test_gemm_dequant_weight_scale_is_parameter():
+    op = MojoGemmDequant._registry.get("torch")(
+        weight_scale_size=8,
+        output_dtype=torch.bfloat16,
+    )
+
+    assert "weight_scale" not in dict(op.named_buffers())
+    assert not hasattr(op, "input_scale")
+    assert isinstance(op.weight_scale, torch.nn.Parameter)
+    assert op.weight_scale.shape == (8,)
+    assert set(op.state_dict()) == {"weight_scale"}
 
 
 # ===========================================================================
@@ -133,11 +163,19 @@ def test_gemm_dequant_backend(m, k, n, output_dtype, trans_weight, has_bias):
         m, k, n, output_dtype, trans_weight, has_bias,
     )
 
-    op = MojoGemmDequant(output_dtype=output_dtype, trans_weight=trans_weight)
-    op_ref = MojoGemmDequant._registry.get("torch")(
-        output_dtype=output_dtype, trans_weight=trans_weight,
+    op = MojoGemmDequant(
+        weight_scale_size=n,
+        output_dtype=output_dtype,
+        trans_weight=trans_weight,
     )
-    op.forward_diff_with(op_ref, x_i8, w_i8, x_scale, w_scale, bias, mixed_tol=True)
+    op = _load_gemm_dequant_params(op, w_scale)
+    op_ref = MojoGemmDequant._registry.get("torch")(
+        weight_scale_size=n,
+        output_dtype=output_dtype,
+        trans_weight=trans_weight,
+    )
+    op_ref = _load_gemm_dequant_params(op_ref, w_scale.clone())
+    op.forward_diff_with(op_ref, x_i8, w_i8, x_scale, bias, mixed_tol=True)
 
 
 # ===========================================================================
@@ -167,12 +205,18 @@ def test_gemm_dequant_ttx(m, k, n, output_dtype, trans_weight, has_bias):
     )
 
     op = MojoGemmDequant._registry.get("ttx")(
-        output_dtype=output_dtype, trans_weight=trans_weight,
+        weight_scale_size=n,
+        output_dtype=output_dtype,
+        trans_weight=trans_weight,
     )
+    op = _load_gemm_dequant_params(op, w_scale)
     op_ref = MojoGemmDequant._registry.get("torch")(
-        output_dtype=output_dtype, trans_weight=trans_weight,
+        weight_scale_size=n,
+        output_dtype=output_dtype,
+        trans_weight=trans_weight,
     )
-    op.forward_diff_with(op_ref, x_i8, w_i8, x_scale, w_scale, bias, mixed_tol=True)
+    op_ref = _load_gemm_dequant_params(op_ref, w_scale.clone())
+    op.forward_diff_with(op_ref, x_i8, w_i8, x_scale, bias, mixed_tol=True)
 
 # ===========================================================================
 # MojoGroupLinear
