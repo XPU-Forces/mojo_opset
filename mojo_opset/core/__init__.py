@@ -32,6 +32,10 @@ from .operators.attention import MojoPrefillMLA
 from .operators.attention import MojoPrefillNSA
 from .operators.attention import MojoSdpa
 from .operators.attention import MojoSWA
+from .operators.attention import MojoPagedDecodeQuantGQA
+from .operators.attention import MojoPagedPrefillQuantGQA
+from .operators.attention import MojoPagedDecodeQuantSWA
+from .operators.attention import MojoPagedPrefillQuantSWA
 
 """ kvcache """
 from .operators.kv_cache import MojoStoreMLAKVCache
@@ -44,6 +48,7 @@ from .operators.gemm import MojoGroupGemm
 from .operators.gemm import MojoGroupGemm as MojoGroupLinear
 from .operators.gemm import MojoQuantGroupLinearReduceSum
 from .operators.linear import MojoLinear
+from .operators.linear import MojoQuantLinear
 
 """ compute + comm """
 from .operators.compute_with_comm import MojoAllGatherGemm
@@ -158,12 +163,17 @@ __all__ = [
     "MojoPagedPrefillSWA",
     "MojoPagedDecodeSWA",
     "MojoSWA",
+    "MojoPagedPrefillQuantGQA",
+    "MojoPagedDecodeQuantGQA",
+    "MojoPagedPrefillQuantSWA",
+    "MojoPagedDecodeQuantSWA",
 
     "MojoStorePagedKVCache",
     "MojoStoreMLAKVCache",
     "MojoStorePagedMLAKVCache",
 
     "MojoLinear",
+    "MojoQuantLinear",
     "MojoGemmDequant",
     "MojoGroupGemm",
     "MojoQuantGroupLinearReduceSum",
