@@ -172,8 +172,10 @@ class MojoPagedDecodeGQA(MojoOperator):
 
         for i in range(batch_size):
             seq_len = seqlens[i].item()
-            if seq_len <= 0 or block_tables[i, 0].item() < 0:
+            if seq_len <= 0:
                 continue
+            if block_tables[i, 0].item() < 0:
+                raise ValueError("Paged decode requires a valid block table for rows with kv lens > 0.")
 
             q = query[i]
 
@@ -400,8 +402,10 @@ class MojoPagedPrefillGQA(MojoOperator):
                 kv_seq_len = q_seq_len
             else:
                 kv_seq_len = seqlens_kv[i].item()
-            if q_seq_len == 0 or kv_seq_len <= 0 or block_tables[i, 0].item() < 0:
+            if q_seq_len == 0 or kv_seq_len <= 0:
                 continue
+            if block_tables[i, 0].item() < 0:
+                raise ValueError("Paged prefill requires a valid block table for rows with kv lens > 0.")
 
             num_blocks_for_seq = (kv_seq_len + block_size - 1) // block_size
             k_unpadded = torch.zeros(kv_seq_len, num_kv_heads, head_dim, dtype=query.dtype, device=query.device)
@@ -592,8 +596,10 @@ class MojoPagedDecodeMLA(MojoOperator):
         outputs = torch.zeros(B, H, self.v_head_dim, dtype=query.dtype, device=query.device)
         for i in range(B):
             sl = seqlens[i].item()
-            if sl <= 0 or block_tables[i, 0].item() < 0:
+            if sl <= 0:
                 continue
+            if block_tables[i, 0].item() < 0:
+                raise ValueError("Paged decode requires a valid block table for rows with kv lens > 0.")
             num_blocks = (sl + block_size - 1) // block_size
 
             # Reconstruct compressed_kv and k_pe from paged cache
@@ -830,8 +836,10 @@ class MojoPagedDecodeNSA(MojoOperator):
         outputs = torch.zeros_like(query)
         for i in range(B):
             sl = seqlens[i].item()
-            if sl <= 0 or block_tables[i, 0].item() < 0:
+            if sl <= 0:
                 continue
+            if block_tables[i, 0].item() < 0:
+                raise ValueError("Paged decode requires a valid block table for rows with kv lens > 0.")
             nb = (sl + blk - 1) // blk
             k_parts, v_parts = [], []
             for j in range(nb):
@@ -1020,8 +1028,10 @@ class MojoPagedPrefillMLA(MojoOperator):
             qe = cu_seqlens_q[i + 1].item()
             q_i = query[qs:qe]
             kv_len = seqlens_kv[i].item() if seqlens_kv is not None else (qe - qs)
-            if q_i.shape[0] == 0 or kv_len <= 0 or block_tables[i, 0].item() < 0:
+            if q_i.shape[0] == 0 or kv_len <= 0:
                 continue
+            if block_tables[i, 0].item() < 0:
+                raise ValueError("Paged prefill requires a valid block table for rows with kv lens > 0.")
 
             c_kv = self._unpage(compressed_kv_cache, block_tables[i], kv_len, block_size)
             kpe = self._unpage(k_pe_cache, block_tables[i], kv_len, block_size)
@@ -1167,8 +1177,10 @@ class MojoPagedPrefillNSA(MojoOperator):
             q_seq = query[qs:qe]
             kv_len = seqlens_kv[i].item() if seqlens_kv is not None else (qe - qs)
             q_len = qe - qs
-            if q_len == 0 or kv_len <= 0 or block_tables[i, 0].item() < 0:
+            if q_len == 0 or kv_len <= 0:
                 continue
+            if block_tables[i, 0].item() < 0:
+                raise ValueError("Paged prefill requires a valid block table for rows with kv lens > 0.")
 
             nb = (kv_len + blk - 1) // blk
             k_parts, v_parts = [], []
@@ -1346,8 +1358,10 @@ class MojoPagedPrefillSWA(MojoOperator):
             q_i = q_i.permute(1, 0, 2)  # -> [n_q_heads, q_seq_len, head_dim]
 
             kv_seq_len = seqlens_kv[i].item()
-            if kv_seq_len <= 0 or block_table[i, 0].item() < 0:
+            if kv_seq_len <= 0:
                 continue
+            if block_table[i, 0].item() < 0:
+                raise ValueError("Paged prefill requires a valid block table for rows with kv lens > 0.")
             kv_blocks = (kv_seq_len + page_size - 1) // page_size
             k_i = k_cache[block_table[i, :kv_blocks]]  # [kv_blocks, n_kv_heads, page_size, head_dim]
             k_i = k_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
@@ -1440,9 +1454,11 @@ class MojoPagedDecodeSWA(MojoOperator):
             q_i = q[i].unsqueeze(1) # -> [n_q_heads, 1, head_dim]
 
             kv_seq_len = seq_lens[i].item()
-            if kv_seq_len <= 0 or block_table[i, 0].item() < 0:
+            if kv_seq_len <= 0:
                 # skip padded tokens
                 continue
+            if block_table[i, 0].item() < 0:
+                raise ValueError("Paged decode requires a valid block table for rows with kv lens > 0.")
             kv_blocks = (kv_seq_len + page_size - 1) // page_size
             k_i = k_cache[block_table[i, :kv_blocks]]  # [kv_blocks, n_kv_heads, page_size, head_dim]
             k_i = k_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]

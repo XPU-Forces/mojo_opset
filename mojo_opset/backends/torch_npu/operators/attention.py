@@ -157,7 +157,8 @@ class TorchNpuPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
 
         actual_seq_lengths_q = torch.arange(1, batch_size + 1, dtype=torch.int32, device=query.device)
         kv_seq_lens = cu_seq_lens if cu_seq_lens is not None else seqlens
-        kv_seq_lens = torch.where(block_tables[:, 0] < 0, torch.zeros_like(kv_seq_lens), kv_seq_lens)
+        if ((kv_seq_lens > 0) & (block_tables[:, 0] < 0)).any():
+            raise ValueError("TorchNpuPagedDecodeGQA requires a valid block table for rows with kv lens > 0.")
         out, _ = torch_npu.npu_fused_infer_attention_score(
             query,
             k_cache,
