@@ -252,14 +252,18 @@ class MojoMoECombine(MojoOperator):
         Output:
         - combined: Combined output tensor.
         """
-        combined_expert_outputs = expert_outputs.float()
+        # NOTE: On some NPU builds, `scatter_reduce(reduce="sum")` may fall back to CPU.
+        # For sum-reduction with include_self=True, it is equivalent to in-place scatter-add.
+        #
+        # Keep everything in the original dtype (bf16/fp16) to avoid FP32 upcast OOM.
+        combined_expert_outputs = expert_outputs
         if self.multiply_by_gates:
-            combined_expert_outputs = combined_expert_outputs * sorted_gates.float()
+            combined_expert_outputs = combined_expert_outputs * sorted_gates.to(dtype=expert_outputs.dtype)
 
         scatter_indices = token_indices.unsqueeze(-1).expand(-1, output_buffer.size(1))
-        output_buffer = output_buffer.float()
-        combined = output_buffer.scatter_reduce(0, scatter_indices, combined_expert_outputs, reduce="sum", include_self=True)
-        return combined.to(expert_outputs.dtype)
+        combined = output_buffer
+        combined.scatter_add_(0, scatter_indices, combined_expert_outputs)
+        return combined
 
 
 def _validate_moe_token_count(token_count: torch.Tensor, route_count: int) -> torch.Tensor:
