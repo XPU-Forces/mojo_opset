@@ -181,14 +181,14 @@ def test_store_paged_kv_bucket_padded_varlen():
 
 
 def generate_store_paged_kv_data(batch_size, kv_heads, head_dim, block_size, kv_lens_val, seq_lens_val):
-    kv_lens = torch.tensor(kv_lens_val, dtype=torch.long)
-    seq_lens = torch.tensor(seq_lens_val, dtype=torch.long)
+    kv_lens = torch.tensor(kv_lens_val, dtype=torch.int32)
+    seq_lens = torch.tensor(seq_lens_val, dtype=torch.int32)
 
     is_decode = torch.all(seq_lens == 1)
     cu_seqlens = (
         torch.cat(
             [torch.zeros(1, dtype=torch.int32), torch.cumsum(seq_lens, dim=0, dtype=torch.int32)]
-        ).to(torch.long)
+        ).to(torch.int32)
         if not is_decode
         else None
     )
@@ -211,7 +211,7 @@ def generate_store_paged_kv_data(batch_size, kv_heads, head_dim, block_size, kv_
     k_cache = torch.zeros(cache_shape, dtype=torch.bfloat16)
     v_cache = torch.zeros(cache_shape, dtype=torch.bfloat16)
 
-    block_table = torch.full((batch_size, max_blocks_per_seq), -1, dtype=torch.long)
+    block_table = torch.full((batch_size, max_blocks_per_seq), -1, dtype=torch.int32)
     curr = 0
     for i in range(batch_size):
         needed = (kv_lens_val[i] + seq_lens_val[i] + block_size - 1) // block_size
@@ -230,12 +230,12 @@ def generate_store_paged_kv_data_with_graph(
     Unlike the non-graph variant, cu_seqlens is ALWAYS created (never None),
     because CUDA Graph requires all kernel arguments to be static buffers.
     """
-    kv_lens = torch.tensor([max_kv_len] * batch_size, dtype=torch.long)
-    seq_lens = torch.tensor([max_seq_len] * batch_size, dtype=torch.long)
+    kv_lens = torch.tensor([max_kv_len] * batch_size, dtype=torch.int32)
+    seq_lens = torch.tensor([max_seq_len] * batch_size, dtype=torch.int32)
 
     cu_seqlens = torch.cat(
         [torch.zeros(1, dtype=torch.int32), torch.cumsum(seq_lens, dim=0, dtype=torch.int32)]
-    ).to(torch.long)
+    ).to(torch.int32)
 
     total_tokens = int(cu_seqlens[-1].item())
 
@@ -254,7 +254,7 @@ def generate_store_paged_kv_data_with_graph(
     k_cache = torch.zeros(cache_shape, dtype=torch.bfloat16)
     v_cache = torch.zeros(cache_shape, dtype=torch.bfloat16)
 
-    block_table = torch.full((batch_size, max_blocks_per_seq), 0, dtype=torch.long)
+    block_table = torch.full((batch_size, max_blocks_per_seq), 0, dtype=torch.int32)
     curr = 0
     for i in range(batch_size):
         needed = (max_kv_len + max_seq_len + block_size - 1) // block_size
@@ -344,12 +344,12 @@ def test_store_paged_kv_with_graph(
             torch.randint(1, max_seq_len + 1, ()).item() for _ in range(current_batch_size)
         ]
 
-        cur_kv_lens_t = torch.tensor(cur_kv_lens_val, dtype=torch.long)
-        cur_seq_lens_t = torch.tensor(cur_seq_lens_val, dtype=torch.long)
+        cur_kv_lens_t = torch.tensor(cur_kv_lens_val, dtype=torch.int32)
+        cur_seq_lens_t = torch.tensor(cur_seq_lens_val, dtype=torch.int32)
 
         cur_cu_seqlens = torch.cat(
             [torch.zeros(1, dtype=torch.int32), torch.cumsum(cur_seq_lens_t, dim=0, dtype=torch.int32)]
-        ).to(torch.long)
+        ).to(torch.int32)
 
         cur_total_tokens = int(cur_cu_seqlens[-1].item())
 
@@ -367,7 +367,7 @@ def test_store_paged_kv_with_graph(
         cur_k_cache = torch.zeros((cur_total_phys_blocks, kv_heads, block_size, head_dim), dtype=torch.bfloat16)
         cur_v_cache = torch.zeros((cur_total_phys_blocks, kv_heads, block_size, head_dim), dtype=torch.bfloat16)
 
-        cur_block_table = torch.full((current_batch_size, cur_max_blocks_per_seq), 0, dtype=torch.long)
+        cur_block_table = torch.full((current_batch_size, cur_max_blocks_per_seq), 0, dtype=torch.int32)
         curr = 0
         for i in range(current_batch_size):
             needed = (cur_kv_lens_val[i] + cur_seq_lens_val[i] + block_size - 1) // block_size
