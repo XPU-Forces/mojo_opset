@@ -1,5 +1,7 @@
 import os
 
+from typing import Optional
+
 from torch.autograd import Function
 
 from mojo_opset.utils.logging import get_logger
@@ -35,12 +37,23 @@ class MojoFunction(Function):
             cls._registry.register(cls)
             cls._registry.sort()
 
-            _raw = os.environ.get("MOJO_BACKEND")
-            target_backend = _raw.strip().lower() if _raw else None
+            target_backend = os.environ.get("MOJO_BACKEND")
             core_op_cls = cls._registry.get_core_op_cls()
 
             core_op_cls.forward = cls._registry.get(target_backend).forward
             core_op_cls.backward = cls._registry.get(target_backend).backward
+
+    @classmethod
+    def get_registry(cls):
+        """Return the backend registry attached to this Mojo function class."""
+        if not hasattr(cls, "_registry") or cls._registry is None:
+            raise NotImplementedError(f"No {cls.__name__} implementation found, please register at least one.")
+        return cls._registry
+
+    @classmethod
+    def get_backend_impl(cls, backend_name: Optional[str] = None):
+        """Return the registered implementation class for the requested backend."""
+        return cls.get_registry().get(backend_name)
 
     @staticmethod
     def forward(ctx, *args, **kwargs):
