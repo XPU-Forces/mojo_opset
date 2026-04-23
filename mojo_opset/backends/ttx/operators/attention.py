@@ -91,7 +91,6 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
             f"[TTXPagedDecodeGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
         assert mask is None, f"[TTXPagedDecodeGQA] TTX does not support mask, but got mask={mask}"
-
         output = paged_attention_decode(
             q=query,
             key_cache=key_cache,
@@ -219,4 +218,3 @@ class TTXSWA(MojoSWA):
             self.gqa_interleave,
         )
         return o
-

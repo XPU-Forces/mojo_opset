@@ -915,6 +915,16 @@ def swa_paged_decode_impl(
         softmax_scale = 1.0 / (head_dim**0.5)
 
     o = torch.empty_like(q, memory_format=torch.contiguous_format)
+    if max_num_blocks_per_seq == 0:
+        return torch.zeros_like(q, memory_format=torch.contiguous_format)
+    pad = seqlens <= 0
+    bad_block_table = (~pad) & (block_tables[:, 0] < 0)
+    if bad_block_table.any():
+        raise ValueError("swa_paged_decode requires a valid block table for rows with kv lens > 0.")
+    if pad.any():
+        seqlens = torch.where(pad, torch.ones_like(seqlens), seqlens)
+        block_tables = block_tables.clone()
+        block_tables[pad, 0] = 0
     
     job_num = get_mlu_total_cores()
     grid = (job_num, )
@@ -963,4 +973,6 @@ def swa_paged_decode_impl(
         num_warps=1, num_stages=3,
         pipeline_strategies=["reduce_delay"],
     )
+    if pad.any():
+        o[pad] = 0
     return o

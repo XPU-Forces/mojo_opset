@@ -1463,6 +1463,8 @@ def swa_paged_decode_impl(
         softmax_scale = 1.0 / (head_dim**0.5)
 
     o = torch.empty_like(q, memory_format=torch.contiguous_format)
+    if max_num_blocks_per_seq == 0:
+        return torch.zeros_like(q, memory_format=torch.contiguous_format)
 
     # One program per (batch, head): maximizes parallelism on NVIDIA (vs. a tiny grid + device loop).
     grid = (batch_size * num_q_heads,)
@@ -1476,6 +1478,14 @@ def swa_paged_decode_impl(
         out_t = tl.float32
 
     bt = block_tables if block_tables.dtype == torch.int32 else block_tables.to(torch.int32)
+    pad = seqlens <= 0
+    bad_block_table = (~pad) & (bt[:, 0] < 0)
+    if bad_block_table.any():
+        raise ValueError("swa_paged_decode requires a valid block table for rows with kv lens > 0.")
+    if pad.any():
+        seqlens = torch.where(pad, torch.ones_like(seqlens), seqlens)
+        bt = bt.clone()
+        bt[pad, 0] = 0
     num_warps = _paged_decode_launch_config(head_dim, block_size_n)
 
     _paged_decode_kernel[grid](
@@ -1517,4 +1527,6 @@ def swa_paged_decode_impl(
         OUT_T=out_t,
         num_warps=num_warps,
     )
+    if pad.any():
+        o[pad] = 0
     return o

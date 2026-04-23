@@ -112,7 +112,9 @@ def store_kv_cache_impl(
 # --- Paged KV cache (same algorithm as NPU; grid[0] = ceil(n / BLOCK) programs, one chunk per program when BLOCK=1) ---
 
 
-def prepare_kv_chunk_indices(cu_seqlens: torch.Tensor, kv_lens: torch.Tensor, chunk_size: int) -> torch.Tensor:
+def prepare_kv_chunk_indices(
+    cu_seqlens: torch.Tensor, kv_lens_before_store: torch.Tensor, chunk_size: int
+) -> torch.Tensor:
     seqlens = prepare_lens(cu_seqlens)
 
     chunks_per_seq = triton.cdiv(seqlens, chunk_size)
@@ -126,9 +128,15 @@ def prepare_kv_chunk_indices(cu_seqlens: torch.Tensor, kv_lens: torch.Tensor, ch
 
     token_offset_in_qkv = (chunk_idx_in_seq * chunk_size).to(torch.int32)
 
-    if kv_lens is not None:
-        batch_kv_lens = kv_lens[seq_ids]
-        logical_kv_start = batch_kv_lens.to(torch.int32) + token_offset_in_qkv
+    if kv_lens_before_store is not None:
+        batch_kv_lens_before_store = kv_lens_before_store[seq_ids]
+        valid = batch_kv_lens_before_store >= 0
+        seq_ids = seq_ids[valid]
+        token_offset_in_qkv = token_offset_in_qkv[valid]
+        batch_kv_lens_before_store = batch_kv_lens_before_store[valid]
+        if seq_ids.numel() == 0:
+            return torch.empty((0, 3), device=cu_seqlens.device, dtype=torch.int32)
+        logical_kv_start = batch_kv_lens_before_store.to(torch.int32) + token_offset_in_qkv
     else:
         logical_kv_start = token_offset_in_qkv
 
@@ -254,7 +262,7 @@ def store_paged_kv_impl(
     value_cache: torch.Tensor,
     block_table: torch.Tensor,
     cu_seqlens: torch.Tensor,
-    kv_lens: torch.Tensor,
+    kv_lens_before_store: torch.Tensor,
 ):
     assert k_states.is_contiguous() and v_states.is_contiguous()
 
@@ -266,7 +274,7 @@ def store_paged_kv_impl(
 
     block_size = key_cache.shape[2]
 
-    chunk_indices = prepare_kv_chunk_indices(cu_seqlens, kv_lens, block_size)
+    chunk_indices = prepare_kv_chunk_indices(cu_seqlens, kv_lens_before_store, block_size)
     n = chunk_indices.shape[0]
     if n == 0:
         return key_cache, value_cache

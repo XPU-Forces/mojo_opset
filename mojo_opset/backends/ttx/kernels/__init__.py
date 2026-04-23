@@ -779,7 +779,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         value_cache: torch.Tensor,
         block_table: torch.Tensor,
         cu_seq_lens: torch.Tensor,
-        kv_lens: torch.Tensor,
+        kv_lens_before_store: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return store_paged_kv_impl(
             key_states,
@@ -788,7 +788,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
             value_cache,
             block_table,
             cu_seq_lens,
-            kv_lens,
+            kv_lens_before_store,
         )
 
     @store_paged_kv.register_fake
@@ -799,7 +799,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         value_cache: torch.Tensor,
         block_table: torch.Tensor,
         cu_seq_lens: torch.Tensor,
-        kv_lens: torch.Tensor,
+        kv_lens_before_store: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(key_cache), torch.empty_like(value_cache)
 
