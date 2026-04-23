@@ -91,6 +91,7 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
             f"[TTXPagedDecodeGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
         assert mask is None, f"[TTXPagedDecodeGQA] TTX does not support mask, but got mask={mask}"
+        seqlens = torch.where(block_tables[:, 0] < 0, torch.zeros_like(seqlens), seqlens)
 
         output = paged_attention_decode(
             q=query,
@@ -177,6 +178,7 @@ class TTXPagedDecodeSWA(MojoPagedDecodeSWA):
         # Note: is_causal = False should never happen
         assert seq_lens.dtype == torch.int32
         assert block_table.dtype == torch.int32
+        seq_lens = torch.where(block_table[:, 0] < 0, torch.zeros_like(seq_lens), seq_lens)
         o = swa_paged_decode(
             q,
             k_cache,
@@ -219,4 +221,3 @@ class TTXSWA(MojoSWA):
             self.gqa_interleave,
         )
         return o
-

@@ -17,12 +17,12 @@ class TTXStorePagedKVCache(MojoStorePagedKVCache):
         value_cache: torch.Tensor,
         block_table: torch.Tensor,
         cu_seq_lens: torch.Tensor,
-        kv_lens: torch.Tensor,
+        kv_lens_before_store: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         assert block_table.dtype == torch.int32
         if cu_seq_lens is not None:
             assert cu_seq_lens.dtype == torch.int32
-        assert kv_lens.dtype == torch.int32
+        assert kv_lens_before_store.dtype == torch.int32
         return store_paged_kv(
             key_states,
             value_states,
@@ -30,5 +30,5 @@ class TTXStorePagedKVCache(MojoStorePagedKVCache):
             value_cache,
             block_table,
             cu_seq_lens,
-            kv_lens,
+            kv_lens_before_store,
         )

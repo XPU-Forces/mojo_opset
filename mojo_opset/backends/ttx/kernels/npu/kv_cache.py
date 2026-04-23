@@ -51,7 +51,8 @@ def _store_paged_kv_cache_kernel(
             seq_len_curr = seq_end_tok - seq_start_tok
 
         write_start = tl.load(kv_lens_ptr + batch_idx)
-        cur_chunks = tl.cdiv(seq_len_curr, CHUNK_SIZE)
+        valid_write = write_start >= 0
+        cur_chunks = tl.where(valid_write, tl.cdiv(seq_len_curr, CHUNK_SIZE), 0)
         start_chunk = (prev_chunks + pid) % num_programs
         prev_chunks += cur_chunks
 
@@ -131,12 +132,14 @@ def store_paged_kv_impl(
     value_cache: torch.Tensor,
     block_table: torch.Tensor,
     cu_seqlens: torch.Tensor,
-    kv_lens: torch.Tensor,
+    kv_lens_before_store: torch.Tensor,
 ):
     assert k_states.is_contiguous() and v_states.is_contiguous()
 
     is_decode = cu_seqlens is None
-    batch_size = kv_lens.shape[0] if is_decode else cu_seqlens.shape[0] - 1
+    batch_size = kv_lens_before_store.shape[0] if is_decode else cu_seqlens.shape[0] - 1
+    if cu_seqlens is None:
+        cu_seqlens = torch.arange(k_states.shape[0] + 1, device=k_states.device, dtype=torch.int32)
 
     num_kv_heads = k_states.shape[1]
     head_dim = k_states.shape[2]
@@ -153,7 +156,7 @@ def store_paged_kv_impl(
         value_cache,
         block_table,
         cu_seqlens,
-        kv_lens,
+        kv_lens_before_store,
         batch_size,
         k_states.stride(0),
         k_states.stride(1),

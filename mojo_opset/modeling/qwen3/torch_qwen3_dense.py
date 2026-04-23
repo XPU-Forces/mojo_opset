@@ -58,7 +58,9 @@ class PagedDummyCache:
             device=self.device,
         )
 
-        self.block_tables = torch.zeros((self.batch_size, max_blocks_per_seq), dtype=torch.long, device=self.device)
+        self.block_tables = torch.full(
+            (self.batch_size, max_blocks_per_seq), -1, dtype=torch.long, device=self.device
+        )
         self.seq_lens = torch.zeros(self.batch_size, dtype=torch.long, device=self.device)
 
         self.free_blocks = torch.arange(total_blocks, device=self.device, dtype=torch.long)
