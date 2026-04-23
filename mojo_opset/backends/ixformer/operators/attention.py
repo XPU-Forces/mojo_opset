@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 
-from typing import Optional
+from typing import Any, Optional, Tuple
 
 import torch
 
@@ -47,7 +47,7 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
         cu_seqlens_kv: Optional[torch.Tensor] = None,
         max_seqlen_q: Optional[int] = None,
         max_seqlen_k: Optional[int] = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[Any]:
         """
         Paged prefill attention with grouped query heads (GQA) using a blocked KV cache.
 
@@ -75,7 +75,7 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
             seqlens_kv (Optional[torch.Tensor]): key/value lengths, shape (B,). Used to derive
                 cu_seqlens_kv when the cumulative lengths are not provided.
             mask (Optional[torch.Tensor]): Attention mask; defaults to None.
-                we do not support custom mask yet.
+                Not support custom mask yet.
         Returns:
             torch.Tensor: Attention output of shape (T, Hq, D).
 
@@ -126,6 +126,10 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
                 f"max_seqlen_k must be a positive int, got {max_seqlen_k} ({type(max_seqlen_k)})."
             )
 
+        if softmax_scale is None:
+            head_dim = query.shape[-1]
+            softmax_scale = 1.0 / math.sqrt(head_dim)
+
         return ix_fa.flash_attn_varlen_func(
             query,
             key_cache,
@@ -156,7 +160,7 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         mask: Optional[torch.Tensor] = None,
         *,
         max_context_len: Optional[int] = None,
-    ) -> torch.Tensor:
+    ):
         """
         Paged decode attention with grouped query heads (GQA) using a blocked KV cache.
 
@@ -252,7 +256,7 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         if (seqlens <= 0).any():
             raise NotImplementedError("IxformerPagedDecodeGQA does not support zero/negative seqlens.")
         if max_context_len <= 1:
-            raise NotImplementedError("IxformerPagedDecodeGQA only support max_context_len > 1.")
+            raise NotImplementedError("IxformerPagedDecodeGQA only supports max_context_len > 1.")
 
         ixf_f.vllm_paged_attention(
             output=output,
