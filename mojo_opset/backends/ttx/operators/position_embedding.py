@@ -10,7 +10,7 @@ from mojo_opset.core import MojoApplyRoPE
 
 
 class TTXRotaryEmbedding(MojoRotaryEmbedding):
-    supported_platforms_list = ["npu", "ilu"]
+    supported_platforms_list = ["npu", "ilu", "mlu"]
 
     def __init__(self, rope_theta, rope_dim, attention_scaling: float = 1.0, init_max_length: Optional[int] = None, **kwargs):
         super().__init__(rope_theta, rope_dim, attention_scaling, init_max_length, **kwargs)
@@ -42,7 +42,7 @@ class TTXRotaryEmbedding(MojoRotaryEmbedding):
 
 
 class TTXApplyRoPE(MojoApplyRoPE):
-    supported_platforms_list = ["npu", "ilu"]
+    supported_platforms_list = ["npu", "ilu", "mlu"]
 
     def forward(
         self,
@@ -53,3 +53,4 @@ class TTXApplyRoPE(MojoApplyRoPE):
         head_first: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return rope_fwd(q, k, cos, sin, head_first)
+
