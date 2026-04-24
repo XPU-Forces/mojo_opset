@@ -4,6 +4,8 @@ import torch
 from mojo_opset.tests.utils import assert_close
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.tests.utils import synchronize_current_device
+from mojo_opset.utils.platform import get_torch_device
 
 from mojo_opset import MojoStorePagedKVCache
 from mojo_opset import MojoStorePagedMLAKVCache
@@ -301,7 +303,7 @@ def test_store_paged_kv_with_graph(
     with torch.no_grad():
         # Warm-up
         store_paged_kv(key_states, value_states, k_cache, v_cache, block_table, cu_seqlens, kv_lens)
-        torch.cuda.synchronize()
+        synchronize_current_device()
 
         graph = torch.cuda.CUDAGraph()
         try:
@@ -309,7 +311,6 @@ def test_store_paged_kv_with_graph(
                 k_out, v_out = store_paged_kv(
                     key_states, value_states, k_cache, v_cache, block_table, cu_seqlens, kv_lens
                 )
-            torch.cuda.synchronize()
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}.")
@@ -322,9 +323,8 @@ def test_store_paged_kv_with_graph(
     k_cache_ref = k_cache.clone()
     v_cache_ref = v_cache.clone()
 
-    torch.cuda.synchronize()
     graph.replay()
-    torch.cuda.synchronize()
+    synchronize_current_device()
 
     k_cache_ref, v_cache_ref = store_paged_kv_ref(
         key_states, value_states, k_cache_ref, v_cache_ref, block_table, cu_seqlens, kv_lens
@@ -404,9 +404,8 @@ def test_store_paged_kv_with_graph(
             cur_block_table, cur_cu_seqlens, cur_kv_lens_t,
         )
 
-        torch.cuda.synchronize()
         graph.replay()
-        torch.cuda.synchronize()
+        synchronize_current_device()
 
         # Verify that the valid cache blocks match reference
         check_tol_diff(k_out[:cur_num_blocks], k_cache_ref, atol=0, rtol=0)
