@@ -6,8 +6,6 @@ import triton
 import triton.language as tl
 
 from mojo_opset.backends.ttx.kernels.mlu.utils import get_mlu_total_cores
-from mojo_opset.backends.ttx.kernels.utils import prepare_lens
-from mojo_opset.backends.ttx.kernels.utils import tensor_cache
 
 ROPE_TOKEN_BLOCK_SIZE_TABLE = {
     (4, 1): 128,
@@ -20,7 +18,6 @@ ROPE_TOKEN_BLOCK_SIZE_TABLE = {
     (32, 32): 16,
 }
 
-SRAM_ALIGNMENT = 32
 
 def _get_token_block_size(n_qh: int, n_kh: int) -> int:
     assert n_qh <= 84 and n_kh <= 84, "don't support head_num > 84, please raise an issue."
@@ -35,6 +32,7 @@ def _get_token_block_size(n_qh: int, n_kh: int) -> int:
         return 16
     else:
         return 32
+
 
 @triton.jit
 def _compute_rope_separated(
@@ -73,8 +71,7 @@ def _rope_inplace_kernel(
     n_qh: tl.constexpr,
     n_kh: tl.constexpr,
     head_dim: tl.constexpr,
-    nope_dim: tl.constexpr,
-    rope_dim: tl.constexpr,
+    nope_dim: tl.constexpr, # head_dim - rope_dim
     half_rope_dim: tl.constexpr,
     TOKEN_BLOCK_SIZE: tl.constexpr,
     inverse: tl.constexpr,
@@ -259,6 +256,7 @@ def rope_fwd_impl(
     head_first: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Apply RoPE to q/k with pre-extracted cos/sin (MLU).
+
     """
     orig_q_shape = q.shape
     orig_k_shape = k.shape
@@ -306,7 +304,6 @@ def rope_fwd_impl(
         n_kv_head,
         head_dim,
         nope_dim,
-        rope_dim,
         half_rope_dim,
         token_block_size,
         inverse=False,  # False for forward
@@ -374,7 +371,6 @@ def rope_bwd_impl(
         n_kv_head,
         head_dim,
         nope_dim,
-        rope_dim,
         half_rope_dim,
         token_block_size,
         inverse=True,  # True for backward
