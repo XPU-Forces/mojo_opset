@@ -1,5 +1,9 @@
+import math
+
 import triton
 import triton.language as tl
+
+LOG2E = tl.constexpr(math.log2(math.e))
 
 try:
     from triton.runtime.libentry import libentry as _libentry_impl

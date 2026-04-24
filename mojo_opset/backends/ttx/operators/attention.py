@@ -3,12 +3,14 @@ from typing import Optional
 import torch
 
 from mojo_opset.backends.ttx.kernels import paged_attention_prefill
+from mojo_opset.backends.ttx.kernels import paged_attention_prefill_quant
 from mojo_opset.backends.ttx.kernels import paged_attention_decode
 from mojo_opset.backends.ttx.kernels import sdpa_infer
 from mojo_opset.backends.ttx.kernels import swa_paged_prefill
 from mojo_opset.backends.ttx.kernels import swa_paged_decode
 from mojo_opset.backends.ttx.kernels import swa_infer
 from mojo_opset.core import MojoPagedPrefillGQA
+from mojo_opset.core import MojoPagedPrefillQuantGQA
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoSdpa
 from mojo_opset.core import MojoPagedPrefillSWA
@@ -69,6 +71,68 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
             gqa_interleave=self.gqa_layout == "ABAB",
             softmax_scale=softmax_scale,
             aux_mask=self.aux_mask,
+        )
+
+        return output
+
+
+class TTXPagedPrefillQuantGQA(MojoPagedPrefillQuantGQA):
+    """Triton paged prefill attention with int8 KV cache on ILU."""
+
+    supported_platforms_list = ["ilu"]
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        k_qscale: torch.Tensor,
+        value_cache: torch.Tensor,
+        v_qscale: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        block_tables: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+        seqlens_kv: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        assert cu_seqlens_q.dtype == torch.int32
+        assert block_tables.dtype == torch.int32
+        if seqlens_kv is not None:
+            assert seqlens_kv.dtype == torch.int32
+        assert self.is_causal, (
+            f"[TTXPagedPrefillQuantGQA] only supports causal attention, got is_causal={self.is_causal}"
+        )
+        assert mask is None, (
+            f"[TTXPagedPrefillQuantGQA] does not support mask"
+        )
+
+        if seqlens_kv is None:
+            seqlens_kv = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+
+        num_q_heads = query.shape[1]
+        num_kv_heads = key_cache.shape[1]
+
+        if num_q_heads != num_kv_heads:
+            if self.gqa_layout == "AABB":
+                k_qscale_expanded = k_qscale.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
+                v_qscale_expanded = v_qscale.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
+            else:
+                k_qscale_expanded = k_qscale.repeat((num_q_heads // num_kv_heads, 1))
+                v_qscale_expanded = v_qscale.repeat((num_q_heads // num_kv_heads, 1))
+        else:
+            k_qscale_expanded = k_qscale
+            v_qscale_expanded = v_qscale
+
+        output = paged_attention_prefill_quant(
+            q=query,
+            key_cache=key_cache,
+            k_qscale=k_qscale_expanded,
+            value_cache=value_cache,
+            v_qscale=v_qscale_expanded,
+            cu_seqlens_q=cu_seqlens_q,
+            seqlens_kv=seqlens_kv,
+            block_tables=block_tables,
+            gqa_interleave=self.gqa_layout == "ABAB",
+            softmax_scale=softmax_scale,
         )
 
         return output

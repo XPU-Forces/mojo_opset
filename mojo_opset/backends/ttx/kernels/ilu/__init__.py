@@ -5,6 +5,7 @@ from .convolution import causal_conv1d_update_bdt_impl
 # from .diffution_attention import diffusion_attention_fwd_impl
 from .flash_attention import paged_attention_decode_impl
 from .flash_attention import paged_attention_prefill_impl
+from .flash_attention import paged_attention_prefill_quant_impl
 from .fused_add_layernorm import fused_add_layernorm_infer_impl
 from .fused_add_rmsnorm import fused_add_rmsnorm_infer_impl
 # from .fused_linear_cross_entropy import fused_linear_cross_entropy_1d_bwd_impl
@@ -16,6 +17,8 @@ from .gelu import gelu_fwd_impl
 from .group_gemm import k_grouped_matmul_impl
 from .group_gemm import m_grouped_matmul_impl
 from .quant_batch_gemm_reduce_sum import quant_batch_gemm_reduce_sum_impl
+from .int8_gemm import int8_gemm_dequant_impl
+from .int8_gemm import prepare_b_impl
 from .kv_cache import store_kv_cache_impl
 from .kv_cache import store_paged_kv_impl
 from .layernorm import layernorm_bwd_impl
@@ -52,6 +55,7 @@ __all__ = [
     # "causal_conv1d_bwd_impl",
     "paged_attention_decode_impl",
     "paged_attention_prefill_impl",
+    "paged_attention_prefill_quant_impl",
     # "fused_linear_cross_entropy_bwd_impl",
     # "fused_linear_cross_entropy_fwd_impl",
     # "fused_linear_cross_entropy_1d_bwd_impl",
@@ -61,6 +65,8 @@ __all__ = [
     "m_grouped_matmul_impl",
     "k_grouped_matmul_impl",
     "quant_batch_gemm_reduce_sum_impl",
+    "int8_gemm_dequant_impl",
+    "prepare_b_impl",
     "store_kv_cache_impl",
     "store_paged_kv_impl",
     "relative_embedding_fwd_impl",

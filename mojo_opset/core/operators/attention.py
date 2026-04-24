@@ -1650,18 +1650,15 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
         self,
         is_causal: bool = True,
         gqa_layout: str = "AABB",
-        query_dtype: torch.dtype = torch.bfloat16,
-        context_dtype: torch.dtype = torch.int8,
-        compute_dtype: torch.dtype = torch.bfloat16,
+        quant_dtype: torch.dtype = torch.int8,
     ):
         """
-        Initialize the Paged Prefill GQA attention operator with common parameters.
-        Parameter descriptions:
-        - is_causal (bool): Whether to enable causal masking, default True.
-        - gqa_layout (str): GQA head grouping layout, values {"ABAB","AABB"}, default "ABAB".
-        - query_dtype (torch.dtype): the dtype for query, default torch.bfloat16 for non-quantized query.
-        - context_dtype (torch.dtype): The context dtype for key_cache and value_cache, default torch.int8.
-        - compute_dtype (torch.dtype): The quant matmul dtype for Q@K and P@V, default torch.bfloat16.
+        Paged Prefill GQA attention with quantized Q@K and P@V matmuls.
+
+        Args:
+            is_causal: Whether to enable causal masking.
+            gqa_layout: GQA head grouping layout, ``"ABAB"`` or ``"AABB"``.
+            quant_dtype: The quant matmul dtype for Q@K and P@V.
         """
         super().__init__()
 
@@ -1670,106 +1667,84 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
 
         self.is_causal = is_causal
         self.gqa_layout = gqa_layout
-        self.query_dtype = query_dtype
-        self.context_dtype = context_dtype
-        self.compute_dtype = compute_dtype
-        assert self.query_dtype in (torch.bfloat16, torch.int8), f"Unsupported query dtype {self.query_dtype}"
-        if self.query_dtype == torch.int8:
-            raise NotImplementedError("Quantized query is not implemented")
-        assert self.context_dtype == torch.int8, f"Quant attention support int8 context only, but got {self.context_dtype}"
-        assert self.compute_dtype in (torch.bfloat16, torch.int8), f"Unsupported compute dtype {self.compute_dtype}"
-        if self.compute_dtype == torch.int8:
+        self.quant_dtype = quant_dtype
+        if self.quant_dtype == torch.int8:
             bits = 8
             self.qmax = 2 ** (bits - 1) - 1
             self.qmin = -(2 ** (bits - 1))
+        else:
+            raise NotImplementedError(f"quant_dtype {self.quant_dtype} is not supported")
 
     def forward(
         self,
         query: torch.Tensor,
-        query_scale: Optional[torch.Tensor],
         key_cache: torch.Tensor,
-        key_scale: torch.Tensor,
+        k_qscale: torch.Tensor,
         value_cache: torch.Tensor,
-        value_scale: torch.Tensor,
-        cu_q_lens: torch.Tensor,
+        v_qscale: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
-        cu_total_seq_lens: Optional[torch.Tensor] = None,
+        seqlens_kv: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
     ) -> torch.Tensor:
         """
-        Paged prefill attention with grouped query heads (GQA) using a blocked KV cache.
+        Paged prefill attention with quantized Q@K and P@V.
 
         Args:
-            query (torch.Tensor): Query tokens of shape (T, Hq, D), it can be of dtype bf16 or int8
-            query_scale (torch.Tensor): if query is quantized, it should be per-token scale of query shape (T, Hq, 1) and dtype bfloat16; if not, it should be None
-            key_cache (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D) and dtype int8.
-            key_scale (torch.Tensor): per-channel scale of key, shape (Hkv, D) and dtype bfloat16
-            value_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D) and dtype in8.
-            value_scale (torch.Tensor): per-channel scale of value, shape (Hkv, D)
-            cu_q_lens (torch.Tensor): Cumulative query lengths, shape (B+1,);
-                `cu_q_lens[i]` is the start offset for query at batch i; `cu_q_lens[-1] == T`.
-            block_tables (torch.Tensor): Logical-to-physical block IDs per batch,
-                shape (B, num_blocks).
-            softmax_scale (Optional[float]): Attention scaling factor; defaults to 1/sqrt(D).
-            cu_total_seq_lens (Optional[torch.Tensor]): Cumulative total KV lengths, shape (B+1,);
-                `cu_total_seq_lens[i+1] - cu_total_seq_lens[i]` is the total visible KV length for batch i.
-                If None, defaults to `cu_q_lens`.
-            mask (Optional[torch.Tensor]): Attention mask; defaults to None.
-                If mask is None, it means a full mask or causal mask based on `is_causal`.
-                If mask is not None, and is_causal=False, applies the mask to the attention scores.
-            max_q_lens (Optional[int]): Hint for the maximum query length (unused).
-            max_total_seq_lens (Optional[int]): Hint for the maximum total KV length (unused).
+            query: ``(T, Hq, D)`` bf16/fp16 query tokens.
+            key_cache: ``(N_blocks, Hkv, block_size, D)`` int8 key cache.
+            k_qscale: ``(Hkv, D)`` per-channel key scale.
+            value_cache: ``(N_blocks, Hkv, block_size, D)`` int8 value cache.
+            v_qscale: ``(Hkv, D)`` per-channel value scale.
+            cu_seqlens_q: ``(B+1,)`` int32 cumulative query lengths.
+            block_tables: ``(B, num_blocks)`` int32 block mapping.
+            softmax_scale: Attention scaling factor; defaults to ``1/sqrt(D)``.
+            seqlens_kv: ``(B,)`` int32 KV lengths. None -> use query lengths.
+            mask: Optional attention mask.
 
         Returns:
-            torch.Tensor: Attention output of shape (T, Hq, D).
-
-        Notes:
-            - If Hq != Hkv, expands K/V heads to match Hq via repeat_interleave.
-            - Applies a causal lower-triangular mask and restricts attention within each sequence.
-            - Softmax is computed in float32 and cast back to the input dtype.
+            ``(T, Hq, D)`` output in query dtype.
         """
-        assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
-        if self.query_dtype == torch.int8:
-            assert query_scale is not None and query.dtype == self.query_dtype, "query_scale must be provided for quantized query"
-        else:
-            assert query_scale is None and query.dtype == self.query_dtype, "query_scale must be None for non-quantized query"
-        
+        assert cu_seqlens_q.dtype == torch.int32
+        assert block_tables.dtype == torch.int32
+        if seqlens_kv is not None:
+            assert seqlens_kv.dtype == torch.int32
         total_q_tokens, num_q_heads, head_dim = query.shape
         _, num_kv_heads, page_size, _ = key_cache.shape
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(head_dim)
 
-        total_seq_lens = (
-            _seq_lens_from_cu(cu_q_lens) if cu_total_seq_lens is None else _seq_lens_from_cu(cu_total_seq_lens)
-        )
-
         if num_q_heads != num_kv_heads:
             if self.gqa_layout == "AABB":
-                key_scale = key_scale.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
-                value_scale = value_scale.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
+                k_qscale = k_qscale.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
+                v_qscale = v_qscale.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
             else:
-                key_scale = key_scale.repeat((num_q_heads // num_kv_heads, 1))
-                value_scale = value_scale.repeat((num_q_heads // num_kv_heads, 1))
+                k_qscale = k_qscale.repeat((num_q_heads // num_kv_heads, 1))
+                v_qscale = v_qscale.repeat((num_q_heads // num_kv_heads, 1))
 
-        outputs = torch.zeros(total_q_tokens, num_q_heads, head_dim, dtype=query.dtype, device=query.device)
+        outputs = torch.empty(total_q_tokens, num_q_heads, head_dim, dtype=query.dtype, device=query.device)
 
-        q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
+        q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
         batch_size = len(q_lens)
 
         for i in range(batch_size):
             q_seq_len = q_lens[i].item()
-            start_loc = cu_q_lens[i].item()
-            end_loc = cu_q_lens[i + 1].item()
-            q = query[start_loc:end_loc].permute(1, 0, 2) # [n_q_heads, q_seq_len, head_dim]
-            kv_seq_len = total_seq_lens[i].item()
+            start_loc = cu_seqlens_q[i].item()
+            end_loc = cu_seqlens_q[i + 1].item()
+            q = query[start_loc:end_loc].permute(1, 0, 2)
+
+            if seqlens_kv is None:
+                kv_seq_len = q_seq_len
+            else:
+                kv_seq_len = seqlens_kv[i].item()
+
+            q_quant, q_scale = _dynamic_quantize(q * k_qscale.unsqueeze(1), self.qmax, self.qmin, self.quant_dtype)
 
             kv_blocks = (kv_seq_len + page_size - 1) // page_size
-            k_unpadded = key_cache[block_tables[i, :kv_blocks]] # [kv_blocks, n_kv_heads, page_size, head_dim]
+            k_unpadded = key_cache[block_tables[i, :kv_blocks]]
             k_unpadded = k_unpadded.permute(1, 0, 2, 3).reshape(num_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
-            v_unpadded = value_cache[block_tables[i, :kv_blocks]] # [kv_blocks, n_kv_heads, page_size, head_dim]
+            v_unpadded = value_cache[block_tables[i, :kv_blocks]]
             v_unpadded = v_unpadded.permute(1, 0, 2, 3).reshape(num_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
 
             if num_q_heads != num_kv_heads:
@@ -1783,12 +1758,7 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
                 k_expanded = k_unpadded
                 v_expanded = v_unpadded
 
-            if self.compute_dtype == torch.int8:
-                q_quant, q_scale = _dynamic_quantize(q * key_scale.unsqueeze(1), self.qmax, self.qmin, self.compute_dtype)
-                attn_scores = torch.matmul(q_quant.float(), k_expanded.mT.float()) * q_scale * softmax_scale
-            else:
-                k_expanded_scaled = k_expanded.float() * key_scale.unsqueeze(1).float()
-                attn_scores = torch.matmul(q.float(), k_expanded_scaled.mT) * softmax_scale
+            attn_scores = torch.matmul(q_quant.float(), k_expanded.mT.float()) * q_scale * softmax_scale
             if self.is_causal:
                 attn_mask = torch.ones(q_seq_len, kv_seq_len, device=query.device, dtype=torch.bool).tril(
                     kv_seq_len - q_seq_len
@@ -1803,18 +1773,13 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
                 attn_scores = torch.where(attn_mask, attn_scores, float("-inf"))
 
             attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
-            if self.compute_dtype == torch.int8:
-                attn_probs_quant, attn_probs_scale = _dynamic_quantize(attn_probs, self.qmax, self.qmin, self.compute_dtype)
-                o = torch.matmul(attn_probs_quant.float(), v_expanded.float()) * attn_probs_scale * value_scale.unsqueeze(1)
-            else:
-                v_expanded_scaled = v_expanded.float() * value_scale.unsqueeze(1).float()
-                o = torch.matmul(attn_probs.float(), v_expanded_scaled)
+            attn_probs_quant, attn_probs_scale = _dynamic_quantize(attn_probs, self.qmax, self.qmin, self.quant_dtype)
+            o = torch.matmul(attn_probs_quant.float(), v_expanded.float()) * attn_probs_scale * v_qscale.unsqueeze(1)
             outputs[start_loc:end_loc] = o.permute(1, 0, 2)
         return outputs
 
     def extra_repr(self) -> str:
-        return f"{self.is_causal=}, {self.gqa_layout=}, {self.compute_dtype=}".replace("self.", "")
-
+        return f"{self.is_causal=}, {self.gqa_layout=}, {self.quant_dtype=}".replace("self.", "")
 
 class MojoPagedDecodeQuantGQA(MojoOperator):
     def __init__(

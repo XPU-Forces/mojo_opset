@@ -54,6 +54,7 @@ fused_add_rmsnorm_infer_impl = _get_kernel_impl(ttx_backend_module, "fused_add_r
 fused_add_layernorm_infer_impl = _get_kernel_impl(ttx_backend_module, "fused_add_layernorm_infer_impl")
 
 paged_attention_prefill_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_prefill_impl")
+paged_attention_prefill_quant_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_prefill_quant_impl")
 paged_attention_decode_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_decode_impl")
 
 fused_linear_cross_entropy_fwd_impl = _get_kernel_impl(ttx_backend_module, "fused_linear_cross_entropy_fwd_impl")
@@ -246,6 +247,45 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         gqa_interleave: bool,
         softmax_scale: Optional[float] = None,
         aux_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return torch.empty_like(q)
+
+    @torch.library.custom_op("ttx::paged_attention_prefill_quant", mutates_args={})
+    def paged_attention_prefill_quant(
+        q: torch.Tensor,
+        key_cache: torch.Tensor,
+        k_qscale: torch.Tensor,
+        value_cache: torch.Tensor,
+        v_qscale: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        seqlens_kv: torch.Tensor,
+        block_tables: torch.Tensor,
+        gqa_interleave: bool,
+        softmax_scale: Optional[float] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_k: Optional[int] = None,
+    ) -> torch.Tensor:
+        return paged_attention_prefill_quant_impl(
+            q, key_cache, k_qscale, value_cache, v_qscale,
+            cu_seqlens_q, seqlens_kv, block_tables, gqa_interleave, softmax_scale,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+        )
+
+    @paged_attention_prefill_quant.register_fake
+    def paged_attention_prefill_quant_fake(
+        q: torch.Tensor,
+        key_cache: torch.Tensor,
+        k_qscale: torch.Tensor,
+        value_cache: torch.Tensor,
+        v_qscale: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        seqlens_kv: torch.Tensor,
+        block_tables: torch.Tensor,
+        gqa_interleave: bool,
+        softmax_scale: Optional[float] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_k: Optional[int] = None,
     ) -> torch.Tensor:
         return torch.empty_like(q)
 
@@ -827,6 +867,7 @@ else:
     swiglu_fwd = swiglu_fwd_impl
     swiglu_bwd = swiglu_bwd_impl
     paged_attention_prefill = paged_attention_prefill_impl
+    paged_attention_prefill_quant = paged_attention_prefill_quant_impl
     paged_attention_decode = paged_attention_decode_impl
     rot_pos_embed = rot_pos_embed_impl
     rope_fwd = rope_fwd_impl
