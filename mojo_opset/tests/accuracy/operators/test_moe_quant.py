@@ -1,9 +1,12 @@
+import pytest
 import torch
 
 from mojo_opset import MojoFusedSwiGLUMoEScaleDynamicQuantize
 from mojo_opset import MojoMoEInitRoutingDynamicQuant
 from mojo_opset import MojoQuantExperts
 from mojo_opset import MojoQuantMoE
+from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.utils.platform import get_torch_device
 
 
 def _pack_int4_to_int8_along_output(input: torch.Tensor) -> torch.Tensor:
@@ -166,6 +169,72 @@ def test_fused_swiglu_moe_scale_dynamic_quant_reference():
 
     torch.testing.assert_close(quantized, expected_quantized, atol=0, rtol=0)
     torch.testing.assert_close(scale, expected_scale, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@bypass_not_implemented
+def test_moe_init_routing_dynamic_quant_backend(dtype):
+    device = get_torch_device()
+    seq_len = 8
+    num_experts = 4
+    top_k = 2
+    hidden_size = 64
+
+    hidden_states = torch.randn(seq_len, hidden_size, dtype=dtype, device=device)
+    gate_logits = torch.randn(seq_len, num_experts, dtype=torch.float32, device=device)
+    gate_probs = torch.softmax(gate_logits, dim=-1)
+    top_k_logits, top_k_indices = torch.topk(gate_probs, top_k, dim=-1)
+    top_k_gates = top_k_logits / torch.sum(top_k_logits, dim=-1, keepdim=True)
+    top_k_indices = top_k_indices.to(torch.int32)
+    smooth_scale = torch.rand(num_experts, hidden_size, dtype=torch.float32, device=device)
+
+    op = MojoMoEInitRoutingDynamicQuant(
+        num_experts=num_experts,
+        top_k=top_k,
+        quant_block_size=hidden_size,
+    ).to(device)
+    op_ref = MojoMoEInitRoutingDynamicQuant._registry.get("torch")(
+        num_experts=num_experts,
+        top_k=top_k,
+        quant_block_size=hidden_size,
+    ).to(device)
+    op.forward_diff_with(
+        op_ref,
+        hidden_states,
+        top_k_gates,
+        top_k_indices,
+        smooth_scale,
+        0,
+        atol=(1, 1e-4, 0, 0, 1e-4),
+        rtol=(0, 1e-4, 0, 0, 1e-4),
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@bypass_not_implemented
+def test_fused_swiglu_moe_scale_dynamic_quant_backend(dtype):
+    device = get_torch_device()
+    seq_len = 8
+    top_k = 2
+    expert_num = 4
+    last_dim = 128
+
+    input = torch.randn(seq_len, top_k, last_dim, dtype=dtype, device=device)
+    smooth_scale = torch.rand(expert_num, last_dim // 2, dtype=torch.float32, device=device)
+    token_count = torch.tensor([4, 5, 3, 4], dtype=torch.int32, device=device)
+
+    op = MojoFusedSwiGLUMoEScaleDynamicQuantize().to(device)
+    op_ref = MojoFusedSwiGLUMoEScaleDynamicQuantize._registry.get("torch")().to(device)
+    op.forward_diff_with(
+        op_ref,
+        input,
+        smooth_scale,
+        token_count,
+        1.0,
+        0,
+        atol=(1, 1e-4),
+        rtol=(0, 1e-4),
+    )
 
 
 def test_quant_experts_reference():
