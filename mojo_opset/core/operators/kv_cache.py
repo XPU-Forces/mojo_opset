@@ -1,8 +1,29 @@
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 
 from ..operator import MojoOperator
+
+
+def assert_paged_kv_store_contract(
+    block_table: torch.Tensor,
+    cu_seq_lens: Optional[torch.Tensor],
+    kv_lens_before_store: Optional[torch.Tensor],
+) -> None:
+    assert block_table.dtype == torch.int32
+    if cu_seq_lens is not None:
+        assert cu_seq_lens.dtype == torch.int32
+    if kv_lens_before_store is not None:
+        assert kv_lens_before_store.dtype == torch.int32
+        assert block_table.shape[0] == kv_lens_before_store.shape[0]
+        has_tokens = kv_lens_before_store >= 0
+        has_first_block = (
+            block_table[:, 0] >= 0 if block_table.shape[1] > 0 else torch.zeros_like(has_tokens, dtype=torch.bool)
+        )
+        torch._assert(
+            torch.all(torch.logical_or(~has_tokens, has_first_block)),
+            "Paged KV store rows with kv_lens_before_store >= 0 require a valid first block.",
+        )
 
 
 class MojoStoreKVCache(MojoOperator):
@@ -46,6 +67,7 @@ class MojoStorePagedKVCache(MojoOperator):
         assert len(key_states.shape) == 3 and len(value_states.shape) == 3 and key_states.shape == value_states.shape, (
             "key/value states must be (token_num, kv_head_num, head_dim), please check."
         )
+        assert_paged_kv_store_contract(block_table, cu_seq_lens, kv_lens_before_store)
 
         block_size = key_cache.shape[2]
 
@@ -163,10 +185,7 @@ class MojoStorePagedMLAKVCache(MojoOperator):
         Returns:
             ``(compressed_kv_cache, k_pe_cache)`` after in-place writes.
         """
-        assert block_table.dtype == torch.int32
-        if cu_seq_lens is not None:
-            assert cu_seq_lens.dtype == torch.int32
-        assert kv_lens_before_store.dtype == torch.int32
+        assert_paged_kv_store_contract(block_table, cu_seq_lens, kv_lens_before_store)
         block_size = compressed_kv_cache.shape[2]
         num_batches = len(kv_lens_before_store) if kv_lens_before_store is not None else 0
         is_decode = cu_seq_lens is None

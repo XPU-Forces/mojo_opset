@@ -310,8 +310,6 @@ def paged_attention_decode_impl(
     assert head_dim == head_dim_cache
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(head_dim)
-    if ((seqlens > 0) & (block_tables[:, 0] < 0)).any():
-        raise ValueError("paged_attention_decode requires a valid block table for rows with kv lens > 0.")
 
     return _paged_decode_gather_and_causal(
         q,

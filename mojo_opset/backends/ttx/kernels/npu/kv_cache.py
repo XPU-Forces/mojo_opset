@@ -36,6 +36,7 @@ def _store_paged_kv_cache_kernel(
     block_size: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
     IS_DECODE: tl.constexpr,
+    HAS_KV_LENS: tl.constexpr,
 ):
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
@@ -50,10 +51,12 @@ def _store_paged_kv_cache_kernel(
             seq_end_tok = tl.load(cu_seqlens_ptr + batch_idx + 1)
             seq_len_curr = seq_end_tok - seq_start_tok
 
-        write_start = tl.load(kv_lens_ptr + batch_idx)
+        write_start = 0
+        if HAS_KV_LENS:
+            write_start = tl.load(kv_lens_ptr + batch_idx)
         valid_write = write_start >= 0
         cur_chunks = tl.where(valid_write, tl.cdiv(seq_len_curr, CHUNK_SIZE), 0)
-        start_chunk = (prev_chunks + pid) % num_programs
+        start_chunk = (pid + num_programs - prev_chunks % num_programs) % num_programs
         prev_chunks += cur_chunks
 
         for chunk_idx in range(start_chunk, cur_chunks, num_programs):
@@ -72,6 +75,8 @@ def _store_paged_kv_cache_kernel(
                 physical_block_id = tl.load(
                     block_table_ptr + batch_idx * stride_bt_batch + block_table_idx * stride_bt_blk
                 )
+                valid_block = physical_block_id >= 0
+                physical_block_id = tl.maximum(physical_block_id, 0)
 
                 space_in_block = block_size - block_inner_off
                 sub_len = tl.minimum(remain_chunk_len - processed, space_in_block).to(tl.int32)
@@ -99,7 +104,7 @@ def _store_paged_kv_cache_kernel(
                         + offs_d[None, :] * stride_kc_dim
                     )
 
-                    tl.store(dst_k_ptr, k_val, mask=mask_sub[:, None])
+                    tl.store(dst_k_ptr, k_val, mask=valid_block & mask_sub[:, None])
 
                     src_v_ptr = (
                         v_ptr
@@ -118,7 +123,7 @@ def _store_paged_kv_cache_kernel(
                         + offs_d[None, :] * stride_vc_dim
                     )
 
-                    tl.store(dst_v_ptr, v_val, mask=mask_sub[:, None])
+                    tl.store(dst_v_ptr, v_val, mask=valid_block & mask_sub[:, None])
 
                 processed += sub_len
                 curr_log_pos += sub_len
@@ -137,9 +142,9 @@ def store_paged_kv_impl(
     assert k_states.is_contiguous() and v_states.is_contiguous()
 
     is_decode = cu_seqlens is None
-    batch_size = kv_lens_before_store.shape[0] if is_decode else cu_seqlens.shape[0] - 1
     if cu_seqlens is None:
         cu_seqlens = torch.arange(k_states.shape[0] + 1, device=k_states.device, dtype=torch.int32)
+    batch_size = kv_lens_before_store.shape[0] if is_decode and kv_lens_before_store is not None else cu_seqlens.shape[0] - 1
 
     num_kv_heads = k_states.shape[1]
     head_dim = k_states.shape[2]
@@ -156,7 +161,7 @@ def store_paged_kv_impl(
         value_cache,
         block_table,
         cu_seqlens,
-        kv_lens_before_store,
+        kv_lens_before_store if kv_lens_before_store is not None else cu_seqlens,
         batch_size,
         k_states.stride(0),
         k_states.stride(1),
@@ -179,6 +184,7 @@ def store_paged_kv_impl(
         block_size,
         CHUNK_SIZE=block_size,
         IS_DECODE=is_decode,
+        HAS_KV_LENS=kv_lens_before_store is not None,
     )
 
     return key_cache, value_cache

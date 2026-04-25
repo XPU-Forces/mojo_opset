@@ -68,7 +68,7 @@ class SimplePagedKVCache(torch.nn.Module):
         )
 
         self.seq_lens = torch.zeros(
-            (self.num_layers, self.batch_size), dtype=torch.int64, device=self.device
+            (self.num_layers, self.batch_size), dtype=torch.int32, device=self.device
         )
 
         self.free_blocks = torch.arange(total_blocks, device=self.device, dtype=torch.int32)
@@ -91,7 +91,7 @@ class SimplePagedKVCache(torch.nn.Module):
         cu_seqlens: torch.Tensor = None,
     ):
         if input_len is None:
-            input_len = torch.ones(self.batch_size, device=key_states.device, dtype=torch.int64)
+            input_len = torch.ones(self.batch_size, device=key_states.device, dtype=torch.int32)
 
         current_seq_lens = self.seq_lens[layer_idx]
         for i in range(self.batch_size):
@@ -348,13 +348,13 @@ class TestMojoParallel:
         output_decode = parallel_block(
             input_tensor_decode,
             kv_cache=kv_cache_tp,
-            decode_kv_len=torch.ones(1, dtype=torch.int64),
+            decode_kv_len=torch.ones(1, dtype=torch.int32),
         )
 
         input_tensor_prefill = torch.ones(128, config.model_config.hidden_size)
-        context_input_len = torch.tensor([128], dtype=torch.int64)
-        context_shifts = torch.zeros(1, dtype=torch.int64)
-        context_cu_seqs = torch.tensor([0, 128], dtype=torch.int64)
+        context_input_len = torch.tensor([128], dtype=torch.int32)
+        context_shifts = torch.zeros(1, dtype=torch.int32)
+        context_cu_seqs = torch.tensor([0, 128], dtype=torch.int32)
 
         output_prefill = parallel_block(
             input_tensor_prefill,
@@ -378,7 +378,7 @@ class TestMojoParallel:
             output_decode_ref = ref_block(
                 input_tensor_decode,
                 kv_cache=kv_cache_ref,
-                decode_kv_len=torch.ones(1, dtype=torch.int64),
+                decode_kv_len=torch.ones(1, dtype=torch.int32),
             )
             output_prefill_ref = ref_block(
                 input_tensor_prefill,

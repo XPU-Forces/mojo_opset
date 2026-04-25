@@ -9,6 +9,8 @@ import torch_npu
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoPrefillGQA
+from mojo_opset.core.operators.attention import assert_paged_decode_contract
+from mojo_opset.core.operators.attention import assert_paged_prefill_contract
 
 
 class TorchNpuPrefillGQA(MojoPrefillGQA, default_priority=0):
@@ -80,6 +82,7 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
         seqlens_kv: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert_paged_prefill_contract(cu_seqlens_q, block_tables, seqlens_kv)
         _, num_q_heads, head_dim = query.shape
         _, num_kv_heads, block_size, _ = key_cache.shape
         
@@ -137,6 +140,8 @@ class TorchNpuPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
     ) -> Tuple[Any]:
         batch_size, num_q_heads, head_dim = query.shape
         _, head_nums, block_size, _ = k_cache.shape
+        kv_seq_lens = cu_seq_lens if cu_seq_lens is not None else seqlens
+        assert_paged_decode_contract(block_tables, kv_seq_lens)
         if head_dim % 128 != 0:
             raise NotImplementedError(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
 
@@ -156,9 +161,6 @@ class TorchNpuPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
                 input_layout = "BNSD"
 
         actual_seq_lengths_q = torch.arange(1, batch_size + 1, dtype=torch.int32, device=query.device)
-        kv_seq_lens = cu_seq_lens if cu_seq_lens is not None else seqlens
-        if ((kv_seq_lens > 0) & (block_tables[:, 0] < 0)).any():
-            raise ValueError("TorchNpuPagedDecodeGQA requires a valid block table for rows with kv lens > 0.")
         out, _ = torch_npu.npu_fused_infer_attention_score(
             query,
             k_cache,

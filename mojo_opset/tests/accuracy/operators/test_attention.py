@@ -54,7 +54,7 @@ def generate_paged_decode_data(
     v_cache = torch.randn(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
 
     block_tables = torch.full((batch_size, max_num_blocks_per_seq), -1, dtype=torch.int32)
-    free_blocks = torch.randperm(num_total_blocks)
+    free_blocks = torch.randperm(num_total_blocks, dtype=torch.int32)
 
     current_block_offset = 0
     for i in range(batch_size):
@@ -183,7 +183,7 @@ def generate_paged_prefill_data(
     v_cache = torch.zeros(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
 
     block_tables = torch.full((batch_size, max_num_blocks_per_seq), -1, dtype=torch.int32)
-    free_blocks = torch.randperm(num_total_blocks)
+    free_blocks = torch.randperm(num_total_blocks, dtype=torch.int32)
 
     current_block_offset = 0
     for i in range(batch_size):
@@ -301,7 +301,7 @@ def test_paged_prefill_gqa_bucket_padded_varlen(gqa_layout: str):
     key_cache[:real_batch_size, :, 0, :] = torch.randn((real_batch_size, num_kv_heads, head_dim), dtype=dtype)
     value_cache[:real_batch_size, :, 0, :] = torch.randn((real_batch_size, num_kv_heads, head_dim), dtype=dtype)
 
-    block_tables = torch.zeros((bucket_batch_size, 1), dtype=torch.int32)
+    block_tables = torch.full((bucket_batch_size, 1), -1, dtype=torch.int32)
     block_tables[:real_batch_size, 0] = torch.arange(real_batch_size, dtype=torch.int32)
 
     paged_prefill_attn = MojoPagedPrefillGQA(

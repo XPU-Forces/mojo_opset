@@ -21,8 +21,6 @@ import torch
 import triton
 import triton.language as tl
 
-from mojo_opset.backends.ttx.kernels.utils import prepare_lens
-
 from .utils import libentry
 
 
@@ -112,39 +110,7 @@ def store_kv_cache_impl(
     return k_cache, v_cache, qkv
 
 
-# --- Paged KV cache (same algorithm as NPU; grid[0] = ceil(n / BLOCK) programs, one chunk per program when BLOCK=1) ---
-
-
-def prepare_kv_chunk_indices(
-    cu_seqlens: torch.Tensor, kv_lens_before_store: torch.Tensor, chunk_size: int
-) -> torch.Tensor:
-    seqlens = prepare_lens(cu_seqlens)
-
-    chunks_per_seq = triton.cdiv(seqlens, chunk_size)
-    seq_ids = torch.repeat_interleave(torch.arange(len(seqlens), device=cu_seqlens.device), chunks_per_seq)
-
-    cumulative_chunks = torch.cumsum(chunks_per_seq, 0)
-    chunk_starts = torch.cat([torch.tensor([0], device=cu_seqlens.device), cumulative_chunks[:-1]])
-
-    flat_indices = torch.arange(chunks_per_seq.sum(), device=cu_seqlens.device)
-    chunk_idx_in_seq = flat_indices - chunk_starts[seq_ids]
-
-    token_offset_in_qkv = (chunk_idx_in_seq * chunk_size).to(torch.int32)
-
-    if kv_lens_before_store is not None:
-        batch_kv_lens_before_store = kv_lens_before_store[seq_ids]
-        valid = batch_kv_lens_before_store >= 0
-        seq_ids = seq_ids[valid]
-        token_offset_in_qkv = token_offset_in_qkv[valid]
-        batch_kv_lens_before_store = batch_kv_lens_before_store[valid]
-        if seq_ids.numel() == 0:
-            return torch.empty((0, 3), device=cu_seqlens.device, dtype=torch.int32)
-        logical_kv_start = batch_kv_lens_before_store.to(torch.int32) + token_offset_in_qkv
-    else:
-        logical_kv_start = token_offset_in_qkv
-
-    indices = torch.stack([seq_ids.to(torch.int32), token_offset_in_qkv, logical_kv_start], dim=1).to(torch.int32)
-    return indices
+# --- Paged KV cache ---
 
 
 @libentry()
@@ -219,6 +185,8 @@ def _store_paged_kv_cache_kernel(
         block_inner_off = curr_log_pos % block_size
 
         physical_block_id = tl.load(block_table_ptr + batch_idx * stride_bt_batch + block_table_idx * stride_bt_blk)
+        valid_block = physical_block_id >= 0
+        physical_block_id = tl.maximum(physical_block_id, 0)
 
         space_in_block = block_size - block_inner_off
         sub_len = tl.minimum(remain_chunk_len - processed, space_in_block).to(tl.int32)
@@ -246,7 +214,7 @@ def _store_paged_kv_cache_kernel(
                 + offs_d[None, :] * stride_kc_dim
             )
 
-            tl.store(dst_k_ptr, k_val, mask=mask_sub[:, None])
+            tl.store(dst_k_ptr, k_val, mask=valid_block & mask_sub[:, None])
 
             src_v_ptr = (
                 v_ptr
@@ -265,7 +233,7 @@ def _store_paged_kv_cache_kernel(
                 + offs_d[None, :] * stride_vc_dim
             )
 
-            tl.store(dst_v_ptr, v_val, mask=mask_sub[:, None])
+            tl.store(dst_v_ptr, v_val, mask=valid_block & mask_sub[:, None])
 
         processed += sub_len
         curr_log_pos += sub_len
@@ -303,7 +271,7 @@ def store_paged_kv_impl(
         value_cache,
         block_table,
         cu_seqlens,
-        kv_lens_before_store if kv_lens_before_store is not None else k_states,
+        kv_lens_before_store if kv_lens_before_store is not None else cu_seqlens,
         k_states.stride(0),
         k_states.stride(1),
         k_states.stride(2),
