@@ -4,6 +4,7 @@ import torch
 
 from mojo_opset.backends.ttx.kernels import store_paged_kv
 from mojo_opset.core import MojoStorePagedKVCache
+from mojo_opset.core.operators.kv_cache import assert_paged_kv_store_contract
 
 
 class TTXStorePagedKVCache(MojoStorePagedKVCache):
@@ -17,12 +18,9 @@ class TTXStorePagedKVCache(MojoStorePagedKVCache):
         value_cache: torch.Tensor,
         block_table: torch.Tensor,
         cu_seq_lens: torch.Tensor,
-        kv_lens: torch.Tensor,
+        kv_lens_before_store: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        assert block_table.dtype == torch.int32
-        if cu_seq_lens is not None:
-            assert cu_seq_lens.dtype == torch.int32
-        assert kv_lens.dtype == torch.int32
+        assert_paged_kv_store_contract(block_table, cu_seq_lens, kv_lens_before_store)
         return store_paged_kv(
             key_states,
             value_states,
@@ -30,5 +28,5 @@ class TTXStorePagedKVCache(MojoStorePagedKVCache):
             value_cache,
             block_table,
             cu_seq_lens,
-            kv_lens,
+            kv_lens_before_store,
         )

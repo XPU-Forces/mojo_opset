@@ -241,10 +241,12 @@ def _paged_decode_gather_and_causal(
     """ILU paged decode: unpage KV + causal attention (one query token per batch row)."""
     batch_size, num_q_heads, head_dim = q.shape
     _, num_kv_heads, block_size, _ = key_cache.shape
-    o = torch.empty_like(q)
+    o = torch.zeros_like(q)
 
     for i in range(batch_size):
         kv_seq_len = int(seqlens[i].item())
+        if kv_seq_len <= 0 or int(block_tables[i, 0].item()) < 0:
+            continue
         q_batch = q[i : i + 1].contiguous()
         num_blocks_for_seq = (kv_seq_len + block_size - 1) // block_size
 
@@ -257,6 +259,8 @@ def _paged_decode_gather_and_causal(
 
         for j in range(num_blocks_for_seq):
             physical_block_id = int(block_tables[i, j].item())
+            if physical_block_id < 0:
+                break
             start_pos_in_seq = j * block_size
             end_pos_in_seq = min(start_pos_in_seq + block_size, kv_seq_len)
             tokens_in_block = end_pos_in_seq - start_pos_in_seq

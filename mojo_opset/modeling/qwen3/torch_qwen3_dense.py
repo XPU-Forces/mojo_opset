@@ -58,10 +58,12 @@ class PagedDummyCache:
             device=self.device,
         )
 
-        self.block_tables = torch.zeros((self.batch_size, max_blocks_per_seq), dtype=torch.long, device=self.device)
-        self.seq_lens = torch.zeros(self.batch_size, dtype=torch.long, device=self.device)
+        self.block_tables = torch.full(
+            (self.batch_size, max_blocks_per_seq), -1, dtype=torch.int32, device=self.device
+        )
+        self.seq_lens = torch.zeros(self.batch_size, dtype=torch.int32, device=self.device)
 
-        self.free_blocks = torch.arange(total_blocks, device=self.device, dtype=torch.long)
+        self.free_blocks = torch.arange(total_blocks, device=self.device, dtype=torch.int32)
         self.num_free_blocks = total_blocks
 
     def _allocate_blocks(self, num_blocks: int):
@@ -321,7 +323,9 @@ def paged_attention_forward(
 
     if q_len > 1:
         q_lens = torch.full((bsz,), q_len, dtype=torch.int32, device=device)
-        cu_seqlens_q = torch.cat([torch.tensor([0], device=device, dtype=torch.int32), q_lens.cumsum(0)])
+        cu_seqlens_q = torch.cat(
+            [torch.tensor([0], device=device, dtype=torch.int32), q_lens.cumsum(0, dtype=torch.int32)]
+        )
         total_tokens = cu_seqlens_q[-1].item()
 
         q = query_states.permute(0, 2, 1, 3).reshape(total_tokens, num_q_heads, head_dim)
