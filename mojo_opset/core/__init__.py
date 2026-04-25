@@ -74,10 +74,12 @@ from .operators.quantize import MojoStaticQuant
 
 """ moe """
 from .operators.moe import MojoExperts
+from .operators.moe import MojoFusedSwiGLUMoEScaleDynamicQuantize
 from .operators.moe import MojoMoE
 from .operators.moe import MojoMoECombine
 from .operators.moe import MojoMoEDispatch
 from .operators.moe import MojoMoEGating
+from .operators.moe import MojoMoEInitRoutingDynamicQuant
 from .operators.moe import MojoQuantExperts
 from .operators.moe import MojoQuantMoE
 
@@ -187,6 +189,8 @@ __all__ = [
     "MojoMoE",
     "MojoMoEGating",
     "MojoMoEDispatch",
+    "MojoMoEInitRoutingDynamicQuant",
+    "MojoFusedSwiGLUMoEScaleDynamicQuantize",
     "MojoExperts",
     "MojoMoECombine",
     "MojoQuantExperts",
