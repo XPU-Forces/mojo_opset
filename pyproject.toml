@@ -12,6 +12,7 @@ readme = { file = "README.md", content-type = "text/markdown" }
 authors = [{name="SeedXPU", email='yuminghui.exp@bytedance.com'}]
 dependencies = [
     "einops",
+    "pydantic",
     "pytest >= 8.4.0",
     "byted-xpu-graph @ https://luban-source.byted.org/repository/scm/Seed.Foundation.xpu_graph_1.0.0.20.tar.gz"
 ]

@@ -7,7 +7,8 @@ from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset import MojoDequantSwiGLUQuant
 from mojo_opset import MojoDequant
 from mojo_opset import MojoDynamicQuant
-from mojo_opset import MojoQuant
+from mojo_opset import MojoMoEDynamicQuant
+from mojo_opset import MojoStaticQuant
 
 torch.manual_seed(42)
 
@@ -15,7 +16,7 @@ dtypes = [torch.float16, torch.bfloat16]
 
 
 # ---------------------------------------------------------------------------
-# Helpers: pre-compute scale / zero_point outside the operator
+# Helpers: pre-compute scale outside the operator
 # ---------------------------------------------------------------------------
 
 def make_per_token_scale_sym(x: torch.Tensor, q_max: int = 127) -> torch.Tensor:
@@ -28,25 +29,18 @@ def make_per_tensor_scale_sym(x: torch.Tensor, q_max: int = 127) -> torch.Tensor
     return (x.float().abs().amax() / q_max).clamp(min=1e-10)
 
 
-def make_per_token_scale_asym(x: torch.Tensor, q_max: int = 127, q_min: int = 0):
-    """Per-token asymmetric scale + zero_point: shapes (..., 1)."""
-    x_fp = x.float()
-    val_min = x_fp.amin(dim=-1, keepdim=True)
-    val_max = x_fp.amax(dim=-1, keepdim=True)
-    scale = ((val_max - val_min) / (q_max - q_min)).clamp(min=1e-10)
-    zero_point = torch.round(-val_min / scale).clamp(q_min, q_max)
-    return scale, zero_point
+def make_per_channel_scale_sym(x: torch.Tensor, q_max: int = 127) -> torch.Tensor:
+    """Per-channel symmetric scale: shape (K,)."""
+    return (x.float().abs().amax(dim=0) / q_max).clamp(min=1e-10)
 
 
-def make_per_group_scale_sym(x: torch.Tensor, group_size: int, q_max: int = 127) -> torch.Tensor:
-    """Per-group symmetric scale: shape (..., K // group_size, 1)."""
-    orig = x.shape
-    xg = x.float().reshape(*orig[:-1], -1, group_size)
-    return (xg.abs().amax(dim=-1, keepdim=True) / q_max).clamp(min=1e-10)
+def load_params(module: torch.nn.Module, **params):
+    module.load_state_dict(params, strict=False)
+    return module
 
 
 # ---------------------------------------------------------------------------
-# MojoQuant: symmetric, per-token (user provides scale)
+# MojoStaticQuant: per-channel scale parameter
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "shape",
@@ -61,15 +55,18 @@ def make_per_group_scale_sym(x: torch.Tensor, group_size: int, q_max: int = 127)
 @bypass_not_implemented
 def test_quant_symmetric_per_token(shape, dtype):
     x = torch.randn(size=shape, dtype=dtype)
-    scale = make_per_token_scale_sym(x)
+    scale = make_per_channel_scale_sym(x)
 
-    quant = MojoQuant(quant_dtype=torch.int8, symmetric=True)
-    quant_ref = MojoQuant._registry.get("torch")(quant_dtype=torch.int8, symmetric=True)
-    quant.forward_diff_with(quant_ref, x, scale, atol=0, rtol=0)
+    quant = load_params(MojoStaticQuant(input_size=shape[-1], quant_dtype=torch.int8), scale=scale)
+    quant_ref = load_params(
+        MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.int8),
+        scale=scale.clone(),
+    )
+    quant.forward_diff_with(quant_ref, x, atol=0, rtol=0)
 
 
 # ---------------------------------------------------------------------------
-# MojoQuant: symmetric, per-tensor (user provides scale)
+# MojoStaticQuant: scalar-like scale parameter
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "shape",
@@ -83,61 +80,18 @@ def test_quant_symmetric_per_token(shape, dtype):
 @bypass_not_implemented
 def test_quant_symmetric_per_tensor(shape, dtype):
     x = torch.randn(size=shape, dtype=dtype)
-    scale = make_per_tensor_scale_sym(x)
+    scale = make_per_tensor_scale_sym(x).expand(shape[-1]).clone()
 
-    quant = MojoQuant(quant_dtype=torch.int8, symmetric=True)
-    quant_ref = MojoQuant._registry.get("torch")(quant_dtype=torch.int8, symmetric=True)
-    quant.forward_diff_with(quant_ref, x, scale, atol=0, rtol=0)
-
-
-# ---------------------------------------------------------------------------
-# MojoQuant: asymmetric, per-token (user provides scale + zero_point)
-# ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    "shape",
-    [
-        (32, 128),
-        (64, 1024),
-        (128, 8192),
-    ],
-)
-@pytest.mark.parametrize("dtype", dtypes)
-@bypass_not_implemented
-def test_quant_asymmetric_per_token(shape, dtype):
-    x = torch.randn(size=shape, dtype=dtype)
-    scale, zero_point = make_per_token_scale_asym(x)
-
-    quant = MojoQuant(quant_dtype=torch.int8, symmetric=False)
-    quant_ref = MojoQuant._registry.get("torch")(quant_dtype=torch.int8, symmetric=False)
-    quant.forward_diff_with(quant_ref, x, scale, zero_point, atol=0, rtol=0)
-
-
-# ---------------------------------------------------------------------------
-# MojoQuant: symmetric, per-group (user provides scale)
-# ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    "shape, group_size",
-    [
-        ((32, 128), 64),
-        ((64, 1024), 128),
-        ((16, 4096), 256),
-    ],
-)
-@pytest.mark.parametrize("dtype", dtypes)
-@bypass_not_implemented
-def test_quant_symmetric_per_group(shape, group_size, dtype):
-    x = torch.randn(size=shape, dtype=dtype)
-    scale = make_per_group_scale_sym(x, group_size)
-
-    quant = MojoQuant(quant_dtype=torch.int8, symmetric=True, group_size=group_size)
-    quant_ref = MojoQuant._registry.get("torch")(
-        quant_dtype=torch.int8, symmetric=True, group_size=group_size
+    quant = load_params(MojoStaticQuant(input_size=shape[-1], quant_dtype=torch.int8), scale=scale)
+    quant_ref = load_params(
+        MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.int8),
+        scale=scale.clone(),
     )
-    quant.forward_diff_with(quant_ref, x, scale, atol=0, rtol=0)
+    quant.forward_diff_with(quant_ref, x, atol=0, rtol=0)
 
 
 # ---------------------------------------------------------------------------
-# MojoQuant: float8_e4m3fn symmetric
+# MojoStaticQuant: float8_e4m3fn
 # ---------------------------------------------------------------------------
 _requires_cpu = pytest.mark.skipif(
     get_platform() != "cpu",
@@ -151,35 +105,27 @@ _requires_cpu = pytest.mark.skipif(
 def test_quant_float8_symmetric(shape, dtype):
     x = torch.randn(size=shape, dtype=dtype)
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
-    scale = (x.float().abs().amax(dim=-1, keepdim=True) / fp8_max).clamp(min=1e-10)
+    scale = (x.float().abs().amax(dim=0) / fp8_max).clamp(min=1e-10)
 
-    quant = MojoQuant._registry.get("torch")(quant_dtype=torch.float8_e4m3fn, symmetric=True)
-    out = quant(x, scale)
+    quant = load_params(
+        MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.float8_e4m3fn),
+        scale=scale,
+    )
+    out = quant(x)
     expected = torch.clamp(torch.round(x.float() / scale.float()), -fp8_max, fp8_max).to(torch.float8_e4m3fn)
     torch.testing.assert_close(out.float(), expected.float(), atol=0, rtol=0)
 
 
 # ---------------------------------------------------------------------------
-# MojoQuant: unsupported dtype raises NotImplementedError
+# MojoStaticQuant: unsupported dtype raises NotImplementedError
 # ---------------------------------------------------------------------------
 def test_quant_unsupported_dtype_raises():
     with pytest.raises(NotImplementedError, match="Unsupported quant_dtype"):
-        MojoQuant._registry.get("torch")(quant_dtype=torch.float32)
+        MojoStaticQuant._registry.get("torch")(input_size=1, quant_dtype=torch.float32)
 
 
 # ---------------------------------------------------------------------------
-# MojoQuant: asymmetric requires zero_point (error path)
-# ---------------------------------------------------------------------------
-def test_quant_asymmetric_missing_zero_point_raises():
-    x = torch.randn(8, 64)
-    scale = make_per_token_scale_sym(x)
-    quant = MojoQuant._registry.get("torch")(quant_dtype=torch.int8, symmetric=False)
-    with pytest.raises(ValueError, match="zero_point"):
-        quant(x, scale)
-
-
-# ---------------------------------------------------------------------------
-# MojoDequant: symmetric
+# MojoDequant
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "shape",
@@ -193,63 +139,19 @@ def test_quant_asymmetric_missing_zero_point_raises():
 @bypass_not_implemented
 def test_dequant_symmetric(shape, output_dtype):
     x = torch.randn(size=shape, dtype=output_dtype)
-    scale = make_per_token_scale_sym(x)
-    quant_op = MojoQuant._registry.get("torch")(quant_dtype=torch.int8, symmetric=True)
-    quantized = quant_op(x, scale)
-
-    dequant = MojoDequant(output_dtype=output_dtype, symmetric=True)
-    dequant_ref = MojoDequant._registry.get("torch")(output_dtype=output_dtype, symmetric=True)
-    dequant.forward_diff_with(dequant_ref, quantized, scale, atol=0, rtol=0)
-
-
-# ---------------------------------------------------------------------------
-# MojoDequant: asymmetric
-# ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    "shape",
-    [
-        (32, 128),
-        (64, 1024),
-    ],
-)
-@pytest.mark.parametrize("output_dtype", dtypes)
-@bypass_not_implemented
-def test_dequant_asymmetric(shape, output_dtype):
-    x = torch.randn(size=shape, dtype=output_dtype)
-    scale, zero_point = make_per_token_scale_asym(x)
-    quant_op = MojoQuant._registry.get("torch")(quant_dtype=torch.int8, symmetric=False)
-    quantized = quant_op(x, scale, zero_point)
-
-    dequant = MojoDequant(output_dtype=output_dtype, symmetric=False)
-    dequant_ref = MojoDequant._registry.get("torch")(output_dtype=output_dtype, symmetric=False)
-    dequant.forward_diff_with(dequant_ref, quantized, scale, zero_point, atol=0, rtol=0)
-
-
-# ---------------------------------------------------------------------------
-# MojoDequant: per-group symmetric
-# ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    "shape, group_size",
-    [
-        ((32, 128), 64),
-        ((64, 1024), 128),
-    ],
-)
-@pytest.mark.parametrize("output_dtype", dtypes)
-@bypass_not_implemented
-def test_dequant_symmetric_per_group(shape, group_size, output_dtype):
-    x = torch.randn(size=shape, dtype=output_dtype)
-    scale = make_per_group_scale_sym(x, group_size)
-    quant_op = MojoQuant._registry.get("torch")(
-        quant_dtype=torch.int8, symmetric=True, group_size=group_size
+    scale = make_per_channel_scale_sym(x)
+    quant_op = load_params(
+        MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.int8),
+        scale=scale,
     )
-    quantized = quant_op(x, scale)
+    quantized = quant_op(x)
 
-    dequant = MojoDequant(output_dtype=output_dtype, symmetric=True, group_size=group_size)
-    dequant_ref = MojoDequant._registry.get("torch")(
-        output_dtype=output_dtype, symmetric=True, group_size=group_size
+    dequant = load_params(MojoDequant(input_size=shape[-1], output_dtype=output_dtype), scale=scale)
+    dequant_ref = load_params(
+        MojoDequant._registry.get("torch")(input_size=shape[-1], output_dtype=output_dtype),
+        scale=scale.clone(),
     )
-    dequant.forward_diff_with(dequant_ref, quantized, scale, atol=0, rtol=0)
+    dequant.forward_diff_with(dequant_ref, quantized, atol=0, rtol=0)
 
 
 # ---------------------------------------------------------------------------
@@ -266,15 +168,58 @@ def test_dequant_symmetric_per_group(shape, group_size, output_dtype):
 @bypass_not_implemented
 def test_quant_dequant_roundtrip(shape, dtype):
     x = torch.randn(size=shape, dtype=dtype)
-    scale = make_per_token_scale_sym(x)
+    scale = make_per_channel_scale_sym(x)
 
-    quant_op = MojoQuant._registry.get("torch")(quant_dtype=torch.int8, symmetric=True)
-    dequant_op = MojoDequant._registry.get("torch")(output_dtype=dtype, symmetric=True)
+    quant_op = load_params(
+        MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.int8),
+        scale=scale,
+    )
+    dequant_op = load_params(
+        MojoDequant._registry.get("torch")(input_size=shape[-1], output_dtype=dtype),
+        scale=scale.clone(),
+    )
 
-    quantized = quant_op(x, scale)
-    recovered = dequant_op(quantized, scale)
+    quantized = quant_op(x)
+    recovered = dequant_op(quantized)
 
     torch.testing.assert_close(recovered.to(torch.float32), x.to(torch.float32), atol=5e-2, rtol=5e-2)
+
+
+def test_dequant_invalid_output_dtype_raises():
+    with pytest.raises(NotImplementedError, match="Unsupported output_dtype"):
+        MojoDequant._registry.get("torch")(input_size=1, output_dtype=torch.int8)
+
+
+def test_quant_scales_are_parameters():
+    static_quant = MojoStaticQuant._registry.get("torch")(input_size=16, quant_dtype=torch.int8)
+    dequant = MojoDequant._registry.get("torch")(input_size=16, output_dtype=torch.bfloat16)
+    dynamic_quant = MojoDynamicQuant._registry.get("torch")(input_size=16, quant_dtype=torch.int8)
+    moe_dynamic_quant = MojoMoEDynamicQuant._registry.get("torch")(
+        expert_num=2,
+        input_size=16,
+        quant_dtype=torch.int8,
+    )
+    swiglu_quant = MojoDequantSwiGLUQuant._registry.get("torch")(
+        expert_num=2,
+        hidden_size=16,
+        quant_dtype=torch.int8,
+    )
+
+    assert isinstance(static_quant.scale, torch.nn.Parameter)
+    assert isinstance(dequant.scale, torch.nn.Parameter)
+    assert isinstance(dynamic_quant.smooth_scale, torch.nn.Parameter)
+    assert isinstance(moe_dynamic_quant.smooth_scale, torch.nn.Parameter)
+    assert isinstance(swiglu_quant.weight_scale, torch.nn.Parameter)
+    assert isinstance(swiglu_quant.quant_scale, torch.nn.Parameter)
+    assert moe_dynamic_quant.smooth_scale.shape == (2, 16)
+    assert swiglu_quant.weight_scale.shape == (2, 32)
+    assert swiglu_quant.quant_scale.shape == (2, 16)
+
+    assert set(static_quant.state_dict()) == {"scale"}
+    assert set(dequant.state_dict()) == {"scale"}
+    assert set(dynamic_quant.state_dict()) == {"smooth_scale"}
+    assert set(moe_dynamic_quant.state_dict()) == {"smooth_scale"}
+    assert set(swiglu_quant.state_dict()) == {"weight_scale", "quant_scale"}
 
 
 # ---------------------------------------------------------------------------
@@ -286,8 +231,11 @@ def test_dynamic_quant_reference(dtype):
     x = torch.randn(32, 128, dtype=dtype)
     smooth_scale = torch.randn(128, dtype=torch.float32)
 
-    op = MojoDynamicQuant._registry.get("torch")(quant_dtype=torch.int8, smooth_input=True)
-    out, scale = op(x, smooth_scale)
+    op = load_params(
+        MojoDynamicQuant._registry.get("torch")(input_size=smooth_scale.numel(), quant_dtype=torch.int8),
+        smooth_scale=smooth_scale,
+    )
+    out, scale = op(x)
 
     expected_input = x.float() * smooth_scale.float().unsqueeze(0)
     expected_scale = expected_input.abs().amax(dim=-1).clamp(min=1e-12) / 127
@@ -307,9 +255,12 @@ def test_dynamic_quant_backend(dtype):
     x = torch.randn(24, 128, dtype=dtype)
     smooth_scale = torch.randn(128, dtype=torch.float32)
 
-    op = MojoDynamicQuant(quant_dtype=torch.int8, smooth_input=True)
-    op_ref = MojoDynamicQuant._registry.get("torch")(quant_dtype=torch.int8, smooth_input=True)
-    op.forward_diff_with(op_ref, x, smooth_scale, atol=(1, 2e-4), rtol=(0, 2e-4))
+    op = load_params(MojoDynamicQuant(input_size=smooth_scale.numel(), quant_dtype=torch.int8), smooth_scale=smooth_scale)
+    op_ref = load_params(
+        MojoDynamicQuant._registry.get("torch")(input_size=smooth_scale.numel(), quant_dtype=torch.int8),
+        smooth_scale=smooth_scale.clone(),
+    )
+    op.forward_diff_with(op_ref, x, atol=(1, 2e-4), rtol=(0, 2e-4))
 
 
 @pytest.mark.parametrize("dtype", dtypes)
@@ -319,16 +270,44 @@ def test_dynamic_quant_backend_moe(dtype):
     smooth_scale = torch.randn(3, 128, dtype=torch.float32)
     token_count = torch.tensor([4, 3, 5], dtype=torch.int32)
 
-    op = MojoDynamicQuant(quant_dtype=torch.int8, smooth_input=True, moe_mode=True)
-    op_ref = MojoDynamicQuant._registry.get("torch")(quant_dtype=torch.int8, smooth_input=True, moe_mode=True)
+    op = load_params(
+        MojoMoEDynamicQuant(expert_num=3, input_size=128, quant_dtype=torch.int8),
+        smooth_scale=smooth_scale,
+    )
+    op_ref = load_params(
+        MojoMoEDynamicQuant._registry.get("torch")(expert_num=3, input_size=128, quant_dtype=torch.int8),
+        smooth_scale=smooth_scale.clone(),
+    )
     op.forward_diff_with(
         op_ref,
         x,
-        smooth_scale,
         token_count,
         atol=(1, 2e-4),
         rtol=(0, 2e-4),
     )
+
+
+def test_dynamic_quant_rejects_token_count():
+    x = torch.randn(4, 16)
+    token_count = torch.tensor([4], dtype=torch.int32)
+    op = MojoDynamicQuant._registry.get("torch")(quant_dtype=torch.int8)
+    with pytest.raises(TypeError):
+        op(x, token_count)
+
+
+def test_moe_dynamic_quant_token_count_shape_check():
+    x = torch.randn(4, 16)
+    token_count = torch.tensor([2, 1], dtype=torch.int32)
+    op = MojoMoEDynamicQuant._registry.get("torch")(expert_num=2, input_size=16, quant_dtype=torch.int8)
+    with pytest.raises(ValueError, match="token_count sum"):
+        op(x, token_count)
+
+
+def test_moe_dynamic_quant_requires_smooth_scale():
+    x = torch.randn(4, 16)
+    token_count = torch.tensor([4], dtype=torch.int32)
+    with pytest.raises(TypeError, match="expert_num"):
+        MojoMoEDynamicQuant._registry.get("torch")(quant_dtype=torch.int8)(x, token_count)
 
 
 # ---------------------------------------------------------------------------
@@ -346,15 +325,31 @@ def test_dequant_swiglu_quant_backend():
     activation_scale = torch.rand(tokens, dtype=torch.float32)
     quant_scale = torch.rand(2, hidden, dtype=torch.float32)
 
-    op = MojoDequantSwiGLUQuant(activate_left=False, quant_mode=1)
-    op_ref = MojoDequantSwiGLUQuant._registry.get("torch")(activate_left=False, quant_mode=1)
+    op = load_params(
+        MojoDequantSwiGLUQuant(
+            expert_num=2,
+            hidden_size=hidden,
+            activate_left=False,
+            quant_mode=1,
+        ),
+        weight_scale=weight_scale,
+        quant_scale=quant_scale,
+    )
+    op_ref = load_params(
+        MojoDequantSwiGLUQuant._registry.get("torch")(
+            expert_num=2,
+            hidden_size=hidden,
+            activate_left=False,
+            quant_mode=1,
+        ),
+        weight_scale=weight_scale.clone(),
+        quant_scale=quant_scale.clone(),
+    )
     op.forward_diff_with(
         op_ref,
         x,
-        weight_scale,
         activation_scale,
         None,
-        quant_scale,
         None,
         token_count,
         atol=(0, 1e-4),
