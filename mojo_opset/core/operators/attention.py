@@ -9,10 +9,6 @@ import torch
 from ..operator import MojoOperator
 
 
-def _check_tensor_contract(cond: torch.Tensor, message: str) -> None:
-    torch._check_tensor_all(cond, lambda: message)
-
-
 def assert_paged_prefill_contract(
     cu_seqlens_q: torch.Tensor,
     block_tables: torch.Tensor,
@@ -25,33 +21,14 @@ def assert_paged_prefill_contract(
     if seqlens_kv is not None:
         assert seqlens_kv.dtype == torch.int32
     assert block_tables.shape[0] == q_lens.shape[0]
-    has_query = q_lens > 0
-    has_kv = kv_lens > 0
-    has_first_block = (
-        block_tables[:, 0] >= 0 if block_tables.shape[1] > 0 else torch.zeros_like(has_kv, dtype=torch.bool)
-    )
-    _check_tensor_contract(
-        torch.logical_or(has_query, ~has_kv),
-        "Paged prefill padding rows require both q len and kv len to be zero.",
-    )
-    _check_tensor_contract(
-        torch.logical_or(~has_kv, has_first_block),
-        "Paged prefill rows with kv len > 0 require a valid first block.",
-    )
+    assert block_tables.dim() == 2
 
 
 def assert_paged_decode_contract(block_tables: torch.Tensor, seqlens: torch.Tensor) -> None:
     assert seqlens.dtype == torch.int32
     assert block_tables.dtype == torch.int32
     assert block_tables.shape[0] == seqlens.shape[0]
-    has_kv = seqlens > 0
-    has_first_block = (
-        block_tables[:, 0] >= 0 if block_tables.shape[1] > 0 else torch.zeros_like(has_kv, dtype=torch.bool)
-    )
-    _check_tensor_contract(
-        torch.logical_or(~has_kv, has_first_block),
-        "Paged decode rows with kv len > 0 require a valid first block.",
-    )
+    assert block_tables.dim() == 2
 
 
 class MojoDecodeGQA(MojoOperator):

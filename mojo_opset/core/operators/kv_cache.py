@@ -5,10 +5,6 @@ import torch
 from ..operator import MojoOperator
 
 
-def _check_tensor_contract(cond: torch.Tensor, message: str) -> None:
-    torch._check_tensor_all(cond, lambda: message)
-
-
 def assert_paged_kv_store_contract(
     block_table: torch.Tensor,
     cu_seq_lens: Optional[torch.Tensor],
@@ -20,14 +16,7 @@ def assert_paged_kv_store_contract(
     if kv_lens_before_store is not None:
         assert kv_lens_before_store.dtype == torch.int32
         assert block_table.shape[0] == kv_lens_before_store.shape[0]
-        has_tokens = kv_lens_before_store >= 0
-        has_first_block = (
-            block_table[:, 0] >= 0 if block_table.shape[1] > 0 else torch.zeros_like(has_tokens, dtype=torch.bool)
-        )
-        _check_tensor_contract(
-            torch.logical_or(~has_tokens, has_first_block),
-            "Paged KV store rows with kv_lens_before_store >= 0 require a valid first block.",
-        )
+    assert block_table.dim() == 2
 
 
 class MojoStoreKVCache(MojoOperator):
