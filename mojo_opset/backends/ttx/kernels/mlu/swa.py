@@ -915,8 +915,7 @@ def swa_paged_decode_impl(
         softmax_scale = 1.0 / (head_dim**0.5)
 
     o = torch.empty_like(q, memory_format=torch.contiguous_format)
-    if max_num_blocks_per_seq == 0:
-        return torch.zeros_like(q, memory_format=torch.contiguous_format)
+    
     pad = seqlens <= 0
     bad_block_table = (~pad) & (block_tables[:, 0] < 0)
     if bad_block_table.any():

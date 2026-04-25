@@ -1463,8 +1463,6 @@ def swa_paged_decode_impl(
         softmax_scale = 1.0 / (head_dim**0.5)
 
     o = torch.empty_like(q, memory_format=torch.contiguous_format)
-    if max_num_blocks_per_seq == 0:
-        return torch.zeros_like(q, memory_format=torch.contiguous_format)
 
     # One program per (batch, head): maximizes parallelism on NVIDIA (vs. a tiny grid + device loop).
     grid = (batch_size * num_q_heads,)
