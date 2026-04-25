@@ -86,6 +86,7 @@ class MojoOverEncodingNGram(MojoOperator):
                 if not isinstance(oe_vocab_sizes, torch.Tensor)
                 else oe_vocab_sizes
             ),
+            persistent=False
         )
         self.register_buffer(
             "oe_grams",
@@ -94,6 +95,7 @@ class MojoOverEncodingNGram(MojoOperator):
                 if not isinstance(oe_grams, torch.Tensor)
                 else oe_grams
             ),
+            persistent=False
         )
         self.register_buffer(
             "oe_vocab_offsets",
@@ -111,6 +113,7 @@ class MojoOverEncodingNGram(MojoOperator):
                 ).to(torch.long),
                 dim=0,
             ),
+            persistent=False
         )
 
         self.register_load_state_dict_post_hook(
