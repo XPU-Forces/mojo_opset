@@ -172,7 +172,6 @@ class MojoPagedDecodeGQA(MojoOperator):
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
-        cu_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
     ):
         """
@@ -182,7 +181,6 @@ class MojoPagedDecodeGQA(MojoOperator):
             query (torch.Tensor): Query of shape (B, Hq, D).
             key_cache (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
             value_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
-            cu_seqlens_q (torch.Tensor): Cumulative query lengths (unused here; see Notes).
             block_tables (torch.Tensor): (B, num_blocks) mapping logical blocks to physical IDs.
             softmax_scale (Optional[float]): Scale factor; defaults to 1/sqrt(D).
 
@@ -193,13 +191,8 @@ class MojoPagedDecodeGQA(MojoOperator):
             - If Hq > Hkv, K/V heads are repeated to match query heads.
             - Causal mask uses per-batch sequence lengths `seqlens`.
             - Softmax is computed in float32 and cast back to the input dtype.
-            - This implementation references variables `query` and `seqlens`; ensure they
-              correspond to `query` and the sequence-lengths tensor in the caller.
         """
         assert_paged_decode_contract(block_tables, seqlens)
-        if cu_seq_lens is not None:
-            assert cu_seq_lens.dtype == torch.int32
-        assert cu_seq_lens is None, "varlen is not supported"
 
         batch_size, num_q_heads, head_dim = query.shape
         _, num_kv_heads, block_size, head_dim = key_cache.shape

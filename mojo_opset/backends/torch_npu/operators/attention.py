@@ -136,17 +136,15 @@ class TorchNpuPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
         input_layout: Optional[str] = None,
-        cu_seq_lens: Optional[torch.Tensor] = None,
     ) -> Tuple[Any]:
         batch_size, num_q_heads, head_dim = query.shape
         _, head_nums, block_size, _ = k_cache.shape
-        kv_seq_lens = cu_seq_lens if cu_seq_lens is not None else seqlens
-        assert_paged_decode_contract(block_tables, kv_seq_lens)
+        assert_paged_decode_contract(block_tables, seqlens)
         if head_dim % 128 != 0:
             raise NotImplementedError(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
 
         if block_size % 128 != 0 or block_size > 512:
-            return super().forward(query, k_cache, v_cache, seqlens, block_tables, softmax_scale, cu_seq_lens)
+            return super().forward(query, k_cache, v_cache, seqlens, block_tables, softmax_scale)
 
         if softmax_scale is None:
             softmax_scale = 1.0 / (head_dim**0.5)
