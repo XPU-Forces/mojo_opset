@@ -271,7 +271,7 @@ def store_paged_kv_impl(
         value_cache,
         block_table,
         cu_seqlens,
-        kv_lens_before_store if kv_lens_before_store is not None else cu_seqlens,
+        kv_lens_before_store,
         k_states.stride(0),
         k_states.stride(1),
         k_states.stride(2),
