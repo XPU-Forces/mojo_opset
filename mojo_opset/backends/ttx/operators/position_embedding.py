@@ -10,7 +10,7 @@ from mojo_opset.core import MojoApplyRoPE
 
 
 class TTXRotaryEmbedding(MojoRotaryEmbedding):
-    supported_platforms_list = ["npu", "ilu", "mlu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def __init__(self, rope_theta, rope_dim, attention_scaling: float = 1.0, init_max_length: Optional[int] = None, **kwargs):
         super().__init__(rope_theta, rope_dim, attention_scaling, init_max_length, **kwargs)
