@@ -356,7 +356,7 @@ class MojoOverEncoding(MojoOperator):
             )
 
         if self.mega_embedding_cpu_only:
-            ori_device = oe_result.device
+            ori_device = oe_ngram_ids.device
             oe_result = self.oe_mega_embedding(oe_ngram_ids.cpu()).to(ori_device)
         else:
             oe_result = self.oe_mega_embedding(oe_ngram_ids)
