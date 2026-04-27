@@ -2767,4 +2767,3 @@ def swa_bwd_impl(
     )
 
     return dq, dk, dv
-

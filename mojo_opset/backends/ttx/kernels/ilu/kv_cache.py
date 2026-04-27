@@ -21,9 +21,10 @@ import torch
 import triton
 import triton.language as tl
 
-from mojo_opset.backends.ttx.kernels.utils import prepare_lens
+from .utils import libentry
 
 
+@libentry()
 @triton.jit
 def _store_kv_cache_fwd_kernel(
     k_cache_ptr,
@@ -109,33 +110,10 @@ def store_kv_cache_impl(
     return k_cache, v_cache, qkv
 
 
-# --- Paged KV cache (same algorithm as NPU; grid[0] = ceil(n / BLOCK) programs, one chunk per program when BLOCK=1) ---
+# --- Paged KV cache ---
 
 
-def prepare_kv_chunk_indices(cu_seqlens: torch.Tensor, kv_lens: torch.Tensor, chunk_size: int) -> torch.Tensor:
-    seqlens = prepare_lens(cu_seqlens)
-
-    chunks_per_seq = triton.cdiv(seqlens, chunk_size)
-    seq_ids = torch.repeat_interleave(torch.arange(len(seqlens), device=cu_seqlens.device), chunks_per_seq)
-
-    cumulative_chunks = torch.cumsum(chunks_per_seq, 0)
-    chunk_starts = torch.cat([torch.tensor([0], device=cu_seqlens.device), cumulative_chunks[:-1]])
-
-    flat_indices = torch.arange(chunks_per_seq.sum(), device=cu_seqlens.device)
-    chunk_idx_in_seq = flat_indices - chunk_starts[seq_ids]
-
-    token_offset_in_qkv = (chunk_idx_in_seq * chunk_size).to(torch.int32)
-
-    if kv_lens is not None:
-        batch_kv_lens = kv_lens[seq_ids]
-        logical_kv_start = batch_kv_lens.to(torch.int32) + token_offset_in_qkv
-    else:
-        logical_kv_start = token_offset_in_qkv
-
-    indices = torch.stack([seq_ids.to(torch.int32), token_offset_in_qkv, logical_kv_start], dim=1).to(torch.int32)
-    return indices
-
-
+@libentry()
 @triton.jit
 def _store_paged_kv_cache_kernel(
     k_ptr,
@@ -144,7 +122,7 @@ def _store_paged_kv_cache_kernel(
     value_cache_ptr,
     block_table_ptr,
     cu_seqlens_ptr,
-    chunk_indices_ptr,
+    kv_lens_ptr,
     stride_k_tok,
     stride_k_head,
     stride_k_dim,
@@ -162,24 +140,37 @@ def _store_paged_kv_cache_kernel(
     stride_bt_batch,
     stride_bt_blk,
     num_kv_heads,
+    batch_size,
+    max_chunks_per_seq,
     head_dim: tl.constexpr,
     block_size: tl.constexpr,
-    total_chunks,
     CHUNK_SIZE: tl.constexpr,
+    HAS_KV_LENS: tl.constexpr,
 ):
     chunk_id_linear = tl.program_id(0)
-    if chunk_id_linear >= total_chunks:
+    batch_idx = chunk_id_linear // max_chunks_per_seq
+    chunk_in_seq = chunk_id_linear % max_chunks_per_seq
+
+    if batch_idx >= batch_size:
         return
 
-    meta_ptr = chunk_indices_ptr + chunk_id_linear * 3
-    batch_idx = tl.load(meta_ptr)
-    token_offset_in_seq = tl.load(meta_ptr + 1)
-    logical_kv_start = tl.load(meta_ptr + 2)
-
     seq_start_tok = tl.load(cu_seqlens_ptr + batch_idx)
-    global_token_idx = seq_start_tok + token_offset_in_seq
+    seq_end_tok = tl.load(cu_seqlens_ptr + batch_idx + 1)
+    seq_len_curr = seq_end_tok - seq_start_tok
 
-    seq_len_curr = tl.load(cu_seqlens_ptr + batch_idx + 1) - seq_start_tok
+    token_offset_in_seq = chunk_in_seq * CHUNK_SIZE
+    if token_offset_in_seq >= seq_len_curr:
+        return
+
+    if HAS_KV_LENS:
+        logical_kv_start = tl.load(kv_lens_ptr + batch_idx).to(tl.int32)
+        if logical_kv_start < 0:
+            return
+        logical_kv_start += token_offset_in_seq
+    else:
+        logical_kv_start = token_offset_in_seq
+
+    global_token_idx = seq_start_tok + token_offset_in_seq
     valid_len = seq_len_curr - token_offset_in_seq
 
     curr_log_pos = logical_kv_start
@@ -194,6 +185,8 @@ def _store_paged_kv_cache_kernel(
         block_inner_off = curr_log_pos % block_size
 
         physical_block_id = tl.load(block_table_ptr + batch_idx * stride_bt_batch + block_table_idx * stride_bt_blk)
+        valid_block = physical_block_id >= 0
+        physical_block_id = tl.maximum(physical_block_id, 0)
 
         space_in_block = block_size - block_inner_off
         sub_len = tl.minimum(remain_chunk_len - processed, space_in_block).to(tl.int32)
@@ -221,7 +214,7 @@ def _store_paged_kv_cache_kernel(
                 + offs_d[None, :] * stride_kc_dim
             )
 
-            tl.store(dst_k_ptr, k_val, mask=mask_sub[:, None])
+            tl.store(dst_k_ptr, k_val, mask=valid_block & mask_sub[:, None])
 
             src_v_ptr = (
                 v_ptr
@@ -240,7 +233,7 @@ def _store_paged_kv_cache_kernel(
                 + offs_d[None, :] * stride_vc_dim
             )
 
-            tl.store(dst_v_ptr, v_val, mask=mask_sub[:, None])
+            tl.store(dst_v_ptr, v_val, mask=valid_block & mask_sub[:, None])
 
         processed += sub_len
         curr_log_pos += sub_len
@@ -254,26 +247,22 @@ def store_paged_kv_impl(
     value_cache: torch.Tensor,
     block_table: torch.Tensor,
     cu_seqlens: torch.Tensor,
-    kv_lens: torch.Tensor,
+    kv_lens_before_store: torch.Tensor,
 ):
     assert k_states.is_contiguous() and v_states.is_contiguous()
 
     if cu_seqlens is None:
-        cu_seqlens = torch.arange(k_states.shape[0] + 1, device=k_states.device)
+        cu_seqlens = torch.arange(k_states.shape[0] + 1, device=k_states.device, dtype=torch.int32)
 
     num_kv_heads = k_states.shape[1]
     head_dim = k_states.shape[2]
 
     block_size = key_cache.shape[2]
 
-    chunk_indices = prepare_kv_chunk_indices(cu_seqlens, kv_lens, block_size)
-    n = chunk_indices.shape[0]
-    if n == 0:
-        return key_cache, value_cache
+    batch_size: int = block_table.shape[0]
+    max_chunks_per_seq = block_table.shape[1]
 
-    # One chunk per program; grid[0] = ceil(n / BLOCK)
-    BLOCK = 1
-    grid = (triton.cdiv(n, BLOCK),)
+    grid = (batch_size * max_chunks_per_seq,)
 
     _store_paged_kv_cache_kernel[grid](
         k_states,
@@ -282,7 +271,7 @@ def store_paged_kv_impl(
         value_cache,
         block_table,
         cu_seqlens,
-        chunk_indices,
+        kv_lens_before_store,
         k_states.stride(0),
         k_states.stride(1),
         k_states.stride(2),
@@ -300,10 +289,12 @@ def store_paged_kv_impl(
         block_table.stride(0),
         block_table.stride(1),
         num_kv_heads,
+        batch_size,
+        max_chunks_per_seq,
         head_dim,
         block_size,
-        n,
         CHUNK_SIZE=block_size,
+        HAS_KV_LENS=kv_lens_before_store is not None,
     )
 
     return key_cache, value_cache

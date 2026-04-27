@@ -76,14 +76,15 @@ class SimplePagedKVCache(torch.nn.Module):
             device=self.device,
         )
 
-        self.block_tables = torch.zeros(
+        self.block_tables = torch.full(
             (self.num_layers, self.batch_size, max_blocks_per_seq),
+            -1,
             dtype=torch.int32,
             device=self.device,
         )
 
         self.seq_lens = torch.zeros(
-            (self.num_layers, self.batch_size), dtype=torch.int64, device=self.device
+            (self.num_layers, self.batch_size), dtype=torch.int32, device=self.device
         )
 
         self.free_blocks = torch.arange(total_blocks, device=self.device, dtype=torch.int32)
@@ -106,7 +107,7 @@ class SimplePagedKVCache(torch.nn.Module):
         cu_seqlens: torch.Tensor = None,
     ):
         if input_len is None:
-            input_len = torch.ones(self.batch_size, device=key_states.device, dtype=torch.int64)
+            input_len = torch.ones(self.batch_size, device=key_states.device, dtype=torch.int32)
 
         current_seq_lens = self.seq_lens[layer_idx]
         for i in range(self.batch_size):

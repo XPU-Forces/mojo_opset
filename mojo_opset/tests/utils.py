@@ -293,6 +293,18 @@ def auto_switch_platform(set_perf: bool = False):
     return decorator
 
 
+def synchronize_current_device():
+    """Synchronize the active accelerator for tests that need host-visible completion."""
+    device = get_torch_device()
+
+    if device == "cuda":
+        torch.cuda.synchronize()
+    elif device == "npu":
+        torch.npu.synchronize()
+    elif device == "mlu":
+        torch.mlu.synchronize()
+
+
 # Skip current test if this case is not implemented on current chosen backend.
 def bypass_not_implemented(func: Callable) -> Callable:
     """

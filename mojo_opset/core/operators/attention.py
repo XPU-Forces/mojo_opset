@@ -9,6 +9,27 @@ import torch
 from ..operator import MojoOperator
 
 
+def assert_paged_prefill_contract(
+    cu_seqlens_q: torch.Tensor,
+    block_tables: torch.Tensor,
+    seqlens_kv: Optional[torch.Tensor],
+) -> None:
+    assert cu_seqlens_q.dtype == torch.int32
+    assert block_tables.dtype == torch.int32
+    q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    if seqlens_kv is not None:
+        assert seqlens_kv.dtype == torch.int32
+    assert block_tables.shape[0] == q_lens.shape[0]
+    assert block_tables.dim() == 2
+
+
+def assert_paged_decode_contract(block_tables: torch.Tensor, seqlens: torch.Tensor) -> None:
+    assert seqlens.dtype == torch.int32
+    assert block_tables.dtype == torch.int32
+    assert block_tables.shape[0] == seqlens.shape[0]
+    assert block_tables.dim() == 2
+
+
 class MojoDecodeGQA(MojoOperator):
     """Non-paged GQA decode attention (single query token per batch)."""
 
@@ -57,6 +78,8 @@ class MojoDecodeGQA(MojoOperator):
         outputs = torch.zeros(B, Hq, D, dtype=query.dtype, device=query.device)
         for i in range(B):
             sl = seqlens[i].item() if seqlens is not None else S
+            if sl <= 0:
+                continue
             q_i = query[i]                         # (Hq, D)
             k_i = key[i, :, :sl, :]                # (Hkv, sl, D)
             v_i = value[i, :, :sl, :]              # (Hkv, sl, D)
@@ -129,7 +152,6 @@ class MojoPagedDecodeGQA(MojoOperator):
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
-        cu_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
     ):
         """
@@ -139,7 +161,6 @@ class MojoPagedDecodeGQA(MojoOperator):
             query (torch.Tensor): Query of shape (B, Hq, D).
             key_cache (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
             value_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
-            cu_seqlens_q (torch.Tensor): Cumulative query lengths (unused here; see Notes).
             block_tables (torch.Tensor): (B, num_blocks) mapping logical blocks to physical IDs.
             softmax_scale (Optional[float]): Scale factor; defaults to 1/sqrt(D).
 
@@ -150,14 +171,8 @@ class MojoPagedDecodeGQA(MojoOperator):
             - If Hq > Hkv, K/V heads are repeated to match query heads.
             - Causal mask uses per-batch sequence lengths `seqlens`.
             - Softmax is computed in float32 and cast back to the input dtype.
-            - This implementation references variables `query` and `seqlens`; ensure they
-              correspond to `query` and the sequence-lengths tensor in the caller.
         """
-        assert seqlens.dtype == torch.int32
-        assert block_tables.dtype == torch.int32
-        if cu_seq_lens is not None:
-            assert cu_seq_lens.dtype == torch.int32
-        assert not cu_seq_lens, "varlen is not supported"
+        assert_paged_decode_contract(block_tables, seqlens)
 
         batch_size, num_q_heads, head_dim = query.shape
         _, num_kv_heads, block_size, head_dim = key_cache.shape
@@ -170,6 +185,10 @@ class MojoPagedDecodeGQA(MojoOperator):
 
         for i in range(batch_size):
             seq_len = seqlens[i].item()
+            if seq_len <= 0:
+                continue
+            if block_tables[i, 0].item() < 0:
+                raise ValueError("Paged decode requires a valid block table for rows with kv lens > 0.")
 
             q = query[i]
 
@@ -179,6 +198,8 @@ class MojoPagedDecodeGQA(MojoOperator):
 
             for j in range(num_blocks_for_seq):
                 physical_block_id = block_tables[i, j].item()
+                if physical_block_id < 0:
+                    break
 
                 start_pos = j * block_size
                 tokens_in_block = min(block_size, seq_len - start_pos)
@@ -371,10 +392,7 @@ class MojoPagedPrefillGQA(MojoOperator):
             - Softmax is computed in float32 and cast back to the input dtype.
             - Despite the type annotation Tuple[Any], this implementation returns a single tensor.
         """
-        assert cu_seqlens_q.dtype == torch.int32
-        assert block_tables.dtype == torch.int32
-        if seqlens_kv is not None:
-            assert seqlens_kv.dtype == torch.int32
+        assert_paged_prefill_contract(cu_seqlens_q, block_tables, seqlens_kv)
         total_q_tokens, num_q_heads, head_dim = query.shape
         _, num_kv_heads, block_size, _ = key_cache.shape
         if softmax_scale is None:
@@ -394,6 +412,10 @@ class MojoPagedPrefillGQA(MojoOperator):
                 kv_seq_len = q_seq_len
             else:
                 kv_seq_len = seqlens_kv[i].item()
+            if q_seq_len == 0 or kv_seq_len <= 0:
+                continue
+            if block_tables[i, 0].item() < 0:
+                raise ValueError("Paged prefill requires a valid block table for rows with kv lens > 0.")
 
             num_blocks_for_seq = (kv_seq_len + block_size - 1) // block_size
             k_unpadded = torch.zeros(kv_seq_len, num_kv_heads, head_dim, dtype=query.dtype, device=query.device)
@@ -401,6 +423,8 @@ class MojoPagedPrefillGQA(MojoOperator):
 
             for j in range(num_blocks_for_seq):
                 physical_block_id = block_tables[i, j].item()
+                if physical_block_id < 0:
+                    break
 
                 start_pos_in_seq = j * block_size
                 end_pos_in_seq = min(start_pos_in_seq + block_size, kv_seq_len)
@@ -516,6 +540,7 @@ class MojoDecodeMLA(MojoOperator):
                 scores[i, :, seqlens[i].item() :] = float("-inf")
 
         probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
+        probs = torch.nan_to_num(probs, nan=0.0)
         return torch.einsum("bhs,bshd->bhd", probs, v)
 
     def extra_repr(self) -> str:
@@ -571,8 +596,7 @@ class MojoPagedDecodeMLA(MojoOperator):
         Returns:
             ``(B, H, v_head_dim)``
         """
-        assert seqlens.dtype == torch.int32
-        assert block_tables.dtype == torch.int32
+        assert_paged_decode_contract(block_tables, seqlens)
         B, H, _ = query.shape
         block_size = compressed_kv_cache.shape[2]
         if softmax_scale is None:
@@ -581,15 +605,23 @@ class MojoPagedDecodeMLA(MojoOperator):
         outputs = torch.zeros(B, H, self.v_head_dim, dtype=query.dtype, device=query.device)
         for i in range(B):
             sl = seqlens[i].item()
+            if sl <= 0:
+                continue
+            if block_tables[i, 0].item() < 0:
+                raise ValueError("Paged decode requires a valid block table for rows with kv lens > 0.")
             num_blocks = (sl + block_size - 1) // block_size
 
             # Reconstruct compressed_kv and k_pe from paged cache
             c_parts, pe_parts = [], []
             for j in range(num_blocks):
                 bid = block_tables[i, j].item()
+                if bid < 0:
+                    break
                 tokens = min(block_size, sl - j * block_size)
                 c_parts.append(compressed_kv_cache[bid, 0, :tokens])
                 pe_parts.append(k_pe_cache[bid, 0, :tokens])
+            if not c_parts:
+                continue
             c_kv = torch.cat(c_parts, dim=0)       # (sl, kv_lora_rank)
             k_pe = torch.cat(pe_parts, dim=0)       # (sl, qk_rope)
 
@@ -708,6 +740,8 @@ def _nsa_extra_repr(self):
 
 def _nsa_decode_core(self, q_i, k_i, v_i, sl, softmax_scale):
     """Shared per-sample decode logic for NSA."""
+    if sl <= 0:
+        return torch.zeros_like(q_i)
     H, D = q_i.shape
     comp_k, comp_v = _nsa_compress_kv(k_i, v_i, self.compress_ratio)
     sel_mask = _nsa_select_blocks(
@@ -765,6 +799,8 @@ class MojoDecodeNSA(MojoOperator):
         outputs = torch.zeros_like(query)
         for i in range(B):
             sl = seqlens[i].item() if seqlens is not None else S
+            if sl <= 0:
+                continue
             outputs[i] = _nsa_decode_core(self, query[i], key[i, :sl], value[i, :sl], sl, softmax_scale)
         return outputs
 
@@ -799,8 +835,7 @@ class MojoPagedDecodeNSA(MojoOperator):
         Returns:
             ``(B, H, D)``
         """
-        assert seqlens.dtype == torch.int32
-        assert block_tables.dtype == torch.int32
+        assert_paged_decode_contract(block_tables, seqlens)
         B, H, D = query.shape
         blk = key_cache.shape[2]
         if softmax_scale is None:
@@ -809,13 +844,21 @@ class MojoPagedDecodeNSA(MojoOperator):
         outputs = torch.zeros_like(query)
         for i in range(B):
             sl = seqlens[i].item()
+            if sl <= 0:
+                continue
+            if block_tables[i, 0].item() < 0:
+                raise ValueError("Paged decode requires a valid block table for rows with kv lens > 0.")
             nb = (sl + blk - 1) // blk
             k_parts, v_parts = [], []
             for j in range(nb):
                 bid = block_tables[i, j].item()
+                if bid < 0:
+                    break
                 t = min(blk, sl - j * blk)
                 k_parts.append(key_cache[bid, :, :t].permute(1, 0, 2))
                 v_parts.append(value_cache[bid, :, :t].permute(1, 0, 2))
+            if not k_parts:
+                continue
             k_i = torch.cat(k_parts, dim=0)
             v_i = torch.cat(v_parts, dim=0)
             outputs[i] = _nsa_decode_core(self, query[i], k_i, v_i, sl, softmax_scale)
@@ -938,12 +981,18 @@ class MojoPagedPrefillMLA(MojoOperator):
 
     def _unpage(self, cache, block_tables_i, sl, block_size):
         """Reconstruct contiguous sequence from paged blocks for one batch."""
+        if sl <= 0:
+            return None
         num_blocks = (sl + block_size - 1) // block_size
         parts = []
         for j in range(num_blocks):
             bid = block_tables_i[j].item()
+            if bid < 0:
+                break
             tokens = min(block_size, sl - j * block_size)
             parts.append(cache[bid, 0, :tokens])
+        if not parts:
+            return None
         return torch.cat(parts, dim=0)
 
     def forward(
@@ -969,10 +1018,7 @@ class MojoPagedPrefillMLA(MojoOperator):
         Returns:
             ``(T, H, v_head_dim)``
         """
-        assert cu_seqlens_q.dtype == torch.int32
-        assert block_tables.dtype == torch.int32
-        if seqlens_kv is not None:
-            assert seqlens_kv.dtype == torch.int32
+        assert_paged_prefill_contract(cu_seqlens_q, block_tables, seqlens_kv)
         T, H, _ = query.shape
         block_size = compressed_kv_cache.shape[2]
         if softmax_scale is None:
@@ -987,9 +1033,15 @@ class MojoPagedPrefillMLA(MojoOperator):
             qe = cu_seqlens_q[i + 1].item()
             q_i = query[qs:qe]
             kv_len = seqlens_kv[i].item() if seqlens_kv is not None else (qe - qs)
+            if q_i.shape[0] == 0 or kv_len <= 0:
+                continue
+            if block_tables[i, 0].item() < 0:
+                raise ValueError("Paged prefill requires a valid block table for rows with kv lens > 0.")
 
             c_kv = self._unpage(compressed_kv_cache, block_tables[i], kv_len, block_size)
             kpe = self._unpage(k_pe_cache, block_tables[i], kv_len, block_size)
+            if c_kv is None or kpe is None:
+                continue
 
             kv = (c_kv @ self.kv_b_proj.T).view(kv_len, H, self.qk_nope_head_dim + self.v_head_dim)
             k_nope = kv[..., : self.qk_nope_head_dim]
@@ -1111,10 +1163,7 @@ class MojoPagedPrefillNSA(MojoOperator):
         Returns:
             ``(T, H, D)``
         """
-        assert cu_seqlens_q.dtype == torch.int32
-        assert block_tables.dtype == torch.int32
-        if seqlens_kv is not None:
-            assert seqlens_kv.dtype == torch.int32
+        assert_paged_prefill_contract(cu_seqlens_q, block_tables, seqlens_kv)
         T, H, D = query.shape
         blk = key_cache.shape[2]
         cr = self.compress_ratio
@@ -1129,18 +1178,26 @@ class MojoPagedPrefillNSA(MojoOperator):
             qs, qe = cu_seqlens_q[i].item(), cu_seqlens_q[i + 1].item()
             q_seq = query[qs:qe]
             kv_len = seqlens_kv[i].item() if seqlens_kv is not None else (qe - qs)
+            q_len = qe - qs
+            if q_len == 0 or kv_len <= 0:
+                continue
+            if block_tables[i, 0].item() < 0:
+                raise ValueError("Paged prefill requires a valid block table for rows with kv lens > 0.")
 
             nb = (kv_len + blk - 1) // blk
             k_parts, v_parts = [], []
             for j in range(nb):
                 bid = block_tables[i, j].item()
+                if bid < 0:
+                    break
                 t = min(blk, kv_len - j * blk)
                 k_parts.append(key_cache[bid, :, :t].permute(1, 0, 2))
                 v_parts.append(value_cache[bid, :, :t].permute(1, 0, 2))
+            if not k_parts:
+                continue
             k_seq = torch.cat(k_parts, dim=0)
             v_seq = torch.cat(v_parts, dim=0)
 
-            q_len = qe - qs
             for t_idx in range(q_len):
                 t_kv = (kv_len - q_len + t_idx + 1) if self.is_causal else kv_len
                 k_ctx, v_ctx = k_seq[:t_kv], v_seq[:t_kv]
@@ -1280,10 +1337,7 @@ class MojoPagedPrefillSWA(MojoOperator):
     ) -> torch.Tensor:
         # Note: if is_causal = False, local_window_size and global_window_size are not used.
 
-        assert cu_seqlens_q.dtype == torch.int32
-        assert block_table.dtype == torch.int32
-        if seqlens_kv is not None:
-            assert seqlens_kv.dtype == torch.int32
+        assert_paged_prefill_contract(cu_seqlens_q, block_table, seqlens_kv)
         total_q_len, n_q_heads, head_dim = q.shape
         _, n_kv_heads, page_size, _ = k_cache.shape
         if softmax_scale is None:
@@ -1303,6 +1357,10 @@ class MojoPagedPrefillSWA(MojoOperator):
             q_i = q_i.permute(1, 0, 2)  # -> [n_q_heads, q_seq_len, head_dim]
 
             kv_seq_len = seqlens_kv[i].item()
+            if kv_seq_len <= 0:
+                continue
+            if block_table[i, 0].item() < 0:
+                raise ValueError("Paged prefill requires a valid block table for rows with kv lens > 0.")
             kv_blocks = (kv_seq_len + page_size - 1) // page_size
             k_i = k_cache[block_table[i, :kv_blocks]]  # [kv_blocks, n_kv_heads, page_size, head_dim]
             k_i = k_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
@@ -1383,8 +1441,7 @@ class MojoPagedDecodeSWA(MojoOperator):
     ) -> torch.Tensor:
         # Note: for decode kernel, is_causal = False should never happen
 
-        assert seq_lens.dtype == torch.int32
-        assert block_table.dtype == torch.int32
+        assert_paged_decode_contract(block_table, seq_lens)
         bsz, n_q_heads, head_dim = q.shape
         _, n_kv_heads, page_size, _ = k_cache.shape
         if softmax_scale is None:
@@ -1395,9 +1452,11 @@ class MojoPagedDecodeSWA(MojoOperator):
             q_i = q[i].unsqueeze(1) # -> [n_q_heads, 1, head_dim]
 
             kv_seq_len = seq_lens[i].item()
-            if kv_seq_len == 0:
+            if kv_seq_len <= 0:
                 # skip padded tokens
                 continue
+            if block_table[i, 0].item() < 0:
+                raise ValueError("Paged decode requires a valid block table for rows with kv lens > 0.")
             kv_blocks = (kv_seq_len + page_size - 1) // page_size
             k_i = k_cache[block_table[i, :kv_blocks]]  # [kv_blocks, n_kv_heads, page_size, head_dim]
             k_i = k_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
@@ -1529,4 +1588,3 @@ class MojoSWA(MojoOperator):
             o_i = o_i.permute(1, 0, 2)  # -> [q_seq_len, n_q_heads, head_dim]
             o[cu_seqlens_q[i] : cu_seqlens_q[i + 1]] = o_i.to(o.dtype)
         return o
-

@@ -127,20 +127,21 @@ class PagedDummyCache:
         )
 
         # Per-layer block tables and sequence lengths
-        self.block_tables = torch.zeros(
+        self.block_tables = torch.full(
             (self.num_layers, self.batch_size, max_blocks_per_seq),
-            dtype=torch.long,
+            -1,
+            dtype=torch.int32,
             device=self.device,
         )
         self.seq_lens = torch.zeros(
             (self.num_layers, self.batch_size),
-            dtype=torch.long,
+            dtype=torch.int32,
             device=self.device,
         )
 
         # Free block management
         self.free_blocks = torch.arange(
-            total_blocks, device=self.device, dtype=torch.long
+            total_blocks, device=self.device, dtype=torch.int32
         )
         self.num_free_blocks = total_blocks
         
@@ -191,7 +192,13 @@ class PagedDummyCache:
 
         key_states = key_states.permute(0, 2, 1, 3).reshape(-1, head_num, head_dim)
         value_states = value_states.permute(0, 2, 1, 3).reshape(-1, head_num, head_dim)
-        cu_seqlens = torch.arange(0, (batch_size + 1) * new_seq_len, step=new_seq_len, device=key_states.device)
+        cu_seqlens = torch.arange(
+            0,
+            (batch_size + 1) * new_seq_len,
+            step=new_seq_len,
+            device=key_states.device,
+            dtype=torch.int32,
+        )
 
         current_seq_lens = self.seq_lens[layer_idx]
 
@@ -610,7 +617,7 @@ class DeepseekV3Attention(nn.Module):
             )
             cu_seqlens_q = torch.cat([
                 torch.tensor([0], device=device, dtype=torch.int32),
-                q_lens.cumsum(0),
+                q_lens.cumsum(0, dtype=torch.int32),
             ])
             total_tokens = cu_seqlens_q[-1].item()
 
