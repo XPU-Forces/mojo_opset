@@ -72,9 +72,9 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | ComputeComm | MojoGemmReduceScatter         | ✅           | TBD       | TBD | TBD      |
 | Attention   | MojoSdpa                      | ✅           | TBD       | ✅  | TBD      |
 | Attention   | MojoPrefillGQA                | ✅           | ✅        | ✅  | TBD      |
-| Attention   | MojoPagedPrefillGQA           | ✅           | ✅        | ✅  | TBD      |
+| Attention   | MojoPagedPrefillGQA           | ✅           | ✅        | ✅  | ✅      |
 | Attention   | MojoDecodeGQA                 | ✅           | TBD       | TBD | TBD      |
-| Attention   | MojoPagedDecodeGQA            | ✅           | ✅        | 🚧  | TBD      |
+| Attention   | MojoPagedDecodeGQA            | ✅           | ✅        | 🚧  | ✅      |
 | Attention   | MojoDecodeMLA                 | ✅           | TBD       | TBD | TBD      |
 | Attention   | MojoPagedDecodeMLA            | ✅           | TBD       | TBD | TBD      |
 | Attention   | MojoPrefillMLA                | ✅           | TBD       | TBD | TBD      |
