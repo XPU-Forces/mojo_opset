@@ -185,7 +185,6 @@ def n_gram_decode_kernel(
             if MTP_STEP > 1:
                 input_indices = tl.arange(0, MTP_STEP)
                 __input_ids = tl.load(input_ids + bid * MTP_STEP + input_indices).to(tl.int64)
-                tl.device_print("__input_ids:", __input_ids)
 
                 n_gram_ids = tl.view(__input_ids, (MTP_STEP, 1))
                 n_gram_ids = tl.broadcast_to(n_gram_ids, (MTP_STEP, BLOCK_SIZE_N))
@@ -193,7 +192,7 @@ def n_gram_decode_kernel(
                 oe_carry = tl.full((MTP_STEP, BLOCK_SIZE_N,), vocab_size, dtype=tl.int64)
 
                 history_ptr = oe_history + oe_history_stride_0 * bid
-                n_gram_offsets = tl.flip(tl.arange(0, MAX_N_GRAM))
+                n_gram_offsets = tl.extra.cann.extension.flip(tl.arange(0, MAX_N_GRAM))
 
                 history_id = tl.load(
                     history_ptr + (oe_history_dim_1 - n_gram_offsets - 1) * oe_history_stride_1
@@ -202,13 +201,13 @@ def n_gram_decode_kernel(
                 # WARNING(liuyuan): tl.cat required the same shapes of lhs and rhs in triton-npu. WTF?
                 # history_id = tl.cat(history_id, __input_ids, can_reorder=True)
                 __tmp = tl.zeros((MTP_STEP + MAX_N_GRAM,), dtype=tl.int64)
-                __tmp = tl.insert_slice(__tmp, history_id, (0,), (MAX_N_GRAM,), (1,))
-                __tmp = tl.insert_slice(__tmp, __input_ids, (MAX_N_GRAM,), (MTP_STEP,), (1,))
+                __tmp = tl.extra.cann.extension.insert_slice(__tmp, history_id, (0,), (MAX_N_GRAM,), (1,))
+                __tmp = tl.extra.cann.extension.insert_slice(__tmp, __input_ids, (MAX_N_GRAM,), (MTP_STEP,), (1,))
                 history_id = __tmp
 
                 for i in tl.static_range(1, MAX_N_GRAM):
                     __cal_mask = n_grams >= (i + 1)
-                    __history_ids = tl.extract_slice(
+                    __history_ids = tl.extra.cann.extension.extract_slice(
                         history_id, (MAX_N_GRAM - i,), (MTP_STEP,), (1,)
                     )
                     __history_ids = (

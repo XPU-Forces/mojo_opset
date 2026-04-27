@@ -89,8 +89,8 @@ class MojoIndexer(MojoOperator):
         q = self.activation(q)
         k = self.activation(k)
 
-        q_quant, q_scale = self.quant(q, None)
-        k_quant, k_scale = self.quant(k, None)
+        q_quant, q_scale = self.quant(q)
+        k_quant, k_scale = self.quant(k)
         if k_scale.dim() == 3:
             k_scale = k_scale.amax(dim=-1)
 

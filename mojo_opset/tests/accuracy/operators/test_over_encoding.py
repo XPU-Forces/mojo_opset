@@ -695,3 +695,7 @@ class TestRefOverEncodingParametrized:
             ttx_oe_layer(input_ids, oe_history_inputs, seq_lens),
             ref_oe_layer(input_ids, oe_history_inputs, seq_lens),
         )
+if __name__ == '__main__':
+    test = TestRefOverEncodingBasic()
+    test.setup_method()
+    test.test_over_encoding()
