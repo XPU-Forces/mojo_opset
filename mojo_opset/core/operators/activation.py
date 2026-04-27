@@ -38,6 +38,10 @@ class MojoSilu(MojoOperator):
 
 
 class MojoSwiGLU(MojoOperator):
+    def __init__(self, swiglu_limit: float = 0.0, **kwargs):
+        super().__init__(**kwargs)
+        self.swiglu_limit = swiglu_limit
+
     def forward(self, gate_out: torch.Tensor, up_out: torch.Tensor) -> torch.Tensor:
         """
         Forward pass with SwiGLU activation.
@@ -51,8 +55,17 @@ class MojoSwiGLU(MojoOperator):
 
         Notes:
             SwiGLU is defined as SiLU(gate_out) * up_out.
+            If ``swiglu_limit > 0``, ``up_out`` is clamped to
+            ``[-swiglu_limit, swiglu_limit]`` and ``gate_out`` is clamped to
+            a maximum of ``swiglu_limit`` before activation.
         """
+        if self.swiglu_limit > 0:
+            up_out = torch.clamp(up_out, min=-self.swiglu_limit, max=self.swiglu_limit)
+            gate_out = torch.clamp(gate_out, max=self.swiglu_limit)
         return torch.nn.functional.silu(gate_out) * up_out
+
+    def extra_repr(self) -> str:
+        return f"{self.swiglu_limit=}".replace("self.", "")
 
 
 class MojoRotateActivation(MojoOperator):

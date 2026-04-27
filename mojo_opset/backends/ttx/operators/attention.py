@@ -14,10 +14,12 @@ from mojo_opset.core import MojoSdpa
 from mojo_opset.core import MojoPagedPrefillSWA
 from mojo_opset.core import MojoPagedDecodeSWA
 from mojo_opset.core import MojoSWA
+from mojo_opset.core.operators.attention import assert_paged_decode_contract
+from mojo_opset.core.operators.attention import assert_paged_prefill_contract
 
 
 class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
-    supported_platforms_list = ["npu", "ilu"]
+    supported_platforms_list = ["npu", "ilu", "mlu"]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -35,6 +37,7 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         seqlens_kv: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
     ):
+        assert_paged_prefill_contract(cu_seqlens_q, block_tables, seqlens_kv)
         assert self.window_size == -1, (
             f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
         )
@@ -78,6 +81,9 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         softmax_scale: Optional[float] = None,
         mask: Optional[torch.Tensor] = None,
     ):
+        assert seqlens.dtype == torch.int32
+        assert block_tables.dtype == torch.int32
+        assert_paged_decode_contract(block_tables, seqlens)
         assert self.window_size == -1, (
             f"[TTXPagedDecodeGQA] TTX does not support sliding window, but got window_size={self.window_size}"
         )
@@ -85,7 +91,6 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
             f"[TTXPagedDecodeGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
         assert mask is None, f"[TTXPagedDecodeGQA] TTX does not support mask, but got mask={mask}"
-
         output = paged_attention_decode(
             q=query,
             key_cache=key_cache,
@@ -132,6 +137,7 @@ class TTXPagedPrefillSWA(MojoPagedPrefillSWA):
         softmax_scale: Optional[float] = None,
         seqlens_kv: Optional[torch.Tensor] = None,  # [bsz]
     ) -> torch.Tensor:
+        assert_paged_prefill_contract(cu_seqlens_q, block_table, seqlens_kv)
         if seqlens_kv is None:
             seqlens_kv = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
 
@@ -164,7 +170,9 @@ class TTXPagedDecodeSWA(MojoPagedDecodeSWA):
         softmax_scale: Optional[float] = None,
     ) -> torch.Tensor:
         # Note: is_causal = False should never happen
-
+        assert seq_lens.dtype == torch.int32
+        assert block_table.dtype == torch.int32
+        assert_paged_decode_contract(block_table, seq_lens)
         o = swa_paged_decode(
             q,
             k_cache,
@@ -176,7 +184,7 @@ class TTXPagedDecodeSWA(MojoPagedDecodeSWA):
             self.gqa_interleave,
             softmax_scale,
         )
-        
+
         return o
 
 
@@ -192,7 +200,8 @@ class TTXSWA(MojoSWA):
         cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
         softmax_scale: Optional[float] = None,
     ) -> torch.Tensor:
-
+        assert cu_seqlens_q.dtype == torch.int32
+        assert cu_seqlens_kv.dtype == torch.int32
         o = swa_infer(
             q,
             k,
@@ -206,4 +215,3 @@ class TTXSWA(MojoSWA):
             self.gqa_interleave,
         )
         return o
-

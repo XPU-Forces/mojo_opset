@@ -96,6 +96,12 @@ top_k_sampling_impl = _get_kernel_impl(ttx_backend_module, "top_k_sampling_impl"
 
 group_rmsnorm_impl = _get_kernel_impl(ttx_backend_module, "group_rmsnorm_impl")
 
+# Over-Encoding (OE)
+embedding_nf4_dequant_impl = _get_kernel_impl(ttx_backend_module, "embedding_nf4_dequant_impl")
+n_gram_decode_impl = _get_kernel_impl(ttx_backend_module, "n_gram_decode_impl")
+n_gram_prefill_impl = _get_kernel_impl(ttx_backend_module, "n_gram_prefill_impl")
+over_encoding_decode_impl = _get_kernel_impl(ttx_backend_module, "over_encoding_decode_impl")
+
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
 
@@ -773,7 +779,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         value_cache: torch.Tensor,
         block_table: torch.Tensor,
         cu_seq_lens: torch.Tensor,
-        kv_lens: torch.Tensor,
+        kv_lens_before_store: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return store_paged_kv_impl(
             key_states,
@@ -782,7 +788,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
             value_cache,
             block_table,
             cu_seq_lens,
-            kv_lens,
+            kv_lens_before_store,
         )
 
     @store_paged_kv.register_fake
@@ -793,7 +799,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         value_cache: torch.Tensor,
         block_table: torch.Tensor,
         cu_seq_lens: torch.Tensor,
-        kv_lens: torch.Tensor,
+        kv_lens_before_store: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(key_cache), torch.empty_like(value_cache)
 
@@ -805,6 +811,10 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     swa_fwd = swa_fwd_impl
     swa_bwd = swa_bwd_impl
     group_rmsnorm = group_rmsnorm_impl
+    embedding_nf4_dequant = embedding_nf4_dequant_impl
+    n_gram_decode = n_gram_decode_impl
+    n_gram_prefill = n_gram_prefill_impl
+    over_encoding_decode = over_encoding_decode_impl
 
 else:
     causal_conv1d_fwd = causal_conv1d_fwd_impl
@@ -858,3 +868,7 @@ else:
     dynamic_quant = dynamic_quant_impl
     lightning_indexer = lightning_indexer_impl
     group_rmsnorm = group_rmsnorm_impl
+    embedding_nf4_dequant = embedding_nf4_dequant_impl
+    n_gram_decode = n_gram_decode_impl
+    n_gram_prefill = n_gram_prefill_impl
+    over_encoding_decode = over_encoding_decode_impl

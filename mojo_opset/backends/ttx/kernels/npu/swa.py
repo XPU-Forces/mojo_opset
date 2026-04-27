@@ -635,7 +635,7 @@ def swa_infer_impl(
     return o
 
 @triton.jit
-def _paged_prefill_kernel(
+def _swa_paged_prefill_kernel(
     o_ptr,
     q_ptr,
     k_ptr,
@@ -983,7 +983,7 @@ def swa_paged_prefill_impl(
 
     grid = (cube_num,)
 
-    _paged_prefill_kernel[grid](
+    _swa_paged_prefill_kernel[grid](
         o,
         q,
         k_cache,
@@ -1085,7 +1085,7 @@ def _sdpa_acc_fwd_1xN(
 
 
 @triton.jit
-def _paged_decode_kernel(
+def _swa_paged_decode_kernel(
     q_ptr,
     k_cache_ptr,
     v_cache_ptr,
@@ -1296,7 +1296,7 @@ def swa_paged_decode_impl(
     #   under swa, the kv workload is rather evenly across diffrent queries,
     #   so we have low necessity to apply split-kv strategy             
 
-    _paged_decode_kernel[grid](
+    _swa_paged_decode_kernel[grid](
         q,
         key_cache,
         value_cache,
@@ -1338,7 +1338,7 @@ def swa_paged_decode_impl(
 
 
 @triton.jit
-def _sdpa_fwd_kernel(
+def _swa_fwd_kernel(
     o_ptr,
     o_f32_ptr,
     lse_ptr,
@@ -1727,7 +1727,7 @@ def swa_fwd_impl(
     cube_num = get_num_cores("cube")
     grid = (cube_num,)
 
-    _sdpa_fwd_kernel[grid](
+    _swa_fwd_kernel[grid](
         o,
         o_f32,
         softmax_lse,
@@ -1789,7 +1789,7 @@ def swa_fwd_impl(
     key=["HEAD_DIM"],
 )
 @triton.jit
-def _sdpa_bwd_preprocess(
+def _swa_bwd_preprocess(
     d_ptr: torch.Tensor,
     o_ptr: torch.Tensor,
     do_ptr: torch.Tensor,
@@ -1945,7 +1945,7 @@ def _sdpa_single_block_bwd_dq(
 
 
 @triton.jit
-def _sdpa_bwd_dkdv_kernel(
+def _swa_bwd_dkdv_kernel(
     dk_ptr,
     dv_ptr,
     do_ptr,
@@ -2267,7 +2267,7 @@ def _sdpa_bwd_dkdv_kernel(
 
 
 @triton.jit
-def _sdpa_bwd_dq_kernel(
+def _swa_bwd_dq_kernel(
     dq_ptr,
     do_ptr,
     delta_ptr,
@@ -2636,7 +2636,7 @@ def swa_bwd_impl(
     do = do.contiguous()
 
     num_vecs = get_num_cores("vector")
-    _sdpa_bwd_preprocess[(num_vecs,)](
+    _swa_bwd_preprocess[(num_vecs,)](
         delta,
         o,
         do,
@@ -2671,7 +2671,7 @@ def swa_bwd_impl(
 
     grid = (cube_num,)
 
-    _sdpa_bwd_dkdv_kernel[grid](
+    _swa_bwd_dkdv_kernel[grid](
         dk,
         dv,
         do,
@@ -2721,7 +2721,7 @@ def swa_bwd_impl(
         BLOCK_N,
         BLOCK_D,
     )
-    _sdpa_bwd_dq_kernel[grid](
+    _swa_bwd_dq_kernel[grid](
         dq,
         do,
         delta,
@@ -2769,4 +2769,3 @@ def swa_bwd_impl(
     )
 
     return dq, dk, dv
-
