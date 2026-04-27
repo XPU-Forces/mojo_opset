@@ -84,7 +84,8 @@ class MojoOverEncodingNGram(MojoOperator):
         self._oe_post_init()
 
     def _oe_post_init(self):
-        oe_cfg_dtype = torch.tensor([]).device
+        oe_cfg_dtype = torch.int64
+        oe_cfg_device = torch.tensor([]).device
         if oe_cfg_device == torch.device("meta"):
             oe_cfg_device = torch.device("cpu")
         self.register_buffer(
