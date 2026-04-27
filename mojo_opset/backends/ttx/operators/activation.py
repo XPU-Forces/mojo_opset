@@ -27,4 +27,6 @@ class TTXSwiGLU(MojoSwiGLU):
     supported_platforms_list = ["npu", "ilu"]
 
     def forward(self, gate_out: torch.Tensor, up_out: torch.Tensor):
+        if self.swiglu_limit > 0:
+            return super().forward(gate_out, up_out)
         return swiglu_fwd(gate_out, up_out)
