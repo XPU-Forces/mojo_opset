@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Optional, List
 
 import torch
 from torch.nn import Parameter
@@ -79,23 +79,31 @@ class MojoOverEncodingNGram(MojoOperator):
         """
         super().__init__(**kwargs)
         self.ori_vocab_size = ori_vocab_size
+        self._oe_vocab_sizes = oe_vocab_sizes
+        self._oe_grams = oe_grams
+        self.reset_buffer("npu")
+        self.register_load_state_dict_post_hook(
+            __make_hook_to_ignore_workspace_buffer__(
+                ("oe_vocab_sizes", "oe_grams", "oe_vocab_offsets")
+            ),
+        )
+
+    def reset_buffer(self, device):
         self.register_buffer(
             "oe_vocab_sizes",
             (
-                torch.tensor(oe_vocab_sizes, **self.tensor_factory_kwargs)
-                if not isinstance(oe_vocab_sizes, torch.Tensor)
-                else oe_vocab_sizes
+                torch.tensor(self._oe_vocab_sizes, device=device, **self.tensor_factory_kwargs)
+                if not isinstance(self._oe_vocab_sizes, torch.Tensor)
+                else self._oe_vocab_sizes
             ),
-            persistent=False
         )
         self.register_buffer(
             "oe_grams",
             (
-                torch.tensor(oe_grams, **self.tensor_factory_kwargs)
-                if not isinstance(oe_grams, torch.Tensor)
-                else oe_grams
+                torch.tensor(self._oe_grams, device=device, **self.tensor_factory_kwargs)
+                if not isinstance(self._oe_grams, torch.Tensor)
+                else self._oe_grams
             ),
-            persistent=False
         )
         self.register_buffer(
             "oe_vocab_offsets",
@@ -113,7 +121,6 @@ class MojoOverEncodingNGram(MojoOperator):
                 ).to(torch.long),
                 dim=0,
             ),
-            persistent=False
         )
 
     def forward(
@@ -357,7 +364,7 @@ class MojoOverEncoding(MojoOperator):
             )
 
         if self.mega_embedding_cpu_only:
-            ori_device = oe_ngram_ids.device
+            ori_device = oe_result.device
             oe_result = self.oe_mega_embedding(oe_ngram_ids.cpu()).to(ori_device)
         else:
             oe_result = self.oe_mega_embedding(oe_ngram_ids)
