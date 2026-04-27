@@ -17,7 +17,6 @@ def assert_paged_prefill_contract(
     assert cu_seqlens_q.dtype == torch.int32
     assert block_tables.dtype == torch.int32
     q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-    kv_lens = q_lens if seqlens_kv is None else seqlens_kv
     if seqlens_kv is not None:
         assert seqlens_kv.dtype == torch.int32
     assert block_tables.shape[0] == q_lens.shape[0]
