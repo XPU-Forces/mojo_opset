@@ -153,6 +153,8 @@ class MojoPagedDecodeGQA(MojoOperator):
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
         mask: Optional[torch.Tensor] = None,
+        *,
+        max_context_len: Optional[int] = None,
     ):
         """
         Paged decode attention with grouped query heads (GQA) using a blocked KV cache.
@@ -361,6 +363,10 @@ class MojoPagedPrefillGQA(MojoOperator):
         softmax_scale: Optional[float] = None,
         seqlens_kv: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
+        *,
+        cu_seqlens_kv: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_k: Optional[int] = None,
     ) -> Tuple[Any]:
         """
         Paged prefill attention with grouped query heads (GQA) using a blocked KV cache.

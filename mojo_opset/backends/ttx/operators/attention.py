@@ -36,6 +36,10 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         softmax_scale: Optional[float] = None,
         seqlens_kv: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
+        *,
+        cu_seqlens_kv: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_k: Optional[int] = None,
     ):
         assert_paged_prefill_contract(cu_seqlens_q, block_tables, seqlens_kv)
         assert self.window_size == -1, (
@@ -45,6 +49,12 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
             f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
         assert mask is None, f"[TTXPagedPrefillGQA] TTX does not support mask, but got mask={mask}"
+        if seqlens_kv is None:
+            if cu_seqlens_kv is not None:
+                seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+            else:
+                seqlens_kv = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        # max_seqlen_q / max_seqlen_k / kwargs: core·Ixformer API compatibility; kernel uses per-seq lengths only.
         if self.aux_mask is None:
             self.aux_mask = torch.ones(
                 self.AUX_MASK_SIZE,
@@ -79,7 +89,10 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         seqlens: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
+        cu_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
+        *,
+        max_context_len: Optional[int] = None,
     ):
         assert seqlens.dtype == torch.int32
         assert block_tables.dtype == torch.int32
@@ -91,6 +104,8 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
             f"[TTXPagedDecodeGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
         assert mask is None, f"[TTXPagedDecodeGQA] TTX does not support mask, but got mask={mask}"
+        assert cu_seq_lens is None, "varlen is not supported"
+        _ = max_context_len  # API parity with core / Ixformer; ILU kernel uses ``seqlens`` per row.
         output = paged_attention_decode(
             q=query,
             key_cache=key_cache,
