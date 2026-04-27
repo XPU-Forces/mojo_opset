@@ -513,6 +513,51 @@ def test_prefill_mla(H, d_nope, d_rope, d_v, d_c):
     )
 
 
+def test_mla_attn_sink_parameter_is_optional():
+    H, d_nope, d_rope, d_v, d_c = 2, 4, 2, 4, 3
+    op_classes = [
+        MojoDecodeMLA._registry.get("torch"),
+        MojoPagedDecodeMLA._registry.get("torch"),
+        MojoPrefillMLA._registry.get("torch"),
+        MojoPagedPrefillMLA._registry.get("torch"),
+    ]
+
+    for op_class in op_classes:
+        op_without_sink = op_class(H, d_nope, d_rope, d_v, d_c)
+        assert "attn_sink" not in op_without_sink.state_dict()
+
+        op_with_sink = op_class(H, d_nope, d_rope, d_v, d_c, use_attn_sink=True)
+        assert isinstance(op_with_sink.attn_sink, torch.nn.Parameter)
+        assert op_with_sink.attn_sink.shape == (H,)
+        assert op_with_sink.attn_sink.dtype == torch.float32
+        assert "attn_sink" in op_with_sink.state_dict()
+
+
+def test_decode_mla_attn_sink_reference():
+    op = MojoDecodeMLA._registry.get("torch")(
+        num_heads=1,
+        qk_nope_head_dim=1,
+        qk_rope_head_dim=1,
+        v_head_dim=1,
+        kv_lora_rank=2,
+        use_attn_sink=True,
+    )
+    with torch.no_grad():
+        op.kv_b_proj.copy_(torch.eye(2))
+        op.attn_sink.fill_(1.0)
+
+    query = torch.tensor([[[1.0, 0.0]]])
+    compressed_kv = torch.tensor([[[1.0, 10.0], [0.0, 20.0]]])
+    k_pe = torch.zeros(1, 2, 1, 1)
+
+    scores = torch.tensor([1.0, 0.0, 1.0])
+    probs = torch.softmax(scores, dim=0)
+    expected = probs[0] * 10.0 + probs[1] * 20.0
+
+    output = op(query, compressed_kv, k_pe, softmax_scale=1.0)
+    torch.testing.assert_close(output, expected.reshape(1, 1, 1))
+
+
 # ===========================================================================
 # MojoDecodeNSA
 # ===========================================================================

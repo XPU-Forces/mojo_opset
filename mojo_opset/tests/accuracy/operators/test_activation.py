@@ -66,6 +66,18 @@ def test_swiglu(shape):
     swiglu.forward_diff_with(swiglu_ref, gate_out, up_out)
 
 
+def test_swiglu_limit_reference():
+    gate_out = torch.tensor([[-3.0, 0.5, 2.0, 6.0]], dtype=torch.float32)
+    up_out = torch.tensor([[-4.0, -1.0, 3.0, 9.0]], dtype=torch.float32)
+    swiglu = MojoSwiGLU._registry.get("torch")(swiglu_limit=2.0)
+
+    expected_gate = torch.clamp(gate_out, max=2.0)
+    expected_up = torch.clamp(up_out, min=-2.0, max=2.0)
+    expected = torch.nn.functional.silu(expected_gate) * expected_up
+
+    torch.testing.assert_close(swiglu(gate_out, up_out), expected)
+
+
 @pytest.mark.parametrize(
     "batch_size, seq_len, num_head, head_dim, dtype",
     [

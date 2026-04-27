@@ -470,6 +470,37 @@ class MojoPagedPrefillGQA(MojoOperator):
         return f"{self.is_causal=}, {self.gqa_layout=}, {self.window_size=}".replace("self.", "")
 
 
+def _make_attn_sink(num_heads: int, tensor_factory_kwargs: dict) -> torch.nn.Parameter:
+    factory_kwargs = dict(tensor_factory_kwargs)
+    factory_kwargs["dtype"] = torch.float32
+    return torch.nn.Parameter(torch.empty(num_heads, **factory_kwargs))
+
+
+def _attention_probs_with_optional_sink(
+    scores: torch.Tensor,
+    output_dtype: torch.dtype,
+    attn_sink: Optional[torch.Tensor],
+) -> torch.Tensor:
+    if attn_sink is None:
+        probs = torch.softmax(scores, dim=-1, dtype=torch.float32)
+        return torch.nan_to_num(probs, nan=0.0).to(output_dtype)
+    if scores.dim() < 2:
+        raise ValueError(f"scores must have at least 2 dimensions, but got {scores.dim()}")
+    if attn_sink.dim() != 1 or attn_sink.numel() != scores.shape[-2]:
+        raise ValueError(
+            f"attn_sink must be 1D with length equal to num_heads {scores.shape[-2]}, "
+            f"but got shape {tuple(attn_sink.shape)}"
+        )
+
+    sink_shape = [1] * scores.dim()
+    sink_shape[-2] = attn_sink.numel()
+    sink_shape[-1] = 1
+    sink_scores = attn_sink.float().view(sink_shape).expand(*scores.shape[:-1], 1)
+    scores_with_sink = torch.cat([scores.float(), sink_scores], dim=-1)
+    probs = torch.softmax(scores_with_sink, dim=-1, dtype=torch.float32)[..., :-1]
+    return torch.nan_to_num(probs, nan=0.0).to(output_dtype)
+
+
 class MojoDecodeMLA(MojoOperator):
     """Non-paged MLA (Multi-head Latent Attention) decode.
 
@@ -485,6 +516,7 @@ class MojoDecodeMLA(MojoOperator):
         qk_rope_head_dim: int,
         v_head_dim: int,
         kv_lora_rank: int,
+        use_attn_sink: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -494,10 +526,13 @@ class MojoDecodeMLA(MojoOperator):
         self.v_head_dim = v_head_dim
         self.kv_lora_rank = kv_lora_rank
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        self.use_attn_sink = use_attn_sink
 
         self.kv_b_proj = torch.nn.Parameter(
             torch.empty(num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank)
         )
+        if use_attn_sink:
+            self.attn_sink = _make_attn_sink(num_heads, self.tensor_factory_kwargs)
 
     def forward(
         self,
@@ -539,15 +574,16 @@ class MojoDecodeMLA(MojoOperator):
             for i in range(B):
                 scores[i, :, seqlens[i].item() :] = float("-inf")
 
-        probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
-        probs = torch.nan_to_num(probs, nan=0.0)
+        probs = _attention_probs_with_optional_sink(
+            scores, query.dtype, getattr(self, "attn_sink", None)
+        )
         return torch.einsum("bhs,bshd->bhd", probs, v)
 
     def extra_repr(self) -> str:
         return (
             f"num_heads={self.num_heads}, qk_nope_head_dim={self.qk_nope_head_dim}, "
             f"qk_rope_head_dim={self.qk_rope_head_dim}, v_head_dim={self.v_head_dim}, "
-            f"kv_lora_rank={self.kv_lora_rank}"
+            f"kv_lora_rank={self.kv_lora_rank}, use_attn_sink={self.use_attn_sink}"
         )
 
 
@@ -561,6 +597,7 @@ class MojoPagedDecodeMLA(MojoOperator):
         qk_rope_head_dim: int,
         v_head_dim: int,
         kv_lora_rank: int,
+        use_attn_sink: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -570,10 +607,13 @@ class MojoPagedDecodeMLA(MojoOperator):
         self.v_head_dim = v_head_dim
         self.kv_lora_rank = kv_lora_rank
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        self.use_attn_sink = use_attn_sink
 
         self.kv_b_proj = torch.nn.Parameter(
             torch.empty(num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank)
         )
+        if use_attn_sink:
+            self.attn_sink = _make_attn_sink(num_heads, self.tensor_factory_kwargs)
 
     def forward(
         self,
@@ -632,7 +672,9 @@ class MojoPagedDecodeMLA(MojoOperator):
             k = torch.cat([k_nope, k_pe.unsqueeze(1).expand(-1, H, -1)], dim=-1)
 
             scores = torch.einsum("hd,shd->hs", query[i], k) * softmax_scale
-            probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
+            probs = _attention_probs_with_optional_sink(
+                scores, query.dtype, getattr(self, "attn_sink", None)
+            )
             outputs[i] = torch.einsum("hs,shd->hd", probs, v)
         return outputs
 
@@ -640,7 +682,7 @@ class MojoPagedDecodeMLA(MojoOperator):
         return (
             f"num_heads={self.num_heads}, qk_nope_head_dim={self.qk_nope_head_dim}, "
             f"qk_rope_head_dim={self.qk_rope_head_dim}, v_head_dim={self.v_head_dim}, "
-            f"kv_lora_rank={self.kv_lora_rank}"
+            f"kv_lora_rank={self.kv_lora_rank}, use_attn_sink={self.use_attn_sink}"
         )
 
 
@@ -878,6 +920,7 @@ class MojoPrefillMLA(MojoOperator):
         v_head_dim: int,
         kv_lora_rank: int,
         is_causal: bool = True,
+        use_attn_sink: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -888,10 +931,13 @@ class MojoPrefillMLA(MojoOperator):
         self.kv_lora_rank = kv_lora_rank
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.is_causal = is_causal
+        self.use_attn_sink = use_attn_sink
 
         self.kv_b_proj = torch.nn.Parameter(
             torch.empty(num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank)
         )
+        if use_attn_sink:
+            self.attn_sink = _make_attn_sink(num_heads, self.tensor_factory_kwargs)
 
     def forward(
         self,
@@ -940,7 +986,9 @@ class MojoPrefillMLA(MojoOperator):
                 causal_mask = torch.tril(torch.ones(L, L, device=query.device, dtype=torch.bool))
                 scores.masked_fill_(~causal_mask.unsqueeze(1), float("-inf"))
 
-            probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
+            probs = _attention_probs_with_optional_sink(
+                scores, query.dtype, getattr(self, "attn_sink", None)
+            )
             outputs[s:e] = torch.einsum("ths,shd->thd", probs, v_i)
 
         return outputs
@@ -949,7 +997,8 @@ class MojoPrefillMLA(MojoOperator):
         return (
             f"num_heads={self.num_heads}, qk_nope_head_dim={self.qk_nope_head_dim}, "
             f"qk_rope_head_dim={self.qk_rope_head_dim}, v_head_dim={self.v_head_dim}, "
-            f"kv_lora_rank={self.kv_lora_rank}, is_causal={self.is_causal}"
+            f"kv_lora_rank={self.kv_lora_rank}, is_causal={self.is_causal}, "
+            f"use_attn_sink={self.use_attn_sink}"
         )
 
 
@@ -964,6 +1013,7 @@ class MojoPagedPrefillMLA(MojoOperator):
         v_head_dim: int,
         kv_lora_rank: int,
         is_causal: bool = True,
+        use_attn_sink: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -974,10 +1024,13 @@ class MojoPagedPrefillMLA(MojoOperator):
         self.kv_lora_rank = kv_lora_rank
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.is_causal = is_causal
+        self.use_attn_sink = use_attn_sink
 
         self.kv_b_proj = torch.nn.Parameter(
             torch.empty(num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank)
         )
+        if use_attn_sink:
+            self.attn_sink = _make_attn_sink(num_heads, self.tensor_factory_kwargs)
 
     def _unpage(self, cache, block_tables_i, sl, block_size):
         """Reconstruct contiguous sequence from paged blocks for one batch."""
@@ -1057,7 +1110,9 @@ class MojoPagedPrefillMLA(MojoOperator):
                 )
                 scores.masked_fill_(~causal_mask.unsqueeze(1), float("-inf"))
 
-            probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
+            probs = _attention_probs_with_optional_sink(
+                scores, query.dtype, getattr(self, "attn_sink", None)
+            )
             outputs[qs:qe] = torch.einsum("ths,shd->thd", probs, v)
 
         return outputs
@@ -1066,7 +1121,8 @@ class MojoPagedPrefillMLA(MojoOperator):
         return (
             f"num_heads={self.num_heads}, qk_nope_head_dim={self.qk_nope_head_dim}, "
             f"qk_rope_head_dim={self.qk_rope_head_dim}, v_head_dim={self.v_head_dim}, "
-            f"kv_lora_rank={self.kv_lora_rank}, is_causal={self.is_causal}"
+            f"kv_lora_rank={self.kv_lora_rank}, is_causal={self.is_causal}, "
+            f"use_attn_sink={self.use_attn_sink}"
         )
 
 
