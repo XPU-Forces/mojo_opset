@@ -69,19 +69,19 @@ class TorchNpuSWAFunction(MojoSWAFunction):
         if local_window_size is None:
             raise NotImplementedError("TorchNpuSWAFunction requires local_window_size for SWA.")
 
-        actual_seq_qlen = cu_seqlens_q[1:].to(dtype=torch.int64, device="cpu").tolist()
-        actual_seq_kvlen = cu_seqlens_kv[1:].to(dtype=torch.int64, device="cpu").tolist()
+        actual_seq_qlen = cu_seqlens_q[1:].to(dtype=torch.int64).tolist()
+        actual_seq_kvlen = cu_seqlens_kv[1:].to(dtype=torch.int64).tolist()
+        max_q_seq_len = int((cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item())
+        max_kv_seq_len = int((cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]).max().item())
         sparse_mode = 0 if global_window_size is not None else 4
         next_tockens = 0
         if sparse_mode == 0:
-            max_q_seq_len = int((cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item())
-            max_kv_seq_len = int((cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]).max().item())
             pre_tockens = max_kv_seq_len
             atten_mask = (
                 ~_generate_window_mask(max_q_seq_len, max_kv_seq_len, local_window_size, global_window_size)
             ).to(q.device)
         else:
-            mask_dim = 2048
+            mask_dim = max(max_q_seq_len, max_kv_seq_len)
             pre_tockens = local_window_size
             atten_mask = torch.triu(torch.ones((mask_dim, mask_dim), dtype=torch.bool, device=q.device), diagonal=1)
 
