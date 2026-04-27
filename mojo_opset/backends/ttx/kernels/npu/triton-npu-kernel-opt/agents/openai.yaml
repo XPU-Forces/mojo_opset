@@ -1,0 +1,4 @@
+interface:
+  display_name: "Triton Ascend NPU"
+  short_description: "Develop and validate Triton kernels for Ascend NPU in mojo_opset"
+  default_prompt: "Use this skill to add, port, optimize, integrate, and validate a Triton kernel for Ascend NPU on the mojo_opset ttx backend."
