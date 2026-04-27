@@ -6,6 +6,8 @@ from .swa import swa_paged_prefill_impl
 from .group_rmsnorm import group_rmsnorm_impl
 from .fa_paged_decode import paged_attention_decode_impl
 from .fa_paged_prefill import paged_attention_prefill_impl
+from .rope import rope_fwd_impl
+from .rope import rope_bwd_impl
 
 __all__ = [
     "layernorm_infer_impl",
@@ -16,6 +18,8 @@ __all__ = [
     "group_rmsnorm_impl",
     "paged_attention_decode_impl",
     "paged_attention_prefill_impl",
+    "rope_fwd_impl",
+    "rope_bwd_impl",
 ]
 
 from mojo_opset.backends.ttx.kernels.utils import tensor_device_guard_for_triton_kernel
