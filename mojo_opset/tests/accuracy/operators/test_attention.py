@@ -156,7 +156,7 @@ def generate_paged_prefill_data(
     else:
         # max_q_len = 0 for testing padding logic, use randperm to generate a list with 0
         q_lens = torch.randperm(batch_size, dtype=torch.int32)
-    cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0, dtype=torch.int32)])
+    cu_q_lens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0, dtype=torch.int32)])
 
     if max_kv_computed_len <= 0:
         kv_cache_lens = None
@@ -165,10 +165,10 @@ def generate_paged_prefill_data(
         kv_cache_lens = torch.randint(max_kv_computed_len // 2, max_kv_computed_len, (batch_size,), dtype=torch.int32)
         kv_lens = q_lens + kv_cache_lens
         kv_lens = torch.where(q_lens > 0, kv_lens, torch.zeros_like(kv_lens))
-    cu_total_seqlens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0, dtype=torch.int32)])
+    cu_total_seq_lens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0, dtype=torch.int32)])
 
-    total_q_tokens = cu_seqlens_q[-1].item()
-    total_kv_tokens = cu_total_seqlens[-1].item()
+    total_q_tokens = cu_q_lens[-1].item()
+    total_kv_tokens = cu_total_seq_lens[-1].item()
 
     query = torch.randn(total_q_tokens, num_q_heads, head_dim, dtype=dtype)
     k_unpadded = torch.randn(total_kv_tokens, num_kv_heads, head_dim, dtype=dtype)
@@ -191,7 +191,7 @@ def generate_paged_prefill_data(
     current_block_offset = 0
     for i in range(batch_size):
         seq_len = kv_lens[i].item()
-        start_loc = cu_total_seqlens[i].item()
+        start_loc = cu_total_seq_lens[i].item()
 
         num_blocks_for_seq = (seq_len + block_size - 1) // block_size
         assigned_blocks = free_blocks[current_block_offset : current_block_offset + num_blocks_for_seq]
@@ -211,10 +211,10 @@ def generate_paged_prefill_data(
             k_cache[physical_block_id, :, :tokens_in_block, :] = k_slice
             v_cache[physical_block_id, :, :tokens_in_block, :] = v_slice
 
-    cu_total_seqlens = None if kv_cache_lens is None else cu_total_seqlens
-    max_seqlen_q = int((cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item()) if cu_seqlens_q.numel() > 1 else 0
-    max_total_seqlen = int(kv_lens.max().item()) if kv_lens.numel() > 0 else 0
-    return query, k_cache, v_cache, cu_seqlens_q, block_tables, cu_total_seqlens, max_seqlen_q, max_total_seqlen
+    cu_total_seq_lens = None if kv_cache_lens is None else cu_total_seq_lens
+    max_q_lens = int((cu_q_lens[1:] - cu_q_lens[:-1]).max().item()) if cu_q_lens.numel() > 1 else 0
+    max_total_seq_lens = int(kv_lens.max().item()) if kv_lens.numel() > 0 else 0
+    return query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens
 
 
 test_configs_prefill = [
@@ -227,7 +227,7 @@ test_configs_prefill = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_seqlens_q, block_tables, cu_total_seqlens, max_seqlen_q, max_total_seqlen",
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens",
     [
         pytest.param(
             *generate_paged_prefill_data(
@@ -252,12 +252,12 @@ def test_paged_prefill_gqa(
     query: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
+    cu_q_lens: torch.Tensor,
     block_tables: torch.Tensor,
     gqa_layout: str,
-    cu_total_seqlens: Optional[torch.Tensor],
-    max_seqlen_q: int,
-    max_total_seqlen: int,
+    cu_total_seq_lens: Optional[torch.Tensor],
+    max_q_lens: int,
+    max_total_seq_lens: int,
 ):
     paged_prefill_attn = MojoPagedPrefillGQA(
         is_causal=True,
@@ -277,12 +277,12 @@ def test_paged_prefill_gqa(
         query,
         k_cache,
         v_cache,
-        cu_seqlens_q,
+        cu_q_lens,
         block_tables=block_tables,
         softmax_scale=softmax_scale,
-        cu_total_seqlens=cu_total_seqlens,
-        max_seqlen_q=max_seqlen_q,
-        max_total_seqlen=max_total_seqlen,
+        cu_total_seq_lens=cu_total_seq_lens,
+        max_q_lens=max_q_lens,
+        max_total_seq_lens=max_total_seq_lens,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
     )
@@ -303,9 +303,9 @@ def test_paged_prefill_gqa_bucket_padded_varlen(gqa_layout: str):
     dtype = torch.bfloat16
 
     query = torch.randn((token_bucket_size, num_q_heads, head_dim), dtype=dtype)
-    cu_seqlens_q = torch.tensor([0, 1, 2, 3, 4, 4, 4], dtype=torch.int32)
+    cu_q_lens = torch.tensor([0, 1, 2, 3, 4, 4, 4], dtype=torch.int32)
     total_seq_lens = torch.tensor([1, 1, 1, 1, 0, 0], dtype=torch.int32)
-    cu_total_seqlens = torch.nn.functional.pad(total_seq_lens.cumsum(0, dtype=torch.int32), (1, 0))
+    cu_total_seq_lens = torch.nn.functional.pad(total_seq_lens.cumsum(0, dtype=torch.int32), (1, 0))
 
     key_cache = torch.zeros((bucket_batch_size, num_kv_heads, block_size, head_dim), dtype=dtype)
     value_cache = torch.zeros_like(key_cache)
@@ -334,19 +334,19 @@ def test_paged_prefill_gqa_bucket_padded_varlen(gqa_layout: str):
         query,
         key_cache,
         value_cache,
-        cu_seqlens_q,
+        cu_q_lens,
         block_tables,
         softmax_scale=softmax_scale,
-        cu_total_seqlens=cu_total_seqlens,
+        cu_total_seq_lens=cu_total_seq_lens,
     )
     out = paged_prefill_attn(
         query,
         key_cache,
         value_cache,
-        cu_seqlens_q,
+        cu_q_lens,
         block_tables,
         softmax_scale=softmax_scale,
-        cu_total_seqlens=cu_total_seqlens,
+        cu_total_seq_lens=cu_total_seq_lens,
     )
 
     torch.testing.assert_close(
@@ -858,7 +858,7 @@ test_configs_swa_prefill = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_seqlens_q, block_tables, cu_total_seqlens",
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens",
     [
         pytest.param(
             *(lambda d: (d[0], d[1], d[2], d[3], d[4], d[5]))(generate_paged_prefill_data(
@@ -886,10 +886,10 @@ def test_paged_prefill_swa(
     query: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
+    cu_q_lens: torch.Tensor,
     block_tables: torch.Tensor,
     gqa_layout: str,
-    cu_total_seqlens: Optional[torch.Tensor],
+    cu_total_seq_lens: Optional[torch.Tensor],
     global_window: int,
     local_window: int,
 ):
@@ -916,10 +916,10 @@ def test_paged_prefill_swa(
         query,
         k_cache,
         v_cache,
-        cu_seqlens_q,
+        cu_q_lens,
         block_tables,
         softmax_scale=softmax_scale,
-        cu_total_seqlens=cu_total_seqlens,
+        cu_total_seq_lens=cu_total_seq_lens,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
     )
@@ -1013,7 +1013,7 @@ def generate_sdpa_data(
 ):
     q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
     q_lens = torch.clamp(q_lens, min=1)
-    cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0, dtype=torch.int32)])
+    cu_q_lens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0, dtype=torch.int32)])
 
     if max_kv_computed_len <= 0:
         kv_cache_lens = None
@@ -1021,17 +1021,17 @@ def generate_sdpa_data(
     else:
         kv_cache_lens = torch.randint(max_kv_computed_len // 2, max_kv_computed_len, (batch_size,), dtype=torch.int32)
         kv_lens = q_lens + kv_cache_lens
-    cu_total_seqlens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0, dtype=torch.int32)])
+    cu_total_seq_lens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0, dtype=torch.int32)])
 
-    total_q_tokens = cu_seqlens_q[-1].item()
-    total_kv_tokens = cu_total_seqlens[-1].item()
+    total_q_tokens = cu_q_lens[-1].item()
+    total_kv_tokens = cu_total_seq_lens[-1].item()
 
     query = torch.randn(total_q_tokens, num_q_heads, head_dim, dtype=dtype)
     key = torch.randn(total_kv_tokens, num_kv_heads, head_dim, dtype=dtype)
     value = torch.randn(total_kv_tokens, num_kv_heads, head_dim, dtype=dtype)
 
 
-    return query, key, value, cu_seqlens_q, cu_total_seqlens
+    return query, key, value, cu_q_lens, cu_total_seq_lens
 
 
 test_configs_swa_infer = [
@@ -1041,7 +1041,7 @@ test_configs_swa_infer = [
 ]
 
 @pytest.mark.parametrize(
-    "query, key, value, cu_seqlens_q, cu_total_seqlens",
+    "query, key, value, cu_q_lens, cu_total_seq_lens",
     [
         pytest.param(
             *generate_sdpa_data(
@@ -1068,8 +1068,8 @@ def test_swa_infer(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
-    cu_total_seqlens: torch.Tensor,
+    cu_q_lens: torch.Tensor,
+    cu_total_seq_lens: torch.Tensor,
     gqa_layout: str,
     global_window: int,
     local_window: int,
@@ -1096,8 +1096,8 @@ def test_swa_infer(
         query,
         key,
         value,
-        cu_seqlens_q,
-        cu_total_seqlens,
+        cu_q_lens,
+        cu_total_seq_lens,
         softmax_scale=softmax_scale,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,

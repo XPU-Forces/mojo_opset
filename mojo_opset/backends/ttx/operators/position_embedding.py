@@ -20,13 +20,13 @@ class TTXRotaryEmbedding(MojoRotaryEmbedding):
     def forward(
         self,
         x: torch.Tensor,
-        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_q_lens: Optional[torch.Tensor] = None,
         total_seq_lens: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-        if cu_seqlens_q is not None:
-            assert cu_seqlens_q.dtype == torch.int32
+        if cu_q_lens is not None:
+            assert cu_q_lens.dtype == torch.int32
         if total_seq_lens is not None:
             assert total_seq_lens.dtype == torch.int32
         if position_ids is not None:
@@ -35,7 +35,7 @@ class TTXRotaryEmbedding(MojoRotaryEmbedding):
             x,
             self.cos,
             self.sin,
-            cu_seqlens_q=cu_seqlens_q,
+            cu_q_lens=cu_q_lens,
             seqlens_kv=total_seq_lens,
             position_ids=position_ids,
         )

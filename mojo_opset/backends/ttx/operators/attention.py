@@ -31,15 +31,15 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         query: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
+        cu_q_lens: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
-        cu_total_seqlens: Optional[torch.Tensor] = None,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        max_seqlen_q: Optional[int] = None,
-        max_total_seqlen: Optional[int] = None,
+        max_q_lens: Optional[int] = None,
+        max_total_seq_lens: Optional[int] = None,
     ):
-        assert_paged_prefill_contract(cu_seqlens_q, block_tables, cu_total_seqlens)
+        assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
         assert self.window_size == -1, (
             f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
         )
@@ -48,11 +48,11 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         )
         assert mask is None, f"[TTXPagedPrefillGQA] TTX does not support mask, but got mask={mask}"
         total_seq_lens = (
-            cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-            if cu_total_seqlens is None
-            else cu_total_seqlens[1:] - cu_total_seqlens[:-1]
+            cu_q_lens[1:] - cu_q_lens[:-1]
+            if cu_total_seq_lens is None
+            else cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
         )
-        # max_seqlen_q / max_total_seqlen / kwargs: core·Ixformer API compatibility; kernel uses per-seq lengths only.
+        # max_q_lens / max_total_seq_lens / kwargs: core·Ixformer API compatibility; kernel uses per-seq lengths only.
         if self.aux_mask is None:
             self.aux_mask = torch.ones(
                 self.AUX_MASK_SIZE,
@@ -65,7 +65,7 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
             q=query,
             key_cache=key_cache,
             value_cache=value_cache,
-            cu_seqlens_q=cu_seqlens_q,
+            cu_q_lens=cu_q_lens,
             seqlens_kv=total_seq_lens,
             block_tables=block_tables,
             gqa_interleave=self.gqa_layout == "ABAB",
@@ -101,7 +101,7 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         )
         assert mask is None, f"[TTXPagedDecodeGQA] TTX does not support mask, but got mask={mask}"
         assert cu_q_lens is None, "varlen is not supported"
-        _ = max_total_seq_len  # API parity with core / Ixformer; ILU kernel uses per-row total sequence lengths.
+
         output = paged_attention_decode(
             q=query,
             key_cache=key_cache,
@@ -143,23 +143,23 @@ class TTXPagedPrefillSWA(MojoPagedPrefillSWA):
         q: torch.Tensor,  # [total_q_len, n_q_heads, head_dim]
         k_cache: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
         v_cache: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
-        cu_seqlens_q: torch.Tensor,  # [bsz + 1]
+        cu_q_lens: torch.Tensor,  # [bsz + 1]
         block_table: torch.Tensor,  # [bsz, num_kv_blocks]
         softmax_scale: Optional[float] = None,
-        cu_total_seqlens: Optional[torch.Tensor] = None,  # [bsz + 1]
+        cu_total_seq_lens: Optional[torch.Tensor] = None,  # [bsz + 1]
     ) -> torch.Tensor:
-        assert_paged_prefill_contract(cu_seqlens_q, block_table, cu_total_seqlens)
+        assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
         total_seq_lens = (
-            cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-            if cu_total_seqlens is None
-            else cu_total_seqlens[1:] - cu_total_seqlens[:-1]
+            cu_q_lens[1:] - cu_q_lens[:-1]
+            if cu_total_seq_lens is None
+            else cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
         )
 
         o = swa_paged_prefill(
             q,
             k_cache,
             v_cache,
-            cu_seqlens_q,
+            cu_q_lens,
             total_seq_lens,
             block_table,
             self.is_causal,
@@ -208,18 +208,18 @@ class TTXSWA(MojoSWA):
         q: torch.Tensor,  # [total_q_len, n_q_heads, head_dim]
         k: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
         v: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
-        cu_seqlens_q: torch.Tensor,  # [bsz + 1]
-        cu_total_seqlens: torch.Tensor,  # [bsz + 1]
+        cu_q_lens: torch.Tensor,  # [bsz + 1]
+        cu_total_seq_lens: torch.Tensor,  # [bsz + 1]
         softmax_scale: Optional[float] = None,
     ) -> torch.Tensor:
-        assert cu_seqlens_q.dtype == torch.int32
-        assert cu_total_seqlens.dtype == torch.int32
+        assert cu_q_lens.dtype == torch.int32
+        assert cu_total_seq_lens.dtype == torch.int32
         o = swa_infer(
             q,
             k,
             v,
-            cu_seqlens_q,
-            cu_total_seqlens,
+            cu_q_lens,
+            cu_total_seq_lens,
             self.is_causal,
             self.local_window_size,
             self.global_window_size,

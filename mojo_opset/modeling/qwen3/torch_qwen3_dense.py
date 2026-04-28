@@ -200,7 +200,7 @@ def paged_attention_prefill(
     q: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
+    cu_q_lens: torch.Tensor,
     block_tables: torch.Tensor,
     softmax_scale: Optional[float] = None,
 ):
@@ -215,13 +215,13 @@ def paged_attention_prefill(
     k_unpadded = torch.zeros(total_kv_tokens, num_kv_heads, head_dim, dtype=q.dtype, device=q.device)
     v_unpadded = torch.zeros(total_kv_tokens, num_kv_heads, head_dim, dtype=q.dtype, device=q.device)
 
-    q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
     batch_size = len(q_lens)
 
     for i in range(batch_size):
         seq_len = q_lens[i].item()
-        start_loc = cu_seqlens_q[i].item()
-        end_loc = cu_seqlens_q[i + 1].item()
+        start_loc = cu_q_lens[i].item()
+        end_loc = cu_q_lens[i + 1].item()
 
         num_blocks_for_seq = (seq_len + block_size - 1) // block_size
 
@@ -323,10 +323,10 @@ def paged_attention_forward(
 
     if q_len > 1:
         q_lens = torch.full((bsz,), q_len, dtype=torch.int32, device=device)
-        cu_seqlens_q = torch.cat(
+        cu_q_lens = torch.cat(
             [torch.tensor([0], device=device, dtype=torch.int32), q_lens.cumsum(0, dtype=torch.int32)]
         )
-        total_tokens = cu_seqlens_q[-1].item()
+        total_tokens = cu_q_lens[-1].item()
 
         q = query_states.permute(0, 2, 1, 3).reshape(total_tokens, num_q_heads, head_dim)
 
@@ -343,7 +343,7 @@ def paged_attention_forward(
             q,
             k_cache,
             v_cache,
-            cu_seqlens_q,
+            cu_q_lens,
             block_tables,
             softmax_scale=module.scaling,
         )

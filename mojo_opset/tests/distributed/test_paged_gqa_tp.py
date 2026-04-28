@@ -199,7 +199,7 @@ class FlashAttentionBlock(torch.nn.Module):
         context_shifts: torch.Tensor = None,
         decode_kv_len: torch.Tensor = None,
         context_cu_seqs: torch.Tensor = None,
-        max_seqlen_q: torch.Tensor = None,
+        max_q_lens: torch.Tensor = None,
         kv_cache: SimplePagedKVCache = None,
     ):
         # dist_breakpoint()
@@ -216,7 +216,7 @@ class FlashAttentionBlock(torch.nn.Module):
         k = self.rms_norms.key(k)
 
         if self.rope:
-            cos, sin = self.rot_pos_emb(hidden_states, cu_seqlens_q=context_cu_seqs, total_seq_lens=context_shifts + context_input_len)
+            cos, sin = self.rot_pos_emb(hidden_states, cu_q_lens=context_cu_seqs, total_seq_lens=context_shifts + context_input_len)
             q, k = self.rope(
                 q,
                 k,
@@ -243,7 +243,7 @@ class FlashAttentionBlock(torch.nn.Module):
                 context_cu_seqs,
                 kv_cache.block_tables[self.layer_id],
                 self.scale_factor,
-                cu_total_seqlens=torch.nn.functional.pad(
+                cu_total_seq_lens=torch.nn.functional.pad(
                     (context_shifts + context_input_len).cumsum(0, dtype=torch.int32),
                     (1, 0),
                 ),

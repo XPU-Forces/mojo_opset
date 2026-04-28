@@ -27,7 +27,7 @@ class TorchNpuPrefillGQA(MojoPrefillGQA, default_priority=0):
         query: torch.Tensor,
         k_cache: torch.Tensor,
         v_cache: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
+        cu_q_lens: torch.Tensor,
         softmax_scale: Optional[float] = None,
     ) -> torch.Tensor:
         
@@ -40,7 +40,7 @@ class TorchNpuPrefillGQA(MojoPrefillGQA, default_priority=0):
 
         if block_size % 128 != 0 or block_size > 512:
             # high performance attention kernel only supports block_size % 128 == 0 and block_size <= 512
-            return super().forward(query, k_cache, v_cache, cu_seqlens_q, softmax_scale)
+            return super().forward(query, k_cache, v_cache, cu_q_lens, softmax_scale)
 
         if softmax_scale is None:
             softmax_scale = head_dim**-0.5
@@ -49,7 +49,7 @@ class TorchNpuPrefillGQA(MojoPrefillGQA, default_priority=0):
             query=query,
             key=k_cache,
             value=v_cache,
-            actual_seq_lengths=cu_seqlens_q,
+            actual_seq_lengths=cu_q_lens,
             num_heads=num_q_heads,
             input_layout="BSND",
             scale=softmax_scale,
@@ -76,26 +76,26 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
         query: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
+        cu_q_lens: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
-        cu_total_seqlens: Optional[torch.Tensor] = None,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        max_seqlen_q: Optional[int] = None,
-        max_total_seqlen: Optional[int] = None,
+        max_q_lens: Optional[int] = None,
+        max_total_seq_lens: Optional[int] = None,
     ) -> torch.Tensor:
-        assert_paged_prefill_contract(cu_seqlens_q, block_tables, cu_total_seqlens)
+        assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
         _, num_q_heads, head_dim = query.shape
         _, num_kv_heads, block_size, _ = key_cache.shape
         total_seq_lens = (
-            cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-            if cu_total_seqlens is None
-            else cu_total_seqlens[1:] - cu_total_seqlens[:-1]
+            cu_q_lens[1:] - cu_q_lens[:-1]
+            if cu_total_seq_lens is None
+            else cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
         )
         
         if head_dim % 128 != 0:
             raise NotImplementedError(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
-        if cu_total_seqlens is not None:
+        if cu_total_seq_lens is not None:
             raise NotImplementedError("NPU kernel npu_fused_infer_attention_score currently does not support TND layout with sparse_mode=3 (Page Attention), raising RuntimeError: call aclnnFusedInferAttentionScoreV3 failed.")
 
 
@@ -105,13 +105,13 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
                 query=query,
                 key_cache=key_cache,
                 value_cache=value_cache,
-                cu_seqlens_q=cu_seqlens_q,
+                cu_q_lens=cu_q_lens,
                 block_tables=block_tables,
                 softmax_scale=softmax_scale,
-                cu_total_seqlens=cu_total_seqlens,
+                cu_total_seq_lens=cu_total_seq_lens,
                 mask=mask,
-                max_seqlen_q=max_seqlen_q,
-                max_total_seqlen=max_total_seqlen,
+                max_q_lens=max_q_lens,
+                max_total_seq_lens=max_total_seq_lens,
             )
 
         if softmax_scale is None:
@@ -126,7 +126,7 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
             block_table=block_tables,
             input_layout="TND",
             block_size=block_size,
-            actual_seq_lengths=cu_seqlens_q[1:],
+            actual_seq_lengths=cu_q_lens[1:],
             actual_seq_lengths_kv=total_seq_lens,
             num_key_value_heads=num_kv_heads,
             num_heads=num_q_heads,

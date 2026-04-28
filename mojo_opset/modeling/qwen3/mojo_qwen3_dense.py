@@ -258,10 +258,10 @@ class Qwen3Attention(nn.Module):
 
         if q_len > 1:
             q_lens = torch.full((bsz,), q_len, dtype=torch.int32, device=device)
-            cu_seqlens_q = torch.cat(
+            cu_q_lens = torch.cat(
                 [torch.tensor([0], device=device, dtype=torch.int32), q_lens.cumsum(0, dtype=torch.int32)]
             )
-            total_tokens = cu_seqlens_q[-1].item()
+            total_tokens = cu_q_lens[-1].item()
 
             q = query_states.permute(0, 2, 1, 3).reshape(total_tokens, num_q_heads, head_dim)
 
@@ -277,10 +277,10 @@ class Qwen3Attention(nn.Module):
                 q,
                 k_cache,
                 v_cache,
-                cu_seqlens_q,
+                cu_q_lens,
                 block_tables,
                 self.scaling,
-                cu_total_seqlens=current_seq_lens,
+                cu_total_seq_lens=current_seq_lens,
             )
             attn_output = attn_output_tnd.reshape(bsz, q_len, num_q_heads, head_dim)
             attn_output = attn_output.transpose(1, 2)

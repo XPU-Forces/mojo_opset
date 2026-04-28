@@ -17,17 +17,17 @@ def generate_paged_prefill_data(
 ):
     q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
     q_lens = torch.clamp(q_lens, min=1)
-    cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0, dtype=torch.int32)])
+    cu_q_lens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0, dtype=torch.int32)])
 
     if max_kv_computed_len <= 0:
         kv_cache_lens = torch.zeros_like(q_lens)
     else:
         kv_cache_lens = torch.randint(max_kv_computed_len // 2, max_kv_computed_len, (batch_size,), dtype=torch.int32)
     kv_lens = q_lens + kv_cache_lens
-    cu_total_seqlens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0, dtype=torch.int32)])
+    cu_total_seq_lens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0, dtype=torch.int32)])
 
-    total_q_tokens = cu_seqlens_q[-1].item()
-    total_kv_tokens = cu_total_seqlens[-1].item()
+    total_q_tokens = cu_q_lens[-1].item()
+    total_kv_tokens = cu_total_seq_lens[-1].item()
 
     query = torch.randn(total_q_tokens, num_q_heads, head_dim, dtype=dtype)
     k_unpadded = torch.randn(total_kv_tokens, num_kv_heads, head_dim, dtype=dtype)
@@ -50,7 +50,7 @@ def generate_paged_prefill_data(
     current_block_offset = 0
     for i in range(batch_size):
         seq_len = kv_lens[i].item()
-        start_loc = cu_total_seqlens[i].item()
+        start_loc = cu_total_seq_lens[i].item()
 
         num_blocks_for_seq = (seq_len + block_size - 1) // block_size
         assigned_blocks = free_blocks[current_block_offset : current_block_offset + num_blocks_for_seq]
@@ -70,7 +70,7 @@ def generate_paged_prefill_data(
             k_cache[physical_block_id, :, :tokens_in_block, :] = k_slice
             v_cache[physical_block_id, :, :tokens_in_block, :] = v_slice
 
-    return query, k_cache, v_cache, cu_seqlens_q, kv_lens, block_tables
+    return query, k_cache, v_cache, cu_q_lens, kv_lens, block_tables
 
 
 test_configs = [
@@ -79,7 +79,7 @@ test_configs = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_seqlens_q, total_seq_lens, block_tables",
+    "query, k_cache, v_cache, cu_q_lens, total_seq_lens, block_tables",
     [
         pytest.param(
             *generate_paged_prefill_data(
@@ -102,7 +102,7 @@ def test_paged_attention_prefill(
     query: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
+    cu_q_lens: torch.Tensor,
     total_seq_lens: torch.Tensor,
     block_tables: torch.Tensor,
 ):
@@ -111,7 +111,7 @@ def test_paged_attention_prefill(
 
     torch.library.opcheck(
         torch.ops.ttx.paged_attention_prefill,
-        (query, k_cache, v_cache, cu_seqlens_q, total_seq_lens, block_tables, softmax_scale),
+        (query, k_cache, v_cache, cu_q_lens, total_seq_lens, block_tables, softmax_scale),
     )
 
 
