@@ -1,5 +1,3 @@
-from typing import Optional
-
 import torch
 import torch_npu
 
@@ -21,13 +19,8 @@ class TorchNpuGemmDequant(MojoGemmDequant):
 
     supported_platforms_list = ["npu"]
 
-    def forward(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        input_scale: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def forward(self, input: torch.Tensor, input_scale: torch.Tensor) -> torch.Tensor:
+        weight = self.weight
         if self.trans_weight:
             weight = weight.t().contiguous()
 
@@ -36,7 +29,6 @@ class TorchNpuGemmDequant(MojoGemmDequant):
             weight,
             self.weight_scale.flatten(),
             pertoken_scale=input_scale.flatten(),
-            bias=bias,
             output_dtype=self.output_dtype,
         )
 

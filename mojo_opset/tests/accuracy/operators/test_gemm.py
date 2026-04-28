@@ -4,18 +4,24 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from mojo_opset.tests.utils import auto_switch_platform, bypass_not_implemented, get_platform, get_torch_device
-
-from mojo_opset import MojoGemmDequant, MojoLinear, MojoGroupLinear, MojoQuantGroupLinearReduceSum
+from mojo_opset import MojoGemmDequant
+from mojo_opset import MojoGroupLinear
+from mojo_opset import MojoLinear
+from mojo_opset import MojoQuantGroupLinearReduceSum
+from mojo_opset.tests.utils import auto_switch_platform
+from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.tests.utils import get_platform
+from mojo_opset.tests.utils import get_torch_device
 
 torch.manual_seed(42)
 
 dtypes = [torch.float16, torch.bfloat16]
 
 
-def _load_gemm_dequant_params(module, weight_scale):
+def _load_gemm_dequant_module(module, weight, weight_scale):
     module.load_state_dict(
         {
+            "weight": weight,
             "weight_scale": weight_scale,
         },
         strict=False,
@@ -49,7 +55,8 @@ def test_gemm(m, k, n, dtype, bias):
 # MojoGemmDequant
 # ===========================================================================
 
-def _make_int8_gemm_data(m, k, n, output_dtype, trans_weight, has_bias):
+
+def _make_int8_gemm_data(m, k, n, trans_weight):
     """Create quantised input/weight pairs with corresponding scales.
 
     Returns weight in (N, K) layout when trans_weight=True, (K, N) otherwise.
@@ -68,9 +75,7 @@ def _make_int8_gemm_data(m, k, n, output_dtype, trans_weight, has_bias):
     else:
         w_i8 = w_i8_nk.t().contiguous()
 
-    bias = torch.randn(n, dtype=output_dtype) if has_bias else None
-
-    return x_i8, w_i8, x_scale, w_scale, bias
+    return x_i8, w_i8, x_scale, w_scale
 
 
 @pytest.mark.parametrize(
@@ -83,66 +88,66 @@ def _make_int8_gemm_data(m, k, n, output_dtype, trans_weight, has_bias):
 )
 @pytest.mark.parametrize("output_dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("trans_weight", [False, True])
-@pytest.mark.parametrize("has_bias", [False, True])
 @bypass_not_implemented
-def test_gemm_dequant(m, k, n, output_dtype, trans_weight, has_bias):
+def test_gemm_dequant(m, k, n, output_dtype, trans_weight):
     """Verify torch reference against manual calculation (exact match)."""
-    x_i8, w_i8, x_scale, w_scale, bias = _make_int8_gemm_data(
-        m, k, n, output_dtype, trans_weight, has_bias,
-    )
+    x_i8, w_i8, x_scale, w_scale = _make_int8_gemm_data(m, k, n, trans_weight)
 
     op = MojoGemmDequant._registry.get("torch")(
-        weight_scale_size=n,
+        in_features=k,
+        out_features=n,
         output_dtype=output_dtype,
         trans_weight=trans_weight,
     )
-    op = _load_gemm_dequant_params(op, w_scale)
-    out = op(x_i8, w_i8, x_scale, bias)
+    op = _load_gemm_dequant_module(op, w_i8, w_scale)
+    out = op(x_i8, x_scale)
 
     w_for_mm = w_i8.t().contiguous() if trans_weight else w_i8
     ref = (x_i8.float() @ w_for_mm.float()) * x_scale.unsqueeze(-1) * w_scale.unsqueeze(0)
-    if bias is not None:
-        ref = ref + bias.float()
     ref = ref.to(output_dtype)
     torch.testing.assert_close(out, ref, atol=0, rtol=0)
 
 
 @bypass_not_implemented
-def test_gemm_dequant_no_bias():
-    """Verify torch reference output without bias (exact match)."""
+def test_gemm_dequant_registered_weight():
+    """Verify torch reference consumes registered weight (exact match)."""
     m, k, n = 64, 512, 256
-    x_i8, w_i8, x_scale, w_scale, _ = _make_int8_gemm_data(
-        m, k, n, torch.bfloat16, False, False,
-    )
+    x_i8, w_i8, x_scale, w_scale = _make_int8_gemm_data(m, k, n, False)
 
     op = MojoGemmDequant._registry.get("torch")(
-        weight_scale_size=n,
+        in_features=k,
+        out_features=n,
         output_dtype=torch.bfloat16,
     )
-    op = _load_gemm_dequant_params(op, w_scale)
-    out = op(x_i8, w_i8, x_scale)
+    op = _load_gemm_dequant_module(op, w_i8, w_scale)
+    out = op(x_i8, x_scale)
 
     ref = (x_i8.float() @ w_i8.float()) * x_scale.unsqueeze(-1) * w_scale.unsqueeze(0)
     ref = ref.to(torch.bfloat16)
     torch.testing.assert_close(out, ref, atol=0, rtol=0)
 
 
-def test_gemm_dequant_weight_scale_is_parameter():
+def test_gemm_dequant_parameters_are_registered():
     op = MojoGemmDequant._registry.get("torch")(
-        weight_scale_size=8,
+        in_features=16,
+        out_features=8,
         output_dtype=torch.bfloat16,
     )
 
+    assert "weight" not in dict(op.named_buffers())
     assert "weight_scale" not in dict(op.named_buffers())
-    assert not hasattr(op, "input_scale")
     assert isinstance(op.weight_scale, torch.nn.Parameter)
+    assert isinstance(op.weight, torch.nn.Parameter)
+    assert op.weight.dtype == torch.int8
     assert op.weight_scale.shape == (8,)
-    assert set(op.state_dict()) == {"weight_scale"}
+    assert op.weight.shape == (16, 8)
+    assert set(op.state_dict()) == {"weight", "weight_scale"}
 
 
 # ===========================================================================
 # MojoGemmDequant — backend vs torch reference
 # ===========================================================================
+
 
 @pytest.mark.parametrize(
     "m, k, n",
@@ -154,33 +159,33 @@ def test_gemm_dequant_weight_scale_is_parameter():
 )
 @pytest.mark.parametrize("output_dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("trans_weight", [False, True])
-@pytest.mark.parametrize("has_bias", [False, True])
 @bypass_not_implemented
 @auto_switch_platform()
-def test_gemm_dequant_backend(m, k, n, output_dtype, trans_weight, has_bias):
+def test_gemm_dequant_backend(m, k, n, output_dtype, trans_weight):
     """Compare active backend against the torch reference via forward_diff_with."""
-    x_i8, w_i8, x_scale, w_scale, bias = _make_int8_gemm_data(
-        m, k, n, output_dtype, trans_weight, has_bias,
-    )
+    x_i8, w_i8, x_scale, w_scale = _make_int8_gemm_data(m, k, n, trans_weight)
 
     op = MojoGemmDequant(
-        weight_scale_size=n,
+        in_features=k,
+        out_features=n,
         output_dtype=output_dtype,
         trans_weight=trans_weight,
     )
-    op = _load_gemm_dequant_params(op, w_scale)
+    op = _load_gemm_dequant_module(op, w_i8, w_scale)
     op_ref = MojoGemmDequant._registry.get("torch")(
-        weight_scale_size=n,
+        in_features=k,
+        out_features=n,
         output_dtype=output_dtype,
         trans_weight=trans_weight,
     )
-    op_ref = _load_gemm_dequant_params(op_ref, w_scale.clone())
-    op.forward_diff_with(op_ref, x_i8, w_i8, x_scale, bias, mixed_tol=True)
+    op_ref = _load_gemm_dequant_module(op_ref, w_i8.clone(), w_scale.clone())
+    op.forward_diff_with(op_ref, x_i8, x_scale, mixed_tol=True)
 
 
 # ===========================================================================
 # MojoGemmDequant — TTX backend vs torch reference
 # ===========================================================================
+
 
 @pytest.mark.parametrize(
     "m, k, n",
@@ -195,32 +200,33 @@ def test_gemm_dequant_backend(m, k, n, output_dtype, trans_weight, has_bias):
 )
 @pytest.mark.parametrize("output_dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("trans_weight", [False, True])
-@pytest.mark.parametrize("has_bias", [False, True])
 @bypass_not_implemented
 @auto_switch_platform()
-def test_gemm_dequant_ttx(m, k, n, output_dtype, trans_weight, has_bias):
+def test_gemm_dequant_ttx(m, k, n, output_dtype, trans_weight):
     """Compare TTX (Triton) backend explicitly against the torch reference."""
-    x_i8, w_i8, x_scale, w_scale, bias = _make_int8_gemm_data(
-        m, k, n, output_dtype, trans_weight, has_bias,
-    )
+    x_i8, w_i8, x_scale, w_scale = _make_int8_gemm_data(m, k, n, trans_weight)
 
     op = MojoGemmDequant._registry.get("ttx")(
-        weight_scale_size=n,
+        in_features=k,
+        out_features=n,
         output_dtype=output_dtype,
         trans_weight=trans_weight,
     )
-    op = _load_gemm_dequant_params(op, w_scale)
+    op = _load_gemm_dequant_module(op, w_i8, w_scale)
     op_ref = MojoGemmDequant._registry.get("torch")(
-        weight_scale_size=n,
+        in_features=k,
+        out_features=n,
         output_dtype=output_dtype,
         trans_weight=trans_weight,
     )
-    op_ref = _load_gemm_dequant_params(op_ref, w_scale.clone())
-    op.forward_diff_with(op_ref, x_i8, w_i8, x_scale, bias, mixed_tol=True)
+    op_ref = _load_gemm_dequant_module(op_ref, w_i8.clone(), w_scale.clone())
+    op.forward_diff_with(op_ref, x_i8, x_scale, mixed_tol=True)
+
 
 # ===========================================================================
 # MojoGroupLinear
 # ===========================================================================
+
 
 def generate_random_list(length, total_sum):
     avg = total_sum // length
