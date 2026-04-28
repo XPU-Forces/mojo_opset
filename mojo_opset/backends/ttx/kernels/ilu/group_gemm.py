@@ -39,48 +39,80 @@ def grouped_launch_diagonal(pid, num_pid_m, num_pid_n, BLOCK_TRESHHOLD: tl.const
     return task_m_idx, task_n_idx
 
 
+def m_grouped_matmul_autotune_config():
+    configs = []
+    for BM, BN, nw in [
+        (64, 64, 4), (64, 128, 4), (128, 64, 4),
+        (128, 128, 8), (128, 256, 8), (256, 128, 8),
+    ]:
+        for BK in [32, 64, 128]:
+            for ns in [2, 3]:
+                configs.append(triton.Config(
+                    {"BLOCK_M": BM, "BLOCK_N": BN, "BLOCK_K": BK},
+                    num_warps=nw, num_stages=ns,
+                ))
+    return configs
+
+
+@triton.autotune(configs=m_grouped_matmul_autotune_config(), key=["N", "K", "MAX_M"])
 @triton.jit
-def _group_matmul_kernel(
+def _m_grouped_matmul_kernel(
     A,
     B,
     C,
-    M,
-    N,
-    K,
-    stride_am,
-    stride_ak,
-    stride_bk,
-    stride_bn,
-    stride_cm,
-    stride_cn,
+    group_offsets_ptr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    MAX_M,
+    stride_bg,
+    strideBK,
+    strideBN,
+    TRANS_B: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    pid = tl.program_id(axis=0)
-    num_pid_n = tl.cdiv(N, BLOCK_N)
-    pid_m = pid // num_pid_n
-    pid_n = pid % num_pid_n
+    n_tile_id = tl.program_id(0)
+    m_tile_id = tl.program_id(1)
+    group_id = tl.program_id(2)
 
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    if m_tile_id * BLOCK_M >= MAX_M:
+        return
+
+    group_start = tl.load(group_offsets_ptr + group_id).to(tl.int32)
+    group_end = tl.load(group_offsets_ptr + group_id + 1).to(tl.int32)
+    m_g = group_end - group_start
+
+    if m_tile_id * BLOCK_M >= m_g:
+        return
+
+    offs_m = group_start + m_tile_id * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = n_tile_id * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, BLOCK_K)
 
-    a_ptrs = A + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
-    b_ptrs = B + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
+    a_ptrs = A + offs_m[:, None] * K + offs_k[None, :]
+    b_base = B + group_id * stride_bg
+    if TRANS_B:
+        b_ptrs = b_base + offs_n[:, None] * strideBN + offs_k[None, :] * strideBK
+    else:
+        b_ptrs = b_base + offs_k[:, None] * strideBK + offs_n[None, :] * strideBN
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
     for k0 in range(0, tl.cdiv(K, BLOCK_K)):
         k_mask = offs_k < (K - k0 * BLOCK_K)
-        a = tl.load(a_ptrs, mask=(offs_m[:, None] < M) & k_mask[None, :], other=0.0)
-        b = tl.load(b_ptrs, mask=k_mask[:, None] & (offs_n[None, :] < N), other=0.0)
+        a = tl.load(a_ptrs, mask=(offs_m[:, None] < group_end) & k_mask[None, :], other=0.0)
+        if TRANS_B:
+            b = tl.load(b_ptrs, mask=(offs_n[:, None] < N) & k_mask[None, :], other=0.0)
+            b = tl.trans(b)
+        else:
+            b = tl.load(b_ptrs, mask=k_mask[:, None] & (offs_n[None, :] < N), other=0.0)
         acc = tl.dot(a, b, acc=acc)
-        a_ptrs += BLOCK_K * stride_ak
-        b_ptrs += BLOCK_K * stride_bk
+        a_ptrs += BLOCK_K
+        b_ptrs += BLOCK_K * strideBK
 
     c = acc.to(C.dtype.element_ty)
-    c_ptrs = C + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
-    c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    c_ptrs = C + offs_m[:, None] * N + offs_n[None, :]
+    c_mask = (offs_m[:, None] < group_end) & (offs_n[None, :] < N)
     tl.store(c_ptrs, c, mask=c_mask)
 
 
@@ -97,112 +129,98 @@ def m_grouped_matmul_impl(
     strideBK: int,
     trans_b: bool = False,
 ) -> torch.Tensor:
-    """Per-group matmul via ``_group_matmul_kernel`` (Triton).
+    cum = size_per_group.cumsum(0, dtype=torch.int32)
+    group_offsets = torch.zeros(num_groups + 1, dtype=torch.int32, device=A.device)
+    group_offsets[1:] = cum
+    max_m = size_per_group.max().item()
 
-    ``trans_b`` matches ``TTXGroupGemm`` (``not trans_weight``): weight storage is ``(G, K, N)``
-    when True and ``(G, N, K)`` when False. Each group uses ``B_g`` with shape ``(K, N)``.
-    ``strideBN`` / ``strideBK`` match the NPU/TTX custom-op signature but are unused here
-    (strides come from ``A_g`` / ``B_g`` slices).
-    """
-    _ = (strideBN, strideBK, num_groups, M)
-    BLOCK_M = 64
-    BLOCK_N = 64
-    BLOCK_K = 32
-
-    group_start = size_per_group.cumsum(0) - size_per_group
-    group_end = size_per_group.cumsum(0)
-    for g, (start, end) in enumerate(zip(group_start.tolist(), group_end.tolist())):
-        m_g = end - start
-        if m_g <= 0:
-            continue
-
-        A_g = A.narrow(0, start, m_g)
-        if trans_b:
-            B_g = B[g]
-        else:
-            B_g = B[g].transpose(0, 1).contiguous()
-        C_g = C.narrow(0, start, m_g)
-        grid = (triton.cdiv(m_g, BLOCK_M) * triton.cdiv(N, BLOCK_N),)
-        _group_matmul_kernel[grid](
-            A_g,
-            B_g,
-            C_g,
-            m_g,
-            N,
-            K,
-            A_g.stride(0),
-            A_g.stride(1),
-            B_g.stride(0),
-            B_g.stride(1),
-            C_g.stride(0),
-            C_g.stride(1),
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            BLOCK_K=BLOCK_K,
+    def grid(META):
+        return (
+            triton.cdiv(N, META["BLOCK_N"]),
+            triton.cdiv(max_m, META["BLOCK_M"]),
+            num_groups,
         )
+
+    _m_grouped_matmul_kernel[grid](
+        A,
+        B,
+        C,
+        group_offsets,
+        N,
+        K,
+        max_m,
+        B.stride(0),
+        strideBK,
+        strideBN,
+        trans_b,
+    )
     return C
 
 
+def k_grouped_matmul_autotune_config():
+    configs = []
+    for BM, BN, nw in [
+        (64, 64, 4), (64, 128, 4), (128, 64, 4),
+        (128, 128, 8), (128, 256, 8), (256, 128, 8),
+    ]:
+        for BK in [32, 64, 128]:
+            for ns in [2, 3]:
+                configs.append(triton.Config(
+                    {"BLOCK_M": BM, "BLOCK_N": BN, "BLOCK_K": BK},
+                    num_warps=nw, num_stages=ns,
+                ))
+    return configs
+
+
+@triton.autotune(configs=k_grouped_matmul_autotune_config(), key=["M", "N"])
 @triton.jit
 def _k_grouped_matmul_kernel(
     A,
     B,
     C,
-    group_size_ptr,
-    num_groups: tl.constexpr,
+    group_offsets_ptr,
     M: tl.constexpr,
     N: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    BLOCK_TRESHHOLD: tl.constexpr,
 ):
-    total_cores = tl.num_programs(axis=0)
-    core_idx = tl.program_id(axis=0)
-    last_count = 0
-    group_start = 0
-    group_end = 0
-    num_block_m = tl.cdiv(M, BLOCK_M)
-    num_block_n = tl.cdiv(N, BLOCK_N)
-    blocks_per_group = num_block_m * num_block_n
-    # group_size_k = tl.load(group_size_ptr + tl.arange(0, num_groups)).to(tl.int32)
-    for group_idx in range(num_groups):
-        # k = tl.extract_slice(group_size_k, [group_idx], [1], [1])
-        tokens = tl.load(group_size_ptr + group_idx).to(tl.int32)
-        group_end = group_start + tokens
-        cur_count = last_count + blocks_per_group
-        cur_block = core_idx if core_idx >= last_count else (core_idx + total_cores)
-        for cur_block in range(cur_block, cur_count, total_cores):
-            task_m_idx, task_n_idx = grouped_launch_diagonal(
-                cur_block - last_count, num_block_m, num_block_n, BLOCK_TRESHHOLD
-            )
-            # matmul begin
-            offs_am = task_m_idx * BLOCK_M + tl.arange(0, BLOCK_M)
-            offs_bn = task_n_idx * BLOCK_N + tl.arange(0, BLOCK_N)
-            offs_k = group_start + tl.arange(0, BLOCK_K)
-            a_ptrs_base = A + offs_k[:, None] * M + offs_am[None, :]
-            b_ptrs_base = B + offs_k[:, None] * N + offs_bn[None, :]
-            msk_m = offs_am < M
-            msk_n = offs_bn < N
-            accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-            for kk in tl.range(0, tl.cdiv(tokens, BLOCK_K)):
-                a_ptrs = a_ptrs_base + kk * BLOCK_K * M
-                b_ptrs = b_ptrs_base + kk * BLOCK_K * N
-                a = tl.load(a_ptrs, mask=(offs_k[:, None] < group_end - kk * BLOCK_K) and msk_m[None, :], other=0.0)
-                aa = tl.trans(a)
-                b = tl.load(b_ptrs, mask=(offs_k[:, None] < group_end - kk * BLOCK_K) and msk_n[None, :], other=0.0)
-                accumulator = tl.dot(aa, b, acc=accumulator)
+    n_tile_id = tl.program_id(0)
+    m_tile_id = tl.program_id(1)
+    group_id = tl.program_id(2)
 
-            c = accumulator.to(C.dtype.element_ty)
-            offs_cm = group_idx * M + task_m_idx * BLOCK_M + tl.arange(0, BLOCK_M)
-            offs_cn = task_n_idx * BLOCK_N + tl.arange(0, BLOCK_N)
-            c_ptrs = C + offs_cm[:, None] * N + offs_cn[None, :]
-            c_mask = (offs_cm[:, None] < (group_idx + 1) * M) and (offs_cn[None, :] < N)
-            tl.store(c_ptrs, c, mask=c_mask)
-            # matmul_end
-            # cur_block = cur_block + total_cores
-        last_count = cur_count % total_cores
-        group_start = group_end
+    group_start = tl.load(group_offsets_ptr + group_id).to(tl.int32)
+    group_end = tl.load(group_offsets_ptr + group_id + 1).to(tl.int32)
+    k_g = group_end - group_start
+
+    offs_m = m_tile_id * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = n_tile_id * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    msk_m = offs_m < M
+    msk_n = offs_n < N
+
+    # A: [total_K, M] row-major, load [BLOCK_K, BLOCK_M] then transpose
+    a_ptrs = A + (group_start + offs_k)[:, None] * M + offs_m[None, :]
+    # B: [total_K, N] row-major, load [BLOCK_K, BLOCK_N]
+    b_ptrs = B + (group_start + offs_k)[:, None] * N + offs_n[None, :]
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    num_k_iters = (k_g + BLOCK_K - 1) // BLOCK_K
+
+    for k0 in tl.range(0, num_k_iters):
+        k_mask = offs_k < (k_g - k0 * BLOCK_K)
+        a = tl.load(a_ptrs, mask=k_mask[:, None] & msk_m[None, :], other=0.0)
+        a = tl.trans(a)
+        b = tl.load(b_ptrs, mask=k_mask[:, None] & msk_n[None, :], other=0.0)
+        acc = tl.dot(a, b, acc=acc)
+        a_ptrs += BLOCK_K * M
+        b_ptrs += BLOCK_K * N
+
+    c = acc.to(C.dtype.element_ty)
+    offs_cm = group_id * M + offs_m
+    c_ptrs = C + offs_cm[:, None] * N + offs_n[None, :]
+    c_mask = msk_m[:, None] & msk_n[None, :]
+    tl.store(c_ptrs, c, mask=c_mask)
 
 
 def k_grouped_matmul_impl(
@@ -214,28 +232,16 @@ def k_grouped_matmul_impl(
     M: int,
     N: int,
 ) -> torch.Tensor:
-    BLOCK_M = 64
-    BLOCK_N = 64
-    BLOCK_K = 64
-    BLOCK_TRESHHOLD = 4
+    cum = size_per_group.cumsum(0, dtype=torch.int32)
+    group_offsets = torch.zeros(num_groups + 1, dtype=torch.int32, device=A.device)
+    group_offsets[1:] = cum
 
-    n_tiles = num_groups * triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N)
-    if n_tiles == 0:
-        return C
-    BLOCK = max(1, triton.cdiv(n_tiles, _TARGET_GRID_PROGRAMS))
-    grid = (triton.cdiv(n_tiles, BLOCK),)
+    def grid(META):
+        return (
+            triton.cdiv(N, META["BLOCK_N"]),
+            triton.cdiv(M, META["BLOCK_M"]),
+            num_groups,
+        )
 
-    _k_grouped_matmul_kernel[grid](
-        A,
-        B,
-        C,
-        size_per_group,
-        num_groups,
-        M,
-        N,
-        BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N,
-        BLOCK_K=BLOCK_K,
-        BLOCK_TRESHHOLD=BLOCK_TRESHHOLD,
-    )
+    _k_grouped_matmul_kernel[grid](A, B, C, group_offsets, M, N)
     return C
