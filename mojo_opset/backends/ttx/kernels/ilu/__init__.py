@@ -19,6 +19,7 @@ from .group_gemm import m_grouped_matmul_impl
 from .quant_batch_gemm_reduce_sum import quant_batch_gemm_reduce_sum_impl
 from .int8_gemm import int8_gemm_dequant_impl
 from .int8_gemm import prepare_b_impl
+from .quant import dynamic_quant_impl
 from .kv_cache import store_kv_cache_impl
 from .kv_cache import store_paged_kv_impl
 from .layernorm import layernorm_bwd_impl
@@ -47,6 +48,7 @@ from .store_lowrank import store_label_cache_infer_impl
 from .swiglu import swiglu_fwd_impl
 from .swa import swa_infer_impl
 from .swa import swa_paged_prefill_impl
+from .swa import swa_paged_prefill_quant_impl
 from .swa import swa_paged_decode_impl
 from .swa import swa_paged_decode_quant_impl
 from .quant import dequant_impl
@@ -69,6 +71,7 @@ __all__ = [
     "quant_batch_gemm_reduce_sum_impl",
     "int8_gemm_dequant_impl",
     "prepare_b_impl",
+    "dynamic_quant_impl",
     "store_kv_cache_impl",
     "store_paged_kv_impl",
     "relative_embedding_fwd_impl",
@@ -94,6 +97,7 @@ __all__ = [
     "sdpa_bwd_impl",
     "swa_infer_impl",
     "swa_paged_prefill_impl",
+    "swa_paged_prefill_quant_impl",
     "silu_bwd_impl",
     "silu_fwd_impl",
     # "swiglu_bwd_impl",

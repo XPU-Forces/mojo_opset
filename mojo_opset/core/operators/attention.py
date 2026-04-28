@@ -1446,6 +1446,186 @@ class MojoPagedPrefillSWA(MojoOperator):
         return o
 
 
+def _swa_dynamic_quantize(tensor, qmax, qmin, quant_dtype):
+    """Per-row symmetric dynamic quantization used by the SWA quant reference impl."""
+    amax = tensor.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)
+    scale = amax / qmax
+    scale = torch.where(scale < 1e-6, torch.ones_like(scale), scale)
+
+    tensor_scaled = tensor / scale
+    tensor_quant = tensor_scaled.round().clamp(qmin, qmax).to(quant_dtype)
+
+    scale = scale.view(*tensor.shape[:-1], 1)
+    return tensor_quant, scale
+
+
+class MojoPagedPrefillQuantSWA(MojoOperator):
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+        global_window_size: Optional[int] = None,
+        local_window_size: Optional[int] = None,
+        quant_dtype: torch.dtype = torch.int8,
+    ):
+        """
+        Paged Prefill SWA attention with quantized Q@K and P@V matmuls.
+
+        KV cache is stored as int8 with per-channel scales; the reference path
+        dequantizes (k_int8 * k_qscale) before the QK GEMM, then re-quantizes
+        the softmax probability before the PV GEMM, matching the kernel-side
+        ``_swa_paged_prefill_quant_kernel`` algorithm.
+
+        Args:
+            is_causal: Whether to enable causal masking. Window args are only
+                effective when ``is_causal=True``.
+            gqa_layout: GQA head grouping layout, ``"ABAB"`` or ``"AABB"``.
+            global_window_size: Global attention window length; ``None`` means
+                no global window. Only effective when ``is_causal=True``.
+            local_window_size: Local attention window length; ``None`` means no
+                local window. Only effective when ``is_causal=True``.
+            quant_dtype: Quant matmul dtype for Q@K and P@V; only ``torch.int8``
+                is currently supported.
+        """
+        super().__init__()
+
+        if gqa_layout not in ["ABAB", "AABB"]:
+            raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
+
+        self.is_causal = is_causal
+        self.gqa_layout = gqa_layout
+        self.gqa_interleave = gqa_layout == "ABAB"
+        self.global_window_size = global_window_size
+        self.local_window_size = local_window_size
+        self.quant_dtype = quant_dtype
+        if self.quant_dtype == torch.int8:
+            bits = 8
+            self.qmax = 2 ** (bits - 1) - 1
+            self.qmin = -(2 ** (bits - 1))
+        else:
+            raise NotImplementedError(f"quant_dtype {self.quant_dtype} is not supported")
+
+    def forward(
+        self,
+        q: torch.Tensor,            # [total_q_len, n_q_heads, head_dim]   bf16/fp16
+        k_cache: torch.Tensor,      # [n_pages, n_kv_heads, page_size, head_dim] int8
+        k_qscale: torch.Tensor,     # [n_kv_heads, head_dim]               float32
+        v_cache: torch.Tensor,      # [n_pages, n_kv_heads, page_size, head_dim] int8
+        v_qscale: torch.Tensor,     # [n_kv_heads, head_dim]               float32
+        cu_seqlens_q: torch.Tensor, # [bsz + 1]                            int32
+        block_table: torch.Tensor,  # [bsz, max_num_blocks]                int32
+        softmax_scale: Optional[float] = None,
+        seqlens_kv: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Reference implementation of paged prefill SWA with int8 KV cache.
+
+        See the class-level docstring for the dataflow. Note: when
+        ``is_causal=False`` the window args are ignored, matching the
+        non-quant ``MojoPagedPrefillSWA`` semantics.
+        """
+        assert_paged_prefill_contract(cu_seqlens_q, block_table, seqlens_kv)
+        total_q_len, n_q_heads, head_dim = q.shape
+        _, n_kv_heads, page_size, _ = k_cache.shape
+        if softmax_scale is None:
+            softmax_scale = 1.0 / (head_dim**0.5)
+
+        if seqlens_kv is None:
+            seqlens_kv = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+
+        # Replicate per-channel scales out to the query head count so that the
+        # downstream per-head broadcast over (q_seq_len, head_dim) is trivial.
+        if n_q_heads != n_kv_heads:
+            if self.gqa_interleave:
+                k_qscale_h = k_qscale.repeat((n_q_heads // n_kv_heads, 1))
+                v_qscale_h = v_qscale.repeat((n_q_heads // n_kv_heads, 1))
+            else:
+                k_qscale_h = k_qscale.repeat_interleave(n_q_heads // n_kv_heads, dim=0)
+                v_qscale_h = v_qscale.repeat_interleave(n_q_heads // n_kv_heads, dim=0)
+        else:
+            k_qscale_h = k_qscale
+            v_qscale_h = v_qscale
+
+        o = torch.empty_like(q)
+        bsz = cu_seqlens_q.shape[0] - 1
+        for i in range(bsz):
+            q_i = q[cu_seqlens_q[i] : cu_seqlens_q[i + 1]]
+            q_seq_len = q_i.shape[0]
+            if q_seq_len == 0:
+                continue
+            q_i = q_i.permute(1, 0, 2)  # -> [n_q_heads, q_seq_len, head_dim]
+
+            kv_seq_len = seqlens_kv[i].item()
+            if kv_seq_len <= 0:
+                continue
+            if block_table[i, 0].item() < 0:
+                raise ValueError("Paged prefill requires a valid block table for rows with kv lens > 0.")
+
+            kv_blocks = (kv_seq_len + page_size - 1) // page_size
+
+            # ---- gather + per-channel dequantize K ----
+            k_i = k_cache[block_table[i, :kv_blocks]]  # [kv_blocks, n_kv_heads, page_size, head_dim] int8
+            k_i = k_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
+            if n_q_heads != n_kv_heads:
+                if self.gqa_interleave:
+                    k_i = k_i.repeat((n_q_heads // n_kv_heads, 1, 1))
+                else:
+                    k_i = k_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)
+            k_i_fp = k_i.to(torch.float32) * k_qscale_h.unsqueeze(1)  # [n_q_heads, kv_seq_len, head_dim]
+
+            # ---- dynamic quant Q (per query token & head) and run Q@K via int8 matmul ----
+            # Pre-multiply q by k_qscale so that int8(q * k_scale) @ int8(k) recovers
+            # the same numeric result as q @ (k * k_scale) up to round-off.
+            q_quant, q_scale = _swa_dynamic_quantize(
+                q_i.to(torch.float32) * k_qscale_h.unsqueeze(1),
+                self.qmax, self.qmin, self.quant_dtype,
+            )  # q_quant: [n_q_heads, q_seq_len, head_dim] int8 ; q_scale: [n_q_heads, q_seq_len, 1]
+
+            # int8 GEMM (kept in float to mirror what triton's accumulator-then-dequant does).
+            s_i = torch.matmul(q_quant.float(), k_i.transpose(-1, -2).float())
+            s_i = s_i * q_scale * softmax_scale  # -> [n_q_heads, q_seq_len, kv_seq_len]
+
+            if self.is_causal:
+                s_mask = _generate_window_mask(
+                    q_seq_len,
+                    kv_seq_len,
+                    self.local_window_size,
+                    self.global_window_size,
+                ).to(s_i.device)
+                s_i = torch.where(s_mask, s_i, float("-inf"))
+
+            # numerically stable softmax in fp32, cast to q dtype for the next quant step
+            m_i = torch.max(s_i, dim=-1, keepdim=True).values
+            s_i = s_i - m_i
+            p_i = torch.exp(s_i)
+            l_i = torch.sum(p_i, dim=-1, keepdim=True)
+            p_i = (p_i / l_i.clamp(min=1e-12)).to(q.dtype)
+
+            # ---- second dynamic quant on the probability, then int8 P@V ----
+            p_quant, p_scale = _swa_dynamic_quantize(p_i, self.qmax, self.qmin, self.quant_dtype)
+
+            v_i = v_cache[block_table[i, :kv_blocks]]
+            v_i = v_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
+            if n_q_heads != n_kv_heads:
+                if self.gqa_interleave:
+                    v_i = v_i.repeat((n_q_heads // n_kv_heads, 1, 1))
+                else:
+                    v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)
+
+            o_i = torch.matmul(p_quant.float(), v_i.float())
+            o_i = o_i * p_scale * v_qscale_h.unsqueeze(1)
+            o_i = o_i.permute(1, 0, 2)  # -> [q_seq_len, n_q_heads, head_dim]
+            o[cu_seqlens_q[i] : cu_seqlens_q[i + 1]] = o_i.to(o.dtype)
+        return o
+
+    def extra_repr(self) -> str:
+        return (
+            f"{self.is_causal=}, {self.gqa_layout=}, "
+            f"{self.global_window_size=}, {self.local_window_size=}, "
+            f"{self.quant_dtype=}"
+        ).replace("self.", "")
+
+
 class MojoPagedDecodeSWA(MojoOperator):
     def __init__(
         self,

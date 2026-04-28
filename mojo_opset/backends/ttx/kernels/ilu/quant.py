@@ -1,3 +1,5 @@
+from typing import Tuple
+
 import torch
 import triton
 import triton.language as tl
@@ -117,3 +119,176 @@ def dequant_kernel(
 
             tl.store(output + input_offset, output_vals, mask=block_mask)
 
+from .utils import libentry
+
+
+# Single-pass row fits in this many fp32 lanes. Above that we fall back to the
+# 2-pass column-blocked kernel below. 32K covers all common hidden sizes
+# (e.g. 4096 / 8192 / 16384) for an int8 quant kernel.
+_MAX_SINGLE_PASS_BLOCK = 32768
+# Column tile width used by the 2-pass fallback kernel.
+_FALLBACK_COL_TILE = 2048
+
+
+def _calculate_settings(n_cols: int) -> Tuple[int, int]:
+    """Pick BLOCK_SIZE and num_warps for the single-pass kernel."""
+    BLOCK_SIZE = triton.next_power_of_2(n_cols)
+    if BLOCK_SIZE >= 32768:
+        num_warps = 16
+    elif BLOCK_SIZE >= 8192:
+        num_warps = 16
+    elif BLOCK_SIZE >= 2048:
+        num_warps = 8
+    else:
+        num_warps = 4
+    return BLOCK_SIZE, num_warps
+
+
+@libentry()
+@triton.jit
+def _dynamic_quant_row_kernel(
+    x_ptr,
+    scale_ptr,
+    y_ptr,
+    qscale_ptr,
+    stride_x_row,
+    stride_y_row,
+    n_cols: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """One program per token. Loads a whole row, computes per-row quant scale, stores int8."""
+    pid = tl.program_id(axis=0).to(tl.int64)
+    x_ptr = x_ptr + pid * stride_x_row
+    y_ptr = y_ptr + pid * stride_y_row
+
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    mask = col_offsets < n_cols
+
+    x = tl.load(x_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
+    s = tl.load(scale_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
+
+    x_scaled = x * s
+    abs_max = tl.max(tl.abs(x_scaled), axis=0)
+
+    qscale = abs_max / 127.0
+    inv_qscale = tl.where(qscale > 0.0, 1.0 / qscale, 0.0)
+
+    q = x_scaled * inv_qscale
+    # Round-half-away-from-zero, matching the NPU reference kernel.
+    q = tl.where(q < 0.0, q - 0.5, q + 0.5)
+    q = tl.minimum(tl.maximum(q, -128.0), 127.0)
+    q_int8 = q.to(tl.int8)
+
+    tl.store(y_ptr + col_offsets, q_int8, mask=mask)
+    tl.store(qscale_ptr + pid, qscale)
+
+
+@libentry()
+@triton.jit
+def _dynamic_quant_row_kernel_blocked(
+    x_ptr,
+    scale_ptr,
+    y_ptr,
+    qscale_ptr,
+    stride_x_row,
+    stride_y_row,
+    n_cols: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+):
+    """
+    Fallback for very wide rows: 2-pass column-blocked.
+        Pass 1: scan the row to find max(|x*s|).
+        Pass 2: re-scan and write int8 with the now-known per-row qscale.
+    """
+    pid = tl.program_id(axis=0).to(tl.int64)
+    x_row_ptr = x_ptr + pid * stride_x_row
+    y_row_ptr = y_ptr + pid * stride_y_row
+
+    abs_max = tl.zeros((), dtype=tl.float32)
+    for col_off in range(0, n_cols, BLOCK_SIZE_N):
+        cols = col_off + tl.arange(0, BLOCK_SIZE_N)
+        m = cols < n_cols
+        x = tl.load(x_row_ptr + cols, mask=m, other=0.0).to(tl.float32)
+        s = tl.load(scale_ptr + cols, mask=m, other=0.0).to(tl.float32)
+        cur = tl.max(tl.abs(x * s), axis=0)
+        abs_max = tl.maximum(abs_max, cur)
+
+    qscale = abs_max / 127.0
+    inv_qscale = tl.where(qscale > 0.0, 1.0 / qscale, 0.0)
+    tl.store(qscale_ptr + pid, qscale)
+
+    for col_off in range(0, n_cols, BLOCK_SIZE_N):
+        cols = col_off + tl.arange(0, BLOCK_SIZE_N)
+        m = cols < n_cols
+        x = tl.load(x_row_ptr + cols, mask=m, other=0.0).to(tl.float32)
+        s = tl.load(scale_ptr + cols, mask=m, other=0.0).to(tl.float32)
+        q = (x * s) * inv_qscale
+        q = tl.where(q < 0.0, q - 0.5, q + 0.5)
+        q = tl.minimum(tl.maximum(q, -128.0), 127.0)
+        tl.store(y_row_ptr + cols, q.to(tl.int8), mask=m)
+
+
+def dynamic_quant_impl(
+    input_tensor: torch.Tensor,
+    scale_tensor: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Dynamic per-token int8 quantization with an optional per-channel pre-scale.
+
+    Args:
+        input_tensor: (..., D) float tensor.
+        scale_tensor: (D,) float tensor; per-channel multiplier applied before
+            computing the per-token max. Pass `torch.ones(D)` for plain dynamic quant.
+
+    Returns:
+        output_tensor: (..., D) int8.
+        quant_scale  : (...,)  float32, such that output * quant_scale ≈ input.
+    """
+    assert input_tensor.shape[-1] == scale_tensor.shape[-1], (
+        f"scale last-dim {scale_tensor.shape[-1]} must match input last-dim "
+        f"{input_tensor.shape[-1]}"
+    )
+
+    ori_shape = input_tensor.shape
+    n_cols = ori_shape[-1]
+
+    x_2d = input_tensor.reshape(-1, n_cols).contiguous()
+    n_rows = x_2d.shape[0]
+
+    output = torch.empty_like(x_2d, dtype=torch.int8)
+    quant_scale = torch.empty(n_rows, device=input_tensor.device, dtype=torch.float32)
+
+    scale_1d = scale_tensor.reshape(-1).contiguous()
+
+    grid = (n_rows,)
+    BLOCK_SIZE = triton.next_power_of_2(n_cols)
+    if BLOCK_SIZE <= _MAX_SINGLE_PASS_BLOCK:
+        BLOCK_SIZE, num_warps = _calculate_settings(n_cols)
+        _dynamic_quant_row_kernel[grid](
+            x_2d,
+            scale_1d,
+            output,
+            quant_scale,
+            x_2d.stride(0),
+            output.stride(0),
+            n_cols=n_cols,
+            BLOCK_SIZE=BLOCK_SIZE,
+            num_warps=num_warps,
+        )
+    else:
+        _dynamic_quant_row_kernel_blocked[grid](
+            x_2d,
+            scale_1d,
+            output,
+            quant_scale,
+            x_2d.stride(0),
+            output.stride(0),
+            n_cols=n_cols,
+            BLOCK_SIZE_N=_FALLBACK_COL_TILE,
+            num_warps=8,
+        )
+
+    return (
+        output.reshape(*ori_shape),
+        quant_scale.reshape(*ori_shape[:-1]) if len(ori_shape) > 1 else quant_scale,
+    )

@@ -22,7 +22,7 @@ class TTXDequant(MojoDequant):
         return dequant(input, self.scale, self.output_dtype)
 
 class TTXDynamicQuant(MojoDynamicQuant):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(
         self,
