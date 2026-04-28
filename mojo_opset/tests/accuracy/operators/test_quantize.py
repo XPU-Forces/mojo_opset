@@ -111,9 +111,10 @@ def test_quant_float8_symmetric(shape, dtype):
         MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.float8_e4m3fn),
         scale=scale,
     )
-    out = quant(x)
+    out, out_scale = quant(x)
     expected = torch.clamp(torch.round(x.float() / scale.float()), -fp8_max, fp8_max).to(torch.float8_e4m3fn)
     torch.testing.assert_close(out.float(), expected.float(), atol=0, rtol=0)
+    torch.testing.assert_close(out_scale, scale, atol=0, rtol=0)
 
 
 # ---------------------------------------------------------------------------
@@ -144,14 +145,11 @@ def test_dequant_symmetric(shape, output_dtype):
         MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.int8),
         scale=scale,
     )
-    quantized = quant_op(x)
+    quantized, quant_scale = quant_op(x)
 
-    dequant = load_params(MojoDequant(input_size=shape[-1], output_dtype=output_dtype), scale=scale)
-    dequant_ref = load_params(
-        MojoDequant._registry.get("torch")(input_size=shape[-1], output_dtype=output_dtype),
-        scale=scale.clone(),
-    )
-    dequant.forward_diff_with(dequant_ref, quantized, atol=0, rtol=0)
+    dequant = MojoDequant(output_dtype=output_dtype)
+    dequant_ref = MojoDequant._registry.get("torch")(output_dtype=output_dtype)
+    dequant.forward_diff_with(dequant_ref, quantized, quant_scale, atol=0, rtol=0)
 
 
 # ---------------------------------------------------------------------------
@@ -174,25 +172,22 @@ def test_quant_dequant_roundtrip(shape, dtype):
         MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.int8),
         scale=scale,
     )
-    dequant_op = load_params(
-        MojoDequant._registry.get("torch")(input_size=shape[-1], output_dtype=dtype),
-        scale=scale.clone(),
-    )
+    dequant_op = MojoDequant._registry.get("torch")(output_dtype=dtype)
 
-    quantized = quant_op(x)
-    recovered = dequant_op(quantized)
+    quantized, quant_scale = quant_op(x)
+    recovered = dequant_op(quantized, quant_scale)
 
     torch.testing.assert_close(recovered.to(torch.float32), x.to(torch.float32), atol=5e-2, rtol=5e-2)
 
 
 def test_dequant_invalid_output_dtype_raises():
     with pytest.raises(NotImplementedError, match="Unsupported output_dtype"):
-        MojoDequant._registry.get("torch")(input_size=1, output_dtype=torch.int8)
+        MojoDequant._registry.get("torch")(output_dtype=torch.int8)
 
 
 def test_quant_scales_are_parameters():
     static_quant = MojoStaticQuant._registry.get("torch")(input_size=16, quant_dtype=torch.int8)
-    dequant = MojoDequant._registry.get("torch")(input_size=16, output_dtype=torch.bfloat16)
+    dequant = MojoDequant._registry.get("torch")(output_dtype=torch.bfloat16)
     dynamic_quant = MojoDynamicQuant._registry.get("torch")(input_size=16, quant_dtype=torch.int8)
     moe_dynamic_quant = MojoMoEDynamicQuant._registry.get("torch")(
         expert_num=2,
@@ -206,7 +201,6 @@ def test_quant_scales_are_parameters():
     )
 
     assert isinstance(static_quant.scale, torch.nn.Parameter)
-    assert isinstance(dequant.scale, torch.nn.Parameter)
     assert isinstance(dynamic_quant.smooth_scale, torch.nn.Parameter)
     assert isinstance(moe_dynamic_quant.smooth_scale, torch.nn.Parameter)
     assert isinstance(swiglu_quant.weight_scale, torch.nn.Parameter)
@@ -216,7 +210,7 @@ def test_quant_scales_are_parameters():
     assert swiglu_quant.quant_scale.shape == (2, 16)
 
     assert set(static_quant.state_dict()) == {"scale"}
-    assert set(dequant.state_dict()) == {"scale"}
+    assert set(dequant.state_dict()) == set()
     assert set(dynamic_quant.state_dict()) == {"smooth_scale"}
     assert set(moe_dynamic_quant.state_dict()) == {"smooth_scale"}
     assert set(swiglu_quant.state_dict()) == {"weight_scale", "quant_scale"}
