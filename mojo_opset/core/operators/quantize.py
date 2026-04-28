@@ -52,7 +52,7 @@ class MojoStaticQuant(MojoOperator):
         """
         input_fp = input.float()
         output = torch.clamp(torch.round(input_fp / self.scale.float()), self.q_min, self.q_max)
-        return output.to(self.quant_dtype)
+        return output.to(self.quant_dtype), self.scale
 
     def extra_repr(self) -> str:
         return f"input_size={self.input_size}, quant_dtype={self.quant_dtype}, q_max={self.q_max}, q_min={self.q_min}"
@@ -61,7 +61,6 @@ class MojoStaticQuant(MojoOperator):
 class MojoDequant(MojoOperator):
     def __init__(
         self,
-        input_size: int,
         output_dtype: torch.dtype = torch.bfloat16,
         **kwargs,
     ):
@@ -75,8 +74,6 @@ class MojoDequant(MojoOperator):
             **kwargs: Tensor factory kwargs.
         """
         super().__init__(**kwargs)
-        self.input_size = input_size
-        self.scale = torch.nn.Parameter(torch.empty(input_size, **self.tensor_factory_kwargs))
         if output_dtype not in (torch.float16, torch.bfloat16, torch.float32):
             raise NotImplementedError(
                 f"Unsupported output_dtype: {output_dtype}, expected torch.float16, torch.bfloat16, or torch.float32."
@@ -86,6 +83,7 @@ class MojoDequant(MojoOperator):
     def forward(
         self,
         input: torch.Tensor,
+        scale: torch.Tensor,
     ) -> torch.Tensor:
         """
         Dequantize a quantized tensor back to floating point.
@@ -96,7 +94,7 @@ class MojoDequant(MojoOperator):
             torch.Tensor: Dequantized tensor in ``self.output_dtype``.
         """
         input_fp = input.float()
-        output = input_fp * self.scale.float()
+        output = input_fp * scale.float()
         return output.to(self.output_dtype)
 
     def extra_repr(self) -> str:
