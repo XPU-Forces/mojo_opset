@@ -1636,7 +1636,8 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
         self,
         is_causal: bool = True,
         gqa_layout: str = "AABB",
-        quant_dtype: torch.dtype = torch.int8
+        quant_dtype: torch.dtype = torch.bfloat16,
+        context_dtype: torch.dtype = torch.int8,
     ):
         """
         Initialize the Paged Prefill GQA attention operator with common parameters.
@@ -1653,7 +1654,10 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
         self.is_causal = is_causal
         self.gqa_layout = gqa_layout
         self.quant_dtype = quant_dtype
-        if self.quant_dtype == torch.int8:
+        self.context_dtype = context_dtype
+        assert self.quant_dtype in (torch.bfloat16, torch.int8), f"Unsupported quant dtype {self.quant_dtype}"
+        assert self.context_dtype == torch.int8, f"Unsupported context dtype {self.context_dtype}"
+        if self.context_dtype == torch.int8:
             bits = 8
             self.qmax = 2 ** (bits - 1) - 1
             self.qmin = -(2 ** (bits - 1))
@@ -1737,8 +1741,6 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
             else:
                 kv_seq_len = seqlens_kv[i].item()
 
-            q_quant, q_scale = _dynamic_quantize(q * k_qscale.unsqueeze(1), self.qmax, self.qmin, self.quant_dtype)
-
             kv_blocks = (kv_seq_len + page_size - 1) // page_size
             k_unpadded = key_cache[block_tables[i, :kv_blocks]] # [kv_blocks, n_kv_heads, page_size, head_dim]
             k_unpadded = k_unpadded.permute(1, 0, 2, 3).reshape(num_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
@@ -1756,7 +1758,12 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
                 k_expanded = k_unpadded
                 v_expanded = v_unpadded
 
-            attn_scores = torch.matmul(q_quant.float(), k_expanded.mT.float()) * q_scale * softmax_scale
+            if self.quant_dtype == torch.int8:
+                q_quant, q_scale = _dynamic_quantize(q * k_qscale.unsqueeze(1), self.qmax, self.qmin, self.quant_dtype)
+                attn_scores = torch.matmul(q_quant.float(), k_expanded.mT.float()) * q_scale * softmax_scale
+            else:
+                k_expanded_scaled = k_expanded.float() * k_qscale.unsqueeze(1).float()
+                attn_scores = torch.matmul(q.float(), k_expanded_scaled.mT) * softmax_scale
             if self.is_causal:
                 attn_mask = torch.ones(q_seq_len, kv_seq_len, device=query.device, dtype=torch.bool).tril(
                     kv_seq_len - q_seq_len
@@ -1771,8 +1778,12 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
                 attn_scores = (attn_mask, attn_scores, float("-inf"))
 
             attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
-            attn_probs_quant, attn_probs_scale = _dynamic_quantize(attn_probs, self.qmax, self.qmin, self.quant_dtype)
-            o = torch.matmul(attn_probs_quant.float(), v_expanded.float()) * attn_probs_scale * v_qscale.unsqueeze(1)
+            if self.quant_dtype == torch.int8:
+                attn_probs_quant, attn_probs_scale = _dynamic_quantize(attn_probs, self.qmax, self.qmin, self.quant_dtype)
+                o = torch.matmul(attn_probs_quant.float(), v_expanded.float()) * attn_probs_scale * v_qscale.unsqueeze(1)
+            else:
+                v_expanded_scaled = v_expanded.float() * v_qscale.unsqueeze(1).float()
+                o = torch.matmul(attn_probs.float(), v_expanded_scaled)
             outputs[start_loc:end_loc] = o.permute(1, 0, 2)
         return outputs
 
@@ -1785,7 +1796,8 @@ class MojoPagedDecodeQuantGQA(MojoOperator):
         self,
         is_causal: bool = True,
         gqa_layout: str = "AABB",
-        quant_dtype: torch.dtype = torch.int8,
+        quant_dtype: torch.dtype = torch.bfloat16,
+        context_dtype: torch.dtype = torch.int8,
     ):
         """
         Initialize the Paged Decode GQA attention operator.
@@ -1809,7 +1821,10 @@ class MojoPagedDecodeQuantGQA(MojoOperator):
         self.is_causal = is_causal
         self.gqa_layout = gqa_layout
         self.quant_dtype = quant_dtype
-        if self.quant_dtype == torch.int8:
+        self.context_dtype = context_dtype
+        assert self.quant_dtype in (torch.bfloat16, torch.int8), f"Unsupported quant dtype {self.quant_dtype}"
+        assert self.context_dtype == torch.int8, f"Unsupported context dtype {self.context_dtype}"
+        if self.context_dtype == torch.int8:
             bits = 8
             self.qmax = 2 ** (bits - 1) - 1
             self.qmin = -(2 ** (bits - 1))
@@ -1881,7 +1896,6 @@ class MojoPagedDecodeQuantGQA(MojoOperator):
             seq_len = seqlens[i].item()
 
             q = query[i].unsqueeze(1) # [n_q_heads, 1, head_dim]
-            q_quant, q_scale = _dynamic_quantize(q * k_qscale.unsqueeze(1), self.qmax, self.qmin, self.quant_dtype)
 
             kv_blocks = (seq_len + page_size - 1) // page_size
             k_unpadded = key_cache[block_tables[i, :kv_blocks]] # [kv_blocks, n_kv_heads, page_size, head_dim]
@@ -1900,7 +1914,12 @@ class MojoPagedDecodeQuantGQA(MojoOperator):
                 k_expanded = k_unpadded
                 v_expanded = v_unpadded
 
-            attn_scores = torch.matmul(q_quant.float(), k_expanded.mT.float()) * q_scale * softmax_scale
+            if self.quant_dtype == torch.int8:
+                q_quant, q_scale = _dynamic_quantize(q * k_qscale.unsqueeze(1), self.qmax, self.qmin, self.quant_dtype)
+                attn_scores = torch.matmul(q_quant.float(), k_expanded.mT.float()) * q_scale * softmax_scale
+            else:
+                k_expanded_scaled = k_expanded.float() * k_qscale.unsqueeze(1).float()
+                attn_scores = torch.matmul(q.float(), k_expanded_scaled.mT) * softmax_scale
             # Note: if is_causal=True, we just do full attention over 1 query to seq_len key/value
             if not self.is_causal and mask is not None:
                 if mask.dim() == 2:
@@ -1911,8 +1930,12 @@ class MojoPagedDecodeQuantGQA(MojoOperator):
                 attn_scores = torch.where(attn_mask, attn_scores, float("-inf"))
 
             attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
-            attn_probs_quant, attn_probs_scale = _dynamic_quantize(attn_probs, self.qmax, self.qmin, self.quant_dtype)
-            o = torch.matmul(attn_probs_quant.float(), v_expanded.float()) * attn_probs_scale * v_qscale.unsqueeze(1)
+            if self.quant_dtype == torch.int8:
+                attn_probs_quant, attn_probs_scale = _dynamic_quantize(attn_probs, self.qmax, self.qmin, self.quant_dtype)
+                o = torch.matmul(attn_probs_quant.float(), v_expanded.float()) * attn_probs_scale * v_qscale.unsqueeze(1)
+            else:
+                v_expanded_scaled = v_expanded.float() * v_qscale.unsqueeze(1).float()
+                o = torch.matmul(attn_probs.float(), v_expanded_scaled)
             outputs[i] = o.squeeze(1)
         return outputs
 
@@ -1927,7 +1950,8 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
         gqa_layout: str = "AABB",
         global_window_size: Optional[int] = None,
         local_window_size: Optional[int] = None,
-        quant_dtype: torch.dtype = torch.int8,
+        quant_dtype: torch.dtype = torch.bfloat16,
+        context_dtype: torch.dtype = torch.int8,
     ):
         """
         Initialize the Paged Prefill GQA attention operator with common parameters.
@@ -1948,7 +1972,10 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
         self.global_window_size = global_window_size
         self.local_window_size = local_window_size
         self.quant_dtype = quant_dtype
-        if self.quant_dtype == torch.int8:
+        self.context_dtype = context_dtype
+        assert self.quant_dtype in (torch.bfloat16, torch.int8), f"Unsupported quant dtype {self.quant_dtype}"
+        assert self.context_dtype == torch.int8, f"Unsupported context dtype {self.context_dtype}"
+        if self.context_dtype == torch.int8:
             self.qmax = 2 ** (8 - 1) - 1
             self.qmin = -(2 ** (8 - 1))
         else:
@@ -1997,7 +2024,6 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
                 # skip padded query
                 continue
             q_i = q_i.permute(1, 0, 2)  # -> [n_q_heads, q_seq_len, head_dim]
-            q_i_quant, q_i_scale = _dynamic_quantize(q_i * k_qscale.unsqueeze(1), self.qmax, self.qmin, self.quant_dtype)
 
             kv_seq_len = seqlens_kv[i].item()
             kv_blocks = (kv_seq_len + page_size - 1) // page_size
@@ -2011,8 +2037,13 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
                     k_i_T = k_i_T.repeat_interleave(
                         n_q_heads // n_kv_heads, dim=0
                     )  # -> [n_q_heads, head_dim, kv_seq_len]
-
-            s_i = torch.bmm(q_i_quant.float(), k_i_T.float()) * q_i_scale * softmax_scale  # -> [n_q_heads, q_seq_len, kv_seq_len]
+            
+            if self.quant_dtype == torch.int8:
+                q_i_quant, q_i_scale = _dynamic_quantize(q_i * k_qscale.unsqueeze(1), self.qmax, self.qmin, self.quant_dtype)
+                s_i = torch.bmm(q_i_quant.float(), k_i_T.float()) * q_i_scale * softmax_scale  # -> [n_q_heads, q_seq_len, kv_seq_len]
+            else:
+                k_i_T = k_i_T.float() * k_qscale.unsqueeze(-1).float()
+                s_i = torch.bmm(q_i.float(), k_i_T.float()) * softmax_scale
 
             if self.is_causal:
                 s_mask = _generate_window_mask(
@@ -2026,7 +2057,6 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
             s_i = s_i - m_i  # -> [n_q_heads, q_seq_len, kv_seq_len]
             p_i = torch.exp(s_i)
             l_i = torch.sum(p_i, dim=-1, keepdim=True)  # -> [n_q_heads, q_seq_len, 1]
-            p_i_quant, p_i_scale = _dynamic_quantize(p_i / l_i, self.qmax, self.qmin, self.quant_dtype)
 
             v_i = v_cache[block_table[i, :kv_blocks]]
             v_i = v_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[
@@ -2037,7 +2067,14 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
                     v_i = v_i.repeat((n_q_heads // n_kv_heads, 1, 1))
                 else:
                     v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, kv_seq_len, head_dim]
-            o_i = torch.bmm(p_i_quant.float(), v_i.float()) * p_i_scale * v_qscale.unsqueeze(1)  # -> [n_q_heads, q_seq_len, head_dim]
+            if self.quant_dtype == torch.int8:
+                p_i_quant, p_i_scale = _dynamic_quantize(p_i, self.qmax, self.qmin, self.quant_dtype)
+                o_i = torch.bmm(p_i_quant.float(), v_i.float()) * p_i_scale * v_qscale.unsqueeze(1)  # -> [n_q_heads, q_seq_len, head_dim]
+            else:
+                v_i = v_i.float() * v_qscale.unsqueeze(1).float()
+                o_i = torch.bmm(p_i.float(), v_i.float()) # -> [n_q_heads, q_seq_len, head_dim]
+            
+            o_i = o_i / l_i
             o_i = o_i.permute(1, 0, 2)  # -> [q_seq_len, n_q_heads, head_dim]
             o[cu_seqlens_q[i] : cu_seqlens_q[i + 1]] = o_i.to(o.dtype)
         return o
@@ -2049,7 +2086,8 @@ class MojoPagedDecodeQuantSWA(MojoOperator):
         gqa_layout: str = "AABB",
         global_window_size: Optional[int] = None,
         local_window_size: Optional[int] = None,
-        quant_dtype: torch.dtype = torch.int8,
+        quant_dtype: torch.dtype = torch.bfloat16,
+        context_dtype: torch.dtype = torch.int8,
     ):
         """
         Initialize the Paged Prefill GQA attention operator with common parameters.
@@ -2069,10 +2107,12 @@ class MojoPagedDecodeQuantSWA(MojoOperator):
         self.global_window_size = global_window_size
         self.local_window_size = local_window_size
         self.quant_dtype = quant_dtype
-        if self.quant_dtype == torch.int8:
-            bits = 8
-            self.qmax = 2 ** (bits - 1) - 1
-            self.qmin = -(2 ** (bits - 1))
+        self.context_dtype = context_dtype
+        assert self.quant_dtype in (torch.bfloat16, torch.int8), f"Unsupported quant dtype {self.quant_dtype}"
+        assert self.context_dtype == torch.int8, f"Unsupported context dtype {self.context_dtype}"
+        if self.context_dtype == torch.int8:
+            self.qmax = 2 ** (8 - 1) - 1
+            self.qmin = -(2 ** (8 - 1))
         else:
             raise NotImplementedError(f"quant_dtype {self.quant_dtype} not supported")
 
@@ -2108,7 +2148,6 @@ class MojoPagedDecodeQuantSWA(MojoOperator):
         o = torch.zeros_like(q)
         for i in range(bsz):
             q_i = q[i].unsqueeze(1) # -> [n_q_heads, 1, head_dim]
-            q_i_quant, q_i_scale = _dynamic_quantize(q_i * k_qscale.unsqueeze(1), self.qmax, self.qmin, self.quant_dtype)
             kv_seq_len = seq_lens[i].item()
             if kv_seq_len == 0:
                 # skip padded tokens
@@ -2124,7 +2163,13 @@ class MojoPagedDecodeQuantSWA(MojoOperator):
                     k_i_T = k_i_T.repeat_interleave(
                         n_q_heads // n_kv_heads, dim=0
                     )  # -> [n_q_heads, head_dim, kv_seq_len]
-            s_i = torch.bmm(q_i_quant.float(), k_i_T.float()) * q_i_scale * softmax_scale  # -> [n_q_heads, 1, kv_seq_len]
+
+            if self.quant_dtype == torch.int8:
+                q_i_quant, q_i_scale = _dynamic_quantize(q_i * k_qscale.unsqueeze(1), self.qmax, self.qmin, self.quant_dtype)
+                s_i = torch.bmm(q_i_quant.float(), k_i_T.float()) * q_i_scale * softmax_scale  # -> [n_q_heads, 1, kv_seq_len]
+            else:
+                k_i_T = k_i_T.float() * k_qscale.unsqueeze(-1).float()
+                s_i = torch.bmm(q_i.float(), k_i_T.float()) * softmax_scale
 
             if self.is_causal:
                 s_mask = _generate_window_mask(
@@ -2138,7 +2183,6 @@ class MojoPagedDecodeQuantSWA(MojoOperator):
             s_i = s_i - m_i  # -> [n_q_heads, 1, kv_seq_len]
             p_i = torch.exp(s_i)
             l_i = torch.sum(p_i, dim=-1, keepdim=True)  # -> [n_q_heads, 1, 1]
-            p_i_quant, p_i_scale = _dynamic_quantize(p_i / l_i, self.qmax, self.qmin, self.quant_dtype)
 
             v_i = v_cache[block_table[i, :kv_blocks]]
             v_i = v_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[
@@ -2149,7 +2193,14 @@ class MojoPagedDecodeQuantSWA(MojoOperator):
                     v_i = v_i.repeat((n_q_heads // n_kv_heads, 1, 1))
                 else:
                     v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, kv_seq_len, head_dim]
-            o_i = torch.bmm(p_i_quant.float(), v_i.float()) * p_i_scale * v_qscale.unsqueeze(1)  # -> [n_q_heads, 1, head_dim]
+            if self.quant_dtype == torch.int8:
+                p_i_quant, p_i_scale = _dynamic_quantize(p_i, self.qmax, self.qmin, self.quant_dtype)
+                o_i = torch.bmm(p_i_quant.float(), v_i.float()) * p_i_scale * v_qscale.unsqueeze(1)  # -> [n_q_heads, 1, head_dim]
+            else:
+                v_i = v_i.float() * v_qscale.unsqueeze(1).float()
+                o_i = torch.bmm(p_i.float(), v_i.float()) # -> [n_q_heads, 1, head_dim]
+
+            o_i = o_i / l_i
             o_i = o_i.squeeze(1)  # -> [n_q_heads, head_dim]
             o[i] = o_i.to(o.dtype)
         return o
