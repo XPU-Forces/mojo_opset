@@ -92,8 +92,6 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         *,
         max_total_seq_len: Optional[int] = None,
     ):
-        assert total_seq_lens.dtype == torch.int32
-        assert block_tables.dtype == torch.int32
         assert_paged_decode_contract(block_tables, total_seq_lens)
         assert self.window_size == -1, (
             f"[TTXPagedDecodeGQA] TTX does not support sliding window, but got window_size={self.window_size}"
@@ -186,8 +184,6 @@ class TTXPagedDecodeSWA(MojoPagedDecodeSWA):
         softmax_scale: Optional[float] = None,
     ) -> torch.Tensor:
         # Note: is_causal = False should never happen
-        assert total_seq_lens.dtype == torch.int32
-        assert block_table.dtype == torch.int32
         assert_paged_decode_contract(block_table, total_seq_lens)
         o = swa_paged_decode(
             q,

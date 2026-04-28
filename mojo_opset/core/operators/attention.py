@@ -9,6 +9,10 @@ import torch
 from ..operator import MojoOperator
 
 
+def _is_supported_seq_dtype(tensor: torch.Tensor) -> bool:
+    return tensor.dtype == torch.int32
+
+
 def assert_paged_prefill_contract(
     cu_seqlens_q: torch.Tensor,
     block_tables: torch.Tensor,

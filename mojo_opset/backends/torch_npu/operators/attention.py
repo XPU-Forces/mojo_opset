@@ -123,7 +123,7 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
             key=key_cache,
             value=value_cache,
             atten_mask=compress_mask,
-            block_table=block_tables.to(torch.int32),
+            block_table=block_tables,
             input_layout="TND",
             block_size=block_size,
             actual_seq_lengths=cu_seqlens_q[1:],
@@ -195,12 +195,12 @@ class TorchNpuPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
             k_cache,
             v_cache,
             input_layout=input_layout,
-            block_table=block_tables.to(torch.int32),
+            block_table=block_tables,
             block_size=block_size,
             num_heads=num_q_heads,
             num_key_value_heads=head_nums,
             actual_seq_lengths=actual_seq_lengths_q,
-            actual_seq_lengths_kv=total_seq_lens.to(torch.int32),
+            actual_seq_lengths_kv=total_seq_lens,
             scale=softmax_scale,
         )
 

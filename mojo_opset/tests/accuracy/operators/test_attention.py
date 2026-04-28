@@ -156,7 +156,7 @@ def generate_paged_prefill_data(
     else:
         # max_q_len = 0 for testing padding logic, use randperm to generate a list with 0
         q_lens = torch.randperm(batch_size, dtype=torch.int32)
-    cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0).to(torch.int32)])
+    cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0, dtype=torch.int32)])
 
     if max_kv_computed_len <= 0:
         kv_cache_lens = None
@@ -165,7 +165,7 @@ def generate_paged_prefill_data(
         kv_cache_lens = torch.randint(max_kv_computed_len // 2, max_kv_computed_len, (batch_size,), dtype=torch.int32)
         kv_lens = q_lens + kv_cache_lens
         kv_lens = torch.where(q_lens > 0, kv_lens, torch.zeros_like(kv_lens))
-    cu_total_seqlens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0).to(torch.int32)])
+    cu_total_seqlens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0, dtype=torch.int32)])
 
     total_q_tokens = cu_seqlens_q[-1].item()
     total_kv_tokens = cu_total_seqlens[-1].item()
@@ -305,7 +305,7 @@ def test_paged_prefill_gqa_bucket_padded_varlen(gqa_layout: str):
     query = torch.randn((token_bucket_size, num_q_heads, head_dim), dtype=dtype)
     cu_seqlens_q = torch.tensor([0, 1, 2, 3, 4, 4, 4], dtype=torch.int32)
     total_seq_lens = torch.tensor([1, 1, 1, 1, 0, 0], dtype=torch.int32)
-    cu_total_seqlens = torch.nn.functional.pad(total_seq_lens.cumsum(0), (1, 0))
+    cu_total_seqlens = torch.nn.functional.pad(total_seq_lens.cumsum(0, dtype=torch.int32), (1, 0))
 
     key_cache = torch.zeros((bucket_batch_size, num_kv_heads, block_size, head_dim), dtype=dtype)
     value_cache = torch.zeros_like(key_cache)
@@ -504,7 +504,7 @@ def test_decode_mla(B, H, d_nope, d_rope, d_v, d_c, S):
 @bypass_not_implemented
 def test_prefill_mla(H, d_nope, d_rope, d_v, d_c):
     total_seq_lens = torch.tensor([32, 48], dtype=torch.int32)
-    cu = torch.cat([torch.tensor([0], dtype=torch.int32), total_seq_lens.cumsum(0)])
+    cu = torch.cat([torch.tensor([0], dtype=torch.int32), total_seq_lens.cumsum(0, dtype=torch.int32)])
     T = cu[-1].item()
 
     query = torch.randn(T, H, d_nope + d_rope, dtype=torch.bfloat16)
@@ -690,7 +690,7 @@ def _generate_paged_mla_prefill_data(batch_size, num_heads, d_nope, d_rope, d_v,
         q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32).clamp(min=1)
     else:
         q_lens = torch.randperm(batch_size, dtype=torch.int32)
-    cu = torch.cat([torch.tensor([0], dtype=torch.int32), q_lens.cumsum(0)])
+    cu = torch.cat([torch.tensor([0], dtype=torch.int32), q_lens.cumsum(0, dtype=torch.int32)])
     T = cu[-1].item()
 
     query = torch.randn(T, num_heads, d_nope + d_rope, dtype=dtype)
@@ -789,7 +789,7 @@ def test_paged_decode_nsa(B, H, D, S, blk):
 @bypass_not_implemented
 def test_prefill_nsa(H, D):
     total_seq_lens = torch.tensor([32, 24], dtype=torch.int32)
-    cu = torch.cat([torch.tensor([0], dtype=torch.int32), total_seq_lens.cumsum(0)])
+    cu = torch.cat([torch.tensor([0], dtype=torch.int32), total_seq_lens.cumsum(0, dtype=torch.int32)])
     T = cu[-1].item()
 
     query = torch.randn(T, H, D, dtype=torch.bfloat16)
@@ -1013,7 +1013,7 @@ def generate_sdpa_data(
 ):
     q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
     q_lens = torch.clamp(q_lens, min=1)
-    cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0).to(torch.int32)])
+    cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0, dtype=torch.int32)])
 
     if max_kv_computed_len <= 0:
         kv_cache_lens = None
@@ -1021,7 +1021,7 @@ def generate_sdpa_data(
     else:
         kv_cache_lens = torch.randint(max_kv_computed_len // 2, max_kv_computed_len, (batch_size,), dtype=torch.int32)
         kv_lens = q_lens + kv_cache_lens
-    cu_total_seqlens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0).to(torch.int32)])
+    cu_total_seqlens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0, dtype=torch.int32)])
 
     total_q_tokens = cu_seqlens_q[-1].item()
     total_kv_tokens = cu_total_seqlens[-1].item()
