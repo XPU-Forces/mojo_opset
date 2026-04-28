@@ -821,7 +821,7 @@ def test_prefill_nsa(H, D):
 @bypass_not_implemented
 def test_paged_prefill_nsa(H, D, blk):
     B = 2
-    query, k_cache, v_cache, cu, _, bt, _, _, _ = generate_paged_prefill_data(
+    query, k_cache, v_cache, cu, bt, _, _, _ = generate_paged_prefill_data(
         batch_size=B, num_q_heads=H, num_kv_heads=H,
         head_dim=D, max_q_len=32, max_kv_computed_len=0,
         block_size=blk, dtype=torch.bfloat16,
