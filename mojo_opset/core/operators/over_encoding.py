@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Optional, List
 
 import torch
 from torch.nn import Parameter
@@ -66,8 +66,8 @@ class MojoOverEncodingNGram(MojoOperator):
     def __init__(
         self,
         ori_vocab_size: int,
-        oe_vocab_sizes: List[int] | torch.Tensor,
-        oe_grams: List[int] | torch.Tensor,
+        oe_vocab_sizes: List[int],
+        oe_grams: List[int],
         **kwargs,
     ):
         """Calculate the ngram ids for over_encoding.
@@ -79,23 +79,24 @@ class MojoOverEncodingNGram(MojoOperator):
         """
         super().__init__(**kwargs)
         self.ori_vocab_size = ori_vocab_size
+        self._oe_vocab_sizes = oe_vocab_sizes
+        self._oe_grams = oe_grams
+        self._oe_post_init()
+
+    def _oe_post_init(self):
+        oe_cfg_dtype = torch.int64
+        oe_cfg_device = torch.tensor([]).device
+        if oe_cfg_device == torch.device("meta"):
+            oe_cfg_device = torch.device("cpu")
         self.register_buffer(
             "oe_vocab_sizes",
-            (
-                torch.tensor(oe_vocab_sizes, **self.tensor_factory_kwargs)
-                if not isinstance(oe_vocab_sizes, torch.Tensor)
-                else oe_vocab_sizes
-            ),
-            persistent=False
+            torch.tensor(self._oe_vocab_sizes, device=oe_cfg_device, dtype=oe_cfg_dtype),
+            persistent=False,
         )
         self.register_buffer(
             "oe_grams",
-            (
-                torch.tensor(oe_grams, **self.tensor_factory_kwargs)
-                if not isinstance(oe_grams, torch.Tensor)
-                else oe_grams
-            ),
-            persistent=False
+            torch.tensor(self._oe_grams, device=oe_cfg_device, dtype=oe_cfg_dtype),
+            persistent=False,
         )
         self.register_buffer(
             "oe_vocab_offsets",
@@ -104,16 +105,16 @@ class MojoOverEncodingNGram(MojoOperator):
                     [
                         torch.tensor(
                             [0],
-                            device=self.oe_vocab_sizes.device,
-                            dtype=self.oe_vocab_sizes.dtype,
+                            device=oe_cfg_device,
+                            dtype=oe_cfg_dtype,
                         ),
                         self.oe_vocab_sizes[:-1],
                     ],
                     dim=0,
-                ).to(torch.long),
+                ),
                 dim=0,
             ),
-            persistent=False
+            persistent=False,
         )
 
     def forward(
@@ -156,9 +157,7 @@ class MojoOverEncodingNGram(MojoOperator):
         return oe_ngram_ids
     
     def extra_repr(self) -> str:
-        return f"{self.ori_vocab_size=}, {self.oe_vocab_sizes=}, {self.oe_grams=}, {self.oe_vocab_offsets=}".replace(
-            "self.", ""
-        )
+        return f"ori_vocab_size={self.ori_vocab_size}, oe_vocab_sizes={self._oe_vocab_sizes}, oe_grams={self._oe_grams}"
 
 
 class MojoOverEncoding(MojoOperator):
