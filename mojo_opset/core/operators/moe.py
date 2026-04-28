@@ -182,7 +182,7 @@ class MojoMoEGating(MojoOperator):
         gate_logits = torch.softmax(gate_logits, dim=-1)
         top_k_logits, top_k_indices = torch.topk(gate_logits, self.top_k, dim=-1)
         top_k_gates = top_k_logits / torch.sum(top_k_logits, dim=-1, keepdim=True)
-        return top_k_indices, top_k_gates
+        return top_k_indices.to(torch.int32), top_k_gates
 
     def extra_repr(self) -> str:
         hidden_size = self.gate_weight.size(0)
