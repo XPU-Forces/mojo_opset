@@ -16,7 +16,8 @@ class TorchNpuDynamicQuant(MojoDynamicQuant):
         kwargs = {"dst_type": self.quant_dtype}
         if self.smooth_scale is not None:
             kwargs["smooth_scales"] = self.smooth_scale.to(dtype=input.dtype)
-        return torch_npu.npu_dynamic_quant(input, **kwargs)
+        output, scale = torch_npu.npu_dynamic_quant(input, **kwargs)
+        return output, scale.unsqueeze(-1)
 
 
 class TorchNpuMoEDynamicQuant(MojoMoEDynamicQuant):
@@ -36,7 +37,8 @@ class TorchNpuMoEDynamicQuant(MojoMoEDynamicQuant):
             ),
         }
         kwargs["smooth_scales"] = self.smooth_scale.to(dtype=input.dtype)
-        return torch_npu.npu_dynamic_quant(input, **kwargs)
+        output, scale = torch_npu.npu_dynamic_quant(input, **kwargs)
+        return output, scale.unsqueeze(-1)
 
 
 class TorchNpuDequantSwiGLUQuant(MojoDequantSwiGLUQuant):
@@ -50,7 +52,7 @@ class TorchNpuDequantSwiGLUQuant(MojoDequantSwiGLUQuant):
         quant_offset: torch.Tensor = None,
         token_count: torch.Tensor = None,
     ):
-        return torch_npu.npu_dequant_swiglu_quant(
+        output, scale = torch_npu.npu_dequant_swiglu_quant(
             x,
             weight_scale=self.weight_scale,
             activation_scale=activation_scale,
@@ -61,3 +63,4 @@ class TorchNpuDequantSwiGLUQuant(MojoDequantSwiGLUQuant):
             activate_left=self.activate_left,
             quant_mode=self.quant_mode,
         )
+        return output, scale.unsqueeze(-1)

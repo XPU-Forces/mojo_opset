@@ -151,8 +151,8 @@ class MojoDynamicQuant(MojoOperator):
             while smooth_scale.dim() < input_fp.dim():
                 smooth_scale = smooth_scale.unsqueeze(0)
             input_fp = input_fp * smooth_scale
-        scale = input_fp.abs().amax(dim=-1).clamp(min=1e-12) / self.q_max
-        output = torch.clamp(torch.round(input_fp / scale.unsqueeze(-1)), self.q_min, self.q_max)
+        scale = input_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
+        output = torch.clamp(torch.round(input_fp / scale), self.q_min, self.q_max)
         return output.to(self.quant_dtype), scale
 
     def extra_repr(self) -> str:
@@ -201,7 +201,7 @@ class MojoMoEDynamicQuant(MojoOperator):
         Returns:
             Tuple[torch.Tensor, torch.Tensor]:
                 - Quantized int8 tensor with the same shape as ``input``.
-                - Per-token dynamic scale of shape ``input.shape[:-1]``.
+                - Per-token dynamic scale of shape ``input.shape[:-1] + (1,)``.
         """
         if input.dim() < 2:
             raise ValueError(f"input must have at least 2 dimensions for MoE dynamic quant, got {input.dim()}.")
@@ -218,8 +218,8 @@ class MojoMoEDynamicQuant(MojoOperator):
             )
         expanded_scale = self.smooth_scale.float().repeat_interleave(token_count, dim=0)
         input_fp = input.float() * expanded_scale
-        scale = input_fp.abs().amax(dim=-1).clamp(min=1e-12) / self.q_max
-        output = torch.clamp(torch.round(input_fp / scale.unsqueeze(-1)), self.q_min, self.q_max)
+        scale = input_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
+        output = torch.clamp(torch.round(input_fp / scale), self.q_min, self.q_max)
         return output.to(self.quant_dtype), scale
 
     def extra_repr(self) -> str:
@@ -286,7 +286,7 @@ class MojoDequantSwiGLUQuant(MojoOperator):
         Returns:
             Tuple[torch.Tensor, torch.Tensor]:
                 - Quantized int8 output of shape ``(tokens, H)``.
-                - Per-token dynamic scale of shape ``(tokens,)``.
+                - Per-token dynamic scale of shape ``(tokens, 1)``.
         """
         if x.dim() != 2:
             raise ValueError(f"x must be 2D with shape (tokens, 2H), but got {tuple(x.shape)}")
@@ -328,8 +328,8 @@ class MojoDequantSwiGLUQuant(MojoOperator):
             quant_scale = quant_scale.repeat_interleave(token_count, dim=0)
         out_fp = out_fp * quant_scale
 
-        scale = out_fp.abs().amax(dim=-1).clamp(min=1e-12) / self.q_max
-        output = torch.clamp(torch.round(out_fp / scale.unsqueeze(-1)), self.q_min, self.q_max)
+        scale = out_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
+        output = torch.clamp(torch.round(out_fp / scale), self.q_min, self.q_max)
         return output.to(self.quant_dtype), scale
 
     def extra_repr(self) -> str:
