@@ -861,7 +861,7 @@ test_configs_swa_prefill = [
     "query, k_cache, v_cache, cu_seqlens_q, block_tables, cu_total_seqlens",
     [
         pytest.param(
-            *(lambda d: (d[0], d[1], d[2], d[3], d[5], d[6]))(generate_paged_prefill_data(
+            *(lambda d: (d[0], d[1], d[2], d[3], d[4], d[5]))(generate_paged_prefill_data(
                 batch_size=B,
                 num_q_heads=Q_H,
                 num_kv_heads=KV_H,

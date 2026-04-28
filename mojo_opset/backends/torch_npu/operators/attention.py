@@ -102,14 +102,14 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
         if block_size % 128 != 0 or block_size > 512:
             # high performance attention kernel only supports block_size % 128 == 0 and block_size <= 512
             return super().forward(
-                query,
-                key_cache,
-                value_cache,
-                cu_seqlens_q,
-                block_tables,
-                softmax_scale,
-                mask,
+                query=query,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                cu_seqlens_q=cu_seqlens_q,
+                block_tables=block_tables,
+                softmax_scale=softmax_scale,
                 cu_total_seqlens=cu_total_seqlens,
+                mask=mask,
                 max_seqlen_q=max_seqlen_q,
                 max_total_seqlen=max_total_seqlen,
             )
