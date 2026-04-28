@@ -216,7 +216,7 @@ class FlashAttentionBlock(torch.nn.Module):
         k = self.rms_norms.key(k)
 
         if self.rope:
-            cos, sin = self.rot_pos_emb(hidden_states, cu_seqlens_q=context_cu_seqs, seqlens_kv=context_shifts + context_input_len)
+            cos, sin = self.rot_pos_emb(hidden_states, cu_seqlens_q=context_cu_seqs, total_seq_lens=context_shifts + context_input_len)
             q, k = self.rope(
                 q,
                 k,
@@ -243,7 +243,7 @@ class FlashAttentionBlock(torch.nn.Module):
                 context_cu_seqs,
                 kv_cache.block_tables[self.layer_id],
                 self.scale_factor,
-                seqlens_kv=context_shifts + context_input_len,
+                cu_total_seqlens=torch.nn.functional.pad((context_shifts + context_input_len).cumsum(0), (1, 0)).to(torch.int32),
             )
         else:
             # dist_breakpoint()

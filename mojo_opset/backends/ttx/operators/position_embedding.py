@@ -21,14 +21,14 @@ class TTXRotaryEmbedding(MojoRotaryEmbedding):
         self,
         x: torch.Tensor,
         cu_seqlens_q: Optional[torch.Tensor] = None,
-        seqlens_kv: Optional[torch.Tensor] = None,
+        total_seq_lens: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
         if cu_seqlens_q is not None:
             assert cu_seqlens_q.dtype == torch.int32
-        if seqlens_kv is not None:
-            assert seqlens_kv.dtype == torch.int32
+        if total_seq_lens is not None:
+            assert total_seq_lens.dtype == torch.int32
         if position_ids is not None:
             assert position_ids.dtype == torch.int32
         return rot_pos_embed(
@@ -36,7 +36,7 @@ class TTXRotaryEmbedding(MojoRotaryEmbedding):
             self.cos,
             self.sin,
             cu_seqlens_q=cu_seqlens_q,
-            seqlens_kv=seqlens_kv,
+            seqlens_kv=total_seq_lens,
             position_ids=position_ids,
         )
 
@@ -53,4 +53,3 @@ class TTXApplyRoPE(MojoApplyRoPE):
         head_first: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return rope_fwd(q, k, cos, sin, head_first)
-

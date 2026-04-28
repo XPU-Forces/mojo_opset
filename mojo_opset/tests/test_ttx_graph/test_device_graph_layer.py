@@ -36,7 +36,8 @@ class SimpleAttention(nn.Module):
 
         cu_seqlens_q = torch.arange(0, (batch_size + 1) * seq_len, step=seq_len, dtype=torch.int32, device=x.device)
         block_tables = torch.arange(0, num_blocks, dtype=torch.int32, device=x.device).view(batch_size, 1)
-        seqlens_kv = torch.full((batch_size,), seq_len, dtype=torch.int32, device=x.device)
+        total_seq_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device=x.device)
+        cu_total_seqlens = torch.nn.functional.pad(total_seq_lens.cumsum(0), (1, 0))
 
         attn_out = self.attn(
             query=q,
@@ -44,7 +45,7 @@ class SimpleAttention(nn.Module):
             value_cache=value_cache,
             cu_seqlens_q=cu_seqlens_q,
             block_tables=block_tables,
-            seqlens_kv=seqlens_kv,
+            cu_total_seqlens=cu_total_seqlens,
         )
 
         attn_out = attn_out.view(batch_size, seq_len, self.hidden_size)

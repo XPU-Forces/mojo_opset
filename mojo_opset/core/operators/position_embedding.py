@@ -43,7 +43,7 @@ class MojoRotaryEmbedding(MojoOperator):
         self,
         x: torch.Tensor,
         cu_seqlens_q: Optional[torch.Tensor] = None,
-        seqlens_kv: Optional[torch.Tensor] = None,
+        total_seq_lens: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -57,8 +57,8 @@ class MojoRotaryEmbedding(MojoOperator):
         """
         if cu_seqlens_q is not None:
             assert cu_seqlens_q.dtype == torch.int32
-        if seqlens_kv is not None:
-            assert seqlens_kv.dtype == torch.int32
+        if total_seq_lens is not None:
+            assert total_seq_lens.dtype == torch.int32
         if position_ids is not None:
             assert position_ids.dtype == torch.int32
         assert position_ids is None or cu_seqlens_q is None, "At most one of cu_seqlens_q or position_ids should be provided"
@@ -70,7 +70,7 @@ class MojoRotaryEmbedding(MojoOperator):
             bsz = seqlens_q.size(0)
             for i in range(bsz):
                 q_len = seqlens_q[i].item()
-                context_len = 0 if seqlens_kv is None else seqlens_kv[i].item() - q_len
+                context_len = 0 if total_seq_lens is None else total_seq_lens[i].item() - q_len
                 position_ids[cu_seqlens_q[i]:cu_seqlens_q[i+1]] = torch.arange(
                     context_len,
                     context_len + q_len, 
