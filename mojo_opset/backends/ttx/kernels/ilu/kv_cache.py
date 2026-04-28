@@ -143,6 +143,7 @@ def _store_paged_kv_cache_kernel(
     batch_size,
     max_chunks_per_seq,
     head_dim: tl.constexpr,
+    padded_head_dim: tl.constexpr,
     block_size: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
     HAS_KV_LENS: tl.constexpr,
@@ -194,7 +195,9 @@ def _store_paged_kv_cache_kernel(
         offs_sub = tl.arange(0, CHUNK_SIZE)
         mask_sub = offs_sub < sub_len
 
-        offs_d = tl.arange(0, head_dim)
+        offs_d = tl.arange(0, padded_head_dim)
+        mask_d = offs_d < head_dim
+        mask = mask_sub[:, None] & mask_d[None, :]
 
         for h in range(num_kv_heads):
             src_k_ptr = (
@@ -204,7 +207,7 @@ def _store_paged_kv_cache_kernel(
                 + offs_d[None, :] * stride_k_dim
             )
 
-            k_val = tl.load(src_k_ptr, mask=mask_sub[:, None], other=0.0)
+            k_val = tl.load(src_k_ptr, mask=mask, other=0.0)
 
             dst_k_ptr = (
                 key_cache_ptr
@@ -214,7 +217,7 @@ def _store_paged_kv_cache_kernel(
                 + offs_d[None, :] * stride_kc_dim
             )
 
-            tl.store(dst_k_ptr, k_val, mask=valid_block & mask_sub[:, None])
+            tl.store(dst_k_ptr, k_val, mask=valid_block & mask)
 
             src_v_ptr = (
                 v_ptr
@@ -223,7 +226,7 @@ def _store_paged_kv_cache_kernel(
                 + offs_d[None, :] * stride_v_dim
             )
 
-            v_val = tl.load(src_v_ptr, mask=mask_sub[:, None], other=0.0)
+            v_val = tl.load(src_v_ptr, mask=mask, other=0.0)
 
             dst_v_ptr = (
                 value_cache_ptr
@@ -233,7 +236,7 @@ def _store_paged_kv_cache_kernel(
                 + offs_d[None, :] * stride_vc_dim
             )
 
-            tl.store(dst_v_ptr, v_val, mask=valid_block & mask_sub[:, None])
+            tl.store(dst_v_ptr, v_val, mask=valid_block & mask)
 
         processed += sub_len
         curr_log_pos += sub_len
@@ -256,6 +259,7 @@ def store_paged_kv_impl(
 
     num_kv_heads = k_states.shape[1]
     head_dim = k_states.shape[2]
+    padded_head_dim = max(triton.next_power_of_2(head_dim), 16)
 
     block_size = key_cache.shape[2]
 
@@ -292,6 +296,7 @@ def store_paged_kv_impl(
         batch_size,
         max_chunks_per_seq,
         head_dim,
+        padded_head_dim,
         block_size,
         CHUNK_SIZE=block_size,
         HAS_KV_LENS=kv_lens_before_store is not None,
