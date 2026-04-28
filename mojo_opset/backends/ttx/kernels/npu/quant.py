@@ -37,7 +37,7 @@ def dynamic_quant_impl(
         BLOCK_SIZE_N=256,
     )
 
-    return output_tensor, quant_scale_tensor
+    return output_tensor, quant_scale_tensor.unsqueeze(-1)
 
 
 @triton.autotune(

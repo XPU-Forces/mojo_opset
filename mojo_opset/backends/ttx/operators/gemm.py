@@ -1,11 +1,9 @@
-from typing import Optional
-
 import torch
 
 from torch.distributed.tensor import DTensor
 
-from mojo_opset.backends.ttx.kernels import m_grouped_matmul
 from mojo_opset.backends.ttx.kernels import int8_gemm_dequant
+from mojo_opset.backends.ttx.kernels import m_grouped_matmul
 from mojo_opset.backends.ttx.kernels import prepare_b
 from mojo_opset.backends.ttx.kernels import quant_group_linear_reduce_sum_impl
 from mojo_opset.core import MojoGemmDequant
@@ -18,20 +16,15 @@ class TTXGemmDequant(MojoGemmDequant):
 
     Uses a hand-tuned Triton kernel with persistent scheduling,
     B-transposed layout, double-buffering, and heuristic tile selection.
-    The kernel fuses int8 × int8 → int32, per-token × per-channel
-    scale application, optional bias add, and output dtype cast into
-    a single kernel epilogue — eliminating intermediate memory traffic.
+    The kernel fuses int8 x int8 -> int32, per-token x per-channel
+    scale application, and output dtype cast into a single kernel
+    epilogue, eliminating intermediate memory traffic.
     """
 
     supported_platforms_list = ["npu"]
 
-    def forward(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        input_scale: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def forward(self, input: torch.Tensor, input_scale: torch.Tensor) -> torch.Tensor:
+        weight = self.weight
         if self.trans_weight:
             weight = weight.t().contiguous()
 
@@ -44,11 +37,13 @@ class TTXGemmDequant(MojoGemmDequant):
             input = input.contiguous()
 
         return int8_gemm_dequant(
-            input, bt,
+            input,
+            bt,
             input_scale.flatten().float(),
             self.weight_scale.flatten().float(),
-            bias,
-            M, N,
+            None,  # no bias.
+            M,
+            N,
             self.output_dtype,
         )
 

@@ -364,7 +364,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return (
             torch.empty_like(input_tensor, dtype=torch.int8),
-            torch.empty(*input_tensor.shape[:-1], dtype=torch.float32, device=input_tensor.device),
+            torch.empty((*input_tensor.shape[:-1], 1), dtype=torch.float32, device=input_tensor.device),
         )
 
     # ====================================
