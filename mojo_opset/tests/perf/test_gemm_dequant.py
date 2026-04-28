@@ -12,7 +12,7 @@ def _make_gemm_dequant_perf_data(m, k, n, trans_weight):
     x_i8 = torch.clamp(torch.round(x_fp / x_scale.unsqueeze(-1)), -128, 127).to(torch.int8)
 
     w_fp_nk = torch.randn(n, k)
-    w_scale = (w_fp_nk.abs().amax(dim=-1) / 127).clamp(min=1e-12)
+    w_scale = (w_fp_nk.abs().amax(dim=-1) / 127).clamp(min=1e-12).to(torch.bfloat16)
     w_i8_nk = torch.clamp(torch.round(w_fp_nk / w_scale.unsqueeze(-1)), -128, 127).to(torch.int8)
 
     if trans_weight:

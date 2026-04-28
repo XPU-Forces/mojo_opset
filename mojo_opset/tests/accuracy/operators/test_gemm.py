@@ -67,7 +67,7 @@ def _make_int8_gemm_data(m, k, n, trans_weight):
     x_i8 = torch.clamp(torch.round(x_fp / x_scale.unsqueeze(-1)), -128, 127).to(torch.int8)
 
     w_fp_nk = torch.randn(n, k)
-    w_scale = (w_fp_nk.abs().amax(dim=-1) / 127).clamp(min=1e-12)
+    w_scale = (w_fp_nk.abs().amax(dim=-1) / 127).clamp(min=1e-12).to(torch.bfloat16)
     w_i8_nk = torch.clamp(torch.round(w_fp_nk / w_scale.unsqueeze(-1)), -128, 127).to(torch.int8)
 
     if trans_weight:
@@ -103,7 +103,7 @@ def test_gemm_dequant(m, k, n, output_dtype, trans_weight):
     out = op(x_i8, x_scale)
 
     w_for_mm = w_i8.t().contiguous() if trans_weight else w_i8
-    ref = (x_i8.float() @ w_for_mm.float()) * x_scale.unsqueeze(-1) * w_scale.unsqueeze(0)
+    ref = (x_i8.float() @ w_for_mm.float()) * x_scale.unsqueeze(-1) * w_scale.float().unsqueeze(0)
     ref = ref.to(output_dtype)
     torch.testing.assert_close(out, ref, atol=0, rtol=0)
 
@@ -122,7 +122,7 @@ def test_gemm_dequant_registered_weight():
     op = _load_gemm_dequant_module(op, w_i8, w_scale)
     out = op(x_i8, x_scale)
 
-    ref = (x_i8.float() @ w_i8.float()) * x_scale.unsqueeze(-1) * w_scale.unsqueeze(0)
+    ref = (x_i8.float() @ w_i8.float()) * x_scale.unsqueeze(-1) * w_scale.float().unsqueeze(0)
     ref = ref.to(torch.bfloat16)
     torch.testing.assert_close(out, ref, atol=0, rtol=0)
 
@@ -139,6 +139,7 @@ def test_gemm_dequant_parameters_are_registered():
     assert isinstance(op.weight_scale, torch.nn.Parameter)
     assert isinstance(op.weight, torch.nn.Parameter)
     assert op.weight.dtype == torch.int8
+    assert op.weight_scale.dtype == torch.bfloat16
     assert op.weight_scale.shape == (8,)
     assert op.weight.shape == (16, 8)
     assert set(op.state_dict()) == {"weight", "weight_scale"}

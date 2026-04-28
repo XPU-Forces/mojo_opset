@@ -104,19 +104,20 @@ class MojoGemmDequant(MojoOperator):
             trans_weight (bool): If True, the weight tensor is provided as
                 ``(N, K)`` and will be transposed to ``(K, N)`` internally.
                 Otherwise it is stored directly as ``(K, N)``.
-            device: Device for registered parameters.
             **kwargs: Additional tensor factory kwargs.
         """
         super().__init__(**kwargs)
         self.in_features = in_features
         self.out_features = out_features
         self.weight_shape = (out_features, in_features) if trans_weight else (in_features, out_features)
+        weight_factory_kwargs = {**self.tensor_factory_kwargs, "dtype": torch.int8}
+        weight_scale_factory_kwargs = {**self.tensor_factory_kwargs, "dtype": torch.bfloat16}
         self.weight = torch.nn.Parameter(
-            torch.empty(self.weight_shape, dtype=torch.int8),
+            torch.empty(self.weight_shape, **weight_factory_kwargs),
             requires_grad=False,
         )
         self.weight_scale = torch.nn.Parameter(
-            torch.empty(out_features, dtype=torch.bfloat16),
+            torch.empty(out_features, **weight_scale_factory_kwargs),
             requires_grad=False,
         )
         self.output_dtype = output_dtype
