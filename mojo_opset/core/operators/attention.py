@@ -37,16 +37,12 @@ class MojoDecodeGQA(MojoOperator):
         self,
         is_causal: bool = True,
         gqa_layout: str = "AABB",
-        window_size: int = -1,
     ):
         super().__init__()
         if gqa_layout not in ("ABAB", "AABB"):
             raise ValueError(f"gqa_layout must be 'ABAB' or 'AABB', got {gqa_layout}")
-        if not isinstance(window_size, int) or (window_size != -1 and window_size < 1):
-            raise ValueError(f"window_size must be -1 or >= 1, got {window_size}")
         self.is_causal = is_causal
         self.gqa_layout = gqa_layout
-        self.window_size = window_size
 
     def forward(
         self,
@@ -94,18 +90,13 @@ class MojoDecodeGQA(MojoOperator):
 
             scores = torch.einsum("hd,hsd->hs", q_i, k_i) * softmax_scale
 
-            if self.window_size > 0:
-                mask = torch.zeros(sl, dtype=torch.bool, device=query.device)
-                mask[max(0, sl - self.window_size):] = True
-                scores.masked_fill_(~mask.unsqueeze(0), float("-inf"))
-
             probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
             o_i = torch.einsum("hs,hsd->hd", probs, v_i)
             outputs[i] = o_i
         return outputs
 
     def extra_repr(self) -> str:
-        return f"{self.is_causal=}, {self.gqa_layout=}, {self.window_size=}".replace("self.", "")
+        return f"{self.is_causal=}, {self.gqa_layout=}".replace("self.", "")
 
 
 class MojoPagedDecodeGQA(MojoOperator):
@@ -113,7 +104,6 @@ class MojoPagedDecodeGQA(MojoOperator):
         self,
         is_causal: bool = True,
         gqa_layout: str = "AABB",
-        window_size: int = -1,
     ):
         """
         Initialize the Paged Decode GQA attention operator.
@@ -121,12 +111,9 @@ class MojoPagedDecodeGQA(MojoOperator):
         Args:
             is_causal (bool, default=True): Enable causal masking (lower-triangular) if True.
             gqa_layout (str, default="ABAB"): GQA head grouping layout; one of {"ABAB", "AABB"}.
-            window_size (int, default=-1): Attention window length. Use -1 for full context,
-                or a positive integer (>= 1) to enable a sliding window of that length.
 
         Raises:
-            ValueError: If `gqa_layout` is not in {"ABAB", "AABB"} or if `window_size` is neither
-                -1 nor a positive integer (>= 1).
+            ValueError: If `gqa_layout` is not in {"ABAB", "AABB"} 
 
         Notes:
             This initializer stores configuration only. Actual causal masking and window enforcement
@@ -137,12 +124,8 @@ class MojoPagedDecodeGQA(MojoOperator):
         if gqa_layout not in ["ABAB", "AABB"]:
             raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
 
-        if not isinstance(window_size, int) or (window_size != -1 and window_size < 1):
-            raise ValueError(f"window_size must be -1 or >= 1, got {window_size}")
-
         self.is_causal = is_causal
         self.gqa_layout = gqa_layout
-        self.window_size = window_size
 
     def forward(
         self,
@@ -235,7 +218,7 @@ class MojoPagedDecodeGQA(MojoOperator):
         return outputs
 
     def extra_repr(self) -> str:
-        return f"{self.is_causal=}, {self.gqa_layout=}, {self.window_size=}".replace("self.", "")
+        return f"{self.is_causal=}, {self.gqa_layout=}".replace("self.", "")
 
 
 class MojoPrefillGQA(MojoOperator):
@@ -243,25 +226,18 @@ class MojoPrefillGQA(MojoOperator):
     GQA attention operator.
     Args:
         is_causal (bool): Whether to apply causal masking.
-        softmax_scale (float): Scaling factor for the softmax operation.
         gqa_layout (str): Layout for GQA attention.
-        rm_padding (bool): Whether to remove padding from attention computation.
-        window_size (int): Window size for attention computation, -1 means full attention.
     """
 
     def __init__(
         self,
         is_causal: bool = True,
         gqa_layout: str = "ABAB",
-        rm_padding: bool = False,
-        window_size: int = -1,
     ):
         super().__init__()
 
         self.is_causal = is_causal
         self.gqa_layout = gqa_layout
-        self.rm_padding = rm_padding
-        self.window_size = window_size
 
     """
     Forward pass of the Mojo GQA attention operator, reference for backend.
@@ -269,6 +245,7 @@ class MojoPrefillGQA(MojoOperator):
         query (torch.Tensor): Query tensor, in shape [B, Q_H, S, D].
         key (torch.Tensor): Key tensor, in shape [B, K_H, S, D].
         value (torch.Tensor): Value tensor, inshape [B, V_H, S, D].
+        softmax_scale (float): Scaling factor for the softmax operation.
 
     Returns:
         torch.Tensor: Output tensor.
@@ -282,8 +259,6 @@ class MojoPrefillGQA(MojoOperator):
         cu_seqlens_q: torch.Tensor,
         softmax_scale: Optional[float] = None,
     ) -> torch.Tensor:
-        if self.window_size != -1:
-            raise NotImplementedError
 
         assert cu_seqlens_q.dtype == torch.int32
         batch_size, num_attn_heads, seq_len, head_dim = query.size()
@@ -331,27 +306,20 @@ class MojoPagedPrefillGQA(MojoOperator):
         self,
         is_causal: bool = True,
         gqa_layout: str = "AABB",
-        window_size: int = -1,
     ):
         """
         Initialize the Paged Prefill GQA attention operator with common parameters.
         Parameter descriptions:
-        - q_scale_factor (int): Multiplier for query heads (integer, default 1), no scaling applied to query.
         - gqa_layout (str): GQA head grouping layout, values {"ABAB","AABB"}, default "ABAB".
         - is_causal (bool): Whether to enable causal masking, default True.
-        - window_size (int): Attention window length; -1 means full window, or >=1 means sliding window length, default -1.
         """
         super().__init__()
 
         if gqa_layout not in ["ABAB", "AABB"]:
             raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
 
-        if not isinstance(window_size, int) or (window_size != -1 and window_size < 1):
-            raise ValueError(f"window_size must be -1 or >= 1, got {window_size}")
-
         self.is_causal = is_causal
         self.gqa_layout = gqa_layout
-        self.window_size = window_size
 
     def forward(
         self,
@@ -473,7 +441,7 @@ class MojoPagedPrefillGQA(MojoOperator):
         return outputs
 
     def extra_repr(self) -> str:
-        return f"{self.is_causal=}, {self.gqa_layout=}, {self.window_size=}".replace("self.", "")
+        return f"{self.is_causal=}, {self.gqa_layout=}".replace("self.", "")
 
 
 def _make_attn_sink(num_heads: int, tensor_factory_kwargs: dict) -> torch.nn.Parameter:

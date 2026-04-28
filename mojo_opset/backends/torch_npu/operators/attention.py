@@ -18,9 +18,8 @@ class TorchNpuPrefillGQA(MojoPrefillGQA, default_priority=0):
         self,
         is_causal: bool = True,
         gqa_layout: str = "ABAB",
-        window_size: int = -1,
     ):
-        super().__init__(is_causal=is_causal, gqa_layout=gqa_layout, rm_padding=False, window_size=window_size)
+        super().__init__(is_causal=is_causal, gqa_layout=gqa_layout)
 
     def forward(
         self,
@@ -67,9 +66,8 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
         self,
         is_causal: bool = True,
         gqa_layout: str = "ABAB",
-        window_size: int = -1,
     ):
-        super().__init__(is_causal=is_causal, gqa_layout=gqa_layout, window_size=window_size)
+        super().__init__(is_causal=is_causal, gqa_layout=gqa_layout)
 
     def forward(
         self,
@@ -139,9 +137,8 @@ class TorchNpuPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
         self,
         is_causal: bool = True,
         gqa_layout: str = "ABAB",
-        window_size: int = -1,
     ):
-        super().__init__(is_causal=is_causal, gqa_layout=gqa_layout, window_size=window_size)
+        super().__init__(is_causal=is_causal, gqa_layout=gqa_layout)
 
     def forward(
         self,

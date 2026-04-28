@@ -447,25 +447,6 @@ def test_decode_gqa(B, Hq, Hkv, D, S, gqa_layout):
         atol=1e-2, rtol=1e-2,
     )
 
-
-@pytest.mark.parametrize("window_size", [64, 128])
-@bypass_not_implemented
-def test_decode_gqa_sliding_window(window_size):
-    B, Hq, Hkv, D, S = 2, 8, 2, 128, 256
-    query = torch.randn(B, Hq, D, dtype=torch.bfloat16)
-    key = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)
-    value = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)
-    seqlens = torch.full((B,), S, dtype=torch.int32)
-
-    op = MojoDecodeGQA(gqa_layout="AABB", window_size=window_size)
-    op_ref = MojoDecodeGQA._registry.get("torch")(gqa_layout="AABB", window_size=window_size)
-    op.forward_diff_with(
-        op_ref, query, key, value, seqlens,
-        softmax_scale=1.0 / math.sqrt(D),
-        atol=1e-2, rtol=1e-2,
-    )
-
-
 # ===========================================================================
 # MojoDecodeMLA
 # ===========================================================================
