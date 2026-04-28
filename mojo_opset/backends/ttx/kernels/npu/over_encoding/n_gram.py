@@ -164,6 +164,7 @@ def n_gram_decode_kernel(
 
     block_offsets = tl.arange(0, BLOCK_SIZE_N)
     block_mask = block_offsets < n_grams_size
+    block_mask_1 = block_offsets[None,:] < n_grams_size
 
     oe_vocab_sizes = tl.load(
         oe_vocab_sizes + block_offsets, mask=block_mask, other=1
@@ -225,7 +226,7 @@ def n_gram_decode_kernel(
                     output_ids + bid * output_stride_0 + tl.arange(0, MTP_STEP)[:, None] * output_stride_1 + block_offsets[None, :] * output_stride_2,
                     # output_ids + bid * output_stride_0 + output_offsets,
                     n_gram_ids.to(output_ids.dtype.element_ty),
-                    mask=tl.view(block_mask, (1, BLOCK_SIZE_N)),
+                    mask= block_mask_1  #tl.view(block_mask, (1, BLOCK_SIZE_N)),
                 )
 
             else:
