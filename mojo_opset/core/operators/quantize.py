@@ -52,7 +52,7 @@ class MojoStaticQuant(MojoOperator):
         """
         input_fp = input.float()
         output = torch.clamp(torch.round(input_fp / self.scale.float()), self.q_min, self.q_max)
-        return output.to(self.quant_dtype)
+        return output.to(self.quant_dtype), self.scale
 
     def extra_repr(self) -> str:
         return f"input_size={self.input_size}, quant_dtype={self.quant_dtype}, q_max={self.q_max}, q_min={self.q_min}"
@@ -61,7 +61,6 @@ class MojoStaticQuant(MojoOperator):
 class MojoDequant(MojoOperator):
     def __init__(
         self,
-        input_size: int,
         output_dtype: torch.dtype = torch.bfloat16,
         **kwargs,
     ):
@@ -75,8 +74,6 @@ class MojoDequant(MojoOperator):
             **kwargs: Tensor factory kwargs.
         """
         super().__init__(**kwargs)
-        self.input_size = input_size
-        self.scale = torch.nn.Parameter(torch.empty(input_size, **self.tensor_factory_kwargs))
         if output_dtype not in (torch.float16, torch.bfloat16, torch.float32):
             raise NotImplementedError(
                 f"Unsupported output_dtype: {output_dtype}, expected torch.float16, torch.bfloat16, or torch.float32."
@@ -86,6 +83,7 @@ class MojoDequant(MojoOperator):
     def forward(
         self,
         input: torch.Tensor,
+        scale: torch.Tensor,
     ) -> torch.Tensor:
         """
         Dequantize a quantized tensor back to floating point.
@@ -96,7 +94,7 @@ class MojoDequant(MojoOperator):
             torch.Tensor: Dequantized tensor in ``self.output_dtype``.
         """
         input_fp = input.float()
-        output = input_fp * self.scale.float()
+        output = input_fp * scale.float()
         return output.to(self.output_dtype)
 
     def extra_repr(self) -> str:
@@ -153,8 +151,8 @@ class MojoDynamicQuant(MojoOperator):
             while smooth_scale.dim() < input_fp.dim():
                 smooth_scale = smooth_scale.unsqueeze(0)
             input_fp = input_fp * smooth_scale
-        scale = input_fp.abs().amax(dim=-1).clamp(min=1e-12) / self.q_max
-        output = torch.clamp(torch.round(input_fp / scale.unsqueeze(-1)), self.q_min, self.q_max)
+        scale = input_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
+        output = torch.clamp(torch.round(input_fp / scale), self.q_min, self.q_max)
         return output.to(self.quant_dtype), scale
 
     def extra_repr(self) -> str:
@@ -203,7 +201,7 @@ class MojoMoEDynamicQuant(MojoOperator):
         Returns:
             Tuple[torch.Tensor, torch.Tensor]:
                 - Quantized int8 tensor with the same shape as ``input``.
-                - Per-token dynamic scale of shape ``input.shape[:-1]``.
+                - Per-token dynamic scale of shape ``input.shape[:-1] + (1,)``.
         """
         if input.dim() < 2:
             raise ValueError(f"input must have at least 2 dimensions for MoE dynamic quant, got {input.dim()}.")
@@ -220,8 +218,8 @@ class MojoMoEDynamicQuant(MojoOperator):
             )
         expanded_scale = self.smooth_scale.float().repeat_interleave(token_count, dim=0)
         input_fp = input.float() * expanded_scale
-        scale = input_fp.abs().amax(dim=-1).clamp(min=1e-12) / self.q_max
-        output = torch.clamp(torch.round(input_fp / scale.unsqueeze(-1)), self.q_min, self.q_max)
+        scale = input_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
+        output = torch.clamp(torch.round(input_fp / scale), self.q_min, self.q_max)
         return output.to(self.quant_dtype), scale
 
     def extra_repr(self) -> str:
@@ -288,7 +286,7 @@ class MojoDequantSwiGLUQuant(MojoOperator):
         Returns:
             Tuple[torch.Tensor, torch.Tensor]:
                 - Quantized int8 output of shape ``(tokens, H)``.
-                - Per-token dynamic scale of shape ``(tokens,)``.
+                - Per-token dynamic scale of shape ``(tokens, 1)``.
         """
         if x.dim() != 2:
             raise ValueError(f"x must be 2D with shape (tokens, 2H), but got {tuple(x.shape)}")
@@ -330,8 +328,8 @@ class MojoDequantSwiGLUQuant(MojoOperator):
             quant_scale = quant_scale.repeat_interleave(token_count, dim=0)
         out_fp = out_fp * quant_scale
 
-        scale = out_fp.abs().amax(dim=-1).clamp(min=1e-12) / self.q_max
-        output = torch.clamp(torch.round(out_fp / scale.unsqueeze(-1)), self.q_min, self.q_max)
+        scale = out_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
+        output = torch.clamp(torch.round(out_fp / scale), self.q_min, self.q_max)
         return output.to(self.quant_dtype), scale
 
     def extra_repr(self) -> str:

@@ -1,7 +1,4 @@
-from typing import Optional
-
 import torch
-from torch.distributed.tensor import DTensor
 
 from ..operator import MojoOperator
 
@@ -48,10 +45,8 @@ class MojoGroupGemm(MojoOperator):
 
         if self.trans_weight:
             num_groups_w, n, bk = self.weight.shape
-            strideBN, strideBK = self.weight.stride(1), self.weight.stride(2)
         else:
             num_groups_w, bk, n = self.weight.shape
-            strideBK, strideBN = self.weight.stride(1), self.weight.stride(2)
 
         m, k = input.shape
         assert bk == k, "K of input should be equal to K of self.weight."
@@ -73,69 +68,88 @@ class MojoGroupGemm(MojoOperator):
         weight_shape = tuple(self.weight.shape) if isinstance(self.weight, torch.Tensor) else None
         weight_dtype = self.weight.dtype if isinstance(self.weight, torch.Tensor) else None
         weight_device = self.weight.device if isinstance(self.weight, torch.Tensor) else None
-        return (
-            f"{weight_shape=}, {weight_dtype=}, {weight_device=}".replace("self.", "")
-        )
+        return f"{weight_shape=}, {weight_dtype=}, {weight_device=}".replace("self.", "")
 
 
 class MojoGemmDequant(MojoOperator):
     """Fused int8 GEMM + dequantization.
 
     Performs int8 matrix multiplication with int32 accumulation, then applies
-    per-token × per-channel scale factors to dequantize the result, adds an
-    optional bias, and casts to ``output_dtype``.
+    per-token x per-channel scale factors to dequantize the result and casts
+    to ``output_dtype``.
 
     The reference uses float32 matmul to emulate int8 GEMM because
     ``torch.matmul`` does not natively support int8 → int32 accumulation.
     float32 is exact for all int8 partial sums at practical ``K`` dimensions.
 
     Computation:
-        ``output = (input_i8 @ weight_i8) * input_scale * weight_scale + bias``
+        ``output = (input_i8 @ weight_i8) * input_scale * weight_scale``
     """
 
     def __init__(
         self,
-        weight_scale_size: int,
+        in_features: int,
+        out_features: int,
         output_dtype: torch.dtype = torch.bfloat16,
         trans_weight: bool = False,
         **kwargs,
     ):
         """
         Args:
-            weight_scale_size (int): Size of the per-channel weight scale parameter.
+            in_features (int): Logical K dimension of the int8 weight.
+            out_features (int): Logical N dimension of the int8 weight and
+                weight scale.
             output_dtype (torch.dtype): Target dtype for the dequantized output.
                 Supported: ``torch.float32``, ``torch.float16``, ``torch.bfloat16``.
             trans_weight (bool): If True, the weight tensor is provided as
                 ``(N, K)`` and will be transposed to ``(K, N)`` internally.
-            **kwargs: Tensor factory kwargs.
+                Otherwise it is stored directly as ``(K, N)``.
+            **kwargs: Additional tensor factory kwargs.
         """
         super().__init__(**kwargs)
-        self.weight_scale_size = weight_scale_size
-        self.weight_scale = torch.nn.Parameter(torch.empty(weight_scale_size, **self.tensor_factory_kwargs))
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight_shape = (out_features, in_features) if trans_weight else (in_features, out_features)
+        weight_factory_kwargs = {**self.tensor_factory_kwargs, "dtype": torch.int8}
+        weight_scale_factory_kwargs = {**self.tensor_factory_kwargs, "dtype": torch.bfloat16}
+        self.weight = torch.nn.Parameter(
+            torch.empty(self.weight_shape, **weight_factory_kwargs),
+            requires_grad=False,
+        )
+        self.weight_scale = torch.nn.Parameter(
+            torch.empty(out_features, **weight_scale_factory_kwargs),
+            requires_grad=False,
+        )
         self.output_dtype = output_dtype
         self.trans_weight = trans_weight
 
     def forward(
         self,
         input: torch.Tensor,
-        weight: torch.Tensor,
         input_scale: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
             input (torch.Tensor): Quantised activation ``(M, K)`` in int8.
-            weight (torch.Tensor): Quantised weight ``(K, N)`` in int8, or
-                ``(N, K)`` when ``trans_weight=True``.
             input_scale (torch.Tensor): Runtime per-token activation scale ``(M,)`` or ``(M, 1)``.
-            bias (Optional[torch.Tensor]): Optional bias ``(N,)`` in
-                ``output_dtype``.
 
         Returns:
             torch.Tensor: Dequantized result ``(M, N)`` in ``output_dtype``.
         """
+        weight = self.weight
         if self.trans_weight:
             weight = weight.t()
+
+        if input.dim() != 2:
+            raise ValueError(f"input must be 2D, got shape {tuple(input.shape)}.")
+        if weight.dim() != 2:
+            raise ValueError(f"weight must be 2D, got shape {tuple(weight.shape)}.")
+        if input.shape[1] != weight.shape[0]:
+            raise ValueError(f"input K {input.shape[1]} must match weight K {weight.shape[0]}.")
+        if self.weight_scale.shape != (weight.shape[1],):
+            raise ValueError(
+                f"weight_scale shape {tuple(self.weight_scale.shape)} must match output dim {(weight.shape[1],)}."
+            )
 
         out = torch.matmul(input.float(), weight.float())
 
@@ -147,14 +161,12 @@ class MojoGemmDequant(MojoOperator):
 
         out = out * input_scale.float() * weight_scale.float()
 
-        if bias is not None:
-            out = out + bias.float()
-
         return out.to(self.output_dtype)
 
     def extra_repr(self) -> str:
         return (
-            f"weight_scale_size={self.weight_scale_size}, "
+            f"in_features={self.in_features}, "
+            f"out_features={self.out_features}, "
             f"output_dtype={self.output_dtype}, trans_weight={self.trans_weight}"
         )
 
