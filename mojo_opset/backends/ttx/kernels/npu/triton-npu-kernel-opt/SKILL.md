@@ -1,313 +1,221 @@
 ---
 name: triton-npu-kernel-opt
 description: >-
-  Triton kernel optimization guide for Ascend NPU (910B/910C). Use when writing
-  or optimizing Triton kernels targeting NPU backend, including GEMM, attention,
-  normalization, or any compute-intensive kernel. Covers hardware constraints,
-  proven optimization patterns, compiler flags, tile tuning, and known pitfalls
-  specific to the ttx backend with Ascend SoCs.
+Build, port, optimize, integrate, and validate Triton kernels for Ascend NPU
+  on the mojo_opset ttx backend. Use when adding a new NPU kernel, migrating a
+  GPU Triton kernel to NPU, tuning an existing NPU kernel, wiring it into
+  core/operator/backend dispatch, or preparing accuracy and performance
+  acceptance for Ascend 910B/910C.
 ---
 
-# Triton NPU Kernel Optimization Guide
+# Triton Ascend NPU Kernel Skill
 
-Backend: **ttx** (Triton for Ascend NPU)
+Backend: `ttx` in `mojo_opset`
 
-## SoC Hardware Specs
+This skill is for end-to-end delivery of a new or updated Triton kernel on
+Ascend NPU. It is not only an optimization note. It defines the required
+workflow for:
 
-### Ascend 910B2C
+- checking that the op contract already exists in `core`
+- checking whether a `torch` or `torch_npu` implementation already exists
+- studying existing optimized NPU kernels before writing new code
+- implementing and registering the new kernel
+- running accuracy, opcheck, and performance validation
+- deciding whether the kernel is ready for acceptance
 
-| Resource | Value |
-|----------|-------|
-| Cube Cores (AI Cores) | 24 |
-| Vector Cores | 48 |
-| Unified Buffer (UB) per core | 192 KB (1,572,864 bits) |
-| L2 Cache | 192 MB |
-| HBM | 62 GB |
-| INT8 peak throughput | ~512 TFLOPS |
-| FP16 peak throughput | ~320 TFLOPS |
+## Mandatory workflow
 
-Get core counts dynamically:
+Follow this order. Do not skip steps.
 
-```python
-from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
-num_cube = get_num_cores("cube")   # 24 on 910B
-num_vec  = get_num_cores("vector") # 48 on 910B
-```
+### 1. Confirm the contract exists in `core`
 
-## Optimization Catalog
+Inspect the relevant API first:
 
-Each optimization is tagged with **applicability** (which kernel types benefit) and **measured impact**.
+- `mojo_opset/core/operators/`
+- `mojo_opset/core/functions/`
 
-### OPT-01: Persistent Kernel
+You need a stable semantic contract before writing a backend kernel.
 
-**Applies to:** GEMM, GroupGEMM, any kernel with many output tiles
-**Impact:** +57% on GEMM 4096³
+If there is no corresponding `core` operator/function, or there is no usable
+`torch` reference implementation for semantics and correctness comparison, stop
+and tell the user exactly what is missing. Ask the user to provide or approve
+the missing core/torch implementation first.
 
-Standard Triton launches one program per tile. On NPU, dispatch overhead is ~6µs per tile. For 512 tiles that's 3ms overhead — often exceeding compute time.
+Practical rule:
 
-Persistent kernel: launch `grid=(NUM_CUBE_CORES,)`, each core loops over assigned tiles.
+- Existing `core` contract + existing `torch` reference: proceed
+- Existing `core` contract but no `torch` reference: proceed only if there is a
+  `torch_npu` implementation or a trusted mathematical reference you can test
+  against; otherwise ask the user to provide one
+- No `core` contract: do not invent API semantics silently
 
-```python
-@triton.jit
-def _persistent_kernel(..., NUM_SMS: tl.constexpr):
-    start_pid = tl.program_id(0)
-    num_tiles = num_pid_m * num_pid_n
-    tiles_per_sm = num_tiles // NUM_SMS
-    if start_pid < num_tiles % NUM_SMS:
-        tiles_per_sm += 1
-    tile_id = start_pid - NUM_SMS
-    for _ in range(0, tiles_per_sm):
-        tile_id += NUM_SMS
-        pid_m = tile_id // num_pid_n
-        pid_n = tile_id % num_pid_n
-        # ... compute tile ...
-```
+### 2. Read the closest existing NPU kernels before coding
 
-**Decision rule:** Use persistent when `num_tiles > 2 * NUM_CUBE_CORES`.
+Before writing any new NPU kernel, read all relevant existing optimized NPU
+kernels in this repository. Start with:
 
-### OPT-02: B Transposed Layout (for GEMM)
+- [guides/repo/kernel_inventory.md](guides/repo/kernel_inventory.md)
 
-**Applies to:** GEMM, GroupGEMM
-**Impact:** +29% on GEMM 4096³
+At minimum, inspect:
 
-Store weight B as `(N, K)` row-major instead of `(K, N)`. Both A and B_T then have K as the stride-1 (contiguous) dimension, doubling DMA efficiency.
+- the same operator family if it exists
+- kernels with similar memory access patterns
+- kernels with similar reduction or tiling structure
+- kernels with similar registration and test shape coverage
 
-```python
-def prepare_b(b):
-    """B(K,N) → B_T(N,K) row-major + padding. Call once for static weights."""
-    return b.T.contiguous()  # + padding to block multiples
-```
+Do not treat the new kernel as greenfield work if the repo already solved a
+similar scheduling, layout, or validation problem elsewhere.
 
-### OPT-03: Native INT8 dot + INT32 Accumulator
+### 3. Read only the needed Triton-Ascend references
 
-**Applies to:** INT8 GEMM
-**Impact:** Enables correct INT8 computation; avoids FP16 intermediate loss
+Use the curated guides as the primary documentation layer. Prefer English only.
 
-```python
-acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.int32)
-acc = tl.dot(a_int8, tl.trans(bt_int8), acc=acc)  # INT8×INT8 → INT32
-```
+Start with:
 
-**Pitfall:** `tl.dot(int8, int8)` without `acc=tl.int32` may produce NaN. Always specify accumulator dtype.
+- [guides/platform/index.md](guides/platform/index.md)
 
-### OPT-04: tl.multibuffer (Double Buffering)
+Load only the sections needed for the current task:
 
-**Applies to:** All kernels with K-loop or sequential block loads
-**Impact:** +15-25% (overlaps HBM load with Cube compute)
+- programming model and migration rules for GPU-to-NPU ports
+- memory/tensor descriptor APIs when layout is non-trivial
+- debugging/profiling docs when compile or runtime issues appear
+- examples only when a close pattern exists
 
-```python
-a = tl.load(a_ptrs)
-bt = tl.load(bt_ptrs)
-tl.multibuffer(a, 2)   # NPU-specific: hint compiler to double-buffer
-tl.multibuffer(bt, 2)
-acc = tl.dot(a, tl.trans(bt), acc=acc)
-```
+Use only the distilled local references that have a clear role:
 
-Also enable via launch kwarg: `multibuffer=True`.
+- [guides/tuning/best_practice.md](guides/tuning/best_practice.md) for repo-specific NPU coding patterns
+- [guides/tuning/compile_option.md](guides/tuning/compile_option.md) for curated compiler/runtime knobs
+- [guides/tuning/ascend-910b-gemm.md](guides/tuning/ascend-910b-gemm.md) for GEMM-only tuning data
+- [guides/tuning/optimization-log.md](guides/tuning/optimization-log.md) for experiment history
 
-**Pitfall:** `num_stages > 1` (GPU-style software pipelining) is NOT supported on NPU. Use `tl.multibuffer` instead.
+### 4. Check existing backend implementations
 
-### OPT-05: Large BLOCK_K
+Inspect the full dispatch path before coding:
 
-**Applies to:** GEMM, attention QK dot
-**Impact:** +10-20% (fewer K-loop iterations → less per-iteration overhead)
+- `mojo_opset/backends/ttx/operators/`
+- `mojo_opset/backends/ttx/kernels/npu/`
+- `mojo_opset/backends/torch_npu/operators/`
+- `mojo_opset/backends/ttx/kernels/npu/__init__.py`
 
-NPU K-loop has ~1µs fixed overhead per iteration. Increasing BLOCK_K from 128 to 512 reduces iterations 4x.
+The questions to answer are:
 
-| BLOCK_K | K-iters (K=4096) | Overhead |
-|---------|------------------|----------|
-| 128     | 32               | ~32µs    |
-| 256     | 16               | ~16µs    |
-| 512     | 8                | ~8µs     |
+- Is there already a `ttx` operator class for this core op?
+- Is there already a native `torch_npu` backend path to use as a baseline?
+- Is the new work a new kernel only, or also an operator wiring change?
+- Is the kernel used through `torch.ops.ttx.*`, a `Mojo*` operator, or both?
 
-**Constraint:** Total UB usage must fit 192KB. For INT8: `(BM + BN) * BK * 1 byte + BM * BN * 4 bytes` (with multibuffer ×2). Typical max for INT8: `BM=128, BN=256, BK=512` → ~192KB.
+### 5. Implement with NPU-first constraints
 
-### OPT-06: Host-side Padding (Eliminate Masks)
+Default assumptions for Ascend NPU:
 
-**Applies to:** All kernels
-**Impact:** +5-10% (removes branch/mask overhead in inner loop)
+- launch overhead is expensive; prefer fewer logical programs
+- persistent scheduling is often better for large tiled workloads
+- host-side padding is usually safer than tail peeling
+- UB is the hard resource limit; tile shapes must justify their footprint
+- GPU heuristics like `num_stages > 1` do not automatically transfer
 
-Pad inputs to block multiples on the host (Python side) so the kernel never needs `tl.where` or mask predicates.
+Start from proven patterns in existing NPU kernels before inventing a new
+schedule.
 
-```python
-pM = ((M + BLOCK_M - 1) // BLOCK_M) * BLOCK_M
-if pM != M:
-    a_pad = torch.zeros(pM, K, device=a.device, dtype=a.dtype)
-    a_pad[:M, :K] = a
-    a = a_pad
-```
+For GEMM-like kernels, read only:
 
-**Pitfall:** Loop peeling (if-else for tail K iteration) crashes the NPU compiler. Always pad K instead.
+- [guides/tuning/ascend-910b-gemm.md](guides/tuning/ascend-910b-gemm.md)
 
-### OPT-07: Narrower Dtype Loads
+For non-GEMM kernels, start from:
 
-**Applies to:** All kernels
-**Impact:** 2x bandwidth savings (INT8 vs FP16)
+- [guides/tuning/best_practice.md](guides/tuning/best_practice.md)
 
-Keep data in narrowest dtype as long as possible. INT8 loads use half the HBM bandwidth of FP16. Cast to wider types only in epilogue.
+### 6. Integrate the kernel completely
 
-### OPT-08: Epilogue Fusion
+A kernel is not done when the Triton body compiles.
 
-**Applies to:** GEMM, normalization, activation
-**Impact:** Avoids extra kernel launch + memory round-trip
+Finish all needed integration work:
 
-Fuse post-compute operations (scale, cast, bias add, activation) into the same kernel:
+- export the kernel or impl symbol from `backends/ttx/kernels/npu`
+- wire the `ttx` operator/function backend if required
+- preserve existing backend dispatch behavior
+- keep the `torch` implementation as the correctness reference
+- keep the `torch_npu` implementation as a native-performance baseline when it
+  exists
 
-```python
-# All in registers, no extra HBM access
-c = (acc.to(tl.float32) * alpha).to(tl.float16)
-tl.store(c_ptrs, c)
-```
+Use:
 
-### OPT-09: Hybrid Dispatch
+- [guides/repo/integration_and_acceptance.md](guides/repo/integration_and_acceptance.md)
 
-**Applies to:** Kernels that serve a wide range of input sizes
-**Impact:** Optimal across all M/N/K ranges
+## Acceptance requirements
 
-Use persistent kernel for large problems, simple 2D grid for small ones:
+Do not present a new NPU kernel as complete unless all applicable checks pass.
 
-```python
-if use_persistent:
-    _persistent_kernel[(min(NUM_CORES, num_tiles),)](...)
-else:
-    _simple_kernel[(tiles_m, tiles_n)](...)
-```
+### Accuracy
 
-### OPT-10: Heuristic Tuning (Replace Autotune)
+You must validate against a trusted reference:
 
-**Applies to:** Performance-critical kernels in inference
-**Impact:** Eliminates autotune warmup cost; deterministic first-call performance
+- `torch` backend first when available
+- otherwise `torch_npu` native operator or mathematically equivalent reference
 
-After sweeping M/N/K parameter space, encode optimal configs as a lookup table:
+Minimum expectations:
 
-```python
-def select_config(M, N, K):
-    flops = 2 * M * N * K
-    if flops > (1 << 34):
-        return 128, 256, 512, True   # persistent
-    if flops > (1 << 30) and M >= 256:
-        return 128, 256, 256, True
-    # ... more tiers ...
-```
+- representative production shapes
+- edge shapes: very small, single-row, tail shapes, uneven groups, non-power-of-two
+- expected dtypes
+- optional arguments and alternate layouts
+- bias/no-bias or fused/non-fused branches when applicable
 
-**When to use autotune instead:** Training kernels, or when shape space is unpredictable.
+Use existing `accuracy` tests where possible. Extend them when the current shape
+set does not cover the new behavior.
 
-### OPT-11: Weight Preprocessing (prepare_b)
+### API correctness
 
-**Applies to:** Inference GEMM (static weights)
-**Impact:** Removes per-forward transpose + pad cost
+If the kernel surfaces through `torch.ops.ttx.*`, add or update opcheck tests in
+`mojo_opset/tests/test_ttx_graph/`.
 
-Pre-transpose and pad weight matrices once at model load time. Pass preprocessed weights to the kernel.
+### Performance
 
-### OPT-12: NZ Format (FRACTAL_NZ) for Native Operators
+You must run performance validation, not only correctness.
 
-**Applies to:** `npu_quant_matmul` and other torch_npu native operators
-**Impact:** +16% on npu_quant_matmul (600T vs 517T @ 4096³)
+Compare against the strongest available baseline:
 
-```python
-b_nz = torch_npu.npu_format_cast(b.contiguous(), 29)  # format 29 = FRACTAL_NZ
-out = torch_npu.npu_quant_matmul(a, b_nz, scale)
-```
+- existing `ttx` kernel, if replacing one
+- `torch_npu` native implementation, if it exists
+- `torch` reference only as a correctness baseline, not as the final
+  performance target
 
-INT8 NZ memory layout: `(M, N)` → `(N//32, ceil(M/16)*16, 32)` row-major.
-Conversion cost: 0.026ms for 4096×4096 (one-time).
+Record or summarize:
 
-**Critical: NZ format is NOT usable in Triton kernels:**
-- NZ address pattern causes UB overflow (770KB > 192KB) with BLOCK_K > 32
-- Forcing 32-wide K steps → Cube Core utilization <2%, 50x slowdown
-- `nd2nz-on-vector` compiler flag is not exposed via Triton API
-- Triton kernels should use ND (row-major) data layout
+- tested shapes
+- dtype/layout
+- latency or throughput
+- which baseline was used
+- whether the new kernel wins, matches, or regresses
 
-## Compiler Flags & Hints
+### Recommended acceptance bar
 
-### Supported Launch Kwargs
+Treat the kernel as accepted only when all of the following are true:
 
-| Flag | Effect | Recommendation |
-|------|--------|----------------|
-| `multibuffer=True` | Enable auto multi-buffering | Always use |
-| `num_stages=1` | Pipeline stages | Keep at 1 (NPU ignores >1) |
-| `num_warps=4` | Warp count | Default 4 works well |
-| `enable_ubuf_saving=True` | UB memory saving | Marginal effect, safe to enable |
-| `set_workspace_multibuffer=N` | Workspace buffer count | 2 (default) is optimal |
+- semantics are covered by `core`
+- a trusted reference path exists
+- accuracy tests pass for normal and boundary cases
+- opcheck passes when `torch.ops.ttx.*` is involved
+- performance tests pass on target NPU hardware
+- no unexplained regression remains against the best available baseline
 
-### tl.compile_hint
+If performance is worse but the kernel is still needed for coverage, state that
+explicitly and keep the gap quantified.
 
-```python
-tl.compile_hint(..., "dot_pad_only_k")   # Pad only K dim for dot
-tl.compile_hint(..., "tile_cube_loop")   # Tile-level cube loop
-```
+## What to read next
 
-**Pitfall:** `dot_pad_only_k` is INCOMPATIBLE with `BLOCK_K=512`. Causes `aicore timeout`. Only use with `BLOCK_K ≤ 256`.
+- Kernel inventory and example selection:
+  [guides/repo/kernel_inventory.md](guides/repo/kernel_inventory.md)
+- Repo integration and validation workflow:
+  [guides/repo/integration_and_acceptance.md](guides/repo/integration_and_acceptance.md)
+- Triton-Ascend doc map:
+  [guides/platform/index.md](guides/platform/index.md)
 
-### Flags That Do NOT Help (Tested)
+## Maintaining this skill
 
-| Flag | Result |
-|------|--------|
-| `num_stages > 1` | Ignored by NPU compiler |
-| `enable_hivm_auto_cv_balance` | No measurable effect |
-| `unit_flag` | No measurable effect |
-| `tile_mix_vector_loop` / `tile_mix_cube_loop` | No improvement for GEMM |
+When new NPU-specific findings appear:
 
-## UB Budget Calculator
-
-```
-UB_total = 192 KB = 196,608 bytes
-
-Per-tile UB (with multibuffer=2):
-  A tile:   BLOCK_M × BLOCK_K × elem_size × 2
-  B tile:   BLOCK_N × BLOCK_K × elem_size × 2
-  Acc:      BLOCK_M × BLOCK_N × 4 bytes (int32/fp32)
-
-Example INT8 GEMM (BM=128, BN=256, BK=512):
-  A: 128 × 512 × 1 × 2 = 128 KB
-  B: 256 × 512 × 1 × 2 = 256 KB  ← exceeds if both double-buffered
-  Acc: 128 × 256 × 4 = 128 KB
-  → Compiler auto-manages, but may fail if too large
-```
-
-When UB overflows: reduce BLOCK_K or BLOCK_N, or disable multibuffer for one operand.
-
-## Known Pitfalls (NPU-Specific)
-
-1. **Loop peeling crashes compiler:** No if-else for K tail iterations. Use host-side padding.
-2. **Zero strides → MLIR error:** `M=1` with modulo arithmetic can produce zero strides. Use explicit clamping.
-3. **arange with int8:** `tl.arange(..., dtype=int8)` not supported. Create as int32 then cast.
-4. **NZ format in Triton:** Cannot use. See OPT-12 for details.
-5. **dot_pad_only_k + large BLOCK_K:** Causes hardware timeout. Only safe with BK ≤ 256.
-6. **Corrupted compiler cache:** After compilation errors, clear `/root/.triton/cache/` before retrying.
-
-## Updating This Skill
-
-**This skill is a living document.** When generating or optimizing new kernel types (attention, normalization, convolution, etc.) on this backend, follow this protocol:
-
-### When to Update
-
-Update this skill whenever you discover:
-- A new optimization technique that applies to NPU kernels
-- A new compiler flag/hint that works (or doesn't work)
-- A new hardware constraint or UB budget formula
-- A new pitfall or compiler bug workaround
-- Performance data for a new kernel type
-
-### How to Update
-
-1. **Add the new technique** to the Optimization Catalog section with:
-   - Tag: `OPT-XX` (next sequential number)
-   - Applicability: which kernel types benefit
-   - Measured impact: % improvement with test conditions
-   - Code example
-   - Any pitfalls discovered
-
-2. **Add kernel-type-specific notes** to the appropriate reference file:
-   - GEMM patterns → [ascend-910b-gemm.md](ascend-910b-gemm.md)
-   - New kernel type → create `ascend-910b-{kernel_type}.md`
-
-3. **Update the optimization log** in [optimization-log.md](optimization-log.md) with:
-   - Date, kernel type, technique, result
-
-4. **Update Known Pitfalls** if new compiler issues are found.
-
-### Reference Files
-
-- [ascend-910b-gemm.md](ascend-910b-gemm.md) — Detailed GEMM optimization results and tuning tables
-- [optimization-log.md](optimization-log.md) — Chronological log of all optimization experiments
+- add reusable workflow changes to this `SKILL.md`
+- add detailed kernel-family notes to the smallest fitting reference file
+- append experiment outcomes to [guides/tuning/optimization-log.md](guides/tuning/optimization-log.md)
+- keep repo and tuning guides focused and avoid duplicating large platform-guide content
