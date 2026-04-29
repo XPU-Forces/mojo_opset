@@ -66,7 +66,7 @@ Chronological record of optimization experiments on the ttx (Triton NPU) backend
 
 **Technique:** NZ (FRACTAL_NZ) format for B matrix in Triton
 **Result:** REJECTED for Triton (UB overflow / 50x slowdown). +16% for npu_quant_matmul.
-**Action:** Added as OPT-12 (for native operators only). Detailed in ascend-910b-gemm.md.
+**Action:** Added as OPT-12 (for native operators only). Detailed in [ascend-910b-gemm.md](ascend-910b-gemm.md).
 
 ### 2026-03-26 | Kernel: INT8 GEMM | SoC: Ascend 910B2C
 
@@ -78,7 +78,7 @@ Chronological record of optimization experiments on the ttx (Triton NPU) backend
 
 **Technique:** Full M/N/K sweep (99 configs: M=1~8192, N/K=2048~8192)
 **Result:** Data used to build select_config() heuristic. Peak: 620T (121% QMM_ND).
-**Action:** Tuning table in ascend-910b-gemm.md
+**Action:** Tuning table in [ascend-910b-gemm.md](ascend-910b-gemm.md)
 
 ---
 
