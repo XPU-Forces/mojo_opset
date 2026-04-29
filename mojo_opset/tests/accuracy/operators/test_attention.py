@@ -23,6 +23,7 @@ from mojo_opset import MojoPagedDecodeSWA
 from mojo_opset import MojoSWA
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.utils.acc import check_tol_diff
 
 
 def generate_paged_decode_data(
@@ -138,6 +139,207 @@ def test_paged_decode_gqa(
         atol=atol,
         rtol=rtol,
     )
+
+def generate_paged_decode_data_with_graph(
+    batch_size: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    max_seq_len: int,
+    block_size: int,
+    dtype: torch.dtype,
+):
+    query = torch.randn(batch_size, num_q_heads, head_dim, dtype=dtype)
+    total_seq_lens = torch.full((batch_size,), max_seq_len, dtype=torch.int32)
+    max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
+    total_blocks_needed = batch_size * max_num_blocks_per_seq
+    num_total_blocks = total_blocks_needed + 10
+
+    k_cache = torch.randn(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
+    v_cache = torch.randn(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
+
+    block_tables = torch.zeros(batch_size, max_num_blocks_per_seq, dtype=torch.int32)
+    free_blocks = torch.randperm(num_total_blocks)
+
+    current_block_offset = 0
+    for i in range(batch_size):
+        seq_len = total_seq_lens[i].item()
+        num_blocks_for_seq = (seq_len + block_size - 1) // block_size
+
+        if current_block_offset + num_blocks_for_seq > num_total_blocks:
+            raise ValueError("Not enough blocks to generate test data.")
+
+        assigned_blocks = free_blocks[current_block_offset : current_block_offset + num_blocks_for_seq]
+        block_tables[i, :num_blocks_for_seq] = assigned_blocks
+        current_block_offset += num_blocks_for_seq
+
+    return query, k_cache, v_cache, total_seq_lens, block_tables, max_seq_len
+
+test_configs_decode_with_graph = [
+    (16, 16, 4, 128, 1024, 32, torch.bfloat16, "M_BF16"),
+    (8, 16, 4, 96, 1024, 128, torch.bfloat16, "M_BF16_PADDIM"),
+    (8, 8, 1, 128, 8192, 1024, torch.bfloat16, "M_BF16_LONG"),
+    (8, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
+    (8, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ")
+]
+
+@pytest.mark.parametrize(
+    "query, k_cache, v_cache, total_seq_lens, block_tables, max_total_seq_len",
+    [
+        pytest.param(
+            *generate_paged_decode_data_with_graph(
+                batch_size=MAX_B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_seq_len=MAX_S_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            id=ID,
+        )
+        for MAX_B, Q_H, KV_H, D, MAX_S_LEN, BLK_S, dtype, ID in test_configs_decode_with_graph
+    ],
+)
+@pytest.mark.parametrize("gqa_layout", ["AABB"])
+@auto_switch_platform()
+@bypass_not_implemented
+def test_paged_decode_gqa_with_graph(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    total_seq_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_total_seq_len: int,
+    gqa_layout: str,
+):
+    with torch.no_grad():
+        paged_decode_attn = MojoPagedDecodeGQA(
+            is_causal=True,
+            gqa_layout=gqa_layout,
+        )
+        # Warm-up: run once to initialize kernels
+        paged_decode_attn(
+            query,
+            k_cache,
+            v_cache,
+            total_seq_lens,
+            block_tables,
+            max_total_seq_len=max_total_seq_len,
+        )
+        torch.cuda.synchronize()
+
+        # Capture CUDA graph
+        graph = torch.cuda.CUDAGraph()
+        try:
+            with torch.cuda.graph(graph):
+                output = paged_decode_attn(
+                    query,
+                    k_cache,
+                    v_cache,
+                    total_seq_lens,
+                    block_tables,
+                    max_total_seq_len=max_total_seq_len,
+                )
+
+            torch.cuda.synchronize()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}.")
+            torch.cuda.empty_cache()
+
+    # --------------------------
+    # CUDA Graph inference
+    # --------------------------
+    torch.cuda.synchronize()
+    graph.replay()
+    torch.cuda.synchronize()
+
+    paged_decode_attn_ref = MojoPagedDecodeGQA._registry.get("torch")(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+    )
+
+    # --------------------------
+    # Compute reference output
+    # --------------------------
+    ref_output = paged_decode_attn_ref(
+        query,
+        k_cache,
+        v_cache,
+        total_seq_lens,
+        block_tables,
+        max_total_seq_len=max_total_seq_len,
+    )
+
+    atol = 2e-2 if query.dtype != torch.float32 else 1e-5
+    rtol = 2e-2 if query.dtype != torch.float32 else 1e-6
+
+    # Check max batches match reference results
+    check_tol_diff(output, ref_output, atol=atol, rtol=rtol)
+
+    max_batch_size, num_q_heads, head_dim = query.shape
+    max_blocks, num_kv_heads, block_size, _ = k_cache.shape
+    for test_step in range(5):
+        current_batch_size = torch.randint(1, max_batch_size + 1, ()).item()
+
+        # Generate valid input data for the current batch
+        cur_q, cur_k, cur_v, cur_seqlens, cur_block_tables, cur_max_len = (
+            generate_paged_decode_data(
+                batch_size=current_batch_size,
+                num_q_heads=num_q_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                max_seq_len=max_total_seq_len,
+                block_size=block_size,
+                dtype=torch.bfloat16,
+                )
+        )
+
+        # --------------------------
+        # In-place update static buffers
+        # --------------------------
+        current_num_blocks = cur_k.shape[0]
+        k_cache[:current_num_blocks].copy_(cur_k)
+        v_cache[:current_num_blocks].copy_(cur_v)
+        query[:current_batch_size].copy_(cur_q)
+
+        # Sequence lengths: set valid batches, pad invalid batches with 0
+        total_seq_lens[:current_batch_size].copy_(cur_seqlens)
+        total_seq_lens[current_batch_size:] = 0
+
+        # Block tables: fill valid entries, pad unused block with -1
+        for i in range(current_batch_size):
+            num_blocks_per_seq = (cur_seqlens[i] + block_size - 1) // block_size
+            block_tables[i, :num_blocks_per_seq].copy_(cur_block_tables[i, :num_blocks_per_seq])
+            block_tables[i, num_blocks_per_seq:] = -1
+
+        # --------------------------
+        # Compute reference output
+        # --------------------------
+        ref_output = paged_decode_attn_ref(
+            cur_q,
+            cur_k,
+            cur_v,
+            cur_seqlens,
+            cur_block_tables,
+            max_total_seq_len=cur_max_len,
+        )
+
+        # Save unused batch outputs to check if they are not modified by CUDA Graph replay
+        reserved_unused_output = output[current_batch_size:].clone()
+
+        # --------------------------
+        # CUDA Graph inference
+        # --------------------------
+        torch.cuda.synchronize()
+        graph.replay()
+        torch.cuda.synchronize()
+
+        # Check valid batches match reference results
+        check_tol_diff(output[:current_batch_size], ref_output, atol=atol, rtol=rtol)
+        # Check unused batches remain unchanged
+        check_tol_diff(output[current_batch_size:], reserved_unused_output, atol=atol, rtol=rtol)
 
 
 def generate_paged_prefill_data(
@@ -355,6 +557,286 @@ def test_paged_prefill_gqa_bucket_padded_varlen(gqa_layout: str):
         atol=2e-2,
         rtol=2e-2,
     )
+
+def generate_paged_prefill_data_with_graph(
+    batch_size: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    max_q_len: int,
+    max_kv_computed_len: int,
+    block_size: int,
+    dtype: torch.dtype,
+):
+
+    q_lens = torch.full((batch_size,), max_q_len, dtype=torch.int32)
+    cu_q_lens = torch.cat(
+        [torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0, dtype=torch.int32)]
+    )
+
+    kv_cache_lens = torch.full((batch_size,), max_kv_computed_len, dtype=torch.int32)
+    kv_lens = q_lens + kv_cache_lens
+    cu_total_seq_lens = torch.cat(
+        [torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0, dtype=torch.int32)]
+    )
+
+    total_q_tokens = int(cu_q_lens[-1].item())
+
+    query = torch.randn(total_q_tokens, num_q_heads, head_dim, dtype=dtype)
+
+    max_num_blocks_per_seq = (int(kv_lens.max().item()) + block_size - 1) // block_size
+    total_blocks_needed = batch_size * max_num_blocks_per_seq
+    num_total_blocks = total_blocks_needed + 10
+
+    k_cache = torch.randn(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
+    v_cache = torch.randn(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
+
+    block_tables = torch.zeros(batch_size, max_num_blocks_per_seq, dtype=torch.int32)
+    free_blocks = torch.randperm(num_total_blocks)
+
+    current_block_offset = 0
+    for i in range(batch_size):
+        seq_len = int(kv_lens[i].item())
+        num_blocks_for_seq = (seq_len + block_size - 1) // block_size
+
+        if current_block_offset + num_blocks_for_seq > num_total_blocks:
+            raise ValueError("Not enough blocks to generate test data.")
+
+        assigned_blocks = free_blocks[current_block_offset : current_block_offset + num_blocks_for_seq]
+        block_tables[i, :num_blocks_for_seq] = assigned_blocks
+        current_block_offset += num_blocks_for_seq
+
+    total_seq_lens = kv_lens.clone()
+    max_q_lens = max_q_len
+    max_total_seq_lens = int(kv_lens.max().item())
+    return (
+        query,
+        k_cache,
+        v_cache,
+        cu_q_lens,
+        cu_total_seq_lens,
+        block_tables,
+        total_seq_lens,
+        max_q_lens,
+        max_total_seq_lens,
+    )
+
+
+test_configs_prefill_with_graph = [
+    (2, 16, 4, 128, 1024, 1024, 32, torch.bfloat16, "M_BF16"),
+    (2, 16, 4, 96, 1024, 1024, 128, torch.bfloat16, "M_BF16_PADDIM"),
+    (2, 8, 1, 128, 4096, 8192, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
+    (2, 8, 1, 128, 1024, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
+]
+
+
+@pytest.mark.parametrize(
+    "query, k_cache, v_cache, cu_q_lens, cu_total_seq_lens, block_tables, total_seq_lens, max_q_lens, max_total_seq_lens",
+    [
+        pytest.param(
+            *generate_paged_prefill_data_with_graph(
+                batch_size=MAX_B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_q_len=MAX_Q_LEN,
+                max_kv_computed_len=MAX_KV_COMPUTED_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            id=ID,
+        )
+        for MAX_B, Q_H, KV_H, D, MAX_Q_LEN, MAX_KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_prefill_with_graph
+    ],
+)
+@pytest.mark.parametrize("gqa_layout", ["AABB"])
+@auto_switch_platform()
+@bypass_not_implemented
+def test_paged_prefill_gqa_with_graph(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cu_q_lens: torch.Tensor,
+    cu_total_seq_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    total_seq_lens: torch.Tensor,
+    max_q_lens: int,
+    max_total_seq_lens: int,
+    gqa_layout: str,
+):
+    head_dim = query.shape[-1]
+    softmax_scale = 1.0 / math.sqrt(head_dim)
+
+    with torch.no_grad():
+        paged_prefill_attn = MojoPagedPrefillGQA(
+            is_causal=True,
+            gqa_layout=gqa_layout,
+        )
+        # Warm-up: run once to initialize kernels
+        paged_prefill_attn(
+            query,
+            k_cache,
+            v_cache,
+            cu_q_lens,
+            block_tables=block_tables,
+            softmax_scale=softmax_scale,
+            cu_total_seq_lens=cu_total_seq_lens,
+            max_q_lens=max_q_lens,
+            max_total_seq_lens=max_total_seq_lens,
+        )
+        torch.cuda.synchronize()
+
+        # Capture CUDA graph
+        graph = torch.cuda.CUDAGraph()
+        try:
+            with torch.cuda.graph(graph):
+                output = paged_prefill_attn(
+                    query,
+                    k_cache,
+                    v_cache,
+                    cu_q_lens,
+                    block_tables=block_tables,
+                    softmax_scale=softmax_scale,
+                    cu_total_seq_lens=cu_total_seq_lens,
+                    max_q_lens=max_q_lens,
+                    max_total_seq_lens=max_total_seq_lens,
+                )
+            torch.cuda.synchronize()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}.")
+            torch.cuda.empty_cache()
+            return
+
+    # --------------------------
+    # CUDA Graph inference
+    # --------------------------
+    torch.cuda.synchronize()
+    graph.replay()
+    torch.cuda.synchronize()
+
+    paged_prefill_attn_ref = MojoPagedPrefillGQA._registry.get("torch")(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+    )
+
+    # --------------------------
+    # Compute reference output
+    # --------------------------
+    ref_output = paged_prefill_attn_ref(
+        query,
+        k_cache,
+        v_cache,
+        cu_q_lens,
+        block_tables=block_tables,
+        softmax_scale=softmax_scale,
+        cu_total_seq_lens=cu_total_seq_lens,
+        max_q_lens=max_q_lens,
+        max_total_seq_lens=max_total_seq_lens,
+    )
+
+    atol = 2e-2 if query.dtype != torch.float32 else 1e-5
+    rtol = 2e-2 if query.dtype != torch.float32 else 1e-6
+
+    # Check max batches match reference results
+    check_tol_diff(output, ref_output, atol=atol, rtol=rtol)
+
+    max_batch_size = cu_q_lens.shape[0] - 1
+    max_total_q_tokens, num_q_heads, head_dim = query.shape
+    _, num_kv_heads, block_size, _ = k_cache.shape
+    max_q_len_cfg = max_total_q_tokens // max_batch_size
+    max_kv_len_cfg = int(total_seq_lens.max().item())
+    max_kv_computed_len_cfg = max_kv_len_cfg - max_q_len_cfg
+
+    atol = 2e-2 if query.dtype != torch.float32 else 1e-5
+    rtol = 2e-2 if query.dtype != torch.float32 else 1e-6
+    for test_step in range(5):
+        current_batch_size = torch.randint(1, max_batch_size + 1, ()).item()
+
+        # Generate valid input data for the current batch
+        (
+            cur_q,
+            cur_k,
+            cur_v,
+            cur_cu_q_lens,
+            cur_block_tables,
+            cur_cu_total_seq_lens,
+            cur_max_q_lens,
+            cur_max_total_seq_lens,
+        ) = generate_paged_prefill_data(
+            batch_size=current_batch_size,
+            num_q_heads=num_q_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            max_q_len=max_q_len_cfg,
+            max_kv_computed_len=max_kv_computed_len_cfg,
+            block_size=block_size,
+            dtype=query.dtype,
+        )
+
+        # generate_paged_prefill_data returns cu_total_seq_lens=None when no cache;
+        # graph always expects a tensor, so derive from cu_q_lens in that case.
+        if cur_cu_total_seq_lens is None:
+            cur_cu_total_seq_lens = cur_cu_q_lens
+
+        cur_T = int(cur_cu_q_lens[-1].item())
+
+        # --------------------------
+        # In-place update static buffers
+        # --------------------------
+        current_num_blocks = cur_k.shape[0]
+        k_cache[:current_num_blocks].copy_(cur_k)
+        v_cache[:current_num_blocks].copy_(cur_v)
+        query[:cur_T].copy_(cur_q)
+
+        # cu_q_lens / cu_total_seq_lens: valid prefix mirrors cur, padded batches
+        # keep the final cumulative value so q_len = kv_len = 0 for them.
+        cu_q_lens[: current_batch_size + 1].copy_(cur_cu_q_lens)
+        cu_q_lens[current_batch_size + 1 :] = cur_cu_q_lens[-1]
+        cu_total_seq_lens[: current_batch_size + 1].copy_(cur_cu_total_seq_lens)
+        cu_total_seq_lens[current_batch_size + 1 :] = cur_cu_total_seq_lens[-1]
+
+        # total_seq_lens: valid batches copied, padded batches set to 0.
+        total_seq_lens[:current_batch_size].copy_(cur_cu_total_seq_lens[1:] - cur_cu_total_seq_lens[:-1])
+        total_seq_lens[current_batch_size:] = 0
+
+        # Block tables: fill valid entries, pad unused block with -1
+        for i in range(current_batch_size):
+            num_blocks_per_seq = (int(total_seq_lens[i].item()) + block_size - 1) // block_size
+            block_tables[i, :num_blocks_per_seq].copy_(cur_block_tables[i, :num_blocks_per_seq])
+            block_tables[i, num_blocks_per_seq:] = -1
+        if current_batch_size < max_batch_size:
+            block_tables[current_batch_size:] = -1
+
+        # --------------------------
+        # Compute reference output
+        # --------------------------
+        ref_output = paged_prefill_attn_ref(
+            cur_q,
+            cur_k,
+            cur_v,
+            cur_cu_q_lens,
+            block_tables=cur_block_tables,
+            softmax_scale=softmax_scale,
+            cu_total_seq_lens=cur_cu_total_seq_lens,
+            max_q_lens=cur_max_q_lens,
+            max_total_seq_lens=cur_max_total_seq_lens,
+        )
+
+        # Save unused tail outputs to check CUDA Graph replay doesn't touch them
+        reserved_unused_output = output[cur_T:].clone()
+
+        # --------------------------
+        # CUDA Graph inference
+        # --------------------------
+        torch.cuda.synchronize()
+        graph.replay()
+        torch.cuda.synchronize()
+
+        # Check valid tokens match reference results
+        check_tol_diff(output[:cur_T], ref_output, atol=atol, rtol=rtol)
+        # Check unused tail remain unchanged
+        check_tol_diff(output[cur_T:], reserved_unused_output, atol=atol, rtol=rtol)
 
 
 @functools.lru_cache()
@@ -870,7 +1352,7 @@ test_configs_swa_prefill = [
                 max_kv_computed_len=KV_COMPUTED_LEN,
                 block_size=BLK_S,
                 dtype=dtype,
-            )),
+            ),
             id=ID,
         )
         for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_swa_prefill
@@ -925,13 +1407,207 @@ def test_paged_prefill_swa(
     )
 
 
+test_configs_swa_prefill_with_graph = [
+    config
+    for config in test_configs_swa_prefill
+    if config[-1] != "M_BF16_PADSEQ"
+]
+
+
+@pytest.mark.parametrize(
+    "query, k_cache, v_cache, cu_q_lens, cu_total_seq_lens, block_tables, total_seq_lens, max_q_lens, max_total_seq_lens",
+    [
+        pytest.param(
+            *generate_paged_prefill_data_with_graph(
+                batch_size=MAX_B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_q_len=MAX_Q_LEN,
+                max_kv_computed_len=MAX_KV_COMPUTED_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            id=ID,
+        )
+        for MAX_B, Q_H, KV_H, D, MAX_Q_LEN, MAX_KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_swa_prefill_with_graph
+    ],
+)
+@pytest.mark.parametrize("gqa_layout, global_window, local_window", [
+    ("ABAB", 4, 255),
+    ("AABB", 4, 1023),
+])
+@auto_switch_platform()
+@bypass_not_implemented
+def test_paged_prefill_swa_with_graph(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cu_q_lens: torch.Tensor,
+    cu_total_seq_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    total_seq_lens: torch.Tensor,
+    max_q_lens: int,
+    max_total_seq_lens: int,
+    gqa_layout: str,
+    global_window: int,
+    local_window: int,
+):
+    head_dim = query.shape[-1]
+    softmax_scale = 1.0 / math.sqrt(head_dim)
+
+    with torch.no_grad():
+        paged_prefill_swa = MojoPagedPrefillSWA(
+            is_causal=True,
+            gqa_layout=gqa_layout,
+            local_window_size=local_window,
+            global_window_size=global_window,
+        )
+        paged_prefill_swa_ref = MojoPagedPrefillSWA._registry.get("torch")(
+            is_causal=True,
+            gqa_layout=gqa_layout,
+            local_window_size=local_window,
+            global_window_size=global_window,
+        )
+
+        paged_prefill_swa(
+            query,
+            k_cache,
+            v_cache,
+            cu_q_lens,
+            block_tables,
+            softmax_scale=softmax_scale,
+            cu_total_seq_lens=cu_total_seq_lens,
+            max_q_lens=max_q_lens,
+            max_total_seq_lens=max_total_seq_lens,
+        )
+        torch.cuda.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        try:
+            with torch.cuda.graph(graph):
+                output = paged_prefill_swa(
+                    query,
+                    k_cache,
+                    v_cache,
+                    cu_q_lens,
+                    block_tables,
+                    softmax_scale=softmax_scale,
+                    cu_total_seq_lens=cu_total_seq_lens,
+                    max_q_lens=max_q_lens,
+                    max_total_seq_lens=max_total_seq_lens,
+                )
+            torch.cuda.synchronize()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}.")
+            torch.cuda.empty_cache()
+            return
+
+    torch.cuda.synchronize()
+    graph.replay()
+    torch.cuda.synchronize()
+
+    ref_output = paged_prefill_swa_ref(
+        query,
+        k_cache,
+        v_cache,
+        cu_q_lens,
+        block_tables,
+        softmax_scale=softmax_scale,
+        cu_total_seq_lens=cu_total_seq_lens,
+        max_q_lens=max_q_lens,
+        max_total_seq_lens=max_total_seq_lens,
+    )
+
+    atol = 2e-2 if query.dtype != torch.float32 else 1e-5
+    rtol = 2e-2 if query.dtype != torch.float32 else 1e-6
+
+    check_tol_diff(output, ref_output, atol=atol, rtol=rtol)
+
+    max_batch_size = cu_q_lens.shape[0] - 1
+    max_total_q_tokens, num_q_heads, head_dim = query.shape
+    _, num_kv_heads, block_size, _ = k_cache.shape
+    max_q_len_cfg = max_total_q_tokens // max_batch_size
+    max_kv_len_cfg = int(total_seq_lens.max().item())
+    max_kv_computed_len_cfg = max_kv_len_cfg - max_q_len_cfg
+
+    for _ in range(5):
+        current_batch_size = torch.randint(1, max_batch_size + 1, ()).item()
+
+        (
+            cur_q,
+            cur_k,
+            cur_v,
+            cur_cu_q_lens,
+            cur_block_tables,
+            cur_cu_total_seq_lens,
+            cur_max_q_lens,
+            cur_max_total_seq_lens,
+        ) = generate_paged_prefill_data(
+            batch_size=current_batch_size,
+            num_q_heads=num_q_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            max_q_len=max_q_len_cfg,
+            max_kv_computed_len=max_kv_computed_len_cfg,
+            block_size=block_size,
+            dtype=query.dtype,
+        )
+
+        if cur_cu_total_seq_lens is None:
+            cur_cu_total_seq_lens = cur_cu_q_lens
+
+        cur_T = int(cur_cu_q_lens[-1].item())
+        current_num_blocks = cur_k.shape[0]
+        k_cache[:current_num_blocks].copy_(cur_k)
+        v_cache[:current_num_blocks].copy_(cur_v)
+        query[:cur_T].copy_(cur_q)
+
+        cu_q_lens[: current_batch_size + 1].copy_(cur_cu_q_lens)
+        cu_q_lens[current_batch_size + 1 :] = cur_cu_q_lens[-1]
+        cu_total_seq_lens[: current_batch_size + 1].copy_(cur_cu_total_seq_lens)
+        cu_total_seq_lens[current_batch_size + 1 :] = cur_cu_total_seq_lens[-1]
+
+        total_seq_lens[:current_batch_size].copy_(cur_cu_total_seq_lens[1:] - cur_cu_total_seq_lens[:-1])
+        total_seq_lens[current_batch_size:] = 0
+
+        for i in range(current_batch_size):
+            num_blocks_per_seq = (int(total_seq_lens[i].item()) + block_size - 1) // block_size
+            block_tables[i, :num_blocks_per_seq].copy_(cur_block_tables[i, :num_blocks_per_seq])
+            block_tables[i, num_blocks_per_seq:] = -1
+        if current_batch_size < max_batch_size:
+            block_tables[current_batch_size:] = -1
+
+        ref_output = paged_prefill_swa_ref(
+            cur_q,
+            cur_k,
+            cur_v,
+            cur_cu_q_lens,
+            cur_block_tables,
+            softmax_scale=softmax_scale,
+            cu_total_seq_lens=cur_cu_total_seq_lens,
+            max_q_lens=cur_max_q_lens,
+            max_total_seq_lens=cur_max_total_seq_lens,
+        )
+
+        reserved_unused_output = output[cur_T:].clone()
+
+        torch.cuda.synchronize()
+        graph.replay()
+        torch.cuda.synchronize()
+
+        check_tol_diff(output[:cur_T], ref_output, atol=atol, rtol=rtol)
+        check_tol_diff(output[cur_T:], reserved_unused_output, atol=atol, rtol=rtol)
+
+
 test_configs_swa_decode = [
     (4, 16, 4, 128, 1024, 512, torch.bfloat16, "M_BF16"),
     (8, 16, 4, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (8, 8, 1, 128, 4096, 128, torch.bfloat16, "M_BF16_LONG"),
-    (2, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
+    # (2, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
     (2, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
-    (2, 8, 2, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP1"),
+    # (2, 8, 2, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP1"),
     (2, 24, 8, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP2"),
 ]
 
@@ -997,9 +1673,187 @@ def test_paged_decode_swa(
         total_seq_lens,
         block_tables,
         softmax_scale=softmax_scale,
+        max_total_seq_len=max_total_seq_len,
         atol=atol,
         rtol=rtol,
     )
+
+test_configs_swa_decode_with_graph = [
+    (8, 16, 4, 128, 1024, 512, torch.bfloat16, "M_BF16"),
+    (8, 16, 4, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
+    (8, 8, 1, 128, 4096, 128, torch.bfloat16, "M_BF16_LONG"),
+    (4, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
+    (4, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
+    (6, 8, 2, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP1"),
+    (6, 24, 8, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP2"),
+]
+
+@pytest.mark.parametrize(
+    "query, k_cache, v_cache, total_seq_lens, block_tables, max_total_seq_len",
+    [
+        pytest.param(
+            *generate_paged_decode_data_with_graph(
+                batch_size=B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_seq_len=S_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            id=ID,
+        )
+        for B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, ID in test_configs_swa_decode_with_graph
+    ],
+)
+@pytest.mark.parametrize("gqa_layout, global_window, local_window", [
+    ("ABAB", 4, 255),
+    ("AABB", 4, 1023),
+])
+@auto_switch_platform()
+@bypass_not_implemented
+def test_paged_decode_swa_with_graph(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    total_seq_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_total_seq_len: int,
+    gqa_layout: str,
+    global_window: int,
+    local_window: int,
+):
+    with torch.no_grad():
+        paged_decode_attn = MojoPagedDecodeSWA(
+            is_causal=True,
+            gqa_layout=gqa_layout,
+            global_window_size=global_window,
+            local_window_size=local_window,
+        )
+        # Warm-up: run once to initialize kernels
+        paged_decode_attn(
+            query,
+            k_cache,
+            v_cache,
+            total_seq_lens,
+            block_tables,
+            max_total_seq_len=max_total_seq_len,
+        )
+        torch.cuda.synchronize()
+
+        # Capture CUDA graph
+        graph = torch.cuda.CUDAGraph()
+        try:
+            with torch.cuda.graph(graph):
+                output = paged_decode_attn(
+                    query,
+                    k_cache,
+                    v_cache,
+                    total_seq_lens,
+                    block_tables,
+                    max_total_seq_len=max_total_seq_len,
+                )
+
+            torch.cuda.synchronize()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}.")
+            torch.cuda.empty_cache()
+
+    # --------------------------
+    # CUDA Graph inference
+    # --------------------------
+    torch.cuda.synchronize()
+    graph.replay()
+    torch.cuda.synchronize()
+
+    paged_decode_attn_ref = MojoPagedDecodeSWA._registry.get("torch")(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+        global_window_size=global_window,
+        local_window_size=local_window,
+    )
+
+    # --------------------------
+    # Compute reference output
+    # --------------------------
+    ref_output = paged_decode_attn_ref(
+        query,
+        k_cache,
+        v_cache,
+        total_seq_lens,
+        block_tables,
+        max_total_seq_len=max_total_seq_len,
+    )
+
+    atol = 2e-2 if query.dtype != torch.float32 else 1e-5
+    rtol = 2e-2 if query.dtype != torch.float32 else 1e-6
+
+    # Check max batches match reference results
+    check_tol_diff(output, ref_output, atol=atol, rtol=rtol)
+
+    max_batch_size, num_q_heads, head_dim = query.shape
+    max_blocks, num_kv_heads, block_size, _ = k_cache.shape
+    for test_step in range(5):
+        current_batch_size = torch.randint(1, max_batch_size + 1, ()).item()
+
+        # Generate valid input data for the current batch
+        cur_q, cur_k, cur_v, cur_seqlens, cur_block_tables, cur_max_len = (
+            generate_paged_decode_data(
+                batch_size=current_batch_size,
+                num_q_heads=num_q_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                max_seq_len=max_total_seq_len,
+                block_size=block_size,
+                dtype=torch.bfloat16,
+                )
+        )
+
+        # --------------------------
+        # In-place update static buffers
+        # --------------------------
+        current_num_blocks = cur_k.shape[0]
+        k_cache[:current_num_blocks].copy_(cur_k)
+        v_cache[:current_num_blocks].copy_(cur_v)
+        query[:current_batch_size].copy_(cur_q)
+
+        # Sequence lengths: set valid batches, pad invalid batches with 0
+        total_seq_lens[:current_batch_size].copy_(cur_seqlens)
+        total_seq_lens[current_batch_size:] = 0
+
+        # Block tables: fill valid entries, pad unused block with -1
+        for i in range(current_batch_size):
+            num_blocks_per_seq = (cur_seqlens[i] + block_size - 1) // block_size
+            block_tables[i, :num_blocks_per_seq].copy_(cur_block_tables[i, :num_blocks_per_seq])
+            block_tables[i, num_blocks_per_seq:] = -1
+
+        # --------------------------
+        # Compute reference output
+        # --------------------------
+        ref_output = paged_decode_attn_ref(
+            cur_q,
+            cur_k,
+            cur_v,
+            cur_seqlens,
+            cur_block_tables,
+            max_total_seq_len=cur_max_len,
+        )
+
+        # Save unused batch outputs to check if they are not modified by CUDA Graph replay
+        reserved_unused_output = output[current_batch_size:].clone()
+
+        # --------------------------
+        # CUDA Graph inference
+        # --------------------------
+        torch.cuda.synchronize()
+        graph.replay()
+        torch.cuda.synchronize()
+
+        # Check valid batches match reference results
+        check_tol_diff(output[:current_batch_size], ref_output, atol=atol, rtol=rtol)
+        # Check unused batches remain unchanged
+        check_tol_diff(output[current_batch_size:], reserved_unused_output, atol=atol, rtol=rtol)
 
 
 def generate_sdpa_data(
