@@ -42,6 +42,7 @@ from .silu import silu_fwd_impl
 from .store_lowrank import store_label_cache_infer_impl
 # from .swiglu import swiglu_bwd_impl
 from .swiglu import swiglu_fwd_impl
+from .group_rmsnorm import group_rmsnorm_impl
 from .swa import swa_infer_impl
 from .swa import swa_paged_prefill_impl
 from .swa import swa_paged_decode_impl
@@ -90,6 +91,7 @@ __all__ = [
     "silu_fwd_impl",
     # "swiglu_bwd_impl",
     "swiglu_fwd_impl",
+    "group_rmsnorm_impl",
     "store_label_cache_infer_impl",
     # "diffusion_attention_fwd_impl",
     # "diffusion_attention_bwd_impl",
