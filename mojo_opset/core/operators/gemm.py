@@ -157,7 +157,7 @@ class MojoGemmDequant(MojoOperator):
                 f"weight_scale shape {tuple(self.weight_scale.shape)} must match output dim {(weight.shape[1],)}."
             )
 
-        out = torch.matmul(input.float(), weight.float())
+        out = torch.mul(input.int().unsuqeeze(-2), weight.int().unsqueeze(-3)).float().sum(dim=-1)
 
         weight_scale = self.weight_scale
         if input_scale.dim() == 1:

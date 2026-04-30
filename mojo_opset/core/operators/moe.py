@@ -479,12 +479,6 @@ class MojoExperts(MojoOperator):
         fc2_outs = [F.linear(activated_outs[i], self.down_proj_weight[i].float()) for i in range(num_experts)]
         return torch.cat(fc2_outs, dim=0).to(sorted_hidden_states.dtype)
 
-
-def _empty_quant_weight(shape: tuple[int, ...], factory_kwargs: dict) -> torch.Tensor:
-    quant_factory_kwargs = {k: v for k, v in factory_kwargs.items() if k != "dtype"}
-    return torch.empty(shape, dtype=torch.int8, **quant_factory_kwargs)
-
-
 class MojoQuantExperts(MojoOperator):
     def __init__(
         self,
@@ -612,13 +606,13 @@ class MojoQuantExperts(MojoOperator):
         if self.quant_group_size > 0:
             x_int8_groups = torch.split(input_int8, self.quant_group_size, dim=-1)
             weight_int8_groups = torch.split(expert_weight, self.quant_group_size, dim=-1)
-            output_groups = [torch.matmul(x_int8_group.float(), weight_int8_group.mT.float())
+            output_groups = [torch.mul(x_int8_group.int().unsqueeze(-2), weight_int8_group.int().unsqueeze(-3)).float().sum(dim=-1)
                              for x_int8_group, weight_int8_group 
                              in zip(x_int8_groups, weight_int8_groups)]
             output = torch.stack(output_groups, dim=-1)
             output = (output * weight_scale * input_scale.unsqueeze(-1)).sum(-1)
         else:
-            output = torch.matmul(input_int8.float(), expert_weight.mT.float()) * weight_scale * input_scale
+            output = torch.mul(input_int8.int().unsqueeze(-2), expert_weight.int().unsqueeze(-2)).float().sum(dim=-1) * weight_scale * input_scale
 
         return output.to(output_dtype)
 
@@ -654,7 +648,7 @@ class MojoQuantExperts(MojoOperator):
                 self.up_proj_weight_scale[expert_idx],
                 sorted_hidden_states.dtype,
             )
-            gate_proj, up_proj = fc1_out.chunk(2, dim=-1)
+            gate_proj, up_proj = fc1_out.float().chunk(2, dim=-1)
             activated_outs.append(F.silu(gate_proj) * up_proj)
         activated = torch.cat(activated_outs, dim=0)
 

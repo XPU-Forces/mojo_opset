@@ -134,10 +134,8 @@ def test_gemm_dequant_parameters_are_registered():
         output_dtype=torch.bfloat16,
     )
 
-    assert "weight" not in dict(op.named_buffers())
-    assert "weight_scale" not in dict(op.named_buffers())
-    assert isinstance(op.weight_scale, torch.nn.Parameter)
-    assert isinstance(op.weight, torch.nn.Parameter)
+    assert "weight" in dict(op.named_buffers())
+    assert "weight_scale" in dict(op.named_buffers())
     assert op.weight.dtype == torch.int8
     assert op.weight_scale.dtype == torch.bfloat16
     assert op.weight_scale.shape == (8,)
