@@ -69,6 +69,7 @@ sdpa_bwd_impl = _get_kernel_impl(ttx_backend_module, "sdpa_bwd_impl")
 
 swa_paged_prefill_impl = _get_kernel_impl(ttx_backend_module, "swa_paged_prefill_impl")
 swa_paged_decode_impl = _get_kernel_impl(ttx_backend_module, "swa_paged_decode_impl")
+swa_paged_decode_quant_impl = _get_kernel_impl(ttx_backend_module, "swa_paged_decode_quant_impl")
 swa_infer_impl = _get_kernel_impl(ttx_backend_module, "swa_infer_impl")
 swa_fwd_impl = _get_kernel_impl(ttx_backend_module, "swa_fwd_impl")
 swa_bwd_impl = _get_kernel_impl(ttx_backend_module, "swa_bwd_impl")
@@ -864,6 +865,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     sdpa_infer = sdpa_infer_impl
     swa_paged_prefill = swa_paged_prefill_impl
     swa_paged_decode = swa_paged_decode_impl
+    swa_paged_decode_quant = swa_paged_decode_quant_impl
     swa_infer = swa_infer_impl
     swa_fwd = swa_fwd_impl
     swa_bwd = swa_bwd_impl
@@ -906,6 +908,7 @@ else:
     sdpa_bwd = sdpa_bwd_impl
     swa_paged_prefill = swa_paged_prefill_impl
     swa_paged_decode = swa_paged_decode_impl
+    swa_paged_decode_quant = swa_paged_decode_quant_impl
     swa_infer = swa_infer_impl
     swa_fwd = swa_fwd_impl
     swa_bwd = swa_bwd_impl

@@ -8,6 +8,7 @@ from mojo_opset.backends.ttx.kernels import paged_attention_decode
 from mojo_opset.backends.ttx.kernels import sdpa_infer
 from mojo_opset.backends.ttx.kernels import swa_paged_prefill
 from mojo_opset.backends.ttx.kernels import swa_paged_decode
+from mojo_opset.backends.ttx.kernels import swa_paged_decode_quant
 from mojo_opset.backends.ttx.kernels import swa_infer
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoPagedPrefillQuantGQA
@@ -15,6 +16,7 @@ from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoSdpa
 from mojo_opset.core import MojoPagedPrefillSWA
 from mojo_opset.core import MojoPagedDecodeSWA
+from mojo_opset.core import MojoPagedDecodeQuantSWA
 from mojo_opset.core import MojoSWA
 from mojo_opset.core.operators.attention import assert_paged_decode_contract
 from mojo_opset.core.operators.attention import assert_paged_prefill_contract
@@ -261,6 +263,38 @@ class TTXPagedDecodeSWA(MojoPagedDecodeSWA):
             softmax_scale,
         )
 
+        return o
+
+class TTXPagedDecodeQuantSWA(MojoPagedDecodeQuantSWA):
+    supported_platforms_list = ["ilu"]
+
+    def forward(
+        self,
+        q: torch.Tensor,           # [bsz, n_q_heads, head_dim]
+        k_cache: torch.Tensor,     # [n_pages, n_kv_heads, page_size, head_dim] int8
+        k_qscale: torch.Tensor,    # [n_kv_heads, head_dim]
+        v_cache: torch.Tensor,     # [n_pages, n_kv_heads, page_size, head_dim] int8
+        v_qscale: torch.Tensor,    # [n_kv_heads, head_dim]
+        seq_lens: torch.Tensor,    # [bsz]
+        block_table: torch.Tensor, # [bsz, max_num_blocks]
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        assert seq_lens.dtype == torch.int32
+        assert block_table.dtype == torch.int32
+        assert_paged_decode_contract(block_table, seq_lens)
+        o = swa_paged_decode_quant(
+            q,
+            k_cache,
+            k_qscale,
+            v_cache,
+            v_qscale,
+            seq_lens,
+            block_table,
+            self.local_window_size,
+            self.global_window_size,
+            self.gqa_interleave,
+            softmax_scale,
+        )
         return o
 
 

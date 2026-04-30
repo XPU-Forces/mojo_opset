@@ -1899,7 +1899,9 @@ def _paged_decode_kernel_tiny_global(
     OUT_T: tl.constexpr,
 ):
     tl.static_assert(HEAD_DIM <= BLOCK_SIZE_D, "HEAD_DIM should be <= BLOCK_SIZE_D")
-    tl.static_assert(PAGE_SIZE <= BLOCK_SIZE_N, "PAGE_SIZE should be <= BLOCK_SIZE_N")
+    tl.static_assert(
+        PAGE_SIZE % BLOCK_SIZE_N == 0, "BLOCK_SIZE_N must divide PAGE_SIZE for paged decode tiling"
+    )
     tl.static_assert(TINY_GLOBAL_N <= BLOCK_SIZE_N, "TINY_GLOBAL_N should be <= BLOCK_SIZE_N")
     pid = tl.program_id(0)
     n_progs = tl.num_programs(0)
@@ -1930,20 +1932,20 @@ def _paged_decode_kernel_tiny_global(
             kv_seq_len - 1,
             1,
             kv_seq_len,
-            PAGE_SIZE,
+            BLOCK_SIZE_N,
             True,
             GLOBAL_WINDOW,
             LOCAL_WINDOW,
         )
 
         if num_global_window_blocks > 0:
-            page0_fully_covered_by_local = False
+            block0_fully_covered_by_local = False
             if LOCAL_WINDOW is not None:
-                page0_fully_covered_by_local = (PAGE_SIZE + LOCAL_WINDOW) >= kv_seq_len
+                block0_fully_covered_by_local = (BLOCK_SIZE_N + LOCAL_WINDOW) >= kv_seq_len
 
             physical_page_id = tl.load(block_tables_ptr + b_id * stride_bt_batch)
-            if page0_fully_covered_by_local:
-                kv_block_len = tl.minimum(PAGE_SIZE, kv_seq_len)
+            if block0_fully_covered_by_local:
+                kv_block_len = tl.minimum(BLOCK_SIZE_N, kv_seq_len)
                 k_block_ptr = tl.make_block_ptr(
                     base=k_cache_ptr + physical_page_id * stride_k_block + kv_head_id * stride_k_head,
                     shape=(kv_block_len, HEAD_DIM),
@@ -2014,12 +2016,12 @@ def _paged_decode_kernel_tiny_global(
                     v_cache_ptr.dtype.element_ty == tl.float8e5,
                 )
 
-        for logical_page_id in tl.range(1, num_global_window_blocks):
-            kv_block_start = logical_page_id * PAGE_SIZE
-            kv_block_end = tl.minimum(kv_block_start + PAGE_SIZE, kv_seq_len)
+        for kv_block_id in tl.range(1, num_global_window_blocks):
+            kv_block_start = kv_block_id * BLOCK_SIZE_N
+            kv_block_end = tl.minimum(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
             kv_block_len = kv_block_end - kv_block_start
             physical_page_id = tl.load(
-                block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
+                block_tables_ptr + b_id * stride_bt_batch + kv_block_id * stride_bt_block
             )
             k_block_ptr = tl.make_block_ptr(
                 base=k_cache_ptr + physical_page_id * stride_k_block + kv_head_id * stride_k_head,
@@ -2061,17 +2063,29 @@ def _paged_decode_kernel_tiny_global(
             )
 
 
-        n_local_pages = num_total_blocks - non_global_window_start_block
-        for j in tl.range(0, n_local_pages):
-            logical_page_id = non_global_window_start_block + j
-            kv_block_start = logical_page_id * PAGE_SIZE
-            kv_block_end = tl.minimum(kv_block_start + PAGE_SIZE, kv_seq_len)
+        num_full_pages = kv_seq_len // BLOCK_SIZE_N
+        if LOCAL_WINDOW is not None:
+            local_win_threshold = tl.maximum(0, kv_seq_len - 1 - LOCAL_WINDOW)
+            first_fully_in_local = tl.cdiv(local_win_threshold, BLOCK_SIZE_N)
+            nomask_start = tl.maximum(first_fully_in_local, non_global_window_start_block)
+        else:
+            nomask_start = non_global_window_start_block
+        nomask_end = tl.maximum(nomask_start, num_full_pages)
+
+        for kv_block_id in tl.range(non_global_window_start_block, nomask_start):
+            kv_block_start = kv_block_id * BLOCK_SIZE_N
+            kv_block_end = tl.minimum(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
             kv_block_len = kv_block_end - kv_block_start
+            logical_page_id = kv_block_start // PAGE_SIZE
+            kv_block_start_in_page = kv_block_start % PAGE_SIZE
             physical_page_id = tl.load(
                 block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
             )
             k_block_ptr = tl.make_block_ptr(
-                base=k_cache_ptr + physical_page_id * stride_k_block + kv_head_id * stride_k_head,
+                base=k_cache_ptr
+                + physical_page_id * stride_k_block
+                + kv_head_id * stride_k_head
+                + kv_block_start_in_page * stride_k_blksz,
                 shape=(kv_block_len, HEAD_DIM),
                 strides=(stride_k_blksz, stride_k_dim),
                 offsets=(0, 0),
@@ -2079,21 +2093,121 @@ def _paged_decode_kernel_tiny_global(
                 order=(1, 0),
             )
             v_block_ptr = tl.make_block_ptr(
-                base=v_cache_ptr + physical_page_id * stride_v_block + kv_head_id * stride_v_head,
+                base=v_cache_ptr
+                + physical_page_id * stride_v_block
+                + kv_head_id * stride_v_head
+                + kv_block_start_in_page * stride_v_blksz,
                 shape=(kv_block_len, HEAD_DIM),
                 strides=(stride_v_blksz, stride_v_dim),
                 offsets=(0, 0),
                 block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
                 order=(1, 0),
             )
-
             kv_mask = offs_n < kv_block_len
             if LOCAL_WINDOW is not None:
                 sw_mask = (kv_block_start + offs_n + LOCAL_WINDOW) >= (kv_seq_len - 1)
                 mask = kv_mask & sw_mask
             else:
                 mask = kv_mask
+            acc, l_i, m_i = _sdpa_acc_fwd_1xN(
+                acc,
+                l_i,
+                m_i,
+                q,
+                k_block_ptr,
+                v_block_ptr,
+                mask,
+                softmax_scale,
+                HEAD_DIM,
+                BLOCK_SIZE_D,
+                BLOCK_SIZE_N,
+                BLOCK_SIZE_D,
+                v_cache_ptr.dtype.element_ty == tl.float8e5,
+            )
 
+        for kv_block_id in tl.range(nomask_start, nomask_end):
+            kv_block_start = kv_block_id * BLOCK_SIZE_N
+            kv_block_end = tl.minimum(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
+            kv_block_len = kv_block_end - kv_block_start
+            logical_page_id = kv_block_start // PAGE_SIZE
+            kv_block_start_in_page = kv_block_start % PAGE_SIZE
+            physical_page_id = tl.load(
+                block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
+            )
+            k_block_ptr = tl.make_block_ptr(
+                base=k_cache_ptr
+                + physical_page_id * stride_k_block
+                + kv_head_id * stride_k_head
+                + kv_block_start_in_page * stride_k_blksz,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_k_blksz, stride_k_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            v_block_ptr = tl.make_block_ptr(
+                base=v_cache_ptr
+                + physical_page_id * stride_v_block
+                + kv_head_id * stride_v_head
+                + kv_block_start_in_page * stride_v_blksz,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_v_blksz, stride_v_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            acc, l_i, m_i = _sdpa_acc_fwd_nomask_1xN(
+                acc,
+                l_i,
+                m_i,
+                q,
+                k_block_ptr,
+                v_block_ptr,
+                softmax_scale,
+                HEAD_DIM,
+                BLOCK_SIZE_D,
+                BLOCK_SIZE_N,
+                BLOCK_SIZE_D,
+                v_cache_ptr.dtype.element_ty == tl.float8e5,
+            )
+
+        for kv_block_id in tl.range(nomask_end, num_total_blocks):
+            kv_block_start = kv_block_id * BLOCK_SIZE_N
+            kv_block_end = tl.minimum(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
+            kv_block_len = kv_block_end - kv_block_start
+            logical_page_id = kv_block_start // PAGE_SIZE
+            kv_block_start_in_page = kv_block_start % PAGE_SIZE
+            physical_page_id = tl.load(
+                block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
+            )
+            k_block_ptr = tl.make_block_ptr(
+                base=k_cache_ptr
+                + physical_page_id * stride_k_block
+                + kv_head_id * stride_k_head
+                + kv_block_start_in_page * stride_k_blksz,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_k_blksz, stride_k_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            v_block_ptr = tl.make_block_ptr(
+                base=v_cache_ptr
+                + physical_page_id * stride_v_block
+                + kv_head_id * stride_v_head
+                + kv_block_start_in_page * stride_v_blksz,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_v_blksz, stride_v_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            kv_mask = offs_n < kv_block_len
+            if LOCAL_WINDOW is not None:
+                sw_mask = (kv_block_start + offs_n + LOCAL_WINDOW) >= (kv_seq_len - 1)
+                mask = kv_mask & sw_mask
+            else:
+                mask = kv_mask
             acc, l_i, m_i = _sdpa_acc_fwd_1xN(
                 acc,
                 l_i,
@@ -2112,6 +2226,224 @@ def _paged_decode_kernel_tiny_global(
 
         l_i_safe = tl.where(l_i > 0, l_i, 1.0)
         acc = tl.where(l_i > 0, acc / l_i_safe, 0.0)
+
+        o_ptrs = o_ptr + b_id * stride_ob + q_head_id * stride_oh + offs_d * stride_od
+        tl.store(o_ptrs, acc.to(OUT_T), mask=offs_d < HEAD_DIM)
+
+@libentry()
+@triton.jit
+def _paged_decode_quant_kernel(
+    q_ptr,           # [bsz, n_q_heads, head_dim] float
+    k_cache_ptr,     # [n_pages, n_kv_heads, page_size, head_dim] int8
+    k_qscale_ptr,    # [n_kv_heads, head_dim] float
+    v_cache_ptr,     # [n_pages, n_kv_heads, page_size, head_dim] int8
+    v_qscale_ptr,    # [n_kv_heads, head_dim] float
+    o_ptr,           # [bsz, n_q_heads, head_dim] float
+    seqlens_ptr,     # [bsz] int32
+    block_tables_ptr,  # [bsz, max_num_blocks] int32
+    BATCH_SIZE,
+    NUM_TOTAL_BLOCKS,
+    MAX_NUM_BLOCKS_PER_SEQ,
+    stride_qb,
+    stride_qh,
+    stride_qd,
+    stride_k_block,
+    stride_k_head,
+    stride_k_blksz,
+    stride_k_dim,
+    stride_kqs_head,
+    stride_kqs_dim,
+    stride_v_block,
+    stride_v_head,
+    stride_v_blksz,
+    stride_v_dim,
+    stride_vqs_head,
+    stride_vqs_dim,
+    stride_ob,
+    stride_oh,
+    stride_od,
+    stride_bt_batch,
+    stride_bt_block,
+    softmax_scale,
+    GLOBAL_WINDOW: tl.constexpr,
+    LOCAL_WINDOW: tl.constexpr,
+    NUM_Q_HEADS: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
+    GQA_INTERLEAVE: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    BLOCK_SIZE_D: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    OUT_T: tl.constexpr,
+):
+    tl.static_assert(HEAD_DIM <= BLOCK_SIZE_D, "HEAD_DIM should be <= BLOCK_SIZE_D")
+    tl.static_assert(
+        PAGE_SIZE % BLOCK_SIZE_N == 0, "BLOCK_SIZE_N must divide PAGE_SIZE for paged decode tiling"
+    )
+    pid = tl.program_id(0)
+    n_progs = tl.num_programs(0)
+
+    num_tasks = BATCH_SIZE * NUM_Q_HEADS
+
+    for q_task_id in tl.range(pid, num_tasks, n_progs):
+        q_head_id = q_task_id % NUM_Q_HEADS
+        b_id = q_task_id // NUM_Q_HEADS
+        if GQA_INTERLEAVE:
+            kv_head_id = q_head_id % NUM_KV_HEADS
+        else:
+            kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
+
+        kv_seq_len = tl.load(seqlens_ptr + b_id)
+
+        offs_d = tl.arange(0, BLOCK_SIZE_D)
+        offs_n = tl.arange(0, BLOCK_SIZE_N)
+
+        # Load Q and k_qscale, compute scaled Q for quantization
+        q_ptrs = q_ptr + b_id * stride_qb + q_head_id * stride_qh + offs_d * stride_qd
+        q = tl.load(q_ptrs, mask=offs_d < HEAD_DIM, other=0.0).to(tl.float32)
+
+        kqs_ptrs = k_qscale_ptr + kv_head_id * stride_kqs_head + offs_d * stride_kqs_dim
+        k_qscale = tl.load(kqs_ptrs, mask=offs_d < HEAD_DIM, other=0.0).to(tl.float32)
+
+        # Dynamic quantize Q * k_qscale -> q_int8, q_q_scale
+        q_scaled = q * k_qscale
+        q_amax = tl.max(tl.abs(q_scaled), axis=0)
+        q_amax = tl.maximum(q_amax, 1e-12)
+        q_q_scale = q_amax / 127.0
+        q_scaled_norm = q_scaled / q_q_scale
+        q_int8 = tl.where(q_scaled_norm < 0, q_scaled_norm - 0.5, q_scaled_norm + 0.5).to(tl.int8)
+
+        m_i = -float("inf")
+        l_i = 0.0
+        acc = tl.zeros((BLOCK_SIZE_D,), dtype=tl.float32)
+
+        num_global_window_blocks, non_global_window_start_block, num_total_blocks = _swa_split_blocks(
+            kv_seq_len - 1,
+            1,
+            kv_seq_len,
+            BLOCK_SIZE_N,
+            True,
+            GLOBAL_WINDOW,
+            LOCAL_WINDOW,
+        )
+
+        # Global window blocks
+        for kv_block_id in tl.range(0, num_global_window_blocks):
+            kv_block_start = kv_block_id * BLOCK_SIZE_N
+            kv_block_end = tl.minimum(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
+            kv_block_len = kv_block_end - kv_block_start
+            logical_page_id = kv_block_start // PAGE_SIZE
+            kv_block_start_in_page = kv_block_start % PAGE_SIZE
+            physical_page_id = tl.load(
+                block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
+            )
+            k_block_ptr = tl.make_block_ptr(
+                base=k_cache_ptr
+                + physical_page_id * stride_k_block
+                + kv_head_id * stride_k_head
+                + kv_block_start_in_page * stride_k_blksz,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_k_blksz, stride_k_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            k_block = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+            qk = tl.sum(q_int8.to(tl.float32)[None, :] * k_block, axis=1) * q_q_scale * softmax_scale
+
+            gw_mask = (kv_block_start + offs_n) < GLOBAL_WINDOW
+            if LOCAL_WINDOW is not None:
+                sw_mask = (kv_block_start + offs_n + LOCAL_WINDOW) >= (kv_seq_len - 1)
+                gw_mask = gw_mask | sw_mask
+            kv_mask = offs_n < kv_block_len
+            mask = gw_mask & kv_mask
+            qk = tl.where(mask, qk, float("-inf"))
+
+            m_ij = tl.maximum(m_i, tl.max(qk, axis=0))
+            p = tl.math.exp(qk - m_ij)
+            p = tl.where(kv_mask, p, 0.0)
+            l_ij = tl.sum(p, axis=0)
+            alpha = tl.math.exp(m_i - m_ij)
+            l_i = l_i * alpha + l_ij
+            acc = acc * alpha
+
+            v_block_ptr = tl.make_block_ptr(
+                base=v_cache_ptr
+                + physical_page_id * stride_v_block
+                + kv_head_id * stride_v_head
+                + kv_block_start_in_page * stride_v_blksz,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_v_blksz, stride_v_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            v_block = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+            acc += tl.sum(p[:, None] * v_block, axis=0)
+            m_i = m_ij
+
+        # Local window blocks
+        for kv_block_id in tl.range(non_global_window_start_block, num_total_blocks):
+            kv_block_start = kv_block_id * BLOCK_SIZE_N
+            kv_block_end = tl.minimum(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
+            kv_block_len = kv_block_end - kv_block_start
+            logical_page_id = kv_block_start // PAGE_SIZE
+            kv_block_start_in_page = kv_block_start % PAGE_SIZE
+            physical_page_id = tl.load(
+                block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
+            )
+            k_block_ptr = tl.make_block_ptr(
+                base=k_cache_ptr
+                + physical_page_id * stride_k_block
+                + kv_head_id * stride_k_head
+                + kv_block_start_in_page * stride_k_blksz,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_k_blksz, stride_k_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            k_block = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+            qk = tl.sum(q_int8.to(tl.float32)[None, :] * k_block, axis=1) * q_q_scale * softmax_scale
+
+            kv_mask = offs_n < kv_block_len
+            if LOCAL_WINDOW is not None:
+                sw_mask = (kv_block_start + offs_n + LOCAL_WINDOW) >= (kv_seq_len - 1)
+                mask = kv_mask & sw_mask
+            else:
+                mask = kv_mask
+            qk = tl.where(mask, qk, float("-inf"))
+
+            m_ij = tl.maximum(m_i, tl.max(qk, axis=0))
+            p = tl.math.exp(qk - m_ij)
+            p = tl.where(kv_mask, p, 0.0)
+            l_ij = tl.sum(p, axis=0)
+            alpha = tl.math.exp(m_i - m_ij)
+            l_i = l_i * alpha + l_ij
+            acc = acc * alpha
+
+            v_block_ptr = tl.make_block_ptr(
+                base=v_cache_ptr
+                + physical_page_id * stride_v_block
+                + kv_head_id * stride_v_head
+                + kv_block_start_in_page * stride_v_blksz,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_v_blksz, stride_v_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            v_block = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+            acc += tl.sum(p[:, None] * v_block, axis=0)
+            m_i = m_ij
+
+        l_i_safe = tl.where(l_i > 0, l_i, 1.0)
+        acc = tl.where(l_i > 0, acc / l_i_safe, 0.0)
+
+        # Dequantize V output by multiplying with v_qscale
+        vqs_ptrs = v_qscale_ptr + kv_head_id * stride_vqs_head + offs_d * stride_vqs_dim
+        v_qscale = tl.load(vqs_ptrs, mask=offs_d < HEAD_DIM, other=0.0).to(tl.float32)
+        acc = acc * v_qscale
 
         o_ptrs = o_ptr + b_id * stride_ob + q_head_id * stride_oh + offs_d * stride_od
         tl.store(o_ptrs, acc.to(OUT_T), mask=offs_d < HEAD_DIM)
@@ -2154,7 +2486,6 @@ def swa_paged_decode_impl(
 
     o = torch.empty_like(q, memory_format=torch.contiguous_format)
 
-    # One program per (batch, head): maximizes parallelism on NVIDIA (vs. a tiny grid + device loop).
     grid = (batch_size * num_q_heads,)
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
 
@@ -2169,8 +2500,7 @@ def swa_paged_decode_impl(
     use_tiny_global = (
         global_window_size is not None
         and global_window_size <= 8
-        and head_dim == 128
-        and block_size == 128
+        and block_size >= 128
     )
 
     if use_tiny_global:
@@ -2209,7 +2539,7 @@ def swa_paged_decode_impl(
             head_dim,
             block_size,
             BLOCK_SIZE_D=BLOCK_SIZE_D,
-            BLOCK_SIZE_N=block_size,
+            BLOCK_SIZE_N=block_size_n,
             TINY_GLOBAL_N=8,
             OUT_T=out_t,
             num_warps=num_warps,
@@ -2250,8 +2580,100 @@ def swa_paged_decode_impl(
             head_dim,
             block_size,
             BLOCK_SIZE_D=BLOCK_SIZE_D,
-            BLOCK_SIZE_N=block_size,
+            BLOCK_SIZE_N=block_size_n,
             OUT_T=out_t,
             num_warps=num_warps,
         )
+    return o
+
+
+def swa_paged_decode_quant_impl(
+    q: torch.Tensor,           # [bsz, n_q_heads, head_dim] float
+    key_cache: torch.Tensor,   # [n_pages, n_kv_heads, page_size, head_dim] int8
+    k_qscale: torch.Tensor,    # [n_kv_heads, head_dim] float
+    value_cache: torch.Tensor, # [n_pages, n_kv_heads, page_size, head_dim] int8
+    v_qscale: torch.Tensor,    # [n_kv_heads, head_dim] float
+    seqlens: torch.Tensor,     # [bsz] int32
+    block_tables: torch.Tensor,  # [bsz, max_num_blocks] int32
+    local_window_size: Optional[int] = None,
+    global_window_size: Optional[int] = None,
+    gqa_interleave: bool = False,
+    softmax_scale: Optional[float] = None,
+) -> torch.Tensor:
+    batch_size, num_q_heads, head_dim = q.shape
+    num_total_blocks, num_kv_heads, block_size, head_dim_cache = key_cache.shape
+
+    assert head_dim == head_dim_cache
+    assert key_cache.dtype == torch.int8, "key_cache must be int8"
+    assert value_cache.dtype == torch.int8, "value_cache must be int8"
+
+    block_size_n = min(128, triton.next_power_of_2(block_size))
+    if block_size % block_size_n != 0:
+        raise ValueError(
+            f"KV block_size ({block_size}) must be divisible by decode tile size ({block_size_n})."
+        )
+    max_num_blocks_per_seq = block_tables.shape[1]
+
+    if softmax_scale is None:
+        softmax_scale = 1.0 / (head_dim**0.5)
+
+    o = torch.empty_like(q, memory_format=torch.contiguous_format)
+
+    grid = (batch_size * num_q_heads,)
+    BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
+
+    if q.dtype == torch.float16:
+        out_t = tl.float16
+    elif q.dtype == torch.bfloat16:
+        out_t = tl.bfloat16
+    else:
+        out_t = tl.float32
+
+    num_warps = _paged_decode_launch_config(head_dim, block_size)
+
+    _paged_decode_quant_kernel[grid](
+        q,
+        key_cache,
+        k_qscale,
+        value_cache,
+        v_qscale,
+        o,
+        seqlens,
+        block_tables,
+        batch_size,
+        num_total_blocks,
+        max_num_blocks_per_seq,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        key_cache.stride(0),
+        key_cache.stride(1),
+        key_cache.stride(2),
+        key_cache.stride(3),
+        k_qscale.stride(0),
+        k_qscale.stride(1),
+        value_cache.stride(0),
+        value_cache.stride(1),
+        value_cache.stride(2),
+        value_cache.stride(3),
+        v_qscale.stride(0),
+        v_qscale.stride(1),
+        o.stride(0),
+        o.stride(1),
+        o.stride(2),
+        block_tables.stride(0),
+        block_tables.stride(1),
+        softmax_scale,
+        global_window_size,
+        local_window_size,
+        num_q_heads,
+        num_kv_heads,
+        gqa_interleave,
+        head_dim,
+        block_size,
+        BLOCK_SIZE_D=BLOCK_SIZE_D,
+        BLOCK_SIZE_N=block_size_n,
+        OUT_T=out_t,
+        num_warps=num_warps,
+    )
     return o

@@ -21,6 +21,7 @@ from mojo_opset import MojoPrefillNSA
 from mojo_opset import MojoSdpa
 from mojo_opset import MojoPagedPrefillSWA
 from mojo_opset import MojoPagedDecodeSWA
+from mojo_opset import MojoPagedDecodeQuantSWA
 from mojo_opset import MojoSWA
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
@@ -2088,3 +2089,134 @@ def test_paged_prefill_quant_gqa(
         rtol=5e-2,
         ptol=0.90,
     )
+
+def generate_paged_decode_quant_data(
+    batch_size: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    max_seq_len: int,
+    block_size: int,
+    dtype: torch.dtype,
+):
+    """Generate test data with int8-quantized K/V caches and per-dim dequant scales."""
+    query = torch.randn(batch_size, num_q_heads, head_dim, dtype=dtype)
+
+    if max_seq_len > 0:
+        seqlens = torch.randint(1, max_seq_len + 1, (batch_size,), dtype=torch.int32)
+        seqlens = torch.clamp(seqlens, min=1)
+    else:
+        seqlens = torch.randperm(batch_size, dtype=torch.int32)
+        seqlens = torch.clamp(seqlens, min=1)
+
+    max_context_len = seqlens.max().item()
+    max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
+    total_blocks_needed = int(
+        torch.div(seqlens + block_size - 1, block_size, rounding_mode="floor").sum().item()
+    )
+    if total_blocks_needed == 0:
+        total_blocks_needed = batch_size * max_num_blocks_per_seq
+    num_total_blocks = total_blocks_needed + 10
+
+    # int8 quantized K/V caches
+    k_cache = torch.randint(-127, 128, (num_total_blocks, num_kv_heads, block_size, head_dim), dtype=torch.int8)
+    v_cache = torch.randint(-127, 128, (num_total_blocks, num_kv_heads, block_size, head_dim), dtype=torch.int8)
+
+    # Per-head-dim dequant scales (small positive values)
+    k_qscale = torch.rand(num_kv_heads, head_dim, dtype=torch.float32) * 0.01 + 1e-4
+    v_qscale = torch.rand(num_kv_heads, head_dim, dtype=torch.float32) * 0.01 + 1e-4
+
+    block_tables = torch.full((batch_size, max_num_blocks_per_seq), -1, dtype=torch.int32)
+    free_blocks = torch.randperm(num_total_blocks, dtype=torch.int32)
+
+    current_block_offset = 0
+    for i in range(batch_size):
+        seq_len = seqlens[i].item()
+        num_blocks_for_seq = (seq_len + block_size - 1) // block_size
+        if current_block_offset + num_blocks_for_seq > num_total_blocks:
+            raise ValueError("Not enough blocks to generate test data.")
+        assigned_blocks = free_blocks[current_block_offset : current_block_offset + num_blocks_for_seq]
+        block_tables[i, :num_blocks_for_seq] = assigned_blocks
+        current_block_offset += num_blocks_for_seq
+
+    return query, k_cache, k_qscale, v_cache, v_qscale, seqlens, block_tables, max_context_len
+
+
+test_configs_swa_decode_quant = [
+    (4, 16, 4, 128, 1024, 512, torch.bfloat16, "M_BF16"),
+    (8, 16, 4, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
+    (8, 8, 1, 128, 4096, 128, torch.bfloat16, "M_BF16_LONG"),
+    (2, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
+    (2, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
+    (2, 8, 2, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP1"),
+    (2, 24, 8, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP2"),
+]
+
+
+@pytest.mark.parametrize(
+    "query, k_cache, k_qscale, v_cache, v_qscale, seqlens, block_tables, max_context_len",
+    [
+        pytest.param(
+            *generate_paged_decode_quant_data(
+                batch_size=B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_seq_len=S_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            id=ID,
+        )
+        for B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, ID in test_configs_swa_decode_quant
+    ],
+)
+@pytest.mark.parametrize("gqa_layout, global_window, local_window", [
+    ("ABAB", 4, 255),
+    ("AABB", 4, 1023),
+])
+@auto_switch_platform()
+@bypass_not_implemented
+def test_paged_decode_quant_swa(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    k_qscale: torch.Tensor,
+    v_cache: torch.Tensor,
+    v_qscale: torch.Tensor,
+    seqlens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_context_len: int,
+    gqa_layout: str,
+    global_window: int,
+    local_window: int,
+):
+    head_dim = query.shape[-1]
+    softmax_scale = 1.0 / math.sqrt(head_dim)
+
+    paged_decode_quant_swa = MojoPagedDecodeQuantSWA(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+        global_window_size=global_window,
+        local_window_size=local_window,
+    )
+    paged_decode_quant_swa_ref = MojoPagedDecodeQuantSWA._registry.get("torch")(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+        global_window_size=global_window,
+        local_window_size=local_window,
+    )
+
+    paged_decode_quant_swa.forward_diff_with(
+        paged_decode_quant_swa_ref,
+        query,
+        k_cache,
+        k_qscale,
+        v_cache,
+        v_qscale,
+        seqlens,
+        block_tables,
+        softmax_scale=softmax_scale,
+        atol=5e-2,
+        rtol=5e-2,
+    )
+
