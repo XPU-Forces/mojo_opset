@@ -36,7 +36,7 @@ class TTXMoEDynamicQuant(MojoMoEDynamicQuant):
         input: torch.Tensor,
         token_count: torch.Tensor,
     ):
-        input_fp = input.float() * self.smooth_scale.float().repeat_interleave(token_count, dim=0)
+        input_fp = input.float() / self.smooth_scale.float().repeat_interleave(token_count, dim=0)
         scale_tensor = torch.ones(
             input_fp.shape[-1],
             device=input_fp.device,

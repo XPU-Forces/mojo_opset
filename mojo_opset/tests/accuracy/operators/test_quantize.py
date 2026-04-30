@@ -231,7 +231,7 @@ def test_dynamic_quant_reference(dtype):
     )
     out, scale = op(x)
 
-    expected_input = x.float() * smooth_scale.float().unsqueeze(0)
+    expected_input = x.float() / smooth_scale.float().unsqueeze(0)
     expected_scale = expected_input.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / 127
     expected_out = torch.clamp(
         torch.round(expected_input / expected_scale),

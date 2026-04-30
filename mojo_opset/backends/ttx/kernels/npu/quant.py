@@ -110,7 +110,7 @@ def scale_dynamic_quant_kernel(
             block_mask = element_mask[:, None] & dims_mask[None, :]
             input_vals = tl.load(input_ptr, mask=block_mask, other=0.0).to(tl.float32)
             scale_vals = tl.load(scale_ptr, mask=dims_mask, other=0.0).to(tl.float32)
-            scaled_vals = input_vals * scale_vals
+            scaled_vals = input_vals / scale_vals
 
             current_max = tl.max(tl.abs(scaled_vals), axis=1)
 

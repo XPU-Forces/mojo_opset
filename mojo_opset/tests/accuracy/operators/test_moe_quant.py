@@ -85,7 +85,7 @@ def _manual_quant_experts(
         )
         gate_proj, up_proj = fc1.float().chunk(2, dim=-1)
         activated = (torch.nn.functional.silu(gate_proj) * up_proj).to(output_dtype)
-        smoothed_activated = activated * fc2_input_smooth_scale[expert_idx].float().unsqueeze(0)
+        smoothed_activated = activated / fc2_input_smooth_scale[expert_idx].float().unsqueeze(0)
         fc2_input_scale = smoothed_activated.abs().amax(dim=-1).clamp(min=1e-12) / 127
         fc2_input = torch.clamp(torch.round(smoothed_activated / fc2_input_scale.unsqueeze(-1)), -128, 127).to(
             torch.int8
@@ -163,7 +163,7 @@ def test_fused_swiglu_moe_scale_dynamic_quant_reference():
     )
     left, right = input.float().chunk(2, dim=-1)
     expected = torch.nn.functional.silu(left) * right
-    expected = expected * expanded_scale
+    expected = expected / expanded_scale
     expected_scale = expected.abs().amax(dim=-1).clamp(min=1e-12) / 127
     expected_quantized = torch.clamp(torch.round(expected / expected_scale.unsqueeze(-1)), -128, 127).to(torch.int8)
 
@@ -371,7 +371,7 @@ def test_quant_moe_reference():
     )
 
     expanded_smooth_scale = smooth_scale.repeat_interleave(tokens_per_expert, dim=0)
-    quant_input = sorted_hidden_states.float() * expanded_smooth_scale
+    quant_input = sorted_hidden_states.float() / expanded_smooth_scale
     input_scale = quant_input.abs().amax(dim=-1).clamp(min=1e-12) / 127
     quantized_hidden_states = torch.clamp(
         torch.round(quant_input / input_scale.unsqueeze(-1)),
