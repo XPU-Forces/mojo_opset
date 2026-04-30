@@ -15,9 +15,9 @@ logger = get_logger(__name__)
 
 @dataclass
 class AttentionMetadata:
-    cu_seqlens_q: torch.Tensor
-    query_lengths: torch.Tensor
-    seqlens_kv: torch.Tensor
+    q_lens: torch.Tensor
+    cu_q_lens: torch.Tensor
+    total_seq_lens: torch.Tensor
     block_tables: torch.Tensor
     slot_mapping: torch.Tensor
     key_caches: list[torch.Tensor]
@@ -53,7 +53,7 @@ class PagedAttentionRuntimeState(MojoSession):
             dtype=torch.int32,
             device=device,
         )
-        self.seqlens_kv = torch.zeros((batch_size,), dtype=torch.int64, device=device)
+        self.total_seq_lens = torch.zeros((batch_size,), dtype=torch.int32, device=device)
         self.free_blocks = torch.arange(total_blocks, dtype=torch.int32, device=device)
         self.num_free_blocks = total_blocks
 
@@ -117,18 +117,18 @@ class PagedAttentionRuntimeState(MojoSession):
         self.num_free_blocks -= num_blocks
         return allocated
 
-    def _normalize_query_lengths(self, query_lengths: Optional[torch.Tensor]) -> torch.Tensor:
-        if query_lengths is None:
-            return torch.ones(self.batch_size, dtype=torch.int64, device=self.device)
-        return query_lengths.to(device=self.device, dtype=torch.int64)
+    def _normalize_q_lens(self, q_lens: Optional[torch.Tensor]) -> torch.Tensor:
+        if q_lens is None:
+            return torch.ones(self.batch_size, dtype=torch.int32, device=self.device)
+        return q_lens.to(device=self.device, dtype=torch.int32)
 
-    def _reserve(self, query_lengths: torch.Tensor) -> torch.Tensor:
-        query_lengths = self._normalize_query_lengths(query_lengths)
-        previous_seqlens = self.seqlens_kv.clone()
+    def _reserve(self, q_lens: torch.Tensor) -> torch.Tensor:
+        q_lens = self._normalize_q_lens(q_lens)
+        previous_total_seq_lens = self.total_seq_lens.clone()
 
         for batch_idx in range(self.batch_size):
-            context_len = int(previous_seqlens[batch_idx].item())
-            append_len = int(query_lengths[batch_idx].item())
+            context_len = int(previous_total_seq_lens[batch_idx].item())
+            append_len = int(q_lens[batch_idx].item())
             old_num_blocks = (context_len + self.block_size - 1) // self.block_size
             new_total_len = context_len + append_len
             new_num_blocks = (new_total_len + self.block_size - 1) // self.block_size
@@ -137,14 +137,14 @@ class PagedAttentionRuntimeState(MojoSession):
                 newly_allocated = self._allocate_blocks(new_num_blocks - old_num_blocks)
                 self.block_tables[batch_idx, old_num_blocks:new_num_blocks] = newly_allocated
 
-        self.seqlens_kv = previous_seqlens + query_lengths
-        return previous_seqlens
+        self.total_seq_lens = previous_total_seq_lens + q_lens
+        return previous_total_seq_lens
 
-    def _build_positions(self, kv_lens_before_store: torch.Tensor, query_lengths: torch.Tensor) -> torch.Tensor:
+    def _build_positions(self, context_kv_lens: torch.Tensor, q_lens: torch.Tensor) -> torch.Tensor:
         positions = []
         for batch_idx in range(self.batch_size):
-            start = int(kv_lens_before_store[batch_idx].item())
-            query_len = int(query_lengths[batch_idx].item())
+            start = int(context_kv_lens[batch_idx].item())
+            query_len = int(q_lens[batch_idx].item())
             if query_len <= 0:
                 continue
             positions.append(torch.arange(start, start + query_len, dtype=torch.int64, device=self.device))
@@ -153,10 +153,10 @@ class PagedAttentionRuntimeState(MojoSession):
             return torch.empty((0,), dtype=torch.int64, device=self.device)
         return torch.cat(positions, dim=0)
 
-    def _build_slot_mapping(self, kv_lens_before_store: torch.Tensor, query_lengths: torch.Tensor) -> torch.Tensor:
+    def _build_slot_mapping(self, context_kv_lens: torch.Tensor, q_lens: torch.Tensor) -> torch.Tensor:
         slot_mapping_chunks = []
         for batch_idx in range(self.batch_size):
-            query_len = query_lengths[batch_idx]
+            query_len = q_lens[batch_idx]
             if query_len <= 0:
                 continue
 
@@ -167,7 +167,7 @@ class PagedAttentionRuntimeState(MojoSession):
             block_start = curr_block_tables * self.block_size
             slot_mapping = (block_start.unsqueeze(-1) + self.offsets.unsqueeze(0)).flatten()
 
-            start = kv_lens_before_store[batch_idx]
+            start = context_kv_lens[batch_idx]
             slot_mapping_chunks.append(slot_mapping[start:start+query_len])
 
         if not slot_mapping_chunks:
@@ -177,42 +177,42 @@ class PagedAttentionRuntimeState(MojoSession):
     def _build_attention_metadata(
         self,
         *,
-        cu_seqlens_q: Optional[torch.Tensor],
-        kv_lens_before_store: torch.Tensor,
-        query_lengths: torch.Tensor,
+        cu_q_lens: Optional[torch.Tensor],
+        context_kv_lens: torch.Tensor,
+        q_lens: torch.Tensor,
     ) -> AttentionMetadata:
         return AttentionMetadata(
-            cu_seqlens_q=cu_seqlens_q,
-            query_lengths=query_lengths,
-            seqlens_kv=self.seqlens_kv.clone(),
+            cu_q_lens=cu_q_lens,
+            q_lens=q_lens,
+            total_seq_lens=self.total_seq_lens,
             block_tables=self.block_tables,
-            slot_mapping=self._build_slot_mapping(kv_lens_before_store, query_lengths),
+            slot_mapping=self._build_slot_mapping(context_kv_lens, q_lens),
             key_caches=self.key_caches,
             value_caches=self.value_caches,
-            is_prefill=cu_seqlens_q is not None,
+            is_prefill=cu_q_lens is not None,
         )
 
     def prepare_prefill_inputs(
         self,
         input_ids: torch.Tensor,
-        query_lengths: torch.Tensor,
+        q_lens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, AttentionMetadata]:
         input_ids = input_ids.reshape(-1).to(device=self.device, dtype=torch.int64)
-        query_lengths = self._normalize_query_lengths(query_lengths)
+        q_lens = self._normalize_q_lens(q_lens)
 
-        if int(query_lengths.sum().item()) != input_ids.numel():
+        if int(q_lens.sum().item()) != input_ids.numel():
             raise ValueError(
-                "Prefill input_ids length must match the sum of query_lengths: "
-                f"{input_ids.numel()} != {int(query_lengths.sum().item())}"
+                "Prefill input_ids length must match the sum of q_lens: "
+                f"{input_ids.numel()} != {int(q_lens.sum().item())}"
             )
 
-        kv_lens_before_store = self._reserve(query_lengths)
-        positions = self._build_positions(kv_lens_before_store, query_lengths)
-        cu_seqlens_q = F.pad(query_lengths.cumsum(-1), (1, 0)).to(torch.int32)
+        context_kv_lens = self._reserve(q_lens)
+        positions = self._build_positions(context_kv_lens, q_lens)
+        cu_q_lens = F.pad(q_lens.cumsum(-1, dtype=torch.int32), (1, 0))
         attention_metadata = self._build_attention_metadata(
-            cu_seqlens_q=cu_seqlens_q,
-            kv_lens_before_store=kv_lens_before_store,
-            query_lengths=query_lengths,
+            cu_q_lens=cu_q_lens,
+            context_kv_lens=context_kv_lens,
+            q_lens=q_lens,
         )
         return input_ids, positions, attention_metadata
 
@@ -226,14 +226,14 @@ class PagedAttentionRuntimeState(MojoSession):
                 f"Decode input_ids must provide exactly one token per sequence: {input_ids.numel()} != {self.batch_size}"
             )
 
-        query_lengths = torch.ones(self.batch_size, dtype=torch.int64, device=self.device)
-        cu_seqlens_q = F.pad(query_lengths.cumsum(-1), (1, 0)).to(torch.int32)
-        positions = self.seqlens_kv.clone()
-        kv_lens_before_store = self._reserve(query_lengths)
+        q_lens = torch.ones(self.batch_size, dtype=torch.int32, device=self.device)
+        cu_q_lens = F.pad(q_lens.cumsum(-1, dtype=torch.int32), (1, 0))
+        positions = self.total_seq_lens.clone()
+        context_kv_lens = self._reserve(q_lens)
         attention_metadata = self._build_attention_metadata(
-            cu_seqlens_q=cu_seqlens_q,
-            kv_lens_before_store=kv_lens_before_store,
-            query_lengths=query_lengths,
+            cu_q_lens=cu_q_lens,
+            context_kv_lens=context_kv_lens,
+            q_lens=q_lens,
         )
         return input_ids, positions, attention_metadata
 
@@ -272,8 +272,8 @@ class PagedAttentionGenerationModel(nn.Module):
 
         if context_input_len is not None:
             model_inputs = session.prepare_prefill_inputs(input_ids, context_input_len)
-            cu_seqlens = model_inputs[-1].cu_seqlens_q[1:]
-            lm_head_indices = cu_seqlens - 1
+            cu_q_lens = model_inputs[-1].cu_q_lens[1:]
+            lm_head_indices = cu_q_lens - 1
         else:
             model_inputs = session.prepare_decode_inputs(input_ids)
 

@@ -615,11 +615,11 @@ class DeepseekV3Attention(nn.Module):
             q_lens = torch.full(
                 (batch_size,), seq_len, dtype=torch.int32, device=device
             )
-            cu_seqlens_q = torch.cat([
+            cu_q_lens = torch.cat([
                 torch.tensor([0], device=device, dtype=torch.int32),
                 q_lens.cumsum(0, dtype=torch.int32),
             ])
-            total_tokens = cu_seqlens_q[-1].item()
+            total_tokens = cu_q_lens[-1].item()
 
             # Reshape queries for prefill attention
             q = query_states.permute(0, 2, 1, 3).reshape(
@@ -633,7 +633,7 @@ class DeepseekV3Attention(nn.Module):
 
             # Prefill attention
             attn_output_tnd = self.attn_prefill(
-                q, k_cache, v_cache, cu_seqlens_q, block_tables, self.scaling
+                q, k_cache, v_cache, cu_q_lens, block_tables, self.scaling
             )
             
             # Reshape output

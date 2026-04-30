@@ -42,8 +42,8 @@ class MojoRotaryEmbedding(MojoOperator):
     def forward(
         self,
         x: torch.Tensor,
-        cu_seqlens_q: Optional[torch.Tensor] = None,
-        seqlens_kv: Optional[torch.Tensor] = None,
+        cu_q_lens: Optional[torch.Tensor] = None,
+        total_seq_lens: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -51,30 +51,30 @@ class MojoRotaryEmbedding(MojoOperator):
         x is necessary for the kernel to determine the output shape.
 
         Scenario descriptions:
-        1. Varlen prefill: input [T, H], cu_seqlens_q [T+1] or position_ids [T] -> cos/sin [T, D].
-        2. Padded prefill: input [B, S, H], cu_seqlens_q None, position_ids None -> cos/sin [S, D].
-        3. Decode: input [B, H], cu_seqlens_q None, position_ids [B] -> cos/sin [B, D].
+        1. Varlen prefill: input [T, H], cu_q_lens [T+1] or position_ids [T] -> cos/sin [T, D].
+        2. Padded prefill: input [B, S, H], cu_q_lens None, position_ids None -> cos/sin [S, D].
+        3. Decode: input [B, H], cu_q_lens None, position_ids [B] -> cos/sin [B, D].
         """
-        if cu_seqlens_q is not None:
-            assert cu_seqlens_q.dtype == torch.int32
-        if seqlens_kv is not None:
-            assert seqlens_kv.dtype == torch.int32
+        if cu_q_lens is not None:
+            assert cu_q_lens.dtype == torch.int32
+        if total_seq_lens is not None:
+            assert total_seq_lens.dtype == torch.int32
         if position_ids is not None:
             assert position_ids.dtype == torch.int32
-        assert position_ids is None or cu_seqlens_q is None, "At most one of cu_seqlens_q or position_ids should be provided"
+        assert position_ids is None or cu_q_lens is None, "At most one of cu_q_lens or position_ids should be provided"
 
-        if cu_seqlens_q is not None:
+        if cu_q_lens is not None:
             assert x.dim() == 2, "x must be 2D: [T, D]"
             position_ids = torch.full((x.shape[0],), -1, device = x.device, dtype = torch.int32)
-            seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-            bsz = seqlens_q.size(0)
+            q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
+            bsz = q_lens.size(0)
             for i in range(bsz):
-                q_len = seqlens_q[i].item()
-                context_len = 0 if seqlens_kv is None else seqlens_kv[i].item() - q_len
-                position_ids[cu_seqlens_q[i]:cu_seqlens_q[i+1]] = torch.arange(
+                q_len = q_lens[i].item()
+                context_len = 0 if total_seq_lens is None else total_seq_lens[i].item() - q_len
+                position_ids[cu_q_lens[i]:cu_q_lens[i+1]] = torch.arange(
                     context_len,
                     context_len + q_len, 
-                    device = cu_seqlens_q.device,
+                    device = cu_q_lens.device,
                     dtype = torch.int32,
                 )
         elif position_ids is not None:

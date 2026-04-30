@@ -68,16 +68,16 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
         x = torch.randn(cu_seqlens[-1].item(), hidden_size, device=device, dtype=torch.float32)
 
         torch.testing.assert_close(
-            rot_pos_emb_ref(x, cu_seqlens_q=cu_seqlens, seqlens_kv=kv_lens),
-            rot_pos_emb(x, cu_seqlens_q=cu_seqlens, seqlens_kv=kv_lens),
+            rot_pos_emb_ref(x, cu_q_lens=cu_seqlens, total_seq_lens=kv_lens),
+            rot_pos_emb(x, cu_q_lens=cu_seqlens, total_seq_lens=kv_lens),
             atol=1e-5,
             rtol=1e-5,
         )
         rot_pos_emb.forward_diff_with(
             rot_pos_emb_ref,
             x,
-            cu_seqlens_q=cu_seqlens,
-            seqlens_kv=kv_lens,
+            cu_q_lens=cu_seqlens,
+            total_seq_lens=kv_lens,
             atol=1e-5,
             rtol=1e-5,
     )
@@ -145,7 +145,7 @@ def test_apply_rope(bs, seqlen, q_heads, k_heads, head_first, head_dim, rope_per
         k = torch.randn(total_seq_len, k_heads, head_dim, device=device, dtype=dtype)
 
         kv_lens = torch.randint(0, max_seq_len - seqlen, (bs,), device=device, dtype=torch.int32)
-        cos, sin = rot_pos_emb(x, cu_seqlens_q=cu_seqlens, seqlens_kv=kv_lens)
+        cos, sin = rot_pos_emb(x, cu_q_lens=cu_seqlens, total_seq_lens=kv_lens)
         if head_first:
             q = q.transpose(0, 1)
             k = k.transpose(0, 1)

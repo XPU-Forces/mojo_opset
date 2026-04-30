@@ -225,15 +225,15 @@ class SeedOssAttention(nn.Module):
 
         if q_len > 1:
             q_lens = torch.full((bsz,), q_len, dtype=torch.int32, device=device)
-            cu_seqlens_q = torch.cat(
+            cu_q_lens = torch.cat(
                 [torch.tensor([0], device=device, dtype=torch.int32), q_lens.cumsum(0, dtype=torch.int32)]
             )
-            total_tokens = int(cu_seqlens_q[-1].item())
+            total_tokens = int(cu_q_lens[-1].item())
             q = query_states.permute(0, 2, 1, 3).reshape(total_tokens, num_q_heads, head_dim)
             k_cache = past_key_values.k_cache
             v_cache = past_key_values.v_cache
             block_tables = past_key_values.block_tables[self.layer_idx]
-            attn_output_tnd = self.attn_prefill(q, k_cache, v_cache, cu_seqlens_q, block_tables, self.scaling)
+            attn_output_tnd = self.attn_prefill(q, k_cache, v_cache, cu_q_lens, block_tables, self.scaling)
             attn_output = attn_output_tnd.reshape(bsz, q_len, num_q_heads, head_dim).transpose(1, 2)
         else:
             q = query_states.squeeze(2)

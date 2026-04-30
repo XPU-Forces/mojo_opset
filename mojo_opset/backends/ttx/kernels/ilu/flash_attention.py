@@ -47,7 +47,7 @@ def _paged_prefill_fav2_kernel(
     V_cache,
     Out,
     aux_mask_ptr,
-    cu_seqlens_q_ptr,
+    cu_q_lens_ptr,
     seqlens_kv_ptr,
     block_tables_ptr,
     stride_qt, stride_qh, stride_qd,
@@ -75,8 +75,8 @@ def _paged_prefill_fav2_kernel(
     q_head_id = tl.program_id(1)
     b_id = tl.program_id(2)
 
-    q_start = tl.load(cu_seqlens_q_ptr + b_id).to(tl.int32)
-    q_seq_len = tl.load(cu_seqlens_q_ptr + b_id + 1).to(tl.int32) - q_start
+    q_start = tl.load(cu_q_lens_ptr + b_id).to(tl.int32)
+    q_seq_len = tl.load(cu_q_lens_ptr + b_id + 1).to(tl.int32) - q_start
     kv_seq_len = tl.load(seqlens_kv_ptr + b_id).to(tl.int32)
 
     q_blk_start = local_q_block_id * BLOCK_M
@@ -517,7 +517,7 @@ def paged_attention_prefill_impl(
     q: torch.Tensor,
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
+    cu_q_lens: torch.Tensor,
     seqlens_kv: Optional[torch.Tensor],
     block_tables: torch.Tensor,
     gqa_interleave: bool,
@@ -526,12 +526,12 @@ def paged_attention_prefill_impl(
 ) -> torch.Tensor:
     total_q_tokens, num_q_heads, head_dim = q.shape
     _, num_kv_heads, block_size, _ = key_cache.shape
-    batch_size = cu_seqlens_q.shape[0] - 1
+    batch_size = cu_q_lens.shape[0] - 1
 
     sm_scale = softmax_scale if softmax_scale is not None else 1.0 / math.sqrt(head_dim)
 
     if seqlens_kv is None:
-        seqlens_kv = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(torch.int32)
+        seqlens_kv = (cu_q_lens[1:] - cu_q_lens[:-1]).to(torch.int32)
     else:
         seqlens_kv = seqlens_kv.to(torch.int32)
 
@@ -555,7 +555,7 @@ def paged_attention_prefill_impl(
 
     def grid(META):
         bm = META["BLOCK_M"]
-        q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
         max_q_blocks = ((q_lens + bm - 1) // bm).max().item()
         return (max_q_blocks, num_q_heads, batch_size)
 
@@ -565,7 +565,7 @@ def paged_attention_prefill_impl(
         value_cache,
         out,
         mask_ptr,
-        cu_seqlens_q,
+        cu_q_lens,
         seqlens_kv,
         block_tables_i32,
         q.stride(0), q.stride(1), q.stride(2),

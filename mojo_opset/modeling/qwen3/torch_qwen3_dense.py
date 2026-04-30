@@ -200,7 +200,7 @@ def paged_attention_prefill(
     q: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
+    cu_q_lens: torch.Tensor,
     block_tables: torch.Tensor,
     softmax_scale: Optional[float] = None,
 ):
@@ -215,13 +215,13 @@ def paged_attention_prefill(
     k_unpadded = torch.zeros(total_kv_tokens, num_kv_heads, head_dim, dtype=q.dtype, device=q.device)
     v_unpadded = torch.zeros(total_kv_tokens, num_kv_heads, head_dim, dtype=q.dtype, device=q.device)
 
-    q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
     batch_size = len(q_lens)
 
     for i in range(batch_size):
         seq_len = q_lens[i].item()
-        start_loc = cu_seqlens_q[i].item()
-        end_loc = cu_seqlens_q[i + 1].item()
+        start_loc = cu_q_lens[i].item()
+        end_loc = cu_q_lens[i + 1].item()
 
         num_blocks_for_seq = (seq_len + block_size - 1) // block_size
 
@@ -264,16 +264,16 @@ def paged_attention_prefill(
     return output
 
 
-def paged_attention_decode(q, k_cache, v_cache, seqlens, block_tables, softmax_scale):
+def paged_attention_decode(q, k_cache, v_cache, total_seq_lens, block_tables, softmax_scale):
     batch_size, num_q_heads, head_dim = q.shape
     num_kv_heads, block_size, head_dim = k_cache.shape[1], k_cache.shape[2], k_cache.shape[3]
-    max_len_in_batch = seqlens.max().item()
+    max_len_in_batch = total_seq_lens.max().item()
 
     k_ref = torch.zeros(batch_size, max_len_in_batch, num_kv_heads, head_dim, device=q.device, dtype=q.dtype)
     v_ref = torch.zeros(batch_size, max_len_in_batch, num_kv_heads, head_dim, device=q.device, dtype=q.dtype)
 
     for i in range(batch_size):
-        seq_len = seqlens[i].item()
+        seq_len = total_seq_lens[i].item()
         num_blocks_for_seq = (seq_len + block_size - 1) // block_size
 
         for j in range(num_blocks_for_seq):
@@ -299,7 +299,7 @@ def paged_attention_decode(q, k_cache, v_cache, seqlens, block_tables, softmax_s
 
     attn = torch.einsum("bhd,bkhd->bhk", q, k_ref) * softmax_scale
 
-    mask = torch.arange(k_len, device=q.device)[None, :] >= seqlens[:, None]
+    mask = torch.arange(k_len, device=q.device)[None, :] >= total_seq_lens[:, None]
     attn.masked_fill_(mask[:, None, :], -torch.inf)
 
     attn = torch.softmax(attn, dim=-1, dtype=torch.float32).to(q.dtype)
@@ -323,10 +323,10 @@ def paged_attention_forward(
 
     if q_len > 1:
         q_lens = torch.full((bsz,), q_len, dtype=torch.int32, device=device)
-        cu_seqlens_q = torch.cat(
+        cu_q_lens = torch.cat(
             [torch.tensor([0], device=device, dtype=torch.int32), q_lens.cumsum(0, dtype=torch.int32)]
         )
-        total_tokens = cu_seqlens_q[-1].item()
+        total_tokens = cu_q_lens[-1].item()
 
         q = query_states.permute(0, 2, 1, 3).reshape(total_tokens, num_q_heads, head_dim)
 
@@ -343,7 +343,7 @@ def paged_attention_forward(
             q,
             k_cache,
             v_cache,
-            cu_seqlens_q,
+            cu_q_lens,
             block_tables,
             softmax_scale=module.scaling,
         )

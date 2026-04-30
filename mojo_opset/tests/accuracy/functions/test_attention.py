@@ -19,7 +19,7 @@ def generate_sdpa_data(
 ):
     q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
     q_lens = torch.clamp(q_lens, min=1)
-    cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0).to(torch.int32)])
+    cu_q_lens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0).to(torch.int32)])
 
     if max_kv_computed_len <= 0:
         kv_cache_lens = None
@@ -27,17 +27,17 @@ def generate_sdpa_data(
     else:
         kv_cache_lens = torch.randint(max_kv_computed_len // 2, max_kv_computed_len, (batch_size,), dtype=torch.int32)
         kv_lens = q_lens + kv_cache_lens
-    cu_seqlens_kv = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0).to(torch.int32)])
+    cu_total_seq_lens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0).to(torch.int32)])
 
-    total_q_tokens = cu_seqlens_q[-1].item()
-    total_kv_tokens = cu_seqlens_kv[-1].item()
+    total_q_tokens = cu_q_lens[-1].item()
+    total_kv_tokens = cu_total_seq_lens[-1].item()
 
     query = torch.randn(total_q_tokens, num_q_heads, head_dim, dtype=dtype)
     key = torch.randn(total_kv_tokens, num_kv_heads, head_dim, dtype=dtype)
     value = torch.randn(total_kv_tokens, num_kv_heads, head_dim, dtype=dtype)
     grad_out = torch.randn(total_q_tokens, num_q_heads, head_dim, dtype=dtype)
 
-    return query, key, value, grad_out, cu_seqlens_q, cu_seqlens_kv
+    return query, key, value, grad_out, cu_q_lens, cu_total_seq_lens
 
 test_configs_swa = [
     (2, 16, 4, 128, 1024, 0, torch.float32, "M_F32"),
@@ -46,7 +46,7 @@ test_configs_swa = [
 ]
 
 @pytest.mark.parametrize(
-    "query, key, value, grad_out, cu_seqlens_q, cu_seqlens_kv",
+    "query, key, value, grad_out, cu_q_lens, cu_total_seq_lens",
     [
         pytest.param(
             *generate_sdpa_data(
@@ -74,8 +74,8 @@ def test_swa_function(
     key: torch.Tensor,
     value: torch.Tensor,
     grad_out: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
-    cu_seqlens_kv: torch.Tensor,
+    cu_q_lens: torch.Tensor,
+    cu_total_seq_lens: torch.Tensor,
     gqa_interleave: bool,
     global_window: int,
     local_window: int,
@@ -94,8 +94,8 @@ def test_swa_function(
         q,
         k,
         v,
-        cu_seqlens_q,
-        cu_seqlens_kv,
+        cu_q_lens,
+        cu_total_seq_lens,
         True,
         local_window,
         global_window,
@@ -112,8 +112,8 @@ def test_swa_function(
         q_ref,
         k_ref,
         v_ref,
-        cu_seqlens_q,
-        cu_seqlens_kv,
+        cu_q_lens,
+        cu_total_seq_lens,
         True,
         local_window,
         global_window,
