@@ -22,6 +22,8 @@ def _repack_int4_tn_to_nn(packed_tn: torch.Tensor, N: int, K: int) -> torch.Tens
     Returns:
         (E, K, N//2) int8 — NN format with tensor-core swizzle, ready for ixformer kernel.
     """
+    device = packed_tn.device
+    packed_tn = packed_tn.cuda()
     E = packed_tn.shape[0]
     u8 = packed_tn.to(torch.uint8)
     low = (u8 & 0x0F).to(torch.int8)
@@ -43,7 +45,7 @@ def _repack_int4_tn_to_nn(packed_tn: torch.Tensor, N: int, K: int) -> torch.Tens
         lo = sign_low * 8 + (out[:, :, :, i] & 0x07)
         hi = out[:, :, :, i + 16] << 4
         packed[:, :, :, i] = hi + lo
-    return packed.reshape(E, K, N // 2).contiguous()
+    return packed.reshape(E, K, N // 2).contiguous().to(device)
 
 
 def _swizzle_weights_post_hook(module, incompatible_keys):
@@ -143,6 +145,9 @@ class IxformerQuantExperts(MojoQuantExperts):
         
         if self.quant_group_size not in [256, 320, 512]:
             raise NotImplementedError(f"IxformerQuantExperts: quant_group_size must be 256, 320, or 512, got {self.quant_group_size}.")
+
+        setattr(self.up_proj_weight_scale, "force_dtype", torch.float32)
+        setattr(self.down_proj_weight_scale, "force_dtype", torch.float32)
 
         self.register_load_state_dict_post_hook(_swizzle_weights_post_hook)
 
