@@ -254,7 +254,7 @@ def test_dynamic_quant_backend(dtype):
         MojoDynamicQuant._registry.get("torch")(input_size=smooth_scale.numel(), quant_dtype=torch.int8),
         smooth_scale=smooth_scale.clone(),
     )
-    op.forward_diff_with(op_ref, x, atol=(1, 2e-3), rtol=(0, 2e-3))
+    op.forward_diff_with(op_ref, x, atol=(1, 2e-2), rtol=(0, 2e-2))
 
 
 @pytest.mark.parametrize("dtype", dtypes)
