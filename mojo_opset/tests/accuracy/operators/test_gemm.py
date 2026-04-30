@@ -154,6 +154,9 @@ def test_gemm_dequant_parameters_are_registered():
         (1, 4096, 4096),
         (32, 4096, 11008),
         (128, 2048, 4096),
+        (256, 4096, 4096),
+        (1024, 4096, 4096),
+        (4096, 4096, 4096),
     ],
 )
 @pytest.mark.parametrize("output_dtype", [torch.float16, torch.bfloat16])
@@ -179,48 +182,6 @@ def test_gemm_dequant_backend(m, k, n, output_dtype, trans_weight):
     )
     op_ref = _load_gemm_dequant_module(op_ref, w_i8.clone(), w_scale.clone())
     op.forward_diff_with(op_ref, x_i8, x_scale, mixed_tol=True)
-
-
-# ===========================================================================
-# MojoGemmDequant — TTX backend vs torch reference
-# ===========================================================================
-
-
-@pytest.mark.parametrize(
-    "m, k, n",
-    [
-        (1, 4096, 4096),
-        (32, 4096, 11008),
-        (128, 2048, 4096),
-        (256, 4096, 4096),
-        (1024, 4096, 4096),
-        (4096, 4096, 4096),
-    ],
-)
-@pytest.mark.parametrize("output_dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("trans_weight", [False, True])
-@bypass_not_implemented
-@auto_switch_platform()
-def test_gemm_dequant_ttx(m, k, n, output_dtype, trans_weight):
-    """Compare TTX (Triton) backend explicitly against the torch reference."""
-    x_i8, w_i8, x_scale, w_scale = _make_int8_gemm_data(m, k, n, trans_weight)
-
-    op = MojoGemmDequant._registry.get("ttx")(
-        in_features=k,
-        out_features=n,
-        output_dtype=output_dtype,
-        trans_weight=trans_weight,
-    )
-    op = _load_gemm_dequant_module(op, w_i8, w_scale)
-    op_ref = MojoGemmDequant._registry.get("torch")(
-        in_features=k,
-        out_features=n,
-        output_dtype=output_dtype,
-        trans_weight=trans_weight,
-    )
-    op_ref = _load_gemm_dequant_module(op_ref, w_i8.clone(), w_scale.clone())
-    op.forward_diff_with(op_ref, x_i8, x_scale, mixed_tol=True)
-
 
 # ===========================================================================
 # MojoGroupLinear

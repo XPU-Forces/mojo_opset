@@ -143,21 +143,21 @@ class MojoGemmDequant(MojoOperator):
             torch.Tensor: Dequantized result ``(M, N)`` in ``output_dtype``.
         """
         weight = self.weight
-        if self.trans_weight:
-            weight = weight.t()
 
         if input.dim() != 2:
             raise ValueError(f"input must be 2D, got shape {tuple(input.shape)}.")
         if weight.dim() != 2:
             raise ValueError(f"weight must be 2D, got shape {tuple(weight.shape)}.")
-        if input.shape[1] != weight.shape[0]:
-            raise ValueError(f"input K {input.shape[1]} must match weight K {weight.shape[0]}.")
-        if self.weight_scale.shape != (weight.shape[1],):
+        if input.shape[-1] != self.in_features:
+            raise ValueError(f"input K {input.shape[-1]} must match weight K {self.in_features}.")
+        if self.weight_scale.shape != (self.out_features,):
             raise ValueError(
-                f"weight_scale shape {tuple(self.weight_scale.shape)} must match output dim {(weight.shape[1],)}."
+                f"weight_scale shape {tuple(self.weight_scale.shape)} must match output dim {(self.out_features,)}."
             )
 
-        out = torch.mul(input.int().unsuqeeze(-2), weight.int().unsqueeze(-3)).float().sum(dim=-1)
+        if not self.trans_weight:
+            weight = weight.mT
+        out = torch.mul(input.int().unsqueeze(-2), weight.int()).float().sum(dim=-1)
 
         weight_scale = self.weight_scale
         if input_scale.dim() == 1:
