@@ -1,6 +1,8 @@
 import torch
 
 from mojo_opset.backends.ttx.kernels import dynamic_quant
+from mojo_opset.backends.ttx.kernels import dequant
+from mojo_opset.core import MojoDequant
 from mojo_opset.core import MojoDynamicQuant
 from mojo_opset.core import MojoMoEDynamicQuant
 from mojo_opset.core import MojoStaticQuant
@@ -9,6 +11,15 @@ from mojo_opset.core import MojoStaticQuant
 class TTXStaticQuant(MojoStaticQuant):
     pass
 
+
+class TTXDequant(MojoDequant):
+    supported_platforms_list = ["ilu"]
+
+    def forward(
+        self,
+        input: torch.Tensor,
+    ) -> torch.Tensor:
+        return dequant(input, self.scale, self.output_dtype)
 
 class TTXDynamicQuant(MojoDynamicQuant):
     supported_platforms_list = ["npu"]

@@ -48,6 +48,7 @@ from .swiglu import swiglu_fwd_impl
 from .swa import swa_infer_impl
 from .swa import swa_paged_prefill_impl
 from .swa import swa_paged_decode_impl
+from .quant import dequant_impl
 
 __all__ = [
     "causal_conv1d_update_bdt_impl",
@@ -100,4 +101,5 @@ __all__ = [
     # "diffusion_attention_fwd_impl",
     # "diffusion_attention_bwd_impl",
     "swa_paged_decode_impl",
+    "dequant_impl",
 ]

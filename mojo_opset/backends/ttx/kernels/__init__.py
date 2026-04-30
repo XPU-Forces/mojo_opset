@@ -36,6 +36,7 @@ silu_bwd_impl = _get_kernel_impl(ttx_backend_module, "silu_bwd_impl")
 
 dynamic_quant_impl = _get_kernel_impl(ttx_backend_module, "dynamic_quant_impl")
 lightning_indexer_impl = _get_kernel_impl(ttx_backend_module, "lightning_indexer_impl")
+dequant_impl = _get_kernel_impl(ttx_backend_module, "dequant_impl")
 
 rot_pos_embed_impl = _get_kernel_impl(ttx_backend_module, "rot_pos_embed_impl")
 rope_fwd_impl = _get_kernel_impl(ttx_backend_module, "rope_fwd_impl")
@@ -406,6 +407,22 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
             torch.empty_like(input_tensor, dtype=torch.int8),
             torch.empty((*input_tensor.shape[:-1], 1), dtype=torch.float32, device=input_tensor.device),
         )
+
+    @torch.library.custom_op("ttx::dequant", mutates_args={})
+    def dequant(
+        input_tensor: torch.Tensor,
+        scale: torch.Tensor,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return dequant_impl(input_tensor, scale, output_dtype)
+
+    @dequant.register_fake
+    def dequant_fake(
+        input_tensor: torch.Tensor,
+        scale: torch.Tensor,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return torch.empty_like(input_tensor, dtype=output_dtype)
 
     # ====================================
     # Register rmsnorm
@@ -907,6 +924,7 @@ else:
     top_p_sampling = top_p_sampling_impl
     top_k_sampling = top_k_sampling_impl
     dynamic_quant = dynamic_quant_impl
+    dequant = dequant_impl
     lightning_indexer = lightning_indexer_impl
     group_rmsnorm = group_rmsnorm_impl
     embedding_nf4_dequant = embedding_nf4_dequant_impl
