@@ -85,7 +85,7 @@ class MojoQuantMoE(MojoOperator):
         if activation != "swiglu":
             raise NotImplementedError(f"MojoQuantMoE: Activation {activation} is not supported.")
         if quant_dtype != torch.int8:
-            raise NotImplementedError(f"MojoQuantMoE: quant_type must be 'int4' or 'int8', got {quant_type}.")
+            raise NotImplementedError(f"MojoQuantMoE: quant_dtype must be 'int8', got {quant_dtype}.")
         if weight_bits not in (4, 8):
             raise ValueError(f"MojoQuantMoE: weight must be w4 or w8")
         for k in ("ep_rank", "ep_size"):
@@ -507,7 +507,7 @@ class MojoQuantExperts(MojoOperator):
         if activation != "swiglu":
             raise NotImplementedError(f"MojoQuantExperts: Activation {activation} is not supported.")
         if quant_dtype != torch.int8:
-            raise ValueError(f"MojoQuantExperts: quant_type must be 'int8', got {quant_dtype}.")
+            raise ValueError(f"MojoQuantExperts: quant_dtype must be 'int8', got {quant_dtype}.")
         if weight_bits not in (4, 8):
             raise NotImplementedError("MojoQuantExperts currently only supports w4 or w8.")
         if weight_bits == 4 and (hidden_size % 2 != 0 or intermediate_size % 2 != 0):
@@ -639,6 +639,7 @@ class MojoQuantExperts(MojoOperator):
             x_int8_i = x_int8_list[expert_idx]
             x_scale_i = x_scale_list[expert_idx]
             if x_int8_i.shape[0] == 0:
+                activated_outs.append(torch.empty(0, self.intermediate_size, device=sorted_hidden_states.device, dtype=torch.float))
                 continue
 
             fc1_out = self._quant_linear(
@@ -660,6 +661,7 @@ class MojoQuantExperts(MojoOperator):
             y_int8_i = y_int8_list[expert_idx]
             y_scale_i = y_scale_list[expert_idx]
             if y_int8_i.shape[0] == 0:
+                outputs.append(torch.empty(0, self.hidden_size, device=sorted_hidden_states.device, dtype=sorted_hidden_states.dtype))
                 continue
 
             fc2_out = self._quant_linear(
