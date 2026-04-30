@@ -76,19 +76,18 @@ class MojoQuantMoE(MojoOperator):
         hidden_size,
         intermediate_size=None,
         activation: str = "swiglu",
-        output_dtype: torch.dtype = torch.bfloat16,
-        quant_type: str = "int4",
-        quant_group_size: int = 128,
+        quant_dtype: torch.dtype = torch.int8,
+        quant_group_size: int = -1,
+        weight_bits: int = 8,
         **kwargs,
     ):
         super().__init__()
         if activation != "swiglu":
             raise NotImplementedError(f"MojoQuantMoE: Activation {activation} is not supported.")
-        if quant_type not in ("int4", "int8"):
-            raise ValueError(f"MojoQuantMoE: quant_type must be 'int4' or 'int8', got {quant_type}.")
-        if quant_type != "int4":
-            raise NotImplementedError("MojoQuantMoE currently only supports quant_type='int4'.")
-
+        if quant_dtype != torch.int8:
+            raise NotImplementedError(f"MojoQuantMoE: quant_type must be 'int4' or 'int8', got {quant_type}.")
+        if weight_bits not in (4, 8):
+            raise ValueError(f"MojoQuantMoE: weight must be w4 or w8")
         for k in ("ep_rank", "ep_size"):
             if k in kwargs:
                 raise ValueError(f"MojoQuantMoE: {k} is not supported; use ParallelStyle to set expert partition.")
@@ -100,9 +99,9 @@ class MojoQuantMoE(MojoOperator):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
-        self.output_dtype = output_dtype
-        self.quant_type = quant_type
+        self.quant_dtype = quant_dtype
         self.quant_group_size = quant_group_size
+        self.weight_bits = weight_bits
 
         self.gating = MojoMoEGating._registry.get(self._backend)(
             hidden_size=self.hidden_size,
@@ -111,19 +110,14 @@ class MojoQuantMoE(MojoOperator):
             **kwargs,
         )
         self.dispatch = MojoMoEDispatch._registry.get(self._backend)(num_experts=self.num_experts, **kwargs)
-        self.input_quant = MojoMoEDynamicQuant._registry.get(self._backend)(
-            expert_num=self.num_experts,
-            input_size=self.hidden_size,
-            **kwargs,
-        )
         self.experts = MojoQuantExperts._registry.get(self._backend)(
             num_experts=self.num_experts,
             hidden_size=self.hidden_size,
             intermediate_size=self.intermediate_size,
             activation=activation,
-            output_dtype=output_dtype,
-            quant_type=self.quant_type,
-            quant_group_size=self.quant_group_size,
+            quant_dtype=quant_dtype,
+            quant_group_size=quant_group_size,
+            weight_bits=weight_bits,
             **kwargs,
         )
         self.combine = MojoMoECombine._registry.get(self._backend)(multiply_by_gates=True, **kwargs)
@@ -135,8 +129,7 @@ class MojoQuantMoE(MojoOperator):
             top_k_gates,
             top_k_indices,
         )
-        quantized_hidden_states, input_scale = self.input_quant(sorted_hidden_states, tokens_per_expert)
-        expert_outputs = self.experts(quantized_hidden_states, input_scale, tokens_per_expert)
+        expert_outputs = self.experts(sorted_hidden_states, tokens_per_expert)
         output_buffer = torch.zeros_like(hidden_states, memory_format=torch.contiguous_format)
         return self.combine(output_buffer, expert_outputs, sorted_gates, token_indices)
 
@@ -499,16 +492,16 @@ class MojoQuantExperts(MojoOperator):
         hidden_size: int,
         intermediate_size: int,
         activation: str = "swiglu",
-        output_dtype: torch.dtype = torch.bfloat16,
-        quant_type: str = "int4",
-        quant_group_size: int = 128,
+        quant_dtype: torch.dtype = torch.int8,
+        quant_group_size: int = -1,
+        weight_bits: int = 8,
         **kwargs,
     ):
         """
         Quantized MoE Experts reference.
 
         The input activation is expected to be dynamically quantized before this
-        operator. For ``quant_type="int4"``, expert weights are signed int4
+        operator. For ``weight_bits=4``, expert weights are signed int4
         values packed two per int8 element along the output/channel dimension,
         matching checkpoint tensors shaped ``[num_experts, output_dim // 2,
         input_dim]``. Weight scales use ``[num_experts, output_dim, group_num]``
@@ -519,161 +512,175 @@ class MojoQuantExperts(MojoOperator):
         super().__init__(**kwargs)
         if activation != "swiglu":
             raise NotImplementedError(f"MojoQuantExperts: Activation {activation} is not supported.")
-        if quant_type not in ("int4", "int8"):
-            raise ValueError(f"MojoQuantExperts: quant_type must be 'int4' or 'int8', got {quant_type}.")
-        if quant_type != "int4":
-            raise NotImplementedError("MojoQuantExperts currently only supports quant_type='int4'.")
-        if hidden_size % 2 != 0 or intermediate_size % 2 != 0:
+        if quant_dtype != torch.int8:
+            raise ValueError(f"MojoQuantExperts: quant_type must be 'int8', got {quant_dtype}.")
+        if weight_bits not in (4, 8):
+            raise NotImplementedError("MojoQuantExperts currently only supports w4 or w8.")
+        if weight_bits == 4 and (hidden_size % 2 != 0 or intermediate_size % 2 != 0):
             raise ValueError("MojoQuantExperts requires even hidden_size and intermediate_size for int4 packing.")
-        if quant_group_size <= 0:
-            raise ValueError(f"quant_group_size must be positive, got {quant_group_size}.")
+        
+        self.activation = activation
+        self.quant_dtype = quant_dtype
         self.quant_group_size = quant_group_size
-        if hidden_size % self.quant_group_size != 0:
-            raise ValueError(
-                f"hidden_size {hidden_size} must be divisible by quant_group_size {self.quant_group_size}."
-            )
-        if intermediate_size % self.quant_group_size != 0:
-            raise ValueError(
-                f"intermediate_size {intermediate_size} must be divisible by quant_group_size {self.quant_group_size}."
-            )
-
+        self.weight_bits = weight_bits
+        assert quant_dtype == torch.int8
+        bits = 8
+        self.qmax = 2 ** (bits - 1) - 1
+        self.qmin = -(2 ** (bits - 1))
         self.num_experts = num_experts
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
-        self.activation = activation
-        self.output_dtype = output_dtype
-        self.quant_type = quant_type
-        self.up_proj_group_num = hidden_size // self.quant_group_size
-        self.down_proj_group_num = intermediate_size // self.quant_group_size
 
-        self.register_buffer(
-            "up_proj_weight",
-            _empty_quant_weight((num_experts, intermediate_size, hidden_size), self.tensor_factory_kwargs),
-        )
-        self.register_buffer(
-            "down_proj_weight",
-            _empty_quant_weight((num_experts, hidden_size // 2, intermediate_size), self.tensor_factory_kwargs),
-        )
-        self.up_proj_weight_scale = nn.Parameter(
-            torch.empty(num_experts, intermediate_size * 2, self.up_proj_group_num, **self.tensor_factory_kwargs)
-        )
-        self.down_proj_weight_scale = nn.Parameter(
-            torch.empty(num_experts, hidden_size, self.down_proj_group_num, **self.tensor_factory_kwargs)
-        )
-        self.fc2_input_quant = MojoMoEDynamicQuant._registry.get(self._backend)(
-            expert_num=num_experts,
-            input_size=intermediate_size,
-            **kwargs,
+        self.up_proj_quantize = MojoMoEDynamicQuant._registry.get(self._backend)(
+            num_experts, hidden_size,
         )
 
-    def _unpack_output_int4_weight(self, packed_weight: torch.Tensor) -> torch.Tensor:
-        input_u8 = packed_weight.to(torch.uint8)
-        low = (input_u8 & 0x0F).to(torch.int8)
-        high = ((input_u8 >> 4) & 0x0F).to(torch.int8)
-        low = torch.where(low >= 8, low - 16, low)
-        high = torch.where(high >= 8, high - 16, high)
-        output = torch.empty(
-            packed_weight.shape[0] * 2,
-            packed_weight.shape[1],
-            dtype=torch.int8,
-            device=packed_weight.device,
+        self.down_proj_quantize = MojoMoEDynamicQuant._registry.get(self._backend)(
+            num_experts, intermediate_size,
         )
-        output[0::2, :] = low
-        output[1::2, :] = high
-        return output
+
+        if weight_bits == 8:
+            self.register_buffer(
+                "up_proj_weight",
+                torch.empty((num_experts, intermediate_size * 2, hidden_size), dtype=torch.int8),
+            )
+            self.register_buffer(
+                "down_proj_weight",
+                torch.empty((num_experts, hidden_size, intermediate_size), dtype=torch.int8),
+            )
+        else:
+            self.register_buffer(
+                "up_proj_weight",
+                torch.empty((num_experts, intermediate_size * 2 // 2, hidden_size), dtype=torch.int8),
+            )
+            self.register_buffer(
+                "down_proj_weight",
+                torch.empty((num_experts, hidden_size // 2, intermediate_size), dtype=torch.int8),
+            )
+
+        if quant_group_size > 0:
+            up_proj_groups = (hidden_size + quant_group_size - 1) // quant_group_size
+            self.up_proj_weight_scale = nn.Parameter(
+                torch.empty(
+                    (num_experts, intermediate_size * 2, up_proj_groups),
+                    dtype=torch.bfloat16,
+                ),
+            )
+
+            down_proj_groups = (intermediate_size + quant_group_size - 1) // quant_group_size
+            self.down_proj_weight_scale = nn.Parameter(
+                torch.empty(
+                    (num_experts, hidden_size, down_proj_groups),
+                    dtype=torch.bfloat16,
+                ),
+            )
+        else:
+            self.up_proj_weight_scale = nn.Parameter(
+                torch.empty(
+                    (num_experts, intermediate_size * 2),
+                    dtype=torch.bfloat16,
+                ),
+            )
+
+            self.down_proj_weight_scale = nn.Parameter(
+                torch.empty(
+                    (num_experts, hidden_size), 
+                    dtype=torch.bfloat16,
+                ),
+            )
+
+    def _unpack_weight(self, weight):
+        assert weight.ndim == 2
+        unpacked_weight = torch.empty(weight.shape[0] * 2, weight.shape[1], device=weight.device, dtype=torch.int8)
+        unpacked_weight[::2] = weight & 0x0F
+        unpacked_weight[1::2] = (weight >> 4) & 0x0F
+        unpacked_weight = torch.where(unpacked_weight >= 8, unpacked_weight - 16, unpacked_weight)
+        return unpacked_weight
 
     def _quant_linear(
-        self,
-        input: torch.Tensor,
+        self, 
+        input_int8: torch.Tensor, 
         input_scale: torch.Tensor,
-        packed_weight: torch.Tensor,
+        expert_weight: torch.Tensor,
         weight_scale: torch.Tensor,
+        output_dtype: torch.dtype = torch.bfloat16,
     ) -> torch.Tensor:
-        weight = self._unpack_output_int4_weight(packed_weight)
-        if input_scale.dim() == 1:
-            input_scale = input_scale.unsqueeze(-1)
+        if self.weight_bits == 4:
+            expert_weight = self._unpack_weight(expert_weight)
+        
+        assert input_scale.ndim == 2 and input_scale.shape[1] == 1
+        if self.quant_group_size > 0:
+            x_int8_groups = torch.split(input_int8, self.quant_group_size, dim=-1)
+            weight_int8_groups = torch.split(expert_weight, self.quant_group_size, dim=-1)
+            output_groups = [torch.matmul(x_int8_group.float(), weight_int8_group.mT.float())
+                             for x_int8_group, weight_int8_group 
+                             in zip(x_int8_groups, weight_int8_groups)]
+            output = torch.stack(output_groups, dim=-1)
+            output = (output * weight_scale * input_scale.unsqueeze(-1)).sum(-1)
+        else:
+            output = torch.matmul(input_int8.float(), expert_weight.mT.float()) * weight_scale * input_scale
 
-        if weight_scale.dim() != 2:
-            raise ValueError(f"weight_scale must have shape [output_dim, group_num], got {tuple(weight_scale.shape)}.")
-        group_num = weight_scale.shape[1]
-        if weight_scale.shape[0] != weight.shape[0]:
-            raise ValueError(
-                f"weight_scale output_dim {weight_scale.shape[0]} must match weight output_dim {weight.shape[0]}."
-            )
-        if input.shape[-1] % group_num != 0:
-            raise ValueError(
-                f"input last dim {input.shape[-1]} must be divisible by weight scale group_num {group_num}."
-            )
-
-        input_groups = input.float().reshape(input.shape[0], group_num, -1)
-        weight_groups = weight.float().reshape(weight.shape[0], group_num, -1)
-        out = input.new_zeros((input.shape[0], weight.shape[0]), dtype=torch.float32)
-        for group_idx in range(group_num):
-            group_out = input_groups[:, group_idx, :] @ weight_groups[:, group_idx, :].transpose(0, 1)
-            out = out + group_out * weight_scale[:, group_idx].float().unsqueeze(0)
-        out = out * input_scale.float()
-        return out.to(self.output_dtype)
+        return output.to(output_dtype)
 
     def forward(
         self,
         sorted_hidden_states: torch.Tensor,
-        input_scale: torch.Tensor,
         tokens_per_expert: torch.Tensor,
     ):
         """
         Args:
-            sorted_hidden_states (torch.Tensor): Dynamic-quantized int8 activations ``(tokens, H)``.
-            input_scale (torch.Tensor): Per-token activation scales ``(tokens,)`` or ``(tokens, 1)``.
+            sorted_hidden_states (torch.Tensor): bf16 activations ``(tokens, H)``.
             tokens_per_expert (torch.Tensor): Token count per expert.
 
         Returns:
             torch.Tensor: Dequantized bf16/fp output for MoE combine, shape ``(tokens, H)``.
         """
-        expert_inputs = torch.split(sorted_hidden_states, tokens_per_expert.tolist(), dim=0)
-        expert_input_scales = torch.split(input_scale.reshape(-1), tokens_per_expert.tolist(), dim=0)
+        x_int8, x_scale = self.up_proj_quantize(sorted_hidden_states, tokens_per_expert)
+
+        x_int8_list = torch.split(x_int8, tokens_per_expert.tolist(), dim=0)
+        x_scale_list = torch.split(x_scale, tokens_per_expert.tolist(), dim=0)
 
         activated_outs = []
-        for expert_idx, expert_input in enumerate(expert_inputs):
-            if expert_input.numel() == 0:
-                activated_outs.append(expert_input.new_empty((0, self.intermediate_size), dtype=self.output_dtype))
+        for expert_idx in range(self.num_experts):
+            x_int8_i = x_int8_list[expert_idx]
+            x_scale_i = x_scale_list[expert_idx]
+            if x_int8_i.shape[0] == 0:
                 continue
 
             fc1_out = self._quant_linear(
-                expert_input,
-                expert_input_scales[expert_idx],
-                self.up_proj_weight[expert_idx],
+                x_int8_i,
+                x_scale_i, 
+                self.up_proj_weight[expert_idx], 
                 self.up_proj_weight_scale[expert_idx],
+                sorted_hidden_states.dtype,
             )
-            gate_proj, up_proj = fc1_out.float().chunk(2, dim=-1)
-            activated_outs.append((F.silu(gate_proj) * up_proj).to(self.output_dtype))
-
+            gate_proj, up_proj = fc1_out.chunk(2, dim=-1)
+            activated_outs.append(F.silu(gate_proj) * up_proj)
         activated = torch.cat(activated_outs, dim=0)
-        fc2_input, fc2_input_scale = self.fc2_input_quant(activated, tokens_per_expert)
-        expert_fc2_inputs = torch.split(fc2_input, tokens_per_expert.tolist(), dim=0)
-        expert_fc2_input_scales = torch.split(fc2_input_scale.reshape(-1), tokens_per_expert.tolist(), dim=0)
 
+        y_int8, y_scale = self.down_proj_quantize(activated, tokens_per_expert)
+        y_int8_list = torch.split(y_int8, tokens_per_expert.tolist(), dim=0)
+        y_scale_list = torch.split(y_scale, tokens_per_expert.tolist(), dim=0)
         outputs = []
-        for expert_idx, expert_input in enumerate(expert_fc2_inputs):
-            if expert_input.numel() == 0:
-                outputs.append(expert_input.new_empty((0, self.hidden_size), dtype=self.output_dtype))
+        for expert_idx in range(self.num_experts):
+            y_int8_i = y_int8_list[expert_idx]
+            y_scale_i = y_scale_list[expert_idx]
+            if y_int8_i.shape[0] == 0:
                 continue
 
             fc2_out = self._quant_linear(
-                expert_input,
-                expert_fc2_input_scales[expert_idx],
+                y_int8_i,
+                y_scale_i,
                 self.down_proj_weight[expert_idx],
                 self.down_proj_weight_scale[expert_idx],
+                sorted_hidden_states.dtype,
             )
             outputs.append(fc2_out)
 
         return torch.cat(outputs, dim=0)
 
     def extra_repr(self) -> str:
-        return (
-            f"num_experts={self.num_experts}, hidden_size={self.hidden_size}, "
-            f"intermediate_size={self.intermediate_size}, quant_type={self.quant_type}, "
-            f"quant_group_size={self.quant_group_size}, output_dtype={self.output_dtype}"
-        )
+        return f"{self.num_experts=}, {self.intermediate_size=}, {self.hidden_size=}, {self.quant_dtype=}, {self.quant_group_size=}, {self.weight_bits=}".replace("self.", "")
 
 
 class MojoMoECombine(MojoOperator):
