@@ -633,9 +633,10 @@ class MojoQuantExperts(MojoOperator):
 
         x_int8_list = torch.split(x_int8, tokens_per_expert.tolist(), dim=0)
         x_scale_list = torch.split(x_scale, tokens_per_expert.tolist(), dim=0)
+        num_experts = tokens_per_expert.size(0)
 
         activated_outs = []
-        for expert_idx in range(self.num_experts):
+        for expert_idx in range(num_experts):
             x_int8_i = x_int8_list[expert_idx]
             x_scale_i = x_scale_list[expert_idx]
             if x_int8_i.shape[0] == 0:
@@ -657,7 +658,7 @@ class MojoQuantExperts(MojoOperator):
         y_int8_list = torch.split(y_int8, tokens_per_expert.tolist(), dim=0)
         y_scale_list = torch.split(y_scale, tokens_per_expert.tolist(), dim=0)
         outputs = []
-        for expert_idx in range(self.num_experts):
+        for expert_idx in range(num_experts):
             y_int8_i = y_int8_list[expert_idx]
             y_scale_i = y_scale_list[expert_idx]
             if y_int8_i.shape[0] == 0:
