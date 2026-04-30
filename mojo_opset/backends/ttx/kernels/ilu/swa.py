@@ -1299,6 +1299,42 @@ def _sdpa_acc_fwd_1xT(
     return acc_ptr, l_i, m_i
 
 
+@triton.jit
+def _sdpa_acc_fwd_nomask_1xN(
+    acc_ptr,
+    l_i,
+    m_i,
+    q,
+    K_block_ptr,
+    V_block_ptr,
+    qk_scale,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    fp8_v: tl.constexpr,
+):
+    k = tl.load(K_block_ptr)
+    qk = tl.sum((q[None, :] * k).to(tl.float32), axis=1)
+    qk = qk * qk_scale
+
+    m_ij = tl.maximum(m_i, tl.max(qk, 0))
+    qk = qk - m_ij
+    p = tl.math.exp(qk)
+    p_cast = p.to(k.dtype)
+
+    v = tl.load(V_block_ptr)
+
+    l_ij = tl.sum(p, axis=0)
+    alpha = tl.math.exp(m_i - m_ij)
+    l_i = l_i * alpha + l_ij
+    acc_ptr = acc_ptr * alpha
+    acc_ptr += tl.sum((p_cast[:, None] * v).to(tl.float32), axis=0)
+
+    m_i = m_ij
+    return acc_ptr, l_i, m_i
+
+
 @libentry()
 @triton.jit
 def _swa_infer_token_kernel(
@@ -2084,9 +2120,16 @@ def _paged_decode_kernel_tiny_global(
             )
 
 
-        n_local_pages = num_total_blocks - non_global_window_start_block
-        for j in tl.range(0, n_local_pages):
-            logical_page_id = non_global_window_start_block + j
+        num_full_pages = kv_seq_len // PAGE_SIZE
+        if LOCAL_WINDOW is not None:
+            local_win_threshold = tl.maximum(0, kv_seq_len - 1 - LOCAL_WINDOW)
+            first_fully_in_local = tl.cdiv(local_win_threshold, PAGE_SIZE)
+            nomask_start = tl.maximum(first_fully_in_local, non_global_window_start_block)
+        else:
+            nomask_start = non_global_window_start_block
+        nomask_end = tl.maximum(nomask_start, num_full_pages)
+
+        for logical_page_id in tl.range(non_global_window_start_block, nomask_start):
             kv_block_start = logical_page_id * PAGE_SIZE
             kv_block_end = tl.minimum(kv_block_start + PAGE_SIZE, kv_seq_len)
             kv_block_len = kv_block_end - kv_block_start
@@ -2109,14 +2152,92 @@ def _paged_decode_kernel_tiny_global(
                 block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
                 order=(1, 0),
             )
-
             kv_mask = offs_n < kv_block_len
             if LOCAL_WINDOW is not None:
                 sw_mask = (kv_block_start + offs_n + LOCAL_WINDOW) >= (kv_seq_len - 1)
                 mask = kv_mask & sw_mask
             else:
                 mask = kv_mask
+            acc, l_i, m_i = _sdpa_acc_fwd_1xN(
+                acc,
+                l_i,
+                m_i,
+                q,
+                k_block_ptr,
+                v_block_ptr,
+                mask,
+                softmax_scale,
+                HEAD_DIM,
+                BLOCK_SIZE_D,
+                BLOCK_SIZE_N,
+                BLOCK_SIZE_D,
+                v_cache_ptr.dtype.element_ty == tl.float8e5,
+            )
 
+        for logical_page_id in tl.range(nomask_start, nomask_end):
+            physical_page_id = tl.load(
+                block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
+            )
+            k_block_ptr = tl.make_block_ptr(
+                base=k_cache_ptr + physical_page_id * stride_k_block + kv_head_id * stride_k_head,
+                shape=(PAGE_SIZE, HEAD_DIM),
+                strides=(stride_k_blksz, stride_k_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            v_block_ptr = tl.make_block_ptr(
+                base=v_cache_ptr + physical_page_id * stride_v_block + kv_head_id * stride_v_head,
+                shape=(PAGE_SIZE, HEAD_DIM),
+                strides=(stride_v_blksz, stride_v_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            acc, l_i, m_i = _sdpa_acc_fwd_nomask_1xN(
+                acc,
+                l_i,
+                m_i,
+                q,
+                k_block_ptr,
+                v_block_ptr,
+                softmax_scale,
+                HEAD_DIM,
+                BLOCK_SIZE_D,
+                BLOCK_SIZE_N,
+                BLOCK_SIZE_D,
+                v_cache_ptr.dtype.element_ty == tl.float8e5,
+            )
+
+        for logical_page_id in tl.range(nomask_end, num_total_blocks):
+            kv_block_start = logical_page_id * PAGE_SIZE
+            kv_block_end = tl.minimum(kv_block_start + PAGE_SIZE, kv_seq_len)
+            kv_block_len = kv_block_end - kv_block_start
+            physical_page_id = tl.load(
+                block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
+            )
+            k_block_ptr = tl.make_block_ptr(
+                base=k_cache_ptr + physical_page_id * stride_k_block + kv_head_id * stride_k_head,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_k_blksz, stride_k_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            v_block_ptr = tl.make_block_ptr(
+                base=v_cache_ptr + physical_page_id * stride_v_block + kv_head_id * stride_v_head,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_v_blksz, stride_v_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            kv_mask = offs_n < kv_block_len
+            if LOCAL_WINDOW is not None:
+                sw_mask = (kv_block_start + offs_n + LOCAL_WINDOW) >= (kv_seq_len - 1)
+                mask = kv_mask & sw_mask
+            else:
+                mask = kv_mask
             acc, l_i, m_i = _sdpa_acc_fwd_1xN(
                 acc,
                 l_i,
@@ -2160,6 +2281,7 @@ def swa_paged_decode_impl(
     global_window_size: Optional[int] = None,
     gqa_interleave: bool = False,
     softmax_scale: Optional[float] = None,
+    o: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     batch_size, num_q_heads, head_dim = q.shape
     num_total_blocks, num_kv_heads, block_size, head_dim_cache = key_cache.shape
@@ -2175,7 +2297,15 @@ def swa_paged_decode_impl(
     if softmax_scale is None:
         softmax_scale = 1.0 / (head_dim**0.5)
 
-    o = torch.empty_like(q, memory_format=torch.contiguous_format)
+    if o is None:
+        o = torch.empty_like(q, memory_format=torch.contiguous_format)
+    else:
+        if o.shape != q.shape:
+            raise ValueError(f"o shape {o.shape} must match q shape {q.shape}.")
+        if o.dtype != q.dtype:
+            raise ValueError(f"o dtype {o.dtype} must match q dtype {q.dtype}.")
+        if o.device != q.device:
+            raise ValueError(f"o device {o.device} must match q device {q.device}.")
 
     # One program per (batch, head): maximizes parallelism on NVIDIA (vs. a tiny grid + device loop).
     grid = (batch_size * num_q_heads,)
