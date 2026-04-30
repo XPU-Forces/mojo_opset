@@ -12,7 +12,7 @@ from mojo_opset.core import MojoRMSNorm
 from mojo_opset.core import MojoGroupRMSNorm
 
 class TTXGroupRMSNorm(MojoGroupRMSNorm):
-    supported_platforms_list = ["mlu"]
+    supported_platforms_list = ["mlu", "ilu"]
 
     def forward(self, input_groups) -> list[torch.tensor]:
         return group_rmsnorm(input_groups, weight = self.weight,
