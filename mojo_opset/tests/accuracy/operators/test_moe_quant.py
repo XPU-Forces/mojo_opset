@@ -51,15 +51,12 @@ def _manual_quant_linear(
     group_size: int,
     output_dtype: torch.dtype,
 ):
-    print(f"{input.shape=} {weight.shape=}")
     input_groups = input.split(group_size, dim=-1)
     weight_groups = weight.split(group_size, -1)
     outs = []
     for group_idx, input_group in enumerate(input_groups):
         group_out = torch.mul(input_group.int().unsqueeze(-2), weight_groups[group_idx].int()).float().sum(dim=-1)
-        print(f"{input_group.shape=} {weight_groups[group_idx].shape=} {group_out.shape=}")
         outs.append(group_out)
-    print(f"{weight_scale.shape=} {input_scale.shape=}")
     out = torch.stack(outs, dim=-1) * weight_scale * input_scale.unsqueeze(-1)
     out = out.sum(dim=-1)
     return out.to(output_dtype)
