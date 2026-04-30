@@ -62,8 +62,8 @@ class TTXSWAFunction(MojoSWAFunction):
         q: torch.Tensor,  # [total_q_len, n_q_heads, head_dim]
         k: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
         v: torch.Tensor,  # [total_k_len, n_kv_heads, head_dim]
-        cu_seqlens_q: torch.Tensor,  # [bsz + 1]
-        cu_seqlens_kv: torch.Tensor,  # [bsz + 1]
+        cu_q_lens: torch.Tensor,  # [bsz + 1]
+        cu_total_seq_lens: torch.Tensor,  # [bsz + 1]
         is_causal: bool = True,
         local_window_size: Optional[int] = None,
         global_window_size: Optional[int] = None,
@@ -76,8 +76,8 @@ class TTXSWAFunction(MojoSWAFunction):
             q,
             k,
             v,
-            cu_seqlens_q,
-            cu_seqlens_kv,
+            cu_q_lens,
+            cu_total_seq_lens,
             is_causal,
             local_window_size,
             global_window_size,
@@ -87,10 +87,10 @@ class TTXSWAFunction(MojoSWAFunction):
         )
         if output_f32:
             o, softmax_lse, o_f32 = fwd_results
-            ctx.save_for_backward(o_f32, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv)
+            ctx.save_for_backward(o_f32, softmax_lse, q, k, v, cu_q_lens, cu_total_seq_lens)
         else:
             o, softmax_lse = fwd_results
-            ctx.save_for_backward(o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv)
+            ctx.save_for_backward(o, softmax_lse, q, k, v, cu_q_lens, cu_total_seq_lens)
         ctx.softmax_scale = softmax_scale
         ctx.is_causal = is_causal
         ctx.local_window_size = local_window_size
@@ -103,7 +103,7 @@ class TTXSWAFunction(MojoSWAFunction):
     def backward(
         ctx, do: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, None, None, None, None, None, None, None, None, None]:
-        o, softmax_lse, q, k, v, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
+        o, softmax_lse, q, k, v, cu_q_lens, cu_total_seq_lens = ctx.saved_tensors
         softmax_scale = ctx.softmax_scale
         is_causal = ctx.is_causal
         local_window_size = ctx.local_window_size
@@ -117,8 +117,8 @@ class TTXSWAFunction(MojoSWAFunction):
             v,
             o,
             softmax_lse,
-            cu_seqlens_q,
-            cu_seqlens_kv,
+            cu_q_lens,
+            cu_total_seq_lens,
             is_causal,
             local_window_size,
             global_window_size,

@@ -224,7 +224,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         q: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
+        cu_q_lens: torch.Tensor,
         seqlens_kv: torch.Tensor,
         block_tables: torch.Tensor,
         gqa_interleave: bool,
@@ -232,7 +232,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         aux_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return paged_attention_prefill_impl(
-            q, key_cache, value_cache, cu_seqlens_q, seqlens_kv, block_tables, gqa_interleave, softmax_scale, aux_mask
+            q, key_cache, value_cache, cu_q_lens, seqlens_kv, block_tables, gqa_interleave, softmax_scale, aux_mask
         )
 
     @paged_attention_prefill.register_fake
@@ -240,7 +240,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         q: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
+        cu_q_lens: torch.Tensor,
         seqlens_kv: torch.Tensor,
         block_tables: torch.Tensor,
         gqa_interleave: bool,
@@ -283,22 +283,22 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         x: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_q_lens: Optional[torch.Tensor] = None,
         seqlens_kv: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return rot_pos_embed_impl(x, cos, sin, cu_seqlens_q, seqlens_kv, position_ids)
+        return rot_pos_embed_impl(x, cos, sin, cu_q_lens, seqlens_kv, position_ids)
 
     @rot_pos_embed.register_fake
     def rot_pos_embed_fake(
         x: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_q_lens: Optional[torch.Tensor] = None,
         seqlens_kv: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if cu_seqlens_q is None and position_ids is None:
+        if cu_q_lens is None and position_ids is None:
             # padded prefill scenario
             seq_dim = x.shape[1]
         else:

@@ -277,8 +277,8 @@ def _swa_infer_kernel(
     k_ptr,
     v_ptr,
     bsz,
-    cu_seqlens_q_ptr,
-    cu_seqlens_kv_ptr,
+    cu_q_lens_ptr,
+    cu_total_seq_lens_ptr,
     scale,
     stride_ot,
     stride_oh,
@@ -313,10 +313,10 @@ def _swa_infer_kernel(
     kv_offsets = tl.arange(0, BLOCK_N)
 
     for b_id in range(bsz):
-        q_start = tl.load(cu_seqlens_q_ptr + b_id).to(tl.int32)
-        q_end = tl.load(cu_seqlens_q_ptr + b_id + 1).to(tl.int32)
-        kv_start = tl.load(cu_seqlens_kv_ptr + b_id).to(tl.int32)
-        kv_end = tl.load(cu_seqlens_kv_ptr + b_id + 1).to(tl.int32)
+        q_start = tl.load(cu_q_lens_ptr + b_id).to(tl.int32)
+        q_end = tl.load(cu_q_lens_ptr + b_id + 1).to(tl.int32)
+        kv_start = tl.load(cu_total_seq_lens_ptr + b_id).to(tl.int32)
+        kv_end = tl.load(cu_total_seq_lens_ptr + b_id + 1).to(tl.int32)
         q_seq_len = q_end - q_start
         kv_seq_len = kv_end - kv_start
         kv_computed_len = kv_seq_len - q_seq_len
@@ -620,7 +620,7 @@ def _swa_paged_prefill_kernel(
     k_cache_ptr,
     v_cache_ptr,
     bsz,
-    cu_seqlens_q_ptr,
+    cu_q_lens_ptr,
     kv_lens_ptr,
     block_table_ptr,
     scale,
@@ -663,8 +663,8 @@ def _swa_paged_prefill_kernel(
     kv_offsets = tl.arange(0, BLOCK_N)
 
     for b_id in range(bsz):
-        q_start = tl.load(cu_seqlens_q_ptr + b_id).to(tl.int32)
-        q_end = tl.load(cu_seqlens_q_ptr + b_id + 1).to(tl.int32)
+        q_start = tl.load(cu_q_lens_ptr + b_id).to(tl.int32)
+        q_end = tl.load(cu_q_lens_ptr + b_id + 1).to(tl.int32)
         kv_seq_len = tl.load(kv_lens_ptr + b_id).to(tl.int32)
         q_seq_len = q_end - q_start
         kv_computed_len = kv_seq_len - q_seq_len
@@ -1025,8 +1025,8 @@ def swa_infer_impl(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
-    cu_seqlens_kv: torch.Tensor,
+    cu_q_lens: torch.Tensor,
+    cu_total_seq_lens: torch.Tensor,
     is_causal: bool = True,
     local_window_size: Optional[int] = None,
     global_window_size: Optional[int] = None,
@@ -1039,9 +1039,9 @@ def swa_infer_impl(
         softmax_scale = 1.0 / math.sqrt(head_dim)
 
     outputs = torch.empty_like(q)
-    batch_size = cu_seqlens_q.shape[0] - 1
+    batch_size = cu_q_lens.shape[0] - 1
     block_d = triton.next_power_of_2(head_dim)
-    q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
 
     def grid(meta):
         block_m = meta["BLOCK_M"]
@@ -1054,8 +1054,8 @@ def swa_infer_impl(
         k,
         v,
         batch_size,
-        cu_seqlens_q,
-        cu_seqlens_kv,
+        cu_q_lens,
+        cu_total_seq_lens,
         softmax_scale,
         outputs.stride(0),
         outputs.stride(1),
@@ -1085,7 +1085,7 @@ def swa_paged_prefill_impl(
     q: torch.Tensor,
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
+    cu_q_lens: torch.Tensor,
     seqlens_kv: Optional[torch.Tensor],
     block_tables: torch.Tensor,
     is_causal: bool = True,
@@ -1100,9 +1100,9 @@ def swa_paged_prefill_impl(
         softmax_scale = 1.0 / math.sqrt(head_dim)
 
     outputs = torch.empty_like(q)
-    batch_size = cu_seqlens_q.shape[0] - 1
+    batch_size = cu_q_lens.shape[0] - 1
     if seqlens_kv is None:
-        seqlens_kv = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        seqlens_kv = cu_q_lens[1:] - cu_q_lens[:-1]
     block_n = min(128, triton.next_power_of_2(block_size))
     if block_size % block_n != 0:
         raise ValueError(
@@ -1110,7 +1110,7 @@ def swa_paged_prefill_impl(
             "use a compatible page size (e.g. power of two, multiple of 128 for large pages)."
         )
     block_d = triton.next_power_of_2(head_dim)
-    q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
 
     def grid(meta):
         block_m = meta["BLOCK_M"]
@@ -1123,7 +1123,7 @@ def swa_paged_prefill_impl(
         key_cache,
         value_cache,
         batch_size,
-        cu_seqlens_q,
+        cu_q_lens,
         seqlens_kv,
         block_tables,
         softmax_scale,
@@ -1280,8 +1280,8 @@ def _swa_infer_token_kernel(
     v_ptr,
     o_ptr,
     bsz,
-    cu_seqlens_q_ptr,
-    cu_seqlens_kv_ptr,
+    cu_q_lens_ptr,
+    cu_total_seq_lens_ptr,
     softmax_scale,
     stride_qt,
     stride_qh,
@@ -1311,10 +1311,10 @@ def _swa_infer_token_kernel(
 
     cu_q_tasks = 0
     for b_id in range(bsz):
-        q_start = tl.load(cu_seqlens_q_ptr + b_id).to(tl.int32)
-        q_end = tl.load(cu_seqlens_q_ptr + b_id + 1).to(tl.int32)
-        kv_start = tl.load(cu_seqlens_kv_ptr + b_id).to(tl.int32)
-        kv_end = tl.load(cu_seqlens_kv_ptr + b_id + 1).to(tl.int32)
+        q_start = tl.load(cu_q_lens_ptr + b_id).to(tl.int32)
+        q_end = tl.load(cu_q_lens_ptr + b_id + 1).to(tl.int32)
+        kv_start = tl.load(cu_total_seq_lens_ptr + b_id).to(tl.int32)
+        kv_end = tl.load(cu_total_seq_lens_ptr + b_id + 1).to(tl.int32)
         q_seq_len = q_end - q_start
         kv_seq_len = kv_end - kv_start
         kv_computed_len = kv_seq_len - q_seq_len
@@ -1460,7 +1460,7 @@ def _swa_paged_prefill_token_kernel(
     v_cache_ptr,
     o_ptr,
     bsz,
-    cu_seqlens_q_ptr,
+    cu_q_lens_ptr,
     kv_lens_ptr,
     block_tables_ptr,
     softmax_scale,
@@ -1499,8 +1499,8 @@ def _swa_paged_prefill_token_kernel(
     n_progs = tl.num_programs(0)
 
     for b_id in range(bsz):
-        q_start = tl.load(cu_seqlens_q_ptr + b_id).to(tl.int32)
-        q_end = tl.load(cu_seqlens_q_ptr + b_id + 1).to(tl.int32)
+        q_start = tl.load(cu_q_lens_ptr + b_id).to(tl.int32)
+        q_end = tl.load(cu_q_lens_ptr + b_id + 1).to(tl.int32)
         kv_seq_len = tl.load(kv_lens_ptr + b_id).to(tl.int32)
         q_seq_len = q_end - q_start
         kv_computed_len = kv_seq_len - q_seq_len
