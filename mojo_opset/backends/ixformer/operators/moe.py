@@ -39,12 +39,13 @@ def _repack_int4_tn_to_nn(packed_tn: torch.Tensor, N: int, K: int) -> torch.Tens
     out = out.permute(0, 1, 5, 3, 4, 2, 6).contiguous().view(E, K, N)
 
     out = out.view(E, K, N // 32, 32)
-    packed = out.new_empty(E, K, N // 32, 16)
-    for i in range(16):
-        sign_low = (out[:, :, :, i] < 0).to(torch.int8)
-        lo = sign_low * 8 + (out[:, :, :, i] & 0x07)
-        hi = out[:, :, :, i + 16] << 4
-        packed[:, :, :, i] = hi + lo
+
+    out_low = out[:, :, :, :16]
+    out_high = out[:, :, :, 16:]
+    sign_low = (out_low < 0).to(torch.int8)
+    lo = sign_low * 8 + (out_low & 0x07)
+    hi = out_high << 4
+    packed = hi + lo
     return packed.reshape(E, K, N // 2).contiguous().to(device)
 
 
@@ -66,6 +67,16 @@ def _swizzle_weights_post_hook(module, incompatible_keys):
     module.register_buffer("down_proj_weight", down_nn.to(device))
     module.up_proj_weight_scale = torch.nn.Parameter(up_scale_nn.to(device))
     module.down_proj_weight_scale = torch.nn.Parameter(down_scale_nn.to(device))
+
+
+def _invert_input_quant_smooth_scale_post_hook(module, incompatible_keys):
+    """load_state_dict post-hook: invert input quant smooth_scale."""
+    smooth_scale = module.input_quant.smooth_scale
+    if smooth_scale is None:
+        return
+    with torch.no_grad():
+        smooth_scale.reciprocal_()
+
 
 class IxformerMoEGating(MojoMoEGating):
     supported_platforms_list = ["ilu"]
@@ -108,9 +119,6 @@ class IxformerMoEDispatchQuant(MojoMoEDispatch):
         
         expand_tokens = num_tokens * top_k
 
-        if sorted_token_ids.numel() == 0:
-            return hidden_states, None, None, None, None
-
         i8_hidden_states, quant_scale = ixf_f.moe_expand_input_dynamic_scaled_int8(
                                                hidden_states=hidden_states,
                                                dst_to_src=sorted_token_ids,
@@ -125,6 +133,7 @@ class IxformerMoEDispatchQuant(MojoMoEDispatch):
             sorted_token_ids,
             src_to_dst,
             expert_sizes_gpu,
+            expert_sizes_cpu,
             quant_scale,
         )
 
@@ -241,18 +250,22 @@ class IxformerQuantMoE(MojoQuantMoE):
 
         if self.enable_cuda_graph:
             raise NotImplementedError("IxformerQuantMoE: enable_cuda_graph is not supported.")
+        
+        self.register_load_state_dict_post_hook(_invert_input_quant_smooth_scale_post_hook)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         top_k_indices, top_k_gates = self.gating(hidden_states)
 
-        i8_hs, sorted_token_ids, src_to_dst, tokens_per_expert, quant_scale = self.dispatch(
+        i8_hs, sorted_token_ids, src_to_dst, expert_sizes_gpu, expert_sizes_cpu, quant_scale = self.dispatch(
             hidden_states,
             top_k_indices,
             self.input_quant.smooth_scale,
         )
 
         if not self.enable_cuda_graph:
-            tokens_per_expert = tokens_per_expert.cpu()
+            tokens_per_expert = expert_sizes_cpu
+        else:
+            tokens_per_expert = expert_sizes_gpu
 
         expert_outputs = self.experts(
             i8_hs,
