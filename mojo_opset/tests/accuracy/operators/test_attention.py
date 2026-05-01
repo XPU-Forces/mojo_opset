@@ -1352,7 +1352,7 @@ test_configs_swa_prefill = [
                 max_kv_computed_len=KV_COMPUTED_LEN,
                 block_size=BLK_S,
                 dtype=dtype,
-            ),
+            )),
             id=ID,
         )
         for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_swa_prefill
@@ -1415,7 +1415,7 @@ test_configs_swa_prefill_with_graph = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_q_lens, cu_total_seq_lens, block_tables, total_seq_lens, max_q_lens, max_total_seq_lens",
+    "query, k_cache, v_cache, cu_q_lens, cu_total_seq_lens, block_tables, total_seq_lens",
     [
         pytest.param(
             *generate_paged_prefill_data_with_graph(
@@ -1427,7 +1427,7 @@ test_configs_swa_prefill_with_graph = [
                 max_kv_computed_len=MAX_KV_COMPUTED_LEN,
                 block_size=BLK_S,
                 dtype=dtype,
-            ),
+            )[:-2],
             id=ID,
         )
         for MAX_B, Q_H, KV_H, D, MAX_Q_LEN, MAX_KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_swa_prefill_with_graph
@@ -1447,8 +1447,6 @@ def test_paged_prefill_swa_with_graph(
     cu_total_seq_lens: torch.Tensor,
     block_tables: torch.Tensor,
     total_seq_lens: torch.Tensor,
-    max_q_lens: int,
-    max_total_seq_lens: int,
     gqa_layout: str,
     global_window: int,
     local_window: int,
@@ -1478,8 +1476,6 @@ def test_paged_prefill_swa_with_graph(
             block_tables,
             softmax_scale=softmax_scale,
             cu_total_seq_lens=cu_total_seq_lens,
-            max_q_lens=max_q_lens,
-            max_total_seq_lens=max_total_seq_lens,
         )
         torch.cuda.synchronize()
 
@@ -1494,8 +1490,6 @@ def test_paged_prefill_swa_with_graph(
                     block_tables,
                     softmax_scale=softmax_scale,
                     cu_total_seq_lens=cu_total_seq_lens,
-                    max_q_lens=max_q_lens,
-                    max_total_seq_lens=max_total_seq_lens,
                 )
             torch.cuda.synchronize()
         except Exception as e:
@@ -1516,8 +1510,6 @@ def test_paged_prefill_swa_with_graph(
         block_tables,
         softmax_scale=softmax_scale,
         cu_total_seq_lens=cu_total_seq_lens,
-        max_q_lens=max_q_lens,
-        max_total_seq_lens=max_total_seq_lens,
     )
 
     atol = 2e-2 if query.dtype != torch.float32 else 1e-5
@@ -1542,8 +1534,8 @@ def test_paged_prefill_swa_with_graph(
             cur_cu_q_lens,
             cur_block_tables,
             cur_cu_total_seq_lens,
-            cur_max_q_lens,
-            cur_max_total_seq_lens,
+            _,
+            _,
         ) = generate_paged_prefill_data(
             batch_size=current_batch_size,
             num_q_heads=num_q_heads,
@@ -1587,8 +1579,6 @@ def test_paged_prefill_swa_with_graph(
             cur_block_tables,
             softmax_scale=softmax_scale,
             cu_total_seq_lens=cur_cu_total_seq_lens,
-            max_q_lens=cur_max_q_lens,
-            max_total_seq_lens=cur_max_total_seq_lens,
         )
 
         reserved_unused_output = output[cur_T:].clone()

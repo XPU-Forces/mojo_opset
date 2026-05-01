@@ -147,6 +147,9 @@ class TTXPagedPrefillSWA(MojoPagedPrefillSWA):
         block_table: torch.Tensor,  # [bsz, num_kv_blocks]
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,  # [bsz + 1]
+        *,
+        max_q_lens: Optional[int] = None,
+        max_total_seq_lens: Optional[int] = None,
     ) -> torch.Tensor:
         assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
         total_seq_lens = (

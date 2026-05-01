@@ -9,12 +9,12 @@ import torch
 from ixformer import functions as ixf_f
 from ixformer.contrib import vllm_flash_attn as ix_fa
 
+from mojo_opset.core import MojoPagedDecodeGQA
+from mojo_opset.core import MojoPagedDecodeSWA
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoPagedPrefillSWA
-from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core.operators.attention import assert_paged_decode_contract
 from mojo_opset.core.operators.attention import assert_paged_prefill_contract
-from mojo_opset.core import MojoPagedDecodeSWA
 
 _IXFORMER_PAGED_DECODE_SUPPORTED_HEAD_DIMS = frozenset(
     {32, 64, 80, 96, 128, 160, 192, 224, 256}
@@ -87,6 +87,7 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
         """
 
         assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
+        cu_kv = cu_total_seq_lens if cu_total_seq_lens is not None else cu_q_lens
         if query.dtype not in (torch.float16, torch.bfloat16):
             raise NotImplementedError(f"query dtype must be fp16 or bf16, got {query.dtype}.")
         if mask is not None:
@@ -100,30 +101,25 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
             )
 
         if cu_q_lens.dtype != torch.int32:
-            raise ValueError(f"cu_q_lens must be int32, got {cu_q_lens.dtype}.")
+            raise NotImplementedError(f"cu_q_lens must be int32, got {cu_q_lens.dtype}.")
         if block_tables.dtype != torch.int32:
-            raise ValueError(f"block_tables must be int32, got {block_tables.dtype}.")
+            raise NotImplementedError(f"block_tables must be int32, got {block_tables.dtype}.")
 
         q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
         if q_lens.dtype != torch.int32:
-            raise ValueError(f"q_lens must be int32, got {q_lens.dtype}.")
-        if (q_lens <= 0).any():
-            raise NotImplementedError(
-                "IxformerPagedPrefillGQA does not support zero/negative q_lens. "
-                "Please provide cu_q_lens such that all sequence lengths are >= 1."
-            )
+            raise NotImplementedError(f"q_lens must be int32, got {q_lens.dtype}.")
         if not isinstance(cu_total_seq_lens, torch.Tensor):
-            raise ValueError(f"cu_total_seq_lens must be torch.Tensor, got {type(cu_total_seq_lens)}.")
+            raise NotImplementedError(f"cu_total_seq_lens must be torch.Tensor, got {type(cu_total_seq_lens)}.")
         if cu_total_seq_lens.dtype != torch.int32:
-            raise ValueError(f"cu_total_seq_lens must be int32, got {cu_total_seq_lens.dtype}.")
+            raise NotImplementedError(f"cu_total_seq_lens must be int32, got {cu_total_seq_lens.dtype}.")
         if cu_total_seq_lens.ndim != 1:
-            raise ValueError(f"cu_total_seq_lens must be 1D, got shape {tuple(cu_total_seq_lens.shape)}.")
+            raise NotImplementedError(f"cu_total_seq_lens must be 1D, got shape {tuple(cu_total_seq_lens.shape)}.")
         if not isinstance(max_q_lens, int) or max_q_lens <= 0:
-            raise ValueError(
+            raise NotImplementedError(
                 f"max_q_lens must be a positive int, got {max_q_lens} ({type(max_q_lens)})."
             )
         if not isinstance(max_total_seq_lens, int) or max_total_seq_lens <= 0:
-            raise ValueError(
+            raise NotImplementedError(
                 f"max_total_seq_lens must be a positive int, got {max_total_seq_lens} ({type(max_total_seq_lens)})."
             )
 
@@ -172,17 +168,14 @@ class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
 
     def forward(
         self,
-        query: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
+        q: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
         cu_q_lens: torch.Tensor,
         block_table: torch.Tensor,
         softmax_scale: Optional[float] = None,
-        # Keep for API parity; the kernel path uses cumulative lengths.
-        seqlens_kv: Optional[torch.Tensor] = None,
-        mask: Optional[torch.Tensor] = None,
-        *,
         cu_total_seq_lens: Optional[torch.Tensor] = None,
+        *,
         max_q_lens: Optional[int] = None,
         max_total_seq_lens: Optional[int] = None,
     ) -> torch.Tensor:
@@ -203,14 +196,14 @@ class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
             - global_window: kv_pos < global_window_size
 
         Args:
-            query (torch.Tensor): Query tokens of shape (T, Hq, D).
+            q (torch.Tensor): Query tokens of shape (T, Hq, D).
                 Hq -> query head count, D -> head dimension.
                 dtype must be fp16 or bf16.
-            key_cache (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
+            k_cache (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
                 Hkv -> kv head count, D -> head dimension.
                 dtype must be fp16 or bf16.
                 block_size must be <= 256 and % 16 == 0.
-            value_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
+            v_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
                 Hkv -> kv head count, D -> head dimension.
                 dtype must be fp16 or bf16.
                 block_size must be <= 256 and % 16 == 0.
@@ -218,24 +211,16 @@ class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
                 `cu_q_lens[i]` is the start offset for query at batch i;
                 `cu_q_lens[-1] == T`.
                 dtype must be int32.
-            cu_total_seq_lens (torch.Tensor): Cumulative total visible KV lengths, shape (B+1,);
-                `cu_total_seq_lens[i]` is the start offset for batch i;
-                `cu_total_seq_lens[-1] == K`.
-                dtype must be int32.
-            max_q_lens (int): Maximum query sequence length across the batch.
-                Must be > 0 and int.
-            max_total_seq_lens (int): Maximum total visible KV sequence length across the batch.
-                Must be > 0 and int.
             block_table (torch.Tensor): Logical-to-physical block IDs per batch,
                 shape (B, num_blocks). Maps logical block indices to physical block
-                locations in key_cache / value_cache.
+                locations in k_cache / v_cache.
                 dtype must be int32.
             softmax_scale (Optional[float]): Attention scaling factor;
                 defaults to 1/sqrt(D).
-            seqlens_kv (Optional[torch.Tensor]): key/value lengths, shape (B,). Used by
-                the reference implementation and kept for parity with MojoPagedPrefillGQA.
-            mask (Optional[torch.Tensor]): Attention mask; defaults to None.
-                Custom mask is not supported; must be None.
+            cu_total_seq_lens (Optional[torch.Tensor]): Cumulative total visible KV lengths, shape (B+1,).
+                If None, defaults to cu_q_lens (same as the reference MojoPagedPrefillSWA).
+            max_q_lens (Optional[int]): Ixformer kernel hint; if None, derived from cu_q_lens.
+            max_total_seq_lens (Optional[int]): Ixformer kernel hint; if None, derived from cu_kv.
 
         Returns:
             torch.Tensor: Attention output of shape (T, Hq, D).
@@ -251,19 +236,18 @@ class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
               underlying kernel.
         """
 
-        if query.dtype not in (torch.float16, torch.bfloat16):
-            raise NotImplementedError(f"query dtype must be fp16 or bf16, got {query.dtype}.")
-        if mask is not None:
-            raise NotImplementedError("IxformerPagedPrefillSWA does not support custom mask.")
+        if q.dtype not in (torch.float16, torch.bfloat16):
+            raise NotImplementedError(f"query dtype must be fp16 or bf16, got {q.dtype}.")
         if self.gqa_interleave:
             raise NotImplementedError("IxformerPagedPrefillSWA only supports AABB layout.")
-        page_block_size = key_cache.shape[2]
+        page_block_size = k_cache.shape[2]
         if page_block_size > 256 or page_block_size % 16 != 0:
             raise NotImplementedError(
                 f"IxformerPagedPrefillSWA only supports page_block_size <= 256 and % 16 == 0, got {page_block_size}."
             )
 
         assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
+        cu_kv = cu_total_seq_lens if cu_total_seq_lens is not None else cu_q_lens
         if cu_q_lens.dtype != torch.int32:
             raise NotImplementedError(f"cu_q_lens must be int32, got {cu_q_lens.dtype}.")
         if block_table.dtype != torch.int32:
@@ -271,11 +255,6 @@ class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
         q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
         if q_lens.dtype != torch.int32:
             raise NotImplementedError(f"q_lens must be int32, got {q_lens.dtype}.")
-        if (q_lens <= 0).any():
-            raise NotImplementedError(
-                "IxformerPagedPrefillSWA does not support zero/negative q_lens. "
-                "Please provide cu_q_lens such that all sequence lengths are >= 1."
-            )
         if not isinstance(cu_total_seq_lens, torch.Tensor):
             raise NotImplementedError(
                 f"cu_total_seq_lens must be torch.Tensor, got {type(cu_total_seq_lens)}."
@@ -305,9 +284,9 @@ class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
             )
 
         return ix_fa.flash_attn_varlen_func(
-            query,
-            key_cache,
-            value_cache,
+            q,
+            k_cache,
+            v_cache,
             cu_q_lens,
             cu_total_seq_lens,
             max_q_lens,
@@ -333,7 +312,6 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         total_seq_lens: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
-        cu_q_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
         *,
         max_total_seq_len: Optional[int] = None,
@@ -363,6 +341,11 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
               correspond to `query` and the sequence-lengths tensor in the caller.
         """
         assert_paged_decode_contract(block_tables, total_seq_lens)
+
+        if bool((total_seq_lens <= 0).any().item()):
+            raise NotImplementedError(
+                "IxformerPagedDecodeGQA does not support batch rows with zero KV length (PADSEQ)."
+            )
 
         if mask is not None:
             raise NotImplementedError("IxformerPagedDecodeGQA does not support custom mask yet.")
@@ -398,12 +381,6 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         if not self.is_causal:
             raise NotImplementedError("IxformerPagedDecodeGQA only supports causal attention.")
 
-        # vllm_paged_attention expects a positive KV length for every batch row.
-        if bool((total_seq_lens < 1).any().item()):
-            raise NotImplementedError(
-                "IxformerPagedDecodeGQA requires total_seq_lens >= 1 for every batch row."
-            )
-
         output = torch.empty(batch_size, num_q_heads, head_dim, dtype=query.dtype, device=query.device)
 
         if softmax_scale is None:
@@ -415,16 +392,10 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         if block_tables.dtype != torch.int32:
             raise NotImplementedError("IxformerPagedDecodeGQA only support block_tables dtype = torch.int32.")
 
-        if cu_q_lens is not None:
-            raise NotImplementedError("IxformerPagedDecodeGQA does not support varlen decode.")
         if total_seq_lens.dtype != torch.int32:
-            raise ValueError(f"total_seq_lens must be int32, got {total_seq_lens.dtype}.")
+            raise NotImplementedError(f"total_seq_lens must be int32, got {total_seq_lens.dtype}.")
         if not isinstance(max_total_seq_len, int) or max_total_seq_len <= 0:
-            raise ValueError(f"max_total_seq_len must be > 0 and int, got {max_total_seq_len}.")
-        if (total_seq_lens <= 0).any():
-            raise NotImplementedError("IxformerPagedDecodeGQA does not support zero/negative total_seq_lens.")
-        if max_total_seq_len <= 1:
-            raise NotImplementedError("IxformerPagedDecodeGQA only supports max_total_seq_len > 1.")
+            raise NotImplementedError(f"max_total_seq_len must be > 0 and int, got {max_total_seq_len}.")
 
         ixf_f.vllm_paged_attention(
             output=output,
@@ -485,6 +456,12 @@ class IxformerPagedDecodeSWA(MojoPagedDecodeSWA):
             - This implementation references variables `q` and `total_seq_lens`; ensure they
               correspond to `q` and the total-sequence-lengths tensor in the caller.
         """
+        assert_paged_decode_contract(block_table, total_seq_lens)
+
+        if bool((total_seq_lens <= 0).any().item()):
+            raise NotImplementedError(
+                "IxformerPagedDecodeSWA does not support batch rows with zero KV length (PADSEQ)."
+            )
 
         if self.gqa_interleave:
             raise NotImplementedError("IxformerPagedDecodeSWA does not support ABAB layout.")
@@ -499,12 +476,6 @@ class IxformerPagedDecodeSWA(MojoPagedDecodeSWA):
 
         if block_table.dtype != torch.int32:
             raise NotImplementedError("IxformerPagedDecodeSWA only support block_table dtype = torch.int32.")
-
-        # vllm_paged_attention expects a positive KV length for every batch row.
-        if bool((total_seq_lens < 1).any().item()):
-            raise NotImplementedError(
-                "IxformerPagedDecodeSWA requires context_lens >= 1 for every batch row."
-            )
 
         if not isinstance(max_total_seq_len, int) or max_total_seq_len <= 0:
             raise NotImplementedError(

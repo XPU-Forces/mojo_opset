@@ -1405,8 +1405,12 @@ class MojoPagedPrefillSWA(MojoOperator):
         block_table: torch.Tensor,  # [bsz, max_num_blocks]
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,  # [bsz + 1]
+        *,
+        max_q_lens: Optional[int] = None,
+        max_total_seq_lens: Optional[int] = None,
     ) -> torch.Tensor:
         # Note: if is_causal = False, local_window_size and global_window_size are not used.
+        # max_q_lens / max_total_seq_lens match fused backends (e.g. ixformer); unused here.
 
         assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
         total_q_len, n_q_heads, head_dim = q.shape
