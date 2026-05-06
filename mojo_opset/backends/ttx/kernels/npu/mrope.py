@@ -165,9 +165,9 @@ def mrope_fwd_impl(
     rope_dim = sum(mrope_section) * 2
 
     # NOTE: head_dim should be explicitly passed by caller.
-    # If not passed, we infer from q.shape[1] assuming n_heads=1 (flat tensor).
+    # If not passed, default to rope_dim assuming full-head rotation.
     if head_dim is None:
-        head_dim = q.shape[1]
+        head_dim = rope_dim
 
     n_qh = n_qh_hd // head_dim
     n_kh = k.shape[1] // head_dim

@@ -306,9 +306,9 @@ class MojoMRoPE(MojoOperator):
         half_rope_dim = rope_dim // 2
 
         # NOTE: head_dim should be explicitly passed by caller.
-        # If not passed, we infer from query.shape[1] assuming n_heads=1 (flat tensor).
+        # If not passed, default to rope_dim assuming full-head rotation.
         if head_dim is None:
-            head_dim = query.shape[1]
+            head_dim = rope_dim
 
         n_qh = n_qh_head_dim // head_dim
         n_kh = n_kh_head_dim // head_dim
