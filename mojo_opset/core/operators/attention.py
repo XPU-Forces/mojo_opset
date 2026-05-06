@@ -1669,8 +1669,6 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
             bits = 8
             self.qmax = 2 ** (bits - 1) - 1
             self.qmin = -(2 ** (bits - 1))
-        else:
-            raise NotImplementedError(f"quant_dtype {self.quant_dtype} is not supported")
 
     def forward(
         self,
@@ -1836,8 +1834,6 @@ class MojoPagedDecodeQuantGQA(MojoOperator):
             bits = 8
             self.qmax = 2 ** (bits - 1) - 1
             self.qmin = -(2 ** (bits - 1))
-        else:
-            raise NotImplementedError(f"quant_dtype {self.quant_dtype} is not supported")
 
     def forward(
         self,
@@ -1983,8 +1979,6 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
         if self.quant_dtype == torch.int8:
             self.qmax = 2 ** (8 - 1) - 1
             self.qmin = -(2 ** (8 - 1))
-        else:
-            raise NotImplementedError(f"quant_dtype {self.quant_dtype} not supported")
 
     def forward(
         self,
@@ -2116,8 +2110,6 @@ class MojoPagedDecodeQuantSWA(MojoOperator):
         if self.quant_dtype == torch.int8:
             self.qmax = 2 ** (8 - 1) - 1
             self.qmin = -(2 ** (8 - 1))
-        else:
-            raise NotImplementedError(f"quant_dtype {self.quant_dtype} not supported")
 
     def forward(
         self,
