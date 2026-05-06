@@ -113,7 +113,7 @@ def scale_dynamic_quant_kernel(
             if scale is not None:
                 scale_ptr = scale + dims_off
                 scale_vals = tl.load(scale_ptr, mask=dims_mask, other=1.0).to(tl.float32)
-                scaled_vals = input_vals / scale_vals
+                scaled_vals = input_vals * scale_vals
             else:
                 scaled_vals = input_vals
             
@@ -146,7 +146,7 @@ def scale_dynamic_quant_kernel(
             if scale is not None:
                 scale_ptr = scale + dims_off
                 scale_vals = tl.load(scale_ptr, mask=dims_mask, other=1.0).to(tl.float32)
-                scaled_vals = input_vals / scale_vals
+                scaled_vals = input_vals * scale_vals
             else:
                 scaled_vals = input_vals
             quant_vals = scaled_vals / current_quant_scale[:, None]

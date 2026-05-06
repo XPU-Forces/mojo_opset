@@ -103,12 +103,12 @@ def _ep_partition_fn(src_data_rank, name, module, device_mesh):
             nn.Parameter(shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.down_proj_weight_scale)),
         )
         module.up_proj_quantize.register_parameter(
-            "smooth_scale",
-            nn.Parameter(shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.up_proj_quantize.smooth_scale)),
+            "inv_smooth_scale",
+            nn.Parameter(shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.up_proj_quantize.inv_smooth_scale)),
         )
         module.down_proj_quantize.register_parameter(
-            "smooth_scale",
-            nn.Parameter(shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.down_proj_quantize.smooth_scale)),
+            "inv_smooth_scale",
+            nn.Parameter(shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.down_proj_quantize.inv_smooth_scale)),
         )
         module.register_state_dict_post_hook(
             partial(
@@ -118,8 +118,8 @@ def _ep_partition_fn(src_data_rank, name, module, device_mesh):
                     "down_proj_weight",
                     "up_proj_weight_scale",
                     "down_proj_weight_scale",
-                    "up_proj_quantize.smooth_scale",
-                    "down_proj_quantize.smooth_scale",
+                    "up_proj_quantize.inv_smooth_scale",
+                    "down_proj_quantize.inv_smooth_scale",
                 ),
                 device_mesh,
             )

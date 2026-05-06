@@ -285,8 +285,8 @@ def test_quant_experts_reference(weight_bits):
             "down_proj_weight": down_weight,
             "up_proj_weight_scale": up_weight_scale,
             "down_proj_weight_scale": down_weight_scale,
-            "up_proj_quantize.smooth_scale": fc1_input_smooth_scale,
-            "down_proj_quantize.smooth_scale": fc2_input_smooth_scale,
+            "up_proj_quantize.inv_smooth_scale": 1.0 / fc1_input_smooth_scale,
+            "down_proj_quantize.inv_smooth_scale": 1.0 / fc2_input_smooth_scale,
         }
     )
 
@@ -322,8 +322,8 @@ def test_quant_experts_reference(weight_bits):
         "down_proj_weight",
         "up_proj_weight_scale",
         "down_proj_weight_scale",
-        "up_proj_quantize.smooth_scale",
-        "down_proj_quantize.smooth_scale",
+        "up_proj_quantize.inv_smooth_scale",
+        "down_proj_quantize.inv_smooth_scale",
     }
 
 
@@ -367,8 +367,8 @@ def test_quant_moe_reference(weight_bits):
             "experts.down_proj_weight": down_weight,
             "experts.up_proj_weight_scale": up_weight_scale,
             "experts.down_proj_weight_scale": down_weight_scale,
-            "experts.up_proj_quantize.smooth_scale": fc1_input_smooth_scale,
-            "experts.down_proj_quantize.smooth_scale": fc2_input_smooth_scale,
+            "experts.up_proj_quantize.inv_smooth_scale": 1.0 / fc1_input_smooth_scale,
+            "experts.down_proj_quantize.inv_smooth_scale": 1.0 / fc2_input_smooth_scale,
         }
     )
 
@@ -407,10 +407,10 @@ def test_quant_moe_reference(weight_bits):
     torch.testing.assert_close(out, ref.to(torch.bfloat16), atol=0, rtol=0)
     assert set(op.state_dict()) == {
         "gating.gate_weight",
-        "experts.up_proj_quantize.smooth_scale",
+        "experts.up_proj_quantize.inv_smooth_scale",
         "experts.up_proj_weight",
         "experts.down_proj_weight",
         "experts.up_proj_weight_scale",
         "experts.down_proj_weight_scale",
-        "experts.down_proj_quantize.smooth_scale",
+        "experts.down_proj_quantize.inv_smooth_scale",
     }

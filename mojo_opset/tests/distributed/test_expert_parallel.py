@@ -101,8 +101,8 @@ def test_quant_moe_ep_cpu_allreduce():
         quant_group_size=4,
     ).to(device)
     _init_weights(ref)
-    ref.experts.up_proj_quantize.smooth_scale.data.abs_().add_(0.5)
-    ref.experts.down_proj_quantize.smooth_scale.data.abs_().add_(0.5)
+    ref.experts.up_proj_quantize.inv_smooth_scale.data.abs_().add_(0.5)
+    ref.experts.down_proj_quantize.inv_smooth_scale.data.abs_().add_(0.5)
     ref.experts.up_proj_weight_scale.data.abs_().add_(0.01)
     ref.experts.down_proj_weight_scale.data.abs_().add_(0.01)
 
