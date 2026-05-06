@@ -53,7 +53,7 @@ def prepare_kv_chunk_indices(
         triton.Config({'BLOCK_HEADS': 2, 'BLOCK_CHUNK': 256}, num_stages=1, num_warps=1),
         triton.Config({'BLOCK_HEADS': 4, 'BLOCK_CHUNK': 256}, num_stages=1, num_warps=1),
     ],
-    key=['num_kv_heads', 'head_dim', 'block_size', 'total_chunks'],
+    key=['num_kv_heads', 'head_dim', 'block_size', 'total_chunks', 'total_head_blocks'],
 )
 @triton.jit
 def _store_paged_kv_cache_kernel(
@@ -84,6 +84,7 @@ def _store_paged_kv_cache_kernel(
     head_dim: tl.constexpr,
     block_size: tl.constexpr,
     total_chunks,
+    total_head_blocks,
     BLOCK_HEADS: tl.constexpr,
     BLOCK_CHUNK: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -92,83 +93,84 @@ def _store_paged_kv_cache_kernel(
     Store key/value states into paged KV cache for MLU.
     """
     pid_chunk = tl.program_id(0)
-    pid_head_chunk = tl.program_id(1)
+    pid_head_block = tl.program_id(1)
 
     total_programs_chunk = tl.num_programs(0)
+    total_programs_head = tl.num_programs(1)
 
-    for chunk_idx in range(pid_chunk, total_chunks, total_programs_chunk):
-        meta_ptr = chunk_indices_ptr + chunk_idx * 3
-        batch_idx = tl.load(meta_ptr)
-        token_offset_in_seq = tl.load(meta_ptr + 1)
-        logical_kv_start = tl.load(meta_ptr + 2)
-        seq_start_tok = tl.load(cu_seqlens_ptr + batch_idx)
-        global_token_idx = seq_start_tok + token_offset_in_seq
-        seq_len_curr = tl.load(cu_seqlens_ptr + batch_idx + 1) - seq_start_tok
-        valid_len = seq_len_curr - token_offset_in_seq
+    for head_block_idx in range(pid_head_block, total_head_blocks, total_programs_head):
+        head_start = head_block_idx * BLOCK_HEADS
 
-        curr_log_pos = logical_kv_start
-        curr_kv_pos = global_token_idx
+        if head_start < num_kv_heads:
+            head_end = tl.minimum(head_start + BLOCK_HEADS, num_kv_heads)
+            num_valid_heads = head_end - head_start
+            for chunk_idx in range(pid_chunk, total_chunks, total_programs_chunk):
+                meta_ptr = chunk_indices_ptr + chunk_idx * 3
+                batch_idx = tl.load(meta_ptr)
+                token_offset_in_seq = tl.load(meta_ptr + 1)
+                logical_kv_start = tl.load(meta_ptr + 2)
+                seq_start_tok = tl.load(cu_seqlens_ptr + batch_idx)
+                global_token_idx = seq_start_tok + token_offset_in_seq
+                seq_len_curr = tl.load(cu_seqlens_ptr + batch_idx + 1) - seq_start_tok
+                valid_len = seq_len_curr - token_offset_in_seq
 
-        max_process = tl.minimum(BLOCK_CHUNK, valid_len)
+                curr_log_pos = logical_kv_start
+                curr_kv_pos = global_token_idx
 
-        processed = 0
-        while processed < max_process:
-            block_table_idx = curr_log_pos // block_size
-            block_inner_off = curr_log_pos % block_size
+                max_process = tl.minimum(BLOCK_CHUNK, valid_len)
 
-            bt_base = batch_idx * stride_bt_batch
-            physical_block_id = tl.load(block_table_ptr + bt_base + block_table_idx * stride_bt_blk)
+                processed = 0
+                while processed < max_process:
+                    block_table_idx = curr_log_pos // block_size
+                    block_inner_off = curr_log_pos % block_size
 
-            space_in_block = block_size - block_inner_off
-            sub_len = tl.minimum(max_process - processed, space_in_block).to(tl.int32)
+                    bt_base = batch_idx * stride_bt_batch
+                    physical_block_id = tl.load(block_table_ptr + bt_base + block_table_idx * stride_bt_blk)
 
-            if physical_block_id >= 0:
-                head_start = pid_head_chunk * BLOCK_HEADS
+                    space_in_block = block_size - block_inner_off
+                    sub_len = tl.minimum(max_process - processed, space_in_block).to(tl.int32)
 
-                if head_start < num_kv_heads:
-                    head_end = tl.minimum(head_start + BLOCK_HEADS, num_kv_heads)
-                    num_valid_heads = head_end - head_start
+                    if physical_block_id >= 0:
+                        offs_d = tl.arange(0, BLOCK_D)
+                        offs_h = tl.arange(0, BLOCK_HEADS)
+                        mask_h = offs_h < num_valid_heads
+                        offs_chunk = tl.arange(0, BLOCK_CHUNK)
+                        mask_chunk = offs_chunk < sub_len
 
-                    offs_d = tl.arange(0, BLOCK_D)
-                    offs_h = tl.arange(0, BLOCK_HEADS)
-                    mask_h = offs_h < num_valid_heads
-                    offs_chunk = tl.arange(0, BLOCK_CHUNK)
-                    mask_chunk = offs_chunk < sub_len
+                        src_k_base = k_ptr + curr_kv_pos * stride_k_tok + head_start * stride_k_head
+                        offs_chunk_h_2d_src = offs_chunk[:, None] * stride_k_tok + offs_h[None, :] * stride_k_head
+                        k_ptrs = src_k_base + offs_chunk_h_2d_src[:, :, None] + offs_d[None, None, :] * stride_k_dim
+                        k_vals = tl.load(k_ptrs, mask=(mask_chunk[:, None, None] & mask_h[None, :, None]), other=0.0)
 
-                    src_k_base = k_ptr + curr_kv_pos * stride_k_tok + head_start * stride_k_head
-                    offs_chunk_h_2d_src = offs_chunk[:, None] * stride_k_tok + offs_h[None, :] * stride_k_head
-                    k_ptrs = src_k_base + offs_chunk_h_2d_src[:, :, None] + offs_d[None, None, :] * stride_k_dim
-                    k_vals = tl.load(k_ptrs, mask=(mask_chunk[:, None, None] & mask_h[None, :, None]), other=0.0)
+                        dst_k_base = (
+                            key_cache_ptr
+                            + physical_block_id * stride_kc_blk
+                            + head_start * stride_kc_head
+                            + block_inner_off * stride_kc_tok
+                        )
+                        offs_chunk_h_2d_dst = offs_chunk[:, None] * stride_kc_tok + offs_h[None, :] * stride_kc_head
+                        dst_k_ptrs = dst_k_base + offs_chunk_h_2d_dst[:, :, None] + offs_d[None, None, :] * stride_kc_dim
+                        tl.store(dst_k_ptrs, k_vals, mask=(mask_chunk[:, None, None] & mask_h[None, :, None]))
 
-                    dst_k_base = (
-                        key_cache_ptr
-                        + physical_block_id * stride_kc_blk
-                        + head_start * stride_kc_head
-                        + block_inner_off * stride_kc_tok
-                    )
-                    offs_chunk_h_2d_dst = offs_chunk[:, None] * stride_kc_tok + offs_h[None, :] * stride_kc_head
-                    dst_k_ptrs = dst_k_base + offs_chunk_h_2d_dst[:, :, None] + offs_d[None, None, :] * stride_kc_dim
-                    tl.store(dst_k_ptrs, k_vals, mask=(mask_chunk[:, None, None] & mask_h[None, :, None]))
+                        src_v_base = v_ptr + curr_kv_pos * stride_v_tok + head_start * stride_v_head
+                        offs_chunk_h_2d_v_src = offs_chunk[:, None] * stride_v_tok + offs_h[None, :] * stride_v_head
+                        v_ptrs = src_v_base + offs_chunk_h_2d_v_src[:, :, None] + offs_d[None, None, :] * stride_v_dim
+                        v_vals = tl.load(v_ptrs, mask=(mask_chunk[:, None, None] & mask_h[None, :, None]), other=0.0)
 
-                    src_v_base = v_ptr + curr_kv_pos * stride_v_tok + head_start * stride_v_head
-                    offs_chunk_h_2d_v_src = offs_chunk[:, None] * stride_v_tok + offs_h[None, :] * stride_v_head
-                    v_ptrs = src_v_base + offs_chunk_h_2d_v_src[:, :, None] + offs_d[None, None, :] * stride_v_dim
-                    v_vals = tl.load(v_ptrs, mask=(mask_chunk[:, None, None] & mask_h[None, :, None]), other=0.0)
+                        dst_v_base = (
+                            value_cache_ptr
+                            + physical_block_id * stride_vc_blk
+                            + head_start * stride_vc_head
+                            + block_inner_off * stride_vc_tok
+                        )
+                        offs_chunk_h_2d_v_dst = offs_chunk[:, None] * stride_vc_tok + offs_h[None, :] * stride_vc_head
+                        dst_v_ptrs = dst_v_base + offs_chunk_h_2d_v_dst[:, :, None] + offs_d[None, None, :] * stride_vc_dim
+                        tl.store(dst_v_ptrs, v_vals, mask=(mask_chunk[:, None, None] & mask_h[None, :, None]))
 
-                    dst_v_base = (
-                        value_cache_ptr
-                        + physical_block_id * stride_vc_blk
-                        + head_start * stride_vc_head
-                        + block_inner_off * stride_vc_tok
-                    )
-                    offs_chunk_h_2d_v_dst = offs_chunk[:, None] * stride_vc_tok + offs_h[None, :] * stride_vc_head
-                    dst_v_ptrs = dst_v_base + offs_chunk_h_2d_v_dst[:, :, None] + offs_d[None, None, :] * stride_vc_dim
-                    tl.store(dst_v_ptrs, v_vals, mask=(mask_chunk[:, None, None] & mask_h[None, :, None]))
-
-            advance = sub_len
-            processed += advance
-            curr_log_pos += advance
-            curr_kv_pos += advance
+                    advance = sub_len
+                    processed += advance
+                    curr_log_pos += advance
+                    curr_kv_pos += advance
 
 
 def store_paged_kv_impl(
@@ -209,10 +211,13 @@ def store_paged_kv_impl(
     if grid_chunk < 4 and total_chunks > 1:
         grid_chunk = min(total_chunks, 4)
 
-    # Calculate grid_head based on BLOCK_HEADS=2 (minimum in autotuner)
-    grid_head_min = (num_kv_heads + 1) // 2
+    # Calculate total head blocks needed (each block handles BLOCK_HEADS heads)
+    # Use BLOCK_HEADS=2 (minimum in autotuner) for grid calculation
+    total_head_blocks = (num_kv_heads + 1) // 2
+
+    # Calculate grid_head - limit based on available cores
     grid_head_limit = max(1, total_cores // max(1, grid_chunk))
-    grid_head = min(grid_head_min, grid_head_limit)
+    grid_head = min(total_head_blocks, grid_head_limit)
     grid = (grid_chunk, grid_head)
 
     _store_paged_kv_cache_kernel[grid](
@@ -243,6 +248,7 @@ def store_paged_kv_impl(
         head_dim,
         block_size,
         total_chunks,
+        total_head_blocks,
         opt_level="O3",
     )
 
