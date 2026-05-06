@@ -6,7 +6,7 @@ from mojo_opset import MojoMoEDispatch
 from mojo_opset import MojoMoEGating
 from mojo_opset import MojoNorm
 from mojo_opset.core.attn.mojo_prefill_gqa import MojoPrefillGQA
-from mojo_opset.core.linear.mojo_linear import MojoGroupGemm
+from mojo_opset import MojoGroupGemm
 
 
 class MojoQwen3MoeBlock(torch.nn.Module):

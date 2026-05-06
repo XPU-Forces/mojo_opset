@@ -1,6 +1,57 @@
+import math
+
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 from ..operator import MojoOperator
+
+
+class MojoGemm(MojoOperator):
+    def __init__(
+        self,
+        in_features: int | None = None,
+        out_features: int | None = None,
+        bias: bool = True,
+        weight: torch.Tensor | None = None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        if weight is not None:
+            if in_features is not None or out_features is not None:
+                raise ValueError("Provide either weight or in_features/out_features, not both.")
+            if weight.dim() != 2:
+                raise ValueError(f"weight must be 2D, got shape {tuple(weight.shape)}.")
+            self.out_features, self.in_features = weight.shape
+            self.weight = nn.Parameter(weight)
+            self.register_parameter("bias", None)
+            return
+
+        if in_features is None or out_features is None:
+            raise ValueError("in_features and out_features are required when weight is not provided.")
+
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = nn.Parameter(torch.empty((out_features, in_features), **self.tensor_factory_kwargs))
+        if bias:
+            self.bias = nn.Parameter(torch.empty(out_features, **self.tensor_factory_kwargs))
+        else:
+            self.register_parameter("bias", None)
+        self.reset_parameters()
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return F.linear(input, self.weight, self.bias)
+
+    def reset_parameters(self) -> None:
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def extra_repr(self) -> str:
+        return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"
 
 
 class MojoGroupGemm(MojoOperator):
@@ -15,7 +66,7 @@ class MojoGroupGemm(MojoOperator):
 
     def forward(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:
         """
-        Grouped linear forward over variable-length segments.
+        Grouped GEMM forward over variable-length segments.
 
         Splits the 2D input into contiguous groups defined by `group_list`,
         applies a per-group weight, and concatenates outputs.
@@ -178,7 +229,7 @@ class MojoGemmDequant(MojoOperator):
         )
 
 
-class MojoQuantGroupLinearReduceSum(MojoOperator):
+class MojoQuantGroupGemmReduceSum(MojoOperator):
     def __init__(
         self,
         weight: torch.Tensor,
@@ -198,7 +249,7 @@ class MojoQuantGroupLinearReduceSum(MojoOperator):
         x2_scale: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Quantized grouped linear with per-token scaling and batch reduction.
+        Quantized grouped GEMM with per-token scaling and batch reduction.
 
         Applies batched matmul on int8 inputs/weights in float32, scales by
         per-token `x1_scale` and per-output `x2_scale`, then reduces over batch.

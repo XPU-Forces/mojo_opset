@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from mojo_opset import MojoGroupGemm
-from mojo_opset import MojoQuantGroupLinearReduceSum
+from mojo_opset import MojoQuantGroupGemmReduceSum
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 
@@ -44,7 +44,7 @@ def test_group_gemm(input, weight, group_list):
     perf(lambda: group_gemm(input, group_list))  # noqa: F821
 
 
-def generate_quant_group_linear_reduce_sum_perf_data(b: int, m: int, k: int, n: int):
+def generate_quant_group_gemm_reduce_sum_perf_data(b: int, m: int, k: int, n: int):
     x1 = torch.randint(-128, 128, (b, m, k), dtype=torch.int8)
     weight = torch.randint(-128, 128, (b, k, n), dtype=torch.int8)
     x1_scale = torch.rand(b, m, dtype=torch.float32)
@@ -55,14 +55,14 @@ def generate_quant_group_linear_reduce_sum_perf_data(b: int, m: int, k: int, n: 
 @pytest.mark.parametrize(
     "x1, weight, x1_scale, x2_scale",
     [
-        generate_quant_group_linear_reduce_sum_perf_data(b, m, k, n)
+        generate_quant_group_gemm_reduce_sum_perf_data(b, m, k, n)
         for b, m, k, n in [(8, 512, 128, 256), (4, 1024, 128, 512)]
     ],
 )
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
-def test_quant_group_linear_reduce_sum_perf(x1, weight, x1_scale, x2_scale):
-    op = MojoQuantGroupLinearReduceSum(trans_weight=False, weight=weight)
+def test_quant_group_gemm_reduce_sum_perf(x1, weight, x1_scale, x2_scale):
+    op = MojoQuantGroupGemmReduceSum(trans_weight=False, weight=weight)
 
     def run():
         op(x1, x1_scale, x2_scale)

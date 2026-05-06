@@ -2,8 +2,8 @@ import torch
 import torch_npu
 
 from mojo_opset.core import MojoGemmDequant
-from mojo_opset.core import MojoGroupLinear
-from mojo_opset.core import MojoQuantGroupLinearReduceSum
+from mojo_opset.core import MojoGroupGemm
+from mojo_opset.core import MojoQuantGroupGemmReduceSum
 from mojo_opset.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -40,7 +40,7 @@ class TorchNpuGemmDequant(MojoGemmDequant):
         return out
 
 
-class TorchNpuGroupGemm(MojoGroupLinear):
+class TorchNpuGroupGemm(MojoGroupGemm):
     def forward(
         self,
         input: torch.Tensor,
@@ -69,7 +69,7 @@ class TorchNpuGroupGemm(MojoGroupLinear):
         return torch.cat(outputs, dim=0)
 
 
-class TorchNpuQuantGroupLinearReduceSum(MojoQuantGroupLinearReduceSum):
+class TorchNpuQuantGroupGemmReduceSum(MojoQuantGroupGemmReduceSum):
     def forward(
         self,
         input: torch.Tensor,

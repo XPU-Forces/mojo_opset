@@ -38,23 +38,17 @@ from .operators.kv_cache import MojoStoreMLAKVCache
 from .operators.kv_cache import MojoStorePagedKVCache
 from .operators.kv_cache import MojoStorePagedMLAKVCache
 
-""" linear """
+""" gemm """
+from .operators.gemm import MojoGemm
 from .operators.gemm import MojoGemmDequant
 from .operators.gemm import MojoGroupGemm
-from .operators.gemm import MojoGroupGemm as MojoGroupLinear
-from .operators.gemm import MojoQuantGroupLinearReduceSum
-from .operators.linear import MojoLinear
+from .operators.gemm import MojoQuantGroupGemmReduceSum
 
 """ compute + comm """
-from .operators.compute_with_comm import MojoAllGatherGemm
 from .operators.compute_with_comm import MojoGemmAll2All
+from .operators.compute_with_comm import MojoAllGatherGemm
 from .operators.compute_with_comm import MojoGemmAllReduce
 from .operators.compute_with_comm import MojoGemmReduceScatter
-
-""" matmul """
-# Aliases for backward compatibility
-from .operators.gemm import MojoGroupGemm as MojoGroupedMatmul
-from .operators.gemm import MojoQuantGroupLinearReduceSum as MojoGroupQuantMatmulReduceSum
 
 """ embedding """
 from .operators.embedding import MojoEmbedding
@@ -137,9 +131,6 @@ __all__ = [
     "MojoOperator",
 
     "MojoGelu",
-    "MojoGroupedMatmul",
-    "MojoGroupLinear",
-    "MojoGroupQuantMatmulReduceSum",
     "MojoSilu",
     "MojoSwiGLU",
     "MojoRotateActivation",
@@ -165,12 +156,12 @@ __all__ = [
     "MojoStoreMLAKVCache",
     "MojoStorePagedMLAKVCache",
 
-    "MojoLinear",
+    "MojoGemm",
     "MojoGemmDequant",
     "MojoGroupGemm",
-    "MojoQuantGroupLinearReduceSum",
-    "MojoAllGatherGemm",
+    "MojoQuantGroupGemmReduceSum",
     "MojoGemmAll2All",
+    "MojoAllGatherGemm",
     "MojoGemmAllReduce",
     "MojoGemmReduceScatter",
 

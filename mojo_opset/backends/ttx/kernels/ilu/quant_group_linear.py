@@ -96,7 +96,7 @@ def quant_group_linear_reduce_sum_impl(
     if b != b2 or k != k2:
         raise ValueError("x and w batch/K dimensions must match")
 
-    # Match MojoQuantGroupLinearReduceSum reference: per-batch fp32 tile, cast to bf16,
+    # Match MojoQuantGroupGemmReduceSum reference: per-batch fp32 tile, cast to bf16,
     # then in-place bf16 accumulation (not fp32 sum then one cast).
     reduced_out = torch.zeros((m, n), device=x.device, dtype=torch.bfloat16)
     batch_contrib = torch.zeros((m, n), device=x.device, dtype=torch.float32)

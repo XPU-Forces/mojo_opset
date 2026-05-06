@@ -63,9 +63,9 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Activation  | MojoGelu                      | ✅           | ✅        | ✅  | TBD      |
 | Activation  | MojoSilu                      | ✅           | ✅        | ✅  | TBD      |
 | Activation  | MojoSwiGlu                    | ✅           | ✅        | ✅  | TBD      |
-| Linear      | MojoLinear                    | ✅           | TBD       | TBD | TBD      |
+| Gemm        | MojoGemm                      | ✅           | TBD       | TBD | TBD      |
 | Gemm        | MojoGroupGemm                 | ✅           | ✅        | ✅  | TBD      |
-| Gemm        | MojoQuantGroupLinearReduceSum | ✅           | ✅        | TBD | TBD      |
+| Gemm        | MojoQuantGroupGemmReduceSum   | ✅           | ✅        | TBD | TBD      |
 | ComputeComm | MojoGemmAllReduce             | ✅           | TBD       | TBD | TBD      |
 | ComputeComm | MojoAllGatherGemm             | ✅           | TBD       | TBD | TBD      |
 | ComputeComm | MojoGemmAll2All               | ✅           | TBD       | TBD | TBD      |

@@ -8,7 +8,7 @@ from mojo_opset.backends.ttx.kernels import prepare_b
 from mojo_opset.backends.ttx.kernels import quant_group_linear_reduce_sum_impl
 from mojo_opset.core import MojoGemmDequant
 from mojo_opset.core import MojoGroupGemm
-from mojo_opset.core import MojoQuantGroupLinearReduceSum
+from mojo_opset.core import MojoQuantGroupGemmReduceSum
 
 
 class TTXGemmDequant(MojoGemmDequant):
@@ -87,7 +87,7 @@ class TTXGroupGemm(MojoGroupGemm):
         return C
 
 
-class TTXQuantGroupLinearReduceSum(MojoQuantGroupLinearReduceSum):
+class TTXQuantGroupGemmReduceSum(MojoQuantGroupGemmReduceSum):
     supported_platforms_list = ["ilu"]
 
     def forward(
