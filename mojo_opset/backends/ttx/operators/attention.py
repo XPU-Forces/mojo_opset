@@ -139,12 +139,7 @@ class TTXPaddedWindowAttention(MojoPaddedWindowAttention):
     @staticmethod
     def _extract_right_padded_seqlens(padding_mask: torch.Tensor) -> torch.Tensor:
         mask_bool = padding_mask.to(dtype=torch.bool)
-        seqlens = mask_bool.sum(dim=-1, dtype=torch.int32)
-        seq_len = padding_mask.shape[1]
-        ref = torch.arange(seq_len, device=padding_mask.device).unsqueeze(0) < seqlens.unsqueeze(1)
-        if not torch.equal(mask_bool, ref):
-            raise NotImplementedError("TTXPaddedWindowAttention requires right-padded masks.")
-        return seqlens
+        return mask_bool.sum(dim=-1, dtype=torch.int32)
 
     def forward(
         self,
@@ -160,9 +155,9 @@ class TTXPaddedWindowAttention(MojoPaddedWindowAttention):
                 f"query/key/value must share the same shape, got {query.shape}, {key.shape}, {value.shape}"
             )
         seqlens = self._extract_right_padded_seqlens(padding_mask)
-        q = query.permute(0, 2, 1, 3).contiguous()
-        k = key.permute(0, 2, 1, 3).contiguous()
-        v = value.permute(0, 2, 1, 3).contiguous()
+        q = query.permute(0, 2, 1, 3)
+        k = key.permute(0, 2, 1, 3)
+        v = value.permute(0, 2, 1, 3)
         o = padded_window_attention(
             q,
             k,
@@ -172,7 +167,7 @@ class TTXPaddedWindowAttention(MojoPaddedWindowAttention):
             self.right_window,
             self.scale,
         )
-        return o.permute(0, 2, 1, 3).contiguous()
+        return o.permute(0, 2, 1, 3)
 
 
 class TTXPagedPrefillSWA(MojoPagedPrefillSWA):

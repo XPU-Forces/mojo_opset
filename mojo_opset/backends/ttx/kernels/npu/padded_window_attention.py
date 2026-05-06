@@ -81,10 +81,8 @@ def _padded_window_attention_fwd_kernel(
             kv_end = tl.minimum(cur_seq_len, q_block_last + right_window + 1)
             kv_block_start_id = kv_start // BLOCK_N
             kv_block_end_id = tl.cdiv(kv_end, BLOCK_N)
-            total_kv_blocks = tl.cdiv(seq_len, BLOCK_N)
 
-            for kv_block_id in range(0, total_kv_blocks):
-                do_work = (kv_block_id >= kv_block_start_id) & (kv_block_id < kv_block_end_id)
+            for kv_block_id in range(kv_block_start_id, kv_block_end_id):
                 kv_block_start = kv_block_id * BLOCK_N
                 kv_offsets = kv_block_start + tl.arange(0, BLOCK_N)
                 kv_valid = kv_offsets < cur_seq_len
@@ -114,7 +112,7 @@ def _padded_window_attention_fwd_kernel(
                 left_bound = q_offsets[:, None] - left_window
                 right_bound = q_offsets[:, None] + right_window
                 window_mask = (kv_offsets[None, :] >= left_bound) & (kv_offsets[None, :] <= right_bound)
-                pre_mask = do_work & q_valid[:, None] & kv_valid[None, :] & window_mask
+                pre_mask = q_valid[:, None] & kv_valid[None, :] & window_mask
 
                 masked_scores = tl.where(pre_mask, qk, -1e6)
                 m_candidate = tl.max(masked_scores, axis=1)
