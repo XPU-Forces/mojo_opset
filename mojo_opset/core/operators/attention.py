@@ -1783,7 +1783,7 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
                 else:
                     attn_mask = mask[i]
                 attn_mask = attn_mask[kv_seq_len - q_seq_len : kv_seq_len, :kv_seq_len]
-                attn_scores = (attn_mask, attn_scores, float("-inf"))
+                attn_scores = torch.where(attn_mask, attn_scores, float("-inf"))
 
             attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
             if self.quant_dtype == torch.int8:
