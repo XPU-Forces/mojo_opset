@@ -51,7 +51,7 @@ jobs:
             -v /lib/modules:/lib/modules \
             -v /usr/src:/usr/src \
             -v /dev:/dev \
-            corex:4.5.0rc \
+            corex:4.5.0rc_0416 \
             tail -f /dev/null
 
       - name: Build And Install Wheel Artifact
@@ -66,6 +66,7 @@ jobs:
             pip install -e .[ilu] --index-url https://bytedpypi.byted.org/simple
             python3 -m build .
             pip install dist/*.whl --force-reinstall --no-deps
+            pip install /data02/wens/ixformer-0.7.0+corex.4.5.0.rc.5.20260416-cp310-cp310-linux_x86_64.whl --force-reinstall --no-deps
           "
 
       - name: test-TTX
