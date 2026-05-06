@@ -1645,14 +1645,15 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
         is_causal: bool = True,
         gqa_layout: str = "AABB",
         quant_dtype: torch.dtype = torch.bfloat16,
-        context_bits: int = 8,
+        context_dtype: torch.dtype = torch.int8,
     ):
         """
         Initialize the Paged Prefill GQA attention operator with common parameters.
         Parameter descriptions:
         - is_causal (bool): Whether to enable causal masking, default True.
         - gqa_layout (str): GQA head grouping layout, values {"ABAB","AABB"}, default "ABAB".
-        - quant_dtype (torch.dtype): The quant matmul dtype for Q@K and P@V, default torch.int8.
+        - quant_dtype (torch.dtype): The quant matmul dtype for Q@K and P@V, default torch.bfloat16.
+        - context_dtype (torch.dtype): The context dtype for key_cache and value_cache, default torch.int8.
         """
         super().__init__()
 
@@ -1662,9 +1663,9 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
         self.is_causal = is_causal
         self.gqa_layout = gqa_layout
         self.quant_dtype = quant_dtype
-        self.context_bits = context_bits
+        self.context_dtype = context_dtype
         assert self.quant_dtype in (torch.bfloat16, torch.int8), f"Unsupported quant dtype {self.quant_dtype}"
-        assert self.context_bits == 8, f"Quant attention support c8, but got c{self.context_bits}"
+        assert self.context_dtype == torch.int8, f"Quant attention support int8 context only, but got {self.context_dtype}"
         if self.quant_dtype == torch.int8:
             bits = 8
             self.qmax = 2 ** (bits - 1) - 1
@@ -1803,7 +1804,7 @@ class MojoPagedDecodeQuantGQA(MojoOperator):
         is_causal: bool = True,
         gqa_layout: str = "AABB",
         quant_dtype: torch.dtype = torch.bfloat16,
-        context_bits: int = 8,
+        context_dtype: torch.dtype = torch.int8,
     ):
         """
         Initialize the Paged Decode GQA attention operator.
@@ -1811,6 +1812,8 @@ class MojoPagedDecodeQuantGQA(MojoOperator):
         Args:
             is_causal (bool, default=True): Enable causal masking (lower-triangular) if True.
             gqa_layout (str, default="ABAB"): GQA head grouping layout; one of {"ABAB", "AABB"}.
+            quant_dtype (torch.dtype): The quant matmul dtype for Q@K and P@V, default torch.bfloat16.
+            context_dtype (torch.dtype): The context dtype for key_cache and value_cache, default torch.int8.
 
         Raises:
             ValueError: If `gqa_layout` is not in {"ABAB", "AABB"}
@@ -1827,9 +1830,9 @@ class MojoPagedDecodeQuantGQA(MojoOperator):
         self.is_causal = is_causal
         self.gqa_layout = gqa_layout
         self.quant_dtype = quant_dtype
-        self.context_bits = context_bits
+        self.context_dtype = context_dtype
         assert self.quant_dtype in (torch.bfloat16, torch.int8), f"Unsupported quant dtype {self.quant_dtype}"
-        assert self.context_bits == 8, f"Quant attention support c8, but got c{self.context_bits}"
+        assert self.context_dtype == torch.int8, f"Quant attention support int8 context only, but got {self.context_dtype}"
         if self.quant_dtype == torch.int8:
             bits = 8
             self.qmax = 2 ** (bits - 1) - 1
@@ -1955,7 +1958,7 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
         global_window_size: Optional[int] = None,
         local_window_size: Optional[int] = None,
         quant_dtype: torch.dtype = torch.bfloat16,
-        context_bits: int = 8,
+        context_dtype: torch.dtype = torch.int8,
     ):
         """
         Initialize the Paged Prefill GQA attention operator with common parameters.
@@ -1964,7 +1967,8 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
         - is_causal (bool): Whether to enable causal masking, default True.
         - global_window_size (Optional[int]): Global attention window length; None means no global window, default None. Only effective when is_causal=True.
         - local_window_size (Optional[int]): Local attention window length; None means no local window, default None. Only effective when is_causal=True.
-        - quant_dtype (torch.dtype): The quant matmul dtype for Q@K and P@V, default torch.int8.
+        - quant_dtype (torch.dtype): The quant matmul dtype for Q@K and P@V, default torch.bfloat16.
+        - context_dtype (torch.dtype): The context dtype for key_cache and value_cache, default torch.int8.
         """
         super().__init__()
 
@@ -1976,9 +1980,9 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
         self.global_window_size = global_window_size
         self.local_window_size = local_window_size
         self.quant_dtype = quant_dtype
-        self.context_bits = context_bits
+        self.context_dtype = context_dtype
         assert self.quant_dtype in (torch.bfloat16, torch.int8), f"Unsupported quant dtype {self.quant_dtype}"
-        assert self.context_bits == 8, f"Quant attention support c8, but got c{self.context_bits}"
+        assert self.context_dtype == torch.int8, f"Quant attention support int8 context only, but got {self.context_dtype}"
         if self.quant_dtype == torch.int8:
             self.qmax = 2 ** (8 - 1) - 1
             self.qmin = -(2 ** (8 - 1))
@@ -2087,7 +2091,7 @@ class MojoPagedDecodeQuantSWA(MojoOperator):
         global_window_size: Optional[int] = None,
         local_window_size: Optional[int] = None,
         quant_dtype: torch.dtype = torch.bfloat16,
-        context_bits: int = 8,
+        context_dtype: torch.dtype = torch.int8,
     ):
         """
         Initialize the Paged Prefill GQA attention operator with common parameters.
@@ -2096,6 +2100,8 @@ class MojoPagedDecodeQuantSWA(MojoOperator):
         - is_causal (bool): Whether to enable causal masking, default True.
         - global_window_size (Optional[int]): Global attention window length; None means no global window, default None. Only effective when is_causal=True.
         - local_window_size (Optional[int]): Local attention window length; None means no local window, default None. Only effective when is_causal=True.
+        - quant_dtype (torch.dtype): The quant matmul dtype for Q@K and P@V, default torch.bfloat16.
+        - context_dtype (torch.dtype): The context dtype for key_cache and value_cache, default torch.int8.
         """
         super().__init__()
 
@@ -2107,9 +2113,9 @@ class MojoPagedDecodeQuantSWA(MojoOperator):
         self.global_window_size = global_window_size
         self.local_window_size = local_window_size
         self.quant_dtype = quant_dtype
-        self.context_bits = context_bits
+        self.context_dtype = context_dtype
         assert self.quant_dtype in (torch.bfloat16, torch.int8), f"Unsupported quant dtype {self.quant_dtype}"
-        assert self.context_bits == 8, f"Quant attention support c8, but got c{self.context_bits}"
+        assert self.context_dtype == torch.int8, f"Quant attention support int8 context only, but got {self.context_dtype}"
         if self.quant_dtype == torch.int8:
             self.qmax = 2 ** (8 - 1) - 1
             self.qmin = -(2 ** (8 - 1))

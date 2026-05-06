@@ -1,5 +1,7 @@
 import torch
 
+from typing import Union
+
 from ..operator import MojoOperator
 
 
@@ -93,7 +95,7 @@ class MojoGemmDequant(MojoOperator):
         output_dtype: torch.dtype = torch.bfloat16,
         trans_weight: bool = False,
         quant_dtype: torch.dtype = torch.int8,
-        weight_bits: int = 8,
+        weight_dtype: Union[str, torch.dtype] = torch.int8,
         **kwargs,
     ):
         """
@@ -116,8 +118,8 @@ class MojoGemmDequant(MojoOperator):
         weight_scale_factory_kwargs = {**self.tensor_factory_kwargs, "dtype": torch.bfloat16}
         self.quant_dtype = quant_dtype
         assert self.quant_dtype == torch.int8, f"GemmDequant only support int8 quantization yet, but get {quant_dtype=}"
-        self.weight_bits = weight_bits
-        assert self.weight_bits == 8, f"GemmDequant only support w8 yet, but get {weight_bits=}"
+        self.weight_dtype = weight_dtype
+        assert self.weight_dtype == torch.int8, f"GemmDequant only support int8 weight yet, but get {weight_dtype=}"
         self.register_buffer(
             "weight",
             torch.empty(self.weight_shape, **weight_factory_kwargs),
@@ -174,7 +176,7 @@ class MojoGemmDequant(MojoOperator):
             f"in_features={self.in_features}, "
             f"out_features={self.out_features}, "
             f"output_dtype={self.output_dtype}, trans_weight={self.trans_weight}"
-            f"quant_dtype={self.quant_dtype}, weight_bits={self.weight_bits}"
+            f"quant_dtype={self.quant_dtype}, weight_dtype={self.weight_dtype}"
         )
 
 
