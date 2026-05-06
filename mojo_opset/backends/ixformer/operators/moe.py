@@ -39,13 +39,13 @@ def _repack_int4_tn_to_nn(packed_tn: torch.Tensor, N: int, K: int) -> torch.Tens
     out = out.permute(0, 1, 5, 3, 4, 2, 6).contiguous().view(E, K, N)
 
     out = out.view(E, K, N // 32, 32)
+    packed = out.new_empty(E, K, N // 32, 16)
+    for i in range(16):
+        sign_low = (out[:, :, :, i] < 0).to(torch.int8)
+        lo = sign_low * 8 + (out[:, :, :, i] & 0x07)
+        hi = out[:, :, :, i + 16] << 4
+        packed[:, :, :, i] = hi + lo
 
-    out_low = out[:, :, :, :16]
-    out_high = out[:, :, :, 16:]
-    sign_low = (out_low < 0).to(torch.int8)
-    lo = sign_low * 8 + (out_low & 0x07)
-    hi = out_high << 4
-    packed = hi + lo
     return packed.reshape(E, K, N // 2).contiguous().to(device)
 
 
@@ -65,17 +65,8 @@ def _swizzle_weights_post_hook(module, incompatible_keys):
 
     module.register_buffer("up_proj_weight", up_nn.to(device))
     module.register_buffer("down_proj_weight", down_nn.to(device))
-    module.up_proj_weight_scale = torch.nn.Parameter(up_scale_nn.to(device))
-    module.down_proj_weight_scale = torch.nn.Parameter(down_scale_nn.to(device))
-
-
-def _invert_input_quant_smooth_scale_post_hook(module, incompatible_keys):
-    """load_state_dict post-hook: invert input quant smooth_scale."""
-    smooth_scale = module.input_quant.smooth_scale
-    if smooth_scale is None:
-        return
-    with torch.no_grad():
-        smooth_scale.reciprocal_()
+    module.up_proj_weight_scale = torch.nn.Parameter(up_scale_nn.to(device=device, dtype=torch.float32))
+    module.down_proj_weight_scale = torch.nn.Parameter(down_scale_nn.to(device=device, dtype=torch.float32))
 
 
 class IxformerMoEGating(MojoMoEGating):
@@ -133,7 +124,6 @@ class IxformerMoEDispatchQuant(MojoMoEDispatch):
             sorted_token_ids,
             src_to_dst,
             expert_sizes_gpu,
-            expert_sizes_cpu,
             quant_scale,
         )
 
@@ -146,11 +136,11 @@ class IxformerQuantExperts(MojoQuantExperts):
                  hidden_size: int,
                  intermediate_size: int,
                  activation: str = "swiglu",
-                 output_dtype: torch.dtype = torch.bfloat16,
-                 quant_type: str = "int4",
-                 quant_group_size: int = 128,
+                 quant_dtype: torch.dtype = torch.int8,
+                 quant_group_size: int = -1,
+                 weight_bits: int = 8,
                  **kwargs):
-        super().__init__(num_experts, hidden_size, intermediate_size, activation, output_dtype, quant_type, quant_group_size, **kwargs)
+        super().__init__(num_experts, hidden_size, intermediate_size, activation, quant_dtype, quant_group_size, weight_bits, **kwargs)
         
         if self.quant_group_size not in [256, 320, 512]:
             raise NotImplementedError(f"IxformerQuantExperts: quant_group_size must be 256, 320, or 512, got {self.quant_group_size}.")
@@ -158,7 +148,10 @@ class IxformerQuantExperts(MojoQuantExperts):
         setattr(self.up_proj_weight_scale, "force_dtype", torch.float32)
         setattr(self.down_proj_weight_scale, "force_dtype", torch.float32)
 
-        self.register_load_state_dict_post_hook(_swizzle_weights_post_hook)
+        if self.weight_bits == 4:
+            self.register_load_state_dict_post_hook(_swizzle_weights_post_hook)
+        
+        self.output_dtype = torch.bfloat16
 
     def forward(self, 
                 sorted_hidden_states: torch.Tensor,
@@ -181,7 +174,7 @@ class IxformerQuantExperts(MojoQuantExperts):
 
         act_i8, act_scale = ixf_f.activation_dynamic_scaled_int8(
             input=group_gemm_output1,
-            smooth_scales=self.fc2_input_quant.smooth_scale,
+            smooth_scales=self.down_proj_quantize.inv_smooth_scale,
             dst_to_src=sorted_token_ids,
             topk_ids=topk_indices,
             act_type="swiglu",
@@ -235,13 +228,13 @@ class IxformerQuantMoE(MojoQuantMoE):
         hidden_size,
         intermediate_size=None,
         activation: str = "swiglu",
-        output_dtype: torch.dtype = torch.bfloat16,
-        quant_type: str = "int4",
-        quant_group_size: int = 128,
+        quant_dtype: torch.dtype = torch.int8,
+        quant_group_size: int = -1,
+        weight_bits: int = 4,
         enable_cuda_graph: bool = False,
         **kwargs
     ):
-        super().__init__(num_experts, top_k, hidden_size, intermediate_size, activation, output_dtype, quant_type, quant_group_size, **kwargs)
+        super().__init__(num_experts, top_k, hidden_size, intermediate_size, activation, quant_dtype, quant_group_size, weight_bits, **kwargs)
         
         if self.quant_group_size not in [256, 320, 512]:
             raise NotImplementedError(f"IxformerQuantMoE: quant_group_size must be 256, 320, or 512, got {self.quant_group_size}.")
@@ -251,21 +244,21 @@ class IxformerQuantMoE(MojoQuantMoE):
         if self.enable_cuda_graph:
             raise NotImplementedError("IxformerQuantMoE: enable_cuda_graph is not supported.")
         
-        self.register_load_state_dict_post_hook(_invert_input_quant_smooth_scale_post_hook)
+        if self.weight_bits != 4:
+            raise NotImplementedError(f"IxformerQuantMoE: weight_bits must be 4, got {self.weight_bits}.")
+
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         top_k_indices, top_k_gates = self.gating(hidden_states)
 
-        i8_hs, sorted_token_ids, src_to_dst, expert_sizes_gpu, expert_sizes_cpu, quant_scale = self.dispatch(
+        i8_hs, sorted_token_ids, src_to_dst, tokens_per_expert, quant_scale = self.dispatch(
             hidden_states,
             top_k_indices,
-            self.input_quant.smooth_scale,
+            self.experts.up_proj_quantize.inv_smooth_scale,
         )
 
         if not self.enable_cuda_graph:
-            tokens_per_expert = expert_sizes_cpu
-        else:
-            tokens_per_expert = expert_sizes_gpu
+            tokens_per_expert = tokens_per_expert.cpu()
 
         expert_outputs = self.experts(
             i8_hs,
