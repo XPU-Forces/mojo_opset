@@ -353,14 +353,14 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     @torch.library.custom_op("ttx::dynamic_quant", mutates_args={})
     def dynamic_quant(
         input_tensor: torch.Tensor,
-        scale_tensor: torch.Tensor,
+        scale_tensor: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return dynamic_quant_impl(input_tensor, scale_tensor)
 
     @dynamic_quant.register_fake
     def dynamic_quant_fake(
         input_tensor: torch.Tensor,
-        scale_tensor: torch.Tensor,
+        scale_tensor: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return (
             torch.empty_like(input_tensor, dtype=torch.int8),

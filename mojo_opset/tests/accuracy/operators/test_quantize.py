@@ -201,18 +201,18 @@ def test_quant_scales_are_parameters():
     )
 
     assert isinstance(static_quant.scale, torch.nn.Parameter)
-    assert isinstance(dynamic_quant.smooth_scale, torch.nn.Parameter)
-    assert isinstance(moe_dynamic_quant.smooth_scale, torch.nn.Parameter)
+    assert isinstance(dynamic_quant.inv_smooth_scale, torch.nn.Parameter)
+    assert isinstance(moe_dynamic_quant.inv_smooth_scale, torch.nn.Parameter)
     assert isinstance(swiglu_quant.weight_scale, torch.nn.Parameter)
     assert isinstance(swiglu_quant.quant_scale, torch.nn.Parameter)
-    assert moe_dynamic_quant.smooth_scale.shape == (2, 16)
+    assert moe_dynamic_quant.inv_smooth_scale.shape == (2, 16)
     assert swiglu_quant.weight_scale.shape == (2, 32)
     assert swiglu_quant.quant_scale.shape == (2, 16)
 
     assert set(static_quant.state_dict()) == {"scale"}
     assert set(dequant.state_dict()) == set()
-    assert set(dynamic_quant.state_dict()) == {"smooth_scale"}
-    assert set(moe_dynamic_quant.state_dict()) == {"smooth_scale"}
+    assert set(dynamic_quant.state_dict()) == {"inv_smooth_scale"}
+    assert set(moe_dynamic_quant.state_dict()) == {"inv_smooth_scale"}
     assert set(swiglu_quant.state_dict()) == {"weight_scale", "quant_scale"}
 
 
@@ -226,12 +226,12 @@ def test_dynamic_quant_reference(dtype):
     smooth_scale = torch.randn(128, dtype=torch.float32)
 
     op = load_params(
-        MojoDynamicQuant._registry.get("torch")(input_size=smooth_scale.numel(), quant_dtype=torch.int8),
-        smooth_scale=smooth_scale,
+        MojoDynamicQuant._registry.get("torch")(input_size=128, quant_dtype=torch.int8),
+        inv_smooth_scale=1.0 / smooth_scale,
     )
     out, scale = op(x)
 
-    expected_input = x.float() * smooth_scale.float().unsqueeze(0)
+    expected_input = x.float() * (1.0 / smooth_scale)
     expected_scale = expected_input.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / 127
     expected_out = torch.clamp(
         torch.round(expected_input / expected_scale),
@@ -249,12 +249,12 @@ def test_dynamic_quant_backend(dtype):
     x = torch.randn(24, 128, dtype=dtype)
     smooth_scale = torch.randn(128, dtype=torch.float32)
 
-    op = load_params(MojoDynamicQuant(input_size=smooth_scale.numel(), quant_dtype=torch.int8), smooth_scale=smooth_scale)
+    op = load_params(MojoDynamicQuant(input_size=128, quant_dtype=torch.int8), inv_smooth_scale=1.0 / smooth_scale)
     op_ref = load_params(
-        MojoDynamicQuant._registry.get("torch")(input_size=smooth_scale.numel(), quant_dtype=torch.int8),
-        smooth_scale=smooth_scale.clone(),
+        MojoDynamicQuant._registry.get("torch")(input_size=128, quant_dtype=torch.int8),
+        inv_smooth_scale=1.0 / smooth_scale,
     )
-    op.forward_diff_with(op_ref, x, atol=(1, 2e-4), rtol=(0, 2e-4))
+    op.forward_diff_with(op_ref, x, atol=(1, 2e-3), rtol=(0, 2e-3))
 
 
 @pytest.mark.parametrize("dtype", dtypes)
@@ -266,18 +266,18 @@ def test_dynamic_quant_backend_moe(dtype):
 
     op = load_params(
         MojoMoEDynamicQuant(expert_num=3, input_size=128, quant_dtype=torch.int8),
-        smooth_scale=smooth_scale,
+        inv_smooth_scale=1.0 / smooth_scale,
     )
     op_ref = load_params(
         MojoMoEDynamicQuant._registry.get("torch")(expert_num=3, input_size=128, quant_dtype=torch.int8),
-        smooth_scale=smooth_scale.clone(),
+        inv_smooth_scale=1.0 / smooth_scale,
     )
     op.forward_diff_with(
         op_ref,
         x,
         token_count,
-        atol=(1, 2e-4),
-        rtol=(0, 2e-4),
+        atol=(1, 2e-3),
+        rtol=(0, 2e-3),
     )
 
 

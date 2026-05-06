@@ -119,9 +119,11 @@ class MojoDynamicQuant(MojoOperator):
         super().__init__(**kwargs)
         self.input_size = input_size
         if input_size is None:
-            self.register_parameter("smooth_scale", None)
+            self.register_parameter("inv_smooth_scale", None)
         else:
-            self.smooth_scale = torch.nn.Parameter(torch.empty(input_size, **self.tensor_factory_kwargs))
+            self.inv_smooth_scale = torch.nn.Parameter(torch.empty(input_size, **self.tensor_factory_kwargs))
+            setattr(self.inv_smooth_scale, "force_dtype", torch.float32)
+
         self.quant_dtype = quant_dtype
 
         if quant_dtype != torch.int8:
@@ -146,12 +148,10 @@ class MojoDynamicQuant(MojoOperator):
             raise ValueError("input must have at least one dimension.")
 
         input_fp = input.float()
-        if self.smooth_scale is not None:
-            smooth_scale = self.smooth_scale.float()
-            while smooth_scale.dim() < input_fp.dim():
-                smooth_scale = smooth_scale.unsqueeze(0)
-            input_fp = input_fp * smooth_scale
+        if self.inv_smooth_scale is not None:
+            input_fp = input_fp * self.inv_smooth_scale
         scale = input_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
+        scale = torch.where(scale < 1e-6, 1.0, scale)
         output = torch.clamp(torch.round(input_fp / scale), self.q_min, self.q_max)
         return output.to(self.quant_dtype), scale
 
@@ -179,7 +179,7 @@ class MojoMoEDynamicQuant(MojoOperator):
         super().__init__(**kwargs)
         self.expert_num = expert_num
         self.input_size = input_size
-        self.smooth_scale = torch.nn.Parameter(torch.empty((expert_num, input_size), **self.tensor_factory_kwargs))
+        self.inv_smooth_scale = torch.nn.Parameter(torch.empty((expert_num, input_size), **self.tensor_factory_kwargs))
         self.quant_dtype = quant_dtype
 
         if quant_dtype != torch.int8:
@@ -216,9 +216,13 @@ class MojoMoEDynamicQuant(MojoOperator):
             raise ValueError(
                 f"token_count sum must equal flattened row count {row_count}, got {token_count.sum().item()}."
             )
-        expanded_scale = self.smooth_scale.float().repeat_interleave(token_count, dim=0)
-        input_fp = input.float() * expanded_scale
+
+        input_fp = input.float()
+        if self.inv_smooth_scale is not None:
+            expanded_scale = self.inv_smooth_scale.float().repeat_interleave(token_count, dim=0)
+            input_fp = input_fp * expanded_scale
         scale = input_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
+        scale = torch.where(scale < 1e-6, 1.0, scale)
         output = torch.clamp(torch.round(input_fp / scale), self.q_min, self.q_max)
         return output.to(self.quant_dtype), scale
 
