@@ -2,17 +2,19 @@ from typing import Optional
 
 import torch
 
-from mojo_opset.backends.ttx.kernels import paged_attention_prefill
+from mojo_opset.backends.ttx.kernels import padded_window_attention
 from mojo_opset.backends.ttx.kernels import paged_attention_decode
+from mojo_opset.backends.ttx.kernels import paged_attention_prefill
 from mojo_opset.backends.ttx.kernels import sdpa_infer
-from mojo_opset.backends.ttx.kernels import swa_paged_prefill
-from mojo_opset.backends.ttx.kernels import swa_paged_decode
 from mojo_opset.backends.ttx.kernels import swa_infer
-from mojo_opset.core import MojoPagedPrefillGQA
+from mojo_opset.backends.ttx.kernels import swa_paged_decode
+from mojo_opset.backends.ttx.kernels import swa_paged_prefill
+from mojo_opset.core import MojoPaddedWindowAttention
 from mojo_opset.core import MojoPagedDecodeGQA
-from mojo_opset.core import MojoSdpa
-from mojo_opset.core import MojoPagedPrefillSWA
 from mojo_opset.core import MojoPagedDecodeSWA
+from mojo_opset.core import MojoPagedPrefillGQA
+from mojo_opset.core import MojoPagedPrefillSWA
+from mojo_opset.core import MojoSdpa
 from mojo_opset.core import MojoSWA
 from mojo_opset.core.operators.attention import assert_paged_decode_contract
 from mojo_opset.core.operators.attention import assert_paged_prefill_contract
@@ -129,6 +131,49 @@ class TTXSdpa(MojoSdpa):
             enable_gqa=self.enable_gqa,
         )
         return output
+
+
+class TTXPaddedWindowAttention(MojoPaddedWindowAttention):
+    supported_platforms_list = ["npu"]
+
+    @staticmethod
+    def _extract_right_padded_seqlens(padding_mask: torch.Tensor) -> torch.Tensor:
+        mask_bool = padding_mask.to(dtype=torch.bool)
+        seqlens = mask_bool.sum(dim=-1, dtype=torch.int32)
+        seq_len = padding_mask.shape[1]
+        ref = torch.arange(seq_len, device=padding_mask.device).unsqueeze(0) < seqlens.unsqueeze(1)
+        if not torch.equal(mask_bool, ref):
+            raise NotImplementedError("TTXPaddedWindowAttention requires right-padded masks.")
+        return seqlens
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        padding_mask: torch.Tensor,
+    ):
+        if query.ndim != 4:
+            raise ValueError(f"expected query to be BSHD, got {query.shape}")
+        if query.shape != key.shape or query.shape != value.shape:
+            raise ValueError(
+                f"query/key/value must share the same shape, got {query.shape}, {key.shape}, {value.shape}"
+            )
+        seqlens = self._extract_right_padded_seqlens(padding_mask)
+        q = query.permute(0, 2, 1, 3).contiguous()
+        k = key.permute(0, 2, 1, 3).contiguous()
+        v = value.permute(0, 2, 1, 3).contiguous()
+        o = padded_window_attention(
+            q,
+            k,
+            v,
+            seqlens,
+            self.left_window,
+            self.right_window,
+            self.scale,
+        )
+        return o.permute(0, 2, 1, 3).contiguous()
+
 
 class TTXPagedPrefillSWA(MojoPagedPrefillSWA):
     supported_platforms_list = ["npu", "mlu", "ilu"]

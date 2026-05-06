@@ -17,6 +17,7 @@ from mojo_opset import MojoPagedPrefillNSA
 from mojo_opset import MojoPrefillGQA
 from mojo_opset import MojoPrefillMLA
 from mojo_opset import MojoPrefillNSA
+from mojo_opset import MojoPaddedWindowAttention
 from mojo_opset import MojoSdpa
 from mojo_opset import MojoPagedPrefillSWA
 from mojo_opset import MojoPagedDecodeSWA
@@ -981,6 +982,65 @@ def test_paged_decode_swa(
         atol=atol,
         rtol=rtol,
     )
+
+
+@pytest.mark.parametrize(
+    "batch_size, seq_len, num_heads, head_dim, left_window, right_window, dtype",
+    [
+        (2, 32, 4, 64, 8, 0, torch.bfloat16),
+        (2, 48, 8, 96, 16, 4, torch.bfloat16),
+        (1, 17, 2, 32, 3, 2, torch.float32),
+    ],
+)
+@auto_switch_platform()
+@bypass_not_implemented
+def test_padded_window_attention(
+    batch_size: int,
+    seq_len: int,
+    num_heads: int,
+    head_dim: int,
+    left_window: int,
+    right_window: int,
+    dtype: torch.dtype,
+):
+    query = torch.randn(batch_size, seq_len, num_heads, head_dim, dtype=dtype)
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+
+    seqlens = torch.randint(low=0, high=seq_len + 1, size=(batch_size,), dtype=torch.int32)
+    padding_mask = torch.arange(seq_len, dtype=torch.int32).unsqueeze(0) < seqlens.unsqueeze(1)
+
+    op = MojoPaddedWindowAttention(left_window=left_window, right_window=right_window)
+    op_ref = MojoPaddedWindowAttention._registry.get("torch")(left_window=left_window, right_window=right_window)
+    atol = 2e-2 if dtype != torch.float32 else 1e-5
+    rtol = 2e-2 if dtype != torch.float32 else 1e-6
+    op.forward_diff_with(
+        op_ref,
+        query,
+        key,
+        value,
+        padding_mask,
+        atol=atol,
+        rtol=rtol,
+    )
+
+
+def test_padded_window_attention_torch_mask_semantics():
+    op = MojoPaddedWindowAttention._registry.get("torch")(left_window=1, right_window=0)
+    query = torch.randn(2, 6, 2, 8)
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+    padding_mask = torch.tensor(
+        [
+            [1, 1, 1, 1, 0, 0],
+            [1, 1, 0, 0, 0, 0],
+        ],
+        dtype=torch.bool,
+    )
+    output = op(query, key, value, padding_mask)
+    assert output.shape == query.shape
+    torch.testing.assert_close(output[0, 4:], torch.zeros_like(output[0, 4:]))
+    torch.testing.assert_close(output[1, 2:], torch.zeros_like(output[1, 2:]))
 
 
 def generate_sdpa_data(
