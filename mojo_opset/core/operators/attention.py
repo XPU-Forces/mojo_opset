@@ -2009,8 +2009,8 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
 
         if n_q_heads != n_kv_heads:
             if self.gqa_interleave:
-                k_qscale = k_qscale.repeat((n_q_heads // n_kv_heads, 1, 1)) # -> [n_q_heads, head_dim]
-                v_qscale = v_qscale.repeat((n_q_heads // n_kv_heads, 1, 1)) # -> [n_q_heads, head_dim]
+                k_qscale = k_qscale.repeat((n_q_heads // n_kv_heads, 1)) # -> [n_q_heads, head_dim]
+                v_qscale = v_qscale.repeat((n_q_heads // n_kv_heads, 1)) # -> [n_q_heads, head_dim]
             else:                
                 k_qscale = k_qscale.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, head_dim]
                 v_qscale = v_qscale.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, head_dim]
@@ -2135,8 +2135,8 @@ class MojoPagedDecodeQuantSWA(MojoOperator):
 
         if n_q_heads != n_kv_heads:
             if self.gqa_interleave:
-                k_qscale = k_qscale.repeat((n_q_heads // n_kv_heads, 1, 1)) # -> [n_q_heads, head_dim]
-                v_qscale = v_qscale.repeat((n_q_heads // n_kv_heads, 1, 1)) # -> [n_q_heads, head_dim]
+                k_qscale = k_qscale.repeat((n_q_heads // n_kv_heads, 1)) # -> [n_q_heads, head_dim]
+                v_qscale = v_qscale.repeat((n_q_heads // n_kv_heads, 1)) # -> [n_q_heads, head_dim]
             else:                
                 k_qscale = k_qscale.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, head_dim]
                 v_qscale = v_qscale.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, head_dim]
