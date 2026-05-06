@@ -1895,6 +1895,9 @@ class MojoPagedDecodeQuantGQA(MojoOperator):
 
         for i in range(batch_size):
             seq_len = total_seq_lens[i].item()
+            if seq_len == 0:
+                # skip padded batches
+                continue
 
             q = query[i].unsqueeze(1) # [n_q_heads, 1, head_dim]
 
