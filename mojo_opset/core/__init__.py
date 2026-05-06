@@ -59,7 +59,6 @@ from .operators.gemm import MojoQuantGroupLinearReduceSum as MojoGroupQuantMatmu
 """ embedding """
 from .operators.embedding import MojoEmbedding
 from .operators.embedding import MojoParallelEmbedding
-from .operators.embedding import MojoRelativeEmbedding
 
 """ over_encoding """
 from .operators.over_encoding import MojoOverEncoding
@@ -98,6 +97,7 @@ from .operators.normalization import MojoRMSNorm
 from .operators.normalization import MojoRMSNormQuant
 
 """ position_embedding """
+from .operators.position_embedding import MojoRelativeEmbedding
 from .operators.position_embedding import MojoApplyRoPE
 from .operators.position_embedding import MojoGridRoPE
 from .operators.position_embedding import MojoNormRoPE
