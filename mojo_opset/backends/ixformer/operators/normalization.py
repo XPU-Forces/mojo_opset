@@ -6,6 +6,7 @@ from mojo_opset.core import MojoLayerNorm
 from mojo_opset.core import MojoResidualAddLayerNorm
 from mojo_opset.core import MojoResidualAddRMSNorm
 from mojo_opset.core import MojoRMSNorm
+from mojo_opset.core import MojoGroupRMSNorm
 
 
 class IxformerResidualAddRMSNorm(MojoResidualAddRMSNorm):
@@ -110,3 +111,27 @@ class IxformerRMSNorm(MojoRMSNorm):
             residual_bias=None,
         )
         return out
+
+
+class IxformerGroupRMSNorm(MojoGroupRMSNorm):
+
+    supported_platforms_list = ["ilu"]
+
+    def forward(self, input_groups):
+        
+        output_groups = []
+        if self.norm_size == 128 and self.num_groups % 2 == 0:
+            for i in range(0, self.num_groups, 2):
+                expected_k_ptr = input_groups[i].data_ptr() + input_groups[i].size(1) * input_groups[i].stride(1) * input_groups[i].element_size()
+                out_q, out_k = ixf_f.rms_norm_qk(input_groups[i], input_groups[i+1], 
+                                                 self.weight[i], self.weight[i+1],
+                                                 eps=self.variance_epsilon)
+                output_groups.append(out_q)
+                output_groups.append(out_k)
+        else:
+            for group_id in range(self.num_groups):
+                out = ixf_f.rms_norm(input_groups[group_id], 
+                                     self.weight[group_id], 
+                                     eps=self.variance_epsilon)
+                output_groups.append(out)
+        return output_groups
