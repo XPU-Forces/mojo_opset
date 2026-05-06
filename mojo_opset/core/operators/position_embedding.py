@@ -164,6 +164,9 @@ class MojoApplyRoPE(MojoOperator):
         assert cos.shape == sin.shape, "cos and sin must have the same shape"
         if q.ndim == 3:
             assert cos.ndim == 2, "rotary position embedding (cos/sin) must be of shape [num_tokens, rope_dim] for varlen prefill or decode"
+        elif q.ndim == 4 and cos.ndim == 3:
+            cos = cos.unsqueeze(1)
+            sin = sin.unsqueeze(1)
         
         if head_first:
             cos = cos.unsqueeze(-3)
