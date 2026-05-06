@@ -467,7 +467,7 @@ class IxformerPagedDecodeSWA(MojoPagedDecodeSWA):
             raise NotImplementedError("IxformerPagedDecodeSWA does not support ABAB layout.")
 
         batch_size, num_q_heads, head_dim = q.shape
-        _, num_kv_heads, block_size, head_dim = k_cache.shape
+        _, num_kv_heads, block_size, _ = k_cache.shape
 
         output = torch.empty(batch_size, num_q_heads, head_dim, dtype=q.dtype, device=q.device)
 
