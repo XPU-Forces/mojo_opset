@@ -92,6 +92,8 @@ class MojoGemmDequant(MojoOperator):
         out_features: int,
         output_dtype: torch.dtype = torch.bfloat16,
         trans_weight: bool = False,
+        quant_dtype: torch.dtype = torch.int8,
+        weight_bits: int = 8,
         **kwargs,
     ):
         """
@@ -110,15 +112,19 @@ class MojoGemmDequant(MojoOperator):
         self.in_features = in_features
         self.out_features = out_features
         self.weight_shape = (out_features, in_features) if trans_weight else (in_features, out_features)
-        weight_factory_kwargs = {**self.tensor_factory_kwargs, "dtype": torch.int8}
+        weight_factory_kwargs = {**self.tensor_factory_kwargs, "dtype": quant_dtype}
         weight_scale_factory_kwargs = {**self.tensor_factory_kwargs, "dtype": torch.bfloat16}
-        self.weight = torch.nn.Parameter(
+        self.quant_dtype = quant_dtype
+        assert self.quant_dtype == torch.int8, f"GemmDequant only support int8 quantization yet, but get {quant_dtype=}"
+        self.weight_bits = weight_bits
+        assert self.weight_bits == 8, f"GemmDequant only support w8 yet, but get {weight_bits=}"
+        self.register_buffer(
+            "weight",
             torch.empty(self.weight_shape, **weight_factory_kwargs),
-            requires_grad=False,
         )
-        self.weight_scale = torch.nn.Parameter(
+        self.register_buffer(
+            "weight_scale",
             torch.empty(out_features, **weight_scale_factory_kwargs),
-            requires_grad=False,
         )
         self.output_dtype = output_dtype
         self.trans_weight = trans_weight
@@ -137,21 +143,21 @@ class MojoGemmDequant(MojoOperator):
             torch.Tensor: Dequantized result ``(M, N)`` in ``output_dtype``.
         """
         weight = self.weight
-        if self.trans_weight:
-            weight = weight.t()
 
         if input.dim() != 2:
             raise ValueError(f"input must be 2D, got shape {tuple(input.shape)}.")
         if weight.dim() != 2:
             raise ValueError(f"weight must be 2D, got shape {tuple(weight.shape)}.")
-        if input.shape[1] != weight.shape[0]:
-            raise ValueError(f"input K {input.shape[1]} must match weight K {weight.shape[0]}.")
-        if self.weight_scale.shape != (weight.shape[1],):
+        if input.shape[-1] != self.in_features:
+            raise ValueError(f"input K {input.shape[-1]} must match weight K {self.in_features}.")
+        if self.weight_scale.shape != (self.out_features,):
             raise ValueError(
-                f"weight_scale shape {tuple(self.weight_scale.shape)} must match output dim {(weight.shape[1],)}."
+                f"weight_scale shape {tuple(self.weight_scale.shape)} must match output dim {(self.out_features,)}."
             )
 
-        out = torch.matmul(input.float(), weight.float())
+        if not self.trans_weight:
+            weight = weight.mT
+        out = torch.mul(input.int().unsqueeze(-2), weight.int()).float().sum(dim=-1)
 
         weight_scale = self.weight_scale
         if input_scale.dim() == 1:
@@ -168,6 +174,7 @@ class MojoGemmDequant(MojoOperator):
             f"in_features={self.in_features}, "
             f"out_features={self.out_features}, "
             f"output_dtype={self.output_dtype}, trans_weight={self.trans_weight}"
+            f"quant_dtype={self.quant_dtype}, weight_bits={self.weight_bits}"
         )
 
 

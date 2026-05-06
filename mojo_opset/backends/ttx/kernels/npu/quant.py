@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
@@ -7,7 +9,7 @@ from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 
 def dynamic_quant_impl(
     input_tensor: torch.Tensor,
-    scale_tensor: torch.Tensor,
+    scale_tensor: Optional[torch.Tensor],
 ):
     num_programs = get_num_cores()
 
@@ -105,19 +107,24 @@ def scale_dynamic_quant_kernel(
             input_offset = element_off[:, None] * dims + dims_off[None, :]
 
             input_ptr = input + input_offset
-            scale_ptr = scale + dims_off
-
             block_mask = element_mask[:, None] & dims_mask[None, :]
             input_vals = tl.load(input_ptr, mask=block_mask, other=0.0).to(tl.float32)
-            scale_vals = tl.load(scale_ptr, mask=dims_mask, other=0.0).to(tl.float32)
-            scaled_vals = input_vals * scale_vals
 
+            if scale is not None:
+                scale_ptr = scale + dims_off
+                scale_vals = tl.load(scale_ptr, mask=dims_mask, other=1.0).to(tl.float32)
+                scaled_vals = input_vals * scale_vals
+            else:
+                scaled_vals = input_vals
+            
             current_max = tl.max(tl.abs(scaled_vals), axis=1)
 
             max_abs_accumulator = tl.maximum(max_abs_accumulator, current_max)
 
         final_max_abs = max_abs_accumulator
         current_quant_scale = final_max_abs / 127.0
+        current_quant_scale = tl.where(current_quant_scale < 1e-6, 1.0, current_quant_scale)
+
         quant_scale_ptr = quant_scale + element_off
         tl.store(quant_scale_ptr, current_quant_scale, mask=element_mask)
 
@@ -130,15 +137,18 @@ def scale_dynamic_quant_kernel(
 
             input_ptr = input + input_offset
             output_ptr = output + input_offset
-            scale_ptr = scale + dims_off
 
             block_mask = element_mask[:, None] & dims_mask[None, :]
 
             input_vals = tl.load(input_ptr, mask=block_mask, other=0.0).to(tl.float32)
-            scale_vals = tl.load(scale_ptr, mask=dims_mask, other=0.0).to(tl.float32)
 
             # Apply scaling and quantization
-            scaled_vals = input_vals * scale_vals
+            if scale is not None:
+                scale_ptr = scale + dims_off
+                scale_vals = tl.load(scale_ptr, mask=dims_mask, other=1.0).to(tl.float32)
+                scaled_vals = input_vals * scale_vals
+            else:
+                scaled_vals = input_vals
             quant_vals = scaled_vals / current_quant_scale[:, None]
             quant_vals = tl.where(quant_vals < 0, quant_vals - 0.5, quant_vals + 0.5)
             quant_vals_int8 = tl.cast(quant_vals, dtype=tl.int8, overflow_mode="saturate")

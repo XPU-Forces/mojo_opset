@@ -14,8 +14,8 @@ class TorchNpuDynamicQuant(MojoDynamicQuant):
         input: torch.Tensor,
     ):
         kwargs = {"dst_type": self.quant_dtype}
-        if self.smooth_scale is not None:
-            kwargs["smooth_scales"] = self.smooth_scale.to(dtype=input.dtype)
+        if self.inv_smooth_scale is not None:
+            kwargs["smooth_scales"] = self.inv_smooth_scale.to(dtype=input.dtype)
         output, scale = torch_npu.npu_dynamic_quant(input, **kwargs)
         return output, scale.unsqueeze(-1)
 
@@ -36,7 +36,7 @@ class TorchNpuMoEDynamicQuant(MojoMoEDynamicQuant):
                 dtype=torch.int32,
             ),
         }
-        kwargs["smooth_scales"] = self.smooth_scale.to(dtype=input.dtype)
+        kwargs["smooth_scales"] = self.inv_smooth_scale.to(dtype=input.dtype)
         output, scale = torch_npu.npu_dynamic_quant(input, **kwargs)
         return output, scale.unsqueeze(-1)
 

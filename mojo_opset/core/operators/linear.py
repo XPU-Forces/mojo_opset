@@ -12,16 +12,14 @@ class MojoLinear(MojoOperator):
         in_features: int,
         out_features: int,
         bias: bool = True,
-        device=None,
-        dtype=None,
+        **kwargs
     ):
-        super().__init__()
-        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__(**kwargs)
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = nn.Parameter(torch.empty((out_features, in_features), **factory_kwargs))
+        self.weight = nn.Parameter(torch.empty((out_features, in_features), **self.tensor_factory_kwargs))
         if bias:
-            self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
+            self.bias = nn.Parameter(torch.empty(out_features, **self.tensor_factory_kwargs))
         else:
             self.register_parameter("bias", None)
         self.reset_parameters()
