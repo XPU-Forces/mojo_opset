@@ -200,8 +200,8 @@ def test_paged_prefill_quant_gqa(
     quant_dtype: torch.dtype,
     context_dtype: torch.dtype,
 ):
-    k_cache_q, k_qscale = _quantize_kv_cache(k_cache, context_dtype)
-    v_cache_q, v_qscale = _quantize_kv_cache(v_cache, context_dtype)
+    k_cache_q, key_scale = _quantize_kv_cache(k_cache, context_dtype)
+    v_cache_q, value_scale = _quantize_kv_cache(v_cache, context_dtype)
 
     op = MojoPagedPrefillQuantGQA(
         is_causal=True,
@@ -223,9 +223,9 @@ def test_paged_prefill_quant_gqa(
         op_ref,
         query,
         k_cache_q,
-        k_qscale,
+        key_scale,
         v_cache_q,
-        v_qscale,
+        value_scale,
         cu_q_lens,
         block_tables,
         softmax_scale=softmax_scale,
@@ -286,8 +286,8 @@ def test_paged_decode_quant_gqa(
     quant_dtype: torch.dtype,
     context_dtype: torch.dtype,
 ):
-    k_cache_q, k_qscale = _quantize_kv_cache(k_cache, context_dtype)
-    v_cache_q, v_qscale = _quantize_kv_cache(v_cache, context_dtype)
+    k_cache_q, key_scale = _quantize_kv_cache(k_cache, context_dtype)
+    v_cache_q, value_scale = _quantize_kv_cache(v_cache, context_dtype)
 
     head_dim = query.shape[-1]
     softmax_scale = 1.0 / math.sqrt(head_dim)
@@ -312,9 +312,9 @@ def test_paged_decode_quant_gqa(
         op_ref,
         query,
         k_cache_q,
-        k_qscale,
+        key_scale,
         v_cache_q,
-        v_qscale,
+        value_scale,
         total_seq_lens,
         block_tables,
         softmax_scale=softmax_scale,
@@ -384,8 +384,8 @@ def test_paged_prefill_quant_swa(
     quant_dtype: torch.dtype,
     context_dtype: torch.dtype,
 ):
-    k_cache_q, k_qscale = _quantize_kv_cache(k_cache, context_dtype)
-    v_cache_q, v_qscale = _quantize_kv_cache(v_cache, context_dtype)
+    k_cache_q, key_scale = _quantize_kv_cache(k_cache, context_dtype)
+    v_cache_q, value_scale = _quantize_kv_cache(v_cache, context_dtype)
 
     op = MojoPagedPrefillQuantSWA(
         is_causal=True,
@@ -411,9 +411,9 @@ def test_paged_prefill_quant_swa(
         op_ref,
         query,
         k_cache_q,
-        k_qscale,
+        key_scale,
         v_cache_q,
-        v_qscale,
+        value_scale,
         cu_q_lens,
         block_tables,
         softmax_scale=softmax_scale,
@@ -483,8 +483,8 @@ def test_paged_decode_quant_swa(
     quant_dtype: torch.dtype,
     context_dtype: torch.dtype,
 ):
-    k_cache_q, k_qscale = _quantize_kv_cache(k_cache, context_dtype)
-    v_cache_q, v_qscale = _quantize_kv_cache(v_cache, context_dtype)
+    k_cache_q, key_scale = _quantize_kv_cache(k_cache, context_dtype)
+    v_cache_q, value_scale = _quantize_kv_cache(v_cache, context_dtype)
 
     head_dim = query.shape[-1]
     softmax_scale = 1.0 / math.sqrt(head_dim)
@@ -513,9 +513,9 @@ def test_paged_decode_quant_swa(
         op_ref,
         query,
         k_cache_q,
-        k_qscale,
+        key_scale,
         v_cache_q,
-        v_qscale,
+        value_scale,
         total_seq_lens,
         block_tables,
         softmax_scale=softmax_scale,
