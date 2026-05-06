@@ -4,7 +4,6 @@ from typing import Tuple
 
 import torch
 
-import mojo_opset.core.operators.position_embedding as mojo_position_embedding
 from mojo_opset.backends.ttx.kernels import rot_pos_embed
 from mojo_opset.backends.ttx.kernels import rope_fwd
 from mojo_opset.backends.ttx.kernels.npu.mrope import mrope_fwd_impl
@@ -74,27 +73,3 @@ class TTXMRoPE(MojoMRoPE):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return mrope_fwd_impl(q, k, cos, sin, mrope_section, is_interleaved)
 
-
-def _patch_torch_apply_rope_for_batched_cos() -> None:
-    """Align torch ref with padded prefill cos/sin [B, S, rope] (pos3d) without editing core."""
-    torch_cls = getattr(mojo_position_embedding, "TorchApplyRoPE", None)
-    if torch_cls is None:
-        return
-    _orig_forward = torch_cls.forward
-
-    def forward(  # type: ignore[no-untyped-def]
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        head_first: bool = True,
-    ):
-        if head_first and q.ndim == 4 and cos.ndim == 3 and sin.ndim == 3:
-            return MojoApplyRoPE._apply_rope(self, q, k, cos.unsqueeze(1), sin.unsqueeze(1))
-        return _orig_forward(self, q, k, cos, sin, head_first)
-
-    torch_cls.forward = forward  # type: ignore[method-assign]
-
-
-_patch_torch_apply_rope_for_batched_cos()

@@ -70,7 +70,7 @@ def _triton_mrope_kernel(
 
     half_rope_dim = rope_dim // 2
     half_rd = half_rope_dim
-    stride_token = hd // 2
+    stride_token = half_rd
 
     t_cos = cos_ptr + pid * stride_token
     h_cos = t_cos + num_tokens * stride_token
@@ -92,7 +92,7 @@ def _triton_mrope_kernel(
         h_mask = (t_end <= cos_offsets) & (cos_offsets < h_end)
         w_mask = (h_end <= cos_offsets) & (cos_offsets < half_rd)
 
-    cos_mask = cos_offsets < (hd // 2)
+    cos_mask = cos_offsets < half_rd
     t_cos_row = tl.load(t_cos + cos_offsets, mask=cos_mask, other=0.0)
     h_cos_row = tl.load(h_cos + cos_offsets, mask=cos_mask, other=0.0)
     w_cos_row = tl.load(w_cos + cos_offsets, mask=cos_mask, other=0.0)
@@ -192,7 +192,6 @@ def mrope_fwd_impl(
     pad_n_qh = triton.next_power_of_2(n_qh)
     pad_n_kh = triton.next_power_of_2(n_kh)
 
-    num_programs = _get_num_programs()
     n_row = num_tokens
 
     _triton_mrope_kernel[(n_row,)](
