@@ -612,7 +612,7 @@ class MojoQuantExperts(MojoOperator):
             output = torch.stack(output_groups, dim=-1)
             output = (output * weight_scale * input_scale.unsqueeze(-1)).sum(-1)
         else:
-            output = torch.mul(input_int8.int().unsqueeze(-2), expert_weight.int().unsqueeze(-2)).float().sum(dim=-1) * weight_scale * input_scale
+            output = torch.mul(input_int8.int().unsqueeze(-2), expert_weight.int().unsqueeze(-3)).float().sum(dim=-1) * weight_scale * input_scale
 
         return output.to(output_dtype)
 

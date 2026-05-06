@@ -30,16 +30,21 @@ def _unpack_int4_from_int8_along_output(input: torch.Tensor) -> torch.Tensor:
 def _quantize_weight_per_group(weight: torch.Tensor, quant_group_size: int, weight_bits: int):
     if weight.shape[-1] % quant_group_size != 0:
         raise ValueError(f"weight input dim {weight.shape[-1]} must be divisible by {quant_group_size}.")
-    weight_groups = weight.float().split(quant_group_size, dim=-1)
+    if quant_group_size > 0:
+        weight_groups = weight.float().split(quant_group_size, dim=-1)
+    else:
+        weight_groups = [weight]
     scales = []
-    quzntizeds = []
+    quantizeds = []
     for weight_group in weight_groups:
         scale = (weight_group.abs().amax(dim=-1, keepdim=True) / 7).clamp(min=1e-12)
-        quzntizeds.append(torch.clamp(torch.round(weight_group / scale), -8, 7).to(torch.int8))
+        quantizeds.append(torch.clamp(torch.round(weight_group / scale), -8, 7).to(torch.int8))
         scales.append(scale)
         
-    quantized = torch.cat(quzntizeds, dim=-1)
+    quantized = torch.cat(quantizeds, dim=-1)
     scale = torch.cat(scales, dim=-1)
+    if quant_group_size <= 0:
+        scale = scale.squeeze(-1)
     return _pack_int4_to_int8_along_output(quantized) if weight_bits == 4 else quantized, scale
 
 
@@ -51,8 +56,13 @@ def _manual_quant_linear(
     group_size: int,
     output_dtype: torch.dtype,
 ):
-    input_groups = input.split(group_size, dim=-1)
-    weight_groups = weight.split(group_size, -1)
+    if group_size > 0:
+        input_groups = input.split(group_size, dim=-1)
+        weight_groups = weight.split(group_size, -1)
+    else:
+        input_groups = [input]
+        weight_groups = [weight]
+        weight_scale = weight_scale.unsqueeze(-1)
     outs = []
     for group_idx, input_group in enumerate(input_groups):
         group_out = torch.mul(input_group.int().unsqueeze(-2), weight_groups[group_idx].int()).float().sum(dim=-1)
@@ -327,16 +337,21 @@ def test_quant_experts_reference(weight_bits):
     }
 
 
-@pytest.mark.parametrize("weight_bits", [4, 8])
+@pytest.mark.parametrize(
+    "weight_bits,quant_group_size", 
+    [(4, 4),
+     (8, 4),
+     (8, -1),
+    ]
+)
 @bypass_not_implemented
-def test_quant_moe_reference(weight_bits):
+def test_quant_moe_reference(weight_bits, quant_group_size):
     torch.manual_seed(1)
     num_tokens = 5
     num_experts = 4
     top_k = 2
     hidden_size = 8
     intermediate_size = 12
-    quant_group_size = 4
 
     hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16)
     gate_weight = torch.randn(hidden_size, num_experts, dtype=torch.float32) * 0.2
