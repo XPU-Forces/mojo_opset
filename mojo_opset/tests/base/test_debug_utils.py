@@ -30,7 +30,13 @@ import pytest
 import torch
 
 from mojo_opset.utils.debugger import MojoDebugger
-from mojo_opset.utils.platform import get_platform, get_torch_device
+from mojo_opset.utils.debugger import compute_angular_metrics
+from mojo_opset.utils.debugger import compute_debug_metrics
+from mojo_opset.utils.debugger import compute_ipd_metrics
+from mojo_opset.utils.debugger import compute_ipd_v_seqdim
+from mojo_opset.utils.debugger import compute_probability_metrics
+from mojo_opset.utils.platform import get_platform
+from mojo_opset.utils.platform import get_torch_device
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -81,6 +87,7 @@ def _clean_debug_env():
     keys = [
         "MOJO_DEBUG", "MOJO_DEBUG_COMPARE",
         "MOJO_DEBUG_DUMP", "MOJO_DEBUG_DUMP_DIR", "MOJO_DEBUG_MAX_STEPS",
+        "MOJO_DEBUG_IPD_PROBES", "MOJO_DEBUG_IPD_SEED",
     ]
     saved = {k: os.environ.get(k) for k in keys}
     yield
@@ -105,12 +112,10 @@ def dump_dir():
 
 
 def _build_mini_transformer(device: str = "cpu"):
-    from mojo_opset import (
-        MojoEmbedding,
-        MojoLinear,
-        MojoRMSNorm,
-        MojoSwiGLU,
-    )
+    from mojo_opset import MojoEmbedding
+    from mojo_opset import MojoLinear
+    from mojo_opset import MojoRMSNorm
+    from mojo_opset import MojoSwiGLU
 
     class Attention(torch.nn.Module):
         def __init__(self, hidden, num_heads):
@@ -188,6 +193,50 @@ def _build_mini_transformer(device: str = "cpu"):
 
 def _random_input(device: str = "cpu"):
     return torch.randint(0, VOCAB_SIZE, (BATCH, SEQ_LEN), device=device)
+
+
+# ---------------------------------------------------------------------------
+# 0. Precision guard metric functions
+# ---------------------------------------------------------------------------
+
+
+class TestPrecisionGuardMetrics:
+
+    def test_probability_metrics_identical_logits(self):
+        logits = torch.tensor([[10.0, 0.0, -1.0], [0.5, 2.0, -3.0]])
+        metrics = compute_probability_metrics(logits, logits)
+        assert metrics["kl_mean"] == pytest.approx(0.0, abs=1e-7)
+        assert metrics["js_mean"] == pytest.approx(0.0, abs=1e-7)
+        assert metrics["topk_match_mean"] == pytest.approx(1.0)
+
+    def test_angular_metrics_reports_degrees(self):
+        ref = torch.tensor([[1.0, 0.0]])
+        cand = torch.tensor([[0.0, 1.0]])
+        metrics = compute_angular_metrics(ref, cand)
+        assert metrics["cos_mean"] == pytest.approx(0.0, abs=1e-7)
+        assert metrics["angular_err_deg_mean"] == pytest.approx(90.0, abs=1e-5)
+
+    def test_ipd_metrics_accept_explicit_probes(self):
+        ref = torch.tensor([[1.0, 2.0, 3.0], [3.0, -1.0, 2.0]])
+        cand = ref * 2.0
+        metrics = compute_ipd_metrics(ref, cand, probes=torch.eye(3), n_probes=3)
+        assert metrics["ipd_mean"] == pytest.approx(1.0, abs=1e-7)
+        assert metrics["ipd_p95"] == pytest.approx(1.0, abs=1e-7)
+        assert metrics["ipd_max"] == pytest.approx(1.0, abs=1e-7)
+
+    def test_v_seqdim_ipd_uses_probability_rows(self):
+        ref = torch.arange(1, 5, dtype=torch.float32).reshape(4, 1, 1)
+        cand = ref * 2.0
+        probs = torch.eye(4, dtype=torch.float32).reshape(1, 4, 4)
+        metrics = compute_ipd_v_seqdim(ref, cand, probs=probs, n_probes=4)
+        assert metrics["ipd_mean"] == pytest.approx(1.0, abs=1e-7)
+
+    def test_debug_metrics_guard_status(self):
+        ref = torch.tensor([[1.0, 2.0, 3.0]])
+        metrics = compute_debug_metrics(ref, ref, metric_type="D")
+        assert metrics["semantic_type"] == "D"
+        assert metrics["guard_status"] == "safe"
+        assert metrics["rel_l2"] == pytest.approx(0.0, abs=1e-7)
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +434,33 @@ class TestCompareIntegration:
             model(_random_input(device))
 
         assert dbg._step_counters[("cmp", 0, "mlp.act_fn")] == 1
+        dbg.detach()
+
+    def test_compare_uses_custom_analysis_hook(self):
+        """Custom analysis hook receives compare context for matched tensor outputs."""
+        device = _get_test_device()
+        MojoDebugger.enable()
+        model = _build_mini_transformer(device)
+
+        seen = {}
+
+        def analysis_hook(ctx):
+            seen["tag"] = ctx.tag
+            seen["op_name"] = ctx.op_name
+            seen["output_shape"] = tuple(ctx.output.shape)
+            seen["ref_shape"] = tuple(ctx.ref_output.shape)
+
+        dbg = MojoDebugger(analysis_func=analysis_hook)
+        dbg.attach(model)
+        dbg.set_compare("0:input_layernorm")
+
+        with torch.no_grad():
+            model(_random_input(device))
+
+        assert seen["tag"] == "layer0.input_layernorm"
+        assert seen["op_name"] == "input_layernorm"
+        assert seen["output_shape"] == seen["ref_shape"]
+        assert dbg._step_counters[("cmp", 0, "input_layernorm")] == 1
         dbg.detach()
 
 
@@ -668,7 +744,7 @@ class TestCompareReplaceMode:
         dbg.set_compare_mode("replace")
         assert dbg._compare_mode == "replace"
         with torch.no_grad():
-            out_rep = model(inp).clone()
+            model(inp)
 
         # Forward 3: switch back to observe
         dbg.set_compare_mode("observe")
