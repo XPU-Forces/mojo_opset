@@ -265,12 +265,12 @@ class MojoMRoPE(MojoOperator):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Apply interleaved MRoPE pattern to cos/sin tables."""
         cos_interleaved = cos_table[0].clone()
-        cos_interleaved[..., 1::3] = cos_table[1, ..., 1::3]
-        cos_interleaved[..., 2::3] = cos_table[2, ..., 2::3]
+        cos_interleaved[..., 1 : mrope_section[1] * 3 : 3] = cos_table[1, ..., 1 : mrope_section[1] * 3 : 3]
+        cos_interleaved[..., 2 : mrope_section[2] * 3 : 3] = cos_table[2, ..., 2 : mrope_section[2] * 3 : 3]
 
         sin_interleaved = sin_table[0].clone()
-        sin_interleaved[..., 1::3] = sin_table[1, ..., 1::3]
-        sin_interleaved[..., 2::3] = sin_table[2, ..., 2::3]
+        sin_interleaved[..., 1 : mrope_section[1] * 3 : 3] = sin_table[1, ..., 1 : mrope_section[1] * 3 : 3]
+        sin_interleaved[..., 2 : mrope_section[2] * 3 : 3] = sin_table[2, ..., 2 : mrope_section[2] * 3 : 3]
 
         return cos_interleaved, sin_interleaved
 
@@ -305,16 +305,10 @@ class MojoMRoPE(MojoOperator):
         rope_dim = sum(mrope_section) * 2
         half_rope_dim = rope_dim // 2
 
-        # NOTE: For partial RoPE (rope_dim < head_dim), inferring head_dim from cos_table.shape[-1]
-        # is incorrect because cos_table.shape[-1] = rope_dim // 2, not head_dim // 2.
-        # Caller must pass head_dim explicitly for partial RoPE scenarios.
+        # NOTE: head_dim should be explicitly passed by caller.
+        # If not passed, we infer from query.shape[1] assuming n_heads=1 (flat tensor).
         if head_dim is None:
-            head_dim = cos_table.shape[-1] * 2
-            if head_dim != rope_dim:
-                raise ValueError(
-                    f"head_dim ({head_dim}) inferred from cos_table does not match "
-                    f"rope_dim ({rope_dim}). Please pass head_dim explicitly."
-                )
+            head_dim = query.shape[1]
 
         n_qh = n_qh_head_dim // head_dim
         n_kh = n_kh_head_dim // head_dim

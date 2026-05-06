@@ -257,10 +257,10 @@ def test_grid_pos_emb(bs, grid, heads, head_dim, pad, dtype):
 
 
 @pytest.mark.parametrize("num_tokens", [1, 16, 32])
-@pytest.mark.parametrize("n_qh", [8, 16])
-@pytest.mark.parametrize("n_kh", [8])
+@pytest.mark.parametrize("n_qh", [64, 128])
+@pytest.mark.parametrize("n_kh", [4, 8])
 @pytest.mark.parametrize("head_dim", [128])
-@pytest.mark.parametrize("mrope_section", [[16, 24, 24], [0, 32, 32]])
+@pytest.mark.parametrize("mrope_section", [[16, 24, 24], [24, 20, 20]])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("is_interleaved", [False, True])
 @bypass_not_implemented
@@ -289,4 +289,4 @@ def test_mrope(
 
     mrope = MojoMRoPE()
     mrope_ref = MojoMRoPE._registry.get("torch")()
-    mrope.forward_diff_with(mrope_ref, query, key, cos_table, sin_table, mrope_section_adj, is_interleaved)
+    mrope.forward_diff_with(mrope_ref, query, key, cos_table, sin_table, mrope_section_adj, is_interleaved, head_dim=head_dim)

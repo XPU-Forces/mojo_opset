@@ -164,16 +164,10 @@ def mrope_fwd_impl(
     num_tokens, n_qh_hd = q.shape
     rope_dim = sum(mrope_section) * 2
 
-    # NOTE: For partial RoPE (rope_dim < head_dim), inferring head_dim from cos.shape[-1]
-    # is incorrect because cos.shape[-1] = rope_dim // 2, not head_dim // 2.
-    # In this case, caller must pass head_dim explicitly.
+    # NOTE: head_dim should be explicitly passed by caller.
+    # If not passed, we infer from q.shape[1] assuming n_heads=1 (flat tensor).
     if head_dim is None:
-        head_dim = cos.shape[-1] * 2
-        if head_dim != rope_dim:
-            raise ValueError(
-                f"head_dim ({head_dim}) inferred from cos does not match "
-                f"rope_dim ({rope_dim}). Please pass head_dim explicitly."
-            )
+        head_dim = q.shape[1]
 
     n_qh = n_qh_hd // head_dim
     n_kh = k.shape[1] // head_dim
