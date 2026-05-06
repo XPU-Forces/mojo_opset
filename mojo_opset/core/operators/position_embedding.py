@@ -165,6 +165,10 @@ class MojoApplyRoPE(MojoOperator):
         if q.ndim == 3:
             assert cos.ndim == 2, "rotary position embedding (cos/sin) must be of shape [num_tokens, rope_dim] for varlen prefill or decode"
         
+        # NOTE: When q.ndim == 4 and cos.ndim == 3 (e.g., q=[B,N,S,D], cos=[B,S,rope_dim]),
+        # do NOT unsqueeze here. The head_first logic below will handle the broadcasting
+        # correctly by adding the head dimension at the appropriate position.
+
         if head_first:
             cos = cos.unsqueeze(-3)
             sin = sin.unsqueeze(-3)
@@ -301,6 +305,9 @@ class MojoMRoPE(MojoOperator):
         rope_dim = sum(mrope_section) * 2
         half_rope_dim = rope_dim // 2
 
+        # NOTE: For partial RoPE (rope_dim < head_dim), inferring head_dim from cos_table.shape[-1]
+        # is incorrect because cos_table.shape[-1] = rope_dim // 2, not head_dim // 2.
+        # Caller must pass head_dim explicitly for partial RoPE scenarios.
         if head_dim is None:
             head_dim = cos_table.shape[-1] * 2
             if head_dim != rope_dim:
