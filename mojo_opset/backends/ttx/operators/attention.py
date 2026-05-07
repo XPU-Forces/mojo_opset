@@ -40,9 +40,7 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         max_total_seq_lens: Optional[int] = None,
     ):
         assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
-        assert self.window_size == -1, (
-            f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
-        )
+
         assert self.is_causal, (
             f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
@@ -93,9 +91,6 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         max_total_seq_len: Optional[int] = None,
     ):
         assert_paged_decode_contract(block_tables, total_seq_lens)
-        assert self.window_size == -1, (
-            f"[TTXPagedDecodeGQA] TTX does not support sliding window, but got window_size={self.window_size}"
-        )
         assert self.is_causal, (
             f"[TTXPagedDecodeGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
