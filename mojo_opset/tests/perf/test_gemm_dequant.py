@@ -1,18 +1,18 @@
 import pytest
 import torch
 
-from mojo_opset import MojoGemmDequant
+from mojo_opset import MojoQuantGemm
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 
 
-def _make_gemm_dequant_perf_data(m, k, n, output_dtype, trans_weight, has_bias):
+def _make_gemm_dequant_perf_data(m, k, n, trans_weight):
     x_fp = torch.randn(m, k)
     x_scale = (x_fp.abs().amax(dim=-1) / 127).clamp(min=1e-12)
     x_i8 = torch.clamp(torch.round(x_fp / x_scale.unsqueeze(-1)), -128, 127).to(torch.int8)
 
     w_fp_nk = torch.randn(n, k)
-    w_scale = (w_fp_nk.abs().amax(dim=-1) / 127).clamp(min=1e-12)
+    w_scale = (w_fp_nk.abs().amax(dim=-1) / 127).clamp(min=1e-12).to(torch.bfloat16)
     w_i8_nk = torch.clamp(torch.round(w_fp_nk / w_scale.unsqueeze(-1)), -128, 127).to(torch.int8)
 
     if trans_weight:
@@ -20,15 +20,13 @@ def _make_gemm_dequant_perf_data(m, k, n, output_dtype, trans_weight, has_bias):
     else:
         w_i8 = w_i8_nk.t().contiguous()
 
-    bias = torch.randn(n, dtype=output_dtype) if has_bias else None
-
-    return x_i8, w_i8, x_scale, w_scale, bias
+    return x_i8, w_i8, x_scale, w_scale
 
 
 @pytest.mark.parametrize(
-    "x_i8, w_i8, x_scale, w_scale, bias, output_dtype, trans_weight",
+    "x_i8, w_i8, x_scale, w_scale, output_dtype, trans_weight",
     [
-        (*_make_gemm_dequant_perf_data(m, k, n, torch.bfloat16, False, False), torch.bfloat16, False)
+        (*_make_gemm_dequant_perf_data(m, k, n, False), torch.bfloat16, False)
         for m, k, n in [
             (1, 4096, 4096),
             (32, 4096, 4096),
@@ -46,17 +44,19 @@ def _make_gemm_dequant_perf_data(m, k, n, output_dtype, trans_weight, has_bias):
 )
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
-def test_gemm_dequant_perf(x_i8, w_i8, x_scale, w_scale, bias, output_dtype, trans_weight):
-    op = MojoGemmDequant(
-        weight_scale_size=w_scale.numel(),
+def test_quant_gemm_perf(x_i8, w_i8, x_scale, w_scale, output_dtype, trans_weight):
+    op = MojoQuantGemm(
+        in_features=x_i8.shape[1],
+        out_features=w_scale.numel(),
         output_dtype=output_dtype,
         trans_weight=trans_weight,
     )
     op.load_state_dict(
         {
+            "weight": w_i8,
             "weight_scale": w_scale,
         },
         strict=False,
     )
 
-    perf(lambda: op(x_i8, w_i8, x_scale, bias))  # noqa: F821
+    perf(lambda: op(x_i8, x_scale))  # noqa: F821

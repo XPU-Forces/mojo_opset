@@ -179,7 +179,7 @@ class MojoGenerator(torch.nn.Module):
 
     def forward(self, prompts):
         input_ids = self.tokenizer(prompts, return_tensors=None).input_ids
-        context_input_len = torch.tensor([len(seq) for seq in input_ids], dtype=torch.int64, device=self.device)
+        context_input_len = torch.tensor([len(seq) for seq in input_ids], dtype=torch.int32, device=self.device)
         input_ids = (
             torch.cat(
                 list(
@@ -311,7 +311,7 @@ class PerfMojoGenerator(MojoGenerator):
     def _run_perf_case(self, batch_size, seqlen, max_decode_steps):
         vocab_size = getattr(self.model.config, "vocab_size", 32000) if hasattr(self.model, "config") else 32000
         input_ids = torch.randint(0, vocab_size, (batch_size * seqlen,), dtype=torch.int64, device=self.device)
-        context_input_len = torch.full((batch_size,), seqlen, dtype=torch.int64, device=self.device)
+        context_input_len = torch.full((batch_size,), seqlen, dtype=torch.int32, device=self.device)
 
         self.generate_from_ids(
             input_ids=input_ids,

@@ -17,15 +17,7 @@ class TTXDynamicQuant(MojoDynamicQuant):
         self,
         input: torch.Tensor,
     ):
-        if self.smooth_scale is not None:
-            scale_tensor = self.smooth_scale.float()
-        else:
-            scale_tensor = torch.ones(
-                input.shape[-1],
-                device=input.device,
-                dtype=torch.float32,
-            )
-        return dynamic_quant(input, scale_tensor)
+        return dynamic_quant(input, self.inv_smooth_scale)
 
 
 class TTXMoEDynamicQuant(MojoMoEDynamicQuant):
@@ -36,7 +28,7 @@ class TTXMoEDynamicQuant(MojoMoEDynamicQuant):
         input: torch.Tensor,
         token_count: torch.Tensor,
     ):
-        input_fp = input.float() * self.smooth_scale.float().repeat_interleave(token_count, dim=0)
+        input_fp = input.float() * self.inv_smooth_scale.float().repeat_interleave(token_count, dim=0)
         scale_tensor = torch.ones(
             input_fp.shape[-1],
             device=input_fp.device,

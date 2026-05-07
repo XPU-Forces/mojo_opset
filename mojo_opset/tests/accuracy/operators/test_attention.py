@@ -37,13 +37,14 @@ def generate_paged_decode_data(
     query = torch.randn(batch_size, num_q_heads, head_dim, dtype=dtype)
 
     if max_seq_len > 0:
-        seqlens = torch.randint(0, max_seq_len, (batch_size,), dtype=torch.int32)
-        seqlens = torch.clamp(seqlens, min=1)
+        total_seq_lens = torch.randint(0, max_seq_len, (batch_size,), dtype=torch.int32)
+        total_seq_lens = torch.clamp(total_seq_lens, min=1)
     else:
-        seqlens = torch.randperm(batch_size, dtype=torch.int32)
+        total_seq_lens = torch.randperm(batch_size, dtype=torch.int32)
 
-    max_num_blocks_per_seq = (seqlens.max().item() + block_size - 1) // block_size
-    total_blocks_needed = int(torch.div(seqlens + block_size - 1, block_size, rounding_mode="floor").sum().item())
+    max_total_seq_len = total_seq_lens.max().item()
+    max_num_blocks_per_seq = (max_total_seq_len + block_size - 1) // block_size
+    total_blocks_needed = int(torch.div(total_seq_lens + block_size - 1, block_size, rounding_mode="floor").sum().item())
 
     if total_blocks_needed == 0:
         total_blocks_needed = batch_size * max_num_blocks_per_seq
@@ -58,7 +59,7 @@ def generate_paged_decode_data(
 
     current_block_offset = 0
     for i in range(batch_size):
-        seq_len = seqlens[i].item()
+        seq_len = total_seq_lens[i].item()
         num_blocks_for_seq = (seq_len + block_size - 1) // block_size
 
         if current_block_offset + num_blocks_for_seq > num_total_blocks:
@@ -68,7 +69,7 @@ def generate_paged_decode_data(
         block_tables[i, :num_blocks_for_seq] = assigned_blocks
         current_block_offset += num_blocks_for_seq
 
-    return query, k_cache, v_cache, seqlens, block_tables
+    return query, k_cache, v_cache, total_seq_lens, block_tables, max_total_seq_len
 
 
 test_configs_decode = [
@@ -81,7 +82,7 @@ test_configs_decode = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, seqlens, block_tables",
+    "query, k_cache, v_cache, total_seq_lens, block_tables, max_total_seq_len",
     [
         pytest.param(
             *generate_paged_decode_data(
@@ -105,8 +106,9 @@ def test_paged_decode_gqa(
     query: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
-    seqlens: torch.Tensor,
+    total_seq_lens: torch.Tensor,
     block_tables: torch.Tensor,
+    max_total_seq_len: int,
     gqa_layout: str,
 ):
     head_dim = query.shape[-1]
@@ -129,9 +131,10 @@ def test_paged_decode_gqa(
         query,
         k_cache,
         v_cache,
-        seqlens,
+        total_seq_lens,
         block_tables,
         softmax_scale=softmax_scale,
+        max_total_seq_len=max_total_seq_len,
         atol=atol,
         rtol=rtol,
     )
@@ -153,7 +156,7 @@ def generate_paged_prefill_data(
     else:
         # max_q_len = 0 for testing padding logic, use randperm to generate a list with 0
         q_lens = torch.randperm(batch_size, dtype=torch.int32)
-    cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0).to(torch.int32)])
+    cu_q_lens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0, dtype=torch.int32)])
 
     if max_kv_computed_len <= 0:
         kv_cache_lens = None
@@ -162,10 +165,10 @@ def generate_paged_prefill_data(
         kv_cache_lens = torch.randint(max_kv_computed_len // 2, max_kv_computed_len, (batch_size,), dtype=torch.int32)
         kv_lens = q_lens + kv_cache_lens
         kv_lens = torch.where(q_lens > 0, kv_lens, torch.zeros_like(kv_lens))
-    cu_seqlens_kv = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0).to(torch.int32)])
+    cu_total_seq_lens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0, dtype=torch.int32)])
 
-    total_q_tokens = cu_seqlens_q[-1].item()
-    total_kv_tokens = cu_seqlens_kv[-1].item()
+    total_q_tokens = cu_q_lens[-1].item()
+    total_kv_tokens = cu_total_seq_lens[-1].item()
 
     query = torch.randn(total_q_tokens, num_q_heads, head_dim, dtype=dtype)
     k_unpadded = torch.randn(total_kv_tokens, num_kv_heads, head_dim, dtype=dtype)
@@ -188,7 +191,7 @@ def generate_paged_prefill_data(
     current_block_offset = 0
     for i in range(batch_size):
         seq_len = kv_lens[i].item()
-        start_loc = cu_seqlens_kv[i].item()
+        start_loc = cu_total_seq_lens[i].item()
 
         num_blocks_for_seq = (seq_len + block_size - 1) // block_size
         assigned_blocks = free_blocks[current_block_offset : current_block_offset + num_blocks_for_seq]
@@ -208,7 +211,10 @@ def generate_paged_prefill_data(
             k_cache[physical_block_id, :, :tokens_in_block, :] = k_slice
             v_cache[physical_block_id, :, :tokens_in_block, :] = v_slice
 
-    return query, k_cache, v_cache, cu_seqlens_q, block_tables, None if kv_cache_lens is None else kv_lens
+    cu_total_seq_lens = None if kv_cache_lens is None else cu_total_seq_lens
+    max_q_lens = int((cu_q_lens[1:] - cu_q_lens[:-1]).max().item()) if cu_q_lens.numel() > 1 else 0
+    max_total_seq_lens = int(kv_lens.max().item()) if kv_lens.numel() > 0 else 0
+    return query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens
 
 
 test_configs_prefill = [
@@ -221,7 +227,7 @@ test_configs_prefill = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_seqlens_q, block_tables, seqlens_kv",
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens",
     [
         pytest.param(
             *generate_paged_prefill_data(
@@ -246,10 +252,12 @@ def test_paged_prefill_gqa(
     query: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
+    cu_q_lens: torch.Tensor,
     block_tables: torch.Tensor,
     gqa_layout: str,
-    seqlens_kv: Optional[torch.Tensor],
+    cu_total_seq_lens: Optional[torch.Tensor],
+    max_q_lens: int,
+    max_total_seq_lens: int,
 ):
     paged_prefill_attn = MojoPagedPrefillGQA(
         is_causal=True,
@@ -269,10 +277,12 @@ def test_paged_prefill_gqa(
         query,
         k_cache,
         v_cache,
-        cu_seqlens_q,
-        block_tables,
+        cu_q_lens,
+        block_tables=block_tables,
         softmax_scale=softmax_scale,
-        seqlens_kv=seqlens_kv,
+        cu_total_seq_lens=cu_total_seq_lens,
+        max_q_lens=max_q_lens,
+        max_total_seq_lens=max_total_seq_lens,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
     )
@@ -293,8 +303,9 @@ def test_paged_prefill_gqa_bucket_padded_varlen(gqa_layout: str):
     dtype = torch.bfloat16
 
     query = torch.randn((token_bucket_size, num_q_heads, head_dim), dtype=dtype)
-    cu_seqlens_q = torch.tensor([0, 1, 2, 3, 4, 4, 4], dtype=torch.int32)
-    seqlens_kv = torch.tensor([1, 1, 1, 1, 0, 0], dtype=torch.int32)
+    cu_q_lens = torch.tensor([0, 1, 2, 3, 4, 4, 4], dtype=torch.int32)
+    total_seq_lens = torch.tensor([1, 1, 1, 1, 0, 0], dtype=torch.int32)
+    cu_total_seq_lens = torch.nn.functional.pad(total_seq_lens.cumsum(0, dtype=torch.int32), (1, 0))
 
     key_cache = torch.zeros((bucket_batch_size, num_kv_heads, block_size, head_dim), dtype=dtype)
     value_cache = torch.zeros_like(key_cache)
@@ -323,19 +334,19 @@ def test_paged_prefill_gqa_bucket_padded_varlen(gqa_layout: str):
         query,
         key_cache,
         value_cache,
-        cu_seqlens_q,
+        cu_q_lens,
         block_tables,
         softmax_scale=softmax_scale,
-        seqlens_kv=seqlens_kv,
+        cu_total_seq_lens=cu_total_seq_lens,
     )
     out = paged_prefill_attn(
         query,
         key_cache,
         value_cache,
-        cu_seqlens_q,
+        cu_q_lens,
         block_tables,
         softmax_scale=softmax_scale,
-        seqlens_kv=seqlens_kv,
+        cu_total_seq_lens=cu_total_seq_lens,
     )
 
     torch.testing.assert_close(
@@ -425,12 +436,12 @@ def test_decode_gqa(B, Hq, Hkv, D, S, gqa_layout):
     query = torch.randn(B, Hq, D, dtype=torch.bfloat16)
     key = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)
     value = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)
-    seqlens = torch.randint(S // 2, S + 1, (B,), dtype=torch.int32)
+    total_seq_lens = torch.randint(S // 2, S + 1, (B,), dtype=torch.int32)
 
     op = MojoDecodeGQA(gqa_layout=gqa_layout)
     op_ref = MojoDecodeGQA._registry.get("torch")(gqa_layout=gqa_layout)
     op.forward_diff_with(
-        op_ref, query, key, value, seqlens,
+        op_ref, query, key, value, total_seq_lens,
         softmax_scale=1.0 / math.sqrt(D),
         atol=1e-2, rtol=1e-2,
     )
@@ -443,12 +454,12 @@ def test_decode_gqa_sliding_window(window_size):
     query = torch.randn(B, Hq, D, dtype=torch.bfloat16)
     key = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)
     value = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)
-    seqlens = torch.full((B,), S, dtype=torch.int32)
+    total_seq_lens = torch.full((B,), S, dtype=torch.int32)
 
     op = MojoDecodeGQA(gqa_layout="AABB", window_size=window_size)
     op_ref = MojoDecodeGQA._registry.get("torch")(gqa_layout="AABB", window_size=window_size)
     op.forward_diff_with(
-        op_ref, query, key, value, seqlens,
+        op_ref, query, key, value, total_seq_lens,
         softmax_scale=1.0 / math.sqrt(D),
         atol=1e-2, rtol=1e-2,
     )
@@ -467,7 +478,7 @@ def test_decode_mla(B, H, d_nope, d_rope, d_v, d_c, S):
     query = torch.randn(B, H, d_nope + d_rope, dtype=torch.bfloat16)
     compressed_kv = torch.randn(B, S, d_c, dtype=torch.bfloat16)
     k_pe = torch.randn(B, S, 1, d_rope, dtype=torch.bfloat16)
-    seqlens = torch.randint(S // 2, S + 1, (B,), dtype=torch.int32)
+    total_seq_lens = torch.randint(S // 2, S + 1, (B,), dtype=torch.int32)
 
     op = MojoDecodeMLA(H, d_nope, d_rope, d_v, d_c)
     op_ref = MojoDecodeMLA._registry.get("torch")(H, d_nope, d_rope, d_v, d_c)
@@ -477,7 +488,7 @@ def test_decode_mla(B, H, d_nope, d_rope, d_v, d_c, S):
         op_ref.kv_b_proj.copy_(w)
 
     op.forward_diff_with(
-        op_ref, query, compressed_kv, k_pe, seqlens,
+        op_ref, query, compressed_kv, k_pe, total_seq_lens,
         atol=1e-2, rtol=1e-2,
     )
 
@@ -492,8 +503,8 @@ def test_decode_mla(B, H, d_nope, d_rope, d_v, d_c, S):
 )
 @bypass_not_implemented
 def test_prefill_mla(H, d_nope, d_rope, d_v, d_c):
-    seqlens = torch.tensor([32, 48], dtype=torch.int32)
-    cu = torch.cat([torch.tensor([0], dtype=torch.int32), seqlens.cumsum(0)])
+    total_seq_lens = torch.tensor([32, 48], dtype=torch.int32)
+    cu = torch.cat([torch.tensor([0], dtype=torch.int32), total_seq_lens.cumsum(0, dtype=torch.int32)])
     T = cu[-1].item()
 
     query = torch.randn(T, H, d_nope + d_rope, dtype=torch.bfloat16)
@@ -571,7 +582,7 @@ def test_decode_nsa(B, H, D, S):
     query = torch.randn(B, H, D, dtype=torch.bfloat16)
     key = torch.randn(B, S, H, D, dtype=torch.bfloat16)
     value = torch.randn(B, S, H, D, dtype=torch.bfloat16)
-    seqlens = torch.full((B,), S, dtype=torch.int32)
+    total_seq_lens = torch.full((B,), S, dtype=torch.int32)
 
     op = MojoDecodeNSA(H, D, compress_ratio=4, num_selected_blocks=4, window_size=64)
     op_ref = MojoDecodeNSA._registry.get("torch")(H, D, compress_ratio=4, num_selected_blocks=4, window_size=64)
@@ -581,7 +592,7 @@ def test_decode_nsa(B, H, D, S):
         op_ref.gate_proj.copy_(g)
 
     op.forward_diff_with(
-        op_ref, query, key, value, seqlens,
+        op_ref, query, key, value, total_seq_lens,
         atol=1e-2, rtol=1e-2,
     )
 
@@ -622,12 +633,12 @@ def _generate_paged_mla_decode_data(batch_size, num_heads, d_nope, d_rope, d_v,
                                      kv_lora_rank, max_seq_len, block_size, dtype):
     query = torch.randn(batch_size, num_heads, d_nope + d_rope, dtype=dtype)
     if max_seq_len > 0:
-        seqlens = torch.randint(max_seq_len // 2, max_seq_len, (batch_size,), dtype=torch.int32).clamp(min=1)
+        total_seq_lens = torch.randint(max_seq_len // 2, max_seq_len, (batch_size,), dtype=torch.int32).clamp(min=1)
     else:
-        seqlens = torch.randperm(batch_size, dtype=torch.int32)
+        total_seq_lens = torch.randperm(batch_size, dtype=torch.int32)
 
-    max_nb = (seqlens.max().item() + block_size - 1) // block_size
-    total_blocks = int(torch.div(seqlens + block_size - 1, block_size, rounding_mode="floor").sum().item()) + 10
+    max_nb = (total_seq_lens.max().item() + block_size - 1) // block_size
+    total_blocks = int(torch.div(total_seq_lens + block_size - 1, block_size, rounding_mode="floor").sum().item()) + 10
 
     ckv_cache = torch.randn(total_blocks, 1, block_size, kv_lora_rank, dtype=dtype)
     kpe_cache = torch.randn(total_blocks, 1, block_size, d_rope, dtype=dtype)
@@ -636,11 +647,11 @@ def _generate_paged_mla_decode_data(batch_size, num_heads, d_nope, d_rope, d_v,
     free = torch.randperm(total_blocks)
     off = 0
     for i in range(batch_size):
-        n = (seqlens[i].item() + block_size - 1) // block_size
+        n = (total_seq_lens[i].item() + block_size - 1) // block_size
         block_tables[i, :n] = free[off:off + n]
         off += n
 
-    return query, ckv_cache, kpe_cache, seqlens, block_tables
+    return query, ckv_cache, kpe_cache, total_seq_lens, block_tables
 
 
 @pytest.mark.parametrize(
@@ -653,7 +664,7 @@ def _generate_paged_mla_decode_data(batch_size, num_heads, d_nope, d_rope, d_v,
 )
 @bypass_not_implemented
 def test_paged_decode_mla(B, H, d_nope, d_rope, d_v, d_c, S, blk):
-    query, ckv_cache, kpe_cache, seqlens, bt = _generate_paged_mla_decode_data(
+    query, ckv_cache, kpe_cache, total_seq_lens, bt = _generate_paged_mla_decode_data(
         B, H, d_nope, d_rope, d_v, d_c, S, blk, torch.bfloat16,
     )
     op = MojoPagedDecodeMLA(H, d_nope, d_rope, d_v, d_c)
@@ -664,7 +675,7 @@ def test_paged_decode_mla(B, H, d_nope, d_rope, d_v, d_c, S, blk):
         op_ref.kv_b_proj.copy_(w)
 
     op.forward_diff_with(
-        op_ref, query, ckv_cache, kpe_cache, seqlens, bt,
+        op_ref, query, ckv_cache, kpe_cache, total_seq_lens, bt,
         atol=1e-2, rtol=1e-2,
     )
 
@@ -679,7 +690,7 @@ def _generate_paged_mla_prefill_data(batch_size, num_heads, d_nope, d_rope, d_v,
         q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32).clamp(min=1)
     else:
         q_lens = torch.randperm(batch_size, dtype=torch.int32)
-    cu = torch.cat([torch.tensor([0], dtype=torch.int32), q_lens.cumsum(0)])
+    cu = torch.cat([torch.tensor([0], dtype=torch.int32), q_lens.cumsum(0, dtype=torch.int32)])
     T = cu[-1].item()
 
     query = torch.randn(T, num_heads, d_nope + d_rope, dtype=dtype)
@@ -749,7 +760,7 @@ def test_paged_prefill_mla(B, H, d_nope, d_rope, d_v, d_c, max_q, blk):
 )
 @bypass_not_implemented
 def test_paged_decode_nsa(B, H, D, S, blk):
-    query, k_cache, v_cache, seqlens, bt = generate_paged_decode_data(
+    query, k_cache, v_cache, total_seq_lens, bt, _ = generate_paged_decode_data(
         batch_size=B, num_q_heads=H, num_kv_heads=H,
         head_dim=D, max_seq_len=S, block_size=blk, dtype=torch.bfloat16,
     )
@@ -762,13 +773,13 @@ def test_paged_decode_nsa(B, H, D, S, blk):
         op_ref.gate_proj.copy_(g)
 
     op.forward_diff_with(
-        op_ref, query, k_cache, v_cache, seqlens, bt,
+        op_ref, query, k_cache, v_cache, total_seq_lens, bt,
         atol=1e-2, rtol=1e-2,
     )
 
 
 # ===========================================================================
-# MojoPrefillNSA (non-paged) — small seqlens to keep runtime manageable
+# MojoPrefillNSA (non-paged) — small total_seq_lens to keep runtime manageable
 # ===========================================================================
 
 @pytest.mark.parametrize(
@@ -777,8 +788,8 @@ def test_paged_decode_nsa(B, H, D, S, blk):
 )
 @bypass_not_implemented
 def test_prefill_nsa(H, D):
-    seqlens = torch.tensor([32, 24], dtype=torch.int32)
-    cu = torch.cat([torch.tensor([0], dtype=torch.int32), seqlens.cumsum(0)])
+    total_seq_lens = torch.tensor([32, 24], dtype=torch.int32)
+    cu = torch.cat([torch.tensor([0], dtype=torch.int32), total_seq_lens.cumsum(0, dtype=torch.int32)])
     T = cu[-1].item()
 
     query = torch.randn(T, H, D, dtype=torch.bfloat16)
@@ -800,7 +811,7 @@ def test_prefill_nsa(H, D):
 
 
 # ===========================================================================
-# MojoPagedPrefillNSA — small seqlens to keep runtime manageable
+# MojoPagedPrefillNSA — small total_seq_lens to keep runtime manageable
 # ===========================================================================
 
 @pytest.mark.parametrize(
@@ -810,7 +821,7 @@ def test_prefill_nsa(H, D):
 @bypass_not_implemented
 def test_paged_prefill_nsa(H, D, blk):
     B = 2
-    query, k_cache, v_cache, cu, bt, _ = generate_paged_prefill_data(
+    query, k_cache, v_cache, cu, bt, _, _, _ = generate_paged_prefill_data(
         batch_size=B, num_q_heads=H, num_kv_heads=H,
         head_dim=D, max_q_len=32, max_kv_computed_len=0,
         block_size=blk, dtype=torch.bfloat16,
@@ -847,10 +858,10 @@ test_configs_swa_prefill = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_seqlens_q, block_tables, seqlens_kv",
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens",
     [
         pytest.param(
-            *generate_paged_prefill_data(
+            *(lambda d: (d[0], d[1], d[2], d[3], d[4], d[5]))(generate_paged_prefill_data(
                 batch_size=B,
                 num_q_heads=Q_H,
                 num_kv_heads=KV_H,
@@ -859,7 +870,7 @@ test_configs_swa_prefill = [
                 max_kv_computed_len=KV_COMPUTED_LEN,
                 block_size=BLK_S,
                 dtype=dtype,
-            ),
+            )),
             id=ID,
         )
         for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_swa_prefill
@@ -875,10 +886,10 @@ def test_paged_prefill_swa(
     query: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
+    cu_q_lens: torch.Tensor,
     block_tables: torch.Tensor,
     gqa_layout: str,
-    seqlens_kv: Optional[torch.Tensor],
+    cu_total_seq_lens: Optional[torch.Tensor],
     global_window: int,
     local_window: int,
 ):
@@ -905,10 +916,10 @@ def test_paged_prefill_swa(
         query,
         k_cache,
         v_cache,
-        cu_seqlens_q,
+        cu_q_lens,
         block_tables,
         softmax_scale=softmax_scale,
-        seqlens_kv=seqlens_kv,
+        cu_total_seq_lens=cu_total_seq_lens,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
     )
@@ -925,7 +936,7 @@ test_configs_swa_decode = [
 ]
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, seqlens, block_tables",
+    "query, k_cache, v_cache, total_seq_lens, block_tables, max_total_seq_len",
     [
         pytest.param(
             *generate_paged_decode_data(
@@ -952,8 +963,9 @@ def test_paged_decode_swa(
     query: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
-    seqlens: torch.Tensor,
+    total_seq_lens: torch.Tensor,
     block_tables: torch.Tensor,
+    max_total_seq_len: int,
     gqa_layout: str,
     global_window: int,
     local_window: int,
@@ -982,7 +994,7 @@ def test_paged_decode_swa(
         query,
         k_cache,
         v_cache,
-        seqlens,
+        total_seq_lens,
         block_tables,
         softmax_scale=softmax_scale,
         atol=atol,
@@ -1001,7 +1013,7 @@ def generate_sdpa_data(
 ):
     q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
     q_lens = torch.clamp(q_lens, min=1)
-    cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0).to(torch.int32)])
+    cu_q_lens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0, dtype=torch.int32)])
 
     if max_kv_computed_len <= 0:
         kv_cache_lens = None
@@ -1009,17 +1021,17 @@ def generate_sdpa_data(
     else:
         kv_cache_lens = torch.randint(max_kv_computed_len // 2, max_kv_computed_len, (batch_size,), dtype=torch.int32)
         kv_lens = q_lens + kv_cache_lens
-    cu_seqlens_kv = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0).to(torch.int32)])
+    cu_total_seq_lens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0, dtype=torch.int32)])
 
-    total_q_tokens = cu_seqlens_q[-1].item()
-    total_kv_tokens = cu_seqlens_kv[-1].item()
+    total_q_tokens = cu_q_lens[-1].item()
+    total_kv_tokens = cu_total_seq_lens[-1].item()
 
     query = torch.randn(total_q_tokens, num_q_heads, head_dim, dtype=dtype)
     key = torch.randn(total_kv_tokens, num_kv_heads, head_dim, dtype=dtype)
     value = torch.randn(total_kv_tokens, num_kv_heads, head_dim, dtype=dtype)
 
 
-    return query, key, value, cu_seqlens_q, cu_seqlens_kv
+    return query, key, value, cu_q_lens, cu_total_seq_lens
 
 
 test_configs_swa_infer = [
@@ -1029,7 +1041,7 @@ test_configs_swa_infer = [
 ]
 
 @pytest.mark.parametrize(
-    "query, key, value, cu_seqlens_q, cu_seqlens_kv",
+    "query, key, value, cu_q_lens, cu_total_seq_lens",
     [
         pytest.param(
             *generate_sdpa_data(
@@ -1056,8 +1068,8 @@ def test_swa_infer(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
-    cu_seqlens_kv: torch.Tensor,
+    cu_q_lens: torch.Tensor,
+    cu_total_seq_lens: torch.Tensor,
     gqa_layout: str,
     global_window: int,
     local_window: int,
@@ -1084,8 +1096,8 @@ def test_swa_infer(
         query,
         key,
         value,
-        cu_seqlens_q,
-        cu_seqlens_kv,
+        cu_q_lens,
+        cu_total_seq_lens,
         softmax_scale=softmax_scale,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,

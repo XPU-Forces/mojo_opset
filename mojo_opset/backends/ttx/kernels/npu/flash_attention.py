@@ -87,7 +87,7 @@ def paged_prefill_kernel(
     o_ptr,
     aux_mask_ptr,
     batch_size,
-    cu_seqlens_q_ptr,
+    cu_q_lens_ptr,
     seqlens_kv_ptr,
     block_tables_ptr,
     stride_qt,
@@ -127,8 +127,8 @@ def paged_prefill_kernel(
     prev_q_chunks = 0
 
     for b_id in range(batch_size):
-        q_start_loc = tl.load(cu_seqlens_q_ptr + b_id).to(tl.int32)
-        q_end_loc = tl.load(cu_seqlens_q_ptr + b_id + 1).to(tl.int32)
+        q_start_loc = tl.load(cu_q_lens_ptr + b_id).to(tl.int32)
+        q_end_loc = tl.load(cu_q_lens_ptr + b_id + 1).to(tl.int32)
         q_seq_len = q_end_loc - q_start_loc
 
         if seqlens_kv_ptr is None:
@@ -247,7 +247,7 @@ def paged_attention_prefill_impl(
     q: torch.Tensor,
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
+    cu_q_lens: torch.Tensor,
     seqlens_kv: Optional[torch.Tensor],
     block_tables: torch.Tensor,
     gqa_interleave: bool,
@@ -256,7 +256,7 @@ def paged_attention_prefill_impl(
 ) -> torch.Tensor:
     _, num_q_heads, head_dim = q.shape
     _, num_kv_heads, page_size, _ = key_cache.shape
-    batch_size = cu_seqlens_q.shape[0] - 1
+    batch_size = cu_q_lens.shape[0] - 1
 
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(head_dim)
@@ -286,7 +286,7 @@ def paged_attention_prefill_impl(
         o,
         aux_mask,
         batch_size,
-        cu_seqlens_q,
+        cu_q_lens,
         seqlens_kv,
         block_tables.to(torch.int32),
         q.stride(0),

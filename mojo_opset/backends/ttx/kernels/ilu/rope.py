@@ -636,7 +636,7 @@ def rot_pos_embed_impl(
     cos: torch.Tensor,
     sin: torch.Tensor,
     *,
-    cu_seqlens_q: Optional[torch.Tensor] = None,
+    cu_q_lens: Optional[torch.Tensor] = None,
     seqlens_kv: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -648,11 +648,11 @@ def rot_pos_embed_impl(
     """
     if position_ids is not None:
         return cos[position_ids], sin[position_ids]
-    if cu_seqlens_q is None:
+    if cu_q_lens is None:
         seq_len = x.shape[-2]
         return cos[:seq_len], sin[:seq_len]
 
-    seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    seqlens_q = cu_q_lens[1:] - cu_q_lens[:-1]
     if seqlens_kv is not None:
         context_lens = seqlens_kv - seqlens_q
     else:
@@ -665,8 +665,8 @@ def rot_pos_embed_impl(
     cos_out = torch.empty((total, rope_dim), device=device, dtype=dtype)
     sin_out = torch.empty((total, rope_dim), device=device, dtype=dtype)
     for i in range(seqlens_q.numel()):
-        start = int(cu_seqlens_q[i].item())
-        end = int(cu_seqlens_q[i + 1].item())
+        start = int(cu_q_lens[i].item())
+        end = int(cu_q_lens[i + 1].item())
         q_len = end - start
         ctx = int(context_lens[i].item())
         positions = torch.arange(ctx, ctx + q_len, device=device, dtype=torch.int64)

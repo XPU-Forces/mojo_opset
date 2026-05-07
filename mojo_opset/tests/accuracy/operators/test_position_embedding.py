@@ -3,9 +3,10 @@ import torch
 
 from mojo_opset.tests.utils import bypass_not_implemented
 
-from mojo_opset import MojoRotaryEmbedding
 from mojo_opset import MojoApplyRoPE
 from mojo_opset import MojoGridRoPE
+from mojo_opset import MojoRelativeEmbedding
+from mojo_opset import MojoRotaryEmbedding
 from mojo_opset.utils.platform import get_torch_device
 
 torch.random.manual_seed(42)
@@ -68,16 +69,16 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
         x = torch.randn(cu_seqlens[-1].item(), hidden_size, device=device, dtype=torch.float32)
 
         torch.testing.assert_close(
-            rot_pos_emb_ref(x, cu_seqlens_q=cu_seqlens, seqlens_kv=kv_lens),
-            rot_pos_emb(x, cu_seqlens_q=cu_seqlens, seqlens_kv=kv_lens),
+            rot_pos_emb_ref(x, cu_q_lens=cu_seqlens, total_seq_lens=kv_lens),
+            rot_pos_emb(x, cu_q_lens=cu_seqlens, total_seq_lens=kv_lens),
             atol=1e-5,
             rtol=1e-5,
         )
         rot_pos_emb.forward_diff_with(
             rot_pos_emb_ref,
             x,
-            cu_seqlens_q=cu_seqlens,
-            seqlens_kv=kv_lens,
+            cu_q_lens=cu_seqlens,
+            total_seq_lens=kv_lens,
             atol=1e-5,
             rtol=1e-5,
     )
@@ -111,7 +112,7 @@ def test_apply_rope(bs, seqlen, q_heads, k_heads, head_first, head_dim, rope_per
     rope_dim = int(head_dim * rope_percentage)
     hidden_size = q_heads * head_dim
 
-    rot_pos_emb = MojoRotaryEmbedding(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
+    rot_pos_emb = MojoRotaryEmbedding._registry.get("torch")(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
 
     if mode == "padding_prefill_pos3d":
         offsets = torch.randint(0, max_seq_len - seqlen - 1, (bs,), device=device, dtype=torch.int32)
@@ -145,7 +146,7 @@ def test_apply_rope(bs, seqlen, q_heads, k_heads, head_first, head_dim, rope_per
         k = torch.randn(total_seq_len, k_heads, head_dim, device=device, dtype=dtype)
 
         kv_lens = torch.randint(0, max_seq_len - seqlen, (bs,), device=device, dtype=torch.int32)
-        cos, sin = rot_pos_emb(x, cu_seqlens_q=cu_seqlens, seqlens_kv=kv_lens)
+        cos, sin = rot_pos_emb(x, cu_q_lens=cu_seqlens, total_seq_lens=kv_lens)
         if head_first:
             q = q.transpose(0, 1)
             k = k.transpose(0, 1)
@@ -206,3 +207,29 @@ def test_grid_pos_emb(bs, grid, heads, head_dim, pad, dtype):
     rope_ref = MojoGridRoPE._registry.get("torch")()
 
     rope.forward_diff_with(rope_ref, x, grid_sizes, freqs_list, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize("num_buckets", [32, 64])
+@pytest.mark.parametrize("num_heads", [8, 16])
+@pytest.mark.parametrize("bidirectional", [True, False])
+@pytest.mark.parametrize(
+    "lq, lk",
+    [
+        (64, 64),
+        (128, 512),
+        (33, 97),
+    ],
+)
+@bypass_not_implemented
+def test_relative_embedding(num_buckets, num_heads, bidirectional, lq, lk):
+    emb = MojoRelativeEmbedding(num_buckets=num_buckets, num_heads=num_heads, bidirectional=bidirectional)
+    emb_ref = MojoRelativeEmbedding._registry.get("torch")(
+        num_buckets=num_buckets, num_heads=num_heads, bidirectional=bidirectional
+    )
+
+    with torch.no_grad():
+        weight = torch.randn(num_buckets, num_heads, dtype=torch.float32)
+        emb.embedding.weight.copy_(weight)
+        emb_ref.embedding.weight.copy_(weight)
+
+    emb.forward_diff_with(emb_ref, lq, lk, atol=1e-5, rtol=1e-6)

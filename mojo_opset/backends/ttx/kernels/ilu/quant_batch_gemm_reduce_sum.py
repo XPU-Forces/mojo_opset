@@ -66,7 +66,7 @@ def _quant_one_batch_accum_kernel(
     tl.store(c_ptrs, prev + contrib, mask=mask)
 
 
-def quant_group_linear_reduce_sum_impl(
+def quant_batch_gemm_reduce_sum_impl(
     x: torch.Tensor,
     w: torch.Tensor,
     x1_scale: torch.Tensor,
@@ -80,7 +80,7 @@ def quant_group_linear_reduce_sum_impl(
     Returns: (M, N) bfloat16
     """
     if x.dtype != torch.int8 or w.dtype != torch.int8:
-        raise TypeError("quant_group_linear_reduce_sum_impl expects int8 x and w")
+        raise TypeError("quant_batch_gemm_reduce_sum_impl expects int8 x and w")
     if not x.is_contiguous():
         x = x.contiguous()
     if not w.is_contiguous():
@@ -96,7 +96,7 @@ def quant_group_linear_reduce_sum_impl(
     if b != b2 or k != k2:
         raise ValueError("x and w batch/K dimensions must match")
 
-    # Match MojoQuantGroupLinearReduceSum reference: per-batch fp32 tile, cast to bf16,
+    # Match MojoQuantBatchGemmReduceSum reference: per-batch fp32 tile, cast to bf16,
     # then in-place bf16 accumulation (not fp32 sum then one cast).
     reduced_out = torch.zeros((m, n), device=x.device, dtype=torch.bfloat16)
     batch_contrib = torch.zeros((m, n), device=x.device, dtype=torch.float32)

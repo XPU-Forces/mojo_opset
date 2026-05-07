@@ -38,28 +38,20 @@ from .operators.kv_cache import MojoStoreMLAKVCache
 from .operators.kv_cache import MojoStorePagedKVCache
 from .operators.kv_cache import MojoStorePagedMLAKVCache
 
-""" linear """
-from .operators.gemm import MojoGemmDequant
+""" gemm """
+from .operators.gemm import MojoGemm
+from .operators.gemm import MojoQuantGemm
 from .operators.gemm import MojoGroupGemm
-from .operators.gemm import MojoGroupGemm as MojoGroupLinear
-from .operators.gemm import MojoQuantGroupLinearReduceSum
-from .operators.linear import MojoLinear
 
 """ compute + comm """
-from .operators.compute_with_comm import MojoAllGatherGemm
 from .operators.compute_with_comm import MojoGemmAll2All
+from .operators.compute_with_comm import MojoAllGatherGemm
 from .operators.compute_with_comm import MojoGemmAllReduce
 from .operators.compute_with_comm import MojoGemmReduceScatter
-
-""" matmul """
-# Aliases for backward compatibility
-from .operators.gemm import MojoGroupGemm as MojoGroupedMatmul
-from .operators.gemm import MojoQuantGroupLinearReduceSum as MojoGroupQuantMatmulReduceSum
 
 """ embedding """
 from .operators.embedding import MojoEmbedding
 from .operators.embedding import MojoParallelEmbedding
-from .operators.embedding import MojoRelativeEmbedding
 
 """ over_encoding """
 from .operators.over_encoding import MojoOverEncoding
@@ -98,6 +90,7 @@ from .operators.normalization import MojoRMSNorm
 from .operators.normalization import MojoRMSNormQuant
 
 """ position_embedding """
+from .operators.position_embedding import MojoRelativeEmbedding
 from .operators.position_embedding import MojoApplyRoPE
 from .operators.position_embedding import MojoGridRoPE
 from .operators.position_embedding import MojoNormRoPE
@@ -137,9 +130,6 @@ __all__ = [
     "MojoOperator",
 
     "MojoGelu",
-    "MojoGroupedMatmul",
-    "MojoGroupLinear",
-    "MojoGroupQuantMatmulReduceSum",
     "MojoSilu",
     "MojoSwiGLU",
     "MojoRotateActivation",
@@ -165,12 +155,11 @@ __all__ = [
     "MojoStoreMLAKVCache",
     "MojoStorePagedMLAKVCache",
 
-    "MojoLinear",
-    "MojoGemmDequant",
+    "MojoGemm",
+    "MojoQuantGemm",
     "MojoGroupGemm",
-    "MojoQuantGroupLinearReduceSum",
-    "MojoAllGatherGemm",
     "MojoGemmAll2All",
+    "MojoAllGatherGemm",
     "MojoGemmAllReduce",
     "MojoGemmReduceScatter",
 

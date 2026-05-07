@@ -83,7 +83,7 @@ Hook 在每次 forward 时重新读取活跃规则，因此支持在迭代之间
 ```
 [MojoDebug] Attached. 58 MojoOperator instances discovered:
   layer 0-4: input_layernorm (MojoRMSNorm), mlp.act_fn (MojoSwiGLU), ...
-  global: embed (MojoEmbedding), lm_head (MojoLinear), norm (MojoRMSNorm)
+  global: embed (MojoEmbedding), lm_head (MojoGemm), norm (MojoRMSNorm)
 [MojoDebug] Rule format: "layer_idx:op_name", e.g. "5:input_layernorm" or "*:self_attn.rope"
 ```
 

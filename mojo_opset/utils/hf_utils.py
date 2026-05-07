@@ -1,5 +1,7 @@
 import glob
 import os
+import json
+import gc
 
 from collections import OrderedDict
 from typing import List
@@ -32,7 +34,6 @@ def _resolve_local_files_only(model_id_or_path: str) -> bool:
             "HF_LOCAL_FILES_ONLY",
         )
     )
-
 
 def load_weights_direct(model_path: str, torch_model: nn.Module) -> None:
     # 1. Collect weight files
@@ -283,3 +284,52 @@ def load_weights_with_renaming_and_converter(
 
     new_state_dict = convert_hf_state_dict(state_dict, model.state_dict(), renamings, converters)
     return model.load_state_dict(new_state_dict, strict=strict_loading)
+
+def load_sharded_weights_into_meta_model(meta_model: nn.Module, *index_files, strict=True, map_locations=None):
+    loaded_keys = set()
+    shard_files = []
+    for load_index in index_files:
+        with open(load_index, "r", encoding="utf-8") as f:
+            index = json.load(f)
+
+        shard_files.extend(
+            os.path.join(os.path.dirname(load_index), weight_file) 
+            for weight_file in set(index["weight_map"].values())
+        )
+        loaded_keys = loaded_keys.union(index["weight_map"].keys())
+
+    meta_state_dict = meta_model.state_dict()
+    model_keys = set(meta_state_dict.keys())
+    missing_keys = model_keys - loaded_keys
+    unexpected_keys = loaded_keys - model_keys
+    if strict and (len(missing_keys) > 0 or len(unexpected_keys) > 0):
+        error_message = f"Error(s) in loading state_dict for {meta_model.__class__.__name__}"
+        if len(missing_keys) > 0:
+            str_missing_keys = ",".join([f'"{k}"' for k in missing_keys])
+            error_message += f"\nMissing key(s): {str_missing_keys}."
+        if len(unexpected_keys) > 0:
+            str_unexpected_keys = ",".join([f'"{k}"' for k in unexpected_keys])
+            error_message += f"\nUnexpected key(s): {str_unexpected_keys}."
+        raise RuntimeError(error_message)
+
+    if map_locations is None:
+        map_locations = {}
+
+    for shard_file in shard_files:
+        state_dict = load_safetensors(shard_file)
+        for key, tensor in state_dict.items():
+            if meta_state_dict[key] is None:
+                # FIXME: directly drop it?
+                continue
+            tensor = tensor.to(meta_state_dict[key].dtype)
+            if key in map_locations:
+                tensor = tensor.to(map_locations[key])
+            state_dict[key] = tensor
+        meta_model.load_state_dict(state_dict, strict=False, assign=True)
+
+        # Make sure memory is freed before we load the next state dict.
+        del state_dict
+        gc.collect()
+
+    # Return the same thing as PyTorch load_state_dict function.
+    return torch.nn.modules.module._IncompatibleKeys(missing_keys, unexpected_keys)
