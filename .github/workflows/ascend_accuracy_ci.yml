@@ -54,6 +54,8 @@ jobs:
           pip install -e .\[npu\] --index-url https://bytedpypi.byted.org/simple
           python3 -m build .
           pip install dist/*.whl --force-reinstall --no-deps
+          pip uninstall -y byted-triton-x triton
+          rm -rf /usr/local/lib/python3.11/dist-packages/triton
           wget https://gitcode.com/Ascend/triton-ascend/releases/download/v3.2.1/triton_ascend-3.2.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
           pip install triton_ascend-3.2.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - name: prepare_ccec_compiler
