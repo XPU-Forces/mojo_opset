@@ -225,6 +225,7 @@ def mrope_native(
     sin: torch.Tensor,
     mrope_section: List[int],
     is_interleaved: bool = False,
+    head_dim: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Native PyTorch implementation of MRoPE for reference.
@@ -232,18 +233,21 @@ def mrope_native(
     Args:
         q: [num_tokens, n_qh * head_dim] tensor
         k: [num_tokens, n_kh * head_dim] tensor
-        cos: [3, num_tokens, head_dim // 2] or [num_tokens, sum(mrope_section)] tensor
-        sin: [3, num_tokens, head_dim // 2] or [num_tokens, sum(mrope_section)] tensor
+        cos: [3, num_tokens, rotary_dim // 2] or [num_tokens, sum(mrope_section)] tensor
+        sin: [3, num_tokens, rotary_dim // 2] or [num_tokens, sum(mrope_section)] tensor
         mrope_section: [t_section, h_section, w_section]
         is_interleaved: if True, T/H/W positions are interleaved
+        head_dim: head dimension. If None, defaults to rope_dim assuming full-head rotation.
 
     Returns:
         (q, k) with RoPE applied
     """
     num_tokens, n_qh_hd = q.shape
-    head_dim = cos.shape[-1] * 2
     rope_dim = sum(mrope_section) * 2
     half_rope_dim = rope_dim // 2
+    
+    if head_dim is None:
+        head_dim = rope_dim
 
     q = q.view(num_tokens, -1, head_dim)
     k = k.view(num_tokens, -1, head_dim)
