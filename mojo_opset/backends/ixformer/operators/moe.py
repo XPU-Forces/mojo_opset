@@ -142,6 +142,9 @@ class IxformerQuantExperts(MojoQuantExperts):
                  **kwargs):
         super().__init__(num_experts, hidden_size, intermediate_size, activation, quant_dtype, quant_group_size, weight_bits, **kwargs)
         
+        if self.weight_bits != 4:
+            raise NotImplementedError(f"IxformerQuantExperts only supports weight_bits=4, got {self.weight_bits}.")
+        
         if self.quant_group_size not in [256, 320, 512]:
             raise NotImplementedError(f"IxformerQuantExperts: quant_group_size must be 256, 320, or 512, got {self.quant_group_size}.")
 

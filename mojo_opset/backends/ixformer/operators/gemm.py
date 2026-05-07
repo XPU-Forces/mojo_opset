@@ -22,11 +22,11 @@ class IxformerGroupGemm(MojoGroupGemm):
         if self.trans_weight:
             num_groups_w, n, bk = self.weight.shape
             if bk % 32 != 0 or n % 2 != 0:
-                raise NotImplementedError("K of input should be divisible by 32 and M of input should be divisible by 2 when trans_weight is True")
+                raise NotImplementedError("K of input should be divisible by 32 and N of weight should be divisible by 2 when trans_weight is True")
         else:
             num_groups_w, bk, n = self.weight.shape
             if bk % 32 != 0 or n % 32 != 0:
-                raise NotImplementedError("K of input should be divisible by 32 and M of input should be divisible by 32 when trans_weight is False")
+                raise NotImplementedError("K of input should be divisible by 32 and N of weight should be divisible by 32 when trans_weight is False")
 
         return ixf_f.moe_w16a16_group_gemm(input, self.weight, input.dtype, group_list, format="TN" if self.trans_weight else "NN")
 
