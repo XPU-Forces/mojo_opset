@@ -709,6 +709,14 @@ requires_ilu = pytest.mark.skipif(
     reason="Cuda graph only supported on Iluvatar GPU",
 )
 
+def _requested_backend() -> str | None:
+    raw_backend = os.environ.get("MOJO_BACKEND")
+    return raw_backend.strip().lower() if raw_backend else None
+
+_requires_ixformer = pytest.mark.skipif(
+    get_platform() != "ilu" or _requested_backend() not in (None, "ixformer"),
+    reason="Test only for Ixformer",
+)
 
 class MockFunctionCtx:
     """
