@@ -11,6 +11,24 @@ from mojo_opset import MojoPagedPrefillQuantSWA
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 
+def _quantize_query(
+    query: torch.Tensor,
+    query_dtype: torch.Tensor,
+):
+    if query_dtype == torch.int8:
+        int_dtype = torch.int8
+        qmax = 2 ** (8 - 1) - 1
+        qmin = -(2 ** (8 - 1))
+    else:
+        assert query_dtype == torch.bfloat16
+        return query.to(query_dtype), None
+    
+    query_f = query.float()
+    amax = query_f.abs().amax(dim=-1, keepdim=True)  # -> [num_tokens, num_q_heads, 1]
+    qscale = (amax / qmax).clamp(min=1e-5)
+    quant = torch.round(query_f / qscale).clamp(qmin, qmax).to(int_dtype)
+    return quant, qscale.to(torch.bfloat16)
+
 def _quantize_kv_cache(
     cache: torch.Tensor,  # [n_blocks, n_kv_heads, block_size, head_dim] in float dtype
     context_dtype: torch.dtype,
@@ -181,10 +199,10 @@ test_configs_prefill_quant_gqa = [
     ],
 )
 @pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
-@pytest.mark.parametrize("quant_dtype, context_dtype", 
+@pytest.mark.parametrize("query_dtype, context_dtype, compute_dtype", 
     [
-        (torch.int8, torch.int8),
-        (torch.bfloat16, torch.int8),
+        (torch.bfloat16, torch.int8, torch.bfloat16),
+        (torch.bfloat16, torch.int8, torch.int8),
     ]
 )
 @auto_switch_platform()
@@ -197,23 +215,28 @@ def test_paged_prefill_quant_gqa(
     block_tables: torch.Tensor,
     cu_total_seq_lens: Optional[torch.Tensor],
     gqa_layout: str,
-    quant_dtype: torch.dtype,
+    query_dtype: torch.dtype,
     context_dtype: torch.dtype,
+    compute_dtype: torch.dtype,
 ):
+    query_q, query_scale = _quantize_query(query, query_dtype)
+
     k_cache_q, key_scale = _quantize_kv_cache(k_cache, context_dtype)
     v_cache_q, value_scale = _quantize_kv_cache(v_cache, context_dtype)
 
     op = MojoPagedPrefillQuantGQA(
         is_causal=True,
         gqa_layout=gqa_layout,
-        quant_dtype=quant_dtype,
+        query_dtype=query_dtype,
         context_dtype=context_dtype,
+        compute_dtype=compute_dtype,
     )
     op_ref = MojoPagedPrefillQuantGQA._registry.get("torch")(
         is_causal=True,
         gqa_layout=gqa_layout,
-        quant_dtype=quant_dtype,
+        query_dtype=query_dtype,
         context_dtype=context_dtype,
+        compute_dtype=compute_dtype,
     )
 
     head_dim = query.shape[-1]
@@ -221,7 +244,8 @@ def test_paged_prefill_quant_gqa(
 
     op.forward_diff_with(
         op_ref,
-        query,
+        query_q,
+        query_scale,
         k_cache_q,
         key_scale,
         v_cache_q,
@@ -267,10 +291,10 @@ test_configs_decode_quant_gqa = [
     ],
 )
 @pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
-@pytest.mark.parametrize("quant_dtype, context_dtype", 
+@pytest.mark.parametrize("query_dtype, context_dtype, compute_dtype", 
     [
-        (torch.int8, torch.int8),
-        (torch.bfloat16, torch.int8),
+        (torch.bfloat16, torch.int8, torch.bfloat16),
+        (torch.bfloat16, torch.int8, torch.int8),
     ]
 )
 @auto_switch_platform()
@@ -283,9 +307,12 @@ def test_paged_decode_quant_gqa(
     block_tables: torch.Tensor,
     max_total_seq_len: int,
     gqa_layout: str,
-    quant_dtype: torch.dtype,
+    query_dtype: torch.dtype,
     context_dtype: torch.dtype,
+    compute_dtype: torch.dtype,
 ):
+    query_q, query_scale = _quantize_query(query, query_dtype)
+
     k_cache_q, key_scale = _quantize_kv_cache(k_cache, context_dtype)
     v_cache_q, value_scale = _quantize_kv_cache(v_cache, context_dtype)
 
@@ -295,14 +322,16 @@ def test_paged_decode_quant_gqa(
     op = MojoPagedDecodeQuantGQA(
         is_causal=True,
         gqa_layout=gqa_layout,
-        quant_dtype=quant_dtype,
+        query_dtype=query_dtype,
         context_dtype=context_dtype,
+        compute_dtype=compute_dtype,
     )
     op_ref = MojoPagedDecodeQuantGQA._registry.get("torch")(
         is_causal=True,
         gqa_layout=gqa_layout,
-        quant_dtype=quant_dtype,
+        query_dtype=query_dtype,
         context_dtype=context_dtype,
+        compute_dtype=compute_dtype,
     )
 
     atol = 2e-2 if query.dtype != torch.float32 else 1e-5
@@ -310,7 +339,8 @@ def test_paged_decode_quant_gqa(
 
     op.forward_diff_with(
         op_ref,
-        query,
+        query_q,
+        query_scale,
         k_cache_q,
         key_scale,
         v_cache_q,
@@ -363,10 +393,10 @@ test_configs_prefill_quant_swa = [
         ("AABB", 4, 1023),
     ],
 )
-@pytest.mark.parametrize("quant_dtype, context_dtype", 
+@pytest.mark.parametrize("query_dtype, context_dtype, compute_dtype", 
     [
-        (torch.int8, torch.int8),
-        (torch.bfloat16, torch.int8),
+        (torch.bfloat16, torch.int8, torch.bfloat16),
+        (torch.bfloat16, torch.int8, torch.int8),
     ]
 )
 @auto_switch_platform()
@@ -381,27 +411,31 @@ def test_paged_prefill_quant_swa(
     gqa_layout: str,
     global_window: int,
     local_window: int,
-    quant_dtype: torch.dtype,
+    query_dtype: torch.dtype,
     context_dtype: torch.dtype,
+    compute_dtype: torch.dtype,
 ):
+    query_q, query_scale = _quantize_query(query, query_dtype)
     k_cache_q, key_scale = _quantize_kv_cache(k_cache, context_dtype)
     v_cache_q, value_scale = _quantize_kv_cache(v_cache, context_dtype)
 
     op = MojoPagedPrefillQuantSWA(
         is_causal=True,
-        gqa_layout=gqa_layout,
+        gqa_layout=gqa_layout,  
         local_window_size=local_window,
         global_window_size=global_window,
-        quant_dtype=quant_dtype,
+        query_dtype=query_dtype,
         context_dtype=context_dtype,
+        compute_dtype=compute_dtype,
     )
     op_ref = MojoPagedPrefillQuantSWA._registry.get("torch")(
         is_causal=True,
         gqa_layout=gqa_layout,
         local_window_size=local_window,
         global_window_size=global_window,
-        quant_dtype=quant_dtype,
+        query_dtype=query_dtype,
         context_dtype=context_dtype,
+        compute_dtype=compute_dtype,
     )
 
     head_dim = query.shape[-1]
@@ -409,7 +443,8 @@ def test_paged_prefill_quant_swa(
 
     op.forward_diff_with(
         op_ref,
-        query,
+        query_q,
+        query_scale,
         k_cache_q,
         key_scale,
         v_cache_q,
@@ -462,10 +497,10 @@ test_configs_decode_quant_swa = [
         ("AABB", 4, 1023),
     ],
 )
-@pytest.mark.parametrize("quant_dtype, context_dtype", 
+@pytest.mark.parametrize("query_dtype, context_dtype, compute_dtype", 
     [
-        (torch.int8, torch.int8),
-        (torch.bfloat16, torch.int8),
+        (torch.bfloat16, torch.int8, torch.bfloat16),
+        (torch.bfloat16, torch.int8, torch.int8),
     ]
 )
 @auto_switch_platform()
@@ -480,9 +515,11 @@ def test_paged_decode_quant_swa(
     gqa_layout: str,
     global_window: int,
     local_window: int,
-    quant_dtype: torch.dtype,
+    query_dtype: torch.dtype,
     context_dtype: torch.dtype,
+    compute_dtype: torch.dtype,
 ):
+    query_q, query_scale = _quantize_query(query, query_dtype)
     k_cache_q, key_scale = _quantize_kv_cache(k_cache, context_dtype)
     v_cache_q, value_scale = _quantize_kv_cache(v_cache, context_dtype)
 
@@ -494,16 +531,18 @@ def test_paged_decode_quant_swa(
         gqa_layout=gqa_layout,
         global_window_size=global_window,
         local_window_size=local_window,
-        quant_dtype=quant_dtype,
+        query_dtype=query_dtype,
         context_dtype=context_dtype,
+        compute_dtype=compute_dtype,
     )
     op_ref = MojoPagedDecodeQuantSWA._registry.get("torch")(
         is_causal=True,
         gqa_layout=gqa_layout,
         global_window_size=global_window,
         local_window_size=local_window,
-        quant_dtype=quant_dtype,
+        query_dtype=query_dtype,
         context_dtype=context_dtype,
+        compute_dtype=compute_dtype,
     )
 
     atol = 2e-2 if query.dtype != torch.float32 else 1e-5
@@ -511,7 +550,8 @@ def test_paged_decode_quant_swa(
 
     op.forward_diff_with(
         op_ref,
-        query,
+        query_q,
+        query_scale,
         k_cache_q,
         key_scale,
         v_cache_q,
