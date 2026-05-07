@@ -77,7 +77,7 @@ class MojoQuantMoE(MojoOperator):
         activation: str = "swiglu",
         quant_dtype: torch.dtype = torch.int8,
         quant_group_size: int = -1,
-        weight_dtype: Union[torch.dtype, int] = torch.int8,
+        weight_dtype: Union[torch.dtype, str] = torch.int8,
         **kwargs,
     ):
         super().__init__()
