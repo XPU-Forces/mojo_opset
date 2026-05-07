@@ -225,3 +225,121 @@ class MojoGridRoPE(MojoOperator):
             output.append(x_i)
         y = torch.stack(output)
         return y.type_as(x)
+
+
+class MojoVisionRoPE2D(MojoOperator):
+    def __init__(
+        self,
+        rope_theta: float = 10000.0,
+        rope_dim: Optional[int] = None,
+        adapooling_factor: int = 1,
+    ):
+        super().__init__()
+        # The native position regrouping assumes a positive adapooling window.
+        assert adapooling_factor >= 1, "adapooling_factor must be >= 1"
+        self.rope_theta = rope_theta
+        self.rope_dim = rope_dim
+        self.adapooling_factor = adapooling_factor
+
+    def extra_repr(self) -> str:
+        return (
+            f"rope_theta={self.rope_theta}, rope_dim={self.rope_dim}, "
+            f"adapooling_factor={self.adapooling_factor}"
+        )
+
+    @staticmethod
+    def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
+
+    def _vision_rotary_embedding(self, seqlen: int, dim: int, device: torch.device) -> torch.Tensor:
+        inv_freq = 1.0 / (self.rope_theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim))
+        seq = torch.arange(seqlen, device=device, dtype=inv_freq.dtype)
+        return torch.outer(seq, inv_freq)
+
+    def _build_position_ids(self, grid_hw: torch.Tensor, device: torch.device) -> torch.Tensor:
+        assert grid_hw.ndim == 2 and grid_hw.size(-1) == 2, "grid_hw must be [B, 2]"
+        if torch.is_floating_point(grid_hw):
+            raise AssertionError("grid_hw must be an integer tensor")
+
+        pos_ids = []
+        for gh, gw in grid_hw.to(dtype=torch.int64).tolist():
+            assert gh > 0 and gw > 0, "grid height/width must be positive"
+            assert gh % self.adapooling_factor == 0 and gw % self.adapooling_factor == 0, (
+                "grid height/width must be divisible by adapooling_factor"
+            )
+            # Match the native rotary regrouping: positions are first regrouped by the
+            # adapooling window before being flattened back to patch order.
+            hpos_ids = torch.arange(gh, device=device).unsqueeze(1).expand(-1, gw)
+            hpos_ids = hpos_ids.reshape(
+                gh // self.adapooling_factor,
+                self.adapooling_factor,
+                gw // self.adapooling_factor,
+                self.adapooling_factor,
+            )
+            hpos_ids = hpos_ids.permute(0, 2, 1, 3).flatten()
+
+            wpos_ids = torch.arange(gw, device=device).unsqueeze(0).expand(gh, -1)
+            wpos_ids = wpos_ids.reshape(
+                gh // self.adapooling_factor,
+                self.adapooling_factor,
+                gw // self.adapooling_factor,
+                self.adapooling_factor,
+            )
+            wpos_ids = wpos_ids.permute(0, 2, 1, 3).flatten()
+            sample_pos_ids = torch.stack([hpos_ids, wpos_ids], dim=-1)
+            pos_ids.append(sample_pos_ids)
+
+        return torch.cat(pos_ids, dim=0)
+
+    def _build_freqs(self, grid_hw: torch.Tensor, rope_dim: int, device: torch.device) -> torch.Tensor:
+        # Rebuild the native frequency lookup in two steps:
+        # 1. create one 1D rotary table up to the largest grid extent,
+        # 2. gather H/W pairs using the adapooling-aware patch order.
+        max_grid_size = int(grid_hw.max().item())
+        rotary_pos_emb_full = self._vision_rotary_embedding(max_grid_size, rope_dim // 2, device=device)
+        pos_ids = self._build_position_ids(grid_hw, device=device)
+        return rotary_pos_emb_full[pos_ids].flatten(-2)
+
+    def _apply_native_vision_rope(self, x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+        # This is the frozen native rotary core: expand gathered frequencies to
+        # the q/k layout, then apply rotate-half mixing on the rotary slice.
+        orig_dtype = x.dtype
+        x = x.float()
+        cos = freqs.cos()
+        sin = freqs.sin()
+        assert x.ndim == 3, "vision rope expects packed token-first tensors [T, H, D]"
+        cos = cos.unsqueeze(1).repeat(1, 1, 2).float()
+        sin = sin.unsqueeze(1).repeat(1, 1, 2).float()
+        output = (x * cos) + (self._rotate_half(x) * sin)
+        return output.to(orig_dtype)
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        grid_hw: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply native vision 2D RoPE to packed token-first tensors.
+
+        Supported layout:
+        1. Packed varlen: q/k [T, N, D], grid_hw [B, 2], where T = sum(H_i * W_i)
+        """
+        assert q.ndim == k.ndim, "q and k must have the same dimension"
+        assert q.ndim == 3, "q and k must be 3D packed token-first tensors"
+        assert q.shape[-1] == k.shape[-1], "q and k must have the same head_dim"
+
+        head_dim = q.shape[-1]
+        rope_dim = head_dim if self.rope_dim is None else self.rope_dim
+        assert rope_dim == head_dim, "vision rope rotates the full head_dim"
+        assert rope_dim % 4 == 0, "vision 2D rope_dim must be divisible by 4"
+        total_tokens = int(grid_hw.to(dtype=torch.int64).prod(dim=-1).sum().item())
+        assert q.shape[0] == total_tokens, "packed token count must equal sum(grid_hw[:, 0] * grid_hw[:, 1])"
+        assert k.shape[0] == total_tokens, "packed token count must equal sum(grid_hw[:, 0] * grid_hw[:, 1])"
+
+        # The packed sequence shares one concatenated frequency table whose order
+        # follows the native multi-image patch packing order.
+        freqs = self._build_freqs(grid_hw, rope_dim, device=q.device)
+        return self._apply_native_vision_rope(q, freqs), self._apply_native_vision_rope(k, freqs)

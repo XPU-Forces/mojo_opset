@@ -1,14 +1,32 @@
 import pytest
 import torch
 
+from mojo_opset.tests.accuracy.operators._vision_rope_2d_golden import (
+    _vision_rope_2d_golden,
+)
+from mojo_opset.tests.utils import assert_close
 from mojo_opset.tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoRotaryEmbedding
 from mojo_opset import MojoApplyRoPE
 from mojo_opset import MojoGridRoPE
+from mojo_opset import MojoVisionRoPE2D
 from mojo_opset.utils.platform import get_torch_device
 
 torch.random.manual_seed(42)
+
+VISION_VIT_CONFIG = {
+    "img_size": 448,
+    "patch_size": 14,
+    "embed_dim": 1280,
+    "depth": 27,
+    "num_heads": 20,
+    "head_dim": 64,
+    "mlp_ratio": 4,
+    "mlp_intermediate_dim": 5120,
+    "rope_theta": 10000.0,
+    "adapooling_factor": 2,
+}
 
 
 @pytest.mark.parametrize("bs", [1, 6])
@@ -206,3 +224,92 @@ def test_grid_pos_emb(bs, grid, heads, head_dim, pad, dtype):
     rope_ref = MojoGridRoPE._registry.get("torch")()
 
     rope.forward_diff_with(rope_ref, x, grid_sizes, freqs_list, atol=1e-3, rtol=1e-3)
+
+
+
+@pytest.mark.parametrize(
+    "grid",
+    [
+        ((4, 4),),
+        ((8, 6),),
+        ((8, 8), (4, 6)),
+    ],
+)
+@pytest.mark.parametrize(
+    "vision_config",
+    [
+        pytest.param(VISION_VIT_CONFIG, id="vision_448_27l_20h_h64"),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@bypass_not_implemented
+def test_vision_rope_2d_packed_against_golden(
+    grid, vision_config, dtype
+):
+    device = get_torch_device()
+    rope_theta = vision_config["rope_theta"]
+    head_dim = vision_config["head_dim"]
+    q_heads = vision_config["num_heads"]
+    k_heads = vision_config["num_heads"]
+    adapooling_factor = vision_config["adapooling_factor"]
+
+    grid_hw = torch.tensor(grid, device=device, dtype=torch.int32)
+    total_tokens = int(grid_hw.to(dtype=torch.int64).prod(dim=-1).sum().item())
+
+    q = torch.randn(total_tokens, q_heads, head_dim, device=device, dtype=dtype)
+    k = torch.randn(total_tokens, k_heads, head_dim, device=device, dtype=dtype)
+
+    rope = MojoVisionRoPE2D(rope_theta=rope_theta, rope_dim=head_dim, adapooling_factor=adapooling_factor)
+    q_rot, k_rot = rope(q, k, grid_hw)
+    q_ref, k_ref = _vision_rope_2d_golden(
+        q, k, grid_hw, rope_theta, head_dim, adapooling_factor=adapooling_factor
+    )
+
+    assert_close(q_rot, q_ref)
+    assert_close(k_rot, k_ref)
+
+
+@pytest.mark.parametrize("invalid_adapooling_factor", [0, -1])
+def test_vision_rope_2d_rejects_non_positive_adapooling_factor(invalid_adapooling_factor):
+    with pytest.raises(AssertionError, match="adapooling_factor must be >= 1"):
+        MojoVisionRoPE2D(adapooling_factor=invalid_adapooling_factor)
+
+
+@pytest.mark.parametrize(
+    "vision_config, batch_size, seq_len, grid_hw_data",
+    [
+        pytest.param(VISION_VIT_CONFIG, 2, 8, [[2, 4], [2, 4]], id="native_4d_layout"),
+    ],
+)
+def test_vision_rope_2d_rejects_non_native_layout_extensions(
+    vision_config, batch_size, seq_len, grid_hw_data
+):
+    q_heads = vision_config["num_heads"]
+    k_heads = vision_config["num_heads"]
+    head_dim = vision_config["head_dim"]
+    rope = MojoVisionRoPE2D(rope_dim=head_dim)
+    q = torch.randn(batch_size, seq_len, q_heads, head_dim)
+    k = torch.randn(batch_size, seq_len, k_heads, head_dim)
+    grid_hw = torch.tensor(grid_hw_data, dtype=torch.int32)
+    with pytest.raises(AssertionError, match="packed token-first"):
+        rope(q, k, grid_hw)
+
+
+@pytest.mark.parametrize(
+    "vision_config, rope_dim, total_tokens, grid_hw_data",
+    [
+        pytest.param(VISION_VIT_CONFIG, 32, 8, [[2, 4]], id="partial_rope_dim"),
+    ],
+)
+def test_vision_rope_2d_rejects_partial_rope_dim(
+    vision_config, rope_dim, total_tokens, grid_hw_data
+):
+    q_heads = vision_config["num_heads"]
+    k_heads = vision_config["num_heads"]
+    head_dim = vision_config["head_dim"]
+    rope = MojoVisionRoPE2D(rope_dim=rope_dim)
+    q = torch.randn(total_tokens, q_heads, head_dim)
+    k = torch.randn(total_tokens, k_heads, head_dim)
+    grid_hw = torch.tensor(grid_hw_data, dtype=torch.int32)
+    with pytest.raises(AssertionError, match="full head_dim"):
+        rope(q, k, grid_hw)

@@ -100,6 +100,7 @@ from .operators.normalization import MojoRMSNormQuant
 """ position_embedding """
 from .operators.position_embedding import MojoApplyRoPE
 from .operators.position_embedding import MojoGridRoPE
+from .operators.position_embedding import MojoVisionRoPE2D
 from .operators.position_embedding import MojoNormRoPE
 from .operators.position_embedding import MojoNormRoPEStoreKV
 from .operators.position_embedding import MojoRoPEStoreKV
@@ -215,6 +216,7 @@ __all__ = [
     "MojoNormRoPE",
     "MojoNormRoPEStoreKV",
     "MojoGridRoPE",
+    "MojoVisionRoPE2D",
 
     "MojoTopPSampling",
     "MojoTopKSampling",
