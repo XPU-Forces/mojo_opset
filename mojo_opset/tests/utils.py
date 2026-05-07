@@ -704,6 +704,12 @@ def perf_ilu(executor, profiling_dir="./ilu_profiling", active=5):
         f.write(plain_log_file + "\n")
 
 
+requires_ilu = pytest.mark.skipif(
+    get_platform() != "ilu",
+    reason="Cuda graph only supported on Iluvatar GPU",
+)
+
+
 class MockFunctionCtx:
     """
     A mock context object to simulate torch.autograd.Function context methods.

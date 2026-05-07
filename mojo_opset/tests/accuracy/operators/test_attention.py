@@ -23,6 +23,7 @@ from mojo_opset import MojoPagedDecodeSWA
 from mojo_opset import MojoSWA
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.tests.utils import requires_ilu
 from mojo_opset.utils.acc import check_tol_diff
 
 
@@ -202,6 +203,7 @@ test_configs_decode_with_graph = [
     ],
 )
 @pytest.mark.parametrize("gqa_layout", ["AABB"])
+@requires_ilu
 @auto_switch_platform()
 @bypass_not_implemented
 def test_paged_decode_gqa_with_graph(
@@ -532,6 +534,9 @@ def test_paged_prefill_gqa_bucket_padded_varlen(gqa_layout: str):
         )
 
     softmax_scale = 1.0 / math.sqrt(head_dim)
+    max_q_lens = int((cu_q_lens[1:] - cu_q_lens[:-1]).max().item())
+    max_total_seq_lens = int(total_seq_lens.max().item())
+
     out_ref = paged_prefill_attn_ref(
         query,
         key_cache,
@@ -540,6 +545,8 @@ def test_paged_prefill_gqa_bucket_padded_varlen(gqa_layout: str):
         block_tables,
         softmax_scale=softmax_scale,
         cu_total_seq_lens=cu_total_seq_lens,
+        max_q_lens=max_q_lens,
+        max_total_seq_lens=max_total_seq_lens,
     )
     out = paged_prefill_attn(
         query,
@@ -549,6 +556,8 @@ def test_paged_prefill_gqa_bucket_padded_varlen(gqa_layout: str):
         block_tables,
         softmax_scale=softmax_scale,
         cu_total_seq_lens=cu_total_seq_lens,
+        max_q_lens=max_q_lens,
+        max_total_seq_lens=max_total_seq_lens,
     )
 
     torch.testing.assert_close(
@@ -650,6 +659,7 @@ test_configs_prefill_with_graph = [
     ],
 )
 @pytest.mark.parametrize("gqa_layout", ["AABB"])
+@requires_ilu
 @auto_switch_platform()
 @bypass_not_implemented
 def test_paged_prefill_gqa_with_graph(
@@ -1340,10 +1350,10 @@ test_configs_swa_prefill = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens",
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens",
     [
         pytest.param(
-            *(lambda d: (d[0], d[1], d[2], d[3], d[4], d[5]))(generate_paged_prefill_data(
+            *generate_paged_prefill_data(
                 batch_size=B,
                 num_q_heads=Q_H,
                 num_kv_heads=KV_H,
@@ -1352,7 +1362,7 @@ test_configs_swa_prefill = [
                 max_kv_computed_len=KV_COMPUTED_LEN,
                 block_size=BLK_S,
                 dtype=dtype,
-            )),
+            ),
             id=ID,
         )
         for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_swa_prefill
@@ -1372,6 +1382,8 @@ def test_paged_prefill_swa(
     block_tables: torch.Tensor,
     gqa_layout: str,
     cu_total_seq_lens: Optional[torch.Tensor],
+    max_q_lens: int,
+    max_total_seq_lens: int,
     global_window: int,
     local_window: int,
 ):
@@ -1402,6 +1414,8 @@ def test_paged_prefill_swa(
         block_tables,
         softmax_scale=softmax_scale,
         cu_total_seq_lens=cu_total_seq_lens,
+        max_q_lens=max_q_lens,
+        max_total_seq_lens=max_total_seq_lens,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
     )
@@ -1415,7 +1429,7 @@ test_configs_swa_prefill_with_graph = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_q_lens, cu_total_seq_lens, block_tables, total_seq_lens",
+    "query, k_cache, v_cache, cu_q_lens, cu_total_seq_lens, block_tables, total_seq_lens, max_q_lens, max_total_seq_lens",
     [
         pytest.param(
             *generate_paged_prefill_data_with_graph(
@@ -1427,7 +1441,7 @@ test_configs_swa_prefill_with_graph = [
                 max_kv_computed_len=MAX_KV_COMPUTED_LEN,
                 block_size=BLK_S,
                 dtype=dtype,
-            )[:-2],
+            ),
             id=ID,
         )
         for MAX_B, Q_H, KV_H, D, MAX_Q_LEN, MAX_KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_swa_prefill_with_graph
@@ -1437,6 +1451,7 @@ test_configs_swa_prefill_with_graph = [
     ("ABAB", 4, 255),
     ("AABB", 4, 1023),
 ])
+@requires_ilu
 @auto_switch_platform()
 @bypass_not_implemented
 def test_paged_prefill_swa_with_graph(
@@ -1447,6 +1462,8 @@ def test_paged_prefill_swa_with_graph(
     cu_total_seq_lens: torch.Tensor,
     block_tables: torch.Tensor,
     total_seq_lens: torch.Tensor,
+    max_q_lens: int,
+    max_total_seq_lens: int,
     gqa_layout: str,
     global_window: int,
     local_window: int,
@@ -1476,6 +1493,8 @@ def test_paged_prefill_swa_with_graph(
             block_tables,
             softmax_scale=softmax_scale,
             cu_total_seq_lens=cu_total_seq_lens,
+            max_q_lens=max_q_lens,
+            max_total_seq_lens=max_total_seq_lens,
         )
         torch.cuda.synchronize()
 
@@ -1490,6 +1509,8 @@ def test_paged_prefill_swa_with_graph(
                     block_tables,
                     softmax_scale=softmax_scale,
                     cu_total_seq_lens=cu_total_seq_lens,
+                    max_q_lens=max_q_lens,
+                    max_total_seq_lens=max_total_seq_lens,
                 )
             torch.cuda.synchronize()
         except Exception as e:
@@ -1510,6 +1531,8 @@ def test_paged_prefill_swa_with_graph(
         block_tables,
         softmax_scale=softmax_scale,
         cu_total_seq_lens=cu_total_seq_lens,
+        max_q_lens=max_q_lens,
+        max_total_seq_lens=max_total_seq_lens,
     )
 
     atol = 2e-2 if query.dtype != torch.float32 else 1e-5
@@ -1534,8 +1557,8 @@ def test_paged_prefill_swa_with_graph(
             cur_cu_q_lens,
             cur_block_tables,
             cur_cu_total_seq_lens,
-            _,
-            _,
+            cur_max_q_lens,
+            cur_max_total_seq_lens,
         ) = generate_paged_prefill_data(
             batch_size=current_batch_size,
             num_q_heads=num_q_heads,
@@ -1579,6 +1602,8 @@ def test_paged_prefill_swa_with_graph(
             cur_block_tables,
             softmax_scale=softmax_scale,
             cu_total_seq_lens=cur_cu_total_seq_lens,
+            max_q_lens=cur_max_q_lens,
+            max_total_seq_lens=cur_max_total_seq_lens,
         )
 
         reserved_unused_output = output[cur_T:].clone()
@@ -1700,6 +1725,7 @@ test_configs_swa_decode_with_graph = [
     ("ABAB", 4, 255),
     ("AABB", 4, 1023),
 ])
+@requires_ilu
 @auto_switch_platform()
 @bypass_not_implemented
 def test_paged_decode_swa_with_graph(

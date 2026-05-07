@@ -87,7 +87,7 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
         """
 
         assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
-        cu_kv = cu_total_seq_lens if cu_total_seq_lens is not None else cu_q_lens
+        cu_kv_lens = cu_total_seq_lens if cu_total_seq_lens is not None else cu_q_lens
         if query.dtype not in (torch.float16, torch.bfloat16):
             raise NotImplementedError(f"query dtype must be fp16 or bf16, got {query.dtype}.")
         if mask is not None:
@@ -101,25 +101,20 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
             )
 
         if cu_q_lens.dtype != torch.int32:
-            raise NotImplementedError(f"cu_q_lens must be int32, got {cu_q_lens.dtype}.")
+            raise ValueError(f"cu_q_lens must be int32, got {cu_q_lens.dtype}.")
         if block_tables.dtype != torch.int32:
-            raise NotImplementedError(f"block_tables must be int32, got {block_tables.dtype}.")
+            raise ValueError(f"block_tables must be int32, got {block_tables.dtype}.")
 
-        q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
-        if q_lens.dtype != torch.int32:
-            raise NotImplementedError(f"q_lens must be int32, got {q_lens.dtype}.")
-        if not isinstance(cu_total_seq_lens, torch.Tensor):
-            raise NotImplementedError(f"cu_total_seq_lens must be torch.Tensor, got {type(cu_total_seq_lens)}.")
-        if cu_total_seq_lens.dtype != torch.int32:
-            raise NotImplementedError(f"cu_total_seq_lens must be int32, got {cu_total_seq_lens.dtype}.")
-        if cu_total_seq_lens.ndim != 1:
-            raise NotImplementedError(f"cu_total_seq_lens must be 1D, got shape {tuple(cu_total_seq_lens.shape)}.")
+        if not isinstance(cu_kv_lens, torch.Tensor):
+            raise ValueError(f"cu_total_seq_lens must be torch.Tensor, got {type(cu_total_seq_lens)}.")
+        if cu_kv_lens.dtype != torch.int32:
+            raise ValueError(f"cu_total_seq_lens must be int32, got {cu_total_seq_lens.dtype}.")
         if not isinstance(max_q_lens, int) or max_q_lens <= 0:
-            raise NotImplementedError(
+            raise ValueError(
                 f"max_q_lens must be a positive int, got {max_q_lens} ({type(max_q_lens)})."
             )
         if not isinstance(max_total_seq_lens, int) or max_total_seq_lens <= 0:
-            raise NotImplementedError(
+            raise ValueError(
                 f"max_total_seq_lens must be a positive int, got {max_total_seq_lens} ({type(max_total_seq_lens)})."
             )
 
@@ -132,7 +127,7 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
             key_cache,
             value_cache,
             cu_q_lens,
-            cu_total_seq_lens,
+            cu_kv_lens,
             max_q_lens,
             max_total_seq_lens,
             causal=self.is_causal,
@@ -247,39 +242,34 @@ class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
             )
 
         assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
-        cu_kv = cu_total_seq_lens if cu_total_seq_lens is not None else cu_q_lens
+        cu_kv_lens = cu_total_seq_lens if cu_total_seq_lens is not None else cu_q_lens
         if cu_q_lens.dtype != torch.int32:
-            raise NotImplementedError(f"cu_q_lens must be int32, got {cu_q_lens.dtype}.")
+            raise ValueError(f"cu_q_lens must be int32, got {cu_q_lens.dtype}.")
         if block_table.dtype != torch.int32:
-            raise NotImplementedError(f"block_table must be int32, got {block_table.dtype}.")
-        q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
-        if q_lens.dtype != torch.int32:
-            raise NotImplementedError(f"q_lens must be int32, got {q_lens.dtype}.")
-        if not isinstance(cu_total_seq_lens, torch.Tensor):
-            raise NotImplementedError(
+            raise ValueError(f"block_table must be int32, got {block_table.dtype}.")
+
+        if not isinstance(cu_kv_lens, torch.Tensor):
+            raise ValueError(
                 f"cu_total_seq_lens must be torch.Tensor, got {type(cu_total_seq_lens)}."
             )
-        if cu_total_seq_lens.dtype != torch.int32:
-            raise NotImplementedError(
-                f"cu_total_seq_lens must be int32, got {cu_total_seq_lens.dtype}."
+        if cu_kv_lens.dtype != torch.int32:
+            raise ValueError(
+                f"cu_total_seq_lens must be int32, got {cu_kv_lens.dtype}."
             )
-        if cu_total_seq_lens.ndim != 1:
-            raise NotImplementedError(
-                f"cu_total_seq_lens must be 1D, got shape {tuple(cu_total_seq_lens.shape)}."
-            )
+            
         if not isinstance(max_q_lens, int) or max_q_lens <= 0:
-            raise NotImplementedError(
+            raise ValueError(
                 f"max_q_lens must be a positive int, got {max_q_lens} ({type(max_q_lens)})."
             )
         if not isinstance(max_total_seq_lens, int) or max_total_seq_lens <= 0:
-            raise NotImplementedError(
+            raise ValueError(
                 f"max_total_seq_lens must be a positive int, got {max_total_seq_lens} ({type(max_total_seq_lens)})."
             )
 
         window_size = (self.local_window_size, 0) if self.local_window_size is not None else (-1, -1)
 
         if window_size == (-1, -1) and self.global_window_size is not None and self.global_window_size > 0:
-            raise NotImplementedError(
+            raise ValueError(
                 "global_window_size > 0 requires a valid local_window_size (sliding window)."
             )
 
@@ -288,7 +278,7 @@ class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
             k_cache,
             v_cache,
             cu_q_lens,
-            cu_total_seq_lens,
+            cu_kv_lens,
             max_q_lens,
             max_total_seq_lens,
             causal=self.is_causal,
