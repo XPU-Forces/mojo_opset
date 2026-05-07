@@ -133,7 +133,7 @@ class TTXSdpa(MojoSdpa):
         return output
 
 
-class TTXPaddedWindowAttention(MojoConformerAttention):
+class TTXConformerAttention(MojoConformerAttention):
     supported_platforms_list = ["npu"]
 
     @staticmethod
