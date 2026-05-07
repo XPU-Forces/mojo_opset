@@ -24,17 +24,6 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
 
     supported_platforms_list = ["ilu"]
 
-    def __init__(
-        self,
-        is_causal: bool = True,
-        gqa_layout: str = "AABB",
-        window_size: int = -1,
-    ):
-        super().__init__(is_causal=is_causal, gqa_layout=gqa_layout, window_size=window_size)
-
-        if self.window_size != -1:
-            raise NotImplementedError("IxformerPagedPrefillGQA only supports window_size == -1")
-
     def forward(
         self,
         query: torch.Tensor,
@@ -191,11 +180,6 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         if self.gqa_layout == "ABAB":
             raise NotImplementedError("IxformerPagedDecodeGQA does not support ABAB layout.")
 
-        if self.window_size != -1:
-            raise NotImplementedError(
-                "IxformerPagedDecodeGQA only supports window_size == -1 (no sliding window)."
-            )
-
         batch_size, num_q_heads, head_dim_q = query.shape
         _, num_kv_heads, block_size, head_dim_kv = key_cache.shape
 
@@ -270,7 +254,6 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
             block_size=block_size,
             max_context_len=max_total_seq_len,
             causal=self.is_causal,
-            window_left=self.window_size,
         )
 
         return output
