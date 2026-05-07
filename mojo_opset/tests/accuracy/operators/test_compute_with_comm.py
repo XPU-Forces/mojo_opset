@@ -237,7 +237,7 @@ def test_gemm_all_reduce_comm(master_port):
     )
 
 
-# --- AllGatherGemm (sequence-parallel) ---
+# --- GemmAllGather (sequence-parallel) ---
 # Each rank holds a sequence shard. AllGather reconstructs full seq, then GEMM.
 
 def _worker_all_gather_gemm(rank, world_size, port, x_full, w, bias, ref):

@@ -15,7 +15,7 @@ from .gelu import gelu_bwd_impl
 from .gelu import gelu_fwd_impl
 from .group_gemm import k_grouped_matmul_impl
 from .group_gemm import m_grouped_matmul_impl
-from .quant_group_linear import quant_group_linear_reduce_sum_impl
+from .quant_batch_gemm_reduce_sum import quant_batch_gemm_reduce_sum_impl
 from .kv_cache import store_kv_cache_impl
 from .kv_cache import store_paged_kv_impl
 from .layernorm import layernorm_bwd_impl
@@ -60,7 +60,7 @@ __all__ = [
     "gelu_fwd_impl",
     "m_grouped_matmul_impl",
     "k_grouped_matmul_impl",
-    "quant_group_linear_reduce_sum_impl",
+    "quant_batch_gemm_reduce_sum_impl",
     "store_kv_cache_impl",
     "store_paged_kv_impl",
     "relative_embedding_fwd_impl",
