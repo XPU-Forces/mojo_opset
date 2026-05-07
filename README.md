@@ -58,8 +58,6 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 
 ### Core Mojo Operator List
 
-The table below tracks the current public operators exported from `mojo_opset.core`.
-
 | Op Category | Op Name | torch native | torch_npu | ttx | ixformer |
 | :---------- | :------ | :----------- | :-------- | :-- | :------- |
 | Activation | `MojoGelu` | ✅ | ✅ | ✅ | TBD |
@@ -94,7 +92,6 @@ The table below tracks the current public operators exported from `mojo_opset.co
 | ComputeComm | `MojoGemmReduceScatter` | ✅ | TBD | TBD | TBD |
 | Embedding | `MojoEmbedding` | ✅ | TBD | TBD | TBD |
 | Embedding | `MojoParallelEmbedding` | ✅ | TBD | TBD | TBD |
-| Embedding | `MojoRelativeEmbedding` | ✅ | TBD | ✅ | TBD |
 | OverEncoding | `MojoOverEncoding` | ✅ | TBD | ✅ | TBD |
 | OverEncoding | `MojoOverEncodingNGram` | ✅ | TBD | ✅ | TBD |
 | Quantize | `MojoStaticQuant` | ✅ | TBD | ✅ | TBD |
@@ -124,6 +121,7 @@ The table below tracks the current public operators exported from `mojo_opset.co
 | Norm | `MojoResidualAddLayerNormQuant` | ✅ | ✅ | TBD | TBD |
 | Norm | `MojoResidualAddNormCast` | ✅ | TBD | TBD | TBD |
 | PositionEmb | `MojoRotaryEmbedding` | ✅ | TBD | ✅ | TBD |
+| PositionEmb | `MojoRelativeEmbedding` | ✅ | TBD | ✅ | TBD |
 | PositionEmb | `MojoApplyRoPE` | ✅ | ✅ | ✅ | TBD |
 | PositionEmb | `MojoRoPEStoreKV` | ✅ | TBD | TBD | TBD |
 | PositionEmb | `MojoNormRoPE` | ✅ | TBD | TBD | TBD |
@@ -141,8 +139,6 @@ The table below tracks the current public operators exported from `mojo_opset.co
 
 ### Experimental Mojo Operator List
 
-The table below tracks the current public operators exported from `mojo_opset.experimental`.
-
 | Op Category | Op Name | torch native | torch_npu | ttx | ixformer |
 | :---------- | :------ | :----------- | :-------- | :-- | :------- |
 | Experimental | `MojoQuantBatchGemmReduceSum` | ✅ | ✅ | ✅ | TBD |
@@ -150,8 +146,6 @@ The table below tracks the current public operators exported from `mojo_opset.ex
 | Experimental | `MojoStoreLowrank` | ✅ | TBD | ✅ | TBD |
 
 ### Core Mojo Function List
-
-The table below tracks the current public functions exported from `mojo_opset.core`.
 
 | Function Category | Function Name | torch native | ttx |
 | :---------------- | :------------ | :----------- | :-- |
@@ -163,8 +157,6 @@ The table below tracks the current public functions exported from `mojo_opset.co
 | Loss | `MojoFusedLinearCrossEntropyFunction` | ✅ | ✅ |
 
 ### Experimental Mojo Function List
-
-The table below tracks the current public functions exported from `mojo_opset.experimental`.
 
 | Function Category | Function Name | torch native | ttx |
 | :---------------- | :------------ | :----------- | :-- |
