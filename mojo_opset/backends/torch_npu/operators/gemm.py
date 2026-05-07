@@ -1,15 +1,15 @@
 import torch
 import torch_npu
 
-from mojo_opset.core import MojoGemmDequant
+from mojo_opset.core import MojoQuantGemm
 from mojo_opset.core import MojoGroupGemm
-from mojo_opset.core import MojoQuantGroupGemmReduceSum
+from mojo_opset.experimental import MojoQuantBatchGemmReduceSum
 from mojo_opset.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 
-class TorchNpuGemmDequant(MojoGemmDequant):
+class TorchNpuQuantGemm(MojoQuantGemm):
     """NPU backend for fused int8 GEMM + dequantization via ``npu_quant_matmul``.
 
     Uses the NPU's native int8 GEMM kernel which performs true int8 → int32
@@ -69,7 +69,7 @@ class TorchNpuGroupGemm(MojoGroupGemm):
         return torch.cat(outputs, dim=0)
 
 
-class TorchNpuQuantGroupGemmReduceSum(MojoQuantGroupGemmReduceSum):
+class TorchNpuQuantBatchGemmReduceSum(MojoQuantBatchGemmReduceSum):
     def forward(
         self,
         input: torch.Tensor,

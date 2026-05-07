@@ -64,8 +64,9 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Activation  | MojoSilu                      | ✅           | ✅        | ✅  | TBD      |
 | Activation  | MojoSwiGlu                    | ✅           | ✅        | ✅  | TBD      |
 | Gemm        | MojoGemm                      | ✅           | TBD       | TBD | TBD      |
+| Gemm        | MojoQuantGemm                 | ✅           | ✅        | ✅  | TBD      |
 | Gemm        | MojoGroupGemm                 | ✅           | ✅        | ✅  | TBD      |
-| Gemm        | MojoQuantGroupGemmReduceSum   | ✅           | ✅        | TBD | TBD      |
+| Experimental| MojoQuantBatchGemmReduceSum   | ✅           | ✅        | ✅  | TBD      |
 | ComputeComm | MojoGemmAllReduce             | ✅           | TBD       | TBD | TBD      |
 | ComputeComm | MojoAllGatherGemm             | ✅           | TBD       | TBD | TBD      |
 | ComputeComm | MojoGemmAll2All               | ✅           | TBD       | TBD | TBD      |
@@ -100,7 +101,6 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Quantize    | MojoDynamicQuant              | ✅           | ✅        | ✅  | TBD      |
 | Quantize    | MojoMoEDynamicQuant           | ✅           | ✅        | ✅  | TBD      |
 | Quantize    | MojoDequantSwiGLUQuant        | ✅           | ✅        | TBD | TBD      |
-| Quantize    | MojoGemmDequant               | ✅           | ✅        | TBD | TBD      |
 | Norm        | MojoRMSNorm                   | ✅           | ✅        | ✅  | ✅       |
 | Norm        | MojoLayerNorm                 | ✅           | TBD       | ✅  | ✅       |
 | Norm        | MojoResidualAddRMSNorm        | ✅           | ✅        | ✅  | ✅       |

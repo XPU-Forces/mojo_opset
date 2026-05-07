@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from mojo_opset import MojoGroupGemm
-from mojo_opset import MojoQuantGroupGemmReduceSum
+from mojo_opset.experimental import MojoQuantBatchGemmReduceSum
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 
@@ -61,8 +61,8 @@ def generate_quant_group_gemm_reduce_sum_perf_data(b: int, m: int, k: int, n: in
 )
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
-def test_quant_group_gemm_reduce_sum_perf(x1, weight, x1_scale, x2_scale):
-    op = MojoQuantGroupGemmReduceSum(trans_weight=False, weight=weight)
+def test_quant_batch_gemm_reduce_sum_perf(x1, weight, x1_scale, x2_scale):
+    op = MojoQuantBatchGemmReduceSum(trans_weight=False, weight=weight)
 
     def run():
         op(x1, x1_scale, x2_scale)

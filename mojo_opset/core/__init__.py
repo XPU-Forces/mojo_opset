@@ -40,9 +40,8 @@ from .operators.kv_cache import MojoStorePagedMLAKVCache
 
 """ gemm """
 from .operators.gemm import MojoGemm
-from .operators.gemm import MojoGemmDequant
+from .operators.gemm import MojoQuantGemm
 from .operators.gemm import MojoGroupGemm
-from .operators.gemm import MojoQuantGroupGemmReduceSum
 
 """ compute + comm """
 from .operators.compute_with_comm import MojoGemmAll2All
@@ -157,9 +156,8 @@ __all__ = [
     "MojoStorePagedMLAKVCache",
 
     "MojoGemm",
-    "MojoGemmDequant",
+    "MojoQuantGemm",
     "MojoGroupGemm",
-    "MojoQuantGroupGemmReduceSum",
     "MojoGemmAll2All",
     "MojoAllGatherGemm",
     "MojoGemmAllReduce",

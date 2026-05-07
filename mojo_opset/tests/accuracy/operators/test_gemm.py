@@ -4,10 +4,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from mojo_opset import MojoGemmDequant
 from mojo_opset import MojoGemm
 from mojo_opset import MojoGroupGemm
-from mojo_opset import MojoQuantGroupGemmReduceSum
+from mojo_opset import MojoQuantGemm
+from mojo_opset.experimental import MojoQuantBatchGemmReduceSum
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.tests.utils import get_platform
@@ -52,7 +52,7 @@ def test_gemm(m, k, n, dtype, bias):
 
 
 # ===========================================================================
-# MojoGemmDequant
+# MojoQuantGemm
 # ===========================================================================
 
 
@@ -89,11 +89,11 @@ def _make_int8_gemm_data(m, k, n, trans_weight):
 @pytest.mark.parametrize("output_dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("trans_weight", [False, True])
 @bypass_not_implemented
-def test_gemm_dequant(m, k, n, output_dtype, trans_weight):
+def test_quant_gemm(m, k, n, output_dtype, trans_weight):
     """Verify torch reference against manual calculation (exact match)."""
     x_i8, w_i8, x_scale, w_scale = _make_int8_gemm_data(m, k, n, trans_weight)
 
-    op = MojoGemmDequant._registry.get("torch")(
+    op = MojoQuantGemm._registry.get("torch")(
         in_features=k,
         out_features=n,
         output_dtype=output_dtype,
@@ -109,12 +109,12 @@ def test_gemm_dequant(m, k, n, output_dtype, trans_weight):
 
 
 @bypass_not_implemented
-def test_gemm_dequant_registered_weight():
+def test_quant_gemm_registered_weight():
     """Verify torch reference consumes registered weight (exact match)."""
     m, k, n = 64, 512, 256
     x_i8, w_i8, x_scale, w_scale = _make_int8_gemm_data(m, k, n, False)
 
-    op = MojoGemmDequant._registry.get("torch")(
+    op = MojoQuantGemm._registry.get("torch")(
         in_features=k,
         out_features=n,
         output_dtype=torch.bfloat16,
@@ -127,8 +127,8 @@ def test_gemm_dequant_registered_weight():
     torch.testing.assert_close(out, ref, atol=0, rtol=0)
 
 
-def test_gemm_dequant_parameters_are_registered():
-    op = MojoGemmDequant._registry.get("torch")(
+def test_quant_gemm_parameters_are_registered():
+    op = MojoQuantGemm._registry.get("torch")(
         in_features=16,
         out_features=8,
         output_dtype=torch.bfloat16,
@@ -144,7 +144,7 @@ def test_gemm_dequant_parameters_are_registered():
 
 
 # ===========================================================================
-# MojoGemmDequant — backend vs torch reference
+# MojoQuantGemm — backend vs torch reference
 # ===========================================================================
 
 
@@ -161,18 +161,18 @@ def test_gemm_dequant_parameters_are_registered():
 @pytest.mark.parametrize("trans_weight", [False, True])
 @bypass_not_implemented
 @auto_switch_platform()
-def test_gemm_dequant_backend(m, k, n, output_dtype, trans_weight):
+def test_quant_gemm_backend(m, k, n, output_dtype, trans_weight):
     """Compare active backend against the torch reference via forward_diff_with."""
     x_i8, w_i8, x_scale, w_scale = _make_int8_gemm_data(m, k, n, trans_weight)
 
-    op = MojoGemmDequant(
+    op = MojoQuantGemm(
         in_features=k,
         out_features=n,
         output_dtype=output_dtype,
         trans_weight=trans_weight,
     )
     op = _load_gemm_dequant_module(op, w_i8, w_scale)
-    op_ref = MojoGemmDequant._registry.get("torch")(
+    op_ref = MojoQuantGemm._registry.get("torch")(
         in_features=k,
         out_features=n,
         output_dtype=output_dtype,
@@ -337,12 +337,12 @@ def test_group_gemm(input, weight, group_list, trans_weight):
 @pytest.mark.skipif(get_platform() == "npu", reason="Skipped on NPU due to CANN 8.2 issue")
 @auto_switch_platform()
 @bypass_not_implemented
-def test_quant_group_gemm_reduce_sum(x1, weight, x1_scale, x2_scale, trans_weight, atol, rtol):
-    quant_gemm = MojoQuantGroupGemmReduceSum(
+def test_quant_batch_gemm_reduce_sum(x1, weight, x1_scale, x2_scale, trans_weight, atol, rtol):
+    quant_gemm = MojoQuantBatchGemmReduceSum(
         trans_weight=trans_weight,
         weight=weight,
     )
-    quant_gemm_ref = MojoQuantGroupGemmReduceSum._registry.get("torch")(
+    quant_gemm_ref = MojoQuantBatchGemmReduceSum._registry.get("torch")(
         trans_weight=trans_weight,
         weight=weight,
     )
