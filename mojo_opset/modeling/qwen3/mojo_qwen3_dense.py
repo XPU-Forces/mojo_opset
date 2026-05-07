@@ -280,7 +280,7 @@ class Qwen3Attention(nn.Module):
                 cu_q_lens,
                 block_tables,
                 self.scaling,
-                cu_total_seq_lens=current_seq_lens,
+                seqlens_kv=current_seq_lens,
             )
             attn_output = attn_output_tnd.reshape(bsz, q_len, num_q_heads, head_dim)
             attn_output = attn_output.transpose(1, 2)

@@ -31,15 +31,29 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         query: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
-        cu_q_lens: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
-        cu_total_seq_lens: Optional[torch.Tensor] = None,
+        seqlens_kv: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        *,
+        cu_seqlens_kv: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_k: Optional[int] = None,
     ):
-        assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
+        q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        if cu_seqlens_kv is None:
+            if seqlens_kv is None:
+                seqlens_kv = q_lens
+                cu_seqlens_kv = cu_seqlens_q
+            else:
+                cu_seqlens_kv = torch.empty_like(cu_seqlens_q)
+                cu_seqlens_kv[0] = 0
+                cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
+        else:
+            seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+
+        assert_paged_prefill_contract(cu_seqlens_q, block_tables, cu_seqlens_kv)
         assert self.window_size == -1, (
             f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
         )
@@ -47,12 +61,7 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
             f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
         assert mask is None, f"[TTXPagedPrefillGQA] TTX does not support mask, but got mask={mask}"
-        total_seq_lens = (
-            cu_q_lens[1:] - cu_q_lens[:-1]
-            if cu_total_seq_lens is None
-            else cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
-        )
-        # max_q_lens / max_total_seq_lens / kwargs: core·Ixformer API compatibility; kernel uses per-seq lengths only.
+        # max_seqlen_q / max_seqlen_k: core/Ixformer API compatibility; kernel uses per-seq lengths only.
         if self.aux_mask is None:
             self.aux_mask = torch.ones(
                 self.AUX_MASK_SIZE,
@@ -65,8 +74,8 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
             q=query,
             key_cache=key_cache,
             value_cache=value_cache,
-            cu_q_lens=cu_q_lens,
-            seqlens_kv=total_seq_lens,
+            cu_q_lens=cu_seqlens_q,
+            seqlens_kv=seqlens_kv,
             block_tables=block_tables,
             gqa_interleave=self.gqa_layout == "ABAB",
             softmax_scale=softmax_scale,
@@ -84,15 +93,15 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         query: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
-        total_seq_lens: torch.Tensor,
+        seqlens: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
-        cu_q_lens: Optional[torch.Tensor] = None,
+        cu_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
         *,
-        max_total_seq_len: Optional[int] = None,
+        max_context_len: Optional[int] = None,
     ):
-        assert_paged_decode_contract(block_tables, total_seq_lens)
+        assert_paged_decode_contract(block_tables, seqlens)
         assert self.window_size == -1, (
             f"[TTXPagedDecodeGQA] TTX does not support sliding window, but got window_size={self.window_size}"
         )
@@ -100,13 +109,13 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
             f"[TTXPagedDecodeGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
         assert mask is None, f"[TTXPagedDecodeGQA] TTX does not support mask, but got mask={mask}"
-        assert cu_q_lens is None, "varlen is not supported"
+        assert cu_seq_lens is None, "varlen is not supported"
 
         output = paged_attention_decode(
             q=query,
             key_cache=key_cache,
             value_cache=value_cache,
-            seqlens=total_seq_lens,
+            seqlens=seqlens,
             block_tables=block_tables,
             gqa_interleave=self.gqa_layout == "ABAB",
             softmax_scale=softmax_scale,

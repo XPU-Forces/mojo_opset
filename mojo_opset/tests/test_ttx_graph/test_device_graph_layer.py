@@ -43,9 +43,9 @@ class SimpleAttention(nn.Module):
             query=q,
             key_cache=key_cache,
             value_cache=value_cache,
-            cu_q_lens=cu_q_lens,
+            cu_seqlens_q=cu_q_lens,
             block_tables=block_tables,
-            cu_total_seq_lens=cu_total_seq_lens,
+            cu_seqlens_kv=cu_total_seq_lens,
         )
 
         attn_out = attn_out.view(batch_size, seq_len, self.hidden_size)

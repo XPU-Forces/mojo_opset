@@ -134,7 +134,7 @@ def test_paged_decode_gqa(
         total_seq_lens,
         block_tables,
         softmax_scale=softmax_scale,
-        max_total_seq_len=max_total_seq_len,
+        max_context_len=max_total_seq_len,
         atol=atol,
         rtol=rtol,
     )
@@ -280,9 +280,9 @@ def test_paged_prefill_gqa(
         cu_q_lens,
         block_tables=block_tables,
         softmax_scale=softmax_scale,
-        cu_total_seq_lens=cu_total_seq_lens,
-        max_q_lens=max_q_lens,
-        max_total_seq_lens=max_total_seq_lens,
+        cu_seqlens_kv=cu_total_seq_lens,
+        max_seqlen_q=max_q_lens,
+        max_seqlen_k=max_total_seq_lens,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
     )
@@ -337,7 +337,7 @@ def test_paged_prefill_gqa_bucket_padded_varlen(gqa_layout: str):
         cu_q_lens,
         block_tables,
         softmax_scale=softmax_scale,
-        cu_total_seq_lens=cu_total_seq_lens,
+        cu_seqlens_kv=cu_total_seq_lens,
     )
     out = paged_prefill_attn(
         query,
@@ -346,7 +346,7 @@ def test_paged_prefill_gqa_bucket_padded_varlen(gqa_layout: str):
         cu_q_lens,
         block_tables,
         softmax_scale=softmax_scale,
-        cu_total_seq_lens=cu_total_seq_lens,
+        cu_seqlens_kv=cu_total_seq_lens,
     )
 
     torch.testing.assert_close(

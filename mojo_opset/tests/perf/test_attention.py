@@ -239,7 +239,7 @@ def test_paged_prefill_gqa(
             cu_q_lens,
             block_tables,
             softmax_scale=softmax_scale,
-            cu_total_seq_lens=cu_total_seq_lens,
+            cu_seqlens_kv=cu_total_seq_lens,
         )
     )
 
