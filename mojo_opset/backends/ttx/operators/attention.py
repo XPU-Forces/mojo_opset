@@ -9,7 +9,7 @@ from mojo_opset.backends.ttx.kernels import sdpa_infer
 from mojo_opset.backends.ttx.kernels import swa_infer
 from mojo_opset.backends.ttx.kernels import swa_paged_decode
 from mojo_opset.backends.ttx.kernels import swa_paged_prefill
-from mojo_opset.core import MojoPaddedWindowAttention
+from mojo_opset.core import MojoConformerAttention
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedDecodeSWA
 from mojo_opset.core import MojoPagedPrefillGQA
@@ -133,7 +133,7 @@ class TTXSdpa(MojoSdpa):
         return output
 
 
-class TTXPaddedWindowAttention(MojoPaddedWindowAttention):
+class TTXPaddedWindowAttention(MojoConformerAttention):
     supported_platforms_list = ["npu"]
 
     @staticmethod

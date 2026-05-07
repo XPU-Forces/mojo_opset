@@ -1344,7 +1344,7 @@ class MojoSdpa(MojoOperator):
         return f"{self.scale=}, {self.enable_gqa=}".replace("self.", "")
 
 
-class MojoPaddedWindowAttention(MojoOperator):
+class MojoConformerAttention(MojoOperator):
     """Attention over right-padded dense batches with per-query left/right visibility windows.
 
     Contract:
@@ -1398,7 +1398,6 @@ class MojoPaddedWindowAttention(MojoOperator):
         else:
             softmax_scale = self.scale
 
-        padding_mask = padding_mask.to(dtype=torch.bool, device=query.device)
         output = torch.zeros_like(query)
         q_idx = torch.arange(seq_len, device=query.device)
 

@@ -5,7 +5,7 @@ from typing import Optional
 import pytest
 import torch
 
-from mojo_opset import MojoPaddedWindowAttention
+from mojo_opset import MojoConformerAttention
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedDecodeSWA
 from mojo_opset import MojoPagedPrefillGQA
@@ -30,7 +30,9 @@ def generate_paged_decode_data(
     total_seq_lens = torch.randint(1, max_seq_len, (batch_size,), dtype=torch.int32)
 
     max_num_blocks_per_seq = (total_seq_lens.max().item() + block_size - 1) // block_size
-    total_blocks_needed = int(torch.div(total_seq_lens + block_size - 1, block_size, rounding_mode="floor").sum().item())
+    total_blocks_needed = int(
+        torch.div(total_seq_lens + block_size - 1, block_size, rounding_mode="floor").sum().item()
+    )
 
     if total_blocks_needed == 0:
         total_blocks_needed = batch_size * max_num_blocks_per_seq
@@ -180,8 +182,10 @@ def generate_paged_prefill_data(
             k_cache[physical_block_id, :, :tokens_in_block, :] = k_slice
             v_cache[physical_block_id, :, :tokens_in_block, :] = v_slice
 
-    cu_total_seq_lens = None if kv_cache_lens is None else torch.cat(
-        [torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0).to(torch.int32)]
+    cu_total_seq_lens = (
+        None
+        if kv_cache_lens is None
+        else torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0).to(torch.int32)])
     )
     return query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens
 
@@ -269,7 +273,7 @@ def test_padded_window_attention(
     seqlens = torch.randint(seq_len // 2, seq_len + 1, (batch_size,), dtype=torch.int32)
     padding_mask = torch.arange(seq_len, dtype=torch.int32).unsqueeze(0) < seqlens.unsqueeze(1)
 
-    op = MojoPaddedWindowAttention(left_window=left_window, right_window=right_window)
+    op = MojoConformerAttention(left_window=left_window, right_window=right_window)
     perf(lambda: op(query, key, value, padding_mask))  # noqa: F821
 
 
