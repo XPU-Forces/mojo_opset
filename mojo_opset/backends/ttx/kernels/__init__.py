@@ -230,13 +230,13 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         gqa_interleave: bool,
         softmax_scale: Optional[float] = None,
         aux_mask: Optional[torch.Tensor] = None,
-        max_seqlen_q: Optional[int] = None,
-        max_seqlen_k: Optional[int] = None,
+        max_q_lens: Optional[int] = None,
+        max_total_seq_lens: Optional[int] = None,
     ) -> torch.Tensor:
         return paged_attention_prefill_impl(
             q, key_cache, value_cache, cu_q_lens, seqlens_kv, block_tables, gqa_interleave, softmax_scale, aux_mask,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
+            max_q_lens=max_q_lens,
+            max_total_seq_lens=max_total_seq_lens,
         )
 
     @paged_attention_prefill.register_fake
@@ -250,8 +250,8 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         gqa_interleave: bool,
         softmax_scale: Optional[float] = None,
         aux_mask: Optional[torch.Tensor] = None,
-        max_seqlen_q: Optional[int] = None,
-        max_seqlen_k: Optional[int] = None,
+        max_q_lens: Optional[int] = None,
+        max_total_seq_lens: Optional[int] = None,
     ) -> torch.Tensor:
         return torch.empty_like(q)
 

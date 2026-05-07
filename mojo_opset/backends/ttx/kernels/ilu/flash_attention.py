@@ -523,8 +523,8 @@ def paged_attention_prefill_impl(
     gqa_interleave: bool,
     softmax_scale: Optional[float] = None,
     aux_mask: Optional[torch.Tensor] = None,
-    max_seqlen_q: Optional[int] = None,
-    max_seqlen_k: Optional[int] = None,
+    max_q_lens: Optional[int] = None,
+    max_total_seq_lens: Optional[int] = None,
 ) -> torch.Tensor:
     total_q_tokens, num_q_heads, head_dim = q.shape
     _, num_kv_heads, block_size, _ = key_cache.shape
@@ -557,8 +557,8 @@ def paged_attention_prefill_impl(
 
     def grid(META):
         bm = META["BLOCK_M"]
-        if max_seqlen_q is not None:
-            max_q_blocks = (max_seqlen_q + bm - 1) // bm
+        if max_q_lens is not None:
+            max_q_blocks = (max_q_lens + bm - 1) // bm
         else:
             q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
             max_q_blocks = ((q_lens + bm - 1) // bm).max().item()

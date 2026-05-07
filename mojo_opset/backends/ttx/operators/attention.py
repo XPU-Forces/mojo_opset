@@ -50,7 +50,7 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
             if cu_total_seq_lens is None
             else cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
         )
-        # max_q_lens / max_total_seq_lens / kwargs: core·Ixformer API compatibility; kernel uses per-seq lengths only.
+        # max_q_lens / max_total_seq_lens / kwargs: core·Ixformer API compatibility.
         if self.aux_mask is None:
             self.aux_mask = torch.ones(
                 self.AUX_MASK_SIZE,
@@ -69,8 +69,8 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
             gqa_interleave=self.gqa_layout == "ABAB",
             softmax_scale=softmax_scale,
             aux_mask=self.aux_mask,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
+            max_q_lens=max_q_lens,
+            max_total_seq_lens=max_total_seq_lens,
         )
 
         return output
