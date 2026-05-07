@@ -54,6 +54,19 @@ jobs:
           pip install -e .\[npu\] --index-url https://bytedpypi.byted.org/simple
           python3 -m build .
           pip install dist/*.whl --force-reinstall --no-deps
+          wget https://gitcode.com/Ascend/triton-ascend/releases/download/v3.2.1/triton_ascend-3.2.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+          pip install triton_ascend-3.2.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+      - name: prepare_ccec_compiler
+        shell: bash
+        run: |
+          bisheng_version=8.5.0.post19
+          export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
+          [ ! -f "npu_compiler.tar.gz" ] && wget "https://tosv.byted.org/obj/aicompiler/npu/common/npu_compiler/npu_compiler_${bisheng_version}_$(uname -m).tar.gz" -O "npu_compiler.tar.gz"
+          [ ! -d "npu_compiler" ] && tar -zxvf npu_compiler.tar.gz
+          CURRENT_CCEC_DIR=npu_compiler/ccec_compiler
+          CURRENT_CCEC_DIR=$(realpath -m "$CURRENT_CCEC_DIR")
+          rm -f $CURRENT_CCEC_DIR/bin/bishengir-hivm-compile $CURRENT_CCEC_DIR/bin/hivmc $CURRENT_CCEC_DIR/bin/bishengir-opt
+          export BISHENG_INSTALL_PATH=$CURRENT_CCEC_DIR > ccec.env
       - name: test-Base
         shell: bash
         run: |
@@ -83,6 +96,7 @@ jobs:
           echo "Running ttx kernels tests..."
           unset ASCEND_VISIBLE_DEVICES
           unset ASCEND_RT_VISIBLE_DEVICES
+          source ccec.env
           MOJO_BACKEND="ttx" python3 -m pytest -n 8 mojo_opset/tests/accuracy/operators/ \
             --ignore=mojo_opset/tests/accuracy/operators/test_compute_with_comm.py
           MOJO_BACKEND="ttx" python3 -m pytest -n 8 mojo_opset/tests/accuracy/functions/
@@ -90,6 +104,7 @@ jobs:
         shell: bash
         run: |
           echo "Running ttx kernels deterministic tests..."
+          source ccec.env
           MOJO_DETERMINISTIC=1 MOJO_BACKEND="ttx" python3 -m pytest mojo_opset/tests/accuracy/functions/test_normalization.py
       - name: test-torch-npu
         shell: bash
@@ -97,6 +112,7 @@ jobs:
           echo "Running torch_npu base tests..."
           unset ASCEND_VISIBLE_DEVICES
           unset ASCEND_RT_VISIBLE_DEVICES
+          source ccec.env
           MOJO_BACKEND="torch_npu" python3 -m pytest -n 8 mojo_opset/tests/accuracy/operators/ \
             --ignore=mojo_opset/tests/accuracy/operators/test_compute_with_comm.py \
             --ignore=mojo_opset/tests/accuracy/operators/test_indexer.py
@@ -106,6 +122,7 @@ jobs:
           echo "Running compute+comm distributed tests..."
           unset ASCEND_VISIBLE_DEVICES
           unset ASCEND_RT_VISIBLE_DEVICES
+          source ccec.env
           python3 -m pytest -v mojo_opset/tests/accuracy/operators/test_compute_with_comm.py
       - name: test-TTX-graph
         shell: bash
