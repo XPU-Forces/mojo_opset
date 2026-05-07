@@ -5,12 +5,14 @@ Once we find the operators of contrib become more and more stable in community, 
 
 from .functions.diffusion_attention import MojoDiffusionAttentionFunction
 from .functions.diffusion_attention import mojo_diffusion_attention
-from .operators.store_lowrank import MojoStoreLowrank
+from .operators.gemm import MojoQuantBatchGemmReduceSum
 from .operators.indexer import MojoIndexer
+from .operators.store_lowrank import MojoStoreLowrank
 
-all = [
+__all__ = [
     "MojoDiffusionAttentionFunction",
     "mojo_diffusion_attention",
+    "MojoQuantBatchGemmReduceSum",
     "MojoStoreLowrank",
     "MojoIndexer",
 ]

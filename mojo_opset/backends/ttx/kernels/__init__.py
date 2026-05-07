@@ -76,7 +76,7 @@ diffusion_attention_bwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_a
 
 m_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "m_grouped_matmul_impl")
 k_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "k_grouped_matmul_impl")
-quant_group_linear_reduce_sum_impl = _get_kernel_impl(ttx_backend_module, "quant_group_linear_reduce_sum_impl")
+quant_batch_gemm_reduce_sum_impl = _get_kernel_impl(ttx_backend_module, "quant_batch_gemm_reduce_sum_impl")
 
 int8_gemm_dequant_impl = _get_kernel_impl(ttx_backend_module, "int8_gemm_dequant_impl")
 prepare_b_impl = _get_kernel_impl(ttx_backend_module, "prepare_b_impl")

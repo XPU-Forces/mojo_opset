@@ -48,7 +48,7 @@ class MojoGemmAllReduce(MojoOperator):
             output = allreduce(input @ weight [+ bias])
 
         When ``torch.distributed`` is not initialised, AllReduce is an identity
-        and the operator behaves as a standard linear projection.
+        and the operator behaves as a standard GEMM projection.
 
         Args:
             weight (torch.Tensor): Weight matrix.
@@ -104,7 +104,7 @@ class MojoAllGatherGemm(MojoOperator):
 
         Each rank holds a sequence shard of the activation.  AllGather
         reconstructs the full sequence across ranks, then the GEMM is computed.
-        Typical use: QKV projection or first FFN linear in an SP layer.
+        Typical use: QKV projection or first FFN GEMM in an SP layer.
 
         Semantics::
 

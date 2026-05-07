@@ -8,10 +8,10 @@ from mojo_opset.tests.utils import get_platform
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import get_torch_device
 
-from mojo_opset import MojoGroupLinear
-from mojo_opset import MojoQuantGroupLinearReduceSum
+from mojo_opset import MojoGroupGemm
+from mojo_opset.experimental import MojoQuantBatchGemmReduceSum
 
-_SKIP_NPU_QUANT_GROUP_LINEAR = get_platform() == "npu"
+_SKIP_NPU_QUANT_GROUP_GEMM = get_platform() == "npu"
 
 
 def generate_random_list(length, total_sum):
@@ -27,7 +27,7 @@ def generate_random_list(length, total_sum):
     return torch.Tensor(lst).to(torch.int32)
 
 
-def generate_quant_group_linear_data(
+def generate_quant_group_gemm_data(
     b: int,
     m: int,
     k: int,
@@ -109,12 +109,12 @@ def generate_quant_group_linear_data(
 @auto_switch_platform()
 @bypass_not_implemented
 def test_group_gemm(input, weight, group_list, trans_weight):
-    group_gemm = MojoGroupLinear(
+    group_gemm = MojoGroupGemm(
         trans_weight=trans_weight,
         weight=weight,
     )
 
-    group_gemm_ref = MojoGroupLinear._registry.get("torch")(
+    group_gemm_ref = MojoGroupGemm._registry.get("torch")(
         trans_weight=trans_weight,
         weight=weight,
     )
@@ -126,35 +126,35 @@ def test_group_gemm(input, weight, group_list, trans_weight):
     "x1, weight, x1_scale, x2_scale, trans_weight, atol, rtol",
     [
         pytest.param(
-            *generate_quant_group_linear_data(b=4, m=7, k=128, n=256, trans_weight=False),
+            *generate_quant_group_gemm_data(b=4, m=7, k=128, n=256, trans_weight=False),
             False,
             1e-1,
             1e-2,
             id="basic_b4_m7_k128_n256",
         ),
         pytest.param(
-            *generate_quant_group_linear_data(b=1, m=16, k=64, n=128, trans_weight=False),
+            *generate_quant_group_gemm_data(b=1, m=16, k=64, n=128, trans_weight=False),
             False,
             1e-1,
             1e-2,
             id="basic_b1_m16_k64_n128",
         ),
         pytest.param(
-            *generate_quant_group_linear_data(b=2, m=9, k=256, n=512, trans_weight=False),
+            *generate_quant_group_gemm_data(b=2, m=9, k=256, n=512, trans_weight=False),
             False,
             1e-1,
             1e-2,
             id="basic_b2_m9_k256_n512",
         ),
         pytest.param(
-            *generate_quant_group_linear_data(b=4, m=31, k=128, n=256, trans_weight=True),
+            *generate_quant_group_gemm_data(b=4, m=31, k=128, n=256, trans_weight=True),
             True,
             1e-1,
             1e-2,
             id="trans_weight_b4_m31_k128_n256",
         ),
         pytest.param(
-            *generate_quant_group_linear_data(b=8, m=1, k=128, n=128, trans_weight=False, x2_scale_dtype=torch.float16),
+            *generate_quant_group_gemm_data(b=8, m=1, k=128, n=128, trans_weight=False, x2_scale_dtype=torch.float16),
             False,
             1e-1,
             1e-2,
@@ -162,19 +162,19 @@ def test_group_gemm(input, weight, group_list, trans_weight):
         ),
     ],
 )
-@pytest.mark.skipif(_SKIP_NPU_QUANT_GROUP_LINEAR, reason="Skipped on NPU due to CANN 8.2 issue")
+@pytest.mark.skipif(_SKIP_NPU_QUANT_GROUP_GEMM, reason="Skipped on NPU due to CANN 8.2 issue")
 @auto_switch_platform()
 @bypass_not_implemented
-def test_quant_group_linear_reduce_sum(x1, weight, x1_scale, x2_scale, trans_weight, atol, rtol):
-    quant_linear = MojoQuantGroupLinearReduceSum(
+def test_quant_batch_gemm_reduce_sum(x1, weight, x1_scale, x2_scale, trans_weight, atol, rtol):
+    quant_gemm = MojoQuantBatchGemmReduceSum(
         trans_weight=trans_weight,
         weight=weight,
     )
-    quant_linear_ref = MojoQuantGroupLinearReduceSum._registry.get("torch")(
+    quant_gemm_ref = MojoQuantBatchGemmReduceSum._registry.get("torch")(
         trans_weight=trans_weight,
         weight=weight,
     )
-    quant_linear.forward_diff_with(quant_linear_ref, x1, x1_scale, x2_scale, atol=atol, rtol=rtol)
+    quant_gemm.forward_diff_with(quant_gemm_ref, x1, x1_scale, x2_scale, atol=atol, rtol=rtol)
 
 
 _test_grouped_matmul_cases = [
@@ -202,7 +202,7 @@ _test_grouped_matmul_cases = [
 @pytest.mark.parametrize("inputs, weights, bias, dtype", _test_grouped_matmul_cases)
 @auto_switch_platform()
 @bypass_not_implemented
-def test_grouped_matmul_cases_via_group_linear(inputs, weights, bias, dtype):
+def test_grouped_gemm_cases_via_group_gemm(inputs, weights, bias, dtype):
     device = get_torch_device()
     input_tensors = [t.to(device=device) for t in inputs]
     weight_tensors = [t.to(device=device) for t in weights]
@@ -211,7 +211,7 @@ def test_grouped_matmul_cases_via_group_linear(inputs, weights, bias, dtype):
     for x, w in zip(input_tensors, weight_tensors):
         group_list = torch.tensor([x.shape[0]], device=device, dtype=torch.int32)
         weight_group = w.unsqueeze(0)
-        op = MojoGroupLinear(weight=weight_group, trans_weight=False)
+        op = MojoGroupGemm(weight=weight_group, trans_weight=False)
         out = op(x, group_list)
         outputs.append(out)
 
@@ -231,7 +231,7 @@ def test_grouped_matmul_cases_via_group_linear(inputs, weights, bias, dtype):
 )
 @auto_switch_platform()
 @bypass_not_implemented
-def test_group_linear_two_groups_single_call(dtype, trans_weight):
+def test_group_gemm_two_groups_single_call(dtype, trans_weight):
     device = get_torch_device()
 
     m0, m1 = 64, 128
@@ -254,7 +254,7 @@ def test_group_linear_two_groups_single_call(dtype, trans_weight):
 
     group_list = torch.tensor([m0, m1], device=device, dtype=torch.int32)
 
-    op = MojoGroupLinear(weight=weight, trans_weight=trans_weight)
+    op = MojoGroupGemm(weight=weight, trans_weight=trans_weight)
     out = op(x, group_list)
 
     torch.testing.assert_close(out.to(torch.float32), ref.to(torch.float32), atol=1e-3, rtol=1e-3)

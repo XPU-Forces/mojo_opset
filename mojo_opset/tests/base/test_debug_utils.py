@@ -2,19 +2,19 @@
 
 The model intentionally mirrors a real LLM structure:
 
-    Embedding -> DecoderLayer x 5 -> final RMSNorm -> LM head (Linear)
+    Embedding -> DecoderLayer x 5 -> final RMSNorm -> LM head (Gemm)
 
 Each DecoderLayer contains:
     input_layernorm  (MojoRMSNorm)
-    self_attn.q_proj (MojoLinear)
-    self_attn.k_proj (MojoLinear)
-    self_attn.v_proj (MojoLinear)
-    self_attn.o_proj (MojoLinear)
+    self_attn.q_proj (MojoGemm)
+    self_attn.k_proj (MojoGemm)
+    self_attn.v_proj (MojoGemm)
+    self_attn.o_proj (MojoGemm)
     post_attention_layernorm (MojoRMSNorm)
-    mlp.gate_proj    (MojoLinear)
-    mlp.up_proj      (MojoLinear)
+    mlp.gate_proj    (MojoGemm)
+    mlp.up_proj      (MojoGemm)
     mlp.act_fn       (MojoSwiGLU)
-    mlp.down_proj    (MojoLinear)
+    mlp.down_proj    (MojoGemm)
 
 Tests are platform-aware:
     - On accelerator platforms (NPU/MLU/ILU), the default backend (e.g. TTX)
@@ -107,7 +107,7 @@ def dump_dir():
 def _build_mini_transformer(device: str = "cpu"):
     from mojo_opset import (
         MojoEmbedding,
-        MojoLinear,
+        MojoGemm,
         MojoRMSNorm,
         MojoSwiGLU,
     )
@@ -117,10 +117,10 @@ def _build_mini_transformer(device: str = "cpu"):
             super().__init__()
             self.num_heads = num_heads
             self.head_dim = hidden // num_heads
-            self.q_proj = MojoLinear(hidden, hidden, bias=False)
-            self.k_proj = MojoLinear(hidden, hidden, bias=False)
-            self.v_proj = MojoLinear(hidden, hidden, bias=False)
-            self.o_proj = MojoLinear(hidden, hidden, bias=False)
+            self.q_proj = MojoGemm(hidden, hidden, bias=False)
+            self.k_proj = MojoGemm(hidden, hidden, bias=False)
+            self.v_proj = MojoGemm(hidden, hidden, bias=False)
+            self.o_proj = MojoGemm(hidden, hidden, bias=False)
 
         def forward(self, x):
             B, T, _ = x.shape
@@ -137,10 +137,10 @@ def _build_mini_transformer(device: str = "cpu"):
         def __init__(self, hidden):
             super().__init__()
             intermediate = hidden * 4
-            self.gate_proj = MojoLinear(hidden, intermediate, bias=False)
-            self.up_proj = MojoLinear(hidden, intermediate, bias=False)
+            self.gate_proj = MojoGemm(hidden, intermediate, bias=False)
+            self.up_proj = MojoGemm(hidden, intermediate, bias=False)
             self.act_fn = MojoSwiGLU()
-            self.down_proj = MojoLinear(intermediate, hidden, bias=False)
+            self.down_proj = MojoGemm(intermediate, hidden, bias=False)
 
         def forward(self, x):
             gate = self.gate_proj(x)
@@ -169,7 +169,7 @@ def _build_mini_transformer(device: str = "cpu"):
                 [DecoderLayer(i, hidden, num_heads) for i in range(n_layers)]
             )
             self.norm = MojoRMSNorm(norm_size=hidden)
-            self.lm_head = MojoLinear(hidden, vocab, bias=False)
+            self.lm_head = MojoGemm(hidden, vocab, bias=False)
 
         def forward(self, input_ids):
             x = self.embed(input_ids)
