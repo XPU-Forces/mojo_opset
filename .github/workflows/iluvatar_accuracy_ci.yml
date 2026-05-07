@@ -47,7 +47,7 @@ jobs:
             --privileged --cap-add=ALL --pid=host --ipc=host --network=host \
             -v ${{ github.workspace }}:/workspace \
             -v /data:/data \
-            -v /data1:/data1 \
+            -v /data01:/data01 \
             -v /lib/modules:/lib/modules \
             -v /usr/src:/usr/src \
             -v /dev:/dev \
