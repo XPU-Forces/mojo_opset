@@ -47,6 +47,12 @@ from .swa import swa_paged_prefill_impl
 from .swiglu import swiglu_bwd_impl
 from .swiglu import swiglu_fwd_impl
 
+# Over-Encoding (OE)
+from .over_encoding.embedding import embedding_nf4_dequant_impl
+from .over_encoding.fused_over_encoding import over_encoding_decode_impl
+from .over_encoding.n_gram import n_gram_decode_impl
+from .over_encoding.n_gram import n_gram_prefill_impl
+
 __all__ = [
     "causal_conv1d_update_bdt_impl",
     "causal_conv1d_fwd_impl",
@@ -96,4 +102,8 @@ __all__ = [
     "swa_infer_impl",
     "swa_fwd_impl",
     "swa_bwd_impl",
+    "embedding_nf4_dequant_impl",
+    "n_gram_decode_impl",
+    "n_gram_prefill_impl",
+    "over_encoding_decode_impl",
 ]

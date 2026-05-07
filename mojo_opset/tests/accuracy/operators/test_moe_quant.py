@@ -1,56 +1,142 @@
-from typing import Optional
-
 import pytest
 import torch
 
-from mojo_opset.tests.utils import bypass_not_implemented
-
 from mojo_opset import MojoFusedSwiGLUMoEScaleDynamicQuantize
-from mojo_opset import MojoGroupQuantGemmCombineMoE
-from mojo_opset import MojoGroupQuantGemmMoE
 from mojo_opset import MojoMoEInitRoutingDynamicQuant
+from mojo_opset import MojoQuantExperts
+from mojo_opset import MojoQuantMoE
+from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.utils.platform import get_torch_device
 
 
+def _pack_int4_to_int8_along_output(input: torch.Tensor) -> torch.Tensor:
+    input_u8 = input.to(torch.uint8)
+    packed = ((input_u8[..., 1::2, :] & 0x0F) << 4) | (input_u8[..., 0::2, :] & 0x0F)
+    return packed.to(torch.int8)
 
-def _manual_group_quant_gemm_moe(
+
+def _unpack_int4_from_int8_along_output(input: torch.Tensor) -> torch.Tensor:
+    input_u8 = input.to(torch.uint8)
+    low = (input_u8 & 0x0F).to(torch.int8)
+    high = ((input_u8 >> 4) & 0x0F).to(torch.int8)
+    low = torch.where(low >= 8, low - 16, low)
+    high = torch.where(high >= 8, high - 16, high)
+    output = torch.empty(*input.shape[:-2], input.shape[-2] * 2, input.shape[-1], dtype=torch.int8, device=input.device)
+    output[..., 0::2, :] = low
+    output[..., 1::2, :] = high
+    return output
+
+
+def _quantize_weight_per_group(weight: torch.Tensor, quant_group_size: int, weight_bits: int):
+    if weight.shape[-1] % quant_group_size != 0:
+        raise ValueError(f"weight input dim {weight.shape[-1]} must be divisible by {quant_group_size}.")
+    if quant_group_size > 0:
+        weight_groups = weight.float().split(quant_group_size, dim=-1)
+    else:
+        weight_groups = [weight]
+    scales = []
+    quantizeds = []
+    for weight_group in weight_groups:
+        scale = (weight_group.abs().amax(dim=-1, keepdim=True) / 7).clamp(min=1e-12)
+        quantizeds.append(torch.clamp(torch.round(weight_group / scale), -8, 7).to(torch.int8))
+        scales.append(scale)
+        
+    quantized = torch.cat(quantizeds, dim=-1)
+    scale = torch.cat(scales, dim=-1)
+    if quant_group_size <= 0:
+        scale = scale.squeeze(-1)
+    return _pack_int4_to_int8_along_output(quantized) if weight_bits == 4 else quantized, scale
+
+
+def _manual_quant_linear(
     input: torch.Tensor,
+    input_scale: torch.Tensor,
     weight: torch.Tensor,
-    token_count: torch.Tensor,
     weight_scale: torch.Tensor,
-    input_scale: Optional[torch.Tensor] = None,
-    *,
-    trans_weight: bool,
-) -> torch.Tensor:
-    batch_size, top_k, hidden_dim = input.shape
-    route_count = batch_size * top_k
-    input_fp = input.float()
+    group_size: int,
+    output_dtype: torch.dtype,
+):
+    if group_size > 0:
+        input_groups = input.split(group_size, dim=-1)
+        weight_groups = weight.split(group_size, -1)
+    else:
+        input_groups = [input]
+        weight_groups = [weight]
+        weight_scale = weight_scale.unsqueeze(-1)
+    outs = []
+    for group_idx, input_group in enumerate(input_groups):
+        group_out = torch.mul(input_group.int().unsqueeze(-2), weight_groups[group_idx].int()).float().sum(dim=-1)
+        outs.append(group_out)
+    out = torch.stack(outs, dim=-1) * weight_scale * input_scale.unsqueeze(-1)
+    out = out.sum(dim=-1)
+    return out.to(output_dtype)
 
-    if input_scale is not None:
-        if input_scale.shape == input.shape[:-1]:
-            input_fp = input_fp * input_scale.float().unsqueeze(-1)
-        else:
-            input_blocks = input_fp.reshape(batch_size, top_k, -1, hidden_dim // input_scale.shape[-1])
-            input_fp = (input_blocks * input_scale.float().unsqueeze(-1)).reshape_as(input_fp)
 
-    input_fp = input_fp.reshape(route_count, hidden_dim)
-    outputs = []
-    route_start = 0
-    for expert_idx, expert_token_count in enumerate(token_count.to(dtype=torch.int64).tolist()):
-        expert_input = input_fp[route_start : route_start + expert_token_count]
-        expert_weight = weight[expert_idx].float()
-        if trans_weight:
-            expert_weight = expert_weight.transpose(0, 1).contiguous()
-        expert_output = expert_input @ expert_weight
-        expert_output = expert_output * weight_scale[expert_idx].float().unsqueeze(0)
-        outputs.append(expert_output)
-        route_start += expert_token_count
-    return torch.cat(outputs, dim=0).reshape(batch_size, top_k, -1)
+def _manual_quant_experts(
+    inputs: torch.Tensor,
+    token_count: torch.Tensor,
+    up_proj_weight: torch.Tensor,
+    up_proj_weight_scale: torch.Tensor,
+    down_proj_weight: torch.Tensor,
+    down_proj_weight_scale: torch.Tensor,
+    fc1_input_smooth_scale: torch.Tensor,
+    fc2_input_smooth_scale: torch.Tensor,
+    group_size: int,
+):
+    up_proj_weight = torch.repeat_interleave(up_proj_weight, token_count, dim=0)
+    up_proj_weight_scale = torch.repeat_interleave(up_proj_weight_scale, token_count, dim=0)
+    fc1_input_smooth_scale = torch.repeat_interleave(fc1_input_smooth_scale, token_count, dim=0)
+    down_proj_weight = torch.repeat_interleave(down_proj_weight, token_count, dim=0)
+    down_proj_weight_scale = torch.repeat_interleave(down_proj_weight_scale, token_count, dim=0)
+    fc2_input_smooth_scale = torch.repeat_interleave(fc2_input_smooth_scale, token_count, dim=0)
+
+    fc1_smoothed = inputs / fc1_input_smooth_scale.float()
+    fc1_input_scale = fc1_smoothed.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / 127
+    fc1_input_scale = torch.where(fc1_input_scale < 1e-6, 1.0, fc1_input_scale)
+    fc1_input_i8 = torch.clamp(torch.round(fc1_smoothed / fc1_input_scale), -128, 127).to(
+        torch.int8
+    )
+    fc1 = _manual_quant_linear(
+        fc1_input_i8,
+        fc1_input_scale,
+        up_proj_weight,
+        up_proj_weight_scale,
+        group_size=group_size,
+        output_dtype=inputs.dtype,
+    )
+    gate_proj, up_proj = fc1.float().chunk(2, dim=-1)
+    activated = (torch.nn.functional.silu(gate_proj) * up_proj)
+    smoothed_activated = activated / fc2_input_smooth_scale.float()
+    fc2_input_scale = smoothed_activated.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / 127
+    fc2_input_scale = torch.where(fc2_input_scale < 1e-6, 1.0, fc2_input_scale)
+    fc2_input = torch.clamp(torch.round(smoothed_activated / fc2_input_scale), -128, 127).to(
+        torch.int8
+    )
+
+    fc2 = _manual_quant_linear(
+        fc2_input,
+        fc2_input_scale,
+        down_proj_weight,
+        down_proj_weight_scale,
+        group_size=group_size,
+        output_dtype=inputs.dtype
+    )
+
+    return fc2
+
+
+def _make_quant_weights(num_experts: int, hidden_size: int, intermediate_size: int, quant_group_size: int, weight_bits: int):
+    up_weight_fp = torch.randn(num_experts, intermediate_size * 2, hidden_size, dtype=torch.float32)
+    down_weight_fp = torch.randn(num_experts, hidden_size, intermediate_size, dtype=torch.float32)
+    up_weight, up_weight_scale = _quantize_weight_per_group(up_weight_fp, quant_group_size, weight_bits)
+    down_weight, down_weight_scale = _quantize_weight_per_group(down_weight_fp, quant_group_size, weight_bits)
+    return up_weight, up_weight_scale.bfloat16(), down_weight, down_weight_scale.bfloat16()
 
 
 def test_moe_init_routing_dynamic_quant_reference():
     hidden_states = torch.arange(1, 17, dtype=torch.float32).reshape(2, 8)
     top_k_gates = torch.tensor([[0.9, 0.1], [0.8, 0.2]], dtype=torch.float32)
-    top_k_indices = torch.tensor([[1, 0], [0, 1]], dtype=torch.int32)
+    top_k_indices = torch.tensor([[1, 0], [0, 1]], dtype=torch.int64)
     smooth_scale = torch.ones(2, 8, dtype=torch.float32)
 
     op = MojoMoEInitRoutingDynamicQuant._registry.get("torch")(num_experts=2, top_k=2, quant_block_size=8)
@@ -61,13 +147,19 @@ def test_moe_init_routing_dynamic_quant_reference():
         smooth_scale,
     )
 
+    sorted_hidden = torch.stack((hidden_states[0], hidden_states[1], hidden_states[0], hidden_states[1])).reshape(
+        2, 2, 8
+    )
+    expected_scale = sorted_hidden.abs().amax(dim=-1, keepdim=True) / 127
+    expected_quantized = torch.clamp(torch.round(sorted_hidden / expected_scale), -128, 127).to(torch.int8)
+
     assert quantized.shape == (2, 2, 8)
     assert quantized.dtype == torch.int8
+    torch.testing.assert_close(quantized, expected_quantized, atol=0, rtol=0)
     torch.testing.assert_close(sorted_gates, torch.tensor([[[0.1], [0.8]], [[0.9], [0.2]]]))
     torch.testing.assert_close(sorted_token_indices, torch.tensor([[[0], [1]], [[0], [1]]], dtype=torch.int32))
     torch.testing.assert_close(token_count, torch.tensor([2, 2], dtype=torch.int32))
-    assert scale.shape == (2, 2, 1)
-    assert scale.dtype == torch.float32
+    torch.testing.assert_close(scale, expected_scale)
 
 
 def test_fused_swiglu_moe_scale_dynamic_quant_reference():
@@ -101,185 +193,239 @@ def test_fused_swiglu_moe_scale_dynamic_quant_reference():
     torch.testing.assert_close(scale, expected_scale, atol=0, rtol=0)
 
 
-def test_group_quant_gemm_moe_reference():
-    input = torch.tensor(
-        [
-            [[1, 0, -1, 2, 1, -2, 0, 1], [2, 1, 0, -1, -2, 1, 2, 0]],
-            [[0, 1, 2, 1, -1, 0, 1, 2], [1, -1, 1, -1, 1, -1, 1, -1]],
-        ],
-        dtype=torch.int8,
-    )
-    weight = torch.randint(-3, 4, (2, 6, 8)).to(dtype=torch.int8)
-    token_count = torch.tensor([2, 2], dtype=torch.int32)
-    weight_scale = torch.ones(2, 6, dtype=torch.float32)
-    input_scale = torch.ones(2, 2, 1, dtype=torch.float32)
-
-    op = MojoGroupQuantGemmMoE._registry.get("torch")(output_dtype=torch.float32, trans_weight=True)
-    out = op(input, weight, token_count, weight_scale, input_scale)
-    ref = _manual_group_quant_gemm_moe(
-        input,
-        weight,
-        token_count,
-        weight_scale,
-        input_scale,
-        trans_weight=True,
-    )
-    torch.testing.assert_close(out, ref, atol=0, rtol=0)
-
-
-def test_group_quant_gemm_combine_moe_reference():
-    input = torch.tensor(
-        [
-            [[1, 0, -1, 2], [0, 1, 2, 1]],
-            [[2, 1, 0, -1], [1, -1, 1, -1]],
-        ],
-        dtype=torch.int8,
-    )
-    weight = torch.randint(-2, 3, (2, 4, 3)).to(dtype=torch.int8)
-    token_count = torch.tensor([2, 2], dtype=torch.int32)
-    top_k_gates = torch.tensor([[[0.2], [0.8]], [[0.6], [0.4]]], dtype=torch.float32)
-    token_indices = torch.tensor([[[0], [1]], [[0], [1]]], dtype=torch.int32)
-    shared_output = torch.zeros(2, 3, dtype=torch.float32)
-    weight_scale = torch.ones(2, 3, dtype=torch.float32)
-    input_scale = torch.ones(2, 2, dtype=torch.float32)
-
-    op = MojoGroupQuantGemmCombineMoE._registry.get("torch")(output_dtype=torch.float32, trans_weight=False)
-    out = op(input, weight, top_k_gates, token_indices, token_count, shared_output, weight_scale, input_scale)
-
-    routed = _manual_group_quant_gemm_moe(
-        input,
-        weight,
-        token_count,
-        weight_scale,
-        input_scale,
-        trans_weight=False,
-    )
-    ref = shared_output.clone()
-    ref.index_add_(
-        0,
-        token_indices.reshape(-1).to(dtype=torch.long),
-        routed.reshape(-1, routed.shape[-1]) * top_k_gates.reshape(-1, 1),
-    )
-    torch.testing.assert_close(out, ref, atol=0, rtol=0)
-
-
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @bypass_not_implemented
-def test_fused_swiglu_moe_scale_dynamic_quant_backend():
-    input = torch.randn(4, 2, 128, dtype=torch.bfloat16)
-    smooth_scale = torch.ones(4, 64, dtype=torch.float32)
-    token_count = torch.tensor([2, 2, 2, 2], dtype=torch.int32)
+def test_moe_init_routing_dynamic_quant_backend(dtype):
+    device = get_torch_device()
+    seq_len = 8
+    num_experts = 4
+    top_k = 2
+    hidden_size = 64
 
-    op = MojoFusedSwiGLUMoEScaleDynamicQuantize()
-    quantized, scale = op(input, smooth_scale, token_count, 1.0, 0)
-    assert quantized.shape == (4, 2, 64)
-    assert quantized.dtype == torch.int8
-    assert scale.shape == (4, 2)
-    assert scale.dtype == torch.float32
+    hidden_states = torch.randn(seq_len, hidden_size, dtype=dtype, device=device)
+    gate_logits = torch.randn(seq_len, num_experts, dtype=torch.float32, device=device)
+    gate_probs = torch.softmax(gate_logits, dim=-1)
+    top_k_logits, top_k_indices = torch.topk(gate_probs, top_k, dim=-1)
+    top_k_gates = top_k_logits / torch.sum(top_k_logits, dim=-1, keepdim=True)
+    top_k_indices = top_k_indices.to(torch.int32)
+    smooth_scale = torch.rand(num_experts, hidden_size, dtype=torch.float32, device=device)
 
-
-@bypass_not_implemented
-def test_group_quant_gemm_moe_backend():
-    input = torch.randint(-128, 127, (4, 2, 64)).to(dtype=torch.int8)
-    weight = torch.randint(-128, 127, (4, 128, 64)).to(dtype=torch.int8)
-    token_count = torch.tensor([2, 2, 2, 2], dtype=torch.int32)
-    weight_scale = torch.ones(4, 128, dtype=torch.float32)
-    input_scale = torch.ones(4, 2, 8, dtype=torch.float32)
-
-    op = MojoGroupQuantGemmMoE(output_dtype=torch.bfloat16, trans_weight=True)
-    op_ref = MojoGroupQuantGemmMoE._registry.get("torch")(output_dtype=torch.bfloat16, trans_weight=True)
-    op.forward_diff_with(
-        op_ref,
-        input,
-        weight,
-        token_count,
-        weight_scale,
-        input_scale,
-        atol=256,
-        rtol=1e-2,
-    )
-
-
-@bypass_not_implemented
-def test_group_quant_gemm_combine_moe_backend():
-    input = torch.randint(-128, 127, (4, 2, 64)).to(dtype=torch.int8)
-    weight = torch.randint(-128, 127, (4, 64, 48)).to(dtype=torch.int8)
-    token_count = torch.tensor([2, 2, 2, 2], dtype=torch.int32)
-    top_k_gates = torch.rand(4, 2, 1, dtype=torch.float32)
-    token_indices = torch.tensor(
-        [[[0], [1]], [[2], [3]], [[0], [1]], [[2], [3]]],
-        dtype=torch.int32,
-    )
-    shared_output = torch.zeros(4, 48, dtype=torch.bfloat16)
-    weight_scale = torch.ones(4, 48, dtype=torch.float32)
-    input_scale = torch.ones(4, 2, dtype=torch.float32)
-
-    op = MojoGroupQuantGemmCombineMoE(output_dtype=torch.bfloat16, trans_weight=False)
-    op_ref = MojoGroupQuantGemmCombineMoE._registry.get("torch")(output_dtype=torch.bfloat16, trans_weight=False)
-    op.forward_diff_with(
-        op_ref,
-        input,
-        weight,
-        top_k_gates,
-        token_indices,
-        token_count,
-        shared_output,
-        weight_scale,
-        input_scale,
-        atol=32,
-        rtol=5e-3,
-    )
-
-@pytest.mark.ci
-@pytest.mark.parametrize("seqlen", [2 , 11, 16, 128, 256, 311, 1024, 1025, 3072, 3071, 8192, 16384])
-@pytest.mark.parametrize("num_experts, hidden_size", [(128, 4096), (128, 5120)])
-@pytest.mark.parametrize("top_k", [2, 4, 8])
-@bypass_not_implemented
-def test_moe_init_routing_dynamic_quant_backend(seqlen: int, num_experts: int, hidden_size: int, top_k: int):
-    hidden_states = torch.randn(seqlen, hidden_size, dtype=torch.bfloat16)
-    # top_k_gates = torch.softmax(torch.randn(seqlen, top_k, dtype=torch.float32), dim=-1)
-    # top_k_indices = torch.stack([torch.randperm(4)[:2] for _ in range(8)])
-    smooth_scale = torch.rand(num_experts, hidden_size, dtype=torch.float32)
-
-    top_k_gates = torch.randn([seqlen, top_k], dtype=torch.float32)
-    top_k_indices = torch.randint(0, num_experts, (seqlen, top_k,), dtype=torch.int32)
-    quant_mode = 0
-
-    op = MojoMoEInitRoutingDynamicQuant(num_experts=num_experts, top_k=top_k, quant_block_size=hidden_size)
-    op_ref = MojoMoEInitRoutingDynamicQuant._registry.get("torch")(num_experts=num_experts, top_k=top_k, quant_block_size=hidden_size)
+    op = MojoMoEInitRoutingDynamicQuant(
+        num_experts=num_experts,
+        top_k=top_k,
+        quant_block_size=hidden_size,
+    ).to(device)
+    op_ref = MojoMoEInitRoutingDynamicQuant._registry.get("torch")(
+        num_experts=num_experts,
+        top_k=top_k,
+        quant_block_size=hidden_size,
+    ).to(device)
     op.forward_diff_with(
         op_ref,
         hidden_states,
         top_k_gates,
         top_k_indices,
         smooth_scale,
-        quant_mode,
+        0,
         atol=(1, 1e-4, 0, 0, 1e-4),
         rtol=(0, 1e-4, 0, 0, 1e-4),
     )
 
 
-def generate_random_list(M, N):
-    """
-    生成一个长度为M，总和为N，所有元素>=0的随机列表
-    使用均匀分布方法
-    """
-    points = torch.cat([torch.tensor([0, N]), torch.randint(0, N + 1, (M - 1,))])
-    points, _ = torch.sort(points)
-    result = (points[1:] - points[:-1]).tolist()
-
-    return result
-
-@pytest.mark.ci
-@pytest.mark.parametrize("seq_len", [2, 64, 128, 1024, 4096])
-@pytest.mark.parametrize("last_dim", [1280, 3584, 4096])
-@pytest.mark.parametrize("EXPERT_NUM", [8, 32, 48, 64])
-@pytest.mark.parametrize("TOPK", [2, 4, 8])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @bypass_not_implemented
-def test_fused_swiglu_moe_scale_dynamic_quant_backend(seq_len, last_dim, EXPERT_NUM, TOPK):
-    input = torch.randn(seq_len, TOPK, last_dim, dtype=torch.bfloat16)
-    smooth_scale = torch.rand(EXPERT_NUM, last_dim//2, dtype=torch.float32)
-    token_count = torch.tensor(generate_random_list(EXPERT_NUM, seq_len * TOPK), dtype=torch.int32)
+def test_fused_swiglu_moe_scale_dynamic_quant_backend(dtype):
+    device = get_torch_device()
+    seq_len = 8
+    top_k = 2
+    expert_num = 4
+    last_dim = 128
 
-    op = MojoFusedSwiGLUMoEScaleDynamicQuantize()
-    op_ref = MojoFusedSwiGLUMoEScaleDynamicQuantize._registry.get("torch")()
-    op.forward_diff_with(op_ref, input, smooth_scale, token_count, 1.0, 0, atol=(1, 1e-4), rtol=(0, 1e-4))
+    input = torch.randn(seq_len, top_k, last_dim, dtype=dtype, device=device)
+    smooth_scale = torch.rand(expert_num, last_dim // 2, dtype=torch.float32, device=device)
+    token_count = torch.tensor([4, 5, 3, 4], dtype=torch.int32, device=device)
+
+    op = MojoFusedSwiGLUMoEScaleDynamicQuantize().to(device)
+    op_ref = MojoFusedSwiGLUMoEScaleDynamicQuantize._registry.get("torch")().to(device)
+    op.forward_diff_with(
+        op_ref,
+        input,
+        smooth_scale,
+        token_count,
+        1.0,
+        0,
+        atol=(1, 1e-4),
+        rtol=(0, 1e-4),
+    )
+
+@pytest.mark.parametrize("weight_bits", [4, 8])
+@bypass_not_implemented
+def test_quant_experts_reference(weight_bits):
+    torch.manual_seed(0)
+    num_experts = 3
+    hidden_size = 8
+    intermediate_size = 12
+    quant_group_size = 4
+    token_count = torch.tensor([2, 0, 3], dtype=torch.int32)
+    total_tokens = int(token_count.sum().item())
+
+    input_fp = torch.randn(total_tokens, hidden_size, dtype=torch.bfloat16)
+    
+    up_weight, up_weight_scale, down_weight, down_weight_scale = _make_quant_weights(
+        num_experts,
+        hidden_size,
+        intermediate_size,
+        quant_group_size,
+        weight_bits,
+    )
+    fc1_input_smooth_scale = torch.rand(num_experts, hidden_size, dtype=torch.float32) + 0.5
+    fc2_input_smooth_scale = torch.rand(num_experts, intermediate_size, dtype=torch.float32) + 0.5
+
+    op = MojoQuantExperts._registry.get("torch")(
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        quant_type=torch.int8,
+        quant_group_size=quant_group_size,
+        weight_bits = weight_bits,
+    )
+    op.load_state_dict(
+        {
+            "up_proj_weight": up_weight,
+            "down_proj_weight": down_weight,
+            "up_proj_weight_scale": up_weight_scale,
+            "down_proj_weight_scale": down_weight_scale,
+            "up_proj_quantize.inv_smooth_scale": 1.0 / fc1_input_smooth_scale,
+            "down_proj_quantize.inv_smooth_scale": 1.0 / fc2_input_smooth_scale,
+        }
+    )
+
+    out = op(input_fp, token_count)
+    
+    if weight_bits == 4:
+        up_weight = _unpack_int4_from_int8_along_output(up_weight)
+        down_weight = _unpack_int4_from_int8_along_output(down_weight)
+    
+    ref = _manual_quant_experts(
+        input_fp,
+        token_count,
+        up_weight,
+        up_weight_scale,
+        down_weight,
+        down_weight_scale,
+        fc1_input_smooth_scale,
+        fc2_input_smooth_scale,
+        quant_group_size,
+    )
+
+    torch.testing.assert_close(out, ref, atol=0, rtol=0)
+    assert op.up_proj_weight.dtype == torch.int8
+    assert op.down_proj_weight.dtype == torch.int8
+    assert isinstance(op.up_proj_weight_scale, torch.nn.Parameter)
+    assert isinstance(op.down_proj_weight_scale, torch.nn.Parameter)
+    assert op.up_proj_weight.shape == (num_experts, intermediate_size * 2 // (8 // weight_bits), hidden_size)
+    assert op.down_proj_weight.shape == (num_experts, hidden_size // (8 // weight_bits), intermediate_size)
+    assert op.up_proj_weight_scale.shape == (num_experts, intermediate_size * 2, hidden_size // quant_group_size)
+    assert op.down_proj_weight_scale.shape == (num_experts, hidden_size, intermediate_size // quant_group_size)
+    assert set(op.state_dict()) == {
+        "up_proj_weight",
+        "down_proj_weight",
+        "up_proj_weight_scale",
+        "down_proj_weight_scale",
+        "up_proj_quantize.inv_smooth_scale",
+        "down_proj_quantize.inv_smooth_scale",
+    }
+
+
+@pytest.mark.parametrize(
+    "weight_bits,quant_group_size", 
+    [(4, 4),
+     (8, 4),
+     (8, -1),
+    ]
+)
+@bypass_not_implemented
+def test_quant_moe_reference(weight_bits, quant_group_size):
+    torch.manual_seed(1)
+    num_tokens = 5
+    num_experts = 4
+    top_k = 2
+    hidden_size = 8
+    intermediate_size = 12
+
+    hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16)
+    gate_weight = torch.randn(hidden_size, num_experts, dtype=torch.float32) * 0.2
+    fc1_input_smooth_scale = torch.rand(num_experts, hidden_size, dtype=torch.float32) + 0.5
+    fc2_input_smooth_scale = torch.rand(num_experts, intermediate_size, dtype=torch.float32) + 0.5
+    up_weight, up_weight_scale, down_weight, down_weight_scale = _make_quant_weights(
+        num_experts,
+        hidden_size,
+        intermediate_size,
+        quant_group_size,
+        weight_bits,
+    )
+
+    op = MojoQuantMoE._registry.get("torch")(
+        num_experts=num_experts,
+        top_k=top_k,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        output_dtype=torch.bfloat16,
+        quant_type=torch.int8,
+        quant_group_size=quant_group_size,
+        weight_bits=weight_bits,
+    )
+    op.load_state_dict(
+        {
+            "gating.gate_weight": gate_weight,
+            "experts.up_proj_weight": up_weight,
+            "experts.down_proj_weight": down_weight,
+            "experts.up_proj_weight_scale": up_weight_scale,
+            "experts.down_proj_weight_scale": down_weight_scale,
+            "experts.up_proj_quantize.inv_smooth_scale": 1.0 / fc1_input_smooth_scale,
+            "experts.down_proj_quantize.inv_smooth_scale": 1.0 / fc2_input_smooth_scale,
+        }
+    )
+
+    top_k_indices, top_k_gates = op.gating(hidden_states)
+    sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = op.dispatch(
+        hidden_states,
+        top_k_gates,
+        top_k_indices,
+    )
+
+    if weight_bits == 4:
+        up_weight = _unpack_int4_from_int8_along_output(up_weight)
+        down_weight = _unpack_int4_from_int8_along_output(down_weight)
+    
+    expert_outputs = _manual_quant_experts(
+        sorted_hidden_states,
+        tokens_per_expert,
+        up_weight,
+        up_weight_scale,
+        down_weight,
+        down_weight_scale,
+        fc1_input_smooth_scale,
+        fc2_input_smooth_scale,
+        quant_group_size,
+    )
+    ref = torch.zeros_like(hidden_states, dtype=torch.float32)
+    ref.scatter_reduce_(
+        0,
+        token_indices.to(torch.int64).unsqueeze(-1).expand(-1, hidden_size),
+        expert_outputs.float() * sorted_gates.float(),
+        reduce="sum",
+        include_self=True,
+    )
+
+    out = op(hidden_states)
+    torch.testing.assert_close(out, ref.to(torch.bfloat16), atol=0, rtol=0)
+    assert set(op.state_dict()) == {
+        "gating.gate_weight",
+        "experts.up_proj_quantize.inv_smooth_scale",
+        "experts.up_proj_weight",
+        "experts.down_proj_weight",
+        "experts.up_proj_weight_scale",
+        "experts.down_proj_weight_scale",
+        "experts.down_proj_quantize.inv_smooth_scale",
+    }

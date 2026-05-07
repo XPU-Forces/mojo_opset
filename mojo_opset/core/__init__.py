@@ -11,9 +11,9 @@ from .operator import MojoOperator
 
 """ activation """
 from .operators.activation import MojoGelu
+from .operators.activation import MojoRotateActivation
 from .operators.activation import MojoSilu
 from .operators.activation import MojoSwiGLU
-from .operators.activation import MojoRotateActivation
 
 """ attention """
 from .operators.attention import MojoDecodeGQA
@@ -22,15 +22,15 @@ from .operators.attention import MojoDecodeNSA
 from .operators.attention import MojoPagedDecodeGQA
 from .operators.attention import MojoPagedDecodeMLA
 from .operators.attention import MojoPagedDecodeNSA
+from .operators.attention import MojoPagedDecodeSWA
 from .operators.attention import MojoPagedPrefillGQA
 from .operators.attention import MojoPagedPrefillMLA
 from .operators.attention import MojoPagedPrefillNSA
+from .operators.attention import MojoPagedPrefillSWA
 from .operators.attention import MojoPrefillGQA
 from .operators.attention import MojoPrefillMLA
 from .operators.attention import MojoPrefillNSA
 from .operators.attention import MojoSdpa
-from .operators.attention import MojoPagedPrefillSWA
-from .operators.attention import MojoPagedDecodeSWA
 from .operators.attention import MojoSWA
 
 """ kvcache """
@@ -38,52 +38,47 @@ from .operators.kv_cache import MojoStoreMLAKVCache
 from .operators.kv_cache import MojoStorePagedKVCache
 from .operators.kv_cache import MojoStorePagedMLAKVCache
 
-""" linear """
-from .operators.gemm import MojoGemmDequant
+""" gemm """
+from .operators.gemm import MojoGemm
+from .operators.gemm import MojoQuantGemm
 from .operators.gemm import MojoGroupGemm
-from .operators.gemm import MojoQuantGroupLinearReduceSum
-from .operators.gemm import MojoGroupGemm as MojoGroupLinear
-from .operators.linear import MojoLinear
 
 """ compute + comm """
-from .operators.compute_with_comm import MojoAllGatherGemm
 from .operators.compute_with_comm import MojoGemmAll2All
+from .operators.compute_with_comm import MojoAllGatherGemm
 from .operators.compute_with_comm import MojoGemmAllReduce
 from .operators.compute_with_comm import MojoGemmReduceScatter
-
-""" matmul """
-# Aliases for backward compatibility
-from .operators.gemm import MojoGroupGemm as MojoGroupedMatmul
-from .operators.gemm import MojoQuantGroupLinearReduceSum
-from .operators.gemm import MojoGroupGemm as MojoGroupLinear
-from .operators.gemm import MojoQuantGroupLinearReduceSum as MojoGroupQuantMatmulReduceSum
 
 """ embedding """
 from .operators.embedding import MojoEmbedding
 from .operators.embedding import MojoParallelEmbedding
-from .operators.embedding import MojoRelativeEmbedding
+
+""" over_encoding """
+from .operators.over_encoding import MojoOverEncoding
+from .operators.over_encoding import MojoOverEncodingNGram
 
 """ quantize """
-from .operators.quantize import MojoDequantSwiGLUQuant
 from .operators.quantize import MojoDequant
+from .operators.quantize import MojoDequantSwiGLUQuant
 from .operators.quantize import MojoDynamicQuant
-from .operators.quantize import MojoQuant
+from .operators.quantize import MojoMoEDynamicQuant
+from .operators.quantize import MojoStaticQuant
 
 """ moe """
+from .operators.moe import MojoExperts
+from .operators.moe import MojoFusedSwiGLUMoEScaleDynamicQuantize
 from .operators.moe import MojoMoE
 from .operators.moe import MojoMoECombine
 from .operators.moe import MojoMoEDispatch
-from .operators.moe import MojoMoEInitRoutingDynamicQuant
 from .operators.moe import MojoMoEGating
-from .operators.moe import MojoFusedSwiGLUMoEScaleDynamicQuantize
-from .operators.moe import MojoGroupQuantGemmA8W4MSD
-from .operators.moe import MojoGroupQuantGemmCombineA8W4MSD
-from .operators.moe import MojoGroupQuantGemmCombineMoE
-from .operators.moe import MojoGroupQuantGemmMoE
-from .operators.moe import MojoGroupedMatmulA8W4MSD
+from .operators.moe import MojoMoEInitRoutingDynamicQuant
+from .operators.moe import MojoQuantExperts
+from .operators.moe import MojoQuantMoE
 
 """ normalization """
 from .operators.normalization import MojoChannelRMSNorm
+from .operators.normalization import MojoGroupLayerNorm
+from .operators.normalization import MojoGroupRMSNorm
 from .operators.normalization import MojoLayerNorm
 from .operators.normalization import MojoLayerNormQuant
 from .operators.normalization import MojoResidualAddLayerNorm
@@ -93,16 +88,15 @@ from .operators.normalization import MojoResidualAddRMSNorm
 from .operators.normalization import MojoResidualAddRMSNormQuant
 from .operators.normalization import MojoRMSNorm
 from .operators.normalization import MojoRMSNormQuant
-from .operators.normalization import MojoGroupRMSNorm
-from .operators.normalization import MojoGroupLayerNorm
 
 """ position_embedding """
-from .operators.position_embedding import MojoRotaryEmbedding
+from .operators.position_embedding import MojoRelativeEmbedding
+from .operators.position_embedding import MojoApplyRoPE
+from .operators.position_embedding import MojoGridRoPE
 from .operators.position_embedding import MojoNormRoPE
 from .operators.position_embedding import MojoNormRoPEStoreKV
-from .operators.position_embedding import MojoApplyRoPE
 from .operators.position_embedding import MojoRoPEStoreKV
-from .operators.position_embedding import MojoGridRoPE
+from .operators.position_embedding import MojoRotaryEmbedding
 
 """ mrope """
 from .operators.position_embedding import MojoMRoPE
@@ -126,12 +120,12 @@ from .operators.indexer import MojoLightningIndexer
 
 """ functions """
 from .functions.activation import MojoSiluFunction
+from .functions.attention import MojoSWAFunction
 from .functions.convolution import MojoCausalConv1dFunction
 from .functions.loss_function import MojoFusedLinearCrossEntropyFunction
 from .functions.loss_function import MojoFusedLinearCrossEntropyLoss
 from .functions.normalization import MojoRMSNormFunction
 from .functions.position_embedding import MojoApplyRoPEFunction
-from .functions.attention import MojoSWAFunction
 
 # fmt: off
 __all__ = [
@@ -139,9 +133,6 @@ __all__ = [
     "MojoOperator",
 
     "MojoGelu",
-    "MojoGroupedMatmul",
-    "MojoGroupLinear",
-    "MojoGroupQuantMatmulReduceSum",
     "MojoSilu",
     "MojoSwiGLU",
     "MojoRotateActivation",
@@ -167,35 +158,35 @@ __all__ = [
     "MojoStoreMLAKVCache",
     "MojoStorePagedMLAKVCache",
 
-    "MojoLinear",
-    "MojoGemmDequant",
+    "MojoGemm",
+    "MojoQuantGemm",
     "MojoGroupGemm",
-    "MojoQuantGroupLinearReduceSum",
-    "MojoAllGatherGemm",
     "MojoGemmAll2All",
+    "MojoAllGatherGemm",
     "MojoGemmAllReduce",
     "MojoGemmReduceScatter",
 
-    "MojoQuant",
+    "MojoStaticQuant",
     "MojoDequant",
     "MojoDynamicQuant",
+    "MojoMoEDynamicQuant",
     "MojoDequantSwiGLUQuant",
 
     "MojoEmbedding",
     "MojoParallelEmbedding",
     "MojoRelativeEmbedding",
+    "MojoOverEncoding",
+    "MojoOverEncodingNGram",
 
     "MojoMoE",
     "MojoMoEGating",
     "MojoMoEDispatch",
-    "MojoMoECombine",
     "MojoMoEInitRoutingDynamicQuant",
     "MojoFusedSwiGLUMoEScaleDynamicQuantize",
-    "MojoGroupQuantGemmMoE",
-    "MojoGroupQuantGemmCombineMoE",
-    "MojoGroupQuantGemmA8W4MSD",
-    "MojoGroupQuantGemmCombineA8W4MSD",
-    "MojoGroupedMatmulA8W4MSD",
+    "MojoExperts",
+    "MojoMoECombine",
+    "MojoQuantExperts",
+    "MojoQuantMoE",
 
     "MojoLayerNorm",
     "MojoRMSNorm",

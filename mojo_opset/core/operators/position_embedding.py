@@ -1,9 +1,81 @@
+import math
 from typing import Optional
 from typing import Tuple, List
 
 import torch
 
 from ..operator import MojoOperator
+
+
+class MojoRelativeEmbedding(MojoOperator):
+    def __init__(self, num_buckets: int, num_heads: int, bidirectional: bool, max_dist: int = 128):
+        """
+        Initialize T5-style relative position embedding.
+
+        Args:
+            num_buckets (int): Number of relative position buckets.
+            num_heads (int): Attention heads; also the embedding output channels.
+            bidirectional (bool): If True, allocate half buckets for positive direction.
+            max_dist (int, default=128): Maximum distance used in logarithmic bucketing.
+        """
+        super().__init__()
+        if not isinstance(num_buckets, int) or num_buckets <= 0:
+            raise ValueError("num_buckets must be a positive integer")
+        if not isinstance(num_heads, int) or num_heads <= 0:
+            raise ValueError("num_heads must be a positive integer")
+        if not isinstance(bidirectional, bool):
+            raise TypeError("bidirectional must be a bool")
+        if not isinstance(max_dist, int) or max_dist <= 0:
+            raise ValueError("max_dist must be a positive integer")
+        self.num_buckets = num_buckets
+        self.num_heads = num_heads
+        self.bidirectional = bidirectional
+        self.max_dist = max_dist
+        self.embedding = torch.nn.Embedding(num_buckets, num_heads)
+
+    def forward(self, lq: int, lk: int) -> torch.Tensor:
+        """
+        Compute relative position bias tensor for attention.
+
+        Args:
+            lq (int): Length of query sequence (Lq).
+            lk (int): Length of key/value sequence (Lk).
+
+        Returns:
+            torch.Tensor: Bias tensor of shape [1, num_heads, Lq, Lk], dtype follows embedding weights.
+        """
+        if not isinstance(lq, int) or not isinstance(lk, int) or lq <= 0 or lk <= 0:
+            raise ValueError("lq and lk must be positive integers")
+        device = self.embedding.weight.device
+        rel_pos = torch.arange(lk, device=device).unsqueeze(0) - torch.arange(lq, device=device).unsqueeze(1)
+        rel_pos = self._relative_position_bucket(rel_pos)
+        rel_pos_embeds = self.embedding(rel_pos)
+        rel_pos_embeds = rel_pos_embeds.permute(2, 0, 1).unsqueeze(0)
+        return rel_pos_embeds.contiguous()
+
+    def _relative_position_bucket(self, rel_pos: torch.Tensor) -> torch.Tensor:
+        if self.bidirectional:
+            num_buckets = self.num_buckets // 2
+            rel_buckets = (rel_pos > 0).long() * num_buckets
+            rel_pos = torch.abs(rel_pos)
+        else:
+            num_buckets = self.num_buckets
+            rel_buckets = 0
+            rel_pos = -torch.min(rel_pos, torch.zeros_like(rel_pos))
+
+        max_exact = num_buckets // 2
+        rel_pos_large = (
+            max_exact
+            + (
+                torch.log(rel_pos.float() / max_exact) / math.log(self.max_dist / max_exact) * (num_buckets - max_exact)
+            ).long()
+        )
+        rel_pos_large = torch.min(rel_pos_large, torch.full_like(rel_pos_large, num_buckets - 1))
+        rel_buckets += torch.where(rel_pos < max_exact, rel_pos, rel_pos_large)
+        return rel_buckets
+
+    def extra_repr(self) -> str:
+        return f"{self.num_buckets=}, {self.num_heads=}, {self.bidirectional=}, {self.max_dist=}".replace("self.", "")
 
 
 class MojoRotaryEmbedding(MojoOperator):
@@ -20,6 +92,7 @@ class MojoRotaryEmbedding(MojoOperator):
             self._rope_init(init_max_length)
 
         def load_state_dict_post_hook(module, incompatible_keys) -> None:
+            del module
             key2ignore = []
             for miss in incompatible_keys.missing_keys:
                 if miss.split('.')[-1] in ("inv_freq", "cos", "sin"):
@@ -42,8 +115,8 @@ class MojoRotaryEmbedding(MojoOperator):
     def forward(
         self,
         x: torch.Tensor,
-        cu_seqlens_q: Optional[torch.Tensor] = None,
-        seqlens_kv: Optional[torch.Tensor] = None,
+        cu_q_lens: Optional[torch.Tensor] = None,
+        total_seq_lens: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -51,30 +124,30 @@ class MojoRotaryEmbedding(MojoOperator):
         x is necessary for the kernel to determine the output shape.
 
         Scenario descriptions:
-        1. Varlen prefill: input [T, H], cu_seqlens_q [T+1] or position_ids [T] -> cos/sin [T, D].
-        2. Padded prefill: input [B, S, H], cu_seqlens_q None, position_ids None -> cos/sin [S, D].
-        3. Decode: input [B, H], cu_seqlens_q None, position_ids [B] -> cos/sin [B, D].
+        1. Varlen prefill: input [T, H], cu_q_lens [T+1] or position_ids [T] -> cos/sin [T, D].
+        2. Padded prefill: input [B, S, H], cu_q_lens None, position_ids None -> cos/sin [S, D].
+        3. Decode: input [B, H], cu_q_lens None, position_ids [B] -> cos/sin [B, D].
         """
-        if cu_seqlens_q is not None:
-            assert cu_seqlens_q.dtype == torch.int32
-        if seqlens_kv is not None:
-            assert seqlens_kv.dtype == torch.int32
+        if cu_q_lens is not None:
+            assert cu_q_lens.dtype == torch.int32
+        if total_seq_lens is not None:
+            assert total_seq_lens.dtype == torch.int32
         if position_ids is not None:
             assert position_ids.dtype == torch.int32
-        assert position_ids is None or cu_seqlens_q is None, "At most one of cu_seqlens_q or position_ids should be provided"
+        assert position_ids is None or cu_q_lens is None, "At most one of cu_q_lens or position_ids should be provided"
 
-        if cu_seqlens_q is not None:
+        if cu_q_lens is not None:
             assert x.dim() == 2, "x must be 2D: [T, D]"
             position_ids = torch.full((x.shape[0],), -1, device = x.device, dtype = torch.int32)
-            seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-            bsz = seqlens_q.size(0)
+            q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
+            bsz = q_lens.size(0)
             for i in range(bsz):
-                q_len = seqlens_q[i].item()
-                context_len = 0 if seqlens_kv is None else seqlens_kv[i].item() - q_len
-                position_ids[cu_seqlens_q[i]:cu_seqlens_q[i+1]] = torch.arange(
+                q_len = q_lens[i].item()
+                context_len = 0 if total_seq_lens is None else total_seq_lens[i].item() - q_len
+                position_ids[cu_q_lens[i]:cu_q_lens[i+1]] = torch.arange(
                     context_len,
                     context_len + q_len, 
-                    device = cu_seqlens_q.device,
+                    device = cu_q_lens.device,
                     dtype = torch.int32,
                 )
         elif position_ids is not None:

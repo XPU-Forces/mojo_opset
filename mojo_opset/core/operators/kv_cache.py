@@ -1,8 +1,22 @@
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 
 from ..operator import MojoOperator
+
+
+def assert_paged_kv_store_contract(
+    block_table: torch.Tensor,
+    cu_q_lens: Optional[torch.Tensor],
+    context_kv_lens: Optional[torch.Tensor],
+) -> None:
+    assert block_table.dtype == torch.int32
+    if cu_q_lens is not None:
+        assert cu_q_lens.dtype == torch.int32
+    if context_kv_lens is not None:
+        assert context_kv_lens.dtype == torch.int32
+        assert block_table.shape[0] == context_kv_lens.shape[0]
+    assert block_table.dim() == 2
 
 
 class MojoStoreKVCache(MojoOperator):
@@ -22,12 +36,12 @@ class MojoStorePagedKVCache(MojoOperator):
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         block_table: torch.Tensor,
-        cu_seq_lens: torch.Tensor,
-        kv_lens: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        context_kv_lens: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Append new K/V tokens into a block-based KV cache.
-        Supports both prefill (via cu_seq_lens) and decode (batch of 1 token) scenarios.
+        Supports both prefill (via cu_q_lens) and decode (batch of 1 token) scenarios.
 
         Args:
             key_states (torch.Tensor): Shape (token_num, kv_head_num, head_dim) — new key tokens.
@@ -35,9 +49,10 @@ class MojoStorePagedKVCache(MojoOperator):
             key_cache (torch.Tensor): Shape (total_phys_blocks, kv_heads, block_size, head_dim) — key cache.
             value_cache (torch.Tensor): Shape (total_phys_blocks, kv_heads, block_size, head_dim) — value cache.
             block_table (torch.Tensor): Shape (bsz, max_blocks_per_seq) mapping logical blocks to physical IDs.
-            cu_seq_lens (Optional[torch.Tensor]): Shape (bsz + 1,) cumulative sequence lengths for prefill.
+            cu_q_lens (Optional[torch.Tensor]): Shape (bsz + 1,) cumulative query lengths for prefill.
                                                  If None, assumes decode phase (1 token per sequence).
-            kv_lens (torch.Tensor): Shape (bsz,) current history sequence lengths per batch (start position for write).
+            context_kv_lens (torch.Tensor): Shape (bsz,) history sequence
+                lengths before storing the current tokens. Padding entries use -1.
 
         Returns:
             Tuple[torch.Tensor, torch.Tensor]: Updated `(key_cahce, value_cahce)` after in-place writes.
@@ -45,17 +60,18 @@ class MojoStorePagedKVCache(MojoOperator):
         assert len(key_states.shape) == 3 and len(value_states.shape) == 3 and key_states.shape == value_states.shape, (
             "key/value states must be (token_num, kv_head_num, head_dim), please check."
         )
+        assert_paged_kv_store_contract(block_table, cu_q_lens, context_kv_lens)
 
         block_size = key_cache.shape[2]
 
-        num_batches = len(kv_lens) if kv_lens is not None else 0
+        num_batches = len(context_kv_lens) if context_kv_lens is not None else 0
 
-        is_decode_mode = cu_seq_lens is None
+        is_decode_mode = cu_q_lens is None
 
         for batch_id in range(num_batches):
             if not is_decode_mode:
-                k_start = cu_seq_lens[batch_id].item()
-                k_end = cu_seq_lens[batch_id + 1].item()
+                k_start = cu_q_lens[batch_id].item()
+                k_end = cu_q_lens[batch_id + 1].item()
                 now_seq_len = k_end - k_start
             else:
                 k_start = batch_id
@@ -71,8 +87,12 @@ class MojoStorePagedKVCache(MojoOperator):
             now_key = now_key.permute(1, 0, 2)
             now_value = now_value.permute(1, 0, 2)
 
-            now_kv_len_start = kv_lens[batch_id].item()
+            now_kv_len_start = context_kv_lens[batch_id].item()
+            if now_kv_len_start < 0:
+                continue
             now_block_table = block_table[batch_id]
+            if now_block_table.numel() == 0 or now_block_table[0].item() < 0:
+                continue
 
             start_block_table_idx = now_kv_len_start // block_size
             block_offset_in_first_block = now_kv_len_start % block_size
@@ -135,8 +155,8 @@ class MojoStorePagedMLAKVCache(MojoOperator):
         compressed_kv_cache: torch.Tensor,
         k_pe_cache: torch.Tensor,
         block_table: torch.Tensor,
-        cu_seq_lens: torch.Tensor,
-        kv_lens: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        context_kv_lens: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -150,26 +170,23 @@ class MojoStorePagedMLAKVCache(MojoOperator):
                 paged positional-key cache (modified in-place).
             block_table: ``(B, max_blocks_per_seq)`` logical-to-physical block
                 mapping.
-            cu_seq_lens: ``(B+1,)`` cumulative new-token lengths for prefill.
+            cu_q_lens: ``(B+1,)`` cumulative query lengths for prefill.
                 ``None`` indicates decode mode (1 token per batch).
-            kv_lens: ``(B,)`` history sequence lengths per batch (write start
-                position).
+            context_kv_lens: ``(B,)`` history sequence lengths before
+                storing the current tokens. Padding entries use -1.
 
         Returns:
             ``(compressed_kv_cache, k_pe_cache)`` after in-place writes.
         """
-        assert block_table.dtype == torch.int32
-        if cu_seq_lens is not None:
-            assert cu_seq_lens.dtype == torch.int32
-        assert kv_lens.dtype == torch.int32
+        assert_paged_kv_store_contract(block_table, cu_q_lens, context_kv_lens)
         block_size = compressed_kv_cache.shape[2]
-        num_batches = len(kv_lens) if kv_lens is not None else 0
-        is_decode = cu_seq_lens is None
+        num_batches = len(context_kv_lens) if context_kv_lens is not None else 0
+        is_decode = cu_q_lens is None
 
         for batch_id in range(num_batches):
             if not is_decode:
-                t_start = cu_seq_lens[batch_id].item()
-                t_end = cu_seq_lens[batch_id + 1].item()
+                t_start = cu_q_lens[batch_id].item()
+                t_end = cu_q_lens[batch_id + 1].item()
                 seq_len = t_end - t_start
             else:
                 t_start = batch_id
@@ -182,8 +199,12 @@ class MojoStorePagedMLAKVCache(MojoOperator):
             ckv_slice = compressed_kv_states[t_start:t_end]   # (seq_len, kv_lora_rank)
             kpe_slice = k_pe_states[t_start:t_end]             # (seq_len, qk_rope_head_dim)
 
-            write_start = kv_lens[batch_id].item()
+            write_start = context_kv_lens[batch_id].item()
+            if write_start < 0:
+                continue
             bt = block_table[batch_id]
+            if bt.numel() == 0 or bt[0].item() < 0:
+                continue
 
             blk_idx = write_start // block_size
             blk_off = write_start % block_size

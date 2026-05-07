@@ -263,7 +263,7 @@ def _swa_paged_prefill_kernel(
     k_ptr,
     v_ptr,
     bsz,
-    cu_seqlens_q_ptr,
+    cu_q_lens_ptr,
     kv_lens_ptr,
     block_table_ptr,
     scale,
@@ -318,8 +318,8 @@ def _swa_paged_prefill_kernel(
 
     cu_q_chunks = 0
     for b_id in range(bsz):
-        q_start = tl.load(cu_seqlens_q_ptr + b_id).to(tl.int32)
-        q_end = tl.load(cu_seqlens_q_ptr + b_id + 1).to(tl.int32)
+        q_start = tl.load(cu_q_lens_ptr + b_id).to(tl.int32)
+        q_end = tl.load(cu_q_lens_ptr + b_id + 1).to(tl.int32)
         kv_seq_len = tl.load(kv_lens_ptr + b_id).to(tl.int32)
         q_seq_len = q_end - q_start
         kv_computed_len = kv_seq_len - q_seq_len
@@ -576,7 +576,7 @@ def swa_paged_prefill_impl(
     q: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,  # [bsz + 1]
+    cu_q_lens: torch.Tensor,  # [bsz + 1]
     kvlens: torch.Tensor,  # [bsz + 1]
     block_table: torch.Tensor,  # [bsz, num_kv_blocks]
     is_causal: bool = True,
@@ -586,7 +586,7 @@ def swa_paged_prefill_impl(
     gqa_interleave: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     mask_size, mask = get_aux_mask()
-    bsz = cu_seqlens_q.shape[0] - 1
+    bsz = cu_q_lens.shape[0] - 1
     tot_q_toks, num_q_heads, head_dim = q.shape
     _, num_kv_heads, page_size, _ = k_cache.shape
 
@@ -612,7 +612,7 @@ def swa_paged_prefill_impl(
         k_cache,
         v_cache,
         bsz,
-        cu_seqlens_q,
+        cu_q_lens,
         kvlens,
         block_table,
         softmax_scale,
@@ -915,7 +915,7 @@ def swa_paged_decode_impl(
         softmax_scale = 1.0 / (head_dim**0.5)
 
     o = torch.empty_like(q, memory_format=torch.contiguous_format)
-    
+
     job_num = get_mlu_total_cores()
     grid = (job_num, )
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
@@ -963,4 +963,5 @@ def swa_paged_decode_impl(
         num_warps=1, num_stages=3,
         pipeline_strategies=["reduce_delay"],
     )
+
     return o

@@ -1,17 +1,15 @@
-from typing import Optional
-
 import torch
 import torch_npu
 
-from mojo_opset.core import MojoGemmDequant
-from mojo_opset.core import MojoGroupLinear
-from mojo_opset.core import MojoQuantGroupLinearReduceSum
+from mojo_opset.core import MojoQuantGemm
+from mojo_opset.core import MojoGroupGemm
+from mojo_opset.experimental import MojoQuantBatchGemmReduceSum
 from mojo_opset.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 
-class TorchNpuGemmDequant(MojoGemmDequant):
+class TorchNpuQuantGemm(MojoQuantGemm):
     """NPU backend for fused int8 GEMM + dequantization via ``npu_quant_matmul``.
 
     Uses the NPU's native int8 GEMM kernel which performs true int8 → int32
@@ -21,28 +19,28 @@ class TorchNpuGemmDequant(MojoGemmDequant):
 
     supported_platforms_list = ["npu"]
 
-    def forward(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        input_scale: torch.Tensor,
-        weight_scale: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def forward(self, input: torch.Tensor, input_scale: torch.Tensor) -> torch.Tensor:
+        weight = self.weight
         if self.trans_weight:
             weight = weight.t().contiguous()
 
-        return torch_npu.npu_quant_matmul(
+        kernel_output_dtype = self.output_dtype
+        if self.weight_scale.dtype == torch.bfloat16 and self.output_dtype not in (torch.bfloat16, torch.int32):
+            kernel_output_dtype = torch.bfloat16
+
+        out = torch_npu.npu_quant_matmul(
             input,
             weight,
-            weight_scale.flatten(),
+            self.weight_scale.flatten(),
             pertoken_scale=input_scale.flatten(),
-            bias=bias,
-            output_dtype=self.output_dtype,
+            output_dtype=kernel_output_dtype,
         )
+        if out.dtype != self.output_dtype:
+            out = out.to(self.output_dtype)
+        return out
 
 
-class TorchNpuGroupGemm(MojoGroupLinear):
+class TorchNpuGroupGemm(MojoGroupGemm):
     def forward(
         self,
         input: torch.Tensor,
@@ -71,7 +69,7 @@ class TorchNpuGroupGemm(MojoGroupLinear):
         return torch.cat(outputs, dim=0)
 
 
-class TorchNpuQuantGroupLinearReduceSum(MojoQuantGroupLinearReduceSum):
+class TorchNpuQuantBatchGemmReduceSum(MojoQuantBatchGemmReduceSum):
     def forward(
         self,
         input: torch.Tensor,

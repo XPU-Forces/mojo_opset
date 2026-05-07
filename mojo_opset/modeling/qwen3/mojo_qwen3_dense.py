@@ -63,13 +63,13 @@ class PagedDummyCache:
         )
 
         # block_tables needs to be per-layer
-        self.block_tables = torch.zeros(
-            (self.num_layers, self.batch_size, max_blocks_per_seq), dtype=torch.long, device=self.device
+        self.block_tables = torch.full(
+            (self.num_layers, self.batch_size, max_blocks_per_seq), -1, dtype=torch.int32, device=self.device
         )
         # seq_lens needs to be per-layer
-        self.seq_lens = torch.zeros((self.num_layers, self.batch_size), dtype=torch.long, device=self.device)
+        self.seq_lens = torch.zeros((self.num_layers, self.batch_size), dtype=torch.int32, device=self.device)
 
-        self.free_blocks = torch.arange(total_blocks, device=self.device, dtype=torch.long)
+        self.free_blocks = torch.arange(total_blocks, device=self.device, dtype=torch.int32)
         self.num_free_blocks = total_blocks
         self.store_paged_kv = MojoStorePagedKVCache()
 
@@ -85,7 +85,13 @@ class PagedDummyCache:
 
         key_states = key_states.permute(0, 2, 1, 3).reshape(-1, head_num, head_dim).contiguous()
         value_states = value_states.permute(0, 2, 1, 3).reshape(-1, head_num, head_dim).contiguous()
-        cu_seqlens = torch.arange(0, (batch_size + 1) * new_seq_len, step=new_seq_len, device=key_states.device)
+        cu_seqlens = torch.arange(
+            0,
+            (batch_size + 1) * new_seq_len,
+            step=new_seq_len,
+            device=key_states.device,
+            dtype=torch.int32,
+        )
 
         current_seq_lens = self.seq_lens[layer_idx]
 
@@ -252,8 +258,10 @@ class Qwen3Attention(nn.Module):
 
         if q_len > 1:
             q_lens = torch.full((bsz,), q_len, dtype=torch.int32, device=device)
-            cu_seqlens_q = torch.cat([torch.tensor([0], device=device, dtype=torch.int32), q_lens.cumsum(0)])
-            total_tokens = cu_seqlens_q[-1].item()
+            cu_q_lens = torch.cat(
+                [torch.tensor([0], device=device, dtype=torch.int32), q_lens.cumsum(0, dtype=torch.int32)]
+            )
+            total_tokens = cu_q_lens[-1].item()
 
             q = query_states.permute(0, 2, 1, 3).reshape(total_tokens, num_q_heads, head_dim)
 
@@ -266,7 +274,13 @@ class Qwen3Attention(nn.Module):
             block_tables = past_key_values.block_tables[self.layer_idx]
 
             attn_output_tnd = self.attn_prefill(
-                q, k_cache, v_cache, cu_seqlens_q, block_tables, self.scaling, current_seq_lens
+                q,
+                k_cache,
+                v_cache,
+                cu_q_lens,
+                block_tables,
+                self.scaling,
+                cu_total_seq_lens=current_seq_lens,
             )
             attn_output = attn_output_tnd.reshape(bsz, q_len, num_q_heads, head_dim)
             attn_output = attn_output.transpose(1, 2)

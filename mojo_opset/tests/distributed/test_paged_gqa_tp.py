@@ -1,5 +1,10 @@
+import os
+
+os.environ["MOJO_BACKEND"] = "torch"
+
 import torch
 import torch.distributed as dist
+import pytest
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor
 from mojo_opset import (
@@ -23,7 +28,18 @@ from torch.distributed.tensor.placement_types import Shard, Replicate, Partial
 from torch.distributed import breakpoint as dist_breakpoint
 from mojo_opset.runtime.config import MojoConfig, BaseModel
 from typing import Optional
-from mojo_opset.tests.dist_common import dist_test
+
+
+def _init_torchrun_gloo(required_world_size: int):
+    import os
+
+    world_size = int(os.environ.get("WORLD_SIZE", "0"))
+    if world_size <= 0:
+        pytest.skip("This distributed test must be launched with torchrun.")
+    if world_size != required_world_size:
+        pytest.skip(f"This test requires WORLD_SIZE={required_world_size}, got {world_size}.")
+    if not dist.is_initialized():
+        dist.init_process_group("gloo")
 
 
 class SimplePagedKVCache(torch.nn.Module):
@@ -60,14 +76,15 @@ class SimplePagedKVCache(torch.nn.Module):
             device=self.device,
         )
 
-        self.block_tables = torch.zeros(
+        self.block_tables = torch.full(
             (self.num_layers, self.batch_size, max_blocks_per_seq),
+            -1,
             dtype=torch.int32,
             device=self.device,
         )
 
         self.seq_lens = torch.zeros(
-            (self.num_layers, self.batch_size), dtype=torch.int64, device=self.device
+            (self.num_layers, self.batch_size), dtype=torch.int32, device=self.device
         )
 
         self.free_blocks = torch.arange(total_blocks, device=self.device, dtype=torch.int32)
@@ -90,7 +107,7 @@ class SimplePagedKVCache(torch.nn.Module):
         cu_seqlens: torch.Tensor = None,
     ):
         if input_len is None:
-            input_len = torch.ones(self.batch_size, device=key_states.device, dtype=torch.int64)
+            input_len = torch.ones(self.batch_size, device=key_states.device, dtype=torch.int32)
 
         current_seq_lens = self.seq_lens[layer_idx]
         for i in range(self.batch_size):
@@ -182,7 +199,7 @@ class FlashAttentionBlock(torch.nn.Module):
         context_shifts: torch.Tensor = None,
         decode_kv_len: torch.Tensor = None,
         context_cu_seqs: torch.Tensor = None,
-        max_seqlen_q: torch.Tensor = None,
+        max_q_lens: torch.Tensor = None,
         kv_cache: SimplePagedKVCache = None,
     ):
         # dist_breakpoint()
@@ -199,7 +216,7 @@ class FlashAttentionBlock(torch.nn.Module):
         k = self.rms_norms.key(k)
 
         if self.rope:
-            cos, sin = self.rot_pos_emb(hidden_states, cu_seqlens_q=context_cu_seqs, seqlens_kv=context_shifts + context_input_len)
+            cos, sin = self.rot_pos_emb(hidden_states, cu_q_lens=context_cu_seqs, total_seq_lens=context_shifts + context_input_len)
             q, k = self.rope(
                 q,
                 k,
@@ -226,7 +243,10 @@ class FlashAttentionBlock(torch.nn.Module):
                 context_cu_seqs,
                 kv_cache.block_tables[self.layer_id],
                 self.scale_factor,
-                seqlens_kv=context_shifts + context_input_len,
+                cu_total_seq_lens=torch.nn.functional.pad(
+                    (context_shifts + context_input_len).cumsum(0, dtype=torch.int32),
+                    (1, 0),
+                ),
             )
         else:
             # dist_breakpoint()
@@ -321,8 +341,8 @@ class TestMojoParallel:
                 torch.nn.init.ones_(p)
 
 
-    @dist_test(world_size=TP_SIZE, backend="gloo")
     def test_paged_gqa_tp(self):
+        _init_torchrun_gloo(self.TP_SIZE)
         config, parallel_block, device_mesh = self.make()
         # NOTE(liuyuan): We have to make replicate input here because we have already sharded the kv_cache by head  mannually.
         # TODO(liuyuan): Use DTensor for k_cache and v_cache in SimplePagedKVCache as well. Register the Partition func for it.
@@ -347,13 +367,13 @@ class TestMojoParallel:
         output_decode = parallel_block(
             input_tensor_decode,
             kv_cache=kv_cache_tp,
-            decode_kv_len=torch.ones(1, dtype=torch.int64),
+            decode_kv_len=torch.ones(1, dtype=torch.int32),
         )
 
         input_tensor_prefill = torch.ones(128, config.model_config.hidden_size)
-        context_input_len = torch.tensor([128], dtype=torch.int64)
-        context_shifts = torch.zeros(1, dtype=torch.int64)
-        context_cu_seqs = torch.tensor([0, 128], dtype=torch.int64)
+        context_input_len = torch.tensor([128], dtype=torch.int32)
+        context_shifts = torch.zeros(1, dtype=torch.int32)
+        context_cu_seqs = torch.tensor([0, 128], dtype=torch.int32)
 
         output_prefill = parallel_block(
             input_tensor_prefill,
@@ -377,7 +397,7 @@ class TestMojoParallel:
             output_decode_ref = ref_block(
                 input_tensor_decode,
                 kv_cache=kv_cache_ref,
-                decode_kv_len=torch.ones(1, dtype=torch.int64),
+                decode_kv_len=torch.ones(1, dtype=torch.int32),
             )
             output_prefill_ref = ref_block(
                 input_tensor_prefill,
@@ -391,8 +411,8 @@ class TestMojoParallel:
             assert_close(output_decode, output_decode_ref)
             assert_close(output_prefill, output_prefill_ref)
     
-    @dist_test(world_size=TP_SIZE, backend="gloo")
     def test_save_and_load(self):
+        _init_torchrun_gloo(self.TP_SIZE)
         _, parallel_block, device_mesh = self.make()
         from tempfile import NamedTemporaryFile
         import os

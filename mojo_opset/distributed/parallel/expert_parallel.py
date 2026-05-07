@@ -10,6 +10,7 @@ from torch.distributed.tensor import Shard
 from mojo_opset.core.operators.moe import MojoMoE
 from mojo_opset.core.operators.moe import MojoMoECombine
 from mojo_opset.core.operators.moe import MojoMoEDispatch
+from mojo_opset.core.operators.moe import MojoQuantMoE
 from mojo_opset.distributed.parallel.mojo_parallel import MojoDistributedModule
 from mojo_opset.distributed.parallel.mojo_parallel import MojoRegisterableParallelStyle
 from mojo_opset.distributed.parallel.utils import shard_tensor
@@ -65,8 +66,10 @@ class _EPCombineWrapper(nn.Module):
 def _ep_partition_fn(src_data_rank, name, module, device_mesh):
     from mojo_opset.core.operators.moe import MojoExperts
     from mojo_opset.core.operators.moe import MojoMoE
+    from mojo_opset.core.operators.moe import MojoQuantExperts
+    from mojo_opset.core.operators.moe import MojoQuantMoE
 
-    if isinstance(module, MojoMoE):
+    if isinstance(module, (MojoMoE, MojoQuantMoE)):
         module.dispatch = _EPDispatchWrapper(module.dispatch, device_mesh)
         module.combine = _EPCombineWrapper(module.combine, device_mesh)
 
@@ -81,6 +84,45 @@ def _ep_partition_fn(src_data_rank, name, module, device_mesh):
         )
         module.register_state_dict_post_hook(
             partial(stat_dict_rename_hook, ("up_proj_weight", "down_proj_weight"), device_mesh)
+        )
+    elif isinstance(module, MojoQuantExperts):
+        module.register_buffer(
+            "up_proj_weight",
+            shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.up_proj_weight),
+        )
+        module.register_buffer(
+            "down_proj_weight",
+            shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.down_proj_weight),
+        )
+        module.register_parameter(
+            "up_proj_weight_scale",
+            nn.Parameter(shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.up_proj_weight_scale)),
+        )
+        module.register_parameter(
+            "down_proj_weight_scale",
+            nn.Parameter(shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.down_proj_weight_scale)),
+        )
+        module.up_proj_quantize.register_parameter(
+            "inv_smooth_scale",
+            nn.Parameter(shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.up_proj_quantize.inv_smooth_scale)),
+        )
+        module.down_proj_quantize.register_parameter(
+            "inv_smooth_scale",
+            nn.Parameter(shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.down_proj_quantize.inv_smooth_scale)),
+        )
+        module.register_state_dict_post_hook(
+            partial(
+                stat_dict_rename_hook,
+                (
+                    "up_proj_weight",
+                    "down_proj_weight",
+                    "up_proj_weight_scale",
+                    "down_proj_weight_scale",
+                    "up_proj_quantize.inv_smooth_scale",
+                    "down_proj_quantize.inv_smooth_scale",
+                ),
+                device_mesh,
+            )
         )
 
 
@@ -102,6 +144,6 @@ class MojoExpertParallel(MojoRegisterableParallelStyle):
 
 
 MojoExpertParallel.register_dist_info(
-    MojoMoE,
+    (MojoMoE, MojoQuantMoE),
     partiton_fn=_ep_partition_fn,
 )

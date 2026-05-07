@@ -1,9 +1,57 @@
-from typing import Optional
+import math
 
 import torch
-from torch.distributed.tensor import DTensor
+import torch.nn as nn
+import torch.nn.functional as F
 
 from ..operator import MojoOperator
+
+
+class MojoGemm(MojoOperator):
+    def __init__(
+        self,
+        in_features: int | None = None,
+        out_features: int | None = None,
+        bias: bool = True,
+        weight: torch.Tensor | None = None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        if weight is not None:
+            if in_features is not None or out_features is not None:
+                raise ValueError("Provide either weight or in_features/out_features, not both.")
+            if weight.dim() != 2:
+                raise ValueError(f"weight must be 2D, got shape {tuple(weight.shape)}.")
+            self.out_features, self.in_features = weight.shape
+            self.weight = nn.Parameter(weight)
+            self.register_parameter("bias", None)
+            return
+
+        if in_features is None or out_features is None:
+            raise ValueError("in_features and out_features are required when weight is not provided.")
+
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = nn.Parameter(torch.empty((out_features, in_features), **self.tensor_factory_kwargs))
+        if bias:
+            self.bias = nn.Parameter(torch.empty(out_features, **self.tensor_factory_kwargs))
+        else:
+            self.register_parameter("bias", None)
+        self.reset_parameters()
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return F.linear(input, self.weight, self.bias)
+
+    def reset_parameters(self) -> None:
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def extra_repr(self) -> str:
+        return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"
 
 
 class MojoGroupGemm(MojoOperator):
@@ -18,7 +66,7 @@ class MojoGroupGemm(MojoOperator):
 
     def forward(self, input: torch.Tensor, group_list: torch.Tensor) -> torch.Tensor:
         """
-        Grouped linear forward over variable-length segments.
+        Grouped GEMM forward over variable-length segments.
 
         Splits the 2D input into contiguous groups defined by `group_list`,
         applies a per-group weight, and concatenates outputs.
@@ -48,10 +96,8 @@ class MojoGroupGemm(MojoOperator):
 
         if self.trans_weight:
             num_groups_w, n, bk = self.weight.shape
-            strideBN, strideBK = self.weight.stride(1), self.weight.stride(2)
         else:
             num_groups_w, bk, n = self.weight.shape
-            strideBK, strideBN = self.weight.stride(1), self.weight.stride(2)
 
         m, k = input.shape
         assert bk == k, "K of input should be equal to K of self.weight."
@@ -73,70 +119,98 @@ class MojoGroupGemm(MojoOperator):
         weight_shape = tuple(self.weight.shape) if isinstance(self.weight, torch.Tensor) else None
         weight_dtype = self.weight.dtype if isinstance(self.weight, torch.Tensor) else None
         weight_device = self.weight.device if isinstance(self.weight, torch.Tensor) else None
-        return (
-            f"{weight_shape=}, {weight_dtype=}, {weight_device=}".replace("self.", "")
-        )
+        return f"{weight_shape=}, {weight_dtype=}, {weight_device=}".replace("self.", "")
 
 
-class MojoGemmDequant(MojoOperator):
-    """Fused int8 GEMM + dequantization.
+class MojoQuantGemm(MojoOperator):
+    """Fused quantized GEMM.
 
     Performs int8 matrix multiplication with int32 accumulation, then applies
-    per-token × per-channel scale factors to dequantize the result, adds an
-    optional bias, and casts to ``output_dtype``.
+    per-token x per-channel scale factors to dequantize the result and casts
+    to ``output_dtype``.
 
     The reference uses float32 matmul to emulate int8 GEMM because
     ``torch.matmul`` does not natively support int8 → int32 accumulation.
     float32 is exact for all int8 partial sums at practical ``K`` dimensions.
 
     Computation:
-        ``output = (input_i8 @ weight_i8) * input_scale * weight_scale + bias``
+        ``output = (input_i8 @ weight_i8) * input_scale * weight_scale``
     """
 
     def __init__(
         self,
+        in_features: int,
+        out_features: int,
         output_dtype: torch.dtype = torch.bfloat16,
         trans_weight: bool = False,
+        quant_dtype: torch.dtype = torch.int8,
+        weight_bits: int = 8,
+        **kwargs,
     ):
         """
         Args:
+            in_features (int): Logical K dimension of the int8 weight.
+            out_features (int): Logical N dimension of the int8 weight and
+                weight scale.
             output_dtype (torch.dtype): Target dtype for the dequantized output.
                 Supported: ``torch.float32``, ``torch.float16``, ``torch.bfloat16``.
             trans_weight (bool): If True, the weight tensor is provided as
                 ``(N, K)`` and will be transposed to ``(K, N)`` internally.
+                Otherwise it is stored directly as ``(K, N)``.
+            **kwargs: Additional tensor factory kwargs.
         """
-        super().__init__()
+        super().__init__(**kwargs)
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight_shape = (out_features, in_features) if trans_weight else (in_features, out_features)
+        weight_factory_kwargs = {**self.tensor_factory_kwargs, "dtype": quant_dtype}
+        weight_scale_factory_kwargs = {**self.tensor_factory_kwargs, "dtype": torch.bfloat16}
+        self.quant_dtype = quant_dtype
+        assert self.quant_dtype == torch.int8, f"QuantGemm only support int8 quantization yet, but get {quant_dtype=}"
+        self.weight_bits = weight_bits
+        assert self.weight_bits == 8, f"QuantGemm only support w8 yet, but get {weight_bits=}"
+        self.register_buffer(
+            "weight",
+            torch.empty(self.weight_shape, **weight_factory_kwargs),
+        )
+        self.register_buffer(
+            "weight_scale",
+            torch.empty(out_features, **weight_scale_factory_kwargs),
+        )
         self.output_dtype = output_dtype
         self.trans_weight = trans_weight
 
     def forward(
         self,
         input: torch.Tensor,
-        weight: torch.Tensor,
         input_scale: torch.Tensor,
-        weight_scale: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
             input (torch.Tensor): Quantised activation ``(M, K)`` in int8.
-            weight (torch.Tensor): Quantised weight ``(K, N)`` in int8, or
-                ``(N, K)`` when ``trans_weight=True``.
-            input_scale (torch.Tensor): Per-token activation scale ``(M, 1)``
-                or ``(M,)``.
-            weight_scale (torch.Tensor): Per-channel weight scale ``(1, N)``
-                or ``(N,)``.
-            bias (Optional[torch.Tensor]): Optional bias ``(N,)`` in
-                ``output_dtype``.
+            input_scale (torch.Tensor): Runtime per-token activation scale ``(M,)`` or ``(M, 1)``.
 
         Returns:
-            torch.Tensor: Dequantized result ``(M, N)`` in ``output_dtype``.
+            torch.Tensor: Quantized GEMM result ``(M, N)`` in ``output_dtype``.
         """
-        if self.trans_weight:
-            weight = weight.t()
+        weight = self.weight
 
-        out = torch.matmul(input.float(), weight.float())
+        if input.dim() != 2:
+            raise ValueError(f"input must be 2D, got shape {tuple(input.shape)}.")
+        if weight.dim() != 2:
+            raise ValueError(f"weight must be 2D, got shape {tuple(weight.shape)}.")
+        if input.shape[-1] != self.in_features:
+            raise ValueError(f"input K {input.shape[-1]} must match weight K {self.in_features}.")
+        if self.weight_scale.shape != (self.out_features,):
+            raise ValueError(
+                f"weight_scale shape {tuple(self.weight_scale.shape)} must match output dim {(self.out_features,)}."
+            )
 
+        if not self.trans_weight:
+            weight = weight.mT
+        out = torch.mul(input.int().unsqueeze(-2), weight.int()).float().sum(dim=-1)
+
+        weight_scale = self.weight_scale
         if input_scale.dim() == 1:
             input_scale = input_scale.unsqueeze(-1)
         if weight_scale.dim() == 1:
@@ -144,75 +218,13 @@ class MojoGemmDequant(MojoOperator):
 
         out = out * input_scale.float() * weight_scale.float()
 
-        if bias is not None:
-            out = out + bias.float()
-
         return out.to(self.output_dtype)
 
     def extra_repr(self) -> str:
-        return f"output_dtype={self.output_dtype}, trans_weight={self.trans_weight}"
+        return (
+            f"in_features={self.in_features}, "
+            f"out_features={self.out_features}, "
+            f"output_dtype={self.output_dtype}, trans_weight={self.trans_weight}"
+            f"quant_dtype={self.quant_dtype}, weight_bits={self.weight_bits}"
+        )
 
-
-class MojoQuantGroupLinearReduceSum(MojoOperator):
-    def __init__(
-        self,
-        weight: torch.Tensor,
-        trans_weight: bool = False,
-    ):
-        super().__init__()
-
-        if not isinstance(trans_weight, bool):
-            raise TypeError("trans_weight must be bool.")
-        self.trans_weight = trans_weight
-        self.weight = weight
-
-    def forward(
-        self,
-        input: torch.Tensor,
-        x1_scale: torch.Tensor,
-        x2_scale: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Quantized grouped linear with per-token scaling and batch reduction.
-
-        Applies batched matmul on int8 inputs/weights in float32, scales by
-        per-token `x1_scale` and per-output `x2_scale`, then reduces over batch.
-
-        Args:
-            input (torch.Tensor): 3D tensor of shape (B, M, K).
-            x1_scale (torch.Tensor): Per-token scale of shape (B, M).
-            x2_scale (torch.Tensor): Per-output scale of shape (N,), bfloat16 preferred.
-
-        Returns:
-            torch.Tensor: Reduced output of shape (M, N) in bfloat16.
-
-        Notes:
-            - Expects `self.weight` of shape (B, K, N) if `trans_weight` is False,
-              otherwise (B, N, K) and transposed to (B, K, N).
-            - The reduction sums outputs across batch dimension B.
-        """
-        assert input.dim() == 3, "input must be 3D"
-        assert self.weight.dim() == 3, "weight must be 3D"
-
-        if self.trans_weight:
-            weight = self.weight.transpose(1, 2).contiguous()
-        else:
-            weight = self.weight
-
-        b, m, k = input.shape
-        b_w, k_w, n = weight.shape
-        assert b == b_w, "input and weight must have same batch size"
-        assert k == k_w, "K of input should be equal to K of weight"
-
-        if x2_scale.dtype != torch.bfloat16:
-            x2_scale = x2_scale.to(torch.bfloat16)
-
-        out = torch.bmm(input.float(), weight.float()).to(torch.float32)
-        out = x2_scale[None, None, :] * out
-        out = x1_scale[:, :, None] * out
-
-        reduced_out = torch.zeros(m, n, dtype=torch.bfloat16, device=out.device)
-        for i in range(b):
-            reduced_out += out[i, ...].to(torch.bfloat16)
-
-        return reduced_out

@@ -65,6 +65,18 @@ jobs:
         run: |
           echo "Running distributed tests..."
           torchrun --nproc_per_node=2 --master_port=31876 -m pytest -q mojo_opset/tests/distributed/test_expert_parallel.py
+          MOJO_BACKEND="torch" torchrun --nproc_per_node=2 --master_port=31877 -m pytest -q \
+            mojo_opset/tests/distributed/test_paged_gqa_tp.py \
+            mojo_opset/tests/distributed/test_tensor_parallel.py::test_swiglu_parallel_basic \
+            mojo_opset/tests/distributed/test_tensor_parallel.py::test_swiglu_parallel_weight_sharding \
+            mojo_opset/tests/distributed/test_tensor_parallel.py::test_qkv_parallel_basic \
+            mojo_opset/tests/distributed/test_tensor_parallel.py::test_qkv_parallel_with_bias
+          MOJO_BACKEND="torch" torchrun --nproc_per_node=4 --master_port=31878 -m pytest -q \
+            mojo_opset/tests/distributed/test_tensor_parallel.py::test_swiglu_parallel_tp4 \
+            mojo_opset/tests/distributed/test_tensor_parallel.py::test_qkv_parallel_kv_replicate
+          MOJO_BACKEND="torch" torchrun --nproc_per_node=8 --master_port=31879 -m pytest -q \
+            mojo_opset/tests/distributed/test_tensor_parallel.py::test_basic \
+            mojo_opset/tests/distributed/test_tensor_parallel.py::test_multi_layer
       - name: test-TTX
         shell: bash
         run: |

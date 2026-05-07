@@ -76,7 +76,7 @@ diffusion_attention_bwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_a
 
 m_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "m_grouped_matmul_impl")
 k_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "k_grouped_matmul_impl")
-quant_group_linear_reduce_sum_impl = _get_kernel_impl(ttx_backend_module, "quant_group_linear_reduce_sum_impl")
+quant_batch_gemm_reduce_sum_impl = _get_kernel_impl(ttx_backend_module, "quant_batch_gemm_reduce_sum_impl")
 
 int8_gemm_dequant_impl = _get_kernel_impl(ttx_backend_module, "int8_gemm_dequant_impl")
 prepare_b_impl = _get_kernel_impl(ttx_backend_module, "prepare_b_impl")
@@ -95,6 +95,12 @@ top_p_sampling_impl = _get_kernel_impl(ttx_backend_module, "top_p_sampling_impl"
 top_k_sampling_impl = _get_kernel_impl(ttx_backend_module, "top_k_sampling_impl")
 
 group_rmsnorm_impl = _get_kernel_impl(ttx_backend_module, "group_rmsnorm_impl")
+
+# Over-Encoding (OE)
+embedding_nf4_dequant_impl = _get_kernel_impl(ttx_backend_module, "embedding_nf4_dequant_impl")
+n_gram_decode_impl = _get_kernel_impl(ttx_backend_module, "n_gram_decode_impl")
+n_gram_prefill_impl = _get_kernel_impl(ttx_backend_module, "n_gram_prefill_impl")
+over_encoding_decode_impl = _get_kernel_impl(ttx_backend_module, "over_encoding_decode_impl")
 
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
@@ -218,7 +224,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         q: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
+        cu_q_lens: torch.Tensor,
         seqlens_kv: torch.Tensor,
         block_tables: torch.Tensor,
         gqa_interleave: bool,
@@ -226,7 +232,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         aux_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return paged_attention_prefill_impl(
-            q, key_cache, value_cache, cu_seqlens_q, seqlens_kv, block_tables, gqa_interleave, softmax_scale, aux_mask
+            q, key_cache, value_cache, cu_q_lens, seqlens_kv, block_tables, gqa_interleave, softmax_scale, aux_mask
         )
 
     @paged_attention_prefill.register_fake
@@ -234,7 +240,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         q: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
+        cu_q_lens: torch.Tensor,
         seqlens_kv: torch.Tensor,
         block_tables: torch.Tensor,
         gqa_interleave: bool,
@@ -277,22 +283,22 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         x: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_q_lens: Optional[torch.Tensor] = None,
         seqlens_kv: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return rot_pos_embed_impl(x, cos, sin, cu_seqlens_q, seqlens_kv, position_ids)
+        return rot_pos_embed_impl(x, cos, sin, cu_q_lens, seqlens_kv, position_ids)
 
     @rot_pos_embed.register_fake
     def rot_pos_embed_fake(
         x: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_q_lens: Optional[torch.Tensor] = None,
         seqlens_kv: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if cu_seqlens_q is None and position_ids is None:
+        if cu_q_lens is None and position_ids is None:
             # padded prefill scenario
             seq_dim = x.shape[1]
         else:
@@ -347,18 +353,18 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     @torch.library.custom_op("ttx::dynamic_quant", mutates_args={})
     def dynamic_quant(
         input_tensor: torch.Tensor,
-        scale_tensor: torch.Tensor,
+        scale_tensor: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return dynamic_quant_impl(input_tensor, scale_tensor)
 
     @dynamic_quant.register_fake
     def dynamic_quant_fake(
         input_tensor: torch.Tensor,
-        scale_tensor: torch.Tensor,
+        scale_tensor: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return (
             torch.empty_like(input_tensor, dtype=torch.int8),
-            torch.empty(*input_tensor.shape[:-1], dtype=torch.float32, device=input_tensor.device),
+            torch.empty((*input_tensor.shape[:-1], 1), dtype=torch.float32, device=input_tensor.device),
         )
 
     # ====================================
@@ -773,7 +779,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         value_cache: torch.Tensor,
         block_table: torch.Tensor,
         cu_seq_lens: torch.Tensor,
-        kv_lens: torch.Tensor,
+        kv_lens_before_store: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return store_paged_kv_impl(
             key_states,
@@ -782,7 +788,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
             value_cache,
             block_table,
             cu_seq_lens,
-            kv_lens,
+            kv_lens_before_store,
         )
 
     @store_paged_kv.register_fake
@@ -793,7 +799,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         value_cache: torch.Tensor,
         block_table: torch.Tensor,
         cu_seq_lens: torch.Tensor,
-        kv_lens: torch.Tensor,
+        kv_lens_before_store: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(key_cache), torch.empty_like(value_cache)
 
@@ -805,6 +811,10 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     swa_fwd = swa_fwd_impl
     swa_bwd = swa_bwd_impl
     group_rmsnorm = group_rmsnorm_impl
+    embedding_nf4_dequant = embedding_nf4_dequant_impl
+    n_gram_decode = n_gram_decode_impl
+    n_gram_prefill = n_gram_prefill_impl
+    over_encoding_decode = over_encoding_decode_impl
 
 else:
     causal_conv1d_fwd = causal_conv1d_fwd_impl
@@ -858,3 +868,7 @@ else:
     dynamic_quant = dynamic_quant_impl
     lightning_indexer = lightning_indexer_impl
     group_rmsnorm = group_rmsnorm_impl
+    embedding_nf4_dequant = embedding_nf4_dequant_impl
+    n_gram_decode = n_gram_decode_impl
+    n_gram_prefill = n_gram_prefill_impl
+    over_encoding_decode = over_encoding_decode_impl
