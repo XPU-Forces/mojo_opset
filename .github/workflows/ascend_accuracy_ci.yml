@@ -69,6 +69,8 @@ jobs:
           CURRENT_CCEC_DIR=$(realpath -m "$CURRENT_CCEC_DIR")
           rm -f $CURRENT_CCEC_DIR/bin/bishengir-hivm-compile $CURRENT_CCEC_DIR/bin/hivmc $CURRENT_CCEC_DIR/bin/bishengir-opt
           echo "export BISHENG_INSTALL_PATH=$CURRENT_CCEC_DIR" > ccec.env
+          source ccec.env
+          cat ccec.env
       - name: test-Base
         shell: bash
         run: |
@@ -99,6 +101,8 @@ jobs:
           unset ASCEND_VISIBLE_DEVICES
           unset ASCEND_RT_VISIBLE_DEVICES
           source ccec.env
+          cat ccec.env
+          env|grep BISHENG_INSTALL_PATH
           MOJO_BACKEND="ttx" python3 -m pytest -n 8 mojo_opset/tests/accuracy/operators/ \
             --ignore=mojo_opset/tests/accuracy/operators/test_compute_with_comm.py
           MOJO_BACKEND="ttx" python3 -m pytest -n 8 mojo_opset/tests/accuracy/functions/
