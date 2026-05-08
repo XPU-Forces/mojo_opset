@@ -1,5 +1,10 @@
+import math
+import os
+
 import triton
 import triton.language as tl
+
+LOG2E = tl.constexpr(math.log2(math.e))
 
 try:
     from triton.runtime.libentry import libentry as _libentry_impl
@@ -13,6 +18,16 @@ except ImportError:
 
 
 libentry = _libentry_impl
+
+_AUTOTUNE_DISABLED = os.environ.get("TRITON_DISABLE_AUTOTUNE") == "1"
+
+def smart_triton_autotune(configs, selected_idx=0, **kwargs):
+    """When TRITON_DISABLE_AUTOTUNE=1, bypasses triton.autotune and injects
+    the selected config directly into triton.jit calls via triton.heuristics."""
+    if _AUTOTUNE_DISABLED:
+        fixed = configs[selected_idx].all_kwargs()
+        return lambda fn: triton.heuristics({k: lambda _args, v=v: v for k, v in fixed.items()})(fn)
+    return triton.autotune(configs=configs, **kwargs)
 
 VEC_ALIGN_BYTES = 256
 
