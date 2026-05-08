@@ -68,7 +68,7 @@ jobs:
           CURRENT_CCEC_DIR=npu_compiler/ccec_compiler
           CURRENT_CCEC_DIR=$(realpath -m "$CURRENT_CCEC_DIR")
           rm -f $CURRENT_CCEC_DIR/bin/bishengir-hivm-compile $CURRENT_CCEC_DIR/bin/hivmc $CURRENT_CCEC_DIR/bin/bishengir-opt
-          echo "export BISHENG_INSTALL_PATH=$CURRENT_CCEC_DIR" > ccec.env
+          echo "export BISHENG_INSTALL_PATH=$CURRENT_CCEC_DIR/bin" > ccec.env
           source ccec.env
           cat ccec.env
       - name: test-Base
