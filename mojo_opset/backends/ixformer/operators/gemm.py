@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Union
 
 import torch
 
@@ -49,10 +49,10 @@ class IxformerQuantGemm(MojoQuantGemm):
         output_dtype: torch.dtype = torch.bfloat16,
         trans_weight: bool = False,
         quant_dtype: torch.dtype = torch.int8,
-        weight_bits: int = 8,
+        weight_dtype: Union[str, torch.dtype] = torch.int8,
         **kwargs,
     ):
-        super().__init__(in_features, out_features, output_dtype, trans_weight, quant_dtype, weight_bits, **kwargs)
+        super().__init__(in_features, out_features, output_dtype, trans_weight, quant_dtype, weight_dtype, **kwargs)
         
         if self.output_dtype == torch.float32:
             raise NotImplementedError("IxformerQuantGemm does not support float32 output dtype")

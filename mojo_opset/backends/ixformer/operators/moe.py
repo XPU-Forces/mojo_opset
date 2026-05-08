@@ -1,4 +1,5 @@
 import torch
+from typing import Optional, Tuple, Union
 
 from mojo_opset.core import MojoMoEGating
 from mojo_opset.core import MojoMoEDispatch
@@ -138,12 +139,12 @@ class IxformerQuantExperts(MojoQuantExperts):
                  activation: str = "swiglu",
                  quant_dtype: torch.dtype = torch.int8,
                  quant_group_size: int = -1,
-                 weight_bits: int = 8,
+                 weight_dtype: Union[str, torch.dtype] = torch.int8,
                  **kwargs):
-        super().__init__(num_experts, hidden_size, intermediate_size, activation, quant_dtype, quant_group_size, weight_bits, **kwargs)
+        super().__init__(num_experts, hidden_size, intermediate_size, activation, quant_dtype, quant_group_size, weight_dtype, **kwargs)
         
-        if self.weight_bits != 4:
-            raise NotImplementedError(f"IxformerQuantExperts only supports weight_bits=4, got {self.weight_bits}.")
+        if self.weight_dtype not in ("int4"):
+            raise NotImplementedError(f"IxformerQuantExperts only supports weight_dtype='int4', got {self.weight_dtype}.")
         
         if self.quant_group_size not in [256, 320, 512]:
             raise NotImplementedError(f"IxformerQuantExperts: quant_group_size must be 256, 320, or 512, got {self.quant_group_size}.")
@@ -151,7 +152,7 @@ class IxformerQuantExperts(MojoQuantExperts):
         setattr(self.up_proj_weight_scale, "force_dtype", torch.float32)
         setattr(self.down_proj_weight_scale, "force_dtype", torch.float32)
 
-        if self.weight_bits == 4:
+        if self.weight_dtype in ("int4"):
             self.register_load_state_dict_post_hook(_swizzle_weights_post_hook)
         
         self.output_dtype = torch.bfloat16
@@ -233,11 +234,11 @@ class IxformerQuantMoE(MojoQuantMoE):
         activation: str = "swiglu",
         quant_dtype: torch.dtype = torch.int8,
         quant_group_size: int = -1,
-        weight_bits: int = 4,
+        weight_dtype: Union[torch.dtype, str] = torch.int8,
         enable_cuda_graph: bool = False,
         **kwargs
     ):
-        super().__init__(num_experts, top_k, hidden_size, intermediate_size, activation, quant_dtype, quant_group_size, weight_bits, **kwargs)
+        super().__init__(num_experts, top_k, hidden_size, intermediate_size, activation, quant_dtype, quant_group_size, weight_dtype, **kwargs)
         
         if self.quant_group_size not in [256, 320, 512]:
             raise NotImplementedError(f"IxformerQuantMoE: quant_group_size must be 256, 320, or 512, got {self.quant_group_size}.")
@@ -247,8 +248,8 @@ class IxformerQuantMoE(MojoQuantMoE):
         if self.enable_cuda_graph:
             raise NotImplementedError("IxformerQuantMoE: enable_cuda_graph is not supported.")
         
-        if self.weight_bits != 4:
-            raise NotImplementedError(f"IxformerQuantMoE: weight_bits must be 4, got {self.weight_bits}.")
+        if self.weight_dtype not in ("int4"):
+            raise NotImplementedError(f"IxformerQuantMoE: weight_dtype must be 'int4', got {self.weight_dtype}.")
 
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
