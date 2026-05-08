@@ -9,8 +9,10 @@ import torch
 from ixformer import functions as ixf_f
 from ixformer.contrib import vllm_flash_attn as ix_fa
 
-from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoPagedDecodeGQA
+from mojo_opset.core import MojoPagedDecodeSWA
+from mojo_opset.core import MojoPagedPrefillGQA
+from mojo_opset.core import MojoPagedPrefillSWA
 from mojo_opset.core.operators.attention import assert_paged_decode_contract
 from mojo_opset.core.operators.attention import assert_paged_prefill_contract
 
@@ -74,6 +76,7 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
         """
 
         assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
+        cu_kv_lens = cu_total_seq_lens if cu_total_seq_lens is not None else cu_q_lens
         if query.dtype not in (torch.float16, torch.bfloat16):
             raise NotImplementedError(f"query dtype must be fp16 or bf16, got {query.dtype}.")
         if mask is not None:
@@ -91,20 +94,10 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
         if block_tables.dtype != torch.int32:
             raise ValueError(f"block_tables must be int32, got {block_tables.dtype}.")
 
-        q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
-        if q_lens.dtype != torch.int32:
-            raise ValueError(f"q_lens must be int32, got {q_lens.dtype}.")
-        if (q_lens <= 0).any():
-            raise NotImplementedError(
-                "IxformerPagedPrefillGQA does not support zero/negative q_lens. "
-                "Please provide cu_q_lens such that all sequence lengths are >= 1."
-            )
-        if not isinstance(cu_total_seq_lens, torch.Tensor):
+        if not isinstance(cu_kv_lens, torch.Tensor):
             raise ValueError(f"cu_total_seq_lens must be torch.Tensor, got {type(cu_total_seq_lens)}.")
-        if cu_total_seq_lens.dtype != torch.int32:
+        if cu_kv_lens.dtype != torch.int32:
             raise ValueError(f"cu_total_seq_lens must be int32, got {cu_total_seq_lens.dtype}.")
-        if cu_total_seq_lens.ndim != 1:
-            raise ValueError(f"cu_total_seq_lens must be 1D, got shape {tuple(cu_total_seq_lens.shape)}.")
         if not isinstance(max_q_lens, int) or max_q_lens <= 0:
             raise ValueError(
                 f"max_q_lens must be a positive int, got {max_q_lens} ({type(max_q_lens)})."
@@ -123,13 +116,167 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
             key_cache,
             value_cache,
             cu_q_lens,
-            cu_total_seq_lens,
+            cu_kv_lens,
             max_q_lens,
             max_total_seq_lens,
             causal=self.is_causal,
             softmax_scale=softmax_scale,
             block_table=block_tables,
         )
+
+class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
+    """Ixformer implementation for paged prefill SWA (Sliding Window Attention)."""
+
+    supported_platforms_list = ["ilu"]
+
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+        global_window_size: Optional[int] = None,
+        local_window_size: Optional[int] = None,
+    ):
+        
+        super().__init__(
+            is_causal=is_causal,
+            gqa_layout=gqa_layout,
+            global_window_size=global_window_size,
+            local_window_size=local_window_size,
+        )
+        
+        if global_window_size is not None and global_window_size < 0:
+            raise ValueError(f"global_window_size must be >= 0, got {global_window_size}.")
+        if local_window_size is not None and local_window_size < 0:
+            raise ValueError(f"local_window_size must be >= 0, got {local_window_size}.")
+        
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,
+        *,
+        max_q_lens: Optional[int] = None,
+        max_total_seq_lens: Optional[int] = None,
+    ) -> torch.Tensor:
+        """
+        Paged prefill attention with sliding window (SWA) using a blocked KV cache.
+
+        Combines local sliding window attention with optional global window attention.
+        When local_window_size is set, each query token only attends to the nearest
+        local_window_size key/value tokens (causal direction). When global_window_size
+        is also set, the first global_window_size tokens of each sequence are always
+        visible to all query positions, regardless of the sliding window.
+
+        The attention mask (when is_causal=True) is constructed as:
+            mask[q_pos, kv_pos] = causal_mask AND (local_window OR global_window)
+        where:
+            - causal_mask: kv_pos <= q_pos + (kv_seq_len - q_seq_len)
+            - local_window: q_pos + (kv_seq_len - q_seq_len) - kv_pos < local_window_size
+            - global_window: kv_pos < global_window_size
+
+        Args:
+            q (torch.Tensor): Query tokens of shape (T, Hq, D).
+                Hq -> query head count, D -> head dimension.
+                dtype must be fp16 or bf16.
+            k_cache (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
+                Hkv -> kv head count, D -> head dimension.
+                dtype must be fp16 or bf16.
+                block_size must be <= 256 and % 16 == 0.
+            v_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
+                Hkv -> kv head count, D -> head dimension.
+                dtype must be fp16 or bf16.
+                block_size must be <= 256 and % 16 == 0.
+            cu_q_lens (torch.Tensor): Cumulative query lengths, shape (B+1,);
+                `cu_q_lens[i]` is the start offset for query at batch i;
+                `cu_q_lens[-1] == T`.
+                dtype must be int32.
+            block_table (torch.Tensor): Logical-to-physical block IDs per batch,
+                shape (B, num_blocks). Maps logical block indices to physical block
+                locations in k_cache / v_cache.
+                dtype must be int32.
+            softmax_scale (Optional[float]): Attention scaling factor;
+                defaults to 1/sqrt(D).
+            cu_total_seq_lens (Optional[torch.Tensor]): Cumulative total visible KV lengths, shape (B+1,).
+                If None, defaults to cu_q_lens (same as the reference MojoPagedPrefillSWA).
+            max_q_lens (Optional[int]): Ixformer kernel hint; if None, derived from cu_q_lens.
+            max_total_seq_lens (Optional[int]): Ixformer kernel hint; if None, derived from cu_kv.
+
+        Returns:
+            torch.Tensor: Attention output of shape (T, Hq, D).
+
+        Notes:
+            - Only AABB GQA layout is supported.
+            - If Hq != Hkv, K/V heads are expanded to match Hq via repeat_interleave.
+            - local_window_size and global_window_size are configured via __init__,
+              not passed to forward directly.
+            - window_size is derived as (local_window_size, 0) when local_window_size
+              is set, or (-1, -1) for full attention.
+            - global_window_size is not supported together with alibi_slopes in the
+              underlying kernel.
+        """
+
+        if q.dtype not in (torch.float16, torch.bfloat16):
+            raise NotImplementedError(f"query dtype must be fp16 or bf16, got {q.dtype}.")
+        if self.gqa_interleave:
+            raise NotImplementedError("IxformerPagedPrefillSWA only supports AABB layout.")
+        page_block_size = k_cache.shape[2]
+        if page_block_size > 256 or page_block_size % 16 != 0:
+            raise NotImplementedError(
+                f"IxformerPagedPrefillSWA only supports page_block_size <= 256 and % 16 == 0, got {page_block_size}."
+            )
+
+        assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
+        cu_kv_lens = cu_total_seq_lens if cu_total_seq_lens is not None else cu_q_lens
+        if cu_q_lens.dtype != torch.int32:
+            raise ValueError(f"cu_q_lens must be int32, got {cu_q_lens.dtype}.")
+        if block_table.dtype != torch.int32:
+            raise ValueError(f"block_table must be int32, got {block_table.dtype}.")
+
+        if not isinstance(cu_kv_lens, torch.Tensor):
+            raise ValueError(
+                f"cu_total_seq_lens must be torch.Tensor, got {type(cu_total_seq_lens)}."
+            )
+        if cu_kv_lens.dtype != torch.int32:
+            raise ValueError(
+                f"cu_total_seq_lens must be int32, got {cu_kv_lens.dtype}."
+            )
+            
+        if not isinstance(max_q_lens, int) or max_q_lens <= 0:
+            raise ValueError(
+                f"max_q_lens must be a positive int, got {max_q_lens} ({type(max_q_lens)})."
+            )
+        if not isinstance(max_total_seq_lens, int) or max_total_seq_lens <= 0:
+            raise ValueError(
+                f"max_total_seq_lens must be a positive int, got {max_total_seq_lens} ({type(max_total_seq_lens)})."
+            )
+
+        window_size = (self.local_window_size, 0) if self.local_window_size is not None else (-1, -1)
+
+        if window_size == (-1, -1) and self.global_window_size is not None and self.global_window_size > 0:
+            raise ValueError(
+                "global_window_size > 0 requires a valid local_window_size (sliding window)."
+            )
+
+        return ix_fa.flash_attn_varlen_func(
+            q,
+            k_cache,
+            v_cache,
+            cu_q_lens,
+            cu_kv_lens,
+            max_q_lens,
+            max_total_seq_lens,
+            causal=self.is_causal,
+            softmax_scale=softmax_scale,
+            block_table=block_table,
+            window_size=window_size,
+            global_window_size=self.global_window_size,
+        )
+
 
 class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
     """Ixformer implementation for paged decode GQA."""
@@ -144,7 +291,6 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         total_seq_lens: torch.Tensor,
         block_tables: torch.Tensor,
         softmax_scale: Optional[float] = None,
-        cu_q_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
         *,
         max_total_seq_len: Optional[int] = None,
@@ -167,12 +313,18 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         Notes:
             - Head dim D only support [32, 64, 80, 96, 128, 160, 192, 224, 256].
             - Block size must be a multiple of 16.
+            - Hq: the number of query head; Hkv: the number of kv head.
             - If Hq > Hkv, K/V heads are repeated to match query heads.
             - Softmax is computed in float32 and cast back to the input dtype.
             - This implementation references variables `query` and `total_seq_lens`; ensure they
               correspond to `query` and the sequence-lengths tensor in the caller.
         """
         assert_paged_decode_contract(block_tables, total_seq_lens)
+
+        if bool((total_seq_lens <= 0).any().item()):
+            raise NotImplementedError(
+                "IxformerPagedDecodeGQA does not support batch rows with zero KV length (PADSEQ)."
+            )
 
         if mask is not None:
             raise NotImplementedError("IxformerPagedDecodeGQA does not support custom mask yet.")
@@ -208,18 +360,6 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         if not self.is_causal:
             raise NotImplementedError("IxformerPagedDecodeGQA only supports causal attention.")
 
-        # vllm_paged_attention expects a positive KV length for every batch row.
-        if bool((total_seq_lens < 1).any().item()):
-            raise NotImplementedError(
-                "IxformerPagedDecodeGQA requires total_seq_lens >= 1 for every batch row."
-            )
-
-        # GQA + small page size is not supported by the fused kernel vs. eager reference parity.
-        if num_q_heads != num_kv_heads and block_size < 128:
-            raise NotImplementedError(
-                "IxformerPagedDecodeGQA does not support GQA (Hq != Hkv) when block_size < 128."
-            )
-
         output = torch.empty(batch_size, num_q_heads, head_dim, dtype=query.dtype, device=query.device)
 
         if softmax_scale is None:
@@ -231,16 +371,10 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         if block_tables.dtype != torch.int32:
             raise NotImplementedError("IxformerPagedDecodeGQA only support block_tables dtype = torch.int32.")
 
-        if cu_q_lens is not None:
-            raise NotImplementedError("IxformerPagedDecodeGQA does not support varlen decode.")
         if total_seq_lens.dtype != torch.int32:
-            raise ValueError(f"total_seq_lens must be int32, got {total_seq_lens.dtype}.")
+            raise NotImplementedError(f"total_seq_lens must be int32, got {total_seq_lens.dtype}.")
         if not isinstance(max_total_seq_len, int) or max_total_seq_len <= 0:
-            raise ValueError(f"max_total_seq_len must be > 0 and int, got {max_total_seq_len}.")
-        if (total_seq_lens <= 0).any():
-            raise NotImplementedError("IxformerPagedDecodeGQA does not support zero/negative total_seq_lens.")
-        if max_total_seq_len <= 1:
-            raise NotImplementedError("IxformerPagedDecodeGQA only supports max_total_seq_len > 1.")
+            raise NotImplementedError(f"max_total_seq_len must be > 0 and int, got {max_total_seq_len}.")
 
         ixf_f.vllm_paged_attention(
             output=output,
@@ -254,6 +388,92 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
             block_size=block_size,
             max_context_len=max_total_seq_len,
             causal=self.is_causal,
+        )
+
+        return output
+
+
+class IxformerPagedDecodeSWA(MojoPagedDecodeSWA):
+    """Ixformer implementation for paged decode SWA."""
+
+    supported_platforms_list = ["ilu"]
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        total_seq_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+        *,
+        max_total_seq_len: Optional[int] = None,
+    ) -> torch.Tensor:
+
+        """
+        Paged decode attention with sliding window (SWA) using a blocked KV cache.
+
+        Args:
+            q (torch.Tensor): Query of shape (B, Hq, D).
+            k_cache (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
+            v_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
+            total_seq_lens (torch.Tensor): Total visible sequence lengths (B).
+            block_table (torch.Tensor): (B, num_blocks) mapping logical blocks to physical IDs.
+            max_total_seq_len (int): Max sequence length, should be equal to total_seq_lens.max().
+            softmax_scale (Optional[float]): Scale factor; defaults to 1/sqrt(D).
+
+        Returns:
+            torch.Tensor: Attention output of shape (B, Hq, D).
+
+        Notes:
+            - Head dim D only support [32, 64, 80, 96, 128, 160, 192, 224, 256].
+            - Block size must be a multiple of 16.
+            - Hq: the number of query head; Hkv: the number of kv head.
+            - If Hq > Hkv, K/V heads are repeated to match query heads.
+            - Softmax is computed in float32 and cast back to the input dtype.
+            - This implementation references variables `q` and `total_seq_lens`; ensure they
+              correspond to `q` and the total-sequence-lengths tensor in the caller.
+        """
+        assert_paged_decode_contract(block_table, total_seq_lens)
+
+        if bool((total_seq_lens <= 0).any().item()):
+            raise NotImplementedError(
+                "IxformerPagedDecodeSWA does not support batch rows with zero KV length (PADSEQ)."
+            )
+
+        if self.gqa_interleave:
+            raise NotImplementedError("IxformerPagedDecodeSWA does not support ABAB layout.")
+
+        batch_size, num_q_heads, head_dim = q.shape
+        _, num_kv_heads, block_size, _ = k_cache.shape
+
+        output = torch.empty(batch_size, num_q_heads, head_dim, dtype=q.dtype, device=q.device)
+
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(head_dim)
+
+        if block_table.dtype != torch.int32:
+            raise NotImplementedError("IxformerPagedDecodeSWA only support block_table dtype = torch.int32.")
+
+        if not isinstance(max_total_seq_len, int) or max_total_seq_len <= 0:
+            raise NotImplementedError(
+                f"max_total_seq_len must be > 0 and int, got {max_total_seq_len}."
+            )
+
+        ixf_f.vllm_paged_attention(
+            output=output,
+            query=q,
+            key_cache=k_cache,
+            value_cache=v_cache,
+            num_kv_heads=num_kv_heads,
+            scale=softmax_scale,
+            block_tables=block_table,
+            context_lens=total_seq_lens,
+            block_size=block_size,
+            max_context_len=max_total_seq_len,
+            causal=self.is_causal,
+            window_left=self.local_window_size,
+            global_window_size=self.global_window_size
         )
 
         return output

@@ -1,5 +1,3 @@
-import os
-
 import pytest
 import torch
 
@@ -12,18 +10,13 @@ from mojo_opset.core.operators.over_encoding import dequantize_nf4_rows
 from mojo_opset.core.operators.over_encoding import n_gram_impl_torch
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.tests.utils import get_torch_device
-from mojo_opset.utils.platform import get_platform
+from mojo_opset.tests.utils import requires_platform_backend
 
 TEST_DEVICE = get_torch_device()
-_requires_npu_oe = pytest.mark.skipif(
-    get_platform() != "npu",
+_requires_npu_oe = requires_platform_backend(
+    platforms="npu",
     reason="Over-Encoding TTX/NF4 kernels are only implemented on NPU.",
 )
-
-
-def _requested_backend() -> str | None:
-    raw_backend = os.environ.get("MOJO_BACKEND")
-    return raw_backend.strip().lower() if raw_backend else None
 
 
 # `embedding_nf4_dequant` is a low-level TTX kernel entrypoint imported directly
@@ -34,8 +27,9 @@ def _requested_backend() -> str | None:
 # platform-only gating would accidentally execute this TTX kernel in the
 # torch_npu job. Keep the standalone kernel test visible only to the backend
 # that owns it.
-_requires_ttx_oe_kernel = pytest.mark.skipif(
-    get_platform() != "npu" or _requested_backend() not in (None, "ttx"),
+_requires_ttx_oe_kernel = requires_platform_backend(
+    platforms="npu",
+    backends="ttx",
     reason="embedding_nf4_dequant is a TTX-only OE kernel on NPU.",
 )
 
