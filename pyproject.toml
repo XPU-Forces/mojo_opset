@@ -65,3 +65,6 @@ line-ending = "auto"
 known-first-party = ["mojo_opset"]
 force-single-line = true
 lines-between-types = 1
+
+[tool.setuptools.package-data]
+mojo_opset = ["backends/uc/kernels/npu/kernel_lib/*.so"]

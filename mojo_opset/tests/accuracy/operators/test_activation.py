@@ -18,16 +18,17 @@ dtype_str_map = {
 
 
 @pytest.mark.parametrize(
-    "shape",
+    "shape, dtype",
     [
-        ([128, 128]),
-        ([999, 9999]),
-        ([1024, 10240]),
+        ([128, 128], torch.bfloat16),
+        ([999, 9999], torch.bfloat16),
+        ([1024, 10240], torch.bfloat16),
+        ([4096, 128], torch.float16),
     ],
 )
 @bypass_not_implemented
-def test_gelu(shape):
-    x = torch.rand(*shape, dtype=torch.bfloat16)
+def test_gelu(shape, dtype):
+    x = torch.rand(*shape, dtype=dtype)
     gelu = MojoGelu()
     gelu_ref = MojoGelu._registry.get("torch")()
     gelu.forward_diff_with(gelu_ref, x)

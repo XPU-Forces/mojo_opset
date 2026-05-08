@@ -183,4 +183,5 @@ fusion_result.json
 kernel_meta*
 *.pt
 
-npu_profiling*
+# UC backend ships generated pybind kernel libraries.
+!mojo_opset/backends/uc/kernels/npu/kernel_lib/*.so
