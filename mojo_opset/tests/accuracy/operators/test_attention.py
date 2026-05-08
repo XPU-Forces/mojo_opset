@@ -23,7 +23,7 @@ from mojo_opset import MojoPagedDecodeSWA
 from mojo_opset import MojoSWA
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
-from mojo_opset.tests.utils import _requires_ixformer
+from mojo_opset.tests.utils import requires_platform_backend
 from mojo_opset.utils.acc import check_tol_diff
 
 
@@ -203,7 +203,7 @@ test_configs_decode_with_graph = [
     ],
 )
 @pytest.mark.parametrize("gqa_layout", ["AABB"])
-@_requires_ixformer
+@requires_platform_backend(platforms="ilu", backends="ixformer", reason="Test only for Ixformer")
 @auto_switch_platform()
 @bypass_not_implemented
 def test_paged_decode_gqa_with_graph(
@@ -659,7 +659,7 @@ test_configs_prefill_with_graph = [
     ],
 )
 @pytest.mark.parametrize("gqa_layout", ["AABB"])
-@_requires_ixformer
+@requires_platform_backend(platforms="ilu", backends="ixformer", reason="Test only for Ixformer")
 @auto_switch_platform()
 @bypass_not_implemented
 def test_paged_prefill_gqa_with_graph(
@@ -1451,7 +1451,7 @@ test_configs_swa_prefill_with_graph = [
     ("ABAB", 4, 255),
     ("AABB", 4, 1023),
 ])
-@_requires_ixformer
+@requires_platform_backend(platforms="ilu", backends="ixformer", reason="Test only for Ixformer")
 @auto_switch_platform()
 @bypass_not_implemented
 def test_paged_prefill_swa_with_graph(
@@ -1725,7 +1725,7 @@ test_configs_swa_decode_with_graph = [
     ("ABAB", 4, 255),
     ("AABB", 4, 1023),
 ])
-@_requires_ixformer
+@requires_platform_backend(platforms="ilu", backends="ixformer", reason="Test only for Ixformer")
 @auto_switch_platform()
 @bypass_not_implemented
 def test_paged_decode_swa_with_graph(
