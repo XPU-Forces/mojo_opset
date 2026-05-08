@@ -16,7 +16,7 @@ import torch.nn.functional as F
 
 from torch import nn
 
-from mojo_opset import MojoLinear
+from mojo_opset import MojoGemm
 from mojo_opset import MojoMoE
 from mojo_opset import MojoPagedDecodeMLA
 from mojo_opset import MojoPagedPrefillMLA
@@ -338,9 +338,9 @@ class DeepseekV3MLP(nn.Module):
             config.intermediate_size if intermediate_size is None else intermediate_size
         )
         
-        self.gate_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.intermediate_size, self.hidden_size)))
-        self.up_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.intermediate_size, self.hidden_size)))
-        self.down_proj = MojoLinear(weight=nn.Parameter(torch.ones(self.hidden_size, self.intermediate_size)))
+        self.gate_proj = MojoGemm(weight=nn.Parameter(torch.ones(self.intermediate_size, self.hidden_size)))
+        self.up_proj = MojoGemm(weight=nn.Parameter(torch.ones(self.intermediate_size, self.hidden_size)))
+        self.down_proj = MojoGemm(weight=nn.Parameter(torch.ones(self.hidden_size, self.intermediate_size)))
         self.act_fn = MojoSilu()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -431,13 +431,13 @@ class DeepseekV3Attention(nn.Module):
 
         # Query projection (with optional LoRA)
         if self.q_lora_rank is None:
-            self.q_proj = MojoLinear(
+            self.q_proj = MojoGemm(
                 weight=nn.Parameter(
                     torch.ones((self.num_heads * self.qk_head_dim, config.hidden_size))
                 )
             )
         else:
-            self.q_a_proj = MojoLinear(
+            self.q_a_proj = MojoGemm(
                 weight=nn.Parameter(
                     torch.ones((config.q_lora_rank, config.hidden_size))
                 )
@@ -446,14 +446,14 @@ class DeepseekV3Attention(nn.Module):
                 eps=config.rms_norm_eps,
                 norm_size=config.q_lora_rank,
                 )
-            self.q_b_proj = MojoLinear(
+            self.q_b_proj = MojoGemm(
                 weight=nn.Parameter(
                     torch.ones((self.num_heads * self.qk_head_dim, config.q_lora_rank))
                 )
             )
 
         # Key-Value projection (with LoRA)
-        self.kv_a_proj_with_mqa = MojoLinear(
+        self.kv_a_proj_with_mqa = MojoGemm(
             weight=nn.Parameter(
                 torch.ones((
                     self.kv_lora_rank + self.qk_rope_head_dim,
@@ -465,7 +465,7 @@ class DeepseekV3Attention(nn.Module):
             eps=config.rms_norm_eps,
             norm_size=self.kv_lora_rank,
             )
-        self.kv_b_proj = MojoLinear(
+        self.kv_b_proj = MojoGemm(
             weight=nn.Parameter(
                 torch.ones((
                     self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
@@ -475,7 +475,7 @@ class DeepseekV3Attention(nn.Module):
         )
 
         # Output projection
-        self.o_proj = MojoLinear(
+        self.o_proj = MojoGemm(
             weight=nn.Parameter(
                 torch.ones((config.hidden_size, self.num_heads * self.v_head_dim))
             )
@@ -854,7 +854,7 @@ class DeepseekV3ForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.model = DeepseekV3Model(config)
-        self.lm_head = MojoLinear(
+        self.lm_head = MojoGemm(
             weight=nn.Parameter(torch.ones((config.vocab_size, config.hidden_size)))
         )
 
