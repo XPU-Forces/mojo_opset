@@ -5,14 +5,16 @@ from typing import Optional
 import pytest
 import torch
 
+from mojo_opset import MojoConformerAttention
 from mojo_opset import MojoPagedDecodeGQA
-from mojo_opset import MojoPagedPrefillGQA
-from mojo_opset import MojoSdpa
-from mojo_opset import MojoPagedPrefillSWA
 from mojo_opset import MojoPagedDecodeSWA
+from mojo_opset import MojoPagedPrefillGQA
+from mojo_opset import MojoPagedPrefillSWA
+from mojo_opset import MojoSdpa
 from mojo_opset import MojoSWA
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.utils.platform import get_torch_device
 
 
 def generate_paged_decode_data(
@@ -29,7 +31,9 @@ def generate_paged_decode_data(
     total_seq_lens = torch.randint(1, max_seq_len, (batch_size,), dtype=torch.int32)
 
     max_num_blocks_per_seq = (total_seq_lens.max().item() + block_size - 1) // block_size
-    total_blocks_needed = int(torch.div(total_seq_lens + block_size - 1, block_size, rounding_mode="floor").sum().item())
+    total_blocks_needed = int(
+        torch.div(total_seq_lens + block_size - 1, block_size, rounding_mode="floor").sum().item()
+    )
 
     if total_blocks_needed == 0:
         total_blocks_needed = batch_size * max_num_blocks_per_seq
@@ -179,8 +183,10 @@ def generate_paged_prefill_data(
             k_cache[physical_block_id, :, :tokens_in_block, :] = k_slice
             v_cache[physical_block_id, :, :tokens_in_block, :] = v_slice
 
-    cu_total_seq_lens = None if kv_cache_lens is None else torch.cat(
-        [torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0).to(torch.int32)]
+    cu_total_seq_lens = (
+        None
+        if kv_cache_lens is None
+        else torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(kv_lens, 0).to(torch.int32)])
     )
     return query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens
 
@@ -244,6 +250,35 @@ def test_paged_prefill_gqa(
     )
 
 
+@pytest.mark.parametrize(
+    "batch_size, seq_len, num_heads, head_dim, left_window, right_window, dtype",
+    [
+        (2, 512, 8, 64, 128, 0, torch.bfloat16),
+        (2, 1024, 8, 128, 256, 8, torch.bfloat16),
+    ],
+)
+@auto_switch_platform(set_perf=True)
+@bypass_not_implemented
+def test_conformer_attention(
+    batch_size: int,
+    seq_len: int,
+    num_heads: int,
+    head_dim: int,
+    left_window: int,
+    right_window: int,
+    dtype: torch.dtype,
+):
+    device = get_torch_device()
+    query = torch.randn(batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=device)
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+    seqlens = torch.randint(seq_len // 2, seq_len + 1, (batch_size,), dtype=torch.int32, device=device)
+    padding_mask = torch.arange(seq_len, dtype=torch.int32, device=device).unsqueeze(0) < seqlens.unsqueeze(1)
+
+    op = MojoConformerAttention(left_window=left_window, right_window=right_window)
+    perf(lambda: op(query, key, value, padding_mask))  # noqa: F821
+
+
 def generate_test_data(
     bsz: int,
     q_head_num: int,
@@ -280,9 +315,7 @@ def test_sdpa(
     blockwise_diffusion_attn_mask: torch.Tensor,
     enable_gqa: bool,
 ):
-    diffusion_attn = MojoSdpa(
-        scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
-    )
+    diffusion_attn = MojoSdpa(scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa)
     perf(lambda: diffusion_attn(query, key, value, blockwise_diffusion_attn_mask))  # noqa: F821
 
 
@@ -312,9 +345,12 @@ test_configs_swa_prefill = [
         for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_swa_prefill
     ],
 )
-@pytest.mark.parametrize("gqa_layout, global_window, local_window", [
-    ("AABB", 4, 1023),
-])
+@pytest.mark.parametrize(
+    "gqa_layout, global_window, local_window",
+    [
+        ("AABB", 4, 1023),
+    ],
+)
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_paged_prefill_swa(
@@ -351,8 +387,6 @@ def test_paged_prefill_swa(
     )
 
 
-
-
 test_configs_swa_decode = [
     (8, 16, 4, 128, 1024, 32, torch.bfloat16, "M_BF16"),
     (8, 16, 4, 96, 1024, 128, torch.bfloat16, "M_BF16_PADDIM"),
@@ -378,9 +412,12 @@ test_configs_swa_decode = [
         for B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, ID in test_configs_swa_decode
     ],
 )
-@pytest.mark.parametrize("gqa_layout, global_window, local_window", [
-    ("AABB", 4, 1023),
-])
+@pytest.mark.parametrize(
+    "gqa_layout, global_window, local_window",
+    [
+        ("AABB", 4, 1023),
+    ],
+)
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_paged_decode_swa(
@@ -445,6 +482,7 @@ def generate_sdpa_data(
 
     return query, key, value, cu_q_lens, cu_total_seq_lens
 
+
 test_configs_swa_infer = [
     (2, 16, 4, 128, 1024, 0, torch.bfloat16, "M_BF16"),
     (2, 16, 4, 96, 1024, 0, torch.bfloat16, "M_BF16_PADDIM"),
@@ -470,9 +508,12 @@ test_configs_swa_infer = [
         for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, dtype, ID in test_configs_swa_infer
     ],
 )
-@pytest.mark.parametrize("gqa_layout, global_window, local_window", [
-    ("AABB", 4, 1023),
-])
+@pytest.mark.parametrize(
+    "gqa_layout, global_window, local_window",
+    [
+        ("AABB", 4, 1023),
+    ],
+)
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_swa_infer(

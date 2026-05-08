@@ -16,6 +16,7 @@ from .operators.activation import MojoSilu
 from .operators.activation import MojoSwiGLU
 
 """ attention """
+from .operators.attention import MojoConformerAttention
 from .operators.attention import MojoDecodeGQA
 from .operators.attention import MojoDecodeMLA
 from .operators.attention import MojoDecodeNSA
@@ -112,6 +113,7 @@ from .operators.sampling import MojoTopPSampling
 
 """ convolution"""
 from .operators.convolution import MojoCausalConv1dUpdateState
+from .operators.convolution import MojoConv1d
 
 """ mlp"""
 from .operators.mlp import MojoSwiGLUMLP
@@ -151,6 +153,7 @@ __all__ = [
     "MojoDecodeNSA",
     "MojoPagedDecodeNSA",
     "MojoSdpa",
+    "MojoConformerAttention",
     "MojoPagedPrefillSWA",
     "MojoPagedDecodeSWA",
     "MojoSWA",
@@ -221,6 +224,7 @@ __all__ = [
     "MojoTopPFilter",
 
     "MojoCausalConv1dUpdateState",
+    "MojoConv1d",
 
     "MojoSwiGLUMLP",
 
