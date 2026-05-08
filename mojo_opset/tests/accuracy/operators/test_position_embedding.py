@@ -2,16 +2,18 @@ import pytest
 import torch
 
 from mojo_opset.tests.accuracy.operators._vision_rope_2d_golden import (
-    _vision_rope_2d_golden,
+    _apply_vision_rope_2d_golden,
+    _vision_rotary_embedding_2d_golden,
 )
 from mojo_opset.tests.utils import assert_close
 from mojo_opset.tests.utils import bypass_not_implemented
 
+from mojo_opset import MojoApplyVisionRoPE2D
 from mojo_opset import MojoRotaryEmbedding
 from mojo_opset import MojoApplyRoPE
 from mojo_opset import MojoGridRoPE
 from mojo_opset import MojoRelativeEmbedding
-from mojo_opset import MojoVisionRoPE2D
+from mojo_opset import MojoVisionRotaryEmbedding2D
 from mojo_opset.utils.platform import get_torch_device
 
 torch.random.manual_seed(42)
@@ -268,75 +270,112 @@ def test_relative_embedding(num_buckets, num_heads, bidirectional, lq, lk):
         pytest.param(VISION_VIT_CONFIG, id="vision_448_27l_20h_h64"),
     ],
 )
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@bypass_not_implemented
-def test_vision_rope_2d_packed_against_golden(
-    grid, vision_config, dtype
-):
+def test_vision_rotary_embedding_2d(grid, vision_config):
     device = get_torch_device()
     rope_theta = vision_config["rope_theta"]
     head_dim = vision_config["head_dim"]
+    adapooling_factor = vision_config["adapooling_factor"]
+
+    grid_hw = torch.tensor(grid, device=device, dtype=torch.int32)
+    rot_pos_emb = MojoVisionRotaryEmbedding2D(
+        rope_theta=rope_theta,
+        rope_dim=head_dim,
+        adapooling_factor=adapooling_factor,
+    ).to(device)
+
+    cos_ref, sin_ref = _vision_rotary_embedding_2d_golden(
+        grid_hw,
+        rope_theta=rope_theta,
+        rope_dim=head_dim,
+        device=device,
+        adapooling_factor=adapooling_factor,
+    )
+    cos, sin = rot_pos_emb(grid_hw)
+
+    torch.testing.assert_close(cos, cos_ref, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(sin, sin_ref, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("invalid_adapooling_factor", [0, -1])
+def test_vision_rotary_embedding_2d_rejects_non_positive_adapooling_factor(invalid_adapooling_factor):
+    with pytest.raises(AssertionError, match="adapooling_factor must be >= 1"):
+        MojoVisionRotaryEmbedding2D(adapooling_factor=invalid_adapooling_factor)
+
+
+@pytest.mark.parametrize(
+    "grid",
+    [
+        ((4, 4),),
+        ((8, 6),),
+        ((8, 8), (4, 6)),
+    ],
+)
+@pytest.mark.parametrize(
+    "vision_config",
+    [
+        pytest.param(VISION_VIT_CONFIG, id="vision_448_27l_20h_h64"),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_apply_vision_rope_2d(grid, vision_config, dtype):
+    device = get_torch_device()
+    rope_theta = vision_config["rope_theta"]
     q_heads = vision_config["num_heads"]
     k_heads = vision_config["num_heads"]
+    head_dim = vision_config["head_dim"]
     adapooling_factor = vision_config["adapooling_factor"]
 
     grid_hw = torch.tensor(grid, device=device, dtype=torch.int32)
     total_tokens = int(grid_hw.to(dtype=torch.int64).prod(dim=-1).sum().item())
-
     q = torch.randn(total_tokens, q_heads, head_dim, device=device, dtype=dtype)
     k = torch.randn(total_tokens, k_heads, head_dim, device=device, dtype=dtype)
-
-    rope = MojoVisionRoPE2D(rope_theta=rope_theta, rope_dim=head_dim, adapooling_factor=adapooling_factor)
-    q_rot, k_rot = rope(q, k, grid_hw)
-    q_ref, k_ref = _vision_rope_2d_golden(
-        q, k, grid_hw, rope_theta, head_dim, adapooling_factor=adapooling_factor
+    cos, sin = _vision_rotary_embedding_2d_golden(
+        grid_hw,
+        rope_theta=rope_theta,
+        rope_dim=head_dim,
+        device=device,
+        adapooling_factor=adapooling_factor,
     )
+
+    rope = MojoApplyVisionRoPE2D()
+    q_ref, k_ref = _apply_vision_rope_2d_golden(q, k, cos, sin)
+    q_rot, k_rot = rope(q, k, cos, sin)
 
     assert_close(q_rot, q_ref)
     assert_close(k_rot, k_ref)
 
 
-@pytest.mark.parametrize("invalid_adapooling_factor", [0, -1])
-def test_vision_rope_2d_rejects_non_positive_adapooling_factor(invalid_adapooling_factor):
-    with pytest.raises(AssertionError, match="adapooling_factor must be >= 1"):
-        MojoVisionRoPE2D(adapooling_factor=invalid_adapooling_factor)
-
-
 @pytest.mark.parametrize(
-    "vision_config, batch_size, seq_len, grid_hw_data",
+    "batch_size, seq_len, q_heads, k_heads, head_dim",
     [
-        pytest.param(VISION_VIT_CONFIG, 2, 8, [[2, 4], [2, 4]], id="native_4d_layout"),
+        pytest.param(2, 8, VISION_VIT_CONFIG["num_heads"], VISION_VIT_CONFIG["num_heads"], VISION_VIT_CONFIG["head_dim"], id="native_4d_layout"),
     ],
 )
-def test_vision_rope_2d_rejects_non_native_layout_extensions(
-    vision_config, batch_size, seq_len, grid_hw_data
+def test_apply_vision_rope_2d_rejects_non_native_layout_extensions(
+    batch_size, seq_len, q_heads, k_heads, head_dim
 ):
-    q_heads = vision_config["num_heads"]
-    k_heads = vision_config["num_heads"]
-    head_dim = vision_config["head_dim"]
-    rope = MojoVisionRoPE2D(rope_dim=head_dim)
+    rope = MojoApplyVisionRoPE2D()
     q = torch.randn(batch_size, seq_len, q_heads, head_dim)
     k = torch.randn(batch_size, seq_len, k_heads, head_dim)
-    grid_hw = torch.tensor(grid_hw_data, dtype=torch.int32)
+    cos = torch.randn(seq_len, head_dim)
+    sin = torch.randn(seq_len, head_dim)
     with pytest.raises(AssertionError, match="packed token-first"):
-        rope(q, k, grid_hw)
+        rope(q, k, cos, sin)
 
 
 @pytest.mark.parametrize(
-    "vision_config, rope_dim, total_tokens, grid_hw_data",
+    "q_heads, k_heads, head_dim, rope_dim, total_tokens",
     [
-        pytest.param(VISION_VIT_CONFIG, 32, 8, [[2, 4]], id="partial_rope_dim"),
+        pytest.param(VISION_VIT_CONFIG["num_heads"], VISION_VIT_CONFIG["num_heads"], VISION_VIT_CONFIG["head_dim"], 32, 8, id="partial_rope_dim"),
     ],
 )
-def test_vision_rope_2d_rejects_partial_rope_dim(
-    vision_config, rope_dim, total_tokens, grid_hw_data
+def test_apply_vision_rope_2d_rejects_partial_rope_dim(
+    q_heads, k_heads, head_dim, rope_dim, total_tokens
 ):
-    q_heads = vision_config["num_heads"]
-    k_heads = vision_config["num_heads"]
-    head_dim = vision_config["head_dim"]
-    rope = MojoVisionRoPE2D(rope_dim=rope_dim)
+    rope = MojoApplyVisionRoPE2D()
     q = torch.randn(total_tokens, q_heads, head_dim)
     k = torch.randn(total_tokens, k_heads, head_dim)
-    grid_hw = torch.tensor(grid_hw_data, dtype=torch.int32)
+    cos = torch.randn(total_tokens, rope_dim)
+    sin = torch.randn(total_tokens, rope_dim)
     with pytest.raises(AssertionError, match="full head_dim"):
-        rope(q, k, grid_hw)
+        rope(q, k, cos, sin)

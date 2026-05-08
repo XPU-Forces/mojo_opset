@@ -61,41 +61,45 @@ def _rot_pos_emb_golden(
     return rotary_pos_emb_full[pos_ids].flatten(1)
 
 
-def _apply_rotary_pos_emb_vision_golden(
-    tensor: torch.Tensor,
-    freqs: torch.Tensor,
-) -> torch.Tensor:
-    # Frozen vision rotary application helper.
-    orig_dtype = tensor.dtype
-    tensor = tensor.float()
-    cos = freqs.cos()
-    sin = freqs.sin()
-    cos = cos.unsqueeze(1).repeat(1, 1, 2).unsqueeze(0).float()
-    sin = sin.unsqueeze(1).repeat(1, 1, 2).unsqueeze(0).float()
-    output = (tensor * cos) + (_rotate_half_golden(tensor) * sin)
-    return output.to(orig_dtype)
-
-
-def _vision_rope_2d_golden(
-    q: torch.Tensor,
-    k: torch.Tensor,
+def _vision_rotary_embedding_2d_golden(
     grid_hw: torch.Tensor,
     rope_theta: float,
     rope_dim: int,
+    device: torch.device,
     adapooling_factor: int = 1,
-):
-    # This helper intentionally stays on the native contract:
-    # packed token-first q/k tensors with the full head_dim rotated.
-    assert q.ndim == 3 and k.ndim == 3, "vision rope golden expects packed token-first tensors"
-    assert q.shape[-1] == rope_dim and k.shape[-1] == rope_dim, "vision rope golden rotates the full head_dim"
+) -> tuple[torch.Tensor, torch.Tensor]:
     freqs = _rot_pos_emb_golden(
         grid_hw,
         rope_dim=rope_dim,
         rope_theta=rope_theta,
-        device=q.device,
+        device=device,
         adapooling_factor=adapooling_factor,
     )
+    emb = torch.cat([freqs, freqs], dim=-1)
+    return emb.cos(), emb.sin()
+
+
+def _apply_vision_rope_2d_golden(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # This helper intentionally stays on the native contract:
+    # packed token-first q/k tensors with the full head_dim rotated.
+    assert q.ndim == 3 and k.ndim == 3, "vision rope golden expects packed token-first tensors"
+    assert cos.ndim == 2 and sin.ndim == 2, "vision rotary embedding golden expects [num_tokens, rope_dim]"
+    assert cos.shape == sin.shape, "vision rotary embedding golden expects matched cos/sin shapes"
+    assert q.shape[-1] == cos.shape[-1] and k.shape[-1] == cos.shape[-1], (
+        "vision rope golden rotates the full head_dim"
+    )
+    q_orig_dtype = q.dtype
+    k_orig_dtype = k.dtype
+    q = q.float()
+    k = k.float()
+    cos = cos.unsqueeze(1)
+    sin = sin.unsqueeze(1)
     return (
-        _apply_rotary_pos_emb_vision_golden(q.unsqueeze(0), freqs).squeeze(0),
-        _apply_rotary_pos_emb_vision_golden(k.unsqueeze(0), freqs).squeeze(0),
+        ((q * cos) + (_rotate_half_golden(q) * sin)).to(q_orig_dtype),
+        ((k * cos) + (_rotate_half_golden(k) * sin)).to(k_orig_dtype),
     )
