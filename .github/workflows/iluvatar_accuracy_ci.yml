@@ -84,7 +84,8 @@ jobs:
             set -euo pipefail
             cd /workspace
             echo 'Running ixformer tests on Iluvatar GPU...'
-            MOJO_BACKEND=ixformer python3 -m pytest mojo_opset/tests/accuracy/operators/test_normalization.py
+            MOJO_BACKEND=ixformer python3 -m pytest mojo_opset/tests/accuracy/operators/test_normalization.py \
+              mojo_opset/tests/accuracy/operators/test_attention.py
           "
 
       - name: Cleanup
