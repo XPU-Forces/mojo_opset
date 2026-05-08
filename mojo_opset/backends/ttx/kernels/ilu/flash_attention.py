@@ -410,7 +410,7 @@ def _launch_causal_attn_triton(
         triton.Config({"BLOCK_N": 128}, num_warps=4, num_stages=3),
         triton.Config({"BLOCK_N": 128}, num_warps=8, num_stages=2),
     ],
-    key=["HQ", "D", "PAGE_SIZE"],
+    key=["HQ", "D", "PAGE_SIZE", "ZERO_EMPTY_SEQLEN"],
 )
 @libentry()
 @triton.jit
@@ -446,6 +446,7 @@ def _paged_decode_gqa_kernel(
     BLOCK_D: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     GQA_LAYOUT: tl.constexpr,
+    ZERO_EMPTY_SEQLEN: tl.constexpr,
     OUT_T: tl.constexpr,
 ):
     pid_b = tl.program_id(0)
@@ -454,11 +455,16 @@ def _paged_decode_gqa_kernel(
     if pid_h >= HQ:
         return
 
-    seq_len = tl.load(seqlens_ptr + pid_b).to(tl.int32)
-    kv_h = tl.where(GQA_LAYOUT == 0, pid_h % HKV, pid_h // GROUP)
-
     offs_d = tl.arange(0, BLOCK_D)
     d_mask = offs_d < D
+    out_ptrs = o_ptr + pid_b * stride_ob + pid_h * stride_oh + offs_d * stride_od
+
+    seq_len = tl.load(seqlens_ptr + pid_b).to(tl.int32)
+    if seq_len <= 0:
+        if ZERO_EMPTY_SEQLEN:
+            tl.store(out_ptrs, tl.zeros((BLOCK_D,), dtype=tl.float32).to(OUT_T), mask=d_mask)
+        return
+    kv_h = tl.where(GQA_LAYOUT == 0, pid_h % HKV, pid_h // GROUP)
 
     q_ptrs = q_ptr + pid_b * stride_qb + pid_h * stride_qh + offs_d * stride_qd
     q = tl.load(q_ptrs, mask=d_mask, other=0.0)
@@ -509,7 +515,6 @@ def _paged_decode_gqa_kernel(
 
     l = tl.maximum(l, 1e-6)
     out = acc / l
-    out_ptrs = o_ptr + pid_b * stride_ob + pid_h * stride_oh + offs_d * stride_od
     tl.store(out_ptrs, out.to(OUT_T), mask=d_mask)
 
 
@@ -523,6 +528,8 @@ def paged_attention_prefill_impl(
     gqa_interleave: bool,
     softmax_scale: Optional[float] = None,
     aux_mask: Optional[torch.Tensor] = None,
+    max_q_lens: Optional[int] = None,
+    max_total_seq_lens: Optional[int] = None,
 ) -> torch.Tensor:
     total_q_tokens, num_q_heads, head_dim = q.shape
     _, num_kv_heads, block_size, _ = key_cache.shape
@@ -555,8 +562,11 @@ def paged_attention_prefill_impl(
 
     def grid(META):
         bm = META["BLOCK_M"]
-        q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
-        max_q_blocks = ((q_lens + bm - 1) // bm).max().item()
+        if max_q_lens is not None:
+            max_q_blocks = (max_q_lens + bm - 1) // bm
+        else:
+            q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
+            max_q_blocks = ((q_lens + bm - 1) // bm).max().item()
         return (max_q_blocks, num_q_heads, batch_size)
 
     _paged_prefill_fav2_kernel[grid](
@@ -609,6 +619,10 @@ def _paged_decode_gather_and_causal(
     block_d = triton.next_power_of_2(head_dim)
     layout_id = 0 if gqa_interleave else 1
 
+    # MAX_S_LEN = 0
+    if block_tables.shape[1] == 0:
+        return torch.zeros_like(q)
+
     if q.dtype == torch.float16:
         out_t = tl.float16
     elif q.dtype == torch.bfloat16:
@@ -618,6 +632,7 @@ def _paged_decode_gather_and_causal(
 
     seqlens_i32 = seqlens.to(torch.int32)
     block_tables_i32 = block_tables.to(torch.int32)
+    zero_empty_seqlen = not torch.cuda.is_current_stream_capturing()
 
     grid = (batch_size, num_q_heads)
     _paged_decode_gqa_kernel[grid](
@@ -651,6 +666,7 @@ def _paged_decode_gather_and_causal(
         BLOCK_D=block_d,
         PAGE_SIZE=page_size,
         GQA_LAYOUT=layout_id,
+        ZERO_EMPTY_SEQLEN=zero_empty_seqlen,
         OUT_T=out_t,
     )
     return o
