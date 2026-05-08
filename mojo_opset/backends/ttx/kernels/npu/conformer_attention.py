@@ -10,15 +10,15 @@ from .utils import get_num_cores
 
 
 @triton.jit
-def _padded_window_attention_fwd_kernel(
+def _conformer_attention_fwd_kernel(
     o_ptr,
     q_ptr,
     k_ptr,
     v_ptr,
     seqlens_ptr,
     scale,
-    left_window,
-    right_window,
+    left_window: tl.constexpr,
+    right_window: tl.constexpr,
     stride_ob,
     stride_oh,
     stride_os,
@@ -87,13 +87,13 @@ def _padded_window_attention_fwd_kernel(
                 kv_offsets = kv_block_start + tl.arange(0, BLOCK_N)
                 kv_valid = kv_offsets < cur_seq_len
 
-                k_block_ptr = tl.make_block_ptr(
+                k_t_block_ptr = tl.make_block_ptr(
                     base=k_ptr + b_id * stride_kb + h_id * stride_kh,
-                    shape=(seq_len, head_dim),
-                    strides=(stride_ks, stride_kd),
-                    offsets=(kv_block_start, 0),
-                    block_shape=(BLOCK_N, head_dim),
-                    order=(1, 0),
+                    shape=(head_dim, seq_len),
+                    strides=(stride_kd, stride_ks),
+                    offsets=(0, kv_block_start),
+                    block_shape=(head_dim, BLOCK_N),
+                    order=(0, 1),
                 )
                 v_block_ptr = tl.make_block_ptr(
                     base=v_ptr + b_id * stride_vb + h_id * stride_vh,
@@ -104,16 +104,16 @@ def _padded_window_attention_fwd_kernel(
                     order=(1, 0),
                 )
 
-                k = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option="zero")
+                k_t = tl.load(k_t_block_ptr, boundary_check=(0, 1), padding_option="zero")
                 v = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
-                qk = tl.dot(q, tl.trans(k)) * scale
+                qk = tl.dot(q, k_t) * scale
+                tl.compile_hint(qk, "tile_cube_loop")
 
                 left_bound = q_offsets[:, None] - left_window
                 right_bound = q_offsets[:, None] + right_window
                 window_mask = (kv_offsets[None, :] >= left_bound) & (kv_offsets[None, :] <= right_bound)
                 pre_mask = q_valid[:, None] & kv_valid[None, :] & window_mask
-
                 masked_scores = tl.where(pre_mask, qk, -1e6)
                 m_candidate = tl.max(masked_scores, axis=1)
                 m_new = tl.where(q_valid, tl.maximum(m_i, m_candidate), m_i)
@@ -122,9 +122,9 @@ def _padded_window_attention_fwd_kernel(
 
                 l_ij = tl.sum(p, axis=1)
                 alpha = tl.where(q_valid, tl.exp(m_i - m_new), 1.0)
-                acc_scaled = acc * alpha[:, None]
-                acc_update = tl.dot(p.to(k.dtype), v)
-                acc = tl.where(q_valid[:, None], acc_scaled + acc_update, acc)
+                acc_update = tl.dot(p.to(k_t.dtype), v, acc * alpha[:, None])
+                tl.compile_hint(acc_update, "tile_cube_loop")
+                acc = tl.where(q_valid[:, None], acc_update, acc)
                 l_i = tl.where(q_valid, l_i * alpha + l_ij, l_i)
                 m_i = m_new
 
@@ -143,7 +143,7 @@ def _padded_window_attention_fwd_kernel(
             tl.store(o_block_ptr, out.to(o_ptr.type.element_ty), boundary_check=(0, 1))
 
 
-def padded_window_attention_infer_impl(
+def conformer_attention_infer_impl(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -164,14 +164,14 @@ def padded_window_attention_infer_impl(
         softmax_scale = 1.0 / math.sqrt(head_dim)
 
     o = torch.zeros_like(q, memory_format=torch.contiguous_format)
-    # Keep tiles conservative on Ascend to avoid UB pressure from
-    # qk/p/acc temporaries, especially for bf16 + larger head dims.
+    # Keep M conservative for UB pressure; D=128 benefits from wider N while
+    # 128-wide M overflows UB on current Ascend compiler settings.
     block_m = 64
-    block_n = 64
+    block_n = 128 if head_dim >= 128 else 64
     block_d = head_dim
     grid = (get_num_cores("cube"),)
 
-    _padded_window_attention_fwd_kernel[grid](
+    _conformer_attention_fwd_kernel[grid](
         o,
         q,
         k,
@@ -205,3 +205,4 @@ def padded_window_attention_infer_impl(
         block_d,
     )
     return o
+

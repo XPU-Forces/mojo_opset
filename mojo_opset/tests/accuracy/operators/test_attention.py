@@ -25,6 +25,7 @@ from mojo_opset import MojoSdpa
 from mojo_opset import MojoSWA
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.utils.platform import get_torch_device
 
 
 def generate_paged_decode_data(
@@ -1102,7 +1103,7 @@ def test_paged_decode_swa(
 )
 @auto_switch_platform()
 @bypass_not_implemented
-def test_padded_window_attention(
+def test_conformer_attention(
     batch_size: int,
     seq_len: int,
     num_heads: int,
@@ -1111,12 +1112,13 @@ def test_padded_window_attention(
     right_window: int,
     dtype: torch.dtype,
 ):
-    query = torch.randn(batch_size, seq_len, num_heads, head_dim, dtype=dtype)
+    device = get_torch_device()
+    query = torch.randn(batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=device)
     key = torch.randn_like(query)
     value = torch.randn_like(query)
 
-    seqlens = torch.randint(low=0, high=seq_len + 1, size=(batch_size,), dtype=torch.int32)
-    padding_mask = torch.arange(seq_len, dtype=torch.int32).unsqueeze(0) < seqlens.unsqueeze(1)
+    seqlens = torch.randint(low=0, high=seq_len + 1, size=(batch_size,), dtype=torch.int32, device=device)
+    padding_mask = torch.arange(seq_len, dtype=torch.int32, device=device).unsqueeze(0) < seqlens.unsqueeze(1)
 
     op = MojoConformerAttention(left_window=left_window, right_window=right_window)
     op_ref = MojoConformerAttention._registry.get("torch")(left_window=left_window, right_window=right_window)
@@ -1133,7 +1135,7 @@ def test_padded_window_attention(
     )
 
 
-def test_padded_window_attention_torch_mask_semantics():
+def test_conformer_attention_torch_mask_semantics():
     op = MojoConformerAttention._registry.get("torch")(left_window=1, right_window=0)
     query = torch.randn(2, 6, 2, 8)
     key = torch.randn_like(query)

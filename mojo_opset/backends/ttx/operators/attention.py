@@ -2,7 +2,7 @@ from typing import Optional
 
 import torch
 
-from mojo_opset.backends.ttx.kernels import padded_window_attention
+from mojo_opset.backends.ttx.kernels import conformer_attention
 from mojo_opset.backends.ttx.kernels import paged_attention_decode
 from mojo_opset.backends.ttx.kernels import paged_attention_prefill
 from mojo_opset.backends.ttx.kernels import sdpa_infer
@@ -158,7 +158,7 @@ class TTXConformerAttention(MojoConformerAttention):
         q = query.permute(0, 2, 1, 3)
         k = key.permute(0, 2, 1, 3)
         v = value.permute(0, 2, 1, 3)
-        o = padded_window_attention(
+        o = conformer_attention(
             q,
             k,
             v,
