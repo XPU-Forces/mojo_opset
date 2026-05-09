@@ -40,9 +40,7 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         max_total_seq_lens: Optional[int] = None,
     ):
         assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
-        assert self.window_size == -1, (
-            f"[TTXPagedPrefillGQA] TTX does not support sliding window, but got window_size={self.window_size}"
-        )
+
         assert self.is_causal, (
             f"[TTXPagedPrefillGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
@@ -93,9 +91,6 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         max_total_seq_len: Optional[int] = None,
     ):
         assert_paged_decode_contract(block_tables, total_seq_lens)
-        assert self.window_size == -1, (
-            f"[TTXPagedDecodeGQA] TTX does not support sliding window, but got window_size={self.window_size}"
-        )
         assert self.is_causal, (
             f"[TTXPagedDecodeGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
@@ -147,6 +142,9 @@ class TTXPagedPrefillSWA(MojoPagedPrefillSWA):
         block_table: torch.Tensor,  # [bsz, num_kv_blocks]
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,  # [bsz + 1]
+        *,
+        max_q_lens: Optional[int] = None,
+        max_total_seq_lens: Optional[int] = None,
     ) -> torch.Tensor:
         assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
         total_seq_lens = (
@@ -182,6 +180,8 @@ class TTXPagedDecodeSWA(MojoPagedDecodeSWA):
         total_seq_lens: torch.Tensor,  # [bsz]
         block_table: torch.Tensor,  # [bsz, max_num_blocks]
         softmax_scale: Optional[float] = None,
+        *,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         # Note: is_causal = False should never happen
         assert_paged_decode_contract(block_table, total_seq_lens)
