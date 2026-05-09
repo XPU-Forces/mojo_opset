@@ -156,8 +156,8 @@ class IxformerQuantExperts(MojoQuantExperts):
         if self.weight_dtype == torch.int8:
             if self.quant_group_size != -1:
                 raise NotImplementedError(f"IxformerQuantExperts only supports weight_dtype='torch.int8' and quant_group_size=-1, got {self.weight_dtype} and {self.quant_group_size}.")
-            if self.hidden_size % 64 != 0 or self.intermediate_size % 64 != 0 or (self.intermediate_size * 2) % 64 != 0:
-                raise NotImplementedError(f"IxformerQuantExperts only supports weight_dtype='torch.int8' and hidden_size, intermediate_size, and intermediate_size * 2 must be divisible by 64, got {self.hidden_size}, {self.intermediate_size}, and {self.intermediate_size * 2}.")
+            if self.hidden_size % 64 != 0 or self.intermediate_size % 64 != 0:
+                raise NotImplementedError(f"IxformerQuantExperts only supports weight_dtype='torch.int8' and hidden_size, intermediate_size must be divisible by 64, got {self.hidden_size} and {self.intermediate_size}.")
         
         if self.weight_dtype == "int4" and self.quant_group_size not in [128, 256, 320, 512]:
             raise NotImplementedError(f"IxformerQuantExperts: weight_dtype is 'int4' and quant_group_size must be 128, 256, 320, or 512, got {self.weight_dtype} and {self.quant_group_size}.")
@@ -186,7 +186,7 @@ class IxformerQuantExperts(MojoQuantExperts):
                 tokens_per_experts=tokens_per_expert,
                 format="NN"
             )
-        else:
+        elif self.weight_dtype == "int4":
             group_gemm_output1 = ixf_f.moe_w4a8_group_gemm(
                 input=sorted_hidden_states,
                 weight=self.up_proj_weight,
@@ -198,6 +198,8 @@ class IxformerQuantExperts(MojoQuantExperts):
                 version=1,
                 group_size=self.quant_group_size,
             )
+        else:
+            raise NotImplementedError(f"IxformerQuantExperts: weight_dtype must be 'torch.int8' or 'int4', got {self.weight_dtype}.")
 
         act_i8, act_scale = ixf_f.activation_dynamic_scaled_int8(
             input=group_gemm_output1,
@@ -222,7 +224,7 @@ class IxformerQuantExperts(MojoQuantExperts):
                 format="NN",
                 output=group_gemm_output2,
             )
-        else:
+        elif self.weight_dtype == "int4":
             ixf_f.moe_w4a8_group_gemm(
                 input=act_i8,
                 weight=self.down_proj_weight,
@@ -236,7 +238,9 @@ class IxformerQuantExperts(MojoQuantExperts):
                 group_size=self.quant_group_size,
                 output=group_gemm_output2,
             )
-
+        else:
+            raise NotImplementedError(f"IxformerQuantExperts: weight_dtype must be 'torch.int8' or 'int4', got {self.weight_dtype}.")
+        
         return group_gemm_output2
 
 
