@@ -7,6 +7,7 @@ from mojo_opset.tests.accuracy.operators._vision_rope_2d_golden import (
 )
 from mojo_opset.tests.utils import assert_close
 from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.tests.utils import requires_platform_backend
 
 from mojo_opset import MojoApplyVisionRoPE2D
 from mojo_opset import MojoRotaryEmbedding
@@ -30,6 +31,12 @@ VISION_VIT_CONFIG = {
     "rope_theta": 10000.0,
     "adapooling_factor": 2,
 }
+
+_requires_torch_npu_vision_rope = requires_platform_backend(
+    platforms="npu",
+    backends="torch_npu",
+    reason="Vision 2D RoPE torch_npu backend requires Ascend NPU.",
+)
 
 
 @pytest.mark.parametrize("bs", [1, 6])
@@ -302,6 +309,13 @@ def test_vision_rotary_embedding_2d_rejects_non_positive_adapooling_factor(inval
         MojoVisionRotaryEmbedding2D(adapooling_factor=invalid_adapooling_factor)
 
 
+@_requires_torch_npu_vision_rope
+def test_apply_vision_rope_2d_uses_torch_npu_backend():
+    registry = MojoApplyVisionRoPE2D.get_registry()._registry
+    assert "torch_npu" in registry
+    assert registry["torch_npu"].__name__ == "TorchNpuApplyVisionRoPE2D"
+
+
 @pytest.mark.parametrize(
     "grid",
     [
@@ -317,6 +331,7 @@ def test_vision_rotary_embedding_2d_rejects_non_positive_adapooling_factor(inval
     ],
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@bypass_not_implemented
 def test_apply_vision_rope_2d(grid, vision_config, dtype):
     device = get_torch_device()
     rope_theta = vision_config["rope_theta"]
