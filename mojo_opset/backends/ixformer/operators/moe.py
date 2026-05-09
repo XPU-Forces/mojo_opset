@@ -51,23 +51,33 @@ def _repack_int4_tn_to_nn(packed_tn: torch.Tensor, N: int, K: int) -> torch.Tens
 
 
 def _swizzle_weights_post_hook(module, incompatible_keys):
-    """load_state_dict post-hook: convert int4 weights from TN (checkpoint) to NN (ixformer) format."""
+    """load_state_dict post-hook: convert int4/int8 weights from TN (checkpoint) to NN (ixformer) format."""
     device = module.up_proj_weight.device
+    if module.weight_dtype == "int4":
+        N_up = module.intermediate_size * 2
+        K_up = module.hidden_size
+        up_nn = _repack_int4_tn_to_nn(module.up_proj_weight.data, N_up, K_up)
+        up_scale_nn = module.up_proj_weight_scale.data.permute(0, 2, 1).contiguous()
 
-    N_up = module.intermediate_size * 2
-    K_up = module.hidden_size
-    up_nn = _repack_int4_tn_to_nn(module.up_proj_weight.data, N_up, K_up)
-    up_scale_nn = module.up_proj_weight_scale.data.permute(0, 2, 1).contiguous()
+        N_down = module.hidden_size
+        K_down = module.intermediate_size
+        down_nn = _repack_int4_tn_to_nn(module.down_proj_weight.data, N_down, K_down)
+        down_scale_nn = module.down_proj_weight_scale.data.permute(0, 2, 1).contiguous()
 
-    N_down = module.hidden_size
-    K_down = module.intermediate_size
-    down_nn = _repack_int4_tn_to_nn(module.down_proj_weight.data, N_down, K_down)
-    down_scale_nn = module.down_proj_weight_scale.data.permute(0, 2, 1).contiguous()
+        module.register_buffer("up_proj_weight", up_nn.to(device))
+        module.register_buffer("down_proj_weight", down_nn.to(device))
+        module.up_proj_weight_scale = torch.nn.Parameter(up_scale_nn.to(device=device, dtype=torch.float32))
+        module.down_proj_weight_scale = torch.nn.Parameter(down_scale_nn.to(device=device, dtype=torch.float32))
+    elif module.weight_dtype == torch.int8:
+        up_nn = module.up_proj_weight.data.transpose(1, 2).contiguous()
+        down_nn = module.down_proj_weight.data.transpose(1, 2).contiguous()
+        up_scale_nn = module.up_proj_weight_scale.data.permute(1, 0).contiguous()
+        down_scale_nn = module.down_proj_weight_scale.data.permute(1, 0).contiguous()
 
-    module.register_buffer("up_proj_weight", up_nn.to(device))
-    module.register_buffer("down_proj_weight", down_nn.to(device))
-    module.up_proj_weight_scale = torch.nn.Parameter(up_scale_nn.to(device=device, dtype=torch.float32))
-    module.down_proj_weight_scale = torch.nn.Parameter(down_scale_nn.to(device=device, dtype=torch.float32))
+        module.register_buffer("up_proj_weight", up_nn.to(device))
+        module.register_buffer("down_proj_weight", down_nn.to(device))
+        module.up_proj_weight_scale = torch.nn.Parameter(up_scale_nn.to(device=device, dtype=torch.float32))
+        module.down_proj_weight_scale = torch.nn.Parameter(down_scale_nn.to(device=device, dtype=torch.float32))
 
 
 class IxformerMoEGating(MojoMoEGating):
@@ -143,17 +153,19 @@ class IxformerQuantExperts(MojoQuantExperts):
                  **kwargs):
         super().__init__(num_experts, hidden_size, intermediate_size, activation, quant_dtype, quant_group_size, weight_dtype, **kwargs)
         
-        if self.weight_dtype not in ("int4"):
-            raise NotImplementedError(f"IxformerQuantExperts only supports weight_dtype='int4', got {self.weight_dtype}.")
+        if self.weight_dtype == torch.int8:
+            if self.quant_group_size != -1:
+                raise NotImplementedError(f"IxformerQuantExperts only supports weight_dtype='torch.int8' and quant_group_size=-1, got {self.weight_dtype} and {self.quant_group_size}.")
+            if self.hidden_size % 64 != 0 or self.intermediate_size % 64 != 0 or (self.intermediate_size * 2) % 64 != 0:
+                raise NotImplementedError(f"IxformerQuantExperts only supports weight_dtype='torch.int8' and hidden_size, intermediate_size, and intermediate_size * 2 must be divisible by 64, got {self.hidden_size}, {self.intermediate_size}, and {self.intermediate_size * 2}.")
         
-        if self.quant_group_size not in [256, 320, 512]:
-            raise NotImplementedError(f"IxformerQuantExperts: quant_group_size must be 256, 320, or 512, got {self.quant_group_size}.")
+        if self.weight_dtype == "int4" and self.quant_group_size not in [128, 256, 320, 512]:
+            raise NotImplementedError(f"IxformerQuantExperts: weight_dtype is 'int4' and quant_group_size must be 128, 256, 320, or 512, got {self.weight_dtype} and {self.quant_group_size}.")
 
         setattr(self.up_proj_weight_scale, "force_dtype", torch.float32)
         setattr(self.down_proj_weight_scale, "force_dtype", torch.float32)
 
-        if self.weight_dtype in ("int4"):
-            self.register_load_state_dict_post_hook(_swizzle_weights_post_hook)
+        self.register_load_state_dict_post_hook(_swizzle_weights_post_hook)
         
         self.output_dtype = torch.bfloat16
 
@@ -164,17 +176,28 @@ class IxformerQuantExperts(MojoQuantExperts):
                 topk_indices: torch.Tensor,
                 sorted_token_ids: torch.Tensor):
         
-        group_gemm_output1 = ixf_f.moe_w4a8_group_gemm(
-            input=sorted_hidden_states,
-            weight=self.up_proj_weight,
-            i_scales=input_scale,
-            w_scales=self.up_proj_weight_scale,
-            output_dtype=self.output_dtype,
-            tokens_per_experts=tokens_per_expert,
-            format=0,
-            version=1,
-            group_size=self.quant_group_size,
-        )
+        if self.weight_dtype == torch.int8:
+            group_gemm_output1 = ixf_f.moe_w8a8_group_gemm(
+                input=sorted_hidden_states,
+                weight=self.up_proj_weight,
+                i_scales=input_scale,
+                w_scales=self.up_proj_weight_scale,
+                output_dtype=self.output_dtype,
+                tokens_per_experts=tokens_per_expert,
+                format="NN"
+            )
+        else:
+            group_gemm_output1 = ixf_f.moe_w4a8_group_gemm(
+                input=sorted_hidden_states,
+                weight=self.up_proj_weight,
+                i_scales=input_scale,
+                w_scales=self.up_proj_weight_scale,
+                output_dtype=self.output_dtype,
+                tokens_per_experts=tokens_per_expert,
+                format=0,
+                version=1,
+                group_size=self.quant_group_size,
+            )
 
         act_i8, act_scale = ixf_f.activation_dynamic_scaled_int8(
             input=group_gemm_output1,
@@ -187,19 +210,32 @@ class IxformerQuantExperts(MojoQuantExperts):
 
         group_gemm_output2 = torch.empty(num_tokens * top_k, self.hidden_size, dtype=self.output_dtype, device=sorted_token_ids.device)
         
-        ixf_f.moe_w4a8_group_gemm(
-            input=act_i8,
-            weight=self.down_proj_weight,
-            i_scales=act_scale,
-            w_scales=self.down_proj_weight_scale,
-            output_dtype=self.output_dtype,
-            tokens_per_experts=tokens_per_expert,
-            dst_to_src=sorted_token_ids,
-            format=0,
-            version=1,
-            group_size=self.quant_group_size,
-            output=group_gemm_output2,
-        )
+        if self.weight_dtype == torch.int8:
+            ixf_f.moe_w8a8_group_gemm(
+                input=act_i8,
+                weight=self.down_proj_weight,
+                i_scales=act_scale,
+                w_scales=self.down_proj_weight_scale,
+                output_dtype=self.output_dtype,
+                tokens_per_experts=tokens_per_expert,
+                dst_to_src=sorted_token_ids,
+                format="NN",
+                output=group_gemm_output2,
+            )
+        else:
+            ixf_f.moe_w4a8_group_gemm(
+                input=act_i8,
+                weight=self.down_proj_weight,
+                i_scales=act_scale,
+                w_scales=self.down_proj_weight_scale,
+                output_dtype=self.output_dtype,
+                tokens_per_experts=tokens_per_expert,
+                dst_to_src=sorted_token_ids,
+                format=0,
+                version=1,
+                group_size=self.quant_group_size,
+                output=group_gemm_output2,
+            )
 
         return group_gemm_output2
 
@@ -240,17 +276,13 @@ class IxformerQuantMoE(MojoQuantMoE):
     ):
         super().__init__(num_experts, top_k, hidden_size, intermediate_size, activation, quant_dtype, quant_group_size, weight_dtype, **kwargs)
         
-        if self.quant_group_size not in [256, 320, 512]:
-            raise NotImplementedError(f"IxformerQuantMoE: quant_group_size must be 256, 320, or 512, got {self.quant_group_size}.")
+        if self.weight_dtype == "int4" and self.quant_group_size not in [128, 256, 320, 512]:
+            raise NotImplementedError(f"IxformerQuantMoE: weight_dtype is 'int4' and quant_group_size must be 128, 256, 320, or 512, got {self.weight_dtype} and {self.quant_group_size}.")
 
         self.enable_cuda_graph = enable_cuda_graph
 
         if self.enable_cuda_graph:
             raise NotImplementedError("IxformerQuantMoE: enable_cuda_graph is not supported.")
-        
-        if self.weight_dtype not in ("int4"):
-            raise NotImplementedError(f"IxformerQuantMoE: weight_dtype must be 'int4', got {self.weight_dtype}.")
-
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         top_k_indices, top_k_gates = self.gating(hidden_states)
