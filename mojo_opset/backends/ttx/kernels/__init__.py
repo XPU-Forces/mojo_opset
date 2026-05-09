@@ -41,6 +41,9 @@ rot_pos_embed_impl = _get_kernel_impl(ttx_backend_module, "rot_pos_embed_impl")
 rope_fwd_impl = _get_kernel_impl(ttx_backend_module, "rope_fwd_impl")
 rope_bwd_impl = _get_kernel_impl(ttx_backend_module, "rope_bwd_impl")
 
+vision_rot_pos_embed_impl = _get_kernel_impl(ttx_backend_module, "vision_rot_pos_embed_impl")
+vision_rope_apply_impl = _get_kernel_impl(ttx_backend_module, "vision_rope_apply_impl")
+
 swiglu_fwd_impl = _get_kernel_impl(ttx_backend_module, "swiglu_fwd_impl")
 swiglu_bwd_impl = _get_kernel_impl(ttx_backend_module, "swiglu_bwd_impl")
 
@@ -831,6 +834,8 @@ else:
     rot_pos_embed = rot_pos_embed_impl
     rope_fwd = rope_fwd_impl
     rope_bwd = rope_bwd_impl
+    vision_rot_pos_embed = vision_rot_pos_embed_impl
+    vision_rope_apply = vision_rope_apply_impl
     rmsnorm_fwd = rmsnorm_fwd_impl
     rmsnorm_bwd = rmsnorm_bwd_impl
     rmsnorm_infer = rmsnorm_infer_impl

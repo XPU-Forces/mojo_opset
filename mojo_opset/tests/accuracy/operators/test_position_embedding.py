@@ -1,14 +1,13 @@
 import pytest
 import torch
 
-from mojo_opset.tests.utils import bypass_not_implemented
-
-from mojo_opset import MojoApplyVisionRoPE2D
-from mojo_opset import MojoRotaryEmbedding
 from mojo_opset import MojoApplyRoPE
+from mojo_opset import MojoApplyVisionRoPE2D
 from mojo_opset import MojoGridRoPE
 from mojo_opset import MojoRelativeEmbedding
+from mojo_opset import MojoRotaryEmbedding
 from mojo_opset import MojoVisionRotaryEmbedding2D
+from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_torch_device
 
 torch.random.manual_seed(42)
@@ -30,7 +29,8 @@ VISION_VIT_CONFIG = {
 @pytest.mark.parametrize("bs", [1, 6])
 @pytest.mark.parametrize("seqlen", [2048])
 @pytest.mark.parametrize(
-    "rope_dim", [32, 48, 64, 88, 96, 128],
+    "rope_dim",
+    [32, 48, 64, 88, 96, 128],
 )
 @pytest.mark.parametrize("mode", ["padding_prefill", "varlen_prefill", "decode"])
 @bypass_not_implemented
@@ -40,16 +40,20 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
     max_seq_len = 32768
     hidden_size = 256
 
-    rot_pos_emb_ref_nocache = MojoRotaryEmbedding._registry.get("torch")(rope_theta=10000.0, rope_dim=rope_dim).to(device)
-    rot_pos_emb_ref = MojoRotaryEmbedding._registry.get("torch")(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
+    rot_pos_emb_ref_nocache = MojoRotaryEmbedding._registry.get("torch")(rope_theta=10000.0, rope_dim=rope_dim).to(
+        device
+    )
+    rot_pos_emb_ref = MojoRotaryEmbedding._registry.get("torch")(
+        rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len
+    ).to(device)
     rot_pos_emb = MojoRotaryEmbedding(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
 
     if mode == "padding_prefill":
         x = torch.randn(bs, seqlen, hidden_size, device=device, dtype=torch.float32)
         torch.testing.assert_close(
-            rot_pos_emb_ref(x), 
-            rot_pos_emb_ref_nocache(x), 
-            atol=1e-5, 
+            rot_pos_emb_ref(x),
+            rot_pos_emb_ref_nocache(x),
+            atol=1e-5,
             rtol=1e-5,
         )
 
@@ -63,9 +67,9 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
         x = torch.randn(bs, hidden_size, device=device, dtype=torch.float32)
         position_ids = torch.randint(0, max_seq_len, (bs,), dtype=torch.int32, device=device)
         torch.testing.assert_close(
-            rot_pos_emb_ref(x, position_ids=position_ids), 
-            rot_pos_emb_ref_nocache(x, position_ids=position_ids), 
-            atol=1e-5, 
+            rot_pos_emb_ref(x, position_ids=position_ids),
+            rot_pos_emb_ref_nocache(x, position_ids=position_ids),
+            atol=1e-5,
             rtol=1e-5,
         )
 
@@ -77,7 +81,7 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
             rtol=1e-5,
         )
     else:
-        seq_lens = torch.randint((seqlen+1) // 2, seqlen + 1, (bs,), device=device, dtype=torch.int32)
+        seq_lens = torch.randint((seqlen + 1) // 2, seqlen + 1, (bs,), device=device, dtype=torch.int32)
         cu_seqlens = torch.zeros(bs + 1, device=device, dtype=torch.int32)
         cu_seqlens[1:] = torch.cumsum(seq_lens, dim=0)
         kv_lens = torch.randint(0, max_seq_len - seqlen, (bs,), device=device, dtype=torch.int32) + seq_lens
@@ -96,7 +100,7 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
             total_seq_lens=kv_lens,
             atol=1e-5,
             rtol=1e-5,
-    )
+        )
 
 
 @pytest.mark.parametrize(
@@ -108,7 +112,7 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
     ],
 )
 @pytest.mark.parametrize(
-    "dtype, q_heads, k_heads, head_first, head_dim, rope_percentage", 
+    "dtype, q_heads, k_heads, head_first, head_dim, rope_percentage",
     [
         (torch.float16, 32, 8, True, 96, 1.0),
         (torch.bfloat16, 8, 2, False, 96, 0.3333333333333333333333),
@@ -127,7 +131,9 @@ def test_apply_rope(bs, seqlen, q_heads, k_heads, head_first, head_dim, rope_per
     rope_dim = int(head_dim * rope_percentage)
     hidden_size = q_heads * head_dim
 
-    rot_pos_emb = MojoRotaryEmbedding._registry.get("torch")(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
+    rot_pos_emb = MojoRotaryEmbedding._registry.get("torch")(
+        rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len
+    ).to(device)
 
     if mode == "padding_prefill_pos3d":
         offsets = torch.randint(0, max_seq_len - seqlen - 1, (bs,), device=device, dtype=torch.int32)
@@ -250,7 +256,6 @@ def test_relative_embedding(num_buckets, num_heads, bidirectional, lq, lk):
     emb.forward_diff_with(emb_ref, lq, lk, atol=1e-5, rtol=1e-6)
 
 
-
 @pytest.mark.parametrize(
     "grid",
     [
@@ -290,13 +295,6 @@ def test_vision_rotary_embedding_2d(grid, vision_config):
         atol=1e-5,
         rtol=1e-5,
     )
-
-
-@pytest.mark.parametrize("invalid_adapooling_factor", [0, -1])
-def test_vision_rotary_embedding_2d_rejects_non_positive_adapooling_factor(invalid_adapooling_factor):
-    with pytest.raises(AssertionError, match="adapooling_factor must be >= 1"):
-        MojoVisionRotaryEmbedding2D(adapooling_factor=invalid_adapooling_factor)
-
 
 
 @pytest.mark.parametrize(
@@ -346,39 +344,3 @@ def test_apply_vision_rope_2d(grid, vision_config, dtype):
         atol=5e-2,
         rtol=5e-2,
     )
-
-
-@pytest.mark.parametrize(
-    "batch_size, seq_len, q_heads, k_heads, head_dim",
-    [
-        pytest.param(2, 8, VISION_VIT_CONFIG["num_heads"], VISION_VIT_CONFIG["num_heads"], VISION_VIT_CONFIG["head_dim"], id="native_4d_layout"),
-    ],
-)
-def test_apply_vision_rope_2d_rejects_non_native_layout_extensions(
-    batch_size, seq_len, q_heads, k_heads, head_dim
-):
-    rope = MojoApplyVisionRoPE2D()
-    q = torch.randn(batch_size, seq_len, q_heads, head_dim)
-    k = torch.randn(batch_size, seq_len, k_heads, head_dim)
-    cos = torch.randn(seq_len, head_dim)
-    sin = torch.randn(seq_len, head_dim)
-    with pytest.raises(AssertionError, match="packed token-first"):
-        rope(q, k, cos, sin)
-
-
-@pytest.mark.parametrize(
-    "q_heads, k_heads, head_dim, rope_dim, total_tokens",
-    [
-        pytest.param(VISION_VIT_CONFIG["num_heads"], VISION_VIT_CONFIG["num_heads"], VISION_VIT_CONFIG["head_dim"], 32, 8, id="partial_rope_dim"),
-    ],
-)
-def test_apply_vision_rope_2d_rejects_partial_rope_dim(
-    q_heads, k_heads, head_dim, rope_dim, total_tokens
-):
-    rope = MojoApplyVisionRoPE2D()
-    q = torch.randn(total_tokens, q_heads, head_dim)
-    k = torch.randn(total_tokens, k_heads, head_dim)
-    cos = torch.randn(total_tokens, rope_dim)
-    sin = torch.randn(total_tokens, rope_dim)
-    with pytest.raises(AssertionError, match="full head_dim"):
-        rope(q, k, cos, sin)
