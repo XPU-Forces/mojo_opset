@@ -4,6 +4,7 @@ import triton
 import triton.language as tl
 
 VEC_ALIGN_BYTES = 256
+SRAM_ALIGN_BYTES = 32
 
 
 @lru_cache(maxsize=1)

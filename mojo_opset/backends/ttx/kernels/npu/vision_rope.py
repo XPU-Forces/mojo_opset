@@ -6,11 +6,11 @@ import triton.language as tl
 
 from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 
-SRAM_ALIGNMENT = 32
+from .utils import SRAM_ALIGN_BYTES
 
 
 def _is_half_rope_dim_aligned(half_rope_dim: int, dtype_size: int = 2) -> bool:
-    return (half_rope_dim * dtype_size) % SRAM_ALIGNMENT == 0
+    return (half_rope_dim * dtype_size) % SRAM_ALIGN_BYTES == 0
 
 
 def vision_rot_pos_embed_impl(
@@ -84,31 +84,25 @@ def _build_position_ids(
 @triton.jit
 def _compute_vision_rope(
     x,
-    sin_tile,
-    cos_tile,
+    sin_half_tile,
+    cos_half_tile,
     head_num: tl.constexpr,
     half_rope_dim: tl.constexpr,
     TOKEN_BLOCK_SIZE: tl.constexpr,
 ):
     """Vision 2D RoPE rotation on a 3D tile [TOKEN_BLOCK_SIZE, head_num, 2*half_rope_dim].
 
-    Uses split cos/sin: the first half of cos/sin rotates x1/x2, the second
-    half rotates x2/x1.
+    The current vision RoPE table is built as ``cat([freqs, freqs], dim=-1)``,
+    so both cos/sin halves are numerically identical and we only need one half.
     """
-    # Split cos/sin into first and second halves: [TOKEN_BLOCK_SIZE, 1, half_rope_dim]
-    c1 = tl.extract_slice(cos_tile, [0, 0, 0], [TOKEN_BLOCK_SIZE, 1, half_rope_dim], [1, 1, 1])
-    c2 = tl.extract_slice(cos_tile, [0, 0, half_rope_dim], [TOKEN_BLOCK_SIZE, 1, half_rope_dim], [1, 1, 1])
-    s1 = tl.extract_slice(sin_tile, [0, 0, 0], [TOKEN_BLOCK_SIZE, 1, half_rope_dim], [1, 1, 1])
-    s2 = tl.extract_slice(sin_tile, [0, 0, half_rope_dim], [TOKEN_BLOCK_SIZE, 1, half_rope_dim], [1, 1, 1])
-
     # Split x into halves: [TOKEN_BLOCK_SIZE, head_num, half_rope_dim]
     x1 = tl.extract_slice(x, [0, 0, 0], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
     x2 = tl.extract_slice(x, [0, 0, half_rope_dim], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
 
-    # out_half1 = x1*c1 - x2*s1  (broadcasts c1/s1 across heads)
-    # out_half2 = x2*c2 + x1*s2
-    roped_x1 = x1 * c1 - x2 * s1
-    roped_x2 = x2 * c2 + x1 * s2
+    # out_half1 = x1*c - x2*s  (broadcasts c/s across heads)
+    # out_half2 = x2*c + x1*s
+    roped_x1 = x1 * cos_half_tile - x2 * sin_half_tile
+    roped_x2 = x2 * cos_half_tile + x1 * sin_half_tile
 
     x = tl.insert_slice(x, roped_x1, [0, 0, 0], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
     x = tl.insert_slice(x, roped_x2, [0, 0, half_rope_dim], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
@@ -120,14 +114,12 @@ def _compute_vision_rope(
 def _compute_vision_rope_separated(
     x1,
     x2,
-    sin_half1,
-    sin_half2,
-    cos_half1,
-    cos_half2,
+    sin_half,
+    cos_half,
 ):
     """Vision 2D RoPE on pre-split halves."""
-    roped_x1 = x1 * cos_half1 - x2 * sin_half1
-    roped_x2 = x2 * cos_half2 + x1 * sin_half2
+    roped_x1 = x1 * cos_half - x2 * sin_half
+    roped_x2 = x2 * cos_half + x1 * sin_half
     return roped_x1, roped_x2
 
 
@@ -175,23 +167,24 @@ def _vision_rope_apply_kernel(
         head_k_offsets = tl.arange(0, n_kh)
 
         if ALIGNED:
+            # The current vision RoPE table duplicates the first half into the
+            # second half, so we only load half of cos/sin and reuse it.
+            cos_half = tl.load(
+                cos_token_ptr + half_dim_offsets[None, :],
+                mask=token_mask[:, None] & half_dim_mask[None, :],
+                other=0.0,
+            )
+            sin_half = tl.load(
+                sin_token_ptr + half_dim_offsets[None, :],
+                mask=token_mask[:, None] & half_dim_mask[None, :],
+                other=0.0,
+            )
+
+            cos_half_tile = tl.reshape(cos_half, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
+            sin_half_tile = tl.reshape(sin_half, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
+
             dim_offsets = tl.arange(0, D)
             dim_mask = dim_offsets < D
-
-            # Load cos/sin as 2D, then reshape to 3D with singleton head dim for broadcasting
-            cos_block_2d = tl.load(
-                cos_token_ptr + dim_offsets[None, :],
-                mask=token_mask[:, None] & dim_mask[None, :],
-                other=0.0,
-            )
-            sin_block_2d = tl.load(
-                sin_token_ptr + dim_offsets[None, :],
-                mask=token_mask[:, None] & dim_mask[None, :],
-                other=0.0,
-            )
-
-            cos_tile = tl.reshape(cos_block_2d, (TOKEN_BLOCK_SIZE, 1, D), can_reorder=True)
-            sin_tile = tl.reshape(sin_block_2d, (TOKEN_BLOCK_SIZE, 1, D), can_reorder=True)
 
             # Q: 3D load [TOKEN_BLOCK_SIZE, n_qh, D], rotate, store
             q_offsets = (
@@ -199,15 +192,11 @@ def _vision_rope_apply_kernel(
                 + head_q_offsets[None, :, None] * q_head_stride
                 + dim_offsets[None, None, :]
             )
-            q_mask = (
-                token_mask[:, None, None]
-                & (head_q_offsets[None, :, None] < n_qh)
-                & dim_mask[None, None, :]
-            )
+            q_mask = token_mask[:, None, None] & (head_q_offsets[None, :, None] < n_qh) & dim_mask[None, None, :]
             q_tile = tl.load(q_ptr + q_offsets, mask=q_mask, other=0.0)
             if CAST_TO_FP32:
-                q_tile = q_tile.to(sin_block_2d.dtype)
-            q_tile = _compute_vision_rope(q_tile, sin_tile, cos_tile, n_qh, HALF_D, TOKEN_BLOCK_SIZE)
+                q_tile = q_tile.to(cos_half.dtype)
+            q_tile = _compute_vision_rope(q_tile, sin_half_tile, cos_half_tile, n_qh, HALF_D, TOKEN_BLOCK_SIZE)
             tl.store(q_ptr + q_offsets, q_tile, mask=q_mask)
 
             # K: 3D load [TOKEN_BLOCK_SIZE, n_kh, D], rotate, store
@@ -216,43 +205,28 @@ def _vision_rope_apply_kernel(
                 + head_k_offsets[None, :, None] * k_head_stride
                 + dim_offsets[None, None, :]
             )
-            k_mask = (
-                token_mask[:, None, None]
-                & (head_k_offsets[None, :, None] < n_kh)
-                & dim_mask[None, None, :]
-            )
+            k_mask = token_mask[:, None, None] & (head_k_offsets[None, :, None] < n_kh) & dim_mask[None, None, :]
             k_tile = tl.load(k_ptr + k_offsets, mask=k_mask, other=0.0)
             if CAST_TO_FP32:
-                k_tile = k_tile.to(sin_block_2d.dtype)
-            k_tile = _compute_vision_rope(k_tile, sin_tile, cos_tile, n_kh, HALF_D, TOKEN_BLOCK_SIZE)
+                k_tile = k_tile.to(cos_half.dtype)
+            k_tile = _compute_vision_rope(k_tile, sin_half_tile, cos_half_tile, n_kh, HALF_D, TOKEN_BLOCK_SIZE)
             tl.store(k_ptr + k_offsets, k_tile, mask=k_mask)
         else:
-            # Load cos/sin halves as 2D, reshape for broadcasting
-            cos_half1 = tl.load(
+            # The current vision RoPE table duplicates the first half into the
+            # second half, so we only load half of cos/sin and reuse it.
+            cos_half = tl.load(
                 cos_token_ptr + half_dim_offsets[None, :],
                 mask=token_mask[:, None] & half_dim_mask[None, :],
                 other=0.0,
             )
-            cos_half2 = tl.load(
-                cos_token_ptr + HALF_D + half_dim_offsets[None, :],
-                mask=token_mask[:, None] & half_dim_mask[None, :],
-                other=0.0,
-            )
-            sin_half1 = tl.load(
+            sin_half = tl.load(
                 sin_token_ptr + half_dim_offsets[None, :],
                 mask=token_mask[:, None] & half_dim_mask[None, :],
                 other=0.0,
             )
-            sin_half2 = tl.load(
-                sin_token_ptr + HALF_D + half_dim_offsets[None, :],
-                mask=token_mask[:, None] & half_dim_mask[None, :],
-                other=0.0,
-            )
 
-            c1 = tl.reshape(cos_half1, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
-            c2 = tl.reshape(cos_half2, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
-            s1 = tl.reshape(sin_half1, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
-            s2 = tl.reshape(sin_half2, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
+            cos_half_tile = tl.reshape(cos_half, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
+            sin_half_tile = tl.reshape(sin_half, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
 
             # Q halves
             q_offsets_half1 = (
@@ -267,9 +241,7 @@ def _vision_rope_apply_kernel(
                 + half_dim_offsets[None, None, :]
             )
             q_half_mask = (
-                token_mask[:, None, None]
-                & (head_q_offsets[None, :, None] < n_qh)
-                & half_dim_mask[None, None, :]
+                token_mask[:, None, None] & (head_q_offsets[None, :, None] < n_qh) & half_dim_mask[None, None, :]
             )
 
             q_tile_1 = tl.load(q_ptr + q_offsets_half1, mask=q_half_mask, other=0.0)
@@ -278,7 +250,10 @@ def _vision_rope_apply_kernel(
                 q_tile_1 = q_tile_1.to(tl.float32)
                 q_tile_2 = q_tile_2.to(tl.float32)
             new_q_1, new_q_2 = _compute_vision_rope_separated(
-                q_tile_1, q_tile_2, s1, s2, c1, c2,
+                q_tile_1,
+                q_tile_2,
+                sin_half_tile,
+                cos_half_tile,
             )
             tl.store(q_ptr + q_offsets_half1, new_q_1, mask=q_half_mask)
             tl.store(q_ptr + q_offsets_half2, new_q_2, mask=q_half_mask)
@@ -296,9 +271,7 @@ def _vision_rope_apply_kernel(
                 + half_dim_offsets[None, None, :]
             )
             k_half_mask = (
-                token_mask[:, None, None]
-                & (head_k_offsets[None, :, None] < n_kh)
-                & half_dim_mask[None, None, :]
+                token_mask[:, None, None] & (head_k_offsets[None, :, None] < n_kh) & half_dim_mask[None, None, :]
             )
 
             k_tile_1 = tl.load(k_ptr + k_offsets_half1, mask=k_half_mask, other=0.0)
@@ -307,7 +280,10 @@ def _vision_rope_apply_kernel(
                 k_tile_1 = k_tile_1.to(tl.float32)
                 k_tile_2 = k_tile_2.to(tl.float32)
             new_k_1, new_k_2 = _compute_vision_rope_separated(
-                k_tile_1, k_tile_2, s1, s2, c1, c2,
+                k_tile_1,
+                k_tile_2,
+                sin_half_tile,
+                cos_half_tile,
             )
             tl.store(k_ptr + k_offsets_half1, new_k_1, mask=k_half_mask)
             tl.store(k_ptr + k_offsets_half2, new_k_2, mask=k_half_mask)
