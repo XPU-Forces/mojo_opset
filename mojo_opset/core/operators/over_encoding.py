@@ -38,24 +38,19 @@ def n_gram_impl_torch(
     Returns:
         _type_: _description_
     """
+    assert input_ids.dtype == oe_history_inputs.dtype == oe_vocab_sizes.dtype == oe_vocab_offset.dtype == n_grams.dtype == torch.long
     n_gram_ids = []
+    complete_input_ids = torch.cat([oe_history_inputs, input_ids], dim=-1)
     for gram_idx, gram in map(lambda val: (val[0], val[1].item()), enumerate(n_grams)):
         oe_carry = ori_vocab_size
         n_gram_id = input_ids
 
         # TODO(liuyuan): make it recomputation free.
         for i in range(1, gram):
-
-            complete_input_ids = torch.cat(
-                (oe_history_inputs[..., -i:], input_ids[..., :-i]),
-                dim=-1,
-            )
-
-            if i > n_gram_id.size(-1):
-                complete_input_ids = complete_input_ids[..., : n_gram_id.size(-1)]
+            prev_input_ids = complete_input_ids[..., -i-n_gram_id.size(-1):-i]
 
             # NOTE(liuyuan): the fowllowing modulo operators are designed for big decimals.
-            n_gram_id = (n_gram_id + complete_input_ids * oe_carry) % oe_vocab_sizes[gram_idx]
+            n_gram_id = (n_gram_id + prev_input_ids * oe_carry) % oe_vocab_sizes[gram_idx]
             oe_carry = oe_carry * ori_vocab_size % oe_vocab_sizes[gram_idx]
 
         n_gram_id = n_gram_id + oe_vocab_offset[gram_idx]

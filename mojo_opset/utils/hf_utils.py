@@ -321,6 +321,11 @@ def load_sharded_weights_into_meta_model(meta_model: nn.Module, *index_files, st
             if meta_state_dict[key] is None:
                 # FIXME: directly drop it?
                 continue
+            if tensor.shape != meta_state_dict[key].shape:
+                logger.warning(f"Shape mismatch for {key}. Expected {meta_state_dict[key].shape}, got {tensor.shape}.")
+            if tensor.dtype != meta_state_dict[key].dtype:
+                logger.info(f"Casting {key} to expected {meta_state_dict[key].dtype} from {tensor.dtype}.")
+            
             tensor = tensor.to(meta_state_dict[key].dtype)
             if key in map_locations:
                 tensor = tensor.to(map_locations[key])
