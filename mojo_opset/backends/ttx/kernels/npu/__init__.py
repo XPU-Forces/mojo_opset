@@ -27,6 +27,7 @@ from .rmsnorm import rmsnorm_infer_impl
 from .rope import rot_pos_embed_impl
 from .rope import rope_bwd_impl
 from .rope import rope_fwd_impl
+from .mrope import mrope_fwd_impl
 from .sample import fused_penalties_temp_impl
 from .sample import join_prob_reject_sampling_impl
 from .sample import reject_sampling_impl
@@ -76,6 +77,7 @@ __all__ = [
     "rot_pos_embed_impl",
     "rope_bwd_impl",
     "rope_fwd_impl",
+    "mrope_fwd_impl",
     "silu_bwd_impl",
     "silu_fwd_impl",
     "swiglu_bwd_impl",

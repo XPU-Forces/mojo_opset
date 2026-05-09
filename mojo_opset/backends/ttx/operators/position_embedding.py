@@ -7,7 +7,7 @@ import torch
 from mojo_opset.backends.ttx.kernels import relative_embedding_fwd_impl
 from mojo_opset.backends.ttx.kernels import rot_pos_embed
 from mojo_opset.backends.ttx.kernels import rope_fwd
-from mojo_opset.backends.ttx.kernels.npu.mrope import mrope_fwd_impl
+from mojo_opset.backends.ttx.kernels import mrope_fwd_impl
 from mojo_opset.core import MojoRelativeEmbedding
 from mojo_opset.core import MojoRotaryEmbedding
 from mojo_opset.core import MojoApplyRoPE
