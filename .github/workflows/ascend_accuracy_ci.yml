@@ -62,7 +62,7 @@ jobs:
         shell: bash
         run: |
           bisheng_version=8.5.0.post19
-          export http_proxy=${MOJO_OPSET_PROXY} https_proxy=${MOJO_OPSET_PROXY} HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
+          export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
           [ ! -f "npu_compiler.tar.gz" ] && wget "https://tosv.byted.org/obj/aicompiler/npu/common/npu_compiler/npu_compiler_${bisheng_version}_$(uname -m).tar.gz" -O "npu_compiler.tar.gz"
           [ ! -d "npu_compiler" ] && tar -zxvf npu_compiler.tar.gz
           CURRENT_CCEC_DIR=npu_compiler/ccec_compiler
@@ -104,7 +104,7 @@ jobs:
           cat ccec.env
           env|grep BISHENG_INSTALL_PATH
           ls -lstr $BISHENG_INSTALL_PATH
-          PATH=$BISHENG_INSTALL_PATH:$PATH
+          export PATH=$BISHENG_INSTALL_PATH:$PATH
           MOJO_BACKEND="ttx" python3 -m pytest -n 8 mojo_opset/tests/accuracy/operators/ \
             --ignore=mojo_opset/tests/accuracy/operators/test_compute_with_comm.py
           MOJO_BACKEND="ttx" python3 -m pytest -n 8 mojo_opset/tests/accuracy/functions/
