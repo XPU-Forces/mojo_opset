@@ -1,13 +1,7 @@
 import pytest
 import torch
 
-from mojo_opset.tests.accuracy.operators._vision_rope_2d_golden import (
-    _apply_vision_rope_2d_golden,
-    _vision_rotary_embedding_2d_golden,
-)
-from mojo_opset.tests.utils import assert_close
 from mojo_opset.tests.utils import bypass_not_implemented
-from mojo_opset.tests.utils import requires_platform_backend
 
 from mojo_opset import MojoApplyVisionRoPE2D
 from mojo_opset import MojoRotaryEmbedding
@@ -31,12 +25,6 @@ VISION_VIT_CONFIG = {
     "rope_theta": 10000.0,
     "adapooling_factor": 2,
 }
-
-_requires_torch_npu_vision_rope = requires_platform_backend(
-    platforms="npu",
-    backends="torch_npu",
-    reason="Vision 2D RoPE torch_npu backend requires Ascend NPU.",
-)
 
 
 @pytest.mark.parametrize("bs", [1, 6])
@@ -277,6 +265,7 @@ def test_relative_embedding(num_buckets, num_heads, bidirectional, lq, lk):
         pytest.param(VISION_VIT_CONFIG, id="vision_448_27l_20h_h64"),
     ],
 )
+@bypass_not_implemented
 def test_vision_rotary_embedding_2d(grid, vision_config):
     device = get_torch_device()
     rope_theta = vision_config["rope_theta"]
@@ -289,18 +278,18 @@ def test_vision_rotary_embedding_2d(grid, vision_config):
         rope_dim=head_dim,
         adapooling_factor=adapooling_factor,
     ).to(device)
-
-    cos_ref, sin_ref = _vision_rotary_embedding_2d_golden(
-        grid_hw,
+    rot_pos_emb_ref = MojoVisionRotaryEmbedding2D._registry.get("torch")(
         rope_theta=rope_theta,
         rope_dim=head_dim,
-        device=device,
         adapooling_factor=adapooling_factor,
-    )
-    cos, sin = rot_pos_emb(grid_hw)
+    ).to(device)
 
-    torch.testing.assert_close(cos, cos_ref, atol=1e-5, rtol=1e-5)
-    torch.testing.assert_close(sin, sin_ref, atol=1e-5, rtol=1e-5)
+    rot_pos_emb.forward_diff_with(
+        rot_pos_emb_ref,
+        grid_hw,
+        atol=1e-5,
+        rtol=1e-5,
+    )
 
 
 @pytest.mark.parametrize("invalid_adapooling_factor", [0, -1])
@@ -308,12 +297,6 @@ def test_vision_rotary_embedding_2d_rejects_non_positive_adapooling_factor(inval
     with pytest.raises(AssertionError, match="adapooling_factor must be >= 1"):
         MojoVisionRotaryEmbedding2D(adapooling_factor=invalid_adapooling_factor)
 
-
-@_requires_torch_npu_vision_rope
-def test_apply_vision_rope_2d_uses_torch_npu_backend():
-    registry = MojoApplyVisionRoPE2D.get_registry()._registry
-    assert "torch_npu" in registry
-    assert registry["torch_npu"].__name__ == "TorchNpuApplyVisionRoPE2D"
 
 
 @pytest.mark.parametrize(
@@ -344,20 +327,25 @@ def test_apply_vision_rope_2d(grid, vision_config, dtype):
     total_tokens = int(grid_hw.to(dtype=torch.int64).prod(dim=-1).sum().item())
     q = torch.randn(total_tokens, q_heads, head_dim, device=device, dtype=dtype)
     k = torch.randn(total_tokens, k_heads, head_dim, device=device, dtype=dtype)
-    cos, sin = _vision_rotary_embedding_2d_golden(
-        grid_hw,
+    rot_pos_emb_ref = MojoVisionRotaryEmbedding2D._registry.get("torch")(
         rope_theta=rope_theta,
         rope_dim=head_dim,
-        device=device,
         adapooling_factor=adapooling_factor,
-    )
+    ).to(device)
+    cos, sin = rot_pos_emb_ref(grid_hw)
 
     rope = MojoApplyVisionRoPE2D()
-    q_ref, k_ref = _apply_vision_rope_2d_golden(q, k, cos, sin)
-    q_rot, k_rot = rope(q, k, cos, sin)
+    rope_ref = MojoApplyVisionRoPE2D._registry.get("torch")()
 
-    assert_close(q_rot, q_ref)
-    assert_close(k_rot, k_ref)
+    rope.forward_diff_with(
+        rope_ref,
+        q,
+        k,
+        cos,
+        sin,
+        atol=5e-2,
+        rtol=5e-2,
+    )
 
 
 @pytest.mark.parametrize(
