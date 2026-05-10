@@ -1,6 +1,8 @@
 # Copyright (c) 2025, Shanghai Iluvatar CoreX Semiconductor Co., Ltd.
 # ILU Triton grouped matmul (aligned with NPU group_gemm; launch uses ILU vector cores).
 
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
@@ -128,11 +130,15 @@ def m_grouped_matmul_impl(
     strideBN: int,
     strideBK: int,
     trans_b: bool = False,
+    group_offsets: Optional[torch.Tensor] = None,
+    max_m: Optional[int] = None,
 ) -> torch.Tensor:
-    cum = size_per_group.cumsum(0, dtype=torch.int32)
-    group_offsets = torch.zeros(num_groups + 1, dtype=torch.int32, device=A.device)
-    group_offsets[1:] = cum
-    max_m = size_per_group.max().item()
+    if group_offsets is None:
+        cum = size_per_group.cumsum(0, dtype=torch.int32)
+        group_offsets = torch.zeros(num_groups + 1, dtype=torch.int32, device=A.device)
+        group_offsets[1:] = cum
+    if max_m is None:
+        max_m = size_per_group.max().item()
 
     def grid(META):
         return (
@@ -231,10 +237,12 @@ def k_grouped_matmul_impl(
     num_groups: int,
     M: int,
     N: int,
+    group_offsets: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    cum = size_per_group.cumsum(0, dtype=torch.int32)
-    group_offsets = torch.zeros(num_groups + 1, dtype=torch.int32, device=A.device)
-    group_offsets[1:] = cum
+    if group_offsets is None:
+        cum = size_per_group.cumsum(0, dtype=torch.int32)
+        group_offsets = torch.zeros(num_groups + 1, dtype=torch.int32, device=A.device)
+        group_offsets[1:] = cum
 
     def grid(META):
         return (
