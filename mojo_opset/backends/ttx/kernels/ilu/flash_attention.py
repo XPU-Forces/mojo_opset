@@ -654,6 +654,9 @@ def paged_attention_prefill_impl(
     gqa_interleave: bool,
     softmax_scale: Optional[float] = None,
     aux_mask: Optional[torch.Tensor] = None,
+    out: Optional[torch.Tensor] = None,
+    block_tables_i32: Optional[torch.Tensor] = None,
+    max_q_blocks: Optional[int] = None,
 ) -> torch.Tensor:
     total_q_tokens, num_q_heads, head_dim = q.shape
     _, num_kv_heads, block_size, _ = key_cache.shape
@@ -668,8 +671,10 @@ def paged_attention_prefill_impl(
 
     use_aux_mask = aux_mask is not None
 
-    out = torch.empty_like(q)
-    block_tables_i32 = block_tables.to(torch.int32)
+    if out is None:
+        out = torch.empty_like(q)
+    if block_tables_i32 is None:
+        block_tables_i32 = block_tables.to(torch.int32)
 
     BLOCK_D = triton.next_power_of_2(head_dim)
 
@@ -684,11 +689,16 @@ def paged_attention_prefill_impl(
         mask_stride_n = 0
         mask_size = 0
 
-    def grid(META):
-        bm = META["BLOCK_M"]
-        q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
-        max_q_blocks = ((q_lens + bm - 1) // bm).max().item()
-        return (max_q_blocks, num_q_heads, batch_size)
+    if max_q_blocks is not None:
+        _max_q_blocks = max_q_blocks
+        def grid(META):
+            return (_max_q_blocks, num_q_heads, batch_size)
+    else:
+        def grid(META):
+            bm = META["BLOCK_M"]
+            q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
+            _mqb = ((q_lens + bm - 1) // bm).max().item()
+            return (_mqb, num_q_heads, batch_size)
 
     _paged_prefill_fav2_kernel[grid](
         q,
@@ -734,6 +744,8 @@ def paged_attention_prefill_quant_impl(
     softmax_scale: Optional[float] = None,
     max_seqlen_q: Optional[int] = None,
     max_seqlen_k: Optional[int] = None,
+    out: Optional[torch.Tensor] = None,
+    block_tables_i32: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Paged prefill attention with int8 KV cache and per-channel scales.
 
@@ -748,8 +760,10 @@ def paged_attention_prefill_quant_impl(
         block_tables: (B, num_blocks) int32.
         gqa_interleave: whether to use ABAB GQA layout.
         softmax_scale: attention scale, default 1/sqrt(D).
-        max_seqlen_q: max query length hint.
+        max_seqlen_q: max query length hint (avoids GPU->CPU sync).
         max_seqlen_k: max KV length hint.
+        out: pre-allocated output tensor (T, Hq, D).
+        block_tables_i32: pre-converted int32 block_tables.
     """
     total_q_tokens, num_q_heads, head_dim = q.shape
     _, num_kv_heads, block_size, _ = key_cache.shape
@@ -762,8 +776,10 @@ def paged_attention_prefill_quant_impl(
     else:
         seqlens_kv = seqlens_kv.to(torch.int32)
 
-    out = torch.empty(total_q_tokens, num_q_heads, head_dim, device=q.device, dtype=q.dtype)
-    block_tables_i32 = block_tables.to(torch.int32)
+    if out is None:
+        out = torch.empty(total_q_tokens, num_q_heads, head_dim, device=q.device, dtype=q.dtype)
+    if block_tables_i32 is None:
+        block_tables_i32 = block_tables.to(torch.int32)
 
     BLOCK_D = triton.next_power_of_2(head_dim)
 
