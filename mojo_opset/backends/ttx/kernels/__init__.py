@@ -35,6 +35,7 @@ silu_fwd_impl = _get_kernel_impl(ttx_backend_module, "silu_fwd_impl")
 silu_bwd_impl = _get_kernel_impl(ttx_backend_module, "silu_bwd_impl")
 
 dynamic_quant_impl = _get_kernel_impl(ttx_backend_module, "dynamic_quant_impl")
+static_quant_impl = _get_kernel_impl(ttx_backend_module, "static_quant_impl")
 lightning_indexer_impl = _get_kernel_impl(ttx_backend_module, "lightning_indexer_impl")
 dequant_impl = _get_kernel_impl(ttx_backend_module, "dequant_impl")
 
@@ -409,6 +410,24 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
             torch.empty_like(input_tensor, dtype=torch.int8),
             torch.empty((*input_tensor.shape[:-1], 1), dtype=torch.float32, device=input_tensor.device),
         )
+
+    @torch.library.custom_op("ttx::static_quant", mutates_args={})
+    def static_quant(
+        input_tensor: torch.Tensor,
+        scale: torch.Tensor,
+        q_min: int = -128,
+        q_max: int = 127,
+    ) -> torch.Tensor:
+        return static_quant_impl(input_tensor, scale, q_min, q_max)
+
+    @static_quant.register_fake
+    def static_quant_fake(
+        input_tensor: torch.Tensor,
+        scale: torch.Tensor,
+        q_min: int = -128,
+        q_max: int = 127,
+    ) -> torch.Tensor:
+        return torch.empty_like(input_tensor, dtype=torch.int8)
 
     @torch.library.custom_op("ttx::dequant", mutates_args={})
     def dequant(
@@ -930,6 +949,7 @@ else:
     top_p_sampling = top_p_sampling_impl
     top_k_sampling = top_k_sampling_impl
     dynamic_quant = dynamic_quant_impl
+    static_quant = static_quant_impl
     dequant = dequant_impl
     lightning_indexer = lightning_indexer_impl
     group_rmsnorm = group_rmsnorm_impl

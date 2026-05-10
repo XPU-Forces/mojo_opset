@@ -39,6 +39,7 @@ from .sample import reject_sampling_impl
 from .sample import top_p_filter_impl
 from .sample import top_p_sampling_impl
 from .sdpa import sdpa_bwd_impl
+from .static_quant import static_quant_impl
 from .sdpa import sdpa_fwd_impl
 from .sdpa import sdpa_infer_impl
 from .silu import silu_bwd_impl
@@ -106,6 +107,7 @@ __all__ = [
     # "diffusion_attention_fwd_impl",
     # "diffusion_attention_bwd_impl",
     "swa_paged_decode_impl",
+    "static_quant_impl",
     "dequant_impl",
     "swa_paged_decode_quant_impl",
 ]

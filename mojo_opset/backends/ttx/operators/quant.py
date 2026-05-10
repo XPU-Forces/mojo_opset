@@ -1,6 +1,7 @@
 import torch
 
 from mojo_opset.backends.ttx.kernels import dynamic_quant
+from mojo_opset.backends.ttx.kernels import static_quant
 from mojo_opset.backends.ttx.kernels import dequant
 from mojo_opset.core import MojoDequant
 from mojo_opset.core import MojoDynamicQuant
@@ -9,7 +10,9 @@ from mojo_opset.core import MojoStaticQuant
 
 
 class TTXStaticQuant(MojoStaticQuant):
-    pass
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return static_quant(input, self.scale, self.q_min, self.q_max), self.scale
 
 
 class TTXDequant(MojoDequant):
