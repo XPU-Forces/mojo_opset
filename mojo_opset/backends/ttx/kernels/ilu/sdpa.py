@@ -1,8 +1,10 @@
 """
-ILU Triton SDPA: masked softmax attention (GQA via repeat_interleave on host).
+ILU Triton SDPA: Flash Attention v2 style tiled attention with online softmax.
+GQA is handled inside the kernel via head index mapping (no host-side repeat).
 Backward path uses torch SDPA for correct GQA gradients.
 """
 
+import math
 from typing import Optional
 
 import torch
@@ -10,7 +12,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from .utils import libentry
+from .utils import LOG2E, libentry
 
 
 def _repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -18,6 +20,191 @@ def _repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         return x
     return x.repeat_interleave(n_rep, dim=1)
 
+
+# ---------------------------------------------------------------------------
+# Flash Attention v2 style forward kernel (infer-only, no LSE output)
+# ---------------------------------------------------------------------------
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8, num_stages=2),
+    ],
+    key=["SEQ", "HEAD_DIM"],
+)
+@libentry()
+@triton.jit
+def _sdpa_fav2_fwd_kernel(
+    Q,
+    K,
+    V,
+    mask_ptr,
+    Out,
+    stride_qb, stride_qh, stride_qs, stride_qd,
+    stride_kb, stride_kh, stride_ks, stride_kd,
+    stride_vb, stride_vh, stride_vs, stride_vd,
+    stride_ob, stride_oh, stride_os, stride_od,
+    stride_m0, stride_m1,
+    sm_scale,
+    BSZ: tl.constexpr,
+    Q_HEAD_NUM: tl.constexpr,
+    KV_HEAD_NUM: tl.constexpr,
+    SEQ: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_bh = tl.program_id(1)
+
+    b_idx = pid_bh // Q_HEAD_NUM
+    q_head_idx = pid_bh % Q_HEAD_NUM
+    kv_head_idx = q_head_idx // (Q_HEAD_NUM // KV_HEAD_NUM)
+
+    q_start = pid_m * BLOCK_M
+
+    offs_m = tl.arange(0, BLOCK_M)
+    offs_n = tl.arange(0, BLOCK_N)
+    offs_d = tl.arange(0, HEAD_DIM)
+
+    q_base = Q + b_idx * stride_qb + q_head_idx * stride_qh
+    q_ptrs = (
+        q_base
+        + (q_start + offs_m[:, None]) * stride_qs
+        + offs_d[None, :] * stride_qd
+    )
+    mask_q = (q_start + offs_m[:, None]) < SEQ
+    q_block = tl.load(q_ptrs, mask=mask_q, other=0.0)
+
+    m_i = tl.full([BLOCK_M], -1e6, dtype=tl.float32)
+    l_i = tl.full([BLOCK_M], 0.0, dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
+
+    kv_base = b_idx * stride_kb + kv_head_idx * stride_kh
+    v_kv_base = b_idx * stride_vb + kv_head_idx * stride_vh
+
+    for kv_start in range(0, SEQ, BLOCK_N):
+        kv_offs = kv_start + offs_n
+
+        k_T_ptrs = (
+            K
+            + kv_base
+            + offs_d[:, None] * stride_kd
+            + kv_offs[None, :] * stride_ks
+        )
+        mask_kv_T = kv_offs[None, :] < SEQ
+        k_T_block = tl.load(k_T_ptrs, mask=mask_kv_T, other=0.0)
+
+        qk = tl.dot(q_block, k_T_block)
+        qk = qk * sm_scale
+
+        attn_mask_ptrs = (
+            mask_ptr
+            + (q_start + offs_m[:, None]) * stride_m0
+            + kv_offs[None, :] * stride_m1
+        )
+        mask_valid = ((q_start + offs_m[:, None]) < SEQ) & (kv_offs[None, :] < SEQ)
+        attn_mask_raw = tl.load(attn_mask_ptrs, mask=mask_valid, other=0)
+        attn_mask = attn_mask_raw != 0
+        qk = tl.where(attn_mask, qk, -1e6)
+
+        m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        alpha = tl.math.exp(m_i - m_ij)
+        p = tl.math.exp(qk - m_ij[:, None])
+
+        acc = acc * alpha[:, None]
+
+        v_ptrs = (
+            V
+            + v_kv_base
+            + kv_offs[:, None] * stride_vs
+            + offs_d[None, :] * stride_vd
+        )
+        mask_kv = kv_offs[:, None] < SEQ
+        v_block = tl.load(v_ptrs, mask=mask_kv, other=0.0)
+
+        acc = tl.dot(p.to(Q.dtype.element_ty), v_block, acc=acc)
+
+        l_i = l_i * alpha + tl.sum(p, 1)
+        m_i = m_ij
+
+    l_i = tl.maximum(l_i, 1e-6)
+    acc = acc / l_i[:, None]
+
+    o_ptrs = (
+        Out
+        + b_idx * stride_ob
+        + q_head_idx * stride_oh
+        + (q_start + offs_m[:, None]) * stride_os
+        + offs_d[None, :] * stride_od
+    )
+    mask_out = (q_start + offs_m[:, None]) < SEQ
+    tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=mask_out)
+
+
+def sdpa_infer_impl(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+    scale: Optional[float] = None,
+    enable_gqa: bool = False,
+):
+    assert q.shape[-1] == k.shape[-1] and k.shape[-1] == v.shape[-1]
+    assert q.shape[-2] == k.shape[-2] and k.shape[-2] == v.shape[-2]
+    seq_length = q.shape[-2]
+    assert mask is not None
+    assert mask.shape == (seq_length, seq_length) and mask.dtype == torch.bool
+
+    if not enable_gqa:
+        assert q.shape[1] == k.shape[1] == v.shape[1]
+    else:
+        assert k.shape[1] == v.shape[1] and q.shape[1] % k.shape[1] == 0
+
+    bsz = q.shape[0]
+    q_head_num = q.shape[1]
+    kv_head_num = k.shape[1]
+    head_dim = q.shape[-1]
+    sm_scale = scale if scale is not None else head_dim ** -0.5
+
+    q_c = q.contiguous()
+    k_c = k.contiguous()
+    v_c = v.contiguous()
+    mask_c = mask.to(torch.int8).contiguous()
+    out = torch.empty_like(q_c)
+
+    def grid(META):
+        return (triton.cdiv(seq_length, META["BLOCK_M"]), bsz * q_head_num)
+
+    _sdpa_fav2_fwd_kernel[grid](
+        q_c,
+        k_c,
+        v_c,
+        mask_c,
+        out,
+        q_c.stride(0), q_c.stride(1), q_c.stride(2), q_c.stride(3),
+        k_c.stride(0), k_c.stride(1), k_c.stride(2), k_c.stride(3),
+        v_c.stride(0), v_c.stride(1), v_c.stride(2), v_c.stride(3),
+        out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+        mask_c.stride(0), mask_c.stride(1),
+        float(sm_scale),
+        BSZ=bsz,
+        Q_HEAD_NUM=q_head_num,
+        KV_HEAD_NUM=kv_head_num,
+        SEQ=seq_length,
+        HEAD_DIM=head_dim,
+    )
+    return out.to(q.dtype)
+
+
+# ---------------------------------------------------------------------------
+# Legacy masked kernel kept for sdpa_fwd_impl (training path with LSE)
+# ---------------------------------------------------------------------------
 
 @libentry()
 @triton.jit
@@ -173,40 +360,6 @@ def _launch_sdpa_masked(
         WRITE_LSE=write_lse,
         OUT_T=out_t,
     )
-
-
-def sdpa_infer_impl(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    mask: Optional[torch.Tensor] = None,
-    scale: Optional[float] = None,
-    enable_gqa: bool = False,
-):
-    assert q.shape[-1] == k.shape[-1] and k.shape[-1] == v.shape[-1]
-    assert q.shape[-2] == k.shape[-2] and k.shape[-2] == v.shape[-2]
-    seq_length = q.shape[-2]
-    assert mask is not None
-    assert mask.shape == (seq_length, seq_length) and mask.dtype == torch.bool
-
-    if not enable_gqa:
-        assert q.shape[1] == k.shape[1] == v.shape[1]
-    else:
-        assert k.shape[1] == v.shape[1] and q.shape[1] % k.shape[1] == 0
-
-    head_dim = q.shape[-1]
-    sm_scale = scale if scale is not None else head_dim**-0.5
-
-    n_rep = q.shape[1] // k.shape[1]
-    k_eff = _repeat_kv(k, n_rep) if enable_gqa else k
-    v_eff = _repeat_kv(v, n_rep) if enable_gqa else v
-
-    q_c = q.contiguous()
-    k_c = k_eff.contiguous()
-    v_c = v_eff.contiguous()
-    out = torch.empty_like(q_c)
-    _launch_sdpa_masked(q_c, k_c, v_c, mask, out, sm_scale, lse=None)
-    return out.to(q.dtype)
 
 
 def sdpa_fwd_impl(
