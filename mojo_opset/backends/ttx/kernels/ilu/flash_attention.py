@@ -11,9 +11,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .utils import libentry
-
-LOG2E: tl.constexpr = math.log2(math.e)
+from .utils import LOG2E, libentry
 
 
 @triton.jit
@@ -513,6 +511,137 @@ def _paged_decode_gqa_kernel(
     tl.store(out_ptrs, out.to(OUT_T), mask=d_mask)
 
 
+@triton.jit
+def _paged_prefill_quant_kernel(
+    Q,
+    K_cache,
+    V_cache,
+    Out,
+    K_qscale,
+    V_qscale,
+    cu_seqlens_q_ptr,
+    seqlens_kv_ptr,
+    block_tables_ptr,
+    stride_qt, stride_qh, stride_qd,
+    stride_kb, stride_kh, stride_kn, stride_kd,
+    stride_vb, stride_vh, stride_vn, stride_vd,
+    stride_ot, stride_oh, stride_od,
+    stride_bt_batch, stride_bt_block,
+    stride_ks_h, stride_ks_d,
+    stride_vs_h, stride_vs_d,
+    sm_scale,
+    NUM_Q_HEADS: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
+    GQA_INTERLEAVE: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
+):
+    """Paged prefill attention with int8 KV cache (per-token scalar loop).
+
+    Avoids tl.dot entirely because the ILU Triton compiler generates invalid
+    ``sitofp <8 x i8> -> <4 x float>`` in the SharedToDotOperand layout pass
+    whenever tl.dot touches data whose provenance is an int8 load.
+
+    Each program handles one (query_token, head) pair and loops over all KV
+    tokens, similar to _paged_decode_gqa_kernel / _paged_prefill_causal_attn_kernel.
+    """
+    q_token_id = tl.program_id(0)
+    q_head_id = tl.program_id(1)
+    b_id = tl.program_id(2)
+
+    q_start = tl.load(cu_seqlens_q_ptr + b_id).to(tl.int32)
+    q_seq_len = tl.load(cu_seqlens_q_ptr + b_id + 1).to(tl.int32) - q_start
+    kv_seq_len = tl.load(seqlens_kv_ptr + b_id).to(tl.int32)
+
+    if q_token_id >= q_seq_len:
+        return
+
+    if GQA_INTERLEAVE:
+        kv_head_id = q_head_id % NUM_KV_HEADS
+    else:
+        kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
+
+    offs_d = tl.arange(0, BLOCK_D)
+    d_mask = offs_d < HEAD_DIM
+
+    q_vec = tl.load(
+        Q + (q_start + q_token_id) * stride_qt + q_head_id * stride_qh + offs_d * stride_qd,
+        mask=d_mask, other=0.0,
+    ).to(tl.float32)
+
+    k_scale_vec = tl.load(
+        K_qscale + q_head_id * stride_ks_h + offs_d * stride_ks_d,
+        mask=d_mask, other=0.0,
+    )
+    v_scale_vec = tl.load(
+        V_qscale + q_head_id * stride_vs_h + offs_d * stride_vs_d,
+        mask=d_mask, other=0.0,
+    )
+
+    kv_cache_len = kv_seq_len - q_seq_len
+
+    if IS_CAUSAL:
+        kv_loop_end = tl.minimum(kv_seq_len, q_token_id + 1 + kv_cache_len)
+    else:
+        kv_loop_end = kv_seq_len
+
+    m_max = tl.full((), -float("inf"), tl.float32)
+    l_sum = tl.full((), 0.0, tl.float32)
+    acc = tl.zeros((BLOCK_D,), dtype=tl.float32)
+
+    num_kv_pages = tl.cdiv(kv_loop_end, PAGE_SIZE)
+    for page_idx in tl.range(0, num_kv_pages):
+        physical_block = tl.load(
+            block_tables_ptr + b_id * stride_bt_batch + page_idx * stride_bt_block
+        )
+        kv_page_start = page_idx * PAGE_SIZE
+        kv_page_end = tl.minimum(kv_page_start + PAGE_SIZE, kv_loop_end)
+
+        for j in tl.range(kv_page_start, kv_page_end):
+            offset_in_page = j - kv_page_start
+
+            if IS_CAUSAL:
+                allowed = j <= (q_token_id + kv_cache_len)
+            else:
+                allowed = True
+
+            k_vec = tl.load(
+                K_cache + physical_block * stride_kb + kv_head_id * stride_kh
+                + offset_in_page * stride_kn + offs_d * stride_kd,
+                mask=d_mask, other=0,
+            ).to(tl.float32)
+            k_vec = k_vec * k_scale_vec
+
+            s = tl.sum(q_vec * k_vec) * sm_scale
+            s = tl.where(allowed, s, -float("inf"))
+
+            m_new = tl.maximum(m_max, s)
+            alpha = tl.math.exp(m_max - m_new)
+            p = tl.where(allowed, tl.math.exp(s - m_new), 0.0)
+
+            v_vec = tl.load(
+                V_cache + physical_block * stride_vb + kv_head_id * stride_vh
+                + offset_in_page * stride_vn + offs_d * stride_vd,
+                mask=d_mask, other=0,
+            ).to(tl.float32)
+            v_vec = v_vec * v_scale_vec
+
+            acc = acc * alpha + p * v_vec
+            l_sum = l_sum * alpha + p
+            m_max = m_new
+
+    l_sum = tl.maximum(l_sum, 1e-6)
+    out_vec = acc / l_sum
+
+    tl.store(
+        Out + (q_start + q_token_id) * stride_ot + q_head_id * stride_oh + offs_d * stride_od,
+        out_vec.to(Out.dtype.element_ty),
+        mask=d_mask,
+    )
+
+
 def paged_attention_prefill_impl(
     q: torch.Tensor,
     key_cache: torch.Tensor,
@@ -585,6 +714,90 @@ def paged_attention_prefill_impl(
         BLOCK_N=min(block_size, 128),
         IS_CAUSAL=True,
         USE_AUX_MASK=use_aux_mask,
+    )
+
+    return out
+
+
+def paged_attention_prefill_quant_impl(
+    q: torch.Tensor,
+    key_cache: torch.Tensor,
+    k_qscale: torch.Tensor,
+    value_cache: torch.Tensor,
+    v_qscale: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seqlens_kv: Optional[torch.Tensor],
+    block_tables: torch.Tensor,
+    gqa_interleave: bool,
+    softmax_scale: Optional[float] = None,
+    max_seqlen_q: Optional[int] = None,
+    max_seqlen_k: Optional[int] = None,
+) -> torch.Tensor:
+    """Paged prefill attention with int8 KV cache and per-channel scales.
+
+    Args:
+        q: (T, Hq, D) bf16/fp16 query tokens.
+        key_cache: (N_blocks, Hkv, block_size, D) int8 key cache.
+        k_qscale: (Hkv, D) float32 per-channel key scale.
+        value_cache: (N_blocks, Hkv, block_size, D) int8 value cache.
+        v_qscale: (Hkv, D) float32 per-channel value scale.
+        cu_seqlens_q: (B+1,) int32.
+        seqlens_kv: (B,) int32 or None.
+        block_tables: (B, num_blocks) int32.
+        gqa_interleave: whether to use ABAB GQA layout.
+        softmax_scale: attention scale, default 1/sqrt(D).
+        max_seqlen_q: max query length hint.
+        max_seqlen_k: max KV length hint.
+    """
+    total_q_tokens, num_q_heads, head_dim = q.shape
+    _, num_kv_heads, block_size, _ = key_cache.shape
+    batch_size = cu_seqlens_q.shape[0] - 1
+
+    sm_scale = softmax_scale if softmax_scale is not None else 1.0 / math.sqrt(head_dim)
+
+    if seqlens_kv is None:
+        seqlens_kv = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(torch.int32)
+    else:
+        seqlens_kv = seqlens_kv.to(torch.int32)
+
+    out = torch.empty(total_q_tokens, num_q_heads, head_dim, device=q.device, dtype=q.dtype)
+    block_tables_i32 = block_tables.to(torch.int32)
+
+    BLOCK_D = triton.next_power_of_2(head_dim)
+
+    if max_seqlen_q is not None:
+        max_q_len = max_seqlen_q
+    else:
+        q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        max_q_len = q_lens.max().item()
+
+    grid = (max_q_len, num_q_heads, batch_size)
+
+    _paged_prefill_quant_kernel[grid](
+        q,
+        key_cache,
+        value_cache,
+        out,
+        k_qscale,
+        v_qscale,
+        cu_seqlens_q,
+        seqlens_kv,
+        block_tables_i32,
+        q.stride(0), q.stride(1), q.stride(2),
+        key_cache.stride(0), key_cache.stride(1), key_cache.stride(2), key_cache.stride(3),
+        value_cache.stride(0), value_cache.stride(1), value_cache.stride(2), value_cache.stride(3),
+        out.stride(0), out.stride(1), out.stride(2),
+        block_tables_i32.stride(0), block_tables_i32.stride(1),
+        k_qscale.stride(0), k_qscale.stride(1),
+        v_qscale.stride(0), v_qscale.stride(1),
+        float(sm_scale),
+        NUM_Q_HEADS=num_q_heads,
+        NUM_KV_HEADS=num_kv_heads,
+        GQA_INTERLEAVE=gqa_interleave,
+        HEAD_DIM=head_dim,
+        BLOCK_D=BLOCK_D,
+        PAGE_SIZE=block_size,
+        IS_CAUSAL=True,
     )
 
     return out
