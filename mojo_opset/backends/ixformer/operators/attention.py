@@ -6,12 +6,13 @@ from typing import Any, Optional, Tuple
 
 import torch
 
-from ixformer import functions as ixf_f
+from ixformer import functions as ixf_ops
 from ixformer.contrib import vllm_flash_attn as ix_fa
 
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedDecodeSWA
 from mojo_opset.core import MojoPagedPrefillGQA
+from mojo_opset.core import MojoPagedPrefillQuantGQA
 from mojo_opset.core import MojoPagedPrefillSWA
 from mojo_opset.core.operators.attention import assert_paged_decode_contract
 from mojo_opset.core.operators.attention import assert_paged_prefill_contract
@@ -19,6 +20,66 @@ from mojo_opset.core.operators.attention import assert_paged_prefill_contract
 _IXFORMER_PAGED_DECODE_SUPPORTED_HEAD_DIMS = frozenset(
     {32, 64, 80, 96, 128, 160, 192, 224, 256}
 )
+
+
+def _prepare_paged_key_cache_for_int8_attn(
+    key_cache: torch.Tensor,
+    key_scale: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if key_cache.dtype != torch.int8:
+        raise NotImplementedError(f"key_cache must be int8, got {key_cache.dtype}.")
+    if key_scale.shape != key_cache.shape[:3]:
+        raise ValueError(
+            "key_scale must be dynamic K scale with shape "
+            f"{tuple(key_cache.shape[:3])}, got {tuple(key_scale.shape)}."
+        )
+    if key_scale.dtype != torch.float32:
+        raise ValueError(f"key_scale must be float32 dynamic K scale, got {key_scale.dtype}.")
+    if key_scale.device != key_cache.device:
+        raise ValueError(f"key_scale must be on {key_cache.device}, got {key_scale.device}.")
+    if not key_scale.is_contiguous():
+        raise ValueError("key_scale must be contiguous.")
+    return key_cache, key_scale
+
+
+def _check_int8_attn_value_scale(value_cache: torch.Tensor, value_scale: torch.Tensor) -> None:
+    expected_shape = (value_cache.shape[1], value_cache.shape[-1])
+    if value_scale.shape != expected_shape:
+        raise ValueError(f"value_scale must have shape {expected_shape}, got {tuple(value_scale.shape)}.")
+    if value_scale.dtype != torch.float32:
+        raise ValueError(f"value_scale must be float32, got {value_scale.dtype}.")
+    if not value_scale.is_contiguous():
+        raise ValueError("value_scale must be contiguous.")
+
+
+def _prepare_query_for_int8_attn(
+    query: torch.Tensor,
+    query_scale: Optional[torch.Tensor],
+) -> Tuple[torch.Tensor, torch.Tensor, torch.dtype]:
+    if query.dtype == torch.int8:
+        expected_shape = (query.shape[1], query.shape[0])
+        if query_scale is None:
+            raise ValueError("query_scale must be provided for int8 query.")
+        if query_scale.shape != expected_shape:
+            raise ValueError(f"query_scale must have shape {expected_shape}, got {tuple(query_scale.shape)}.")
+        if query_scale.dtype != torch.float32:
+            raise ValueError(f"query_scale must be float32 dynamic Q scale, got {query_scale.dtype}.")
+        if query_scale.device != query.device:
+            raise ValueError(f"query_scale must be on {query.device}, got {query_scale.device}.")
+        if not query_scale.is_contiguous():
+            raise ValueError("query_scale must be contiguous.")
+        return query, query_scale, torch.bfloat16
+
+    if query.dtype not in (torch.float16, torch.bfloat16):
+        raise NotImplementedError(f"query dtype must be fp16, bf16, or int8, got {query.dtype}.")
+    if query_scale is not None:
+        raise ValueError("query_scale must be None for non-quantized query.")
+    query_i8, query_i8_scale = ixf_ops.scaled_int8_quant_for_attn(
+        query,
+        quant_dim=2,
+        transpose_scale=True,
+    )
+    return query_i8, query_i8_scale, query.dtype
 
 
 class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
@@ -57,14 +118,14 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
             cu_total_seq_lens (torch.Tensor): Cumulative total KV lengths, shape (B+1,);
                 `cu_total_seq_lens[i]` is the start offset for batch i; `cu_total_seq_lens[-1] == K`.
                 dtype must be int32.
-            max_q_lens (int): Maximum query sequence length across the batch. >0 and must be int.
-            max_total_seq_lens (int): Maximum total visible key/value sequence length across the batch. >0 and must be int.
             block_tables (torch.Tensor): Logical-to-physical block IDs per batch,
                 shape (B, num_blocks).
                 dtype must be int32.
             softmax_scale (Optional[float]): Attention scaling factor; defaults to 1/sqrt(D).
             mask (Optional[torch.Tensor]): Attention mask; defaults to None.
                 Not support custom mask yet.
+            max_q_lens (int): Maximum query sequence length across the batch. >0 and must be int.
+            max_total_seq_lens (int): Maximum total visible key/value sequence length across the batch. >0 and must be int.
         Returns:
             torch.Tensor: Attention output of shape (T, Hq, D).
 
@@ -98,6 +159,7 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
             raise ValueError(f"cu_total_seq_lens must be torch.Tensor, got {type(cu_total_seq_lens)}.")
         if cu_kv_lens.dtype != torch.int32:
             raise ValueError(f"cu_total_seq_lens must be int32, got {cu_total_seq_lens.dtype}.")
+
         if not isinstance(max_q_lens, int) or max_q_lens <= 0:
             raise ValueError(
                 f"max_q_lens must be a positive int, got {max_q_lens} ({type(max_q_lens)})."
@@ -245,7 +307,7 @@ class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
             raise ValueError(
                 f"cu_total_seq_lens must be int32, got {cu_kv_lens.dtype}."
             )
-            
+
         if not isinstance(max_q_lens, int) or max_q_lens <= 0:
             raise ValueError(
                 f"max_q_lens must be a positive int, got {max_q_lens} ({type(max_q_lens)})."
@@ -276,6 +338,126 @@ class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
             window_size=window_size,
             global_window_size=self.global_window_size,
         )
+
+
+class IxformerPagedPrefillQuantGQA(MojoPagedPrefillQuantGQA):
+    """Ixformer implementation for int8-KV paged prefill GQA."""
+
+    supported_platforms_list = ["ilu"]
+
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+        query_dtype: torch.dtype = torch.bfloat16,
+        context_dtype: torch.dtype = torch.int8,
+        compute_dtype: torch.dtype = torch.int8,
+    ):
+        super().__init__(
+            is_causal=is_causal,
+            gqa_layout=gqa_layout,
+            query_dtype=query_dtype,
+            context_dtype=context_dtype,
+            compute_dtype=compute_dtype,
+        )
+        if self.gqa_layout == "ABAB":
+            raise NotImplementedError("IxformerPagedPrefillQuantGQA only supports AABB layout.")
+        if self.compute_dtype != torch.int8:
+            raise NotImplementedError("IxformerPagedPrefillQuantGQA only supports int8 compute.")
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        query_scale: Optional[torch.Tensor],
+        key_cache: torch.Tensor,
+        key_scale: torch.Tensor,
+        value_cache: torch.Tensor,
+        value_scale: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        block_tables: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
+        max_q_lens: Optional[int] = None,
+        max_total_seq_lens: Optional[int] = None,
+    ) -> torch.Tensor:
+        """
+        Ixformer int8-KV paged prefill GQA.
+
+        Args:
+            query: [T, Hq, D]. dtype must match self.query_dtype. Supports fp16,
+                bf16, or int8 query on the int8 compute path.
+            query_scale: for int8 query, dynamic Q scale with shape [Hq, T] and
+                dtype float32; otherwise None.
+            key_cache: int8 paged K cache, [num_blocks, Hkv, block_size, D].
+            key_scale: for int8 compute, dynamic K scale [num_blocks, Hkv, block_size]
+                with dtype float32.
+            value_cache: int8 paged V cache, [num_blocks, Hkv, block_size, D].
+            value_scale: per-channel V scale [Hkv, D]. For int8 compute it must be
+                float32 because ixformer consumes it directly.
+            cu_q_lens: cumulative query lengths [B + 1], int32.
+            block_tables: logical-to-physical block table [B, max_num_blocks], int32.
+            softmax_scale: attention scale; defaults to 1 / sqrt(D).
+            cu_total_seq_lens: cumulative KV lengths [B + 1], int32. If None, uses cu_q_lens.
+            mask: custom masks are not supported by this backend.
+            max_q_lens: max query length, required by ixformer.
+            max_total_seq_lens: max KV length, required by ixformer.
+        """
+        assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
+    
+        if self.context_dtype != torch.int8:
+            raise NotImplementedError(
+                f"IxformerPagedPrefillQuantGQA only supports int8 KV cache, got {self.context_dtype}."
+            )
+
+        if mask is not None:
+            raise NotImplementedError("IxformerPagedPrefillQuantGQA does not support custom mask yet.")
+
+        page_block_size = key_cache.shape[2]
+        if page_block_size > 256 or page_block_size % 16 != 0:
+            raise NotImplementedError(
+                f"IxformerPagedPrefillQuantGQA only supports page_block_size <= 256 and % 16 == 0, got {page_block_size}."
+            )
+
+        cu_kv_lens = cu_total_seq_lens if cu_total_seq_lens is not None else cu_q_lens
+        if not isinstance(max_q_lens, int) or max_q_lens <= 0:
+            raise ValueError(
+                f"max_q_lens must be a positive int, got {max_q_lens} ({type(max_q_lens)})."
+            )
+        if not isinstance(max_total_seq_lens, int) or max_total_seq_lens <= 0:
+            raise ValueError(
+                f"max_total_seq_lens must be a positive int, got {max_total_seq_lens} ({type(max_total_seq_lens)})."
+            )
+
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(query.shape[-1])
+
+        query_i8, query_i8_scale, output_dtype = _prepare_query_for_int8_attn(
+            query,
+            query_scale,
+        )
+        key_cache_i8, key_cache_i8_scale = _prepare_paged_key_cache_for_int8_attn(
+            key_cache,
+            key_scale,
+        )
+        _check_int8_attn_value_scale(value_cache, value_scale)
+        output = ix_fa.flash_attn_varlen_int8_func(
+            query_i8,
+            key_cache_i8,
+            value_cache,
+            query_i8_scale,
+            key_cache_i8_scale,
+            value_scale,
+            cu_q_lens,
+            cu_kv_lens,
+            max_q_lens,
+            max_total_seq_lens,
+            causal=self.is_causal,
+            softmax_scale=softmax_scale,
+            block_table=block_tables,
+            output_dtype=output_dtype,
+        )
+        return output
 
 
 class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
@@ -376,7 +558,7 @@ class IxformerPagedDecodeGQA(MojoPagedDecodeGQA):
         if not isinstance(max_total_seq_len, int) or max_total_seq_len <= 0:
             raise NotImplementedError(f"max_total_seq_len must be > 0 and int, got {max_total_seq_len}.")
 
-        ixf_f.vllm_paged_attention(
+        ixf_ops.vllm_paged_attention(
             output=output,
             query=query,
             key_cache=key_cache,
@@ -460,7 +642,7 @@ class IxformerPagedDecodeSWA(MojoPagedDecodeSWA):
                 f"max_total_seq_len must be > 0 and int, got {max_total_seq_len}."
             )
 
-        ixf_f.vllm_paged_attention(
+        ixf_ops.vllm_paged_attention(
             output=output,
             query=q,
             key_cache=k_cache,
