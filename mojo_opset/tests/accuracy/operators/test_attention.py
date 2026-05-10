@@ -1656,8 +1656,8 @@ def generate_paged_prefill_quant_swa_data(
         block_tables[i, :num_blocks_for_seq] = assigned_blocks
         current_block_offset += num_blocks_for_seq
 
-    seqlens_kv = None if kv_cache_lens is None else kv_lens
-    return query, k_cache, k_qscale, v_cache, v_qscale, cu_seqlens_q, block_tables, seqlens_kv
+    cu_total_seq_lens = None if kv_cache_lens is None else cu_seqlens_kv
+    return query, k_cache, k_qscale, v_cache, v_qscale, cu_seqlens_q, block_tables, cu_total_seq_lens
 
 
 test_configs_swa_prefill_quant = [
@@ -1668,7 +1668,7 @@ test_configs_swa_prefill_quant = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, k_qscale, v_cache, v_qscale, cu_seqlens_q, block_tables, seqlens_kv",
+    "query, k_cache, k_qscale, v_cache, v_qscale, cu_q_lens, block_tables, cu_total_seq_lens",
     [
         pytest.param(
             *generate_paged_prefill_quant_swa_data(
@@ -1699,9 +1699,9 @@ def test_paged_prefill_quant_swa(
     k_qscale: torch.Tensor,
     v_cache: torch.Tensor,
     v_qscale: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
+    cu_q_lens: torch.Tensor,
     block_tables: torch.Tensor,
-    seqlens_kv: Optional[torch.Tensor],
+    cu_total_seq_lens: Optional[torch.Tensor],
     gqa_layout: str,
     global_window: Optional[int],
     local_window: Optional[int],
@@ -1730,10 +1730,10 @@ def test_paged_prefill_quant_swa(
         k_qscale,
         v_cache,
         v_qscale,
-        cu_seqlens_q,
+        cu_q_lens,
         block_table=block_tables,
         softmax_scale=softmax_scale,
-        seqlens_kv=seqlens_kv,
+        cu_total_seq_lens=cu_total_seq_lens,
         atol=5e-2,
         rtol=5e-2,
         ptol=0.90,

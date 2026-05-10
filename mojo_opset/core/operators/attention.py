@@ -1512,10 +1512,10 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
         k_qscale: torch.Tensor,     # [n_kv_heads, head_dim]               float32
         v_cache: torch.Tensor,      # [n_pages, n_kv_heads, page_size, head_dim] int8
         v_qscale: torch.Tensor,     # [n_kv_heads, head_dim]               float32
-        cu_seqlens_q: torch.Tensor, # [bsz + 1]                            int32
+        cu_q_lens: torch.Tensor,    # [bsz + 1]                            int32
         block_table: torch.Tensor,  # [bsz, max_num_blocks]                int32
         softmax_scale: Optional[float] = None,
-        seqlens_kv: Optional[torch.Tensor] = None,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,  # [bsz + 1]
     ) -> torch.Tensor:
         """
         Reference implementation of paged prefill SWA with int8 KV cache.
@@ -1524,14 +1524,17 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
         ``is_causal=False`` the window args are ignored, matching the
         non-quant ``MojoPagedPrefillSWA`` semantics.
         """
-        assert_paged_prefill_contract(cu_seqlens_q, block_table, seqlens_kv)
+        assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
         total_q_len, n_q_heads, head_dim = q.shape
         _, n_kv_heads, page_size, _ = k_cache.shape
         if softmax_scale is None:
             softmax_scale = 1.0 / (head_dim**0.5)
 
-        if seqlens_kv is None:
-            seqlens_kv = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        seqlens_kv = (
+            _seq_lens_from_cu(cu_q_lens)
+            if cu_total_seq_lens is None
+            else _seq_lens_from_cu(cu_total_seq_lens)
+        )
 
         # Replicate per-channel scales out to the query head count so that the
         # downstream per-head broadcast over (q_seq_len, head_dim) is trivial.
@@ -1547,9 +1550,9 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
             v_qscale_h = v_qscale
 
         o = torch.empty_like(q)
-        bsz = cu_seqlens_q.shape[0] - 1
+        bsz = cu_q_lens.shape[0] - 1
         for i in range(bsz):
-            q_i = q[cu_seqlens_q[i] : cu_seqlens_q[i + 1]]
+            q_i = q[cu_q_lens[i] : cu_q_lens[i + 1]]
             q_seq_len = q_i.shape[0]
             if q_seq_len == 0:
                 continue
@@ -1615,7 +1618,7 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
             o_i = torch.matmul(p_quant.float(), v_i.float())
             o_i = o_i * p_scale * v_qscale_h.unsqueeze(1)
             o_i = o_i.permute(1, 0, 2)  # -> [q_seq_len, n_q_heads, head_dim]
-            o[cu_seqlens_q[i] : cu_seqlens_q[i + 1]] = o_i.to(o.dtype)
+            o[cu_q_lens[i] : cu_q_lens[i + 1]] = o_i.to(o.dtype)
         return o
 
     def extra_repr(self) -> str:

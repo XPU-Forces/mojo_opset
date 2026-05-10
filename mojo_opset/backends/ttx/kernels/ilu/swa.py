@@ -1562,6 +1562,8 @@ def _swa_infer_token_kernel(
     tl.static_assert(HEAD_DIM <= BLOCK_SIZE_D, "HEAD_DIM should be <= BLOCK_SIZE_D")
     pid = tl.program_id(0)
     n_progs = tl.num_programs(0)
+    has_global_window = GLOBAL_WINDOW is not None
+    has_local_window = LOCAL_WINDOW is not None
 
     cu_q_tasks = 0
     for b_id in range(bsz):
@@ -1610,12 +1612,18 @@ def _swa_infer_token_kernel(
 
                 mask = kv_mask
                 if IS_CAUSAL:
-                    global_mask = kv_pos < GLOBAL_WINDOW
-                    if LOCAL_WINDOW is not None:
-                        local_mask = (kv_pos + LOCAL_WINDOW) >= q_abs
-                        global_mask = global_mask | local_mask
                     causal_mask = kv_pos <= q_abs
-                    mask = kv_mask & global_mask & causal_mask
+                    if has_global_window and has_local_window:
+                        local_mask = (kv_pos + LOCAL_WINDOW) >= q_abs
+                        global_mask = kv_pos < GLOBAL_WINDOW
+                        mask = kv_mask & causal_mask & (global_mask | local_mask)
+                    elif has_global_window:
+                        mask = kv_mask & causal_mask & (kv_pos < GLOBAL_WINDOW)
+                    elif has_local_window:
+                        local_mask = (kv_pos + LOCAL_WINDOW) >= q_abs
+                        mask = kv_mask & causal_mask & local_mask
+                    else:
+                        mask = kv_mask & causal_mask
 
                 k_block_ptr = tl.make_block_ptr(
                     base=k_ptr + kv_start * stride_kt + kv_head_id * stride_kh,
@@ -1660,7 +1668,7 @@ def _swa_infer_token_kernel(
                 mask = kv_mask
                 if IS_CAUSAL:
                     causal_mask = kv_pos <= q_abs
-                    if LOCAL_WINDOW is not None:
+                    if has_local_window:
                         local_mask = (kv_pos + LOCAL_WINDOW) >= q_abs
                         causal_mask = causal_mask & local_mask
                     mask = kv_mask & causal_mask
@@ -1751,6 +1759,8 @@ def _swa_paged_prefill_token_kernel(
     )
     pid = tl.program_id(0)
     n_progs = tl.num_programs(0)
+    has_global_window = GLOBAL_WINDOW is not None
+    has_local_window = LOCAL_WINDOW is not None
 
     for b_id in range(bsz):
         q_start = tl.load(cu_q_lens_ptr + b_id).to(tl.int32)
@@ -1798,12 +1808,18 @@ def _swa_paged_prefill_token_kernel(
 
                 mask = kv_mask
                 if IS_CAUSAL:
-                    global_mask = kv_pos < GLOBAL_WINDOW
-                    if LOCAL_WINDOW is not None:
-                        local_mask = (kv_pos + LOCAL_WINDOW) >= q_abs
-                        global_mask = global_mask | local_mask
                     causal_mask = kv_pos <= q_abs
-                    mask = kv_mask & global_mask & causal_mask
+                    if has_global_window and has_local_window:
+                        local_mask = (kv_pos + LOCAL_WINDOW) >= q_abs
+                        global_mask = kv_pos < GLOBAL_WINDOW
+                        mask = kv_mask & causal_mask & (global_mask | local_mask)
+                    elif has_global_window:
+                        mask = kv_mask & causal_mask & (kv_pos < GLOBAL_WINDOW)
+                    elif has_local_window:
+                        local_mask = (kv_pos + LOCAL_WINDOW) >= q_abs
+                        mask = kv_mask & causal_mask & local_mask
+                    else:
+                        mask = kv_mask & causal_mask
 
                 physical_page_id = tl.load(
                     block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
@@ -1859,7 +1875,7 @@ def _swa_paged_prefill_token_kernel(
                 mask = kv_mask
                 if IS_CAUSAL:
                     causal_mask = kv_pos <= q_abs
-                    if LOCAL_WINDOW is not None:
+                    if has_local_window:
                         local_mask = (kv_pos + LOCAL_WINDOW) >= q_abs
                         causal_mask = causal_mask & local_mask
                     mask = kv_mask & causal_mask

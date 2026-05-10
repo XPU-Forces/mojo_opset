@@ -249,19 +249,18 @@ class TTXPagedPrefillQuantSWA(MojoPagedPrefillQuantSWA):
         k_qscale: torch.Tensor,     # [n_kv_heads, head_dim]               float32
         v_cache: torch.Tensor,      # [n_pages, n_kv_heads, page_size, head_dim] int8
         v_qscale: torch.Tensor,     # [n_kv_heads, head_dim]               float32
-        cu_seqlens_q: torch.Tensor, # [bsz + 1]                            int32
+        cu_q_lens: torch.Tensor,    # [bsz + 1]                            int32
         block_table: torch.Tensor,  # [bsz, max_num_blocks]                int32
         softmax_scale: Optional[float] = None,
-        seqlens_kv: Optional[torch.Tensor] = None,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,  # [bsz + 1]     int32
     ) -> torch.Tensor:
-        assert_paged_prefill_contract(cu_seqlens_q, block_table, seqlens_kv)
-        assert cu_seqlens_q.dtype == torch.int32
-        assert block_table.dtype == torch.int32
-        if seqlens_kv is not None:
-            assert seqlens_kv.dtype == torch.int32
+        assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
 
-        if seqlens_kv is None:
-            seqlens_kv = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        seqlens_kv = (
+            cu_q_lens[1:] - cu_q_lens[:-1]
+            if cu_total_seq_lens is None
+            else cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
+        )
 
         # Pre-expand per-channel KV scales from kv-head count to q-head count
         # so the kernel can index by `q_head_id` without GQA arithmetic.
@@ -284,7 +283,7 @@ class TTXPagedPrefillQuantSWA(MojoPagedPrefillQuantSWA):
             k_qscale=k_qscale_expanded,
             value_cache=v_cache,
             v_qscale=v_qscale_expanded,
-            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_q=cu_q_lens,
             seqlens_kv=seqlens_kv,
             block_tables=block_table,
             is_causal=self.is_causal,
