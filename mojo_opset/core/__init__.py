@@ -23,9 +23,12 @@ from .operators.attention import MojoPagedDecodeGQA
 from .operators.attention import MojoPagedDecodeMLA
 from .operators.attention import MojoPagedDecodeNSA
 from .operators.attention import MojoPagedDecodeSWA
+from .operators.attention import MojoPagedDecodeQuantSWA
 from .operators.attention import MojoPagedPrefillGQA
+from .operators.attention import MojoPagedPrefillQuantGQA
 from .operators.attention import MojoPagedPrefillMLA
 from .operators.attention import MojoPagedPrefillNSA
+from .operators.attention import MojoPagedPrefillQuantSWA
 from .operators.attention import MojoPagedPrefillSWA
 from .operators.attention import MojoPrefillGQA
 from .operators.attention import MojoPrefillMLA
@@ -152,9 +155,12 @@ __all__ = [
     "MojoPagedDecodeMLA",
     "MojoDecodeNSA",
     "MojoPagedDecodeNSA",
+    "MojoPagedPrefillQuantGQA",
     "MojoSdpa",
     "MojoPagedPrefillSWA",
+    "MojoPagedPrefillQuantSWA",
     "MojoPagedDecodeSWA",
+    "MojoPagedDecodeQuantSWA",
     "MojoSWA",
     "MojoPagedPrefillQuantGQA",
     "MojoPagedDecodeQuantGQA",
