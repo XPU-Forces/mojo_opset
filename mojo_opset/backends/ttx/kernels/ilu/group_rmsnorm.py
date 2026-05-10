@@ -3,11 +3,10 @@ import torch
 import triton
 import triton.language as tl
 
+from .utils import _block_size_n_pow2
 from .utils import COL_BLOCKING_THRESHOLD
-from .utils import VEC_ALIGN_BYTES
 from .utils import ilu_grid_dim_from_row_tasks
 from .utils import rms_norm_fwd_heuristics
-from mojo_opset.backends.ttx.kernels.utils import align
 
 
 def _group_rmsnorm_grid_n_programs(n_rows: int, n_cols: int) -> int:
@@ -79,6 +78,7 @@ def _rmsnorm_fwd_single(
     x: torch.Tensor,
     weight: torch.Tensor = None,
     eps: float = 1e-6,
+    output_like_input_stride: bool = False,
 ) -> torch.Tensor:
     assert x.ndim == 3, f"x must be 3D [token, num_head, norm_size], got {x.shape}"
     T, H, N = x.shape
@@ -90,13 +90,13 @@ def _rmsnorm_fwd_single(
 
     x_contig = x.contiguous()
     x_2d = x_contig.reshape(-1, N)
-    y_2d = torch.empty_like(x_2d)
     n_rows = x_2d.shape[0]
+    y_2d = torch.empty_like(x_2d)
 
     if N > COL_BLOCKING_THRESHOLD:
         BLOCK_SIZE_N = COL_BLOCKING_THRESHOLD
     else:
-        BLOCK_SIZE_N = align(x_2d, N, VEC_ALIGN_BYTES)
+        BLOCK_SIZE_N = _block_size_n_pow2(N)
 
     grid = (_group_rmsnorm_grid_n_programs(n_rows, N),)
 
@@ -113,7 +113,17 @@ def _rmsnorm_fwd_single(
         HAS_WEIGHT=weight is not None,
     )
 
-    return y_2d.reshape(T, H, N)
+    y_3d = y_2d.reshape(T, H, N)
+    if output_like_input_stride and not x.is_contiguous():
+        y = torch.empty_strided(
+            size=x.shape,
+            stride=x.stride(),
+            dtype=x.dtype,
+            device=x.device,
+        )
+        y.copy_(y_3d)
+        return y
+    return y_3d
 
 
 def group_rmsnorm_impl(
@@ -143,9 +153,18 @@ def group_rmsnorm_impl(
                 x=xg,
                 weight=wg,
                 eps=eps,
+                output_like_input_stride=output_like_input_stride,
             )
         else:
-            yg = torch.empty_like(xg, memory_format=torch.contiguous_format)
+            if output_like_input_stride:
+                yg = torch.empty_strided(
+                    size=xg.shape,
+                    stride=xg.stride(),
+                    dtype=xg.dtype,
+                    device=xg.device,
+                )
+            else:
+                yg = torch.empty_like(xg, memory_format=torch.contiguous_format)
         output_groups.append(yg)
 
     return output_groups

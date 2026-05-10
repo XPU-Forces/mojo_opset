@@ -4,13 +4,11 @@ import torch
 import triton
 import triton.language as tl
 
-from .utils import COL_BLOCKING_THRESHOLD
-from .utils import VEC_ALIGN_BYTES
 from .utils import _block_size_n_pow2
+from .utils import COL_BLOCKING_THRESHOLD
 from .utils import ilu_grid_dim_from_row_tasks
 from .utils import libentry
 from .utils import rms_norm_fwd_heuristics
-from mojo_opset.backends.ttx.kernels.utils import align
 from mojo_opset.backends.ttx.kernels.utils import ceil_div
 from mojo_opset.backends.ttx.kernels.utils import torch_to_triton_dtype
 from mojo_opset.utils.misc import get_bool_env
@@ -105,7 +103,10 @@ def rmsnorm_infer_impl(
 
     y = torch.empty_like(X_2d)
 
-    BLOCK_SIZE_N = _block_size_n_pow2(n_cols)
+    if n_cols > COL_BLOCKING_THRESHOLD:
+        BLOCK_SIZE_N = COL_BLOCKING_THRESHOLD
+    else:
+        BLOCK_SIZE_N = _block_size_n_pow2(n_cols)
 
     grid = (_rmsnorm_fwd_grid_n_programs(n_rows, n_cols),)
 
@@ -380,7 +381,7 @@ def rmsnorm_fwd_impl(
     if n_cols > COL_BLOCKING_THRESHOLD:
         BLOCK_SIZE_N = COL_BLOCKING_THRESHOLD
     else:
-        BLOCK_SIZE_N = align(X, n_cols, VEC_ALIGN_BYTES)
+        BLOCK_SIZE_N = _block_size_n_pow2(n_cols)
 
     grid = (_rmsnorm_fwd_grid_n_programs(n_rows, n_cols),)
     Y = torch.empty_like(X_2d)
@@ -450,7 +451,7 @@ def rmsnorm_bwd_impl(
             offset,
             casting_mode_int,
             X_dtype_triton,
-            BLOCK_SIZE_N=align(X_2d, n_cols, VEC_ALIGN_BYTES),
+            BLOCK_SIZE_N=_block_size_n_pow2(n_cols),
         )
         dW = _dW.sum(dim=0).to(W.dtype)
     else:

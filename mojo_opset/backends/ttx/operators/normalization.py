@@ -16,7 +16,7 @@ class TTXGroupRMSNorm(MojoGroupRMSNorm):
 
     def forward(self, input_groups) -> list[torch.tensor]:
         return group_rmsnorm(input_groups, weight = self.weight,
-                             eps = self.variance_epsilon, output_like_input_stride = True)
+                             eps = self.variance_epsilon)
 
 class TTXLayerNorm(MojoLayerNorm):
     supported_platforms_list = ["npu", "ilu", "mlu"]
