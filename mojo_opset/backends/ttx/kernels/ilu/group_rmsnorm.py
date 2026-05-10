@@ -3,11 +3,10 @@ import torch
 import triton
 import triton.language as tl
 
+from .utils import _block_size_n_pow2
 from .utils import COL_BLOCKING_THRESHOLD
-from .utils import VEC_ALIGN_BYTES
 from .utils import ilu_grid_dim_from_row_tasks
 from .utils import rms_norm_fwd_heuristics
-from mojo_opset.backends.ttx.kernels.utils import align
 
 
 def _group_rmsnorm_grid_n_programs(n_rows: int, n_cols: int) -> int:
@@ -96,7 +95,7 @@ def _rmsnorm_fwd_single(
     if N > COL_BLOCKING_THRESHOLD:
         BLOCK_SIZE_N = COL_BLOCKING_THRESHOLD
     else:
-        BLOCK_SIZE_N = align(x_2d, N, VEC_ALIGN_BYTES)
+        BLOCK_SIZE_N = _block_size_n_pow2(N)
 
     grid = (_group_rmsnorm_grid_n_programs(n_rows, N),)
 
@@ -120,10 +119,11 @@ def group_rmsnorm_impl(
     input_groups,
     weight=None,
     eps=1e-6,
-    output_like_input_stride=True,
+    output_like_input_stride=False,
 ) -> list[torch.Tensor]:
     assert isinstance(input_groups, (list, tuple))
     assert len(input_groups) > 0
+    assert not output_like_input_stride, "ILU group_rmsnorm does not support non-contiguous output tensors"
 
     G = len(input_groups)
     N = input_groups[0].shape[-1]

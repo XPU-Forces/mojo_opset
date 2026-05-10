@@ -10,13 +10,15 @@ from mojo_opset.core import MojoResidualAddLayerNorm
 from mojo_opset.core import MojoResidualAddRMSNorm
 from mojo_opset.core import MojoRMSNorm
 from mojo_opset.core import MojoGroupRMSNorm
+from mojo_opset.utils.platform import get_platform
 
 class TTXGroupRMSNorm(MojoGroupRMSNorm):
     supported_platforms_list = ["mlu", "ilu"]
 
     def forward(self, input_groups) -> list[torch.tensor]:
+        output_like_input_stride = get_platform() != "ilu"
         return group_rmsnorm(input_groups, weight = self.weight,
-                             eps = self.variance_epsilon, output_like_input_stride = True)
+                             eps = self.variance_epsilon, output_like_input_stride = output_like_input_stride)
 
 class TTXLayerNorm(MojoLayerNorm):
     supported_platforms_list = ["npu", "ilu", "mlu"]
