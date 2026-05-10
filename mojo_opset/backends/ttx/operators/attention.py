@@ -104,12 +104,13 @@ class TTXPagedPrefillQuantGQA(MojoPagedPrefillQuantGQA):
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if query_scale is not None and query_scale.dim() == 4:
-            key_cache, k_qscale, value_cache, v_qscale, cu_seqlens_q = (
+            key_cache, k_qscale, value_cache, v_qscale, cu_seqlens_q, block_tables = (
                 query_scale,
                 key_cache,
                 k_qscale,
                 value_cache,
                 v_qscale,
+                cu_seqlens_q,
             )
             query_scale = None
         assert query_scale is None, "[TTXPagedPrefillQuantGQA] quantized query is not supported"
