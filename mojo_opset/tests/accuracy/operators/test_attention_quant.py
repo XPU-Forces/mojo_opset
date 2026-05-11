@@ -623,3 +623,167 @@ def test_paged_decode_quant_swa(
         atol=atol,
         rtol=rtol,
     )
+
+
+# ----------------------------------------------------------------------------
+# Init / forward dtype-combination validation
+# ----------------------------------------------------------------------------
+#
+# Quant prefill ops (GQA / SWA) accept these init dtype combos:
+#   - (bf16, int8, bf16): FakeQuant path
+#   - (int8, int8, int8): SageAttention path
+# Decode ops do not yet support int8 query.
+# Any other combo must raise ValueError at __init__.
+# At forward time:
+#   - query / key_cache / value_cache dtype must match the init config
+#   - query_scale must be provided iff query_dtype == int8
+
+# (query_dtype, context_dtype, compute_dtype, init_ok_for_prefill, init_ok_for_decode)
+_INIT_DTYPE_CASES = [
+    (torch.bfloat16, torch.int8, torch.bfloat16, True,  True),
+    (torch.bfloat16, torch.int8, torch.int8,    False, True),  # decode still allows it
+    (torch.int8,     torch.int8, torch.int8,    True,  False), # prefill ok, decode not supported
+    (torch.int8,     torch.int8, torch.bfloat16, False, False),
+    (torch.float32,  torch.int8, torch.bfloat16, False, False),  # unsupported query dtype
+    (torch.bfloat16, torch.bfloat16, torch.bfloat16, False, False),  # unsupported ctx dtype
+    (torch.bfloat16, torch.int8, torch.float32, False, False),  # unsupported compute dtype
+]
+
+
+@pytest.mark.parametrize(
+    "query_dtype, context_dtype, compute_dtype, prefill_ok, decode_ok",
+    _INIT_DTYPE_CASES,
+)
+@bypass_not_implemented
+def test_quant_attention_init_dtype_combinations(
+    query_dtype, context_dtype, compute_dtype, prefill_ok, decode_ok,
+):
+    """Init must accept only the documented dtype combinations and reject the rest with ValueError."""
+    prefill_classes = [MojoPagedPrefillQuantGQA, MojoPagedPrefillQuantSWA]
+    decode_classes = [MojoPagedDecodeQuantGQA, MojoPagedDecodeQuantSWA]
+
+    for cls in prefill_classes:
+        if prefill_ok:
+            cls(
+                query_dtype=query_dtype,
+                context_dtype=context_dtype,
+                compute_dtype=compute_dtype,
+            )
+        else:
+            with pytest.raises(ValueError):
+                cls(
+                    query_dtype=query_dtype,
+                    context_dtype=context_dtype,
+                    compute_dtype=compute_dtype,
+                )
+
+    for cls in decode_classes:
+        if decode_ok:
+            cls(
+                query_dtype=query_dtype,
+                context_dtype=context_dtype,
+                compute_dtype=compute_dtype,
+            )
+        else:
+            with pytest.raises(ValueError):
+                cls(
+                    query_dtype=query_dtype,
+                    context_dtype=context_dtype,
+                    compute_dtype=compute_dtype,
+                )
+
+
+def _build_minimal_prefill_inputs(query_dtype: torch.dtype):
+    """Build a minimal valid set of inputs for the prefill quant ops."""
+    bsz, total_q, n_q_heads, n_kv_heads, head_dim, page_size = 1, 4, 2, 2, 16, 4
+    n_pages = 4
+    if query_dtype == torch.int8:
+        query = torch.zeros(total_q, n_q_heads, head_dim, dtype=torch.int8)
+        query_scale = torch.ones(total_q, n_q_heads, 1, dtype=torch.bfloat16)
+        key_scale = torch.ones(n_pages, n_kv_heads, page_size, 1, dtype=torch.bfloat16)
+    else:
+        query = torch.zeros(total_q, n_q_heads, head_dim, dtype=torch.bfloat16)
+        query_scale = None
+        key_scale = torch.ones(n_kv_heads, head_dim, dtype=torch.bfloat16)
+    key_cache = torch.zeros(n_pages, n_kv_heads, page_size, head_dim, dtype=torch.int8)
+    value_cache = torch.zeros(n_pages, n_kv_heads, page_size, head_dim, dtype=torch.int8)
+    value_scale = torch.ones(n_kv_heads, head_dim, dtype=torch.bfloat16)
+    cu_q_lens = torch.tensor([0, total_q], dtype=torch.int32)
+    cu_total_seq_lens = torch.tensor([0, total_q], dtype=torch.int32)
+    block_tables = torch.zeros(bsz, 1, dtype=torch.int32)
+    return {
+        "query": query,
+        "query_scale": query_scale,
+        "key_cache": key_cache,
+        "key_scale": key_scale,
+        "value_cache": value_cache,
+        "value_scale": value_scale,
+        "cu_q_lens": cu_q_lens,
+        "cu_total_seq_lens": cu_total_seq_lens,
+        "block_tables": block_tables,
+    }
+
+
+def _call_prefill(op, args):
+    return op.forward(
+        args["query"],
+        args["query_scale"],
+        args["key_cache"],
+        args["key_scale"],
+        args["value_cache"],
+        args["value_scale"],
+        args["cu_q_lens"],
+        args["block_tables"],
+        cu_total_seq_lens=args["cu_total_seq_lens"],
+    )
+
+
+@pytest.mark.parametrize(
+    "init_query_dtype, compute_dtype",
+    [
+        (torch.bfloat16, torch.bfloat16),
+        (torch.int8, torch.int8),
+    ],
+)
+@bypass_not_implemented
+def test_quant_prefill_forward_input_dtype_validation(init_query_dtype, compute_dtype):
+    """Forward must reject mismatched Q/K/V dtype or wrong query_scale presence with ValueError."""
+    for cls in (MojoPagedPrefillQuantGQA, MojoPagedPrefillQuantSWA):
+        op = cls(
+            query_dtype=init_query_dtype,
+            context_dtype=torch.int8,
+            compute_dtype=compute_dtype,
+        )
+
+        # 1) query.dtype mismatch -> ValueError.
+        bad = _build_minimal_prefill_inputs(init_query_dtype)
+        wrong_dtype = torch.int8 if init_query_dtype == torch.bfloat16 else torch.bfloat16
+        bad["query"] = bad["query"].to(wrong_dtype)
+        with pytest.raises(ValueError):
+            _call_prefill(op, bad)
+
+        # 2) key_cache.dtype mismatch -> ValueError.
+        bad = _build_minimal_prefill_inputs(init_query_dtype)
+        bad["key_cache"] = bad["key_cache"].to(torch.bfloat16)
+        with pytest.raises(ValueError):
+            _call_prefill(op, bad)
+
+        # 3) value_cache.dtype mismatch -> ValueError.
+        bad = _build_minimal_prefill_inputs(init_query_dtype)
+        bad["value_cache"] = bad["value_cache"].to(torch.bfloat16)
+        with pytest.raises(ValueError):
+            _call_prefill(op, bad)
+
+        # 4) query_scale presence mismatch -> ValueError.
+        bad = _build_minimal_prefill_inputs(init_query_dtype)
+        if init_query_dtype == torch.int8:
+            bad["query_scale"] = None  # should be required
+        else:
+            bad["query_scale"] = torch.ones(
+                bad["query"].shape[0],
+                bad["query"].shape[1],
+                1,
+                dtype=torch.bfloat16,
+            )  # should be None
+        with pytest.raises(ValueError):
+            _call_prefill(op, bad)

@@ -1737,9 +1737,14 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
         self.compute_dtype = compute_dtype
         self.quant_block_size = quant_block_size
         self.output_dtype = output_dtype
-        assert self.query_dtype in (torch.bfloat16, torch.int8), f"Unsupported query dtype {self.query_dtype}"
-        assert self.context_dtype == torch.int8, f"Quant attention support int8 context only, but got {self.context_dtype}"
-        assert self.compute_dtype in (torch.bfloat16, torch.int8), f"Unsupported compute dtype {self.compute_dtype}"
+        if self.query_dtype not in (torch.bfloat16, torch.int8):
+            raise ValueError(f"Unsupported query dtype {self.query_dtype}")
+        if self.context_dtype != torch.int8:
+            raise ValueError(
+                f"Quant attention support int8 context only, but got {self.context_dtype}"
+            )
+        if self.compute_dtype not in (torch.bfloat16, torch.int8):
+            raise ValueError(f"Unsupported compute dtype {self.compute_dtype}")
         if self.query_dtype == torch.int8 and self.compute_dtype != torch.int8:
             raise NotImplementedError(
                 "Quantized int8 query is only supported with compute_dtype=int8 (SageAttention)"
@@ -1808,9 +1813,24 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
         """
         assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
         if self.query_dtype == torch.int8:
-            assert query_scale is not None and query.dtype == self.query_dtype, "query_scale must be provided for quantized query"
+            if query.dtype != self.query_dtype or query_scale is None:
+                raise ValueError(
+                    f"query_scale must be provided and query.dtype must be {self.query_dtype} "
+                    f"for quantized query, got query.dtype={query.dtype}, query_scale is "
+                    f"{'set' if query_scale is not None else 'None'}"
+                )
         else:
-            assert query_scale is None and query.dtype == self.query_dtype, "query_scale must be None for non-quantized query"
+            if query.dtype != self.query_dtype or query_scale is not None:
+                raise ValueError(
+                    f"query_scale must be None and query.dtype must be {self.query_dtype} "
+                    f"for non-quantized query, got query.dtype={query.dtype}, query_scale is "
+                    f"{'set' if query_scale is not None else 'None'}"
+                )
+        if key_cache.dtype != self.context_dtype or value_cache.dtype != self.context_dtype:
+            raise ValueError(
+                f"key/value cache must be quantized to {self.context_dtype}, but got "
+                f"{key_cache.dtype=} and {value_cache.dtype=}"
+            )
 
         total_q_tokens, num_q_heads, head_dim = query.shape
         _, num_kv_heads, page_size, _ = key_cache.shape
@@ -1946,11 +1966,16 @@ class MojoPagedDecodeQuantGQA(MojoOperator):
         self.query_dtype = query_dtype
         self.context_dtype = context_dtype
         self.compute_dtype = compute_dtype
-        assert self.query_dtype in (torch.bfloat16, torch.int8), f"Unsupported query dtype {self.query_dtype}"
+        if self.query_dtype not in (torch.bfloat16, torch.int8):
+            raise ValueError(f"Unsupported query dtype {self.query_dtype}")
         if self.query_dtype == torch.int8:
-            raise NotImplementedError("Quantized query is not implemented")
-        assert self.context_dtype == torch.int8, f"Quant attention support int8 context only, but got {self.context_dtype}"
-        assert self.compute_dtype in (torch.bfloat16, torch.int8), f"Unsupported compute dtype {self.compute_dtype}"
+            raise ValueError("Quantized query is not implemented")
+        if self.context_dtype != torch.int8:
+            raise ValueError(
+                f"Quant attention support int8 context only, but got {self.context_dtype}"
+            )
+        if self.compute_dtype not in (torch.bfloat16, torch.int8):
+            raise ValueError(f"Unsupported compute dtype {self.compute_dtype}")
         if self.compute_dtype == torch.int8:
             bits = 8
             self.qmax = 2 ** (bits - 1) - 1
@@ -1999,9 +2024,24 @@ class MojoPagedDecodeQuantGQA(MojoOperator):
         """
         assert_paged_decode_contract(block_tables, total_seq_lens)
         if self.query_dtype == torch.int8:
-            assert query_scale is not None and query.dtype == self.query_dtype, "query_scale must be provided for quantized query"
+            if query.dtype != self.query_dtype or query_scale is None:
+                raise ValueError(
+                    f"query_scale must be provided and query.dtype must be {self.query_dtype} "
+                    f"for quantized query, got query.dtype={query.dtype}, query_scale is "
+                    f"{'set' if query_scale is not None else 'None'}"
+                )
         else:
-            assert query_scale is None and query.dtype == self.query_dtype, "query_scale must be None for non-quantized query"
+            if query.dtype != self.query_dtype or query_scale is not None:
+                raise ValueError(
+                    f"query_scale must be None and query.dtype must be {self.query_dtype} "
+                    f"for non-quantized query, got query.dtype={query.dtype}, query_scale is "
+                    f"{'set' if query_scale is not None else 'None'}"
+                )
+        if key_cache.dtype != self.context_dtype or value_cache.dtype != self.context_dtype:
+            raise ValueError(
+                f"key/value cache must be quantized to {self.context_dtype}, but got "
+                f"{key_cache.dtype=} and {value_cache.dtype=}"
+            )
         
 
         batch_size, num_q_heads, head_dim = query.shape
@@ -2117,9 +2157,14 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
         self.compute_dtype = compute_dtype
         self.quant_block_size = quant_block_size
         self.output_dtype = output_dtype
-        assert self.query_dtype in (torch.bfloat16, torch.int8), f"Unsupported query dtype {self.query_dtype}"
-        assert self.context_dtype == torch.int8, f"Quant attention support int8 context only, but got {self.context_dtype}"
-        assert self.compute_dtype in (torch.bfloat16, torch.int8), f"Unsupported compute dtype {self.compute_dtype}"
+        if self.query_dtype not in (torch.bfloat16, torch.int8):
+            raise ValueError(f"Unsupported query dtype {self.query_dtype}")
+        if self.context_dtype != torch.int8:
+            raise ValueError(
+                f"Quant attention support int8 context only, but got {self.context_dtype}"
+            )
+        if self.compute_dtype not in (torch.bfloat16, torch.int8):
+            raise ValueError(f"Unsupported compute dtype {self.compute_dtype}")
         if self.query_dtype == torch.int8 and self.compute_dtype != torch.int8:
             raise NotImplementedError(
                 "Quantized int8 query is only supported with compute_dtype=int8 (SageAttention path)"
@@ -2182,11 +2227,24 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
 
         assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
         if self.query_dtype == torch.int8:
-            assert query_scale is not None and query.dtype == self.query_dtype, "query_scale must be provided for quantized query"
+            if query.dtype != self.query_dtype or query_scale is None:
+                raise ValueError(
+                    f"query_scale must be provided and query.dtype must be {self.query_dtype} "
+                    f"for quantized query, got query.dtype={query.dtype}, query_scale is "
+                    f"{'set' if query_scale is not None else 'None'}"
+                )
         else:
-            assert query_scale is None and query.dtype == self.query_dtype, "query_scale must be None for non-quantized query"
-
-        assert key_cache.dtype == value_cache.dtype == self.context_dtype, f"key/value cache must be quantized to {self.context_dtype}, but got {key_cache.dtype=} and {value_cache.dtype=}"
+            if query.dtype != self.query_dtype or query_scale is not None:
+                raise ValueError(
+                    f"query_scale must be None and query.dtype must be {self.query_dtype} "
+                    f"for non-quantized query, got query.dtype={query.dtype}, query_scale is "
+                    f"{'set' if query_scale is not None else 'None'}"
+                )
+        if key_cache.dtype != self.context_dtype or value_cache.dtype != self.context_dtype:
+            raise ValueError(
+                f"key/value cache must be quantized to {self.context_dtype}, but got "
+                f"{key_cache.dtype=} and {value_cache.dtype=}"
+            )
         total_q_len, n_q_heads, head_dim = query.shape
         _, n_kv_heads, page_size, _ = key_cache.shape
         if softmax_scale is None:
@@ -2317,11 +2375,16 @@ class MojoPagedDecodeQuantSWA(MojoOperator):
         self.query_dtype = query_dtype
         self.context_dtype = context_dtype
         self.compute_dtype = compute_dtype
-        assert self.query_dtype in (torch.bfloat16, torch.int8), f"Unsupported query dtype {self.query_dtype}"
+        if self.query_dtype not in (torch.bfloat16, torch.int8):
+            raise ValueError(f"Unsupported query dtype {self.query_dtype}")
         if self.query_dtype == torch.int8:
-            raise NotImplementedError("Quantized query is not implemented")
-        assert self.context_dtype == torch.int8, f"Quant attention support int8 context only, but got {self.context_dtype}"
-        assert self.compute_dtype in (torch.bfloat16, torch.int8), f"Unsupported compute dtype {self.compute_dtype}"
+            raise ValueError("Quantized query is not implemented")
+        if self.context_dtype != torch.int8:
+            raise ValueError(
+                f"Quant attention support int8 context only, but got {self.context_dtype}"
+            )
+        if self.compute_dtype not in (torch.bfloat16, torch.int8):
+            raise ValueError(f"Unsupported compute dtype {self.compute_dtype}")
         if self.compute_dtype == torch.int8:
             bits = 8
             self.qmax = 2 ** (bits - 1) - 1
@@ -2364,11 +2427,24 @@ class MojoPagedDecodeQuantSWA(MojoOperator):
 
         assert_paged_decode_contract(block_table, total_seq_lens)
         if self.query_dtype == torch.int8:
-            assert query_scale is not None and query.dtype == self.query_dtype, "query_scale must be provided for quantized query"
+            if query.dtype != self.query_dtype or query_scale is None:
+                raise ValueError(
+                    f"query_scale must be provided and query.dtype must be {self.query_dtype} "
+                    f"for quantized query, got query.dtype={query.dtype}, query_scale is "
+                    f"{'set' if query_scale is not None else 'None'}"
+                )
         else:
-            assert query_scale is None and query.dtype == self.query_dtype, "query_scale must be None for non-quantized query"
-
-        assert key_cache.dtype == value_cache.dtype == self.context_dtype, f"key/value cache must be quantized to {self.context_dtype}, but got {key_cache.dtype=} and {value_cache.dtype=}"
+            if query.dtype != self.query_dtype or query_scale is not None:
+                raise ValueError(
+                    f"query_scale must be None and query.dtype must be {self.query_dtype} "
+                    f"for non-quantized query, got query.dtype={query.dtype}, query_scale is "
+                    f"{'set' if query_scale is not None else 'None'}"
+                )
+        if key_cache.dtype != self.context_dtype or value_cache.dtype != self.context_dtype:
+            raise ValueError(
+                f"key/value cache must be quantized to {self.context_dtype}, but got "
+                f"{key_cache.dtype=} and {value_cache.dtype=}"
+            )
         
         bsz, n_q_heads, head_dim = query.shape
         _, n_kv_heads, page_size, _ = key_cache.shape
