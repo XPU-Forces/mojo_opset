@@ -74,7 +74,7 @@ jobs:
             set -euo pipefail
             cd /workspace
             echo 'Running ttx kernels tests on Iluvatar GPU...'
-            MOJO_BACKEND=ttx python3 -m pytest mojo_opset/tests/accuracy/operators/ \
+            MOJO_BACKEND=ttx python3 -m pytest -n 8 mojo_opset/tests/accuracy/operators/ \
               --ignore=mojo_opset/tests/accuracy/operators/test_compute_with_comm.py
           "
 
@@ -84,10 +84,8 @@ jobs:
             set -euo pipefail
             cd /workspace
             echo 'Running ixformer tests on Iluvatar GPU...'
-            MOJO_BACKEND=ixformer python3 -m pytest mojo_opset/tests/accuracy/operators/test_normalization.py \
-              mojo_opset/tests/accuracy/operators/test_attention.py \
-              mojo_opset/tests/accuracy/operators/test_moe.py \
-              mojo_opset/tests/accuracy/operators/test_gemm.py
+            MOJO_BACKEND=ixformer python3 -m pytest -n 8 mojo_opset/tests/accuracy/operators/ \
+              --ignore=mojo_opset/tests/accuracy/operators/test_compute_with_comm.py
           "
 
       - name: Cleanup
