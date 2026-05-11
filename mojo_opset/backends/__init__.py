@@ -17,7 +17,10 @@ if platform in _SUPPORT_IXFORMER_PLATFORM:
         logger.warning("Skipping ixformer backend (import failed): %s", e)
 
 if platform in _SUPPORT_TTX_PLATFROM:
-    from .ttx import *
+    try:
+        from .ttx import *
+    except Exception as e:
+        logger.warning("Skipping ttx backend (import failed): %s", e)
 
 if platform in _SUPPORT_TORCH_NPU_PLATFROM:
     from .torch_npu import *
