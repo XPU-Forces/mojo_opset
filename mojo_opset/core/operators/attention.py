@@ -1345,22 +1345,20 @@ class MojoSdpa(MojoOperator):
 
 
 class MojoConformerAttention(MojoOperator):
-    """Attention over right-padded dense batches with per-query left/right visibility windows.
+    """Varlen Conformer encoder attention with per-query left/right visibility windows.
 
     Contract:
-        - `query`, `key`, `value` use BSHD layout: ``[batch, seq, heads, head_dim]``.
-        - `padding_mask` uses ``[batch, seq]`` with valid tokens on the left and padding on the right.
-        - attention visibility is limited to ``[q_idx - left_window, q_idx + right_window]`` intersected
-          with the valid key range from `padding_mask`.
-        - invalid query rows are zeroed in the output, matching the original USM attention semantics
-          where query masking happens after softmax.
+        - `query`, `key`, `value` use THD layout: ``[total_tokens, heads, head_dim]``.
+        - `cu_q_lens` and `cu_total_seq_lens` delimit per-sequence query and KV spans.
+        - if `cu_total_seq_lens` is None, KV spans are the same as query spans.
+        - for each query, visible keys are limited to ``[q_abs - left_window, q_abs + right_window]``.
     """
 
     def __init__(
         self,
         left_window: int,
         right_window: int = 0,
-        scale: Optional[float] = None,
+        softmax_scale: Optional[float] = None,
     ):
         super().__init__()
         if left_window < 0:
@@ -1369,62 +1367,67 @@ class MojoConformerAttention(MojoOperator):
             raise ValueError(f"right_window must be >= 0, got {right_window}")
         self.left_window = left_window
         self.right_window = right_window
-        self.scale = scale
+        self.softmax_scale = softmax_scale
 
     def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        padding_mask: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if query.ndim != 4 or key.ndim != 4 or value.ndim != 4:
-            raise ValueError("query/key/value must be 4D BSHD tensors")
-        if query.shape != key.shape or query.shape != value.shape:
-            raise ValueError(
-                f"query/key/value must share the same shape, got {query.shape}, {key.shape}, {value.shape}"
-            )
-        if padding_mask.ndim != 2:
-            raise ValueError(f"padding_mask must be [B, T], got shape {padding_mask.shape}")
+        if query.ndim != 3 or key.ndim != 3 or value.ndim != 3:
+            raise ValueError("query/key/value must be 3D THD tensors")
+        if key.shape != value.shape:
+            raise ValueError(f"key/value must share the same shape, got {key.shape}, {value.shape}")
+        if cu_q_lens.dtype != torch.int32:
+            raise ValueError(f"cu_q_lens must be int32, got {cu_q_lens.dtype}")
+        if cu_total_seq_lens is not None and cu_total_seq_lens.dtype != torch.int32:
+            raise ValueError(f"cu_total_seq_lens must be int32, got {cu_total_seq_lens.dtype}")
 
-        batch_size, seq_len, num_heads, head_dim = query.shape
-        if padding_mask.shape != (batch_size, seq_len):
-            raise ValueError(
-                f"padding_mask must match batch/seq of query, expected {(batch_size, seq_len)}, got {padding_mask.shape}"
-            )
+        total_q_tokens, num_heads, head_dim = query.shape
 
-        if self.scale is None:
-            softmax_scale = 1.0 / math.sqrt(head_dim)
+        if cu_total_seq_lens is None:
+            cu_total_seq_lens = cu_q_lens
+
+        if self.softmax_scale is not None:
+            softmax_scale = self.softmax_scale
         else:
-            softmax_scale = self.scale
+            softmax_scale = 1.0 / math.sqrt(head_dim)
 
         output = torch.zeros_like(query)
-        q_idx = torch.arange(seq_len, device=query.device)
+        batch_size = cu_q_lens.shape[0] - 1
 
         for b in range(batch_size):
-            valid_len = int(padding_mask[b].sum().item())
-            if valid_len <= 0:
+            q_start, q_end = cu_q_lens[b].item(), cu_q_lens[b + 1].item()
+            kv_start, kv_end = cu_total_seq_lens[b].item(), cu_total_seq_lens[b + 1].item()
+            q_len = q_end - q_start
+            kv_len = kv_end - kv_start
+            if q_len <= 0 or kv_len <= 0:
                 continue
+            if kv_len < q_len:
+                raise ValueError(f"KV length must be >= query length for conformer attention, got {kv_len} vs {q_len}")
 
-            q_b = query[b, :valid_len].permute(1, 0, 2)  # [H, S, D]
-            k_b = key[b, :valid_len].permute(1, 2, 0)  # [H, D, S]
-            v_b = value[b, :valid_len].permute(1, 0, 2)  # [H, S, D]
+            q = query[q_start:q_end].permute(1, 0, 2)
+            k_t = key[kv_start:kv_end].permute(1, 2, 0)
+            scores = torch.bmm(q, k_t).float() * softmax_scale
 
-            scores = torch.bmm(q_b, k_b).float() * softmax_scale
-            q_valid_idx = q_idx[:valid_len]
-            window_mask = (q_valid_idx[:, None] - self.left_window <= q_valid_idx[None, :]) & (
-                q_valid_idx[None, :] <= q_valid_idx[:, None] + self.right_window
+            q_abs_idx = torch.arange(kv_len - q_len, kv_len, device=query.device)
+            kv_idx = torch.arange(kv_len, device=query.device)
+            window_mask = (q_abs_idx[:, None] - self.left_window <= kv_idx[None, :]) & (
+                kv_idx[None, :] <= q_abs_idx[:, None] + self.right_window
             )
             scores = torch.where(window_mask.unsqueeze(0), scores, float("-inf"))
 
-            probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(v_b.dtype)
-            out_b = torch.bmm(probs, v_b).permute(1, 0, 2)
-            output[b, :valid_len] = out_b.to(output.dtype)
+            probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(value.dtype)
+            v = value[kv_start:kv_end].permute(1, 0, 2)
+            output[q_start:q_end] = torch.bmm(probs, v).permute(1, 0, 2).to(output.dtype)
 
         return output
 
     def extra_repr(self) -> str:
-        return f"{self.left_window=}, {self.right_window=}, {self.scale=}".replace("self.", "")
+        return f"{self.left_window=}, {self.right_window=}, {self.softmax_scale=}".replace("self.", "")
 
 
 def _generate_window_mask(

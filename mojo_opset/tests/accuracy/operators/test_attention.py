@@ -1093,19 +1093,39 @@ def test_paged_decode_swa(
     )
 
 
+def generate_conformer_attention_data(
+    q_lens: list[int],
+    cache_lens: list[int],
+    num_heads: int,
+    head_dim: int,
+    dtype: torch.dtype,
+):
+    cu_q_lens = torch.tensor([0] + torch.cumsum(torch.tensor(q_lens, dtype=torch.int32), 0).tolist(), dtype=torch.int32)
+    kv_lens = [q_len + cache_len for q_len, cache_len in zip(q_lens, cache_lens)]
+    cu_total_seq_lens = torch.tensor(
+        [0] + torch.cumsum(torch.tensor(kv_lens, dtype=torch.int32), 0).tolist(),
+        dtype=torch.int32,
+    )
+    query = torch.randn(cu_q_lens[-1].item(), num_heads, head_dim, dtype=dtype)
+    key = torch.randn(cu_total_seq_lens[-1].item(), num_heads, head_dim, dtype=dtype)
+    value = torch.randn_like(key)
+    return query, key, value, cu_q_lens, cu_total_seq_lens
+
+
 @pytest.mark.parametrize(
-    "batch_size, seq_len, num_heads, head_dim, left_window, right_window, dtype",
+    "q_lens, cache_lens, num_heads, head_dim, left_window, right_window, dtype",
     [
-        (2, 32, 4, 64, 8, 0, torch.bfloat16),
-        (2, 48, 8, 96, 16, 4, torch.bfloat16),
-        (1, 17, 2, 32, 3, 2, torch.float32),
+        ([5, 7], [0, 0], 2, 96, 3, 2, torch.bfloat16),
+        ([1, 17, 9], [4, 0, 8], 4, 96, 8, 0, torch.bfloat16),
+        ([3], [2], 2, 128, 2, 1, torch.float32),
+        ([33, 11], [5, 13], 8, 96, 16, 4, torch.bfloat16),
     ],
 )
 @auto_switch_platform()
 @bypass_not_implemented
 def test_conformer_attention(
-    batch_size: int,
-    seq_len: int,
+    q_lens: list[int],
+    cache_lens: list[int],
     num_heads: int,
     head_dim: int,
     left_window: int,
@@ -1113,12 +1133,18 @@ def test_conformer_attention(
     dtype: torch.dtype,
 ):
     device = get_torch_device()
-    query = torch.randn(batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=device)
-    key = torch.randn_like(query)
-    value = torch.randn_like(query)
-
-    seqlens = torch.randint(low=0, high=seq_len + 1, size=(batch_size,), dtype=torch.int32, device=device)
-    padding_mask = torch.arange(seq_len, dtype=torch.int32, device=device).unsqueeze(0) < seqlens.unsqueeze(1)
+    query, key, value, cu_q_lens, cu_total_seq_lens = generate_conformer_attention_data(
+        q_lens,
+        cache_lens,
+        num_heads,
+        head_dim,
+        dtype,
+    )
+    query = query.to(device)
+    key = key.to(device)
+    value = value.to(device)
+    cu_q_lens = cu_q_lens.to(device)
+    cu_total_seq_lens = cu_total_seq_lens.to(device)
 
     op = MojoConformerAttention(left_window=left_window, right_window=right_window)
     op_ref = MojoConformerAttention._registry.get("torch")(left_window=left_window, right_window=right_window)
@@ -1129,28 +1155,11 @@ def test_conformer_attention(
         query,
         key,
         value,
-        padding_mask,
+        cu_q_lens,
+        cu_total_seq_lens,
         atol=atol,
         rtol=rtol,
     )
-
-
-def test_conformer_attention_torch_mask_semantics():
-    op = MojoConformerAttention._registry.get("torch")(left_window=1, right_window=0)
-    query = torch.randn(2, 6, 2, 8)
-    key = torch.randn_like(query)
-    value = torch.randn_like(query)
-    padding_mask = torch.tensor(
-        [
-            [1, 1, 1, 1, 0, 0],
-            [1, 1, 0, 0, 0, 0],
-        ],
-        dtype=torch.bool,
-    )
-    output = op(query, key, value, padding_mask)
-    assert output.shape == query.shape
-    torch.testing.assert_close(output[0, 4:], torch.zeros_like(output[0, 4:]))
-    torch.testing.assert_close(output[1, 2:], torch.zeros_like(output[1, 2:]))
 
 
 def generate_sdpa_data(

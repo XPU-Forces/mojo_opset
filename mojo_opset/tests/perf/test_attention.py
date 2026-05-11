@@ -250,18 +250,24 @@ def test_paged_prefill_gqa(
     )
 
 
+def _make_cu_lens(lengths: list[int], device: torch.device | str) -> torch.Tensor:
+    return torch.tensor([0] + torch.cumsum(torch.tensor(lengths, dtype=torch.int32), 0).tolist(), dtype=torch.int32, device=device)
+
+
 @pytest.mark.parametrize(
-    "batch_size, seq_len, num_heads, head_dim, left_window, right_window, dtype",
+    "q_lens, cache_lens, num_heads, head_dim, left_window, right_window, dtype",
     [
-        (2, 512, 8, 64, 128, 0, torch.bfloat16),
-        (2, 1024, 8, 128, 256, 8, torch.bfloat16),
+        ([512, 384], [0, 0], 8, 64, 128, 0, torch.bfloat16),
+        ([1024, 768], [0, 0], 8, 128, 256, 8, torch.bfloat16),
+        ([512, 256, 128], [512, 256, 128], 8, 128, 256, 0, torch.bfloat16),
+        ([128, 65, 33, 17], [64, 32, 16, 8], 4, 64, 64, 4, torch.bfloat16),
     ],
 )
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_conformer_attention(
-    batch_size: int,
-    seq_len: int,
+    q_lens: list[int],
+    cache_lens: list[int],
     num_heads: int,
     head_dim: int,
     left_window: int,
@@ -269,14 +275,15 @@ def test_conformer_attention(
     dtype: torch.dtype,
 ):
     device = get_torch_device()
-    query = torch.randn(batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=device)
-    key = torch.randn_like(query)
-    value = torch.randn_like(query)
-    seqlens = torch.randint(seq_len // 2, seq_len + 1, (batch_size,), dtype=torch.int32, device=device)
-    padding_mask = torch.arange(seq_len, dtype=torch.int32, device=device).unsqueeze(0) < seqlens.unsqueeze(1)
+    kv_lens = [q_len + cache_len for q_len, cache_len in zip(q_lens, cache_lens)]
+    cu_q_lens = _make_cu_lens(q_lens, device)
+    cu_total_seq_lens = _make_cu_lens(kv_lens, device)
+    query = torch.randn(cu_q_lens[-1].item(), num_heads, head_dim, dtype=dtype, device=device)
+    key = torch.randn(cu_total_seq_lens[-1].item(), num_heads, head_dim, dtype=dtype, device=device)
+    value = torch.randn_like(key)
 
     op = MojoConformerAttention(left_window=left_window, right_window=right_window)
-    perf(lambda: op(query, key, value, padding_mask))  # noqa: F821
+    perf(lambda: op(query, key, value, cu_q_lens, cu_total_seq_lens))  # noqa: F821
 
 
 def generate_test_data(

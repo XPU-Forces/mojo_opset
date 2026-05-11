@@ -136,38 +136,28 @@ class TTXSdpa(MojoSdpa):
 class TTXConformerAttention(MojoConformerAttention):
     supported_platforms_list = ["npu"]
 
-    @staticmethod
-    def _extract_right_padded_seqlens(padding_mask: torch.Tensor) -> torch.Tensor:
-        mask_bool = padding_mask.to(dtype=torch.bool)
-        return mask_bool.sum(dim=-1, dtype=torch.int32)
-
     def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        padding_mask: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,
     ):
-        if query.ndim != 4:
-            raise ValueError(f"expected query to be BSHD, got {query.shape}")
-        if query.shape != key.shape or query.shape != value.shape:
-            raise ValueError(
-                f"query/key/value must share the same shape, got {query.shape}, {key.shape}, {value.shape}"
-            )
-        seqlens = self._extract_right_padded_seqlens(padding_mask)
-        q = query.permute(0, 2, 1, 3)
-        k = key.permute(0, 2, 1, 3)
-        v = value.permute(0, 2, 1, 3)
-        o = conformer_attention(
-            q,
-            k,
-            v,
-            seqlens,
+        if cu_q_lens.dtype != torch.int32:
+            raise ValueError(f"cu_q_lens must be int32, got {cu_q_lens.dtype}")
+        if cu_total_seq_lens is not None and cu_total_seq_lens.dtype != torch.int32:
+            raise ValueError(f"cu_total_seq_lens must be int32, got {cu_total_seq_lens.dtype}")
+        return conformer_attention(
+            query,
+            key,
+            value,
+            cu_q_lens,
+            cu_total_seq_lens,
             self.left_window,
             self.right_window,
-            self.scale,
+            self.softmax_scale,
         )
-        return o.permute(0, 2, 1, 3)
 
 
 class TTXPagedPrefillSWA(MojoPagedPrefillSWA):
