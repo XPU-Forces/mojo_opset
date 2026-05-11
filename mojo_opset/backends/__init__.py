@@ -17,13 +17,22 @@ if platform in _SUPPORT_IXFORMER_PLATFORM:
         logger.warning("Skipping ixformer backend (import failed): %s", e)
 
 if platform in _SUPPORT_TTX_PLATFROM:
-    from .ttx import *
+    try:
+        from .ttx import *
+    except Exception as e:
+        logger.warning("Skipping ttx backend (import failed): %s", e)
 
 if platform in _SUPPORT_TORCH_NPU_PLATFROM:
     from .torch_npu import *
 
+if platform in _SUPPORT_TORCH_NPU_PLATFROM:
+    try:
+        from .uc import *
+    except ImportError as e:
+        logger.warning("Skipping uc backend (import failed): %s", e)
+
 if platform == "npu" and get_bool_env("MOJO_DETERMINISTIC", default=False):
     import os
-    
+
     # special setting for npu deterministic matmul
     os.environ["CLOSE_MATMUL_K_SHIFT"] = "1"
