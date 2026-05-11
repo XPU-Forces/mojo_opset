@@ -298,3 +298,141 @@ def store_paged_kv_impl(
     )
 
     return key_cache, value_cache
+
+
+# --- Paged KV MLA cache ---
+
+@libentry()
+@triton.jit
+def _store_paged_kv_mla_cache_kernel(
+    k_ptr,
+    v_ptr,
+    key_cache_ptr,
+    value_cache_ptr,
+    block_table_ptr,
+    cu_seqlens_ptr,
+    kv_lens_ptr,
+    stride_k_tok,
+    stride_k_dim,
+    stride_v_tok,
+    stride_v_dim,
+    stride_kc_blk,
+    stride_kc_tok,
+    stride_kc_dim,
+    stride_vc_blk,
+    stride_vc_tok,
+    stride_vc_dim,
+    stride_bt_batch,
+    stride_bt_blk,
+    batch_size,
+    max_seq_len,
+    kv_lora_rank: tl.constexpr,
+    qk_rope_head_dim: tl.constexpr,
+    block_size: tl.constexpr,
+):
+    #pid = tl.program_id(0)
+    #batch_idx = pid // max_seq_len
+    #token_offset_in_seq = pid % max_seq_len
+
+    batch_idx = tl.program_id(0)
+    chunk_idx = tl.program_id(1)
+
+    if batch_idx >= batch_size:
+        return
+
+    seq_start = tl.load(cu_seqlens_ptr + batch_idx)
+    seq_end = tl.load(cu_seqlens_ptr + batch_idx + 1)
+    seq_len = seq_end - seq_start
+    if seq_len <= 0:
+        return
+    
+    write_start = tl.load(kv_lens_ptr + batch_idx).to(tl.int32)
+    write_end = write_start + seq_len
+    if write_start < 0:
+        return
+
+    chunk_end = (write_start//block_size*block_size) + chunk_idx * block_size
+    chunk_start = chunk_end - block_size
+    chunk_start = tl.maximum(chunk_start, write_start)
+    chunk_end = tl.minimum(chunk_end, write_end)
+    if chunk_start >= chunk_end:
+        return
+    
+    chunk_start -= write_start
+    chunk_end -= write_start
+    
+    for off in range(chunk_start, chunk_end):
+        write_idx = write_start + off
+        read_idx = seq_start + off
+        blk_idx = write_idx // block_size
+        blk_off = write_idx % block_size
+
+        phys_id = tl.load(block_table_ptr + batch_idx * stride_bt_batch + blk_idx * stride_bt_blk)
+
+        offs_k = tl.arange(0, kv_lora_rank)
+        offs_v = tl.arange(0, qk_rope_head_dim)    
+
+        src_k_ptr = k_ptr + read_idx * stride_k_tok + offs_k * stride_k_dim
+        src_v_ptr = v_ptr + read_idx * stride_v_tok + offs_v * stride_v_dim
+        k_val = tl.load(src_k_ptr)
+        v_val = tl.load(src_v_ptr)
+
+        dst_k_ptr = key_cache_ptr + phys_id * stride_kc_blk + blk_off * stride_kc_tok + offs_k * stride_kc_dim
+        dst_v_ptr = value_cache_ptr + phys_id * stride_vc_blk + blk_off * stride_vc_tok + offs_v * stride_vc_dim
+
+        tl.store(dst_k_ptr, k_val)
+        tl.store(dst_v_ptr, v_val)
+
+
+def store_paged_kv_mla_impl(
+    compressed_kv_states: torch.Tensor,
+    k_pe_states: torch.Tensor,
+    compressed_kv_cache: torch.Tensor,
+    k_pe_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    context_kv_lens: torch.Tensor,
+):
+    assert compressed_kv_states.is_contiguous() and k_pe_states.is_contiguous()
+
+    if cu_seqlens is None:
+        cu_seqlens = torch.arange(context_kv_lens.shape[0] + 1, device=compressed_kv_states.device, dtype=torch.int32)
+
+    kv_lora_rank = compressed_kv_states.shape[1]
+    qk_rope_head_dim = k_pe_states.shape[1]
+
+    block_size = compressed_kv_cache.shape[2]
+
+    batch_size = block_table.shape[0]
+    max_seq_len = block_table.shape[1]
+
+    grid = (batch_size,max_seq_len,)
+
+    _store_paged_kv_mla_cache_kernel[grid](
+        compressed_kv_states,
+        k_pe_states,
+        compressed_kv_cache,
+        k_pe_cache,
+        block_table,
+        cu_seqlens,
+        context_kv_lens,
+        compressed_kv_states.stride(0),
+        compressed_kv_states.stride(1),
+        k_pe_states.stride(0),
+        k_pe_states.stride(1),
+        compressed_kv_cache.stride(0),
+        compressed_kv_cache.stride(2),
+        compressed_kv_cache.stride(3),
+        k_pe_cache.stride(0),
+        k_pe_cache.stride(2),
+        k_pe_cache.stride(3),
+        block_table.stride(0),
+        block_table.stride(1),
+        batch_size,
+        max_seq_len,
+        kv_lora_rank,
+        qk_rope_head_dim,
+        block_size,
+    )
+
+    return compressed_kv_cache, k_pe_cache

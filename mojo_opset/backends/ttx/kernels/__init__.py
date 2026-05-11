@@ -47,6 +47,7 @@ swiglu_bwd_impl = _get_kernel_impl(ttx_backend_module, "swiglu_bwd_impl")
 rmsnorm_fwd_impl = _get_kernel_impl(ttx_backend_module, "rmsnorm_fwd_impl")
 rmsnorm_bwd_impl = _get_kernel_impl(ttx_backend_module, "rmsnorm_bwd_impl")
 rmsnorm_infer_impl = _get_kernel_impl(ttx_backend_module, "rmsnorm_infer_impl")
+rmsnorm_quant_infer_impl = _get_kernel_impl(ttx_backend_module, "rmsnorm_quant_infer_impl")
 layernorm_infer_impl = _get_kernel_impl(ttx_backend_module, "layernorm_infer_impl")
 layernorm_bwd_impl = _get_kernel_impl(ttx_backend_module, "layernorm_bwd_impl")
 layernorm_fwd_impl = _get_kernel_impl(ttx_backend_module, "layernorm_fwd_impl")
@@ -82,6 +83,7 @@ int8_gemm_dequant_impl = _get_kernel_impl(ttx_backend_module, "int8_gemm_dequant
 prepare_b_impl = _get_kernel_impl(ttx_backend_module, "prepare_b_impl")
 
 store_paged_kv_impl = _get_kernel_impl(ttx_backend_module, "store_paged_kv_impl")
+store_paged_kv_mla_impl = _get_kernel_impl(ttx_backend_module, "store_paged_kv_mla_impl")
 
 store_label_cache_infer_impl = _get_kernel_impl(ttx_backend_module, "store_label_cache_infer_impl")
 
@@ -437,6 +439,37 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         dX = torch.empty_like(X)
         dW = torch.empty(dY.shape[-1], dtype=W.dtype, device=W.device)
         return dX, dW
+    
+    @torch.library.custom_op("ttx::rmsnorm_quant_infer", mutates_args={})
+    def rmsnorm_quant_infer(
+        x: torch.Tensor,
+        smooth_scale: torch.Tensor,
+        w: torch.Tensor,
+        eps: float,
+        q_min: float,
+        q_max: float,
+        dtype: torch.dtype
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return rmsnorm_infer_impl(x, smooth_scale, w, eps, q_min, q_max, dtype)
+    
+    @rmsnorm_quant_infer.register_fake
+    def rmsnorm_quant_infer_fake(
+        x: torch.Tensor,
+        smooth_scale: torch.Tensor,
+        w: torch.Tensor,
+        eps: float,
+        q_min: float,
+        q_max: float,
+        dtype: torch.dtype
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        shape = x.shape
+        dim = shape[-1]
+        X_2d = x.reshape(-1, dim)
+        n_rows, n_cols = X_2d.shape
+
+        y = torch.empty_like(X_2d)
+        scale = torch.empty(n_rows, dtype=torch.float32, device=X_2d.device)
+        return y, scale
 
     # ====================================
     # Register fused_linear_cross_entropy
@@ -803,6 +836,36 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(key_cache), torch.empty_like(value_cache)
 
+    @torch.library.custom_op("ttx::store_paged_kv_mla", mutates_args={})
+    def store_paged_kv_mla(
+        compressed_kv_states: torch.Tensor,
+        k_pe_states: torch.Tensor,
+        compressed_kv_cache: torch.Tensor,
+        k_pe_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        context_kv_lens: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return store_paged_kv_mla_impl(compressed_kv_states,
+            k_pe_states,
+            compressed_kv_cache,
+            k_pe_cache,
+            block_table,
+            cu_seqlens,
+            context_kv_lens)
+    
+    @store_paged_kv_mla.register_fake
+    def store_paged_kv_mla_fake(
+        compressed_kv_states: torch.Tensor,
+        k_pe_states: torch.Tensor,
+        compressed_kv_cache: torch.Tensor,
+        k_pe_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        context_kv_lens: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return torch.empty_like(compressed_kv_cache), torch.empty_like(k_pe_cache)
+
     # TODO(zhangjihang): Support compile mode
     sdpa_infer = sdpa_infer_impl
     swa_paged_prefill = swa_paged_prefill_impl
@@ -834,6 +897,7 @@ else:
     rmsnorm_fwd = rmsnorm_fwd_impl
     rmsnorm_bwd = rmsnorm_bwd_impl
     rmsnorm_infer = rmsnorm_infer_impl
+    rmsnorm_quant_infer = rmsnorm_quant_infer_impl
     layernorm_fwd = layernorm_fwd_impl
     layernorm_bwd = layernorm_bwd_impl
     layernorm_infer = layernorm_infer_impl
@@ -858,6 +922,7 @@ else:
     int8_gemm_dequant = int8_gemm_dequant_impl
     prepare_b = prepare_b_impl
     store_paged_kv = store_paged_kv_impl
+    store_paged_kv_mla = store_paged_kv_mla_impl
     store_label_cache_infer = store_label_cache_infer_impl
     fused_penalties_temp = fused_penalties_temp_impl
     join_prob_reject_sampling = join_prob_reject_sampling_impl

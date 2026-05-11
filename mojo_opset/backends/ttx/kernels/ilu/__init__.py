@@ -18,6 +18,7 @@ from .group_gemm import m_grouped_matmul_impl
 from .quant_batch_gemm_reduce_sum import quant_batch_gemm_reduce_sum_impl
 from .kv_cache import store_kv_cache_impl
 from .kv_cache import store_paged_kv_impl
+from .kv_cache import store_paged_kv_mla_impl
 from .layernorm import layernorm_bwd_impl
 from .layernorm import layernorm_fwd_impl
 from .layernorm import layernorm_infer_impl
@@ -26,6 +27,7 @@ from .rmsnorm import rmsnorm_bwd_impl
 from .rmsnorm import rmsnorm_fwd_impl
 from .relative_embedding import relative_embedding_fwd_impl
 from .rmsnorm import rmsnorm_infer_impl
+from .rmsnorm_quant import rmsnorm_quant_infer_impl
 from .rope import rope_bwd_impl
 from .rope import rope_fwd_impl
 from .rope import rot_pos_embed_impl
@@ -67,6 +69,7 @@ __all__ = [
     "rmsnorm_bwd_impl",
     "rmsnorm_fwd_impl",
     "rmsnorm_infer_impl",
+    "rmsnorm_quant_infer_impl",
     "layernorm_infer_impl",
     "layernorm_bwd_impl",
     "layernorm_fwd_impl",
@@ -91,6 +94,8 @@ __all__ = [
     # "swiglu_bwd_impl",
     "swiglu_fwd_impl",
     "store_label_cache_infer_impl",
+    "store_paged_kv_impl",
+    "store_paged_kv_mla_impl",
     # "diffusion_attention_fwd_impl",
     # "diffusion_attention_bwd_impl",
     "swa_paged_decode_impl",
