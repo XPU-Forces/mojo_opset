@@ -2,10 +2,11 @@ import torch
 
 from mojo_opset.core import MojoGelu
 
+from ._utils import run_unary_kernel
+
 
 class UCGelu(MojoGelu):
     supported_platforms_list = ["npu"]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        print("UC backend stub: mojo_opset.backends.uc.operators.gelu.UCGelu.forward")
-        raise NotImplementedError("UC backend MojoGelu is waiting for the uc-kernel pybind implementation.")
+        return run_unary_kernel("mojo_gelu", x)
