@@ -125,13 +125,13 @@ class TestRefOverEncodingBasic:
         )
 
         input_ids = input_ids.to(TEST_DEVICE)
-        input_seq_len = torch.Tensor([5]).to(torch.int64).to(TEST_DEVICE)
+        q_lens = torch.Tensor([5]).to(torch.int64).to(TEST_DEVICE)
         oe_history = oe_history.to(TEST_DEVICE)
 
         oe_ngram = oe_ngram.to(TEST_DEVICE)
         oe_ngram_ref = oe_ngram_ref.to(TEST_DEVICE)
 
-        oe_ngram.forward_diff_with(oe_ngram_ref, input_ids, oe_history[:1], input_seq_len, atol=0, rtol=0)
+        oe_ngram.forward_diff_with(oe_ngram_ref, input_ids, oe_history[:1], q_lens, atol=0, rtol=0)
         oe_history = torch.stack([torch.arange(1, self.N) for _ in range(input_ids.size(0))], dim=0).to(TEST_DEVICE)
         # goldens = torch.Tensor(
         #     [
@@ -173,7 +173,7 @@ class TestRefOverEncodingBasic:
             [11, 13, 15, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89],
             dtype=torch.int64,
         )
-        input_seq_lens = torch.tensor([5, 7, 9], dtype=torch.int64)
+        q_lens = torch.tensor([5, 7, 9], dtype=torch.int64)
         oe_history = torch.tensor(
             [
                 [3, 5, 7, 9],
@@ -188,7 +188,7 @@ class TestRefOverEncodingBasic:
 
         seq_offset = 0
         golden = []
-        for seq_idx, seq_len in enumerate(input_seq_lens.tolist()):
+        for seq_idx, seq_len in enumerate(q_lens.tolist()):
             seq_input_ids = input_ids[seq_offset : seq_offset + seq_len]
             golden.append(
                 n_gram_impl_torch(
@@ -204,7 +204,7 @@ class TestRefOverEncodingBasic:
         golden = torch.cat(golden, dim=0)
 
         assert_close(
-            oe_ngram_ref(input_ids, oe_history, input_seq_lens),
+            oe_ngram_ref(input_ids, oe_history, q_lens),
             golden,
             atol=0,
             rtol=0,
@@ -216,7 +216,7 @@ class TestRefOverEncodingBasic:
             oe_ngram_ref,
             input_ids.to(TEST_DEVICE),
             oe_history.to(TEST_DEVICE),
-            input_seq_lens.to(TEST_DEVICE),
+            q_lens.to(TEST_DEVICE),
             atol=0,
             rtol=0,
         )
@@ -224,7 +224,7 @@ class TestRefOverEncodingBasic:
     @bypass_not_implemented
     def test_over_encoding(self):
         input_ids = torch.Tensor([1, 2, 3, 4, 5, 6]).to(torch.int64).to(TEST_DEVICE)
-        input_seq_len = torch.Tensor([3, 3]).to(torch.int64).to(TEST_DEVICE)
+        q_lens = torch.Tensor([3, 3]).to(torch.int64).to(TEST_DEVICE)
         oe_history = torch.zeros(2, 3, device=TEST_DEVICE).to(torch.int64)
 
         @torch.no_grad
@@ -257,8 +257,8 @@ class TestRefOverEncodingBasic:
         ttx_oe_layer.apply(init_weight)
 
         # NOTE(liuyuan): Test Prefill
-        ref = oe_layer(input_ids, oe_history, input_seq_len)
-        ttx_res = ttx_oe_layer(input_ids, oe_history, input_seq_len)
+        ref = oe_layer(input_ids, oe_history, q_lens)
+        ttx_res = ttx_oe_layer(input_ids, oe_history, q_lens)
         assert_close(ttx_res, ref)
 
         # NOTE(liuyuan): Test Decode
@@ -289,21 +289,21 @@ class TestRefOverEncodingParametrized:
     @staticmethod
     def move_case_to_test_device(
         input_ids,
-        seq_lens,
+        q_lens,
         oe_history_inputs,
         oe_vocab_sizes,
         n_grams,
     ):
         input_ids = input_ids.to(TEST_DEVICE)
-        if seq_lens is not None:
-            seq_lens = seq_lens.to(TEST_DEVICE)
+        if q_lens is not None:
+            q_lens = q_lens.to(TEST_DEVICE)
         oe_history_inputs = oe_history_inputs.to(TEST_DEVICE)
         oe_vocab_sizes = oe_vocab_sizes.to(TEST_DEVICE)
         n_grams = n_grams.to(TEST_DEVICE)
-        return input_ids, seq_lens, oe_history_inputs, oe_vocab_sizes, n_grams
+        return input_ids, q_lens, oe_history_inputs, oe_vocab_sizes, n_grams
 
     @pytest.mark.parametrize(
-        "input_ids,seq_lens,oe_history_inputs",
+        "input_ids,q_lens,oe_history_inputs",
         (
             (
                 torch.arange(1, 129, dtype=torch.long),
@@ -354,7 +354,7 @@ class TestRefOverEncodingParametrized:
     def test_over_encoding_parametrized(
         self,
         input_ids,
-        seq_lens,
+        q_lens,
         oe_history_inputs,
         vocab_size,
         oe_vocab_sizes,
@@ -362,9 +362,9 @@ class TestRefOverEncodingParametrized:
         embed_dim,
         oe_embed_dims,
     ):
-        input_ids, seq_lens, oe_history_inputs, oe_vocab_sizes, n_grams = self.move_case_to_test_device(
+        input_ids, q_lens, oe_history_inputs, oe_vocab_sizes, n_grams = self.move_case_to_test_device(
             input_ids,
-            seq_lens,
+            q_lens,
             oe_history_inputs,
             oe_vocab_sizes,
             n_grams,
@@ -379,12 +379,12 @@ class TestRefOverEncodingParametrized:
         ttx_oe_layer.apply(self.init_weight)
 
         assert_close(
-            ttx_oe_layer(input_ids, oe_history_inputs, seq_lens),
-            ref_oe_layer(input_ids, oe_history_inputs, seq_lens),
+            ttx_oe_layer(input_ids, oe_history_inputs, q_lens),
+            ref_oe_layer(input_ids, oe_history_inputs, q_lens),
         )
 
     @pytest.mark.parametrize(
-        "input_ids,seq_lens,oe_history_inputs,vocab_size,oe_vocab_sizes,n_grams,embed_dim,oe_embed_dims",
+        "input_ids,q_lens,oe_history_inputs,vocab_size,oe_vocab_sizes,n_grams,embed_dim,oe_embed_dims",
         (
             (
                 torch.tensor(
@@ -429,7 +429,7 @@ class TestRefOverEncodingParametrized:
     def test_over_encoding_additional_shapes(
         self,
         input_ids,
-        seq_lens,
+        q_lens,
         oe_history_inputs,
         vocab_size,
         oe_vocab_sizes,
@@ -437,9 +437,9 @@ class TestRefOverEncodingParametrized:
         embed_dim,
         oe_embed_dims,
     ):
-        input_ids, seq_lens, oe_history_inputs, oe_vocab_sizes, n_grams = self.move_case_to_test_device(
+        input_ids, q_lens, oe_history_inputs, oe_vocab_sizes, n_grams = self.move_case_to_test_device(
             input_ids,
-            seq_lens,
+            q_lens,
             oe_history_inputs,
             oe_vocab_sizes,
             n_grams,
@@ -454,8 +454,8 @@ class TestRefOverEncodingParametrized:
         ttx_oe_layer.apply(self.init_weight)
 
         assert_close(
-            ttx_oe_layer(input_ids, oe_history_inputs, seq_lens),
-            ref_oe_layer(input_ids, oe_history_inputs, seq_lens),
+            ttx_oe_layer(input_ids, oe_history_inputs, q_lens),
+            ref_oe_layer(input_ids, oe_history_inputs, q_lens),
             atol=1e-5,
             rtol=1e-5,
         )
@@ -561,7 +561,7 @@ class TestRefOverEncodingParametrized:
         prefill_input_ids = (
             torch.arange(1, SEQ_NUM + 1, dtype=torch.long, device=TEST_DEVICE).broadcast_to(SEQ_NUM, SEQ_NUM).flatten()
         )
-        prefill_seq_lens = torch.tensor([SEQ_NUM] * SEQ_NUM, dtype=torch.int64, device=TEST_DEVICE)
+        prefill_q_lens = torch.tensor([SEQ_NUM] * SEQ_NUM, dtype=torch.int64, device=TEST_DEVICE)
         prefill_history = torch.zeros(SEQ_NUM, 2, dtype=torch.int64, device=TEST_DEVICE)
 
         decode_input_ids = torch.arange(1, 17, dtype=torch.long, device=TEST_DEVICE).view(-1, 1)
@@ -573,8 +573,8 @@ class TestRefOverEncodingParametrized:
         )
 
         assert_close(
-            ref_oe_layer(prefill_input_ids, prefill_history, prefill_seq_lens),
-            ttx_oe_layer(prefill_input_ids, prefill_history, prefill_seq_lens),
+            ref_oe_layer(prefill_input_ids, prefill_history, prefill_q_lens),
+            ttx_oe_layer(prefill_input_ids, prefill_history, prefill_q_lens),
             atol=1e-5,
             rtol=1e-5,
         )
@@ -586,7 +586,7 @@ class TestRefOverEncodingParametrized:
         )
 
     @pytest.mark.parametrize(
-        "input_ids,seq_lens,oe_history_inputs",
+        "input_ids,q_lens,oe_history_inputs",
         (
             (
                 torch.arange(1, 129, dtype=torch.long),
@@ -637,7 +637,7 @@ class TestRefOverEncodingParametrized:
     def test_over_encoding_with_custom_weight_tensor(
         self,
         input_ids,
-        seq_lens,
+        q_lens,
         oe_history_inputs,
         vocab_size,
         oe_vocab_sizes,
@@ -645,9 +645,9 @@ class TestRefOverEncodingParametrized:
         embed_dim,
         oe_embed_dims,
     ):
-        input_ids, seq_lens, oe_history_inputs, oe_vocab_sizes, n_grams = self.move_case_to_test_device(
+        input_ids, q_lens, oe_history_inputs, oe_vocab_sizes, n_grams = self.move_case_to_test_device(
             input_ids,
-            seq_lens,
+            q_lens,
             oe_history_inputs,
             oe_vocab_sizes,
             n_grams,
@@ -686,6 +686,6 @@ class TestRefOverEncodingParametrized:
         ttx_oe_layer.apply(init_weight)
 
         assert_close(
-            ttx_oe_layer(input_ids, oe_history_inputs, seq_lens),
-            ref_oe_layer(input_ids, oe_history_inputs, seq_lens),
+            ttx_oe_layer(input_ids, oe_history_inputs, q_lens),
+            ref_oe_layer(input_ids, oe_history_inputs, q_lens),
         )
