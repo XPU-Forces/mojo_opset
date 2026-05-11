@@ -298,3 +298,132 @@ class MojoGridRoPE(MojoOperator):
             output.append(x_i)
         y = torch.stack(output)
         return y.type_as(x)
+
+
+class MojoVisionRotaryEmbedding2D(MojoOperator):
+    def __init__(
+        self,
+        rope_theta: float = 10000.0,
+        rope_dim: int = 64,
+        adapooling_factor: int = 1,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        # The native position regrouping assumes a positive adapooling window.
+        assert adapooling_factor >= 1, "adapooling_factor must be >= 1"
+        assert rope_dim % 4 == 0, "vision 2D rope_dim must be divisible by 4"
+        self.rope_theta = rope_theta
+        self.rope_dim = rope_dim
+        self.adapooling_factor = adapooling_factor
+        rotary_dim = self.rope_dim // 2
+        inv_freq = 1.0 / (
+            self.rope_theta
+            ** (
+                torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=self.tensor_factory_kwargs.get("device"))
+                / rotary_dim
+            )
+        )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def extra_repr(self) -> str:
+        return (
+            f"rope_theta={self.rope_theta}, rope_dim={self.rope_dim}, "
+            f"adapooling_factor={self.adapooling_factor}"
+        )
+
+    def _vision_rotary_embedding(self, seqlen: int, device: torch.device) -> torch.Tensor:
+        inv_freq = self.inv_freq.to(device=device)
+        seq = torch.arange(seqlen, device=device, dtype=inv_freq.dtype)
+        return torch.outer(seq, inv_freq)
+
+    def _build_position_ids(self, grid_hw: torch.Tensor, device: torch.device) -> torch.Tensor:
+        assert grid_hw.ndim == 2 and grid_hw.size(-1) == 2, "grid_hw must be [B, 2]"
+        assert not torch.is_floating_point(grid_hw), "grid_hw must be an integer tensor"
+
+        pos_ids = []
+        grid_hw_cpu = grid_hw.to(device="cpu", dtype=torch.int64)
+        for gh, gw in grid_hw_cpu.tolist():
+            assert gh > 0 and gw > 0, "grid height/width must be positive"
+            assert gh % self.adapooling_factor == 0 and gw % self.adapooling_factor == 0, (
+                "grid height/width must be divisible by adapooling_factor"
+            )
+            # Match the native rotary regrouping: positions are first regrouped by the
+            # adapooling window before being flattened back to patch order.
+            hpos_ids = torch.arange(gh, device=device).unsqueeze(1).expand(-1, gw)
+            hpos_ids = hpos_ids.reshape(
+                gh // self.adapooling_factor,
+                self.adapooling_factor,
+                gw // self.adapooling_factor,
+                self.adapooling_factor,
+            )
+            hpos_ids = hpos_ids.permute(0, 2, 1, 3).flatten()
+
+            wpos_ids = torch.arange(gw, device=device).unsqueeze(0).expand(gh, -1)
+            wpos_ids = wpos_ids.reshape(
+                gh // self.adapooling_factor,
+                self.adapooling_factor,
+                gw // self.adapooling_factor,
+                self.adapooling_factor,
+            )
+            wpos_ids = wpos_ids.permute(0, 2, 1, 3).flatten()
+            sample_pos_ids = torch.stack([hpos_ids, wpos_ids], dim=-1)
+            pos_ids.append(sample_pos_ids)
+
+        return torch.cat(pos_ids, dim=0)
+
+    def forward(self, grid_hw: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Rebuild the native frequency lookup in two steps:
+        # 1. create one 1D rotary table up to the largest grid extent,
+        # 2. gather H/W pairs using the adapooling-aware patch order.
+        device = self.inv_freq.device if self.inv_freq.device.type != "cpu" or grid_hw.device.type == "cpu" else grid_hw.device
+        grid_hw_cpu = grid_hw.to(device="cpu", dtype=torch.int64)
+        max_grid_size = int(grid_hw_cpu.max().item())
+        rotary_pos_emb_full = self._vision_rotary_embedding(max_grid_size, device=device)
+        pos_ids = self._build_position_ids(grid_hw, device=device)
+        freqs = rotary_pos_emb_full[pos_ids].flatten(-2)
+        emb = torch.cat([freqs, freqs], dim=-1)
+        return emb.cos(), emb.sin()
+
+
+class MojoApplyVisionRoPE2D(MojoOperator):
+    def __init__(self):
+        super().__init__()
+
+    @staticmethod
+    def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
+
+    def _apply_rope(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        orig_dtype = x.dtype
+        x = x.float()
+        assert x.ndim == 3, "vision rope expects packed token-first tensors [T, H, D]"
+        cos = cos.unsqueeze(1)
+        sin = sin.unsqueeze(1)
+        output = (x * cos) + (self._rotate_half(x) * sin)
+        return output.to(orig_dtype)
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply native vision 2D RoPE to packed token-first tensors with prebuilt cos/sin.
+
+        Supported layout:
+        1. Packed varlen: q/k [T, N, D], cos/sin [T, D]
+        """
+        assert q.ndim == k.ndim, "q and k must have the same dimension"
+        assert q.ndim == 3, "q and k must be 3D packed token-first tensors"
+        assert q.shape[-1] == k.shape[-1], "q and k must have the same head_dim"
+        assert cos.shape == sin.shape, "cos and sin must have the same shape"
+        assert cos.ndim == 2, "vision rotary embedding (cos/sin) must be of shape [num_tokens, rope_dim]"
+        assert q.shape[0] == cos.shape[0], "packed token count must match cos/sin sequence length"
+        assert k.shape[0] == cos.shape[0], "packed token count must match cos/sin sequence length"
+        assert q.shape[-1] == cos.shape[-1], "vision rope rotates the full head_dim"
+        assert k.shape[-1] == cos.shape[-1], "vision rope rotates the full head_dim"
+        return self._apply_rope(q, cos, sin), self._apply_rope(k, cos, sin)
