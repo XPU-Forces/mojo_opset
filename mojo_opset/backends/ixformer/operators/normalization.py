@@ -117,15 +117,56 @@ class IxformerGroupRMSNorm(MojoGroupRMSNorm):
 
     supported_platforms_list = ["ilu"]
 
+    @staticmethod
+    def _can_merge_adjacent_head_dim(input_q: torch.Tensor, input_k: torch.Tensor) -> bool:
+        if input_q.dim() < 3 or input_q.dim() != input_k.dim():
+            return False
+        if input_q.shape[:-1] != input_k.shape[:-1]:
+            return False
+        if input_q.stride() != input_k.stride():
+            return False
+        if input_q.untyped_storage().data_ptr() != input_k.untyped_storage().data_ptr():
+            return False
+
+        expected_k_ptr = input_q.data_ptr() + input_q.size(-1) * input_q.stride(-1) * input_q.element_size()
+        return expected_k_ptr == input_k.data_ptr()
+
+    def _rms_norm_merged_head_dim(
+        self,
+        input_q: torch.Tensor,
+        input_k: torch.Tensor,
+        weight_q: torch.Tensor,
+        weight_k: torch.Tensor,
+    ):
+        merged_shape = list(input_q.shape)
+        q_head_dim = input_q.size(-1)
+        k_head_dim = input_k.size(-1)
+        merged_shape[-1] = q_head_dim + k_head_dim
+        merged = input_q.as_strided(merged_shape, input_q.stride())
+        merged_weight = torch.cat([weight_q, weight_k], dim=0)
+
+        normalized = ixf_f.rms_norm(merged, merged_weight, eps=self.variance_epsilon)
+        return torch.split(normalized, [q_head_dim, k_head_dim], dim=-1)
+
     def forward(self, input_groups):
         
         output_groups = []
-        if self.norm_size == 128 and self.num_groups % 2 == 0:
+        if self.num_groups % 2 == 0:
             for i in range(0, self.num_groups, 2):
-                expected_k_ptr = input_groups[i].data_ptr() + input_groups[i].size(1) * input_groups[i].stride(1) * input_groups[i].element_size()
-                out_q, out_k = ixf_f.rms_norm_qk(input_groups[i], input_groups[i+1], 
-                                                 self.weight[i], self.weight[i+1],
-                                                 eps=self.variance_epsilon)
+                if self._can_merge_adjacent_head_dim(input_groups[i], input_groups[i + 1]):
+                    out_q, out_k = self._rms_norm_merged_head_dim(
+                        input_groups[i],
+                        input_groups[i + 1],
+                        self.weight[i],
+                        self.weight[i + 1],
+                    )
+                else:
+                    out_q = ixf_f.rms_norm(input_groups[i],
+                                           self.weight[i],
+                                           eps=self.variance_epsilon)
+                    out_k = ixf_f.rms_norm(input_groups[i + 1],
+                                           self.weight[i + 1],
+                                           eps=self.variance_epsilon)
                 output_groups.append(out_q)
                 output_groups.append(out_k)
         else:
