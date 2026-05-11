@@ -11,7 +11,7 @@ from mojo_opset import MojoPagedPrefillQuantSWA
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 
-def _quantize_query(
+def _quantize_query_per_token(
     query: torch.Tensor,
     query_dtype: torch.Tensor,
 ):
@@ -29,7 +29,7 @@ def _quantize_query(
     quant = torch.round(query_f / qscale).clamp(qmin, qmax).to(int_dtype)
     return quant, qscale.to(torch.bfloat16)
 
-def _quantize_kv_cache(
+def _quantize_kv_cache_per_channel(
     cache: torch.Tensor,  # [n_blocks, n_kv_heads, block_size, head_dim] in float dtype
     context_dtype: torch.dtype,
 ):
@@ -50,6 +50,32 @@ def _quantize_kv_cache(
     amax = cache_f.abs().amax(dim=(0, 2))  # -> [n_kv_heads, head_dim]
     qscale = (amax / qmax).clamp(min=1e-5)
     quant = torch.round(cache_f / qscale.unsqueeze(0).unsqueeze(2)).clamp(qmin, qmax).to(int_dtype)
+    return quant, qscale.to(torch.bfloat16)
+
+
+def _quantize_kv_cache_per_token(
+    cache: torch.Tensor,  # [n_blocks, n_kv_heads, block_size, head_dim] in float dtype
+    context_dtype: torch.dtype,
+):
+    """Per-token symmetric INT8 quantize a paged KV cache along head_dim.
+
+    Used by the SageAttention path where K is per-token quantized. Each token-slot
+    (across each n_blocks * block_size row) of every kv-head has its own scale.
+
+    Returns:
+        quant_cache: int8 tensor of shape (n_blocks, n_kv_heads, block_size, head_dim).
+        qscale: per-token scale of shape (n_blocks, n_kv_heads, block_size, 1) in bf16.
+    """
+    if context_dtype == torch.int8:
+        int_dtype = torch.int8
+        qmax = 2 ** (8 - 1) - 1
+        qmin = -(2 ** (8 - 1))
+    else:
+        assert False, f"Context dtype {context_dtype} not supported yet"
+    cache_f = cache.float()
+    amax = cache_f.abs().amax(dim=-1, keepdim=True)  # (n_blocks, n_kv_heads, block_size, 1)
+    qscale = (amax / qmax).clamp(min=1e-5)
+    quant = torch.round(cache_f / qscale).clamp(qmin, qmax).to(int_dtype)
     return quant, qscale.to(torch.bfloat16)
 
 
@@ -82,9 +108,10 @@ def generate_paged_decode_quant_data(
 
     num_total_blocks = total_blocks_needed + 10
 
-    # float KV cache; will be quantized inside the test according to context_dtype
-    k_cache = torch.randn(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
-    v_cache = torch.randn(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
+    # float KV cache; unused block / unused slot positions are kept as zero so that
+    # quantization scales are not polluted by garbage data.
+    k_cache = torch.zeros(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
+    v_cache = torch.zeros(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
 
     block_tables = torch.full((batch_size, max_num_blocks_per_seq), -1, dtype=torch.int32)
     free_blocks = torch.randperm(num_total_blocks, dtype=torch.int32)
@@ -100,6 +127,16 @@ def generate_paged_decode_quant_data(
         assigned_blocks = free_blocks[current_block_offset : current_block_offset + num_blocks_for_seq]
         block_tables[i, :num_blocks_for_seq] = assigned_blocks
         current_block_offset += num_blocks_for_seq
+
+        # Fill only the slots actually used; tail of the last block stays zero.
+        for b_idx, phys in enumerate(assigned_blocks.tolist()):
+            token_start = b_idx * block_size
+            token_end = min(token_start + block_size, seq_len)
+            valid = token_end - token_start
+            if valid <= 0:
+                continue
+            k_cache[phys, :, :valid, :] = torch.randn(num_kv_heads, valid, head_dim, dtype=dtype)
+            v_cache[phys, :, :valid, :] = torch.randn(num_kv_heads, valid, head_dim, dtype=dtype)
 
     return query, k_cache, v_cache, total_seq_lens, block_tables, max_total_seq_len
 
@@ -147,8 +184,10 @@ def generate_paged_prefill_quant_data(
 
     num_total_blocks = total_blocks_needed + 10
 
-    k_cache = torch.randn(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
-    v_cache = torch.randn(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
+    # float KV cache; unused block / unused slot positions are kept as zero so that
+    # quantization scales are not polluted by garbage data.
+    k_cache = torch.zeros(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
+    v_cache = torch.zeros(num_total_blocks, num_kv_heads, block_size, head_dim, dtype=dtype)
 
     block_tables = torch.full((batch_size, max_num_blocks_per_seq), -1, dtype=torch.int32)
     free_blocks = torch.randperm(num_total_blocks, dtype=torch.int32)
@@ -162,6 +201,16 @@ def generate_paged_prefill_quant_data(
         assigned_blocks = free_blocks[current_block_offset : current_block_offset + num_blocks_for_seq]
         block_tables[i, :num_blocks_for_seq] = assigned_blocks
         current_block_offset += num_blocks_for_seq
+
+        # Fill only the slots actually used; tail of the last block stays zero.
+        for b_idx, phys in enumerate(assigned_blocks.tolist()):
+            token_start = b_idx * block_size
+            token_end = min(token_start + block_size, seq_len)
+            valid = token_end - token_start
+            if valid <= 0:
+                continue
+            k_cache[phys, :, :valid, :] = torch.randn(num_kv_heads, valid, head_dim, dtype=dtype)
+            v_cache[phys, :, :valid, :] = torch.randn(num_kv_heads, valid, head_dim, dtype=dtype)
 
     return query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens
 
@@ -202,7 +251,7 @@ test_configs_prefill_quant_gqa = [
 @pytest.mark.parametrize("query_dtype, context_dtype, compute_dtype", 
     [
         (torch.bfloat16, torch.int8, torch.bfloat16),
-        (torch.bfloat16, torch.int8, torch.int8),
+        (torch.int8, torch.int8, torch.int8),
     ]
 )
 @auto_switch_platform()
@@ -219,10 +268,16 @@ def test_paged_prefill_quant_gqa(
     context_dtype: torch.dtype,
     compute_dtype: torch.dtype,
 ):
-    query_q, query_scale = _quantize_query(query, query_dtype)
+    query_q, query_scale = _quantize_query_per_token(query, query_dtype)
 
-    k_cache_q, key_scale = _quantize_kv_cache(k_cache, context_dtype)
-    v_cache_q, value_scale = _quantize_kv_cache(v_cache, context_dtype)
+    sage_path = (query_dtype == torch.int8 and compute_dtype == torch.int8)
+    if sage_path:
+        # SageAttention path uses per-token K scales.
+        k_cache_q, key_scale = _quantize_kv_cache_per_token(k_cache, context_dtype)
+    else:
+        k_cache_q, key_scale = _quantize_kv_cache_per_channel(k_cache, context_dtype)
+    # V is per-channel quantized in both paths.
+    v_cache_q, value_scale = _quantize_kv_cache_per_channel(v_cache, context_dtype)
 
     op = MojoPagedPrefillQuantGQA(
         is_causal=True,
@@ -311,10 +366,10 @@ def test_paged_decode_quant_gqa(
     context_dtype: torch.dtype,
     compute_dtype: torch.dtype,
 ):
-    query_q, query_scale = _quantize_query(query, query_dtype)
+    query_q, query_scale = _quantize_query_per_token(query, query_dtype)
 
-    k_cache_q, key_scale = _quantize_kv_cache(k_cache, context_dtype)
-    v_cache_q, value_scale = _quantize_kv_cache(v_cache, context_dtype)
+    k_cache_q, key_scale = _quantize_kv_cache_per_channel(k_cache, context_dtype)
+    v_cache_q, value_scale = _quantize_kv_cache_per_channel(v_cache, context_dtype)
 
     head_dim = query.shape[-1]
     softmax_scale = 1.0 / math.sqrt(head_dim)
@@ -396,7 +451,7 @@ test_configs_prefill_quant_swa = [
 @pytest.mark.parametrize("query_dtype, context_dtype, compute_dtype", 
     [
         (torch.bfloat16, torch.int8, torch.bfloat16),
-        (torch.bfloat16, torch.int8, torch.int8),
+        (torch.int8, torch.int8, torch.int8),
     ]
 )
 @auto_switch_platform()
@@ -415,9 +470,15 @@ def test_paged_prefill_quant_swa(
     context_dtype: torch.dtype,
     compute_dtype: torch.dtype,
 ):
-    query_q, query_scale = _quantize_query(query, query_dtype)
-    k_cache_q, key_scale = _quantize_kv_cache(k_cache, context_dtype)
-    v_cache_q, value_scale = _quantize_kv_cache(v_cache, context_dtype)
+    query_q, query_scale = _quantize_query_per_token(query, query_dtype)
+    sage_path = (query_dtype == torch.int8 and compute_dtype == torch.int8)
+    if sage_path:
+        # SageAttention path uses per-token K scales.
+        k_cache_q, key_scale = _quantize_kv_cache_per_token(k_cache, context_dtype)
+    else:
+        k_cache_q, key_scale = _quantize_kv_cache_per_channel(k_cache, context_dtype)
+    # V is per-channel quantized in both paths.
+    v_cache_q, value_scale = _quantize_kv_cache_per_channel(v_cache, context_dtype)
 
     op = MojoPagedPrefillQuantSWA(
         is_causal=True,
@@ -519,9 +580,9 @@ def test_paged_decode_quant_swa(
     context_dtype: torch.dtype,
     compute_dtype: torch.dtype,
 ):
-    query_q, query_scale = _quantize_query(query, query_dtype)
-    k_cache_q, key_scale = _quantize_kv_cache(k_cache, context_dtype)
-    v_cache_q, value_scale = _quantize_kv_cache(v_cache, context_dtype)
+    query_q, query_scale = _quantize_query_per_token(query, query_dtype)
+    k_cache_q, key_scale = _quantize_kv_cache_per_channel(k_cache, context_dtype)
+    v_cache_q, value_scale = _quantize_kv_cache_per_channel(v_cache, context_dtype)
 
     head_dim = query.shape[-1]
     softmax_scale = 1.0 / math.sqrt(head_dim)
