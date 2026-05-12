@@ -92,14 +92,14 @@ from .operators.normalization import MojoRMSNormQuant
 """ position_embedding """
 from .operators.position_embedding import MojoRelativeEmbedding
 from .operators.position_embedding import MojoApplyRoPE
+from .operators.position_embedding import MojoApplyVisionRoPE2D
 from .operators.position_embedding import MojoGridRoPE
+from .operators.position_embedding import MojoMRoPE
 from .operators.position_embedding import MojoNormRoPE
 from .operators.position_embedding import MojoNormRoPEStoreKV
 from .operators.position_embedding import MojoRoPEStoreKV
 from .operators.position_embedding import MojoRotaryEmbedding
-
-""" mrope """
-from .operators.position_embedding import MojoMRoPE
+from .operators.position_embedding import MojoVisionRotaryEmbedding2D
 
 """ sampling """
 from .operators.sampling import MojoApplyPenaltiesTempurate
@@ -203,11 +203,12 @@ __all__ = [
 
     "MojoRotaryEmbedding",
     "MojoApplyRoPE",
+    "MojoApplyVisionRoPE2D",
     "MojoRoPEStoreKV",
     "MojoNormRoPE",
     "MojoNormRoPEStoreKV",
     "MojoGridRoPE",
-
+    "MojoVisionRotaryEmbedding2D",
     "MojoMRoPE",
 
     "MojoTopPSampling",

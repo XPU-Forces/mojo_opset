@@ -1,16 +1,30 @@
 import pytest
 import torch
 
-from mojo_opset.tests.utils import bypass_not_implemented
-
 from mojo_opset import MojoApplyRoPE
+from mojo_opset import MojoApplyVisionRoPE2D
 from mojo_opset import MojoGridRoPE
-from mojo_opset import MojoMRoPE
 from mojo_opset import MojoRelativeEmbedding
 from mojo_opset import MojoRotaryEmbedding
+from mojo_opset import MojoVisionRotaryEmbedding2D
+from mojo_opset import MojoMRoPE
+from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_torch_device
 
 torch.random.manual_seed(42)
+
+VISION_VIT_CONFIG = {
+    "img_size": 448,
+    "patch_size": 14,
+    "embed_dim": 1280,
+    "depth": 27,
+    "num_heads": 20,
+    "head_dim": 64,
+    "mlp_ratio": 4,
+    "mlp_intermediate_dim": 5120,
+    "rope_theta": 10000.0,
+    "adapooling_factor": 2,
+}
 
 
 def compute_cos_sin_cache(head_dim, rotary_dim, max_position, base=10000.0):
