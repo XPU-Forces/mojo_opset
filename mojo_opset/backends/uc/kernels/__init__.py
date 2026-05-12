@@ -18,7 +18,17 @@ def _get_kernel_impl(uc_backend_module, kernel_name):
 
 
 gelu_fwd_impl = _get_kernel_impl(uc_backend_module, "gelu_fwd_impl")
+silu_fwd_impl = _get_kernel_impl(uc_backend_module, "silu_fwd_impl")
+swiglu_fwd_impl = _get_kernel_impl(uc_backend_module, "swiglu_fwd_impl")
 
 
 def gelu_fwd(x):
     return gelu_fwd_impl(x)
+
+
+def silu_fwd(x):
+    return silu_fwd_impl(x)
+
+
+def swiglu_fwd(gate_out, up_out):
+    return swiglu_fwd_impl(gate_out, up_out)
