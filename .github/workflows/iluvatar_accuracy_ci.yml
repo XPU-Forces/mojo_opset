@@ -74,7 +74,7 @@ jobs:
             set -euo pipefail
             cd /workspace
             echo 'Running ttx kernels tests on Iluvatar GPU...'
-            MOJO_BACKEND=ttx python3 -m pytest -n 8 mojo_opset/tests/accuracy/operators/ \
+            TRITON_DISABLE_AUTOTUNE=1 MOJO_BACKEND=ttx python3 -m pytest -n 8 mojo_opset/tests/accuracy/operators/ \
               --ignore=mojo_opset/tests/accuracy/operators/test_compute_with_comm.py
           "
 

@@ -14,6 +14,7 @@ import triton.language as tl
 
 from .utils import ilu_grid_dim_from_row_tasks
 from .utils import libentry
+from .utils import smart_triton_autotune
 
 
 def _generate_window_mask(
@@ -265,8 +266,9 @@ def _swa_acc_fwd_nomask_mxn(
     return acc_ptr, l_i, m_i
 
 
-@triton.autotune(
+@smart_triton_autotune(
     configs=_swa_infer_autotune_configs(),
+    selected_idx=0,
     key=["HEAD_DIM", "GLOBAL_WINDOW", "LOCAL_WINDOW", "NUM_Q_HEADS", "NUM_KV_HEADS"],
 )
 @libentry()
@@ -608,8 +610,9 @@ def _swa_infer_kernel(
             tl.store(o_block_ptr, out_block.to(o_ptr.type.element_ty), boundary_check=(0, 1))
 
 
-@triton.autotune(
+@smart_triton_autotune(
     configs=_swa_paged_prefill_autotune_configs(),
+    selected_idx=0,
     key=["HEAD_DIM", "GLOBAL_WINDOW", "LOCAL_WINDOW", "NUM_Q_HEADS", "NUM_KV_HEADS"],
 )
 @libentry()

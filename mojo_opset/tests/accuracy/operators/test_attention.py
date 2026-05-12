@@ -855,22 +855,16 @@ def generate_diffusion_attention_mask(
     block_size: int,
 ) -> torch.Tensor:
     total_length = seq_length * 2
-    attn_mask = torch.zeros(total_length, total_length, dtype=torch.int8)
+    i = torch.arange(total_length).unsqueeze(1)
+    j = torch.arange(total_length).unsqueeze(0)
+    block_i = i // block_size
+    block_j = j // block_size
 
-    for i in range(total_length):
-        for j in range(total_length):
-            block_i = i // block_size
-            block_j = j // block_size
-            if block_i == block_j:
-                attn_mask[i, j] = 1
+    same_block = block_i == block_j
+    cross = (j >= seq_length) & (i < seq_length) & (((j - seq_length) // block_size) < block_i)
+    lower_tri = (i >= seq_length) & (j >= seq_length) & (block_j < block_i)
 
-            if j >= seq_length and i < seq_length and ((j - seq_length) // block_size) < block_i:
-                attn_mask[i, j] = 1
-
-            if i >= seq_length and j >= seq_length and block_j < block_i:
-                attn_mask[i, j] = 1
-
-    return attn_mask.to(torch.bool)
+    return same_block | cross | lower_tri
 
 
 def generate_diffusion_attn_test_data(
