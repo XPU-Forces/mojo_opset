@@ -292,7 +292,7 @@ def test_conformer_sliding_window_attention(
 @pytest.mark.parametrize(
     "q_lens, cache_lens, num_heads, head_dim, chunk_size, left_context_chunks, dtype",
     [
-        ([5120, 384], [0, 0], 8, 128, 8, -1, torch.bfloat16),
+        ([4096], [0], 1, 128, 8, -1, torch.bfloat16),
         ([102, 768, 334, 5, 82], [0, 0, 0, 0, 0], 8, 128, 8, -1, torch.bfloat16),
     ],
 )

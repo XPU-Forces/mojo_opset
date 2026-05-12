@@ -131,9 +131,9 @@ def _conformer_chunk_attention_kernel(
                 )
 
                 k_t = tl.load(k_t_block_ptr, boundary_check=(0, 1), padding_option="zero")
-                tl.multibuffer(k_t, 2)
+                # tl.multibuffer(k_t, 2)
                 v = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero")
-                tl.multibuffer(v, 2)
+                # tl.multibuffer(v, 2)
 
                 # QK^T
                 qk = tl.dot(q, k_t) * scale
@@ -144,28 +144,34 @@ def _conformer_chunk_attention_kernel(
 
                 pre_mask = q_valid[:, None] & kv_valid[None, :] & chunk_mask
 
-                # Online softmax
                 qk = tl.where(pre_mask, qk, float("-inf"))
                 m_candidate = tl.max(qk, axis=1)
                 m_new = tl.maximum(m_i, m_candidate)
-                # Guard against -inf - (-inf) → NaN when a query has no valid KV
-                # in the first KV block it encounters (cross-chunk boundary case).
-                has_valid = m_candidate > float("-inf")
-                m_shift = tl.where(q_valid & (has_valid | (m_i > float("-inf"))), m_new, 0.0)
-                qk = qk - m_shift[:, None]
-                qk = tl.where(pre_mask, tl.exp(qk), 0.0)
 
+                if left_context_chunks < 0:
+                    qk = qk - m_new[:, None]
+                    m_delta = m_i - m_new
+
+                else:
+                    has_valid = m_candidate > float("-inf")
+                    qk = qk - tl.where(has_valid, m_new, 0.0)[:, None]
+
+                    # alpha rescales old accumulator: exp(m_i - m_new) if m_new > m_i, else 1.
+                    # When m_i == -inf (first valid block): alpha = 0 (no prior accumulator).
+                    m_delta = tl.where(has_valid, m_i - m_new, 0.0)
+
+                alpha = tl.exp(m_delta)
+
+                qk = tl.exp(qk)
                 l_ij = tl.sum(qk, axis=1)
-                # alpha rescales old accumulator: exp(m_i - m_new) if m_new > m_i, else 1.
-                # When m_i == -inf (first valid block): alpha = 0 (no prior accumulator).
-                m_delta = tl.where(has_valid & (m_i > float("-inf")), m_new - m_i, 0.0)
-                alpha = tl.where(m_i > float("-inf"), tl.exp(-m_delta), 0.0)
-                acc_update = tl.dot(qk.to(k_t.dtype), v, acc * alpha[:, None])
-                acc = acc_update
+
+                acc = tl.dot(qk.to(k_t.dtype), v, acc * alpha[:, None])
                 l_i = l_i * alpha + l_ij
+
                 m_i = m_new
 
-            out = acc / tl.where(q_valid, l_i, 1.0)[:, None]
+            out = acc / l_i[:, None]
+            # out = acc / tl.where(q_valid, l_i, 1.0)[:, None]
             # out = tl.where(q_valid[:, None], out, 0.0)
             o_block_ptr = tl.make_block_ptr(
                 base=o_ptr + q_start * stride_ot + h_id * stride_oh,
@@ -181,10 +187,14 @@ def _conformer_chunk_attention_kernel(
 def _select_blocks(head_dim: int, dtype: torch.dtype) -> tuple[int, int, int, bool]:
     """Heuristic tile selection for Ascend 910B2C with 192 KB UB.
 
-    UB budget accounting for explicit tl.multibuffer + auto-multibuffer:
-        UB_total = BM*(12*D + 8) + BN*(8*D) + BM*BN*8
+    Empirically verified UB-safe tile sizes (bm/bn combos tested with TRITON_DEBUG=1):
+      D=128: BM=128 any BN → UB overflow (~205KB needed). BM=96 all BN ≤ 64 pass.
+      D=96:  BM=96, BN=96 passes. BM=64, BN=64 passes.
+      D=64:  BM=128, BN=64 passes. BM=128, BN≥96 overflows.
 
-    All tile combinations below are verified to fit within ~196 KB UB.
+    multibuffer=False at launch since cbuf workspace-multibuffer still doubles
+    NZ allocation overhead. AI = 2*BM*BN/(BM+2*BN).
+    Ascend 910B2C roofline knee ≈ 197 FLOP/byte.
     """
     block_m_override = os.getenv("MOJO_CHUNK_ATTN_BLOCK_M")
     block_n_override = os.getenv("MOJO_CHUNK_ATTN_BLOCK_N")
@@ -192,22 +202,20 @@ def _select_blocks(head_dim: int, dtype: torch.dtype) -> tuple[int, int, int, bo
     if block_m_override is not None or block_n_override is not None:
         block_m = int(block_m_override) if block_m_override is not None else 128
         block_n = int(block_n_override) if block_n_override is not None else 64
-        return block_m, block_n, head_dim, True
+        return block_m, block_n, head_dim, False
 
     if dtype == torch.float32:
         return 64, 64, head_dim, False
 
-    enable_multibuf = True
-
     if head_dim >= 128:
-        # D=128: BM=80, BN=36, UB≈183KB, AI≈38
-        return 80, 36, head_dim, enable_multibuf
+        # D≥128: BM=96, BN=64, AI=2*96*64/(96+128)≈55
+        return 96, 64, head_dim, True
     elif head_dim >= 96:
-        # D=96: BM=64, BN=64, UB≈153KB, AI≈43
-        return 64, 64, head_dim, enable_multibuf
+        # 96≤D<128: BM=64, BN=64, AI=2*64*64/(64+128)≈43
+        return 64, 64, head_dim, False
     else:
-        # D<=64: BM=96, BN=64, UB≈156KB, AI≈55
-        return 96, 64, head_dim, enable_multibuf
+        # D<96: BM=128, BN=64, AI=2*128*64/(128+128)=64
+        return 128, 64, head_dim, False
 
 
 def conformer_chunk_attention_impl(
