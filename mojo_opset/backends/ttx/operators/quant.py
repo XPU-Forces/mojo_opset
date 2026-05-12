@@ -21,7 +21,7 @@ class TTXDynamicQuant(MojoDynamicQuant):
 
 
 class TTXMoEDynamicQuant(MojoMoEDynamicQuant):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(
         self,
@@ -29,9 +29,4 @@ class TTXMoEDynamicQuant(MojoMoEDynamicQuant):
         token_count: torch.Tensor,
     ):
         input_fp = input.float() * self.inv_smooth_scale.float().repeat_interleave(token_count, dim=0)
-        scale_tensor = torch.ones(
-            input_fp.shape[-1],
-            device=input_fp.device,
-            dtype=torch.float32,
-        )
-        return dynamic_quant(input_fp, scale_tensor)
+        return dynamic_quant(input_fp, None)
