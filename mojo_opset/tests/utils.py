@@ -14,10 +14,12 @@ from typing import Union
 
 import pytest
 import torch
+
 from torch.autograd import DeviceType
 
 from mojo_opset.utils.logging import get_logger
-from mojo_opset.utils.platform import get_platform, get_torch_device
+from mojo_opset.utils.platform import get_platform
+from mojo_opset.utils.platform import get_torch_device
 
 logger = get_logger(__name__)
 
@@ -269,7 +271,7 @@ def auto_switch_platform(set_perf: bool = False):
     if set_perf:
         if platform == "npu":
             perf_fn = perf_npu
-        elif platform == 'mlu':
+        elif platform == "mlu":
             perf_fn = perf_mlu
         elif platform == "ilu":
             perf_fn = perf_ilu
@@ -342,7 +344,7 @@ def device_perf_npu(executor, profiling_dir="./npu_profiling", active=5):
     """
     if not os.path.exists(profiling_dir):
         os.makedirs(profiling_dir)
-    
+
     import torch_npu
 
     experimental_config = torch_npu.profiler._ExperimentalConfig(
@@ -419,18 +421,13 @@ def device_perf_mlu(executor, profiling_dir="./mlu_profiling", active=5):
     if not os.path.exists(profiling_dir):
         os.makedirs(profiling_dir)
 
-    import torch_mlu
-
     with torch.profiler.profile(
         activities=[
             torch.profiler.ProfilerActivity.CPU,
             torch.profiler.ProfilerActivity.MLU,
         ],
-        schedule=torch.profiler.schedule(
-            wait=1,
-            warmup=5,
-            active=active),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(profiling_dir)
+        schedule=torch.profiler.schedule(wait=1, warmup=5, active=active),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(profiling_dir),
     ) as prof:
         for _ in range(1 + 5 + active):
             executor()
@@ -444,11 +441,7 @@ def device_perf_mlu(executor, profiling_dir="./mlu_profiling", active=5):
             if item.device_type == DeviceType.PrivateUse1 and not item.is_user_annotation:
                 mlu_total += item.self_device_time_total
 
-        trace_files = [
-            os.path.join(profiling_dir, f) 
-            for f in os.listdir(profiling_dir) 
-            if f.endswith('.json')
-        ]
+        trace_files = [os.path.join(profiling_dir, f) for f in os.listdir(profiling_dir) if f.endswith(".json")]
         latest_trace = max(trace_files, key=os.path.getmtime) if trace_files else profiling_dir
 
         return mlu_total / active, latest_trace
@@ -500,9 +493,7 @@ def device_perf_ilu(executor, profiling_dir="./ilu_profiling", active=5):
         elapsed_ms.append(ev_start.elapsed_time(ev_end))
     avg_device_us = sum(elapsed_ms) / len(elapsed_ms) * 1000.0
 
-    schedule_fn = torch.profiler.schedule(
-        wait=wait, warmup=schedule_warmup, active=active, repeat=repeat
-    )
+    schedule_fn = torch.profiler.schedule(wait=wait, warmup=schedule_warmup, active=active, repeat=repeat)
     total_steps = (wait + schedule_warmup + active) * repeat
 
     with torch.profiler.profile(
@@ -702,6 +693,41 @@ def perf_ilu(executor, profiling_dir="./ilu_profiling", active=5):
             f.write("| Timestamp | Op Name | Parameters | Device Latency (us) | Host Latency (ms) |\n")
             f.write("|-----------|---------|------------|---------------------|-------------------|\n")
         f.write(plain_log_file + "\n")
+
+
+def _requested_backend() -> str | None:
+    raw_backend = os.environ.get("MOJO_BACKEND")
+    return raw_backend.strip().lower() if raw_backend else None
+
+
+def requires_platform_backend(
+    *,
+    platforms: str | tuple[str, ...] | None = None,
+    backends: str | tuple[str, ...] | None = None,
+    reason: str | None = None,
+):
+    if isinstance(platforms, str):
+        platforms = (platforms,)
+    if isinstance(backends, str):
+        backends = (backends.strip().lower(),)
+    elif backends is not None:
+        backends = tuple(backend.strip().lower() for backend in backends)
+
+    requested_backend = _requested_backend()
+    current_platform = get_platform()
+
+    platform_mismatch = platforms is not None and current_platform not in platforms
+    backend_mismatch = backends is not None and requested_backend not in (None, *backends)
+
+    if reason is None:
+        scope = []
+        if platforms is not None:
+            scope.append(f"platform in {platforms}")
+        if backends is not None:
+            scope.append(f"backend in {backends}")
+        reason = f"Test requires {' and '.join(scope)}."
+
+    return pytest.mark.skipif(platform_mismatch or backend_mismatch, reason=reason)
 
 
 class MockFunctionCtx:

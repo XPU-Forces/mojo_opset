@@ -45,6 +45,9 @@ mrope_fwd_impl = _get_kernel_impl(ttx_backend_module, "mrope_fwd_impl")
 vision_rot_pos_embed_impl = _get_kernel_impl(ttx_backend_module, "vision_rot_pos_embed_impl")
 vision_rope_apply_impl = _get_kernel_impl(ttx_backend_module, "vision_rope_apply_impl")
 
+vision_rot_pos_embed_impl = _get_kernel_impl(ttx_backend_module, "vision_rot_pos_embed_impl")
+vision_rope_apply_impl = _get_kernel_impl(ttx_backend_module, "vision_rope_apply_impl")
+
 swiglu_fwd_impl = _get_kernel_impl(ttx_backend_module, "swiglu_fwd_impl")
 swiglu_bwd_impl = _get_kernel_impl(ttx_backend_module, "swiglu_bwd_impl")
 

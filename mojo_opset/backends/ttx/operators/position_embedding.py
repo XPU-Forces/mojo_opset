@@ -10,10 +10,10 @@ from mojo_opset.backends.ttx.kernels import rope_fwd
 from mojo_opset.backends.ttx.kernels import mrope_fwd_impl
 from mojo_opset.backends.ttx.kernels import vision_rope_apply
 from mojo_opset.backends.ttx.kernels import vision_rot_pos_embed
-from mojo_opset.core import MojoRelativeEmbedding
-from mojo_opset.core import MojoRotaryEmbedding
 from mojo_opset.core import MojoApplyRoPE
 from mojo_opset.core import MojoApplyVisionRoPE2D
+from mojo_opset.core import MojoRelativeEmbedding
+from mojo_opset.core import MojoRotaryEmbedding
 from mojo_opset.core import MojoVisionRotaryEmbedding2D
 from mojo_opset.core.operators.position_embedding import MojoMRoPE
 
@@ -115,4 +115,3 @@ class TTXApplyVisionRoPE2D(MojoApplyVisionRoPE2D):
         sin: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return vision_rope_apply(q, k, cos, sin)
-

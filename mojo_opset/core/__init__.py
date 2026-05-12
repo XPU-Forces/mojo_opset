@@ -32,6 +32,10 @@ from .operators.attention import MojoPrefillMLA
 from .operators.attention import MojoPrefillNSA
 from .operators.attention import MojoSdpa
 from .operators.attention import MojoSWA
+from .operators.attention import MojoPagedDecodeQuantGQA
+from .operators.attention import MojoPagedPrefillQuantGQA
+from .operators.attention import MojoPagedDecodeQuantSWA
+from .operators.attention import MojoPagedPrefillQuantSWA
 
 """ kvcache """
 from .operators.kv_cache import MojoStoreMLAKVCache
@@ -153,6 +157,10 @@ __all__ = [
     "MojoPagedPrefillSWA",
     "MojoPagedDecodeSWA",
     "MojoSWA",
+    "MojoPagedPrefillQuantGQA",
+    "MojoPagedDecodeQuantGQA",
+    "MojoPagedPrefillQuantSWA",
+    "MojoPagedDecodeQuantSWA",
 
     "MojoStorePagedKVCache",
     "MojoStoreMLAKVCache",

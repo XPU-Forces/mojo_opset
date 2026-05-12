@@ -1,5 +1,4 @@
-from typing import Optional
-from typing import Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -78,7 +77,7 @@ class MojoQuantMoE(MojoOperator):
         activation: str = "swiglu",
         quant_dtype: torch.dtype = torch.int8,
         quant_group_size: int = -1,
-        weight_bits: int = 8,
+        weight_dtype: Union[torch.dtype, str] = torch.int8,
         **kwargs,
     ):
         super().__init__()
@@ -86,7 +85,7 @@ class MojoQuantMoE(MojoOperator):
             raise NotImplementedError(f"MojoQuantMoE: Activation {activation} is not supported.")
         if quant_dtype != torch.int8:
             raise NotImplementedError(f"MojoQuantMoE: quant_dtype must be 'int8', got {quant_dtype}.")
-        if weight_bits not in (4, 8):
+        if weight_dtype not in ("int4", torch.int8):
             raise ValueError(f"MojoQuantMoE: weight must be w4 or w8")
         for k in ("ep_rank", "ep_size"):
             if k in kwargs:
@@ -101,7 +100,7 @@ class MojoQuantMoE(MojoOperator):
         self.intermediate_size = intermediate_size
         self.quant_dtype = quant_dtype
         self.quant_group_size = quant_group_size
-        self.weight_bits = weight_bits
+        self.weight_dtype = weight_dtype
 
         self.gating = MojoMoEGating._registry.get(self._backend)(
             hidden_size=self.hidden_size,
@@ -117,7 +116,7 @@ class MojoQuantMoE(MojoOperator):
             activation=activation,
             quant_dtype=quant_dtype,
             quant_group_size=quant_group_size,
-            weight_bits=weight_bits,
+            weight_dtype=weight_dtype,
             **kwargs,
         )
         self.combine = MojoMoECombine._registry.get(self._backend)(multiply_by_gates=True, **kwargs)
@@ -175,7 +174,7 @@ class MojoMoEGating(MojoOperator):
         gate_logits = torch.softmax(gate_logits, dim=-1)
         top_k_logits, top_k_indices = torch.topk(gate_logits, self.top_k, dim=-1)
         top_k_gates = top_k_logits / torch.sum(top_k_logits, dim=-1, keepdim=True)
-        return top_k_indices, top_k_gates
+        return top_k_indices.to(torch.int32), top_k_gates
 
     def extra_repr(self) -> str:
         hidden_size = self.gate_weight.size(0)
@@ -488,14 +487,14 @@ class MojoQuantExperts(MojoOperator):
         activation: str = "swiglu",
         quant_dtype: torch.dtype = torch.int8,
         quant_group_size: int = -1,
-        weight_bits: int = 8,
+        weight_dtype: Union[torch.dtype, str] = torch.int8,
         **kwargs,
     ):
         """
         Quantized MoE Experts reference.
 
         The input activation is expected to be dynamically quantized before this
-        operator. For ``weight_bits=4``, expert weights are signed int4
+        operator. For ``weight_dtype=4``, expert weights are signed int4
         values packed two per int8 element along the output/channel dimension,
         matching checkpoint tensors shaped ``[num_experts, output_dim // 2,
         input_dim]``. Weight scales use ``[num_experts, output_dim, group_num]``
@@ -508,15 +507,15 @@ class MojoQuantExperts(MojoOperator):
             raise NotImplementedError(f"MojoQuantExperts: Activation {activation} is not supported.")
         if quant_dtype != torch.int8:
             raise ValueError(f"MojoQuantExperts: quant_dtype must be 'int8', got {quant_dtype}.")
-        if weight_bits not in (4, 8):
+        if weight_dtype not in ("int4", torch.int8):
             raise NotImplementedError("MojoQuantExperts currently only supports w4 or w8.")
-        if weight_bits == 4 and (hidden_size % 2 != 0 or intermediate_size % 2 != 0):
+        if weight_dtype == "int4" and (hidden_size % 2 != 0 or intermediate_size % 2 != 0):
             raise ValueError("MojoQuantExperts requires even hidden_size and intermediate_size for int4 packing.")
         
         self.activation = activation
         self.quant_dtype = quant_dtype
         self.quant_group_size = quant_group_size
-        self.weight_bits = weight_bits
+        self.weight_dtype = weight_dtype
         assert quant_dtype == torch.int8
         bits = 8
         self.qmax = 2 ** (bits - 1) - 1
@@ -533,7 +532,7 @@ class MojoQuantExperts(MojoOperator):
             num_experts, intermediate_size,
         )
 
-        if weight_bits == 8:
+        if weight_dtype == torch.int8:
             self.register_buffer(
                 "up_proj_weight",
                 torch.empty((num_experts, intermediate_size * 2, hidden_size), dtype=torch.int8),
@@ -543,6 +542,7 @@ class MojoQuantExperts(MojoOperator):
                 torch.empty((num_experts, hidden_size, intermediate_size), dtype=torch.int8),
             )
         else:
+            assert weight_dtype == "int4"
             self.register_buffer(
                 "up_proj_weight",
                 torch.empty((num_experts, intermediate_size * 2 // 2, hidden_size), dtype=torch.int8),
@@ -599,7 +599,7 @@ class MojoQuantExperts(MojoOperator):
         weight_scale: torch.Tensor,
         output_dtype: torch.dtype = torch.bfloat16,
     ) -> torch.Tensor:
-        if self.weight_bits == 4:
+        if self.weight_dtype == "int4":
             expert_weight = self._unpack_weight(expert_weight)
         
         assert input_scale.ndim == 2 and input_scale.shape[1] == 1
@@ -677,7 +677,7 @@ class MojoQuantExperts(MojoOperator):
         return torch.cat(outputs, dim=0)
 
     def extra_repr(self) -> str:
-        return f"{self.num_experts=}, {self.intermediate_size=}, {self.hidden_size=}, {self.quant_dtype=}, {self.quant_group_size=}, {self.weight_bits=}".replace("self.", "")
+        return f"{self.num_experts=}, {self.intermediate_size=}, {self.hidden_size=}, {self.quant_dtype=}, {self.quant_group_size=}, {self.weight_dtype=}".replace("self.", "")
 
 
 class MojoMoECombine(MojoOperator):

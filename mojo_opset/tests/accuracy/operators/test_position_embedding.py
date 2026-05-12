@@ -4,10 +4,10 @@ import torch
 from mojo_opset import MojoApplyRoPE
 from mojo_opset import MojoApplyVisionRoPE2D
 from mojo_opset import MojoGridRoPE
+from mojo_opset import MojoMRoPE
 from mojo_opset import MojoRelativeEmbedding
 from mojo_opset import MojoRotaryEmbedding
 from mojo_opset import MojoVisionRotaryEmbedding2D
-from mojo_opset import MojoMRoPE
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_torch_device
 
@@ -35,32 +35,32 @@ def compute_cos_sin_cache(head_dim, rotary_dim, max_position, base=10000.0):
     return freqs.cos(), freqs.sin()
 
 
-
 def prepare_mrope_test_inputs(num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=torch.float32):
     rotary_dim = sum(mrope_section) * 2
-    
+
     positions = torch.randint(0, 1000, (3, num_tokens), device=device, dtype=torch.long)
     cos_cache, sin_cache = compute_cos_sin_cache(head_dim, rotary_dim, 4000, base=10000.0)
-    
+
     half_rotary_dim = rotary_dim // 2
     cos_3d = torch.zeros(3, num_tokens, half_rotary_dim, device=device, dtype=torch.float32)
     sin_3d = torch.zeros(3, num_tokens, half_rotary_dim, device=device, dtype=torch.float32)
-    
+
     for dim_idx in range(3):
         pos = positions[dim_idx]
         cos_3d[dim_idx] = cos_cache[pos][:, :half_rotary_dim]
         sin_3d[dim_idx] = sin_cache[pos][:, :half_rotary_dim]
-    
+
     query = torch.randn(num_tokens, n_qh * head_dim, device=device, dtype=dtype)
     key = torch.randn(num_tokens, n_kh * head_dim, device=device, dtype=dtype)
-    
+
     return query, key, cos_3d, sin_3d, mrope_section
 
 
 @pytest.mark.parametrize("bs", [1, 6])
 @pytest.mark.parametrize("seqlen", [2048])
 @pytest.mark.parametrize(
-    "rope_dim", [32, 48, 64, 88, 96, 128],
+    "rope_dim",
+    [32, 48, 64, 88, 96, 128],
 )
 @pytest.mark.parametrize("mode", ["padding_prefill", "varlen_prefill", "decode"])
 @bypass_not_implemented
@@ -70,16 +70,20 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
     max_seq_len = 32768
     hidden_size = 256
 
-    rot_pos_emb_ref_nocache = MojoRotaryEmbedding._registry.get("torch")(rope_theta=10000.0, rope_dim=rope_dim).to(device)
-    rot_pos_emb_ref = MojoRotaryEmbedding._registry.get("torch")(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
+    rot_pos_emb_ref_nocache = MojoRotaryEmbedding._registry.get("torch")(rope_theta=10000.0, rope_dim=rope_dim).to(
+        device
+    )
+    rot_pos_emb_ref = MojoRotaryEmbedding._registry.get("torch")(
+        rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len
+    ).to(device)
     rot_pos_emb = MojoRotaryEmbedding(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
 
     if mode == "padding_prefill":
         x = torch.randn(bs, seqlen, hidden_size, device=device, dtype=torch.float32)
         torch.testing.assert_close(
-            rot_pos_emb_ref(x), 
-            rot_pos_emb_ref_nocache(x), 
-            atol=1e-5, 
+            rot_pos_emb_ref(x),
+            rot_pos_emb_ref_nocache(x),
+            atol=1e-5,
             rtol=1e-5,
         )
 
@@ -93,9 +97,9 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
         x = torch.randn(bs, hidden_size, device=device, dtype=torch.float32)
         position_ids = torch.randint(0, max_seq_len, (bs,), dtype=torch.int32, device=device)
         torch.testing.assert_close(
-            rot_pos_emb_ref(x, position_ids=position_ids), 
-            rot_pos_emb_ref_nocache(x, position_ids=position_ids), 
-            atol=1e-5, 
+            rot_pos_emb_ref(x, position_ids=position_ids),
+            rot_pos_emb_ref_nocache(x, position_ids=position_ids),
+            atol=1e-5,
             rtol=1e-5,
         )
 
@@ -107,7 +111,7 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
             rtol=1e-5,
         )
     else:
-        seq_lens = torch.randint((seqlen+1) // 2, seqlen + 1, (bs,), device=device, dtype=torch.int32)
+        seq_lens = torch.randint((seqlen + 1) // 2, seqlen + 1, (bs,), device=device, dtype=torch.int32)
         cu_seqlens = torch.zeros(bs + 1, device=device, dtype=torch.int32)
         cu_seqlens[1:] = torch.cumsum(seq_lens, dim=0)
         kv_lens = torch.randint(0, max_seq_len - seqlen, (bs,), device=device, dtype=torch.int32) + seq_lens
@@ -126,7 +130,7 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
             total_seq_lens=kv_lens,
             atol=1e-5,
             rtol=1e-5,
-    )
+        )
 
 
 @pytest.mark.parametrize(
@@ -138,7 +142,7 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
     ],
 )
 @pytest.mark.parametrize(
-    "dtype, q_heads, k_heads, head_first, head_dim, rope_percentage", 
+    "dtype, q_heads, k_heads, head_first, head_dim, rope_percentage",
     [
         (torch.float16, 32, 8, True, 96, 1.0),
         (torch.bfloat16, 8, 2, False, 96, 0.3333333333333333333333),
@@ -157,7 +161,9 @@ def test_apply_rope(bs, seqlen, q_heads, k_heads, head_first, head_dim, rope_per
     rope_dim = int(head_dim * rope_percentage)
     hidden_size = q_heads * head_dim
 
-    rot_pos_emb = MojoRotaryEmbedding._registry.get("torch")(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
+    rot_pos_emb = MojoRotaryEmbedding._registry.get("torch")(
+        rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len
+    ).to(device)
 
     if mode == "padding_prefill_pos3d":
         offsets = torch.randint(0, max_seq_len - seqlen - 1, (bs,), device=device, dtype=torch.int32)
@@ -256,10 +262,10 @@ def test_grid_pos_emb(bs, grid, heads, head_dim, pad, dtype):
 
 @pytest.mark.parametrize("num_tokens", [1, 32, 128])
 @pytest.mark.parametrize("n_qh, n_kh, mrope_section, is_interleaved, model_name", [
-    (28, 4, [16, 24, 24], False, "Qwen2-VL-7B"),      # Qwen2-VL / Qwen2.5-VL-7B
-    (40, 8, [16, 24, 24], False, "Qwen2.5-VL-32B"),   # Qwen2.5-VL-32B
-    (16, 8, [24, 20, 20], True, "Qwen3-VL-2B"),       # Qwen3-VL-2B (interleaved)
-    (32, 8, [24, 20, 20], True, "Qwen3-VL-8B"),       # Qwen3-VL-8B (interleaved)
+    (28, 4, [16, 24, 24], False, "Qwen2-VL-7B"),
+    (40, 8, [16, 24, 24], False, "Qwen2.5-VL-32B"),
+    (16, 8, [24, 20, 20], True, "Qwen3-VL-2B"),
+    (32, 8, [24, 20, 20], True, "Qwen3-VL-8B"),
 ])
 @pytest.mark.parametrize("head_dim", [128])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -274,15 +280,6 @@ def test_mrope_qwen_models(
     model_name,
     dtype,
 ):
-    """
-    Test MRoPE with actual Qwen2-VL, Qwen2.5-VL, and Qwen3-VL model configurations.
-    
-    Key differences:
-    - Qwen2/2.5-VL: mrope_section=[16, 24, 24], is_interleaved=False
-    - Qwen3-VL: mrope_section=[24, 20, 20], is_interleaved=True
-    
-    All models use head_dim=128, rotary_dim=128 (full rotation).
-    """
     device = get_torch_device()
     query, key, cos_table, sin_table, mrope_section_out = prepare_mrope_test_inputs(
         num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=dtype
@@ -295,13 +292,13 @@ def test_mrope_qwen_models(
 
 @pytest.mark.parametrize("num_tokens", [16, 64])
 @pytest.mark.parametrize("n_qh, n_kh", [
-    (32, 4),   # Typical GQA ratio 8:1
-    (64, 8),   # Typical GQA ratio 8:1
+    (32, 4),
+    (64, 8),
 ])
 @pytest.mark.parametrize("head_dim, mrope_section, description", [
-    (128, [8, 12, 12], "partial_rotation_50pct"),   # rotary_dim=64, 50% rotation
-    (128, [12, 18, 18], "partial_rotation_75pct"),  # rotary_dim=96, 75% rotation
-    (96, [8, 12, 12], "small_head_full_rotation"),  # rotary_dim=64, full rotation
+    (128, [8, 12, 12], "partial_rotation_50pct"),
+    (128, [12, 18, 18], "partial_rotation_75pct"),
+    (96, [8, 12, 12], "small_head_full_rotation"),
 ])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("is_interleaved", [False])
@@ -316,10 +313,6 @@ def test_mrope_partial_rotation(
     dtype,
     is_interleaved,
 ):
-    """
-    Test MRoPE with partial rotation (head_dim > rotary_dim) and various configurations.
-    This tests scenarios beyond Qwen VL's standard full rotation.
-    """
     device = get_torch_device()
     query, key, cos_table, sin_table, mrope_section_out = prepare_mrope_test_inputs(
         num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=dtype
@@ -354,3 +347,93 @@ def test_relative_embedding(num_buckets, num_heads, bidirectional, lq, lk):
         emb_ref.embedding.weight.copy_(weight)
 
     emb.forward_diff_with(emb_ref, lq, lk, atol=1e-5, rtol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "grid",
+    [
+        ((4, 4),),
+        ((8, 6),),
+        ((8, 8), (4, 6)),
+    ],
+)
+@pytest.mark.parametrize(
+    "vision_config",
+    [
+        pytest.param(VISION_VIT_CONFIG, id="vision_448_27l_20h_h64"),
+    ],
+)
+@bypass_not_implemented
+def test_vision_rotary_embedding_2d(grid, vision_config):
+    device = get_torch_device()
+    rope_theta = vision_config["rope_theta"]
+    head_dim = vision_config["head_dim"]
+    adapooling_factor = vision_config["adapooling_factor"]
+
+    grid_hw = torch.tensor(grid, device=device, dtype=torch.int32)
+    rot_pos_emb = MojoVisionRotaryEmbedding2D(
+        rope_theta=rope_theta,
+        rope_dim=head_dim,
+        adapooling_factor=adapooling_factor,
+    ).to(device)
+    rot_pos_emb_ref = MojoVisionRotaryEmbedding2D._registry.get("torch")(
+        rope_theta=rope_theta,
+        rope_dim=head_dim,
+        adapooling_factor=adapooling_factor,
+    ).to(device)
+
+    rot_pos_emb.forward_diff_with(
+        rot_pos_emb_ref,
+        grid_hw,
+        atol=1e-5,
+        rtol=1e-5,
+    )
+
+
+@pytest.mark.parametrize(
+    "grid",
+    [
+        ((4, 4),),
+        ((8, 6),),
+        ((8, 8), (4, 6)),
+    ],
+)
+@pytest.mark.parametrize(
+    "vision_config",
+    [
+        pytest.param(VISION_VIT_CONFIG, id="vision_448_27l_20h_h64"),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@bypass_not_implemented
+def test_apply_vision_rope_2d(grid, vision_config, dtype):
+    device = get_torch_device()
+    rope_theta = vision_config["rope_theta"]
+    q_heads = vision_config["num_heads"]
+    k_heads = vision_config["num_heads"]
+    head_dim = vision_config["head_dim"]
+    adapooling_factor = vision_config["adapooling_factor"]
+
+    grid_hw = torch.tensor(grid, device=device, dtype=torch.int32)
+    total_tokens = int(grid_hw.to(dtype=torch.int64).prod(dim=-1).sum().item())
+    q = torch.randn(total_tokens, q_heads, head_dim, device=device, dtype=dtype)
+    k = torch.randn(total_tokens, k_heads, head_dim, device=device, dtype=dtype)
+    rot_pos_emb_ref = MojoVisionRotaryEmbedding2D._registry.get("torch")(
+        rope_theta=rope_theta,
+        rope_dim=head_dim,
+        adapooling_factor=adapooling_factor,
+    ).to(device)
+    cos, sin = rot_pos_emb_ref(grid_hw)
+
+    rope = MojoApplyVisionRoPE2D()
+    rope_ref = MojoApplyVisionRoPE2D._registry.get("torch")()
+
+    rope.forward_diff_with(
+        rope_ref,
+        q,
+        k,
+        cos,
+        sin,
+        atol=5e-2,
+        rtol=5e-2,
+    )

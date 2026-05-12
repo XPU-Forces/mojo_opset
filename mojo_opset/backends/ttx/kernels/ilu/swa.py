@@ -1214,12 +1214,14 @@ def _sdpa_acc_fwd_1xN(
 
     qk = qk * qk_scale
     if mask is not None and mask is not True:
-        qk = tl.where(mask, qk, float("-inf"))
+        qk = tl.where(mask, qk, -1.0e20)
 
     m_ij = tl.maximum(m_i, tl.max(qk, 0))
     qk = qk - m_ij
 
     p = tl.math.exp(qk)
+    if mask is not None and mask is not True:
+        p = tl.where(mask, p, 0.0)
 
     p_cast = p.to(k.dtype)
 
@@ -1255,11 +1257,13 @@ def _sdpa_acc_fwd_1xT(
     qk = tl.sum((q[None, :] * k).to(tl.float32), axis=1)
     qk = qk * qk_scale
     if mask is not None and mask is not True:
-        qk = tl.where(mask, qk, float("-inf"))
+        qk = tl.where(mask, qk, -1.0e20)
 
     m_ij = tl.maximum(m_i, tl.max(qk, axis=0))
     qk = qk - m_ij
     p = tl.math.exp(qk)
+    if mask is not None and mask is not True:
+        p = tl.where(mask, p, 0.0)
 
     p_cast = p.to(k.dtype)
     l_ij = tl.sum(p, axis=0)

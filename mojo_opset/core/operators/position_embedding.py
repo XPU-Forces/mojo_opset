@@ -237,11 +237,7 @@ class MojoApplyRoPE(MojoOperator):
         assert cos.shape == sin.shape, "cos and sin must have the same shape"
         if q.ndim == 3:
             assert cos.ndim == 2, "rotary position embedding (cos/sin) must be of shape [num_tokens, rope_dim] for varlen prefill or decode"
-
-        # NOTE: When q.ndim == 4 and cos.ndim == 3 (e.g., q=[B,N,S,D], cos=[B,S,rope_dim]),
-        # do NOT unsqueeze here. The head_first logic below will handle the broadcasting
-        # correctly by adding the head dimension at the appropriate position.
-
+        
         if head_first:
             cos = cos.unsqueeze(-3)
             sin = sin.unsqueeze(-3)
@@ -357,29 +353,12 @@ class MojoMRoPE(MojoOperator):
         is_interleaved: bool = False,
         head_dim: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Apply Multimodal Rotary Position Embedding to query and key tensors.
-
-        Args:
-            query: ``(num_tokens, n_qh * head_dim)`` query tensor.
-            key: ``(num_tokens, n_kh * head_dim)`` key tensor.
-            cos_table: ``(3, num_tokens, rotary_dim // 2)`` cos values for T/H/W dimensions.
-            sin_table: ``(3, num_tokens, rotary_dim // 2)`` sin values for T/H/W dimensions.
-            mrope_section: ``[t_section, h_section, w_section]`` - how half rope_dim is split.
-            is_interleaved: if True, T/H/W positions are interleaved.
-            head_dim: head dimension. If None, inferred from cos_table.
-
-        Returns:
-            ``(query, key)`` with RoPE applied, same shape as input.
-        """
         num_tokens, n_qh_head_dim = query.shape
         num_tokens_k, n_kh_head_dim = key.shape
 
         rope_dim = sum(mrope_section) * 2
         half_rope_dim = rope_dim // 2
 
-        # NOTE: head_dim should be explicitly passed by caller.
-        # If not passed, default to rope_dim assuming full-head rotation.
         if head_dim is None:
             head_dim = rope_dim
 
@@ -433,6 +412,7 @@ class MojoVisionRotaryEmbedding2D(MojoOperator):
         **kwargs,
     ):
         super().__init__(**kwargs)
+        # The native position regrouping assumes a positive adapooling window.
         assert adapooling_factor >= 1, "adapooling_factor must be >= 1"
         assert rope_dim % 4 == 0, "vision 2D rope_dim must be divisible by 4"
         self.rope_theta = rope_theta
@@ -470,6 +450,8 @@ class MojoVisionRotaryEmbedding2D(MojoOperator):
             assert gh % self.adapooling_factor == 0 and gw % self.adapooling_factor == 0, (
                 "grid height/width must be divisible by adapooling_factor"
             )
+            # Match the native rotary regrouping: positions are first regrouped by the
+            # adapooling window before being flattened back to patch order.
             hpos_ids = torch.arange(gh, device=device).unsqueeze(1).expand(-1, gw)
             hpos_ids = hpos_ids.reshape(
                 gh // self.adapooling_factor,
@@ -493,6 +475,9 @@ class MojoVisionRotaryEmbedding2D(MojoOperator):
         return torch.cat(pos_ids, dim=0)
 
     def forward(self, grid_hw: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Rebuild the native frequency lookup in two steps:
+        # 1. create one 1D rotary table up to the largest grid extent,
+        # 2. gather H/W pairs using the adapooling-aware patch order.
         device = self.inv_freq.device if self.inv_freq.device.type != "cpu" or grid_hw.device.type == "cpu" else grid_hw.device
         grid_hw_cpu = grid_hw.to(device="cpu", dtype=torch.int64)
         max_grid_size = int(grid_hw_cpu.max().item())
@@ -529,6 +514,12 @@ class MojoApplyVisionRoPE2D(MojoOperator):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply native vision 2D RoPE to packed token-first tensors with prebuilt cos/sin.
+
+        Supported layout:
+        1. Packed varlen: q/k [T, N, D], cos/sin [T, D]
+        """
         assert q.ndim == k.ndim, "q and k must have the same dimension"
         assert q.ndim == 3, "q and k must be 3D packed token-first tensors"
         assert q.shape[-1] == k.shape[-1], "q and k must have the same head_dim"
