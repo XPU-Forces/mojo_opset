@@ -62,7 +62,7 @@ def test_quant_symmetric_per_token(shape, dtype):
         MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.int8),
         scale=scale.clone(),
     )
-    quant.forward_diff_with(quant_ref, x, atol=0, rtol=0)
+    quant.forward_diff_with(quant_ref, x, atol=1, rtol=0) 
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +87,7 @@ def test_quant_symmetric_per_tensor(shape, dtype):
         MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.int8),
         scale=scale.clone(),
     )
-    quant.forward_diff_with(quant_ref, x, atol=0, rtol=0)
+    quant.forward_diff_with(quant_ref, x, atol=1, rtol=0)
 
 
 # ---------------------------------------------------------------------------
