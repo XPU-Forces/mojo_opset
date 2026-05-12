@@ -81,7 +81,7 @@ def _sdpa_fav2_fwd_kernel(
     mask_q = (q_start + offs_m[:, None]) < SEQ
     q_block = tl.load(q_ptrs, mask=mask_q, other=0.0)
 
-    m_i = tl.full([BLOCK_M], -1e6, dtype=tl.float32)
+    m_i = tl.full([BLOCK_M], -float("inf"), dtype=tl.float32)
     l_i = tl.full([BLOCK_M], 0.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
 
@@ -111,11 +111,12 @@ def _sdpa_fav2_fwd_kernel(
         mask_valid = ((q_start + offs_m[:, None]) < SEQ) & (kv_offs[None, :] < SEQ)
         attn_mask_raw = tl.load(attn_mask_ptrs, mask=mask_valid, other=0)
         attn_mask = attn_mask_raw != 0
-        qk = tl.where(attn_mask, qk, -1e6)
+        qk = tl.where(attn_mask, qk, float("-inf"))
 
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
-        alpha = tl.math.exp(m_i - m_ij)
-        p = tl.math.exp(qk - m_ij[:, None])
+        row_is_all_masked = m_ij == -float("inf")
+        alpha = tl.where(row_is_all_masked, 0.0, tl.math.exp(m_i - m_ij))
+        p = tl.where(row_is_all_masked[:, None], 0.0, tl.math.exp(qk - m_ij[:, None]))
 
         acc = acc * alpha[:, None]
 
@@ -133,8 +134,8 @@ def _sdpa_fav2_fwd_kernel(
         l_i = l_i * alpha + tl.sum(p, 1)
         m_i = m_ij
 
-    l_i = tl.maximum(l_i, 1e-6)
-    acc = acc / l_i[:, None]
+    l_i_safe = tl.where(l_i > 0, l_i, 1.0)
+    acc = tl.where(l_i[:, None] > 0, acc / l_i_safe[:, None], 0.0)
 
     o_ptrs = (
         Out
