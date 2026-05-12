@@ -88,7 +88,7 @@ Chronological record of optimization experiments on the ttx (Triton NPU) backend
 
 **Technique:** Replaced dense BSHD + padding-mask path with a THD varlen encoder API. The kernel uses cumulative query/KV lengths and direct window masking by absolute query position.
 **Result:** Accuracy passed for bf16/float32, cache/no-cache encoder cases, and uneven lengths. Perf profiler device latency: 64.9472 us / 173.7712 us / 108.5136 us / 23.5040 us for the four perf cases. Effective throughput by visible-window FLOPs peaked at 9.641 TFLOP/s; normalized to a 354 TFLOP/s bf16 peak, current best observed MFU is about 2.72%.
-**Action:** Added `MojoConformerAttention`, unified TTX varlen backend, and updated accuracy/perf tests.
+**Action:** Added `MojoConformerSlidingWindowAttention`, unified TTX varlen backend, and updated accuracy/perf tests.
 
 ---
 
@@ -114,4 +114,4 @@ MFU         = core_FLOPs / (peak_bf16_TFLOPS * device_time_us * 1e-6 * 1e12)
 where `peak_bf16_TFLOPS ≈ 320` for Ascend 910B2C (24 AICores, Cube units).
 This counts the full dense matmul FLOPs that the core reference operator performs (the kernel's window-skipping is an optimization that reduces actual FLOPs).
 
-**Action:** Updated `_conformer_attention_kernel` with multibuffering, optimized tiles, hoisted mask precomputation; added optional mask-lookup path.
+**Action:** Updated `_conformer_sliding_window_attention_kernel` with multibuffering, optimized tiles, hoisted mask precomputation; added optional mask-lookup path.

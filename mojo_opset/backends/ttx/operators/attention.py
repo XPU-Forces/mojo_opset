@@ -2,14 +2,16 @@ from typing import Optional
 
 import torch
 
-from mojo_opset.backends.ttx.kernels import conformer_attention
+from mojo_opset.backends.ttx.kernels import conformer_chunk_attention
+from mojo_opset.backends.ttx.kernels import conformer_sliding_window_attention
 from mojo_opset.backends.ttx.kernels import paged_attention_decode
 from mojo_opset.backends.ttx.kernels import paged_attention_prefill
 from mojo_opset.backends.ttx.kernels import sdpa_infer
 from mojo_opset.backends.ttx.kernels import swa_infer
 from mojo_opset.backends.ttx.kernels import swa_paged_decode
 from mojo_opset.backends.ttx.kernels import swa_paged_prefill
-from mojo_opset.core import MojoConformerAttention
+from mojo_opset.core import MojoConformerChunkAttention
+from mojo_opset.core import MojoConformerSlidingWindowAttention
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedDecodeSWA
 from mojo_opset.core import MojoPagedPrefillGQA
@@ -133,7 +135,7 @@ class TTXSdpa(MojoSdpa):
         return output
 
 
-class TTXConformerAttention(MojoConformerAttention):
+class TTXConformerSlidingWindowAttention(MojoConformerSlidingWindowAttention):
     supported_platforms_list = ["npu"]
 
     def forward(
@@ -148,7 +150,7 @@ class TTXConformerAttention(MojoConformerAttention):
             raise ValueError(f"cu_q_lens must be int32, got {cu_q_lens.dtype}")
         if cu_total_seq_lens is not None and cu_total_seq_lens.dtype != torch.int32:
             raise ValueError(f"cu_total_seq_lens must be int32, got {cu_total_seq_lens.dtype}")
-        return conformer_attention(
+        return conformer_sliding_window_attention(
             query,
             key,
             value,
@@ -156,6 +158,33 @@ class TTXConformerAttention(MojoConformerAttention):
             cu_total_seq_lens,
             self.left_window,
             self.right_window,
+            self.softmax_scale,
+        )
+
+
+class TTXConformerChunkAttention(MojoConformerChunkAttention):
+    supported_platforms_list = ["npu"]
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,
+    ):
+        if cu_q_lens.dtype != torch.int32:
+            raise ValueError(f"cu_q_lens must be int32, got {cu_q_lens.dtype}")
+        if cu_total_seq_lens is not None and cu_total_seq_lens.dtype != torch.int32:
+            raise ValueError(f"cu_total_seq_lens must be int32, got {cu_total_seq_lens.dtype}")
+        return conformer_chunk_attention(
+            query,
+            key,
+            value,
+            cu_q_lens,
+            cu_total_seq_lens,
+            self.chunk_size,
+            self.left_context_chunks,
             self.softmax_scale,
         )
 

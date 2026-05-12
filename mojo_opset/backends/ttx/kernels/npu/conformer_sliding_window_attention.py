@@ -56,7 +56,7 @@ def _load_triu_mask(
 
 
 @triton.jit
-def _conformer_attention_kernel(
+def _conformer_sliding_window_attention_kernel(
     o_ptr,
     q_ptr,
     k_ptr,
@@ -269,7 +269,7 @@ def _select_blocks(head_dim: int, dtype: torch.dtype) -> tuple[int, int, int, bo
         return 128, 128, head_dim, use_mask_lookup, enable_multibuf
 
 
-def conformer_attention_impl(
+def conformer_sliding_window_attention_impl(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -301,7 +301,7 @@ def conformer_attention_impl(
     o = torch.zeros_like(q, memory_format=torch.contiguous_format)
     grid = (get_num_cores("cube"),)
 
-    _conformer_attention_kernel[grid](
+    _conformer_sliding_window_attention_kernel[grid](
         o,
         q,
         k,

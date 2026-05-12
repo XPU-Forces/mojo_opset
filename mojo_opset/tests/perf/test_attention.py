@@ -5,7 +5,8 @@ from typing import Optional
 import pytest
 import torch
 
-from mojo_opset import MojoConformerAttention
+from mojo_opset import MojoConformerChunkAttention
+from mojo_opset import MojoConformerSlidingWindowAttention
 from mojo_opset import MojoPagedDecodeGQA
 from mojo_opset import MojoPagedDecodeSWA
 from mojo_opset import MojoPagedPrefillGQA
@@ -251,7 +252,9 @@ def test_paged_prefill_gqa(
 
 
 def _make_cu_lens(lengths: list[int], device: torch.device | str) -> torch.Tensor:
-    return torch.tensor([0] + torch.cumsum(torch.tensor(lengths, dtype=torch.int32), 0).tolist(), dtype=torch.int32, device=device)
+    return torch.tensor(
+        [0] + torch.cumsum(torch.tensor(lengths, dtype=torch.int32), 0).tolist(), dtype=torch.int32, device=device
+    )
 
 
 @pytest.mark.parametrize(
@@ -265,7 +268,7 @@ def _make_cu_lens(lengths: list[int], device: torch.device | str) -> torch.Tenso
 )
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
-def test_conformer_attention(
+def test_conformer_sliding_window_attention(
     q_lens: list[int],
     cache_lens: list[int],
     num_heads: int,
@@ -282,7 +285,52 @@ def test_conformer_attention(
     key = torch.randn(cu_total_seq_lens[-1].item(), num_heads, head_dim, dtype=dtype, device=device)
     value = torch.randn_like(key)
 
-    op = MojoConformerAttention(left_window=left_window, right_window=right_window)
+    op = MojoConformerSlidingWindowAttention(left_window=left_window, right_window=right_window)
+    perf(lambda: op(query, key, value, cu_q_lens, cu_total_seq_lens))  # noqa: F821
+
+
+@pytest.mark.parametrize(
+    "q_lens, cache_lens, num_heads, head_dim, chunk_size, left_context_chunks, dtype",
+    [
+        ([512, 384], [0, 0], 8, 64, 128, -1, torch.bfloat16),
+        ([1024, 768], [0, 0], 8, 128, 256, 1, torch.bfloat16),
+        ([512, 256, 128], [512, 256, 128], 8, 128, 64, 2, torch.bfloat16),
+        ([128, 65, 33, 17], [64, 32, 16, 8], 4, 64, 32, 0, torch.bfloat16),
+        # varied (chunk_size, left_context_chunks)
+        ([256, 192, 128], [0, 0, 0], 8, 64, 8, -1, torch.bfloat16),   # small chunk, unlimited left
+        ([512, 384], [0, 0], 4, 64, 32, -1, torch.bfloat16),          # medium chunk, unlimited left
+        ([384, 256, 128], [0, 0, 0], 8, 96, 8, 8, torch.bfloat16),    # left_ctx > chunk
+        ([256, 192], [0, 0], 8, 96, 16, 0, torch.bfloat16),           # no left context
+        ([512, 384, 256], [0, 0, 0], 8, 128, 16, 4, torch.bfloat16),  # left_ctx = 4 chunks
+        # longer sequences, larger batch
+        ([1024, 768, 512], [0, 0, 0], 8, 64, 32, -1, torch.bfloat16),
+        ([768, 512, 384, 256], [0, 0, 0, 0], 4, 96, 64, -1, torch.bfloat16),
+        ([512, 384, 256, 128], [256, 128, 64, 32], 8, 128, 32, 0, torch.bfloat16),
+        # multi-head
+        ([512, 384], [0, 0], 16, 64, 32, 2, torch.bfloat16),
+        ([384, 256, 128], [128, 64, 32], 12, 96, 16, 3, torch.bfloat16),
+    ],
+)
+@auto_switch_platform(set_perf=True)
+@bypass_not_implemented
+def test_conformer_chunk_attention(
+    q_lens: list[int],
+    cache_lens: list[int],
+    num_heads: int,
+    head_dim: int,
+    chunk_size: int,
+    left_context_chunks: int,
+    dtype: torch.dtype,
+):
+    device = get_torch_device()
+    kv_lens = [q_len + cache_len for q_len, cache_len in zip(q_lens, cache_lens)]
+    cu_q_lens = _make_cu_lens(q_lens, device)
+    cu_total_seq_lens = _make_cu_lens(kv_lens, device)
+    query = torch.randn(cu_q_lens[-1].item(), num_heads, head_dim, dtype=dtype, device=device)
+    key = torch.randn(cu_total_seq_lens[-1].item(), num_heads, head_dim, dtype=dtype, device=device)
+    value = torch.randn_like(key)
+
+    op = MojoConformerChunkAttention(chunk_size=chunk_size, left_context_chunks=left_context_chunks)
     perf(lambda: op(query, key, value, cu_q_lens, cu_total_seq_lens))  # noqa: F821
 
 

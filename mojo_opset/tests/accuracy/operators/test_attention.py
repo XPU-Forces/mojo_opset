@@ -6,7 +6,8 @@ from typing import Optional
 import pytest
 import torch
 
-from mojo_opset import MojoConformerAttention
+from mojo_opset import MojoConformerChunkAttention
+from mojo_opset import MojoConformerSlidingWindowAttention
 from mojo_opset import MojoDecodeGQA
 from mojo_opset import MojoDecodeMLA
 from mojo_opset import MojoDecodeNSA
@@ -1093,7 +1094,7 @@ def test_paged_decode_swa(
     )
 
 
-def generate_conformer_attention_data(
+def generate_conformer_varlen_attention_data(
     q_lens: list[int],
     cache_lens: list[int],
     num_heads: int,
@@ -1112,6 +1113,52 @@ def generate_conformer_attention_data(
     return query, key, value, cu_q_lens, cu_total_seq_lens
 
 
+def conformer_chunk_attention_golden(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    cu_q_lens: torch.Tensor,
+    cu_total_seq_lens: torch.Tensor,
+    chunk_size: int,
+    left_context_chunks: int,
+    softmax_scale: Optional[float] = None,
+) -> torch.Tensor:
+    _, _, head_dim = query.shape
+    scale = softmax_scale if softmax_scale is not None else 1.0 / math.sqrt(head_dim)
+    left_context_tokens = left_context_chunks * chunk_size
+    output = torch.zeros_like(query)
+    batch_size = cu_q_lens.shape[0] - 1
+
+    for b in range(batch_size):
+        q_start, q_end = cu_q_lens[b].item(), cu_q_lens[b + 1].item()
+        kv_start, kv_end = cu_total_seq_lens[b].item(), cu_total_seq_lens[b + 1].item()
+        q_len = q_end - q_start
+        kv_len = kv_end - kv_start
+        if q_len <= 0 or kv_len <= 0:
+            continue
+
+        q = query[q_start:q_end].permute(1, 0, 2)
+        k_t = key[kv_start:kv_end].permute(1, 2, 0)
+        scores = torch.bmm(q, k_t).float() * scale
+
+        q_abs_idx = torch.arange(kv_len - q_len, kv_len, device=query.device)
+        kv_idx = torch.arange(kv_len, device=query.device)
+        chunk_start = torch.div(q_abs_idx, chunk_size, rounding_mode="floor") * chunk_size
+        chunk_end = torch.clamp(chunk_start + chunk_size, max=kv_len)
+        if left_context_chunks < 0:
+            ctx_start = torch.zeros_like(chunk_start)
+        else:
+            ctx_start = torch.clamp(chunk_start - left_context_tokens, min=0)
+        chunk_mask = (ctx_start[:, None] <= kv_idx[None, :]) & (kv_idx[None, :] < chunk_end[:, None])
+        scores = torch.where(chunk_mask.unsqueeze(0), scores, float("-inf"))
+
+        probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(value.dtype)
+        v = value[kv_start:kv_end].permute(1, 0, 2)
+        output[q_start:q_end] = torch.bmm(probs, v).permute(1, 0, 2).to(output.dtype)
+
+    return output
+
+
 @pytest.mark.parametrize(
     "q_lens, cache_lens, num_heads, head_dim, left_window, right_window, dtype",
     [
@@ -1123,7 +1170,7 @@ def generate_conformer_attention_data(
 )
 @auto_switch_platform()
 @bypass_not_implemented
-def test_conformer_attention(
+def test_conformer_sliding_window_attention(
     q_lens: list[int],
     cache_lens: list[int],
     num_heads: int,
@@ -1133,7 +1180,7 @@ def test_conformer_attention(
     dtype: torch.dtype,
 ):
     device = get_torch_device()
-    query, key, value, cu_q_lens, cu_total_seq_lens = generate_conformer_attention_data(
+    query, key, value, cu_q_lens, cu_total_seq_lens = generate_conformer_varlen_attention_data(
         q_lens,
         cache_lens,
         num_heads,
@@ -1146,8 +1193,78 @@ def test_conformer_attention(
     cu_q_lens = cu_q_lens.to(device)
     cu_total_seq_lens = cu_total_seq_lens.to(device)
 
-    op = MojoConformerAttention(left_window=left_window, right_window=right_window)
-    op_ref = MojoConformerAttention._registry.get("torch")(left_window=left_window, right_window=right_window)
+    op = MojoConformerSlidingWindowAttention(left_window=left_window, right_window=right_window)
+    op_ref = MojoConformerSlidingWindowAttention._registry.get("torch")(
+        left_window=left_window, right_window=right_window
+    )
+    atol = 2e-2 if dtype != torch.float32 else 1e-5
+    rtol = 2e-2 if dtype != torch.float32 else 1e-6
+    op.forward_diff_with(
+        op_ref,
+        query,
+        key,
+        value,
+        cu_q_lens,
+        cu_total_seq_lens,
+        atol=atol,
+        rtol=rtol,
+    )
+
+
+@pytest.mark.parametrize(
+    "q_lens, cache_lens, num_heads, head_dim, chunk_size, left_context_chunks, dtype",
+    [
+        ([662, 182], [0, 0], 2, 128, 4, -1, torch.bfloat16),
+        ([8, 172, 933], [4, 0, 8], 4, 128, 8, 1, torch.bfloat16),
+        ([872], [2], 2, 128, 2, 0, torch.float32),
+        ([33, 11], [5, 13], 8, 128, 8, 2, torch.bfloat16),
+        ([314, 272], [5, 3], 4, 128, 8, -1, torch.bfloat16),
+        ([478, 198], [2, 8], 4, 128, 32, -1, torch.bfloat16),
+        ([2300, 1100], [0, 0], 2, 128, 128, -1, torch.bfloat16),
+        ([249, 153], [0, 0], 4, 128, 8, 8, torch.bfloat16),
+        ([167, 263], [0, 0], 4, 128, 16, 0, torch.bfloat16),
+        ([121, 414], [0, 0], 2, 128, 32, 0, torch.float32),
+        ([347, 371], [0, 0], 4, 128, 16, 4, torch.bfloat16),
+        ([7, 11, 1443], [3, 5, 0], 8, 128, 8, -1, torch.bfloat16),
+        ([127, 61, 843], [0, 0, 0], 8, 128, 32, 2, torch.bfloat16),
+        ([257, 193], [0, 0], 4, 128, 64, -1, torch.bfloat16),
+        ([131, 927, 733], [31, 13, 7], 8, 96, 16, 0, torch.bfloat16),
+        ([211, 1769, 1451], [0, 0, 101], 8, 128, 32, -1, torch.bfloat16),
+        ([63, 47, 31, 17], [0, 0, 0, 0], 12, 64, 8, -1, torch.bfloat16),
+        ([101, 89], [0, 0], 16, 96, 16, 3, torch.bfloat16),
+        ([7, 13], [0, 0], 2, 64, 256, -1, torch.float32),
+        ([3, 5, 7], [0, 0, 2], 4, 96, 128, 0, torch.bfloat16),
+    ],
+)
+@auto_switch_platform()
+@bypass_not_implemented
+def test_conformer_chunk_attention(
+    q_lens: list[int],
+    cache_lens: list[int],
+    num_heads: int,
+    head_dim: int,
+    chunk_size: int,
+    left_context_chunks: int,
+    dtype: torch.dtype,
+):
+    device = get_torch_device()
+    query, key, value, cu_q_lens, cu_total_seq_lens = generate_conformer_varlen_attention_data(
+        q_lens,
+        cache_lens,
+        num_heads,
+        head_dim,
+        dtype,
+    )
+    query = query.to(device)
+    key = key.to(device)
+    value = value.to(device)
+    cu_q_lens = cu_q_lens.to(device)
+    cu_total_seq_lens = cu_total_seq_lens.to(device)
+
+    op = MojoConformerChunkAttention(chunk_size=chunk_size, left_context_chunks=left_context_chunks)
+    op_ref = MojoConformerChunkAttention._registry.get("torch")(
+        chunk_size=chunk_size, left_context_chunks=left_context_chunks
+    )
     atol = 2e-2 if dtype != torch.float32 else 1e-5
     rtol = 2e-2 if dtype != torch.float32 else 1e-6
     op.forward_diff_with(

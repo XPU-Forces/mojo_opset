@@ -1344,7 +1344,7 @@ class MojoSdpa(MojoOperator):
         return f"{self.scale=}, {self.enable_gqa=}".replace("self.", "")
 
 
-class MojoConformerAttention(MojoOperator):
+class MojoConformerSlidingWindowAttention(MojoOperator):
     """Varlen Conformer encoder attention with per-query left/right visibility windows.
 
     Contract:
@@ -1428,6 +1428,98 @@ class MojoConformerAttention(MojoOperator):
 
     def extra_repr(self) -> str:
         return f"{self.left_window=}, {self.right_window=}, {self.softmax_scale=}".replace("self.", "")
+
+
+class MojoConformerChunkAttention(MojoOperator):
+    """Varlen duplex Conformer encoder attention with chunk-based visibility.
+
+    Contract:
+        - `query`, `key`, `value` use THD layout: ``[total_tokens, heads, head_dim]``.
+        - `cu_q_lens` and `cu_total_seq_lens` delimit per-sequence query and KV spans.
+        - if `cu_total_seq_lens` is None, KV spans are the same as query spans.
+        - visibility matches the duplex audio modeling mask:
+          queries are grouped into chunks of size ``chunk_size`` and may attend to
+          keys in ``[ctx_start, chunk_end)`` where ``ctx_start`` is derived from
+          ``left_context_chunks`` and chunk boundaries.
+        - ``left_context_chunks < 0`` means unlimited left context.
+    """
+
+    def __init__(
+        self,
+        chunk_size: int,
+        left_context_chunks: int = -1,
+        softmax_scale: Optional[float] = None,
+    ):
+        super().__init__()
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size must be > 0, got {chunk_size}")
+        if left_context_chunks < -1:
+            raise ValueError(f"left_context_chunks must be >= -1, got {left_context_chunks}")
+        self.chunk_size = chunk_size
+        self.left_context_chunks = left_context_chunks
+        self.softmax_scale = softmax_scale
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if query.ndim != 3 or key.ndim != 3 or value.ndim != 3:
+            raise ValueError("query/key/value must be 3D THD tensors")
+        if key.shape != value.shape:
+            raise ValueError(f"key/value must share the same shape, got {key.shape}, {value.shape}")
+        if cu_q_lens.dtype != torch.int32:
+            raise ValueError(f"cu_q_lens must be int32, got {cu_q_lens.dtype}")
+        if cu_total_seq_lens is not None and cu_total_seq_lens.dtype != torch.int32:
+            raise ValueError(f"cu_total_seq_lens must be int32, got {cu_total_seq_lens.dtype}")
+
+        _, _, head_dim = query.shape
+
+        if cu_total_seq_lens is None:
+            cu_total_seq_lens = cu_q_lens
+
+        softmax_scale = self.softmax_scale if self.softmax_scale is not None else 1.0 / math.sqrt(head_dim)
+        left_context_tokens = self.left_context_chunks * self.chunk_size
+
+        output = torch.zeros_like(query)
+        batch_size = cu_q_lens.shape[0] - 1
+
+        for b in range(batch_size):
+            q_start, q_end = cu_q_lens[b].item(), cu_q_lens[b + 1].item()
+            kv_start, kv_end = cu_total_seq_lens[b].item(), cu_total_seq_lens[b + 1].item()
+            q_len = q_end - q_start
+            kv_len = kv_end - kv_start
+            if q_len <= 0 or kv_len <= 0:
+                continue
+            if kv_len < q_len:
+                raise ValueError(f"KV length must be >= query length for conformer attention, got {kv_len} vs {q_len}")
+
+            q = query[q_start:q_end].permute(1, 0, 2)
+            k_t = key[kv_start:kv_end].permute(1, 2, 0)
+            scores = torch.bmm(q, k_t).float() * softmax_scale
+
+            q_abs_idx = torch.arange(kv_len - q_len, kv_len, device=query.device)
+            kv_idx = torch.arange(kv_len, device=query.device)
+            chunk_start = torch.div(q_abs_idx, self.chunk_size, rounding_mode="floor") * self.chunk_size
+            chunk_end = torch.clamp(chunk_start + self.chunk_size, max=kv_len)
+            if self.left_context_chunks < 0:
+                ctx_start = torch.zeros_like(chunk_start)
+            else:
+                ctx_start = torch.clamp(chunk_start - left_context_tokens, min=0)
+            chunk_mask = (ctx_start[:, None] <= kv_idx[None, :]) & (kv_idx[None, :] < chunk_end[:, None])
+            scores = torch.where(chunk_mask.unsqueeze(0), scores, float("-inf"))
+
+            probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(value.dtype)
+            v = value[kv_start:kv_end].permute(1, 0, 2)
+            output[q_start:q_end] = torch.bmm(probs, v).permute(1, 0, 2).to(output.dtype)
+
+        return output
+
+    def extra_repr(self) -> str:
+        return f"{self.chunk_size=}, {self.left_context_chunks=}, {self.softmax_scale=}".replace("self.", "")
 
 
 def _generate_window_mask(

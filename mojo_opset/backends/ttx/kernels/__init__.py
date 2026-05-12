@@ -36,7 +36,10 @@ silu_bwd_impl = _get_kernel_impl(ttx_backend_module, "silu_bwd_impl")
 
 dynamic_quant_impl = _get_kernel_impl(ttx_backend_module, "dynamic_quant_impl")
 lightning_indexer_impl = _get_kernel_impl(ttx_backend_module, "lightning_indexer_impl")
-conformer_attention_impl = _get_kernel_impl(ttx_backend_module, "conformer_attention_impl")
+conformer_sliding_window_attention_impl = _get_kernel_impl(
+    ttx_backend_module, "conformer_sliding_window_attention_impl"
+)
+conformer_chunk_attention_impl = _get_kernel_impl(ttx_backend_module, "conformer_chunk_attention_impl")
 
 rot_pos_embed_impl = _get_kernel_impl(ttx_backend_module, "rot_pos_embed_impl")
 rope_fwd_impl = _get_kernel_impl(ttx_backend_module, "rope_fwd_impl")
@@ -811,7 +814,8 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     swa_paged_prefill = swa_paged_prefill_impl
     swa_paged_decode = swa_paged_decode_impl
     swa_infer = swa_infer_impl
-    conformer_attention = conformer_attention_impl
+    conformer_sliding_window_attention = conformer_sliding_window_attention_impl
+    conformer_chunk_attention = conformer_chunk_attention_impl
     swa_fwd = swa_fwd_impl
     swa_bwd = swa_bwd_impl
     group_rmsnorm = group_rmsnorm_impl
@@ -871,7 +875,8 @@ else:
     top_k_sampling = top_k_sampling_impl
     dynamic_quant = dynamic_quant_impl
     lightning_indexer = lightning_indexer_impl
-    conformer_attention = conformer_attention_impl
+    conformer_sliding_window_attention = conformer_sliding_window_attention_impl
+    conformer_chunk_attention = conformer_chunk_attention_impl
     group_rmsnorm = group_rmsnorm_impl
     embedding_nf4_dequant = embedding_nf4_dequant_impl
     n_gram_decode = n_gram_decode_impl

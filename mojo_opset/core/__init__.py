@@ -16,27 +16,28 @@ from .operators.activation import MojoSilu
 from .operators.activation import MojoSwiGLU
 
 """ attention """
-from .operators.attention import MojoConformerAttention
+from .operators.attention import MojoConformerChunkAttention
+from .operators.attention import MojoConformerSlidingWindowAttention
 from .operators.attention import MojoDecodeGQA
 from .operators.attention import MojoDecodeMLA
 from .operators.attention import MojoDecodeNSA
 from .operators.attention import MojoPagedDecodeGQA
 from .operators.attention import MojoPagedDecodeMLA
 from .operators.attention import MojoPagedDecodeNSA
+from .operators.attention import MojoPagedDecodeQuantGQA
+from .operators.attention import MojoPagedDecodeQuantSWA
 from .operators.attention import MojoPagedDecodeSWA
 from .operators.attention import MojoPagedPrefillGQA
 from .operators.attention import MojoPagedPrefillMLA
 from .operators.attention import MojoPagedPrefillNSA
+from .operators.attention import MojoPagedPrefillQuantGQA
+from .operators.attention import MojoPagedPrefillQuantSWA
 from .operators.attention import MojoPagedPrefillSWA
 from .operators.attention import MojoPrefillGQA
 from .operators.attention import MojoPrefillMLA
 from .operators.attention import MojoPrefillNSA
 from .operators.attention import MojoSdpa
 from .operators.attention import MojoSWA
-from .operators.attention import MojoPagedDecodeQuantGQA
-from .operators.attention import MojoPagedPrefillQuantGQA
-from .operators.attention import MojoPagedDecodeQuantSWA
-from .operators.attention import MojoPagedPrefillQuantSWA
 
 """ kvcache """
 from .operators.kv_cache import MojoStoreMLAKVCache
@@ -45,12 +46,12 @@ from .operators.kv_cache import MojoStorePagedMLAKVCache
 
 """ gemm """
 from .operators.gemm import MojoGemm
-from .operators.gemm import MojoQuantGemm
 from .operators.gemm import MojoGroupGemm
+from .operators.gemm import MojoQuantGemm
 
 """ compute + comm """
-from .operators.compute_with_comm import MojoGemmAll2All
 from .operators.compute_with_comm import MojoAllGatherGemm
+from .operators.compute_with_comm import MojoGemmAll2All
 from .operators.compute_with_comm import MojoGemmAllReduce
 from .operators.compute_with_comm import MojoGemmReduceScatter
 
@@ -95,11 +96,11 @@ from .operators.normalization import MojoRMSNorm
 from .operators.normalization import MojoRMSNormQuant
 
 """ position_embedding """
-from .operators.position_embedding import MojoRelativeEmbedding
 from .operators.position_embedding import MojoApplyRoPE
 from .operators.position_embedding import MojoGridRoPE
 from .operators.position_embedding import MojoNormRoPE
 from .operators.position_embedding import MojoNormRoPEStoreKV
+from .operators.position_embedding import MojoRelativeEmbedding
 from .operators.position_embedding import MojoRoPEStoreKV
 from .operators.position_embedding import MojoRotaryEmbedding
 
@@ -153,7 +154,8 @@ __all__ = [
     "MojoDecodeNSA",
     "MojoPagedDecodeNSA",
     "MojoSdpa",
-    "MojoConformerAttention",
+    "MojoConformerSlidingWindowAttention",
+    "MojoConformerChunkAttention",
     "MojoPagedPrefillSWA",
     "MojoPagedDecodeSWA",
     "MojoSWA",
