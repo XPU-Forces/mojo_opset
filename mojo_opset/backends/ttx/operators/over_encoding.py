@@ -11,7 +11,7 @@ from mojo_opset.core import MojoOverEncodingNGram
 from mojo_opset.core.operators.over_encoding import NF4DequantEmbedding
 
 class TTXOverEncodingNGram(MojoOverEncodingNGram):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(self, input_tensor: torch.Tensor, oe_history_input: torch.Tensor, input_seq_lens: Optional[torch.Tensor] = None):
         if input_seq_lens is not None:
@@ -41,7 +41,7 @@ class TTXOverEncodingNGram(MojoOverEncodingNGram):
 
 # NOTE(liuyuan): loop unroll
 class TTXOverEncoding(MojoOverEncoding):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

@@ -18,6 +18,11 @@ _requires_npu_oe = requires_platform_backend(
     reason="Over-Encoding TTX/NF4 kernels are only implemented on NPU.",
 )
 
+_requires_npu_or_ilu_oe = requires_platform_backend(
+    platforms=["npu", "ilu"],
+    reason="Over-Encoding TTX/NF4 kernels are only implemented on NPU or ILU.",
+)
+
 
 # `embedding_nf4_dequant` is a low-level TTX kernel entrypoint imported directly
 # from `mojo_opset.backends.ttx.kernels`, so this test intentionally does not go
@@ -28,9 +33,9 @@ _requires_npu_oe = requires_platform_backend(
 # torch_npu job. Keep the standalone kernel test visible only to the backend
 # that owns it.
 _requires_ttx_oe_kernel = requires_platform_backend(
-    platforms="npu",
+    platforms=["npu", "ilu"],
     backends="ttx",
-    reason="embedding_nf4_dequant is a TTX-only OE kernel on NPU.",
+    reason="embedding_nf4_dequant is a TTX-only OE kernel on NPU or ILU.",
 )
 
 
@@ -504,7 +509,7 @@ class TestRefOverEncodingParametrized:
         assert_close(output, expected, atol=1e-5, rtol=0)
 
     @bypass_not_implemented
-    @_requires_npu_oe
+    @_requires_npu_or_ilu_oe
     @torch.no_grad
     def test_over_encoding_with_quantized_mega_embedding(self):
         torch.manual_seed(0)
