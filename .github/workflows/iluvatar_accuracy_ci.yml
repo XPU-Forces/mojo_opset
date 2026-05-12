@@ -47,11 +47,11 @@ jobs:
             --privileged --cap-add=ALL --pid=host --ipc=host --network=host \
             -v ${{ github.workspace }}:/workspace \
             -v /data:/data \
-            -v /data1:/data1 \
+            -v /data01:/data01 \
             -v /lib/modules:/lib/modules \
             -v /usr/src:/usr/src \
             -v /dev:/dev \
-            corex:4.5.0rc \
+            corex:4.5.0rc_0416 \
             tail -f /dev/null
 
       - name: Build And Install Wheel Artifact
@@ -62,10 +62,11 @@ jobs:
             git config --global --add safe.directory /workspace
             export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
             pip install -U pip setuptools wheel --no-input --no-cache-dir
-            pip install pytest-xdist build --no-cache-dir --no-build-isolation
+            pip install pytest-xdist build setuptools-scm --no-cache-dir
             pip install -e .[ilu] --index-url https://bytedpypi.byted.org/simple
-            python3 -m build .
+            python3 -m build --no-isolation .
             pip install dist/*.whl --force-reinstall --no-deps
+            pip install /data01/mojo_ci/ixformer-0.7.0+corex.4.5.0.rc.5.20260416-cp310-cp310-linux_x86_64.whl --force-reinstall --no-deps
           "
 
       - name: test-TTX
