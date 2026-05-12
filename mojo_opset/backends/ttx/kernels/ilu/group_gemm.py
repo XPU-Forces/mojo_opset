@@ -5,6 +5,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .utils import smart_triton_autotune
+
 # Target upper bound on grid[0]; tiles per program ~= ceil(n / TARGET_PROGRAMS).
 _TARGET_GRID_PROGRAMS = 256
 
@@ -54,7 +56,7 @@ def m_grouped_matmul_autotune_config():
     return configs
 
 
-@triton.autotune(configs=m_grouped_matmul_autotune_config(), key=["N", "K", "MAX_M"])
+@smart_triton_autotune(configs=m_grouped_matmul_autotune_config(), selected_idx=0, key=["N", "K", "MAX_M"])
 @triton.jit
 def _m_grouped_matmul_kernel(
     A,
@@ -172,7 +174,7 @@ def k_grouped_matmul_autotune_config():
     return configs
 
 
-@triton.autotune(configs=k_grouped_matmul_autotune_config(), key=["M", "N"])
+@smart_triton_autotune(configs=k_grouped_matmul_autotune_config(), selected_idx=0, key=["M", "N"])
 @triton.jit
 def _k_grouped_matmul_kernel(
     A,

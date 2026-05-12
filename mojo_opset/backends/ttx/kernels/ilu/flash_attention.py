@@ -11,9 +11,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .utils import libentry
-
-LOG2E: tl.constexpr = math.log2(math.e)
+from .utils import LOG2E, libentry, smart_triton_autotune
 
 
 @triton.jit
@@ -27,7 +25,7 @@ def causal_mask_fn(mask_ptr, mask_size, mask_stride_m, mask_stride_n, q_start, k
     return mask_causal
 
 
-@triton.autotune(
+@smart_triton_autotune(
     configs=[
         triton.Config({"BLOCK_M": 32}, num_warps=4, num_stages=1),
         triton.Config({"BLOCK_M": 64}, num_warps=4, num_stages=1),
@@ -38,6 +36,7 @@ def causal_mask_fn(mask_ptr, mask_size, mask_stride_m, mask_stride_n, q_start, k
         triton.Config({"BLOCK_M": 128}, num_warps=4, num_stages=3),
         triton.Config({"BLOCK_M": 128}, num_warps=8, num_stages=2),
     ],
+    selected_idx=0,
     key=["NUM_Q_HEADS", "HEAD_DIM", "PAGE_SIZE"],
 )
 @triton.jit
@@ -401,15 +400,16 @@ def _launch_causal_attn_triton(
     )
 
 
-@triton.autotune(
+@smart_triton_autotune(
     configs=[
+        triton.Config({"BLOCK_N": 128}, num_warps=4, num_stages=2),
         triton.Config({"BLOCK_N": 64}, num_warps=4, num_stages=2),
         triton.Config({"BLOCK_N": 64}, num_warps=4, num_stages=3),
         triton.Config({"BLOCK_N": 64}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_N": 128}, num_warps=4, num_stages=2),
         triton.Config({"BLOCK_N": 128}, num_warps=4, num_stages=3),
         triton.Config({"BLOCK_N": 128}, num_warps=8, num_stages=2),
     ],
+    selected_idx=0,
     key=["HQ", "D", "PAGE_SIZE"],
 )
 @libentry()
