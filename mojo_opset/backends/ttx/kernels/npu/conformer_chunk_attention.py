@@ -106,9 +106,7 @@ def _conformer_chunk_attention_kernel(
             if left_context_chunks < 0:
                 ctx_start_f32 = tl.zeros((BLOCK_M,), dtype=tl.float32)
             else:
-                ctx_start_f32 = tl.maximum(
-                    (chunk_start_i32 - left_context_chunks * chunk_size).to(tl.float32), 0.0
-                )
+                ctx_start_f32 = tl.maximum((chunk_start_i32 - left_context_chunks * chunk_size).to(tl.float32), 0.0)
 
             for kv_block_id in range(kv_block_start_id, kv_block_end_id):
                 kv_block_start = kv_block_id * BLOCK_N
@@ -142,16 +140,14 @@ def _conformer_chunk_attention_kernel(
 
                 # Chunk mask: kv_idx ∈ [ctx_start[q], chunk_end[q])
                 kv_f32 = kv_offsets.to(tl.float32)
-                chunk_mask = (kv_f32[None, :] >= ctx_start_f32[:, None]) & (
-                    kv_f32[None, :] < chunk_end_f32[:, None]
-                )
+                chunk_mask = (kv_f32[None, :] >= ctx_start_f32[:, None]) & (kv_f32[None, :] < chunk_end_f32[:, None])
 
                 pre_mask = q_valid[:, None] & kv_valid[None, :] & chunk_mask
 
                 # Online softmax
                 qk = tl.where(pre_mask, qk, float("-inf"))
                 m_candidate = tl.max(qk, axis=1)
-                m_new = tl.where(q_valid, tl.maximum(m_i, m_candidate), m_i)
+                m_new = tl.maximum(m_i, m_candidate)
                 # Guard against -inf - (-inf) → NaN when a query has no valid KV
                 # in the first KV block it encounters (cross-chunk boundary case).
                 has_valid = m_candidate > float("-inf")
@@ -163,14 +159,14 @@ def _conformer_chunk_attention_kernel(
                 # alpha rescales old accumulator: exp(m_i - m_new) if m_new > m_i, else 1.
                 # When m_i == -inf (first valid block): alpha = 0 (no prior accumulator).
                 m_delta = tl.where(has_valid & (m_i > float("-inf")), m_new - m_i, 0.0)
-                alpha = tl.where(q_valid & (m_i > float("-inf")), tl.exp(-m_delta), 0.0)
+                alpha = tl.where(m_i > float("-inf"), tl.exp(-m_delta), 0.0)
                 acc_update = tl.dot(qk.to(k_t.dtype), v, acc * alpha[:, None])
-                acc = tl.where(q_valid[:, None], acc_update, acc)
-                l_i = tl.where(q_valid, l_i * alpha + l_ij, l_i)
+                acc = acc_update
+                l_i = l_i * alpha + l_ij
                 m_i = m_new
 
             out = acc / tl.where(q_valid, l_i, 1.0)[:, None]
-            out = tl.where(q_valid[:, None], out, 0.0)
+            # out = tl.where(q_valid[:, None], out, 0.0)
             o_block_ptr = tl.make_block_ptr(
                 base=o_ptr + q_start * stride_ot + h_id * stride_oh,
                 shape=(q_seq_len, head_dim),
