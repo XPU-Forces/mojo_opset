@@ -290,5 +290,5 @@ def dynamic_quant_impl(
 
     return (
         output.reshape(*ori_shape),
-        quant_scale.reshape(*ori_shape[:-1]) if len(ori_shape) > 1 else quant_scale,
+        quant_scale.reshape(*ori_shape[:-1], 1),
     )

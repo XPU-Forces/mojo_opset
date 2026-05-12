@@ -618,8 +618,12 @@ def _paged_prefill_quant_kernel(
             s = tl.where(allowed, s, -float("inf"))
 
             m_new = tl.maximum(m_max, s)
-            alpha = tl.math.exp(m_max - m_new)
-            p = tl.where(allowed, tl.math.exp(s - m_new), 0.0)
+            row_is_all_masked = m_new == -float("inf")
+            alpha = tl.math.exp(tl.where(row_is_all_masked, 0.0, m_max - m_new))
+            alpha = tl.where(row_is_all_masked, 0.0, alpha)
+            p = tl.math.exp(tl.where(row_is_all_masked, 0.0, s - m_new))
+            p = tl.where(allowed, p, 0.0)
+            p = tl.where(row_is_all_masked, 0.0, p)
 
             v_vec = tl.load(
                 V_cache + physical_block * stride_vb + kv_head_id * stride_vh
@@ -632,8 +636,8 @@ def _paged_prefill_quant_kernel(
             l_sum = l_sum * alpha + p
             m_max = m_new
 
-    l_sum = tl.maximum(l_sum, 1e-6)
-    out_vec = acc / l_sum
+    l_sum_safe = tl.where(l_sum > 0, l_sum, 1.0)
+    out_vec = tl.where(l_sum > 0, acc / l_sum_safe, 0.0)
 
     tl.store(
         Out + (q_start + q_token_id) * stride_ot + q_head_id * stride_oh + offs_d * stride_od,
