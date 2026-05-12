@@ -1,8 +1,10 @@
 import pytest
+import torch
 
 from mojo_opset.tests.utils import BackendNotImplementedForTest
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.tests.utils import resolve_backend_for_accuracy_test
+from mojo_opset.utils.platform import get_platform
 
 from mojo_opset import MojoSilu
 from mojo_opset import MojoSiluFunction
@@ -72,3 +74,14 @@ def test_accuracy_helper_raises_when_requested_backend_missing(monkeypatch):
 
     with pytest.raises(BackendNotImplementedForTest, match="Silu"):
         resolve_backend_for_accuracy_test(MojoSilu._registry)
+
+
+@pytest.mark.skipif(get_platform() != "npu", reason="AscendC backend is only registered on npu platform.")
+def test_ascendc_backend_can_be_resolved_and_is_placeholder(monkeypatch):
+    AscendcOpCls = MojoSilu.get_backend_impl("ascendc")
+    assert AscendcOpCls is MojoSilu.get_registry().get("ascendc")
+    assert AscendcOpCls.__name__ == "AscendcSilu"
+
+    monkeypatch.setenv("MOJO_BACKEND", "ascendc")
+    with pytest.raises(NotImplementedError, match="placeholder backend implementation"):
+        MojoSilu()(torch.zeros(4))
