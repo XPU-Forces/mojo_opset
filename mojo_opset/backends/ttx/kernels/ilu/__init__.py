@@ -16,6 +16,8 @@ from .gelu import gelu_bwd_impl
 from .gelu import gelu_fwd_impl
 from .group_gemm import k_grouped_matmul_impl
 from .group_gemm import m_grouped_matmul_impl
+from .int8_gemm import int8_gemm_dequant_impl
+from .int8_gemm import prepare_b_impl
 from .quant_batch_gemm_reduce_sum import quant_batch_gemm_reduce_sum_impl
 from .int8_gemm import int8_gemm_dequant_impl
 from .int8_gemm import prepare_b_impl
@@ -69,6 +71,8 @@ __all__ = [
     "gelu_fwd_impl",
     "m_grouped_matmul_impl",
     "k_grouped_matmul_impl",
+    "int8_gemm_dequant_impl",
+    "prepare_b_impl",
     "quant_batch_gemm_reduce_sum_impl",
     "int8_gemm_dequant_impl",
     "prepare_b_impl",

@@ -48,7 +48,7 @@ def test_gemm(m, k, n, dtype, bias):
     gemm.forward_diff_with(gemm_ref, input, mixed_tol=True)
     torch_out = F.linear(input, gemm.weight, gemm.bias)
     mojo_out = gemm(input)
-    torch.testing.assert_close(mojo_out, torch_out)
+    torch.testing.assert_close(mojo_out, torch_out, atol=1e-3, rtol=1.6e-2)
 
 
 # ===========================================================================

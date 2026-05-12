@@ -3,21 +3,51 @@ import torch
 from torch.distributed.tensor import DTensor
 
 from mojo_opset.backends.ttx.kernels import int8_gemm_dequant
+from mojo_opset.backends.ttx.kernels import linear_fwd_impl
 from mojo_opset.backends.ttx.kernels import m_grouped_matmul
 from mojo_opset.backends.ttx.kernels import prepare_b
 from mojo_opset.backends.ttx.kernels import quant_batch_gemm_reduce_sum_impl
+from mojo_opset.core import MojoGemm
 from mojo_opset.core import MojoQuantGemm
 from mojo_opset.core import MojoGroupGemm
 from mojo_opset.experimental import MojoQuantBatchGemmReduceSum
 
 
+class TTXGemm(MojoGemm):
+    """Triton GEMM (F.linear) on ILU device.
+
+    Delegates to the ILU linear_fwd_impl Triton kernel with pre-computed
+    dimension metadata to avoid Host-side Python int() conversions and
+    shape unpacking overhead on every forward call.
+    """
+
+    supported_platforms_list = ["ilu"]
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        *batch, _ = input.shape
+        x2 = input.reshape(-1, self.in_features)
+        m = x2.shape[0]
+        out = torch.empty(m, self.out_features, device=input.device, dtype=input.dtype)
+        linear_fwd_impl(
+            x2,
+            self.weight,
+            self.bias,
+            M=m,
+            N=self.out_features,
+            K=self.in_features,
+            out=out,
+        )
+        if batch:
+            return out.reshape(*batch, self.out_features)
+        return out
+
+
 class TTXQuantGemm(MojoQuantGemm):
     """Triton INT8 GEMM + fused dequantization.
 
-    Uses a Triton kernel with B-transposed layout and fused epilogue.
-    The kernel fuses int8 x int8 -> int32, per-token x per-channel
-    scale application, optional bias add, and output dtype cast into
-    a single kernel epilogue -- eliminating intermediate memory traffic.
+    Fuses int8 x int8 -> int32 accumulation, per-token x per-channel
+    scale application, and output dtype cast into a single kernel
+    epilogue, eliminating intermediate memory traffic.
     """
 
     supported_platforms_list = ["npu", "ilu"]

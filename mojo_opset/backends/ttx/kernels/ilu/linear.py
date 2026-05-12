@@ -1,6 +1,6 @@
 """
-ILU Triton: F.linear(x, weight, bias) with weight (out_features, in_features), x (*, in_features).
-Computes y = x @ weight.T (+ bias), same as torch.nn.functional.linear.
+ILU Triton: 2D GEMM kernel  y = x @ weight.T (+ bias).
+weight is (N, K), x is (M, K), output is (M, N).
 """
 
 from typing import Optional
@@ -76,38 +76,56 @@ def linear_fwd_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: Optional[torch.Tensor],
+    *,
+    M: Optional[int] = None,
+    N: Optional[int] = None,
+    K: Optional[int] = None,
+    out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    if weight.dim() != 2:
-        raise ValueError("weight must be 2D (out_features, in_features)")
-    n_out, n_in = int(weight.shape[0]), int(weight.shape[1])
+    """2D GEMM: out(M,N) = x(M,K) @ weight(N,K).T [+ bias(N,)].
+
+    x must be 2D. Callers handle any batch-dim reshape.
+
+    Args:
+        M, N, K: Pre-computed dimensions. When provided, skips Host-side
+            int() conversions on tensor shapes.
+        out: Pre-allocated (M, N) output buffer. When provided, skips
+            internal torch.empty allocation.
+    """
+    if M is not None:
+        m, n_out, n_in = M, N, K
+    else:
+        if weight.dim() != 2 or x.dim() != 2:
+            raise ValueError("x and weight must both be 2D")
+        n_out, n_in = int(weight.shape[0]), int(weight.shape[1])
+        m = int(x.shape[0])
+
     if x.dtype not in torch_to_triton_dtype or weight.dtype != x.dtype:
         raise TypeError("linear_fwd_impl expects matching float16, bfloat16, or float32 tensors")
     if bias is not None and bias.dtype != x.dtype:
         raise TypeError("bias dtype must match input")
 
-    *batch, k_in = x.shape
-    if k_in != n_in:
-        raise ValueError(f"input last dim {k_in} != weight in_features {n_in}")
-    x2 = x.reshape(-1, n_in)
-    m = int(x2.shape[0])
     if m == 0:
-        return x.new_empty(*batch, n_out, dtype=x.dtype, device=x.device)
+        if out is not None:
+            return out
+        return x.new_empty(0, n_out, dtype=x.dtype, device=x.device)
 
-    out = torch.empty(m, n_out, device=x.device, dtype=x.dtype)
+    if out is None:
+        out = torch.empty(m, n_out, device=x.device, dtype=x.dtype)
     OUT_T = torch_to_triton_dtype[x.dtype]
     has_bias = bias is not None
     bm, bn, bk = _DEFAULT_BM, _DEFAULT_BN, _DEFAULT_BK
     grid = (triton.cdiv(m, bm) * triton.cdiv(n_out, bn),)
     _linear_fwd_kernel[grid](
-        x2,
+        x,
         weight,
-        bias if has_bias else x2,
+        bias if has_bias else x,
         out,
         m,
         n_out,
         n_in,
-        x2.stride(0),
-        x2.stride(1),
+        x.stride(0),
+        x.stride(1),
         weight.stride(0),
         weight.stride(1),
         out.stride(0),
@@ -118,4 +136,4 @@ def linear_fwd_impl(
         BLOCK_N=bn,
         BLOCK_K=bk,
     )
-    return out.reshape(*batch, n_out)
+    return out
