@@ -4,12 +4,14 @@ import torch
 
 from mojo_opset.backends.ttx.kernels import paged_attention_prefill
 from mojo_opset.backends.ttx.kernels import paged_attention_decode
+from mojo_opset.backends.ttx.kernels import paged_attention_decode_quant
 from mojo_opset.backends.ttx.kernels import sdpa_infer
 from mojo_opset.backends.ttx.kernels import swa_paged_prefill
 from mojo_opset.backends.ttx.kernels import swa_paged_decode
 from mojo_opset.backends.ttx.kernels import swa_infer
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoPagedDecodeGQA
+from mojo_opset.core import MojoPagedDecodeQuantGQA
 from mojo_opset.core import MojoSdpa
 from mojo_opset.core import MojoPagedPrefillSWA
 from mojo_opset.core import MojoPagedDecodeSWA
@@ -106,6 +108,47 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
             seqlens=total_seq_lens,
             block_tables=block_tables,
             gqa_interleave=self.gqa_layout == "ABAB",
+            softmax_scale=softmax_scale,
+        )
+
+        return output
+
+
+class TTXPagedDecodeQuantGQA(MojoPagedDecodeQuantGQA):
+    supported_platforms_list = ["ilu"]
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        query_scale: Optional[torch.Tensor],
+        key_cache: torch.Tensor,
+        key_scale: torch.Tensor,
+        value_cache: torch.Tensor,
+        value_scale: torch.Tensor,
+        total_seq_lens: torch.Tensor,
+        block_tables: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+        mask: Optional[torch.Tensor] = None,
+        *,
+        max_total_seq_len: Optional[int] = None,
+    ) -> torch.Tensor:
+        assert_paged_decode_contract(block_tables, total_seq_lens)
+        assert self.is_causal, (
+            f"[TTXPagedDecodeQuantGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
+        )
+        assert mask is None, f"[TTXPagedDecodeQuantGQA] TTX does not support mask, but got mask={mask}"
+
+        output = paged_attention_decode_quant(
+            q=query,
+            query_scale=query_scale,
+            key_cache=key_cache,
+            key_scale=key_scale,
+            value_cache=value_cache,
+            value_scale=value_scale,
+            seqlens=total_seq_lens,
+            block_tables=block_tables,
+            gqa_interleave=self.gqa_layout == "ABAB",
+            compute_dtype=self.compute_dtype,
             softmax_scale=softmax_scale,
         )
 
