@@ -92,16 +92,29 @@ class TTXPagedPrefillQuantGQA(MojoPagedPrefillQuantGQA):
     def forward(
         self,
         query: torch.Tensor,
-        key_cache: torch.Tensor,
-        k_qscale: torch.Tensor,
-        value_cache: torch.Tensor,
-        v_qscale: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
-        block_tables: torch.Tensor,
+        query_scale: Optional[torch.Tensor] = None,
+        key_cache: Optional[torch.Tensor] = None,
+        k_qscale: Optional[torch.Tensor] = None,
+        value_cache: Optional[torch.Tensor] = None,
+        v_qscale: Optional[torch.Tensor] = None,
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        block_tables: Optional[torch.Tensor] = None,
         softmax_scale: Optional[float] = None,
         seqlens_kv: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if query_scale is not None and query_scale.dim() == 4:
+            key_cache, k_qscale, value_cache, v_qscale, cu_seqlens_q = (
+                query_scale,
+                key_cache,
+                k_qscale,
+                value_cache,
+                v_qscale,
+            )
+            query_scale = None
+        assert query_scale is None, "[TTXPagedPrefillQuantGQA] quantized query is not supported"
+        assert key_cache is not None and k_qscale is not None and value_cache is not None and v_qscale is not None
+        assert cu_seqlens_q is not None and block_tables is not None
         assert cu_seqlens_q.dtype == torch.int32
         assert block_tables.dtype == torch.int32
         if seqlens_kv is not None:
@@ -290,15 +303,28 @@ class TTXPagedPrefillQuantSWA(MojoPagedPrefillQuantSWA):
     def forward(
         self,
         q: torch.Tensor,            # [total_q_len, n_q_heads, head_dim]   bf16/fp16
-        k_cache: torch.Tensor,      # [n_pages, n_kv_heads, page_size, head_dim] int8
-        k_qscale: torch.Tensor,     # [n_kv_heads, head_dim]               float32
-        v_cache: torch.Tensor,      # [n_pages, n_kv_heads, page_size, head_dim] int8
-        v_qscale: torch.Tensor,     # [n_kv_heads, head_dim]               float32
-        cu_q_lens: torch.Tensor,    # [bsz + 1]                            int32
-        block_table: torch.Tensor,  # [bsz, max_num_blocks]                int32
+        q_scale: Optional[torch.Tensor] = None,
+        k_cache: Optional[torch.Tensor] = None,      # [n_pages, n_kv_heads, page_size, head_dim] int8
+        k_qscale: Optional[torch.Tensor] = None,     # [n_kv_heads, head_dim]               float32
+        v_cache: Optional[torch.Tensor] = None,      # [n_pages, n_kv_heads, page_size, head_dim] int8
+        v_qscale: Optional[torch.Tensor] = None,     # [n_kv_heads, head_dim]               float32
+        cu_q_lens: Optional[torch.Tensor] = None,    # [bsz + 1]                            int32
+        block_table: Optional[torch.Tensor] = None,  # [bsz, max_num_blocks]                int32
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,  # [bsz + 1]     int32
     ) -> torch.Tensor:
+        if q_scale is not None and q_scale.dim() == 4:
+            k_cache, k_qscale, v_cache, v_qscale, cu_q_lens = (
+                q_scale,
+                k_cache,
+                k_qscale,
+                v_cache,
+                v_qscale,
+            )
+            q_scale = None
+        assert q_scale is None, "[TTXPagedPrefillQuantSWA] quantized query is not supported"
+        assert k_cache is not None and k_qscale is not None and v_cache is not None and v_qscale is not None
+        assert cu_q_lens is not None and block_table is not None
         assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
 
         seqlens_kv = (
@@ -373,20 +399,50 @@ class TTXPagedDecodeSWA(MojoPagedDecodeSWA):
 class TTXPagedDecodeQuantSWA(MojoPagedDecodeQuantSWA):
     supported_platforms_list = ["ilu"]
 
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+        global_window_size: Optional[int] = None,
+        local_window_size: Optional[int] = None,
+        quant_dtype: torch.dtype = torch.int8,
+    ):
+        super().__init__(
+            is_causal=is_causal,
+            gqa_layout=gqa_layout,
+            global_window_size=global_window_size,
+            local_window_size=local_window_size,
+            quant_dtype=quant_dtype,
+        )
+
     def forward(
         self,
         q: torch.Tensor,           # [bsz, n_q_heads, head_dim]
-        k_cache: torch.Tensor,     # [n_pages, n_kv_heads, page_size, head_dim] int8
-        k_qscale: torch.Tensor,    # [n_kv_heads, head_dim]
-        v_cache: torch.Tensor,     # [n_pages, n_kv_heads, page_size, head_dim] int8
-        v_qscale: torch.Tensor,    # [n_kv_heads, head_dim]
-        seq_lens: torch.Tensor,    # [bsz]
-        block_table: torch.Tensor, # [bsz, max_num_blocks]
+        q_scale: Optional[torch.Tensor] = None,
+        k_cache: Optional[torch.Tensor] = None,     # [n_pages, n_kv_heads, page_size, head_dim] int8
+        k_qscale: Optional[torch.Tensor] = None,    # [n_kv_heads, head_dim]
+        v_cache: Optional[torch.Tensor] = None,     # [n_pages, n_kv_heads, page_size, head_dim] int8
+        v_qscale: Optional[torch.Tensor] = None,    # [n_kv_heads, head_dim]
+        seq_lens: Optional[torch.Tensor] = None,    # [bsz]
+        block_table: Optional[torch.Tensor] = None, # [bsz, max_num_blocks]
         softmax_scale: Optional[float] = None,
     ) -> torch.Tensor:
+        if q_scale is not None and q_scale.dim() == 4:
+            k_cache, k_qscale, v_cache, v_qscale, seq_lens = (
+                q_scale,
+                k_cache,
+                k_qscale,
+                v_cache,
+                v_qscale,
+            )
+            q_scale = None
+        assert q_scale is not None and q.dtype == self.quant_dtype, "q_scale must be provided for quantized query"
+        assert k_cache is not None and k_qscale is not None and v_cache is not None and v_qscale is not None
+        assert seq_lens is not None and block_table is not None
         assert seq_lens.dtype == torch.int32
         assert block_table.dtype == torch.int32
         assert_paged_decode_contract(block_table, seq_lens)
+        q = (q.to(q_scale.dtype) * q_scale).contiguous()
         o = swa_paged_decode_quant(
             q,
             k_cache,

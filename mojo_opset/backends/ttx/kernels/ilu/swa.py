@@ -1232,8 +1232,12 @@ def _swa_paged_prefill_quant_kernel(
             s = tl.where(allowed, s, -float("inf"))
 
             m_new = tl.maximum(m_max, s)
-            alpha = tl.math.exp(m_max - m_new)
-            p = tl.where(allowed, tl.math.exp(s - m_new), 0.0)
+            row_is_all_masked = m_new == -float("inf")
+            alpha = tl.math.exp(tl.where(row_is_all_masked, 0.0, m_max - m_new))
+            alpha = tl.where(row_is_all_masked, 0.0, alpha)
+            p = tl.math.exp(tl.where(row_is_all_masked, 0.0, s - m_new))
+            p = tl.where(allowed, p, 0.0)
+            p = tl.where(row_is_all_masked, 0.0, p)
 
             v_vec = tl.load(
                 V_cache + physical_block * stride_vb + kv_head_id * stride_vh
@@ -1246,8 +1250,8 @@ def _swa_paged_prefill_quant_kernel(
             l_sum = l_sum * alpha + p
             m_max = m_new
 
-    l_sum = tl.maximum(l_sum, 1e-6)
-    out_vec = acc / l_sum
+    l_sum_safe = tl.where(l_sum > 0, l_sum, 1.0)
+    out_vec = tl.where(l_sum > 0, acc / l_sum_safe, 0.0)
 
     tl.store(
         Out + (q_start + q_token_id) * stride_ot + q_head_id * stride_oh + offs_d * stride_od,
@@ -2287,10 +2291,11 @@ def _paged_decode_kernel_tiny_global(
                     + offs_t[:, None] * stride_v_blksz
                     + offs_d[None, :] * stride_v_dim
                 )
-                tiny_load_mask = (offs_t[:, None] < GLOBAL_WINDOW) & (offs_d[None, :] < HEAD_DIM)
+                tiny_valid = (offs_t < GLOBAL_WINDOW) & (offs_t < kv_seq_len)
+                tiny_load_mask = tiny_valid[:, None] & (offs_d[None, :] < HEAD_DIM)
                 k_tiny = tl.load(k_ptrs, mask=tiny_load_mask, other=0.0)
                 v_tiny = tl.load(v_ptrs, mask=tiny_load_mask, other=0.0)
-                tiny_mask = offs_t < GLOBAL_WINDOW
+                tiny_mask = tiny_valid
                 acc, l_i, m_i = _sdpa_acc_fwd_1xT(
                     acc,
                     l_i,
@@ -2649,10 +2654,13 @@ def _paged_decode_quant_kernel(
             qk = tl.where(mask, qk, float("-inf"))
 
             m_ij = tl.maximum(m_i, tl.max(qk, axis=0))
-            p = tl.math.exp(qk - m_ij)
-            p = tl.where(kv_mask, p, 0.0)
+            row_is_all_masked = m_ij == -float("inf")
+            p = tl.math.exp(tl.where(row_is_all_masked, 0.0, qk - m_ij))
+            p = tl.where(row_is_all_masked, 0.0, p)
+            p = tl.where(mask, p, 0.0)
             l_ij = tl.sum(p, axis=0)
-            alpha = tl.math.exp(m_i - m_ij)
+            alpha = tl.math.exp(tl.where(row_is_all_masked, 0.0, m_i - m_ij))
+            alpha = tl.where(row_is_all_masked, 0.0, alpha)
             l_i = l_i * alpha + l_ij
             acc = acc * alpha
 
@@ -2704,10 +2712,13 @@ def _paged_decode_quant_kernel(
             qk = tl.where(mask, qk, float("-inf"))
 
             m_ij = tl.maximum(m_i, tl.max(qk, axis=0))
-            p = tl.math.exp(qk - m_ij)
-            p = tl.where(kv_mask, p, 0.0)
+            row_is_all_masked = m_ij == -float("inf")
+            p = tl.math.exp(tl.where(row_is_all_masked, 0.0, qk - m_ij))
+            p = tl.where(row_is_all_masked, 0.0, p)
+            p = tl.where(mask, p, 0.0)
             l_ij = tl.sum(p, axis=0)
-            alpha = tl.math.exp(m_i - m_ij)
+            alpha = tl.math.exp(tl.where(row_is_all_masked, 0.0, m_i - m_ij))
+            alpha = tl.where(row_is_all_masked, 0.0, alpha)
             l_i = l_i * alpha + l_ij
             acc = acc * alpha
 

@@ -21,8 +21,9 @@ class TTXDequant(MojoDequant):
     def forward(
         self,
         input: torch.Tensor,
+        scale: torch.Tensor,
     ) -> torch.Tensor:
-        return dequant(input, self.scale, self.output_dtype)
+        return dequant(input, scale, self.output_dtype)
 
 class TTXDynamicQuant(MojoDynamicQuant):
     supported_platforms_list = ["npu", "ilu"]
