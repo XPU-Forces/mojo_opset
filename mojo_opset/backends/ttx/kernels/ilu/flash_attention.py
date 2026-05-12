@@ -656,6 +656,229 @@ def _paged_decode_gather_and_causal(
     return o
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_N": 64}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_N": 64}, num_warps=4, num_stages=3),
+        triton.Config({"BLOCK_N": 64}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_N": 128}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_N": 128}, num_warps=4, num_stages=3),
+        triton.Config({"BLOCK_N": 128}, num_warps=8, num_stages=2),
+    ],
+    key=["HQ", "D", "PAGE_SIZE", "COMPUTE_INT8"],
+)
+@libentry()
+@triton.jit
+def _paged_decode_quant_gqa_kernel(
+    q_ptr,
+    k_cache_ptr,
+    key_scale_ptr,
+    v_cache_ptr,
+    value_scale_ptr,
+    o_ptr,
+    seqlens_ptr,
+    block_tables_ptr,
+    stride_qb,
+    stride_qh,
+    stride_qd,
+    stride_k_block,
+    stride_k_head,
+    stride_k_blksz,
+    stride_k_dim,
+    stride_ks_head,
+    stride_ks_dim,
+    stride_v_block,
+    stride_v_head,
+    stride_v_blksz,
+    stride_v_dim,
+    stride_vs_head,
+    stride_vs_dim,
+    stride_ob,
+    stride_oh,
+    stride_od,
+    stride_bt_batch,
+    stride_bt_block,
+    HQ,
+    HKV,
+    D,
+    GROUP,
+    SOFTMAX_SCALE,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    GQA_LAYOUT: tl.constexpr,
+    COMPUTE_INT8: tl.constexpr,
+    OUT_T: tl.constexpr,
+):
+    pid_b = tl.program_id(0)
+    pid_h = tl.program_id(1)
+
+    if pid_h >= HQ:
+        return
+
+    seq_len = tl.load(seqlens_ptr + pid_b).to(tl.int32)
+    kv_h = tl.where(GQA_LAYOUT == 0, pid_h % HKV, pid_h // GROUP)
+
+    offs_d = tl.arange(0, BLOCK_D)
+    d_mask = offs_d < D
+
+    q_ptrs = q_ptr + pid_b * stride_qb + pid_h * stride_qh + offs_d * stride_qd
+    q = tl.load(q_ptrs, mask=d_mask, other=0.0).to(tl.float32)
+
+    k_scale = tl.load(
+        key_scale_ptr + kv_h * stride_ks_head + offs_d * stride_ks_dim,
+        mask=d_mask,
+        other=0.0,
+    ).to(tl.float32)
+    v_scale = tl.load(
+        value_scale_ptr + kv_h * stride_vs_head + offs_d * stride_vs_dim,
+        mask=d_mask,
+        other=0.0,
+    ).to(tl.float32)
+
+    if COMPUTE_INT8:
+        q_scaled = q * k_scale
+        q_amax = tl.max(tl.abs(q_scaled), axis=0)
+        q_quant_scale = q_amax / 127.0
+        q_quant_scale = tl.where(q_quant_scale < 1.0e-6, 1.0, q_quant_scale)
+        q_quant_f = q_scaled / q_quant_scale
+        q_quant_pos = (q_quant_f + 0.5).to(tl.int32)
+        q_quant_neg = (q_quant_f - 0.5).to(tl.int32)
+        q_quant_i32 = tl.where(q_quant_f >= 0.0, q_quant_pos, q_quant_neg)
+        q_quant_i32 = tl.minimum(tl.maximum(q_quant_i32, -128), 127)
+        q_for_score = q_quant_i32.to(tl.float32)
+    else:
+        q_for_score = q
+        q_quant_scale = 1.0
+
+    neg_inf = -1.0e30
+    m = tl.full((1,), neg_inf, tl.float32)
+    num_blocks = tl.cdiv(seq_len, BLOCK_N)
+
+    for block_idx in tl.range(0, num_blocks):
+        start_n = block_idx * BLOCK_N
+        offs_n = start_n + tl.arange(0, BLOCK_N)
+        s_mask = offs_n < seq_len
+
+        logical_block_idx = offs_n // PAGE_SIZE
+        offset_in_block = offs_n % PAGE_SIZE
+        physical_block_id = tl.load(
+            block_tables_ptr + pid_b * stride_bt_batch + logical_block_idx * stride_bt_block,
+            mask=s_mask,
+            other=0,
+        )
+
+        k_ptrs = (
+            k_cache_ptr
+            + physical_block_id[:, None] * stride_k_block
+            + kv_h * stride_k_head
+            + offset_in_block[:, None] * stride_k_blksz
+            + offs_d[None, :] * stride_k_dim
+        )
+        k = tl.load(k_ptrs, mask=s_mask[:, None] & d_mask[None, :], other=0.0).to(tl.float32)
+        if COMPUTE_INT8:
+            scores = tl.sum(k * q_for_score[None, :], axis=1) * q_quant_scale * SOFTMAX_SCALE
+        else:
+            scores = tl.sum(k * k_scale[None, :] * q_for_score[None, :], axis=1) * SOFTMAX_SCALE
+        scores = tl.where(s_mask, scores, neg_inf)
+        m = tl.maximum(m, tl.max(scores, axis=0))
+
+    l = tl.zeros((1,), dtype=tl.float32)
+    acc = tl.zeros((BLOCK_D,), dtype=tl.float32)
+    p_amax = tl.zeros((1,), dtype=tl.float32)
+
+    for block_idx in tl.range(0, num_blocks):
+        start_n = block_idx * BLOCK_N
+        offs_n = start_n + tl.arange(0, BLOCK_N)
+        s_mask = offs_n < seq_len
+
+        logical_block_idx = offs_n // PAGE_SIZE
+        offset_in_block = offs_n % PAGE_SIZE
+        physical_block_id = tl.load(
+            block_tables_ptr + pid_b * stride_bt_batch + logical_block_idx * stride_bt_block,
+            mask=s_mask,
+            other=0,
+        )
+
+        k_ptrs = (
+            k_cache_ptr
+            + physical_block_id[:, None] * stride_k_block
+            + kv_h * stride_k_head
+            + offset_in_block[:, None] * stride_k_blksz
+            + offs_d[None, :] * stride_k_dim
+        )
+        k = tl.load(k_ptrs, mask=s_mask[:, None] & d_mask[None, :], other=0.0).to(tl.float32)
+        if COMPUTE_INT8:
+            scores = tl.sum(k * q_for_score[None, :], axis=1) * q_quant_scale * SOFTMAX_SCALE
+        else:
+            v_ptrs = (
+                v_cache_ptr
+                + physical_block_id[:, None] * stride_v_block
+                + kv_h * stride_v_head
+                + offset_in_block[:, None] * stride_v_blksz
+                + offs_d[None, :] * stride_v_dim
+            )
+            v = tl.load(v_ptrs, mask=s_mask[:, None] & d_mask[None, :], other=0.0).to(tl.float32)
+            scores = tl.sum(k * k_scale[None, :] * q_for_score[None, :], axis=1) * SOFTMAX_SCALE
+        scores = tl.where(s_mask, scores, neg_inf)
+        p = tl.where(s_mask, tl.exp(scores - m), 0.0)
+        l += tl.sum(p, axis=0)
+        if COMPUTE_INT8:
+            p_amax = tl.maximum(p_amax, tl.max(p, axis=0))
+        else:
+            acc += tl.sum(p[:, None] * v * v_scale[None, :], axis=0)
+
+    l = tl.maximum(l, 1.0e-6)
+
+    if COMPUTE_INT8:
+        p_scale = (p_amax / l) / 127.0
+        p_scale = tl.where(p_scale < 1.0e-6, 1.0, p_scale)
+
+        for block_idx in tl.range(0, num_blocks):
+            start_n = block_idx * BLOCK_N
+            offs_n = start_n + tl.arange(0, BLOCK_N)
+            s_mask = offs_n < seq_len
+
+            logical_block_idx = offs_n // PAGE_SIZE
+            offset_in_block = offs_n % PAGE_SIZE
+            physical_block_id = tl.load(
+                block_tables_ptr + pid_b * stride_bt_batch + logical_block_idx * stride_bt_block,
+                mask=s_mask,
+                other=0,
+            )
+
+            k_ptrs = (
+                k_cache_ptr
+                + physical_block_id[:, None] * stride_k_block
+                + kv_h * stride_k_head
+                + offset_in_block[:, None] * stride_k_blksz
+                + offs_d[None, :] * stride_k_dim
+            )
+            v_ptrs = (
+                v_cache_ptr
+                + physical_block_id[:, None] * stride_v_block
+                + kv_h * stride_v_head
+                + offset_in_block[:, None] * stride_v_blksz
+                + offs_d[None, :] * stride_v_dim
+            )
+            k = tl.load(k_ptrs, mask=s_mask[:, None] & d_mask[None, :], other=0.0).to(tl.float32)
+            v = tl.load(v_ptrs, mask=s_mask[:, None] & d_mask[None, :], other=0.0).to(tl.float32)
+            scores = tl.sum(k * q_for_score[None, :], axis=1) * q_quant_scale * SOFTMAX_SCALE
+            scores = tl.where(s_mask, scores, neg_inf)
+            p = tl.where(s_mask, tl.exp(scores - m) / l, 0.0)
+            p_quant_f = p / p_scale
+            p_quant_i32 = (p_quant_f + 0.5).to(tl.int32)
+            p_quant_i32 = tl.minimum(tl.maximum(p_quant_i32, -128), 127)
+            acc += tl.sum(p_quant_i32.to(tl.float32)[:, None] * v, axis=0)
+
+        out = acc * p_scale * v_scale
+    else:
+        out = acc / l
+
+    out_ptrs = o_ptr + pid_b * stride_ob + pid_h * stride_oh + offs_d * stride_od
+    tl.store(out_ptrs, out.to(OUT_T), mask=d_mask)
+
+
 def paged_attention_decode_impl(
     q: torch.Tensor,
     key_cache: torch.Tensor,
@@ -682,3 +905,92 @@ def paged_attention_decode_impl(
         gqa_interleave,
         float(softmax_scale),
     )
+
+
+def paged_attention_decode_quant_impl(
+    q: torch.Tensor,
+    query_scale: Optional[torch.Tensor],
+    key_cache: torch.Tensor,
+    key_scale: torch.Tensor,
+    value_cache: torch.Tensor,
+    value_scale: torch.Tensor,
+    seqlens: torch.Tensor,
+    block_tables: torch.Tensor,
+    gqa_interleave: bool,
+    compute_dtype: torch.dtype,
+    softmax_scale: Optional[float] = None,
+) -> torch.Tensor:
+    """Paged KV decode attention with int8 KV cache and per-channel scales."""
+    if query_scale is not None:
+        raise NotImplementedError("ILU quant paged decode does not support quantized query.")
+    if key_cache.dtype != torch.int8 or value_cache.dtype != torch.int8:
+        raise TypeError("paged_attention_decode_quant_impl expects int8 key/value cache.")
+
+    batch_size, num_q_heads, head_dim = q.shape
+    _, num_kv_heads, page_size, head_dim_cache = key_cache.shape
+
+    assert head_dim == head_dim_cache
+    assert key_scale.shape == (num_kv_heads, head_dim)
+    assert value_scale.shape == (num_kv_heads, head_dim)
+
+    if softmax_scale is None:
+        softmax_scale = 1.0 / math.sqrt(head_dim)
+
+    group = num_q_heads // num_kv_heads
+    out = torch.empty_like(q)
+    block_d = triton.next_power_of_2(head_dim)
+    layout_id = 0 if gqa_interleave else 1
+    compute_int8 = compute_dtype == torch.int8
+
+    if q.dtype == torch.float16:
+        out_t = tl.float16
+    elif q.dtype == torch.bfloat16:
+        out_t = tl.bfloat16
+    else:
+        out_t = tl.float32
+
+    seqlens_i32 = seqlens.to(torch.int32)
+    block_tables_i32 = block_tables.to(torch.int32)
+
+    grid = (batch_size, num_q_heads)
+    _paged_decode_quant_gqa_kernel[grid](
+        q,
+        key_cache,
+        key_scale,
+        value_cache,
+        value_scale,
+        out,
+        seqlens_i32,
+        block_tables_i32,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        key_cache.stride(0),
+        key_cache.stride(1),
+        key_cache.stride(2),
+        key_cache.stride(3),
+        key_scale.stride(0),
+        key_scale.stride(1),
+        value_cache.stride(0),
+        value_cache.stride(1),
+        value_cache.stride(2),
+        value_cache.stride(3),
+        value_scale.stride(0),
+        value_scale.stride(1),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        block_tables_i32.stride(0),
+        block_tables_i32.stride(1),
+        num_q_heads,
+        num_kv_heads,
+        head_dim,
+        group,
+        float(softmax_scale),
+        BLOCK_D=block_d,
+        PAGE_SIZE=page_size,
+        GQA_LAYOUT=layout_id,
+        COMPUTE_INT8=compute_int8,
+        OUT_T=out_t,
+    )
+    return out
