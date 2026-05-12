@@ -1015,8 +1015,8 @@ def _swa_paged_prefill_kernel(
                         BLOCK_D,
                     )
 
-            l_safe = tl.where(q_valid, l_i, 1.0)
-            out_block = acc / l_safe[:, None]
+            l_i_safe = tl.where(l_i > 0, l_i, 1.0)
+            out_block = tl.where(l_i[:, None] > 0, acc / l_i_safe[:, None], 0.0)
             # Replace per-batch out-of-bound rows with 0 *before* the cast so
             # NaN/Inf produced by the all-masked softmax (max(-inf,-inf) ->
             # NaN exponent) does not propagate; combined with the explicit

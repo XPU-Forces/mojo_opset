@@ -973,7 +973,7 @@ def test_paged_decode_swa_with_graph(
         total_seq_lens[current_batch_size:] = 0
 
         for i in range(current_batch_size):
-            num_blocks_per_seq = (cur_total_seq_lens[i] + block_size - 1) // block_size
+            num_blocks_per_seq = (int(cur_total_seq_lens[i].item()) + block_size - 1) // block_size
             block_tables[i, :num_blocks_per_seq].copy_(cur_block_tables[i, :num_blocks_per_seq])
             if num_blocks_per_seq < block_tables.shape[1]:
                 pad_id = (
