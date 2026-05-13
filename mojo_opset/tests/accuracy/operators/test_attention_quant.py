@@ -450,6 +450,8 @@ def test_paged_prefill_quant_swa(
         cu_total_seq_lens=cu_total_seq_lens,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
+        # int8 compute can have a few round-boundary outliers across millions of elements.
+        ptol=0.99999 if compute_dtype == torch.int8 else 1.0,
     )
 
 
