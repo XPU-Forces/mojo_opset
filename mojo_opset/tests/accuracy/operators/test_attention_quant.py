@@ -219,7 +219,7 @@ def test_paged_prefill_quant_gqa(
     context_dtype: torch.dtype,
     compute_dtype: torch.dtype,
 ):
-    query_q, query_scale = _quantize_query(query, query_dtype)
+    query_q, _query_scale = _quantize_query(query, query_dtype)
 
     k_cache_q, key_scale = _quantize_kv_cache(k_cache, context_dtype)
     v_cache_q, value_scale = _quantize_kv_cache(v_cache, context_dtype)
@@ -227,25 +227,19 @@ def test_paged_prefill_quant_gqa(
     op = MojoPagedPrefillQuantGQA(
         is_causal=True,
         gqa_layout=gqa_layout,
-        query_dtype=query_dtype,
-        context_dtype=context_dtype,
-        compute_dtype=compute_dtype,
     )
     op_ref = MojoPagedPrefillQuantGQA._registry.get("torch")(
         is_causal=True,
         gqa_layout=gqa_layout,
-        query_dtype=query_dtype,
-        context_dtype=context_dtype,
-        compute_dtype=compute_dtype,
     )
 
     head_dim = query.shape[-1]
     softmax_scale = 1.0 / math.sqrt(head_dim)
+    seqlens_kv = None if cu_total_seq_lens is None else cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
 
     op.forward_diff_with(
         op_ref,
         query_q,
-        query_scale,
         k_cache_q,
         key_scale,
         v_cache_q,
@@ -253,7 +247,7 @@ def test_paged_prefill_quant_gqa(
         cu_q_lens,
         block_tables,
         softmax_scale=softmax_scale,
-        cu_total_seq_lens=cu_total_seq_lens,
+        seqlens_kv=seqlens_kv,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
     )
@@ -531,18 +525,12 @@ def test_paged_decode_quant_swa(
         gqa_layout=gqa_layout,
         global_window_size=global_window,
         local_window_size=local_window,
-        query_dtype=query_dtype,
-        context_dtype=context_dtype,
-        compute_dtype=compute_dtype,
     )
     op_ref = MojoPagedDecodeQuantSWA._registry.get("torch")(
         is_causal=True,
         gqa_layout=gqa_layout,
         global_window_size=global_window,
         local_window_size=local_window,
-        query_dtype=query_dtype,
-        context_dtype=context_dtype,
-        compute_dtype=compute_dtype,
     )
 
     atol = 2e-2 if query.dtype != torch.float32 else 1e-5
@@ -551,7 +539,6 @@ def test_paged_decode_quant_swa(
     op.forward_diff_with(
         op_ref,
         query_q,
-        query_scale,
         k_cache_q,
         key_scale,
         v_cache_q,

@@ -245,15 +245,28 @@ class TTXPagedPrefillQuantSWA(MojoPagedPrefillQuantSWA):
     def forward(
         self,
         q: torch.Tensor,            # [total_q_len, n_q_heads, head_dim]   bf16/fp16
-        k_cache: torch.Tensor,      # [n_pages, n_kv_heads, page_size, head_dim] int8
-        k_qscale: torch.Tensor,     # [n_kv_heads, head_dim]               float32
-        v_cache: torch.Tensor,      # [n_pages, n_kv_heads, page_size, head_dim] int8
-        v_qscale: torch.Tensor,     # [n_kv_heads, head_dim]               float32
-        cu_q_lens: torch.Tensor,    # [bsz + 1]                            int32
-        block_table: torch.Tensor,  # [bsz, max_num_blocks]                int32
+        q_scale: Optional[torch.Tensor] = None,
+        k_cache: Optional[torch.Tensor] = None,      # [n_pages, n_kv_heads, page_size, head_dim] int8
+        k_qscale: Optional[torch.Tensor] = None,     # [n_kv_heads, head_dim]               float32
+        v_cache: Optional[torch.Tensor] = None,      # [n_pages, n_kv_heads, page_size, head_dim] int8
+        v_qscale: Optional[torch.Tensor] = None,     # [n_kv_heads, head_dim]               float32
+        cu_q_lens: Optional[torch.Tensor] = None,    # [bsz + 1]                            int32
+        block_table: Optional[torch.Tensor] = None,  # [bsz, max_num_blocks]                int32
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,  # [bsz + 1]     int32
     ) -> torch.Tensor:
+        if q_scale is not None and q_scale.dim() == 4:
+            k_cache, k_qscale, v_cache, v_qscale, cu_q_lens = (
+                q_scale,
+                k_cache,
+                k_qscale,
+                v_cache,
+                v_qscale,
+            )
+            q_scale = None
+        assert q_scale is None, "[TTXPagedPrefillQuantSWA] quantized query is not supported"
+        assert k_cache is not None and k_qscale is not None and v_cache is not None and v_qscale is not None
+        assert cu_q_lens is not None and block_table is not None
         assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
 
         seqlens_kv = (
