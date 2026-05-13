@@ -131,7 +131,6 @@ class TTXOverEncoding(MojoOverEncoding):
                     LUT_qweight=self.oe_mega_embedding.weight,
                     LUT_scale=self.oe_mega_embedding.scale,
                     LUT_mean=self.oe_mega_embedding.mean,
-                    max_gram=oe_history_input.size(1) + 1,
                     ori_vocab_size=self.ori_vocab_size,
                     mega_vocab_size=self.oe_mega_embedding.weight.size(0),
                     mega_vocab_start_id=self.oe_mega_embedding.vocab_start_id,

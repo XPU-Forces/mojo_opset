@@ -100,8 +100,6 @@ def n_gram_decode_impl(
     G    = int(n_grams.size(0))
     H    = int(oe_history_inputs.size(1))
 
-    max_gram = int(n_grams.max().item())
-
     out = torch.empty(B, S, G, dtype=torch.int64, device=input_ids.device)
     if B == 0 or S == 0 or G == 0:
         return out
@@ -113,7 +111,7 @@ def n_gram_decode_impl(
         out,
         B=B, S=S, G=G, H=H,
         ori_vocab_size=vocab_size,
-        MAX_GRAM=max_gram,
+        MAX_GRAM=H+1,
     )
     return out
 
@@ -196,8 +194,6 @@ def n_gram_prefill_impl(
     G = int(n_grams.size(0))
     H = int(oe_history_inputs.size(1))
 
-    max_gram = int(n_grams.max().item())
-
     out = torch.empty(T, G, dtype=torch.int64, device=input_ids.device)
     if T == 0 or G == 0:
         return out
@@ -225,6 +221,6 @@ def n_gram_prefill_impl(
         out,
         T=T, G=G, H=H,
         ori_vocab_size=vocab_size,
-        MAX_GRAM=max_gram,
+        MAX_GRAM=H+1,
     )
     return out
