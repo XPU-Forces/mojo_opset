@@ -98,6 +98,7 @@ from .operators.position_embedding import MojoRelativeEmbedding
 from .operators.position_embedding import MojoApplyRoPE
 from .operators.position_embedding import MojoApplyVisionRoPE2D
 from .operators.position_embedding import MojoGridRoPE
+from .operators.position_embedding import MojoMRoPE
 from .operators.position_embedding import MojoNormRoPE
 from .operators.position_embedding import MojoNormRoPEStoreKV
 from .operators.position_embedding import MojoRoPEStoreKV
@@ -216,6 +217,7 @@ __all__ = [
     "MojoNormRoPEStoreKV",
     "MojoGridRoPE",
     "MojoVisionRotaryEmbedding2D",
+    "MojoMRoPE",
 
     "MojoTopPSampling",
     "MojoTopKSampling",

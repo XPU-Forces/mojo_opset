@@ -4,6 +4,7 @@ import torch
 from mojo_opset import MojoApplyRoPE
 from mojo_opset import MojoApplyVisionRoPE2D
 from mojo_opset import MojoGridRoPE
+from mojo_opset import MojoMRoPE
 from mojo_opset import MojoRelativeEmbedding
 from mojo_opset import MojoRotaryEmbedding
 from mojo_opset import MojoVisionRotaryEmbedding2D
@@ -24,6 +25,35 @@ VISION_VIT_CONFIG = {
     "rope_theta": 10000.0,
     "adapooling_factor": 2,
 }
+
+
+def compute_cos_sin_cache(head_dim, rotary_dim, max_position, base=10000.0):
+    inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim // 2, 2, dtype=torch.float32) / rotary_dim))
+    t = torch.arange(max_position, dtype=inv_freq.dtype)
+    freqs = torch.einsum("i,j->ij", t, inv_freq)
+    freqs = freqs.repeat_interleave(2, dim=-1)
+    return freqs.cos(), freqs.sin()
+
+
+def prepare_mrope_test_inputs(num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=torch.float32):
+    rotary_dim = sum(mrope_section) * 2
+
+    positions = torch.randint(0, 1000, (3, num_tokens), device=device, dtype=torch.long)
+    cos_cache, sin_cache = compute_cos_sin_cache(head_dim, rotary_dim, 4000, base=10000.0)
+
+    half_rotary_dim = rotary_dim // 2
+    cos_3d = torch.zeros(3, num_tokens, half_rotary_dim, device=device, dtype=torch.float32)
+    sin_3d = torch.zeros(3, num_tokens, half_rotary_dim, device=device, dtype=torch.float32)
+
+    for dim_idx in range(3):
+        pos = positions[dim_idx]
+        cos_3d[dim_idx] = cos_cache[pos][:, :half_rotary_dim]
+        sin_3d[dim_idx] = sin_cache[pos][:, :half_rotary_dim]
+
+    query = torch.randn(num_tokens, n_qh * head_dim, device=device, dtype=dtype)
+    key = torch.randn(num_tokens, n_kh * head_dim, device=device, dtype=dtype)
+
+    return query, key, cos_3d, sin_3d, mrope_section
 
 
 @pytest.mark.parametrize("bs", [1, 6])
@@ -228,6 +258,69 @@ def test_grid_pos_emb(bs, grid, heads, head_dim, pad, dtype):
     rope_ref = MojoGridRoPE._registry.get("torch")()
 
     rope.forward_diff_with(rope_ref, x, grid_sizes, freqs_list, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize("num_tokens", [1, 32, 128])
+@pytest.mark.parametrize("n_qh, n_kh, mrope_section, is_interleaved, model_name", [
+    (28, 4, [16, 24, 24], False, "Qwen2-VL-7B"),
+    (40, 8, [16, 24, 24], False, "Qwen2.5-VL-32B"),
+    (16, 8, [24, 20, 20], True, "Qwen3-VL-2B"),
+    (32, 8, [24, 20, 20], True, "Qwen3-VL-8B"),
+])
+@pytest.mark.parametrize("head_dim", [128])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@bypass_not_implemented
+def test_mrope_qwen_models(
+    num_tokens,
+    n_qh,
+    n_kh,
+    head_dim,
+    mrope_section,
+    is_interleaved,
+    model_name,
+    dtype,
+):
+    device = get_torch_device()
+    query, key, cos_table, sin_table, mrope_section_out = prepare_mrope_test_inputs(
+        num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=dtype
+    )
+
+    mrope = MojoMRoPE()
+    mrope_ref = MojoMRoPE._registry.get("torch")()
+    mrope.forward_diff_with(mrope_ref, query, key, cos_table, sin_table, mrope_section_out, is_interleaved, head_dim=head_dim)
+
+
+@pytest.mark.parametrize("num_tokens", [16, 64])
+@pytest.mark.parametrize("n_qh, n_kh", [
+    (32, 4),
+    (64, 8),
+])
+@pytest.mark.parametrize("head_dim, mrope_section, description", [
+    (128, [8, 12, 12], "partial_rotation_50pct"),
+    (128, [12, 18, 18], "partial_rotation_75pct"),
+    (96, [8, 12, 12], "small_head_full_rotation"),
+])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("is_interleaved", [False])
+@bypass_not_implemented
+def test_mrope_partial_rotation(
+    num_tokens,
+    n_qh,
+    n_kh,
+    head_dim,
+    mrope_section,
+    description,
+    dtype,
+    is_interleaved,
+):
+    device = get_torch_device()
+    query, key, cos_table, sin_table, mrope_section_out = prepare_mrope_test_inputs(
+        num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=dtype
+    )
+
+    mrope = MojoMRoPE()
+    mrope_ref = MojoMRoPE._registry.get("torch")()
+    mrope.forward_diff_with(mrope_ref, query, key, cos_table, sin_table, mrope_section_out, is_interleaved, head_dim=head_dim)
 
 
 @pytest.mark.parametrize("num_buckets", [32, 64])
