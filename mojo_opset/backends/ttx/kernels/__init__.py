@@ -40,6 +40,13 @@ lightning_indexer_impl = _get_kernel_impl(ttx_backend_module, "lightning_indexer
 rot_pos_embed_impl = _get_kernel_impl(ttx_backend_module, "rot_pos_embed_impl")
 rope_fwd_impl = _get_kernel_impl(ttx_backend_module, "rope_fwd_impl")
 rope_bwd_impl = _get_kernel_impl(ttx_backend_module, "rope_bwd_impl")
+mrope_fwd_impl = _get_kernel_impl(ttx_backend_module, "mrope_fwd_impl")
+
+vision_rot_pos_embed_impl = _get_kernel_impl(ttx_backend_module, "vision_rot_pos_embed_impl")
+vision_rope_apply_impl = _get_kernel_impl(ttx_backend_module, "vision_rope_apply_impl")
+
+vision_rot_pos_embed_impl = _get_kernel_impl(ttx_backend_module, "vision_rot_pos_embed_impl")
+vision_rope_apply_impl = _get_kernel_impl(ttx_backend_module, "vision_rope_apply_impl")
 
 swiglu_fwd_impl = _get_kernel_impl(ttx_backend_module, "swiglu_fwd_impl")
 swiglu_bwd_impl = _get_kernel_impl(ttx_backend_module, "swiglu_bwd_impl")
@@ -76,7 +83,7 @@ diffusion_attention_bwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_a
 
 m_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "m_grouped_matmul_impl")
 k_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "k_grouped_matmul_impl")
-quant_group_linear_reduce_sum_impl = _get_kernel_impl(ttx_backend_module, "quant_group_linear_reduce_sum_impl")
+quant_batch_gemm_reduce_sum_impl = _get_kernel_impl(ttx_backend_module, "quant_batch_gemm_reduce_sum_impl")
 
 int8_gemm_dequant_impl = _get_kernel_impl(ttx_backend_module, "int8_gemm_dequant_impl")
 prepare_b_impl = _get_kernel_impl(ttx_backend_module, "prepare_b_impl")
@@ -831,6 +838,8 @@ else:
     rot_pos_embed = rot_pos_embed_impl
     rope_fwd = rope_fwd_impl
     rope_bwd = rope_bwd_impl
+    vision_rot_pos_embed = vision_rot_pos_embed_impl
+    vision_rope_apply = vision_rope_apply_impl
     rmsnorm_fwd = rmsnorm_fwd_impl
     rmsnorm_bwd = rmsnorm_bwd_impl
     rmsnorm_infer = rmsnorm_infer_impl

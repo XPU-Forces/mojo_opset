@@ -33,29 +33,26 @@ from .operators.attention import MojoPrefillNSA
 from .operators.attention import MojoSdpa
 from .operators.attention import MojoSWA
 from .operators.attention import MojoPrefillSageGQA
+from .operators.attention import MojoPagedDecodeQuantGQA
+from .operators.attention import MojoPagedPrefillQuantGQA
+from .operators.attention import MojoPagedDecodeQuantSWA
+from .operators.attention import MojoPagedPrefillQuantSWA
 
 """ kvcache """
 from .operators.kv_cache import MojoStoreMLAKVCache
 from .operators.kv_cache import MojoStorePagedKVCache
 from .operators.kv_cache import MojoStorePagedMLAKVCache
 
-""" linear """
-from .operators.gemm import MojoGemmDequant
+""" gemm """
+from .operators.gemm import MojoGemm
+from .operators.gemm import MojoQuantGemm
 from .operators.gemm import MojoGroupGemm
-from .operators.gemm import MojoGroupGemm as MojoGroupLinear
-from .operators.gemm import MojoQuantGroupLinearReduceSum
-from .operators.linear import MojoLinear
 
 """ compute + comm """
-from .operators.compute_with_comm import MojoAllGatherGemm
 from .operators.compute_with_comm import MojoGemmAll2All
+from .operators.compute_with_comm import MojoAllGatherGemm
 from .operators.compute_with_comm import MojoGemmAllReduce
 from .operators.compute_with_comm import MojoGemmReduceScatter
-
-""" matmul """
-# Aliases for backward compatibility
-from .operators.gemm import MojoGroupGemm as MojoGroupedMatmul
-from .operators.gemm import MojoQuantGroupLinearReduceSum as MojoGroupQuantMatmulReduceSum
 
 """ embedding """
 from .operators.embedding import MojoEmbedding
@@ -100,11 +97,14 @@ from .operators.normalization import MojoRMSNormQuant
 """ position_embedding """
 from .operators.position_embedding import MojoRelativeEmbedding
 from .operators.position_embedding import MojoApplyRoPE
+from .operators.position_embedding import MojoApplyVisionRoPE2D
 from .operators.position_embedding import MojoGridRoPE
+from .operators.position_embedding import MojoMRoPE
 from .operators.position_embedding import MojoNormRoPE
 from .operators.position_embedding import MojoNormRoPEStoreKV
 from .operators.position_embedding import MojoRoPEStoreKV
 from .operators.position_embedding import MojoRotaryEmbedding
+from .operators.position_embedding import MojoVisionRotaryEmbedding2D
 
 """ sampling """
 from .operators.sampling import MojoApplyPenaltiesTempurate
@@ -138,9 +138,6 @@ __all__ = [
     "MojoOperator",
 
     "MojoGelu",
-    "MojoGroupedMatmul",
-    "MojoGroupLinear",
-    "MojoGroupQuantMatmulReduceSum",
     "MojoSilu",
     "MojoSwiGLU",
     "MojoRotateActivation",
@@ -162,17 +159,20 @@ __all__ = [
     "MojoPagedPrefillSWA",
     "MojoPagedDecodeSWA",
     "MojoSWA",
+    "MojoPagedPrefillQuantGQA",
+    "MojoPagedDecodeQuantGQA",
+    "MojoPagedPrefillQuantSWA",
+    "MojoPagedDecodeQuantSWA",
 
     "MojoStorePagedKVCache",
     "MojoStoreMLAKVCache",
     "MojoStorePagedMLAKVCache",
 
-    "MojoLinear",
-    "MojoGemmDequant",
+    "MojoGemm",
+    "MojoQuantGemm",
     "MojoGroupGemm",
-    "MojoQuantGroupLinearReduceSum",
-    "MojoAllGatherGemm",
     "MojoGemmAll2All",
+    "MojoAllGatherGemm",
     "MojoGemmAllReduce",
     "MojoGemmReduceScatter",
 
@@ -213,10 +213,13 @@ __all__ = [
 
     "MojoRotaryEmbedding",
     "MojoApplyRoPE",
+    "MojoApplyVisionRoPE2D",
     "MojoRoPEStoreKV",
     "MojoNormRoPE",
     "MojoNormRoPEStoreKV",
     "MojoGridRoPE",
+    "MojoVisionRotaryEmbedding2D",
+    "MojoMRoPE",
 
     "MojoTopPSampling",
     "MojoTopKSampling",
