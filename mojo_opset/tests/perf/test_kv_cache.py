@@ -78,6 +78,6 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, context_kv_l
             value_states,
             k_cache,
             v_cache,
-            chunk_metadata,
+            chunk_metadata=chunk_metadata,
         )
     )

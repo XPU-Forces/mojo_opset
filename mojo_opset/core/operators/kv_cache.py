@@ -117,18 +117,25 @@ class MojoStorePagedKVCache(MojoOperator):
         value_states: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
-        chunk_metadata: torch.Tensor,
+        block_table: Optional[torch.Tensor] = None,
+        cu_q_lens: Optional[torch.Tensor] = None,
+        context_kv_lens: Optional[torch.Tensor] = None,
+        *,
+        chunk_metadata: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Copy new K/V tokens into a paged KV cache using precomputed chunk metadata.
+        Copy new K/V tokens into a paged KV cache.
 
         Args:
             key_states (torch.Tensor): Shape (token_num, kv_head_num, head_dim) — new key tokens.
             value_states (torch.Tensor): Shape (token_num, kv_head_num, head_dim) — new value tokens.
             key_cache (torch.Tensor): Shape (total_phys_blocks, kv_heads, block_size, head_dim) — key cache.
             value_cache (torch.Tensor): Shape (total_phys_blocks, kv_heads, block_size, head_dim) — value cache.
-            chunk_metadata (torch.Tensor): Shape ``(num_chunks, 4)`` with per-row
-                ``(src_token_start, dst_block_id, dst_block_offset, chunk_len)``.
+            block_table (torch.Tensor | None): Legacy logical-to-physical block mapping.
+            cu_q_lens (torch.Tensor | None): Legacy cumulative query lengths. ``None`` indicates decode mode.
+            context_kv_lens (torch.Tensor | None): Legacy KV lengths before storing current tokens.
+            chunk_metadata (torch.Tensor | None): Optimized precomputed store plan with shape ``(num_chunks, 4)``
+                and per-row ``(src_token_start, dst_block_id, dst_block_offset, chunk_len)``.
 
         Returns:
             Tuple[torch.Tensor, torch.Tensor]: Updated `(key_cahce, value_cahce)` after in-place writes.
@@ -136,6 +143,20 @@ class MojoStorePagedKVCache(MojoOperator):
         assert len(key_states.shape) == 3 and len(value_states.shape) == 3 and key_states.shape == value_states.shape, (
             "key/value states must be (token_num, kv_head_num, head_dim), please check."
         )
+        if chunk_metadata is None:
+            assert block_table is not None, "block_table is required when chunk_metadata is not provided."
+            assert context_kv_lens is not None, "context_kv_lens is required when chunk_metadata is not provided."
+            chunk_metadata = build_paged_kv_chunk_metadata(
+                block_table,
+                cu_q_lens,
+                context_kv_lens,
+                key_cache.shape[2],
+            )
+        else:
+            assert block_table is None and cu_q_lens is None and context_kv_lens is None, (
+                "chunk_metadata path should not be mixed with block_table/cu_q_lens/context_kv_lens."
+            )
+
         assert_paged_kv_store_contract(chunk_metadata)
 
         if chunk_metadata.shape[0] == 0:
