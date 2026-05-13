@@ -16,17 +16,13 @@ class TTXStorePagedKVCache(MojoStorePagedKVCache):
         value_states: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
-        block_table: torch.Tensor,
-        cu_q_lens: torch.Tensor,
-        context_kv_lens: torch.Tensor,
+        chunk_metadata: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        assert_paged_kv_store_contract(block_table, cu_q_lens, context_kv_lens)
+        assert_paged_kv_store_contract(chunk_metadata)
         return store_paged_kv(
             key_states,
             value_states,
             key_cache,
             value_cache,
-            block_table,
-            cu_q_lens,
-            context_kv_lens,
+            chunk_metadata,
         )

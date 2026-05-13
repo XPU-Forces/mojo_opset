@@ -4,6 +4,26 @@ import triton.language as tl
 
 from mojo_opset.backends.ttx.kernels.mlu.utils import get_mlu_total_cores
 
+_MAX_CHUNK_TILE_ELEMS = 16384
+
+
+def _floor_power_of_two(x: int) -> int:
+    if x <= 1:
+        return 1
+    return 1 << (x.bit_length() - 1)
+
+
+def _get_chunk_size(block_size: int, head_dim: int) -> int:
+    if head_dim <= 0:
+        return 1
+
+    chunk_cap = max(1, _MAX_CHUNK_TILE_ELEMS // head_dim)
+    return min(block_size, _floor_power_of_two(chunk_cap))
+
+
+def _get_num_subchunks(block_size: int, chunk_size: int) -> int:
+    return max(1, triton.cdiv(block_size, chunk_size))
+
 
 @triton.jit
 def _store_kv_chunk(
@@ -120,7 +140,7 @@ def _store_kv_chunk(
     key=['num_kv_heads', 'head_dim', 'block_size', 'batch_size', 'max_chunks_per_seq', 'total_head_blocks'],
 )
 @triton.jit
-def _store_paged_kv_cache_kernel(
+def _store_paged_kv_cache_kernel_legacy(
     k_ptr,
     v_ptr,
     key_cache_ptr,
@@ -226,7 +246,7 @@ def _store_paged_kv_cache_kernel(
                             )
 
 
-def store_paged_kv_impl(
+def store_paged_kv_impl_legacy(
     k_states: torch.Tensor,
     v_states: torch.Tensor,
     key_cache: torch.Tensor,
@@ -277,7 +297,7 @@ def store_paged_kv_impl(
     grid_head = min(total_head_blocks, grid_head_limit)
     grid = (grid_chunk, grid_head)
 
-    _store_paged_kv_cache_kernel[grid](
+    _store_paged_kv_cache_kernel_legacy[grid](
         k_states,
         v_states,
         key_cache,
@@ -309,6 +329,146 @@ def store_paged_kv_impl(
         block_size,
         opt_level="O3",
         HAS_KV_LENS=kv_lens_before_store is not None,
+    )
+
+    return key_cache, value_cache
+
+
+@triton.jit
+def _store_paged_kv_cache_chunk_kernel(
+    k_ptr,
+    v_ptr,
+    key_cache_ptr,
+    value_cache_ptr,
+    chunk_meta_ptr,
+    num_chunks,
+    stride_cm_row,
+    stride_cm_col,
+    num_kv_heads,
+    stride_k_tok,
+    stride_k_head,
+    stride_k_dim,
+    stride_v_tok,
+    stride_v_head,
+    stride_v_dim,
+    stride_kc_blk,
+    stride_kc_head,
+    stride_kc_tok,
+    stride_kc_dim,
+    stride_vc_blk,
+    stride_vc_head,
+    stride_vc_tok,
+    stride_vc_dim,
+    head_dim: tl.constexpr,
+    num_subchunks: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+    offs_sub = tl.arange(0, CHUNK_SIZE)
+    offs_d = tl.arange(0, head_dim)
+
+    for chunk_idx in range(pid, num_chunks, num_programs):
+        chunk_base = chunk_meta_ptr + chunk_idx * stride_cm_row
+        src_token_start = tl.load(chunk_base + 0 * stride_cm_col)
+        dst_block_id = tl.load(chunk_base + 1 * stride_cm_col)
+        dst_block_offset = tl.load(chunk_base + 2 * stride_cm_col)
+        chunk_len = tl.load(chunk_base + 3 * stride_cm_col)
+
+        for subchunk_idx in range(num_subchunks):
+            processed = subchunk_idx * CHUNK_SIZE
+            token_offsets = processed + offs_sub
+            mask_sub = token_offsets < chunk_len
+
+            for h in range(num_kv_heads):
+                src_k_ptr = (
+                    k_ptr
+                    + (src_token_start + token_offsets[:, None]) * stride_k_tok
+                    + h * stride_k_head
+                    + offs_d[None, :] * stride_k_dim
+                )
+                k_val = tl.load(src_k_ptr, mask=mask_sub[:, None], other=0.0)
+
+                dst_k_ptr = (
+                    key_cache_ptr
+                    + dst_block_id * stride_kc_blk
+                    + h * stride_kc_head
+                    + (dst_block_offset + token_offsets[:, None]) * stride_kc_tok
+                    + offs_d[None, :] * stride_kc_dim
+                )
+                tl.store(dst_k_ptr, k_val, mask=mask_sub[:, None])
+
+                src_v_ptr = (
+                    v_ptr
+                    + (src_token_start + token_offsets[:, None]) * stride_v_tok
+                    + h * stride_v_head
+                    + offs_d[None, :] * stride_v_dim
+                )
+                v_val = tl.load(src_v_ptr, mask=mask_sub[:, None], other=0.0)
+
+                dst_v_ptr = (
+                    value_cache_ptr
+                    + dst_block_id * stride_vc_blk
+                    + h * stride_vc_head
+                    + (dst_block_offset + token_offsets[:, None]) * stride_vc_tok
+                    + offs_d[None, :] * stride_vc_dim
+                )
+                tl.store(dst_v_ptr, v_val, mask=mask_sub[:, None])
+
+
+def _get_chunk_num_programs(num_chunks: int) -> int:
+    return max(1, min(get_mlu_total_cores(), num_chunks))
+
+
+def store_paged_kv_impl(
+    k_states: torch.Tensor,
+    v_states: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    chunk_metadata: torch.Tensor,
+):
+    assert k_states.is_contiguous() and v_states.is_contiguous()
+    assert chunk_metadata.dim() == 2
+    assert chunk_metadata.shape[1] == 4
+
+    num_chunks = chunk_metadata.shape[0]
+    if num_chunks == 0:
+        return key_cache, value_cache
+
+    num_kv_heads = k_states.shape[1]
+    head_dim = k_states.shape[2]
+    block_size = key_cache.shape[2]
+    chunk_size = _get_chunk_size(block_size, head_dim)
+    num_subchunks = _get_num_subchunks(block_size, chunk_size)
+    grid = (_get_chunk_num_programs(num_chunks),)
+
+    _store_paged_kv_cache_chunk_kernel[grid](
+        k_states,
+        v_states,
+        key_cache,
+        value_cache,
+        chunk_metadata,
+        num_chunks,
+        chunk_metadata.stride(0),
+        chunk_metadata.stride(1),
+        num_kv_heads,
+        k_states.stride(0),
+        k_states.stride(1),
+        k_states.stride(2),
+        v_states.stride(0),
+        v_states.stride(1),
+        v_states.stride(2),
+        key_cache.stride(0),
+        key_cache.stride(1),
+        key_cache.stride(2),
+        key_cache.stride(3),
+        value_cache.stride(0),
+        value_cache.stride(1),
+        value_cache.stride(2),
+        value_cache.stride(3),
+        head_dim=head_dim,
+        num_subchunks=num_subchunks,
+        CHUNK_SIZE=chunk_size,
     )
 
     return key_cache, value_cache
