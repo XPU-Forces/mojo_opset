@@ -13,6 +13,7 @@ from mojo_opset import MojoPagedDecodeMLA
 from mojo_opset import MojoPagedDecodeNSA
 from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoPagedPrefillQuantGQA
+from mojo_opset import MojoPagedPrefillQuantSWA
 from mojo_opset import MojoPagedPrefillMLA
 from mojo_opset import MojoPagedPrefillNSA
 from mojo_opset import MojoPrefillGQA
@@ -1720,6 +1721,7 @@ def test_paged_prefill_quant_swa(
     paged_prefill_quant_swa.forward_diff_with(
         paged_prefill_quant_swa_ref,
         query,
+        None,
         k_cache,
         k_qscale,
         v_cache,
