@@ -4,7 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .utils import libentry
+from .utils import ilu_grid_dim_from_row_tasks, libentry
 
 
 def dynamic_quant_impl(
@@ -20,13 +20,16 @@ def dynamic_quant_impl(
         scale_tensor = torch.empty(0, device=input_tensor.device, dtype=torch.float32)
 
     block_size = triton.next_power_of_2(dims)
-    _dynamic_quant_kernel[(input_2d.shape[0],)](
+    n_rows = input_2d.shape[0]
+    grid = lambda META: (ilu_grid_dim_from_row_tasks(n_rows),)
+    _dynamic_quant_kernel[grid](
         input_2d,
         scale_tensor,
         output_2d,
         quant_scale,
         input_2d.stride(0),
         output_2d.stride(0),
+        n_rows,
         dims,
         HAS_SCALE=has_scale,
         BLOCK_SIZE=block_size,
@@ -45,11 +48,14 @@ def _dynamic_quant_kernel(
     quant_scale_ptr,
     input_stride,
     output_stride,
+    n_rows,
     n_cols: tl.constexpr,
     HAS_SCALE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     row_id = tl.program_id(0).to(tl.int64)
+    if row_id >= n_rows:
+        return
     offsets = tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_cols
 
