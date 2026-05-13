@@ -1,7 +1,7 @@
 from typing import Optional, Tuple
 
 import torch
-from ixformer import functions as ixf_ops
+from ixformer import functions as ixf_f
 
 from mojo_opset.core import MojoStorePagedKVCache
 from mojo_opset.core.operators.kv_cache import assert_paged_kv_store_contract
@@ -51,7 +51,7 @@ class IxformerStorePagedKVCache(MojoStorePagedKVCache):
 
         assert_paged_kv_store_contract(block_table, cu_q_lens, context_kv_lens)
 
-        ixf_ops.paged_store_kv_cache_with_block_table(
+        ixf_f.paged_store_kv_cache_with_block_table(
             key_states,
             value_states,
             key_cache,

@@ -1,6 +1,6 @@
 import torch
 
-from ixformer import functions as ixf_ops
+from ixformer import functions as ixf_f
 from mojo_opset.core import MojoStaticQuant
 from mojo_opset.core import MojoDynamicQuant
 
@@ -23,7 +23,7 @@ class IxformerStaticQuant(MojoStaticQuant):
             )
 
         output = torch.empty_like(input, dtype=torch.int8, device=input.device)
-        ixf_ops.static_quant(output, input, self.scale, self.quant_dtype)
+        ixf_f.static_quant(output, input, self.scale, self.quant_dtype)
 
         return output, self.scale
 
@@ -44,6 +44,6 @@ class IxformerDynamicQuant(MojoDynamicQuant):
                 f"IxformerDynamicQuant only supports fp32 inv_smooth_scale or the same dtype with input, got {self.inv_smooth_scale.dtype}."
             )
 
-        output, scale = ixf_ops.dynamic_quant(input, self.inv_smooth_scale)
+        output, scale = ixf_f.dynamic_quant(input, self.inv_smooth_scale)
 
         return output, scale
