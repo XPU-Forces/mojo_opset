@@ -2037,6 +2037,8 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
         block_table: torch.Tensor,  # [bsz, max_num_blocks]
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,  # [bsz + 1]
+        max_q_lens: Optional[int] = None,
+        max_total_seq_lens: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Paged prefill attention with grouped query heads (GQA) using a blocked KV cache.

@@ -163,7 +163,9 @@ def generate_paged_prefill_quant_data(
         block_tables[i, :num_blocks_for_seq] = assigned_blocks
         current_block_offset += num_blocks_for_seq
 
-    return query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens
+    max_q_lens = int(q_lens.max().item()) if q_lens.numel() > 0 else 0
+    max_total_seq_lens = int(kv_lens.max().item()) if kv_lens.numel() > 0 else 0
+    return query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens
 
 
 # ===========================================================================
@@ -180,7 +182,7 @@ test_configs_prefill_quant_gqa = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens",
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens",
     [
         pytest.param(
             *generate_paged_prefill_quant_data(
@@ -214,6 +216,8 @@ def test_paged_prefill_quant_gqa(
     cu_q_lens: torch.Tensor,
     block_tables: torch.Tensor,
     cu_total_seq_lens: Optional[torch.Tensor],
+    max_q_lens: int,
+    max_total_seq_lens: int,
     gqa_layout: str,
     query_dtype: torch.dtype,
     context_dtype: torch.dtype,
@@ -254,6 +258,8 @@ def test_paged_prefill_quant_gqa(
         block_tables,
         softmax_scale=softmax_scale,
         cu_total_seq_lens=cu_total_seq_lens,
+        max_q_lens=max_q_lens,
+        max_total_seq_lens=max_total_seq_lens,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
     )
@@ -368,7 +374,7 @@ test_configs_prefill_quant_swa = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens",
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens",
     [
         pytest.param(
             *generate_paged_prefill_quant_data(
@@ -408,6 +414,8 @@ def test_paged_prefill_quant_swa(
     cu_q_lens: torch.Tensor,
     block_tables: torch.Tensor,
     cu_total_seq_lens: Optional[torch.Tensor],
+    max_q_lens: int,
+    max_total_seq_lens: int,
     gqa_layout: str,
     global_window: int,
     local_window: int,
@@ -453,6 +461,8 @@ def test_paged_prefill_quant_swa(
         block_tables,
         softmax_scale=softmax_scale,
         cu_total_seq_lens=cu_total_seq_lens,
+        max_q_lens=max_q_lens,
+        max_total_seq_lens=max_total_seq_lens,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
     )
