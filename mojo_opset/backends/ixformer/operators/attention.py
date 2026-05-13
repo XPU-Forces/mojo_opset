@@ -129,26 +129,17 @@ def _swa_window_block_ids(
     q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
     total_blocks = (kv_lens + block_size - 1) // block_size
 
-    keep = torch.zeros(batch_size, max_num_blocks, dtype=torch.bool, device=device)
-
+    indices = torch.arange(max_num_blocks, device=device).view(1, -1)
     if local_window_size is not None and local_window_size >= 0:
-        for b in range(batch_size):
-            n = int(total_blocks[b].item())
-            kv_len_b = int(kv_lens[b].item())
-            q_len_b = int(q_lens[b].item())
-            earliest_kv_pos = max(0, kv_len_b - q_len_b - local_window_size)
-            start_block = earliest_kv_pos // block_size
-            keep[b, start_block:n] = True
+        earliest_kv_pos = torch.clamp(kv_lens - q_lens - local_window_size, min=0)
+        start_block = earliest_kv_pos // block_size
+        keep = (indices >= start_block.unsqueeze(1)) & (indices < total_blocks.unsqueeze(1))
     else:
-        for b in range(batch_size):
-            n = int(total_blocks[b].item())
-            keep[b, :n] = True
+        keep = indices < total_blocks.unsqueeze(1)
 
     if global_window_size is not None and global_window_size > 0:
         global_blocks = (global_window_size + block_size - 1) // block_size
-        for b in range(batch_size):
-            n = int(total_blocks[b].item())
-            keep[b, :min(global_blocks, n)] = True
+        keep |= (indices < global_blocks) & (indices < total_blocks.unsqueeze(1))
 
     ids = block_table[keep]
     ids = ids[ids >= 0].unique()
