@@ -5,33 +5,13 @@ from triton.testing import assert_close
 
 from mojo_opset import MojoOverEncoding
 from mojo_opset import MojoOverEncodingNGram
-from mojo_opset.backends.ttx.kernels import embedding_nf4_dequant
+from mojo_opset import MojoNF4DequantEmbedding
 from mojo_opset.core.operators.over_encoding import dequantize_nf4_rows
 from mojo_opset.core.operators.over_encoding import n_gram_impl_torch
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.tests.utils import get_torch_device
-from mojo_opset.tests.utils import requires_platform_backend
 
 TEST_DEVICE = get_torch_device()
-_requires_npu_oe = requires_platform_backend(
-    platforms="npu",
-    reason="Over-Encoding TTX/NF4 kernels are only implemented on NPU.",
-)
-
-
-# `embedding_nf4_dequant` is a low-level TTX kernel entrypoint imported directly
-# from `mojo_opset.backends.ttx.kernels`, so this test intentionally does not go
-# through `MojoOperator` backend dispatch. That means the accuracy-test
-# `bypass_not_implemented`/registry path cannot tell that `MOJO_BACKEND=torch_npu`
-# has no OE implementation. Since torch_npu CI also runs on the NPU platform,
-# platform-only gating would accidentally execute this TTX kernel in the
-# torch_npu job. Keep the standalone kernel test visible only to the backend
-# that owns it.
-_requires_ttx_oe_kernel = requires_platform_backend(
-    platforms="npu",
-    backends="ttx",
-    reason="embedding_nf4_dequant is a TTX-only OE kernel on NPU.",
-)
 
 
 def pack_nf4_uint4_to_int8(q_idx: torch.Tensor) -> torch.Tensor:
@@ -461,7 +441,6 @@ class TestRefOverEncodingParametrized:
         )
 
     @bypass_not_implemented
-    @_requires_ttx_oe_kernel
     def test_embedding_nf4_dequant_impl(self):
         vocab_size = 257
         embedding_dim = 128
@@ -493,18 +472,16 @@ class TestRefOverEncodingParametrized:
         valid_mask = (input_ids >= 0) & (input_ids < vocab_size)
         expected[valid_mask] = dequant_lut.index_select(0, input_ids[valid_mask])
 
-        output = embedding_nf4_dequant(
-            input_ids,
+        output = MojoNF4DequantEmbedding(
             qweight,
             scale,
             mean,
             group_size=group_size,
             output_dtype=torch.float32,
-        )
+        ).to(TEST_DEVICE)(input_ids)
         assert_close(output, expected, atol=1e-5, rtol=0)
 
     @bypass_not_implemented
-    @_requires_npu_oe
     @torch.no_grad
     def test_over_encoding_with_quantized_mega_embedding(self):
         torch.manual_seed(0)

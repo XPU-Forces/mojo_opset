@@ -279,7 +279,7 @@ class MojoOverEncoding(MojoOperator):
             and _mega_embedding_scale is not None
             and _mega_embedding_mean is not None
         ):
-            oe_mega_embedding = NF4DequantEmbedding(
+            oe_mega_embedding = MojoNF4DequantEmbedding._registry.get(self._backend)(
                 _mega_embedding_weight,
                 _mega_embedding_scale,
                 _mega_embedding_mean,
@@ -481,7 +481,15 @@ def dequantize_nf4_rows(
     mean = nf4_mean.to(torch.float32).reshape(num_rows, num_groups, 1)
     return (values * scale + mean).reshape(num_rows, embedding_dim).to(output_dtype)
 
-class NF4DequantEmbedding(torch.nn.Module):
+class MojoNF4DequantEmbedding(MojoOperator):
+    """NF4-quantized embedding lookup with on-the-fly dequantization.
+
+    The embedding table is stored as packed NF4 (two 4-bit indices per int8
+    byte) together with per-group ``scale`` and ``mean`` tensors. ``forward``
+    gathers the rows corresponding to ``input``, dequantizes them and returns
+    a dense tensor in ``output_dtype``.
+    """
+
     def __init__(
         self,
         qweight: torch.Tensor,
@@ -492,12 +500,14 @@ class NF4DequantEmbedding(torch.nn.Module):
         vocab_start_id: int = 0,
         cpu_only: bool = False,
         output_dtype: torch.dtype = torch.bfloat16,
+        **kwargs,
     ):
-        super().__init__()
+        super().__init__(**kwargs)
         if qweight.ndim != 2 or scale.ndim != 2 or mean.ndim != 2:
             raise ValueError(
                 "NF4 embedding tensors must all be 2D, "
-                f"got qweight={tuple(qweight.shape)}, scale={tuple(scale.shape)}, mean={tuple(mean.shape)}."
+                f"got qweight={tuple(qweight.shape)}, "
+                f"scale={tuple(scale.shape)}, mean={tuple(mean.shape)}."
             )
 
         if scale.shape != mean.shape:
@@ -508,12 +518,6 @@ class NF4DequantEmbedding(torch.nn.Module):
         if group_size <= 0:
             raise ValueError(f"`group_size` must be > 0, got {group_size}.")
 
-        if qweight.ndim != 2 or scale.ndim != 2 or mean.ndim != 2:
-            raise ValueError(
-                "NF4 embedding tensors must all be 2D, "
-                f"got qweight={tuple(qweight.shape)}, "
-                f"scale={tuple(scale.shape)}, mean={tuple(mean.shape)}."
-            )
 
         self.embedding_dim = scale.size(1) * group_size
 
