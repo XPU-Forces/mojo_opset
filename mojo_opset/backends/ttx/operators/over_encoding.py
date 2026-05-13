@@ -8,10 +8,10 @@ from mojo_opset.backends.ttx.kernels import n_gram_prefill
 from mojo_opset.backends.ttx.kernels import over_encoding_decode
 from mojo_opset.core import MojoOverEncoding
 from mojo_opset.core import MojoOverEncodingNGram
-from mojo_opset.core.operators.over_encoding import NF4DequantEmbedding
+from mojo_opset.core import MojoNF4DequantEmbedding
 
 class TTXOverEncodingNGram(MojoOverEncodingNGram):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(self, input_tensor: torch.Tensor, oe_history_input: torch.Tensor, input_seq_lens: Optional[torch.Tensor] = None):
         if input_seq_lens is not None:
@@ -41,10 +41,7 @@ class TTXOverEncodingNGram(MojoOverEncodingNGram):
 
 # NOTE(liuyuan): loop unroll
 class TTXOverEncoding(MojoOverEncoding):
-    supported_platforms_list = ["npu"]
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    supported_platforms_list = ["npu", "ilu"]
 
     def _create_mega_embedding(
         self,
@@ -124,7 +121,7 @@ class TTXOverEncoding(MojoOverEncoding):
         else:
             assert input_tensor.dim() == 2 # [batch_size, seq_len]
             assert oe_history_input.dim() == 2 and oe_history_input.size(0) == input_tensor.size(0) # [batch_size, max_n_gram - 1]
-            if isinstance(self.oe_mega_embedding, NF4DequantEmbedding):
+            if isinstance(self.oe_mega_embedding, MojoNF4DequantEmbedding):
                 oe_result = over_encoding_decode(
                     input_ids=input_tensor,
                     oe_history_inputs=oe_history_input,
@@ -171,7 +168,11 @@ class TTXOverEncoding(MojoOverEncoding):
 ########################################################
 # NF4 Dequantization fused Embedding
 ########################################################
-class TTXNF4DequantEmbedding(NF4DequantEmbedding):
+class TTXNF4DequantEmbedding(MojoNF4DequantEmbedding):
+    """NF4-quantized embedding backed by the TTX ``embedding_nf4_dequant`` kernel."""
+
+    supported_platforms_list = ["npu", "ilu"]
+
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         output = embedding_nf4_dequant(
             input=input,

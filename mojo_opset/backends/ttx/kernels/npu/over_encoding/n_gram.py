@@ -300,7 +300,7 @@ def n_gram_decode_impl(
         BLOCK_BATCH_SIZE=triton.next_power_of_2(
             math.ceil(input_ids.size(0) / num_programs)
         ),
-        MAX_N_GRAM=max(n_grams).item(),
+        MAX_N_GRAM=oe_history_inputs.size(-1) + 1,
         MTP_STEP=input_ids.size(1),
     )
     return output

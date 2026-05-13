@@ -60,6 +60,7 @@ from .operators.embedding import MojoParallelEmbedding
 """ over_encoding """
 from .operators.over_encoding import MojoOverEncoding
 from .operators.over_encoding import MojoOverEncodingNGram
+from .operators.over_encoding import MojoNF4DequantEmbedding
 
 """ quantize """
 from .operators.quantize import MojoDequant
@@ -182,6 +183,7 @@ __all__ = [
 
     "MojoEmbedding",
     "MojoParallelEmbedding",
+    "MojoNF4DequantEmbedding",
     "MojoRelativeEmbedding",
     "MojoOverEncoding",
     "MojoOverEncodingNGram",

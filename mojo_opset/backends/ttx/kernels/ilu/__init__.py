@@ -45,6 +45,10 @@ from .swiglu import swiglu_fwd_impl
 from .swa import swa_infer_impl
 from .swa import swa_paged_prefill_impl
 from .swa import swa_paged_decode_impl
+from .over_encoding.embedding import embedding_nf4_dequant_impl
+from .over_encoding.fused_over_encoding import over_encoding_decode_impl
+from .over_encoding.n_gram import n_gram_decode_impl
+from .over_encoding.n_gram import n_gram_prefill_impl
 
 __all__ = [
     "causal_conv1d_update_bdt_impl",
@@ -94,4 +98,8 @@ __all__ = [
     # "diffusion_attention_fwd_impl",
     # "diffusion_attention_bwd_impl",
     "swa_paged_decode_impl",
+    "embedding_nf4_dequant_impl",
+    "over_encoding_decode_impl",
+    "n_gram_decode_impl",
+    "n_gram_prefill_impl",
 ]
