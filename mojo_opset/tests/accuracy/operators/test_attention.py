@@ -24,6 +24,7 @@ from mojo_opset import MojoPrefillMLA
 from mojo_opset import MojoPrefillNSA
 from mojo_opset import MojoSdpa
 from mojo_opset import MojoSWA
+from mojo_opset.backends.ttx.kernels import prepare_conformer_chunk_attention_q_block_indices
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_torch_device
@@ -1265,18 +1266,29 @@ def test_conformer_chunk_attention(
     op_ref = MojoConformerChunkAttention._registry.get("torch")(
         chunk_size=chunk_size, left_context_chunks=left_context_chunks
     )
+    if type(op) is type(op_ref):
+        raise NotImplementedError("both operands resolve to the same implementation, skipping comparison.")
+
+    q_block_indices = prepare_conformer_chunk_attention_q_block_indices(cu_q_lens, head_dim, dtype)
     atol = 2e-2 if dtype != torch.float32 else 1e-5
     rtol = 2e-2 if dtype != torch.float32 else 1e-6
-    op.forward_diff_with(
-        op_ref,
+
+    out_ref = op_ref(
         query,
         key,
         value,
         cu_q_lens,
         cu_total_seq_lens,
-        atol=atol,
-        rtol=rtol,
     )
+    out = op(
+        query,
+        key,
+        value,
+        cu_q_lens,
+        cu_total_seq_lens,
+        q_block_indices=q_block_indices,
+    )
+    torch.testing.assert_close(out.to(torch.float32), out_ref.to(torch.float32), atol=atol, rtol=rtol)
 
 
 def generate_sdpa_data(

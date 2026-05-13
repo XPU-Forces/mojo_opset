@@ -1466,6 +1466,8 @@ class MojoConformerChunkAttention(MojoOperator):
         value: torch.Tensor,
         cu_q_lens: torch.Tensor,
         cu_total_seq_lens: Optional[torch.Tensor] = None,
+        *,
+        q_block_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if query.ndim != 3 or key.ndim != 3 or value.ndim != 3:
             raise ValueError("query/key/value must be 3D THD tensors")

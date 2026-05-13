@@ -7,6 +7,8 @@ import torch
 import triton
 import triton.language as tl
 
+from mojo_opset.backends.ttx.kernels.utils import prepare_chunk_indices
+
 from .utils import get_num_cores
 
 
@@ -18,6 +20,7 @@ def _conformer_chunk_attention_kernel(
     v_ptr,
     cu_q_lens_ptr,
     cu_total_seq_lens_ptr,
+    q_block_indices_ptr,
     scale,
     chunk_size: tl.constexpr,
     left_context_chunks: tl.constexpr,
@@ -33,7 +36,7 @@ def _conformer_chunk_attention_kernel(
     stride_vt,
     stride_vh,
     stride_vd,
-    batch_size: tl.constexpr,
+    total_q_blocks,
     num_heads: tl.constexpr,
     head_dim: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -45,8 +48,13 @@ def _conformer_chunk_attention_kernel(
     pid = tl.program_id(0)
     n_programs = tl.num_programs(0)
 
-    prev_q_chunks = 0
-    for b_id in range(batch_size):
+    total_tasks = total_q_blocks * num_heads
+    for task_id in range(pid, total_tasks, n_programs):
+        block_task_id = task_id // num_heads
+        b_id = tl.load(q_block_indices_ptr + block_task_id * 2).to(tl.int32)
+        q_block_id = tl.load(q_block_indices_ptr + block_task_id * 2 + 1).to(tl.int32)
+        h_id = task_id % num_heads
+
         q_start = tl.load(cu_q_lens_ptr + b_id).to(tl.int32)
         q_end = tl.load(cu_q_lens_ptr + b_id + 1).to(tl.int32)
         kv_start = tl.load(cu_total_seq_lens_ptr + b_id).to(tl.int32)
@@ -55,133 +63,125 @@ def _conformer_chunk_attention_kernel(
         kv_seq_len = kv_end - kv_start
         kv_computed_len = kv_seq_len - q_seq_len
 
-        cur_q_chunks = tl.cdiv(q_seq_len, BLOCK_M)
-        prev_q_tasks = prev_q_chunks * num_heads
-        cur_q_tasks = cur_q_chunks * num_heads
-        prev_q_chunks += cur_q_chunks
+        q_block_start = q_block_id * BLOCK_M
+        q_offs = q_block_start + tl.arange(0, BLOCK_M)
+        q_valid = q_offs < q_seq_len
+        q_block_abs_start = kv_computed_len + q_block_start
 
-        for q_task_id in range((prev_q_tasks + pid) % n_programs, cur_q_tasks, n_programs):
-            q_block_id = q_task_id // num_heads
-            h_id = q_task_id % num_heads
-            q_block_start = q_block_id * BLOCK_M
-            q_offs = q_block_start + tl.arange(0, BLOCK_M)
-            q_valid = q_offs < q_seq_len
-            q_block_abs_start = kv_computed_len + q_block_start
+        q_block_ptr = tl.make_block_ptr(
+            base=q_ptr + q_start * stride_qt + h_id * stride_qh,
+            shape=(q_seq_len, head_dim),
+            strides=(stride_qt, stride_qd),
+            offsets=(q_block_start, 0),
+            block_shape=(BLOCK_M, BLOCK_D),
+            order=(1, 0),
+        )
+        q = tl.load(q_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
-            q_block_ptr = tl.make_block_ptr(
-                base=q_ptr + q_start * stride_qt + h_id * stride_qh,
-                shape=(q_seq_len, head_dim),
-                strides=(stride_qt, stride_qd),
-                offsets=(q_block_start, 0),
-                block_shape=(BLOCK_M, BLOCK_D),
+        m_i = tl.full((BLOCK_M,), -float("inf"), dtype=tl.float32)
+        l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
+        acc = tl.zeros((BLOCK_M, head_dim), dtype=tl.float32)
+
+        # Compute KV window for this query block
+        # ctx_start = max(0, chunk_start - left_context_chunks * chunk_size)
+        # chunk_end = min(chunk_start + chunk_size, kv_seq_len)
+        q_block_abs_last_actual = tl.minimum(q_block_abs_start + BLOCK_M - 1, kv_seq_len - 1)
+        chunk_start_first = (q_block_abs_start // chunk_size) * chunk_size
+        chunk_start_last = (q_block_abs_last_actual // chunk_size) * chunk_size
+
+        if left_context_chunks < 0:
+            kv_win_start = 0
+        else:
+            kv_win_start = tl.maximum(0, chunk_start_first - left_context_chunks * chunk_size)
+
+        kv_win_end = tl.minimum(chunk_start_last + chunk_size, kv_seq_len)
+        kv_block_start_id = kv_win_start // BLOCK_N
+        kv_block_end_id = tl.cdiv(kv_win_end, BLOCK_N)
+
+        # Precompute fp32 query positions and chunk boundaries for mask
+        q_abs_f32 = (kv_computed_len + q_offs).to(tl.float32)
+        q_abs_i32 = kv_computed_len + q_offs
+        chunk_start_i32 = (q_abs_i32 // chunk_size) * chunk_size
+        chunk_end_f32 = tl.minimum((chunk_start_i32 + chunk_size).to(tl.float32), kv_seq_len.to(tl.float32))
+        if left_context_chunks < 0:
+            ctx_start_f32 = tl.zeros((BLOCK_M,), dtype=tl.float32)
+        else:
+            ctx_start_f32 = tl.maximum((chunk_start_i32 - left_context_chunks * chunk_size).to(tl.float32), 0.0)
+
+        for kv_block_id in range(kv_block_start_id, kv_block_end_id):
+            kv_block_start = kv_block_id * BLOCK_N
+            kv_offsets = kv_block_start + tl.arange(0, BLOCK_N)
+            kv_valid = kv_offsets < kv_seq_len
+
+            k_t_block_ptr = tl.make_block_ptr(
+                base=k_ptr + kv_start * stride_kt + h_id * stride_kh,
+                shape=(head_dim, kv_seq_len),
+                strides=(stride_kd, stride_kt),
+                offsets=(0, kv_block_start),
+                block_shape=(BLOCK_D, BLOCK_N),
+                order=(0, 1),
+            )
+            v_block_ptr = tl.make_block_ptr(
+                base=v_ptr + kv_start * stride_vt + h_id * stride_vh,
+                shape=(kv_seq_len, head_dim),
+                strides=(stride_vt, stride_vd),
+                offsets=(kv_block_start, 0),
+                block_shape=(BLOCK_N, BLOCK_D),
                 order=(1, 0),
             )
-            q = tl.load(q_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
-            m_i = tl.full((BLOCK_M,), -float("inf"), dtype=tl.float32)
-            l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
-            acc = tl.zeros((BLOCK_M, head_dim), dtype=tl.float32)
+            k_t = tl.load(k_t_block_ptr, boundary_check=(0, 1), padding_option="zero")
+            v = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
-            # Compute KV window for this query block
-            # ctx_start = max(0, chunk_start - left_context_chunks * chunk_size)
-            # chunk_end = min(chunk_start + chunk_size, kv_seq_len)
-            q_block_abs_last_actual = tl.minimum(q_block_abs_start + BLOCK_M - 1, kv_seq_len - 1)
-            chunk_start_first = (q_block_abs_start // chunk_size) * chunk_size
-            chunk_start_last = (q_block_abs_last_actual // chunk_size) * chunk_size
+            # QK^T
+            qk = tl.dot(q, k_t) * scale
+
+            # Chunk mask: kv_idx ∈ [ctx_start[q], chunk_end[q])
+            kv_f32 = kv_offsets.to(tl.float32)
+            chunk_mask = (kv_f32[None, :] >= ctx_start_f32[:, None]) & (kv_f32[None, :] < chunk_end_f32[:, None])
+
+            pre_mask = q_valid[:, None] & kv_valid[None, :] & chunk_mask
+
+            qk = tl.where(pre_mask, qk, float("-inf"))
+            # m_candidate = tl.max(qk, axis=1)
+            # m_new = tl.maximum(m_i, m_candidate)
+            m_candidate = tl.max(qk, 1, propagate_nan=tl.PropagateNan.ALL)
+            m_new = tl.maximum(m_i, m_candidate, propagate_nan=tl.PropagateNan.ALL)
 
             if left_context_chunks < 0:
-                kv_win_start = 0
+                qk = qk - m_new[:, None]
+                m_delta = m_i - m_new
+
             else:
-                kv_win_start = tl.maximum(0, chunk_start_first - left_context_chunks * chunk_size)
+                has_valid = m_candidate > float("-inf")
+                qk = qk - tl.where(has_valid, m_new, 0.0)[:, None]
 
-            kv_win_end = tl.minimum(chunk_start_last + chunk_size, kv_seq_len)
-            kv_block_start_id = kv_win_start // BLOCK_N
-            kv_block_end_id = tl.cdiv(kv_win_end, BLOCK_N)
+                # alpha rescales old accumulator: exp(m_i - m_new) if m_new > m_i, else 1.
+                # When m_i == -inf (first valid block): alpha = 0 (no prior accumulator).
+                m_delta = tl.where(has_valid, m_i - m_new, 0.0)
 
-            # Precompute fp32 query positions and chunk boundaries for mask
-            q_abs_f32 = (kv_computed_len + q_offs).to(tl.float32)
-            q_abs_i32 = kv_computed_len + q_offs
-            chunk_start_i32 = (q_abs_i32 // chunk_size) * chunk_size
-            chunk_end_f32 = tl.minimum((chunk_start_i32 + chunk_size).to(tl.float32), kv_seq_len.to(tl.float32))
-            if left_context_chunks < 0:
-                ctx_start_f32 = tl.zeros((BLOCK_M,), dtype=tl.float32)
-            else:
-                ctx_start_f32 = tl.maximum((chunk_start_i32 - left_context_chunks * chunk_size).to(tl.float32), 0.0)
+            alpha = tl.exp(m_delta)
 
-            for kv_block_id in range(kv_block_start_id, kv_block_end_id):
-                kv_block_start = kv_block_id * BLOCK_N
-                kv_offsets = kv_block_start + tl.arange(0, BLOCK_N)
-                kv_valid = kv_offsets < kv_seq_len
+            qk = tl.exp(qk)
+            l_ij = tl.sum(qk, axis=1)
 
-                k_t_block_ptr = tl.make_block_ptr(
-                    base=k_ptr + kv_start * stride_kt + h_id * stride_kh,
-                    shape=(head_dim, kv_seq_len),
-                    strides=(stride_kd, stride_kt),
-                    offsets=(0, kv_block_start),
-                    block_shape=(BLOCK_D, BLOCK_N),
-                    order=(0, 1),
-                )
-                v_block_ptr = tl.make_block_ptr(
-                    base=v_ptr + kv_start * stride_vt + h_id * stride_vh,
-                    shape=(kv_seq_len, head_dim),
-                    strides=(stride_vt, stride_vd),
-                    offsets=(kv_block_start, 0),
-                    block_shape=(BLOCK_N, BLOCK_D),
-                    order=(1, 0),
-                )
+            acc = tl.dot(qk.to(k_t.dtype), v, acc * alpha[:, None])
+            l_i = l_i * alpha + l_ij
 
-                k_t = tl.load(k_t_block_ptr, boundary_check=(0, 1), padding_option="zero")
-                # tl.multibuffer(k_t, 2)
-                v = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero")
-                # tl.multibuffer(v, 2)
+            m_i = m_new
 
-                # QK^T
-                qk = tl.dot(q, k_t) * scale
-
-                # Chunk mask: kv_idx ∈ [ctx_start[q], chunk_end[q])
-                kv_f32 = kv_offsets.to(tl.float32)
-                chunk_mask = (kv_f32[None, :] >= ctx_start_f32[:, None]) & (kv_f32[None, :] < chunk_end_f32[:, None])
-
-                pre_mask = q_valid[:, None] & kv_valid[None, :] & chunk_mask
-
-                qk = tl.where(pre_mask, qk, float("-inf"))
-                m_candidate = tl.max(qk, axis=1)
-                m_new = tl.maximum(m_i, m_candidate)
-
-                if left_context_chunks < 0:
-                    qk = qk - m_new[:, None]
-                    m_delta = m_i - m_new
-
-                else:
-                    has_valid = m_candidate > float("-inf")
-                    qk = qk - tl.where(has_valid, m_new, 0.0)[:, None]
-
-                    # alpha rescales old accumulator: exp(m_i - m_new) if m_new > m_i, else 1.
-                    # When m_i == -inf (first valid block): alpha = 0 (no prior accumulator).
-                    m_delta = tl.where(has_valid, m_i - m_new, 0.0)
-
-                alpha = tl.exp(m_delta)
-
-                qk = tl.exp(qk)
-                l_ij = tl.sum(qk, axis=1)
-
-                acc = tl.dot(qk.to(k_t.dtype), v, acc * alpha[:, None])
-                l_i = l_i * alpha + l_ij
-
-                m_i = m_new
-
-            out = acc / l_i[:, None]
-            # out = acc / tl.where(q_valid, l_i, 1.0)[:, None]
-            # out = tl.where(q_valid[:, None], out, 0.0)
-            o_block_ptr = tl.make_block_ptr(
-                base=o_ptr + q_start * stride_ot + h_id * stride_oh,
-                shape=(q_seq_len, head_dim),
-                strides=(stride_ot, stride_od),
-                offsets=(q_block_start, 0),
-                block_shape=(BLOCK_M, BLOCK_D),
-                order=(1, 0),
-            )
-            tl.store(o_block_ptr, out.to(o_ptr.type.element_ty), boundary_check=(0, 1))
+        out = acc / l_i[:, None]
+        # out = acc / tl.where(q_valid, l_i, 1.0)[:, None]
+        # out = tl.where(q_valid[:, None], out, 0.0)
+        o_block_ptr = tl.make_block_ptr(
+            base=o_ptr + q_start * stride_ot + h_id * stride_oh,
+            shape=(q_seq_len, head_dim),
+            strides=(stride_ot, stride_od),
+            offsets=(q_block_start, 0),
+            block_shape=(BLOCK_M, BLOCK_D),
+            order=(1, 0),
+        )
+        tl.store(o_block_ptr, out.to(o_ptr.type.element_ty), boundary_check=(0, 1))
 
 
 def _select_blocks(head_dim: int, dtype: torch.dtype) -> tuple[int, int, int, bool]:
@@ -209,13 +209,22 @@ def _select_blocks(head_dim: int, dtype: torch.dtype) -> tuple[int, int, int, bo
 
     if head_dim >= 128:
         # D≥128: BM=96, BN=64, AI=2*96*64/(96+128)≈55
-        return 96, 64, head_dim, True
+        return 128, 128, head_dim, True
     elif head_dim >= 96:
         # 96≤D<128: BM=64, BN=64, AI=2*64*64/(64+128)≈43
         return 64, 64, head_dim, False
     else:
         # D<96: BM=128, BN=64, AI=2*128*64/(128+128)=64
         return 128, 64, head_dim, False
+
+
+def prepare_conformer_chunk_attention_q_block_indices(
+    cu_q_lens: torch.Tensor,
+    head_dim: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    block_m, _, _, _ = _select_blocks(head_dim, dtype)
+    return prepare_chunk_indices(cu_q_lens, block_m).to(torch.int32)
 
 
 def conformer_chunk_attention_impl(
@@ -227,6 +236,7 @@ def conformer_chunk_attention_impl(
     chunk_size: int,
     left_context_chunks: int,
     softmax_scale: Optional[float] = None,
+    q_block_indices: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     if q.ndim != 3 or k.ndim != 3 or v.ndim != 3:
         raise ValueError("q/k/v must be [T, H, D]")
@@ -240,9 +250,16 @@ def conformer_chunk_attention_impl(
         softmax_scale = 1.0 / math.sqrt(head_dim)
 
     block_m, block_n, block_d, enable_multibuf = _select_blocks(head_dim, q.dtype)
+    if q_block_indices is None:
+        raise ValueError("q_block_indices must be prepared before conformer_chunk_attention_impl")
+    if q_block_indices.ndim != 2 or q_block_indices.shape[1] != 2:
+        raise ValueError(f"q_block_indices must have shape [num_q_blocks, 2], got {q_block_indices.shape}")
+    if q_block_indices.dtype != torch.int32:
+        raise ValueError(f"q_block_indices must be int32, got {q_block_indices.dtype}")
+    total_q_blocks = q_block_indices.shape[0]
 
     o = torch.zeros_like(q, memory_format=torch.contiguous_format)
-    grid = (get_num_cores("cube"),)
+    grid = (min(total_q_blocks * num_heads, get_num_cores("cube")),)
 
     _conformer_chunk_attention_kernel[grid](
         o,
@@ -251,6 +268,7 @@ def conformer_chunk_attention_impl(
         v,
         cu_q_lens,
         cu_total_seq_lens,
+        q_block_indices,
         softmax_scale,
         chunk_size,
         left_context_chunks,
@@ -266,12 +284,18 @@ def conformer_chunk_attention_impl(
         v.stride(0),
         v.stride(1),
         v.stride(2),
-        cu_q_lens.shape[0] - 1,
+        total_q_blocks,
         num_heads,
         head_dim,
         block_m,
         block_n,
         block_d,
         multibuffer=enable_multibuf,
+        enable_ubuf_saving=True,
+        limit_auto_multi_buffer_only_for_local_buffer=False,
+        limit_auto_multi_buffer_of_local_buffer="no-l0c",
+        set_workspace_multibuffer=4,
+        # tile_mix_vector_loop=4,
+        # tile_mix_cube_loop=4,
     )
     return o

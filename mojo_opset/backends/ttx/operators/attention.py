@@ -6,6 +6,7 @@ from mojo_opset.backends.ttx.kernels import conformer_chunk_attention
 from mojo_opset.backends.ttx.kernels import conformer_sliding_window_attention
 from mojo_opset.backends.ttx.kernels import paged_attention_decode
 from mojo_opset.backends.ttx.kernels import paged_attention_prefill
+from mojo_opset.backends.ttx.kernels import prepare_conformer_chunk_attention_q_block_indices
 from mojo_opset.backends.ttx.kernels import sdpa_infer
 from mojo_opset.backends.ttx.kernels import swa_infer
 from mojo_opset.backends.ttx.kernels import swa_paged_decode
@@ -172,11 +173,19 @@ class TTXConformerChunkAttention(MojoConformerChunkAttention):
         value: torch.Tensor,
         cu_q_lens: torch.Tensor,
         cu_total_seq_lens: Optional[torch.Tensor] = None,
+        *,
+        q_block_indices: Optional[torch.Tensor] = None,
     ):
         if cu_q_lens.dtype != torch.int32:
             raise ValueError(f"cu_q_lens must be int32, got {cu_q_lens.dtype}")
         if cu_total_seq_lens is not None and cu_total_seq_lens.dtype != torch.int32:
             raise ValueError(f"cu_total_seq_lens must be int32, got {cu_total_seq_lens.dtype}")
+        if q_block_indices is None:
+            q_block_indices = prepare_conformer_chunk_attention_q_block_indices(
+                cu_q_lens, query.shape[-1], query.dtype
+            )
+        elif q_block_indices.dtype != torch.int32:
+            raise ValueError(f"q_block_indices must be int32, got {q_block_indices.dtype}")
         return conformer_chunk_attention(
             query,
             key,
@@ -186,6 +195,7 @@ class TTXConformerChunkAttention(MojoConformerChunkAttention):
             self.chunk_size,
             self.left_context_chunks,
             self.softmax_scale,
+            q_block_indices=q_block_indices,
         )
 
 

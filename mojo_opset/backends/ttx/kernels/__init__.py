@@ -40,6 +40,10 @@ conformer_sliding_window_attention_impl = _get_kernel_impl(
     ttx_backend_module, "conformer_sliding_window_attention_impl"
 )
 conformer_chunk_attention_impl = _get_kernel_impl(ttx_backend_module, "conformer_chunk_attention_impl")
+prepare_conformer_chunk_attention_q_block_indices = _get_kernel_impl(
+    ttx_backend_module,
+    "prepare_conformer_chunk_attention_q_block_indices",
+)
 
 rot_pos_embed_impl = _get_kernel_impl(ttx_backend_module, "rot_pos_embed_impl")
 rope_fwd_impl = _get_kernel_impl(ttx_backend_module, "rope_fwd_impl")

@@ -21,6 +21,7 @@ from .layernorm import layernorm_fwd_impl
 from .layernorm import layernorm_infer_impl
 from .lightning_indexer import lightning_indexer_impl
 from .conformer_chunk_attention import conformer_chunk_attention_impl
+from .conformer_chunk_attention import prepare_conformer_chunk_attention_q_block_indices
 from .conformer_sliding_window_attention import conformer_sliding_window_attention_impl
 from .quant import dynamic_quant_impl
 from .rmsnorm import rmsnorm_bwd_impl
@@ -87,6 +88,7 @@ __all__ = [
     "sdpa_bwd_impl",
     "lightning_indexer_impl",
     "conformer_chunk_attention_impl",
+    "prepare_conformer_chunk_attention_q_block_indices",
     "conformer_sliding_window_attention_impl",
     "dynamic_quant_impl",
     "diffusion_attention_fwd_impl",

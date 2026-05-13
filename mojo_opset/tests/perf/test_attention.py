@@ -13,6 +13,7 @@ from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoPagedPrefillSWA
 from mojo_opset import MojoSdpa
 from mojo_opset import MojoSWA
+from mojo_opset.backends.ttx.kernels import prepare_conformer_chunk_attention_q_block_indices
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_torch_device
@@ -257,6 +258,33 @@ def _make_cu_lens(lengths: list[int], device: torch.device | str) -> torch.Tenso
     )
 
 
+class TorchNpuCausalFusionAttention:
+    def __call__(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        atten_mask: torch.Tensor,
+        scale: float,
+    ) -> torch.Tensor:
+        import torch_npu
+
+        return torch_npu.npu_fusion_attention(
+            query,
+            key,
+            value,
+            query.shape[1],
+            input_layout="BNSD",
+            padding_mask=None,
+            atten_mask=atten_mask,
+            scale=scale,
+            keep_prob=1.0,
+            pre_tockens=65535,
+            next_tockens=65535,
+            sparse_mode=0,
+        )[0]
+
+
 @pytest.mark.parametrize(
     "q_lens, cache_lens, num_heads, head_dim, left_window, right_window, dtype",
     [
@@ -292,7 +320,7 @@ def test_conformer_sliding_window_attention(
 @pytest.mark.parametrize(
     "q_lens, cache_lens, num_heads, head_dim, chunk_size, left_context_chunks, dtype",
     [
-        ([4096], [0], 1, 128, 8, -1, torch.bfloat16),
+        ([8192], [0], 1, 128, 1, -1, torch.bfloat16),
         ([102, 768, 334, 5, 82], [0, 0, 0, 0, 0], 8, 128, 8, -1, torch.bfloat16),
     ],
 )
@@ -316,7 +344,20 @@ def test_conformer_chunk_attention(
     value = torch.randn_like(key)
 
     op = MojoConformerChunkAttention(chunk_size=chunk_size, left_context_chunks=left_context_chunks)
-    perf(lambda: op(query, key, value, cu_q_lens, cu_total_seq_lens))  # noqa: F821
+    q_block_indices = prepare_conformer_chunk_attention_q_block_indices(cu_q_lens, head_dim, dtype)
+    perf(lambda: op(query, key, value, cu_q_lens, cu_total_seq_lens, q_block_indices=q_block_indices))  # noqa: F821
+
+    if chunk_size == 1 and left_context_chunks < 0 and len(q_lens) == 1 and all(cache_len == 0 for cache_len in cache_lens):
+        query_fa = query.transpose(0, 1).unsqueeze(0).contiguous()
+        key_fa = key.transpose(0, 1).unsqueeze(0).contiguous()
+        value_fa = value.transpose(0, 1).unsqueeze(0).contiguous()
+        atten_mask = torch.triu(
+            torch.ones((q_lens[0], q_lens[0]), dtype=torch.bool, device=device),
+            diagonal=1,
+        )
+        scale = 1.0 / math.sqrt(head_dim)
+        torch_npu_causal_fa = TorchNpuCausalFusionAttention()
+        perf(lambda: torch_npu_causal_fa(query_fa, key_fa, value_fa, atten_mask, scale))  # noqa: F821
 
 
 def generate_test_data(
