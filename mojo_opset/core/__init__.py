@@ -121,6 +121,9 @@ from .operators.mlp import MojoSwiGLUMLP
 """ indexer """
 from .operators.indexer import MojoLightningIndexer
 
+""" hc_post """
+from .operators.hc_post import MojoHcPost
+
 """ functions """
 from .functions.activation import MojoSiluFunction
 from .functions.attention import MojoSWAFunction
@@ -235,6 +238,8 @@ __all__ = [
     "MojoCausalConv1dFunction",
 
     "MojoLightningIndexer",
+
+    "MojoHcPost",
 
     "MojoFusedLinearCrossEntropyLoss",
 
