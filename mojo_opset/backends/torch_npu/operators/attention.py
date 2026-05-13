@@ -237,7 +237,7 @@ class TorchNpuFusedInferAttentionScore(MojoFusedInferAttentionScore):
         value,
         actual_seq_lengths=None,
         actual_seq_lengths_kv=None,
-        num_kv_heads=0,
+        num_key_value_heads=0,
         block_table=None,
         sparse_mode=0,
         is_varlen=False,
@@ -263,7 +263,7 @@ class TorchNpuFusedInferAttentionScore(MojoFusedInferAttentionScore):
                 num_heads=self.head_num,
                 scale=self.scale,
                 input_layout=input_layout,
-                num_key_value_heads=num_kv_heads,
+                num_key_value_heads=num_key_value_heads,
                 block_size=block_size,
             )[0]
         return attn_out
