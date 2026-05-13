@@ -1,3 +1,4 @@
+from typing import List
 from typing import Optional
 from typing import Tuple
 
@@ -6,6 +7,7 @@ import torch
 from mojo_opset.backends.ttx.kernels import relative_embedding_fwd_impl
 from mojo_opset.backends.ttx.kernels import rot_pos_embed
 from mojo_opset.backends.ttx.kernels import rope_fwd
+from mojo_opset.backends.ttx.kernels import mrope_fwd_impl
 from mojo_opset.backends.ttx.kernels import vision_rope_apply
 from mojo_opset.backends.ttx.kernels import vision_rot_pos_embed
 from mojo_opset.core import MojoApplyRoPE
@@ -13,6 +15,7 @@ from mojo_opset.core import MojoApplyVisionRoPE2D
 from mojo_opset.core import MojoRelativeEmbedding
 from mojo_opset.core import MojoRotaryEmbedding
 from mojo_opset.core import MojoVisionRotaryEmbedding2D
+from mojo_opset.core.operators.position_embedding import MojoMRoPE
 
 
 class TTXRelativeEmbedding(MojoRelativeEmbedding):
@@ -71,6 +74,22 @@ class TTXApplyRoPE(MojoApplyRoPE):
         head_first: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return rope_fwd(q, k, cos, sin, head_first)
+
+
+class TTXMRoPE(MojoMRoPE):
+    supported_platforms_list = ["npu"]
+
+    @staticmethod
+    def forward(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        mrope_section: List[int],
+        is_interleaved: bool = False,
+        head_dim: Optional[int] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return mrope_fwd_impl(q, k, cos, sin, mrope_section, is_interleaved, head_dim)
 
 
 class TTXVisionRotaryEmbedding2D(MojoVisionRotaryEmbedding2D):

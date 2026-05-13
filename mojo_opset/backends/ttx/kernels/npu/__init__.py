@@ -29,6 +29,7 @@ from .rope import rope_bwd_impl
 from .rope import rope_fwd_impl
 from .vision_rope import vision_rope_apply_impl
 from .vision_rope import vision_rot_pos_embed_impl
+from .mrope import mrope_fwd_impl
 from .sample import fused_penalties_temp_impl
 from .sample import join_prob_reject_sampling_impl
 from .sample import reject_sampling_impl
@@ -80,6 +81,7 @@ __all__ = [
     "rope_fwd_impl",
     "vision_rope_apply_impl",
     "vision_rot_pos_embed_impl",
+    "mrope_fwd_impl",
     "silu_bwd_impl",
     "silu_fwd_impl",
     "swiglu_bwd_impl",
