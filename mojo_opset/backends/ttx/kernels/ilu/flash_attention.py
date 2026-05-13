@@ -769,87 +769,47 @@ def _paged_decode_quant_gqa_kernel(
 
     neg_inf = -1.0e30
     m = tl.full((1,), neg_inf, tl.float32)
-    num_blocks = tl.cdiv(seq_len, BLOCK_N)
-
-    for block_idx in tl.range(0, num_blocks):
-        start_n = block_idx * BLOCK_N
-        offs_n = start_n + tl.arange(0, BLOCK_N)
-        s_mask = offs_n < seq_len
-
-        logical_block_idx = offs_n // PAGE_SIZE
-        offset_in_block = offs_n % PAGE_SIZE
-        physical_block_id = tl.load(
-            block_tables_ptr + pid_b * stride_bt_batch + logical_block_idx * stride_bt_block,
-            mask=s_mask,
-            other=0,
-        )
-
-        k_ptrs = (
-            k_cache_ptr
-            + physical_block_id[:, None] * stride_k_block
-            + kv_h * stride_k_head
-            + offset_in_block[:, None] * stride_k_blksz
-            + offs_d[None, :] * stride_k_dim
-        )
-        k = tl.load(k_ptrs, mask=s_mask[:, None] & d_mask[None, :], other=0.0).to(tl.float32)
-        if COMPUTE_INT8:
-            scores = tl.sum(k * q_for_score[None, :], axis=1) * q_quant_scale * SOFTMAX_SCALE
-        else:
-            scores = tl.sum(k * k_scale[None, :] * q_for_score[None, :], axis=1) * SOFTMAX_SCALE
-        scores = tl.where(s_mask, scores, neg_inf)
-        m = tl.maximum(m, tl.max(scores, axis=0))
-
     l = tl.zeros((1,), dtype=tl.float32)
     acc = tl.zeros((BLOCK_D,), dtype=tl.float32)
-    p_amax = tl.zeros((1,), dtype=tl.float32)
-
-    for block_idx in tl.range(0, num_blocks):
-        start_n = block_idx * BLOCK_N
-        offs_n = start_n + tl.arange(0, BLOCK_N)
-        s_mask = offs_n < seq_len
-
-        logical_block_idx = offs_n // PAGE_SIZE
-        offset_in_block = offs_n % PAGE_SIZE
-        physical_block_id = tl.load(
-            block_tables_ptr + pid_b * stride_bt_batch + logical_block_idx * stride_bt_block,
-            mask=s_mask,
-            other=0,
-        )
-
-        k_ptrs = (
-            k_cache_ptr
-            + physical_block_id[:, None] * stride_k_block
-            + kv_h * stride_k_head
-            + offset_in_block[:, None] * stride_k_blksz
-            + offs_d[None, :] * stride_k_dim
-        )
-        k = tl.load(k_ptrs, mask=s_mask[:, None] & d_mask[None, :], other=0.0).to(tl.float32)
-        if COMPUTE_INT8:
-            scores = tl.sum(k * q_for_score[None, :], axis=1) * q_quant_scale * SOFTMAX_SCALE
-        else:
-            v_ptrs = (
-                v_cache_ptr
-                + physical_block_id[:, None] * stride_v_block
-                + kv_h * stride_v_head
-                + offset_in_block[:, None] * stride_v_blksz
-                + offs_d[None, :] * stride_v_dim
-            )
-            v = tl.load(v_ptrs, mask=s_mask[:, None] & d_mask[None, :], other=0.0).to(tl.float32)
-            scores = tl.sum(k * k_scale[None, :] * q_for_score[None, :], axis=1) * SOFTMAX_SCALE
-        scores = tl.where(s_mask, scores, neg_inf)
-        p = tl.where(s_mask, tl.exp(scores - m), 0.0)
-        l += tl.sum(p, axis=0)
-        if COMPUTE_INT8:
-            p_amax = tl.maximum(p_amax, tl.max(p, axis=0))
-        else:
-            acc += tl.sum(p[:, None] * v * v_scale[None, :], axis=0)
-
-    l = tl.maximum(l, 1.0e-6)
+    num_blocks = tl.cdiv(seq_len, BLOCK_N)
 
     if COMPUTE_INT8:
-        p_scale = (p_amax / l) / 127.0
+        # Pass 1: online softmax to compute m and l
+        for block_idx in tl.range(0, num_blocks):
+            start_n = block_idx * BLOCK_N
+            offs_n = start_n + tl.arange(0, BLOCK_N)
+            s_mask = offs_n < seq_len
+
+            logical_block_idx = offs_n // PAGE_SIZE
+            offset_in_block = offs_n % PAGE_SIZE
+            physical_block_id = tl.load(
+                block_tables_ptr + pid_b * stride_bt_batch + logical_block_idx * stride_bt_block,
+                mask=s_mask,
+                other=0,
+            )
+
+            k_ptrs = (
+                k_cache_ptr
+                + physical_block_id[:, None] * stride_k_block
+                + kv_h * stride_k_head
+                + offset_in_block[:, None] * stride_k_blksz
+                + offs_d[None, :] * stride_k_dim
+            )
+            k = tl.load(k_ptrs, mask=s_mask[:, None] & d_mask[None, :], other=0.0).to(tl.float32)
+            scores = tl.sum(k * q_for_score[None, :], axis=1) * q_quant_scale * SOFTMAX_SCALE
+            scores = tl.where(s_mask, scores, neg_inf)
+            m_new = tl.maximum(m, tl.max(scores, axis=0))
+            alpha = tl.math.exp(m - m_new)
+            p = tl.where(s_mask, tl.math.exp(scores - m_new), 0.0)
+            l = l * alpha + tl.sum(p, axis=0)
+            m = m_new
+
+        # p_amax is always 1.0 since max(exp(scores - m)) = exp(0) = 1.0
+        safe_l = tl.where(l > 0, l, 1.0)
+        p_scale = (1.0 / safe_l) / 127.0
         p_scale = tl.where(p_scale < 1.0e-6, 1.0, p_scale)
 
+        # Pass 2: quantized P @ V
         for block_idx in tl.range(0, num_blocks):
             start_n = block_idx * BLOCK_N
             offs_n = start_n + tl.arange(0, BLOCK_N)
@@ -881,15 +841,57 @@ def _paged_decode_quant_gqa_kernel(
             v = tl.load(v_ptrs, mask=s_mask[:, None] & d_mask[None, :], other=0.0).to(tl.float32)
             scores = tl.sum(k * q_for_score[None, :], axis=1) * q_quant_scale * SOFTMAX_SCALE
             scores = tl.where(s_mask, scores, neg_inf)
-            p = tl.where(s_mask, tl.exp(scores - m) / l, 0.0)
+            p = tl.where(s_mask, tl.math.exp(scores - m) / safe_l, 0.0)
             p_quant_f = p / p_scale
             p_quant_i32 = (p_quant_f + 0.5).to(tl.int32)
             p_quant_i32 = tl.minimum(tl.maximum(p_quant_i32, -128), 127)
             acc += tl.sum(p_quant_i32.to(tl.float32)[:, None] * v, axis=0)
 
         out = acc * p_scale * v_scale
+        out = tl.where(l > 0, out, 0.0)
     else:
-        out = acc / l
+        # Single pass: online softmax
+        for block_idx in tl.range(0, num_blocks):
+            start_n = block_idx * BLOCK_N
+            offs_n = start_n + tl.arange(0, BLOCK_N)
+            s_mask = offs_n < seq_len
+
+            logical_block_idx = offs_n // PAGE_SIZE
+            offset_in_block = offs_n % PAGE_SIZE
+            physical_block_id = tl.load(
+                block_tables_ptr + pid_b * stride_bt_batch + logical_block_idx * stride_bt_block,
+                mask=s_mask,
+                other=0,
+            )
+
+            k_ptrs = (
+                k_cache_ptr
+                + physical_block_id[:, None] * stride_k_block
+                + kv_h * stride_k_head
+                + offset_in_block[:, None] * stride_k_blksz
+                + offs_d[None, :] * stride_k_dim
+            )
+            v_ptrs = (
+                v_cache_ptr
+                + physical_block_id[:, None] * stride_v_block
+                + kv_h * stride_v_head
+                + offset_in_block[:, None] * stride_v_blksz
+                + offs_d[None, :] * stride_v_dim
+            )
+            k = tl.load(k_ptrs, mask=s_mask[:, None] & d_mask[None, :], other=0.0).to(tl.float32)
+            v = tl.load(v_ptrs, mask=s_mask[:, None] & d_mask[None, :], other=0.0).to(tl.float32)
+            scores = tl.sum(k * k_scale[None, :] * q_for_score[None, :], axis=1) * SOFTMAX_SCALE
+            scores = tl.where(s_mask, scores, neg_inf)
+            m_new = tl.maximum(m, tl.max(scores, axis=0))
+            alpha = tl.math.exp(m - m_new)
+            p = tl.where(s_mask, tl.math.exp(scores - m_new), 0.0)
+            l = l * alpha + tl.sum(p, axis=0)
+            acc = acc * alpha + tl.sum(p[:, None] * v * v_scale[None, :], axis=0)
+            m = m_new
+
+        safe_l = tl.where(l > 0, l, 1.0)
+        out = acc / safe_l
+        out = tl.where(l > 0, out, 0.0)
 
     out_ptrs = o_ptr + pid_b * stride_ob + pid_h * stride_oh + offs_d * stride_od
     tl.store(out_ptrs, out.to(OUT_T), mask=d_mask)
@@ -923,7 +925,7 @@ def paged_attention_decode_impl(
     )
 
 
-def paged_attention_decode_quant_impl(
+def paged_attention_decode_with_kv_dequant_impl(
     q: torch.Tensor,
     query_scale: Optional[torch.Tensor],
     key_cache: torch.Tensor,
@@ -940,7 +942,7 @@ def paged_attention_decode_quant_impl(
     if query_scale is not None:
         raise NotImplementedError("ILU quant paged decode does not support quantized query.")
     if key_cache.dtype != torch.int8 or value_cache.dtype != torch.int8:
-        raise TypeError("paged_attention_decode_quant_impl expects int8 key/value cache.")
+        raise TypeError("paged_attention_decode_with_kv_dequant_impl expects int8 key/value cache.")
 
     batch_size, num_q_heads, head_dim = q.shape
     _, num_kv_heads, page_size, head_dim_cache = key_cache.shape

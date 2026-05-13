@@ -4,7 +4,7 @@ from .convolution import causal_conv1d_update_bdt_impl
 # from .diffution_attention import diffusion_attention_bwd_impl
 # from .diffution_attention import diffusion_attention_fwd_impl
 from .flash_attention import paged_attention_decode_impl
-from .flash_attention import paged_attention_decode_quant_impl
+from .flash_attention import paged_attention_decode_with_kv_dequant_impl
 from .flash_attention import paged_attention_prefill_impl
 from .fused_add_layernorm import fused_add_layernorm_infer_impl
 from .fused_add_rmsnorm import fused_add_rmsnorm_infer_impl
@@ -57,7 +57,7 @@ __all__ = [
     # "causal_conv1d_fwd_impl",
     # "causal_conv1d_bwd_impl",
     "paged_attention_decode_impl",
-    "paged_attention_decode_quant_impl",
+    "paged_attention_decode_with_kv_dequant_impl",
     "paged_attention_prefill_impl",
     # "fused_linear_cross_entropy_bwd_impl",
     # "fused_linear_cross_entropy_fwd_impl",
