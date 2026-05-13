@@ -481,7 +481,7 @@ class MojoPrefillSageGQA(MojoOperator):
 
         score = torch.softmax(score, -1).to(query.dtype)
 
-        score_int8, score_scale = self.per_block_int8(score, blk=self.BLOCK_P, q_max=self.q_max, q_min=self.q_min)
+        score_int8, score_scale = self.per_token_int8(score, q_max=self.q_max, q_min=self.q_min)
         v_int8, v_scale = self.per_channel_int8(v_cache, q_max=self.q_max, q_min=self.q_min)
         attn_output = torch.bmm(score_int8.float(), v_int8.float())
         attn_output *= score_scale * v_scale
