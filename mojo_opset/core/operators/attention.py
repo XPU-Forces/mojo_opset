@@ -354,9 +354,9 @@ class MojoPrefillSageGQA(MojoOperator):
         gqa_layout: str = "ABAB",
         rm_padding: bool = False,
         window_size: int = -1,
-        BLOCK_Q: int = 128,
-        BLOCK_K: int = 64,
-        BLOCK_P: int = 64,
+        BLOCK_Q: int = 1,
+        BLOCK_K: int = 1,
+        BLOCK_P: int = 1,
         quant_dtype: torch.dtype = torch.int8,
     ):
         super().__init__()
@@ -413,11 +413,14 @@ class MojoPrefillSageGQA(MojoOperator):
             x_scale = x_scale[:, :L].contiguous()
         return x_q, x_scale
 
+    def per_token_int8(self, x, xm=None, q_max=127, q_min=-128):
+        return self.per_block_int8(x, xm, blk=1, q_max=q_max, q_min=q_min)
+
     def per_channel_int8(self, v, vm=None, q_max=127, q_min=-128):
         if vm is not None:
             v = v - vm
-        reduce_dims = tuple(range(v.dim()-1))
-        v_q, v_scale = self.get_scale_and_quant(v, reduce_dims, q_max, q_min)
+        quant_dims = -2
+        v_q, v_scale = self.get_scale_and_quant(v, quant_dims, q_max, q_min)
         return v_q, v_scale
 
     """
@@ -459,11 +462,10 @@ class MojoPrefillSageGQA(MojoOperator):
             v_cache = v_cache.repeat_interleave(group, dim=1).reshape(-1, seq_len, head_dim)
         else:
             raise NotImplementedError
-        query_int8, query_scale = self.per_block_int8(query, blk=self.BLOCK_Q, q_max=self.q_max, q_min=self.q_min)
-        k_int8, k_scale = self.per_block_int8(k_cache, blk=self.BLOCK_K, q_max=self.q_max, q_min=self.q_min)
+        query_int8, query_scale = self.per_token_int8(query, q_max=self.q_max, q_min=self.q_min)
+        k_int8, k_scale = self.per_token_int8(k_cache, q_max=self.q_max, q_min=self.q_min)
         k_int8 = k_int8.transpose(-2, -1)
         score = torch.bmm(query_int8.float(), k_int8.float()).float()
-        print(f"query_int8: {query_int8.shape}, k_int8: {k_int8.shape}, score: {score.shape}, query_scale: {query_scale.shape}, k_scale: {k_scale.shape}")
         score *= query_scale * k_scale.transpose(-2, -1)
 
         if softmax_scale is None:
@@ -482,7 +484,6 @@ class MojoPrefillSageGQA(MojoOperator):
         score_int8, score_scale = self.per_block_int8(score, blk=self.BLOCK_P, q_max=self.q_max, q_min=self.q_min)
         v_int8, v_scale = self.per_channel_int8(v_cache, q_max=self.q_max, q_min=self.q_min)
         attn_output = torch.bmm(score_int8.float(), v_int8.float())
-        print(f"score_int8: {score_int8.shape}, v_int8: {v_int8.shape}, attn_output: {attn_output.shape}, score_scale: {score_scale.shape}, v_scale: {v_scale.shape}")
         attn_output *= score_scale * v_scale
         attn_output = attn_output.view(batch_size, num_attn_heads, seq_len, head_dim).transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, seq_len, num_attn_heads, head_dim)
