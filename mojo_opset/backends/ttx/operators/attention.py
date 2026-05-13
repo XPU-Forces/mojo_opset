@@ -304,6 +304,7 @@ class TTXPagedPrefillQuantSWA(MojoPagedPrefillQuantSWA):
             global_window_size=self.global_window_size,
             softmax_scale=softmax_scale,
             gqa_interleave=self.gqa_interleave,
+            compute_dtype=self.compute_dtype,
         )
         return o
 
