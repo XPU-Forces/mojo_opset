@@ -204,6 +204,7 @@ def over_encoding_decode_impl(
     LUT_scale: torch.Tensor,
     LUT_mean: torch.Tensor,
     *,
+    max_gram: int = None,  # accepted for API parity with ILU; unused on NPU
     group_size: int = 1,
     codebook: torch.Tensor = None,
     ori_vocab_size: int = None,
@@ -302,7 +303,7 @@ def over_encoding_decode_impl(
         BLOCK_BATCH_SIZE=triton.next_power_of_2(
             math.ceil(input_ids.size(0) / num_programs)
         ),
-        MAX_N_GRAM=max(n_grams).item(),
+        MAX_N_GRAM=max_gram,
         MTP_STEP=input_ids.size(1),
         embedding_dim=embedding_dim,
         LUT_qweight_stride_0=LUT_qweight.stride(0),
