@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from mojo_opset.core.operators.kv_cache import build_paged_kv_chunk_metadata
 from mojo_opset.runtime.config import MojoConfig
 from mojo_opset.runtime.generation import MojoSession
 from mojo_opset.utils.logging import get_logger
@@ -16,10 +17,10 @@ logger = get_logger(__name__)
 @dataclass
 class AttentionMetadata:
     q_lens: torch.Tensor
-    cu_q_lens: torch.Tensor
+    cu_q_lens: Optional[torch.Tensor]
     total_seq_lens: torch.Tensor
     block_tables: torch.Tensor
-    slot_mapping: torch.Tensor
+    chunk_metadata: torch.Tensor
     key_caches: list[torch.Tensor]
     value_caches: list[torch.Tensor]
     is_prefill: bool
@@ -45,8 +46,6 @@ class PagedAttentionRuntimeState(MojoSession):
 
         self.max_blocks_per_seq = (config.model_config.max_position_embeddings + block_size - 1) // block_size
         total_blocks = batch_size * self.max_blocks_per_seq
-        self.offsets = torch.arange(self.block_size, dtype=torch.int64, device=self.device)
-
         self.block_tables = torch.full(
             (batch_size, self.max_blocks_per_seq),
             -1,
@@ -153,26 +152,18 @@ class PagedAttentionRuntimeState(MojoSession):
             return torch.empty((0,), dtype=torch.int64, device=self.device)
         return torch.cat(positions, dim=0)
 
-    def _build_slot_mapping(self, context_kv_lens: torch.Tensor, q_lens: torch.Tensor) -> torch.Tensor:
-        slot_mapping_chunks = []
-        for batch_idx in range(self.batch_size):
-            query_len = q_lens[batch_idx]
-            if query_len <= 0:
-                continue
-
-            curr_block_tables = self.block_tables[batch_idx]
-            first_pad_index = torch.nonzero(curr_block_tables == -1)[0]
-            curr_block_tables = curr_block_tables[:first_pad_index]
-
-            block_start = curr_block_tables * self.block_size
-            slot_mapping = (block_start.unsqueeze(-1) + self.offsets.unsqueeze(0)).flatten()
-
-            start = context_kv_lens[batch_idx]
-            slot_mapping_chunks.append(slot_mapping[start:start+query_len])
-
-        if not slot_mapping_chunks:
-            return torch.empty((0,), dtype=torch.int64, device=self.device)
-        return torch.cat(slot_mapping_chunks, dim=0)
+    def _build_chunk_metadata(
+        self,
+        context_kv_lens: torch.Tensor,
+        q_lens: torch.Tensor,
+        cu_q_lens: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        return build_paged_kv_chunk_metadata(
+            self.block_tables,
+            cu_q_lens,
+            context_kv_lens,
+            self.block_size,
+        )
 
     def _build_attention_metadata(
         self,
@@ -186,7 +177,7 @@ class PagedAttentionRuntimeState(MojoSession):
             q_lens=q_lens,
             total_seq_lens=self.total_seq_lens,
             block_tables=self.block_tables,
-            slot_mapping=self._build_slot_mapping(context_kv_lens, q_lens),
+            chunk_metadata=self._build_chunk_metadata(context_kv_lens, q_lens, cu_q_lens),
             key_caches=self.key_caches,
             value_caches=self.value_caches,
             is_prefill=cu_q_lens is not None,
@@ -227,11 +218,10 @@ class PagedAttentionRuntimeState(MojoSession):
             )
 
         q_lens = torch.ones(self.batch_size, dtype=torch.int32, device=self.device)
-        cu_q_lens = F.pad(q_lens.cumsum(-1, dtype=torch.int32), (1, 0))
         positions = self.total_seq_lens.clone()
         context_kv_lens = self._reserve(q_lens)
         attention_metadata = self._build_attention_metadata(
-            cu_q_lens=cu_q_lens,
+            cu_q_lens=None,
             context_kv_lens=context_kv_lens,
             q_lens=q_lens,
         )
