@@ -166,6 +166,7 @@ def over_encoding_decode_impl(
     LUT_scale: torch.Tensor,            # [V, D/group_size] float32
     LUT_mean: torch.Tensor,             # [V, D/group_size] float32
     *,
+    max_gram: int,
     group_size: int = 1,
     codebook: torch.Tensor = None,
     ori_vocab_size: int = None,
@@ -188,6 +189,8 @@ def over_encoding_decode_impl(
         LUT_qweight:         [V, D/2] int8 – NF4-packed embedding weights.
         LUT_scale:           [V, D/group_size] float32 – per-group scale.
         LUT_mean:            [V, D/group_size] float32 – per-group mean.
+        max_gram:            Maximum n-gram order; passed explicitly to avoid
+                             reading n_grams on the host during CUDA Graph capture.
         group_size:          Quantisation group size.
         codebook:            16-entry float16 NF4 codebook; built if None.
         ori_vocab_size:      Original (non-OE) vocabulary size.
@@ -207,7 +210,6 @@ def over_encoding_decode_impl(
     H           = int(oe_history_inputs.size(1))
     embedding_dim = int(LUT_scale.size(1)) * group_size
     vocab_size  = LUT_qweight.size(0) if mega_vocab_size is None else mega_vocab_size
-    max_gram    = int(n_grams.max().item())
 
     if codebook is None:
         codebook = get_nf4_codebook(device=LUT_qweight.device, dtype=torch.float16)
