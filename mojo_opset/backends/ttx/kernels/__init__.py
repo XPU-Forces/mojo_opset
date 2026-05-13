@@ -62,7 +62,7 @@ fused_add_layernorm_infer_impl = _get_kernel_impl(ttx_backend_module, "fused_add
 
 paged_attention_prefill_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_prefill_impl")
 paged_attention_decode_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_decode_impl")
-paged_attention_decode_quant_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_decode_quant_impl")
+paged_attention_decode_with_kv_dequant_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_decode_with_kv_dequant_impl")
 
 fused_linear_cross_entropy_fwd_impl = _get_kernel_impl(ttx_backend_module, "fused_linear_cross_entropy_fwd_impl")
 fused_linear_cross_entropy_bwd_impl = _get_kernel_impl(ttx_backend_module, "fused_linear_cross_entropy_bwd_impl")
@@ -813,7 +813,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
 
     # TODO(zhangjihang): Support compile mode
     sdpa_infer = sdpa_infer_impl
-    paged_attention_decode_quant = paged_attention_decode_quant_impl
+    paged_attention_decode_with_kv_dequant = paged_attention_decode_with_kv_dequant_impl
     swa_paged_prefill = swa_paged_prefill_impl
     swa_paged_decode = swa_paged_decode_impl
     swa_infer = swa_infer_impl
@@ -837,7 +837,7 @@ else:
     swiglu_bwd = swiglu_bwd_impl
     paged_attention_prefill = paged_attention_prefill_impl
     paged_attention_decode = paged_attention_decode_impl
-    paged_attention_decode_quant = paged_attention_decode_quant_impl
+    paged_attention_decode_with_kv_dequant = paged_attention_decode_with_kv_dequant_impl
     rot_pos_embed = rot_pos_embed_impl
     rope_fwd = rope_fwd_impl
     rope_bwd = rope_bwd_impl

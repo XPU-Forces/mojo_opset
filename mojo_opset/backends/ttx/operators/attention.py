@@ -4,14 +4,14 @@ import torch
 
 from mojo_opset.backends.ttx.kernels import paged_attention_prefill
 from mojo_opset.backends.ttx.kernels import paged_attention_decode
-from mojo_opset.backends.ttx.kernels import paged_attention_decode_quant
+from mojo_opset.backends.ttx.kernels import paged_attention_decode_with_kv_dequant
 from mojo_opset.backends.ttx.kernels import sdpa_infer
 from mojo_opset.backends.ttx.kernels import swa_paged_prefill
 from mojo_opset.backends.ttx.kernels import swa_paged_decode
 from mojo_opset.backends.ttx.kernels import swa_infer
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoPagedDecodeGQA
-from mojo_opset.core import MojoPagedDecodeQuantGQA
+from mojo_opset.core import MojoPagedDecodeGQAWithKVDequant
 from mojo_opset.core import MojoSdpa
 from mojo_opset.core import MojoPagedPrefillSWA
 from mojo_opset.core import MojoPagedDecodeSWA
@@ -114,7 +114,7 @@ class TTXPagedDecodeGQA(MojoPagedDecodeGQA):
         return output
 
 
-class TTXPagedDecodeQuantGQA(MojoPagedDecodeQuantGQA):
+class TTXPagedDecodeGQAWithKVDequant(MojoPagedDecodeGQAWithKVDequant):
     supported_platforms_list = ["ilu"]
 
     def forward(
@@ -134,11 +134,11 @@ class TTXPagedDecodeQuantGQA(MojoPagedDecodeQuantGQA):
     ) -> torch.Tensor:
         assert_paged_decode_contract(block_tables, total_seq_lens)
         assert self.is_causal, (
-            f"[TTXPagedDecodeQuantGQA] TTX only support causal attention, but got is_causal={self.is_causal}"
+            f"[TTXPagedDecodeGQAWithKVDequant] TTX only support causal attention, but got is_causal={self.is_causal}"
         )
-        assert mask is None, f"[TTXPagedDecodeQuantGQA] TTX does not support mask, but got mask={mask}"
+        assert mask is None, f"[TTXPagedDecodeGQAWithKVDequant] TTX does not support mask, but got mask={mask}"
 
-        output = paged_attention_decode_quant(
+        output = paged_attention_decode_with_kv_dequant(
             q=query,
             query_scale=query_scale,
             key_cache=key_cache,
