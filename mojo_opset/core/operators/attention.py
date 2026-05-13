@@ -354,9 +354,9 @@ class MojoPrefillSageGQA(MojoOperator):
         gqa_layout: str = "ABAB",
         rm_padding: bool = False,
         window_size: int = -1,
-        BLOCK_Q: int = 1,
-        BLOCK_K: int = 1,
-        BLOCK_P: int = 1,
+        BLOCK_Q: int = 128,
+        BLOCK_K: int = 64,
+        BLOCK_P: int = 64,
         quant_dtype: torch.dtype = torch.int8,
     ):
         super().__init__()
