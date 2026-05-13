@@ -7,6 +7,7 @@ from typing import Tuple
 import torch
 
 from ..operator import MojoOperator
+from .quantize import MojoDynamicQuant
 
 
 def assert_paged_prefill_contract(
@@ -336,6 +337,157 @@ class MojoPrefillGQA(MojoOperator):
 
         return attn_output
 
+class MojoPrefillSageGQA(MojoOperator):
+    """
+    GQA attention operator.
+    Args:
+        is_causal (bool): Whether to apply causal masking.
+        softmax_scale (float): Scaling factor for the softmax operation.
+        gqa_layout (str): Layout for GQA attention.
+        rm_padding (bool): Whether to remove padding from attention computation.
+        window_size (int): Window size for attention computation, -1 means full attention.
+    """
+
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "ABAB",
+        rm_padding: bool = False,
+        window_size: int = -1,
+        BLOCK_Q: int = 128,
+        BLOCK_K: int = 64,
+        BLOCK_P: int = 64,
+        quant_dtype: torch.dtype = torch.int8,
+    ):
+        super().__init__()
+
+        self.is_causal = is_causal
+        self.gqa_layout = gqa_layout
+        self.rm_padding = rm_padding
+        self.window_size = window_size
+        # sage attention specific parameters
+        self.BLOCK_Q = BLOCK_Q
+        self.BLOCK_K = BLOCK_K
+        self.BLOCK_P = BLOCK_P
+        if quant_dtype != torch.int8:
+            raise ValueError("quant_dtype must be torch.int8")
+        self.q_max = 127
+        self.q_min = -128
+
+    @staticmethod
+    def get_scale_and_quant(
+        x, 
+        reduce_dims, 
+        q_max: int = 127, 
+        q_min: int = -128,
+        eps=1e-6, 
+        quant_dtype=torch.int8,
+    )->tuple[torch.Tensor, torch.Tensor]:        
+        scale = x.abs().amax(dim=reduce_dims, keepdim=True) / q_max
+        scale = torch.where(scale < eps, torch.ones_like(scale), scale)
+        q = torch.clamp(torch.round(x / scale), q_min, q_max,).to(quant_dtype)
+        return q, scale
+
+    def per_block_int8(self, x, xm=None, blk=64, q_max=127, q_min=-128):
+        if xm is not None:
+            x = x - xm
+        # BH: batch*heads, L: seq_len, D: head_dim
+        BH, L, D = x.shape
+
+        num_blocks = (L + blk - 1) // blk
+        if num_blocks * blk != L:
+            pad_len = num_blocks * blk - L
+            x = torch.nn.functional.pad(x, (0, 0, 0, pad_len))
+        original_shape = (BH, num_blocks * blk, D)
+
+        x = x.reshape(-1, num_blocks, blk, D)
+        # Reduce over blk and D together
+        reduce_dims = (-1, -2)
+        x_q, x_scale = self.get_scale_and_quant(x, reduce_dims, q_max, q_min)
+        x_q = x_q.reshape(original_shape)
+        # [BH, num_blocks, 1, 1] -> [BH, num_blocks*blk, 1]
+        x_scale = x_scale.repeat_interleave(blk, dim=1).squeeze(-1)
+
+        if num_blocks * blk != L:
+            x_q = x_q[:, :L].contiguous()
+            x_scale = x_scale[:, :L].contiguous()
+        return x_q, x_scale
+
+    def per_channel_int8(self, v, vm=None, q_max=127, q_min=-128):
+        if vm is not None:
+            v = v - vm
+        reduce_dims = tuple(range(v.dim()-1))
+        v_q, v_scale = self.get_scale_and_quant(v, reduce_dims, q_max, q_min)
+        return v_q, v_scale
+
+    """
+    Forward pass of the Mojo GQA attention operator, reference for backend.
+    Args:
+        query (torch.Tensor): Query tensor, in shape [B, Q_H, S, D].
+        key (torch.Tensor): Key tensor, in shape [B, K_H, S, D].
+        value (torch.Tensor): Value tensor, inshape [B, V_H, S, D].
+
+    Returns:
+        torch.Tensor: Output tensor.
+    """
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        if self.window_size != -1:
+            raise NotImplementedError
+
+        assert cu_q_lens.dtype == torch.int32
+        batch_size, num_attn_heads, seq_len, head_dim = query.size()
+
+        num_kv_heads = k_cache.shape[1]
+
+        group = num_attn_heads // num_kv_heads
+
+        query = query.reshape(-1, seq_len, head_dim)
+
+        if self.gqa_layout == "ABAB":
+            k_cache = torch.cat([k_cache] * group, axis=1).reshape(-1, seq_len, head_dim)
+            v_cache = torch.cat([v_cache] * group, axis=1).reshape(-1, seq_len, head_dim)
+        elif self.gqa_layout == "AABB":
+            k_cache = k_cache.repeat_interleave(group, dim=1).reshape(-1, seq_len, head_dim)
+            v_cache = v_cache.repeat_interleave(group, dim=1).reshape(-1, seq_len, head_dim)
+        else:
+            raise NotImplementedError
+        query_int8, query_scale = self.per_block_int8(query, blk=self.BLOCK_Q, q_max=self.q_max, q_min=self.q_min)
+        k_int8, k_scale = self.per_block_int8(k_cache, blk=self.BLOCK_K, q_max=self.q_max, q_min=self.q_min)
+        k_int8 = k_int8.transpose(-2, -1)
+        score = torch.bmm(query_int8.float(), k_int8.float()).float()
+        print(f"query_int8: {query_int8.shape}, k_int8: {k_int8.shape}, score: {score.shape}, query_scale: {query_scale.shape}, k_scale: {k_scale.shape}")
+        score *= query_scale * k_scale.transpose(-2, -1)
+
+        if softmax_scale is None:
+            score *= 1 / (head_dim**0.5)
+        else:
+            score *= softmax_scale
+
+        if self.is_causal:
+            mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool, device=query.device))
+            score.masked_fill_(~mask, float("-inf"))
+        else:
+            raise NotImplementedError
+
+        score = torch.softmax(score, -1).to(query.dtype)
+
+        score_int8, score_scale = self.per_block_int8(score, blk=self.BLOCK_P, q_max=self.q_max, q_min=self.q_min)
+        v_int8, v_scale = self.per_channel_int8(v_cache, q_max=self.q_max, q_min=self.q_min)
+        attn_output = torch.bmm(score_int8.float(), v_int8.float())
+        print(f"score_int8: {score_int8.shape}, v_int8: {v_int8.shape}, attn_output: {attn_output.shape}, score_scale: {score_scale.shape}, v_scale: {v_scale.shape}")
+        attn_output *= score_scale * v_scale
+        attn_output = attn_output.view(batch_size, num_attn_heads, seq_len, head_dim).transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(batch_size, seq_len, num_attn_heads, head_dim)
+
+        return attn_output
 
 class MojoPagedPrefillGQA(MojoOperator):
     def __init__(
