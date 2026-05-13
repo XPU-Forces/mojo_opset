@@ -75,6 +75,7 @@ from .operators.moe import MojoMoE
 from .operators.moe import MojoMoECombine
 from .operators.moe import MojoMoEDispatch
 from .operators.moe import MojoMoEGating
+from .operators.moe_gating_top_k import MojoMoEGatingTopK
 from .operators.moe import MojoMoEInitRoutingDynamicQuant
 from .operators.moe import MojoQuantExperts
 from .operators.moe import MojoQuantMoE
@@ -123,6 +124,9 @@ from .operators.indexer import MojoLightningIndexer
 
 """ hc_post """
 from .operators.hc_post import MojoHcPost
+
+""" hc_pre """
+from .operators.hc_pre import MojoHcPre
 
 """ functions """
 from .functions.activation import MojoSiluFunction
@@ -190,6 +194,7 @@ __all__ = [
 
     "MojoMoE",
     "MojoMoEGating",
+    "MojoMoEGatingTopK",
     "MojoMoEDispatch",
     "MojoMoEInitRoutingDynamicQuant",
     "MojoFusedSwiGLUMoEScaleDynamicQuantize",
@@ -240,6 +245,7 @@ __all__ = [
     "MojoLightningIndexer",
 
     "MojoHcPost",
+    "MojoHcPre",
 
     "MojoFusedLinearCrossEntropyLoss",
 
