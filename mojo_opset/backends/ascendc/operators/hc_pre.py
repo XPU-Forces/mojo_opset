@@ -25,7 +25,7 @@ class AscendcHcPre(MojoHcPre):
             import torch_npu
 
             if hasattr(torch_npu, "npu_hc_pre"):
-                print("aaaaaaaaaaaa")
+                # print("aaaaaaaaaaaa")
                 return torch_npu.npu_hc_pre(
                     x,
                     hc_fn,
@@ -44,7 +44,7 @@ class AscendcHcPre(MojoHcPre):
                 import custom_ops  # noqa: F401
             except Exception:
                 pass
-            print("bbbbbbbbbbb")
+            # print("bbbbbbbbbbb")
             return torch.ops.custom.npu_hc_pre(
                 x,
                 hc_fn,

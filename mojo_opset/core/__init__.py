@@ -37,6 +37,9 @@ from .operators.attention import MojoPagedPrefillQuantGQA
 from .operators.attention import MojoPagedDecodeQuantSWA
 from .operators.attention import MojoPagedPrefillQuantSWA
 
+""" compressor """
+from .operators.compressor import MojoCompressor
+
 """ kvcache """
 from .operators.kv_cache import MojoStoreMLAKVCache
 from .operators.kv_cache import MojoStorePagedKVCache
@@ -93,6 +96,7 @@ from .operators.normalization import MojoResidualAddRMSNorm
 from .operators.normalization import MojoResidualAddRMSNormQuant
 from .operators.normalization import MojoRMSNorm
 from .operators.normalization import MojoRMSNormQuant
+from .operators.rms_norm_dynamic_quant import MojoRMSNormDynamicQuant
 
 """ position_embedding """
 from .operators.position_embedding import MojoRelativeEmbedding
@@ -104,6 +108,7 @@ from .operators.position_embedding import MojoNormRoPEStoreKV
 from .operators.position_embedding import MojoRoPEStoreKV
 from .operators.position_embedding import MojoRotaryEmbedding
 from .operators.position_embedding import MojoVisionRotaryEmbedding2D
+from .operators.inplace_partial_rotary_mul import MojoInplacePartialRotaryMul
 
 """ sampling """
 from .operators.sampling import MojoApplyPenaltiesTempurate
@@ -127,6 +132,9 @@ from .operators.hc_post import MojoHcPost
 
 """ hc_pre """
 from .operators.hc_pre import MojoHcPre
+
+""" scatter_nd_update_asc """
+from .operators.scatter_nd_update_asc import MojoScatterNdUpdateAsc
 
 """ functions """
 from .functions.activation import MojoSiluFunction
@@ -166,6 +174,8 @@ __all__ = [
     "MojoPagedPrefillQuantGQA",
     "MojoPagedDecodeQuantGQA",
     "MojoPagedPrefillQuantSWA",
+
+    "MojoCompressor",
     "MojoPagedDecodeQuantSWA",
 
     "MojoStorePagedKVCache",
@@ -210,6 +220,7 @@ __all__ = [
     "MojoChannelRMSNorm",
     "MojoRMSNormQuant",
     "MojoLayerNormQuant",
+    "MojoRMSNormDynamicQuant",
     "MojoResidualAddRMSNorm",
     "MojoResidualAddLayerNorm",
     "MojoResidualAddRMSNormQuant",
@@ -220,6 +231,7 @@ __all__ = [
     "MojoApplyRoPE",
     "MojoApplyVisionRoPE2D",
     "MojoRoPEStoreKV",
+    "MojoInplacePartialRotaryMul",
     "MojoNormRoPE",
     "MojoNormRoPEStoreKV",
     "MojoGridRoPE",
@@ -246,6 +258,7 @@ __all__ = [
 
     "MojoHcPost",
     "MojoHcPre",
+    "MojoScatterNdUpdateAsc",
 
     "MojoFusedLinearCrossEntropyLoss",
 
