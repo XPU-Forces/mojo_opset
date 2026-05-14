@@ -54,7 +54,7 @@ You can control the backend you want to use via the `MOJO_BACKEND` environment v
 - "torch_npu"
 - "torch"
 
-When multiple backends are added, Mojo Opset selects the backend implementation according to its internal priority order (We plan to add a tuner feature later to automatically choose the optimal implementation for the current scenario).
+Backend registration is platform-dependent: `ttx` is available on NPU/ILU/MLU, `ixformer` is available on ILU, and `torch_npu` is available on NPU. When multiple backends are available on the current platform, Mojo Opset selects the backend implementation according to its internal priority order (We plan to add a tuner feature later to automatically choose the optimal implementation for the current scenario).
 
 ## Op List
 
@@ -79,15 +79,19 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Attention | `MojoDecodeNSA` | ✅ | TBD | TBD | TBD | TBD | TBD |
 | Attention | `MojoPagedDecodeNSA` | ✅ | TBD | TBD | TBD | TBD | TBD |
 | Attention | `MojoSdpa` | ✅ | TBD | ✅ | ✅ | TBD | TBD |
-| Attention | `MojoPagedPrefillSWA` | ✅ | TBD | ✅ | ✅ | ✅ | TBD |
-| Attention | `MojoPagedDecodeSWA` | ✅ | TBD | ✅ | ✅ | ✅ | TBD |
+| Attention | `MojoPagedPrefillSWA` | ✅ | TBD | ✅ | ✅ | ✅ | ✅ |
+| Attention | `MojoPagedDecodeSWA` | ✅ | TBD | ✅ | ✅ | ✅ | ✅ |
 | Attention | `MojoSWA` | ✅ | TBD | ✅ | ✅ | TBD | TBD |
-| KVCache | `MojoStorePagedKVCache` | ✅ | TBD | ✅ | ✅ | TBD | TBD |
+| Attention | `MojoPagedPrefillGQAWithKVDequant` | ✅ | TBD | TBD | TBD | TBD | ✅ |
+| Attention | `MojoPagedDecodeGQAWithKVDequant` | ✅ | TBD | TBD | TBD | TBD | TBD |
+| Attention | `MojoPagedPrefillSWAWithKVDequant` | ✅ | TBD | TBD | TBD | TBD | ✅ |
+| Attention | `MojoPagedDecodeSWAWithKVDequant` | ✅ | TBD | TBD | TBD | TBD | TBD |
+| KVCache | `MojoStorePagedKVCache` | ✅ | TBD | ✅ | ✅ | TBD | ✅ |
 | KVCache | `MojoStoreMLAKVCache` | ✅ | TBD | TBD | TBD | TBD | TBD |
 | KVCache | `MojoStorePagedMLAKVCache` | ✅ | TBD | TBD | TBD | TBD | TBD |
 | Gemm | `MojoGemm` | ✅ | TBD | TBD | TBD | TBD | TBD |
-| Gemm | `MojoQuantGemm` | ✅ | ✅ | ✅ | TBD | TBD | TBD |
-| Gemm | `MojoGroupGemm` | ✅ | ✅ | ✅ | ✅ | TBD | TBD |
+| Gemm | `MojoQuantGemm` | ✅ | ✅ | ✅ | TBD | TBD | ✅ |
+| Gemm | `MojoGroupGemm` | ✅ | ✅ | ✅ | ✅ | TBD | ✅ |
 | ComputeComm | `MojoGemmAll2All` | ✅ | TBD | TBD | TBD | TBD | TBD |
 | ComputeComm | `MojoAllGatherGemm` | ✅ | TBD | TBD | TBD | TBD | TBD |
 | ComputeComm | `MojoGemmAllReduce` | ✅ | TBD | TBD | TBD | TBD | TBD |
@@ -96,24 +100,25 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Embedding | `MojoParallelEmbedding` | ✅ | TBD | TBD | TBD | TBD | TBD |
 | OverEncoding | `MojoOverEncoding` | ✅ | TBD | ✅ | TBD | TBD | TBD |
 | OverEncoding | `MojoOverEncodingNGram` | ✅ | TBD | ✅ | TBD | TBD | TBD |
-| Quantize | `MojoStaticQuant` | ✅ | TBD | ✅ | ✅ | ✅ | TBD |
+| OverEncoding | `MojoNF4DequantEmbedding` | ✅ | TBD | ✅ | ✅ | TBD | TBD |
+| Quantize | `MojoStaticQuant` | ✅ | TBD | ✅ | ✅ | ✅ | ✅ |
 | Quantize | `MojoDequant` | ✅ | TBD | TBD | TBD | TBD | TBD |
-| Quantize | `MojoDynamicQuant` | ✅ | ✅ | ✅ | TBD | TBD | TBD |
-| Quantize | `MojoMoEDynamicQuant` | ✅ | ✅ | ✅ | TBD | TBD | TBD |
+| Quantize | `MojoDynamicQuant` | ✅ | ✅ | ✅ | TBD | TBD | ✅ |
+| Quantize | `MojoMoEDynamicQuant` | ✅ | ✅ | ✅ | TBD | TBD | ✅ |
 | Quantize | `MojoDequantSwiGLUQuant` | ✅ | ✅ | TBD | TBD | TBD | TBD |
 | MoE | `MojoMoE` | ✅ | TBD | TBD | TBD | TBD | TBD |
-| MoE | `MojoMoEGating` | ✅ | TBD | TBD | TBD | TBD | TBD |
-| MoE | `MojoMoEDispatch` | ✅ | TBD | TBD | TBD | TBD | TBD |
+| MoE | `MojoMoEGating` | ✅ | TBD | TBD | TBD | TBD | ✅ |
+| MoE | `MojoMoEDispatch` | ✅ | TBD | TBD | TBD | TBD | ✅ |
 | MoE | `MojoMoEInitRoutingDynamicQuant` | ✅ | TBD | TBD | TBD | TBD | TBD |
 | MoE | `MojoFusedSwiGLUMoEScaleDynamicQuantize` | ✅ | TBD | TBD | TBD | TBD | TBD |
 | MoE | `MojoExperts` | ✅ | TBD | TBD | TBD | TBD | TBD |
-| MoE | `MojoMoECombine` | ✅ | TBD | TBD | TBD | TBD | TBD |
-| MoE | `MojoQuantExperts` | ✅ | TBD | TBD | TBD | TBD | TBD |
-| MoE | `MojoQuantMoE` | ✅ | TBD | TBD | TBD | TBD | TBD |
+| MoE | `MojoMoECombine` | ✅ | TBD | TBD | TBD | TBD | ✅ |
+| MoE | `MojoQuantExperts` | ✅ | TBD | TBD | TBD | TBD | ✅ |
+| MoE | `MojoQuantMoE` | ✅ | TBD | TBD | TBD | TBD | ✅ |
 | Norm | `MojoLayerNorm` | ✅ | TBD | ✅ | ✅ | ✅ | ✅ |
 | Norm | `MojoRMSNorm` | ✅ | ✅ | ✅ | ✅ | TBD | ✅ |
 | Norm | `MojoGroupLayerNorm` | ✅ | TBD | TBD | TBD | TBD | TBD |
-| Norm | `MojoGroupRMSNorm` | ✅ | TBD | TBD | TBD | ✅ | TBD |
+| Norm | `MojoGroupRMSNorm` | ✅ | TBD | TBD | TBD | ✅ | ✅ |
 | Norm | `MojoChannelRMSNorm` | ✅ | TBD | TBD | TBD | TBD | TBD |
 | Norm | `MojoRMSNormQuant` | ✅ | ✅ | TBD | TBD | TBD | TBD |
 | Norm | `MojoLayerNormQuant` | ✅ | ✅ | TBD | TBD | TBD | TBD |
@@ -124,11 +129,14 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | Norm | `MojoResidualAddNormCast` | ✅ | TBD | TBD | TBD | TBD | TBD |
 | PositionEmb | `MojoRotaryEmbedding` | ✅ | TBD | ✅ | ✅ | TBD | TBD |
 | PositionEmb | `MojoRelativeEmbedding` | ✅ | TBD | TBD | ✅ | TBD | TBD |
-| PositionEmb | `MojoApplyRoPE` | ✅ | ✅ | ✅ | ✅ | ✅ | TBD |
+| PositionEmb | `MojoApplyRoPE` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| PositionEmb | `MojoApplyVisionRoPE2D` | ✅ | ✅ | ✅ | TBD | TBD | TBD |
 | PositionEmb | `MojoRoPEStoreKV` | ✅ | TBD | TBD | TBD | TBD | TBD |
 | PositionEmb | `MojoNormRoPE` | ✅ | TBD | TBD | TBD | TBD | TBD |
 | PositionEmb | `MojoNormRoPEStoreKV` | ✅ | TBD | TBD | TBD | TBD | TBD |
 | PositionEmb | `MojoGridRoPE` | ✅ | TBD | TBD | TBD | TBD | TBD |
+| PositionEmb | `MojoMRoPE` | ✅ | TBD | ✅ | TBD | TBD | TBD |
+| PositionEmb | `MojoVisionRotaryEmbedding2D` | ✅ | TBD | ✅ | TBD | TBD | TBD |
 | Sampling | `MojoTopPSampling` | ✅ | TBD | ✅ | ✅ | TBD | TBD |
 | Sampling | `MojoTopKSampling` | ✅ | TBD | ✅ | TBD | TBD | TBD |
 | Sampling | `MojoRejectSampling` | ✅ | TBD | ✅ | ✅ | TBD | TBD |
@@ -202,7 +210,7 @@ You can build the model using Mojo Opset in the following ways:
 
     ```python
     # 1. Apply mojo opset to qwen3 model
-    mojo_opsetutils.patching.apply_mojo_to_qwen3()
+    mojo_opset.utils.patching.apply_mojo_to_qwen3()
 
     # 2. Instantiate patched model
     model = transformers.AutoModelForCausalLM("path/to/qwen3/model")
