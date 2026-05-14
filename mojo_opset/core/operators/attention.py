@@ -2565,7 +2565,8 @@ class MojoPagedPrefillSageGQA(MojoOperator):
 
             num_blocks_for_seq = (kv_seq_len + block_size - 1) // block_size
             k_unpadded = torch.zeros(kv_seq_len, num_kv_heads, head_dim, dtype=query.dtype, device=query.device)
-            k_scale_unpadded = torch.zeros(kv_seq_len, num_kv_heads, head_dim, dtype=key_scale.dtype, device=key_scale.device)
+            # k_scale_unpadded: [kv_seq_len, num_kv_heads, 1]
+            k_scale_unpadded = torch.zeros(kv_seq_len, num_kv_heads, 1, dtype=key_scale.dtype, device=key_scale.device)
             v_unpadded = torch.zeros(kv_seq_len, num_kv_heads, head_dim, dtype=query.dtype, device=query.device)
 
 
@@ -2603,6 +2604,8 @@ class MojoPagedPrefillSageGQA(MojoOperator):
                 v_expanded = v_unpadded
 
             q_scale = query_scale[start_loc:end_loc]
+            # npu don't support int8
+            q, k_expanded = q.float(), k_expanded.float()
             attn_scores = torch.einsum("thd,khd->thk", q, k_expanded).float() * softmax_scale * q_scale * k_scale_expanded
             if self.is_causal:
                 attn_mask = torch.ones(q_seq_len, kv_seq_len, device=query.device, dtype=torch.bool).tril(
@@ -2620,6 +2623,8 @@ class MojoPagedPrefillSageGQA(MojoOperator):
             attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
             attn_probs_int8, attn_probs_scale = quant_int8(attn_probs, quant_dims=(-1,), q_max=self.q_max, q_min=self.q_min)
             v_expanded_int8, v_expanded_scale = quant_int8(v_expanded, quant_dims=(-2,), q_max=self.q_max, q_min=self.q_min)
+            # npu don't support int8
+            attn_probs_int8, v_expanded_int8 = attn_probs_int8.float(), v_expanded_int8.float()
             outputs[start_loc:end_loc] = torch.einsum("thk,khd->thd", attn_probs_int8, v_expanded_int8) * attn_probs_scale * v_expanded_scale
         return outputs
 
@@ -2697,6 +2702,7 @@ class MojoPagedPrefillSageSWA(MojoOperator):
                 # skip padded query
                 continue
             q_i = q_i.permute(1, 0, 2)  # -> [n_q_heads, q_seq_len, head_dim]
+            q_scale_i = q_scale_i.permute(1, 0, 2) # -> [n_q_heads, q_seq_len, 1]
 
             kv_seq_len = total_seq_lens[i].item()
             if kv_seq_len <= 0:
@@ -2710,7 +2716,7 @@ class MojoPagedPrefillSageSWA(MojoOperator):
 
             k_i_scale = key_cache_scale[block_table[i, :kv_blocks]] # [kv_blocks, n_kv_heads, page_size, 1]
             k_i_scale = k_i_scale.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, 1)[:, :kv_seq_len]
-            k_i_scale_T = k_i.permute(0, 2, 1) # -> [n_kv_heads, 1, kv_seq_len]
+            k_i_scale_T = k_i_scale.permute(0, 2, 1) # -> [n_kv_heads, 1, kv_seq_len]
             if n_q_heads != n_kv_heads:
                 if self.gqa_interleave:
                     k_i_T = k_i_T.repeat((n_q_heads // n_kv_heads, 1, 1))
