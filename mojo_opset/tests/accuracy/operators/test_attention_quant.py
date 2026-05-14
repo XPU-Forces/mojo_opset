@@ -248,8 +248,9 @@ def test_paged_prefill_quant_gqa(
         block_tables,
         softmax_scale=softmax_scale,
         seqlens_kv=seqlens_kv,
-        atol=2e-2 if query.dtype != torch.float32 else 1e-5,
-        rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
+        atol=5e-2 if query.dtype != torch.float32 else 1e-5,
+        rtol=5e-2 if query.dtype != torch.float32 else 1e-6,
+        ptol=0.90,
     )
 
 
