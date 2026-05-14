@@ -519,7 +519,7 @@ def _paged_decode_gqa_kernel(
 
 
 @triton.jit
-def _paged_prefill_quant_kernel(
+def _paged_prefill_with_kv_dequant_kernel(
     Q,
     K_cache,
     V_cache,
@@ -747,7 +747,7 @@ def paged_attention_prefill_impl(
     return out
 
 
-def paged_attention_prefill_quant_impl(
+def paged_attention_prefill_with_kv_dequant_impl(
     q: torch.Tensor,
     key_cache: torch.Tensor,
     k_qscale: torch.Tensor,
@@ -807,7 +807,7 @@ def paged_attention_prefill_quant_impl(
 
     grid = (max_q_len, num_q_heads, batch_size)
 
-    _paged_prefill_quant_kernel[grid](
+    _paged_prefill_with_kv_dequant_kernel[grid](
         q,
         key_cache,
         value_cache,

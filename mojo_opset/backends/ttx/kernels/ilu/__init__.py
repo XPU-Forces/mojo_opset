@@ -6,7 +6,7 @@ from .convolution import causal_conv1d_update_bdt_impl
 from .flash_attention import paged_attention_decode_impl
 from .flash_attention import paged_attention_decode_with_kv_dequant_impl
 from .flash_attention import paged_attention_prefill_impl
-from .flash_attention import paged_attention_prefill_quant_impl
+from .flash_attention import paged_attention_prefill_with_kv_dequant_impl
 from .fused_add_layernorm import fused_add_layernorm_infer_impl
 from .fused_add_rmsnorm import fused_add_rmsnorm_infer_impl
 # from .fused_linear_cross_entropy import fused_linear_cross_entropy_1d_bwd_impl
@@ -51,7 +51,7 @@ from .swiglu import swiglu_fwd_impl
 from .group_rmsnorm import group_rmsnorm_impl
 from .swa import swa_infer_impl
 from .swa import swa_paged_prefill_impl
-from .swa import swa_paged_prefill_quant_impl
+from .swa import swa_paged_prefill_with_kv_dequant_impl
 from .swa import swa_paged_decode_impl
 from .swa import swa_paged_decode_quant_impl
 from .quant import dequant_impl
@@ -67,7 +67,7 @@ __all__ = [
     "paged_attention_decode_impl",
     "paged_attention_decode_with_kv_dequant_impl",
     "paged_attention_prefill_impl",
-    "paged_attention_prefill_quant_impl",
+    "paged_attention_prefill_with_kv_dequant_impl",
     # "fused_linear_cross_entropy_bwd_impl",
     # "fused_linear_cross_entropy_fwd_impl",
     # "fused_linear_cross_entropy_1d_bwd_impl",
@@ -105,7 +105,7 @@ __all__ = [
     "sdpa_bwd_impl",
     "swa_infer_impl",
     "swa_paged_prefill_impl",
-    "swa_paged_prefill_quant_impl",
+    "swa_paged_prefill_with_kv_dequant_impl",
     "silu_bwd_impl",
     "silu_fwd_impl",
     # "swiglu_bwd_impl",

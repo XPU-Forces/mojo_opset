@@ -1101,7 +1101,7 @@ def swa_infer_impl(
 
 
 @triton.jit
-def _swa_paged_prefill_quant_kernel(
+def _swa_paged_prefill_with_kv_dequant_kernel(
     Q,
     K_cache,
     V_cache,
@@ -1133,7 +1133,7 @@ def _swa_paged_prefill_quant_kernel(
 ):
     """Paged prefill SWA attention with int8 KV cache.
 
-    Mirrors `_paged_prefill_quant_kernel` (commit 1130f65) but adds the SWA
+    Mirrors `_paged_prefill_with_kv_dequant_kernel` (commit 1130f65) but adds the SWA
     local / global window mask. Each program handles one
     (q_token_in_seq, q_head, batch) triple and walks all KV tokens linearly,
     accumulating online-softmax stats in fp32. We deliberately avoid tl.dot
@@ -1405,7 +1405,7 @@ def _swa_paged_prefill_quant_kernel(
     )
 
 
-def swa_paged_prefill_quant_impl(
+def swa_paged_prefill_with_kv_dequant_impl(
     q: torch.Tensor,
     key_cache: torch.Tensor,
     k_qscale: torch.Tensor,
@@ -1468,7 +1468,7 @@ def swa_paged_prefill_quant_impl(
 
     grid = (max_q_len, num_q_heads, batch_size)
 
-    _swa_paged_prefill_quant_kernel[grid](
+    _swa_paged_prefill_with_kv_dequant_kernel[grid](
         q,
         key_cache,
         value_cache,
@@ -2598,13 +2598,16 @@ def _paged_decode_kernel_tiny_global(
                 block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
                 order=(1, 0),
             )
-            acc, l_i, m_i = _sdpa_acc_fwd_nomask_1xN(
+            # FIXME: _sdpa_acc_fwd_nomask_1xN is not defined in Triton. Use _sdpa_acc_fwd_1xN
+            # with mask=True to skip the mask branch, semantically equivalent to the nomask path.
+            acc, l_i, m_i = _sdpa_acc_fwd_1xN(
                 acc,
                 l_i,
                 m_i,
                 q,
                 k_block_ptr,
                 v_block_ptr,
+                True,
                 softmax_scale,
                 HEAD_DIM,
                 BLOCK_SIZE_D,
