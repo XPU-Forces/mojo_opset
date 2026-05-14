@@ -11,6 +11,19 @@ from mojo_opset import MojoPagedPrefillSWAWithKVDequant
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 
+
+def _make_varlen_positive_int32(lengths: torch.Tensor, upper_bound: int) -> torch.Tensor:
+    """Make per-batch lengths explicitly varlen while keeping them positive."""
+    lengths = lengths.to(torch.int32).clone()
+    if lengths.numel() <= 1 or upper_bound <= 1:
+        return torch.clamp(lengths, min=1)
+
+    offsets = torch.arange(lengths.numel(), dtype=torch.int32)
+    span = max(upper_bound - 1, 1)
+    lengths = ((lengths + offsets) % span) + 1
+    return lengths
+
+
 def _quantize_query(
     query: torch.Tensor,
     query_dtype: torch.Tensor,
@@ -67,7 +80,7 @@ def generate_paged_decode_quant_data(
 
     if max_seq_len > 0:
         total_seq_lens = torch.randint(0, max_seq_len, (batch_size,), dtype=torch.int32)
-        total_seq_lens = torch.clamp(total_seq_lens, min=1)
+        total_seq_lens = _make_varlen_positive_int32(total_seq_lens, max_seq_len)
     else:
         total_seq_lens = torch.randperm(batch_size, dtype=torch.int32)
 
@@ -117,7 +130,7 @@ def generate_paged_prefill_quant_data(
     """Generate prefill test data; KV cache kept in float dtype and quantized inside the test."""
     if max_q_len > 0:
         q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
-        q_lens = torch.clamp(q_lens, min=1)
+        q_lens = _make_varlen_positive_int32(q_lens, max_q_len)
     else:
         q_lens = torch.randperm(batch_size, dtype=torch.int32)
     cu_q_lens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0, dtype=torch.int32)])
@@ -129,6 +142,7 @@ def generate_paged_prefill_quant_data(
         kv_cache_lens = torch.randint(
             max_kv_computed_len // 2, max_kv_computed_len, (batch_size,), dtype=torch.int32
         )
+        kv_cache_lens = _make_varlen_positive_int32(kv_cache_lens, max_kv_computed_len)
         kv_lens = q_lens + kv_cache_lens
         kv_lens = torch.where(q_lens > 0, kv_lens, torch.zeros_like(kv_lens))
         cu_total_seq_lens = torch.cat(
@@ -178,6 +192,9 @@ test_configs_prefill_gqa_with_kv_dequant = [
     (2, 8, 1, 128, 512, 1024, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
     (2, 8, 1, 128, 1024, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
     (2, 8, 2, 128, 1024, 0, 128, torch.bfloat16, "M_BF16_GROUP"),
+    (3, 12, 3, 64, 257, 513, 16, torch.bfloat16, "M_BF16_VARLEN_BLK16_D64"),
+    (4, 20, 5, 192, 193, 769, 256, torch.bfloat16, "M_BF16_VARLEN_BLK256_D192"),
+    (3, 24, 6, 80, 321, 641, 64, torch.bfloat16, "M_BF16_VARLEN_BLK64_D80"),
 ]
 
 
@@ -275,6 +292,9 @@ test_configs_decode_gqa_with_kv_dequant = [
     (4, 8, 1, 128, 8192, 1024, torch.bfloat16, "M_BF16_LONG"),
     (4, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
     (4, 8, 2, 128, 2048, 128, torch.bfloat16, "M_BF16_GROUP"),
+    (5, 12, 3, 64, 257, 16, torch.bfloat16, "M_BF16_VARLEN_BLK16_D64"),
+    (3, 20, 5, 192, 1537, 256, torch.bfloat16, "M_BF16_VARLEN_BLK256_D192"),
+    (6, 24, 6, 80, 513, 64, torch.bfloat16, "M_BF16_VARLEN_BLK64_D80"),
 ]
 
 
@@ -370,6 +390,8 @@ test_configs_prefill_swa_with_kv_dequant = [
     (2, 8, 1, 128, 1024, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
     (2, 8, 2, 128, 2048, 0, 1024, torch.bfloat16, "M_BF16_GROUP1"),
     (2, 24, 8, 128, 1024, 1024, 1024, torch.bfloat16, "M_BF16_GROUP2"),
+    (3, 12, 3, 64, 257, 513, 16, torch.bfloat16, "M_BF16_VARLEN_BLK16_D64"),
+    (3, 20, 5, 256, 193, 769, 256, torch.bfloat16, "M_BF16_VARLEN_BLK256_D256"),
 ]
 
 
@@ -479,6 +501,8 @@ test_configs_decode_swa_with_kv_dequant = [
     (2, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
     (2, 8, 2, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP1"),
     (2, 24, 8, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP2"),
+    (5, 12, 3, 64, 257, 16, torch.bfloat16, "M_BF16_VARLEN_BLK16_D64"),
+    (3, 20, 5, 256, 1537, 256, torch.bfloat16, "M_BF16_VARLEN_BLK256_D256"),
 ]
 
 
