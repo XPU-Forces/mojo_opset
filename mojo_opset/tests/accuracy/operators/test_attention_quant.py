@@ -4,12 +4,25 @@ from typing import Optional
 import pytest
 import torch
 
-from mojo_opset import MojoPagedDecodeQuantGQA
-from mojo_opset import MojoPagedDecodeQuantSWA
-from mojo_opset import MojoPagedPrefillQuantGQA
-from mojo_opset import MojoPagedPrefillQuantSWA
+from mojo_opset import MojoPagedDecodeGQAWithKVDequant
+from mojo_opset import MojoPagedDecodeSWAWithKVDequant
+from mojo_opset import MojoPagedPrefillGQAWithKVDequant
+from mojo_opset import MojoPagedPrefillSWAWithKVDequant
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
+
+
+def _make_varlen_positive_int32(lengths: torch.Tensor, upper_bound: int) -> torch.Tensor:
+    """Make per-batch lengths explicitly varlen while keeping them positive."""
+    lengths = lengths.to(torch.int32).clone()
+    if lengths.numel() <= 1 or upper_bound <= 1:
+        return torch.clamp(lengths, min=1)
+
+    offsets = torch.arange(lengths.numel(), dtype=torch.int32)
+    span = max(upper_bound - 1, 1)
+    lengths = ((lengths + offsets) % span) + 1
+    return lengths
+
 
 def _quantize_query(
     query: torch.Tensor,
@@ -67,7 +80,7 @@ def generate_paged_decode_quant_data(
 
     if max_seq_len > 0:
         total_seq_lens = torch.randint(0, max_seq_len, (batch_size,), dtype=torch.int32)
-        total_seq_lens = torch.clamp(total_seq_lens, min=1)
+        total_seq_lens = _make_varlen_positive_int32(total_seq_lens, max_seq_len)
     else:
         total_seq_lens = torch.randperm(batch_size, dtype=torch.int32)
 
@@ -117,7 +130,7 @@ def generate_paged_prefill_quant_data(
     """Generate prefill test data; KV cache kept in float dtype and quantized inside the test."""
     if max_q_len > 0:
         q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
-        q_lens = torch.clamp(q_lens, min=1)
+        q_lens = _make_varlen_positive_int32(q_lens, max_q_len)
     else:
         q_lens = torch.randperm(batch_size, dtype=torch.int32)
     cu_q_lens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0, dtype=torch.int32)])
@@ -129,6 +142,7 @@ def generate_paged_prefill_quant_data(
         kv_cache_lens = torch.randint(
             max_kv_computed_len // 2, max_kv_computed_len, (batch_size,), dtype=torch.int32
         )
+        kv_cache_lens = _make_varlen_positive_int32(kv_cache_lens, max_kv_computed_len)
         kv_lens = q_lens + kv_cache_lens
         kv_lens = torch.where(q_lens > 0, kv_lens, torch.zeros_like(kv_lens))
         cu_total_seq_lens = torch.cat(
@@ -163,24 +177,29 @@ def generate_paged_prefill_quant_data(
         block_tables[i, :num_blocks_for_seq] = assigned_blocks
         current_block_offset += num_blocks_for_seq
 
-    return query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens
+    max_q_lens = int(q_lens.max().item()) if q_lens.numel() > 0 else 0
+    max_total_seq_lens = int(kv_lens.max().item()) if kv_lens.numel() > 0 else 0
+    return query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens
 
 
 # ===========================================================================
-# MojoPagedPrefillQuantGQA
+# MojoPagedPrefillGQAWithKVDequant
 # ===========================================================================
 
-test_configs_prefill_quant_gqa = [
+test_configs_prefill_gqa_with_kv_dequant = [
     (2, 16, 4, 128, 1024, 0, 32, torch.bfloat16, "M_BF16"),
     (2, 16, 4, 96, 1024, 0, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (2, 8, 1, 128, 512, 1024, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
     (2, 8, 1, 128, 1024, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
     (2, 8, 2, 128, 1024, 0, 128, torch.bfloat16, "M_BF16_GROUP"),
+    (3, 12, 3, 64, 257, 513, 16, torch.bfloat16, "M_BF16_VARLEN_BLK16_D64"),
+    (4, 20, 5, 192, 193, 769, 256, torch.bfloat16, "M_BF16_VARLEN_BLK256_D192"),
+    (3, 24, 6, 80, 321, 641, 64, torch.bfloat16, "M_BF16_VARLEN_BLK64_D80"),
 ]
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens",
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens",
     [
         pytest.param(
             *generate_paged_prefill_quant_data(
@@ -195,7 +214,7 @@ test_configs_prefill_quant_gqa = [
             ),
             id=ID,
         )
-        for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_prefill_quant_gqa
+        for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_prefill_gqa_with_kv_dequant
     ],
 )
 @pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
@@ -207,13 +226,15 @@ test_configs_prefill_quant_gqa = [
 )
 @auto_switch_platform()
 @bypass_not_implemented
-def test_paged_prefill_quant_gqa(
+def test_paged_prefill_gqa_with_kv_dequant(
     query: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
     cu_q_lens: torch.Tensor,
     block_tables: torch.Tensor,
     cu_total_seq_lens: Optional[torch.Tensor],
+    max_q_lens: int,
+    max_total_seq_lens: int,
     gqa_layout: str,
     query_dtype: torch.dtype,
     context_dtype: torch.dtype,
@@ -224,14 +245,14 @@ def test_paged_prefill_quant_gqa(
     k_cache_q, key_scale = _quantize_kv_cache(k_cache, context_dtype)
     v_cache_q, value_scale = _quantize_kv_cache(v_cache, context_dtype)
 
-    op = MojoPagedPrefillQuantGQA(
+    op = MojoPagedPrefillGQAWithKVDequant(
         is_causal=True,
         gqa_layout=gqa_layout,
         query_dtype=query_dtype,
         context_dtype=context_dtype,
         compute_dtype=compute_dtype,
     )
-    op_ref = MojoPagedPrefillQuantGQA._registry.get("torch")(
+    op_ref = MojoPagedPrefillGQAWithKVDequant._registry.get("torch")(
         is_causal=True,
         gqa_layout=gqa_layout,
         query_dtype=query_dtype,
@@ -254,21 +275,26 @@ def test_paged_prefill_quant_gqa(
         block_tables,
         softmax_scale=softmax_scale,
         cu_total_seq_lens=cu_total_seq_lens,
+        max_q_lens=max_q_lens,
+        max_total_seq_lens=max_total_seq_lens,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
     )
 
 
 # ===========================================================================
-# MojoPagedDecodeQuantGQA
+# MojoPagedDecodeGQAWithKVDequant
 # ===========================================================================
 
-test_configs_decode_quant_gqa = [
+test_configs_decode_gqa_with_kv_dequant = [
     (8, 16, 4, 128, 1024, 32, torch.bfloat16, "M_BF16"),
     (8, 16, 4, 96, 1024, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (4, 8, 1, 128, 8192, 1024, torch.bfloat16, "M_BF16_LONG"),
     (4, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
     (4, 8, 2, 128, 2048, 128, torch.bfloat16, "M_BF16_GROUP"),
+    (5, 12, 3, 64, 257, 16, torch.bfloat16, "M_BF16_VARLEN_BLK16_D64"),
+    (3, 20, 5, 192, 1537, 256, torch.bfloat16, "M_BF16_VARLEN_BLK256_D192"),
+    (6, 24, 6, 80, 513, 64, torch.bfloat16, "M_BF16_VARLEN_BLK64_D80"),
 ]
 
 
@@ -287,7 +313,7 @@ test_configs_decode_quant_gqa = [
             ),
             id=ID,
         )
-        for B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, ID in test_configs_decode_quant_gqa
+        for B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, ID in test_configs_decode_gqa_with_kv_dequant
     ],
 )
 @pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
@@ -299,7 +325,7 @@ test_configs_decode_quant_gqa = [
 )
 @auto_switch_platform()
 @bypass_not_implemented
-def test_paged_decode_quant_gqa(
+def test_paged_decode_gqa_with_kv_dequant(
     query: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
@@ -319,14 +345,14 @@ def test_paged_decode_quant_gqa(
     head_dim = query.shape[-1]
     softmax_scale = 1.0 / math.sqrt(head_dim)
 
-    op = MojoPagedDecodeQuantGQA(
+    op = MojoPagedDecodeGQAWithKVDequant(
         is_causal=True,
         gqa_layout=gqa_layout,
         query_dtype=query_dtype,
         context_dtype=context_dtype,
         compute_dtype=compute_dtype,
     )
-    op_ref = MojoPagedDecodeQuantGQA._registry.get("torch")(
+    op_ref = MojoPagedDecodeGQAWithKVDequant._registry.get("torch")(
         is_causal=True,
         gqa_layout=gqa_layout,
         query_dtype=query_dtype,
@@ -354,21 +380,23 @@ def test_paged_decode_quant_gqa(
 
 
 # ===========================================================================
-# MojoPagedPrefillQuantSWA
+# MojoPagedPrefillSWAWithKVDequant
 # ===========================================================================
 
-test_configs_prefill_quant_swa = [
+test_configs_prefill_swa_with_kv_dequant = [
     (2, 16, 4, 128, 1024, 0, 32, torch.bfloat16, "M_BF16"),
     (2, 16, 4, 96, 2048, 0, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (2, 8, 1, 128, 256, 1024, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
     (2, 8, 1, 128, 1024, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
     (2, 8, 2, 128, 2048, 0, 1024, torch.bfloat16, "M_BF16_GROUP1"),
     (2, 24, 8, 128, 1024, 1024, 1024, torch.bfloat16, "M_BF16_GROUP2"),
+    (3, 12, 3, 64, 257, 513, 16, torch.bfloat16, "M_BF16_VARLEN_BLK16_D64"),
+    (3, 20, 5, 256, 193, 769, 256, torch.bfloat16, "M_BF16_VARLEN_BLK256_D256"),
 ]
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens",
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens",
     [
         pytest.param(
             *generate_paged_prefill_quant_data(
@@ -383,7 +411,7 @@ test_configs_prefill_quant_swa = [
             ),
             id=ID,
         )
-        for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_prefill_quant_swa
+        for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_prefill_swa_with_kv_dequant
     ],
 )
 @pytest.mark.parametrize(
@@ -401,13 +429,15 @@ test_configs_prefill_quant_swa = [
 )
 @auto_switch_platform()
 @bypass_not_implemented
-def test_paged_prefill_quant_swa(
+def test_paged_prefill_swa_with_kv_dequant(
     query: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
     cu_q_lens: torch.Tensor,
     block_tables: torch.Tensor,
     cu_total_seq_lens: Optional[torch.Tensor],
+    max_q_lens: int,
+    max_total_seq_lens: int,
     gqa_layout: str,
     global_window: int,
     local_window: int,
@@ -419,7 +449,7 @@ def test_paged_prefill_quant_swa(
     k_cache_q, key_scale = _quantize_kv_cache(k_cache, context_dtype)
     v_cache_q, value_scale = _quantize_kv_cache(v_cache, context_dtype)
 
-    op = MojoPagedPrefillQuantSWA(
+    op = MojoPagedPrefillSWAWithKVDequant(
         is_causal=True,
         gqa_layout=gqa_layout,  
         local_window_size=local_window,
@@ -428,7 +458,7 @@ def test_paged_prefill_quant_swa(
         context_dtype=context_dtype,
         compute_dtype=compute_dtype,
     )
-    op_ref = MojoPagedPrefillQuantSWA._registry.get("torch")(
+    op_ref = MojoPagedPrefillSWAWithKVDequant._registry.get("torch")(
         is_causal=True,
         gqa_layout=gqa_layout,
         local_window_size=local_window,
@@ -453,22 +483,26 @@ def test_paged_prefill_quant_swa(
         block_tables,
         softmax_scale=softmax_scale,
         cu_total_seq_lens=cu_total_seq_lens,
+        max_q_lens=max_q_lens,
+        max_total_seq_lens=max_total_seq_lens,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
     )
 
 
 # ===========================================================================
-# MojoPagedDecodeQuantSWA
+# MojoPagedDecodeSWAWithKVDequant
 # ===========================================================================
 
-test_configs_decode_quant_swa = [
+test_configs_decode_swa_with_kv_dequant = [
     (4, 16, 4, 128, 1024, 512, torch.bfloat16, "M_BF16"),
     (8, 16, 4, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (8, 8, 1, 128, 4096, 128, torch.bfloat16, "M_BF16_LONG"),
     (2, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
     (2, 8, 2, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP1"),
     (2, 24, 8, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP2"),
+    (5, 12, 3, 64, 257, 16, torch.bfloat16, "M_BF16_VARLEN_BLK16_D64"),
+    (3, 20, 5, 256, 1537, 256, torch.bfloat16, "M_BF16_VARLEN_BLK256_D256"),
 ]
 
 
@@ -487,7 +521,7 @@ test_configs_decode_quant_swa = [
             ),
             id=ID,
         )
-        for B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, ID in test_configs_decode_quant_swa
+        for B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, ID in test_configs_decode_swa_with_kv_dequant
     ],
 )
 @pytest.mark.parametrize(
@@ -505,7 +539,7 @@ test_configs_decode_quant_swa = [
 )
 @auto_switch_platform()
 @bypass_not_implemented
-def test_paged_decode_quant_swa(
+def test_paged_decode_swa_with_kv_dequant(
     query: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
@@ -526,7 +560,7 @@ def test_paged_decode_quant_swa(
     head_dim = query.shape[-1]
     softmax_scale = 1.0 / math.sqrt(head_dim)
 
-    op = MojoPagedDecodeQuantSWA(
+    op = MojoPagedDecodeSWAWithKVDequant(
         is_causal=True,
         gqa_layout=gqa_layout,
         global_window_size=global_window,
@@ -535,7 +569,7 @@ def test_paged_decode_quant_swa(
         context_dtype=context_dtype,
         compute_dtype=compute_dtype,
     )
-    op_ref = MojoPagedDecodeQuantSWA._registry.get("torch")(
+    op_ref = MojoPagedDecodeSWAWithKVDequant._registry.get("torch")(
         is_causal=True,
         gqa_layout=gqa_layout,
         global_window_size=global_window,

@@ -1645,7 +1645,9 @@ def _dynamic_quantize(tensor, qmax, qmin, quant_dtype):
     scale = scale.view(*tensor.shape[:-1], 1)
     return tensor_quant, scale
 
-class MojoPagedPrefillQuantGQA(MojoOperator):
+class MojoPagedPrefillGQAWithKVDequant(MojoOperator):
+    """Paged prefill GQA that consumes int8 KV cache and dequantizes KV in the forward path."""
+
     def __init__(
         self,
         is_causal: bool = True,
@@ -1655,12 +1657,12 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
         compute_dtype: torch.dtype = torch.bfloat16,
     ):
         """
-        Initialize the Paged Prefill GQA attention operator with common parameters.
+        Initialize the paged prefill GQA operator with explicit KV dequantization semantics.
         Parameter descriptions:
         - is_causal (bool): Whether to enable causal masking, default True.
         - gqa_layout (str): GQA head grouping layout, values {"ABAB","AABB"}, default "ABAB".
         - query_dtype (torch.dtype): the dtype for query, default torch.bfloat16 for non-quantized query.
-        - context_dtype (torch.dtype): The context dtype for key_cache and value_cache, default torch.int8.
+        - context_dtype (torch.dtype): The stored KV-cache dtype before dequantization, default torch.int8.
         - compute_dtype (torch.dtype): The quant matmul dtype for Q@K and P@V, default torch.bfloat16.
         """
         super().__init__()
@@ -1701,6 +1703,7 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
     ) -> torch.Tensor:
         """
         Paged prefill attention with grouped query heads (GQA) using a blocked KV cache.
+        The KV cache is stored in int8 and dequantized with per-channel scales during forward.
 
         Args:
             query (torch.Tensor): Query tokens of shape (T, Hq, D), it can be of dtype bf16 or int8
@@ -1816,7 +1819,9 @@ class MojoPagedPrefillQuantGQA(MojoOperator):
         return f"{self.is_causal=}, {self.gqa_layout=}, {self.compute_dtype=}".replace("self.", "")
 
 
-class MojoPagedDecodeQuantGQA(MojoOperator):
+class MojoPagedDecodeGQAWithKVDequant(MojoOperator):
+    """Paged decode GQA that consumes int8 KV cache and dequantizes KV in the forward path."""
+
     def __init__(
         self,
         is_causal: bool = True,
@@ -1826,13 +1831,13 @@ class MojoPagedDecodeQuantGQA(MojoOperator):
         compute_dtype: torch.dtype = torch.bfloat16,
     ):
         """
-        Initialize the Paged Decode GQA attention operator.
+        Initialize the paged decode GQA operator with explicit KV dequantization semantics.
 
         Args:
             is_causal (bool, default=True): Enable causal masking (lower-triangular) if True.
             gqa_layout (str, default="ABAB"): GQA head grouping layout; one of {"ABAB", "AABB"}.
             query_dtype (torch.dtype): the dtype for query, default torch.bfloat16 for non-quantized query.
-            context_dtype (torch.dtype): The context dtype for key_cache and value_cache, default torch.int8.
+            context_dtype (torch.dtype): The stored KV-cache dtype before dequantization, default torch.int8.
             compute_dtype (torch.dtype): The quant matmul dtype for Q@K and P@V, default torch.bfloat16.
 
         Raises:
@@ -1879,6 +1884,7 @@ class MojoPagedDecodeQuantGQA(MojoOperator):
     ) -> torch.Tensor:
         """
         Paged decode attention with grouped query heads (GQA) using a blocked KV cache.
+        The KV cache is stored in int8 and dequantized with per-channel scales during forward.
 
         $$\text{Attention}(Q, K, V) = \text{dequant} \left( \text{Quant} \left( \text{softmax} \left( \frac{\text{Quant}(Q) \cdot \text{Quant}(K)^T}{\text{scale}} \right) \right) \cdot V_{int8} \right)$$
 
@@ -1981,7 +1987,9 @@ class MojoPagedDecodeQuantGQA(MojoOperator):
         return f"{self.is_causal=}, {self.gqa_layout=}, {self.compute_dtype=}".replace("self.", "")
 
 
-class MojoPagedPrefillQuantSWA(MojoOperator):
+class MojoPagedPrefillSWAWithKVDequant(MojoOperator):
+    """Paged prefill SWA that consumes int8 KV cache and dequantizes KV in the forward path."""
+
     def __init__(
         self,
         is_causal: bool = True,
@@ -1993,14 +2001,14 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
         compute_dtype: torch.dtype = torch.bfloat16,
     ):
         """
-        Initialize the Paged Prefill SWA attention operator with common parameters.
+        Initialize the paged prefill SWA operator with explicit KV dequantization semantics.
         Parameter descriptions:
         - gqa_layout (str): GQA head grouping layout, values {"ABAB","AABB"}, default "ABAB".
         - is_causal (bool): Whether to enable causal masking, default True.
         - global_window_size (Optional[int]): Global attention window length; None means no global window, default None. Only effective when is_causal=True.
         - local_window_size (Optional[int]): Local attention window length; None means no local window, default None. Only effective when is_causal=True.
         - query_dtype (torch.dtype): the dtype for query, default torch.bfloat16 for non-quantized query.
-        - context_dtype (torch.dtype): The context dtype for key_cache and value_cache, default torch.int8.
+        - context_dtype (torch.dtype): The stored KV-cache dtype before dequantization, default torch.int8.
         - compute_dtype (torch.dtype): The quant matmul dtype for Q@K and P@V, default torch.bfloat16.
         """
         super().__init__()
@@ -2037,9 +2045,12 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
         block_table: torch.Tensor,  # [bsz, max_num_blocks]
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,  # [bsz + 1]
+        max_q_lens: Optional[int] = None,
+        max_total_seq_lens: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Paged prefill attention with grouped query heads (GQA) using a blocked KV cache.
+        The KV cache is stored in int8 and dequantized with per-channel scales during forward.
 
         Args:
             query (torch.Tensor): Query tokens of shape (T, Hq, D), it can be of dtype bf16 or int8
@@ -2154,7 +2165,9 @@ class MojoPagedPrefillQuantSWA(MojoOperator):
             o[cu_q_lens[i] : cu_q_lens[i + 1]] = o_i.to(o.dtype)
         return o
 
-class MojoPagedDecodeQuantSWA(MojoOperator):
+class MojoPagedDecodeSWAWithKVDequant(MojoOperator):
+    """Paged decode SWA that consumes int8 KV cache and dequantizes KV in the forward path."""
+
     def __init__(
         self,
         is_causal: bool = True,
@@ -2166,14 +2179,14 @@ class MojoPagedDecodeQuantSWA(MojoOperator):
         compute_dtype: torch.dtype = torch.bfloat16,
     ):
         """
-        Initialize the Paged Prefill SWA attention operator with common parameters.
+        Initialize the paged decode SWA operator with explicit KV dequantization semantics.
         Parameter descriptions:
         - gqa_layout (str): GQA head grouping layout, values {"ABAB","AABB"}, default "ABAB".
         - is_causal (bool): Whether to enable causal masking, default True.
         - global_window_size (Optional[int]): Global attention window length; None means no global window, default None. Only effective when is_causal=True.
         - local_window_size (Optional[int]): Local attention window length; None means no local window, default None. Only effective when is_causal=True.
         - query_dtype (torch.dtype): the dtype for query, default torch.bfloat16 for non-quantized query.
-        - context_dtype (torch.dtype): The context dtype for key_cache and value_cache, default torch.int8.
+        - context_dtype (torch.dtype): The stored KV-cache dtype before dequantization, default torch.int8.
         - compute_dtype (torch.dtype): The quant matmul dtype for Q@K and P@V, default torch.bfloat16.
         """
         super().__init__()
@@ -2212,6 +2225,7 @@ class MojoPagedDecodeQuantSWA(MojoOperator):
     ) -> torch.Tensor:
         """
         Paged decode attention with Sliding-Window (SWA) using a blocked KV cache.
+        The KV cache is stored in int8 and dequantized with per-channel scales during forward.
 
         Args:
             query (torch.Tensor): Query of shape (B, Hq, D), it can be of dtype bf16 or int8
@@ -2312,4 +2326,3 @@ class MojoPagedDecodeQuantSWA(MojoOperator):
             o_i = o_i.squeeze(1)  # -> [n_q_heads, head_dim]
             o[i] = o_i.to(o.dtype)
         return o
-
