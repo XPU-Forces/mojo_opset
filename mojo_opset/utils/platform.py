@@ -5,12 +5,41 @@ import os
 import pkgutil
 
 from typing import Literal
+from typing import Optional
 
 import torch
 
 from mojo_opset.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+@functools.lru_cache
+def get_npu_device_name() -> Optional[str]:
+    """Return ``torch_npu``'s device name for the current NPU, or ``None`` if unavailable."""
+    try:
+        if not torch.npu.is_available():
+            return None
+    except Exception as e:
+        logger.debug(f"NPU not queryable for device name: {e}")
+        return None
+    try:
+        import torch_npu
+
+        idx = torch.npu.current_device()
+        return str(torch_npu.npu.get_device_name(idx))
+    except Exception as e:
+        logger.debug(f"Failed to query NPU device name: {e}")
+        return None
+
+
+@functools.lru_cache
+def is_ascend_npu_950_series() -> bool:
+    """True when the visible Ascend NPU reports a 950-series SOC name (e.g. ``Ascend950PR_*``)."""
+    name = get_npu_device_name()
+    if not name:
+        return False
+    return name.startswith("Ascend950")
 
 
 @functools.lru_cache
@@ -27,6 +56,11 @@ def get_platform() -> Literal["npu", "mlu", "meta_device", "ilu"]:
     try:
         if torch.npu.is_available():
             logger.info("Ascend NPU detected")
+            soc = get_npu_device_name()
+            if soc and is_ascend_npu_950_series():
+                logger.info("Ascend 950-series NPU: %s", soc)
+            elif soc:
+                logger.info("Ascend NPU SOC: %s", soc)
             return "npu"
     except Exception as e:
         logger.debug(f"Failed to check NPU availability: {e}")
