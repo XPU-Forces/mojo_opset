@@ -21,6 +21,7 @@ from mojo_opset import MojoSdpa
 from mojo_opset import MojoPagedPrefillSWA
 from mojo_opset import MojoPagedDecodeSWA
 from mojo_opset import MojoSWA
+from mojo_opset import MojoPrefillSageGQA
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.tests.utils import requires_platform_backend
@@ -1091,6 +1092,35 @@ def test_prefill_gqa(B, Hq, Hkv, D, S, gqa_layout):
         atol=2e-2, rtol=2e-2,
     )
 
+# ===========================================================================
+# MojoPrefillSageGQA (non-paged)
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "B, Hq, Hkv, D, S",
+    [(1, 8, 1, 64, 128)]
+    # [(2, 16, 4, 128, 64), (1, 8, 1, 64, 128)],
+)
+@pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
+@auto_switch_platform()
+@bypass_not_implemented
+def test_prefill_sage_gqa(B, Hq, Hkv, D, S, gqa_layout):
+    """Non-paged prefill SageGQA — query/key/value are batched 4-D tensors."""
+
+    query = torch.randn(B, Hq, S, D, dtype=torch.bfloat16)
+    key = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)
+    value = torch.randn(B, Hkv, S, D, dtype=torch.bfloat16)
+    cu = torch.arange(0, (B + 1) * S, S, dtype=torch.int32)
+
+    # op = MojoPrefillSageGQA(is_causal=True, gqa_layout=gqa_layout)
+    sage_op_ref = MojoPrefillSageGQA._registry.get("torch")(is_causal=True, gqa_layout=gqa_layout)
+    op_ref = MojoPrefillGQA._registry.get("torch")(is_causal=True, gqa_layout=gqa_layout)
+
+    sage_op_ref.forward_diff_with(
+        op_ref, query, key, value, cu,
+        softmax_scale=1.0 / math.sqrt(D),
+        atol=2e-2, rtol=2e-2,
+    )
 
 # ===========================================================================
 # MojoPagedDecodeMLA

@@ -7,6 +7,7 @@ from typing import Tuple
 import torch
 
 from ..operator import MojoOperator
+from .quantize import MojoDynamicQuant
 
 
 def assert_paged_prefill_contract(
@@ -310,7 +311,6 @@ class MojoPrefillGQA(MojoOperator):
         attn_output = attn_output.reshape(batch_size, seq_len, num_attn_heads, head_dim)
 
         return attn_output
-
 
 class MojoPagedPrefillGQA(MojoOperator):
     def __init__(
@@ -2325,4 +2325,456 @@ class MojoPagedDecodeSWAWithKVDequant(MojoOperator):
             o_i = o_i / l_i
             o_i = o_i.squeeze(1)  # -> [n_q_heads, head_dim]
             o[i] = o_i.to(o.dtype)
+        return o
+
+# sage quant dtype utils, can be reused for other attention implementations
+# assert x.shape == [Batch*Heads, Seq_len, Head_dim]
+def get_scale_and_quant(
+    x, 
+    reduce_dims, 
+    q_max: int = 127, 
+    q_min: int = -128,
+    eps=1e-6, 
+    quant_dtype=torch.int8,
+)->tuple[torch.Tensor, torch.Tensor]:        
+    scale = x.abs().amax(dim=reduce_dims, keepdim=True) / q_max
+    scale = torch.where(scale < eps, torch.ones_like(scale), scale)
+    q = torch.clamp(torch.round(x / scale), q_min, q_max,).to(quant_dtype)
+    return q, scale
+
+def per_block_int8(x, xm=None, quant_dims=(-1, -2), blk=64, q_max=127, q_min=-128):
+    if xm is not None:
+        x = x - xm
+    # BH: batch*heads, L: seq_len, D: head_dim
+    BH, L, D = x.shape
+
+    num_blocks = (L + blk - 1) // blk
+    if num_blocks * blk != L:
+        pad_len = num_blocks * blk - L
+        x = torch.nn.functional.pad(x, (0, 0, 0, pad_len))
+    original_shape = (BH, num_blocks * blk, D)
+
+    x = x.reshape(-1, num_blocks, blk, D)
+    # Reduce over blk and D together
+    x_q, x_scale = get_scale_and_quant(x, quant_dims, q_max, q_min)
+    x_q = x_q.reshape(original_shape)
+    # [BH, num_blocks, 1, 1] -> [BH, num_blocks*blk, 1]
+    x_scale = x_scale.repeat_interleave(blk, dim=1).squeeze(-1)
+
+    if num_blocks * blk != L:
+        x_q = x_q[:, :L].contiguous()
+        x_scale = x_scale[:, :L].contiguous()
+    return x_q, x_scale
+
+# for per_token, quant_dims should be the head_dim;
+# for per_channel, quant_dims should be the seq_len;
+def quant_int8(x, xm=None, quant_dims=(-1,), q_max=127, q_min=-128):
+    if xm is not None:
+        x = x - xm
+    x_q, x_scale = get_scale_and_quant(x, quant_dims, q_max, q_min)
+    return x_q, x_scale
+
+
+class MojoPrefillSageGQA(MojoOperator):
+    """
+    GQA attention operator.
+    Args:
+        is_causal (bool): Whether to apply causal masking.
+        softmax_scale (float): Scaling factor for the softmax operation.
+        gqa_layout (str): Layout for GQA attention.
+        rm_padding (bool): Whether to remove padding from attention computation.
+        window_size (int): Window size for attention computation, -1 means full attention.
+        BLOCK_Q (int): Block size for quantizing query. If BLOCK_Q=1, it means per-token quantization; otherwise, it means per-block quantization.
+        BLOCK_K (int): Block size for quantizing key. If BLOCK_K=1, it means per-token quantization; otherwise, it means per-block quantization.
+        BLOCK_P (int): Block size for quantizing attention score. If BLOCK_P=1, it means per-token quantization; otherwise, it means per-block quantization.
+        quant_dtype (torch.dtype): Quantization dtype, currently only support torch.int8.
+    """
+
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "ABAB",
+        rm_padding: bool = False,
+        window_size: int = -1,
+        quant_granularity: str = "token",
+        quant_dtype: torch.dtype = torch.int8,
+    ):
+        super().__init__()
+
+        self.is_causal = is_causal
+        self.gqa_layout = gqa_layout
+        self.rm_padding = rm_padding
+        self.window_size = window_size
+        # sage attention specific parameters
+        assert quant_granularity is "token", f"Unsupported quant granularity {quant_granularity}"
+        if quant_dtype != torch.int8:
+            raise ValueError("quant_dtype must be torch.int8")
+        self.q_max = 127
+        self.q_min = -128
+
+    """
+    Forward pass of the Mojo GQA attention operator, reference for backend.
+    Args:
+        query (torch.Tensor): Query tensor, in shape [B, Q_H, S, D].
+        key (torch.Tensor): Key tensor, in shape [B, K_H, S, D].
+        value (torch.Tensor): Value tensor, inshape [B, V_H, S, D].
+
+    Returns:
+        torch.Tensor: Output tensor.
+    """
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        if self.window_size != -1:
+            raise NotImplementedError
+
+        assert cu_q_lens.dtype == torch.int32
+        batch_size, num_attn_heads, seq_len, head_dim = query.size()
+
+        num_kv_heads = k_cache.shape[1]
+
+        group = num_attn_heads // num_kv_heads
+
+        query = query.reshape(-1, seq_len, head_dim)
+
+        if self.gqa_layout == "ABAB":
+            k_cache = torch.cat([k_cache] * group, axis=1).reshape(-1, seq_len, head_dim)
+            v_cache = torch.cat([v_cache] * group, axis=1).reshape(-1, seq_len, head_dim)
+        elif self.gqa_layout == "AABB":
+            k_cache = k_cache.repeat_interleave(group, dim=1).reshape(-1, seq_len, head_dim)
+            v_cache = v_cache.repeat_interleave(group, dim=1).reshape(-1, seq_len, head_dim)
+        else:
+            raise NotImplementedError
+        query_int8, query_scale = quant_int8(query, quant_dims=(-1,), q_max=self.q_max, q_min=self.q_min)
+        k_int8, k_scale = quant_int8(k_cache, quant_dims=(-1,), q_max=self.q_max, q_min=self.q_min)
+        k_int8 = k_int8.transpose(-2, -1)
+        score = torch.bmm(query_int8.float(), k_int8.float()).float()
+        score *= query_scale * k_scale.transpose(-2, -1)
+
+        if softmax_scale is None:
+            score *= 1 / (head_dim**0.5)
+        else:
+            score *= softmax_scale
+
+        if self.is_causal:
+            mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool, device=query.device))
+            score.masked_fill_(~mask, float("-inf"))
+        else:
+            raise NotImplementedError
+
+        score = torch.softmax(score, -1).to(query.dtype)
+
+        score_int8, score_scale = quant_int8(score, quant_dims=(-1,), q_max=self.q_max, q_min=self.q_min)
+        v_int8, v_scale = quant_int8(v_cache, quant_dims=(-2,), q_max=self.q_max, q_min=self.q_min)
+        attn_output = torch.bmm(score_int8.float(), v_int8.float())
+        attn_output *= score_scale * v_scale
+        attn_output = attn_output.view(batch_size, num_attn_heads, seq_len, head_dim).transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(batch_size, seq_len, num_attn_heads, head_dim)
+
+        return attn_output
+
+class MojoPagedPrefillSageGQA(MojoOperator):
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+        quant_granularity: str = "token", # "token" or "block"
+        quant_dtype: torch.dtype = torch.int8,
+    ):
+        """
+        Initialize the Paged Prefill GQA attention operator with common parameters.
+        Parameter descriptions:
+        - gqa_layout (str): GQA head grouping layout, values {"ABAB","AABB"}, default "ABAB".
+        - is_causal (bool): Whether to enable causal masking, default True.
+        """
+        super().__init__()
+
+        if gqa_layout not in ["ABAB", "AABB"]:
+            raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
+
+        self.is_causal = is_causal
+        self.gqa_layout = gqa_layout
+        # sage attention specific parameters
+        assert quant_granularity is "token", f"Unsupported quant granularity {quant_granularity}"
+        if quant_dtype != torch.int8:
+            raise ValueError("quant_dtype must be torch.int8")
+        self.q_max = 127
+        self.q_min = -128
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        block_tables: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
+        max_q_lens: Optional[int] = None,
+        max_total_seq_lens: Optional[int] = None,
+    ) -> Tuple[Any]:
+        """
+        Paged prefill attention with grouped query heads (GQA) using a blocked KV cache.
+
+        Args:
+            query (torch.Tensor): Query tokens of shape (T, Hq, D).
+            key_cache (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
+            value_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
+            cu_q_lens (torch.Tensor): Cumulative query lengths, shape (B+1,);
+                `cu_q_lens[i]` is the start offset for query at batch i; `cu_q_lens[-1] == T`.
+            block_tables (torch.Tensor): Logical-to-physical block IDs per batch,
+                shape (B, num_blocks).
+            softmax_scale (Optional[float]): Attention scaling factor; defaults to 1/sqrt(D).
+            cu_total_seq_lens (Optional[torch.Tensor]): Cumulative total KV lengths, shape (B+1,);
+                `cu_total_seq_lens[i+1] - cu_total_seq_lens[i]` is the total visible KV length for batch i.
+                If None, defaults to `cu_q_lens`.
+            mask (Optional[torch.Tensor]): Attention mask; defaults to None.
+                If mask is None, it means a full mask or causal mask based on `is_causal`.
+                If mask is not None, and is_causal=False, applies the mask to the attention scores.
+                Currently we do not constrain the shape of mask, it is recommended be of shape (B, T, T) or (T, T),
+                where B is the block size, and T >= max(max(total_seq_lens), max(q_lens)).
+
+        Returns:
+            torch.Tensor: Attention output of shape (T, Hq, D).
+
+        Notes:
+            - If Hq != Hkv, expands K/V heads to match Hq via repeat_interleave.
+            - Applies a causal lower-triangular mask and restricts attention within each sequence.
+            - Softmax is computed in float32 and cast back to the input dtype.
+            - Despite the type annotation Tuple[Any], this implementation returns a single tensor.
+        """
+        assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
+        total_q_tokens, num_q_heads, head_dim = query.shape
+        _, num_kv_heads, block_size, _ = key_cache.shape
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(head_dim)
+
+        outputs = torch.zeros(total_q_tokens, num_q_heads, head_dim, dtype=query.dtype, device=query.device)
+
+        q_lens = _seq_lens_from_cu(cu_q_lens)
+        total_seq_lens = q_lens if cu_total_seq_lens is None else _seq_lens_from_cu(cu_total_seq_lens)
+        batch_size = len(q_lens)
+
+        # apply per_token quant, quant_dim = -1
+        query, query_scale = quant_int8(query, quant_dims=(-1,), q_max=self.q_max, q_min=self.q_min)
+        key_cache, key_scale = quant_int8(key_cache, quant_dims=(-1,), q_max=self.q_max, q_min=self.q_min)
+
+        for i in range(batch_size):
+            q_seq_len = q_lens[i].item()
+            start_loc = cu_q_lens[i].item()
+            end_loc = cu_q_lens[i + 1].item()
+            q = query[start_loc:end_loc]
+            kv_seq_len = total_seq_lens[i].item()
+            if q_seq_len == 0 or kv_seq_len <= 0:
+                continue
+            if block_tables[i, 0].item() < 0:
+                raise ValueError("Paged prefill requires a valid block table for rows with kv lens > 0.")
+
+            num_blocks_for_seq = (kv_seq_len + block_size - 1) // block_size
+            k_unpadded = torch.zeros(kv_seq_len, num_kv_heads, head_dim, dtype=query.dtype, device=query.device)
+            # k_scale_unpadded: [kv_seq_len, num_kv_heads, 1]
+            k_scale_unpadded = torch.zeros(kv_seq_len, num_kv_heads, 1, dtype=key_scale.dtype, device=key_scale.device)
+            v_unpadded = torch.zeros(kv_seq_len, num_kv_heads, head_dim, dtype=query.dtype, device=query.device)
+
+
+            for j in range(num_blocks_for_seq):
+                physical_block_id = block_tables[i, j].item()
+                if physical_block_id < 0:
+                    break
+
+                start_pos_in_seq = j * block_size
+                end_pos_in_seq = min(start_pos_in_seq + block_size, kv_seq_len)
+                tokens_in_block = end_pos_in_seq - start_pos_in_seq
+
+                k_slice = key_cache[physical_block_id, :, :tokens_in_block, :]
+
+                k_unpadded[start_pos_in_seq:end_pos_in_seq, :, :] = k_slice.permute(1, 0, 2)
+
+                k_scale_slice = key_scale[physical_block_id, :, :tokens_in_block, :]
+                k_scale_unpadded[start_pos_in_seq:end_pos_in_seq, :, :] = k_scale_slice.permute(1, 0, 2)
+
+                v_slice = value_cache[physical_block_id, :, :tokens_in_block, :]
+                v_unpadded[start_pos_in_seq:end_pos_in_seq, :, :] = v_slice.permute(1, 0, 2)
+
+            if num_q_heads != num_kv_heads:
+                if self.gqa_layout == "AABB":
+                    k_expanded = k_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=1)
+                    k_scale_expanded = k_scale_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=1)
+                    v_expanded = v_unpadded.repeat_interleave(num_q_heads // num_kv_heads, dim=1)
+                else:
+                    k_expanded = k_unpadded.repeat((1, num_q_heads // num_kv_heads, 1))
+                    k_scale_expanded = k_scale_unpadded.repeat((1, num_q_heads // num_kv_heads, 1))
+                    v_expanded = v_unpadded.repeat((1, num_q_heads // num_kv_heads, 1))
+            else:
+                k_expanded = k_unpadded
+                k_scale_expanded = k_scale_unpadded
+                v_expanded = v_unpadded
+
+            q_scale = query_scale[start_loc:end_loc]
+            # npu don't support int8
+            q, k_expanded = q.float(), k_expanded.float()
+            attn_scores = torch.einsum("thd,khd->thk", q, k_expanded).float() * softmax_scale * q_scale * k_scale_expanded
+            if self.is_causal:
+                attn_mask = torch.ones(q_seq_len, kv_seq_len, device=query.device, dtype=torch.bool).tril(
+                    kv_seq_len - q_seq_len
+                )
+                attn_scores.masked_fill_(~attn_mask.unsqueeze(1), -torch.inf)
+            elif mask is not None:
+                if mask.dim() == 2:
+                    attn_mask = mask
+                else:
+                    attn_mask = mask[i]
+                attn_mask = attn_mask[kv_seq_len - q_seq_len : kv_seq_len, :kv_seq_len]
+                attn_scores.masked_fill_(~attn_mask.unsqueeze(1), -torch.inf)
+
+            attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
+            attn_probs_int8, attn_probs_scale = quant_int8(attn_probs, quant_dims=(-1,), q_max=self.q_max, q_min=self.q_min)
+            v_expanded_int8, v_expanded_scale = quant_int8(v_expanded, quant_dims=(-2,), q_max=self.q_max, q_min=self.q_min)
+            # npu don't support int8
+            attn_probs_int8, v_expanded_int8 = attn_probs_int8.float(), v_expanded_int8.float()
+            outputs[start_loc:end_loc] = torch.einsum("thk,khd->thd", attn_probs_int8, v_expanded_int8) * attn_probs_scale * v_expanded_scale
+        return outputs
+
+    def extra_repr(self) -> str:
+        return f"{self.is_causal=}, {self.gqa_layout=}, {self.BLOCK_Q=}, {self.BLOCK_K=}, {self.BLOCK_P=}, {self.q_max=}, {self.q_min=}".replace("self.", "")
+
+class MojoPagedPrefillSageSWA(MojoOperator):
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+        global_window_size: Optional[int] = None,
+        local_window_size: Optional[int] = None,
+        quant_granularity: str = "token", # "token" or "block"
+        quant_dtype: torch.dtype = torch.int8,
+    ):
+        """
+        Initialize the Paged Prefill GQA attention operator with common parameters.
+        Parameter descriptions:
+        - gqa_layout (str): GQA head grouping layout, values {"ABAB","AABB"}, default "ABAB".
+        - is_causal (bool): Whether to enable causal masking, default True.
+        - global_window_size (Optional[int]): Global attention window length; None means no global window, default None. Only effective when is_causal=True.
+        - local_window_size (Optional[int]): Local attention window length; None means no local window, default None. Only effective when is_causal=True.
+        """
+        super().__init__()
+
+        if gqa_layout not in ["ABAB", "AABB"]:
+            raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
+
+        self.is_causal = is_causal
+        self.gqa_interleave = gqa_layout == "ABAB"
+        self.global_window_size = global_window_size
+        self.local_window_size = local_window_size
+        # sage attention specific parameters
+        assert quant_granularity is "token", f"Unsupported quant granularity {quant_granularity}"
+        if quant_dtype != torch.int8:
+            raise ValueError("quant_dtype must be torch.int8")
+        self.q_max = 127
+        self.q_min = -128
+
+    def forward(
+        self,
+        query: torch.Tensor,  # [total_q_len, n_q_heads, head_dim]
+        key_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
+        value_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
+        cu_q_lens: torch.Tensor,  # [bsz + 1]
+        block_table: torch.Tensor,  # [bsz, max_num_blocks]
+        softmax_scale: Optional[float] = None,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,  # [bsz + 1]
+        *,
+        max_q_lens: Optional[int] = None,
+        max_total_seq_lens: Optional[int] = None,
+    ) -> torch.Tensor:
+        # Note: if is_causal = False, local_window_size and global_window_size are not used.
+        # max_q_lens / max_total_seq_lens match fused backends (e.g. ixformer); unused here.
+
+        assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
+        total_q_len, n_q_heads, head_dim = query.shape
+        _, n_kv_heads, page_size, _ = key_cache.shape
+        if softmax_scale is None:
+            softmax_scale = 1.0 / (head_dim**0.5)
+
+        total_seq_lens = _seq_lens_from_cu(cu_q_lens) if cu_total_seq_lens is None else _seq_lens_from_cu(cu_total_seq_lens)
+        # per-token quant
+        query, query_scale = quant_int8(query, quant_dims=(-1,), q_max=self.q_max, q_min=self.q_min)
+        key_cache, key_cache_scale = quant_int8(key_cache, quant_dims=(-1,), q_max=self.q_max, q_min=self.q_min)
+
+        o = torch.empty_like(query)
+        bsz = cu_q_lens.shape[0] - 1
+        for i in range(bsz):
+            q_i = query[cu_q_lens[i] : cu_q_lens[i + 1]]
+            q_scale_i = query_scale[cu_q_lens[i] : cu_q_lens[i + 1]]
+            q_seq_len = q_i.shape[0]
+            if q_seq_len == 0:
+                # skip padded query
+                continue
+            q_i = q_i.permute(1, 0, 2)  # -> [n_q_heads, q_seq_len, head_dim]
+            q_scale_i = q_scale_i.permute(1, 0, 2) # -> [n_q_heads, q_seq_len, 1]
+
+            kv_seq_len = total_seq_lens[i].item()
+            if kv_seq_len <= 0:
+                continue
+            if block_table[i, 0].item() < 0:
+                raise ValueError("Paged prefill requires a valid block table for rows with kv lens > 0.")
+            kv_blocks = (kv_seq_len + page_size - 1) // page_size
+            k_i = key_cache[block_table[i, :kv_blocks]]  # [kv_blocks, n_kv_heads, page_size, head_dim]
+            k_i = k_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
+            k_i_T = k_i.permute(0, 2, 1)  # -> [n_kv_heads, head_dim, kv_seq_len]
+
+            k_i_scale = key_cache_scale[block_table[i, :kv_blocks]] # [kv_blocks, n_kv_heads, page_size, 1]
+            k_i_scale = k_i_scale.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, 1)[:, :kv_seq_len]
+            k_i_scale_T = k_i_scale.permute(0, 2, 1) # -> [n_kv_heads, 1, kv_seq_len]
+            if n_q_heads != n_kv_heads:
+                if self.gqa_interleave:
+                    k_i_T = k_i_T.repeat((n_q_heads // n_kv_heads, 1, 1))
+                    k_i_scale_T = k_i_scale_T.repeat((n_q_heads // n_kv_heads, 1, 1))
+                else:
+                    k_i_T = k_i_T.repeat_interleave(
+                        n_q_heads // n_kv_heads, dim=0
+                    )  # -> [n_q_heads, head_dim, kv_seq_len]
+                    k_i_scale_T = k_i_scale_T.repeat_interleave(
+                        n_q_heads // n_kv_heads, dim=0
+                    )  # -> [n_q_heads, 1, kv_seq_len]
+            q_i, k_i_T = q_i.float(), k_i_T.float()
+            s_i = torch.bmm(q_i, k_i_T).float() * softmax_scale * q_scale_i * k_i_scale_T  # -> [n_q_heads, q_seq_len, kv_seq_len]
+
+            if self.is_causal:
+                s_mask = _generate_window_mask(
+                    q_seq_len,
+                    kv_seq_len,
+                    self.local_window_size,
+                    self.global_window_size,
+                ).to(s_i.device)
+                s_i = torch.where(s_mask, s_i, float("-inf"))
+            m_i = torch.max(s_i, dim=-1, keepdim=True).values  # -> [n_q_heads, q_seq_len, 1]
+            s_i = s_i - m_i  # -> [n_q_heads, q_seq_len, kv_seq_len]
+            p_i = torch.exp(s_i)
+            l_i = torch.sum(p_i, dim=-1, keepdim=True)  # -> [n_q_heads, q_seq_len, 1]
+            p_i = p_i.to(query.dtype)
+
+            v_i = value_cache[block_table[i, :kv_blocks]]
+            v_i = v_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[
+                :, :kv_seq_len
+            ]  # -> [n_kv_heads, kv_seq_len, head_dim]
+            if n_q_heads != n_kv_heads:
+                if self.gqa_interleave:
+                    v_i = v_i.repeat((n_q_heads // n_kv_heads, 1, 1))
+                else:
+                    v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, kv_seq_len, head_dim]
+            # per_token quant for P and per_channel quant for V
+            p_i, p_i_scale = quant_int8(p_i, quant_dims=(-1,), q_max=self.q_max, q_min=self.q_min)
+            v_i, v_i_scale = quant_int8(v_i, quant_dims=(-2,), q_max=self.q_max, q_min=self.q_min)
+            # for npu
+            p_i, v_i = p_i.float(), v_i.float()
+            o_i = torch.bmm(p_i, v_i).float() * p_i_scale * v_i_scale  # -> [n_q_heads, q_seq_len, head_dim]
+            o_i = o_i / l_i  # -> [n_q_heads, q_seq_len, head_dim]
+            o_i = o_i.permute(1, 0, 2)  # -> [q_seq_len, n_q_heads, head_dim]
+            o[cu_q_lens[i] : cu_q_lens[i + 1]] = o_i.to(o.dtype)
         return o
