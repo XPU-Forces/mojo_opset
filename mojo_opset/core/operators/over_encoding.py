@@ -38,29 +38,86 @@ def n_gram_impl_torch(
     Returns:
         _type_: _description_
     """
+
+    assert input_ids.dtype == oe_history_inputs.dtype == oe_vocab_sizes.dtype == oe_vocab_offset.dtype == n_grams.dtype == torch.long
     n_gram_ids = []
+    complete_input_ids = torch.cat([oe_history_inputs, input_ids], dim=-1)
     for gram_idx, gram in map(lambda val: (val[0], val[1].item()), enumerate(n_grams)):
         oe_carry = ori_vocab_size
         n_gram_id = input_ids
 
         # TODO(liuyuan): make it recomputation free.
         for i in range(1, gram):
-
-            complete_input_ids = torch.cat(
-                (oe_history_inputs[..., -i:], input_ids[..., :-i]),
-                dim=-1,
-            )
-
-            if i > n_gram_id.size(-1):
-                complete_input_ids = complete_input_ids[..., : n_gram_id.size(-1)]
+            prev_input_ids = complete_input_ids[..., -i-n_gram_id.size(-1):-i]
 
             # NOTE(liuyuan): the fowllowing modulo operators are designed for big decimals.
-            n_gram_id = (n_gram_id + complete_input_ids * oe_carry) % oe_vocab_sizes[gram_idx]
+            n_gram_id = (n_gram_id + prev_input_ids * oe_carry) % oe_vocab_sizes[gram_idx]
             oe_carry = oe_carry * ori_vocab_size % oe_vocab_sizes[gram_idx]
 
         n_gram_id = n_gram_id + oe_vocab_offset[gram_idx]
         n_gram_ids.append(n_gram_id)
-    return torch.stack(n_gram_ids, dim=-1)
+    n_gram_ids_tensor = torch.stack(n_gram_ids, dim=-1)
+
+
+    # reference_output = n_gram_impl_torch_ref(
+    #     input_ids,
+    #     oe_history_inputs,
+    #     oe_vocab_sizes,
+    #     oe_vocab_offset,
+    #     n_grams,
+    #     ori_vocab_size,
+    # )
+    # if not torch.equal(n_gram_ids_tensor, reference_output):
+    #     torch.save({
+    #         "input_ids": input_ids,
+    #         "oe_history_inputs": oe_history_inputs,
+    #         "oe_vocab_sizes": oe_vocab_sizes,
+    #         "oe_vocab_offset": oe_vocab_offset,
+    #         "n_grams": n_grams,
+    #         "ori_vocab_size": ori_vocab_size,
+    #     }, "n_gram_impl_torch_ref.pt")
+    #     raise ValueError("n_gram_impl_torch output_tensor is not equal to reference_output")
+    return n_gram_ids_tensor
+
+def n_gram_impl_torch_ref(
+    input_ids: torch.Tensor,
+    oe_history_inputs: torch.Tensor,
+    oe_vocab_sizes: torch.Tensor,
+    oe_vocab_offset: torch.Tensor,
+    n_grams: torch.Tensor,
+    ori_vocab_size: int,
+):
+    """_summary_
+
+    Args:
+        input_ids (torch.Tensor): _description_
+        oe_history_inputs (torch.Tensor): _description_
+        oe_vocab_sizes (torch.Tensor): _description_
+        oe_vocab_offset (torch.Tensor): _description_
+        n_grams (torch.Tensor): _description_
+        ori_vocab_size (int): _description_
+
+    Returns:
+        _type_: _description_
+    """
+    assert input_ids.dtype == oe_history_inputs.dtype == oe_vocab_sizes.dtype == oe_vocab_offset.dtype == n_grams.dtype == torch.long
+    n_gram_ids = []
+    complete_input_ids = torch.cat([oe_history_inputs.cpu(), input_ids.cpu()], dim=-1)
+    for gram_idx, gram in map(lambda val: (val[0], val[1].item()), enumerate(n_grams)):
+        oe_carry = ori_vocab_size
+        n_gram_id = input_ids.cpu()
+
+        # TODO(liuyuan): make it recomputation free.
+        for i in range(1, gram):
+            prev_input_ids = complete_input_ids[..., -i-n_gram_id.size(-1):-i]
+
+            # NOTE(liuyuan): the fowllowing modulo operators are designed for big decimals.
+            n_gram_id = (n_gram_id + prev_input_ids * oe_carry) % oe_vocab_sizes[gram_idx].item()
+            oe_carry = oe_carry * ori_vocab_size % oe_vocab_sizes[gram_idx].item()
+
+        n_gram_id = n_gram_id + oe_vocab_offset[gram_idx].item()
+        n_gram_ids.append(n_gram_id)
+    return torch.stack(n_gram_ids, dim=-1).cuda()
 
 class MojoOverEncodingNGram(MojoOperator):
     def __init__(
