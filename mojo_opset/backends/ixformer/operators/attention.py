@@ -12,8 +12,8 @@ from ixformer.contrib import vllm_flash_attn as ix_fa
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedDecodeSWA
 from mojo_opset.core import MojoPagedPrefillGQA
-from mojo_opset.core import MojoPagedPrefillQuantGQA
-from mojo_opset.core import MojoPagedPrefillQuantSWA
+from mojo_opset.core import MojoPagedPrefillGQAWithKVDequant
+from mojo_opset.core import MojoPagedPrefillSWAWithKVDequant
 from mojo_opset.core import MojoPagedPrefillSWA
 from mojo_opset.core.operators.attention import assert_paged_decode_contract
 from mojo_opset.core.operators.attention import assert_paged_prefill_contract
@@ -438,7 +438,7 @@ class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
         )
 
 
-class IxformerPagedPrefillQuantGQA(MojoPagedPrefillQuantGQA):
+class IxformerPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
     """Ixformer implementation for int8-KV paged prefill GQA."""
 
     supported_platforms_list = ["ilu"]
@@ -459,7 +459,7 @@ class IxformerPagedPrefillQuantGQA(MojoPagedPrefillQuantGQA):
             compute_dtype=compute_dtype,
         )
         if self.gqa_layout == "ABAB":
-            raise NotImplementedError("IxformerPagedPrefillQuantGQA only supports AABB layout.")
+            raise NotImplementedError("IxformerPagedPrefillGQAWithKVDequant only supports AABB layout.")
 
     def forward(
         self,
@@ -481,29 +481,29 @@ class IxformerPagedPrefillQuantGQA(MojoPagedPrefillQuantGQA):
         if query.dtype not in (torch.float16, torch.bfloat16):
             raise NotImplementedError(f"query dtype must be fp16 or bf16, got {query.dtype}.")
         if self.query_dtype == torch.int8:
-            raise NotImplementedError("IxformerPagedPrefillQuantGQA does not support quantized query yet.")
+            raise NotImplementedError("IxformerPagedPrefillGQAWithKVDequant does not support quantized query yet.")
         if query_scale is not None:
             raise ValueError("query_scale must be None for non-quantized query.")
         if self.context_dtype != torch.int8:
             raise NotImplementedError(
-                f"IxformerPagedPrefillQuantGQA only supports int8 KV cache, got {self.context_dtype}."
+                f"IxformerPagedPrefillGQAWithKVDequant only supports int8 KV cache, got {self.context_dtype}."
             )
         if self.compute_dtype == torch.int8:
             raise NotImplementedError(
-                "IxformerPagedPrefillQuantGQA uses float16 compute and does not support int8 compute."
+                "IxformerPagedPrefillGQAWithKVDequant uses float16 compute and does not support int8 compute."
             )
         if key_cache.dtype != torch.int8 or value_cache.dtype != torch.int8:
             raise NotImplementedError(
-                "IxformerPagedPrefillQuantGQA requires int8 key_cache/value_cache, "
+                "IxformerPagedPrefillGQAWithKVDequant requires int8 key_cache/value_cache, "
                 f"got {key_cache.dtype}/{value_cache.dtype}."
             )
         if mask is not None:
-            raise NotImplementedError("IxformerPagedPrefillQuantGQA does not support custom mask yet.")
+            raise NotImplementedError("IxformerPagedPrefillGQAWithKVDequant does not support custom mask yet.")
 
         page_block_size = key_cache.shape[2]
         if page_block_size > 256 or page_block_size % 16 != 0:
             raise NotImplementedError(
-                f"IxformerPagedPrefillQuantGQA only supports page_block_size <= 256 and % 16 == 0, got {page_block_size}."
+                f"IxformerPagedPrefillGQAWithKVDequant only supports page_block_size <= 256 and % 16 == 0, got {page_block_size}."
             )
 
         cu_kv_lens = cu_total_seq_lens if cu_total_seq_lens is not None else cu_q_lens
@@ -543,7 +543,7 @@ class IxformerPagedPrefillQuantGQA(MojoPagedPrefillQuantGQA):
         return output
 
 
-class IxformerPagedPrefillQuantSWA(MojoPagedPrefillQuantSWA):
+class IxformerPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
     """Ixformer implementation for int8-KV paged prefill SWA."""
 
     supported_platforms_list = ["ilu"]
@@ -568,7 +568,7 @@ class IxformerPagedPrefillQuantSWA(MojoPagedPrefillQuantSWA):
             compute_dtype=compute_dtype,
         )
         if self.gqa_interleave:
-            raise NotImplementedError("IxformerPagedPrefillQuantSWA only supports AABB layout.")
+            raise NotImplementedError("IxformerPagedPrefillSWAWithKVDequant only supports AABB layout.")
         if global_window_size is not None and global_window_size < 0:
             raise ValueError(f"global_window_size must be >= 0, got {global_window_size}.")
         if local_window_size is not None and local_window_size < 0:
@@ -592,28 +592,28 @@ class IxformerPagedPrefillQuantSWA(MojoPagedPrefillQuantSWA):
         if query.dtype not in (torch.float16, torch.bfloat16):
             raise NotImplementedError(f"query dtype must be fp16 or bf16, got {query.dtype}.")
         if self.query_dtype == torch.int8:
-            raise NotImplementedError("IxformerPagedPrefillQuantSWA does not support quantized query yet.")
+            raise NotImplementedError("IxformerPagedPrefillSWAWithKVDequant does not support quantized query yet.")
         if query_scale is not None:
             raise ValueError("query_scale must be None for non-quantized query.")
         if self.context_dtype != torch.int8:
             raise NotImplementedError(
-                f"IxformerPagedPrefillQuantSWA only supports int8 KV cache, got {self.context_dtype}."
+                f"IxformerPagedPrefillSWAWithKVDequant only supports int8 KV cache, got {self.context_dtype}."
             )
         if self.compute_dtype == torch.int8:
             raise NotImplementedError(
-                "IxformerPagedPrefillQuantSWA uses float16 compute and does not support int8 compute."
+                "IxformerPagedPrefillSWAWithKVDequant uses float16 compute and does not support int8 compute."
             )
         if key_cache.dtype != torch.int8 or value_cache.dtype != torch.int8:
             raise NotImplementedError(
-                "IxformerPagedPrefillQuantSWA requires int8 key_cache/value_cache, "
+                "IxformerPagedPrefillSWAWithKVDequant requires int8 key_cache/value_cache, "
                 f"got {key_cache.dtype}/{value_cache.dtype}."
             )
         if self.gqa_interleave:
-            raise NotImplementedError("IxformerPagedPrefillQuantSWA only supports AABB layout.")
+            raise NotImplementedError("IxformerPagedPrefillSWAWithKVDequant only supports AABB layout.")
         page_block_size = key_cache.shape[2]
         if page_block_size > 256 or page_block_size % 16 != 0:
             raise NotImplementedError(
-                f"IxformerPagedPrefillQuantSWA only supports page_block_size <= 256 and % 16 == 0, got {page_block_size}."
+                f"IxformerPagedPrefillSWAWithKVDequant only supports page_block_size <= 256 and % 16 == 0, got {page_block_size}."
             )
 
         assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
