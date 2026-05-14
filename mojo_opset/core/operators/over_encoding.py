@@ -118,15 +118,15 @@ class MojoOverEncodingNGram(MojoOperator):
         )
 
     def forward(
-        self, input_ids: torch.Tensor, oe_history_input: torch.Tensor, input_seq_lens: Optional[torch.Tensor] = None
+        self, input_ids: torch.Tensor, oe_history_input: torch.Tensor, q_lens: Optional[torch.Tensor] = None
     ):
-        
-        if input_seq_lens is not None:
+
+        if q_lens is not None:
             assert input_ids.dim() == 1  # [total_tokens]
-            assert oe_history_input.dim() == 2 and oe_history_input.size(0) == input_seq_lens.size(0) # [batch_size, max_n_gram - 1]
+            assert oe_history_input.dim() == 2 and oe_history_input.size(0) == q_lens.size(0) # [batch_size, max_n_gram - 1]
             seq_offset = 0
             oe_ngram_ids_list = []
-            for seq_idx, seq_len in map(lambda x: (x[0], x[1].item()), enumerate(input_seq_lens)):
+            for seq_idx, seq_len in map(lambda x: (x[0], x[1].item()), enumerate(q_lens)):
                 input_ids_i = input_ids[seq_offset : seq_offset + seq_len]
                 oe_ngram_ids_list.append(
                     n_gram_impl_torch(
@@ -279,7 +279,7 @@ class MojoOverEncoding(MojoOperator):
             and _mega_embedding_scale is not None
             and _mega_embedding_mean is not None
         ):
-            oe_mega_embedding = NF4DequantEmbedding(
+            oe_mega_embedding = MojoNF4DequantEmbedding._registry.get(self._backend)(
                 _mega_embedding_weight,
                 _mega_embedding_scale,
                 _mega_embedding_mean,
@@ -309,25 +309,25 @@ class MojoOverEncoding(MojoOperator):
         return oe_mega_embedding
 
     def forward(
-        self, input_tensor: torch.Tensor, oe_history_input: torch.Tensor, input_seq_lens: Optional[torch.Tensor] = None
+        self, input_tensor: torch.Tensor, oe_history_input: torch.Tensor, q_lens: Optional[torch.Tensor] = None
     ):
         """Calculate the word vectors through over encoding.
 
         Args:
             input_tensor (torch.Tensor): the input token ids.
             oe_history_input (torch.Tensor): the historic input token ids ([n-gram - 1] at most).
-            input_seq_lens (Optional[torch.Tensor], optional): the lengths of each sequences for prefill. Defaults to None.
+            q_lens (Optional[torch.Tensor], optional): per-sequence input lengths for prefill (q_len). Defaults to None.
 
         Returns:
             torch.Tensor: the word vectors.
         """
 
-        if input_seq_lens is not None:
+        if q_lens is not None:
             assert input_tensor.dim() == 1  # [total_tokens]
-            assert oe_history_input.dim() == 2 and oe_history_input.size(0) == input_seq_lens.size(0) # [batch_size, max_n_gram - 1]
+            assert oe_history_input.dim() == 2 and oe_history_input.size(0) == q_lens.size(0) # [batch_size, max_n_gram - 1]
             seq_offset = 0
             oe_ngram_ids_list = []
-            for seq_idx, seq_len in map(lambda x: (x[0], x[1].item()), enumerate(input_seq_lens)):
+            for seq_idx, seq_len in map(lambda x: (x[0], x[1].item()), enumerate(q_lens)):
                 input_ids = input_tensor[seq_offset : seq_offset + seq_len]
                 oe_ngram_ids_list.append(
                     n_gram_impl_torch(
@@ -481,7 +481,15 @@ def dequantize_nf4_rows(
     mean = nf4_mean.to(torch.float32).reshape(num_rows, num_groups, 1)
     return (values * scale + mean).reshape(num_rows, embedding_dim).to(output_dtype)
 
-class NF4DequantEmbedding(torch.nn.Module):
+class MojoNF4DequantEmbedding(MojoOperator):
+    """NF4-quantized embedding lookup with on-the-fly dequantization.
+
+    The embedding table is stored as packed NF4 (two 4-bit indices per int8
+    byte) together with per-group ``scale`` and ``mean`` tensors. ``forward``
+    gathers the rows corresponding to ``input``, dequantizes them and returns
+    a dense tensor in ``output_dtype``.
+    """
+
     def __init__(
         self,
         qweight: torch.Tensor,
@@ -492,12 +500,14 @@ class NF4DequantEmbedding(torch.nn.Module):
         vocab_start_id: int = 0,
         cpu_only: bool = False,
         output_dtype: torch.dtype = torch.bfloat16,
+        **kwargs,
     ):
-        super().__init__()
+        super().__init__(**kwargs)
         if qweight.ndim != 2 or scale.ndim != 2 or mean.ndim != 2:
             raise ValueError(
                 "NF4 embedding tensors must all be 2D, "
-                f"got qweight={tuple(qweight.shape)}, scale={tuple(scale.shape)}, mean={tuple(mean.shape)}."
+                f"got qweight={tuple(qweight.shape)}, "
+                f"scale={tuple(scale.shape)}, mean={tuple(mean.shape)}."
             )
 
         if scale.shape != mean.shape:
@@ -508,12 +518,6 @@ class NF4DequantEmbedding(torch.nn.Module):
         if group_size <= 0:
             raise ValueError(f"`group_size` must be > 0, got {group_size}.")
 
-        if qweight.ndim != 2 or scale.ndim != 2 or mean.ndim != 2:
-            raise ValueError(
-                "NF4 embedding tensors must all be 2D, "
-                f"got qweight={tuple(qweight.shape)}, "
-                f"scale={tuple(scale.shape)}, mean={tuple(mean.shape)}."
-            )
 
         self.embedding_dim = scale.size(1) * group_size
 

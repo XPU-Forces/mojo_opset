@@ -39,6 +39,10 @@ from .operators.attention import MojoPagedDecodeQuantGQA
 from .operators.attention import MojoPagedPrefillQuantGQA
 from .operators.attention import MojoPagedDecodeQuantSWA
 from .operators.attention import MojoPagedPrefillQuantSWA
+from .operators.attention import MojoPagedDecodeGQAWithKVDequant
+from .operators.attention import MojoPagedPrefillGQAWithKVDequant
+from .operators.attention import MojoPagedDecodeSWAWithKVDequant
+from .operators.attention import MojoPagedPrefillSWAWithKVDequant
 
 """ kvcache """
 from .operators.kv_cache import MojoStoreMLAKVCache
@@ -63,6 +67,7 @@ from .operators.embedding import MojoParallelEmbedding
 """ over_encoding """
 from .operators.over_encoding import MojoOverEncoding
 from .operators.over_encoding import MojoOverEncodingNGram
+from .operators.over_encoding import MojoNF4DequantEmbedding
 
 """ quantize """
 from .operators.quantize import MojoDequant
@@ -163,10 +168,10 @@ __all__ = [
     "MojoPagedPrefillSageSWA",
     "MojoPagedDecodeSWA",
     "MojoSWA",
-    "MojoPagedPrefillQuantGQA",
-    "MojoPagedDecodeQuantGQA",
-    "MojoPagedPrefillQuantSWA",
-    "MojoPagedDecodeQuantSWA",
+    "MojoPagedPrefillGQAWithKVDequant",
+    "MojoPagedDecodeGQAWithKVDequant",
+    "MojoPagedPrefillSWAWithKVDequant",
+    "MojoPagedDecodeSWAWithKVDequant",
 
     "MojoStorePagedKVCache",
     "MojoStoreMLAKVCache",
@@ -188,6 +193,7 @@ __all__ = [
 
     "MojoEmbedding",
     "MojoParallelEmbedding",
+    "MojoNF4DequantEmbedding",
     "MojoRelativeEmbedding",
     "MojoOverEncoding",
     "MojoOverEncodingNGram",
