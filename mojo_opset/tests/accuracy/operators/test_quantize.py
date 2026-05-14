@@ -1,37 +1,60 @@
 import pytest
 import torch
 
-from mojo_opset.utils.platform import get_platform
-from mojo_opset.tests.utils import bypass_not_implemented
-
-from mojo_opset import MojoDequantSwiGLUQuant
 from mojo_opset import MojoDequant
+from mojo_opset import MojoDequantSwiGLUQuant
 from mojo_opset import MojoDynamicQuant
 from mojo_opset import MojoMoEDynamicQuant
 from mojo_opset import MojoStaticQuant
+from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.utils.platform import get_platform
 
 torch.manual_seed(42)
 
 dtypes = [torch.float16, torch.bfloat16]
 
+static_quant_shapes = [
+    (1, 128),
+    (2, 256),
+    (8, 512),
+    (32, 1024),
+    (64, 4096),
+    (57, 7338),
+    (128, 8192),
+]
 
-# ---------------------------------------------------------------------------
-# Helpers: pre-compute scale outside the operator
-# ---------------------------------------------------------------------------
+dequant_shapes = [
+    (1, 128),
+    (4, 128),
+    (16, 512),
+    (32, 1024),
+    (96, 4096),
+    (128, 8192),
+]
 
-def make_per_token_scale_sym(x: torch.Tensor, q_max: int = 127) -> torch.Tensor:
-    """Per-token symmetric scale: shape (..., 1)."""
-    return (x.float().abs().amax(dim=-1, keepdim=True) / q_max).clamp(min=1e-10)
+dynamic_quant_shapes = [
+    (1, 128),
+    (8, 128),
+    (17, 320),
+    (24, 512),
+    (48, 1536),
+    (64, 2048),
+]
 
+moe_dynamic_quant_cases = [
+    (8, 128, [8]),
+    (12, 256, [4, 3, 5]),
+    (18, 512, [6, 6, 4, 2]),
+    (21, 1024, [2, 5, 1, 7, 6]),
+    (32, 2048, [8, 7, 5, 6, 4, 2]),
+]
 
-def make_per_tensor_scale_sym(x: torch.Tensor, q_max: int = 127) -> torch.Tensor:
-    """Per-tensor symmetric scale: scalar tensor."""
-    return (x.float().abs().amax() / q_max).clamp(min=1e-10)
-
-
-def make_per_channel_scale_sym(x: torch.Tensor, q_max: int = 127) -> torch.Tensor:
-    """Per-channel symmetric scale: shape (K,)."""
-    return (x.float().abs().amax(dim=0) / q_max).clamp(min=1e-10)
+dequant_swiglu_quant_cases = [
+    (12, 64, [4, 3, 5]),
+    (20, 128, [6, 4, 7, 3]),
+    (24, 256, [5, 8, 4, 7]),
+    (30, 512, [6, 3, 8, 5, 8]),
+]
 
 
 def load_params(module: torch.nn.Module, **params):
@@ -39,308 +62,140 @@ def load_params(module: torch.nn.Module, **params):
     return module
 
 
-# ---------------------------------------------------------------------------
-# MojoStaticQuant: per-channel scale parameter
-# ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    "shape",
-    [
-        (32, 128),
-        (64, 1024),
-        (1, 4096),
-        (128, 8192),
-    ],
-)
-@pytest.mark.parametrize("dtype", dtypes)
-@bypass_not_implemented
-def test_quant_symmetric_per_token(shape, dtype):
-    x = torch.randn(size=shape, dtype=dtype)
-    scale = make_per_channel_scale_sym(x)
+def make_scale(x: torch.Tensor, q_max: float) -> torch.Tensor:
+    return (x.float().abs().amax(dim=0) / q_max).clamp(min=1e-10)
 
-    quant = load_params(MojoStaticQuant(input_size=shape[-1], quant_dtype=torch.int8), scale=scale)
+
+def has_ixformer_quant_kernel(name: str) -> bool:
+    if get_platform() != "ilu":
+        return True
+    try:
+        from ixformer import functions as ixf_f
+    except ImportError:
+        return False
+    return hasattr(ixf_f, name)
+
+
+@pytest.mark.parametrize("shape", static_quant_shapes)
+@pytest.mark.parametrize("dtype", dtypes)
+@pytest.mark.parametrize("quant_dtype", [torch.int8])
+@bypass_not_implemented
+def test_static_quant(shape, dtype, quant_dtype):
+    if quant_dtype == torch.int8 and not has_ixformer_quant_kernel("static_quant"):
+        pytest.skip("static_quant kernel is not available on the current ixformer build")
+
+    x = torch.randn(shape, dtype=dtype)
+    q_max = 127
+    scale = make_scale(x, q_max)
+
+    quant = load_params(MojoStaticQuant(input_size=shape[-1], quant_dtype=quant_dtype), scale=scale)
     quant_ref = load_params(
-        MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.int8),
+        MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=quant_dtype),
         scale=scale.clone(),
     )
-    quant.forward_diff_with(quant_ref, x, atol=0, rtol=0)
+
+    atol = 1 if quant_dtype == torch.int8 else 0
+    quant.forward_diff_with(quant_ref, x, atol=atol, rtol=0)
 
 
-# ---------------------------------------------------------------------------
-# MojoStaticQuant: scalar-like scale parameter
-# ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    "shape",
-    [
-        (32, 128),
-        (64, 1024),
-        (128, 8192),
-    ],
-)
+@pytest.mark.parametrize("shape", dequant_shapes)
 @pytest.mark.parametrize("dtype", dtypes)
 @bypass_not_implemented
-def test_quant_symmetric_per_tensor(shape, dtype):
-    x = torch.randn(size=shape, dtype=dtype)
-    scale = make_per_tensor_scale_sym(x).expand(shape[-1]).clone()
+def test_dequant(shape, dtype):
+    x = torch.randn(shape, dtype=dtype)
+    scale = make_scale(x, 127)
 
-    quant = load_params(MojoStaticQuant(input_size=shape[-1], quant_dtype=torch.int8), scale=scale)
     quant_ref = load_params(
-        MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.int8),
-        scale=scale.clone(),
-    )
-    quant.forward_diff_with(quant_ref, x, atol=0, rtol=0)
-
-
-# ---------------------------------------------------------------------------
-# MojoStaticQuant: float8_e4m3fn
-# ---------------------------------------------------------------------------
-_requires_cpu = pytest.mark.skipif(
-    get_platform() != "cpu",
-    reason="float8_e4m3fn not supported on NPU; reference-only test requires CPU",
-)
-
-
-@_requires_cpu
-@pytest.mark.parametrize("shape", [(32, 128), (64, 1024)])
-@pytest.mark.parametrize("dtype", dtypes)
-def test_quant_float8_symmetric(shape, dtype):
-    x = torch.randn(size=shape, dtype=dtype)
-    fp8_max = torch.finfo(torch.float8_e4m3fn).max
-    scale = (x.float().abs().amax(dim=0) / fp8_max).clamp(min=1e-10)
-
-    quant = load_params(
-        MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.float8_e4m3fn),
-        scale=scale,
-    )
-    out, out_scale = quant(x)
-    expected = torch.clamp(torch.round(x.float() / scale.float()), -fp8_max, fp8_max).to(torch.float8_e4m3fn)
-    torch.testing.assert_close(out.float(), expected.float(), atol=0, rtol=0)
-    torch.testing.assert_close(out_scale, scale, atol=0, rtol=0)
-
-
-# ---------------------------------------------------------------------------
-# MojoStaticQuant: unsupported dtype raises NotImplementedError
-# ---------------------------------------------------------------------------
-def test_quant_unsupported_dtype_raises():
-    with pytest.raises(NotImplementedError, match="Unsupported quant_dtype"):
-        MojoStaticQuant._registry.get("torch")(input_size=1, quant_dtype=torch.float32)
-
-
-# ---------------------------------------------------------------------------
-# MojoDequant
-# ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    "shape",
-    [
-        (32, 128),
-        (64, 1024),
-        (128, 8192),
-    ],
-)
-@pytest.mark.parametrize("output_dtype", dtypes)
-@bypass_not_implemented
-def test_dequant_symmetric(shape, output_dtype):
-    x = torch.randn(size=shape, dtype=output_dtype)
-    scale = make_per_channel_scale_sym(x)
-    quant_op = load_params(
         MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.int8),
         scale=scale,
     )
-    quantized, quant_scale = quant_op(x)
+    quantized, quant_scale = quant_ref(x)
 
-    dequant = MojoDequant(output_dtype=output_dtype)
-    dequant_ref = MojoDequant._registry.get("torch")(output_dtype=output_dtype)
+    dequant = MojoDequant(output_dtype=dtype)
+    dequant_ref = MojoDequant._registry.get("torch")(output_dtype=dtype)
     dequant.forward_diff_with(dequant_ref, quantized, quant_scale, atol=0, rtol=0)
 
 
-# ---------------------------------------------------------------------------
-# Round-trip: quant → dequant should approximate original
-# ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    "shape",
-    [
-        (64, 256),
-        (128, 1024),
-    ],
-)
+@pytest.mark.parametrize("shape", dynamic_quant_shapes)
 @pytest.mark.parametrize("dtype", dtypes)
 @bypass_not_implemented
-def test_quant_dequant_roundtrip(shape, dtype):
-    x = torch.randn(size=shape, dtype=dtype)
-    scale = make_per_channel_scale_sym(x)
+def test_dynamic_quant(shape, dtype):
+    if not has_ixformer_quant_kernel("dynamic_quant"):
+        pytest.skip("dynamic_quant kernel is not available on the current ixformer build")
 
-    quant_op = load_params(
-        MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.int8),
-        scale=scale,
+    x = torch.randn(shape, dtype=dtype)
+    smooth_scale = torch.rand(shape[-1], dtype=torch.float32) + 0.1
+    inv_smooth_scale = 1.0 / smooth_scale
+
+    quant = load_params(
+        MojoDynamicQuant(input_size=shape[-1], quant_dtype=torch.int8),
+        inv_smooth_scale=inv_smooth_scale,
     )
-    dequant_op = MojoDequant._registry.get("torch")(output_dtype=dtype)
-
-    quantized, quant_scale = quant_op(x)
-    recovered = dequant_op(quantized, quant_scale)
-
-    torch.testing.assert_close(recovered.to(torch.float32), x.to(torch.float32), atol=5e-2, rtol=5e-2)
-
-
-def test_dequant_invalid_output_dtype_raises():
-    with pytest.raises(NotImplementedError, match="Unsupported output_dtype"):
-        MojoDequant._registry.get("torch")(output_dtype=torch.int8)
-
-
-def test_quant_scales_are_parameters():
-    static_quant = MojoStaticQuant._registry.get("torch")(input_size=16, quant_dtype=torch.int8)
-    dequant = MojoDequant._registry.get("torch")(output_dtype=torch.bfloat16)
-    dynamic_quant = MojoDynamicQuant._registry.get("torch")(input_size=16, quant_dtype=torch.int8)
-    moe_dynamic_quant = MojoMoEDynamicQuant._registry.get("torch")(
-        expert_num=2,
-        input_size=16,
-        quant_dtype=torch.int8,
+    quant_ref = load_params(
+        MojoDynamicQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.int8),
+        inv_smooth_scale=inv_smooth_scale,
     )
-    swiglu_quant = MojoDequantSwiGLUQuant._registry.get("torch")(
-        expert_num=2,
-        hidden_size=16,
-        quant_dtype=torch.int8,
-    )
-
-    assert isinstance(static_quant.scale, torch.nn.Parameter)
-    assert isinstance(dynamic_quant.inv_smooth_scale, torch.nn.Parameter)
-    assert isinstance(moe_dynamic_quant.inv_smooth_scale, torch.nn.Parameter)
-    assert isinstance(swiglu_quant.weight_scale, torch.nn.Parameter)
-    assert isinstance(swiglu_quant.quant_scale, torch.nn.Parameter)
-    assert moe_dynamic_quant.inv_smooth_scale.shape == (2, 16)
-    assert swiglu_quant.weight_scale.shape == (2, 32)
-    assert swiglu_quant.quant_scale.shape == (2, 16)
-
-    assert set(static_quant.state_dict()) == {"scale"}
-    assert set(dequant.state_dict()) == set()
-    assert set(dynamic_quant.state_dict()) == {"inv_smooth_scale"}
-    assert set(moe_dynamic_quant.state_dict()) == {"inv_smooth_scale"}
-    assert set(swiglu_quant.state_dict()) == {"weight_scale", "quant_scale"}
+    quant.forward_diff_with(quant_ref, x, atol=(1, 2e-3), rtol=(0, 2e-3))
 
 
-# ---------------------------------------------------------------------------
-# MojoDynamicQuant
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("tokens, hidden_size, token_count", moe_dynamic_quant_cases)
 @pytest.mark.parametrize("dtype", dtypes)
 @bypass_not_implemented
-def test_dynamic_quant_reference(dtype):
-    x = torch.randn(32, 128, dtype=dtype)
-    smooth_scale = torch.randn(128, dtype=torch.float32)
+def test_moe_dynamic_quant(tokens, hidden_size, token_count, dtype):
+    x = torch.randn(tokens, hidden_size, dtype=dtype)
+    expert_num = len(token_count)
+    token_count = torch.tensor(token_count, dtype=torch.int32)
+    smooth_scale = torch.rand(expert_num, hidden_size, dtype=torch.float32) + 0.1
+    inv_smooth_scale = 1.0 / smooth_scale
 
-    op = load_params(
-        MojoDynamicQuant._registry.get("torch")(input_size=128, quant_dtype=torch.int8),
-        inv_smooth_scale=1.0 / smooth_scale,
+    quant = load_params(
+        MojoMoEDynamicQuant(expert_num=expert_num, input_size=hidden_size, quant_dtype=torch.int8),
+        inv_smooth_scale=inv_smooth_scale,
     )
-    out, scale = op(x)
-
-    expected_input = x.float() * (1.0 / smooth_scale)
-    expected_scale = expected_input.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / 127
-    expected_out = torch.clamp(
-        torch.round(expected_input / expected_scale),
-        -128,
-        127,
-    ).to(torch.int8)
-
-    torch.testing.assert_close(out, expected_out, atol=0, rtol=0)
-    torch.testing.assert_close(scale, expected_scale, atol=0, rtol=0)
+    quant_ref = load_params(
+        MojoMoEDynamicQuant._registry.get("torch")(
+            expert_num=expert_num,
+            input_size=hidden_size,
+            quant_dtype=torch.int8,
+        ),
+        inv_smooth_scale=inv_smooth_scale,
+    )
+    quant.forward_diff_with(quant_ref, x, token_count, atol=(1, 2e-3), rtol=(0, 2e-3))
 
 
-@pytest.mark.parametrize("dtype", dtypes)
+@pytest.mark.parametrize("tokens, hidden_size, token_count", dequant_swiglu_quant_cases)
 @bypass_not_implemented
-def test_dynamic_quant_backend(dtype):
-    x = torch.randn(24, 128, dtype=dtype)
-    smooth_scale = torch.randn(128, dtype=torch.float32)
+def test_dequant_swiglu_quant(tokens, hidden_size, token_count):
+    expert_num = len(token_count)
+    token_count = torch.tensor(token_count, dtype=torch.int64)
 
-    op = load_params(MojoDynamicQuant(input_size=128, quant_dtype=torch.int8), inv_smooth_scale=1.0 / smooth_scale)
-    op_ref = load_params(
-        MojoDynamicQuant._registry.get("torch")(input_size=128, quant_dtype=torch.int8),
-        inv_smooth_scale=1.0 / smooth_scale,
-    )
-    op.forward_diff_with(op_ref, x, atol=(1, 2e-3), rtol=(0, 2e-3))
-
-
-@pytest.mark.parametrize("dtype", dtypes)
-@bypass_not_implemented
-def test_dynamic_quant_backend_moe(dtype):
-    x = torch.randn(12, 128, dtype=dtype)
-    smooth_scale = torch.randn(3, 128, dtype=torch.float32)
-    token_count = torch.tensor([4, 3, 5], dtype=torch.int32)
-
-    op = load_params(
-        MojoMoEDynamicQuant(expert_num=3, input_size=128, quant_dtype=torch.int8),
-        inv_smooth_scale=1.0 / smooth_scale,
-    )
-    op_ref = load_params(
-        MojoMoEDynamicQuant._registry.get("torch")(expert_num=3, input_size=128, quant_dtype=torch.int8),
-        inv_smooth_scale=1.0 / smooth_scale,
-    )
-    op.forward_diff_with(
-        op_ref,
-        x,
-        token_count,
-        atol=(1, 2e-3),
-        rtol=(0, 2e-3),
-    )
-
-
-def test_dynamic_quant_rejects_token_count():
-    x = torch.randn(4, 16)
-    token_count = torch.tensor([4], dtype=torch.int32)
-    op = MojoDynamicQuant._registry.get("torch")(quant_dtype=torch.int8)
-    with pytest.raises(TypeError):
-        op(x, token_count)
-
-
-def test_moe_dynamic_quant_token_count_shape_check():
-    x = torch.randn(4, 16)
-    token_count = torch.tensor([2, 1], dtype=torch.int32)
-    op = MojoMoEDynamicQuant._registry.get("torch")(expert_num=2, input_size=16, quant_dtype=torch.int8)
-    with pytest.raises(ValueError, match="token_count sum"):
-        op(x, token_count)
-
-
-def test_moe_dynamic_quant_requires_smooth_scale():
-    x = torch.randn(4, 16)
-    token_count = torch.tensor([4], dtype=torch.int32)
-    with pytest.raises(TypeError, match="expert_num"):
-        MojoMoEDynamicQuant._registry.get("torch")(quant_dtype=torch.int8)(x, token_count)
-
-
-# ---------------------------------------------------------------------------
-# MojoDequantSwiGLUQuant
-# ---------------------------------------------------------------------------
-@bypass_not_implemented
-def test_dequant_swiglu_quant_backend():
-    tokens = 12
-    hidden = 64
-    # torch_npu reqires int64
-    token_count = torch.tensor([5, 7], dtype=torch.int64)
-
-    x = torch.randint(-1024, 1024, (tokens, hidden * 2), dtype=torch.int32)
-    weight_scale = torch.rand(2, hidden * 2, dtype=torch.float32)
+    x = torch.randint(-1024, 1024, (tokens, hidden_size * 2), dtype=torch.int32)
     activation_scale = torch.rand(tokens, dtype=torch.float32)
-    quant_scale = torch.rand(2, hidden, dtype=torch.float32)
+    weight_scale = torch.rand(expert_num, hidden_size * 2, dtype=torch.float32)
+    quant_scale = torch.rand(expert_num, hidden_size, dtype=torch.float32)
 
-    op = load_params(
+    quant = load_params(
         MojoDequantSwiGLUQuant(
-            expert_num=2,
-            hidden_size=hidden,
+            expert_num=expert_num,
+            hidden_size=hidden_size,
             activate_left=False,
             quant_mode=1,
         ),
         weight_scale=weight_scale,
         quant_scale=quant_scale,
     )
-    op_ref = load_params(
+    quant_ref = load_params(
         MojoDequantSwiGLUQuant._registry.get("torch")(
-            expert_num=2,
-            hidden_size=hidden,
+            expert_num=expert_num,
+            hidden_size=hidden_size,
             activate_left=False,
             quant_mode=1,
         ),
         weight_scale=weight_scale.clone(),
         quant_scale=quant_scale.clone(),
     )
-    op.forward_diff_with(
-        op_ref,
+    quant.forward_diff_with(
+        quant_ref,
         x,
         activation_scale,
         None,

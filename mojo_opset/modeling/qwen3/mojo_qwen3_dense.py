@@ -113,7 +113,7 @@ class PagedDummyCache:
             value_states,
             self.k_cache,
             self.v_cache,
-            build_paged_kv_chunk_metadata(
+            chunk_metadata=build_paged_kv_chunk_metadata(
                 self.block_tables[layer_idx],
                 cu_seqlens,
                 current_seq_lens,

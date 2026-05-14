@@ -177,14 +177,14 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, context_kv_l
         case["value_states"],
         case["k_cache"].clone(),
         case["v_cache"].clone(),
-        case["chunk_metadata"],
+        chunk_metadata=case["chunk_metadata"],
     )
     k_cache, v_cache = store_paged_kv(
         case["key_states"],
         case["value_states"],
         case["k_cache"].clone(),
         case["v_cache"].clone(),
-        case["chunk_metadata"],
+        chunk_metadata=case["chunk_metadata"],
     )
 
     assert_close(k_cache, k_cache_ref)
@@ -242,14 +242,14 @@ def test_store_paged_kv_bucket_padded_varlen():
         value_states,
         k_cache_ref,
         v_cache_ref,
-        chunk_metadata,
+        chunk_metadata=chunk_metadata,
     )
     k_cache, v_cache = store_paged_kv(
         key_states,
         value_states,
         k_cache,
         v_cache,
-        chunk_metadata,
+        chunk_metadata=chunk_metadata,
     )
 
     for batch_id in range(real_batch_size):
@@ -303,7 +303,7 @@ def test_store_paged_kv_chunk_metadata_perf_and_accuracy():
         case["value_states"],
         case["k_cache"].clone(),
         case["v_cache"].clone(),
-        case["chunk_metadata"],
+        chunk_metadata=case["chunk_metadata"],
     )
     k_cache_legacy, v_cache_legacy = store_paged_kv_impl_legacy(
         case["key_states"],
@@ -329,7 +329,7 @@ def test_store_paged_kv_chunk_metadata_perf_and_accuracy():
             case["value_states"],
             k_cache_bench_new,
             v_cache_bench_new,
-            case["chunk_metadata"],
+            chunk_metadata=case["chunk_metadata"],
         ),
         "npu",
         warmup=10,
