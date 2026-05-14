@@ -287,6 +287,8 @@ def paged_attention_prefill_impl(
     gqa_interleave: bool,
     softmax_scale: Optional[float] = None,
     aux_mask: Optional[torch.Tensor] = None,
+    max_q_lens: Optional[int] = None,
+    max_total_seq_lens: Optional[int] = None,
 ) -> torch.Tensor:
     del aux_mask
 
