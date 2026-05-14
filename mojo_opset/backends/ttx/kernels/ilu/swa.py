@@ -670,9 +670,14 @@ def _swa_paged_prefill_kernel(
         q_end = tl.load(cu_q_lens_ptr + b_id + 1).to(tl.int32)
         kv_seq_len = tl.load(kv_lens_ptr + b_id).to(tl.int32)
         q_seq_len = q_end - q_start
+        # CUDA-Graph / padded-batch safety: skip batches with non-positive
+        # q_len or kv_len (e.g. padded tail in a max-shape static buffer).
+        if q_seq_len > 0 and kv_seq_len > 0:
+            num_q_chunks = tl.cdiv(q_seq_len, BLOCK_M)
+        else:
+            num_q_chunks = 0
         kv_computed_len = kv_seq_len - q_seq_len
 
-        num_q_chunks = tl.cdiv(q_seq_len, BLOCK_M)
         prev_q_tasks = cu_q_chunks * NUM_Q_HEADS
         cu_q_chunks += num_q_chunks
         new_q_tasks = num_q_chunks * NUM_Q_HEADS
@@ -1012,16 +1017,27 @@ def _swa_paged_prefill_kernel(
 
             l_i_safe = tl.where(l_i > 0, l_i, 1.0)
             out_block = tl.where(l_i[:, None] > 0, acc / l_i_safe[:, None], 0.0)
+            # Replace per-batch out-of-bound rows with 0 *before* the cast so
+            # NaN/Inf produced by the all-masked softmax (max(-inf,-inf) ->
+            # NaN exponent) does not propagate; combined with the explicit
+            # row+col store mask below this guarantees the padded suffix of
+            # the output buffer is left bit-identical (mandatory for CUDA
+            # Graph capture where the output address is fixed across replays).
             out_block = tl.where(q_valid[:, None], out_block, 0.0)
-            o_block_ptr = tl.make_block_ptr(
-                base=o_ptr + q_start * stride_ot + q_head_id * stride_oh,
-                shape=(q_seq_len, HEAD_DIM),
-                strides=(stride_ot, stride_od),
-                offsets=(q_block_start.to(tl.int32), 0),
-                block_shape=(BLOCK_M, BLOCK_D),
-                order=(1, 0),
+            offs_d = tl.arange(0, BLOCK_D)
+            out_rows = q_start + q_block_start + q_offsets
+            out_ptrs = (
+                o_ptr
+                + out_rows[:, None] * stride_ot
+                + q_head_id * stride_oh
+                + offs_d[None, :] * stride_od
             )
-            tl.store(o_block_ptr, out_block.to(o_ptr.type.element_ty), boundary_check=(0, 1))
+            # Use raw-pointer store with an explicit row+col mask instead of
+            # make_block_ptr + boundary_check; the latter does not reliably
+            # mask out-of-bound rows on the Iluvatar Triton backend, which
+            # would otherwise overwrite the per-batch padding region.
+            out_mask = q_valid[:, None] & (offs_d[None, :] < HEAD_DIM)
+            tl.store(out_ptrs, out_block.to(o_ptr.type.element_ty), mask=out_mask)
 
 
 def swa_infer_impl(
@@ -1113,12 +1129,16 @@ def swa_paged_prefill_impl(
             "use a compatible page size (e.g. power of two, multiple of 128 for large pages)."
         )
     block_d = triton.next_power_of_2(head_dim)
-    q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
 
     def grid(meta):
         block_m = meta["BLOCK_M"]
-        total_q_chunks = int(torch.div(q_lens + block_m - 1, block_m, rounding_mode="floor").sum().item())
-        return (ilu_grid_dim_from_row_tasks(total_q_chunks * num_q_heads),)
+        # CUDA-Graph-safe upper bound: avoid a D2H sync on cu_seqlens_q. The
+        # worst case for total Q chunks is every batch contributing at most
+        # one partial-tail chunk plus enough full chunks to cover all Q
+        # tokens, i.e. total_q_tokens / BLOCK_M + batch_size. Extra programs
+        # exit via the per-batch skip guard inside the kernel (num_q_chunks=0).
+        max_q_chunks = (total_q_tokens + block_m - 1) // block_m + batch_size
+        return (ilu_grid_dim_from_row_tasks(max_q_chunks * num_q_heads),)
 
     _swa_paged_prefill_kernel[grid](
         outputs,
