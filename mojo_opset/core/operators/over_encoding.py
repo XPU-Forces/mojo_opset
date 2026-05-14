@@ -118,15 +118,15 @@ class MojoOverEncodingNGram(MojoOperator):
         )
 
     def forward(
-        self, input_ids: torch.Tensor, oe_history_input: torch.Tensor, input_seq_lens: Optional[torch.Tensor] = None
+        self, input_ids: torch.Tensor, oe_history_input: torch.Tensor, q_lens: Optional[torch.Tensor] = None
     ):
-        
-        if input_seq_lens is not None:
+
+        if q_lens is not None:
             assert input_ids.dim() == 1  # [total_tokens]
-            assert oe_history_input.dim() == 2 and oe_history_input.size(0) == input_seq_lens.size(0) # [batch_size, max_n_gram - 1]
+            assert oe_history_input.dim() == 2 and oe_history_input.size(0) == q_lens.size(0) # [batch_size, max_n_gram - 1]
             seq_offset = 0
             oe_ngram_ids_list = []
-            for seq_idx, seq_len in map(lambda x: (x[0], x[1].item()), enumerate(input_seq_lens)):
+            for seq_idx, seq_len in map(lambda x: (x[0], x[1].item()), enumerate(q_lens)):
                 input_ids_i = input_ids[seq_offset : seq_offset + seq_len]
                 oe_ngram_ids_list.append(
                     n_gram_impl_torch(
@@ -309,25 +309,25 @@ class MojoOverEncoding(MojoOperator):
         return oe_mega_embedding
 
     def forward(
-        self, input_tensor: torch.Tensor, oe_history_input: torch.Tensor, input_seq_lens: Optional[torch.Tensor] = None
+        self, input_tensor: torch.Tensor, oe_history_input: torch.Tensor, q_lens: Optional[torch.Tensor] = None
     ):
         """Calculate the word vectors through over encoding.
 
         Args:
             input_tensor (torch.Tensor): the input token ids.
             oe_history_input (torch.Tensor): the historic input token ids ([n-gram - 1] at most).
-            input_seq_lens (Optional[torch.Tensor], optional): the lengths of each sequences for prefill. Defaults to None.
+            q_lens (Optional[torch.Tensor], optional): per-sequence input lengths for prefill (q_len). Defaults to None.
 
         Returns:
             torch.Tensor: the word vectors.
         """
 
-        if input_seq_lens is not None:
+        if q_lens is not None:
             assert input_tensor.dim() == 1  # [total_tokens]
-            assert oe_history_input.dim() == 2 and oe_history_input.size(0) == input_seq_lens.size(0) # [batch_size, max_n_gram - 1]
+            assert oe_history_input.dim() == 2 and oe_history_input.size(0) == q_lens.size(0) # [batch_size, max_n_gram - 1]
             seq_offset = 0
             oe_ngram_ids_list = []
-            for seq_idx, seq_len in map(lambda x: (x[0], x[1].item()), enumerate(input_seq_lens)):
+            for seq_idx, seq_len in map(lambda x: (x[0], x[1].item()), enumerate(q_lens)):
                 input_ids = input_tensor[seq_offset : seq_offset + seq_len]
                 oe_ngram_ids_list.append(
                     n_gram_impl_torch(
