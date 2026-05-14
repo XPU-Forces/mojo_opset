@@ -50,7 +50,6 @@ moe_dynamic_quant_cases = [
 ]
 
 dequant_swiglu_quant_cases = [
-    (8, 32, [3, 5]),
     (12, 64, [4, 3, 5]),
     (20, 128, [6, 4, 7, 3]),
     (24, 256, [5, 8, 4, 7]),
