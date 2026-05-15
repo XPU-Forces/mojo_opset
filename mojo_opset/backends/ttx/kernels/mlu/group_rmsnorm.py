@@ -89,7 +89,7 @@ def rmsnorm_fwd_triton(
     assert x.ndim == 3, f"x must be 3D [token, num_head, norm_size], got {x.shape}"
     T, H, N = x.shape
     assert x.stride(2) == 1, f"x last dim must be contiguous, got stride={x.stride()}"
-    assert N <= 8192, f"x last size must be <= 8192, got token={x.size(-1)}"
+    assert N <= 8192, f"x last size must be <= 8192, got norm_size={x.size(-1)}"
     if weight is not None:
         assert weight.dtype == x.dtype
         assert weight.shape == (N,)
