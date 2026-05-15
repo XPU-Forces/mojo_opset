@@ -8,7 +8,7 @@ platform = get_platform()
 
 _SUPPORT_TTX_PLATFROM = ["npu", "ilu", "mlu"]
 _SUPPORT_TORCH_NPU_PLATFROM = ["npu"]
-_SUPPORT_ASCENDC_PLATFORM = ["npu"]
+_SUPPORT_ASCENDC_PLATFORM = ["npu", "meta_device"]
 _SUPPORT_IXFORMER_PLATFORM = ["ilu"]
 
 if platform in _SUPPORT_IXFORMER_PLATFORM:

@@ -120,6 +120,14 @@ from .operators.mlp import MojoSwiGLUMLP
 
 """ indexer """
 from .operators.indexer import MojoLightningIndexer
+from .operators.indexer import MojoQuantLightningIndexer
+from .operators.indexer import MojoIndexerCompressEpilog
+from .operators.indexer import MojoKvCompressEpilog
+from .operators.indexer import MojoSparseAttnSharedkv
+from .operators.indexer import MojoSparseAttnSharedkvMetadata
+from .operators.indexer import MojoKvQuantSparseAttnSharedkv
+from .operators.indexer import MojoKvQuantSparseAttnSharedkvMetadata
+from .operators.indexer import MojoQuantLightningIndexerMetadata
 
 """ hc_post """
 from .operators.hc_post import MojoHcPost
@@ -238,6 +246,14 @@ __all__ = [
     "MojoCausalConv1dFunction",
 
     "MojoLightningIndexer",
+    "MojoQuantLightningIndexer",
+    "MojoIndexerCompressEpilog",
+    "MojoKvCompressEpilog",
+    "MojoSparseAttnSharedkv",
+    "MojoSparseAttnSharedkvMetadata",
+    "MojoKvQuantSparseAttnSharedkv",
+    "MojoKvQuantSparseAttnSharedkvMetadata",
+    "MojoQuantLightningIndexerMetadata",
 
     "MojoHcPost",
 

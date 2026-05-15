@@ -33,6 +33,7 @@ class MojoHcPost(MojoOperator):
         Returns:
             Output tensor with the same shape as residual.
         """
+        print('qqqq')
         data_type = x.dtype
         x_fp = x.float()
         residual_fp = residual.float()

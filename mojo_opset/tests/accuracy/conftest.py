@@ -43,7 +43,7 @@ def setup_session_device(request):
                 f"worker_id {worker_id} is greater than device_num {device_num}, "
                 f"set worker_id to {worker_id % device_num}"
             )
-        torch.cuda.set_device(worker_id % device_num)
+        # torch.cuda.set_device(worker_id % device_num)
     else:
         pass
 
