@@ -1,3 +1,6 @@
 [submodule "third_party/cann-recipes-infer"]
 	path = third_party/cann-recipes-infer
 	url = https://gitcode.com/cann/cann-recipes-infer.git
+[submodule "third_party/ops-transformer"]
+	path = third_party/ops-transformer
+	url = https://gitcode.com/cann/ops-transformer.git
