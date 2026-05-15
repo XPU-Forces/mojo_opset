@@ -103,8 +103,13 @@ class IxformerMoEDispatchQuant(MojoMoEDispatch):
         self,
         hidden_states: torch.Tensor,
         top_k_indices: torch.Tensor,
-        smooth_scale: torch.Tensor
+        smooth_scale: torch.Tensor,
+        weight_dtype: Union[str, torch.dtype] = torch.int8,
+        enable_cuda_graph: bool = False
     ):
+        if enable_cuda_graph:
+            assert torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+
         if hidden_states.dim() == 3:
             num_tokens = hidden_states.shape[0] * hidden_states.shape[1]
             dim = hidden_states.shape[-1]
@@ -128,7 +133,8 @@ class IxformerMoEDispatchQuant(MojoMoEDispatch):
                                                topk=top_k,
                                                src_to_dst=src_to_dst,
                                                topk_ids=top_k_indices,
-                                               smooth_scales=smooth_scale)
+                                               smooth_scales=smooth_scale,
+                                               output_format=1 if enable_cuda_graph and weight_dtype == "int4" else 0)
 
         return (
             i8_hidden_states.view(-1, dim),
@@ -174,30 +180,58 @@ class IxformerQuantExperts(MojoQuantExperts):
                 input_scale: torch.Tensor,
                 tokens_per_expert: torch.Tensor,
                 topk_indices: torch.Tensor,
-                sorted_token_ids: torch.Tensor):
+                sorted_token_ids: torch.Tensor,
+                enable_cuda_graph: bool = False):
         
+        if enable_cuda_graph:
+            assert torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+
         if self.weight_dtype == torch.int8:
-            group_gemm_output1 = ixf_f.moe_w8a8_group_gemm(
-                input=sorted_hidden_states,
-                weight=self.up_proj_weight,
-                i_scales=input_scale,
-                w_scales=self.up_proj_weight_scale,
-                output_dtype=self.output_dtype,
-                tokens_per_experts=tokens_per_expert,
-                format="NN"
-            )
+            if not enable_cuda_graph:
+                group_gemm_output1 = ixf_f.moe_w8a8_group_gemm(
+                    input=sorted_hidden_states,
+                    weight=self.up_proj_weight,
+                    i_scales=input_scale,
+                    w_scales=self.up_proj_weight_scale,
+                    output_dtype=self.output_dtype,
+                    tokens_per_experts=tokens_per_expert,
+                    format="NN"
+                )
+            else:
+                group_gemm_output1 = ixf_f.moe_w8a8_group_gemv(
+                    input=sorted_hidden_states,
+                    weight=self.up_proj_weight,
+                    i_scales=input_scale,
+                    w_scales=self.up_proj_weight_scale,
+                    output_dtype=self.output_dtype,
+                    tokens_per_experts=tokens_per_expert,
+                    format=0
+                )
         elif self.weight_dtype == "int4":
-            group_gemm_output1 = ixf_f.moe_w4a8_group_gemm(
-                input=sorted_hidden_states,
-                weight=self.up_proj_weight,
-                i_scales=input_scale,
-                w_scales=self.up_proj_weight_scale,
-                output_dtype=self.output_dtype,
-                tokens_per_experts=tokens_per_expert,
-                format=0,
-                version=1,
-                group_size=self.quant_group_size,
-            )
+            if not enable_cuda_graph:
+                group_gemm_output1 = ixf_f.moe_w4a8_group_gemm(
+                    input=sorted_hidden_states,
+                    weight=self.up_proj_weight,
+                    i_scales=input_scale,
+                    w_scales=self.up_proj_weight_scale,
+                    output_dtype=self.output_dtype,
+                    tokens_per_experts=tokens_per_expert,
+                    format=0,
+                    version=1,
+                    group_size=self.quant_group_size,
+                )
+            else:
+                group_gemm_output1 = ixf_f.moe_w4a8_group_gemv(
+                    input=sorted_hidden_states,
+                    weight=self.up_proj_weight,
+                    i_scales=input_scale,
+                    w_scales=self.up_proj_weight_scale,
+                    output_dtype=self.output_dtype,
+                    tokens_per_experts=tokens_per_expert,
+                    format=0,
+                    version=1,
+                    group_size=self.quant_group_size,
+                )
         else:
             raise NotImplementedError(f"IxformerQuantExperts: weight_dtype must be 'torch.int8' or 'int4', got {self.weight_dtype}.")
 
@@ -207,37 +241,66 @@ class IxformerQuantExperts(MojoQuantExperts):
             dst_to_src=sorted_token_ids,
             topk_ids=topk_indices,
             act_type="swiglu",
+            output_format=1 if enable_cuda_graph and self.weight_dtype == "int4" else 0
         )
         num_tokens, top_k = topk_indices.shape
 
         group_gemm_output2 = torch.empty(num_tokens * top_k, self.hidden_size, dtype=self.output_dtype, device=sorted_token_ids.device)
         
         if self.weight_dtype == torch.int8:
-            ixf_f.moe_w8a8_group_gemm(
-                input=act_i8,
-                weight=self.down_proj_weight,
-                i_scales=act_scale,
-                w_scales=self.down_proj_weight_scale,
-                output_dtype=self.output_dtype,
-                tokens_per_experts=tokens_per_expert,
-                dst_to_src=sorted_token_ids,
-                format="NN",
-                output=group_gemm_output2,
-            )
+            if not enable_cuda_graph:
+                ixf_f.moe_w8a8_group_gemm(
+                    input=act_i8,
+                    weight=self.down_proj_weight,
+                    i_scales=act_scale,
+                    w_scales=self.down_proj_weight_scale,
+                    output_dtype=self.output_dtype,
+                    tokens_per_experts=tokens_per_expert,
+                    dst_to_src=sorted_token_ids,
+                    format="NN",
+                    output=group_gemm_output2,
+                )
+            else:
+                ixf_f.moe_w8a8_group_gemv(
+                    input=act_i8,
+                    weight=self.down_proj_weight,
+                    i_scales=act_scale,
+                    w_scales=self.down_proj_weight_scale,
+                    output_dtype=self.output_dtype,
+                    tokens_per_experts=tokens_per_expert,
+                    dst_to_src=sorted_token_ids,
+                    format=0,
+                    output=group_gemm_output2,
+                )
         elif self.weight_dtype == "int4":
-            ixf_f.moe_w4a8_group_gemm(
-                input=act_i8,
-                weight=self.down_proj_weight,
-                i_scales=act_scale,
-                w_scales=self.down_proj_weight_scale,
-                output_dtype=self.output_dtype,
-                tokens_per_experts=tokens_per_expert,
-                dst_to_src=sorted_token_ids,
-                format=0,
-                version=1,
-                group_size=self.quant_group_size,
-                output=group_gemm_output2,
-            )
+            if not enable_cuda_graph:
+                ixf_f.moe_w4a8_group_gemm(
+                    input=act_i8,
+                    weight=self.down_proj_weight,
+                    i_scales=act_scale,
+                    w_scales=self.down_proj_weight_scale,
+                    output_dtype=self.output_dtype,
+                    tokens_per_experts=tokens_per_expert,
+                    dst_to_src=sorted_token_ids,
+                    format=0,
+                    version=1,
+                    group_size=self.quant_group_size,
+                    output=group_gemm_output2,
+                )
+            else:
+                ixf_f.moe_w4a8_group_gemv(
+                    input=act_i8,
+                    weight=self.down_proj_weight,
+                    i_scales=act_scale,
+                    w_scales=self.down_proj_weight_scale,
+                    output_dtype=self.output_dtype,
+                    tokens_per_experts=tokens_per_expert,
+                    dst_to_src=sorted_token_ids,
+                    format=0,
+                    version=1,
+                    group_size=self.quant_group_size,
+                    output=group_gemm_output2,
+                )
         else:
             raise NotImplementedError(f"IxformerQuantExperts: weight_dtype must be 'torch.int8' or 'int4', got {self.weight_dtype}.")
         
@@ -275,29 +338,33 @@ class IxformerQuantMoE(MojoQuantMoE):
         quant_dtype: torch.dtype = torch.int8,
         quant_group_size: int = -1,
         weight_dtype: Union[torch.dtype, str] = torch.int8,
-        enable_cuda_graph: bool = False,
         **kwargs
     ):
         super().__init__(num_experts, top_k, hidden_size, intermediate_size, activation, quant_dtype, quant_group_size, weight_dtype, **kwargs)
         
         if self.weight_dtype == "int4" and self.quant_group_size not in [128, 256, 320, 512]:
             raise NotImplementedError(f"IxformerQuantMoE: weight_dtype is 'int4' and quant_group_size must be 128, 256, 320, or 512, got {self.weight_dtype} and {self.quant_group_size}.")
-
-        self.enable_cuda_graph = enable_cuda_graph
-
-        if self.enable_cuda_graph:
-            raise NotImplementedError("IxformerQuantMoE: enable_cuda_graph is not supported.")
+        elif self.weight_dtype == torch.int8 and self.quant_group_size != -1:
+            raise NotImplementedError(f"IxformerQuantMoE: weight_dtype is 'torch.int8' and quant_group_size must be -1, got {self.weight_dtype} and {self.quant_group_size}.")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            enable_cuda_graph = True
+        else:
+            enable_cuda_graph = False
+
         top_k_indices, top_k_gates = self.gating(hidden_states)
 
         i8_hs, sorted_token_ids, src_to_dst, tokens_per_expert, quant_scale = self.dispatch(
             hidden_states,
             top_k_indices,
             self.experts.up_proj_quantize.inv_smooth_scale,
+            weight_dtype=self.weight_dtype,
+            enable_cuda_graph=enable_cuda_graph
         )
 
-        if not self.enable_cuda_graph:
+        if not enable_cuda_graph:
             tokens_per_expert = tokens_per_expert.cpu()
 
         expert_outputs = self.experts(
@@ -305,7 +372,8 @@ class IxformerQuantMoE(MojoQuantMoE):
             quant_scale,
             tokens_per_expert,
             top_k_indices,
-            sorted_token_ids      
+            sorted_token_ids,
+            enable_cuda_graph=enable_cuda_graph      
         )
 
         expert_outputs = expert_outputs.view(-1, self.top_k, self.hidden_size)
