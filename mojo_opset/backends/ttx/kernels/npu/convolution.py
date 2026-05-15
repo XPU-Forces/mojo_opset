@@ -96,7 +96,7 @@ def causal_conv1d_fwd_kernel(
                 # We keep intra loop load because preloading will cause ub overflow under certain tiling.
                 b_yi = tl.load(x + bos * D + yi_offset_0 * D + yi_offset_1, mask=mask, other=0.0).to(tl.float32)
                 if HAS_WEIGHT:
-                    b_yi *= tl.extract_slice(b_w, [i_w + W - 1, 0], [1, BD], [1, 1])
+                    b_yi *= tl.extra.cann.extension.extract_slice(b_w, [i_w + W - 1, 0], [1, BD], [1, 1])
 
                 b_y += b_yi
         elif i_t * BT >= W:
@@ -105,7 +105,7 @@ def causal_conv1d_fwd_kernel(
                 mask = (yi_offset_0 < T_len) & (yi_offset_1 < D) & (yi_offset_0 >= 0)
                 b_yi = tl.load(x + bos * D + yi_offset_0 * D + yi_offset_1, mask=mask, other=0.0).to(tl.float32)
                 if HAS_WEIGHT:
-                    b_yi *= tl.extract_slice(b_w, [i_w + W - 1, 0], [1, BD], [1, 1])
+                    b_yi *= tl.extra.cann.extension.extract_slice(b_w, [i_w + W - 1, 0], [1, BD], [1, 1])
                 b_y += b_yi
         else:
             o_t = i_t * BT + tl.arange(0, BT)
@@ -123,7 +123,7 @@ def causal_conv1d_fwd_kernel(
                 )
 
                 if HAS_WEIGHT:
-                    b_yi *= tl.extract_slice(b_w, [i_w + W - 1, 0], [1, BD], [1, 1])
+                    b_yi *= tl.extra.cann.extension.extract_slice(b_w, [i_w + W - 1, 0], [1, BD], [1, 1])
                 b_y += b_yi
 
         if HAS_BIAS:
@@ -246,19 +246,19 @@ def causal_conv1d_bwd_kernel(
                 b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
 
             for i_w in tl.static_range(0, W):
-                b_dy_sub = tl.extract_slice(b_dy, [i_w, 0], [BT, BD], [1, 1])
+                b_dy_sub = tl.extra.cann.extension.extract_slice(b_dy, [i_w, 0], [BT, BD], [1, 1])
 
                 if ACTIVATION == "swish" or ACTIVATION == "silu":
-                    b_y_sub = tl.extract_slice(b_y, [i_w, 0], [BT, BD], [1, 1])
+                    b_y_sub = tl.extra.cann.extension.extract_slice(b_y, [i_w, 0], [BT, BD], [1, 1])
                     b_ys = tl.sigmoid(b_y_sub)
                     b_dy_sub = b_dy_sub * b_ys * (1 + b_y_sub * (1 - b_ys))
 
                 b_wdy = b_dy_sub
                 if HAS_WEIGHT:
-                    b_wdy = b_wdy * tl.extract_slice(b_w, [W - i_w - 1, 0], [1, BD], [1, 1])
+                    b_wdy = b_wdy * tl.extra.cann.extension.extract_slice(b_w, [W - i_w - 1, 0], [1, BD], [1, 1])
 
                     b_dw_sub = tl.sum(b_dy_sub * b_x, 0)  # [BT, BD] * [BT, BD] --> sum(0) = [BD]
-                    b_dw = tl.insert_slice(b_dw, b_dw_sub[None, :], [W - i_w - 1, 0], [1, BD], [1, 1])
+                    b_dw = tl.extra.cann.extension.insert_slice(b_dw, b_dw_sub[None, :], [W - i_w - 1, 0], [1, BD], [1, 1])
 
                 if HAS_BIAS and i_w == 0:
                     b_db += tl.sum(b_dy_sub, 0)
@@ -280,7 +280,7 @@ def causal_conv1d_bwd_kernel(
                     b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
                 b_wdy = b_dy
                 if HAS_WEIGHT:
-                    b_wdy = b_wdy * tl.extract_slice(b_w, [W - i_w - 1, 0], [1, BD], [1, 1])
+                    b_wdy = b_wdy * tl.extra.cann.extension.extract_slice(b_w, [W - i_w - 1, 0], [1, BD], [1, 1])
 
                     b_dw = tl.sum(b_dy * b_x, 0)
                     tl.store(dw + i_tg * D * W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
@@ -335,7 +335,7 @@ def causal_conv1d_bwd_kernel(
                 b_wdy = (
                     b_dy_shift
                     if not HAS_WEIGHT
-                    else (b_dy_shift * tl.extract_slice(b_w, [W - i_w - 1, 0], [1, BD], [1, 1]))
+                    else (b_dy_shift * tl.extra.cann.extension.extract_slice(b_w, [W - i_w - 1, 0], [1, BD], [1, 1]))
                 )
                 b_dx += b_wdy
 
@@ -583,7 +583,7 @@ def causal_conv1d_states_fwd_kernel(
     o_t = eos - BW + tl.arange(0, BW)
     o_d = i_d * BD + tl.arange(0, BD)
     o_w = W - BW + tl.arange(0, BW)
-    m_t = o_t >= tl.maximum(bos, eos - W)
+    m_t = o_t >= tl.maximum(bos, eos - W,propagate_nan=tl.PropagateNan.ALL)
     m_d = o_d < D
     m_w = (o_w >= 0) & (o_w < W)
 
@@ -694,7 +694,7 @@ def causal_conv1d_update_kernel_bdt_fwd(
             mask_x = (offset0_x < dim)[:, None] & ((offset1_x >= 0) & (offset1_x < seq_len))[None, :]
             block_off_x = bi * dim * seq_len + offset0_x[:, None] * seq_len + offset1_x[None, :]
             x_b_tmp = tl.load(x_ptr + block_off_x, mask=mask_x, other=0)
-            x_b = tl.insert_slice(st_b, x_b_tmp, (0, width - 1), (D_CHK_SIZE, T_CHK_SIZE), (1, 1))
+            x_b = tl.extra.cann.extension.insert_slice(st_b, x_b_tmp, (0, width - 1), (D_CHK_SIZE, T_CHK_SIZE), (1, 1))
         else:
             offset0 = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)
             offset1 = ti * T_CHK_SIZE - (width - 1) + tl.arange(0, T_CHK_SIZE + width - 1)
@@ -715,7 +715,7 @@ def causal_conv1d_update_kernel_bdt_fwd(
                 # NOTE: In order to avoid use tl.maximum for negative offset,
                 #       we pre-compute a fix head tile size (ST_STORE_HEAD_TILE_SIZE)
                 #       to store the scene of negative address
-                x_new_h = tl.extract_slice(x_b, (-t_off, 0), (ST_STORE_HEAD_TILE_SIZE, D_CHK_SIZE), (1, 1))
+                x_new_h = tl.extra.cann.extension.extract_slice(x_b, (-t_off, 0), (ST_STORE_HEAD_TILE_SIZE, D_CHK_SIZE), (1, 1))
                 x_new_h = tl.trans(x_new_h, (1, 0))
                 nst_off_y0 = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)[:, None]
                 nst_off_y1_h = tl.arange(0, ST_STORE_HEAD_TILE_SIZE)[None, :]
@@ -723,7 +723,7 @@ def causal_conv1d_update_kernel_bdt_fwd(
                 block_ptr_h = bi * dim * state_len + nst_off_y0 * state_len + nst_off_y1_h
                 tl.store(conv_state_update_ptr + block_ptr_h, x_new_h, mask=nst_mask_h)
             else:
-                x_new_s = tl.extract_slice(x_b, (width - 1, 0), (T_CHK_SIZE, D_CHK_SIZE), (1, 1))
+                x_new_s = tl.extra.cann.extension.extract_slice(x_b, (width - 1, 0), (T_CHK_SIZE, D_CHK_SIZE), (1, 1))
                 x_new_s = tl.trans(x_new_s, (1, 0))
                 nst_off_y0 = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)[:, None]
                 nst_off_y1 = width - 1 + t_off + tl.arange(0, T_CHK_SIZE)[None, :]
@@ -732,14 +732,14 @@ def causal_conv1d_update_kernel_bdt_fwd(
                 tl.store(conv_state_update_ptr + block_ptr, x_new_s, mask=nst_mask)
 
         for owi in tl.range(0, width):
-            new_x = tl.extract_slice(x_b, (owi, 0), (T_CHK_SIZE, D_CHK_SIZE), (1, 1))
-            w_chl_wi = tl.extract_slice(w, (owi, 0), (1, D_CHK_SIZE), (1, 1))
+            new_x = tl.extra.cann.extension.extract_slice(x_b, (owi, 0), (T_CHK_SIZE, D_CHK_SIZE), (1, 1))
+            w_chl_wi = tl.extra.cann.extension.extract_slice(w, (owi, 0), (1, D_CHK_SIZE), (1, 1))
             x_mul_chl_wi = new_x * w_chl_wi
             out_block += x_mul_chl_wi
         out_block = tl.trans(out_block, (1, 0))
 
         if SILU_ACTIVATION:
-            out_block = out_block * tl.sigmoid(out_block)
+            out_block = (out_block * tl.sigmoid(out_block)).to(x_ptr.dtype.element_ty)
         tl.store(
             tl.make_block_ptr(
                 out_ptr,

@@ -23,7 +23,7 @@ class TTXRMSNormFunction(MojoRMSNormFunction):
     ) -> torch.Tensor:
         # FIXME: Currently, MojoNormFunction base class does not define fields like 'offset', so they are hardcoded here temporarily.
         offset = 0.0
-        casting_mode = "llama"
+        casting_mode = "gemma"
         str_to_casting_mode = {"llama": 0, "gemma": 1, "none": -1}
         casting_mode_int = str_to_casting_mode[casting_mode]
 
