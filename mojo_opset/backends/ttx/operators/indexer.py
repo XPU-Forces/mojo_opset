@@ -1,8 +1,11 @@
 from typing import Optional
+from typing import Tuple
 
 import torch
 
 from mojo_opset.backends.ttx.kernels import lightning_indexer_impl
+from mojo_opset.backends.ttx.kernels import sals_indexer_impl
+from mojo_opset.core import MojoSALSIndexer
 from mojo_opset.experimental import MojoLightningIndexer
 from mojo_opset.experimental.operators.indexer import MojoIndexer
 
@@ -60,3 +63,33 @@ class TTXIndexer(MojoIndexer):
     """
 
     supported_platforms_list = ["npu"]
+
+
+class TTXSALSIndexer(MojoSALSIndexer):
+    supported_platforms_list = ["npu"]
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        block_table: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+        act_n_counts: torch.Tensor,
+        sparse_block_size: int,
+        sparse_ratio: float,
+        fixed_tail_count: int,
+        sparse_count: int,
+        score_mode: str,
+        max_seqlen_key: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        query = query.contiguous()
+        key = key.contiguous()
+        block_table = block_table.contiguous()
+        actual_seq_lengths_key = actual_seq_lengths_key.contiguous()
+        act_n_counts = act_n_counts.contiguous()
+
+        return sals_indexer_impl(
+            query, key, block_table, actual_seq_lengths_key, act_n_counts,
+            sparse_block_size, sparse_ratio, fixed_tail_count, sparse_count,
+            score_mode, max_seqlen_key,
+        )

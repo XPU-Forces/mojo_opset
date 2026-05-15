@@ -95,6 +95,9 @@ from .operators.convolution import MojoCausalConv1dUpdateState
 """ mlp"""
 from .operators.mlp import MojoSwiGLUMLP
 
+""" indexer """
+from .operators.indexer import MojoSALSIndexer
+
 """ functions """
 from .functions.activation import MojoSiluFunction
 from .functions.attention import MojoSWAFunction
@@ -184,6 +187,8 @@ __all__ = [
     "MojoApplyRoPEFunction",
     "MojoFusedLinearCrossEntropyFunction",
     "MojoCausalConv1dFunction",
+
+    "MojoSALSIndexer",
 
     "MojoFusedLinearCrossEntropyLoss",
 
