@@ -9,7 +9,7 @@ from mojo_opset.tests.utils import bypass_not_implemented
 HEAD_DIM = 128
 SPARSE_BLOCK_SIZE = 16
 DEFAULT_SPARSE_RATIO = 0.25
-DEFAULT_FIXED_TAIL = 8
+DEFAULT_FIXED_TAIL = 32
 
 MODEL_SPECS = [
     ("new_model_1", 2),
@@ -20,6 +20,14 @@ MODEL_SPECS = [
     ("new_model_6", 16),
     ("M9-23B", 8),
     ("M8-14B", 8),
+]
+
+# (q_seqlen, share_len, kv_seqlen)
+PREFILL_SCENARIOS = [
+    (8192,  128, 1024),
+    (8192,  256, 2048),
+    (16384, 256, 1024),
+    (32768, 256, 2048),
 ]
 
 
@@ -61,26 +69,16 @@ def _generate_sals_indexer_data(G, seq_lengths, kv_heads):
     )
 
 
-@pytest.mark.parametrize(
-    "query, key, block_table, actual_seq_lengths_key, act_n_counts, "
-    "sparse_block_size, sparse_ratio, fixed_tail_count, sparse_count, "
-    "score_mode, max_seqlen_key",
-    [
-        pytest.param(*_generate_sals_indexer_data(G=4, seq_lengths=[512] * 4, kv_heads=kv_heads), id=f"{name}-G4-S512")
-        for name, kv_heads in MODEL_SPECS
-    ] + [
-        pytest.param(*_generate_sals_indexer_data(G=2, seq_lengths=[1024, 2048], kv_heads=kv_heads), id=f"{name}-G2-S1024-2048")
-        for name, kv_heads in MODEL_SPECS
-    ],
-)
+@pytest.mark.parametrize("model_name,kv_heads", MODEL_SPECS)
+@pytest.mark.parametrize("q_seqlen,share_len,kv_seqlen", PREFILL_SCENARIOS)
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
-def test_sals_indexer_perf(
-    query, key, block_table, actual_seq_lengths_key, act_n_counts,
-    sparse_block_size, sparse_ratio, fixed_tail_count, sparse_count,
-    score_mode, max_seqlen_key,
-):
+def test_sals_indexer_perf(model_name, kv_heads, q_seqlen, share_len, kv_seqlen):
+    G = q_seqlen // share_len
+    (query, key, block_table, actual_seq_lengths_key, act_n_counts,
+     sbs, sparse_ratio, fixed_tail_count, sparse_count,
+     score_mode, max_seqlen_key) = _generate_sals_indexer_data(G, [kv_seqlen] * G, kv_heads)
     indexer = MojoSALSIndexer()
     perf(lambda: indexer(query, key, block_table, actual_seq_lengths_key, act_n_counts,
-                         sparse_block_size, sparse_ratio, fixed_tail_count, sparse_count,
+                         sbs, sparse_ratio, fixed_tail_count, sparse_count,
                          score_mode, max_seqlen_key))

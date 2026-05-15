@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """Performance: MojoSALSSFA operator-level benchmark.
 
-Only tests MODEL_SPECS scenarios as required.
-
 pytest mojo_opset/tests/perf/test_sals_sfa.py -v
 """
 from __future__ import annotations
@@ -18,7 +16,8 @@ from mojo_opset.utils.platform import get_torch_device
 
 SPARSE_BLOCK_SIZE = 16
 HEAD_DIM = 128
-DEFAULT_K = 8
+DEFAULT_SPARSE_RATIO = 0.25
+DEFAULT_FIXED_TAIL = 32
 
 MODEL_SPECS = [
     ("new_model_1", 128, 8, 2),
@@ -31,40 +30,42 @@ MODEL_SPECS = [
     ("M8-14B", 128, 64, 8),
 ]
 
+# (q_seqlen, share_len, base_kv, sparsity)
+PREFILL_SCENARIOS = [
+    (8192,  128, 1024, 4),
+    (8192,  256, 0,    4),
+    (16384, 256, 0,    4),
+    (32768, 256, 0,    4),
+]
 
-def _generate_sfa_data(num_query_heads, num_kv_heads, head_dim, B_req, q_lens, base_kv_lens):
+
+def _compute_K(total_kv_len, sparse_ratio=DEFAULT_SPARSE_RATIO, fixed_tail=DEFAULT_FIXED_TAIL):
+    num_blocks = (total_kv_len + SPARSE_BLOCK_SIZE - 1) // SPARSE_BLOCK_SIZE
+    ft = min(fixed_tail, num_blocks)
+    sort_blocks = max(num_blocks - ft, 0)
+    topk = max(1, int(sort_blocks * sparse_ratio + 0.5)) if sort_blocks > 0 else 0
+    return min(topk + ft, num_blocks)
+
+
+def _generate_sfa_data(num_query_heads, num_kv_heads, head_dim,
+                       q_seqlen, base_kv, G, sparse_ratio):
     device = get_torch_device()
     dtype = torch.float16
-    G = B_req
-    K = DEFAULT_K
     sbs = SPARSE_BLOCK_SIZE
-    softmax_scale = 1.0 / (head_dim**0.5)
+    total_kv = base_kv + q_seqlen
+    K = _compute_K(total_kv, sparse_ratio=sparse_ratio)
+    softmax_scale = 1.0 / (head_dim ** 0.5)
 
-    T = sum(q_lens)
-    cumsum_q = [0]
-    for ql in q_lens:
-        cumsum_q.append(cumsum_q[-1] + ql)
-    total_kv_lens = [base_kv_lens[b] + q_lens[b] for b in range(B_req)]
+    T = q_seqlen
+    cumsum_q = [0, q_seqlen]
 
-    cache_block_size = sbs
-    max_blocks_needed = max(
-        (tv + cache_block_size - 1) // cache_block_size
-        for tv in total_kv_lens
-    ) if total_kv_lens else 1
+    max_blocks_needed = (total_kv + sbs - 1) // sbs
     table_len = max_blocks_needed
-    num_blocks = table_len * B_req + 4
+    num_blocks = table_len + 4
 
-    k_cache = torch.randn(
-        num_blocks, cache_block_size, num_kv_heads, head_dim,
-        dtype=dtype, device=device,
-    )
-    v_cache = torch.randn(
-        num_blocks, cache_block_size, num_kv_heads, head_dim,
-        dtype=dtype, device=device,
-    )
-    block_tables = torch.arange(
-        0, B_req * table_len, dtype=torch.int32, device=device,
-    ).reshape(B_req, table_len)
+    k_cache = torch.randn(num_blocks, sbs, num_kv_heads, head_dim, dtype=dtype, device=device)
+    v_cache = torch.randn(num_blocks, sbs, num_kv_heads, head_dim, dtype=dtype, device=device)
+    block_tables = torch.arange(0, table_len, dtype=torch.int32, device=device).unsqueeze(0)
 
     q = torch.randn(T, num_query_heads, head_dim, dtype=dtype, device=device)
 
@@ -74,27 +75,22 @@ def _generate_sfa_data(num_query_heads, num_kv_heads, head_dim, B_req, q_lens, b
     seq_len_flat = torch.zeros(G, dtype=torch.int32, device=device)
     indices_flat = torch.zeros(G, num_kv_heads, K, dtype=torch.int32, device=device)
 
+    chunk_size = q_seqlen // G if G > 0 else 0
+    fixed_tail = DEFAULT_FIXED_TAIL
     for i in range(G):
-        qid = i % B_req
-        group_qid[i] = qid
-        groups_for_req = sum(1 for j in range(G) if j % B_req == qid)
-        group_idx = sum(1 for j in range(i) if j % B_req == qid)
-        q_len_req = q_lens[qid]
-        chunk_size = q_len_req // groups_for_req if groups_for_req > 0 else 0
-        q_start_offset = cumsum_q[qid] + group_idx * chunk_size
-        if group_idx < groups_for_req - 1:
-            q_end_offset = cumsum_q[qid] + (group_idx + 1) * chunk_size
-        else:
-            q_end_offset = cumsum_q[qid + 1]
-        actual_q_len = q_end_offset - q_start_offset
-        group_q_start[i] = q_start_offset
-        group_q_len_t[i] = actual_q_len
+        group_qid[i] = 0
+        group_q_start[i] = i * chunk_size
+        group_q_len_t[i] = chunk_size if i < G - 1 else (q_seqlen - i * chunk_size)
 
-        tv = total_kv_lens[qid]
-        max_logical_blocks = (tv + sbs - 1) // sbs
-        num_selected = min(K, max(1, max_logical_blocks // 2)) if max_logical_blocks > 0 else 0
-        if max_logical_blocks > 0 and num_selected > 0:
-            perm = torch.randperm(max_logical_blocks, device=device)[:num_selected]
+        if max_blocks_needed > 0:
+            ft = min(fixed_tail, max_blocks_needed)
+            sort_n = max(max_blocks_needed - ft, 0)
+            topk = max(1, int(sort_n * sparse_ratio + 0.5)) if sort_n > 0 else 0
+            num_selected = min(topk + ft, max_blocks_needed, K)
+        else:
+            num_selected = 0
+        if max_blocks_needed > 0 and num_selected > 0:
+            perm = torch.randperm(max_blocks_needed, device=device)[:num_selected]
             actual = perm.shape[0]
             for h in range(num_kv_heads):
                 indices_flat[i, h, :actual] = perm
@@ -102,7 +98,7 @@ def _generate_sfa_data(num_query_heads, num_kv_heads, head_dim, B_req, q_lens, b
                     indices_flat[i, h, actual:] = perm[-1]
         seq_len_flat[i] = num_selected
 
-    base_kv_len = torch.tensor(base_kv_lens, dtype=torch.int32, device=device)
+    base_kv_len = torch.tensor([base_kv], dtype=torch.int32, device=device)
     cumsum_q_len = torch.tensor(cumsum_q, dtype=torch.int32, device=device)
 
     return (
@@ -116,51 +112,30 @@ def _generate_sfa_data(num_query_heads, num_kv_heads, head_dim, B_req, q_lens, b
     )
 
 
-@pytest.mark.parametrize(
-    "q, k_cache, v_cache, k_scales, v_scales, "
-    "block_tables, indices_flat, seq_len_flat, "
-    "group_qid, group_q_start, group_q_len, "
-    "cumsum_q_len, base_kv_len, group_use_dense, "
-    "softmax_scale, "
-    "num_kv_heads, num_query_heads, head_dim, sparse_block_size",
-    [
-        pytest.param(
-            *_generate_sfa_data(
-                num_query_heads=qh, num_kv_heads=kv, head_dim=hd,
-                B_req=2, q_lens=[32, 48], base_kv_lens=[64, 96],
-            ),
-            id=f"{name}-B2-S32-48",
-        )
-        for name, hd, qh, kv in MODEL_SPECS
-    ] + [
-        pytest.param(
-            *_generate_sfa_data(
-                num_query_heads=qh, num_kv_heads=kv, head_dim=hd,
-                B_req=1, q_lens=[64], base_kv_lens=[128],
-            ),
-            id=f"{name}-B1-S64",
-        )
-        for name, hd, qh, kv in MODEL_SPECS
-    ],
-)
+@pytest.mark.parametrize("model_name,head_dim,num_query_heads,num_kv_heads", MODEL_SPECS)
+@pytest.mark.parametrize("q_seqlen,share_len,base_kv,sparsity", PREFILL_SCENARIOS)
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
-def test_sals_sfa_perf(
-    q, k_cache, v_cache, k_scales, v_scales,
-    block_tables, indices_flat, seq_len_flat,
-    group_qid, group_q_start, group_q_len,
-    cumsum_q_len, base_kv_len, group_use_dense,
-    softmax_scale,
-    num_kv_heads, num_query_heads, head_dim, sparse_block_size,
-):
+def test_sals_sfa_perf(model_name, head_dim, num_query_heads, num_kv_heads,
+                       q_seqlen, share_len, base_kv, sparsity):
+    G = q_seqlen // share_len
+    sr = 1.0 / sparsity
+    (q, k_cache, v_cache, k_scales, v_scales,
+     block_tables, indices_flat, seq_len_flat,
+     group_qid, group_q_start, group_q_len,
+     cumsum_q_len, base_kv_len, group_use_dense,
+     softmax_scale,
+     num_kv_heads_out, num_query_heads_out, head_dim_out,
+     sparse_block_size) = _generate_sfa_data(
+        num_query_heads, num_kv_heads, head_dim, q_seqlen, base_kv, G, sr)
     op = MojoSALSSFA()
-    perf(lambda: op(
+    perf(lambda: op(  # noqa: F821
         q, k_cache, v_cache, k_scales, v_scales,
         block_tables, indices_flat, seq_len_flat,
         group_qid, group_q_start, group_q_len,
         cumsum_q_len, base_kv_len, group_use_dense,
         softmax_scale,
-        num_kv_heads, num_query_heads, head_dim, sparse_block_size,
+        num_kv_heads_out, num_query_heads_out, head_dim_out, sparse_block_size,
     ))
 
 

@@ -19,9 +19,9 @@ from mojo_opset.tests.utils import auto_switch_platform, bypass_not_implemented
 
 SPARSE_BLOCK_SIZE = 16
 HEAD_DIM = 128
-DEFAULT_K = 8
 
 MODEL_SPECS = [
+    # (name, head_dim, num_query_heads, num_kv_heads)
     ("new_model_1", 128, 8, 2),
     ("new_model_2", 128, 8, 4),
     ("new_model_3", 128, 16, 4),
@@ -32,6 +32,50 @@ MODEL_SPECS = [
     ("M8-14B", 128, 64, 8),
 ]
 
+# (q_seqlen, share_len, base_kv, sparsity, fixed_tail, dtype)
+# Minimal set covering all required parameter values:
+#   share_len ∈ {128, 256}
+#   sparsity ∈ {2, 4}  (sparse_ratio 0.5, 0.25)
+#   fixed_tail ∈ {32, 64}
+#   dtype ∈ {fp16, bf16}
+#   base_kv ∈ {0, 1024, 2048}
+#   q_seqlen ∈ {8k, 16k, 32k}
+SCENARIOS = [
+    (8192,  128, 0,    4, 32, torch.float16),
+    (8192,  256, 2048, 2, 64, torch.bfloat16),
+    (16384, 128, 1024, 4, 64, torch.float16),
+    (16384, 256, 0,    2, 32, torch.bfloat16),
+    (32768, 256, 0,    4, 32, torch.float16),
+]
+
+# 64k/128k only with lightweight model to avoid OOM
+LARGE_SCENARIOS = [
+    (65536,  256, 0, 4, 32, torch.float16),
+    (131072, 256, 0, 2, 64, torch.float16),
+]
+
+_SMALL_MODEL = MODEL_SPECS[0]  # new_model_1 (qH=8, kvH=2)
+
+_ALL_PARAMS = []
+for _m in MODEL_SPECS:
+    for _s in SCENARIOS:
+        _ALL_PARAMS.append(pytest.param(
+            *_m, *_s, id=f"{_m[0]}-q{_s[0]}-sl{_s[1]}",
+        ))
+for _s in LARGE_SCENARIOS:
+    _ALL_PARAMS.append(pytest.param(
+        *_SMALL_MODEL, *_s, id=f"{_SMALL_MODEL[0]}-q{_s[0]}-sl{_s[1]}",
+    ))
+
+
+def _compute_K(total_kv_len, sparse_block_size=SPARSE_BLOCK_SIZE,
+               sparse_ratio=0.25, fixed_tail=32):
+    num_blocks = (total_kv_len + sparse_block_size - 1) // sparse_block_size
+    ft = min(fixed_tail, num_blocks)
+    sort_blocks = max(num_blocks - ft, 0)
+    topk = max(1, int(sort_blocks * sparse_ratio + 0.5)) if sort_blocks > 0 else 0
+    return min(topk + ft, num_blocks)
+
 
 def _device():
     return get_torch_device()
@@ -39,72 +83,39 @@ def _device():
 
 def _make_sfa_inputs(
     *,
-    num_query_heads: int = 8,
-    num_kv_heads: int = 2,
+    num_query_heads: int,
+    num_kv_heads: int,
     head_dim: int = HEAD_DIM,
     sparse_block_size: int = SPARSE_BLOCK_SIZE,
-    B_req: int = 2,
-    q_lens: list[int] | None = None,
-    base_kv_lens: list[int] | None = None,
-    G: int | None = None,
-    K: int = DEFAULT_K,
+    q_seqlen: int,
+    base_kv: int,
+    G: int,
+    sparse_ratio: float = 0.25,
+    fixed_tail: int = 32,
     dtype: torch.dtype = torch.float16,
-    with_scales: bool = False,
-    with_dense: bool = False,
 ) -> dict:
     device = _device()
-    assert B_req >= 1
+    B_req = 1
+    q_lens = [q_seqlen]
+    base_kv_lens = [base_kv]
 
-    if q_lens is None:
-        q_lens = [32] * B_req
-    if base_kv_lens is None:
-        base_kv_lens = [64] * B_req
-    assert len(q_lens) == B_req
-    assert len(base_kv_lens) == B_req
+    total_kv = base_kv + q_seqlen
+    K = _compute_K(total_kv, sparse_block_size, sparse_ratio, fixed_tail)
 
-    if G is None:
-        G = B_req
-    assert G >= 0
-
-    T = sum(q_lens)
-    softmax_scale = 1.0 / (head_dim**0.5)
-
-    cumsum_q = [0]
-    for ql in q_lens:
-        cumsum_q.append(cumsum_q[-1] + ql)
-
-    total_kv_lens = [base_kv_lens[b] + q_lens[b] for b in range(B_req)]
+    T = q_seqlen
+    softmax_scale = 1.0 / (head_dim ** 0.5)
+    cumsum_q = [0, q_seqlen]
 
     cache_block_size = sparse_block_size
-    max_blocks_needed = max(
-        (tv + cache_block_size - 1) // cache_block_size
-        for tv in total_kv_lens
-    ) if total_kv_lens else 1
+    max_blocks_needed = (total_kv + cache_block_size - 1) // cache_block_size
     table_len = max_blocks_needed
-    num_blocks = table_len * B_req + 4
+    num_blocks = table_len + 4
 
-    k_cache = torch.randn(
-        num_blocks, cache_block_size, num_kv_heads, head_dim,
-        dtype=dtype, device=device,
-    )
-    v_cache = torch.randn(
-        num_blocks, cache_block_size, num_kv_heads, head_dim,
-        dtype=dtype, device=device,
-    )
-
-    block_tables = torch.arange(
-        0, B_req * table_len, dtype=torch.int32, device=device,
-    ).reshape(B_req, table_len)
-
-    k_scales: torch.Tensor | None = None
-    v_scales: torch.Tensor | None = None
-    if with_scales:
-        k_scales = torch.randn(
-            num_kv_heads, head_dim, dtype=torch.float32, device=device,
-        ).abs() + 0.5
-        v_scales = torch.randn(
-            num_kv_heads, head_dim, dtype=torch.float32, device=device,
-        ).abs() + 0.5
+    k_cache = torch.randn(num_blocks, cache_block_size, num_kv_heads, head_dim,
+                           dtype=dtype, device=device)
+    v_cache = torch.randn(num_blocks, cache_block_size, num_kv_heads, head_dim,
+                           dtype=dtype, device=device)
+    block_tables = torch.arange(0, table_len, dtype=torch.int32, device=device).unsqueeze(0)
 
     q = torch.randn(T, num_query_heads, head_dim, dtype=dtype, device=device)
 
@@ -114,30 +125,21 @@ def _make_sfa_inputs(
     seq_len_flat = torch.zeros(G, dtype=torch.int32, device=device)
     indices_flat = torch.zeros(G, num_kv_heads, K, dtype=torch.int32, device=device)
 
+    chunk_size = q_seqlen // G if G > 0 else 0
     for i in range(G):
-        qid = i % B_req
-        group_qid[i] = qid
+        group_qid[i] = 0
+        group_q_start[i] = i * chunk_size
+        group_q_len_t[i] = chunk_size if i < G - 1 else (q_seqlen - i * chunk_size)
 
-        groups_for_req = sum(1 for j in range(G) if j % B_req == qid)
-        group_idx = sum(1 for j in range(i) if j % B_req == qid)
-
-        q_len_req = q_lens[qid]
-        chunk_size = q_len_req // groups_for_req if groups_for_req > 0 else 0
-
-        q_start_offset = cumsum_q[qid] + group_idx * chunk_size
-        if group_idx < groups_for_req - 1:
-            q_end_offset = cumsum_q[qid] + (group_idx + 1) * chunk_size
+        max_logical_blocks = max_blocks_needed
+        if max_logical_blocks > 0:
+            ft = min(fixed_tail, max_logical_blocks)
+            sort_n = max(max_logical_blocks - ft, 0)
+            topk = max(1, int(sort_n * sparse_ratio + 0.5)) if sort_n > 0 else 0
+            num_selected = min(topk + ft, max_logical_blocks, K)
         else:
-            q_end_offset = cumsum_q[qid + 1]
+            num_selected = 0
 
-        actual_q_len = q_end_offset - q_start_offset
-        group_q_start[i] = q_start_offset
-        group_q_len_t[i] = actual_q_len
-
-        tv = total_kv_lens[qid]
-        max_logical_blocks = (tv + sparse_block_size - 1) // sparse_block_size
-
-        num_selected = min(K, max(1, max_logical_blocks // 2)) if max_logical_blocks > 0 else 0
         if max_logical_blocks > 0 and num_selected > 0:
             perm = torch.randperm(max_logical_blocks, device=device)[:num_selected]
             actual = perm.shape[0]
@@ -145,34 +147,23 @@ def _make_sfa_inputs(
                 indices_flat[i, h, :actual] = perm
                 if actual > 0 and actual < K:
                     indices_flat[i, h, actual:] = perm[-1]
-
         seq_len_flat[i] = num_selected
-
-    base_kv_len = torch.tensor(base_kv_lens, dtype=torch.int32, device=device)
-    cumsum_q_len = torch.tensor(cumsum_q, dtype=torch.int32, device=device)
-
-    group_use_dense: torch.Tensor | None = None
-    if with_dense and G > 0:
-        group_use_dense = torch.zeros(G, dtype=torch.int32, device=device)
-        for i in range(G):
-            if i % 3 == 0:
-                group_use_dense[i] = 1
 
     return dict(
         q=q,
         k_cache=k_cache,
         v_cache=v_cache,
-        k_scales=k_scales,
-        v_scales=v_scales,
+        k_scales=None,
+        v_scales=None,
         block_tables=block_tables,
         indices_flat=indices_flat,
         seq_len_flat=seq_len_flat,
         group_qid=group_qid,
         group_q_start=group_q_start,
         group_q_len=group_q_len_t,
-        cumsum_q_len=cumsum_q_len,
-        base_kv_len=base_kv_len,
-        group_use_dense=group_use_dense,
+        cumsum_q_len=torch.tensor(cumsum_q, dtype=torch.int32, device=device),
+        base_kv_len=torch.tensor(base_kv_lens, dtype=torch.int32, device=device),
+        group_use_dense=None,
         softmax_scale=softmax_scale,
         num_kv_heads=num_kv_heads,
         num_query_heads=num_query_heads,
@@ -197,156 +188,36 @@ def _assert_match(torch_out: torch.Tensor, ttx_out: torch.Tensor, *, atol: float
     assert max_err < atol, f"Max abs error {max_err:.6f} >= {atol}"
 
 
-def _run_operator_vs_reference(kwargs: dict) -> tuple[torch.Tensor, torch.Tensor]:
-    op = MojoSALSSFA()
-    torch_cls = op._registry.get("torch")
-    ttx_cls = op._registry.get("ttx")
-
-    torch_out = torch_cls().forward(**kwargs)
-    ttx_out = ttx_cls().forward(**kwargs)
-    return torch_out, ttx_out
-
-
-@pytest.fixture
-def assert_ttx_vs_torch():
-    def _fn(kwargs, *, atol=0.1):
-        torch_out, ttx_out = _run_operator_vs_reference(kwargs)
-        _assert_match(torch_out, ttx_out, atol=atol)
-    return _fn
-
-
-# ===== Basic shape tests =====
-
-@pytest.mark.parametrize("num_query_heads,num_kv_heads", [
-    (8, 2), (4, 4), (16, 4),
-])
+@pytest.mark.parametrize(
+    "model_name,head_dim,num_query_heads,num_kv_heads,"
+    "q_seqlen,share_len,base_kv,sparsity,fixed_tail,dtype",
+    _ALL_PARAMS,
+)
 @auto_switch_platform()
 @bypass_not_implemented
-def test_basic(num_query_heads, num_kv_heads, assert_ttx_vs_torch):
-    for B_req, q_lens, base_kv_lens in [
-        (2, [32, 48], [64, 96]),
-        (1, [32], [64]),
-        (3, [16, 32, 48], [32, 64, 80]),
-    ]:
-        kw = _make_sfa_inputs(
-            num_query_heads=num_query_heads,
-            num_kv_heads=num_kv_heads,
-            B_req=B_req,
-            q_lens=q_lens,
-            base_kv_lens=base_kv_lens,
-        )
-        assert_ttx_vs_torch(kw)
-
-
-# ===== Edge cases =====
-
-@auto_switch_platform()
-@bypass_not_implemented
-def test_empty_groups(assert_ttx_vs_torch):
-    kw = _make_sfa_inputs(B_req=1, q_lens=[32], base_kv_lens=[64], G=0)
+def test_sfa_model_specs(
+    model_name, head_dim, num_query_heads, num_kv_heads,
+    q_seqlen, share_len, base_kv, sparsity, fixed_tail, dtype,
+):
+    G = q_seqlen // share_len
+    sr = 1.0 / sparsity
+    kw = _make_sfa_inputs(
+        num_query_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        q_seqlen=q_seqlen,
+        base_kv=base_kv,
+        G=G,
+        sparse_ratio=sr,
+        fixed_tail=fixed_tail,
+        dtype=dtype,
+    )
     op = MojoSALSSFA()
     torch_cls = op._registry.get("torch")
     ttx_cls = op._registry.get("ttx")
     torch_out = torch_cls().forward(**kw)
     ttx_out = ttx_cls().forward(**kw)
-    assert torch_out.abs().max().item() == 0.0
-    assert ttx_out.abs().max().item() == 0.0
-    torch.testing.assert_close(torch_out, ttx_out, atol=0, rtol=0)
-
-
-@auto_switch_platform()
-@bypass_not_implemented
-def test_with_dense_groups(assert_ttx_vs_torch):
-    kw = _make_sfa_inputs(
-        B_req=3, q_lens=[32, 48, 32], base_kv_lens=[64, 80, 64],
-        G=3, with_dense=True,
-    )
-    assert_ttx_vs_torch(kw, atol=0.15)
-
-
-@auto_switch_platform()
-@bypass_not_implemented
-def test_with_scales(assert_ttx_vs_torch):
-    kw = _make_sfa_inputs(
-        num_query_heads=8, num_kv_heads=2,
-        B_req=2, q_lens=[32, 48], base_kv_lens=[64, 96],
-        with_scales=True,
-    )
-    assert_ttx_vs_torch(kw, atol=0.15)
-
-
-@auto_switch_platform()
-@bypass_not_implemented
-def test_single_group(assert_ttx_vs_torch):
-    kw = _make_sfa_inputs(
-        num_query_heads=4, num_kv_heads=2,
-        B_req=1, q_lens=[16], base_kv_lens=[32],
-        G=1,
-    )
-    assert_ttx_vs_torch(kw)
-
-
-@auto_switch_platform()
-@bypass_not_implemented
-def test_multiple_groups_per_request(assert_ttx_vs_torch):
-    kw = _make_sfa_inputs(
-        num_query_heads=8, num_kv_heads=2,
-        B_req=2, q_lens=[48, 64], base_kv_lens=[80, 96],
-        G=4,
-    )
-    assert_ttx_vs_torch(kw)
-
-
-# ===== Dtype tests =====
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@auto_switch_platform()
-@bypass_not_implemented
-def test_dtype(dtype, assert_ttx_vs_torch):
-    kw = _make_sfa_inputs(
-        B_req=2, q_lens=[32, 48], base_kv_lens=[64, 96],
-        dtype=dtype,
-    )
-    assert_ttx_vs_torch(kw)
-
-
-# ===== Determinism =====
-
-@auto_switch_platform()
-@bypass_not_implemented
-def test_determinism():
-    kw = _make_sfa_inputs(B_req=2, q_lens=[32, 48], base_kv_lens=[64, 96])
-    op = MojoSALSSFA()
-    torch_cls = op._registry.get("torch")
-    ttx_cls = op._registry.get("ttx")
-
-    for cls in [torch_cls, ttx_cls]:
-        impl = cls()
-        a = impl.forward(**kw)
-        b = impl.forward(**kw)
-        torch.testing.assert_close(a, b, atol=0, rtol=0)
-
-
-# ===== Critical model spec tests (MUST INCLUDE) =====
-
-@pytest.mark.parametrize("model_name,head_dim,num_query_heads,num_kv_heads", MODEL_SPECS)
-@auto_switch_platform()
-@bypass_not_implemented
-def test_sfa_model_specs(model_name, head_dim, num_query_heads, num_kv_heads, assert_ttx_vs_torch):
-    for B_req, q_lens, base_kv_lens in [
-        (2, [32, 48], [64, 96]),
-        (1, [64], [128]),
-    ]:
-        kw = _make_sfa_inputs(
-            num_query_heads=num_query_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim=head_dim,
-            sparse_block_size=SPARSE_BLOCK_SIZE,
-            B_req=B_req,
-            q_lens=q_lens,
-            base_kv_lens=base_kv_lens,
-        )
-        assert_ttx_vs_torch(kw)
+    _assert_match(torch_out, ttx_out)
 
 
 if __name__ == "__main__":

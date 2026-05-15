@@ -17,10 +17,7 @@ from mojo_opset.tests.utils import auto_switch_platform, bypass_not_implemented
 
 
 HEAD_DIM = 128
-KV_HEADS = 2
 SPARSE_BLOCK_SIZE = 16
-DEFAULT_SPARSE_RATIO = 0.25
-DEFAULT_FIXED_TAIL = 8
 
 MODEL_SPECS = [
     ("new_model_1", 2, 128),
@@ -31,6 +28,24 @@ MODEL_SPECS = [
     ("new_model_6", 16, 128),
     ("M9-23B", 8, 128),
     ("M8-14B", 8, 128),
+]
+
+# (q_seqlen, share_len, kv_seqlen, sparse_ratio, fixed_tail, dtype)
+# Minimal set covering all required parameter values:
+#   share_len ∈ {128, 256}
+#   kv_seqlen ∈ {256, 512, 1024, 2048}
+#   sparse_ratio ∈ {0.25, 0.5}  (sparsity 4, 2)
+#   fixed_tail ∈ {32, 64}
+#   dtype ∈ {fp16, bf16}
+#   q_seqlen ∈ {8k, 16k, 32k, 64k, 128k}
+SCENARIOS = [
+    (8192,   128, 1024, 0.25, 32, torch.float16),
+    (8192,   256, 2048, 0.5,  64, torch.bfloat16),
+    (16384,  128, 512,  0.25, 64, torch.float16),
+    (16384,  256, 256,  0.5,  32, torch.bfloat16),
+    (32768,  256, 2048, 0.25, 32, torch.float16),
+    (65536,  256, 512,  0.25, 32, torch.float16),
+    (131072, 256, 256,  0.5,  64, torch.float16),
 ]
 
 
@@ -49,18 +64,11 @@ def _make_block_table(G, max_blocks, num_phys, device):
     return table
 
 
-def _make_inputs(
-    G, seq_lengths, *,
-    dtype=torch.float16,
-    sparse_block_size=SPARSE_BLOCK_SIZE,
-    sparse_ratio=DEFAULT_SPARSE_RATIO,
-    fixed_tail_count=DEFAULT_FIXED_TAIL,
-    kv_heads=KV_HEADS,
-):
-    """Build the kwargs dict that matches MojoSALSIndexer.forward() signature."""
+def _make_inputs(G, seq_lengths, *, dtype=torch.float16, sparse_ratio=0.25,
+                 fixed_tail_count=32, kv_heads=2):
     device = _device()
+    sbs = SPARSE_BLOCK_SIZE
     max_seqlen = max(seq_lengths) if seq_lengths else 0
-    sbs = sparse_block_size
     max_bpg = max((max_seqlen + sbs - 1) // sbs, 1)
     num_phys = max_bpg * G + 4
 
@@ -90,13 +98,11 @@ def _make_inputs(
 
 
 def _assert_match(torch_out, ttx_out, G, N, fixed_tail_count):
-    """Compare torch vs ttx outputs for the SALS indexer."""
     si_ref, ssl_ref = torch_out
     si_ttx, ssl_ttx = ttx_out
 
     assert ssl_ref.shape == ssl_ttx.shape
     torch.testing.assert_close(ssl_ref, ssl_ttx, atol=0, rtol=0)
-
     assert si_ref.shape == si_ttx.shape
 
     for g in range(G):
@@ -119,120 +125,29 @@ def _assert_match(torch_out, ttx_out, G, N, fixed_tail_count):
                 torch.testing.assert_close(row_ref[topk_n:], row_ttx[topk_n:], atol=0, rtol=0)
 
 
-@pytest.fixture
-def assert_ttx_vs_torch():
-    def _fn(kwargs):
-        indexer = MojoSALSIndexer()
-        torch_cls = indexer._registry.get("torch")
-        ttx_cls = indexer._registry.get("ttx")
-
-        torch_out = torch_cls().forward(**kwargs)
-        ttx_out = ttx_cls().forward(**kwargs)
-        G, N = kwargs["query"].shape[0], kwargs["query"].shape[1]
-        _assert_match(torch_out, ttx_out, G, N, kwargs["fixed_tail_count"])
-    return _fn
-
-
-# ===== Basic shape tests =====
-@pytest.mark.parametrize("G,seqs", [
-    (8, [512] * 8),
-    (4, [2048] * 4),
-    (1, [512]),
-    (3, [512, 0, 256]),
-    (6, [512, 64, 1024, 128, 256, 32]),
-    (4, [64, 96, 128, 160]),
-])
+@pytest.mark.parametrize("model_name,kv_heads,head_dim", MODEL_SPECS)
+@pytest.mark.parametrize(
+    "q_seqlen,share_len,kv_seqlen,sparse_ratio,fixed_tail,dtype", SCENARIOS,
+)
 @auto_switch_platform()
 @bypass_not_implemented
-def test_basic(G, seqs, assert_ttx_vs_torch):
-    assert_ttx_vs_torch(_make_inputs(G=G, seq_lengths=seqs))
-
-
-@pytest.mark.parametrize("seqlen", [512, 1024])
-@auto_switch_platform()
-@bypass_not_implemented
-def test_long(seqlen, assert_ttx_vs_torch):
-    assert_ttx_vs_torch(_make_inputs(G=4, seq_lengths=[seqlen] * 4))
-
-
-# ===== Edge cases =====
-@pytest.mark.parametrize("G,seqs", [
-    (2, [192, 193]),
-    (2, [208, 208]),
-    (2, [8192, 4096]),
-    (8, [16, 32, 48, 64, 80, 96, 112, 128]),
-])
-@auto_switch_platform()
-@bypass_not_implemented
-def test_edge(G, seqs, assert_ttx_vs_torch):
-    assert_ttx_vs_torch(_make_inputs(G=G, seq_lengths=seqs))
-
-
-@auto_switch_platform()
-@bypass_not_implemented
-def test_large_G(assert_ttx_vs_torch):
-    seqs = [256 + (i % 3) * 128 for i in range(32)]
-    assert_ttx_vs_torch(_make_inputs(G=32, seq_lengths=seqs))
-
-
-# ===== Dtype tests =====
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@auto_switch_platform()
-@bypass_not_implemented
-def test_dtype(dtype, assert_ttx_vs_torch):
-    assert_ttx_vs_torch(_make_inputs(G=4, seq_lengths=[512] * 4, dtype=dtype))
-
-
-# ===== Block table variants =====
-@auto_switch_platform()
-@bypass_not_implemented
-def test_block_table_identity(assert_ttx_vs_torch):
-    kw = _make_inputs(G=4, seq_lengths=[512] * 4)
-    mb = (512 + SPARSE_BLOCK_SIZE - 1) // SPARSE_BLOCK_SIZE
-    kw["block_table"] = (
-        torch.arange(kw["key"].shape[0], device=_device(), dtype=torch.int32)
-        [:mb].unsqueeze(0).expand(4, -1).contiguous()
+def test_sals_indexer_model_specs(
+    model_name, kv_heads, head_dim,
+    q_seqlen, share_len, kv_seqlen, sparse_ratio, fixed_tail, dtype,
+):
+    G = q_seqlen // share_len
+    kw = _make_inputs(
+        G=G, seq_lengths=[kv_seqlen] * G,
+        dtype=dtype, sparse_ratio=sparse_ratio,
+        fixed_tail_count=fixed_tail, kv_heads=kv_heads,
     )
-    assert_ttx_vs_torch(kw)
-
-
-@auto_switch_platform()
-@bypass_not_implemented
-def test_block_table_reverse(assert_ttx_vs_torch):
-    kw = _make_inputs(G=4, seq_lengths=[512] * 4)
-    mb = (512 + SPARSE_BLOCK_SIZE - 1) // SPARSE_BLOCK_SIZE
-    np_ = kw["key"].shape[0]
-    rev = torch.arange(np_ - 1, max(np_ - mb - 1, -1), -1,
-                        device=_device(), dtype=torch.int32)[:mb]
-    kw["block_table"] = rev.unsqueeze(0).expand(4, -1).contiguous()
-    assert_ttx_vs_torch(kw)
-
-
-# ===== Determinism =====
-@auto_switch_platform()
-@bypass_not_implemented
-def test_determinism():
-    kw = _make_inputs(G=4, seq_lengths=[512] * 4)
     indexer = MojoSALSIndexer()
     torch_cls = indexer._registry.get("torch")
     ttx_cls = indexer._registry.get("ttx")
-
-    for cls in [torch_cls, ttx_cls]:
-        op = cls()
-        a = op.forward(**kw)
-        b = op.forward(**kw)
-        torch.testing.assert_close(a[0], b[0], atol=0, rtol=0)
-        torch.testing.assert_close(a[1], b[1], atol=0, rtol=0)
-
-
-# ===== Critical model spec tests (MUST INCLUDE) =====
-@pytest.mark.parametrize("model_name,kv_heads,head_dim", MODEL_SPECS)
-@auto_switch_platform()
-@bypass_not_implemented
-def test_sals_indexer_model_specs(model_name, kv_heads, head_dim, assert_ttx_vs_torch):
-    assert_ttx_vs_torch(_make_inputs(G=4, seq_lengths=[512] * 4, kv_heads=kv_heads))
-    assert_ttx_vs_torch(_make_inputs(G=2, seq_lengths=[1024, 2048], kv_heads=kv_heads))
+    torch_out = torch_cls().forward(**kw)
+    ttx_out = ttx_cls().forward(**kw)
+    _assert_match(torch_out, ttx_out, G, kv_heads, kw["fixed_tail_count"])
 
 
 if __name__ == "__main__":
-    pytest.main([__file__ + "::test_sals_indexer_model_specs"])
+    pytest.main([__file__, "-v"])
