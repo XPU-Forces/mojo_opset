@@ -24,6 +24,10 @@ class TorchNpuQuantGemm(MojoQuantGemm):
         if self.trans_weight:
             weight = weight.t().contiguous()
 
+        pertoken_scale = input_scale.flatten()
+        if pertoken_scale.dtype != torch.float32:
+            pertoken_scale = pertoken_scale.float()
+
         kernel_output_dtype = self.output_dtype
         if self.weight_scale.dtype == torch.bfloat16 and self.output_dtype not in (torch.bfloat16, torch.int32):
             kernel_output_dtype = torch.bfloat16
@@ -32,7 +36,7 @@ class TorchNpuQuantGemm(MojoQuantGemm):
             input,
             weight,
             self.weight_scale.flatten(),
-            pertoken_scale=input_scale.flatten(),
+            pertoken_scale=pertoken_scale,
             output_dtype=kernel_output_dtype,
         )
         if out.dtype != self.output_dtype:

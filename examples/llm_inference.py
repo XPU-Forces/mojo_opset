@@ -13,6 +13,7 @@ from mojo_opset.utils.hf_utils import build_model_from_hf
 ARCH_MAP = {
     "Qwen3ForCausalLM": ("mojo_opset.modeling.qwen3.mojo_qwen3_dense", "Qwen3ForCausalLM"),
     "SeedOssForCausalLM": ("mojo_opset.modeling.seed_oss.mojo_seed_oss_base", "SeedOssForCausalLM"),
+    "DeepseekV4ForCausalLM": ("mojo_opset.modeling.deepseekv4.mojo_deepseek_v4", "DeepseekV4ForCausalLM"),
 }
 
 
@@ -37,9 +38,12 @@ def resolve_model_class(model_path: str):
 
 def generate(model, tokenizer, prompt, max_new_tokens, device):
     messages = [{"role": "user", "content": prompt}]
-    input_ids = tokenizer.apply_chat_template(
-        messages, tokenize=True, add_generation_prompt=True, return_tensors="pt", thinking_budget=-1
-    ).to(device)
+    try:
+        input_ids = tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True, return_tensors="pt",
+        ).to(device)
+    except (TypeError, NotImplementedError, ValueError):
+        input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
 
     print(f"\nPrompt: {prompt}")
     print("-" * 40)
@@ -57,7 +61,7 @@ def generate(model, tokenizer, prompt, max_new_tokens, device):
     generated_ids = [next_token_id.item()]
     input_ids = next_token_id
 
-    for _ in range(max_new_tokens - 1):
+    for step in range(max_new_tokens - 1):
         with torch.no_grad():
             outputs = model(input_ids, past_key_values=past_key_values, use_cache=True)
             if hasattr(outputs, "logits"):
@@ -68,15 +72,21 @@ def generate(model, tokenizer, prompt, max_new_tokens, device):
 
         next_token_logits = logits[:, -1, :]
         next_token_id = torch.argmax(next_token_logits, dim=-1).unsqueeze(-1)
-        generated_ids.append(next_token_id.item())
+        tid = next_token_id.item()
+        generated_ids.append(tid)
         input_ids = next_token_id
 
-        if next_token_id.item() == tokenizer.eos_token_id:
-            print("EOS reached.")
+        if tid == tokenizer.eos_token_id:
+            print(f"EOS reached at step {step}.")
             break
 
     print("-" * 40)
-    full_output = tokenizer.decode(generated_ids)
+    print(f"Generated token IDs: {generated_ids}")
+    for tid in generated_ids:
+        raw = tokenizer.decode([tid])
+        clean = tokenizer.decode([tid], skip_special_tokens=True)
+        print(f"  token {tid}: raw={repr(raw)}, clean={repr(clean)}")
+    full_output = tokenizer.decode(generated_ids, skip_special_tokens=True)
     print(f"Generated text: {full_output}")
 
 
@@ -101,17 +111,48 @@ def main():
 
     if args.transformers:
         from transformers import AutoModelForCausalLM as model_class
+        model = build_model_from_hf(
+            model_class,
+            args.model_path,
+            device=args.device,
+            num_layers=args.num_layers,
+            trust_remote_code=True,
+        )
     else:
         model_class = resolve_model_class(args.model_path)
+        local_files_only = _resolve_local_files_only(args.model_path)
 
-    print(f"Loading model from {args.model_path}...")
-    model = build_model_from_hf(
-        model_class,
-        args.model_path,
-        device=args.device,
-        num_layers=args.num_layers,
-        trust_remote_code=True,
-    )
+        try:
+            from transformers import AutoConfig
+            hf_config = AutoConfig.from_pretrained(
+                args.model_path,
+                local_files_only=local_files_only,
+                trust_remote_code=True,
+            )
+        except (ValueError, KeyError, ImportError):
+            cfg_path = os.path.join(args.model_path, "config.json")
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg_dict = json.load(f)
+            from mojo_opset.modeling.deepseekv4.mojo_deepseek_v4 import DeepseekV4Config
+            hf_config = DeepseekV4Config(**cfg_dict)
+
+        if hasattr(model_class, "load_weights"):
+            from transformers.modeling_utils import no_init_weights
+            origin_dtype = torch.get_default_dtype()
+            torch.set_default_dtype(torch.bfloat16)
+            with no_init_weights():
+                model = model_class(hf_config, num_layers=args.num_layers)
+            torch.set_default_dtype(origin_dtype)
+            model = model.to(args.device).eval()
+            model_class.load_weights(model, args.model_path)
+        else:
+            model = build_model_from_hf(
+                model_class,
+                args.model_path,
+                device=args.device,
+                num_layers=args.num_layers,
+                trust_remote_code=True,
+            )
 
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(
