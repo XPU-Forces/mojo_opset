@@ -6,6 +6,7 @@ from .convolution import causal_conv1d_update_bdt_impl
 from .flash_attention import paged_attention_decode_impl
 from .flash_attention import paged_attention_decode_with_kv_dequant_impl
 from .flash_attention import paged_attention_prefill_impl
+from .flash_attention import paged_attention_prefill_with_kv_dequant_impl
 from .fused_add_layernorm import fused_add_layernorm_infer_impl
 from .fused_add_rmsnorm import fused_add_rmsnorm_infer_impl
 # from .fused_linear_cross_entropy import fused_linear_cross_entropy_1d_bwd_impl
@@ -17,6 +18,9 @@ from .gelu import gelu_fwd_impl
 from .group_gemm import k_grouped_matmul_impl
 from .group_gemm import m_grouped_matmul_impl
 from .quant_batch_gemm_reduce_sum import quant_batch_gemm_reduce_sum_impl
+from .int8_gemm import int8_gemm_dequant_impl
+from .int8_gemm import prepare_b_impl
+from .quant import dynamic_quant_impl
 from .kv_cache import store_kv_cache_impl
 from .kv_cache import store_paged_kv_impl
 from .layernorm import layernorm_bwd_impl
@@ -36,6 +40,7 @@ from .sample import reject_sampling_impl
 from .sample import top_p_filter_impl
 from .sample import top_p_sampling_impl
 from .sdpa import sdpa_bwd_impl
+from .static_quant import static_quant_impl
 from .sdpa import sdpa_fwd_impl
 from .sdpa import sdpa_infer_impl
 from .silu import silu_bwd_impl
@@ -46,7 +51,10 @@ from .swiglu import swiglu_fwd_impl
 from .group_rmsnorm import group_rmsnorm_impl
 from .swa import swa_infer_impl
 from .swa import swa_paged_prefill_impl
+from .swa import swa_paged_prefill_with_kv_dequant_impl
 from .swa import swa_paged_decode_impl
+from .swa import swa_paged_decode_quant_impl
+from .quant import dequant_impl
 from .over_encoding.embedding import embedding_nf4_dequant_impl
 from .over_encoding.fused_over_encoding import over_encoding_decode_impl
 from .over_encoding.n_gram import n_gram_decode_impl
@@ -59,6 +67,7 @@ __all__ = [
     "paged_attention_decode_impl",
     "paged_attention_decode_with_kv_dequant_impl",
     "paged_attention_prefill_impl",
+    "paged_attention_prefill_with_kv_dequant_impl",
     # "fused_linear_cross_entropy_bwd_impl",
     # "fused_linear_cross_entropy_fwd_impl",
     # "fused_linear_cross_entropy_1d_bwd_impl",
@@ -68,6 +77,9 @@ __all__ = [
     "m_grouped_matmul_impl",
     "k_grouped_matmul_impl",
     "quant_batch_gemm_reduce_sum_impl",
+    "int8_gemm_dequant_impl",
+    "prepare_b_impl",
+    "dynamic_quant_impl",
     "store_kv_cache_impl",
     "store_paged_kv_impl",
     "relative_embedding_fwd_impl",
@@ -93,6 +105,7 @@ __all__ = [
     "sdpa_bwd_impl",
     "swa_infer_impl",
     "swa_paged_prefill_impl",
+    "swa_paged_prefill_with_kv_dequant_impl",
     "silu_bwd_impl",
     "silu_fwd_impl",
     # "swiglu_bwd_impl",
@@ -102,6 +115,9 @@ __all__ = [
     # "diffusion_attention_fwd_impl",
     # "diffusion_attention_bwd_impl",
     "swa_paged_decode_impl",
+    "static_quant_impl",
+    "dequant_impl",
+    "swa_paged_decode_quant_impl",
     "embedding_nf4_dequant_impl",
     "over_encoding_decode_impl",
     "n_gram_decode_impl",

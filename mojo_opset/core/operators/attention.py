@@ -1446,6 +1446,19 @@ class MojoPagedPrefillSWA(MojoOperator):
         return o
 
 
+def _swa_dynamic_quantize(tensor, qmax, qmin, quant_dtype):
+    """Per-row symmetric dynamic quantization used by the SWA quant reference impl."""
+    amax = tensor.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)
+    scale = amax / qmax
+    scale = torch.where(scale < 1e-6, torch.ones_like(scale), scale)
+
+    tensor_scaled = tensor / scale
+    tensor_quant = tensor_scaled.round().clamp(qmin, qmax).to(quant_dtype)
+
+    scale = scale.view(*tensor.shape[:-1], 1)
+    return tensor_quant, scale
+
+
 class MojoPagedDecodeSWA(MojoOperator):
     def __init__(
         self,
@@ -1817,6 +1830,7 @@ class MojoPagedPrefillGQAWithKVDequant(MojoOperator):
 
     def extra_repr(self) -> str:
         return f"{self.is_causal=}, {self.gqa_layout=}, {self.compute_dtype=}".replace("self.", "")
+
 
 
 class MojoPagedDecodeGQAWithKVDequant(MojoOperator):
