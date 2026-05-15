@@ -181,7 +181,7 @@ def _n_gram_prefill_kernel(
 @input_guard(make_contiguous=True, auto_to_device=True)
 def n_gram_prefill_impl(
     input_ids: torch.Tensor,          # [T] int64 – packed tokens from all sequences
-    seq_lens: torch.Tensor,           # [B] int64
+    q_lens: torch.Tensor,             # [B] int64
     oe_history_inputs: torch.Tensor,  # [B, H] int64
     oe_vocab_sizes: torch.Tensor,     # [G] int64
     oe_vocab_offsets: torch.Tensor,   # [G] int64
@@ -190,7 +190,7 @@ def n_gram_prefill_impl(
 ) -> torch.Tensor:                    # [T, G] int64
     assert input_ids.dim() == 1, f"n_gram_prefill expects 1-D input_ids, got {input_ids.shape}"
     T = int(input_ids.size(0))
-    B = int(seq_lens.size(0))
+    B = int(q_lens.size(0))
     G = int(n_grams.size(0))
     H = int(oe_history_inputs.size(1))
 
@@ -202,13 +202,13 @@ def n_gram_prefill_impl(
 
     # Precompute per-token metadata on the same device so the kernel
     # can look them up with a single scalar load per program.
-    seq_lens_i64 = seq_lens.to(dtype=torch.int64, device=device)
+    q_lens_i64 = q_lens.to(dtype=torch.int64, device=device)
     batch_ids = torch.repeat_interleave(
         torch.arange(B, dtype=torch.int64, device=device),
-        seq_lens_i64,
+        q_lens_i64,
     )  # [T]
     cu_seq_lens = torch.zeros(B + 1, dtype=torch.int64, device=device)
-    cu_seq_lens[1:] = seq_lens_i64.cumsum(0)
+    cu_seq_lens[1:] = q_lens_i64.cumsum(0)
     seq_positions = (
         torch.arange(T, dtype=torch.int64, device=device) - cu_seq_lens[batch_ids]
     )  # [T]
