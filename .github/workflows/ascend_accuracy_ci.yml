@@ -54,6 +54,9 @@ jobs:
           pip install -e .\[npu\] --index-url https://bytedpypi.byted.org/simple
           python3 -m build .
           pip install dist/*.whl --force-reinstall --no-deps
+          pip uninstall -y byted-triton-x triton
+          rm -rf /usr/local/lib/python3.11/dist-packages/triton
+          pip install triton-ascend>=3.2.1 --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
       - name: test-Base
         shell: bash
         run: |
