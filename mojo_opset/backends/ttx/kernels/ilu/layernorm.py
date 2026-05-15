@@ -2,12 +2,11 @@ import torch
 import triton
 import triton.language as tl
 
+from .utils import _block_size_n_pow2
 from .utils import COL_BLOCKING_THRESHOLD
-from .utils import VEC_ALIGN_BYTES
 from .utils import ilu_grid_dim_from_row_tasks
 from .utils import layer_norm_fwd_heuristics
 # from .utils import libentry
-from mojo_opset.backends.ttx.kernels.utils import align
 from mojo_opset.backends.ttx.kernels.utils import ceil_div
 from mojo_opset.backends.ttx.kernels.utils import torch_to_triton_dtype
 
@@ -269,7 +268,7 @@ def layernorm_infer_impl(
     if n_cols > COL_BLOCKING_THRESHOLD:
         BLOCK_SIZE_N = 2048
     else:
-        BLOCK_SIZE_N = align(hidden_states, n_cols, VEC_ALIGN_BYTES)
+        BLOCK_SIZE_N = _block_size_n_pow2(n_cols)
 
     grid = (_layernorm_fwd_grid_n_programs(n_rows, n_cols),)
 
@@ -304,7 +303,7 @@ def layernorm_fwd_impl(x, w, b, eps):
     if n_cols > COL_BLOCKING_THRESHOLD:
         BLOCK_SIZE_N = 2048
     else:
-        BLOCK_SIZE_N = align(x, n_cols, VEC_ALIGN_BYTES)
+        BLOCK_SIZE_N = _block_size_n_pow2(n_cols)
 
     grid = (_layernorm_fwd_grid_n_programs(n_rows, n_cols),)
 
@@ -339,7 +338,7 @@ def layernorm_bwd_impl(dy, x_2d, w, b, mean, rstd):
     if n_cols > COL_BLOCKING_THRESHOLD:
         BLOCK_SIZE_N = 2048
     else:
-        BLOCK_SIZE_N = align(x_2d, n_cols, VEC_ALIGN_BYTES)
+        BLOCK_SIZE_N = _block_size_n_pow2(n_cols)
 
     dx = torch.empty_like(dy_2d)
 
