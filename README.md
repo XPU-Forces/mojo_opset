@@ -90,6 +90,8 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 | ComputeComm | `MojoAllGatherGemm` | ✅ | TBD | TBD | TBD |
 | ComputeComm | `MojoGemmAllReduce` | ✅ | TBD | TBD | TBD |
 | ComputeComm | `MojoGemmReduceScatter` | ✅ | TBD | TBD | TBD |
+| ComputeComm | `MojoQuantGemmAll2All` | ✅ | TBD | TBD | TBD |
+| ComputeComm | `MojoAll2AllQuantGemm` | ✅ | TBD | TBD | TBD |
 | Embedding | `MojoEmbedding` | ✅ | TBD | TBD | TBD |
 | Embedding | `MojoParallelEmbedding` | ✅ | TBD | TBD | TBD |
 | OverEncoding | `MojoOverEncoding` | ✅ | TBD | ✅ | TBD |
