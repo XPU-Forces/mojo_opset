@@ -7,6 +7,7 @@ from mojo_opset.tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoLayerNorm
 from mojo_opset import MojoLayerNormQuant
+from mojo_opset import MojoGroupRMSNorm
 from mojo_opset import MojoResidualAddLayerNorm
 from mojo_opset import MojoResidualAddLayerNormQuant
 from mojo_opset import MojoResidualAddRMSNorm
