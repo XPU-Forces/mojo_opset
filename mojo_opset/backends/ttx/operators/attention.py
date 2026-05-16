@@ -15,7 +15,6 @@ from mojo_opset.backends.ttx.kernels import swa_infer
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoPagedPrefillGQAWithKVDequant
 from mojo_opset.core import MojoPagedDecodeGQA
-from mojo_opset.core import MojoPagedDecodeGQAWithKVDequant
 from mojo_opset.core import MojoSdpa
 from mojo_opset.core import MojoPagedPrefillSWAWithKVDequant
 from mojo_opset.core import MojoPagedPrefillSWA
@@ -24,6 +23,7 @@ from mojo_opset.core import MojoPagedDecodeSWAWithKVDequant
 from mojo_opset.core import MojoSWA
 from mojo_opset.core.operators.attention import assert_paged_decode_contract
 from mojo_opset.core.operators.attention import assert_paged_prefill_contract
+from mojo_opset.experimental import MojoPagedDecodeGQAWithKVDequant
 
 
 class TTXPagedPrefillGQA(MojoPagedPrefillGQA):

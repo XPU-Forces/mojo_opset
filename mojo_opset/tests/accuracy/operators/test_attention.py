@@ -6,23 +6,23 @@ import pytest
 import torch
 
 from mojo_opset import MojoDecodeGQA
-from mojo_opset import MojoDecodeMLA
-from mojo_opset import MojoDecodeNSA
 from mojo_opset import MojoPagedDecodeGQA
-from mojo_opset import MojoPagedDecodeMLA
-from mojo_opset import MojoPagedDecodeNSA
 from mojo_opset import MojoPagedPrefillGQA
-from mojo_opset import MojoPagedPrefillGQAWithKVDequant
-from mojo_opset import MojoPagedPrefillMLA
-from mojo_opset import MojoPagedPrefillNSA
 from mojo_opset import MojoPrefillGQA
-from mojo_opset import MojoPrefillMLA
-from mojo_opset import MojoPrefillNSA
 from mojo_opset import MojoSdpa
 from mojo_opset import MojoPagedPrefillSWA
 from mojo_opset import MojoPagedDecodeSWA
-from mojo_opset import MojoPagedDecodeSWAWithKVDequant
 from mojo_opset import MojoSWA
+from mojo_opset.experimental import MojoDecodeMLA
+from mojo_opset.experimental import MojoDecodeNSA
+from mojo_opset.experimental import MojoPagedDecodeMLA
+from mojo_opset.experimental import MojoPagedDecodeNSA
+from mojo_opset.experimental import MojoPagedDecodeSWAWithKVDequant
+from mojo_opset.experimental import MojoPagedPrefillGQAWithKVDequant
+from mojo_opset.experimental import MojoPagedPrefillMLA
+from mojo_opset.experimental import MojoPagedPrefillNSA
+from mojo_opset.experimental import MojoPrefillMLA
+from mojo_opset.experimental import MojoPrefillNSA
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.tests.utils import requires_platform_backend
@@ -2223,4 +2223,3 @@ def test_paged_decode_quant_swa(
         atol=5e-2,
         rtol=5e-2,
     )
-

@@ -12,11 +12,11 @@ from ixformer.contrib import vllm_flash_attn as ix_fa
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedDecodeSWA
 from mojo_opset.core import MojoPagedPrefillGQA
-from mojo_opset.core import MojoPagedPrefillGQAWithKVDequant
-from mojo_opset.core import MojoPagedPrefillSWAWithKVDequant
 from mojo_opset.core import MojoPagedPrefillSWA
 from mojo_opset.core.operators.attention import assert_paged_decode_contract
 from mojo_opset.core.operators.attention import assert_paged_prefill_contract
+from mojo_opset.experimental import MojoPagedPrefillGQAWithKVDequant
+from mojo_opset.experimental import MojoPagedPrefillSWAWithKVDequant
 
 _IXFORMER_PAGED_DECODE_SUPPORTED_HEAD_DIMS = frozenset(
     {32, 64, 80, 96, 128, 160, 192, 224, 256}
