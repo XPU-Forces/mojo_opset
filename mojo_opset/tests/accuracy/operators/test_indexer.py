@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from mojo_opset.experimental import MojoLightningIndexer
-from mojo_opset.experimental.operators.indexer import MojoIndexer
+from mojo_opset.experimental import MojoIndexer
 from mojo_opset.utils.platform import get_torch_device
 from mojo_opset.tests.utils import auto_switch_platform, bypass_not_implemented
 
