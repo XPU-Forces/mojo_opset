@@ -6,7 +6,7 @@ import torch
 from mojo_opset import MojoGelu
 from mojo_opset import MojoSilu
 from mojo_opset import MojoSwiGLU
-from mojo_opset import MojoRotateActivation
+from mojo_opset.experimental import MojoRotateActivation
 from mojo_opset.utils.platform import get_torch_device
 from mojo_opset.tests.utils import auto_switch_platform, bypass_not_implemented
 
