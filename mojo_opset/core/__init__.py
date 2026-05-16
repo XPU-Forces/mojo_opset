@@ -11,36 +11,21 @@ from .operator import MojoOperator
 
 """ activation """
 from .operators.activation import MojoGelu
-from .operators.activation import MojoRotateActivation
 from .operators.activation import MojoSilu
 from .operators.activation import MojoSwiGLU
 
 """ attention """
 from .operators.attention import MojoDecodeGQA
-from .operators.attention import MojoDecodeMLA
-from .operators.attention import MojoDecodeNSA
 from .operators.attention import MojoPagedDecodeGQA
-from .operators.attention import MojoPagedDecodeMLA
-from .operators.attention import MojoPagedDecodeNSA
 from .operators.attention import MojoPagedDecodeSWA
 from .operators.attention import MojoPagedPrefillGQA
-from .operators.attention import MojoPagedPrefillMLA
-from .operators.attention import MojoPagedPrefillNSA
 from .operators.attention import MojoPagedPrefillSWA
 from .operators.attention import MojoPrefillGQA
-from .operators.attention import MojoPrefillMLA
-from .operators.attention import MojoPrefillNSA
 from .operators.attention import MojoSdpa
 from .operators.attention import MojoSWA
-from .operators.attention import MojoPagedDecodeGQAWithKVDequant
-from .operators.attention import MojoPagedPrefillGQAWithKVDequant
-from .operators.attention import MojoPagedDecodeSWAWithKVDequant
-from .operators.attention import MojoPagedPrefillSWAWithKVDequant
 
 """ kvcache """
-from .operators.kv_cache import MojoStoreMLAKVCache
 from .operators.kv_cache import MojoStorePagedKVCache
-from .operators.kv_cache import MojoStorePagedMLAKVCache
 
 """ gemm """
 from .operators.gemm import MojoGemm
@@ -71,38 +56,28 @@ from .operators.quantize import MojoStaticQuant
 
 """ moe """
 from .operators.moe import MojoExperts
-from .operators.moe import MojoFusedSwiGLUMoEScaleDynamicQuantize
 from .operators.moe import MojoMoE
 from .operators.moe import MojoMoECombine
 from .operators.moe import MojoMoEDispatch
 from .operators.moe import MojoMoEGating
-from .operators.moe import MojoMoEInitRoutingDynamicQuant
 from .operators.moe import MojoQuantExperts
 from .operators.moe import MojoQuantMoE
 
 """ normalization """
-from .operators.normalization import MojoChannelRMSNorm
-from .operators.normalization import MojoGroupLayerNorm
 from .operators.normalization import MojoGroupRMSNorm
 from .operators.normalization import MojoLayerNorm
 from .operators.normalization import MojoLayerNormQuant
 from .operators.normalization import MojoResidualAddLayerNorm
 from .operators.normalization import MojoResidualAddLayerNormQuant
-from .operators.normalization import MojoResidualAddNormCast
 from .operators.normalization import MojoResidualAddRMSNorm
 from .operators.normalization import MojoResidualAddRMSNormQuant
 from .operators.normalization import MojoRMSNorm
 from .operators.normalization import MojoRMSNormQuant
 
 """ position_embedding """
-from .operators.position_embedding import MojoRelativeEmbedding
 from .operators.position_embedding import MojoApplyRoPE
 from .operators.position_embedding import MojoApplyVisionRoPE2D
-from .operators.position_embedding import MojoGridRoPE
 from .operators.position_embedding import MojoMRoPE
-from .operators.position_embedding import MojoNormRoPE
-from .operators.position_embedding import MojoNormRoPEStoreKV
-from .operators.position_embedding import MojoRoPEStoreKV
 from .operators.position_embedding import MojoRotaryEmbedding
 from .operators.position_embedding import MojoVisionRotaryEmbedding2D
 
@@ -119,9 +94,6 @@ from .operators.convolution import MojoCausalConv1dUpdateState
 
 """ mlp"""
 from .operators.mlp import MojoSwiGLUMLP
-
-""" indexer """
-from .operators.indexer import MojoLightningIndexer
 
 """ functions """
 from .functions.activation import MojoSiluFunction
@@ -140,32 +112,17 @@ __all__ = [
     "MojoGelu",
     "MojoSilu",
     "MojoSwiGLU",
-    "MojoRotateActivation",
 
     "MojoPrefillGQA",
     "MojoPagedPrefillGQA",
-    "MojoPrefillMLA",
-    "MojoPagedPrefillMLA",
-    "MojoPrefillNSA",
-    "MojoPagedPrefillNSA",
     "MojoDecodeGQA",
     "MojoPagedDecodeGQA",
-    "MojoDecodeMLA",
-    "MojoPagedDecodeMLA",
-    "MojoDecodeNSA",
-    "MojoPagedDecodeNSA",
     "MojoSdpa",
     "MojoPagedPrefillSWA",
     "MojoPagedDecodeSWA",
     "MojoSWA",
-    "MojoPagedPrefillGQAWithKVDequant",
-    "MojoPagedDecodeGQAWithKVDequant",
-    "MojoPagedPrefillSWAWithKVDequant",
-    "MojoPagedDecodeSWAWithKVDequant",
 
     "MojoStorePagedKVCache",
-    "MojoStoreMLAKVCache",
-    "MojoStorePagedMLAKVCache",
 
     "MojoGemm",
     "MojoQuantGemm",
@@ -184,15 +141,12 @@ __all__ = [
     "MojoEmbedding",
     "MojoParallelEmbedding",
     "MojoNF4DequantEmbedding",
-    "MojoRelativeEmbedding",
     "MojoOverEncoding",
     "MojoOverEncodingNGram",
 
     "MojoMoE",
     "MojoMoEGating",
     "MojoMoEDispatch",
-    "MojoMoEInitRoutingDynamicQuant",
-    "MojoFusedSwiGLUMoEScaleDynamicQuantize",
     "MojoExperts",
     "MojoMoECombine",
     "MojoQuantExperts",
@@ -200,24 +154,17 @@ __all__ = [
 
     "MojoLayerNorm",
     "MojoRMSNorm",
-    "MojoGroupLayerNorm",
     "MojoGroupRMSNorm",
-    "MojoChannelRMSNorm",
     "MojoRMSNormQuant",
     "MojoLayerNormQuant",
     "MojoResidualAddRMSNorm",
     "MojoResidualAddLayerNorm",
     "MojoResidualAddRMSNormQuant",
     "MojoResidualAddLayerNormQuant",
-    "MojoResidualAddNormCast",
 
     "MojoRotaryEmbedding",
     "MojoApplyRoPE",
     "MojoApplyVisionRoPE2D",
-    "MojoRoPEStoreKV",
-    "MojoNormRoPE",
-    "MojoNormRoPEStoreKV",
-    "MojoGridRoPE",
     "MojoVisionRotaryEmbedding2D",
     "MojoMRoPE",
 
@@ -237,8 +184,6 @@ __all__ = [
     "MojoApplyRoPEFunction",
     "MojoFusedLinearCrossEntropyFunction",
     "MojoCausalConv1dFunction",
-
-    "MojoLightningIndexer",
 
     "MojoFusedLinearCrossEntropyLoss",
 

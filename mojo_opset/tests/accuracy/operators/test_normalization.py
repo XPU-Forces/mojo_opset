@@ -5,17 +5,17 @@ import torch.nn.functional as F
 from mojo_opset.utils.platform import get_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 
-from mojo_opset import MojoChannelRMSNorm
 from mojo_opset import MojoLayerNorm
 from mojo_opset import MojoLayerNormQuant
+from mojo_opset import MojoGroupRMSNorm
 from mojo_opset import MojoResidualAddLayerNorm
 from mojo_opset import MojoResidualAddLayerNormQuant
 from mojo_opset import MojoResidualAddRMSNorm
 from mojo_opset import MojoResidualAddRMSNormQuant
 from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoRMSNormQuant
-from mojo_opset import MojoGroupRMSNorm
-from mojo_opset import MojoGroupLayerNorm
+from mojo_opset.experimental import MojoChannelRMSNorm
+from mojo_opset.experimental import MojoGroupLayerNorm
 
 torch.manual_seed(43)
 
