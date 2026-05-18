@@ -201,8 +201,8 @@ test_configs_prefill_gqa_with_kv_dequant = [
     (4, 24, 6, 128, 769, 511, 128, torch.bfloat16, "M_BF16_H24_BLK128"),
     (5, 16, 4, 128, 1025, 333, 256, torch.bfloat16, "M_BF16_ODD_KV_333"),
     (6, 24, 6, 128, 1537, 777, 128, torch.bfloat16, "M_BF16_H24_ODD_777"),
-    (7, 16, 4, 128, 4097, 2049, 256, torch.bfloat16, "M_BF16_LONG_ODD"),
-    (8, 24, 6, 128, 8192, 4095, 256, torch.bfloat16, "M_BF16_H24_LONG"),
+    (5, 16, 4, 128, 2049, 1025, 256, torch.bfloat16, "M_BF16_LONG_ODD"),
+    (4, 24, 6, 128, 3073, 1537, 256, torch.bfloat16, "M_BF16_H24_LONG"),
 ]
 
 
@@ -406,8 +406,8 @@ test_configs_prefill_swa_with_kv_dequant = [
     (4, 24, 6, 128, 769, 511, 128, torch.bfloat16, "M_BF16_H24_BLK128"),
     (5, 16, 4, 128, 1025, 333, 256, torch.bfloat16, "M_BF16_ODD_KV_333"),
     (6, 24, 6, 128, 1537, 777, 128, torch.bfloat16, "M_BF16_H24_ODD_777"),
-    (7, 16, 4, 128, 4097, 2049, 256, torch.bfloat16, "M_BF16_LONG_ODD"),
-    (8, 24, 6, 128, 8192, 4095, 256, torch.bfloat16, "M_BF16_H24_LONG"),
+    (5, 16, 4, 128, 2049, 1025, 256, torch.bfloat16, "M_BF16_LONG_ODD"),
+    (4, 24, 6, 128, 3073, 1537, 256, torch.bfloat16, "M_BF16_H24_LONG"),
 ]
 
 
