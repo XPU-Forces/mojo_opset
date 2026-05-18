@@ -191,6 +191,70 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, context_kv_l
     assert_close(v_cache, v_cache_ref)
 
 
+@pytest.mark.parametrize(
+    "batch_size, kv_heads, head_dim, block_size, context_kv_lens_val, q_lens_val",
+    [
+        (1, 2, 128, 16, [0], [3]),
+        (1, 2, 128, 128, [127], [1]),
+        (2, 4, 128, 32, [5, 33], [7, 19]),
+        (2, 4, 128, 256, [255, 511], [1, 1]),
+        (3, 8, 128, 64, [0, 11, 95], [5, 17, 29]),
+        (3, 8, 128, 128, [17, -1, 63], [1, 1, 1]),
+        (4, 16, 128, 128, [0, 3, 127, 255], [9, 17, 33, 65]),
+        (4, 16, 128, 512, [511, 1025, 7, 63], [1, 1, 1, 1]),
+        (5, 24, 128, 64, [13, 97, 0, 255, 511], [31, 65, 7, 19, 127]),
+        (5, 24, 128, 256, [255, 511, -1, 33, 777], [1, 1, 1, 1, 1]),
+        (6, 24, 128, 1024, [1023, 17, 2047, 0, 4097, 63], [1, 1, 1, 1, 1, 1]),
+        (6, 24, 128, 128, [31, 511, 1023, 7, 95, 1535], [129, 257, 513, 5, 17, 65]),
+    ],
+)
+@bypass_not_implemented
+def test_store_paged_kv_without_chunk_metadata(
+    batch_size,
+    kv_heads,
+    head_dim,
+    block_size,
+    context_kv_lens_val,
+    q_lens_val,
+):
+    case = _build_store_paged_kv_case(
+        batch_size,
+        kv_heads,
+        head_dim,
+        block_size,
+        context_kv_lens_val,
+        q_lens_val,
+        device=get_torch_device(),
+    )
+
+    store_paged_kv_ref = MojoStorePagedKVCache._registry.get("torch")()
+    store_paged_kv = MojoStorePagedKVCache()
+    if type(store_paged_kv_ref) is type(store_paged_kv):
+        raise NotImplementedError("both operands resolve to the same implementation, skipping comparison.")
+
+    k_cache_ref, v_cache_ref = store_paged_kv_ref(
+        case["key_states"],
+        case["value_states"],
+        case["k_cache"].clone(),
+        case["v_cache"].clone(),
+        case["block_table"],
+        case["cu_q_lens"],
+        case["context_kv_lens"],
+    )
+    k_cache, v_cache = store_paged_kv(
+        case["key_states"],
+        case["value_states"],
+        case["k_cache"].clone(),
+        case["v_cache"].clone(),
+        case["block_table"],
+        case["cu_q_lens"],
+        case["context_kv_lens"],
+    )
+
+    assert_close(k_cache, k_cache_ref)
+    assert_close(v_cache, v_cache_ref)
+
+
 @auto_switch_platform()
 @bypass_not_implemented
 def test_store_paged_kv_bucket_padded_varlen():

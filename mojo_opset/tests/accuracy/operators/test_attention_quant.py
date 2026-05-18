@@ -195,6 +195,14 @@ test_configs_prefill_gqa_with_kv_dequant = [
     (3, 12, 3, 64, 257, 513, 16, torch.bfloat16, "M_BF16_VARLEN_BLK16_D64"),
     (4, 20, 5, 192, 193, 769, 256, torch.bfloat16, "M_BF16_VARLEN_BLK256_D192"),
     (3, 24, 6, 80, 321, 641, 64, torch.bfloat16, "M_BF16_VARLEN_BLK64_D80"),
+    (1, 16, 4, 128, 128, 0, 16, torch.bfloat16, "M_BF16_SMALL_BLK16"),
+    (2, 24, 6, 128, 255, 129, 32, torch.bfloat16, "M_BF16_H24_VARLEN"),
+    (3, 16, 4, 128, 513, 257, 64, torch.bfloat16, "M_BF16_VARLEN_513"),
+    (4, 24, 6, 128, 769, 511, 128, torch.bfloat16, "M_BF16_H24_BLK128"),
+    (5, 16, 4, 128, 1025, 333, 256, torch.bfloat16, "M_BF16_ODD_KV_333"),
+    (6, 24, 6, 128, 1537, 777, 128, torch.bfloat16, "M_BF16_H24_ODD_777"),
+    (7, 16, 4, 128, 4097, 2049, 256, torch.bfloat16, "M_BF16_LONG_ODD"),
+    (8, 24, 6, 128, 8192, 4095, 256, torch.bfloat16, "M_BF16_H24_LONG"),
 ]
 
 
@@ -392,6 +400,14 @@ test_configs_prefill_swa_with_kv_dequant = [
     (2, 24, 8, 128, 1024, 1024, 1024, torch.bfloat16, "M_BF16_GROUP2"),
     (3, 12, 3, 64, 257, 513, 16, torch.bfloat16, "M_BF16_VARLEN_BLK16_D64"),
     (3, 20, 5, 256, 193, 769, 256, torch.bfloat16, "M_BF16_VARLEN_BLK256_D256"),
+    (1, 16, 4, 128, 128, 0, 16, torch.bfloat16, "M_BF16_SMALL_BLK16"),
+    (2, 24, 6, 128, 255, 129, 32, torch.bfloat16, "M_BF16_H24_VARLEN"),
+    (3, 16, 4, 128, 513, 257, 64, torch.bfloat16, "M_BF16_VARLEN_513"),
+    (4, 24, 6, 128, 769, 511, 128, torch.bfloat16, "M_BF16_H24_BLK128"),
+    (5, 16, 4, 128, 1025, 333, 256, torch.bfloat16, "M_BF16_ODD_KV_333"),
+    (6, 24, 6, 128, 1537, 777, 128, torch.bfloat16, "M_BF16_H24_ODD_777"),
+    (7, 16, 4, 128, 4097, 2049, 256, torch.bfloat16, "M_BF16_LONG_ODD"),
+    (8, 24, 6, 128, 8192, 4095, 256, torch.bfloat16, "M_BF16_H24_LONG"),
 ]
 
 
