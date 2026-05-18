@@ -12,6 +12,7 @@ import torch
 import triton
 import triton.language as tl
 
+from .utils import LOG2E
 from .utils import ilu_grid_dim_from_row_tasks
 from .utils import libentry
 from .utils import smart_triton_autotune
@@ -1625,11 +1626,6 @@ def _sdpa_acc_fwd_1xN(
     V_block_ptr,  # Key and value block pointers for current stage
     mask,
     qk_scale,
-    HEAD_DIM: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-    fp8_v: tl.constexpr,
 ):
     if mask is False:
         return acc_ptr, l_i, m_i
@@ -1644,7 +1640,7 @@ def _sdpa_acc_fwd_1xN(
     m_ij = tl.maximum(m_i, tl.max(qk, 0))
     qk = qk - m_ij
 
-    p = tl.math.exp(qk)
+    p = tl.math.exp2(qk)
     if mask is not None and mask is not True:
         p = tl.where(mask, p, 0.0)
 
@@ -1653,7 +1649,7 @@ def _sdpa_acc_fwd_1xN(
     v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
     l_ij = tl.sum(p, axis=0)
-    alpha = tl.math.exp(m_i - m_ij)
+    alpha = tl.math.exp2(m_i - m_ij)
     l_i = l_i * alpha + l_ij
     acc_ptr = acc_ptr * alpha
     acc_ptr += tl.sum((p_cast[:, None] * v).to(tl.float32), axis=0)
@@ -1672,9 +1668,6 @@ def _sdpa_acc_fwd_1xT(
     v,
     mask,
     qk_scale,
-    BLOCK_T: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-    fp8_v: tl.constexpr,
 ):
     if mask is False:
         return acc_ptr, l_i, m_i
@@ -1686,13 +1679,44 @@ def _sdpa_acc_fwd_1xT(
 
     m_ij = tl.maximum(m_i, tl.max(qk, axis=0))
     qk = qk - m_ij
-    p = tl.math.exp(qk)
+    p = tl.math.exp2(qk)
     if mask is not None and mask is not True:
         p = tl.where(mask, p, 0.0)
 
     p_cast = p.to(k.dtype)
     l_ij = tl.sum(p, axis=0)
-    alpha = tl.math.exp(m_i - m_ij)
+    alpha = tl.math.exp2(m_i - m_ij)
+    l_i = l_i * alpha + l_ij
+    acc_ptr = acc_ptr * alpha
+    acc_ptr += tl.sum((p_cast[:, None] * v).to(tl.float32), axis=0)
+
+    m_i = m_ij
+    return acc_ptr, l_i, m_i
+
+
+@triton.jit
+def _sdpa_acc_fwd_nomask_1xN(
+    acc_ptr,
+    l_i,
+    m_i,
+    q,
+    K_block_ptr,
+    V_block_ptr,
+    qk_scale,
+):
+    k = tl.load(K_block_ptr)
+    qk = tl.sum((q[None, :] * k).to(tl.float32), axis=1)
+    qk = qk * qk_scale
+
+    m_ij = tl.maximum(m_i, tl.max(qk, 0))
+    qk = qk - m_ij
+    p = tl.math.exp2(qk)
+    p_cast = p.to(k.dtype)
+
+    v = tl.load(V_block_ptr)
+
+    l_ij = tl.sum(p, axis=0)
+    alpha = tl.math.exp2(m_i - m_ij)
     l_i = l_i * alpha + l_ij
     acc_ptr = acc_ptr * alpha
     acc_ptr += tl.sum((p_cast[:, None] * v).to(tl.float32), axis=0)
@@ -1739,6 +1763,8 @@ def _swa_infer_token_kernel(
     n_progs = tl.num_programs(0)
     has_global_window = GLOBAL_WINDOW is not None
     has_local_window = LOCAL_WINDOW is not None
+
+    kernel_scale = softmax_scale * LOG2E
 
     cu_q_tasks = 0
     for b_id in range(bsz):
@@ -1825,12 +1851,7 @@ def _swa_infer_token_kernel(
                     k_block_ptr,
                     v_block_ptr,
                     mask,
-                    softmax_scale,
-                    HEAD_DIM,
-                    BLOCK_SIZE_D,
-                    BLOCK_SIZE_N,
-                    BLOCK_SIZE_D,
-                    v_ptr.dtype.element_ty == tl.float8e5,
+                    kernel_scale,
                 )
 
             for kv_block_id in range(non_global_window_start_block, num_total_blocks):
@@ -1873,12 +1894,7 @@ def _swa_infer_token_kernel(
                     k_block_ptr,
                     v_block_ptr,
                     mask,
-                    softmax_scale,
-                    HEAD_DIM,
-                    BLOCK_SIZE_D,
-                    BLOCK_SIZE_N,
-                    BLOCK_SIZE_D,
-                    v_ptr.dtype.element_ty == tl.float8e5,
+                    kernel_scale,
                 )
 
             l_i_safe = tl.where(l_i > 0, l_i, 1.0)
@@ -1936,6 +1952,8 @@ def _swa_paged_prefill_token_kernel(
     n_progs = tl.num_programs(0)
     has_global_window = GLOBAL_WINDOW is not None
     has_local_window = LOCAL_WINDOW is not None
+
+    kernel_scale = softmax_scale * LOG2E
 
     for b_id in range(bsz):
         q_start = tl.load(cu_q_lens_ptr + b_id).to(tl.int32)
@@ -2030,12 +2048,7 @@ def _swa_paged_prefill_token_kernel(
                     k_block_ptr,
                     v_block_ptr,
                     mask,
-                    softmax_scale,
-                    HEAD_DIM,
-                    BLOCK_SIZE_D,
-                    BLOCK_SIZE_N,
-                    BLOCK_SIZE_D,
-                    v_cache_ptr.dtype.element_ty == tl.float8e5,
+                    kernel_scale,
                 )
 
             for kv_block_id in range(non_global_window_start_block, num_total_blocks):
@@ -2089,12 +2102,7 @@ def _swa_paged_prefill_token_kernel(
                     k_block_ptr,
                     v_block_ptr,
                     mask,
-                    softmax_scale,
-                    HEAD_DIM,
-                    BLOCK_SIZE_D,
-                    BLOCK_SIZE_N,
-                    BLOCK_SIZE_D,
-                    v_cache_ptr.dtype.element_ty == tl.float8e5,
+                    kernel_scale,
                 )
 
             l_i_safe = tl.where(l_i > 0, l_i, 1.0)
@@ -2229,11 +2237,6 @@ def _paged_decode_kernel(
                 v_block_ptr,
                 mask,
                 softmax_scale,
-                HEAD_DIM,
-                BLOCK_SIZE_D,
-                BLOCK_SIZE_N,
-                BLOCK_SIZE_D,
-                v_cache_ptr.dtype.element_ty == tl.float8e5,
             )
 
         for kv_block_id in tl.range(non_global_window_start_block, num_total_blocks):
@@ -2284,11 +2287,6 @@ def _paged_decode_kernel(
                 v_block_ptr,
                 mask,
                 softmax_scale,
-                HEAD_DIM,
-                BLOCK_SIZE_D,
-                BLOCK_SIZE_N,
-                BLOCK_SIZE_D,
-                v_cache_ptr.dtype.element_ty == tl.float8e5,
             )
 
         l_i_safe = tl.where(l_i > 0, l_i, 1.0)
@@ -2418,11 +2416,6 @@ def _paged_decode_kernel_tiny_global(
                     v_block_ptr,
                     mask,
                     softmax_scale,
-                    HEAD_DIM,
-                    BLOCK_SIZE_D,
-                    BLOCK_SIZE_N,
-                    BLOCK_SIZE_D,
-                    v_cache_ptr.dtype.element_ty == tl.float8e5,
                 )
             else:
                 k_ptrs = (
@@ -2453,9 +2446,6 @@ def _paged_decode_kernel_tiny_global(
                     v_tiny,
                     tiny_mask,
                     softmax_scale,
-                    TINY_GLOBAL_N,
-                    BLOCK_SIZE_D,
-                    v_cache_ptr.dtype.element_ty == tl.float8e5,
                 )
 
         for kv_block_id in tl.range(1, num_global_window_blocks):
@@ -2497,11 +2487,6 @@ def _paged_decode_kernel_tiny_global(
                 v_block_ptr,
                 mask,
                 softmax_scale,
-                HEAD_DIM,
-                BLOCK_SIZE_D,
-                BLOCK_SIZE_N,
-                BLOCK_SIZE_D,
-                v_cache_ptr.dtype.element_ty == tl.float8e5,
             )
 
 
@@ -2560,11 +2545,6 @@ def _paged_decode_kernel_tiny_global(
                 v_block_ptr,
                 mask,
                 softmax_scale,
-                HEAD_DIM,
-                BLOCK_SIZE_D,
-                BLOCK_SIZE_N,
-                BLOCK_SIZE_D,
-                v_cache_ptr.dtype.element_ty == tl.float8e5,
             )
 
         for kv_block_id in tl.range(nomask_start, nomask_end):
@@ -2609,11 +2589,6 @@ def _paged_decode_kernel_tiny_global(
                 v_block_ptr,
                 True,
                 softmax_scale,
-                HEAD_DIM,
-                BLOCK_SIZE_D,
-                BLOCK_SIZE_N,
-                BLOCK_SIZE_D,
-                v_cache_ptr.dtype.element_ty == tl.float8e5,
             )
 
         for kv_block_id in tl.range(nomask_end, num_total_blocks):
@@ -2662,11 +2637,6 @@ def _paged_decode_kernel_tiny_global(
                 v_block_ptr,
                 mask,
                 softmax_scale,
-                HEAD_DIM,
-                BLOCK_SIZE_D,
-                BLOCK_SIZE_N,
-                BLOCK_SIZE_D,
-                v_cache_ptr.dtype.element_ty == tl.float8e5,
             )
 
         l_i_safe = tl.where(l_i > 0, l_i, 1.0)
@@ -2920,6 +2890,7 @@ def swa_paged_decode_impl(
     global_window_size: Optional[int] = None,
     gqa_interleave: bool = False,
     softmax_scale: Optional[float] = None,
+    o: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     batch_size, num_q_heads, head_dim = q.shape
     num_total_blocks, num_kv_heads, block_size, head_dim_cache = key_cache.shape
@@ -2935,7 +2906,17 @@ def swa_paged_decode_impl(
     if softmax_scale is None:
         softmax_scale = 1.0 / (head_dim**0.5)
 
-    o = torch.empty_like(q, memory_format=torch.contiguous_format)
+    kernel_scale = softmax_scale * LOG2E.value
+
+    if o is None:
+        o = torch.empty_like(q, memory_format=torch.contiguous_format)
+    else:
+        if o.shape != q.shape:
+            raise ValueError(f"o shape {o.shape} must match q shape {q.shape}.")
+        if o.dtype != q.dtype:
+            raise ValueError(f"o dtype {o.dtype} must match q dtype {q.dtype}.")
+        if o.device != q.device:
+            raise ValueError(f"o device {o.device} must match q device {q.device}.")
 
     grid = (batch_size * num_q_heads,)
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
@@ -2981,7 +2962,7 @@ def swa_paged_decode_impl(
             o.stride(2),
             block_tables.stride(0),
             block_tables.stride(1),
-            softmax_scale,
+            kernel_scale,
             global_window_size,
             local_window_size,
             num_q_heads,
@@ -3022,7 +3003,7 @@ def swa_paged_decode_impl(
             o.stride(2),
             block_tables.stride(0),
             block_tables.stride(1),
-            softmax_scale,
+            kernel_scale,
             global_window_size,
             local_window_size,
             num_q_heads,
