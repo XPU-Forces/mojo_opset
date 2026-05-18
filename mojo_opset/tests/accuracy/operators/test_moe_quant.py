@@ -393,7 +393,7 @@ def test_quant_moe_reference(up_weight_dtype, up_quant_group_size, down_weight_d
         down_weight_dtype,
     )
 
-    op = MojoQuantMoE._registry.get("torch")(
+    op = MojoQuantMoE(
         num_experts=num_experts,
         top_k=top_k,
         hidden_size=hidden_size,
