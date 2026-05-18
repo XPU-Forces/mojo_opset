@@ -35,7 +35,9 @@ silu_fwd_impl = _get_kernel_impl(ttx_backend_module, "silu_fwd_impl")
 silu_bwd_impl = _get_kernel_impl(ttx_backend_module, "silu_bwd_impl")
 
 dynamic_quant_impl = _get_kernel_impl(ttx_backend_module, "dynamic_quant_impl")
+static_quant_impl = _get_kernel_impl(ttx_backend_module, "static_quant_impl")
 lightning_indexer_impl = _get_kernel_impl(ttx_backend_module, "lightning_indexer_impl")
+dequant_impl = _get_kernel_impl(ttx_backend_module, "dequant_impl")
 
 rot_pos_embed_impl = _get_kernel_impl(ttx_backend_module, "rot_pos_embed_impl")
 rope_fwd_impl = _get_kernel_impl(ttx_backend_module, "rope_fwd_impl")
@@ -61,6 +63,7 @@ fused_add_rmsnorm_infer_impl = _get_kernel_impl(ttx_backend_module, "fused_add_r
 fused_add_layernorm_infer_impl = _get_kernel_impl(ttx_backend_module, "fused_add_layernorm_infer_impl")
 
 paged_attention_prefill_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_prefill_impl")
+paged_attention_prefill_with_kv_dequant_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_prefill_with_kv_dequant_impl")
 paged_attention_decode_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_decode_impl")
 paged_attention_decode_with_kv_dequant_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_decode_with_kv_dequant_impl")
 
@@ -74,7 +77,9 @@ sdpa_fwd_impl = _get_kernel_impl(ttx_backend_module, "sdpa_fwd_impl")
 sdpa_bwd_impl = _get_kernel_impl(ttx_backend_module, "sdpa_bwd_impl")
 
 swa_paged_prefill_impl = _get_kernel_impl(ttx_backend_module, "swa_paged_prefill_impl")
+swa_paged_prefill_with_kv_dequant_impl = _get_kernel_impl(ttx_backend_module, "swa_paged_prefill_with_kv_dequant_impl")
 swa_paged_decode_impl = _get_kernel_impl(ttx_backend_module, "swa_paged_decode_impl")
+swa_paged_decode_quant_impl = _get_kernel_impl(ttx_backend_module, "swa_paged_decode_quant_impl")
 swa_infer_impl = _get_kernel_impl(ttx_backend_module, "swa_infer_impl")
 swa_fwd_impl = _get_kernel_impl(ttx_backend_module, "swa_fwd_impl")
 swa_bwd_impl = _get_kernel_impl(ttx_backend_module, "swa_bwd_impl")
@@ -263,6 +268,45 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     ) -> torch.Tensor:
         return torch.empty_like(q)
 
+    @torch.library.custom_op("ttx::paged_attention_prefill_with_kv_dequant", mutates_args={})
+    def paged_attention_prefill_with_kv_dequant(
+        q: torch.Tensor,
+        key_cache: torch.Tensor,
+        k_qscale: torch.Tensor,
+        value_cache: torch.Tensor,
+        v_qscale: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        seqlens_kv: torch.Tensor,
+        block_tables: torch.Tensor,
+        gqa_interleave: bool,
+        softmax_scale: Optional[float] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_k: Optional[int] = None,
+    ) -> torch.Tensor:
+        return paged_attention_prefill_with_kv_dequant_impl(
+            q, key_cache, k_qscale, value_cache, v_qscale,
+            cu_seqlens_q, seqlens_kv, block_tables, gqa_interleave, softmax_scale,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+        )
+
+    @paged_attention_prefill_with_kv_dequant.register_fake
+    def paged_attention_prefill_with_kv_dequant_fake(
+        q: torch.Tensor,
+        key_cache: torch.Tensor,
+        k_qscale: torch.Tensor,
+        value_cache: torch.Tensor,
+        v_qscale: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        seqlens_kv: torch.Tensor,
+        block_tables: torch.Tensor,
+        gqa_interleave: bool,
+        softmax_scale: Optional[float] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_k: Optional[int] = None,
+    ) -> torch.Tensor:
+        return torch.empty_like(q)
+
     @torch.library.custom_op("ttx::paged_attention_decode", mutates_args={})
     def paged_attention_decode(
         q: torch.Tensor,
@@ -380,6 +424,40 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
             torch.empty_like(input_tensor, dtype=torch.int8),
             torch.empty((*input_tensor.shape[:-1], 1), dtype=torch.float32, device=input_tensor.device),
         )
+
+    @torch.library.custom_op("ttx::static_quant", mutates_args={})
+    def static_quant(
+        input_tensor: torch.Tensor,
+        scale: torch.Tensor,
+        q_min: int = -128,
+        q_max: int = 127,
+    ) -> torch.Tensor:
+        return static_quant_impl(input_tensor, scale, q_min, q_max)
+
+    @static_quant.register_fake
+    def static_quant_fake(
+        input_tensor: torch.Tensor,
+        scale: torch.Tensor,
+        q_min: int = -128,
+        q_max: int = 127,
+    ) -> torch.Tensor:
+        return torch.empty_like(input_tensor, dtype=torch.int8)
+
+    @torch.library.custom_op("ttx::dequant", mutates_args={})
+    def dequant(
+        input_tensor: torch.Tensor,
+        scale: torch.Tensor,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return dequant_impl(input_tensor, scale, output_dtype)
+
+    @dequant.register_fake
+    def dequant_fake(
+        input_tensor: torch.Tensor,
+        scale: torch.Tensor,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return torch.empty_like(input_tensor, dtype=output_dtype)
 
     # ====================================
     # Register rmsnorm
@@ -815,7 +893,9 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     sdpa_infer = sdpa_infer_impl
     paged_attention_decode_with_kv_dequant = paged_attention_decode_with_kv_dequant_impl
     swa_paged_prefill = swa_paged_prefill_impl
+    swa_paged_prefill_with_kv_dequant = swa_paged_prefill_with_kv_dequant_impl
     swa_paged_decode = swa_paged_decode_impl
+    swa_paged_decode_quant = swa_paged_decode_quant_impl
     swa_infer = swa_infer_impl
     swa_fwd = swa_fwd_impl
     swa_bwd = swa_bwd_impl
@@ -836,6 +916,7 @@ else:
     swiglu_fwd = swiglu_fwd_impl
     swiglu_bwd = swiglu_bwd_impl
     paged_attention_prefill = paged_attention_prefill_impl
+    paged_attention_prefill_with_kv_dequant = paged_attention_prefill_with_kv_dequant_impl
     paged_attention_decode = paged_attention_decode_impl
     paged_attention_decode_with_kv_dequant = paged_attention_decode_with_kv_dequant_impl
     rot_pos_embed = rot_pos_embed_impl
@@ -859,7 +940,9 @@ else:
     sdpa_fwd = sdpa_fwd_impl
     sdpa_bwd = sdpa_bwd_impl
     swa_paged_prefill = swa_paged_prefill_impl
+    swa_paged_prefill_with_kv_dequant = swa_paged_prefill_with_kv_dequant_impl
     swa_paged_decode = swa_paged_decode_impl
+    swa_paged_decode_quant = swa_paged_decode_quant_impl
     swa_infer = swa_infer_impl
     swa_fwd = swa_fwd_impl
     swa_bwd = swa_bwd_impl
@@ -878,6 +961,8 @@ else:
     top_p_sampling = top_p_sampling_impl
     top_k_sampling = top_k_sampling_impl
     dynamic_quant = dynamic_quant_impl
+    static_quant = static_quant_impl
+    dequant = dequant_impl
     lightning_indexer = lightning_indexer_impl
     group_rmsnorm = group_rmsnorm_impl
     embedding_nf4_dequant = embedding_nf4_dequant_impl

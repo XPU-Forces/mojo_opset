@@ -3,18 +3,24 @@ from typing import Optional
 import torch
 
 from mojo_opset.backends.ttx.kernels import paged_attention_prefill
+from mojo_opset.backends.ttx.kernels import paged_attention_prefill_with_kv_dequant
 from mojo_opset.backends.ttx.kernels import paged_attention_decode
 from mojo_opset.backends.ttx.kernels import paged_attention_decode_with_kv_dequant
 from mojo_opset.backends.ttx.kernels import sdpa_infer
 from mojo_opset.backends.ttx.kernels import swa_paged_prefill
+from mojo_opset.backends.ttx.kernels import swa_paged_prefill_with_kv_dequant
 from mojo_opset.backends.ttx.kernels import swa_paged_decode
+from mojo_opset.backends.ttx.kernels import swa_paged_decode_quant
 from mojo_opset.backends.ttx.kernels import swa_infer
 from mojo_opset.core import MojoPagedPrefillGQA
+from mojo_opset.core import MojoPagedPrefillGQAWithKVDequant
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedDecodeGQAWithKVDequant
 from mojo_opset.core import MojoSdpa
+from mojo_opset.core import MojoPagedPrefillSWAWithKVDequant
 from mojo_opset.core import MojoPagedPrefillSWA
 from mojo_opset.core import MojoPagedDecodeSWA
+from mojo_opset.core import MojoPagedDecodeSWAWithKVDequant
 from mojo_opset.core import MojoSWA
 from mojo_opset.core.operators.attention import assert_paged_decode_contract
 from mojo_opset.core.operators.attention import assert_paged_prefill_contract
@@ -73,6 +79,75 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
             aux_mask=self.aux_mask,
             max_q_lens=max_q_lens,
             max_total_seq_lens=max_total_seq_lens,
+        )
+
+        return output
+
+
+class TTXPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
+    """Triton paged prefill attention with int8 KV cache on ILU."""
+
+    supported_platforms_list = ["ilu"]
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        query_scale: Optional[torch.Tensor],
+        key_cache: torch.Tensor,
+        key_scale: torch.Tensor,
+        value_cache: torch.Tensor,
+        value_scale: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        block_tables: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
+        max_q_lens: Optional[int] = None,
+        max_total_seq_lens: Optional[int] = None,
+    ) -> torch.Tensor:
+        assert query_scale is None, "[TTXPagedPrefillGQAWithKVDequant] quantized query is not supported"
+        assert cu_q_lens.dtype == torch.int32
+        assert block_tables.dtype == torch.int32
+        assert self.is_causal, (
+            f"[TTXPagedPrefillGQAWithKVDequant] only supports causal attention, got is_causal={self.is_causal}"
+        )
+        assert mask is None, (
+            f"[TTXPagedPrefillGQAWithKVDequant] does not support mask"
+        )
+
+        seqlens_kv = (
+            cu_q_lens[1:] - cu_q_lens[:-1]
+            if cu_total_seq_lens is None
+            else cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
+        )
+
+        num_q_heads = query.shape[1]
+        num_kv_heads = key_cache.shape[1]
+
+        if num_q_heads != num_kv_heads:
+            if self.gqa_layout == "AABB":
+                k_qscale_expanded = key_scale.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
+                v_qscale_expanded = value_scale.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
+            else:
+                k_qscale_expanded = key_scale.repeat((num_q_heads // num_kv_heads, 1))
+                v_qscale_expanded = value_scale.repeat((num_q_heads // num_kv_heads, 1))
+        else:
+            k_qscale_expanded = key_scale
+            v_qscale_expanded = value_scale
+
+        output = paged_attention_prefill_with_kv_dequant(
+            q=query,
+            key_cache=key_cache,
+            k_qscale=k_qscale_expanded,
+            value_cache=value_cache,
+            v_qscale=v_qscale_expanded,
+            cu_seqlens_q=cu_q_lens,
+            seqlens_kv=seqlens_kv,
+            block_tables=block_tables,
+            gqa_interleave=self.gqa_layout == "ABAB",
+            softmax_scale=softmax_scale,
+            max_seqlen_q=max_q_lens,
+            max_seqlen_k=max_total_seq_lens,
         )
 
         return output
@@ -214,6 +289,67 @@ class TTXPagedPrefillSWA(MojoPagedPrefillSWA):
         return o
 
 
+class TTXPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
+    """Triton paged prefill SWA attention with int8 KV cache on ILU."""
+
+    supported_platforms_list = ["ilu"]
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        query_scale: Optional[torch.Tensor],
+        key_cache: torch.Tensor,
+        key_scale: torch.Tensor,
+        value_cache: torch.Tensor,
+        value_scale: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,
+        max_q_lens: Optional[int] = None,
+        max_total_seq_lens: Optional[int] = None,
+    ) -> torch.Tensor:
+        assert query_scale is None, "[TTXPagedPrefillSWAWithKVDequant] quantized query is not supported"
+        assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
+
+        seqlens_kv = (
+            cu_q_lens[1:] - cu_q_lens[:-1]
+            if cu_total_seq_lens is None
+            else cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
+        )
+
+        num_q_heads = query.shape[1]
+        num_kv_heads = key_cache.shape[1]
+        if num_q_heads != num_kv_heads:
+            if self.gqa_interleave:
+                k_qscale_expanded = key_scale.repeat((num_q_heads // num_kv_heads, 1))
+                v_qscale_expanded = value_scale.repeat((num_q_heads // num_kv_heads, 1))
+            else:
+                k_qscale_expanded = key_scale.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
+                v_qscale_expanded = value_scale.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
+        else:
+            k_qscale_expanded = key_scale
+            v_qscale_expanded = value_scale
+
+        o = swa_paged_prefill_with_kv_dequant(
+            q=query,
+            key_cache=key_cache,
+            k_qscale=k_qscale_expanded,
+            value_cache=value_cache,
+            v_qscale=v_qscale_expanded,
+            cu_seqlens_q=cu_q_lens,
+            seqlens_kv=seqlens_kv,
+            block_tables=block_table,
+            is_causal=self.is_causal,
+            local_window_size=self.local_window_size,
+            global_window_size=self.global_window_size,
+            softmax_scale=softmax_scale,
+            gqa_interleave=self.gqa_interleave,
+            compute_dtype=self.compute_dtype,
+        )
+        return o
+
+
 class TTXPagedDecodeSWA(MojoPagedDecodeSWA):
     supported_platforms_list = ["npu", "mlu", "ilu"]
 
@@ -242,6 +378,40 @@ class TTXPagedDecodeSWA(MojoPagedDecodeSWA):
             softmax_scale,
         )
 
+        return o
+
+class TTXPagedDecodeSWAWithKVDequant(MojoPagedDecodeSWAWithKVDequant):
+    supported_platforms_list = ["ilu"]
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        query_scale: Optional[torch.Tensor],
+        key_cache: torch.Tensor,
+        key_scale: torch.Tensor,
+        value_cache: torch.Tensor,
+        value_scale: torch.Tensor,
+        total_seq_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        assert query_scale is None, "[TTXPagedDecodeSWAWithKVDequant] quantized query is not supported"
+        assert total_seq_lens.dtype == torch.int32
+        assert block_table.dtype == torch.int32
+        assert_paged_decode_contract(block_table, total_seq_lens)
+        o = swa_paged_decode_quant(
+            query,
+            key_cache,
+            key_scale,
+            value_cache,
+            value_scale,
+            total_seq_lens,
+            block_table,
+            self.local_window_size,
+            self.global_window_size,
+            self.gqa_interleave,
+            softmax_scale,
+        )
         return o
 
 
