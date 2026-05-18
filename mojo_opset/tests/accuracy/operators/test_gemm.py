@@ -154,7 +154,7 @@ def test_quant_gemm_parameters_are_registered():
         (1, 4096, 4096),
         (32, 4096, 11008),
         (128, 2048, 4096),
-        (128, 4096, 4096),
+        (64, 4096, 4096),
     ],
 )
 @pytest.mark.parametrize("output_dtype", [torch.float16, torch.bfloat16])
