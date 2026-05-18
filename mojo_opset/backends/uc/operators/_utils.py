@@ -3,6 +3,13 @@ from functools import lru_cache
 import torch
 
 
+_DTYPE_API_SUFFIX = {
+    torch.float16: "fp16",
+    torch.bfloat16: "bf16",
+    torch.float32: "fp32",
+}
+
+
 @lru_cache(maxsize=1)
 def _uc_kernels():
     import uc_kernel
@@ -18,39 +25,46 @@ def _matrix_shape(tensor: torch.Tensor) -> tuple[int, int]:
     return tensor.numel() // tensor.shape[-1], tensor.shape[-1]
 
 
-def run_unary_kernel(api: str, x: torch.Tensor) -> torch.Tensor:
-    original_dtype = x.dtype
-    kernel_input = x.contiguous()
-    if kernel_input.dtype != torch.float16:
-        kernel_input = kernel_input.to(torch.float16)
+def _typed_api(api: str, dtype: torch.dtype) -> str:
+    suffix = _DTYPE_API_SUFFIX.get(dtype)
+    if suffix is None:
+        raise NotImplementedError(f"UC backend {api} does not support dtype {dtype}.")
 
+    kernels = _uc_kernels()
+    typed_api = f"{api}_{suffix}"
+    if typed_api in kernels.keys():
+        return typed_api
+    if dtype == torch.float16 and api in kernels.keys():
+        return api
+    raise NotImplementedError(f"UC backend {api} does not provide a {suffix} kernel artifact.")
+
+
+def run_unary_kernel(api: str, x: torch.Tensor) -> torch.Tensor:
+    if x.numel() == 0:
+        return torch.empty_like(x)
+
+    kernel_input = x.contiguous()
     kernel_output = torch.empty_like(kernel_input)
     rows, cols = _matrix_shape(kernel_input)
-    _uc_kernels()[api](kernel_input, kernel_output, rows, cols)
-
-    output = kernel_output.reshape(x.shape)
-    if output.dtype != original_dtype:
-        output = output.to(original_dtype)
-    return output
+    _uc_kernels()[_typed_api(api, kernel_input.dtype)](kernel_input, kernel_output, rows, cols)
+    return kernel_output.reshape(x.shape)
 
 
 def run_binary_kernel(api: str, lhs: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
     if lhs.shape != rhs.shape:
         raise ValueError(f"UC backend {api} expects matching input shapes, got {lhs.shape} and {rhs.shape}.")
+    if lhs.dtype != rhs.dtype:
+        raise ValueError(f"UC backend {api} expects matching input dtypes, got {lhs.dtype} and {rhs.dtype}.")
+    if lhs.numel() == 0:
+        return torch.empty_like(lhs)
 
-    original_dtype = lhs.dtype
     kernel_lhs = lhs.contiguous()
     kernel_rhs = rhs.contiguous()
-    if kernel_lhs.dtype != torch.float16:
-        kernel_lhs = kernel_lhs.to(torch.float16)
-    if kernel_rhs.dtype != torch.float16:
-        kernel_rhs = kernel_rhs.to(torch.float16)
-
     kernel_output = torch.empty_like(kernel_lhs)
     rows, cols = _matrix_shape(kernel_lhs)
-    _uc_kernels()[api](kernel_lhs, kernel_rhs, kernel_output, rows, cols)
+    _uc_kernels()[_typed_api(api, kernel_lhs.dtype)](kernel_lhs, kernel_rhs, kernel_output, rows, cols)
+    return kernel_output.reshape(lhs.shape)
 
-    output = kernel_output.reshape(lhs.shape)
-    if output.dtype != original_dtype:
-        output = output.to(original_dtype)
-    return output
+
+def run_kernel(api: str, dtype: torch.dtype, *args) -> None:
+    _uc_kernels()[_typed_api(api, dtype)](*args)
