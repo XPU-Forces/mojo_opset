@@ -23,7 +23,9 @@ from .operators.attention import MojoPagedDecodeGQA
 from .operators.attention import MojoPagedDecodeMLA
 from .operators.attention import MojoPagedDecodeNSA
 from .operators.attention import MojoPagedDecodeSWA
+from .operators.attention import MojoPagedDecodeSWAWithKVDequant
 from .operators.attention import MojoPagedPrefillGQA
+from .operators.attention import MojoPagedPrefillGQAWithKVDequant
 from .operators.attention import MojoPagedPrefillMLA
 from .operators.attention import MojoPagedPrefillNSA
 from .operators.attention import MojoPagedPrefillSWA
@@ -32,10 +34,10 @@ from .operators.attention import MojoPrefillMLA
 from .operators.attention import MojoPrefillNSA
 from .operators.attention import MojoSdpa
 from .operators.attention import MojoSWA
-from .operators.attention import MojoPagedDecodeQuantGQA
-from .operators.attention import MojoPagedPrefillQuantGQA
-from .operators.attention import MojoPagedDecodeQuantSWA
-from .operators.attention import MojoPagedPrefillQuantSWA
+from .operators.attention import MojoPagedDecodeGQAWithKVDequant
+from .operators.attention import MojoPagedPrefillGQAWithKVDequant
+from .operators.attention import MojoPagedDecodeSWAWithKVDequant
+from .operators.attention import MojoPagedPrefillSWAWithKVDequant
 
 """ kvcache """
 from .operators.kv_cache import MojoStoreMLAKVCache
@@ -60,6 +62,7 @@ from .operators.embedding import MojoParallelEmbedding
 """ over_encoding """
 from .operators.over_encoding import MojoOverEncoding
 from .operators.over_encoding import MojoOverEncodingNGram
+from .operators.over_encoding import MojoNF4DequantEmbedding
 
 """ quantize """
 from .operators.quantize import MojoDequant
@@ -96,11 +99,14 @@ from .operators.normalization import MojoRMSNormQuant
 """ position_embedding """
 from .operators.position_embedding import MojoRelativeEmbedding
 from .operators.position_embedding import MojoApplyRoPE
+from .operators.position_embedding import MojoApplyVisionRoPE2D
 from .operators.position_embedding import MojoGridRoPE
+from .operators.position_embedding import MojoMRoPE
 from .operators.position_embedding import MojoNormRoPE
 from .operators.position_embedding import MojoNormRoPEStoreKV
 from .operators.position_embedding import MojoRoPEStoreKV
 from .operators.position_embedding import MojoRotaryEmbedding
+from .operators.position_embedding import MojoVisionRotaryEmbedding2D
 
 """ sampling """
 from .operators.sampling import MojoApplyPenaltiesTempurate
@@ -150,14 +156,16 @@ __all__ = [
     "MojoPagedDecodeMLA",
     "MojoDecodeNSA",
     "MojoPagedDecodeNSA",
+    "MojoPagedPrefillGQAWithKVDequant",
     "MojoSdpa",
     "MojoPagedPrefillSWA",
     "MojoPagedDecodeSWA",
+    "MojoPagedDecodeSWAWithKVDequant",
     "MojoSWA",
-    "MojoPagedPrefillQuantGQA",
-    "MojoPagedDecodeQuantGQA",
-    "MojoPagedPrefillQuantSWA",
-    "MojoPagedDecodeQuantSWA",
+    "MojoPagedPrefillGQAWithKVDequant",
+    "MojoPagedDecodeGQAWithKVDequant",
+    "MojoPagedPrefillSWAWithKVDequant",
+    "MojoPagedDecodeSWAWithKVDequant",
 
     "MojoStorePagedKVCache",
     "MojoStoreMLAKVCache",
@@ -179,6 +187,7 @@ __all__ = [
 
     "MojoEmbedding",
     "MojoParallelEmbedding",
+    "MojoNF4DequantEmbedding",
     "MojoRelativeEmbedding",
     "MojoOverEncoding",
     "MojoOverEncodingNGram",
@@ -208,10 +217,13 @@ __all__ = [
 
     "MojoRotaryEmbedding",
     "MojoApplyRoPE",
+    "MojoApplyVisionRoPE2D",
     "MojoRoPEStoreKV",
     "MojoNormRoPE",
     "MojoNormRoPEStoreKV",
     "MojoGridRoPE",
+    "MojoVisionRotaryEmbedding2D",
+    "MojoMRoPE",
 
     "MojoTopPSampling",
     "MojoTopKSampling",

@@ -4,6 +4,7 @@ import torch
 import torch_npu
 
 from mojo_opset.core import MojoApplyRoPE
+from mojo_opset.core import MojoApplyVisionRoPE2D
 
 
 class TorchNpuApplyRoPE(MojoApplyRoPE, default_priority=0):
@@ -50,3 +51,23 @@ class TorchNpuApplyRoPE(MojoApplyRoPE, default_priority=0):
             k_rot = torch.cat([k_nope, k_rot], dim=-1)
 
         return q_rot, k_rot
+
+
+class TorchNpuApplyVisionRoPE2D(MojoApplyVisionRoPE2D, default_priority=0):
+    supported_platforms_list = ["npu"]
+
+    def _apply_rope(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
+        orig_dtype = x.dtype
+
+        # npu_rotary_mul requires 4D input.
+        x = x.unsqueeze(0)
+        cos = cos.unsqueeze(0).unsqueeze(2)
+        sin = sin.unsqueeze(0).unsqueeze(2)
+
+        output = torch_npu.npu_rotary_mul(x, cos, sin, rotary_mode="half")
+        return output.squeeze(0).to(orig_dtype)

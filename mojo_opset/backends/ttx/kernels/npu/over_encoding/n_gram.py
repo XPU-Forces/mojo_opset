@@ -91,7 +91,7 @@ def n_gram_prefill_kerenl(
 
 def n_gram_prefill_impl(
     input_ids: torch.Tensor,
-    seq_lens: torch.Tensor,
+    q_lens: torch.Tensor,
     oe_history_inputs: torch.Tensor,
     oe_vocab_sizes: torch.Tensor,
     oe_vocab_offsets: torch.Tensor,
@@ -101,7 +101,7 @@ def n_gram_prefill_impl(
 
     input_offsets = torch.cumsum(
         torch.cat(
-            (torch.tensor([0], dtype=seq_lens.dtype, device="npu"), seq_lens), dim=0
+            (torch.tensor([0], dtype=q_lens.dtype, device="npu"), q_lens), dim=0
         ),
         dim=0,
     )
@@ -128,9 +128,9 @@ def n_gram_prefill_impl(
         oe_history_stride_0=oe_history_inputs.stride(0),
         oe_history_stride_1=oe_history_inputs.stride(1),
         vocab_size=vocab_size,
-        BLOCK_IDX_SIZE=math.ceil(n_grams.size(0) * seq_lens.size(0) / num_programs),
+        BLOCK_IDX_SIZE=math.ceil(n_grams.size(0) * q_lens.size(0) / num_programs),
         N_GRAM_SIZE=n_grams.size(0),
-        SEQ_LEN=seq_lens.size(0),
+        SEQ_LEN=q_lens.size(0),
     )
     # NOTE(liuyuan): stored by layout [oe_vocab_sizes.size(0), total_seq_len] but we need [total_seq_len, oe_vocab_sizes.size(0)]
     return output.transpose(0, 1).contiguous()
@@ -300,7 +300,7 @@ def n_gram_decode_impl(
         BLOCK_BATCH_SIZE=triton.next_power_of_2(
             math.ceil(input_ids.size(0) / num_programs)
         ),
-        MAX_N_GRAM=max(n_grams).item(),
+        MAX_N_GRAM=oe_history_inputs.size(-1) + 1,
         MTP_STEP=input_ids.size(1),
     )
     return output

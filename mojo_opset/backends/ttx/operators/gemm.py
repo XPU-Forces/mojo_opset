@@ -12,16 +12,15 @@ from mojo_opset.experimental import MojoQuantBatchGemmReduceSum
 
 
 class TTXQuantGemm(MojoQuantGemm):
-    """Triton INT8 GEMM + fused dequantization on Ascend NPU.
+    """Triton INT8 GEMM + fused dequantization.
 
-    Uses a hand-tuned Triton kernel with persistent scheduling,
-    B-transposed layout, double-buffering, and heuristic tile selection.
+    Uses a Triton kernel with B-transposed layout and fused epilogue.
     The kernel fuses int8 x int8 -> int32, per-token x per-channel
-    scale application, and output dtype cast into a single kernel
-    epilogue, eliminating intermediate memory traffic.
+    scale application, optional bias add, and output dtype cast into
+    a single kernel epilogue -- eliminating intermediate memory traffic.
     """
 
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(self, input: torch.Tensor, input_scale: torch.Tensor) -> torch.Tensor:
         weight = self.weight

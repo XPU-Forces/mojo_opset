@@ -1,9 +1,13 @@
 # Copyright (c) 2025, Shanghai Iluvatar CoreX Semiconductor Co., Ltd.
 # ILU Triton grouped matmul (aligned with NPU group_gemm; launch uses ILU vector cores).
 
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
+
+from .utils import smart_triton_autotune
 
 # Target upper bound on grid[0]; tiles per program ~= ceil(n / TARGET_PROGRAMS).
 _TARGET_GRID_PROGRAMS = 256
@@ -54,7 +58,7 @@ def m_grouped_matmul_autotune_config():
     return configs
 
 
-@triton.autotune(configs=m_grouped_matmul_autotune_config(), key=["N", "K", "MAX_M"])
+@smart_triton_autotune(configs=m_grouped_matmul_autotune_config(), selected_idx=0, key=["N", "K", "MAX_M"])
 @triton.jit
 def _m_grouped_matmul_kernel(
     A,
@@ -128,11 +132,15 @@ def m_grouped_matmul_impl(
     strideBN: int,
     strideBK: int,
     trans_b: bool = False,
+    group_offsets: Optional[torch.Tensor] = None,
+    max_m: Optional[int] = None,
 ) -> torch.Tensor:
-    cum = size_per_group.cumsum(0, dtype=torch.int32)
-    group_offsets = torch.zeros(num_groups + 1, dtype=torch.int32, device=A.device)
-    group_offsets[1:] = cum
-    max_m = size_per_group.max().item()
+    if group_offsets is None:
+        cum = size_per_group.cumsum(0, dtype=torch.int32)
+        group_offsets = torch.zeros(num_groups + 1, dtype=torch.int32, device=A.device)
+        group_offsets[1:] = cum
+    if max_m is None:
+        max_m = size_per_group.max().item()
 
     def grid(META):
         return (
@@ -172,7 +180,7 @@ def k_grouped_matmul_autotune_config():
     return configs
 
 
-@triton.autotune(configs=k_grouped_matmul_autotune_config(), key=["M", "N"])
+@smart_triton_autotune(configs=k_grouped_matmul_autotune_config(), selected_idx=0, key=["M", "N"])
 @triton.jit
 def _k_grouped_matmul_kernel(
     A,
@@ -231,10 +239,12 @@ def k_grouped_matmul_impl(
     num_groups: int,
     M: int,
     N: int,
+    group_offsets: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    cum = size_per_group.cumsum(0, dtype=torch.int32)
-    group_offsets = torch.zeros(num_groups + 1, dtype=torch.int32, device=A.device)
-    group_offsets[1:] = cum
+    if group_offsets is None:
+        cum = size_per_group.cumsum(0, dtype=torch.int32)
+        group_offsets = torch.zeros(num_groups + 1, dtype=torch.int32, device=A.device)
+        group_offsets[1:] = cum
 
     def grid(META):
         return (

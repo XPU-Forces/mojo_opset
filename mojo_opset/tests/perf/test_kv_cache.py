@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from mojo_opset import MojoStorePagedKVCache
+from mojo_opset.core.operators.kv_cache import build_paged_kv_chunk_metadata
 from mojo_opset.utils.platform import get_torch_device
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
@@ -28,11 +29,13 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, context_kv_l
     context_kv_lens = torch.tensor(context_kv_lens_val, dtype=torch.int32, device=device)
     q_lens = torch.tensor(q_lens_val, dtype=torch.int32, device=device)
 
-    cu_q_lens = torch.cat(
-        [torch.zeros(1, dtype=torch.int32, device=device), torch.cumsum(q_lens, dim=0, dtype=torch.int32)]
+    is_decode = torch.all(q_lens == 1).item()
+    cu_q_lens = (
+        torch.cat([torch.zeros(1, dtype=torch.int32, device=device), torch.cumsum(q_lens, dim=0, dtype=torch.int32)])
+        if not is_decode
+        else None
     )
-
-    total_tokens = cu_q_lens[-1].item()
+    total_tokens = int(q_lens.sum().item()) if not is_decode else batch_size
 
     key_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=torch.bfloat16, device=device)
     value_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=torch.bfloat16, device=device)
@@ -62,6 +65,8 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, context_kv_l
         block_table[i, :needed] = ids
         curr += needed
 
+    chunk_metadata = build_paged_kv_chunk_metadata(block_table, cu_q_lens, context_kv_lens, block_size)
+
     k_cache = k_cache_ref.clone()
     v_cache = v_cache_ref.clone()
 
@@ -73,8 +78,6 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, context_kv_l
             value_states,
             k_cache,
             v_cache,
-            block_table,
-            cu_q_lens,
-            context_kv_lens,
+            chunk_metadata=chunk_metadata,
         )
     )

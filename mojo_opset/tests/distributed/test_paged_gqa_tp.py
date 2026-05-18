@@ -28,6 +28,7 @@ from torch.distributed.tensor.placement_types import Shard, Replicate, Partial
 from torch.distributed import breakpoint as dist_breakpoint
 from mojo_opset.runtime.config import MojoConfig, BaseModel
 from typing import Optional
+from mojo_opset.core.operators.kv_cache import build_paged_kv_chunk_metadata
 
 
 def _init_torchrun_gloo(required_world_size: int):
@@ -127,9 +128,12 @@ class SimplePagedKVCache(torch.nn.Module):
             value_states,
             self.k_cache,
             self.v_cache,
-            self.block_tables[layer_idx],
-            cu_seqlens,
-            current_seq_lens,
+            chunk_metadata=build_paged_kv_chunk_metadata(
+                self.block_tables[layer_idx],
+                cu_seqlens,
+                current_seq_lens,
+                self.block_size,
+            ),
         )
         self.seq_lens[layer_idx] += input_len
 

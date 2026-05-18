@@ -1,17 +1,32 @@
 import torch
 
 from mojo_opset.backends.ttx.kernels import dynamic_quant
+from mojo_opset.backends.ttx.kernels import static_quant
+from mojo_opset.backends.ttx.kernels import dequant
+from mojo_opset.core import MojoDequant
 from mojo_opset.core import MojoDynamicQuant
 from mojo_opset.core import MojoMoEDynamicQuant
 from mojo_opset.core import MojoStaticQuant
 
 
 class TTXStaticQuant(MojoStaticQuant):
-    pass
 
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return static_quant(input, self.scale, self.q_min, self.q_max), self.scale
+
+
+class TTXDequant(MojoDequant):
+    supported_platforms_list = ["ilu"]
+
+    def forward(
+        self,
+        input: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> torch.Tensor:
+        return dequant(input, scale, self.output_dtype)
 
 class TTXDynamicQuant(MojoDynamicQuant):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(
         self,
@@ -21,7 +36,7 @@ class TTXDynamicQuant(MojoDynamicQuant):
 
 
 class TTXMoEDynamicQuant(MojoMoEDynamicQuant):
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(
         self,
@@ -29,9 +44,4 @@ class TTXMoEDynamicQuant(MojoMoEDynamicQuant):
         token_count: torch.Tensor,
     ):
         input_fp = input.float() * self.inv_smooth_scale.float().repeat_interleave(token_count, dim=0)
-        scale_tensor = torch.ones(
-            input_fp.shape[-1],
-            device=input_fp.device,
-            dtype=torch.float32,
-        )
-        return dynamic_quant(input_fp, scale_tensor)
+        return dynamic_quant(input_fp, None)

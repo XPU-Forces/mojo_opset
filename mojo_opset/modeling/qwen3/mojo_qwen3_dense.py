@@ -11,6 +11,7 @@ from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoApplyRoPE
 from mojo_opset import MojoSilu
 from mojo_opset import MojoStorePagedKVCache
+from mojo_opset.core.operators.kv_cache import build_paged_kv_chunk_metadata
 
 
 class Qwen3Config:
@@ -112,9 +113,12 @@ class PagedDummyCache:
             value_states,
             self.k_cache,
             self.v_cache,
-            self.block_tables[layer_idx],
-            cu_seqlens,
-            current_seq_lens,
+            chunk_metadata=build_paged_kv_chunk_metadata(
+                self.block_tables[layer_idx],
+                cu_seqlens,
+                current_seq_lens,
+                self.block_size,
+            ),
         )
         self.seq_lens[layer_idx] += new_seq_len
 
