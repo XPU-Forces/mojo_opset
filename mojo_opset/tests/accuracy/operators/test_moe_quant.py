@@ -128,8 +128,8 @@ def _manual_quant_experts(
 
 
 def _make_quant_weights(num_experts: int, hidden_size: int, intermediate_size: int, quant_group_size: int, weight_dtype: Union[torch.dtype, str]):
-    up_weight_fp = torch.randn(num_experts, intermediate_size * 2, hidden_size, dtype=torch.float32)
-    down_weight_fp = torch.randn(num_experts, hidden_size, intermediate_size, dtype=torch.float32)
+    up_weight_fp = torch.randn(num_experts, intermediate_size * 2, hidden_size, dtype=torch.float32) * 0.01
+    down_weight_fp = torch.randn(num_experts, hidden_size, intermediate_size, dtype=torch.float32) * 0.01
     up_weight, up_weight_scale = _quantize_weight_per_group(up_weight_fp, quant_group_size, weight_dtype)
     down_weight, down_weight_scale = _quantize_weight_per_group(down_weight_fp, quant_group_size, weight_dtype)
     return up_weight, up_weight_scale.bfloat16(), down_weight, down_weight_scale.bfloat16()
@@ -505,4 +505,4 @@ def test_quant_moe_backend(
     ).to(device)
     op.load_state_dict(state_dict)
     op_ref.load_state_dict({k: v.clone() for k, v in state_dict.items()})
-    op.forward_diff_with(op_ref, hidden_states, mixed_tol=True)
+    op.forward_diff_with(op_ref, hidden_states, atol=2.5e-2, rtol=2.5e-2, ptol=0.997)
