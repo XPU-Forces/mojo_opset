@@ -88,6 +88,7 @@ def rewrite_assertion(module_name):
 
     disable = get_bool_env("MOJO_DISABLE_ASSERTION_REWRITE", False)
     if disable:
+        yield
         return
 
     from _pytest.assertion import install_importhook
