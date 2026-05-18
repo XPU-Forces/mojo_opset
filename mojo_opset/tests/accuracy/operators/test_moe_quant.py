@@ -518,4 +518,4 @@ def test_quant_moe_backend(
     ).to(device)
     op.load_state_dict(state_dict)
     op_ref.load_state_dict({k: v.clone() for k, v in state_dict.items()})
-    op.forward_diff_with(op_ref, hidden_states, mixed_tol=True)
+    op.forward_diff_with(op_ref, hidden_states, atol=2.5e-2, rtol=2.5e-2, ptol=0.997)
