@@ -36,11 +36,6 @@ class AscendcCompressor(MojoCompressor):
         cache_mode: int = 1,
     ) -> torch.Tensor:
         try:
-            try:
-                import custom_ops  # noqa: F401
-            except Exception:
-                pass
-
             return torch.ops.custom.compressor(
                 x,
                 wkv,

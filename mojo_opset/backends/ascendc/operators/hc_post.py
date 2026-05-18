@@ -17,14 +17,6 @@ class AscendcHcPost(MojoHcPost):
         comb: torch.Tensor,
     ):
         try:
-            import torch_npu
-            if hasattr(torch_npu, "npu_hc_post"):
-                return torch_npu.npu_hc_post(x, residual, post, comb)
-        except Exception:
-            pass
-
-        try:
-            import custom_ops
             return torch.ops.custom.npu_hc_post(x, residual, post, comb)
         except Exception:
             logger.warning("AscendC HcPost kernel not available, falling back to reference implementation.")

@@ -1,6 +1,8 @@
 [submodule "third_party/cann-recipes-infer"]
 	path = third_party/cann-recipes-infer
 	url = https://gitcode.com/cann/cann-recipes-infer.git
+	ignore = dirty
 [submodule "third_party/ops-transformer"]
 	path = third_party/ops-transformer
 	url = https://gitcode.com/cann/ops-transformer.git
+	ignore = dirty

@@ -31,35 +31,6 @@ class AscendcMoEGatingTopK(MojoMoEGatingTopK):
         eps: float = 1e-20,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         try:
-            import torch_npu
-
-            if (
-                hasattr(torch_npu, "npu_moe_gating_top_k")
-                and input_ids is None
-                and tid2eid is None
-            ):
-                return torch_npu.npu_moe_gating_top_k(
-                    x,
-                    k,
-                    bias=bias,
-                    k_group=k_group,
-                    group_count=group_count,
-                    routed_scaling_factor=routed_scaling_factor,
-                    eps=eps,
-                    group_select_mode=group_select_mode,
-                    renorm=renorm,
-                    norm_type=norm_type,
-                    out_flag=out_flag,
-                )
-        except Exception:
-            pass
-
-        try:
-            try:
-                import custom_ops  # noqa: F401
-            except Exception:
-                pass
-
             return torch.ops.custom.npu_moe_gating_top_k(
                 x,
                 k,

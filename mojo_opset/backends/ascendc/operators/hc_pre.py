@@ -22,29 +22,6 @@ class AscendcHcPre(MojoHcPre):
         hc_eps: float = 1e-6,
     ):
         try:
-            import torch_npu
-
-            if hasattr(torch_npu, "npu_hc_pre"):
-                # print("aaaaaaaaaaaa")
-                return torch_npu.npu_hc_pre(
-                    x,
-                    hc_fn,
-                    hc_scale,
-                    hc_base,
-                    hc_mult=hc_mult,
-                    hc_sinkhorn_iters=hc_sinkhorn_iters,
-                    norm_eps=norm_eps,
-                    hc_eps=hc_eps,
-                )
-        except Exception:
-            pass
-
-        try:
-            try:
-                import custom_ops  # noqa: F401
-            except Exception:
-                pass
-            # print("bbbbbbbbbbb")
             return torch.ops.custom.npu_hc_pre(
                 x,
                 hc_fn,

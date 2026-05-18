@@ -23,11 +23,6 @@ class AscendcRMSNormDynamicQuant(MojoRMSNormDynamicQuant):
         epsilon: float = 1e-6,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         try:
-            try:
-                import custom_ops  # noqa: F401
-            except Exception:
-                pass
-
             return torch.ops.custom.npu_rms_norm_dynamic_quant(
                 x,
                 gamma,

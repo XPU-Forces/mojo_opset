@@ -20,6 +20,20 @@ ARCH_MAP = {
     "DeepseekV4ForCausalLM": ("mojo_opset.modeling.deepseekv4.mojo_deepseek_v4", "DeepseekV4ForCausalLM"),
 }
 
+_MEM_PROFILING = os.getenv("MEM_PROFILING", "0") == "1"
+
+def _mem_snapshot(tag, device=None):
+    if not _MEM_PROFILING:
+        return
+    if device is None:
+        device = torch.npu.current_device()
+    alloc = torch.npu.memory_allocated(device) / (1024 ** 3)
+    reserved = torch.npu.memory_reserved(device) / (1024 ** 3)
+    max_alloc = torch.npu.max_memory_allocated(device) / (1024 ** 3)
+    max_reserved = torch.npu.max_memory_reserved(device) / (1024 ** 3)
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    print(f"[MEM][rank{rank}] {tag:50s} alloc={alloc:7.3f}GiB reserved={reserved:7.3f}GiB max_alloc={max_alloc:7.3f}GiB max_reserved={max_reserved:7.3f}GiB", flush=True)
+
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - [LLM](%(filename)s:%(lineno)d): %(message)s',
     level=logging.INFO,
@@ -103,6 +117,7 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1):
 
     input_ids, prompt_text = build_prompt_input_ids(model, tokenizer, prompt)
     input_ids = input_ids.to(device)
+    _mem_snapshot("after input_ids.to(device)")
 
     if is_main:
         print(f"\nPrompt: {prompt}")
@@ -110,6 +125,8 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1):
         print(f"Input token IDs: {input_ids.detach().cpu().tolist()}")
         print("-" * 40)
 
+    torch.npu.reset_peak_memory_stats()
+    _mem_snapshot("before prefill (peak reset)")
     with torch.no_grad():
         outputs = model(input_ids, use_cache=True, is_prefill=True)
         if hasattr(outputs, "logits"):
@@ -117,6 +134,7 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1):
             past_key_values = outputs.past_key_values
         else:
             logits, past_key_values = outputs
+    _mem_snapshot("after prefill")
 
     next_token_logits = logits[:, -1, :]
     next_token_id = torch.argmax(next_token_logits, dim=-1).unsqueeze(-1)
@@ -151,6 +169,8 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1):
                 print(f"EOS reached at step {step}.")
             break
 
+    _mem_snapshot("after all decode steps")
+
     if is_main:
         print("-" * 40)
         print(f"Generated token IDs: {generated_ids}")
@@ -169,6 +189,7 @@ def parse_args():
     parser.add_argument("--num_layers", type=int, default=int(os.getenv("QWEN3_NUM_LAYERS", "36")))
     parser.add_argument("--prompt", type=str, default="今天天气怎么样？")
     parser.add_argument("--max_new_tokens", type=int, default=100)
+    parser.add_argument("--pa_max_length", type=int, default=int(os.getenv("PA_MAX_LENGTH", "2048")))
     parser.add_argument("--transformers", action="store_true", help="Use Transformers model")
     parser.add_argument("--ep_size", type=int, default=int(os.getenv("EP_SIZE", "1")))
     return parser.parse_args()
@@ -214,33 +235,41 @@ def main():
             from mojo_opset.modeling.deepseekv4.mojo_deepseek_v4 import DeepseekV4Config
             hf_config = DeepseekV4Config(**cfg_dict)
 
+        hf_config.pa_max_length = args.pa_max_length
+
         ep_rank = global_rank % ep_size if ep_size > 1 else 0
 
         npu_device_idx = int(os.getenv("NPU_DEVICE_IDX", local_rank))
+    _mem_snapshot("before model construct", npu_device_idx)
 
-        if hasattr(model_class, "load_weights"):
-            from transformers.modeling_utils import no_init_weights
-            origin_dtype = torch.get_default_dtype()
-            torch.set_default_dtype(torch.bfloat16)
-            with no_init_weights():
-                model = model_class(hf_config, num_layers=args.num_layers, ep_size=ep_size, ep_rank=ep_rank)
-            torch.set_default_dtype(origin_dtype)
-            model = model.to(f"npu:{npu_device_idx}").eval()
+    if hasattr(model_class, "load_weights"):
+        from transformers.modeling_utils import no_init_weights
+        origin_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        with no_init_weights():
+            model = model_class(hf_config, num_layers=args.num_layers, ep_size=ep_size, ep_rank=ep_rank)
+        torch.set_default_dtype(origin_dtype)
+        _mem_snapshot("after model construct (CPU)", npu_device_idx)
+        model = model.to(f"npu:{npu_device_idx}").eval()
+        _mem_snapshot("after model.to(npu)", npu_device_idx)
 
-            if ep_size > 1 and dist.is_initialized():
-                model.init_parallel_comm_group()
-                model.set_ep_group()
+        if ep_size > 1 and dist.is_initialized():
+            model.init_parallel_comm_group()
+            model.set_ep_group()
+        _mem_snapshot("after init_parallel_comm_group", npu_device_idx)
 
-            model_class.load_weights(model, args.model_path)
-        else:
-            model = build_model_from_hf(
-                model_class,
-                args.model_path,
-                device=args.device,
-                num_layers=args.num_layers,
-                trust_remote_code=True,
-            )
+        model_class.load_weights(model, args.model_path)
+        _mem_snapshot("after load_weights", npu_device_idx)
+    else:
+        model = build_model_from_hf(
+            model_class,
+            args.model_path,
+            device=args.device,
+            num_layers=args.num_layers,
+            trust_remote_code=True,
+        )
 
+    _mem_snapshot("before tokenizer", npu_device_idx)
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path,

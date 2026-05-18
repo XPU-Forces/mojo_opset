@@ -23,11 +23,6 @@ class AscendcInplacePartialRotaryMul(MojoInplacePartialRotaryMul):
         partial_slice: List[int] = None,
     ) -> torch.Tensor:
         try:
-            try:
-                import custom_ops  # noqa: F401
-            except Exception:
-                pass
-
             torch.ops.custom.inplace_partial_rotary_mul(
                 x,
                 r1,

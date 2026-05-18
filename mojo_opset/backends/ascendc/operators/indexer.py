@@ -41,33 +41,6 @@ class AscendcQuantLightningIndexer(MojoQuantLightningIndexer):
         cmp_ratio: int = 1,
         return_value: bool = False,
     ):
-        try:
-            import torch_npu
-
-            if hasattr(torch_pu, "npu_quant_lightning_indexer"):
-                print('[AscendcQuantLightningIndexer] Calling torch_npu.npu_quant_lightning_indexer')
-                print('nnnnnnnnnn')
-                return torch_npu.npu_quant_lightning_indexer(
-                    query, key, weights, query_dequant_scale, key_dequant_scale,
-                    query_quant_mode, key_quant_mode,
-                    actual_seq_lengths_query=actual_seq_lengths_query,
-                    actual_seq_lengths_key=actual_seq_lengths_key,
-                    block_table=block_table,
-                    metadata=metadata,
-                    layout_query=layout_query,
-                    layout_key=layout_key,
-                    sparse_count=sparse_count,
-                    sparse_mode=sparse_mode,
-                    pre_tokens=pre_tokens,
-                    next_tokens=next_tokens,
-                    cmp_ratio=cmp_ratio,
-                    return_value=return_value,
-                )
-        except Exception:
-            pass
-
-        import custom_ops
-        print('[AscendcQuantLightningIndexer] Calling torch.ops.custom.npu_quant_lightning_indexer')
         # Ensure tensors are contiguous as required by the operator
         # Use clone() to create a guaranteed contiguous copy
         query = query.clone().contiguous()
@@ -104,19 +77,8 @@ class AscendcIndexerCompressEpilog(MojoIndexerCompressEpilog):
         gamma: torch.Tensor,
     ):
         try:
-            import torch_npu
-
-            if hasattr(torch_npu, "indexer_compress_epilog"):
-                print('[AscendcIndexerCompressEpilog] Calling torch_npu.indexer_compress_epilog')
-                return torch_npu.indexer_compress_epilog(attn, x, residual, gamma)
-        except Exception:
-            pass
-
-        try:
-            print('[AscendcIndexerCompressEpilog] Calling torch.ops.custom.indexer_compress_epilog')
             return torch.ops.custom.indexer_compress_epilog(attn, x, residual, gamma)
         except Exception:
-            print('[AscendcIndexerCompressEpilog] Fallback to reference implementation')
             logger.warning("AscendC IndexerCompressEpilog kernel not available, falling back to reference implementation.")
             return super().forward(attn, x, residual, gamma)
 
@@ -134,22 +96,11 @@ class AscendcKvCompressEpilog(MojoKvCompressEpilog):
         kv_z: torch.Tensor = None,
     ):
         try:
-            import torch_npu
-
-            if hasattr(torch_npu, "kv_compress_epilog"):
-                print('[AscendcKvCompressEpilog] Calling torch_npu.kv_compress_epilog')
-                return torch_npu.kv_compress_epilog(attn, x, residual, gamma, kv_s, kv_z)
-        except Exception:
-            pass
-
-        try:
-            print('[AscendcKvCompressEpilog] Calling torch.ops.custom.kv_compress_epilog')
+            # print('[AscendcKvCompressEpilog] Calling torch.ops.custom.kv_compress_epilog')
             return torch.ops.custom.kv_compress_epilog(attn, x, residual, gamma, kv_s, kv_z)
         except Exception:
-            print('[AscendcKvCompressEpilog] Fallback to reference implementation')
             logger.warning("AscendC KvCompressEpilog kernel not available, falling back to reference implementation.")
             return super().forward(attn, x, residual, gamma, kv_s, kv_z)
-
 
 class AscendcSparseAttnSharedkvMetadata(MojoSparseAttnSharedkvMetadata):
     supported_platforms_list = ["npu", "meta_device"]
@@ -180,7 +131,6 @@ class AscendcSparseAttnSharedkvMetadata(MojoSparseAttnSharedkvMetadata):
         has_cmp_kv: bool = False,
         device: str = 'npu:0',
     ):
-        logger.info("Calling torch.ops.custom.npu_sparse_attn_sharedkv_metadata")
         return torch.ops.custom.npu_sparse_attn_sharedkv_metadata(
             num_heads_q=num_heads_q,
             num_heads_kv=num_heads_kv,
@@ -205,7 +155,6 @@ class AscendcSparseAttnSharedkvMetadata(MojoSparseAttnSharedkvMetadata):
             has_cmp_kv=has_cmp_kv,
             device=device,
         )
-
 
 class AscendcSparseAttnSharedkv(MojoSparseAttnSharedkv):
     supported_platforms_list = ["npu", "meta_device"]
@@ -238,7 +187,6 @@ class AscendcSparseAttnSharedkv(MojoSparseAttnSharedkv):
         return_softmax_lse: bool = False,
     ):
         try:
-            print('[AscendcSparseAttnSharedkv] Calling torch.ops.custom.npu_sparse_attn_sharedkv')
             return torch.ops.custom.npu_sparse_attn_sharedkv(
                 q,
                 ori_kv=ori_kv,
@@ -307,19 +255,8 @@ class AscendcKvQuantSparseAttnSharedkv(MojoKvQuantSparseAttnSharedkv):
         causal: bool = False,
     ):
         try:
-            import torch_npu
-
-            if hasattr(torch_npu, "npu_kv_quant_sparse_attn_sharedkv"):
-                print('[AscendcKvQuantSparseAttnSharedkv] Calling torch_npu.npu_kv_quant_sparse_attn_sharedkv')
-                return torch_npu.npu_kv_quant_sparse_attn_sharedkv(query, key, value, kv_s, kv_z, scale, causal)
-        except Exception:
-            pass
-
-        try:
-            print('[AscendcKvQuantSparseAttnSharedkv] Calling torch.ops.custom.npu_kv_quant_sparse_attn_sharedkv')
             return torch.ops.custom.npu_kv_quant_sparse_attn_sharedkv(query, key, value, kv_s, kv_z, scale, causal)
         except Exception:
-            print('[AscendcKvQuantSparseAttnSharedkv] Fallback to reference implementation')
             logger.warning("AscendC KvQuantSparseAttnSharedkv kernel not available, falling back to reference implementation.")
             return super().forward(query, key, value, kv_s, kv_z, scale, causal)
 
@@ -357,38 +294,6 @@ class AscendcKvQuantSparseAttnSharedkvMetadata(MojoKvQuantSparseAttnSharedkvMeta
         has_cmp_kv: bool = True,
     ):
         try:
-            import torch_npu
-
-            if hasattr(torch_npu, "npu_kv_quant_sparse_attn_sharedkv_metadata"):
-                print('[AscendcKvQuantSparseAttnSharedkvMetadata] Calling torch_npu.npu_kv_quant_sparse_attn_sharedkv_metadata')
-                return torch_npu.npu_kv_quant_sparse_attn_sharedkv_metadata(
-                    num_heads_q, num_heads_kv, head_dim, kv_quant_mode,
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_ori_kv=cu_seqlens_ori_kv,
-                    cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-                    seqused_q=seqused_q,
-                    seqused_kv=seqused_kv,
-                    batch_size=batch_size,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_kv=max_seqlen_kv,
-                    ori_topk=ori_topk,
-                    cmp_topk=cmp_topk,
-                    tile_size=tile_size,
-                    rope_head_dim=rope_head_dim,
-                    cmp_ratio=cmp_ratio,
-                    ori_mask_mode=ori_mask_mode,
-                    cmp_mask_mode=cmp_mask_mode,
-                    ori_win_left=ori_win_left,
-                    ori_win_right=ori_win_right,
-                    layout_q=layout_q,
-                    layout_kv=layout_kv,
-                    return_softmax_lse=False
-                )
-        except Exception:
-            pass
-
-        try:
-            print('[AscendcKvQuantSparseAttnSharedkvMetadata] Calling torch.ops.custom.npu_kv_quant_sparse_attn_sharedkv_metadata')
             return torch.ops.custom.npu_kv_quant_sparse_attn_sharedkv_metadata(
                 num_heads_q, num_heads_kv, head_dim, kv_quant_mode,
                 cu_seqlens_q=cu_seqlens_q,
@@ -414,7 +319,6 @@ class AscendcKvQuantSparseAttnSharedkvMetadata(MojoKvQuantSparseAttnSharedkvMeta
                 has_cmp_kv=has_cmp_kv,
             )
         except Exception as e:
-            print(f'[AscendcKvQuantSparseAttnSharedkvMetadata] Fallback to reference implementation: {e}')
             logger.warning("AscendC KvQuantSparseAttnSharedkvMetadata kernel not available, falling back to reference implementation.")
             return super().forward(
                 num_heads_q, num_heads_kv, head_dim, kv_quant_mode,
@@ -494,36 +398,6 @@ class AscendcQuantLightningIndexerMetadata(MojoQuantLightningIndexerMetadata):
                 max_seqlen_k = key.shape[1]
 
         try:
-            import torch_npu
-
-            if hasattr(torch_npu, "npu_quant_lightning_indexer_metadata"):
-                print('[AscendcQuantLightningIndexerMetadata] Calling torch_npu.npu_quant_lightning_indexer_metadata')
-                return torch_npu.npu_quant_lightning_indexer_metadata(
-                    actual_seq_lengths_query=actual_seq_lengths_query,
-                    actual_seq_lengths_key=actual_seq_lengths_key,
-                    num_heads_q=num_heads_q,
-                    num_heads_k=num_heads_k,
-                    head_dim=head_dim,
-                    query_quant_mode=query_quant_mode,
-                    key_quant_mode=key_quant_mode,
-                    batch_size=batch_size,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_k=max_seqlen_k,
-                    layout_query=layout_query,
-                    layout_key=layout_key,
-                    sparse_count=sparse_count,
-                    sparse_mode=sparse_mode,
-                    pre_tokens=pre_tokens,
-                    next_tokens=next_tokens,
-                    cmp_ratio=cmp_ratio,
-                    device='npu:0'
-                )
-        except Exception as e:
-            print(f'[AscendcQuantLightningIndexerMetadata] torch_npu failed: {e}')
-            pass
-
-        try:
-            print('[AscendcQuantLightningIndexerMetadata] Calling torch.ops.custom.npu_quant_lightning_indexer_metadata')
             return torch.ops.custom.npu_quant_lightning_indexer_metadata(
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
@@ -545,7 +419,6 @@ class AscendcQuantLightningIndexerMetadata(MojoQuantLightningIndexerMetadata):
                 device='npu:0'
             )
         except Exception as e:
-            print(f'[AscendcQuantLightningIndexerMetadata] Fallback to reference implementation: {e}')
             logger.warning("AscendC QuantLightningIndexerMetadata kernel not available, falling back to reference implementation.")
             return super().forward(
                 query, key, weights, query_dequant_scale, key_dequant_scale,

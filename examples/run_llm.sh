@@ -32,6 +32,7 @@ export MOJO_DISABLE_ASSERTION_REWRITE="${MOJO_DISABLE_ASSERTION_REWRITE:-1}"
 EP_SIZE="${EP_SIZE:-8}"
 NUM_LAYERS="${LLM_NUM_LAYERS:-43}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-16}"
+PA_MAX_LENGTH="${PA_MAX_LENGTH:-2048}"
 PROMPT="${PROMPT:-你好}"
 
 cd "$PROJECT_ROOT" || exit 1
@@ -44,6 +45,7 @@ if [ "$EP_SIZE" -eq 1 ]; then
         --device "${DEVICE:-npu}" \
         --num_layers "${NUM_LAYERS}" \
         --max_new_tokens "${MAX_NEW_TOKENS}" \
+        --pa_max_length "${PA_MAX_LENGTH}" \
         --prompt "${PROMPT}" \
         --ep_size 1
 else
@@ -79,6 +81,7 @@ else
             --device "${DEVICE:-npu}" \
             --num_layers "${NUM_LAYERS}" \
             --max_new_tokens "${MAX_NEW_TOKENS}" \
+            --pa_max_length "${PA_MAX_LENGTH}" \
             --prompt "${PROMPT}" \
             --ep_size "${EP_SIZE}" &
 

@@ -18,11 +18,6 @@ class AscendcScatterNdUpdateAsc(MojoScatterNdUpdateAsc):
         update: torch.Tensor,
     ) -> torch.Tensor:
         try:
-            try:
-                import custom_ops  # noqa: F401
-            except Exception:
-                pass
-
             torch.ops.custom.scatter_nd_update_asc(var, indices, update)
             return var
         except Exception:
