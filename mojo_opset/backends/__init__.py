@@ -26,6 +26,7 @@ if platform in _SUPPORT_TORCH_NPU_PLATFROM and requested_backend in ("", "torch_
     from .torch_npu import *
 
 if platform in _SUPPORT_ASCENDC_PLATFORM and requested_backend in ("", "ascendc"):
+    from .torch_npu import *
     from .ascendc import *
 
 if platform == "npu" and get_bool_env("MOJO_DETERMINISTIC", default=False):
