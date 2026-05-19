@@ -2330,59 +2330,61 @@ class MojoPagedDecodeSWAWithKVDequant(MojoOperator):
 # sage quant dtype utils, can be reused for other attention implementations
 # assert x.shape == [Batch*Heads, Seq_len, Head_dim]
 def get_scale_and_quant(
-    x, 
-    scale,
-    quant_dims, 
-    q_max: int = 127, 
-    q_min: int = -128,
-    eps=1e-6, 
-    quant_dtype=torch.int8,
-)->tuple[torch.Tensor, torch.Tensor]:
+    x: torch.Tensor,
+    scale: Optional[torch.Tensor],
+    quant_dims,                          # int or tuple/list of int
+    q_max: int = 127,
+    q_min: int = -127,                   # symmetric
+    eps: float = 1e-6,
+    quant_dtype: torch.dtype = torch.int8,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return (q, scale) where scale is broadcastable to x (keepdim layout)."""
+    assert scale is None or isinstance(scale, torch.Tensor), \
+        f"scale must be None or Tensor, got {type(scale)}"
+
     if scale is None:
-        scale = x.abs().amax(dim=quant_dims) / q_max
-        scale = torch.where(scale < eps, torch.ones_like(scale), scale)
-    # unsqueeze scale
-    dims = sorted([for d in quant_dims])
-    for d in dims:
-        scale = scale.unsqueeze(d)
-    q = torch.clamp(torch.round(x / scale), q_min, q_max,).to(quant_dtype)
+        scale = x.abs().amax(dim=quant_dims, keepdim=True).float() / q_max
+        scale = scale.clamp(min=eps)
+    elif scale.ndim != x.ndim:
+        # Caller passed a non-keepdim scale; restore the reduced dims.
+        dims = (quant_dims,) if isinstance(quant_dims, int) else tuple(quant_dims)
+        dims = sorted({d % x.ndim for d in dims})
+        for d in dims:
+            scale = scale.unsqueeze(d)
+
+    q = torch.clamp(torch.round(x.float() / scale), q_min, q_max).to(quant_dtype)
     return q, scale
 
-# for per_block, quant_dims show be the (blk, D)
-# return: x_q: [BH, S, D], x_scale: [BH, N, 1, 1], N=(S+blk-1)//blk
-def per_block_int8(x, xm=None, scale=None, quant_dims=(-1, -2), blk=64, q_max=127, q_min=-128):
-    # BH: batch*heads, S: seq_len, D: head_dim
-    BH, S, D = x.shape
-
-    num_blocks = (S + blk - 1) // blk
-    if num_blocks * blk != S:
-        pad_len = num_blocks * blk - S
-        x = torch.nn.functional.pad(x, (0, 0, 0, pad_len))
-
+# for per_token, quant_dims should be the D
+# return: x_q: [T, H, D], x_scale: [T, H, 1]
+def per_token_int8(
+    x: torch.Tensor,
+    xm: Optional[torch.Tensor] = None,
+    scale: Optional[torch.Tensor] = None,
+    *,
+    q_max: int = 127,
+    q_min: int = -127,
+):
+    """Per-token quant: one scale per row along the last dim.
+       Works for any shape ending in D. scale shape == x.shape with last dim = 1."""
     if xm is not None:
         x = x - xm
-    original_shape = (BH, num_blocks * blk, D)
-
-    x = x.reshape(-1, num_blocks, blk, D)
-    x_q, x_scale = get_scale_and_quant(x, quant_dims, q_max, q_min)
-    x_q = x_q.reshape(original_shape)
-
-    if num_blocks * blk != S:
-        x_q = x_q[:, :S].contiguous()
-    return x_q, x_scale
-
-# for per_token, quant_dims should be the D
-# return: x_q: [BH, S, D], x_scale: [BH, S, 1]
-def per_token_int8(x, xm=None, scale=None, quant_dims=(-1,), q_max=127, q_min=-128):
-    return per_block_int8(x, xm, quant_dims, 1, q_max, q_min)
+    return get_scale_and_quant(x, scale, quant_dims=-1, q_max=q_max, q_min=q_min)
 
 # for per_channel, quant_dims should be S
-# return: x_q: [BH, S, D], x_scale: [BH, 1, D]
-def per_channel_int8(x, xm=None, scale=None, quant_dims=(-2,), q_max=127, q_min=-128):
+# return: x_q: [T, H, D], x_scale: [1, H, D]
+def per_channel_int8(
+    x: torch.Tensor,
+    xm: Optional[torch.Tensor] = None,
+    scale: Optional[torch.Tensor] = None,
+    *,
+    seq_dim: int = -2,
+    q_max: int = 127,
+    q_min: int = -127,
+):
     if xm is not None:
         x = x - xm
-    x_q, x_scale = get_scale_and_quant(x, quant_dims, q_max, q_min)
-    return x_q, x_scale
+    return get_scale_and_quant(x, scale, quant_dims=seq_dim, q_max=q_max, q_min=q_min)
 
 
 class MojoPagedPrefillSageGQA(MojoOperator):
@@ -2412,19 +2414,20 @@ class MojoPagedPrefillSageGQA(MojoOperator):
         assert quant_granularity is "token", f"Unsupported quant granularity {quant_granularity}"
         if quant_dtype != torch.int8:
             raise ValueError("quant_dtype must be torch.int8")
+        self.quant_granularity = quant_granularity
         self.q_max = 127
         self.q_min = -128
 
     def forward(
         self,
         query: torch.Tensor,
-        quert_scale: Optional[torch.Tensor] = None,
         key_cache: torch.Tensor,
-        key_scale: torch.Tensor = None,
         value_cache: torch.Tensor,
-        value_scale: torch.Tensor = None,
         cu_q_lens: torch.Tensor,
         block_tables: torch.Tensor,
+        query_scale: Optional[torch.Tensor] = None,
+        key_scale: Optional[torch.Tensor] = None,
+        value_scale: Optional[torch.Tensor] = None,
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
@@ -2477,12 +2480,11 @@ class MojoPagedPrefillSageGQA(MojoOperator):
         batch_size = len(q_lens)
 
         # apply per_token_int8 quant, quant_dim = -1
-        head_dim = -1
         assert query_scale is None, "dynamic Q quant, query_scale should be None"
         assert key_scale is None, "dynamic K quant, key_scale should be None"
-        assert value_scale is not None, "static V quant, value should not be None"
-        query, query_scale = per_token_int8(x=query, scale=query_scale, quant_dims=(head_dim,), q_max=self.q_max, q_min=self.q_min)
-        key_cache, key_scale = per_token_int8(x=key_cache, scale=key_scale, quant_dims=(head_dim,), q_max=self.q_max, q_min=self.q_min)
+        # assert value_scale is not None, "static V quant, value should not be None"
+        query, query_scale = per_token_int8(x=query, scale=query_scale, q_max=self.q_max, q_min=self.q_min)
+        key_cache, key_scale = per_token_int8(x=key_cache, scale=key_scale, q_max=self.q_max, q_min=self.q_min)
 
         for i in range(batch_size):
             q_seq_len = q_lens[i].item()
@@ -2553,9 +2555,8 @@ class MojoPagedPrefillSageGQA(MojoOperator):
                 attn_scores.masked_fill_(~attn_mask.unsqueeze(1), -torch.inf)
 
             attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
-            seq_len_dim, head_dim = -2, -1
-            attn_probs_int8, attn_probs_scale = per_token_int8(x=attn_probs, quant_dims=(head_dim,), q_max=self.q_max, q_min=self.q_min)
-            v_expanded_int8, v_expanded_scale = per_channel_int8(x=v_expanded, quant_dims=(seq_len_dim,), q_max=self.q_max, q_min=self.q_min)
+            attn_probs_int8, attn_probs_scale = per_token_int8(x=attn_probs, q_max=self.q_max, q_min=self.q_min)
+            v_expanded_int8, v_expanded_scale = per_channel_int8(x=v_expanded, seq_dim=-2, q_max=self.q_max, q_min=self.q_min)
             # npu don't support int8
             attn_probs_int8, v_expanded_int8 = attn_probs_int8.float(), v_expanded_int8.float()
             outputs[start_loc:end_loc] = torch.einsum("thk,khd->thd", attn_probs_int8, v_expanded_int8) * attn_probs_scale * v_expanded_scale
