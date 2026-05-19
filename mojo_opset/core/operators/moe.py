@@ -77,6 +77,8 @@ class MojoQuantMoE(MojoOperator):
         activation: str = "swiglu",
         quant_dtype: torch.dtype = torch.int8,
         quant_group_size: int = -1,
+        fc1_quant_group_size: Optional[int] = None,
+        fc2_quant_group_size: Optional[int] = None,
         weight_dtype: Union[torch.dtype, str] = torch.int8,
         **kwargs,
     ):
@@ -100,6 +102,8 @@ class MojoQuantMoE(MojoOperator):
         self.intermediate_size = intermediate_size
         self.quant_dtype = quant_dtype
         self.quant_group_size = quant_group_size
+        self.fc1_quant_group_size = quant_group_size if fc1_quant_group_size is None else fc1_quant_group_size
+        self.fc2_quant_group_size = quant_group_size if fc2_quant_group_size is None else fc2_quant_group_size
         self.weight_dtype = weight_dtype
 
         self.gating = MojoMoEGating._registry.get(self._backend)(
@@ -116,6 +120,8 @@ class MojoQuantMoE(MojoOperator):
             activation=activation,
             quant_dtype=quant_dtype,
             quant_group_size=quant_group_size,
+            fc1_quant_group_size=self.fc1_quant_group_size,
+            fc2_quant_group_size=self.fc2_quant_group_size,
             weight_dtype=weight_dtype,
             **kwargs,
         )
@@ -487,6 +493,8 @@ class MojoQuantExperts(MojoOperator):
         activation: str = "swiglu",
         quant_dtype: torch.dtype = torch.int8,
         quant_group_size: int = -1,
+        fc1_quant_group_size: Optional[int] = None,
+        fc2_quant_group_size: Optional[int] = None,
         weight_dtype: Union[torch.dtype, str] = torch.int8,
         **kwargs,
     ):
@@ -515,6 +523,8 @@ class MojoQuantExperts(MojoOperator):
         self.activation = activation
         self.quant_dtype = quant_dtype
         self.quant_group_size = quant_group_size
+        self.fc1_quant_group_size = quant_group_size if fc1_quant_group_size is None else fc1_quant_group_size
+        self.fc2_quant_group_size = quant_group_size if fc2_quant_group_size is None else fc2_quant_group_size
         self.weight_dtype = weight_dtype
         assert quant_dtype == torch.int8
         bits = 8
@@ -552,19 +562,11 @@ class MojoQuantExperts(MojoOperator):
                 torch.empty((num_experts, hidden_size // 2, intermediate_size), dtype=torch.int8),
             )
 
-        if quant_group_size > 0:
-            up_proj_groups = (hidden_size + quant_group_size - 1) // quant_group_size
+        if self.fc1_quant_group_size > 0:
+            up_proj_groups = (hidden_size + self.fc1_quant_group_size - 1) // self.fc1_quant_group_size
             self.up_proj_weight_scale = nn.Parameter(
                 torch.empty(
                     (num_experts, intermediate_size * 2, up_proj_groups),
-                    dtype=torch.bfloat16,
-                ),
-            )
-
-            down_proj_groups = (intermediate_size + quant_group_size - 1) // quant_group_size
-            self.down_proj_weight_scale = nn.Parameter(
-                torch.empty(
-                    (num_experts, hidden_size, down_proj_groups),
                     dtype=torch.bfloat16,
                 ),
             )
@@ -576,6 +578,15 @@ class MojoQuantExperts(MojoOperator):
                 ),
             )
 
+        if self.fc2_quant_group_size > 0:
+            down_proj_groups = (intermediate_size + self.fc2_quant_group_size - 1) // self.fc2_quant_group_size
+            self.down_proj_weight_scale = nn.Parameter(
+                torch.empty(
+                    (num_experts, hidden_size, down_proj_groups),
+                    dtype=torch.bfloat16,
+                ),
+            )
+        else:
             self.down_proj_weight_scale = nn.Parameter(
                 torch.empty(
                     (num_experts, hidden_size), 
@@ -597,15 +608,16 @@ class MojoQuantExperts(MojoOperator):
         input_scale: torch.Tensor,
         expert_weight: torch.Tensor,
         weight_scale: torch.Tensor,
+        group_size: int,
         output_dtype: torch.dtype = torch.bfloat16,
     ) -> torch.Tensor:
         if self.weight_dtype == "int4":
             expert_weight = self._unpack_weight(expert_weight)
         
         assert input_scale.ndim == 2 and input_scale.shape[1] == 1
-        if self.quant_group_size > 0:
-            x_int8_groups = torch.split(input_int8, self.quant_group_size, dim=-1)
-            weight_int8_groups = torch.split(expert_weight, self.quant_group_size, dim=-1)
+        if group_size > 0:
+            x_int8_groups = torch.split(input_int8, group_size, dim=-1)
+            weight_int8_groups = torch.split(expert_weight, group_size, dim=-1)
             output_groups = [torch.mul(x_int8_group.int().unsqueeze(-2), weight_int8_group.int().unsqueeze(-3)).float().sum(dim=-1)
                              for x_int8_group, weight_int8_group 
                              in zip(x_int8_groups, weight_int8_groups)]
@@ -648,6 +660,7 @@ class MojoQuantExperts(MojoOperator):
                 x_scale_i, 
                 self.up_proj_weight[expert_idx], 
                 self.up_proj_weight_scale[expert_idx],
+                self.fc1_quant_group_size,
                 sorted_hidden_states.dtype,
             )
             gate_proj, up_proj = fc1_out.float().chunk(2, dim=-1)
@@ -670,6 +683,7 @@ class MojoQuantExperts(MojoOperator):
                 y_scale_i,
                 self.down_proj_weight[expert_idx],
                 self.down_proj_weight_scale[expert_idx],
+                self.fc2_quant_group_size,
                 sorted_hidden_states.dtype,
             )
             outputs.append(fc2_out)
@@ -677,7 +691,11 @@ class MojoQuantExperts(MojoOperator):
         return torch.cat(outputs, dim=0)
 
     def extra_repr(self) -> str:
-        return f"{self.num_experts=}, {self.intermediate_size=}, {self.hidden_size=}, {self.quant_dtype=}, {self.quant_group_size=}, {self.weight_dtype=}".replace("self.", "")
+        return (
+            f"{self.num_experts=}, {self.intermediate_size=}, {self.hidden_size=}, "
+            f"{self.quant_dtype=}, {self.quant_group_size=}, {self.fc1_quant_group_size=}, "
+            f"{self.fc2_quant_group_size=}, {self.weight_dtype=}"
+        ).replace("self.", "")
 
 
 class MojoMoECombine(MojoOperator):
