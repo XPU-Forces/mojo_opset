@@ -10,7 +10,7 @@ from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoLayerNorm
 from mojo_opset import MojoGelu
 from mojo_opset import MojoSilu
-from mojo_opset import MojoGridRoPE
+from mojo_opset.experimental import MojoGridRoPE
 
 __all__ = ["WanModel"]
 

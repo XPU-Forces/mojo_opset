@@ -2,10 +2,10 @@ import pytest
 import torch
 from typing import Union
 
-from mojo_opset import MojoFusedSwiGLUMoEScaleDynamicQuantize
-from mojo_opset import MojoMoEInitRoutingDynamicQuant
 from mojo_opset import MojoQuantExperts
 from mojo_opset import MojoQuantMoE
+from mojo_opset.experimental import MojoFusedSwiGLUMoEScaleDynamicQuantize
+from mojo_opset.experimental import MojoMoEInitRoutingDynamicQuant
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_torch_device
 

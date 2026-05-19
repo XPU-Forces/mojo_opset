@@ -3,11 +3,11 @@ import torch
 
 from mojo_opset import MojoApplyRoPE
 from mojo_opset import MojoApplyVisionRoPE2D
-from mojo_opset import MojoGridRoPE
 from mojo_opset import MojoMRoPE
-from mojo_opset import MojoRelativeEmbedding
 from mojo_opset import MojoRotaryEmbedding
 from mojo_opset import MojoVisionRotaryEmbedding2D
+from mojo_opset.experimental import MojoGridRoPE
+from mojo_opset.experimental import MojoRelativeEmbedding
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_torch_device
 

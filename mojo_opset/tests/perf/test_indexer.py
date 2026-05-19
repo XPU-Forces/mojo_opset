@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from mojo_opset import MojoLightningIndexer
+from mojo_opset.experimental import MojoLightningIndexer
 from mojo_opset.tests.utils import auto_switch_platform, bypass_not_implemented
 
 TEST_SHAPES = [

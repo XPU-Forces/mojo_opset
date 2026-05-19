@@ -18,12 +18,12 @@ from torch import nn
 
 from mojo_opset import MojoGemm
 from mojo_opset import MojoMoE
-from mojo_opset import MojoPagedDecodeMLA
-from mojo_opset import MojoPagedPrefillMLA
 from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoApplyRoPE
 from mojo_opset import MojoSilu
 from mojo_opset import MojoStorePagedKVCache
+from mojo_opset.experimental import MojoPagedDecodeMLA
+from mojo_opset.experimental import MojoPagedPrefillMLA
 from mojo_opset.core.operators.kv_cache import build_paged_kv_chunk_metadata
 
 

@@ -4,10 +4,10 @@ from typing import Optional
 import pytest
 import torch
 
-from mojo_opset import MojoPagedDecodeGQAWithKVDequant
-from mojo_opset import MojoPagedDecodeSWAWithKVDequant
-from mojo_opset import MojoPagedPrefillGQAWithKVDequant
-from mojo_opset import MojoPagedPrefillSWAWithKVDequant
+from mojo_opset.experimental import MojoPagedDecodeGQAWithKVDequant
+from mojo_opset.experimental import MojoPagedDecodeSWAWithKVDequant
+from mojo_opset.experimental import MojoPagedPrefillGQAWithKVDequant
+from mojo_opset.experimental import MojoPagedPrefillSWAWithKVDequant
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 

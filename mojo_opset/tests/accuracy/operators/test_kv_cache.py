@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from mojo_opset import MojoStorePagedKVCache
-from mojo_opset import MojoStorePagedMLAKVCache
+from mojo_opset.experimental import MojoStorePagedMLAKVCache
 from mojo_opset.tests.utils import assert_close
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
