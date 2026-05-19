@@ -31,7 +31,7 @@ def _unpack_int4_from_int8_along_output(input: torch.Tensor) -> torch.Tensor:
 
 
 def _quantize_weight_per_group(weight: torch.Tensor, quant_group_size: int, weight_dtype: Union[torch.dtype, str]):
-    if weight.shape[-1] % quant_group_size != 0:
+    if quant_group_size > 0 and weight.shape[-1] % quant_group_size != 0:
         raise ValueError(f"weight input dim {weight.shape[-1]} must be divisible by {quant_group_size}.")
     if quant_group_size > 0:
         weight_groups = weight.float().split(quant_group_size, dim=-1)
@@ -84,7 +84,8 @@ def _manual_quant_experts(
     down_proj_weight_scale: torch.Tensor,
     fc1_input_smooth_scale: torch.Tensor,
     fc2_input_smooth_scale: torch.Tensor,
-    group_size: int,
+    fc1_group_size: int,
+    fc2_group_size: int,
 ):
     up_proj_weight = torch.repeat_interleave(up_proj_weight, token_count, dim=0)
     up_proj_weight_scale = torch.repeat_interleave(up_proj_weight_scale, token_count, dim=0)
@@ -102,7 +103,7 @@ def _manual_quant_experts(
         fc1_input_scale,
         up_proj_weight,
         up_proj_weight_scale,
-        group_size=group_size,
+        group_size=fc1_group_size,
         output_dtype=inputs.dtype,
     )
     gate_proj, up_proj = fc1.float().chunk(2, dim=-1)
@@ -117,7 +118,7 @@ def _manual_quant_experts(
         fc2_input_scale,
         down_proj_weight,
         down_proj_weight_scale,
-        group_size=group_size,
+        group_size=fc2_group_size,
         output_dtype=inputs.dtype,
     )
 
@@ -128,13 +129,14 @@ def _make_quant_weights(
     num_experts: int,
     hidden_size: int,
     intermediate_size: int,
-    quant_group_size: int,
+    fc1_quant_group_size: int,
+    fc2_quant_group_size: int,
     weight_dtype: Union[torch.dtype, str],
 ):
     up_weight_fp = torch.randn(num_experts, intermediate_size * 2, hidden_size, dtype=torch.float32) * 0.01
     down_weight_fp = torch.randn(num_experts, hidden_size, intermediate_size, dtype=torch.float32) * 0.01
-    up_weight, up_weight_scale = _quantize_weight_per_group(up_weight_fp, quant_group_size, weight_dtype)
-    down_weight, down_weight_scale = _quantize_weight_per_group(down_weight_fp, quant_group_size, weight_dtype)
+    up_weight, up_weight_scale = _quantize_weight_per_group(up_weight_fp, fc1_quant_group_size, weight_dtype)
+    down_weight, down_weight_scale = _quantize_weight_per_group(down_weight_fp, fc2_quant_group_size, weight_dtype)
     return up_weight, up_weight_scale.bfloat16(), down_weight, down_weight_scale.bfloat16()
 
 
@@ -147,6 +149,19 @@ quant_moe_backend_cases = [
     (32, 4, 256, 1024, 161),
     (48, 2, 512, 1024, 193),
     (48, 4, 512, 1536, 257),
+]
+
+quant_moe_backend_configs = [
+    ("int4", 128, 128, *case) for case in quant_moe_backend_cases
+] + [
+    ("int4", 256, 128, *case) for case in quant_moe_backend_cases
+] + [
+    ("int4", 512, 320, 16, 2, 512, 1280, 65),
+    ("int4", 256, 320, 24, 4, 512, 1280, 97),
+    ("int4", 512, 320, 32, 2, 512, 2560, 129),
+    ("int4", 512, 320, 32, 4, 1024, 1280, 161),
+] + [
+    (torch.int8, -1, -1, *case) for case in quant_moe_backend_cases
 ]
 
 
@@ -283,7 +298,8 @@ def test_quant_experts_reference(weight_dtype):
     num_experts = 3
     hidden_size = 8
     intermediate_size = 12
-    quant_group_size = 4
+    fc1_quant_group_size = 4
+    fc2_quant_group_size = 4
     token_count = torch.tensor([2, 0, 3], dtype=torch.int32)
     total_tokens = int(token_count.sum().item())
 
@@ -293,7 +309,8 @@ def test_quant_experts_reference(weight_dtype):
         num_experts,
         hidden_size,
         intermediate_size,
-        quant_group_size,
+        fc1_quant_group_size,
+        fc2_quant_group_size,
         weight_dtype,
     )
     fc1_input_smooth_scale = torch.rand(num_experts, hidden_size, dtype=torch.float32) + 0.5
@@ -304,7 +321,9 @@ def test_quant_experts_reference(weight_dtype):
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
         quant_type=torch.int8,
-        quant_group_size=quant_group_size,
+        quant_group_size=fc1_quant_group_size,
+        fc1_quant_group_size=fc1_quant_group_size,
+        fc2_quant_group_size=fc2_quant_group_size,
         weight_dtype=weight_dtype,
     )
     op.load_state_dict(
@@ -333,7 +352,8 @@ def test_quant_experts_reference(weight_dtype):
         down_weight_scale,
         fc1_input_smooth_scale,
         fc2_input_smooth_scale,
-        quant_group_size,
+        fc1_quant_group_size,
+        fc2_quant_group_size,
     )
 
     torch.testing.assert_close(out, ref, atol=0, rtol=0)
@@ -351,8 +371,8 @@ def test_quant_experts_reference(weight_dtype):
         hidden_size // (2 if weight_dtype == "int4" else 1),
         intermediate_size,
     )
-    assert op.up_proj_weight_scale.shape == (num_experts, intermediate_size * 2, hidden_size // quant_group_size)
-    assert op.down_proj_weight_scale.shape == (num_experts, hidden_size, intermediate_size // quant_group_size)
+    assert op.up_proj_weight_scale.shape == (num_experts, intermediate_size * 2, hidden_size // fc1_quant_group_size)
+    assert op.down_proj_weight_scale.shape == (num_experts, hidden_size, intermediate_size // fc2_quant_group_size)
     assert set(op.state_dict()) == {
         "up_proj_weight",
         "down_proj_weight",
@@ -364,15 +384,16 @@ def test_quant_experts_reference(weight_dtype):
 
 
 @pytest.mark.parametrize(
-    "weight_dtype,quant_group_size",
+    "weight_dtype,fc1_quant_group_size,fc2_quant_group_size",
     [
-        ("int4", 4),
-        (torch.int8, 4),
-        (torch.int8, -1),
+        ("int4", 4, 4),
+        ("int4", 8, 4),
+        (torch.int8, 4, 4),
+        (torch.int8, -1, -1),
     ],
 )
 @bypass_not_implemented
-def test_quant_moe_reference(weight_dtype, quant_group_size):
+def test_quant_moe_reference(weight_dtype, fc1_quant_group_size, fc2_quant_group_size):
     torch.manual_seed(1)
     num_tokens = 5
     num_experts = 4
@@ -388,7 +409,8 @@ def test_quant_moe_reference(weight_dtype, quant_group_size):
         num_experts,
         hidden_size,
         intermediate_size,
-        quant_group_size,
+        fc1_quant_group_size,
+        fc2_quant_group_size,
         weight_dtype,
     )
 
@@ -398,7 +420,9 @@ def test_quant_moe_reference(weight_dtype, quant_group_size):
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
         quant_type=torch.int8,
-        quant_group_size=quant_group_size,
+        quant_group_size=fc1_quant_group_size,
+        fc1_quant_group_size=fc1_quant_group_size,
+        fc2_quant_group_size=fc2_quant_group_size,
         weight_dtype=weight_dtype,
     )
     op.load_state_dict(
@@ -433,7 +457,8 @@ def test_quant_moe_reference(weight_dtype, quant_group_size):
         down_weight_scale,
         fc1_input_smooth_scale,
         fc2_input_smooth_scale,
-        quant_group_size,
+        fc1_quant_group_size,
+        fc2_quant_group_size,
     )
     ref = torch.zeros_like(hidden_states, dtype=torch.float32)
     ref.scatter_reduce_(
@@ -457,19 +482,22 @@ def test_quant_moe_reference(weight_dtype, quant_group_size):
     }
 
 
-@pytest.mark.parametrize("num_experts, top_k, hidden_size, intermediate_size, num_tokens", quant_moe_backend_cases)
-@pytest.mark.parametrize("weight_dtype,quant_group_size", [("int4", 128), (torch.int8, -1)])
+@pytest.mark.parametrize(
+    "weight_dtype,fc1_quant_group_size,fc2_quant_group_size,num_experts,top_k,hidden_size,intermediate_size,num_tokens",
+    quant_moe_backend_configs,
+)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @auto_switch_platform()
 @bypass_not_implemented
 def test_quant_moe_backend(
+    weight_dtype,
+    fc1_quant_group_size,
+    fc2_quant_group_size,
     num_experts,
     top_k,
     hidden_size,
     intermediate_size,
     num_tokens,
-    weight_dtype,
-    quant_group_size,
     dtype,
 ):
     device = get_torch_device()
@@ -481,7 +509,8 @@ def test_quant_moe_backend(
         num_experts,
         hidden_size,
         intermediate_size,
-        quant_group_size,
+        fc1_quant_group_size,
+        fc2_quant_group_size,
         weight_dtype,
     )
 
@@ -501,7 +530,9 @@ def test_quant_moe_backend(
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
         quant_type=torch.int8,
-        quant_group_size=quant_group_size,
+        quant_group_size=fc1_quant_group_size,
+        fc1_quant_group_size=fc1_quant_group_size,
+        fc2_quant_group_size=fc2_quant_group_size,
         weight_dtype=weight_dtype,
     ).to(device)
     op_ref = MojoQuantMoE._registry.get("torch")(
@@ -510,7 +541,9 @@ def test_quant_moe_backend(
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
         quant_type=torch.int8,
-        quant_group_size=quant_group_size,
+        quant_group_size=fc1_quant_group_size,
+        fc1_quant_group_size=fc1_quant_group_size,
+        fc2_quant_group_size=fc2_quant_group_size,
         weight_dtype=weight_dtype,
     ).to(device)
     op.load_state_dict(state_dict)
