@@ -7,6 +7,7 @@ from .flash_attention import paged_attention_decode_impl
 from .flash_attention import paged_attention_prefill_impl
 from .fused_add_layernorm import fused_add_layernorm_infer_impl
 from .fused_add_rmsnorm import fused_add_rmsnorm_infer_impl
+from .group_rmsnorm import group_rmsnorm_impl
 from .fused_linear_cross_entropy import fused_linear_cross_entropy_1d_bwd_impl
 from .fused_linear_cross_entropy import fused_linear_cross_entropy_1d_fwd_impl
 from .fused_linear_cross_entropy import fused_linear_cross_entropy_bwd_impl
