@@ -285,7 +285,7 @@ def load_weights_with_renaming_and_converter(
     new_state_dict = convert_hf_state_dict(state_dict, model.state_dict(), renamings, converters)
     return model.load_state_dict(new_state_dict, strict=strict_loading)
 
-def load_sharded_weights_into_meta_model(meta_model: nn.Module, *index_files, strict=True, map_locations=None):
+def load_sharded_weights_into_meta_model(meta_model: nn.Module, *index_files, strict=True, map_locations=None, check_only=False):
     loaded_keys = set()
     shard_files = []
     for load_index in index_files:
@@ -312,15 +312,23 @@ def load_sharded_weights_into_meta_model(meta_model: nn.Module, *index_files, st
             error_message += f"\nUnexpected key(s): {str_unexpected_keys}."
         raise RuntimeError(error_message)
 
+    if check_only:
+        return torch.nn.modules.module._IncompatibleKeys(missing_keys, unexpected_keys)
+
     if map_locations is None:
         map_locations = {}
 
     for shard_file in shard_files:
         state_dict = load_safetensors(shard_file)
         for key, tensor in state_dict.items():
-            if meta_state_dict[key] is None:
+            if meta_state_dict.get(key) is None:
                 # FIXME: directly drop it?
                 continue
+            if tensor.shape != meta_state_dict[key].shape:
+                logger.warning(f"Shape mismatch for {key}. Expected {meta_state_dict[key].shape}, got {tensor.shape}.")
+            if tensor.dtype != meta_state_dict[key].dtype:
+                logger.info(f"Casting {key} to expected {meta_state_dict[key].dtype} from {tensor.dtype}.")
+            
             tensor = tensor.to(meta_state_dict[key].dtype)
             if key in map_locations:
                 tensor = tensor.to(map_locations[key])

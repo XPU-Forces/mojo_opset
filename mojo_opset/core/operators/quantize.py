@@ -180,6 +180,7 @@ class MojoMoEDynamicQuant(MojoOperator):
         self.expert_num = expert_num
         self.input_size = input_size
         self.inv_smooth_scale = torch.nn.Parameter(torch.empty((expert_num, input_size), **self.tensor_factory_kwargs))
+        setattr(self.inv_smooth_scale, "force_dtype", torch.float32)
         self.quant_dtype = quant_dtype
 
         if quant_dtype != torch.int8:

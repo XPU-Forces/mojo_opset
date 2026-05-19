@@ -74,7 +74,8 @@ def test_quant_moe_registered_for_expert_parallel():
             top_k=1,
             hidden_size=8,
             intermediate_size=8,
-            quant_group_size=4,
+            up_quant_group_size=4,
+            down_quant_group_size=4,
         )
     )
     assert partition_fn is not None
@@ -98,7 +99,8 @@ def test_quant_moe_ep_cpu_allreduce():
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
         quant_dtype=torch.int8,
-        quant_group_size=4,
+        up_quant_group_size=4,
+        down_quant_group_size=4,
     ).to(device)
     _init_weights(ref)
     ref.experts.up_proj_quantize.inv_smooth_scale.data.abs_().add_(0.5)
@@ -112,7 +114,8 @@ def test_quant_moe_ep_cpu_allreduce():
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
         quant_dtype=torch.int8,
-        quant_group_size=4,
+        up_quant_group_size=4,
+        down_quant_group_size=4,
     ).to(device)
     moe.load_state_dict(ref.state_dict())
     moe = parallelize_module(moe, device_mesh=device_mesh, parallelize_plan=MojoExpertParallel())

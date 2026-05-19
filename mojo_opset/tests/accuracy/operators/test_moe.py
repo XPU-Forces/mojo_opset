@@ -31,8 +31,6 @@ def test_moe(num_experts, top_k, hidden_size, intermediate_size, num_tokens, dty
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
     )
-    for p in moe.parameters():
-        nn.init.normal_(p, std=0.02)
 
     moe_ref = MojoMoE._registry.get("torch")(
         num_experts=num_experts,
@@ -41,9 +39,12 @@ def test_moe(num_experts, top_k, hidden_size, intermediate_size, num_tokens, dty
         intermediate_size=intermediate_size,
     )
 
+    for p in moe_ref.parameters():
+        nn.init.normal_(p, std=0.02)
+
     moe = moe.to(dtype).to(device)
     moe_ref = moe_ref.to(dtype).to(device)
-    moe_ref.load_state_dict(moe.state_dict())
+    moe.load_state_dict(moe_ref.state_dict())
 
     # FIXME: moe.gating.gate_weight.data should not be casted to float32
     moe.gating.gate_weight.data = moe.gating.gate_weight.data.float()
@@ -73,8 +74,6 @@ def test_moe_gating(num_experts, top_k, hidden_size, num_tokens, dtype):
         num_experts=num_experts,
         top_k=top_k,
     )
-    for p in moe_gating.parameters():
-        nn.init.normal_(p, std=0.02)
 
     moe_gating_ref = MojoMoEGating._registry.get("torch")(
         hidden_size=hidden_size,
@@ -82,9 +81,12 @@ def test_moe_gating(num_experts, top_k, hidden_size, num_tokens, dtype):
         top_k=top_k,
     )
 
+    for p in moe_gating.parameters():
+        nn.init.normal_(p, std=0.02)
+
     moe_gating = moe_gating.to(device)
     moe_gating_ref = moe_gating_ref.to(device)
-    moe_gating_ref.load_state_dict(moe_gating.state_dict())
+    moe_gating.load_state_dict(moe_gating_ref.state_dict())
 
     assert moe_gating.gate_weight.dtype == torch.float32 and moe_gating_ref.gate_weight.dtype == torch.float32
 
