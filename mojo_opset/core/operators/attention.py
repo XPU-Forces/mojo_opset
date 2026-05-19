@@ -2439,11 +2439,11 @@ class MojoPagedPrefillSageGQA(MojoOperator):
 
         Args:
             query (torch.Tensor): Query tokens of shape (T, Hq, D).
-            query_scale (torch.Tensor): if using dynamic quant it should be None, otherwise its shape is (T, Hq) with dtype fp32.
+            query_scale (torch.Tensor): if using per token dynamic quant it should be None, otherwise its shape is (Hq, T) with dtype fp32.
             key_cache (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D).
-            key_scale (torch.Tensor): Key scale for quant, should be None if using dynamic quant, otherwise shape is (N_blocks, Hkv, block_size) with dtype fp32.
+            key_scale (torch.Tensor): Key scale for quant, should be None if using per token dynamic quant, otherwise shape is (N_blocks, Hkv, block_size) with dtype fp32.
             value_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D).
-            value_scale (torch.Tensor): Value scale for quant, should be None if using dynamic quant, otherwise shape is [Hkv, D] with dtype fp32.
+            value_scale (torch.Tensor): Value scale for quant, should be None if using per channel dynamic quant, otherwise shape is [Hkv, D] with dtype fp32.
             cu_q_lens (torch.Tensor): Cumulative query lengths, shape (B+1,);
                 `cu_q_lens[i]` is the start offset for query at batch i; `cu_q_lens[-1] == T`.
             block_tables (torch.Tensor): Logical-to-physical block IDs per batch,
