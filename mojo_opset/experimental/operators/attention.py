@@ -629,7 +629,7 @@ class MojoPagedPrefillGQAWithKVDequant(MojoOperator):
         return outputs
 
     def extra_repr(self) -> str:
-        return f"{self.is_causal=}, {self.gqa_layout=}, {self.compute_dtype=}".replace("self.", "")
+        return f"{self.is_causal=}, {self.gqa_layout=}, {self.query_dtype=}, {self.context_dtype=}, {self.compute_dtype=}".replace("self.", "")
 
 
 class MojoPagedDecodeGQAWithKVDequant(MojoOperator):
@@ -797,7 +797,7 @@ class MojoPagedDecodeGQAWithKVDequant(MojoOperator):
         return outputs
 
     def extra_repr(self) -> str:
-        return f"{self.is_causal=}, {self.gqa_layout=}, {self.compute_dtype=}".replace("self.", "")
+        return f"{self.is_causal=}, {self.gqa_layout=}, {self.query_dtype=}, {self.context_dtype=}, {self.compute_dtype=}".replace("self.", "")
 
 
 class MojoPagedPrefillSWAWithKVDequant(MojoOperator):
@@ -830,6 +830,7 @@ class MojoPagedPrefillSWAWithKVDequant(MojoOperator):
             raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
 
         self.is_causal = is_causal
+        self.gqa_layout = gqa_layout
         self.gqa_interleave = gqa_layout == "ABAB"
         self.global_window_size = global_window_size
         self.local_window_size = local_window_size
@@ -977,6 +978,9 @@ class MojoPagedPrefillSWAWithKVDequant(MojoOperator):
             o_i = o_i.permute(1, 0, 2)  # -> [q_seq_len, n_q_heads, head_dim]
             o[cu_q_lens[i] : cu_q_lens[i + 1]] = o_i.to(o.dtype)
         return o
+    
+    def extra_repr(self):
+        return f"{self.is_causal=}, {self.gqa_layout=}, {self.global_window_size=}, {self.local_window_size=}, {self.query_dtype=}, {self.context_dtype=}, {self.compute_dtype=}".replace("self.", "")
 
 class MojoPagedDecodeSWAWithKVDequant(MojoOperator):
     """Paged decode SWA that consumes int8 KV cache and dequantizes KV in the forward path."""
@@ -1008,6 +1012,7 @@ class MojoPagedDecodeSWAWithKVDequant(MojoOperator):
             raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
 
         self.is_causal = is_causal
+        self.gqa_layout = gqa_layout
         self.gqa_interleave = gqa_layout == "ABAB"
         self.global_window_size = global_window_size
         self.local_window_size = local_window_size
@@ -1139,6 +1144,9 @@ class MojoPagedDecodeSWAWithKVDequant(MojoOperator):
             o_i = o_i.squeeze(1)  # -> [n_q_heads, head_dim]
             o[i] = o_i.to(o.dtype)
         return o
+
+    def extra_repr(self):
+        return f"{self.is_causal=}, {self.gqa_layout=}, {self.global_window_size=}, {self.local_window_size=}, {self.query_dtype=}, {self.context_dtype=}, {self.compute_dtype=}".replace("self.", "")
 
 
 # ---------------------------------------------------------------------------

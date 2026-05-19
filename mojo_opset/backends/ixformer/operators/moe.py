@@ -55,39 +55,49 @@ def _repack_int4_tn_to_nn(packed_tn: torch.Tensor, N: int, K: int) -> torch.Tens
 def _swizzle_weights_post_hook(module, incompatible_keys):
     """load_state_dict post-hook: convert int4/int8 weights from TN (checkpoint) to NN (ixformer) format."""
     device = module.up_proj_weight.device
-    if module.weight_dtype == "int4":
+    if module.up_weight_dtype == "int4":
         N_up = module.intermediate_size * 2
         K_up = module.hidden_size
         up_nn = _repack_int4_tn_to_nn(module.up_proj_weight.data, N_up, K_up)
         up_scale_nn = module.up_proj_weight_scale.data.permute(0, 2, 1).contiguous()
+        module.register_buffer("up_proj_weight", up_nn.to(device))
+        module.up_proj_weight_scale = torch.nn.Parameter(up_scale_nn.to(device=device, dtype=torch.float32))
+    elif module.up_weight_dtype == torch.int8:
+        up_nn = module.up_proj_weight.data.transpose(1, 2).contiguous()
+        up_scale_nn = module.up_proj_weight_scale.data.contiguous()
+        module.register_buffer("up_proj_weight", up_nn.to(device))
+        module.up_proj_weight_scale = torch.nn.Parameter(up_scale_nn.to(device=device, dtype=torch.float32))
 
+    if module.down_weight_dtype == "int4":
         N_down = module.hidden_size
         K_down = module.intermediate_size
         down_nn = _repack_int4_tn_to_nn(module.down_proj_weight.data, N_down, K_down)
         down_scale_nn = module.down_proj_weight_scale.data.permute(0, 2, 1).contiguous()
-
-        module.register_buffer("up_proj_weight", up_nn.to(device))
         module.register_buffer("down_proj_weight", down_nn.to(device))
-        module.up_proj_weight_scale = torch.nn.Parameter(up_scale_nn.to(device=device, dtype=torch.float32))
         module.down_proj_weight_scale = torch.nn.Parameter(down_scale_nn.to(device=device, dtype=torch.float32))
-    elif module.weight_dtype == torch.int8:
-        up_nn = module.up_proj_weight.data.transpose(1, 2).contiguous()
+    elif module.down_weight_dtype == torch.int8:
         down_nn = module.down_proj_weight.data.transpose(1, 2).contiguous()
-        up_scale_nn = module.up_proj_weight_scale.data.contiguous()
         down_scale_nn = module.down_proj_weight_scale.data.contiguous()
-
-        module.register_buffer("up_proj_weight", up_nn.to(device))
         module.register_buffer("down_proj_weight", down_nn.to(device))
-        module.up_proj_weight_scale = torch.nn.Parameter(up_scale_nn.to(device=device, dtype=torch.float32))
         module.down_proj_weight_scale = torch.nn.Parameter(down_scale_nn.to(device=device, dtype=torch.float32))
 
 
 class IxformerMoEGating(MojoMoEGating):
     supported_platforms_list = ["ilu"]
 
+    def __init__(self, hidden_size: int, num_experts: int, top_k: int, **kwargs):
+        super().__init__(hidden_size, num_experts, top_k, **kwargs)
+        self.register_load_state_dict_post_hook(self._transform_gate_weight_post_hook)
+
+    @staticmethod
+    def _transform_gate_weight_post_hook(module, incompatible_keys):
+        device = module.gate_weight.device
+        gate_weight_tn = module.gate_weight.data.T.contiguous()
+        module.gate_weight = torch.nn.Parameter(gate_weight_tn.to(device=device, dtype=torch.float32))
+
     def forward(self, hidden_states: torch.Tensor):
         assert self.gate_weight.dtype == torch.float32
-        gate_logits = ixf_f.mixed_type_linear(hidden_states, self.gate_weight, format="NN")
+        gate_logits = ixf_f.mixed_type_linear(hidden_states, self.gate_weight)
         top_k_gates, top_k_indices = ixf_f.moe_topk_softmax(gate_logits, self.top_k, renormalize=True)
 
         return top_k_indices, top_k_gates
@@ -244,22 +254,54 @@ class IxformerQuantExperts(MojoQuantExperts):
                  intermediate_size: int,
                  activation: str = "swiglu",
                  quant_dtype: torch.dtype = torch.int8,
-                 quant_group_size: int = -1,
-                 weight_dtype: Union[str, torch.dtype] = torch.int8,
+                 up_quant_group_size: int = -1,
+                 up_weight_dtype: Union[str, torch.dtype] = torch.int8,
+                 down_quant_group_size: int = -1,
+                 down_weight_dtype: Union[str, torch.dtype] = torch.int8,
                  **kwargs):
-        super().__init__(num_experts, hidden_size, intermediate_size, activation, quant_dtype, quant_group_size, weight_dtype, **kwargs)
-        
-        if self.weight_dtype == torch.int8:
-            if self.quant_group_size != -1:
-                raise NotImplementedError(f"IxformerQuantExperts only supports weight_dtype='torch.int8' and quant_group_size=-1, got {self.weight_dtype} and {self.quant_group_size}.")
-            if self.hidden_size % 64 != 0 or self.intermediate_size % 64 != 0:
-                raise NotImplementedError(f"IxformerQuantExperts only supports weight_dtype='torch.int8' and hidden_size, intermediate_size must be divisible by 64, got {self.hidden_size} and {self.intermediate_size}.")
-        
-        if self.weight_dtype == "int4":
-            if self.quant_group_size not in [128, 256, 320, 512]:
-                raise NotImplementedError(f"IxformerQuantExperts: weight_dtype is 'int4' and quant_group_size must be 128, 256, 320, or 512, got {self.weight_dtype} and {self.quant_group_size}.")
-            if self.hidden_size % 64 != 0 or self.intermediate_size % 64 != 0 or self.intermediate_size * 2 < 256 or self.hidden_size < 256:
-                raise NotImplementedError(f"IxformerQuantExperts: weight_dtype is 'int4' and hidden_size, intermediate_size must be divisible by 64, intermediate_size * 2 must be >= 256, and hidden_size must be >= 256, got {self.hidden_size} and {self.intermediate_size}.")
+        super().__init__(
+            num_experts,
+            hidden_size,
+            intermediate_size,
+            activation,
+            quant_dtype,
+            up_quant_group_size,
+            up_weight_dtype,
+            down_quant_group_size,
+            down_weight_dtype,
+            **kwargs,
+        )
+
+        if self.hidden_size % 64 != 0 or self.intermediate_size % 64 != 0:
+            raise NotImplementedError(
+                f"IxformerQuantExperts only supports hidden_size and intermediate_size divisible by 64, got {self.hidden_size} and {self.intermediate_size}."
+            )
+        if self.up_weight_dtype == torch.int8 and self.up_quant_group_size != -1:
+            raise NotImplementedError(
+                f"IxformerQuantExperts only supports up_weight_dtype='torch.int8' with up_quant_group_size=-1, got {self.up_weight_dtype} and {self.up_quant_group_size}."
+            )
+        if self.down_weight_dtype == torch.int8 and self.down_quant_group_size != -1:
+            raise NotImplementedError(
+                f"IxformerQuantExperts only supports down_weight_dtype='torch.int8' with down_quant_group_size=-1, got {self.down_weight_dtype} and {self.down_quant_group_size}."
+            )
+        if self.up_weight_dtype == "int4":
+            if self.up_quant_group_size not in [128, 256, 320, 512]:
+                raise NotImplementedError(
+                    f"IxformerQuantExperts: up_weight_dtype is 'int4' and up_quant_group_size must be 128, 256, 320, or 512, got {self.up_weight_dtype} and {self.up_quant_group_size}."
+                )
+            if self.intermediate_size * 2 < 256 or self.hidden_size < 256:
+                raise NotImplementedError(
+                    f"IxformerQuantExperts: up_weight_dtype is 'int4' and intermediate_size * 2 must be >= 256, hidden_size must be >= 256, got {self.hidden_size} and {self.intermediate_size}."
+                )
+        if self.down_weight_dtype == "int4":
+            if self.down_quant_group_size not in [128, 256, 320, 512]:
+                raise NotImplementedError(
+                    f"IxformerQuantExperts: down_weight_dtype is 'int4' and down_quant_group_size must be 128, 256, 320, or 512, got {self.down_weight_dtype} and {self.down_quant_group_size}."
+                )
+            if self.intermediate_size < 256 or self.hidden_size < 256:
+                raise NotImplementedError(
+                    f"IxformerQuantExperts: down_weight_dtype is 'int4' and intermediate_size must be >= 256, hidden_size must be >= 256, got {self.hidden_size} and {self.intermediate_size}."
+                )
 
         setattr(self.up_proj_weight_scale, "force_dtype", torch.float32)
         setattr(self.down_proj_weight_scale, "force_dtype", torch.float32)
@@ -279,7 +321,7 @@ class IxformerQuantExperts(MojoQuantExperts):
         if enable_cuda_graph:
             assert torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
 
-        if self.weight_dtype == torch.int8:
+        if self.up_weight_dtype == torch.int8:
             if not enable_cuda_graph:
                 group_gemm_output1 = ixf_f.moe_w8a8_group_gemm(
                     input=sorted_hidden_states,
@@ -300,7 +342,7 @@ class IxformerQuantExperts(MojoQuantExperts):
                     tokens_per_experts=tokens_per_expert,
                     format=0
                 )
-        elif self.weight_dtype == "int4":
+        elif self.up_weight_dtype == "int4":
             if not enable_cuda_graph:
                 group_gemm_output1 = ixf_f.moe_w4a8_group_gemm(
                     input=sorted_hidden_states,
@@ -311,7 +353,7 @@ class IxformerQuantExperts(MojoQuantExperts):
                     tokens_per_experts=tokens_per_expert,
                     format=0,
                     version=1,
-                    group_size=self.quant_group_size,
+                    group_size=self.up_quant_group_size,
                 )
             else:
                 group_gemm_output1 = ixf_f.moe_w4a8_group_gemv(
@@ -323,10 +365,10 @@ class IxformerQuantExperts(MojoQuantExperts):
                     tokens_per_experts=tokens_per_expert,
                     format=0,
                     version=1,
-                    group_size=self.quant_group_size,
+                    group_size=self.up_quant_group_size,
                 )
         else:
-            raise NotImplementedError(f"IxformerQuantExperts: weight_dtype must be 'torch.int8' or 'int4', got {self.weight_dtype}.")
+            raise NotImplementedError(f"IxformerQuantExperts: up_weight_dtype must be 'torch.int8' or 'int4', got {self.up_weight_dtype}.")
 
         act_i8, act_scale = ixf_f.activation_dynamic_scaled_int8(
             input=group_gemm_output1,
@@ -334,13 +376,13 @@ class IxformerQuantExperts(MojoQuantExperts):
             dst_to_src=sorted_token_ids,
             topk_ids=topk_indices,
             act_type="swiglu",
-            output_format=1 if enable_cuda_graph and self.weight_dtype == "int4" else 0
+            output_format=1 if enable_cuda_graph and self.down_weight_dtype == "int4" else 0
         )
         num_tokens, top_k = topk_indices.shape
 
         group_gemm_output2 = torch.empty(num_tokens * top_k, self.hidden_size, dtype=self.output_dtype, device=sorted_token_ids.device)
         
-        if self.weight_dtype == torch.int8:
+        if self.down_weight_dtype == torch.int8:
             if not enable_cuda_graph:
                 ixf_f.moe_w8a8_group_gemm(
                     input=act_i8,
@@ -365,7 +407,7 @@ class IxformerQuantExperts(MojoQuantExperts):
                     format=0,
                     output=group_gemm_output2,
                 )
-        elif self.weight_dtype == "int4":
+        elif self.down_weight_dtype == "int4":
             if not enable_cuda_graph:
                 ixf_f.moe_w4a8_group_gemm(
                     input=act_i8,
@@ -377,7 +419,7 @@ class IxformerQuantExperts(MojoQuantExperts):
                     dst_to_src=sorted_token_ids,
                     format=0,
                     version=1,
-                    group_size=self.quant_group_size,
+                    group_size=self.down_quant_group_size,
                     output=group_gemm_output2,
                 )
             else:
@@ -391,11 +433,11 @@ class IxformerQuantExperts(MojoQuantExperts):
                     dst_to_src=sorted_token_ids,
                     format=0,
                     version=1,
-                    group_size=self.quant_group_size,
+                    group_size=self.down_quant_group_size,
                     output=group_gemm_output2,
                 )
         else:
-            raise NotImplementedError(f"IxformerQuantExperts: weight_dtype must be 'torch.int8' or 'int4', got {self.weight_dtype}.")
+            raise NotImplementedError(f"IxformerQuantExperts: down_weight_dtype must be 'torch.int8' or 'int4', got {self.down_weight_dtype}.")
         
         return group_gemm_output2
 
@@ -457,16 +499,25 @@ class IxformerQuantMoE(MojoQuantMoE):
         intermediate_size=None,
         activation: str = "swiglu",
         quant_dtype: torch.dtype = torch.int8,
-        quant_group_size: int = -1,
-        weight_dtype: Union[torch.dtype, str] = torch.int8,
+        up_quant_group_size: int = -1,
+        up_weight_dtype: Union[torch.dtype, str] = torch.int8,
+        down_quant_group_size: int = -1,
+        down_weight_dtype: Union[torch.dtype, str] = torch.int8,
         **kwargs
     ):
-        super().__init__(num_experts, top_k, hidden_size, intermediate_size, activation, quant_dtype, quant_group_size, weight_dtype, **kwargs)
-        
-        if self.weight_dtype == "int4" and self.quant_group_size not in [128, 256, 320, 512]:
-            raise NotImplementedError(f"IxformerQuantMoE: weight_dtype is 'int4' and quant_group_size must be 128, 256, 320, or 512, got {self.weight_dtype} and {self.quant_group_size}.")
-        elif self.weight_dtype == torch.int8 and self.quant_group_size != -1:
-            raise NotImplementedError(f"IxformerQuantMoE: weight_dtype is 'torch.int8' and quant_group_size must be -1, got {self.weight_dtype} and {self.quant_group_size}.")
+        super().__init__(
+            num_experts,
+            top_k,
+            hidden_size,
+            intermediate_size,
+            activation,
+            quant_dtype,
+            up_quant_group_size,
+            up_weight_dtype,
+            down_quant_group_size,
+            down_weight_dtype,
+            **kwargs,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
 
@@ -486,7 +537,7 @@ class IxformerQuantMoE(MojoQuantMoE):
             hidden_states,
             top_k_indices,
             self.experts.up_proj_quantize.inv_smooth_scale,
-            weight_dtype=self.weight_dtype,
+            weight_dtype=self.up_weight_dtype,
             enable_cuda_graph=enable_cuda_graph
         )
 
