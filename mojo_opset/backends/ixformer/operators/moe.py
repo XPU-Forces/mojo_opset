@@ -71,8 +71,8 @@ def _swizzle_weights_post_hook(module, incompatible_keys):
     elif module.weight_dtype == torch.int8:
         up_nn = module.up_proj_weight.data.transpose(1, 2).contiguous()
         down_nn = module.down_proj_weight.data.transpose(1, 2).contiguous()
-        up_scale_nn = module.up_proj_weight_scale.data.permute(1, 0).contiguous()
-        down_scale_nn = module.down_proj_weight_scale.data.permute(1, 0).contiguous()
+        up_scale_nn = module.up_proj_weight_scale.data.contiguous()
+        down_scale_nn = module.down_proj_weight_scale.data.contiguous()
 
         module.register_buffer("up_proj_weight", up_nn.to(device))
         module.register_buffer("down_proj_weight", down_nn.to(device))
@@ -165,8 +165,11 @@ class IxformerQuantExperts(MojoQuantExperts):
             if self.hidden_size % 64 != 0 or self.intermediate_size % 64 != 0:
                 raise NotImplementedError(f"IxformerQuantExperts only supports weight_dtype='torch.int8' and hidden_size, intermediate_size must be divisible by 64, got {self.hidden_size} and {self.intermediate_size}.")
         
-        if self.weight_dtype == "int4" and self.quant_group_size not in [128, 256, 320, 512]:
-            raise NotImplementedError(f"IxformerQuantExperts: weight_dtype is 'int4' and quant_group_size must be 128, 256, 320, or 512, got {self.weight_dtype} and {self.quant_group_size}.")
+        if self.weight_dtype == "int4":
+            if self.quant_group_size not in [128, 256, 320, 512]:
+                raise NotImplementedError(f"IxformerQuantExperts: weight_dtype is 'int4' and quant_group_size must be 128, 256, 320, or 512, got {self.weight_dtype} and {self.quant_group_size}.")
+            if self.hidden_size % 64 != 0 or self.intermediate_size % 64 != 0 or self.intermediate_size * 2 < 256 or self.hidden_size < 256:
+                raise NotImplementedError(f"IxformerQuantExperts: weight_dtype is 'int4' and hidden_size, intermediate_size must be divisible by 64, intermediate_size * 2 must be >= 256, and hidden_size must be >= 256, got {self.hidden_size} and {self.intermediate_size}.")
 
         setattr(self.up_proj_weight_scale, "force_dtype", torch.float32)
         setattr(self.down_proj_weight_scale, "force_dtype", torch.float32)
@@ -353,6 +356,11 @@ class IxformerQuantMoE(MojoQuantMoE):
             enable_cuda_graph = True
         else:
             enable_cuda_graph = False
+        
+        if hidden_states.dtype in [torch.bfloat16, torch.float16]:
+            self.experts.output_dtype = hidden_states.dtype
+        else:
+            raise NotImplementedError(f"IxformerQuantMoE: hidden_states dtype must be 'torch.bfloat16' or 'torch.float16', got {hidden_states.dtype}.")
 
         top_k_indices, top_k_gates = self.gating(hidden_states)
 
