@@ -1998,8 +1998,8 @@ def generate_paged_prefill_quant_data(
     k_cache = torch.randint(-128, 127, (num_total_blocks, num_kv_heads, block_size, head_dim), dtype=torch.int8)
     v_cache = torch.randint(-128, 127, (num_total_blocks, num_kv_heads, block_size, head_dim), dtype=torch.int8)
 
-    k_qscale = torch.rand(num_kv_heads, head_dim, dtype=torch.float32) * 0.1 + 0.01
-    v_qscale = torch.rand(num_kv_heads, head_dim, dtype=torch.float32) * 0.1 + 0.01
+    k_qscale = torch.rand(num_kv_heads, head_dim, dtype=dtype) * 0.1 + 0.01
+    v_qscale = torch.rand(num_kv_heads, head_dim, dtype=dtype) * 0.1 + 0.01
 
     block_tables = torch.zeros(batch_size, max_num_blocks_per_seq, dtype=torch.int32)
     free_blocks = torch.randperm(num_total_blocks)
