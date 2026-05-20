@@ -34,20 +34,6 @@ def _mem_snapshot(tag, device=None):
     rank = dist.get_rank() if dist.is_initialized() else 0
     print(f"[MEM][rank{rank}] {tag:50s} alloc={alloc:7.3f}GiB reserved={reserved:7.3f}GiB max_alloc={max_alloc:7.3f}GiB max_reserved={max_reserved:7.3f}GiB", flush=True)
 
-_MEM_PROFILING = os.getenv("MEM_PROFILING", "0") == "1"
-
-def _mem_snapshot(tag, device=None):
-    if not _MEM_PROFILING:
-        return
-    if device is None:
-        device = torch.npu.current_device()
-    alloc = torch.npu.memory_allocated(device) / (1024 ** 3)
-    reserved = torch.npu.memory_reserved(device) / (1024 ** 3)
-    max_alloc = torch.npu.max_memory_allocated(device) / (1024 ** 3)
-    max_reserved = torch.npu.max_memory_reserved(device) / (1024 ** 3)
-    rank = dist.get_rank() if dist.is_initialized() else 0
-    print(f"[MEM][rank{rank}] {tag:50s} alloc={alloc:7.3f}GiB reserved={reserved:7.3f}GiB max_alloc={max_alloc:7.3f}GiB max_reserved={max_reserved:7.3f}GiB", flush=True)
-
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - [LLM](%(filename)s:%(lineno)d): %(message)s',
     level=logging.INFO,
@@ -220,8 +206,6 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, batch_
 
     torch.npu.reset_peak_memory_stats()
     _mem_snapshot("before prefill (peak reset)")
-    torch.npu.reset_peak_memory_stats()
-    _mem_snapshot("before prefill (peak reset)")
     with torch.no_grad():
         next_token_logits, past_key_values = forward_prefill_mojo(model, input_ids, attention_mask, lengths)
     _mem_snapshot("after prefill")
@@ -268,7 +252,6 @@ def parse_args():
     parser.add_argument("--num_layers", type=int, default=int(os.getenv("QWEN3_NUM_LAYERS", "36")))
     parser.add_argument("--prompt", type=str, default="今天天气怎么样？")
     parser.add_argument("--max_new_tokens", type=int, default=100)
-    parser.add_argument("--pa_max_length", type=int, default=int(os.getenv("PA_MAX_LENGTH", "2048")))
     parser.add_argument("--pa_max_length", type=int, default=int(os.getenv("PA_MAX_LENGTH", "2048")))
     parser.add_argument("--transformers", action="store_true", help="Use Transformers model")
     parser.add_argument("--ep_size", type=int, default=int(os.getenv("EP_SIZE", "1")))

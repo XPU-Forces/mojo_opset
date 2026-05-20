@@ -26,7 +26,7 @@ if ! "${PYTHON_BIN}" -c "import torch" >/dev/null 2>&1; then
     exit 1
 fi
 
-export MOJO_BACKEND="${MOJO_BACKEND:-torch_npu}"
+export MOJO_BACKEND="${MOJO_BACKEND:-ascendc}"
 export MOJO_DISABLE_ASSERTION_REWRITE="${MOJO_DISABLE_ASSERTION_REWRITE:-1}"
 
 EP_SIZE="${EP_SIZE:-8}"

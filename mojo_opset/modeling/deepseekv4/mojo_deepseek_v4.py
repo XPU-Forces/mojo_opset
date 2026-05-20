@@ -1037,18 +1037,21 @@ class DeepseekV4Indexer(nn.Module):
 
             with _profile_timer(layer_idx, "indexer_metadata"):
                 li_metadata = self.quant_lightning_indexer_metadata(
+                    q_quant.view(batch_size, seq_len, self.n_heads, self.head_dim),
+                    li_cmp_kv,
+                    weights,
+                    q_scale.view(batch_size, seq_len, self.n_heads),
+                    li_key_dequant_scale.squeeze(-2),
+                    0,
+                    0,
+                    actual_seq_lengths_query=actual_seq_q,
+                    actual_seq_lengths_key=actual_seq_k,
+                    block_table=c4a_block_table,
                     layout_key='PA_BSND',
                     sparse_count=self.index_topk,
                     sparse_mode=3,
                     layout_query="TND",
                     cmp_ratio=self.compress_ratio,
-                    key_quant_mode=0,
-                    query_quant_mode=0,
-                    num_heads_q=self.n_heads,
-                    num_heads_k=1,
-                    head_dim=self.head_dim,
-                    actual_seq_lengths_query=actual_seq_q,
-                    actual_seq_lengths_key=actual_seq_k,
                 )
 
             with _profile_timer(layer_idx, "indexer_li_kernel"):
@@ -1075,7 +1078,6 @@ class DeepseekV4Indexer(nn.Module):
 def _dynamic_quant_per_token(x: torch.Tensor):
     quant, scale = _DYNAMIC_QUANT_PER_TOKEN(x)
     return quant, scale.squeeze(-1)
-
 
 class DeepseekV4Attention(nn.Module):
 
@@ -1454,6 +1456,10 @@ class DeepseekV4Attention(nn.Module):
             compress_ratio, cu_q_lens, cmp_kv_cache, cmp_block_tables, cmp_sparse_indices,
         )
 
+
+        # import os as _os; _rank = _os.getenv("RANK_ID", "0")
+        # if self.layer_idx == 0 and int(_rank) == 0:
+        #     print(f"[DEBUG] q.shape={q.shape}, kv_cache.shape={kv_cache.shape}, block_tables.shape={block_tables.shape}, seq_lens={seq_lens}, bs={batch_size}, sl={seq_length}, cu_q_lens={cu_q_lens}, cmp_ratio={compress_ratio}")
         with _profile_timer(self.layer_idx, "attn_core"):
             o = self.sparse_attn(
                 q=q, ori_kv=kv_cache,
@@ -1621,7 +1627,7 @@ class DeepseekV4SharedExpert(nn.Module):
                 }
             )
         with _profile_timer(self.layer_idx, "shared_expert_swiglu") if hasattr(self, "layer_idx") else nullcontext():
-            intermediate_quant, intermediate_scale = self.dequant_swiglu_quant(
+            intermediate_quant, intermediate_scale = torch_npu.npu_dequant_swiglu_clamp_quant(
                 merged_x,
                 weight_scale=gate_up_weight_scale,
                 quant_scale=self.intermediate_quant.inv_smooth_scale.to(dtype=torch.float32),
@@ -1816,7 +1822,7 @@ class DeepseekV4MoE(nn.Module):
 
         if pertoken_scale is None:
             x, pertoken_scale = self.dynamic_quant(x)
-            pertoken_scale = pertoken_scale.squeeze(-1)
+            # pertoken_scale = pertoken_scale.squeeze(-1)
 
         fc1_out = self.grouped_matmul(
             [x], [experts_mod.up_proj_weight],
@@ -1828,7 +1834,7 @@ class DeepseekV4MoE(nn.Module):
             tuning_config=[0],
         )[0]
 
-        intermediate_h, pertoken_scale = self.dequant_swiglu_quant(
+        intermediate_h, pertoken_scale = torch_npu.npu_dequant_swiglu_quant(
             fc1_out,
             weight_scale=experts_mod.up_proj_weight_scale,
             quant_scale=self.smooth_scale_2,
@@ -2028,7 +2034,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 position_embeddings=position_embeddings,
                 is_prefill=is_prefill, **kwargs,
             )
-        hidden_states = OpKernel.hc_post(hidden_states, residual, post, comb)
+        hidden_states = self.hc_post(hidden_states, residual, post, comb)
 
         residual = hidden_states
         hidden_states, post, comb = self.hc_pre(
