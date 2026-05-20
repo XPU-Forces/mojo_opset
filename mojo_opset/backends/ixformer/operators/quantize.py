@@ -22,10 +22,28 @@ class IxformerStaticQuant(MojoStaticQuant):
                 f"IxformerStaticQuant only supports fp32/bf16 scale, got {self.scale.dtype}."
             )
 
-        output = torch.empty_like(input, dtype=self.quant_dtype, device=input.device)
-        ixf_f.static_quant(output, input, self.scale, self.quant_dtype)
+        if input.dim() < len(self.input_size):
+            raise ValueError(
+                f"input must have at least {len(self.input_size)} dims for scale shape "
+                f"{self.input_size}, got {tuple(input.shape)}."
+            )
+        if tuple(input.shape[-len(self.input_size):]) != self.input_size:
+            raise ValueError(
+                f"input trailing dims {tuple(input.shape[-len(self.input_size):])} must "
+                f"match scale shape {self.input_size}."
+            )
 
-        return output, self.scale
+        scale = self.scale
+        output = torch.empty_like(input, dtype=self.quant_dtype, device=input.device)
+        if scale.ndim > 1:
+            flat_hidden = scale.numel()
+            flat_input = input.reshape(-1, flat_hidden)
+            flat_output = output.reshape(-1, flat_hidden)
+            ixf_f.static_quant(flat_output, flat_input, scale.reshape(-1), self.quant_dtype)
+        else:
+            ixf_f.static_quant(output, input, scale, self.quant_dtype)
+
+        return output, scale
 
 class IxformerDynamicQuant(MojoDynamicQuant):
     supported_platforms_list = ["ilu"]

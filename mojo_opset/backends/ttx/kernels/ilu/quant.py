@@ -13,29 +13,34 @@ def dequant_impl(
     output_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
     """
-    Dequantize a quantized tensor using a per-channel scale.
+    Dequantize a quantized tensor using a static scale tensor.
 
-    Computes ``output[..., c] = input[..., c].to(float32) * scale[c]``
-    and stores the result in ``output_dtype`` (same convention as ``MojoDequant``).
+    Computes ``output = input.to(float32) * scale`` over the trailing dimensions
+    covered by ``scale`` and stores the result in ``output_dtype`` (same
+    convention as ``MojoDequant``).
 
     Args:
-        input_tensor: Quantized input tensor of shape ``(..., K)``.
-        scale: Per-channel scale tensor whose flattened length equals ``K``
-            (the last dimension / number of columns of ``input_tensor``).
+        input_tensor: Quantized input tensor of shape ``(..., *scale.shape)``.
+        scale: Static scale tensor applied over the trailing dimensions of
+            ``input_tensor``.
         output_dtype: Target floating-point dtype for the output.
 
     Returns:
         Dequantized tensor of the same shape as ``input_tensor`` in ``output_dtype``.
     """
 
-    dims = input_tensor.shape[-1]
-    scale_flat = scale.reshape(-1)
-    if scale_flat.numel() != dims:
+    if input_tensor.dim() < scale.dim():
         raise ValueError(
-            f"dequant scale must have one entry per channel: got scale.numel()={scale_flat.numel()}, "
-            f"expected {dims} (input last dim)."
+            f"input must have at least {scale.dim()} dims for scale shape {tuple(scale.shape)}, "
+            f"got {tuple(input_tensor.shape)}."
+        )
+    if tuple(input_tensor.shape[-scale.dim():]) != tuple(scale.shape):
+        raise ValueError(
+            f"input trailing dims {tuple(input_tensor.shape[-scale.dim():])} must match "
+            f"scale shape {tuple(scale.shape)}."
         )
 
+    dims = scale.numel()
     total_tokens = input_tensor.numel() // dims
     grid = (ilu_grid_dim_from_row_tasks(total_tokens),)
 
@@ -44,7 +49,7 @@ def dequant_impl(
 
     input_2d = input_tensor.view(-1, dims)
     output_2d = output_tensor.view(-1, dims)
-    scale_channels = scale_flat.contiguous()
+    scale_channels = scale.reshape(-1).contiguous()
 
     dequant_kernel[grid](
         input_2d,
