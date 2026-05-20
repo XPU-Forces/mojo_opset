@@ -13,7 +13,7 @@ from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedDecodeSWA
 from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoPagedPrefillSWA
-from mojo_opset.core import MojoPagedPrefillSageGQA
+from mojo_opset.experimental import MojoPagedPrefillSageGQA
 from mojo_opset.core.operators.attention import assert_paged_decode_contract
 from mojo_opset.core.operators.attention import assert_paged_prefill_contract
 from mojo_opset.experimental import MojoPagedPrefillGQAWithKVDequant

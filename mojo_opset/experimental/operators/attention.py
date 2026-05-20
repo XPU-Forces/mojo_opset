@@ -1,6 +1,6 @@
 import math
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 
@@ -1707,7 +1707,7 @@ class MojoPagedPrefillSageGQA(MojoOperator):
         mask: Optional[torch.Tensor] = None,
         max_q_lens: Optional[int] = None,
         max_total_seq_lens: Optional[int] = None,
-    ) -> Tuple[Any]:
+    ):
         """
         Paged prefill sage attention with grouped query heads (GQA) using a blocked KV cache.
 
@@ -1852,4 +1852,5 @@ __all__ = [
     "MojoPagedDecodeGQAWithKVDequant",
     "MojoPagedPrefillSWAWithKVDequant",
     "MojoPagedDecodeSWAWithKVDequant",
+    "MojoPagedPrefillSageGQA",
 ]
