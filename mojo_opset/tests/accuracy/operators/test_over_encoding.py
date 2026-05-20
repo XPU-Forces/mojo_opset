@@ -201,6 +201,83 @@ class TestRefOverEncodingBasic:
             rtol=0,
         )
 
+    @pytest.mark.parametrize(
+        "vocab_size, oe_vocab_sizes, n_grams, q_lens, oe_history",
+        [
+            (
+                97,
+                [101, 103, 107, 109],
+                [2, 2, 3, 3],
+                [4, 6],
+                [[5, 7], [11, 13]],
+            ),
+            (
+                193,
+                [197, 199, 211, 223, 227, 229],
+                [2, 2, 3, 3, 4, 4],
+                [3, 5, 7],
+                [[2, 3, 5], [7, 11, 13], [17, 19, 23]],
+            ),
+            (
+                257,
+                [263, 269, 271, 277, 281, 283, 293, 307],
+                [2, 2, 3, 3, 4, 4, 5, 5],
+                [8, 9, 11],
+                [[3, 5, 7, 9], [2, 4, 6, 8], [11, 13, 17, 19]],
+            ),
+        ],
+    )
+    @bypass_not_implemented
+    def test_n_gram_encoding_more_varlen_cases(
+        self,
+        vocab_size,
+        oe_vocab_sizes,
+        n_grams,
+        q_lens,
+        oe_history,
+    ):
+        oe_vocab_sizes = torch.tensor(oe_vocab_sizes, dtype=torch.int64)
+        oe_vocab_offsets = torch.cat(
+            [torch.zeros(1, dtype=torch.long), torch.cumsum(oe_vocab_sizes[:-1], dim=0).to(torch.long)]
+        )
+        n_grams = torch.tensor(n_grams, dtype=torch.int64)
+        q_lens = torch.tensor(q_lens, dtype=torch.int64)
+        oe_history = torch.tensor(oe_history, dtype=torch.int64)
+        total_tokens = int(q_lens.sum().item())
+        input_ids = (torch.arange(1, total_tokens + 1, dtype=torch.int64) * 3) % vocab_size
+
+        oe_ngram = MojoOverEncodingNGram(vocab_size, oe_vocab_sizes, n_grams)
+        oe_ngram_ref = MojoOverEncodingNGram._registry.get("torch")(vocab_size, oe_vocab_sizes, n_grams)
+
+        seq_offset = 0
+        golden = []
+        for seq_idx, seq_len in enumerate(q_lens.tolist()):
+            seq_input_ids = input_ids[seq_offset : seq_offset + seq_len]
+            golden.append(
+                n_gram_impl_torch(
+                    seq_input_ids,
+                    oe_history[seq_idx],
+                    oe_vocab_sizes,
+                    oe_vocab_offsets,
+                    n_grams,
+                    vocab_size,
+                )
+            )
+            seq_offset += seq_len
+        golden = torch.cat(golden, dim=0)
+
+        assert_close(oe_ngram_ref(input_ids, oe_history, q_lens), golden, atol=0, rtol=0)
+        oe_ngram = oe_ngram.to(TEST_DEVICE)
+        oe_ngram_ref = oe_ngram_ref.to(TEST_DEVICE)
+        oe_ngram.forward_diff_with(
+            oe_ngram_ref,
+            input_ids.to(TEST_DEVICE),
+            oe_history.to(TEST_DEVICE),
+            q_lens.to(TEST_DEVICE),
+            atol=0,
+            rtol=0,
+        )
+
     @bypass_not_implemented
     def test_over_encoding(self):
         input_ids = torch.Tensor([1, 2, 3, 4, 5, 6]).to(torch.int64).to(TEST_DEVICE)

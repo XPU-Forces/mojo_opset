@@ -50,6 +50,8 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           export HTTP_PROXY=${MOJO_OPSET_PROXY} HTTPS_PROXY=${MOJO_OPSET_PROXY}
+          export NO_PROXY=bytedpypi.byted.org,hub.byted.org,code.byted.org,localhost,127.0.0.1,::1
+          export no_proxy=bytedpypi.byted.org,hub.byted.org,code.byted.org,localhost,127.0.0.1,::1
           pip install -U pip setuptools wheel build pytest-xdist
           pip install -e .\[npu\] --index-url https://bytedpypi.byted.org/simple
           python3 -m build .

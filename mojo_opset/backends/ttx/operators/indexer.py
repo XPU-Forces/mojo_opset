@@ -3,7 +3,7 @@ from typing import Optional
 import torch
 
 from mojo_opset.backends.ttx.kernels import lightning_indexer_impl
-from mojo_opset.core import MojoLightningIndexer
+from mojo_opset.experimental import MojoLightningIndexer
 from mojo_opset.experimental.operators.indexer import MojoIndexer
 
 

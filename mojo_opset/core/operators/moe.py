@@ -76,8 +76,10 @@ class MojoQuantMoE(MojoOperator):
         intermediate_size=None,
         activation: str = "swiglu",
         quant_dtype: torch.dtype = torch.int8,
-        quant_group_size: int = -1,
-        weight_dtype: Union[torch.dtype, str] = torch.int8,
+        up_quant_group_size: int = -1,
+        up_weight_dtype: Union[torch.dtype, str] = torch.int8,
+        down_quant_group_size: int = -1,
+        down_weight_dtype: Union[torch.dtype, str] = torch.int8,
         **kwargs,
     ):
         super().__init__()
@@ -85,8 +87,8 @@ class MojoQuantMoE(MojoOperator):
             raise NotImplementedError(f"MojoQuantMoE: Activation {activation} is not supported.")
         if quant_dtype != torch.int8:
             raise NotImplementedError(f"MojoQuantMoE: quant_dtype must be 'int8', got {quant_dtype}.")
-        if weight_dtype not in ("int4", torch.int8):
-            raise ValueError(f"MojoQuantMoE: weight must be w4 or w8")
+        if up_weight_dtype not in ("int4", torch.int8) or down_weight_dtype not in ("int4", torch.int8):
+            raise ValueError("MojoQuantMoE: weight must be w4 or w8")
         for k in ("ep_rank", "ep_size"):
             if k in kwargs:
                 raise ValueError(f"MojoQuantMoE: {k} is not supported; use ParallelStyle to set expert partition.")
@@ -99,8 +101,10 @@ class MojoQuantMoE(MojoOperator):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.quant_dtype = quant_dtype
-        self.quant_group_size = quant_group_size
-        self.weight_dtype = weight_dtype
+        self.up_quant_group_size = up_quant_group_size
+        self.up_weight_dtype = up_weight_dtype
+        self.down_quant_group_size = down_quant_group_size
+        self.down_weight_dtype = down_weight_dtype
 
         self.gating = MojoMoEGating._registry.get(self._backend)(
             hidden_size=self.hidden_size,
@@ -115,8 +119,10 @@ class MojoQuantMoE(MojoOperator):
             intermediate_size=self.intermediate_size,
             activation=activation,
             quant_dtype=quant_dtype,
-            quant_group_size=quant_group_size,
-            weight_dtype=weight_dtype,
+            up_quant_group_size=up_quant_group_size,
+            up_weight_dtype=up_weight_dtype,
+            down_quant_group_size=down_quant_group_size,
+            down_weight_dtype=down_weight_dtype,
             **kwargs,
         )
         self.combine = MojoMoECombine._registry.get(self._backend)(multiply_by_gates=True, **kwargs)
@@ -185,192 +191,6 @@ class MojoMoEGating(MojoOperator):
 def _count_expert_tokens(top_k_indices: torch.Tensor, num_experts: int) -> torch.Tensor:
     flat_indices = top_k_indices.reshape(-1).to(dtype=torch.int64, device=top_k_indices.device)
     return torch.bincount(flat_indices, minlength=num_experts).to(dtype=torch.int32, device=top_k_indices.device)
-
-
-def _validate_moe_token_count(token_count: torch.Tensor, route_count: int) -> torch.Tensor:
-    token_count_i64 = token_count.to(dtype=torch.int64, device=token_count.device)
-    if token_count_i64.dim() != 1:
-        raise ValueError(f"token_count must be 1D, but got shape {tuple(token_count.shape)}")
-    if int(token_count_i64.sum().item()) != route_count:
-        raise ValueError(
-            f"token_count sum must equal total routed token count {route_count}, "
-            f"but got {token_count_i64.sum().item()}."
-        )
-    return token_count_i64
-
-
-def _expand_grouped_route_param(
-    param: Optional[torch.Tensor],
-    token_count: torch.Tensor,
-    route_shape: tuple[int, int],
-) -> Optional[torch.Tensor]:
-    if param is None:
-        return None
-
-    token_count_i64 = _validate_moe_token_count(token_count, route_shape[0] * route_shape[1])
-    param_fp = param.float()
-
-    if param_fp.dim() == 1:
-        return param_fp.view(1, 1, -1).expand(*route_shape, -1)
-    if param_fp.dim() != 2 or param_fp.size(0) != token_count_i64.numel():
-        raise ValueError(
-            "Grouped route param must be 2D with the first dimension equal to token_count length, "
-            f"but got shape {tuple(param.shape)} and token_count length {token_count_i64.numel()}."
-        )
-
-    expanded = param_fp.repeat_interleave(token_count_i64, dim=0)
-    return expanded.reshape(*route_shape, param_fp.size(-1))
-
-
-def _block_dynamic_quant(input_fp: torch.Tensor, quant_block_size: int):
-    if input_fp.shape[-1] % quant_block_size != 0:
-        raise ValueError(
-            f"Last dim {input_fp.shape[-1]} must be divisible by quant_block_size {quant_block_size}."
-        )
-    input_blocks = input_fp.reshape(*input_fp.shape[:-1], -1, quant_block_size)
-    scale = input_blocks.abs().amax(dim=-1).clamp(min=1e-12) / 127
-    quantized = torch.clamp(torch.round(input_blocks / scale.unsqueeze(-1)), -128, 127)
-    return quantized.reshape_as(input_fp).to(torch.int8), scale
-
-
-def _sort_moe_routes(
-    hidden_states: torch.Tensor,
-    top_k_gates: torch.Tensor,
-    top_k_indices: torch.Tensor,
-):
-    if hidden_states.dim() != 2:
-        raise ValueError(f"hidden_states must be 2D, but got shape {tuple(hidden_states.shape)}")
-    if top_k_gates.shape != top_k_indices.shape:
-        raise ValueError(
-            f"top_k_gates and top_k_indices must have the same shape, got "
-            f"{tuple(top_k_gates.shape)} vs {tuple(top_k_indices.shape)}."
-        )
-    if top_k_indices.dim() != 2:
-        raise ValueError(f"top_k_indices must be 2D, but got shape {tuple(top_k_indices.shape)}")
-
-    token_num, top_k = top_k_indices.shape
-    hidden_dim = hidden_states.shape[-1]
-
-    flat_hidden = hidden_states.unsqueeze(1).expand(-1, top_k, -1).reshape(-1, hidden_dim)
-    flat_gates = top_k_gates.reshape(-1, 1)
-    flat_experts = top_k_indices.reshape(-1).to(dtype=torch.int64)
-    flat_token_indices = (
-        torch.arange(token_num, device=top_k_indices.device, dtype=torch.int64)
-        .unsqueeze(1)
-        .expand(-1, top_k)
-        .reshape(-1)
-    )
-
-    _, sort_indices = flat_experts.sort(stable=True)
-    sorted_experts = flat_experts.index_select(0, sort_indices)
-    sorted_hidden = flat_hidden.index_select(0, sort_indices).reshape(token_num, top_k, hidden_dim)
-    sorted_gates = flat_gates.index_select(0, sort_indices).reshape(token_num, top_k, 1)
-    sorted_token_indices = flat_token_indices.index_select(0, sort_indices).reshape(token_num, top_k, 1)
-    return sorted_hidden, sorted_gates, sorted_token_indices, sorted_experts.reshape(token_num, top_k)
-
-
-class MojoMoEInitRoutingDynamicQuant(MojoOperator):
-    def __init__(
-        self,
-        num_experts: int,
-        top_k: int,
-        quant_block_size: int = 8,
-        quant_dtype: torch.dtype = torch.int8,
-        start_expert_id: int = 0,
-        end_expert_id: Optional[int] = None,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        if quant_dtype != torch.int8:
-            raise NotImplementedError(f"Unsupported quant_dtype: {quant_dtype}, expected torch.int8.")
-        self.num_experts = num_experts
-        self.top_k = top_k
-        self.quant_block_size = quant_block_size
-        self.quant_dtype = quant_dtype
-        self.start_expert_id = start_expert_id
-        self.end_expert_id = num_experts if end_expert_id is None else end_expert_id
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        top_k_gates: torch.Tensor,
-        top_k_indices: torch.Tensor,
-        smooth_scale: Optional[torch.Tensor] = None,
-        quant_mode: int = 0,
-    ):
-        if quant_mode not in (0, 1):
-            raise NotImplementedError(f"Unsupported quant_mode: {quant_mode}, expected 0 or 1.")
-
-        sorted_hidden, sorted_gates, sorted_token_indices, sorted_experts = _sort_moe_routes(
-            hidden_states,
-            top_k_gates,
-            top_k_indices,
-        )
-
-        route_hidden = sorted_hidden.float()
-        if smooth_scale is not None:
-            if smooth_scale.dim() != 2 or smooth_scale.size(0) != self.num_experts:
-                raise ValueError(
-                    "smooth_scale must be 2D with shape (num_experts, hidden_size), "
-                    f"but got shape {tuple(smooth_scale.shape)} and num_experts={self.num_experts}."
-                )
-            route_scale = smooth_scale.index_select(0, sorted_experts.reshape(-1).to(dtype=torch.long))
-            route_scale = route_scale.reshape_as(route_hidden)
-            route_hidden = route_hidden * route_scale.float()
-
-        quantized, scale = _block_dynamic_quant(route_hidden, self.quant_block_size)
-        token_count = _count_expert_tokens(top_k_indices, self.num_experts)
-        return (
-            quantized.to(self.quant_dtype),
-            sorted_gates.float(),
-            sorted_token_indices.to(dtype=torch.int32),
-            token_count,
-            scale,
-        )
-
-
-class MojoFusedSwiGLUMoEScaleDynamicQuantize(MojoOperator):
-    def __init__(
-        self,
-        quant_dtype: torch.dtype = torch.int8,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        if quant_dtype != torch.int8:
-            raise NotImplementedError(f"Unsupported quant_dtype: {quant_dtype}, expected torch.int8.")
-        self.quant_dtype = quant_dtype
-
-    def forward(
-        self,
-        input: torch.Tensor,
-        smooth_scale: Optional[torch.Tensor],
-        token_count: torch.Tensor,
-        beta: float = 1.0,
-        quant_mode: int = 0,
-    ):
-        if input.dim() != 3:
-            raise ValueError(f"input must be 3D, but got shape {tuple(input.shape)}")
-        if input.shape[-1] % 2 != 0:
-            raise ValueError(f"input last dim must be even for SwiGLU, but got {input.shape[-1]}")
-        if beta == 0:
-            raise ValueError("beta must be non-zero.")
-        if quant_mode not in (0, 1):
-            raise NotImplementedError(f"Unsupported quant_mode: {quant_mode}, expected 0 or 1.")
-
-        route_shape = input.shape[:2]
-        _validate_moe_token_count(token_count, route_shape[0] * route_shape[1])
-
-        left, right = input.float().chunk(2, dim=-1)
-        output = (F.silu(left * beta) / beta) * right
-
-        expanded_scale = _expand_grouped_route_param(smooth_scale, token_count, route_shape)
-        if expanded_scale is not None:
-            output = output * expanded_scale
-
-        scale = output.abs().amax(dim=-1).clamp(min=1e-12) / 127
-        quantized = torch.clamp(torch.round(output / scale.unsqueeze(-1)), -128, 127)
-        return quantized.to(self.quant_dtype), scale
-
 
 class MojoMoEDispatch(MojoOperator):
     def __init__(
@@ -486,8 +306,10 @@ class MojoQuantExperts(MojoOperator):
         intermediate_size: int,
         activation: str = "swiglu",
         quant_dtype: torch.dtype = torch.int8,
-        quant_group_size: int = -1,
-        weight_dtype: Union[torch.dtype, str] = torch.int8,
+        up_quant_group_size: int = -1,
+        up_weight_dtype: Union[torch.dtype, str] = torch.int8,
+        down_quant_group_size: int = -1,
+        down_weight_dtype: Union[torch.dtype, str] = torch.int8,
         **kwargs,
     ):
         """
@@ -507,15 +329,17 @@ class MojoQuantExperts(MojoOperator):
             raise NotImplementedError(f"MojoQuantExperts: Activation {activation} is not supported.")
         if quant_dtype != torch.int8:
             raise ValueError(f"MojoQuantExperts: quant_dtype must be 'int8', got {quant_dtype}.")
-        if weight_dtype not in ("int4", torch.int8):
+        if up_weight_dtype not in ("int4", torch.int8) or down_weight_dtype not in ("int4", torch.int8):
             raise NotImplementedError("MojoQuantExperts currently only supports w4 or w8.")
-        if weight_dtype == "int4" and (hidden_size % 2 != 0 or intermediate_size % 2 != 0):
+        if (up_weight_dtype == "int4" and (hidden_size % 2 != 0 or intermediate_size % 2 != 0)) or (down_weight_dtype == "int4" and (intermediate_size % 2 != 0 or hidden_size % 2 != 0)):
             raise ValueError("MojoQuantExperts requires even hidden_size and intermediate_size for int4 packing.")
         
         self.activation = activation
         self.quant_dtype = quant_dtype
-        self.quant_group_size = quant_group_size
-        self.weight_dtype = weight_dtype
+        self.up_quant_group_size = up_quant_group_size
+        self.up_weight_dtype = up_weight_dtype
+        self.down_quant_group_size = down_quant_group_size
+        self.down_weight_dtype = down_weight_dtype
         assert quant_dtype == torch.int8
         bits = 8
         self.qmax = 2 ** (bits - 1) - 1
@@ -532,39 +356,35 @@ class MojoQuantExperts(MojoOperator):
             num_experts, intermediate_size,
         )
 
-        if weight_dtype == torch.int8:
+        if up_weight_dtype == torch.int8:
             self.register_buffer(
                 "up_proj_weight",
                 torch.empty((num_experts, intermediate_size * 2, hidden_size), dtype=torch.int8),
             )
+        else:
+            assert up_weight_dtype == "int4"
+            self.register_buffer(
+                "up_proj_weight",
+                torch.empty((num_experts, intermediate_size * 2 // 2, hidden_size), dtype=torch.int8),
+            )
+
+        if down_weight_dtype == torch.int8:
             self.register_buffer(
                 "down_proj_weight",
                 torch.empty((num_experts, hidden_size, intermediate_size), dtype=torch.int8),
             )
         else:
-            assert weight_dtype == "int4"
-            self.register_buffer(
-                "up_proj_weight",
-                torch.empty((num_experts, intermediate_size * 2 // 2, hidden_size), dtype=torch.int8),
-            )
+            assert down_weight_dtype == "int4"
             self.register_buffer(
                 "down_proj_weight",
                 torch.empty((num_experts, hidden_size // 2, intermediate_size), dtype=torch.int8),
             )
 
-        if quant_group_size > 0:
-            up_proj_groups = (hidden_size + quant_group_size - 1) // quant_group_size
+        if up_quant_group_size > 0:
+            up_proj_groups = (hidden_size + up_quant_group_size - 1) // up_quant_group_size
             self.up_proj_weight_scale = nn.Parameter(
                 torch.empty(
                     (num_experts, intermediate_size * 2, up_proj_groups),
-                    dtype=torch.bfloat16,
-                ),
-            )
-
-            down_proj_groups = (intermediate_size + quant_group_size - 1) // quant_group_size
-            self.down_proj_weight_scale = nn.Parameter(
-                torch.empty(
-                    (num_experts, hidden_size, down_proj_groups),
                     dtype=torch.bfloat16,
                 ),
             )
@@ -576,6 +396,15 @@ class MojoQuantExperts(MojoOperator):
                 ),
             )
 
+        if down_quant_group_size > 0:
+            down_proj_groups = (intermediate_size + down_quant_group_size - 1) // down_quant_group_size
+            self.down_proj_weight_scale = nn.Parameter(
+                torch.empty(
+                    (num_experts, hidden_size, down_proj_groups),
+                    dtype=torch.bfloat16,
+                ),
+            )
+        else:
             self.down_proj_weight_scale = nn.Parameter(
                 torch.empty(
                     (num_experts, hidden_size), 
@@ -583,7 +412,8 @@ class MojoQuantExperts(MojoOperator):
                 ),
             )
 
-    def _unpack_weight(self, weight):
+    @staticmethod
+    def _unpack_weight(weight):
         assert weight.ndim == 2
         unpacked_weight = torch.empty(weight.shape[0] * 2, weight.shape[1], device=weight.device, dtype=torch.int8)
         unpacked_weight[::2] = weight & 0x0F
@@ -591,21 +421,23 @@ class MojoQuantExperts(MojoOperator):
         unpacked_weight = torch.where(unpacked_weight >= 8, unpacked_weight - 16, unpacked_weight)
         return unpacked_weight
 
+    @staticmethod
     def _quant_linear(
-        self, 
         input_int8: torch.Tensor, 
         input_scale: torch.Tensor,
         expert_weight: torch.Tensor,
         weight_scale: torch.Tensor,
         output_dtype: torch.dtype = torch.bfloat16,
+        weight_dtype: Union[torch.dtype, str] = torch.int8,
+        quant_group_size: int = -1,
     ) -> torch.Tensor:
-        if self.weight_dtype == "int4":
-            expert_weight = self._unpack_weight(expert_weight)
+        if weight_dtype == "int4":
+            expert_weight = MojoQuantExperts._unpack_weight(expert_weight)
         
         assert input_scale.ndim == 2 and input_scale.shape[1] == 1
-        if self.quant_group_size > 0:
-            x_int8_groups = torch.split(input_int8, self.quant_group_size, dim=-1)
-            weight_int8_groups = torch.split(expert_weight, self.quant_group_size, dim=-1)
+        if quant_group_size > 0:
+            x_int8_groups = torch.split(input_int8, quant_group_size, dim=-1)
+            weight_int8_groups = torch.split(expert_weight, quant_group_size, dim=-1)
             output_groups = [torch.mul(x_int8_group.int().unsqueeze(-2), weight_int8_group.int().unsqueeze(-3)).float().sum(dim=-1)
                              for x_int8_group, weight_int8_group 
                              in zip(x_int8_groups, weight_int8_groups)]
@@ -649,6 +481,8 @@ class MojoQuantExperts(MojoOperator):
                 self.up_proj_weight[expert_idx], 
                 self.up_proj_weight_scale[expert_idx],
                 sorted_hidden_states.dtype,
+                self.up_weight_dtype,
+                self.up_quant_group_size,
             )
             gate_proj, up_proj = fc1_out.float().chunk(2, dim=-1)
             activated_outs.append(F.silu(gate_proj) * up_proj)
@@ -671,13 +505,15 @@ class MojoQuantExperts(MojoOperator):
                 self.down_proj_weight[expert_idx],
                 self.down_proj_weight_scale[expert_idx],
                 sorted_hidden_states.dtype,
+                self.down_weight_dtype,
+                self.down_quant_group_size,
             )
             outputs.append(fc2_out)
 
         return torch.cat(outputs, dim=0)
 
     def extra_repr(self) -> str:
-        return f"{self.num_experts=}, {self.intermediate_size=}, {self.hidden_size=}, {self.quant_dtype=}, {self.quant_group_size=}, {self.weight_dtype=}".replace("self.", "")
+        return f"{self.num_experts=}, {self.intermediate_size=}, {self.hidden_size=}, {self.quant_dtype=}, {self.up_quant_group_size=}, {self.up_weight_dtype=}, {self.down_quant_group_size=}, {self.down_weight_dtype=}".replace("self.", "")
 
 
 class MojoMoECombine(MojoOperator):

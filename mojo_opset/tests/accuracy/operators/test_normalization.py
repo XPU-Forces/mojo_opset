@@ -5,17 +5,17 @@ import torch.nn.functional as F
 from mojo_opset.utils.platform import get_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 
-from mojo_opset import MojoChannelRMSNorm
 from mojo_opset import MojoLayerNorm
 from mojo_opset import MojoLayerNormQuant
+from mojo_opset import MojoGroupRMSNorm
 from mojo_opset import MojoResidualAddLayerNorm
 from mojo_opset import MojoResidualAddLayerNormQuant
 from mojo_opset import MojoResidualAddRMSNorm
 from mojo_opset import MojoResidualAddRMSNormQuant
 from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoRMSNormQuant
-from mojo_opset import MojoGroupRMSNorm
-from mojo_opset import MojoGroupLayerNorm
+from mojo_opset.experimental import MojoChannelRMSNorm
+from mojo_opset.experimental import MojoGroupLayerNorm
 
 torch.manual_seed(43)
 
@@ -108,6 +108,14 @@ def test_layernorm(shape, dtype, eps):
         (1024, (16, 4), 96),
         (798, (16, 4, 8, 2), 128),
         (8000, (48, 8, 16, 4), 128),
+        (17, (3, 5), 128),
+        (33, (2, 7, 1), 128),
+        (65, (4, 4, 4, 4), 128),
+        (129, (1, 3, 5, 7), 128),
+        (257, (6, 2), 192),
+        (513, (8, 8, 8), 256),
+        (1025, (12, 6, 3, 1), 128),
+        (2049, (5, 9, 7, 3), 64),
     ],
 )
 @pytest.mark.parametrize("dtype", dtypes)

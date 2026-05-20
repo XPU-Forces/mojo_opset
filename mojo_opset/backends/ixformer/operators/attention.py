@@ -12,197 +12,47 @@ from ixformer.contrib import vllm_flash_attn as ix_fa
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedDecodeSWA
 from mojo_opset.core import MojoPagedPrefillGQA
-from mojo_opset.core import MojoPagedPrefillGQAWithKVDequant
-from mojo_opset.core import MojoPagedPrefillSWAWithKVDequant
 from mojo_opset.core import MojoPagedPrefillSWA
 from mojo_opset.core import MojoPagedPrefillSageGQA
 from mojo_opset.core.operators.attention import assert_paged_decode_contract
 from mojo_opset.core.operators.attention import assert_paged_prefill_contract
+from mojo_opset.experimental import MojoPagedPrefillGQAWithKVDequant
+from mojo_opset.experimental import MojoPagedPrefillSWAWithKVDequant
 
 _IXFORMER_PAGED_DECODE_SUPPORTED_HEAD_DIMS = frozenset(
     {32, 64, 80, 96, 128, 160, 192, 224, 256}
 )
 
-def _remap_block_tables(
-    block_tables: torch.Tensor,
-    num_cache_blocks: int,
-    used_block_ids: torch.Tensor,
-    *,
-    dummy_idx: Optional[int],
-) -> torch.Tensor:
-    fill_value = -1 if dummy_idx is None else dummy_idx
-    remap = torch.full(
-        (num_cache_blocks,), fill_value, dtype=block_tables.dtype, device=block_tables.device
-    )
-    remap[used_block_ids.long()] = torch.arange(
-        len(used_block_ids), dtype=block_tables.dtype, device=block_tables.device
-    )
-
-    flat_ids = block_tables.reshape(-1)
-    valid = flat_ids >= 0
-    remapped = torch.full_like(flat_ids, fill_value)
-    remapped[valid] = remap[flat_ids[valid].long()]
-    return remapped.reshape(block_tables.shape)
-
-
-def _dequantize_int8_paged_cache_by_block_ids(
-    cache: torch.Tensor,
-    scale: torch.Tensor,
-    block_ids: torch.Tensor,
-    *,
-    target_dtype: torch.dtype,
-    name: str,
-    append_dummy_block: bool = False,
-) -> torch.Tensor:
-    if cache.dtype != torch.int8:
-        raise NotImplementedError(f"{name} must be int8, got {cache.dtype}.")
-    if scale.shape != (cache.shape[1], cache.shape[-1]):
+def _check_int8_paged_kv_cache(
+    key_cache: torch.Tensor,
+    key_scale: torch.Tensor,
+    value_cache: torch.Tensor,
+    value_scale: torch.Tensor,
+) -> None:
+    if key_cache.dtype != torch.int8:
+        raise NotImplementedError(f"key_cache must be int8, got {key_cache.dtype}.")
+    if value_cache.dtype != torch.int8:
+        raise NotImplementedError(f"value_cache must be int8, got {value_cache.dtype}.")
+    expected_key_scale_shapes = {
+        (key_cache.shape[1], key_cache.shape[-1]),
+        (key_cache.shape[0], key_cache.shape[1], key_cache.shape[2]),
+    }
+    if tuple(key_scale.shape) not in expected_key_scale_shapes:
         raise ValueError(
-            f"{name}_scale must have shape {(cache.shape[1], cache.shape[-1])}, got {tuple(scale.shape)}."
+            "key_cache_scale must have per-channel shape "
+            f"{(key_cache.shape[1], key_cache.shape[-1])} or per-token shape "
+            f"{(key_cache.shape[0], key_cache.shape[1], key_cache.shape[2])}, got {tuple(key_scale.shape)}."
         )
-
-    scale_expanded = scale.view(1, cache.shape[1], 1, cache.shape[-1])
-    compact_cache = (
-        cache[block_ids.long()].to(scale.dtype) * scale_expanded
-    ).to(target_dtype)
-
-    if append_dummy_block:
-        dummy_block = torch.zeros(
-            1, cache.shape[1], cache.shape[2], cache.shape[3],
-            dtype=target_dtype, device=cache.device,
+    expected_value_scale_shapes = {
+        (value_cache.shape[1], value_cache.shape[-1]),
+        (value_cache.shape[0], value_cache.shape[1], value_cache.shape[2]),
+    }
+    if tuple(value_scale.shape) not in expected_value_scale_shapes:
+        raise ValueError(
+            "value_cache_scale must have per-channel shape "
+            f"{(value_cache.shape[1], value_cache.shape[-1])} or per-token shape "
+            f"{(value_cache.shape[0], value_cache.shape[1], value_cache.shape[2])}, got {tuple(value_scale.shape)}."
         )
-        compact_cache = torch.cat([compact_cache, dummy_block], dim=0)
-
-    return compact_cache
-
-
-def _dequantize_int8_paged_kv_cache_compact(
-    key_cache: torch.Tensor,
-    key_scale: torch.Tensor,
-    value_cache: torch.Tensor,
-    value_scale: torch.Tensor,
-    block_tables: torch.Tensor,
-    *,
-    target_dtype: torch.dtype,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    used_block_ids = block_tables[block_tables >= 0].unique()
-    new_block_tables = _remap_block_tables(
-        block_tables,
-        key_cache.shape[0],
-        used_block_ids,
-        dummy_idx=None,
-    )
-    key_cache_f16 = _dequantize_int8_paged_cache_by_block_ids(
-        key_cache,
-        key_scale,
-        used_block_ids,
-        target_dtype=target_dtype,
-        name="key_cache",
-    )
-    value_cache_f16 = _dequantize_int8_paged_cache_by_block_ids(
-        value_cache,
-        value_scale,
-        used_block_ids,
-        target_dtype=target_dtype,
-        name="value_cache",
-    )
-    return key_cache_f16, value_cache_f16, new_block_tables
-
-
-def _swa_window_block_ids(
-    block_table: torch.Tensor,
-    cu_q_lens: torch.Tensor,
-    cu_kv_lens: torch.Tensor,
-    block_size: int,
-    local_window_size: Optional[int],
-    global_window_size: Optional[int],
-) -> torch.Tensor:
-    """Return the unique physical block IDs that fall inside the sliding window
-    (local + global).  Block IDs < 0 are excluded.
-
-    In prefill every query position has its own window, so the needed KV range
-    is the **union** of all per-query windows:
-        [max(0, kv_len - q_len - local_window_size), kv_len - 1]
-    """
-    batch_size, max_num_blocks = block_table.shape
-    device = block_table.device
-    kv_lens = cu_kv_lens[1:] - cu_kv_lens[:-1]
-    q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
-    total_blocks = (kv_lens + block_size - 1) // block_size
-
-    indices = torch.arange(max_num_blocks, device=device).view(1, -1)
-    if local_window_size is not None and local_window_size >= 0:
-        earliest_kv_pos = torch.clamp(kv_lens - q_lens - local_window_size, min=0)
-        start_block = earliest_kv_pos // block_size
-        keep = (indices >= start_block.unsqueeze(1)) & (indices < total_blocks.unsqueeze(1))
-    else:
-        keep = indices < total_blocks.unsqueeze(1)
-
-    if global_window_size is not None and global_window_size > 0:
-        global_blocks = (global_window_size + block_size - 1) // block_size
-        keep |= (indices < global_blocks) & (indices < total_blocks.unsqueeze(1))
-
-    ids = block_table[keep]
-    ids = ids[ids >= 0].unique()
-    return ids
-
-
-def _dequantize_int8_paged_kv_cache_compact_swa(
-    key_cache: torch.Tensor,
-    key_scale: torch.Tensor,
-    value_cache: torch.Tensor,
-    value_scale: torch.Tensor,
-    block_table: torch.Tensor,
-    cu_q_lens: torch.Tensor,
-    cu_kv_lens: torch.Tensor,
-    *,
-    target_dtype: torch.dtype,
-    local_window_size: Optional[int],
-    global_window_size: Optional[int],
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Dequantize only K/V blocks within the sliding window and remap
-    *block_table* into a compact cache.  Blocks outside the window are mapped
-    to a trailing dummy block filled with zeros so that the kernel can still
-    dereference every ``block_table`` entry without accessing invalid memory.
-
-    Returns:
-        key_cache_f16, value_cache_f16: ``(num_window_blocks + 1, Hkv, block_size, D)``
-        new_block_table: remapped table with the same shape as *block_table*.
-    """
-    block_size = key_cache.shape[2]
-
-    window_ids = _swa_window_block_ids(
-        block_table, cu_q_lens, cu_kv_lens, block_size,
-        local_window_size, global_window_size,
-    )
-
-    num_window = len(window_ids)
-    dummy_idx = num_window  # index of the trailing zero block
-
-    new_block_table = _remap_block_tables(
-        block_table,
-        key_cache.shape[0],
-        window_ids,
-        dummy_idx=dummy_idx,
-    )
-    key_cache_f16 = _dequantize_int8_paged_cache_by_block_ids(
-        key_cache,
-        key_scale,
-        window_ids,
-        target_dtype=target_dtype,
-        name="key_cache",
-        append_dummy_block=True,
-    )
-    value_cache_f16 = _dequantize_int8_paged_cache_by_block_ids(
-        value_cache,
-        value_scale,
-        window_ids,
-        target_dtype=target_dtype,
-        name="value_cache",
-        append_dummy_block=True,
-    )
-
-    return key_cache_f16, value_cache_f16, new_block_table
 
 
 class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
@@ -461,6 +311,44 @@ class IxformerPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
         )
         if self.gqa_layout == "ABAB":
             raise NotImplementedError("IxformerPagedPrefillGQAWithKVDequant only supports AABB layout.")
+        self._dequant_key_buffer: Optional[torch.Tensor] = None
+        self._dequant_value_buffer: Optional[torch.Tensor] = None
+
+    def _get_dequant_buffers(
+        self,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        *,
+        max_total_seq_lens: int,
+        batch_size: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        output_shape = (
+            batch_size * max_total_seq_lens,
+            key_cache.shape[1],
+            key_cache.shape[-1],
+        )
+
+        if (
+            self._dequant_key_buffer is None
+            or self._dequant_key_buffer.shape != output_shape
+            or self._dequant_key_buffer.dtype != self.compute_dtype
+            or self._dequant_key_buffer.device != key_cache.device
+        ):
+            self._dequant_key_buffer = torch.empty(
+                output_shape, dtype=self.compute_dtype, device=key_cache.device
+            )
+
+        if (
+            self._dequant_value_buffer is None
+            or self._dequant_value_buffer.shape != output_shape
+            or self._dequant_value_buffer.dtype != self.compute_dtype
+            or self._dequant_value_buffer.device != value_cache.device
+        ):
+            self._dequant_value_buffer = torch.empty(
+                output_shape, dtype=self.compute_dtype, device=value_cache.device
+            )
+
+        return self._dequant_key_buffer, self._dequant_value_buffer
 
     def forward(
         self,
@@ -478,6 +366,43 @@ class IxformerPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
         max_q_lens: Optional[int] = None,
         max_total_seq_lens: Optional[int] = None,
     ) -> torch.Tensor:
+        """Paged prefill GQA with int8-quantized KV cache.
+
+        Dequantizes the int8 paged KV cache to fp16/bf16 into pre-allocated
+        contiguous buffers (CUDA-graph friendly), then runs flash attention
+        on the dequantized varlen KV.
+
+        Args:
+            query (torch.Tensor): Query tokens, shape (T, Hq, D).
+                dtype must be fp16 or bf16.
+            query_scale (Optional[torch.Tensor]): Must be None (quantized query
+                not supported).
+            key_cache (torch.Tensor): Int8 key cache, shape
+                (N_blocks, Hkv, block_size, D). block_size <= 256 and % 16 == 0.
+            key_scale (torch.Tensor): Per-channel shape (Hkv, D) 
+            value_cache (torch.Tensor): Int8 value cache, shape
+                (N_blocks, Hkv, block_size, D). block_size <= 256 and % 16 == 0.
+            value_scale (torch.Tensor): Per-channel dequantization scale for values 
+                (same shape convention as key_scale).
+            cu_q_lens (torch.Tensor): Cumulative query lengths, shape (B+1,);
+                ``cu_q_lens[-1] == T``. dtype must be int32.
+            block_tables (torch.Tensor): Logical-to-physical block IDs,
+                shape (B, num_blocks). dtype must be int32.
+            softmax_scale (Optional[float]): Attention scaling factor;
+                defaults to 1/sqrt(D).
+            cu_total_seq_lens (Optional[torch.Tensor]): Cumulative total KV
+                lengths, shape (B+1,). If None, defaults to cu_q_lens.
+                dtype must be int32.
+            mask (Optional[torch.Tensor]): Not supported, must be None.
+            max_q_lens (int): Maximum query length across the batch. Must be > 0.
+            max_total_seq_lens (int): Maximum total KV length across the batch.
+
+        Returns:
+            torch.Tensor: Attention output, shape (T, Hq, D).
+
+        Notes:
+            - Only AABB GQA layout is supported.
+        """
         assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
         if query.dtype not in (torch.float16, torch.bfloat16):
             raise NotImplementedError(f"query dtype must be fp16 or bf16, got {query.dtype}.")
@@ -493,13 +418,10 @@ class IxformerPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
             raise NotImplementedError(
                 "IxformerPagedPrefillGQAWithKVDequant uses float16 compute and does not support int8 compute."
             )
-        if key_cache.dtype != torch.int8 or value_cache.dtype != torch.int8:
-            raise NotImplementedError(
-                "IxformerPagedPrefillGQAWithKVDequant requires int8 key_cache/value_cache, "
-                f"got {key_cache.dtype}/{value_cache.dtype}."
-            )
         if mask is not None:
             raise NotImplementedError("IxformerPagedPrefillGQAWithKVDequant does not support custom mask yet.")
+
+        _check_int8_paged_kv_cache(key_cache, key_scale, value_cache, value_scale)
 
         page_block_size = key_cache.shape[2]
         if page_block_size > 256 or page_block_size % 16 != 0:
@@ -520,15 +442,26 @@ class IxformerPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(query.shape[-1])
 
-        key_cache_f16, value_cache_f16, new_block_tables = _dequantize_int8_paged_kv_cache_compact(
+        batch_size = cu_kv_lens.numel() - 1
+        key_cache_f16, value_cache_f16 = self._get_dequant_buffers(
+            key_cache,
+            value_cache,
+            max_total_seq_lens=max_total_seq_lens,
+            batch_size=batch_size,
+        )
+        ixf_f.paged_kv_cache_dequant_varlen(
             key_cache,
             key_scale,
             value_cache,
             value_scale,
             block_tables,
-            target_dtype=self.compute_dtype,
+            cu_kv_lens,
+            key_cache_f16,
+            value_cache_f16,
+            max_total_seq_lens,
         )
 
+        # 传入连续的kvcache ， 不再传入block_table
         output = ix_fa.flash_attn_varlen_func(
             query,
             key_cache_f16,
@@ -539,7 +472,6 @@ class IxformerPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
             max_total_seq_lens,
             causal=self.is_causal,
             softmax_scale=softmax_scale,
-            block_table=new_block_tables,
         )
         return output
 
@@ -574,6 +506,66 @@ class IxformerPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
             raise ValueError(f"global_window_size must be >= 0, got {global_window_size}.")
         if local_window_size is not None and local_window_size < 0:
             raise ValueError(f"local_window_size must be >= 0, got {local_window_size}.")
+        self._dequant_key_buffer: Optional[torch.Tensor] = None
+        self._dequant_value_buffer: Optional[torch.Tensor] = None
+        self._dequant_cu_out_lens: Optional[torch.Tensor] = None
+
+    def _get_dequant_buffers(
+        self,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        cu_kv_lens: torch.Tensor,
+        *,
+        max_q_lens: int,
+        max_total_seq_lens: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        batch_size = cu_kv_lens.numel() - 1
+        max_dequant_seq_lens = max_total_seq_lens
+        if self.local_window_size is not None:
+            global_window = 0 if self.global_window_size is None else int(self.global_window_size)
+            window_bound = max_q_lens + int(self.local_window_size) + global_window
+            max_dequant_seq_lens = min(max_total_seq_lens, window_bound)
+
+        output_shape = (
+            batch_size * max_dequant_seq_lens,
+            key_cache.shape[1],
+            key_cache.shape[-1],
+        )
+
+        if (
+            self._dequant_key_buffer is None
+            or self._dequant_key_buffer.shape != output_shape
+            or self._dequant_key_buffer.dtype != self.compute_dtype
+            or self._dequant_key_buffer.device != key_cache.device
+        ):
+            self._dequant_key_buffer = torch.empty(
+                output_shape, dtype=self.compute_dtype, device=key_cache.device
+            )
+
+        if (
+            self._dequant_value_buffer is None
+            or self._dequant_value_buffer.shape != output_shape
+            or self._dequant_value_buffer.dtype != self.compute_dtype
+            or self._dequant_value_buffer.device != value_cache.device
+        ):
+            self._dequant_value_buffer = torch.empty(
+                output_shape, dtype=self.compute_dtype, device=value_cache.device
+            )
+
+        if (
+            self._dequant_cu_out_lens is None
+            or self._dequant_cu_out_lens.shape != cu_kv_lens.shape
+            or self._dequant_cu_out_lens.dtype != cu_kv_lens.dtype
+            or self._dequant_cu_out_lens.device != cu_kv_lens.device
+        ):
+            self._dequant_cu_out_lens = torch.empty_like(cu_kv_lens)
+
+        return (
+            self._dequant_key_buffer,
+            self._dequant_value_buffer,
+            self._dequant_cu_out_lens,
+            max_dequant_seq_lens,
+        )
 
     def forward(
         self,
@@ -590,6 +582,43 @@ class IxformerPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
         max_q_lens: Optional[int] = None,
         max_total_seq_lens: Optional[int] = None,
     ) -> torch.Tensor:
+        """Paged prefill SWA with int8-quantized KV cache.
+
+        Dequantizes the int8 paged KV cache to fp16/bf16 into pre-allocated
+        contiguous buffers (CUDA-graph friendly), applying sliding-window and
+        optional global-window trimming during dequantization, then runs flash
+        attention on the dequantized varlen KV.
+
+        Args:
+            query (torch.Tensor): Query tokens, shape (T, Hq, D).
+                dtype must be fp16 or bf16.
+            query_scale (Optional[torch.Tensor]): Must be None (quantized query
+                not supported).
+            key_cache (torch.Tensor): Int8 key cache, shape
+                (N_blocks, Hkv, block_size, D). block_size <= 256 and % 16 == 0.
+            key_scale (torch.Tensor): Per-channel shape (Hkv, D) dequantization scale for keys.
+            value_cache (torch.Tensor): Int8 value cache, shape
+                (N_blocks, Hkv, block_size, D). block_size <= 256 and % 16 == 0.
+            value_scale (torch.Tensor): Per-channel dequantization scale for values 
+                (same shape convention as key_scale).
+            cu_q_lens (torch.Tensor): Cumulative query lengths, shape (B+1,);
+                ``cu_q_lens[-1] == T``. dtype must be int32.
+            block_table (torch.Tensor): Logical-to-physical block IDs,
+                shape (B, num_blocks). dtype must be int32.
+            softmax_scale (Optional[float]): Attention scaling factor;
+                defaults to 1/sqrt(D).
+            cu_total_seq_lens (Optional[torch.Tensor]): Cumulative total KV
+                lengths, shape (B+1,). If None, defaults to cu_q_lens.
+                dtype must be int32.
+            max_q_lens (int): Maximum query length across the batch. Must be > 0.
+            max_total_seq_lens (int): Maximum total KV length across the batch.
+
+        Returns:
+            torch.Tensor: Attention output, shape (T, Hq, D).
+
+        Notes:
+            - Only AABB GQA layout is supported.
+        """
         if query.dtype not in (torch.float16, torch.bfloat16):
             raise NotImplementedError(f"query dtype must be fp16 or bf16, got {query.dtype}.")
         if self.query_dtype == torch.int8:
@@ -604,13 +633,11 @@ class IxformerPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
             raise NotImplementedError(
                 "IxformerPagedPrefillSWAWithKVDequant uses float16 compute and does not support int8 compute."
             )
-        if key_cache.dtype != torch.int8 or value_cache.dtype != torch.int8:
-            raise NotImplementedError(
-                "IxformerPagedPrefillSWAWithKVDequant requires int8 key_cache/value_cache, "
-                f"got {key_cache.dtype}/{value_cache.dtype}."
-            )
         if self.gqa_interleave:
             raise NotImplementedError("IxformerPagedPrefillSWAWithKVDequant only supports AABB layout.")
+
+        _check_int8_paged_kv_cache(key_cache, key_scale, value_cache, value_scale)
+
         page_block_size = key_cache.shape[2]
         if page_block_size > 256 or page_block_size % 16 != 0:
             raise NotImplementedError(
@@ -637,7 +664,15 @@ class IxformerPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
                 "global_window_size > 0 requires a valid local_window_size (sliding window)."
             )
 
-        key_cache_f16, value_cache_f16, new_block_table = _dequantize_int8_paged_kv_cache_compact_swa(
+        local_window = -1 if self.local_window_size is None else int(self.local_window_size)
+        global_window = 0 if self.global_window_size is None else int(self.global_window_size)
+
+        key_cache_f16, value_cache_f16, trimmed_cu_kv_lens, max_dequant_seq_lens = self._get_dequant_buffers(
+            key_cache, value_cache, cu_kv_lens,
+            max_q_lens=max_q_lens,
+            max_total_seq_lens=max_total_seq_lens,
+        )
+        ixf_f.paged_kv_cache_dequant_varlen_window(
             key_cache,
             key_scale,
             value_cache,
@@ -645,9 +680,12 @@ class IxformerPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
             block_table,
             cu_q_lens,
             cu_kv_lens,
-            target_dtype=self.compute_dtype,
-            local_window_size=self.local_window_size,
-            global_window_size=self.global_window_size,
+            trimmed_cu_kv_lens,
+            key_cache_f16,
+            value_cache_f16,
+            local_window,
+            global_window,
+            max_dequant_seq_lens,
         )
 
         output = ix_fa.flash_attn_varlen_func(
@@ -655,12 +693,11 @@ class IxformerPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
             key_cache_f16,
             value_cache_f16,
             cu_q_lens,
-            cu_kv_lens,
+            trimmed_cu_kv_lens,
             max_q_lens,
-            max_total_seq_lens,
+            max_dequant_seq_lens,
             causal=self.is_causal,
             softmax_scale=softmax_scale,
-            block_table=new_block_table,
             window_size=window_size,
             global_window_size=self.global_window_size,
         )
