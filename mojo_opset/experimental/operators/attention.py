@@ -1539,12 +1539,6 @@ def get_scale_and_quant(
     if scale is None:
         scale = x.abs().amax(dim=quant_dims, keepdim=True).float() / q_max
         scale = scale.clamp(min=eps)
-    elif scale.ndim != x.ndim:
-        # Caller passed a non-keepdim scale; restore the reduced dims.
-        dims = (quant_dims,) if isinstance(quant_dims, int) else tuple(quant_dims)
-        dims = sorted({d % x.ndim for d in dims})
-        for d in dims:
-            scale = scale.unsqueeze(d)
 
     q = torch.clamp(torch.round(x.float() / scale), q_min, q_max).to(quant_dtype)
     return q, scale
@@ -1756,6 +1750,9 @@ class MojoPagedPrefillSageGQA(MojoOperator):
         # apply per_token_int8 quant, quant_dim = -1
         assert query_scale is None, "dynamic Q quant, query_scale should be None"
         assert key_scale is None, "dynamic K quant, key_scale should be None"
+        # value_scale: [Hkv, D] -> [1, Hkv, 1, D]
+        if value_scale is not None:
+            value_scale = value_scale[None, :, None, :]
         # assert value_scale is not None, "static V quant, value should not be None"
         query, query_scale = per_token_int8(x=query, scale=query_scale, q_max=self.qmax, q_min=self.qmin)
         key_cache, key_scale = per_token_int8(x=key_cache, scale=key_scale, q_max=self.qmax, q_min=self.qmin)
@@ -1812,7 +1809,6 @@ class MojoPagedPrefillSageGQA(MojoOperator):
                 v_expanded = v_unpadded
 
             q_scale = query_scale[start_loc:end_loc]
-            # npu don't support int8
             q, k_expanded = q.float(), k_expanded.float()
             attn_scores = torch.einsum("thd,khd->thk", q, k_expanded).float() * softmax_scale * q_scale * k_scale_expanded
             if self.is_causal:

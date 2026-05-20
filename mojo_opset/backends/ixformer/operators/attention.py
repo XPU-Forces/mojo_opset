@@ -925,4 +925,6 @@ class IxformerPagedPrefillSageGQA(MojoPagedPrefillSageGQA):
         max_q_lens: Optional[int] = None,
         max_total_seq_lens: Optional[int] = None,
     ):
-        pass
+        raise NotImplementedError(
+            "IxformerPagedPrefillSageGQA.forward is not implemented yet."
+        )

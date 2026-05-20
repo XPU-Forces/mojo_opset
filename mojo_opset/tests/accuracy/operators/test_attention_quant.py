@@ -696,6 +696,7 @@ def test_paged_prefill_sage_gqa(
 
     atol = 5e-2 if query.dtype != torch.float32 else 1e-5
     rtol = 5e-2 if query.dtype != torch.float32 else 1e-6
+    print(f"{query.shape=}, {k_cache.shape=}, {v_cache_q.shape=}, {value_scale.shape=}")
 
     op.forward_diff_with(
         op_ref,
