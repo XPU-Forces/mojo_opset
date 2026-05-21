@@ -29,11 +29,6 @@ from mojo_opset.experimental import MojoPagedPrefillSWAWithKVDequant
 class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
     supported_platforms_list = ["npu", "ilu", "mlu"]
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.AUX_MASK_SIZE = 1024
-        self.aux_mask = None
-
     def forward(
         self,
         query: torch.Tensor,
@@ -58,14 +53,6 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
             if cu_total_seq_lens is None
             else cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
         )
-        # max_q_len / max_total_seq_len / kwargs: core·Ixformer API compatibility.
-        if self.aux_mask is None:
-            self.aux_mask = torch.ones(
-                self.AUX_MASK_SIZE,
-                self.AUX_MASK_SIZE * 3,
-                dtype=torch.bool,
-                device=query.device,
-            ).tril(self.AUX_MASK_SIZE)
 
         output = paged_attention_prefill(
             q=query,
@@ -76,9 +63,9 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
             block_tables=block_tables,
             gqa_interleave=self.gqa_layout == "ABAB",
             softmax_scale=softmax_scale,
-            aux_mask=self.aux_mask,
-            max_q_len=max_q_len,
-            max_total_seq_len=max_total_seq_len,
+            aux_mask=None,
+            max_q_lens=max_q_lens,
+            max_total_seq_lens=max_total_seq_lens,
         )
 
         return output
