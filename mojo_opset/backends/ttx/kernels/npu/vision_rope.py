@@ -324,9 +324,6 @@ def vision_rope_apply_impl(
     assert cos.shape == (T, D)
     assert sin.shape == (T, D)
 
-    q = q.clone()
-    k = k.clone()
-
     half_D = D // 2
     is_aligned = _is_half_rope_dim_aligned(half_D)
     cast_to_fp32 = q.dtype != torch.float32

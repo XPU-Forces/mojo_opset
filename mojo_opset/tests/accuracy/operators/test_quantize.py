@@ -23,6 +23,12 @@ static_quant_shapes = [
     (128, 8192),
 ]
 
+static_quant_grouped_cases = [
+    ((2, 4, 128), (4, 128)),
+    ((3, 8, 64), (8, 64)),
+    ((5, 2, 16, 32), (16, 32)),
+]
+
 dequant_shapes = [
     (1, 128),
     (4, 128),
@@ -74,6 +80,11 @@ def make_scale(x: torch.Tensor, q_max: float) -> torch.Tensor:
     return (x.float().abs().amax(dim=0) / q_max).clamp(min=1e-10)
 
 
+def make_grouped_scale(x: torch.Tensor, q_max: float, scale_shape: tuple[int, ...]) -> torch.Tensor:
+    reduce_dims = tuple(range(x.dim() - len(scale_shape)))
+    return (x.float().abs().amax(dim=reduce_dims) / q_max).clamp(min=1e-10)
+
+
 def has_ixformer_quant_kernel(name: str) -> bool:
     if get_platform() != "ilu":
         return True
@@ -106,6 +117,28 @@ def test_static_quant(shape, dtype, quant_dtype):
     quant.forward_diff_with(quant_ref, x, atol=atol, rtol=0)
 
 
+@pytest.mark.parametrize("shape,scale_shape", static_quant_grouped_cases)
+@pytest.mark.parametrize("dtype", dtypes)
+@pytest.mark.parametrize("quant_dtype", [torch.int8])
+@bypass_not_implemented
+def test_static_quant_grouped(shape, scale_shape, dtype, quant_dtype):
+    if quant_dtype == torch.int8 and not has_ixformer_quant_kernel("static_quant"):
+        pytest.skip("static_quant kernel is not available on the current ixformer build")
+
+    x = torch.randn(shape, dtype=dtype)
+    q_max = 127
+    scale = make_grouped_scale(x, q_max, scale_shape)
+
+    quant = load_params(MojoStaticQuant(input_size=scale_shape, quant_dtype=quant_dtype), scale=scale)
+    quant_ref = load_params(
+        MojoStaticQuant._registry.get("torch")(input_size=scale_shape, quant_dtype=quant_dtype),
+        scale=scale.clone(),
+    )
+
+    atol = 1 if quant_dtype == torch.int8 else 0
+    quant.forward_diff_with(quant_ref, x, atol=atol, rtol=0)
+
+
 @pytest.mark.parametrize("shape", dequant_shapes)
 @pytest.mark.parametrize("dtype", dtypes)
 @bypass_not_implemented
@@ -115,6 +148,24 @@ def test_dequant(shape, dtype):
 
     quant_ref = load_params(
         MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.int8),
+        scale=scale,
+    )
+    quantized, quant_scale = quant_ref(x)
+
+    dequant = MojoDequant(output_dtype=dtype)
+    dequant_ref = MojoDequant._registry.get("torch")(output_dtype=dtype)
+    dequant.forward_diff_with(dequant_ref, quantized, quant_scale, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("shape,scale_shape", static_quant_grouped_cases)
+@pytest.mark.parametrize("dtype", dtypes)
+@bypass_not_implemented
+def test_dequant_grouped(shape, scale_shape, dtype):
+    x = torch.randn(shape, dtype=dtype)
+    scale = make_grouped_scale(x, 127, scale_shape)
+
+    quant_ref = load_params(
+        MojoStaticQuant._registry.get("torch")(input_size=scale_shape, quant_dtype=torch.int8),
         scale=scale,
     )
     quantized, quant_scale = quant_ref(x)

@@ -64,8 +64,19 @@ def static_quant_impl(
     q_min: int = -128,
     q_max: int = 127,
 ) -> torch.Tensor:
+    if input_tensor.dim() < scale.dim():
+        raise ValueError(
+            f"input must have at least {scale.dim()} dims for scale shape {tuple(scale.shape)}, "
+            f"got {tuple(input_tensor.shape)}."
+        )
+    if tuple(input_tensor.shape[-scale.dim():]) != tuple(scale.shape):
+        raise ValueError(
+            f"input trailing dims {tuple(input_tensor.shape[-scale.dim():])} must match "
+            f"scale shape {tuple(scale.shape)}."
+        )
+
     shape = input_tensor.shape
-    n_cols = shape[-1]
+    n_cols = scale.numel()
     input_2d = input_tensor.reshape(-1, n_cols)
     n_rows = input_2d.shape[0]
 
@@ -78,7 +89,7 @@ def static_quant_impl(
     _static_quant_kernel[grid](
         output,
         input_2d,
-        scale,
+        scale.reshape(-1).contiguous(),
         input_2d.stride(0),
         output.stride(0),
         n_rows,

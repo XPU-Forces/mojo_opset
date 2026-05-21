@@ -9,22 +9,27 @@ from ..operator import MojoOperator
 class MojoStaticQuant(MojoOperator):
     def __init__(
         self,
-        input_size: int,
+        input_size: int | tuple[int, ...],
         quant_dtype: torch.dtype = torch.int8,
         **kwargs,
     ):
         """
-        Quantize a floating-point tensor with a one-dimensional scale parameter.
+        Quantize a floating-point tensor with a static scale parameter.
 
         Args:
-            input_size (int): Size of the 1-D scale vector. It is expected to match ``input.shape[-1]``.
+            input_size (int | tuple[int, ...]): Shape of the scale tensor. It is
+                expected to match ``input.shape[-N:]`` where ``N`` is the number
+                of dimensions in ``input_size``.
             quant_dtype (torch.dtype, default=torch.int8): Target quantization dtype.
                 Supported: torch.int8, torch.float8_e4m3fn.
             **kwargs: Tensor factory kwargs.
         """
         super().__init__(**kwargs)
-        self.input_size = input_size
-        self.scale = torch.nn.Parameter(torch.empty(input_size, **self.tensor_factory_kwargs))
+        if isinstance(input_size, int):
+            self.input_size = (input_size,)
+        else:
+            self.input_size = tuple(input_size)
+        self.scale = torch.nn.Parameter(torch.empty(self.input_size, **self.tensor_factory_kwargs))
         self.quant_dtype = quant_dtype
 
         if quant_dtype == torch.int8:
@@ -46,10 +51,21 @@ class MojoStaticQuant(MojoOperator):
         Quantize a floating-point tensor with a caller-supplied scale.
 
         Args:
-            input (torch.Tensor): Input floating-point tensor of shape (..., K).
+            input (torch.Tensor): Input floating-point tensor of shape
+                ``(..., *input_size)``.
         Returns:
             torch.Tensor: Quantized tensor in ``self.quant_dtype``, same shape as ``input``.
         """
+        if input.dim() < len(self.input_size):
+            raise ValueError(
+                f"input must have at least {len(self.input_size)} dims for scale shape "
+                f"{self.input_size}, got {tuple(input.shape)}."
+            )
+        if tuple(input.shape[-len(self.input_size):]) != self.input_size:
+            raise ValueError(
+                f"input trailing dims {tuple(input.shape[-len(self.input_size):])} must "
+                f"match scale shape {self.input_size}."
+            )
         input_fp = input.float()
         output = torch.clamp(torch.round(input_fp / self.scale.float()), self.q_min, self.q_max)
         return output.to(self.quant_dtype), self.scale
