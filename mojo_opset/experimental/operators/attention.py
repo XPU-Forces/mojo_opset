@@ -1543,17 +1543,26 @@ def get_scale_and_quant(
     q = torch.clamp(torch.round(x.float() / scale), q_min, q_max).to(quant_dtype)
     return q, scale
 
-
-def quant_for_attn_probs(
+def quant_p_int8(
     x: torch.Tensor,
-    scale: Optional[torch.Tensor] = None,
-    *,
-    blk: int = 16,
-    block_dim: int = -2,
     q_max: int = 127,
-    q_min: int = -128,
+    q_min: int = -128
 ):
-    pass
+    """ quant for attn_probs.
+    Since attn_probs values are in (0, 1] after softmax, quantization is
+    simplified to a fixed-scale multiplication (same approach as SageAttention).
+    No dynamic absmax computation is needed.
+
+    - x: The tensor need to quant.
+    - q_max: The max quant number.
+    - q_min: The min quant number.
+
+    Return:
+        x_q: result tensor.
+        scale: using to dequant.
+    """
+    x_q = x * q_max
+    return x_q.to(torch.int8), 1./q_max
 
 
 def per_block_int8(
@@ -1573,7 +1582,7 @@ def per_block_int8(
     - scale: The scale tensor, if have it is used to quant scale; otherwise None.
     - blk: The block size, mean one scale per blk token.
     - dim1: The dim to split blocks.
-    - dim2: The other dim to quant, if not None, mean 2d block quant, one scale per (blk, dim2); else mean 1d block quant, one scale per (blk).
+    - dim2: The other dim to quant.
     - q_max: The max quant number.
     - q_min: The min quant number.
     
@@ -1585,11 +1594,7 @@ def per_block_int8(
     if xm is not None:
         x = x - xm
     dim1_norm = dim1 % x.ndim
-    dim2_norm = dim2 % x.ndim if dim2 != None else None
-    if dim1_norm != None and dim2_norm == None:
-        print(f"1d block quant, the shape of input is {x.shape}, the block dim is {dim1_norm}, blk is {blk}")
-    elif dim1 != None and dim2 != None:
-        print(f"2d block quant, the shape of input is {x.shape}, the block dim is ({dim1_norm}, {dim2_norm}), blk is {blk}")
+    dim2_norm = dim2 % x.ndim
 
     seq_len = x.shape[dim1_norm]
     assert seq_len % blk == 0, (
@@ -1605,12 +1610,11 @@ def per_block_int8(
         + list(x.shape[dim1_norm + 1:])
     )
     x_reshaped = x.reshape(new_shape)
-    quant_dims = (dim1_norm+1) if dim2_norm == None else (dim1_norm+1, dim2_norm)
 
     q, scale_kd = get_scale_and_quant(
         x_reshaped,
         scale,
-        quant_dims=quant_dims,
+        quant_dims=(dim1_norm, dim2_norm),
         q_max=q_max,
         q_min=q_min,
     )
@@ -1854,23 +1858,11 @@ class MojoPagedPrefillSageGQA(MojoOperator):
                 attn_scores.masked_fill_(~attn_mask.unsqueeze(1), -torch.inf)
 
             attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32).to(query.dtype)
-            # per-block int8 quant on attn_probs along kv_seq_len dim (last dim).
-            pad = (-kv_seq_len) % blk
-            if pad > 0:
-                # pad the last dim (kv) on the right by `pad` so it's divisible by blk.
-                attn_probs_padded = torch.nn.functional.pad(attn_probs, (0, pad))
-            else:
-                attn_probs_padded = attn_probs
-            attn_probs_int8, attn_probs_scale = per_block_int8(x=attn_probs_padded, blk=blk, dim1=-1, dim2=None, q_max=self.qmax, q_min=self.qmin)
-            # trim back to kv_seq_len on the last dim
-            attn_probs_int8 = attn_probs_int8[..., :kv_seq_len].float()
-            attn_probs_scale = attn_probs_scale[..., :kv_seq_len]
+            attn_probs_quant, attn_probs_scale = quant_p_int8(attn_probs, self.qmax, self.qmin)
             v_expanded_float = v_expanded.float()
-            # Dequant attn_probs first (scale shape matches int8 shape on kv axis), then einsum with v and apply v_scale.
-            attn_probs_dequant = attn_probs_int8 * attn_probs_scale
-            # v dequant: v_expanded int8 [kv_seq_len, Hq, D]; v_scale_expanded [1, Hq, D]
+            # v_expanded_float: [kv_seq_len, Hq, D], v_scale_expanded: [1, Hq, D], attn_probs_scale: const = 1./self.qmax
             outputs[start_loc:end_loc] = (
-                torch.einsum("thk,khd->thd", attn_probs_dequant, v_expanded_float) * v_scale_expanded
+                torch.einsum("thk,khd->thd", attn_probs_quant.float(), v_expanded_float) * v_scale_expanded * attn_probs_scale
             )
         return outputs
 
