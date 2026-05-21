@@ -424,13 +424,12 @@ class PagedDummyCache:
         offsets = F.pad(torch.cumsum(compressed_len, dim=0, dtype=torch.int32), (1, 0))[:-1]
         expanded_starts = torch.repeat_interleave(cmp_start, compressed_len)
         expanded_offsets = torch.repeat_interleave(offsets, compressed_len)
-        flat_range = torch.arange(int(compressed_len.sum().item()), dtype=torch.int32, device=start_pos.device)
+        flat_range = torch.arange(compressed_len.sum(), dtype=torch.int32, device=start_pos.device)
         compressed_ids = flat_range - expanded_offsets + expanded_starts
-
-        total_q = int(cu_seqlens_q[-1].item())
-        max_len = min(total_q, total_q // ratio + start_pos.shape[0])
+        bsz = start_pos.shape[0]
+        max_len = min(cu_seqlens_q[-1], cu_seqlens_q[-1] // ratio + bsz)
         position_ids_cmp = torch.full((max_len,), pad_value, dtype=torch.int32, device=start_pos.device)
-        valid_len = min(int(compressed_ids.numel()), max_len)
+        valid_len = min(compressed_ids.numel(), max_len)
         if valid_len > 0:
             position_ids_cmp[:valid_len] = compressed_ids[:valid_len]
         return compressed_len, position_ids_cmp
@@ -450,8 +449,10 @@ class PagedDummyCache:
             return None
         if compressed_len is None or position_ids_cmp is None:
             if cu_seqlens_q is None:
-                total_q = int(seq_used_q.sum().item())
-                cu_seqlens_q = torch.tensor([0, total_q], dtype=torch.int32, device=start_pos.device)
+                cu_seqlens_q = torch.cat([
+                    torch.zeros(1, dtype=torch.int32, device=start_pos.device),
+                    seq_used_q.cumsum(0, dtype=torch.int32),
+                ])
             compressed_len, position_ids_cmp = self.get_compressed_position_ids(
                 start_pos, seq_used_q, cu_seqlens_q, ratio
             )
@@ -460,12 +461,12 @@ class PagedDummyCache:
             torch.arange(start_pos.shape[0], dtype=torch.int32, device=start_pos.device),
             compressed_len,
         )
-        total_len = int(position_ids_cmp.shape[0])
+        total_len = position_ids_cmp.shape[0]
         slot_mapping = torch.full((total_len,), -1, dtype=torch.int32, device=start_pos.device)
         if row_indices.numel() == 0:
             return slot_mapping
 
-        valid_len = min(int(row_indices.numel()), total_len)
+        valid_len = min(row_indices.numel(), total_len)
         row_indices = row_indices[:valid_len].to(torch.long)
         indices = position_ids_cmp[:valid_len]
         block_idx = (indices // self.block_size).to(torch.long)
@@ -1350,10 +1351,10 @@ class DeepseekV4Attention(nn.Module):
                 q_lens = torch.full((batch_size,), seq_length, dtype=torch.int32, device=hidden_states.device)
             else:
                 q_lens = q_lens.to(dtype=torch.int32, device=hidden_states.device)
-            cu_seqlens_q = torch.cat([
-                torch.zeros(1, dtype=torch.int32, device=hidden_states.device),
-                q_lens.cumsum(0, dtype=torch.int32),
-            ])
+            cu_seqlens_q = torch.arange(
+                0, (batch_size + 1) * seq_length, step=seq_length,
+                dtype=torch.int32, device=hidden_states.device,
+            )
 
         if context_lens is not None:
             _context_lens = context_lens.to(device=hidden_states.device)
@@ -1457,13 +1458,18 @@ class DeepseekV4Attention(nn.Module):
                     past_key_values.update_sfa_cmp_kv(cmp_kv, self.layer_idx, cmp_slot_mapping)
 
             if self.indexer is not None:
-                current_seq_lens = _context_lens.to(dtype=torch.int32) + q_lens
+                if is_prefill:
+                    indexer_seq_lens = torch.full(
+                        (batch_size,), seq_length, dtype=torch.int32, device=hidden_states.device
+                    )
+                else:
+                    indexer_seq_lens = _context_lens.to(dtype=torch.int32) + q_lens
                 with _profile_timer(self.layer_idx, "indexer"):
                     cmp_sparse_indices = self.indexer.forward(
                         hidden_states, qa, cos, sin,
                         past_key_values=past_key_values, layer_idx=self.layer_idx,
                         cu_seqlens_q=cu_seqlens_q,
-                        seq_lens=current_seq_lens,
+                        seq_lens=indexer_seq_lens,
                         start_pos=start_pos,
                         state_block_table=state_block_table,
                         seq_used_q=q_lens,
@@ -1541,11 +1547,15 @@ class DeepseekV4Attention(nn.Module):
         else:
             if q_lens is None:
                 q_lens = torch.full((batch_size,), seq_length, dtype=torch.int32, device=q.device)
-            cu_q_lens_padded = torch.cat([
-                torch.zeros(1, dtype=torch.int32, device=q.device),
-                q_lens.cumsum(0, dtype=torch.int32),
-            ])
+            cu_q_lens_padded = torch.arange(
+                0, (batch_size + 1) * seq_length, step=seq_length,
+                dtype=torch.int32, device=q.device,
+            )
         current_seq_lens = context_lens.to(torch.int32) + q_lens
+        if is_prefill:
+            attn_seq_lens = torch.full((batch_size,), seq_length, dtype=torch.int32, device=q.device)
+        else:
+            attn_seq_lens = current_seq_lens
         if is_prefill:
             with _profile_timer(self.layer_idx, "cache_update"):
                 kv_cache, block_tables = past_key_values.build_full_kv_for_prefill(kv, context_lens, cu_q_lens_padded, actual_q_lens=q_lens)
@@ -1572,7 +1582,7 @@ class DeepseekV4Attention(nn.Module):
             past_key_values.update(kv, self.layer_idx)
             kv_cache, block_tables = past_key_values.get_win_kv_for_decode(self.layer_idx)
         sas_metadata = decode_attn_inputs.get("sas_metadata") if decode_attn_inputs is not None and not is_prefill else None
-        out = self._run_attn(q_padded, kv_cache, block_tables, current_seq_lens, batch_size, seq_length, 1, cu_q_lens_padded, sas_metadata=sas_metadata)
+        out = self._run_attn(q_padded, kv_cache, block_tables, attn_seq_lens, batch_size, seq_length, 1, cu_q_lens_padded, sas_metadata=sas_metadata)
         if is_prefill:
             with _profile_timer(self.layer_idx, "cache_update"):
                 past_key_values.update(kv, self.layer_idx, cu_q_lens_padded, actual_q_lens=q_lens)
@@ -1590,11 +1600,15 @@ class DeepseekV4Attention(nn.Module):
         else:
             if q_lens is None:
                 q_lens = torch.full((batch_size,), seq_length, dtype=torch.int32, device=q.device)
-            cu_q_lens_padded = torch.cat([
-                torch.zeros(1, dtype=torch.int32, device=q.device),
-                q_lens.cumsum(0, dtype=torch.int32),
-            ])
+            cu_q_lens_padded = torch.arange(
+                0, (batch_size + 1) * seq_length, step=seq_length,
+                dtype=torch.int32, device=q.device,
+            )
         current_seq_lens = context_lens.to(torch.int32) + q_lens
+        if is_prefill:
+            attn_seq_lens = torch.full((batch_size,), seq_length, dtype=torch.int32, device=q.device)
+        else:
+            attn_seq_lens = current_seq_lens
         if is_prefill:
             with _profile_timer(self.layer_idx, "cache_update"):
                 kv_cache, block_tables = past_key_values.build_full_kv_for_prefill(kv, context_lens, cu_q_lens_padded, actual_q_lens=q_lens)
@@ -1627,7 +1641,7 @@ class DeepseekV4Attention(nn.Module):
             cmp_kv_cache = past_key_values.get_sfa_cmp_kv(self.layer_idx)
             cmp_block_tables = past_key_values.get_cmp_kv_block_table(self.layer_idx) if self.compress_ratio > 1 else None
         sas_metadata = decode_attn_inputs.get("sas_metadata") if decode_attn_inputs is not None and not is_prefill else None
-        out = self._run_attn(q_padded, kv_cache, block_tables, current_seq_lens, batch_size, seq_length,
+        out = self._run_attn(q_padded, kv_cache, block_tables, attn_seq_lens, batch_size, seq_length,
                              self.compress_ratio, cu_q_lens_padded, cmp_kv_cache, cmp_block_tables,
                              cmp_sparse_indices, sas_metadata=sas_metadata)
         if is_prefill:

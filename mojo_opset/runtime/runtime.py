@@ -370,10 +370,10 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
         position_ids = context_lens.to(dtype=torch.long).unsqueeze(1) + position_offsets
         current_seq_lens = context_lens.to(torch.int32) + seq_len
         q_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device=device)
-        cu_q_lens = torch.cat([
-            torch.tensor([0], device=device, dtype=torch.int32),
-            q_lens.cumsum(0, dtype=torch.int32),
-        ])
+        cu_q_lens = torch.arange(
+            0, (batch_size + 1) * seq_len, step=seq_len,
+            dtype=torch.int32, device=device,
+        )
 
         start_pos = context_lens.to(dtype=torch.int32)
         seq_used_q = q_lens
