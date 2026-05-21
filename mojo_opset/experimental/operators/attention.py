@@ -1869,7 +1869,6 @@ class MojoPagedPrefillSageGQA(MojoOperator):
             # Dequant attn_probs first (scale shape matches int8 shape on kv axis), then einsum with v and apply v_scale.
             attn_probs_dequant = attn_probs_int8 * attn_probs_scale
             # v dequant: v_expanded int8 [kv_seq_len, Hq, D]; v_scale_expanded [1, Hq, D]
-            print(f"{attn_probs_dequant.shape=}, {v_expanded_float.shape=}, {v_scale_expanded.shape=}")
             outputs[start_loc:end_loc] = (
                 torch.einsum("thk,khd->thd", attn_probs_dequant, v_expanded_float) * v_scale_expanded
             )
