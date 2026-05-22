@@ -81,7 +81,7 @@ def test_moe_gating(num_experts, top_k, hidden_size, num_tokens, dtype):
         top_k=top_k,
     )
 
-    for p in moe_gating.parameters():
+    for p in moe_gating_ref.parameters():
         nn.init.normal_(p, std=0.02)
 
     moe_gating = moe_gating.to(device)
