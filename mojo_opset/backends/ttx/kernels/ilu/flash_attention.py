@@ -518,6 +518,60 @@ def _paged_decode_gqa_kernel(
     tl.store(out_ptrs, out.to(OUT_T), mask=d_mask)
 
 
+_KV_DEQUANT_BLOCK_M = 64
+
+
+def _kv_dequant_block_m_heur(args):
+    """BLOCK_M is fixed at 64.
+
+    The ``acc`` tensor ``(BLOCK_M, BLOCK_D) fp32`` plus ``q (BLOCK_M,
+    BLOCK_D)`` bf16/fp16 are the dominant SRAM consumers — about 6 bytes
+    per (m, d) cell. To keep this kernel correct for any reasonable
+    head_dim (up to BLOCK_D=256, i.e., HEAD_DIM <= 192) within ILU's
+    128 KB per-program SRAM cap, we instead scale ``BLOCK_N`` and
+    ``num_stages`` down as BLOCK_D grows; see ``_kv_dequant_block_n_heur``
+    and the launcher's ``num_stages`` selection.
+    """
+    return _KV_DEQUANT_BLOCK_M
+
+
+def _kv_dequant_block_n_heur(args):
+    """Pick BLOCK_N tied to (HEAD_DIM, PAGE_SIZE).
+
+    BLOCK_N controls how wide the inner ``tl.dot`` tile is. We cap it so
+    the K/V pipeline tile fits in SRAM alongside the static Q/acc slice
+    (which is ``BLOCK_M=64 × BLOCK_D × 6`` bytes — already 96 KB for
+    BLOCK_D=256, leaving only ~32 KB headroom for the inner tile and the
+    ``qk`` / ``p`` temporaries). BLOCK_N must also divide PAGE_SIZE because
+    each tile lives inside one physical page.
+    """
+    bd = triton.next_power_of_2(args["HEAD_DIM"])
+    page_size = args["PAGE_SIZE"]
+    if bd >= 256:
+        # 96 KB static + (K=8 + V=8 + qk=4 + p=2) = 118 KB at num_stages=1.
+        cap = 16
+    elif bd >= 128:
+        cap = 64
+    elif bd >= 64:
+        cap = 128
+    else:
+        cap = 256
+    block_n = min(page_size, cap)
+    if block_n < 16:
+        # tl.dot requires the K dimension to be at least 16 for bf16/fp16
+        # operands. Tiny pages should never reach this kernel — guard so
+        # the failure mode is clear.
+        raise ValueError(
+            f"PAGE_SIZE={page_size} produces BLOCK_N={block_n} < 16, which "
+            "is too small for tl.dot. Use a larger page size."
+        )
+    return block_n
+
+
+@triton.heuristics({
+    "BLOCK_M": _kv_dequant_block_m_heur,
+    "BLOCK_N": _kv_dequant_block_n_heur,
+})
 @triton.jit
 def _paged_prefill_with_kv_dequant_kernel(
     Q,
@@ -542,19 +596,38 @@ def _paged_prefill_with_kv_dequant_kernel(
     GQA_INTERLEAVE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
 ):
-    """Paged prefill attention with int8 KV cache (per-token scalar loop).
+    """Paged prefill attention with int8 KV cache, FA2-style ``tl.dot`` tile.
 
-    Avoids tl.dot entirely because the ILU Triton compiler generates invalid
-    ``sitofp <8 x i8> -> <4 x float>`` in the SharedToDotOperand layout pass
-    whenever tl.dot touches data whose provenance is an int8 load.
+    Each program handles a (BLOCK_M, head, batch) Q tile against the full
+    causal KV prefix:
 
-    Each program handles one (query_token, head) pair and loops over all KV
-    tokens, similar to _paged_decode_gqa_kernel / _paged_prefill_causal_attn_kernel.
+        QK = Q @ K^T   (BLOCK_M, BLOCK_N)   tl.dot
+        P  = softmax(QK)                     online over BLOCK_N tiles
+        O += P @ V     (BLOCK_M, BLOCK_D)    tl.dot
+
+    The K/V int8 cache is dequantised by an explicit ``i8 -> f32 -> qdtype``
+    conversion BEFORE entering ``tl.dot``. Folding the actual numerical
+    conversion via fp32 detaches the SSA value's provenance from the int8
+    load, which side-steps the ILU Triton SharedToDotOperand layout bug
+    (``invalid sitofp <8 x i8> -> <4 x float>``) that previously forced this
+    kernel to use a per-token scalar loop. ``k_scale`` is folded into Q once
+    and ``v_scale`` is applied to ``acc`` at the end (linearity of the
+    accumulator), so the inner loop only sees one cast per K/V tile.
+
+    BLOCK_N must divide PAGE_SIZE; the launcher picks BLOCK_N = min(PAGE_SIZE,
+    128) so each ``tl.dot`` tile lives entirely inside one physical page (no
+    cross-page gather).
     """
-    q_token_id = tl.program_id(0)
+    tl.static_assert(BLOCK_N <= PAGE_SIZE, "BLOCK_N must be <= PAGE_SIZE")
+    tl.static_assert(PAGE_SIZE % BLOCK_N == 0, "BLOCK_N must divide PAGE_SIZE")
+    tl.static_assert(HEAD_DIM <= BLOCK_D, "BLOCK_D must be >= HEAD_DIM")
+
+    q_blk_id = tl.program_id(0)
     q_head_id = tl.program_id(1)
     b_id = tl.program_id(2)
 
@@ -562,7 +635,8 @@ def _paged_prefill_with_kv_dequant_kernel(
     q_seq_len = tl.load(cu_seqlens_q_ptr + b_id + 1).to(tl.int32) - q_start
     kv_seq_len = tl.load(seqlens_kv_ptr + b_id).to(tl.int32)
 
-    if q_token_id >= q_seq_len:
+    q_blk_start = q_blk_id * BLOCK_M
+    if q_blk_start >= q_seq_len:
         return
 
     if GQA_INTERLEAVE:
@@ -570,13 +644,23 @@ def _paged_prefill_with_kv_dequant_kernel(
     else:
         kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
 
+    offs_m = tl.arange(0, BLOCK_M)
+    offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_D)
     d_mask = offs_d < HEAD_DIM
 
-    q_vec = tl.load(
-        Q + (q_start + q_token_id) * stride_qt + q_head_id * stride_qh + offs_d * stride_qd,
-        mask=d_mask, other=0.0,
-    ).to(tl.float32)
+    q_blk_end = tl.minimum(q_blk_start + BLOCK_M, q_seq_len)
+    q_token_offsets = q_blk_start + offs_m
+    q_row_mask = q_token_offsets < q_seq_len
+
+    q_ptrs = (
+        Q
+        + (q_start + q_token_offsets[:, None]) * stride_qt
+        + q_head_id * stride_qh
+        + offs_d[None, :] * stride_qd
+    )
+    q_block = tl.load(q_ptrs, mask=q_row_mask[:, None] & d_mask[None, :], other=0.0)
+    qdtype = q_block.dtype
 
     k_scale_vec = tl.load(
         K_qscale + q_head_id * stride_ks_h + offs_d * stride_ks_d,
@@ -587,69 +671,112 @@ def _paged_prefill_with_kv_dequant_kernel(
         mask=d_mask, other=0.0,
     )
 
+    # Pre-fold k_scale into Q so the inner loop never multiplies K by scale.
+    q_scaled = (q_block.to(tl.float32) * k_scale_vec[None, :]).to(qdtype)
+
     kv_cache_len = kv_seq_len - q_seq_len
 
     if IS_CAUSAL:
-        kv_loop_end = tl.minimum(kv_seq_len, q_token_id + 1 + kv_cache_len)
+        kv_loop_end = tl.minimum(kv_seq_len, q_blk_end + kv_cache_len)
     else:
         kv_loop_end = kv_seq_len
 
-    m_max = tl.full((), -float("inf"), tl.float32)
-    l_sum = tl.full((), 0.0, tl.float32)
-    acc = tl.zeros((BLOCK_D,), dtype=tl.float32)
+    m_i = tl.full((BLOCK_M,), -float("inf"), tl.float32)
+    l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
+    acc = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
 
     num_kv_pages = tl.cdiv(kv_loop_end, PAGE_SIZE)
+    causal_offset = q_token_offsets[:, None] + kv_cache_len  # (BLOCK_M, 1)
+
     for page_idx in tl.range(0, num_kv_pages):
         physical_block = tl.load(
             block_tables_ptr + b_id * stride_bt_batch + page_idx * stride_bt_block
         )
         kv_page_start = page_idx * PAGE_SIZE
-        kv_page_end = tl.minimum(kv_page_start + PAGE_SIZE, kv_loop_end)
 
-        for j in tl.range(kv_page_start, kv_page_end):
-            offset_in_page = j - kv_page_start
+        for kv_inner_idx in tl.range(0, PAGE_SIZE // BLOCK_N):
+            kv_offset_in_page = kv_inner_idx * BLOCK_N
+            kv_blk_start = kv_page_start + kv_offset_in_page
+            kv_pos = kv_blk_start + offs_n              # (BLOCK_N,)
+            kv_mask = kv_pos < kv_loop_end              # (BLOCK_N,)
+
+            # ---- Load K tile (BLOCK_N, BLOCK_D) -----------------------
+            k_ptrs = (
+                K_cache
+                + physical_block * stride_kb
+                + kv_head_id * stride_kh
+                + (kv_offset_in_page + offs_n[:, None]) * stride_kn
+                + offs_d[None, :] * stride_kd
+            )
+            k_int8 = tl.load(
+                k_ptrs, mask=kv_mask[:, None] & d_mask[None, :], other=0,
+            )
+            # i8 -> f32 -> qdtype: forces a real numerical conversion so the
+            # tl.dot operand layout pass sees qdtype, not int8.
+            k_block = k_int8.to(tl.float32).to(qdtype)
+
+            # ---- QK = Q_scaled @ K^T (BLOCK_M, BLOCK_N) ----------------
+            qk = tl.dot(q_scaled, tl.trans(k_block)).to(tl.float32) * sm_scale
 
             if IS_CAUSAL:
-                allowed = j <= (q_token_id + kv_cache_len)
+                allowed = (
+                    (causal_offset >= kv_pos[None, :])
+                    & q_row_mask[:, None]
+                    & kv_mask[None, :]
+                )
             else:
-                allowed = True
+                allowed = q_row_mask[:, None] & kv_mask[None, :]
+            qk = tl.where(allowed, qk, -float("inf"))
 
-            k_vec = tl.load(
-                K_cache + physical_block * stride_kb + kv_head_id * stride_kh
-                + offset_in_page * stride_kn + offs_d * stride_kd,
-                mask=d_mask, other=0,
-            ).to(tl.float32)
-            k_vec = k_vec * k_scale_vec
-
-            s = tl.sum(q_vec * k_vec) * sm_scale
-            s = tl.where(allowed, s, -float("inf"))
-
-            m_new = tl.maximum(m_max, s)
-            row_is_all_masked = m_new == -float("inf")
-            alpha = tl.math.exp(tl.where(row_is_all_masked, 0.0, m_max - m_new))
-            alpha = tl.where(row_is_all_masked, 0.0, alpha)
-            p = tl.math.exp(tl.where(row_is_all_masked, 0.0, s - m_new))
+            # ---- Online softmax (row-wise on BLOCK_M) ------------------
+            m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+            row_all_masked = m_ij == -float("inf")
+            alpha = tl.where(
+                row_all_masked,
+                0.0,
+                tl.math.exp(tl.where(row_all_masked, 0.0, m_i - m_ij)),
+            )
+            p = tl.math.exp(
+                tl.where(row_all_masked[:, None], 0.0, qk - m_ij[:, None])
+            )
             p = tl.where(allowed, p, 0.0)
-            p = tl.where(row_is_all_masked, 0.0, p)
 
-            v_vec = tl.load(
-                V_cache + physical_block * stride_vb + kv_head_id * stride_vh
-                + offset_in_page * stride_vn + offs_d * stride_vd,
-                mask=d_mask, other=0,
-            ).to(tl.float32)
-            v_vec = v_vec * v_scale_vec
+            # ---- Load V tile (BLOCK_N, BLOCK_D) -----------------------
+            v_ptrs = (
+                V_cache
+                + physical_block * stride_vb
+                + kv_head_id * stride_vh
+                + (kv_offset_in_page + offs_n[:, None]) * stride_vn
+                + offs_d[None, :] * stride_vd
+            )
+            v_int8 = tl.load(
+                v_ptrs, mask=kv_mask[:, None] & d_mask[None, :], other=0,
+            )
+            v_block = v_int8.to(tl.float32).to(qdtype)
 
-            acc = acc * alpha + p * v_vec
-            l_sum = l_sum * alpha + p
-            m_max = m_new
+            # ---- O += alpha * O + P @ V (BLOCK_M, BLOCK_D) -------------
+            acc = acc * alpha[:, None]
+            acc = tl.dot(p.to(qdtype), v_block, acc=acc)
 
-    l_sum_safe = tl.where(l_sum > 0, l_sum, 1.0)
-    out_vec = tl.where(l_sum > 0, acc / l_sum_safe, 0.0)
+            l_i = l_i * alpha + tl.sum(p, axis=1)
+            m_i = m_ij
 
+    # Apply v_scale once at the end (linear in acc).
+    acc = acc * v_scale_vec[None, :]
+
+    l_i_safe = tl.where(l_i > 0, l_i, 1.0)
+    out = tl.where(l_i[:, None] > 0, acc / l_i_safe[:, None], 0.0)
+
+    out_ptrs = (
+        Out
+        + (q_start + q_token_offsets[:, None]) * stride_ot
+        + q_head_id * stride_oh
+        + offs_d[None, :] * stride_od
+    )
     tl.store(
-        Out + (q_start + q_token_id) * stride_ot + q_head_id * stride_oh + offs_d * stride_od,
-        out_vec.to(Out.dtype.element_ty),
-        mask=d_mask,
+        out_ptrs,
+        out.to(Out.dtype.element_ty),
+        mask=q_row_mask[:, None] & d_mask[None, :],
     )
 
 
@@ -800,12 +927,29 @@ def paged_attention_prefill_with_kv_dequant_impl(
     BLOCK_D = triton.next_power_of_2(head_dim)
 
     if max_seqlen_q is not None:
-        max_q_len = max_seqlen_q
+        max_q_len = int(max_seqlen_q)
     else:
         q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-        max_q_len = q_lens.max().item()
+        max_q_len = int(q_lens.max().item()) if q_lens.numel() > 0 else 0
 
-    grid = (max_q_len, num_q_heads, batch_size)
+    if max_q_len == 0:
+        return out
+
+    # BLOCK_M is fixed at 64 (see _kv_dequant_block_m_heur). Launcher must
+    # use the same value to size grid.x or programs would skip Q tokens.
+    block_m_for_grid = _KV_DEQUANT_BLOCK_M
+
+    _max_q_len = max_q_len
+    _grid_x = (_max_q_len + block_m_for_grid - 1) // block_m_for_grid
+
+    grid = (_grid_x, num_q_heads, batch_size)
+
+    # num_stages: K/V pipeline tile is double-buffered when num_stages>=2.
+    # For BLOCK_D=256 (HEAD_DIM > 128) the static (q+acc) slice already eats
+    # ~96 KB of the 128 KB SRAM cap, so we drop to num_stages=1 to keep the
+    # kernel within budget; for smaller head dims we keep the 2-stage pipeline
+    # for K/V load+compute overlap.
+    num_stages = 1 if BLOCK_D >= 256 else 2
 
     _paged_prefill_with_kv_dequant_kernel[grid](
         q,
@@ -832,6 +976,8 @@ def paged_attention_prefill_with_kv_dequant_impl(
         BLOCK_D=BLOCK_D,
         PAGE_SIZE=block_size,
         IS_CAUSAL=True,
+        num_warps=4,
+        num_stages=num_stages,
     )
 
     return out
