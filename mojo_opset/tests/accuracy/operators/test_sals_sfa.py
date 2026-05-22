@@ -78,7 +78,8 @@ def _compute_K(total_kv_len, sparse_block_size=SPARSE_BLOCK_SIZE,
 
 
 def _device():
-    return get_torch_device()
+    device = get_torch_device()
+    return "cpu" if device == "meta" else device
 
 
 def _make_sfa_inputs(
@@ -186,6 +187,58 @@ def _assert_match(torch_out: torch.Tensor, ttx_out: torch.Tensor, *, atol: float
         assert cos_sim > 0.99, f"Cosine similarity {cos_sim:.6f} < 0.99"
     max_err = (torch_out.float() - ttx_out.float()).abs().max().item()
     assert max_err < atol, f"Max abs error {max_err:.6f} >= {atol}"
+
+
+@auto_switch_platform()
+@bypass_not_implemented
+def test_sfa_ttx_uses_group_level_union_across_kv_heads():
+    kw = _make_sfa_inputs(
+        num_query_heads=8,
+        num_kv_heads=2,
+        head_dim=HEAD_DIM,
+        q_seqlen=64,
+        base_kv=0,
+        G=2,
+        sparse_ratio=0.25,
+        fixed_tail=2,
+        dtype=torch.float16,
+    )
+    device = kw["q"].device
+    kw["indices_flat"] = torch.full((2, 2, 3), -1, dtype=torch.int32, device=device)
+    kw["indices_flat"][0, 0, :2] = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    kw["indices_flat"][0, 1, :2] = torch.tensor([2, 3], dtype=torch.int32, device=device)
+    kw["indices_flat"][1, 0, :2] = torch.tensor([1, 2], dtype=torch.int32, device=device)
+    kw["indices_flat"][1, 1, :2] = torch.tensor([0, 3], dtype=torch.int32, device=device)
+    kw["seq_len_flat"] = torch.tensor([2, 2], dtype=torch.int32, device=device)
+
+    op = MojoSALSSFA()
+    torch_out = op._registry.get("torch")().forward(**kw)
+    ttx_out = op._registry.get("ttx")().forward(**kw)
+    _assert_match(torch_out, ttx_out)
+
+
+@auto_switch_platform()
+@bypass_not_implemented
+def test_sfa_ttx_masks_partial_last_sparse_block():
+    kw = _make_sfa_inputs(
+        num_query_heads=8,
+        num_kv_heads=2,
+        head_dim=HEAD_DIM,
+        q_seqlen=70,
+        base_kv=0,
+        G=1,
+        sparse_ratio=1.0,
+        fixed_tail=0,
+        dtype=torch.float16,
+    )
+    device = kw["q"].device
+    kw["indices_flat"] = torch.tensor([[[0, 1, 2, 3, 4], [0, 1, 2, 3, 4]]], dtype=torch.int32, device=device)
+    kw["seq_len_flat"] = torch.tensor([5], dtype=torch.int32, device=device)
+
+    op = MojoSALSSFA()
+    torch_out = op._registry.get("torch")().forward(**kw)
+    ttx_out = op._registry.get("ttx")().forward(**kw)
+    _assert_match(torch_out, ttx_out)
 
 
 @pytest.mark.parametrize(

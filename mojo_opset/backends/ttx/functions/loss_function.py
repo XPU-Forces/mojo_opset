@@ -12,9 +12,39 @@ from mojo_opset.utils.platform import get_torch_device
 device = get_torch_device()
 
 
+def _amp_custom(kind: str):
+    def decorator(func):
+        amp_modules = []
+        amp = getattr(torch, "amp", None)
+        if amp is not None:
+            amp_modules.append(amp)
+        cuda = getattr(torch, "cuda", None)
+        cuda_amp = getattr(cuda, "amp", None) if cuda is not None else None
+        if cuda_amp is not None:
+            amp_modules.append(cuda_amp)
+
+        for amp_mod in amp_modules:
+            fn = getattr(amp_mod, f"custom_{kind}", None)
+            if fn is None:
+                continue
+            attempts = (
+                lambda: fn(device_type=device)(func),  # torch.amp custom_fwd/custom_bwd
+                lambda: fn(func),                      # older torch.cuda.amp custom_bwd
+                lambda: fn()(func),                    # older torch.cuda.amp custom_fwd factory
+            )
+            for attempt in attempts:
+                try:
+                    return attempt()
+                except TypeError:
+                    continue
+        return func
+
+    return decorator
+
+
 class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
     @staticmethod
-    @torch.amp.custom_fwd(device_type=device)
+    @_amp_custom("fwd")
     def forward(
         ctx,
         input_tensor: torch.Tensor,
@@ -88,7 +118,7 @@ class TTXFusedLinearCrossEntropyFunction(MojoFusedLinearCrossEntropyFunction):
             return loss, None
 
     @staticmethod
-    @torch.amp.custom_bwd(device_type=device)
+    @_amp_custom("bwd")
     def backward(
         ctx,
         grad_loss: torch.Tensor,

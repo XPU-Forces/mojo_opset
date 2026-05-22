@@ -227,11 +227,21 @@ class MojoSALSIndexer(MojoOperator):
             if act_n_count <= 0:
                 continue
             if act_n_count < fixed_tail_count + 4:
+                keep_n = min(act_n_count, sparse_count)
+                sparse_seq_lengths_key[g] = keep_n
+                if keep_n > 0:
+                    full = torch.arange(keep_n, device=query.device, dtype=torch.int32)
+                    sparse_indices[g, :, :keep_n] = full.view(1, -1).expand(n2, -1)
                 continue
 
             sort_n_count = act_n_count - fixed_tail_count
             topk_n_count = max(
-                1, min(int(sort_n_count * float(sparse_ratio) + 0.5), sort_n_count)
+                1,
+                min(
+                    int(sort_n_count * float(sparse_ratio) + 0.5),
+                    sort_n_count,
+                    max(1, int(sparse_count) - int(fixed_tail_count)),
+                ),
             )
             sparse_seq_lengths_key[g] = topk_n_count + fixed_tail_count
 

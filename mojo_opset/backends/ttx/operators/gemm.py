@@ -1,6 +1,9 @@
 import torch
 
-from torch.distributed.tensor import DTensor
+try:
+    from torch.distributed.tensor import DTensor
+except ImportError:  # Older torch builds used by the 910B image may not expose DTensor.
+    DTensor = ()
 
 from mojo_opset.backends.ttx.kernels import int8_gemm_dequant
 from mojo_opset.backends.ttx.kernels import m_grouped_matmul

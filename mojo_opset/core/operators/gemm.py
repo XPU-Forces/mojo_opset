@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import math
 
 import torch
@@ -229,4 +231,3 @@ class MojoQuantGemm(MojoOperator):
             f"output_dtype={self.output_dtype}, trans_weight={self.trans_weight}"
             f"quant_dtype={self.quant_dtype}, weight_dtype={self.weight_dtype}"
         )
-

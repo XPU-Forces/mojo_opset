@@ -9,6 +9,43 @@ import triton.language as tl
 from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 
 
+def _expand_indices_by_group_union(
+    indices_flat: torch.Tensor,
+    seq_len_flat: torch.Tensor,
+    num_kv_heads: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Match xpu_gpt SALS semantics: each Q group shares union(KV-head blocks)."""
+    G = int(indices_flat.shape[0])
+    K = int(indices_flat.shape[2]) if indices_flat.dim() == 3 else 0
+    unions = []
+    max_union = 0
+    for group in range(G):
+        s_count = int(seq_len_flat[group].item()) if seq_len_flat.numel() > group else 0
+        if s_count <= 0 or K <= 0:
+            union = indices_flat.new_empty((0,), dtype=torch.int32)
+        else:
+            blocks = indices_flat[group, :, : min(s_count, K)].reshape(-1)
+            blocks = blocks[blocks >= 0]
+            union = torch.unique(blocks, sorted=True).to(torch.int32) if blocks.numel() > 0 else blocks.to(torch.int32)
+        unions.append(union)
+        max_union = max(max_union, int(union.numel()))
+
+    out_k = max(max_union, 1)
+    union_indices = torch.full(
+        (G, num_kv_heads, out_k),
+        -1,
+        dtype=torch.int32,
+        device=indices_flat.device,
+    )
+    union_seq_len = torch.zeros((G,), dtype=torch.int32, device=seq_len_flat.device)
+    for group, union in enumerate(unions):
+        keep = int(union.numel())
+        union_seq_len[group] = keep
+        if keep > 0:
+            union_indices[group, :, :keep] = union.view(1, keep).expand(num_kv_heads, keep)
+    return union_indices, union_seq_len
+
+
 # ---- Cube helpers (proven patterns from original kernel) ----
 
 @triton.jit
@@ -119,10 +156,11 @@ def _gather_kv_to_wksp(
                 phys_pages = tl.load(
                     block_tables_ptr + qid * stride_bt_req + page_ids * stride_bt_blk,
                 ).to(tl.int32)
+                valid_pages = phys_pages >= 0
                 ws_offs_token = j * sparse_block_size + offs_sbs
                 tl.store(
                     Wksp_pos_ptr + wk_base_p + ws_offs_token * stride_wp_kv,
-                    offs_token, mask=mask_token,
+                    offs_token, mask=mask_token & valid_pages,
                 )
 
                 for d in range(loop_d_times):
@@ -138,7 +176,7 @@ def _gather_kv_to_wksp(
                                     + hkv * stride_kc_h + offs_d[None, :] * stride_kc_d)
                         v_offset = (phys_pages[:, None] * stride_vc_blk + page_offsets[:, None] * stride_vc_s
                                     + hkv * stride_vc_h + offs_d[None, :] * stride_vc_d)
-                    combined_mask = mask_token[:, None] & mask_d[None, :]
+                    combined_mask = mask_token[:, None] & valid_pages[:, None] & mask_d[None, :]
                     k_vals = tl.load(K_cache_ptr + k_offset, mask=combined_mask).to(tl.float32)
                     v_vals = tl.load(V_cache_ptr + v_offset, mask=combined_mask).to(tl.float32)
                     if HAS_KSCALES:
@@ -307,11 +345,11 @@ def _sals_sfa_fwd_kernel(
                             wksp_id,
                         )
 
-                        valid_kv = offs_kv[None, :] < cur_kv
                         token_pos = tl.load(
                             Wksp_pos_ptr + wk_base_p + offs_kv * stride_wp_kv,
-                            mask=offs_kv < cur_kv, other=0,
+                            mask=offs_kv < cur_kv, other=-1,
                         )
+                        valid_kv = (offs_kv[None, :] < cur_kv) & (token_pos[None, :] >= 0) & (token_pos[None, :] < total_kv_len)
                         scores = cube_qkt_sfa(
                             Q_ptr, Wksp_K_ptr,
                             stride_q_t, stride_q_h, stride_q_d,
@@ -378,6 +416,10 @@ def sals_sfa_impl(
     if G == 0:
         return output
 
+    indices_flat, seq_len_flat = _expand_indices_by_group_union(
+        indices_flat, seq_len_flat, num_kv_heads,
+    )
+
     if k_cache.shape[1] == num_kv_heads:
         cache_layout = 0
         cache_block_size = k_cache.shape[2]
@@ -387,7 +429,14 @@ def sals_sfa_impl(
 
     g_ratio = num_query_heads // num_kv_heads
     BLOCK_Q = 16
-    BLOCK_RS2 = 8
+    # Keep BLOCK_KV small enough for 910B2C local buffers. 64-token sparse
+    # blocks overflow cbuf/ub with BLOCK_RS2=8, so shrink the block batch.
+    if sparse_block_size >= 128:
+        BLOCK_RS2 = 2
+    elif sparse_block_size >= 64:
+        BLOCK_RS2 = 4
+    else:
+        BLOCK_RS2 = 8
     BLOCK_D = head_dim
     BLOCK_KV = BLOCK_RS2 * sparse_block_size
 
@@ -399,7 +448,7 @@ def sals_sfa_impl(
     wksp_count = prog_num
     workspace_k = torch.empty((wksp_count, BLOCK_KV, head_dim), dtype=torch.float32, device=device)
     workspace_v = torch.empty((wksp_count, BLOCK_KV, head_dim), dtype=torch.float32, device=device)
-    workspace_pos = torch.empty((wksp_count, BLOCK_KV), dtype=torch.int64, device=device)
+    workspace_pos = torch.full((wksp_count, BLOCK_KV), -1, dtype=torch.int64, device=device)
 
     if k_scales is None:
         k_scales = torch.empty(0, dtype=torch.float32, device=device)

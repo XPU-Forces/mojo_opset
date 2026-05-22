@@ -25,7 +25,9 @@ def sals_indexer_kernel(
     N: tl.constexpr,
     D: tl.constexpr,
     SBS: tl.constexpr,
+    CBS: tl.constexpr,
     max_sort_n: tl.constexpr,
+    sparse_count: tl.constexpr,
     sparse_ratio_f32,
     fixed_tail_count: tl.constexpr,
     scale,
@@ -48,7 +50,19 @@ def sals_indexer_kernel(
             act_n_count = tl.load(act_n_counts_ptr + g).to(tl.int32)
 
             if act_n_count > 0:
-                if act_n_count >= fixed_tail_count + 4:
+                if act_n_count < fixed_tail_count + 4:
+                    keep_n = act_n_count
+                    if keep_n > sparse_count:
+                        keep_n = sparse_count
+                    if n == 0:
+                        tl.store(sparse_seq_lengths_key_ptr + g, keep_n)
+                    for ki in range(0, sparse_count):
+                        if ki < keep_n:
+                            tl.store(
+                                sparse_indices_ptr + g * stride_si_g + n * stride_si_n + ki * stride_si_k,
+                                ki,
+                            )
+                else:
                     sort_n_count = act_n_count - fixed_tail_count
                     tmp = (sort_n_count * sparse_ratio_f32 + 0.5).to(tl.int32)
                     topk_n_count = sort_n_count
@@ -56,8 +70,14 @@ def sals_indexer_kernel(
                         tmp = 1
                     if tmp < sort_n_count:
                         topk_n_count = tmp
+                    max_sparse_topk = sparse_count - fixed_tail_count
+                    if max_sparse_topk < 1:
+                        max_sparse_topk = 1
+                    if topk_n_count > max_sparse_topk:
+                        topk_n_count = max_sparse_topk
 
-                    tl.store(sparse_seq_lengths_key_ptr + g, topk_n_count + fixed_tail_count)
+                    if n == 0:
+                        tl.store(sparse_seq_lengths_key_ptr + g, topk_n_count + fixed_tail_count)
 
                     # Load Q[g, n, :] once — full D vector
                     q_vec = tl.load(
@@ -69,19 +89,23 @@ def sals_indexer_kernel(
 
                     for b in range(0, max_sort_n):
                         if b < sort_n_count:
-                            phys_id = tl.load(
-                                block_table_ptr + g * stride_btg + b * stride_btt
-                            ).to(tl.int32)
                             block_start = b * SBS
                             mask_s = (block_start + offs_sbs) < act_s2
+                            token_pos = block_start + offs_sbs
+                            page_ids = token_pos // CBS
+                            page_offsets = token_pos - page_ids * CBS
+                            phys_id = tl.load(
+                                block_table_ptr + g * stride_btg + page_ids * stride_btt
+                            ).to(tl.int32)
+                            valid_page = phys_id >= 0
 
                             # K[phys_id, :, n, :] → [SBS, D]
                             k_block = tl.load(
-                                key_ptr + phys_id * stride_kblk
-                                + offs_sbs[:, None] * stride_kbs
+                                key_ptr + phys_id[:, None] * stride_kblk
+                                + page_offsets[:, None] * stride_kbs
                                 + n * stride_kn
                                 + offs_d[None, :] * stride_kd,
-                                mask=mask_s[:, None],
+                                mask=mask_s[:, None] & valid_page[:, None],
                                 other=0.0,
                             ).to(tl.float32)
 
@@ -90,7 +114,7 @@ def sals_indexer_kernel(
                             dot_scores = dot_scores * scale
 
                             # logsumexp over SBS
-                            masked_scores = tl.where(mask_s, dot_scores, -1e30)
+                            masked_scores = tl.where(mask_s & valid_page, dot_scores, -1e30)
                             m = tl.max(masked_scores)
                             e = tl.exp(masked_scores - m)
                             lse = m + tl.log(tl.sum(e))
@@ -125,10 +149,11 @@ def sals_indexer_kernel(
 
                     # Stage 3: Tail append
                     for t in range(0, fixed_tail_count):
-                        tl.store(
-                            sparse_indices_ptr + g * stride_si_g + n * stride_si_n + (topk_n_count + t) * stride_si_k,
-                            sort_n_count + t,
-                        )
+                        if topk_n_count + t < sparse_count:
+                            tl.store(
+                                sparse_indices_ptr + g * stride_si_g + n * stride_si_n + (topk_n_count + t) * stride_si_k,
+                                sort_n_count + t,
+                            )
 
 
 def sals_indexer_impl(
@@ -174,7 +199,7 @@ def sals_indexer_impl(
         k_s[0], k_s[1], k_s[2], k_s[3],
         bt_s[0], bt_s[1] if len(bt_s) > 1 else 1,
         si_s[0], si_s[1], si_s[2],
-        N_dim, D_dim, sparse_block_size, max_sort_n,
+        N_dim, D_dim, sparse_block_size, key.shape[1], max_sort_n, sparse_count,
         float(sparse_ratio), fixed_tail_count,
         scale,
         t1_per_prog=t1_per_prog,

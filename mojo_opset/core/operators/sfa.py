@@ -231,8 +231,16 @@ class MojoSALSSFA(MojoOperator):
             causal_mask = causal_mask.unsqueeze(1).expand(-1, num_query_heads, -1)
             scores = scores.masked_fill(causal_mask, float('-inf'))
 
-            probs = torch.softmax(scores, dim=-1).nan_to_num(0).to(dtype)
-            out = torch.einsum("qhl,lhd->qhd", probs, v_expanded)
+            # Keep the torch reference portable on NPU: fp16 einsum/baddbmm is
+            # not implemented in some CANN torch builds. bf16 is supported and
+            # keeps long stress cases practical while staying within test tol.
+            probs = torch.softmax(scores, dim=-1).nan_to_num(0)
+            compute_dtype = torch.bfloat16 if dtype == torch.float16 else dtype
+            out = torch.einsum(
+                "qhl,lhd->qhd",
+                probs.to(compute_dtype),
+                v_expanded.to(compute_dtype),
+            ).to(dtype)
 
             output[q_start:q_end] = out
 
