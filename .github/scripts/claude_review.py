@@ -16,7 +16,7 @@ import urllib.request
 ENDPOINT = "https://f7xnt9mg.fn.bytedance.net"
 MODEL = "claude-opus-4-7"
 MAX_DIFF_BYTES = 200_000
-GITHUB_COMMENT_LIMIT = 65_000  # GitHub hard limit is 65536; leave headroom
+GITHUB_COMMENT_LIMIT_BYTES = 65_000  # GitHub hard limit is 65536 bytes; leave headroom
 
 
 def env(name: str) -> str:
@@ -116,9 +116,13 @@ def main() -> None:
     comment = f"## Claude Code Review\n\n{review}"
     if truncated:
         comment += "\n\n_Note: the diff was truncated for review._"
-    if len(comment) > GITHUB_COMMENT_LIMIT:
+    encoded = comment.encode("utf-8")
+    if len(encoded) > GITHUB_COMMENT_LIMIT_BYTES:
         suffix = "\n\n_(comment truncated to fit GitHub limit)_"
-        comment = comment[: GITHUB_COMMENT_LIMIT - len(suffix)] + suffix
+        # Slice on bytes; decode with errors='ignore' to avoid splitting a
+        # multi-byte char.
+        budget = GITHUB_COMMENT_LIMIT_BYTES - len(suffix.encode("utf-8"))
+        comment = encoded[:budget].decode("utf-8", errors="ignore") + suffix
 
     # GitHub API needs the outbound proxy.
     if proxy:
@@ -138,8 +142,14 @@ def main() -> None:
         },
         method="POST",
     )
-    with external_opener.open(gh_req, timeout=60) as resp:
-        print(f"posted comment: HTTP {resp.status}")
+    try:
+        with external_opener.open(gh_req, timeout=60) as resp:
+            print(f"posted comment: HTTP {resp.status}")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")[:2000]
+        sys.exit(f"GitHub API error: HTTP {e.code}\n{body}")
+    except urllib.error.URLError as e:
+        sys.exit(f"GitHub API request failed: {e!r}")
 
 
 if __name__ == "__main__":
