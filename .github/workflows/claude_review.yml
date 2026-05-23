@@ -26,6 +26,13 @@ jobs:
     name: Claude review
     runs-on: NPU
     steps:
+      - name: Pre-cleanup workspace
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            hub.byted.org/aicompiler/npu.ci.debian12:cann8.2.rc1_py3.11_th27 \
+            bash -c "find /workspace -mindepth 1 -delete" || true
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
