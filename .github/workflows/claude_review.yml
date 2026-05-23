@@ -28,10 +28,11 @@ jobs:
     steps:
       - name: Pre-cleanup workspace
         run: |
-          docker run --rm \
+          docker run --rm --user 0:0 \
             -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
             hub.byted.org/aicompiler/npu.ci.debian12:cann8.2.rc1_py3.11_th27 \
-            bash -c "find /workspace -mindepth 1 -delete" || true
+            bash -c 'shopt -s dotglob nullglob; rm -rf /workspace/*; ls -la /workspace'
 
       - uses: actions/checkout@v4
         with:
