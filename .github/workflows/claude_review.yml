@@ -17,7 +17,6 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
-  id-token: write
 
 env:
   MOJO_OPSET_PROXY: ${{ secrets.MOJO_OPSET_PROXY }}
@@ -39,15 +38,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Run Claude code review
-        uses: anthropics/claude-code-action@v1
+      - name: Run Claude review
         env:
-          ANTHROPIC_BASE_URL: https://f7xnt9mg.fn.bytedance.net
-          HTTP_PROXY: ${{ env.MOJO_OPSET_PROXY }}
-          HTTPS_PROXY: ${{ env.MOJO_OPSET_PROXY }}
-          NO_PROXY: f7xnt9mg.fn.bytedance.net,bytedpypi.byted.org,hub.byted.org,code.byted.org,localhost,127.0.0.1
-        with:
-          anthropic_api_key: internal-endpoint-auths-by-network
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          prompt: "/review"
-          claude_args: "--model claude-opus-4-7"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          OUTBOUND_PROXY: ${{ env.MOJO_OPSET_PROXY }}
+        run: |
+          docker run --rm --user 0:0 --entrypoint bash \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            -e GITHUB_TOKEN \
+            -e ANTHROPIC_AUTH_TOKEN \
+            -e PR_NUMBER \
+            -e BASE_SHA \
+            -e HEAD_SHA \
+            -e REPO \
+            -e OUTBOUND_PROXY \
+            hub.byted.org/aicompiler/npu.ci.debian12:cann8.2.rc1_py3.11_th27 \
+            -c '
+              set -euo pipefail
+              git config --global --add safe.directory /workspace
+              python3 /workspace/.github/scripts/claude_review.py
+            '
