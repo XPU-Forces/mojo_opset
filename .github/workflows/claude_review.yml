@@ -17,6 +17,7 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
+  id-token: write
 
 env:
   MOJO_OPSET_PROXY: ${{ secrets.MOJO_OPSET_PROXY }}
@@ -47,5 +48,6 @@ jobs:
           NO_PROXY: f7xnt9mg.fn.bytedance.net,bytedpypi.byted.org,hub.byted.org,code.byted.org,localhost,127.0.0.1
         with:
           anthropic_api_key: internal-endpoint-auths-by-network
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: "/review"
           claude_args: "--model claude-opus-4-7"
