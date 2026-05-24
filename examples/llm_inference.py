@@ -163,13 +163,14 @@ class DeepseekV4DecodeWrapper(torch.nn.Module):
         super().__init__()
         self.model = model
 
-    def forward(self, input_ids, past_key_values, position_ids, context_lens, attn_inputs):
+    def forward(self, input_ids, past_key_values, position_ids, context_lens, attn_inputs, attn_metadata=None):
         logits, past_key_values = self.model(
             input_ids,
             past_key_values=past_key_values,
             position_ids=position_ids,
             context_lens=context_lens,
             attn_inputs=attn_inputs,
+            attn_metadata=attn_metadata,
             use_cache=True,
             is_prefill=False,
         )
@@ -223,7 +224,7 @@ def compile_deepseek_v4_decode(model, graph_mode):
     raise ValueError(f"Unsupported graph_mode: {graph_mode}")
 
 
-def forward_prefill_mojo(model, input_ids, attention_mask, lengths, runtime_state=None):
+def forward_prefill_mojo(model, input_ids, attention_mask, lengths, runtime_state=None, use_attn_metadata=True):
     if runtime_state is not None:
         prefill_meta = runtime_state.prepare_prefill_inputs(input_ids, attention_mask=attention_mask, q_lens=None)
         outputs = model(
@@ -234,6 +235,7 @@ def forward_prefill_mojo(model, input_ids, attention_mask, lengths, runtime_stat
             use_cache=True,
             is_prefill=True,
             attn_inputs=prefill_meta["attn_inputs"],
+            attn_metadata=prefill_meta.get("attn_metadata") if use_attn_metadata else None,
             context_lens=prefill_meta["context_lens"],
             q_lens=prefill_meta["q_lens"],
         )
@@ -243,9 +245,10 @@ def forward_prefill_mojo(model, input_ids, attention_mask, lengths, runtime_stat
     return last_logits_from_output(logits, lengths), past_key_values
 
 
-def forward_decode_mojo(model, token_ids, past_key_values, decode_fn=None, runtime_state=None):
+def forward_decode_mojo(model, token_ids, past_key_values, decode_fn=None, runtime_state=None, use_attn_metadata=True):
     if runtime_state is not None:
         decode_meta = runtime_state.prepare_decode_inputs(token_ids)
+        attn_metadata = decode_meta.get("attn_metadata") if use_attn_metadata else None
         if decode_fn is not None:
             outputs = decode_fn(
                 token_ids,
@@ -253,6 +256,7 @@ def forward_decode_mojo(model, token_ids, past_key_values, decode_fn=None, runti
                 decode_meta["position_ids"],
                 decode_meta["context_lens"],
                 decode_meta["attn_inputs"],
+                attn_metadata,
             )
         else:
             outputs = model(
@@ -261,6 +265,7 @@ def forward_decode_mojo(model, token_ids, past_key_values, decode_fn=None, runti
                 position_ids=decode_meta["position_ids"],
                 context_lens=decode_meta["context_lens"],
                 attn_inputs=decode_meta["attn_inputs"],
+                attn_metadata=attn_metadata,
                 use_cache=True,
                 is_prefill=False,
             )
@@ -271,9 +276,21 @@ def forward_decode_mojo(model, token_ids, past_key_values, decode_fn=None, runti
     return logits[:, -1, :], past_key_values
 
 
-def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, batch_size=1, graph_mode="eager", prof=False):
+def generate(
+    model,
+    tokenizer,
+    prompt,
+    max_new_tokens,
+    device,
+    ep_size=1,
+    batch_size=1,
+    graph_mode="eager",
+    prof=False,
+    use_attn_metadata=True,
+):
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+    os.environ["MOJO_BUILD_LEGACY_ATTN_INPUTS"] = "0" if use_attn_metadata else "1"
 
     if dist.is_initialized():
         global_rank = dist.get_rank()
@@ -306,6 +323,7 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, batch_
             print(f"  Rendered prefix: {repr(rendered[i][:200])}")
             print(f"  Input length: {lengths[i].item()}")
         print(f"Graph mode: {graph_mode}")
+        print(f"Use attn_metadata: {use_attn_metadata}")
         print("-" * 40)
 
     torch.npu.reset_peak_memory_stats()
@@ -330,7 +348,12 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, batch_
 
     with torch.no_grad():
         next_token_logits, past_key_values = forward_prefill_mojo(
-            model, input_ids, attention_mask, lengths, runtime_state=runtime_state,
+            model,
+            input_ids,
+            attention_mask,
+            lengths,
+            runtime_state=runtime_state,
+            use_attn_metadata=use_attn_metadata,
         )
     _mem_snapshot("after prefill")
 
@@ -369,7 +392,12 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, batch_
 
             with torch.no_grad():
                 next_token_logits, past_key_values = forward_decode_mojo(
-                    model, input_ids, past_key_values, decode_fn=decode_fn, runtime_state=runtime_state,
+                    model,
+                    input_ids,
+                    past_key_values,
+                    decode_fn=decode_fn,
+                    runtime_state=runtime_state,
+                    use_attn_metadata=use_attn_metadata,
                 )
 
             if step == 0 and decode_fn is not None and is_main:
@@ -431,6 +459,9 @@ def parse_args():
                         help="Enable NPU profiling for decode")
     parser.add_argument("--graph_mode", type=str, default=os.getenv("MOJO_GRAPH_MODE", "eager"),
                         choices=["eager", "npugraph_ex", "ge_graph"], help="Graph compilation mode for decode")
+    parser.add_argument("--use_attn_metadata", type=int, choices=[0, 1],
+                        default=int(os.getenv("MOJO_USE_ATTN_METADATA", "1")),
+                        help="Use runtime attn_metadata in DeepSeek-V4 attention path (default: 1)")
     return parser.parse_args()
 
 
@@ -522,6 +553,7 @@ def main():
     generate(
         model, tokenizer, args.prompt, args.max_new_tokens, f"npu:{npu_device_idx}",
         ep_size=ep_size, batch_size=args.batch_size, graph_mode=args.graph_mode, prof=args.prof,
+        use_attn_metadata=bool(args.use_attn_metadata),
     )
 
     if dist.is_initialized():

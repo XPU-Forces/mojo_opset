@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -292,6 +293,95 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
     def kv_cache(self):
         return self.paged_cache
 
+    def _get_first_layer_for_ratio(self, ratio):
+        for layer_idx in range(self.paged_cache.num_layers):
+            layer_ratio = self.config.compress_ratios[layer_idx] if layer_idx < len(self.config.compress_ratios) else 0
+            if layer_ratio == ratio:
+                return layer_idx
+        return None
+
+    def _build_golden_style_attn_metadata(
+        self,
+        *,
+        position_ids,
+        context_lens,
+        q_lens,
+        cu_q_lens,
+        current_seq_lens,
+        start_pos,
+        seq_used_q,
+        shared_metadata,
+        win_slot_mapping,
+        kv_slot_mapping,
+        is_prefill,
+        batch_size,
+    ):
+        pkv = self.paged_cache
+        position_ids_c = {}
+        block_table = {}
+        slot_mapping = {}
+        kernel_metadata = {}
+
+        win_kv_cache, win_block_table = pkv.get_win_kv_for_decode(0)
+        block_table["win_kv"] = win_block_table
+        slot_mapping["win_kv"] = win_slot_mapping
+        if kv_slot_mapping is not None:
+            slot_mapping["kv"] = kv_slot_mapping
+
+        if is_prefill:
+            block_table["full_kv"] = pkv.get_full_block_table(batch_size)
+            slot_mapping["full_kv"] = pkv.get_win_slot_mapping(context_lens, q_lens, pad_to_window=False)
+            slot_mapping["full_kv_gather_indices"] = pkv.get_full_kv_gather_indices(context_lens, q_lens)
+
+        for ratio, metadata in shared_metadata.items():
+            attn_ratio = ratio if ratio > 1 else 1
+            kernel_metadata[f"c{attn_ratio}a_metadata"] = metadata.get("sas_metadata")
+            if ratio <= 1:
+                continue
+
+            position_ids_cmp = metadata.get("position_ids_cmp")
+            if position_ids_cmp is not None:
+                position_ids_c[str(ratio)] = position_ids_cmp * ratio
+
+            layer_idx = self._get_first_layer_for_ratio(ratio)
+            if layer_idx is None:
+                continue
+
+            cmp_block_table_key = f"c{ratio}a_cmp_kv"
+            block_table[cmp_block_table_key] = pkv.get_cmp_kv_block_table(layer_idx)
+            slot_mapping[cmp_block_table_key] = pkv.get_cmp_slot_mapping(
+                layer_idx,
+                start_pos,
+                seq_used_q,
+                cu_seqlens_q=cu_q_lens,
+                compressed_len=metadata.get("compressed_len"),
+                position_ids_cmp=position_ids_cmp,
+            )
+            block_table[f"c{ratio}a_cmp_state"] = pkv.get_cmp_state_block_table(
+                layer_idx, start_pos, seq_used_q, is_prefill
+            )
+
+            if ratio == 4:
+                block_table["c4a_cmp_kv"] = pkv.get_c4a_cmp_kv_block_table(layer_idx)
+                kernel_metadata["lightning_indexer_quant"] = metadata.get("li_metadata")
+
+        return {
+            "batch_size_per_rank": batch_size,
+            "position_ids": position_ids.to(dtype=torch.int32),
+            "kv_len": current_seq_lens.to(dtype=torch.int32),
+            "actual_seq_q": cu_q_lens[1:],
+            "actual_seq_k": current_seq_lens.to(dtype=torch.int32),
+            "cu_seq_lens_q": cu_q_lens,
+            "seq_used_q": seq_used_q,
+            "start_pos": start_pos,
+            "position_ids_c": position_ids_c,
+            "block_table": block_table,
+            "slot_mapping": slot_mapping,
+            "kernel_metadata": kernel_metadata,
+            "is_prefill": is_prefill,
+            "win_kv_cache": win_kv_cache,
+        }
+
     @classmethod
     def from_model(
         cls,
@@ -375,14 +465,32 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
                     "cmp_rope_position_ids": cmp_rope_position_ids,
                 })
 
-        attn_inputs = {}
-        for layer_idx in range(pkv.num_layers):
-            ratio = self.config.compress_ratios[layer_idx] if layer_idx < len(self.config.compress_ratios) else 0
-            attn_inputs[layer_idx] = self._prepare_layer_prefill_inputs(
-                layer_idx, ratio, context_lens, q_lens, cu_q_lens,
-                start_pos, seq_used_q, batch_size, seq_len, device,
-                shared_metadata.get(ratio, {}),
-            )
+        win_slot_mapping = pkv.get_win_slot_mapping(context_lens, q_lens, pad_to_window=True)
+        attn_metadata = self._build_golden_style_attn_metadata(
+            position_ids=position_ids,
+            context_lens=context_lens,
+            q_lens=q_lens,
+            cu_q_lens=cu_q_lens,
+            current_seq_lens=current_seq_lens,
+            start_pos=start_pos,
+            seq_used_q=seq_used_q,
+            shared_metadata=shared_metadata,
+            win_slot_mapping=win_slot_mapping,
+            kv_slot_mapping=None,
+            is_prefill=True,
+            batch_size=batch_size,
+        )
+
+        attn_inputs = None
+        if os.getenv("MOJO_BUILD_LEGACY_ATTN_INPUTS", "0") == "1":
+            attn_inputs = {}
+            for layer_idx in range(pkv.num_layers):
+                ratio = self.config.compress_ratios[layer_idx] if layer_idx < len(self.config.compress_ratios) else 0
+                attn_inputs[layer_idx] = self._prepare_layer_prefill_inputs(
+                    layer_idx, ratio, context_lens, q_lens, cu_q_lens,
+                    start_pos, seq_used_q, batch_size, seq_len, device,
+                    shared_metadata.get(ratio, {}),
+                )
 
         return {
             "input_ids": input_ids,
@@ -392,6 +500,7 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
             "cu_q_lens": cu_q_lens,
             "q_lens": q_lens,
             "attn_inputs": attn_inputs,
+            "attn_metadata": attn_metadata,
         }
 
     def _prepare_layer_prefill_inputs(
@@ -478,6 +587,7 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
         start_pos = context_lens.to(dtype=torch.int32)
         seq_used_q = q_lens
         win_slot_mapping = pkv.get_win_slot_mapping(context_lens, q_lens)
+        kv_slot_mapping = pkv.get_all_kv_slot_mapping(start_pos, seq_used_q, seq_len)
 
         unique_ratios = sorted(set(
             self.config.compress_ratios[l] if l < len(self.config.compress_ratios) else 0
@@ -503,14 +613,31 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
                 li_meta = self._compute_li_metadata(cu_q_lens[1:], current_seq_lens, c4a_block_table)
                 shared_metadata[ratio]["li_metadata"] = li_meta
 
-        attn_inputs = {}
-        for layer_idx in range(pkv.num_layers):
-            ratio = self.config.compress_ratios[layer_idx] if layer_idx < len(self.config.compress_ratios) else 0
-            attn_inputs[layer_idx] = self._prepare_layer_decode_inputs(
-                layer_idx, ratio, context_lens, q_lens, cu_q_lens,
-                start_pos, seq_used_q, batch_size, seq_len, device,
-                shared_metadata.get(ratio, {}), win_slot_mapping,
-            )
+        attn_metadata = self._build_golden_style_attn_metadata(
+            position_ids=position_ids,
+            context_lens=context_lens,
+            q_lens=q_lens,
+            cu_q_lens=cu_q_lens,
+            current_seq_lens=current_seq_lens,
+            start_pos=start_pos,
+            seq_used_q=seq_used_q,
+            shared_metadata=shared_metadata,
+            win_slot_mapping=win_slot_mapping,
+            kv_slot_mapping=kv_slot_mapping,
+            is_prefill=False,
+            batch_size=batch_size,
+        )
+
+        attn_inputs = None
+        if os.getenv("MOJO_BUILD_LEGACY_ATTN_INPUTS", "0") == "1":
+            attn_inputs = {}
+            for layer_idx in range(pkv.num_layers):
+                ratio = self.config.compress_ratios[layer_idx] if layer_idx < len(self.config.compress_ratios) else 0
+                attn_inputs[layer_idx] = self._prepare_layer_decode_inputs(
+                    layer_idx, ratio, context_lens, q_lens, cu_q_lens,
+                    start_pos, seq_used_q, batch_size, seq_len, device,
+                    shared_metadata.get(ratio, {}), win_slot_mapping,
+                )
 
         return {
             "position_ids": position_ids,
@@ -521,6 +648,7 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
             "start_pos": start_pos,
             "seq_used_q": seq_used_q,
             "attn_inputs": attn_inputs,
+            "attn_metadata": attn_metadata,
         }
 
     def post_decode_step(self, seq_len=1):

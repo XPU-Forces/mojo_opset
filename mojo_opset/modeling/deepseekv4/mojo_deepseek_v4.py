@@ -278,6 +278,8 @@ class PagedDummyCache:
         self.next_n = config.next_n if next_n is None else next_n
         self.pa_max_length = config.pa_max_length if pa_max_length is None else pa_max_length
         self.win_cache_size = self.sliding_window + self.next_n
+        self._win_block_table = self._calc_ring_block_table(self.win_cache_size, self.batch_size)
+        self._full_block_table = self._calc_full_block_table(self.max_seq_len, self.batch_size)
 
         max_blocks_per_seq = (max_seq_len + self.block_size - 1) // self.block_size
         total_blocks = self.batch_size * max_blocks_per_seq * self.num_layers
@@ -495,7 +497,7 @@ class PagedDummyCache:
         start_pos = start_pos.to(device=self.device, dtype=torch.int32)
         seq_used_q = seq_used_q.to(device=self.device, dtype=torch.int32)
         batch_size = start_pos.shape[0]
-        block_table = self._calc_ring_block_table(self.win_cache_size, start_pos.shape[0])
+        block_table = self._get_win_block_table(batch_size)
         if pad_to_window:
             seq_len = self.sliding_window
             base_pos = torch.clamp(start_pos + seq_used_q - self.sliding_window, min=0)
@@ -535,7 +537,7 @@ class PagedDummyCache:
         batch_size = kv.shape[0]
         seq_len = kv.shape[1]
         full_kv = self._create_cache(self._get_block_num(self.max_seq_len), self.head_dim, kv.dtype)
-        block_table = self._calc_full_block_table(self.max_seq_len, batch_size)
+        block_table = self._get_full_block_table(batch_size)
         q_lens = (cu_q_lens[1:] - cu_q_lens[:-1]).to(device=kv.device, dtype=torch.int32)
         if actual_q_lens is not None:
             q_lens = actual_q_lens.to(device=kv.device, dtype=torch.int32)
@@ -711,10 +713,58 @@ class PagedDummyCache:
     def get_kv_for_decode(self, layer_idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.kv_cache, self.block_tables[layer_idx]
 
+    def get_kv_slot_mapping(
+        self,
+        layer_idx: int,
+        start_pos: torch.Tensor,
+        seq_used_q: torch.Tensor,
+        seq_len: int,
+    ) -> torch.Tensor:
+        return self.get_all_kv_slot_mapping(start_pos, seq_used_q, seq_len)[layer_idx]
+
+    def get_all_kv_slot_mapping(
+        self,
+        start_pos: torch.Tensor,
+        seq_used_q: torch.Tensor,
+        seq_len: int,
+    ) -> torch.Tensor:
+        batch_size = start_pos.shape[0]
+        if batch_size == 0 or seq_len == 0:
+            return torch.empty((self.num_layers, 0), dtype=torch.int32, device=start_pos.device)
+        positions = start_pos.to(torch.int32).unsqueeze(1) + torch.arange(
+            seq_len, dtype=torch.int32, device=start_pos.device,
+        ).unsqueeze(0)
+        block_idx = positions // self.block_size
+        offset = positions % self.block_size
+        max_blocks = self.block_tables.shape[2]
+        valid_mask = (
+            (block_idx < max_blocks)
+            & (torch.arange(seq_len, dtype=torch.int32, device=start_pos.device).unsqueeze(0) < seq_used_q.to(torch.int32).unsqueeze(1))
+        )
+        batch_indices = torch.arange(batch_size, dtype=torch.long, device=start_pos.device).view(1, batch_size, 1)
+        block_idx_clamped = block_idx.clamp(max=max_blocks - 1).to(torch.long).unsqueeze(0)
+        phys_blocks = self.block_tables[:, batch_indices, block_idx_clamped].squeeze(1)
+        slot_mapping = phys_blocks * self.block_size + offset.unsqueeze(0)
+        slot_mapping = torch.where(valid_mask.unsqueeze(0), slot_mapping, torch.full_like(slot_mapping, -1))
+        return slot_mapping.reshape(self.num_layers, -1).to(torch.int32)
+
     def get_win_kv_for_decode(self, layer_idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         win_kv = self.cache_data[layer_idx]["win_kv"]
-        block_table = self._calc_ring_block_table(self.win_cache_size, self.batch_size)
+        block_table = self._get_win_block_table(self.batch_size)
         return win_kv, block_table
+
+    def get_full_block_table(self, batch_size: Optional[int] = None) -> torch.Tensor:
+        return self._get_full_block_table(self.batch_size if batch_size is None else batch_size)
+
+    def _get_full_block_table(self, batch_size: int) -> torch.Tensor:
+        if batch_size == self.batch_size:
+            return self._full_block_table
+        return self._calc_full_block_table(self.max_seq_len, batch_size)
+
+    def _get_win_block_table(self, batch_size: int) -> torch.Tensor:
+        if batch_size == self.batch_size:
+            return self._win_block_table
+        return self._calc_ring_block_table(self.win_cache_size, batch_size)
 
     def get_win_kv(self, layer_idx: int):
         return self.cache_data[layer_idx]["win_kv"]
@@ -1112,6 +1162,89 @@ class DeepseekV4Attention(nn.Module):
         self.sparse_attn = MojoSparseAttnSharedkv()
         self.scatter_nd_update = MojoScatterNdUpdateAsc()
 
+    def _resolve_attn_inputs(self, attn_inputs, attn_metadata, past_key_values):
+        if attn_metadata is None:
+            if attn_inputs is None:
+                raise ValueError("DeepseekV4Attention requires attn_inputs or attn_metadata.")
+            return attn_inputs
+
+        layer_inputs = dict(attn_inputs) if attn_inputs is not None else {}
+        block_table = attn_metadata.get("block_table", {})
+        slot_mapping = attn_metadata.get("slot_mapping", {})
+        kernel_metadata = attn_metadata.get("kernel_metadata", {})
+        position_ids_c = attn_metadata.get("position_ids_c", {})
+
+        def prefer_metadata(value, fallback_key):
+            return value if value is not None else layer_inputs.get(fallback_key)
+
+        layer_inputs.update({
+            "q_lens": attn_metadata["seq_used_q"],
+            "cu_q_lens": attn_metadata["cu_seq_lens_q"],
+            "start_pos": attn_metadata["start_pos"],
+            "seq_used_q": attn_metadata["seq_used_q"],
+            "sas_metadata": prefer_metadata(kernel_metadata.get(f"c{self.compress_ratio}a_metadata"), "sas_metadata"),
+        })
+
+        if past_key_values is not None:
+            kv_cache, decode_block_tables = past_key_values.get_kv_for_decode(self.layer_idx)
+            win_kv_cache, fallback_win_block_table = past_key_values.get_win_kv_for_decode(self.layer_idx)
+            win_block_table = prefer_metadata(block_table.get("win_kv"), "win_block_table")
+            if win_block_table is None:
+                win_block_table = fallback_win_block_table
+            layer_inputs.update({
+                "kv_cache": kv_cache,
+                "block_tables": decode_block_tables,
+                "win_kv_cache": win_kv_cache,
+                "win_block_table": win_block_table,
+                "win_slot_mapping": prefer_metadata(slot_mapping.get("win_kv"), "win_slot_mapping"),
+            })
+            kv_slot_mapping = prefer_metadata(slot_mapping.get("kv"), "kv_slot_mapping")
+            if kv_slot_mapping is not None and kv_slot_mapping.dim() > 1:
+                kv_slot_mapping = kv_slot_mapping[self.layer_idx]
+            if kv_slot_mapping is None and not attn_metadata.get("is_prefill", False):
+                kv_slot_mapping = past_key_values.get_kv_slot_mapping(
+                    self.layer_idx,
+                    attn_metadata["start_pos"],
+                    attn_metadata["seq_used_q"],
+                    attn_metadata["position_ids"].shape[-1],
+                )
+            if kv_slot_mapping is not None:
+                layer_inputs["kv_slot_mapping"] = kv_slot_mapping
+
+        if self.compress_ratio <= 1:
+            return layer_inputs
+
+        ratio_key = str(self.compress_ratio)
+        cmp_block_key = f"c{self.compress_ratio}a_cmp_kv"
+        cmp_state_key = f"c{self.compress_ratio}a_cmp_state"
+        cmp_position_ids = position_ids_c.get(ratio_key)
+        if cmp_position_ids is not None:
+            layer_inputs["cmp_rope_position_ids"] = cmp_position_ids.to(dtype=torch.long).unsqueeze(0)
+
+        if past_key_values is not None:
+            layer_inputs.update({
+                "sfa_state_cache": past_key_values.get_sfa_kv_state(self.layer_idx),
+                "cmp_kv_cache": past_key_values.get_sfa_cmp_kv(self.layer_idx),
+            })
+        layer_inputs.update({
+            "state_block_table": prefer_metadata(block_table.get(cmp_state_key), "state_block_table"),
+            "cmp_slot_mapping": prefer_metadata(slot_mapping.get(cmp_block_key), "cmp_slot_mapping"),
+            "cmp_block_tables": prefer_metadata(block_table.get(cmp_block_key), "cmp_block_tables"),
+        })
+
+        if self.compress_ratio == 4 and past_key_values is not None:
+            layer_inputs.update({
+                "li_cmp_kv": past_key_values.get_li_cmp_kv(self.layer_idx),
+                "li_key_dequant_scale": past_key_values.get_li_key_dequant_scale(self.layer_idx),
+                "li_state_cache": past_key_values.get_li_kv_state(self.layer_idx),
+                "li_state_block_table": prefer_metadata(block_table.get(cmp_state_key), "li_state_block_table"),
+                "li_cmp_slot_mapping": prefer_metadata(slot_mapping.get(cmp_block_key), "li_cmp_slot_mapping"),
+                "li_metadata": prefer_metadata(kernel_metadata.get("lightning_indexer_quant"), "li_metadata"),
+                "c4a_cmp_kv_block_table": prefer_metadata(block_table.get("c4a_cmp_kv"), "c4a_cmp_kv_block_table"),
+            })
+
+        return layer_inputs
+
     def _debug_sparse_attn_inputs(
         self,
         q,
@@ -1290,10 +1423,12 @@ class DeepseekV4Attention(nn.Module):
         is_prefill: bool = True,
         context_lens: Optional[torch.Tensor] = None,
         attn_inputs: Optional[dict] = None,
+        attn_metadata: Optional[dict] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, None]:
         batch_size, seq_length = hidden_states.shape[:2]
 
+        attn_inputs = self._resolve_attn_inputs(attn_inputs, attn_metadata, past_key_values)
         q_lens = attn_inputs["q_lens"]
         cu_seqlens_q = attn_inputs["cu_q_lens"]
 
@@ -1993,6 +2128,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         input_ids: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
         attn_inputs: Optional[dict] = None,
+        attn_metadata: Optional[dict] = None,
         **kwargs,
     ) -> torch.Tensor:
         if _DSV4_LAYER_PROFILE:
@@ -2016,6 +2152,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 past_key_values=past_key_values, use_cache=use_cache,
                 position_embeddings=position_embeddings,
                 is_prefill=is_prefill, attn_inputs=attn_inputs,
+                attn_metadata=attn_metadata,
             )
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
 
@@ -2088,6 +2225,7 @@ class DeepseekV4Model(nn.Module):
         is_prefill: bool = True,
         context_lens: Optional[torch.Tensor] = None,
         attn_inputs: Optional[dict] = None,
+        attn_metadata: Optional[dict] = None,
         q_lens: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, PagedDummyCache]:
@@ -2143,6 +2281,7 @@ class DeepseekV4Model(nn.Module):
                 input_ids=input_ids, is_prefill=is_prefill,
                 context_lens=context_lens,
                 attn_inputs=attn_inputs.get(layer_idx) if attn_inputs is not None else None,
+                attn_metadata=attn_metadata,
             )
 
         hidden_states = self._hc_head(hidden_states)
@@ -2188,6 +2327,7 @@ class DeepseekV4ForCausalLM(nn.Module):
         use_cache: Optional[bool] = None,
         is_prefill: bool = True,
         attn_inputs: Optional[dict] = None,
+        attn_metadata: Optional[dict] = None,
         context_lens: Optional[torch.Tensor] = None,
         q_lens: Optional[torch.Tensor] = None,
         **kwargs,
@@ -2196,7 +2336,7 @@ class DeepseekV4ForCausalLM(nn.Module):
             input_ids, attention_mask=attention_mask, position_ids=position_ids,
             past_key_values=past_key_values, use_cache=use_cache,
             is_prefill=is_prefill, attn_inputs=attn_inputs,
-            context_lens=context_lens, q_lens=q_lens,
+            attn_metadata=attn_metadata, context_lens=context_lens, q_lens=q_lens,
         )
         if is_prefill:
             if q_lens is not None:
