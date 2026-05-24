@@ -315,6 +315,7 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
         kv_slot_mapping,
         is_prefill,
         batch_size,
+        decode_fast_path=False,
     ):
         pkv = self.paged_cache
         position_ids_c = {}
@@ -349,17 +350,28 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
 
             cmp_block_table_key = f"c{ratio}a_cmp_kv"
             block_table[cmp_block_table_key] = pkv.get_cmp_kv_block_table(layer_idx)
-            slot_mapping[cmp_block_table_key] = pkv.get_cmp_slot_mapping(
-                layer_idx,
-                start_pos,
-                seq_used_q,
-                cu_seqlens_q=cu_q_lens,
-                compressed_len=metadata.get("compressed_len"),
-                position_ids_cmp=position_ids_cmp,
-            )
-            block_table[f"c{ratio}a_cmp_state"] = pkv.get_cmp_state_block_table(
-                layer_idx, start_pos, seq_used_q, is_prefill
-            )
+            if decode_fast_path:
+                slot_mapping[cmp_block_table_key] = pkv.get_cmp_slot_mapping_decode(
+                    layer_idx,
+                    start_pos,
+                    compressed_len=metadata.get("compressed_len"),
+                    position_ids_cmp=position_ids_cmp,
+                )
+                block_table[f"c{ratio}a_cmp_state"] = pkv.get_cmp_state_block_table_decode(
+                    layer_idx, start_pos
+                )
+            else:
+                slot_mapping[cmp_block_table_key] = pkv.get_cmp_slot_mapping(
+                    layer_idx,
+                    start_pos,
+                    seq_used_q,
+                    cu_seqlens_q=cu_q_lens,
+                    compressed_len=metadata.get("compressed_len"),
+                    position_ids_cmp=position_ids_cmp,
+                )
+                block_table[f"c{ratio}a_cmp_state"] = pkv.get_cmp_state_block_table(
+                    layer_idx, start_pos, seq_used_q, is_prefill
+                )
 
             if ratio == 4:
                 block_table["c4a_cmp_kv"] = pkv.get_c4a_cmp_kv_block_table(layer_idx)
@@ -479,6 +491,7 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
             kv_slot_mapping=None,
             is_prefill=True,
             batch_size=batch_size,
+            decode_fast_path=False,
         )
 
         attn_inputs = None
@@ -573,21 +586,33 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
         pkv = self.paged_cache
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
+        decode_fast_path = seq_len == 1 and batch_size == pkv.batch_size
 
-        context_lens = pkv.get_seq_length(0).to(device=device, dtype=torch.long)
-        position_offsets = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0)
-        position_ids = context_lens.to(dtype=torch.long).unsqueeze(1) + position_offsets
-        current_seq_lens = context_lens.to(torch.int32) + seq_len
-        q_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device=device)
-        cu_q_lens = torch.arange(
-            0, (batch_size + 1) * seq_len, step=seq_len,
-            dtype=torch.int32, device=device,
-        )
+        context_lens_i32 = pkv.get_seq_length(0).to(device=device, dtype=torch.int32)
+        context_lens = context_lens_i32.to(dtype=torch.long)
+        if decode_fast_path:
+            position_ids = context_lens.unsqueeze(1) + pkv._decode_position_offsets
+            current_seq_lens = context_lens_i32 + 1
+            q_lens = pkv._decode_q_lens
+            cu_q_lens = pkv._decode_cu_q_lens
+        else:
+            position_offsets = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0)
+            position_ids = context_lens.unsqueeze(1) + position_offsets
+            current_seq_lens = context_lens_i32 + seq_len
+            q_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device=device)
+            cu_q_lens = torch.arange(
+                0, (batch_size + 1) * seq_len, step=seq_len,
+                dtype=torch.int32, device=device,
+            )
 
-        start_pos = context_lens.to(dtype=torch.int32)
+        start_pos = context_lens_i32
         seq_used_q = q_lens
-        win_slot_mapping = pkv.get_win_slot_mapping(context_lens, q_lens)
-        kv_slot_mapping = pkv.get_all_kv_slot_mapping(start_pos, seq_used_q, seq_len)
+        if decode_fast_path:
+            win_slot_mapping = pkv.get_win_slot_mapping_decode(start_pos)
+            kv_slot_mapping = pkv.get_all_kv_slot_mapping_decode(start_pos)
+        else:
+            win_slot_mapping = pkv.get_win_slot_mapping(context_lens, q_lens)
+            kv_slot_mapping = pkv.get_all_kv_slot_mapping(start_pos, seq_used_q, seq_len)
 
         unique_ratios = sorted(set(
             self.config.compress_ratios[l] if l < len(self.config.compress_ratios) else 0
@@ -599,9 +624,14 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
             sas_meta = self._compute_sas_metadata(cu_q_lens, current_seq_lens, batch_size, attn_ratio)
             shared_metadata[ratio] = {"sas_metadata": sas_meta}
             if ratio > 1:
-                compressed_len, position_ids_cmp = pkv.get_compressed_position_ids(
-                    start_pos, seq_used_q, cu_q_lens, ratio,
-                )
+                if decode_fast_path:
+                    compressed_len, position_ids_cmp = pkv.get_compressed_position_ids_decode(
+                        start_pos, ratio,
+                    )
+                else:
+                    compressed_len, position_ids_cmp = pkv.get_compressed_position_ids(
+                        start_pos, seq_used_q, cu_q_lens, ratio,
+                    )
                 cmp_rope_position_ids = (position_ids_cmp * ratio).to(dtype=torch.long).unsqueeze(0)
                 shared_metadata[ratio].update({
                     "compressed_len": compressed_len,
@@ -626,6 +656,7 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
             kv_slot_mapping=kv_slot_mapping,
             is_prefill=False,
             batch_size=batch_size,
+            decode_fast_path=decode_fast_path,
         )
 
         attn_inputs = None
