@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
-
+rm -rf /tmp/torchinductor_root
+rm -rf /tmp/torch_compile_debug
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
@@ -101,6 +102,9 @@ fi
 
 export MOJO_BACKEND="${MOJO_BACKEND:-ascendc}"
 export MOJO_DISABLE_ASSERTION_REWRITE="${MOJO_DISABLE_ASSERTION_REWRITE:-1}"
+export MOJO_MOE_MULTI_STREAM="${MOJO_MOE_MULTI_STREAM:-1}"
+export MOJO_ATTN_MLA_MULTI_STREAM="${MOJO_ATTN_MLA_MULTI_STREAM:-1}"
+export MOJO_ATTN_COMPRESSOR_MULTI_STREAM="${MOJO_ATTN_COMPRESSOR_MULTI_STREAM:-1}"
 
 EP_SIZE="${EP_SIZE:-8}"
 NUM_LAYERS="${LLM_NUM_LAYERS:-43}"
@@ -120,7 +124,7 @@ fi
 cd "$PROJECT_ROOT" || exit 1
 
 if [ "$EP_SIZE" -eq 1 ]; then
-    echo "EP=1, single card inference, batch_size=${BATCH_SIZE}, use_attn_metadata=${USE_ATTN_METADATA}, build_legacy_attn_inputs=${MOJO_BUILD_LEGACY_ATTN_INPUTS}"
+    echo "EP=1, single card inference, batch_size=${BATCH_SIZE}, use_attn_metadata=${USE_ATTN_METADATA}, build_legacy_attn_inputs=${MOJO_BUILD_LEGACY_ATTN_INPUTS}, moe_multi_stream=${MOJO_MOE_MULTI_STREAM}, attn_mla_multi_stream=${MOJO_ATTN_MLA_MULTI_STREAM}, attn_compressor_multi_stream=${MOJO_ATTN_COMPRESSOR_MULTI_STREAM}"
     ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0}" \
     "${PYTHON_BIN}" -m examples.llm_inference \
         --model_path "${MODEL_PATH}" \
@@ -133,7 +137,7 @@ if [ "$EP_SIZE" -eq 1 ]; then
         --batch_size "${BATCH_SIZE}" \
         --use_attn_metadata "${USE_ATTN_METADATA}"
 else
-    echo "EP=${EP_SIZE}, multi-card inference, batch_size=${BATCH_SIZE}, use_attn_metadata=${USE_ATTN_METADATA}, build_legacy_attn_inputs=${MOJO_BUILD_LEGACY_ATTN_INPUTS}"
+    echo "EP=${EP_SIZE}, multi-card inference, batch_size=${BATCH_SIZE}, use_attn_metadata=${USE_ATTN_METADATA}, build_legacy_attn_inputs=${MOJO_BUILD_LEGACY_ATTN_INPUTS}, moe_multi_stream=${MOJO_MOE_MULTI_STREAM}, attn_mla_multi_stream=${MOJO_ATTN_MLA_MULTI_STREAM}, attn_compressor_multi_stream=${MOJO_ATTN_COMPRESSOR_MULTI_STREAM}"
 
     MA_NUM_GPUS="$EP_SIZE"
 

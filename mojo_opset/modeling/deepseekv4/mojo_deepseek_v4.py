@@ -53,6 +53,37 @@ _DYNAMIC_QUANT_PER_TOKEN = MojoDynamicQuant()
 
 _DSV4_LAYER_PROFILE = os.getenv("DSV4_LAYER_PROFILE", "0") == "1"
 _DSV4_LAYER_PROFILE_STATS = {}
+_MOE_SHARED_EXPERT_STREAMS = {}
+_ATTN_MLA_STREAMS = {}
+_ATTN_COMPRESSOR_STREAMS = {}
+_NPU_FRACTAL_NZ_FORMAT = 29
+
+
+def _get_global_moe_shared_expert_stream():
+    device_idx = torch.npu.current_device()
+    stream = _MOE_SHARED_EXPERT_STREAMS.get(device_idx)
+    if stream is None:
+        stream = torch.npu.Stream()
+        _MOE_SHARED_EXPERT_STREAMS[device_idx] = stream
+    return stream
+
+
+def _get_global_attn_mla_stream():
+    device_idx = torch.npu.current_device()
+    stream = _ATTN_MLA_STREAMS.get(device_idx)
+    if stream is None:
+        stream = torch.npu.Stream()
+        _ATTN_MLA_STREAMS[device_idx] = stream
+    return stream
+
+
+def _get_global_attn_compressor_stream():
+    device_idx = torch.npu.current_device()
+    stream = _ATTN_COMPRESSOR_STREAMS.get(device_idx)
+    if stream is None:
+        stream = torch.npu.Stream()
+        _ATTN_COMPRESSOR_STREAMS[device_idx] = stream
+    return stream
 
 
 def _profile_rank0() -> bool:
@@ -1271,6 +1302,9 @@ class DeepseekV4Attention(nn.Module):
 
         self.wo_a = MojoGemm(in_features=self.num_heads * self.head_dim // self.o_groups, out_features=self.o_groups * self.o_lora_rank, bias=False)
         self.wo_b = MojoQuantGemm(in_features=self.o_groups * self.o_lora_rank, out_features=config.hidden_size, trans_weight=True)
+        self.register_buffer("_wq_b_weight_tn", None, persistent=False)
+        self.register_buffer("_wo_b_weight_tn", None, persistent=False)
+        self.register_buffer("_wo_a_weight_tbmm", None, persistent=False)
 
         self.attn_sink = nn.Parameter(torch.empty(self.num_heads, dtype=torch.float32))
 
@@ -1285,6 +1319,238 @@ class DeepseekV4Attention(nn.Module):
         self.sparse_attn_metadata = MojoSparseAttnSharedkvMetadata()
         self.sparse_attn = MojoSparseAttnSharedkv()
         self.scatter_nd_update = MojoScatterNdUpdateAsc()
+        self.enable_attn_mla_multi_stream = os.getenv("MOJO_ATTN_MLA_MULTI_STREAM", "0") == "1"
+        self.enable_attn_compressor_multi_stream = os.getenv("MOJO_ATTN_COMPRESSOR_MULTI_STREAM", "0") == "1"
+        if self.enable_attn_mla_multi_stream:
+            self.mla_stream = _get_global_attn_mla_stream()
+            self.mla_input_ready_event = torch.npu.Event()
+            self.mla_wkv_done_event = torch.npu.Event()
+            self.mla_kv_done_event = torch.npu.Event()
+        else:
+            self.mla_stream = None
+            self.mla_input_ready_event = None
+            self.mla_wkv_done_event = None
+            self.mla_kv_done_event = None
+        if self.enable_attn_compressor_multi_stream:
+            self.compressor_stream = _get_global_attn_compressor_stream()
+            self.compressor_input_ready_event = torch.npu.Event()
+            self.compressor_done_event = torch.npu.Event()
+        else:
+            self.compressor_stream = None
+            self.compressor_input_ready_event = None
+            self.compressor_done_event = None
+
+    def prepare_wo_a_weight(self) -> torch.Tensor:
+        weight = self.wo_a.weight
+        self._wo_a_weight_tbmm = (
+            weight.view(self.o_groups, self.o_lora_rank, -1)
+            .transpose(1, 2)
+            .contiguous()
+        )
+        return self._wo_a_weight_tbmm
+
+    @staticmethod
+    def _maybe_cast_weight_to_nz(weight: torch.Tensor) -> torch.Tensor:
+        if weight.device.type == "npu":
+            return torch_npu.npu_format_cast(weight, _NPU_FRACTAL_NZ_FORMAT)
+        return weight
+
+    @staticmethod
+    def _prepare_quant_weight_tn(module: MojoQuantGemm, use_nz: bool = True) -> torch.Tensor:
+        weight = module.weight.t().contiguous() if module.trans_weight else module.weight.contiguous()
+        if use_nz:
+            weight = DeepseekV4Attention._maybe_cast_weight_to_nz(weight)
+        return weight
+
+    def prepare_quant_proj_weights(self):
+        # Golden casts wq_b scales to fp32 after loading to hit the intended
+        # W8A8 path on A3. Keep wo_b scale dtype unchanged for now.
+        if self.wq_b.weight_scale.dtype != torch.float32:
+            self.wq_b.weight_scale.data = self.wq_b.weight_scale.data.float()
+
+        self._wq_b_weight_tn = self._prepare_quant_weight_tn(self.wq_b, use_nz=True)
+        self._wo_b_weight_tn = self._prepare_quant_weight_tn(self.wo_b, use_nz=True)
+
+    def _get_quant_proj_weight_tn(self, cache_name: str, module: MojoQuantGemm) -> torch.Tensor:
+        cached_weight = getattr(self, cache_name)
+        if (
+            cached_weight is None
+            or cached_weight.device != module.weight.device
+            or cached_weight.dtype != module.weight.dtype
+        ):
+            cached_weight = self._prepare_quant_weight_tn(module)
+            setattr(self, cache_name, cached_weight)
+        return cached_weight
+
+    @staticmethod
+    def _run_cached_quant_gemm(
+        module: MojoQuantGemm,
+        cached_weight_tn: torch.Tensor,
+        input: torch.Tensor,
+        input_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        pertoken_scale = input_scale.flatten()
+        if pertoken_scale.dtype != torch.float32:
+            pertoken_scale = pertoken_scale.float()
+
+        kernel_output_dtype = module.output_dtype
+        if module.weight_scale.dtype == torch.bfloat16 and module.output_dtype not in (torch.bfloat16, torch.int32):
+            kernel_output_dtype = torch.bfloat16
+
+        out = torch_npu.npu_quant_matmul(
+            input,
+            cached_weight_tn,
+            module.weight_scale.flatten(),
+            pertoken_scale=pertoken_scale,
+            output_dtype=kernel_output_dtype,
+        )
+        if out.dtype != module.output_dtype:
+            out = out.to(module.output_dtype)
+        return out
+
+    def _get_wo_a_weight_for_tbmm(self) -> torch.Tensor:
+        cached_weight = self._wo_a_weight_tbmm
+        if (
+            cached_weight is None
+            or cached_weight.device != self.wo_a.weight.device
+            or cached_weight.dtype != self.wo_a.weight.dtype
+        ):
+            cached_weight = self.prepare_wo_a_weight()
+        return cached_weight
+
+    def _use_mla_multi_stream(self, is_prefill: bool) -> bool:
+        return self.enable_attn_mla_multi_stream and not is_prefill
+
+    def _use_compressor_multi_stream(self, is_prefill: bool) -> bool:
+        return self.enable_attn_compressor_multi_stream and not is_prefill and self.sfa_compressor is not None
+
+    def _ensure_mla_multi_stream(self):
+        if self.mla_stream is None:
+            self.mla_stream = _get_global_attn_mla_stream()
+        if self.mla_input_ready_event is None:
+            self.mla_input_ready_event = torch.npu.Event()
+        if self.mla_wkv_done_event is None:
+            self.mla_wkv_done_event = torch.npu.Event()
+        if self.mla_kv_done_event is None:
+            self.mla_kv_done_event = torch.npu.Event()
+        return self.mla_stream, self.mla_input_ready_event, self.mla_wkv_done_event, self.mla_kv_done_event
+
+    def _ensure_compressor_multi_stream(self):
+        if self.compressor_stream is None:
+            self.compressor_stream = _get_global_attn_compressor_stream()
+        if self.compressor_input_ready_event is None:
+            self.compressor_input_ready_event = torch.npu.Event()
+        if self.compressor_done_event is None:
+            self.compressor_done_event = torch.npu.Event()
+        return self.compressor_stream, self.compressor_input_ready_event, self.compressor_done_event
+
+    def _launch_kv_mla_prolog(
+        self,
+        h_flat: torch.Tensor,
+        batch_size: int,
+        seq_length: int,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ):
+        mla_stream, ready_event, wkv_done_event, kv_done_event = self._ensure_mla_multi_stream()
+        main_stream = torch.npu.current_stream()
+        ready_event.record(main_stream)
+        with torch.npu.stream(mla_stream):
+            mla_stream.wait_event(ready_event)
+            h_flat.record_stream(mla_stream)
+            cos.record_stream(mla_stream)
+            sin.record_stream(mla_stream)
+            kv = self.wkv(h_flat)
+            wkv_done_event.record(mla_stream)
+            kv = self.kv_norm(kv)
+            kv = kv.view(batch_size, seq_length, self.head_dim)
+            kv = _apply_partial_rotary(
+                kv.view(batch_size, seq_length, 1, self.head_dim), cos, sin, self.partial_slice
+            ).view(batch_size, seq_length, self.head_dim)
+            kv.record_stream(mla_stream)
+            kv_done_event.record(mla_stream)
+        return kv, wkv_done_event, kv_done_event
+
+    def _run_sfa_compressor(
+        self,
+        hidden_states: torch.Tensor,
+        cmp_cos: torch.Tensor,
+        cmp_sin: torch.Tensor,
+        sfa_state_cache: torch.Tensor,
+        state_block_table: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        seq_used_q: torch.Tensor,
+        start_pos: torch.Tensor,
+        cmp_cache: torch.Tensor,
+        cmp_slot_mapping: torch.Tensor,
+    ) -> None:
+        cmp_kv = self.sfa_compressor(
+            hidden_states, cmp_cos, cmp_sin,
+            state_cache=sfa_state_cache,
+            state_block_table=state_block_table,
+            cu_seqlens=cu_seqlens_q,
+            seq_used_q=seq_used_q,
+            start_pos=start_pos,
+        )
+        self.scatter_nd_update(
+            cmp_cache.view(-1, self.head_dim),
+            cmp_slot_mapping.reshape(-1, 1),
+            cmp_kv.reshape(-1, self.head_dim),
+        )
+
+    def _launch_sfa_compressor(
+        self,
+        hidden_states: torch.Tensor,
+        cmp_cos: torch.Tensor,
+        cmp_sin: torch.Tensor,
+        sfa_state_cache: torch.Tensor,
+        state_block_table: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        seq_used_q: torch.Tensor,
+        start_pos: torch.Tensor,
+        cmp_cache: torch.Tensor,
+        cmp_slot_mapping: torch.Tensor,
+    ):
+        compressor_stream, ready_event, done_event = self._ensure_compressor_multi_stream()
+        main_stream = torch.npu.current_stream()
+        ready_event.record(main_stream)
+        with torch.npu.stream(compressor_stream):
+            compressor_stream.wait_event(ready_event)
+            for tensor in (
+                hidden_states,
+                cmp_cos,
+                cmp_sin,
+                sfa_state_cache,
+                state_block_table,
+                cu_seqlens_q,
+                seq_used_q,
+                start_pos,
+                cmp_cache,
+                cmp_slot_mapping,
+            ):
+                if tensor is not None:
+                    tensor.record_stream(compressor_stream)
+            with _profile_timer(self.layer_idx, "compressor"):
+                self._run_sfa_compressor(
+                    hidden_states,
+                    cmp_cos,
+                    cmp_sin,
+                    sfa_state_cache,
+                    state_block_table,
+                    cu_seqlens_q,
+                    seq_used_q,
+                    start_pos,
+                    cmp_cache,
+                    cmp_slot_mapping,
+                )
+            done_event.record(compressor_stream)
+        return done_event
+
+    @staticmethod
+    def _wait_mla_event(event):
+        if event is None:
+            return
+        torch.npu.current_stream().wait_event(event)
 
     def _resolve_attn_inputs(self, attn_inputs, attn_metadata, past_key_values):
         if attn_metadata is None:
@@ -1567,30 +1833,51 @@ class DeepseekV4Attention(nn.Module):
 
         with _profile_timer(self.layer_idx, "attention_setup"):
             h_flat = hidden_states.reshape(-1, hidden_states.shape[-1]).to(torch.bfloat16)
+            cos, sin = position_embeddings
 
             qa = self.wq_a(h_flat)
+            use_mla_multi_stream = self._use_mla_multi_stream(is_prefill)
+            if use_mla_multi_stream:
+                kv, wkv_done_event, kv_done_event = self._launch_kv_mla_prolog(
+                    h_flat, batch_size, seq_length, cos, sin
+                )
+            else:
+                wkv_done_event = None
+                kv_done_event = None
+
             qa = qa.view(batch_size, seq_length, -1)
             qa = self.q_norm(qa)
             qa_flat = qa.reshape(-1, qa.shape[-1]).to(torch.bfloat16)
             qa_quant, qa_scale = self.q_a_quant(qa_flat)
-            q = self.wq_b(qa_quant, qa_scale)
+            self._wait_mla_event(wkv_done_event)
+            q = self._run_cached_quant_gemm(
+                self.wq_b,
+                self._get_quant_proj_weight_tn("_wq_b_weight_tn", self.wq_b),
+                qa_quant,
+                qa_scale,
+            )
             q = q.view(batch_size, seq_length, self.num_heads, self.head_dim)
             q = self.q_b_norm(q)
 
-            kv = self.wkv(h_flat)
-            kv = self.kv_norm(kv)
-            kv = kv.view(batch_size, seq_length, self.head_dim)
+            if not use_mla_multi_stream:
+                kv = self.wkv(h_flat)
+                kv = self.kv_norm(kv)
+                kv = kv.view(batch_size, seq_length, self.head_dim)
 
-            cos, sin = position_embeddings
             q = _apply_partial_rotary(q, cos, sin, self.partial_slice)
-            kv = _apply_partial_rotary(
-                kv.view(batch_size, seq_length, 1, self.head_dim), cos, sin, self.partial_slice
-            ).view(batch_size, seq_length, self.head_dim)
+            if use_mla_multi_stream:
+                self._wait_mla_event(kv_done_event)
+                kv.record_stream(torch.npu.current_stream())
+            else:
+                kv = _apply_partial_rotary(
+                    kv.view(batch_size, seq_length, 1, self.head_dim), cos, sin, self.partial_slice
+                ).view(batch_size, seq_length, self.head_dim)
 
         if past_key_values is None:
             raise ValueError("Paged Attention requires a PagedDummyCache instance.")
 
         cmp_sparse_indices = None
+        compressor_done_event = None
         if self.sfa_compressor is not None:
             start_pos = attn_inputs["start_pos"]
             seq_used_q = attn_inputs["seq_used_q"]
@@ -1602,20 +1889,33 @@ class DeepseekV4Attention(nn.Module):
 
             cmp_cos, cmp_sin = self.compress_rotary_emb(hidden_states, cmp_rope_position_ids)
             self.sfa_compressor.debug_layer_idx = self.layer_idx
-            with _profile_timer(self.layer_idx, "compressor"):
-                cmp_kv = self.sfa_compressor(
-                    hidden_states, cmp_cos, cmp_sin,
-                    state_cache=sfa_state_cache,
-                    state_block_table=state_block_table,
-                    cu_seqlens=cu_seqlens_q,
-                    seq_used_q=seq_used_q,
-                    start_pos=start_pos,
+            if self._use_compressor_multi_stream(is_prefill):
+                compressor_done_event = self._launch_sfa_compressor(
+                    hidden_states,
+                    cmp_cos,
+                    cmp_sin,
+                    sfa_state_cache,
+                    state_block_table,
+                    cu_seqlens_q,
+                    seq_used_q,
+                    start_pos,
+                    cmp_cache,
+                    cmp_slot_mapping,
                 )
-            self.scatter_nd_update(
-                cmp_cache.view(-1, self.head_dim),
-                cmp_slot_mapping.reshape(-1, 1),
-                cmp_kv.reshape(-1, self.head_dim),
-            )
+            else:
+                with _profile_timer(self.layer_idx, "compressor"):
+                    self._run_sfa_compressor(
+                        hidden_states,
+                        cmp_cos,
+                        cmp_sin,
+                        sfa_state_cache,
+                        state_block_table,
+                        cu_seqlens_q,
+                        seq_used_q,
+                        start_pos,
+                        cmp_cache,
+                        cmp_slot_mapping,
+                    )
 
             if self.indexer is not None:
                 if is_prefill:
@@ -1639,7 +1939,17 @@ class DeepseekV4Attention(nn.Module):
         if self._is_c1a:
             o = self._c1a_attention(q, kv, past_key_values, _context_lens, is_prefill, q_lens, attn_inputs)
         else:
-            o = self._sparse_attention(q, kv, past_key_values, _context_lens, cmp_sparse_indices, is_prefill, q_lens, attn_inputs)
+            o = self._sparse_attention(
+                q,
+                kv,
+                past_key_values,
+                _context_lens,
+                cmp_sparse_indices,
+                is_prefill,
+                q_lens,
+                attn_inputs,
+                compressor_done_event=compressor_done_event,
+            )
 
         with _profile_timer(self.layer_idx, "attention_post"):
             o = self._attn_post(o, position_embeddings)
@@ -1738,7 +2048,7 @@ class DeepseekV4Attention(nn.Module):
 
     def _sparse_attention(self, q, kv, past_key_values, context_lens, cmp_sparse_indices=None,
                           is_prefill: bool = True, q_lens: Optional[torch.Tensor] = None,
-                          attn_inputs=None):
+                          attn_inputs=None, compressor_done_event=None):
         batch_size, seq_length = q.shape[:2]
         q_padded = q.contiguous().view(-1, self.num_heads, self.head_dim)
         q_lens = attn_inputs["q_lens"]
@@ -1771,6 +2081,7 @@ class DeepseekV4Attention(nn.Module):
         cmp_kv_cache = attn_inputs["cmp_kv_cache"]
         cmp_block_tables = attn_inputs["cmp_block_tables"]
         sas_metadata = attn_inputs.get("sas_metadata")
+        self._wait_mla_event(compressor_done_event)
         out = self._run_attn(q_padded, kv_cache, block_tables, attn_seq_lens, batch_size, seq_length,
                              self.compress_ratio, cu_q_lens_padded, cmp_kv_cache, cmp_block_tables,
                              cmp_sparse_indices, sas_metadata=sas_metadata)
@@ -1793,16 +2104,20 @@ class DeepseekV4Attention(nn.Module):
             partial_slice=self.partial_slice,
         )
         o = o.reshape(batch_size * seq_length, self.o_groups, -1).to(torch.bfloat16)
-        wo_a_weight = self.wo_a.weight.view(self.o_groups, self.o_lora_rank, -1).transpose(1, 2).contiguous()
         wo_a_out = torch_npu.npu_transpose_batchmatmul(
             o,
-            wo_a_weight,
+            self._get_wo_a_weight_for_tbmm(),
             perm_x1=(1, 0, 2),
             perm_y=(1, 0, 2),
         )
         wo_a_out = wo_a_out.reshape(batch_size * seq_length, -1).to(torch.bfloat16)
         wo_a_quant, wo_a_scale = _dynamic_quant_per_token(wo_a_out)
-        wo_b_out = self.wo_b(wo_a_quant, wo_a_scale)
+        wo_b_out = self._run_cached_quant_gemm(
+            self.wo_b,
+            self._get_quant_proj_weight_tn("_wo_b_weight_tn", self.wo_b),
+            wo_a_quant,
+            wo_a_scale,
+        )
         return wo_b_out.view(batch_size, seq_length, -1)
 
 
@@ -1826,21 +2141,41 @@ class DeepseekV4SharedExpert(nn.Module):
         nn.init.ones_(self.gate_quant.inv_smooth_scale)
         nn.init.ones_(self.up_quant.inv_smooth_scale)
         nn.init.ones_(self.intermediate_quant.inv_smooth_scale)
-        self._gate_up_weight_cache = None
-        self._gate_up_weight_scale_cache = None
+        self.register_buffer("_gate_up_weight_cache", None, persistent=False)
+        self.register_buffer("_gate_up_weight_scale_cache", None, persistent=False)
+        self.register_buffer("_down_proj_weight_tn", None, persistent=False)
+
+    def prepare_quant_proj_weights(self):
+        self._gate_up_weight_cache = DeepseekV4Attention._maybe_cast_weight_to_nz(torch.cat(
+            (self.gate_proj.weight, self.up_proj.weight), dim=0
+        ).transpose(0, 1).contiguous()
+        )
+        self._gate_up_weight_scale_cache = torch.cat(
+            (self.gate_proj.weight_scale, self.up_proj.weight_scale), dim=0
+        ).contiguous().view(-1).float()
+        self._down_proj_weight_tn = DeepseekV4Attention._prepare_quant_weight_tn(
+            self.down_proj, use_nz=True
+        )
 
     def _get_gate_up_weight(self):
         if (
             self._gate_up_weight_cache is None
             or self._gate_up_weight_cache.device != self.gate_proj.weight.device
+            or self._gate_up_weight_cache.dtype != self.gate_proj.weight.dtype
         ):
-            self._gate_up_weight_cache = torch.cat(
-                (self.gate_proj.weight, self.up_proj.weight), dim=0
-            ).transpose(0, 1).contiguous()
-            self._gate_up_weight_scale_cache = torch.cat(
-                (self.gate_proj.weight_scale, self.up_proj.weight_scale), dim=0
-            ).contiguous().view(-1).float()
+            self.prepare_quant_proj_weights()
         return self._gate_up_weight_cache, self._gate_up_weight_scale_cache
+
+    def _get_down_proj_weight_tn(self):
+        cached_weight = self._down_proj_weight_tn
+        if (
+            cached_weight is None
+            or cached_weight.device != self.down_proj.weight.device
+            or cached_weight.dtype != self.down_proj.weight.dtype
+        ):
+            self.prepare_quant_proj_weights()
+            cached_weight = self._down_proj_weight_tn
+        return cached_weight
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         orig_shape = x.shape
@@ -1879,7 +2214,12 @@ class DeepseekV4SharedExpert(nn.Module):
             )
             intermediate_scale = intermediate_scale.unsqueeze(-1)
         with _profile_timer(self.layer_idx, "shared_expert_down") if hasattr(self, "layer_idx") else nullcontext():
-            return self.down_proj(intermediate_quant, intermediate_scale).view(*orig_shape)
+            return DeepseekV4Attention._run_cached_quant_gemm(
+                self.down_proj,
+                self._get_down_proj_weight_tn(),
+                intermediate_quant,
+                intermediate_scale,
+            ).view(*orig_shape)
 
 
 class DeepseekV4MoE(nn.Module):
@@ -1956,6 +2296,49 @@ class DeepseekV4MoE(nn.Module):
             self.e_score_correction_bias = nn.Parameter(torch.empty(config.n_routed_experts, dtype=torch.float32))
             self.tid2eid = None
 
+        self.enable_moe_multi_stream = os.getenv("MOJO_MOE_MULTI_STREAM", "0") == "1"
+        if self.enable_moe_multi_stream:
+            self.shared_expert_stream = _get_global_moe_shared_expert_stream()
+            self.shared_expert_ready_event = torch.npu.Event()
+            self.shared_expert_done_event = torch.npu.Event()
+        else:
+            self.shared_expert_stream = None
+            self.shared_expert_ready_event = None
+            self.shared_expert_done_event = None
+
+    def _use_moe_multi_stream(self) -> bool:
+        return self.enable_moe_multi_stream and self.ep_size > 1 and self.ep_group is not None
+
+    def _ensure_moe_multi_stream(self):
+        if self.shared_expert_stream is None:
+            self.shared_expert_stream = _get_global_moe_shared_expert_stream()
+        if self.shared_expert_ready_event is None:
+            self.shared_expert_ready_event = torch.npu.Event()
+        if self.shared_expert_done_event is None:
+            self.shared_expert_done_event = torch.npu.Event()
+        return self.shared_expert_stream, self.shared_expert_ready_event, self.shared_expert_done_event
+
+    def _launch_shared_expert(self, residuals: torch.Tensor) -> Tuple[torch.Tensor, torch.npu.Event]:
+        shared_stream, ready_event, done_event = self._ensure_moe_multi_stream()
+        main_stream = torch.npu.current_stream()
+        ready_event.record(main_stream)
+        with torch.npu.stream(shared_stream):
+            shared_stream.wait_event(ready_event)
+            residuals.record_stream(shared_stream)
+            shared_out = self.shared_experts(residuals)
+            shared_out_flat = shared_out.view(-1, self.hidden_size).to(torch.bfloat16)
+            shared_out_flat.record_stream(shared_stream)
+            done_event.record(shared_stream)
+        return shared_out_flat, done_event
+
+    @staticmethod
+    def _wait_shared_expert(shared_expert_out: Optional[torch.Tensor], shared_expert_event=None):
+        if shared_expert_event is None or shared_expert_out is None:
+            return
+        current_stream = torch.npu.current_stream()
+        current_stream.wait_event(shared_expert_event)
+        shared_expert_out.record_stream(current_stream)
+
     def _gate_topk(self, logits, input_ids=None):
         if self.scoring_func == "sigmoid":
             scores = logits.sigmoid()
@@ -1995,20 +2378,31 @@ class DeepseekV4MoE(nn.Module):
         orig_shape = hidden_states.shape
         hidden_states_flat = hidden_states.view(-1, self.hidden_size).to(torch.bfloat16)
 
+        use_moe_multi_stream = self._use_moe_multi_stream()
+        if use_moe_multi_stream:
+            shared_out_flat, shared_expert_event = self._launch_shared_expert(residuals)
+        else:
+            shared_out = self.shared_experts(residuals)
+            shared_out_flat = shared_out.view(-1, self.hidden_size).to(torch.bfloat16)
+            shared_expert_event = None
+
         logits = F.linear(hidden_states_flat.float(), self.gate)
         topk_idx, topk_weight = self._gate_topk(logits, input_ids)
-
-        shared_out = self.shared_experts(residuals)
-        shared_out_flat = shared_out.view(-1, self.hidden_size).to(torch.bfloat16)
 
         if self.ep_size > 1 and self.ep_group is not None:
             if is_prefill:
                 routed_out = self._moe_infer_ep(
-                    hidden_states_flat, topk_idx, topk_weight, shared_expert_out=shared_out_flat)
+                    hidden_states_flat, topk_idx, topk_weight,
+                    shared_expert_out=shared_out_flat,
+                    shared_expert_event=shared_expert_event,
+                )
                 return routed_out.view(*orig_shape)
             else:
                 routed_out = self._moe_infer_ep_decode(
-                    hidden_states_flat, topk_idx, topk_weight, shared_expert_out=shared_out_flat)
+                    hidden_states_flat, topk_idx, topk_weight,
+                    shared_expert_out=shared_out_flat,
+                    shared_expert_event=shared_expert_event,
+                )
                 return routed_out.view(*orig_shape)
 
         sorted_hidden, tokens_per_expert, sorted_gates, token_indices = self.dispatch(
@@ -2112,7 +2506,14 @@ class DeepseekV4MoE(nn.Module):
         self.smooth_scale_1.data = self.smooth_scale_1.data.to(torch.float)
         self.smooth_scale_2.data = self.smooth_scale_2.data.to(torch.float)
 
-    def _moe_infer_ep(self, hidden_states_flat, topk_idx, topk_weight, shared_expert_out=None):
+    def _moe_infer_ep(
+        self,
+        hidden_states_flat,
+        topk_idx,
+        topk_weight,
+        shared_expert_out=None,
+        shared_expert_event=None,
+    ):
         moe_ep_group = self.ep_group
         n_tokens = hidden_states_flat.shape[0]
 
@@ -2163,6 +2564,7 @@ class DeepseekV4MoE(nn.Module):
         combined_tokens = new_x.new_empty(expanded_x.shape[0], new_x.shape[1])
         dist.all_to_all_single(combined_tokens, new_x, input_splits, output_splits, group=moe_ep_group)
 
+        self._wait_shared_expert(shared_expert_out, shared_expert_event)
         routed_out = self.moe_finalize_routing(
             combined_tokens,
             skip1=shared_expert_out,
@@ -2175,7 +2577,14 @@ class DeepseekV4MoE(nn.Module):
         )
         return routed_out
 
-    def _moe_infer_ep_decode(self, hidden_states_flat, topk_idx, topk_weight, shared_expert_out=None):
+    def _moe_infer_ep_decode(
+        self,
+        hidden_states_flat,
+        topk_idx,
+        topk_weight,
+        shared_expert_out=None,
+        shared_expert_event=None,
+    ):
         if self.dispatch_kwargs is None:
             self.set_mc2_kwargs()
 
@@ -2190,6 +2599,7 @@ class DeepseekV4MoE(nn.Module):
 
         expert_out = self.forward_expert_gmm(expand_x, expert_token_num, pertoken_scale=dynamic_scale, group_list_type=1)
 
+        self._wait_shared_expert(shared_expert_out, shared_expert_event)
         combine_input = {
             "expand_x": expert_out,
             "shared_expert_x": shared_expert_out,
@@ -2612,6 +3022,12 @@ class DeepseekV4ForCausalLM(nn.Module):
             mlp = model.model.layers[layer_idx].mlp
             if hasattr(mlp, 'process_expert_weights'):
                 mlp.process_expert_weights()
+
+        for layer_idx in range(model.config.num_hidden_layers):
+            self_attn = model.model.layers[layer_idx].self_attn
+            self_attn.prepare_wo_a_weight()
+            self_attn.prepare_quant_proj_weights()
+            model.model.layers[layer_idx].mlp.shared_experts.prepare_quant_proj_weights()
 
         if model.ep_size > 1 and dist.is_initialized():
             moe_ep_group = model.hccl_comm_dict.get("moe_ep_group")
