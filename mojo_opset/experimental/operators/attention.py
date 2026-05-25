@@ -1624,7 +1624,6 @@ class MojoPagedPrefillSageGQA(MojoOperator):
         query_scale = query_scale[..., None]
         key_scale = key_scale[..., None]
         value_scale = value_scale[None, :, :]
-        blk = self.p_quant_block
 
 
         if softmax_scale is None:
