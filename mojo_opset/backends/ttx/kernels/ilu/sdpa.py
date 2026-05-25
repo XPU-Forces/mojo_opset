@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from .utils import LOG2E, libentry
+from .utils import LOG2E, libentry, smart_triton_autotune
 
 
 def _repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -25,7 +25,7 @@ def _repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 # Flash Attention v2 style forward kernel (infer-only, no LSE output)
 # ---------------------------------------------------------------------------
 
-@triton.autotune(
+@smart_triton_autotune(
     configs=[
         triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=2),
         triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, num_warps=4, num_stages=2),
@@ -35,6 +35,7 @@ def _repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_warps=8, num_stages=2),
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8, num_stages=2),
     ],
+    selected_idx=0,
     key=["SEQ", "HEAD_DIM"],
 )
 @libentry()

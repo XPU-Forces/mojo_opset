@@ -17,6 +17,11 @@ from .gelu import gelu_bwd_impl
 from .gelu import gelu_fwd_impl
 from .group_gemm import k_grouped_matmul_impl
 from .group_gemm import m_grouped_matmul_impl
+from .moe import moe_gating_impl
+from .moe import moe_dispatch_impl
+from .moe import moe_experts_impl
+from .moe import moe_combine_impl
+from .moe_quant_experts import quant_moe_experts_impl
 from .quant_batch_gemm_reduce_sum import quant_batch_gemm_reduce_sum_impl
 from .int8_gemm import int8_gemm_dequant_impl
 from .int8_gemm import prepare_b_impl
@@ -76,6 +81,11 @@ __all__ = [
     "gelu_fwd_impl",
     "m_grouped_matmul_impl",
     "k_grouped_matmul_impl",
+    "moe_gating_impl",
+    "moe_dispatch_impl",
+    "moe_experts_impl",
+    "moe_combine_impl",
+    "quant_moe_experts_impl",
     "quant_batch_gemm_reduce_sum_impl",
     "int8_gemm_dequant_impl",
     "prepare_b_impl",

@@ -89,6 +89,12 @@ diffusion_attention_bwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_a
 
 m_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "m_grouped_matmul_impl")
 k_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "k_grouped_matmul_impl")
+
+moe_gating_impl = _get_kernel_impl(ttx_backend_module, "moe_gating_impl")
+moe_dispatch_impl = _get_kernel_impl(ttx_backend_module, "moe_dispatch_impl")
+moe_experts_impl = _get_kernel_impl(ttx_backend_module, "moe_experts_impl")
+moe_combine_impl = _get_kernel_impl(ttx_backend_module, "moe_combine_impl")
+quant_moe_experts_impl = _get_kernel_impl(ttx_backend_module, "quant_moe_experts_impl")
 quant_batch_gemm_reduce_sum_impl = _get_kernel_impl(ttx_backend_module, "quant_batch_gemm_reduce_sum_impl")
 
 int8_gemm_dequant_impl = _get_kernel_impl(ttx_backend_module, "int8_gemm_dequant_impl")
@@ -950,6 +956,11 @@ else:
     diffusion_attention_bwd = diffusion_attention_bwd_impl
     m_grouped_matmul = m_grouped_matmul_impl
     k_grouped_matmul = k_grouped_matmul_impl
+    moe_gating = moe_gating_impl
+    moe_dispatch = moe_dispatch_impl
+    moe_experts = moe_experts_impl
+    moe_combine = moe_combine_impl
+    quant_moe_experts = quant_moe_experts_impl
     int8_gemm_dequant = int8_gemm_dequant_impl
     prepare_b = prepare_b_impl
     store_paged_kv = store_paged_kv_impl

@@ -91,4 +91,9 @@ def test_moe_gating(num_experts, top_k, hidden_size, num_tokens, dtype):
     assert moe_gating.gate_weight.dtype == torch.float32 and moe_gating_ref.gate_weight.dtype == torch.float32
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device=device)
-    moe_gating.forward_diff_with(moe_gating_ref, x, mixed_tol=True)
+    moe_gating.forward_diff_with(
+        moe_gating_ref, x,
+        atol=(0, 1e-2),
+        rtol=(0, 1e-2),
+        ptol=(0.999, 1.0),
+    )

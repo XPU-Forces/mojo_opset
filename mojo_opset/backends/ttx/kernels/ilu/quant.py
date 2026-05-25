@@ -4,7 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .utils import ilu_grid_dim_from_row_tasks, libentry
+from .utils import ilu_grid_dim_from_row_tasks, libentry, smart_triton_autotune
 
 
 def dequant_impl(
@@ -64,13 +64,14 @@ def dequant_impl(
     return output_tensor
 
 
-@triton.autotune(
+@smart_triton_autotune(
     configs=[
         triton.Config({"BLOCK_SIZE_M": 8}),
         triton.Config({"BLOCK_SIZE_M": 16}),
         triton.Config({"BLOCK_SIZE_M": 32}),
         triton.Config({"BLOCK_SIZE_M": 64}),
     ],
+    selected_idx=0,
     key=["dims"],
 )
 @triton.jit
