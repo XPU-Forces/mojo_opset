@@ -15,9 +15,14 @@ def _group_rmsnorm_grid_n_programs(n_rows: int, n_cols: int) -> int:
     return ilu_grid_dim_from_row_tasks(n_tasks)
 
 
+# ---------------------------------------------------------------------------
+# Two-pass kernel: reads X twice (sum-of-squares then normalize).
+# Used as fallback when N_COLS > BLOCK_SIZE_N (column blocking needed).
+# ---------------------------------------------------------------------------
+
 @triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
 @triton.jit
-def _group_rmsnorm_fwd_kernel(
+def _group_rmsnorm_fwd_twopass_kernel(
     X_ptr,
     Y_ptr,
     W_ptr,
@@ -66,13 +71,66 @@ def _group_rmsnorm_fwd_kernel(
 
         if HAS_WEIGHT:
             w = tl.load(W_ptr + col_offsets, mask=col_mask, other=0.0)
-            w_f32 = w.to(tl.float32)
-            y = x_normalized * w_f32[None, :]
+            y = x_normalized * w.to(tl.float32)[None, :]
         else:
             y = x_normalized
 
         tl.store(y_ptrs, y, mask=row_mask[:, None] & col_mask[None, :])
 
+
+# ---------------------------------------------------------------------------
+# Single-pass kernel: reads X once into registers, normalises in-place.
+# All pointers are compile-time-fixed per program → SME-friendly on ILU.
+# ---------------------------------------------------------------------------
+
+@triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
+@triton.jit
+def _group_rmsnorm_fwd_singlepass_kernel(
+    X_ptr,
+    Y_ptr,
+    W_ptr,
+    stride_x_row,
+    stride_y_row,
+    n_rows,
+    eps,
+    N_COLS: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    HAS_WEIGHT: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    num_row_tasks = (n_rows + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+    task_mask = pid < num_row_tasks
+
+    block_start_row = pid * BLOCK_SIZE_M
+    current_row_offsets = block_start_row + tl.arange(0, BLOCK_SIZE_M)
+    row_mask = task_mask & (current_row_offsets < n_rows)
+
+    col_offsets = tl.arange(0, BLOCK_SIZE_N)
+    col_mask = col_offsets < N_COLS
+    mask = row_mask[:, None] & col_mask[None, :]
+
+    x_ptrs = X_ptr + (current_row_offsets[:, None] * stride_x_row + col_offsets[None, :])
+    x = tl.load(x_ptrs, mask=mask, other=0.0)
+    x_f32 = x.to(tl.float32)
+
+    ss = tl.sum(x_f32 * x_f32, axis=1)
+    ss = tl.where(row_mask, ss, 0.0)
+    rrms = tl.rsqrt(ss / N_COLS + eps)
+
+    y = x_f32 * rrms[:, None]
+
+    if HAS_WEIGHT:
+        w = tl.load(W_ptr + col_offsets, mask=col_mask, other=0.0)
+        y = y * w.to(tl.float32)[None, :]
+
+    y_ptrs = Y_ptr + (current_row_offsets[:, None] * stride_y_row + col_offsets[None, :])
+    tl.store(y_ptrs, y, mask=mask)
+
+
+# ---------------------------------------------------------------------------
+# Host-side helpers
+# ---------------------------------------------------------------------------
 
 def _rmsnorm_fwd_single(
     x: torch.Tensor,
@@ -93,23 +151,20 @@ def _rmsnorm_fwd_single(
     n_rows = x_2d.shape[0]
     y_2d = torch.empty_like(x_2d)
 
+    # _block_size_n_pow2 rounds up, so N <= BLOCK_SIZE_N whenever N <= COL_BLOCKING_THRESHOLD.
     if N > COL_BLOCKING_THRESHOLD:
         BLOCK_SIZE_N = COL_BLOCKING_THRESHOLD
+        kernel = _group_rmsnorm_fwd_twopass_kernel
     else:
         BLOCK_SIZE_N = _block_size_n_pow2(N)
+        kernel = _group_rmsnorm_fwd_singlepass_kernel
 
     grid = (_group_rmsnorm_grid_n_programs(n_rows, N),)
-
-    _group_rmsnorm_fwd_kernel[grid](
-        x_2d,
-        y_2d,
-        weight,
-        x_2d.stride(0),
-        y_2d.stride(0),
-        n_rows=n_rows,
-        eps=eps,
-        N_COLS=N,
-        BLOCK_SIZE_N=BLOCK_SIZE_N,
+    kernel[grid](
+        x_2d, y_2d, weight,
+        x_2d.stride(0), y_2d.stride(0),
+        n_rows=n_rows, eps=eps,
+        N_COLS=N, BLOCK_SIZE_N=BLOCK_SIZE_N,
         HAS_WEIGHT=weight is not None,
     )
 
