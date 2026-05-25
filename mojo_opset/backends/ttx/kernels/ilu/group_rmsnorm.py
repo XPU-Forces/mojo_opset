@@ -99,10 +99,12 @@ def _group_rmsnorm_fwd_singlepass_kernel(
     HAS_WEIGHT: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
+    num_row_tasks = (n_rows + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+    task_mask = pid < num_row_tasks
 
     block_start_row = pid * BLOCK_SIZE_M
     current_row_offsets = block_start_row + tl.arange(0, BLOCK_SIZE_M)
-    row_mask = current_row_offsets < n_rows
+    row_mask = task_mask & (current_row_offsets < n_rows)
 
     col_offsets = tl.arange(0, BLOCK_SIZE_N)
     col_mask = col_offsets < N_COLS
