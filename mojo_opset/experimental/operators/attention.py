@@ -1582,7 +1582,7 @@ class MojoPagedPrefillSageGQA(MojoOperator):
 
         Args:
             query (torch.Tensor): Query tokens of shape (T, Hq, D) with dtype in8.
-            query_scale (torch.Tensor): scale for query dequant, shape is (T, Hq) with dtype fp32.
+            query_scale (torch.Tensor): scale for query dequant, shape is (Hq, T) with dtype fp32.
             key_cache (torch.Tensor): Key cache of shape (N_blocks, Hkv, block_size, D) with dtype int8.
             key_scale (torch.Tensor): scale for key dequant, shape is (N_blocks, Hkv, block_size) with dtype fp32.
             value_cache (torch.Tensor): Value cache of shape (N_blocks, Hkv, block_size, D) with dtype int8.
@@ -1617,11 +1617,11 @@ class MojoPagedPrefillSageGQA(MojoOperator):
         assert query_scale is not None, "Q should be dynamic quant, and pass scale to MojoPagedPrefillSageGQA"
         assert key_scale is not None, "K should be dynamic quant, and pass scale to MojoPagedPrefillSageGQA"
         assert value_scale is not None, "V should be static quant, and pass scale to MojoPagedPrefillSageGQA"
-        assert query_scale.shape == (total_q_tokens, num_q_heads), f"query_scale.shape should be ({total_q_tokens}, {num_q_heads}), got {query_scale.shape}"
+        assert query_scale.shape == (num_q_heads, total_q_tokens), f"query_scale.shape should be ({num_q_heads}, {total_q_tokens}), got {query_scale.shape}"
         assert key_scale.shape == (num_blocks, num_kv_heads, block_size), f"key_scale.shape should be ({num_blocks}, {num_kv_heads}, {block_size}), got {key_scale.shape}"
         assert value_scale.shape == (num_kv_heads, head_dim), f"value_scale.shape should be ({num_kv_heads}, {head_dim}), got {value_scale.shape}"
-        # query_scale: [T, Hq] -> [T, Hq, 1], key_scale: [N_blocks, Hkv, block_size] -> [N_blocks, Hkv, block_size, 1], value_scale: [Hkv, D] -> [1, Hkv, 1, D]
-        query_scale = query_scale[..., None]
+        # query_scale: [Hq, T] -> [T, Hq, 1], key_scale: [N_blocks, Hkv, block_size] -> [N_blocks, Hkv, block_size, 1], value_scale: [Hkv, D] -> [1, Hkv, 1, D]
+        query_scale = query_scale[..., None].transpose(0, 1)
         key_scale = key_scale[..., None]
         value_scale = value_scale[None, :, :]
 

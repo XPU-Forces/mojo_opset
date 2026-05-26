@@ -785,8 +785,8 @@ def test_paged_prefill_sage_gqa(
     query_int8, query_scale = per_token_int8(query, q_max=127, q_min=-128)
     key_cache_int8, key_scale = per_token_int8(k_cache, q_max=127, q_min=-128)
     value_cache_int8, value_scale = per_channel_int8(v_cache, seq_dim=[0, 2], q_max=127, q_min=-128)
-    # forward expects: query_scale [T, Hq], key_scale [N_blocks, Hkv, block_size], value_scale [Hkv, D]
-    query_scale = query_scale.squeeze(-1)
+    # forward expects: query_scale [Hq, T], key_scale [N_blocks, Hkv, block_size], value_scale [Hkv, D]
+    query_scale = query_scale.squeeze(-1).transpose(0, 1)
     key_scale = key_scale.squeeze(-1)
     value_scale = value_scale.squeeze(2).squeeze(0)
 
