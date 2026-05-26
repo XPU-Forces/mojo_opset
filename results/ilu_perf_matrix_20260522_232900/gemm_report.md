@@ -1,0 +1,26 @@
+| Op | Parameters | TTX Time (ms) | Ixformer Time (ms) | SpeedUp |
+|----|------------|---------------|--------------------|---------|
+| gemm | M=1 K=128 N=512 trans_weight=False dtype=bf16 | 0.0072 | 0.0073 | 1.0139 |
+| gemm | M=1 K=128 N=512 trans_weight=True dtype=bf16 | 0.0072 | 0.0071 | 0.9861 |
+| gemm | M=1 K=128 N=1024 trans_weight=False dtype=bf16 | 0.0084 | 0.0085 | 1.0119 |
+| gemm | M=1 K=128 N=1024 trans_weight=True dtype=bf16 | 0.0086 | 0.0088 | 1.0233 |
+| gemm | M=1 K=128 N=2048 trans_weight=False dtype=bf16 | 0.0088 | 0.0090 | 1.0227 |
+| gemm | M=1 K=128 N=2048 trans_weight=True dtype=bf16 | 0.0089 | 0.0088 | 0.9888 |
+| gemm | M=1 K=128 N=10240 trans_weight=False dtype=bf16 | 0.0103 | 0.0105 | 1.0194 |
+| gemm | M=1 K=128 N=10240 trans_weight=True dtype=bf16 | 0.0107 | 0.0103 | 0.9626 |
+| gemm | M=64 K=128 N=512 trans_weight=False dtype=bf16 | 0.0079 | 0.0078 | 0.9873 |
+| gemm | M=64 K=128 N=512 trans_weight=True dtype=bf16 | 0.0077 | 0.0076 | 0.9870 |
+| gemm | M=64 K=128 N=1024 trans_weight=False dtype=bf16 | 0.0089 | 0.0092 | 1.0337 |
+| gemm | M=64 K=128 N=1024 trans_weight=True dtype=bf16 | 0.0093 | 0.0093 | 1.0000 |
+| gemm | M=64 K=128 N=2048 trans_weight=False dtype=bf16 | 0.0093 | 0.0098 | 1.0538 |
+| gemm | M=64 K=128 N=2048 trans_weight=True dtype=bf16 | 0.0096 | 0.0093 | 0.9688 |
+| gemm | M=64 K=128 N=10240 trans_weight=False dtype=bf16 | 0.0131 | 0.0132 | 1.0076 |
+| gemm | M=64 K=128 N=10240 trans_weight=True dtype=bf16 | 0.0132 | 0.0131 | 0.9924 |
+| gemm | M=128 K=128 N=512 trans_weight=False dtype=bf16 | 0.0094 | 0.0094 | 1.0000 |
+| gemm | M=128 K=128 N=512 trans_weight=True dtype=bf16 | 0.0095 | 0.0094 | 0.9895 |
+| gemm | M=128 K=128 N=1024 trans_weight=False dtype=bf16 | 0.0095 | 0.0093 | 0.9789 |
+| gemm | M=128 K=128 N=1024 trans_weight=True dtype=bf16 | 0.0092 | 0.0099 | 1.0761 |
+| gemm | M=128 K=128 N=2048 trans_weight=False dtype=bf16 | 0.0095 | 0.0093 | 0.9789 |
+| gemm | M=128 K=128 N=2048 trans_weight=True dtype=bf16 | 0.0095 | 0.0096 | 1.0105 |
+| gemm | M=128 K=128 N=10240 trans_weight=False dtype=bf16 | 0.0160 | 0.0161 | 1.0062 |
+| gemm | M=128 K=128 N=10240 trans_weight=True dtype=bf16 | 0.0164 | 0.0162 | 0.9878 |
