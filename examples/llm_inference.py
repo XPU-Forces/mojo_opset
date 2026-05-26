@@ -190,7 +190,7 @@ def compile_deepseek_v4_decode(model, graph_mode):
         graph_pool = torch.npu.graph_pool_handle()
         compile_options = {
             "frozen_parameter": True,
-            "static_kernel_compile": False,
+            "static_kernel_compile": True,
             "clone_input": False,
             "use_graph_pool": graph_pool,
         }
@@ -383,7 +383,7 @@ def generate(
                     schedule=prof_mod.schedule(wait=0, warmup=0, active=prof_steps, repeat=1),
                     on_trace_ready=prof_mod.tensorboard_trace_handler(prof_dir),
                     record_shapes=True,
-                    with_stack=True,
+                    with_stack=False,
                     with_flops=True,
                 )
                 prof_ctx.__enter__()
