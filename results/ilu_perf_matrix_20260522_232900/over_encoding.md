@@ -1,0 +1,10 @@
+| Op | Parameters | Traffic (GB) | Time (ms) | Bandwidth (GB/s) |
+|----|------------|--------------|-----------|-------------------|
+| ttx::over_encoding | impl=TTXOverEncoding MOJO_BACKEND=ttx traffic_obs=TTXOverEncodingObserver case=parametrized-prefill mode=prefill B=2 S=64,64 vocab=10086 ori_dim=1536 oe_dim=192 max_gram=7 G=12 dtype=fp32 | 0.0283 | 0.2483 | 114.04 |
+| ixformer::over_encoding | impl=IxformerOverEncoding MOJO_BACKEND=ixformer traffic_obs=IxformerOverEncodingObserver case=parametrized-prefill mode=prefill B=2 S=64,64 vocab=10086 ori_dim=1536 oe_dim=192 max_gram=7 G=12 dtype=fp32 | 0.0283 | 0.2554 | 110.84 |
+| ttx::over_encoding | impl=TTXOverEncoding MOJO_BACKEND=ttx traffic_obs=TTXOverEncodingObserver case=parametrized-decode mode=decode B=128 S=1 vocab=10086 ori_dim=1536 oe_dim=192 max_gram=7 G=12 dtype=fp32 | 0.0283 | 0.1974 | 143.45 |
+| ixformer::over_encoding | impl=IxformerOverEncoding MOJO_BACKEND=ixformer traffic_obs=IxformerOverEncodingObserver case=parametrized-decode mode=decode B=128 S=1 vocab=10086 ori_dim=1536 oe_dim=192 max_gram=7 G=12 dtype=fp32 | 0.0283 | 0.2271 | 124.68 |
+| ttx::over_encoding | impl=TTXOverEncoding MOJO_BACKEND=ttx traffic_obs=TTXOverEncodingObserver case=additional-prefill mode=prefill B=3 S=5,7,9 vocab=257 ori_dim=640 oe_dim=80 max_gram=5 G=8 dtype=fp32 | 0.0035 | 0.2035 | 17.43 |
+| ixformer::over_encoding | impl=IxformerOverEncoding MOJO_BACKEND=ixformer traffic_obs=IxformerOverEncodingObserver case=additional-prefill mode=prefill B=3 S=5,7,9 vocab=257 ori_dim=640 oe_dim=80 max_gram=5 G=8 dtype=fp32 | 0.0035 | 0.2264 | 15.66 |
+| ttx::over_encoding | impl=TTXOverEncoding MOJO_BACKEND=ttx traffic_obs=TTXOverEncodingObserver case=additional-decode mode=decode B=48 S=1 vocab=257 ori_dim=320 oe_dim=40 max_gram=5 G=8 dtype=fp32 | 0.0011 | 0.1590 | 7.09 |
+| ixformer::over_encoding | impl=IxformerOverEncoding MOJO_BACKEND=ixformer traffic_obs=IxformerOverEncodingObserver case=additional-decode mode=decode B=48 S=1 vocab=257 ori_dim=320 oe_dim=40 max_gram=5 G=8 dtype=fp32 | 0.0011 | 0.1871 | 6.03 |

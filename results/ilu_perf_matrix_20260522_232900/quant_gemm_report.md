@@ -1,0 +1,26 @@
+| Op | Parameters | TTX Time (ms) | Ixformer Time (ms) | SpeedUp |
+|----|------------|---------------|--------------------|---------|
+| int8_gemm_dequant | M=1 K=128 N=512 trans_weight=False output_dtype=bf16 | 0.0091 | 0.0074 | 0.8132 |
+| int8_gemm_dequant | M=1 K=128 N=512 trans_weight=True output_dtype=bf16 | 0.0091 | 0.0089 | 0.9780 |
+| int8_gemm_dequant | M=1 K=128 N=1024 trans_weight=False output_dtype=bf16 | 0.0100 | 0.0089 | 0.8900 |
+| int8_gemm_dequant | M=1 K=128 N=1024 trans_weight=True output_dtype=bf16 | 0.0100 | 0.0088 | 0.8800 |
+| int8_gemm_dequant | M=1 K=128 N=2048 trans_weight=False output_dtype=bf16 | 0.0111 | 0.0088 | 0.7928 |
+| int8_gemm_dequant | M=1 K=128 N=2048 trans_weight=True output_dtype=bf16 | 0.0116 | 0.0086 | 0.7414 |
+| int8_gemm_dequant | M=1 K=128 N=10240 trans_weight=False output_dtype=bf16 | 0.0819 | 0.0101 | 0.1233 |
+| int8_gemm_dequant | M=1 K=128 N=10240 trans_weight=True output_dtype=bf16 | 0.0137 | 0.0115 | 0.8394 |
+| int8_gemm_dequant | M=64 K=128 N=512 trans_weight=False output_dtype=bf16 | 0.0080 | 0.0071 | 0.8875 |
+| int8_gemm_dequant | M=64 K=128 N=512 trans_weight=True output_dtype=bf16 | 0.0081 | 0.0074 | 0.9136 |
+| int8_gemm_dequant | M=64 K=128 N=1024 trans_weight=False output_dtype=bf16 | 0.0090 | 0.0081 | 0.9000 |
+| int8_gemm_dequant | M=64 K=128 N=1024 trans_weight=True output_dtype=bf16 | 0.0089 | 0.0082 | 0.9213 |
+| int8_gemm_dequant | M=64 K=128 N=2048 trans_weight=False output_dtype=bf16 | 0.0102 | 0.0093 | 0.9118 |
+| int8_gemm_dequant | M=64 K=128 N=2048 trans_weight=True output_dtype=bf16 | 0.0101 | 0.0097 | 0.9604 |
+| int8_gemm_dequant | M=64 K=128 N=10240 trans_weight=False output_dtype=bf16 | 0.0131 | 0.0116 | 0.8855 |
+| int8_gemm_dequant | M=64 K=128 N=10240 trans_weight=True output_dtype=bf16 | 0.0132 | 0.0117 | 0.8864 |
+| int8_gemm_dequant | M=128 K=128 N=512 trans_weight=False output_dtype=bf16 | 0.0085 | 0.0076 | 0.8941 |
+| int8_gemm_dequant | M=128 K=128 N=512 trans_weight=True output_dtype=bf16 | 0.0086 | 0.0079 | 0.9186 |
+| int8_gemm_dequant | M=128 K=128 N=1024 trans_weight=False output_dtype=bf16 | 0.0095 | 0.0078 | 0.8211 |
+| int8_gemm_dequant | M=128 K=128 N=1024 trans_weight=True output_dtype=bf16 | 0.0096 | 0.0079 | 0.8229 |
+| int8_gemm_dequant | M=128 K=128 N=2048 trans_weight=False output_dtype=bf16 | 0.0111 | 0.0088 | 0.7928 |
+| int8_gemm_dequant | M=128 K=128 N=2048 trans_weight=True output_dtype=bf16 | 0.0112 | 0.0093 | 0.8304 |
+| int8_gemm_dequant | M=128 K=128 N=10240 trans_weight=False output_dtype=bf16 | 0.0154 | 0.0140 | 0.9091 |
+| int8_gemm_dequant | M=128 K=128 N=10240 trans_weight=True output_dtype=bf16 | 0.0155 | 0.0139 | 0.8968 |
