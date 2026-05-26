@@ -826,6 +826,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         M: int,
         N: int,
         output_dtype: torch.dtype,
+        trans_weight: bool = False,
     ) -> torch.Tensor:
         return int8_gemm_dequant_impl(
             a,
@@ -836,6 +837,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
             M,
             N,
             output_dtype,
+            trans_weight,
         )
 
     @int8_gemm_dequant.register_fake
@@ -848,6 +850,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         M: int,
         N: int,
         output_dtype: torch.dtype,
+        trans_weight: bool = False,
     ) -> torch.Tensor:
         return torch.zeros((M, N), dtype=output_dtype, device=a.device)
 

@@ -4,7 +4,6 @@ from torch.distributed.tensor import DTensor
 
 from mojo_opset.backends.ttx.kernels import int8_gemm_dequant
 from mojo_opset.backends.ttx.kernels import m_grouped_matmul
-from mojo_opset.backends.ttx.kernels import prepare_b
 from mojo_opset.backends.ttx.kernels import quant_batch_gemm_reduce_sum_impl
 from mojo_opset.core import MojoQuantGemm
 from mojo_opset.core import MojoGroupGemm
@@ -24,26 +23,23 @@ class TTXQuantGemm(MojoQuantGemm):
 
     def forward(self, input: torch.Tensor, input_scale: torch.Tensor) -> torch.Tensor:
         weight = self.weight
-        if self.trans_weight:
-            weight = weight.t().contiguous()
 
         M, K = input.shape
-        K_w, N = weight.shape
-
-        bt = prepare_b(weight)
-
-        if not input.is_contiguous():
-            input = input.contiguous()
+        if self.trans_weight:
+            N, K_w = weight.shape
+        else:
+            K_w, N = weight.shape
 
         return int8_gemm_dequant(
             input,
-            bt,
+            weight,
             input_scale.flatten().float(),
             self.weight_scale.flatten().float(),
             None,  # no bias.
             M,
             N,
             self.output_dtype,
+            self.trans_weight,
         )
 
 

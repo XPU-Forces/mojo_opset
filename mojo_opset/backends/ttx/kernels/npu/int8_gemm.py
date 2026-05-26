@@ -136,13 +136,14 @@ def prepare_b(b: torch.Tensor) -> torch.Tensor:
 
 def int8_gemm_dequant_impl(
     a: torch.Tensor,
-    b_transposed: torch.Tensor,
+    b: torch.Tensor,
     input_scale: torch.Tensor,
     weight_scale: torch.Tensor,
     bias: torch.Tensor,
     M_orig: int,
     N_orig: int,
     output_dtype: torch.dtype,
+    trans_weight: bool = False,
 ) -> torch.Tensor:
     """Fused Triton INT8 GEMM + dequantization.
 
@@ -150,17 +151,27 @@ def int8_gemm_dequant_impl(
 
     Args:
         a: (M, K) int8, contiguous
-        b_transposed: (N_padded, K_padded) int8, from prepare_b
+        b: int8 weight tensor. Layout depends on ``trans_weight``:
+            - ``trans_weight=True``: ``(N, K)`` (kernel-native layout, may be
+              pre-padded by :func:`prepare_b`; remaining padding is handled here)
+            - ``trans_weight=False``: ``(K, N)`` (will be transposed + padded via
+              :func:`prepare_b` internally)
         input_scale: (M,) float32, per-token scale
         weight_scale: (N,) float32, per-channel scale
         bias: (N,) output_dtype or None
         M_orig: original M before padding
         N_orig: original N before padding
         output_dtype: torch.float16 / torch.bfloat16 / torch.float32
+        trans_weight: layout flag for ``b`` (see above). Defaults to False.
 
     Returns:
         c: (M_orig, N_orig) in output_dtype
     """
+    if not trans_weight:
+        b_transposed = prepare_b(b)
+    else:
+        b_transposed = b
+
     M, K = a.shape
     num_sms = get_num_cores("cube")
 
