@@ -38,15 +38,15 @@ def _union_unique_bitmap_kernel(
     for task_sub in range(tasks_per_prog):
         g = pid * tasks_per_prog + task_sub
         if g < G:
-            s_count = tl.load(seq_len_flat_ptr + g).to(tl.int32)
+            s_count = tl.load(seq_len_flat_ptr + g)
             if s_count == 0:
                 tl.store(group_union_seq_len_ptr + g, 0)
             else:
-                qid = tl.load(group_qid_ptr + g).to(tl.int32)
-                base_kv = tl.load(base_kv_len_ptr + qid).to(tl.int32)
-                req_start = tl.load(cumsum_q_len_ptr + qid).to(tl.int32)
+                qid = tl.load(group_qid_ptr + g)
+                base_kv = tl.load(base_kv_len_ptr + qid)
+                req_start = tl.load(cumsum_q_len_ptr + qid)
                 if qid + 1 < cumsum_q_len_len:
-                    req_end = tl.load(cumsum_q_len_ptr + qid + 1).to(tl.int32)
+                    req_end = tl.load(cumsum_q_len_ptr + qid + 1)
                 else:
                     req_end = req_start
                 total_kv_len = base_kv + (req_end - req_start)
@@ -66,7 +66,7 @@ def _union_unique_bitmap_kernel(
                             + g * stride_idx_g
                             + h_idx * stride_idx_h
                             + k_idx * stride_idx_k,
-                        ).to(tl.int32)
+                        )
                         if bid >= 0:
                             if bid < max_valid_block:
                                 word_idx = bid >> 5
@@ -240,7 +240,7 @@ def _gather_kv_to_wksp(
     group, hkv, qid, s_count, total_kv_len,
     beg_blk, cur_blk, wksp_id, kv_offset,
 ):
-    offs_sbs = tl.arange(0, sparse_block_size)
+    offs_sbs = tl.arange(0, sparse_block_size).to(tl.int32)
     wk_base_k = wksp_id * stride_wk_slot + kv_offset * stride_wk_kv
     wk_base_v = wksp_id * stride_wv_slot + kv_offset * stride_wv_kv
     wk_base_p = wksp_id * stride_wp_slot + kv_offset * stride_wp_kv
@@ -251,7 +251,7 @@ def _gather_kv_to_wksp(
             logical_blk = tl.load(
                 group_indices_ptr + group * stride_gi_g
                 + blk_idx * stride_gi_k,
-            ).to(tl.int32)
+            )
             if logical_blk >= 0:
                 token_start = logical_blk * sparse_block_size
                 offs_token = token_start + offs_sbs
@@ -260,7 +260,7 @@ def _gather_kv_to_wksp(
                 page_offsets = offs_token - page_ids * cache_block_size
                 phys_pages = tl.load(
                     block_tables_ptr + qid * stride_bt_req + page_ids * stride_bt_blk,
-                ).to(tl.int32)
+                )
                 valid_pages = phys_pages >= 0
                 ws_offs_token = j * sparse_block_size + offs_sbs
                 tl.store(
@@ -345,34 +345,34 @@ def _sals_sfa_fwd_kernel(
         if task < G * num_kv_heads:
             group = task // num_kv_heads
             hkv = task % num_kv_heads
-            qid = tl.load(group_qid_ptr + group).to(tl.int32)
-            q_start = tl.load(group_q_start_ptr + group).to(tl.int32)
-            q_len = tl.load(group_q_len_ptr + group).to(tl.int32)
-            s_count = tl.load(seq_len_flat_ptr + group).to(tl.int32)
+            qid = tl.load(group_qid_ptr + group)
+            q_start = tl.load(group_q_start_ptr + group)
+            q_len = tl.load(group_q_len_ptr + group)
+            s_count = tl.load(seq_len_flat_ptr + group)
             should_process = (q_len > 0) & (q_start < T) & (s_count > 0)
             if HAS_USEDENSE:
-                use_dense = tl.load(group_use_dense_ptr + group).to(tl.int32)
+                use_dense = tl.load(group_use_dense_ptr + group)
                 should_process = should_process & (use_dense != 1)
             q_end = q_start + q_len
             if q_end > T:
                 q_end = T
             actual_q_len = q_end - q_start
             should_process = should_process & (actual_q_len > 0)
-            req_start = tl.load(cumsum_q_len_ptr + qid).to(tl.int32)
+            req_start = tl.load(cumsum_q_len_ptr + qid)
             if qid + 1 < cumsum_q_len_len:
-                req_end = tl.load(cumsum_q_len_ptr + qid + 1).to(tl.int32)
+                req_end = tl.load(cumsum_q_len_ptr + qid + 1)
             else:
                 req_end = req_start
             q_len_req = req_end - req_start
             start_in_req = q_start - req_start
-            base_kv = tl.load(base_kv_len_ptr + qid).to(tl.int32)
+            base_kv = tl.load(base_kv_len_ptr + qid)
             total_kv_len = base_kv + q_len_req
 
             if should_process:
                 num_q_tiles = tl.cdiv(actual_q_len, BLOCK_Q)
                 num_blk_batches = tl.cdiv(s_count, BLOCK_RS2)
                 wksp_id = pid
-                offs_kv = tl.arange(0, BLOCK_KV)
+                offs_kv = tl.arange(0, BLOCK_KV).to(tl.int32)
 
                 for blk_batch in range(num_blk_batches):
                     beg_blk = blk_batch * BLOCK_RS2
@@ -430,9 +430,9 @@ def _sals_sfa_fwd_kernel(
                     o_base = q_start * stride_o_t + hq * stride_o_h
 
                     for q_tile in range(num_q_tiles):
-                        q_offs = q_tile * BLOCK_Q + tl.arange(0, BLOCK_Q)
+                        q_offs = (q_tile * BLOCK_Q) + tl.arange(0, BLOCK_Q).to(tl.int32)
                         mask_q = q_offs < actual_q_len
-                        causal_thresh = (base_kv + start_in_req + q_offs).to(tl.int32)
+                        causal_thresh = base_kv + start_in_req + q_offs
                         m_i = tl.zeros([BLOCK_Q], dtype=tl.float32) + float('-inf')
                         l_i = tl.zeros([BLOCK_Q], dtype=tl.float32)
                         o_i = tl.zeros([BLOCK_Q, head_dim], dtype=tl.float32)
@@ -466,7 +466,7 @@ def _sals_sfa_fwd_kernel(
                             scores = tl.where(valid_kv, scores, float('-inf'))
                             scores = tl.where(mask_q[:, None], scores, float('-inf'))
                             scores = tl.where(causal_mask, float('-inf'), scores)
-                            row_max_j = tl.max(scores, axis=1)
+                            row_max_j = tl.max(scores, axis=1,propagate_nan=tl.PropagateNan.ALL)
                             m_new = tl.maximum(m_i, row_max_j, propagate_nan=tl.PropagateNan.ALL)
                             alpha = tl.where(m_i > float('-inf'), tl.exp(m_i - m_new), 0.0)
                             p = tl.exp(scores - m_new[:, None])
@@ -618,5 +618,10 @@ def sals_sfa_impl(
         BLOCK_Q=BLOCK_Q, BLOCK_RS2=BLOCK_RS2,
         multibuffer=True,
         enable_ubuf_saving=True,
+        # unit_flag=True, 
+        # limit_auto_multi_buffer_only_for_local_buffer=False,
+        # set_workspace_multibuffer=4, 
+        # tile_mix_vector_loop=4,
+        # tile_mix_cube_loop=4,
     )
     return output
