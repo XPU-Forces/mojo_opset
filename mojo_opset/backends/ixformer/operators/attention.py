@@ -926,8 +926,35 @@ class IxformerPagedDecodeGQAWithKVDequant(MojoPagedDecodeGQAWithKVDequant):
             context_dtype=context_dtype,
             compute_dtype=compute_dtype,
         )
+
         if self.gqa_layout == "ABAB":
             raise NotImplementedError("IxformerPagedDecodeGQAWithKVDequant only supports AABB layout.")
+        self._dequant_key_buffer: Optional[torch.Tensor] = None
+        self._dequant_value_buffer: Optional[torch.Tensor] = None
+
+    def _get_dequant_buffers(
+        self,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        dtype: torch.dtype,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if (
+            self._dequant_key_buffer is None
+            or self._dequant_key_buffer.shape != key_cache.shape
+            or self._dequant_key_buffer.dtype != dtype
+            or self._dequant_key_buffer.device != key_cache.device
+        ):
+            self._dequant_key_buffer = torch.empty_like(key_cache, dtype=dtype)
+
+        if (
+            self._dequant_value_buffer is None
+            or self._dequant_value_buffer.shape != value_cache.shape
+            or self._dequant_value_buffer.dtype != dtype
+            or self._dequant_value_buffer.device != value_cache.device
+        ):
+            self._dequant_value_buffer = torch.empty_like(value_cache, dtype=dtype)
+
+        return self._dequant_key_buffer, self._dequant_value_buffer
 
     def forward(
         self,
@@ -1024,8 +1051,7 @@ class IxformerPagedDecodeGQAWithKVDequant(MojoPagedDecodeGQAWithKVDequant):
             softmax_scale = 1.0 / math.sqrt(head_dim)
 
         compute_dtype = self.compute_dtype if self.compute_dtype != torch.int8 else query.dtype
-        k_cache_fp = torch.empty_like(key_cache, dtype=compute_dtype)
-        v_cache_fp = torch.empty_like(value_cache, dtype=compute_dtype)
+        k_cache_fp, v_cache_fp = self._get_dequant_buffers(key_cache, value_cache, compute_dtype)
         output = torch.empty(batch_size, num_q_heads, head_dim, dtype=query.dtype, device=query.device)
 
         ixf_f.paged_kv_cache_dequant_decode(
@@ -1085,6 +1111,62 @@ class IxformerPagedDecodeSWAWithKVDequant(MojoPagedDecodeSWAWithKVDequant):
             raise ValueError(f"global_window_size must be >= 0, got {global_window_size}.")
         if local_window_size is not None and local_window_size < 0:
             raise ValueError(f"local_window_size must be >= 0, got {local_window_size}.")
+        self._dequant_key_buffer: Optional[torch.Tensor] = None
+        self._dequant_value_buffer: Optional[torch.Tensor] = None
+        self._dequant_out_kv_lens: Optional[torch.Tensor] = None
+        self._dequant_block_table_output: Optional[torch.Tensor] = None
+
+    def _get_dequant_buffers(
+        self,
+        batch_size: int,
+        max_num_blocks_per_seq: int,
+        num_kv_heads: int,
+        block_size: int,
+        head_dim: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        buf_shape = (batch_size * max_num_blocks_per_seq, num_kv_heads, block_size, head_dim)
+        if (
+            self._dequant_key_buffer is None
+            or self._dequant_key_buffer.shape != buf_shape
+            or self._dequant_key_buffer.dtype != dtype
+            or self._dequant_key_buffer.device != device
+        ):
+            self._dequant_key_buffer = torch.empty(buf_shape, dtype=dtype, device=device)
+
+        if (
+            self._dequant_value_buffer is None
+            or self._dequant_value_buffer.shape != buf_shape
+            or self._dequant_value_buffer.dtype != dtype
+            or self._dequant_value_buffer.device != device
+        ):
+            self._dequant_value_buffer = torch.empty(buf_shape, dtype=dtype, device=device)
+
+        if (
+            self._dequant_out_kv_lens is None
+            or self._dequant_out_kv_lens.shape != (batch_size,)
+            or self._dequant_out_kv_lens.dtype != torch.int32
+            or self._dequant_out_kv_lens.device != device
+        ):
+            self._dequant_out_kv_lens = torch.empty((batch_size,), dtype=torch.int32, device=device)
+
+        block_table_shape = (batch_size, max_num_blocks_per_seq)
+        if (
+            self._dequant_block_table_output is None
+            or self._dequant_block_table_output.shape != block_table_shape
+            or self._dequant_block_table_output.dtype != torch.int32
+            or self._dequant_block_table_output.device != device
+        ):
+            self._dequant_block_table_output = torch.empty(block_table_shape, dtype=torch.int32, device=device)
+
+        return (
+            self._dequant_key_buffer,
+            self._dequant_value_buffer,
+            self._dequant_out_kv_lens,
+            self._dequant_block_table_output,
+        )
 
     def forward(
         self,
@@ -1185,14 +1267,14 @@ class IxformerPagedDecodeSWAWithKVDequant(MojoPagedDecodeSWAWithKVDequant):
         max_num_blocks_per_seq = block_table.shape[1]
         compute_dtype = self.compute_dtype if self.compute_dtype != torch.int8 else query.dtype
 
-        k_buf = torch.empty(
-            (batch_size * max_num_blocks_per_seq, num_kv_heads, block_size, head_dim),
-            dtype=compute_dtype, device=key_cache.device,
-        )
-        v_buf = torch.empty_like(k_buf)
-        out_kv_lens = torch.empty((batch_size,), dtype=torch.int32, device=total_seq_lens.device)
-        block_table_output = torch.empty(
-            (batch_size, max_num_blocks_per_seq), dtype=torch.int32, device=block_table.device,
+        k_buf, v_buf, out_kv_lens, block_table_output = self._get_dequant_buffers(
+            batch_size,
+            max_num_blocks_per_seq,
+            num_kv_heads,
+            block_size,
+            head_dim,
+            compute_dtype,
+            key_cache.device,
         )
 
         ixf_f.paged_kv_cache_dequant_decode_window(
