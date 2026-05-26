@@ -33,17 +33,11 @@ class IxformerStaticQuant(MojoStaticQuant):
                 f"match scale shape {self.input_size}."
             )
 
-        scale = self.scale
         output = torch.empty_like(input, dtype=self.quant_dtype, device=input.device)
-        if scale.ndim > 1:
-            flat_hidden = scale.numel()
-            flat_input = input.reshape(-1, flat_hidden)
-            flat_output = output.reshape(-1, flat_hidden)
-            ixf_f.static_quant(flat_output, flat_input, scale.reshape(-1), self.quant_dtype)
-        else:
-            ixf_f.static_quant(output, input, scale, self.quant_dtype)
 
-        return output, scale
+        ixf_f.static_quant(output, input, self.scale, self.quant_dtype)
+
+        return output, self.scale
 
 class IxformerDynamicQuant(MojoDynamicQuant):
     supported_platforms_list = ["ilu"]

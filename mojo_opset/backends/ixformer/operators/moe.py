@@ -56,7 +56,6 @@ def _swizzle_weights_post_hook(module, incompatible_keys):
     """load_state_dict post-hook: convert int4/int8 weights from TN (checkpoint) to NN (ixformer) format."""
     device = module.up_proj_weight.device
     module.up_proj_quantize.inv_smooth_scale = torch.nn.Parameter(module.up_proj_quantize.inv_smooth_scale.data.to(dtype=torch.bfloat16))
-    module.down_proj_quantize.inv_smooth_scale = torch.nn.Parameter(module.down_proj_quantize.inv_smooth_scale.data.to(dtype=torch.bfloat16))
     
     if module.up_weight_dtype == "int4":
         N_up = module.intermediate_size * 2
@@ -305,6 +304,10 @@ class IxformerQuantExperts(MojoQuantExperts):
                 raise NotImplementedError(
                     f"IxformerQuantExperts: up_weight_dtype is 'int4' and up_quant_group_size must be 128, 256, 320, or 512, got {self.up_weight_dtype} and {self.up_quant_group_size}."
                 )
+            if self.hidden_size % self.up_quant_group_size != 0:
+                raise NotImplementedError(
+                    f"IxformerQuantExperts: up_weight_dtype is 'int4' and k (hidden_size) must be divisible by up_quant_group_size, got hidden_size={self.hidden_size} and up_quant_group_size={self.up_quant_group_size}."
+                )
             if self.intermediate_size * 2 < 256 or self.hidden_size < 256:
                 raise NotImplementedError(
                     f"IxformerQuantExperts: up_weight_dtype is 'int4' and intermediate_size * 2 must be >= 256, hidden_size must be >= 256, got {self.hidden_size} and {self.intermediate_size}."
@@ -313,6 +316,10 @@ class IxformerQuantExperts(MojoQuantExperts):
             if self.down_quant_group_size not in [128, 256, 320, 512]:
                 raise NotImplementedError(
                     f"IxformerQuantExperts: down_weight_dtype is 'int4' and down_quant_group_size must be 128, 256, 320, or 512, got {self.down_weight_dtype} and {self.down_quant_group_size}."
+                )
+            if self.intermediate_size % self.down_quant_group_size != 0:
+                raise NotImplementedError(
+                    f"IxformerQuantExperts: down_weight_dtype is 'int4' and k (intermediate_size) must be divisible by down_quant_group_size, got intermediate_size={self.intermediate_size} and down_quant_group_size={self.down_quant_group_size}."
                 )
             if self.intermediate_size < 256 or self.hidden_size < 256:
                 raise NotImplementedError(
@@ -567,9 +574,6 @@ class IxformerQuantMoE(MojoQuantMoE):
         if hidden_states.dtype == torch.float16:
             self.experts.up_proj_quantize.inv_smooth_scale = torch.nn.Parameter(
                 self.experts.up_proj_quantize.inv_smooth_scale.to(dtype=torch.float32)
-            )
-            self.experts.down_proj_quantize.inv_smooth_scale = torch.nn.Parameter(
-                self.experts.down_proj_quantize.inv_smooth_scale.to(dtype=torch.float32)
             )
 
         i8_hs, sorted_token_ids, src_to_dst, tokens_per_expert, quant_scale = self.dispatch(

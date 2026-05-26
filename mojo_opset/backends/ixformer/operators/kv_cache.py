@@ -4,6 +4,7 @@ import torch
 from ixformer import functions as ixf_f
 
 from mojo_opset.core import MojoStorePagedKVCache
+from mojo_opset.core.operators.kv_cache import assert_paged_kv_store_contract
 
 class IxformerStorePagedKVCache(MojoStorePagedKVCache):
     supported_platforms_list = ["ilu"]
@@ -38,9 +39,8 @@ class IxformerStorePagedKVCache(MojoStorePagedKVCache):
                 prefill with shape (batch_size + 1,). None indicates decode mode.
             context_kv_lens (torch.Tensor | None): Existing KV lengths before storing
                 the current tokens, shape (batch_size,). Padding entries use -1.
-            chunk_metadata (torch.Tensor | None): Optional optimized precomputed metadata.
-                Ixformer does not provide a dedicated kernel for this path and
-                falls back to the base implementation.
+            chunk_metadata (torch.Tensor | None): Optional precomputed store plan with shape
+                (num_chunks, 4) and per-row (src_token_start, dst_block_id, dst_block_offset, chunk_len).
 
         Returns:
             Tuple[torch.Tensor, torch.Tensor]: Updated key_cache and value_cache.
@@ -53,13 +53,17 @@ class IxformerStorePagedKVCache(MojoStorePagedKVCache):
             raise ValueError("IxformerStorePagedKVCache requires all key/value tensors to have the same dtype.")
 
         if chunk_metadata is not None:
-            return super().forward(
+            assert_paged_kv_store_contract(chunk_metadata)
+            if chunk_metadata.shape[0] == 0:
+                return key_cache, value_cache
+            ixf_f.paged_store_kv_cache_with_chunk_metadata(
                 key_states,
                 value_states,
                 key_cache,
                 value_cache,
-                chunk_metadata=chunk_metadata,
+                chunk_metadata,
             )
+            return key_cache, value_cache
 
         if block_table is None or context_kv_lens is None:
             raise ValueError("block_table and context_kv_lens are required when chunk_metadata is not provided.")
