@@ -394,6 +394,8 @@ class TTXPagedDecodeSWAWithKVDequant(MojoPagedDecodeSWAWithKVDequant):
         total_seq_lens: torch.Tensor,
         block_table: torch.Tensor,
         softmax_scale: Optional[float] = None,
+        *,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         assert query_scale is None, "[TTXPagedDecodeSWAWithKVDequant] quantized query is not supported"
         assert total_seq_lens.dtype == torch.int32

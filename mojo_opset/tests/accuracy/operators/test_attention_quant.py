@@ -382,6 +382,7 @@ def test_paged_decode_gqa_with_kv_dequant(
         total_seq_lens,
         block_tables,
         softmax_scale=softmax_scale,
+        max_total_seq_len=max_total_seq_len,
         atol=atol,
         rtol=rtol,
     )
@@ -611,6 +612,7 @@ def test_paged_decode_swa_with_kv_dequant(
         total_seq_lens,
         block_tables,
         softmax_scale=softmax_scale,
+        max_total_seq_len=max_total_seq_len,
         atol=atol,
         rtol=rtol,
         ptol=0.90,

@@ -1040,6 +1040,8 @@ class MojoPagedDecodeSWAWithKVDequant(MojoOperator):
         total_seq_lens: torch.Tensor,  # [bsz]
         block_table: torch.Tensor,  # [bsz, max_num_blocks]
         softmax_scale: Optional[float] = None,
+        *,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Paged decode attention with Sliding-Window (SWA) using a blocked KV cache.
