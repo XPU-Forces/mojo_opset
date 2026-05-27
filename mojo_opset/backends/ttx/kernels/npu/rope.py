@@ -67,6 +67,7 @@ def prepare_chunk_indices(
     return torch.stack([seq_ids, chunk_indices, seq_start_per_block, sin_cos_offset_per_block, lens[seq_ids]], dim=1)
 
 
+import triton.language.extra.cann.extension as al
 @triton.jit
 def _compute_rope(
     x,
@@ -77,8 +78,8 @@ def _compute_rope(
     TOKEN_BLOCK_SIZE: tl.constexpr,
     inverse: tl.constexpr,
 ):
-    x1 = tl.extract_slice(x, [0, 0, 0], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
-    x2 = tl.extract_slice(x, [0, 0, half_rope_dim], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
+    x1 = al.extract_slice(x, [0, 0, 0], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
+    x2 = al.extract_slice(x, [0, 0, half_rope_dim], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
 
     if inverse:
         roped_x1 = x1 * cos_tile + x2 * sin_tile
@@ -87,8 +88,8 @@ def _compute_rope(
         roped_x1 = x1 * cos_tile - x2 * sin_tile
         roped_x2 = x2 * cos_tile + x1 * sin_tile
 
-    x = tl.insert_slice(x, roped_x1, [0, 0, 0], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
-    x = tl.insert_slice(
+    x = al.insert_slice(x, roped_x1, [0, 0, 0], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
+    x = al.insert_slice(
         x,
         roped_x2,
         [0, 0, half_rope_dim],
@@ -178,12 +179,25 @@ def _rot_pos_embed_kernel(
         )
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"TOKEN_BLOCK_SIZE": 1}),
+        triton.Config({"TOKEN_BLOCK_SIZE": 2}),
+        triton.Config({"TOKEN_BLOCK_SIZE": 4}),
+        triton.Config({"TOKEN_BLOCK_SIZE": 8}),
+        triton.Config({"TOKEN_BLOCK_SIZE": 16}),
+        triton.Config({"TOKEN_BLOCK_SIZE": 32}),
+    ],
+    key=["n_qh", "n_kh"],
+)
 @triton.jit(do_not_specialize=["seq_len"])
 def _rope_inplace_kernel(
     q_ptr,
+    q_out_ptr,
     q_batch_stride,
     q_seq_stride,
     k_ptr,
+    k_out_ptr,
     k_batch_stride,
     k_seq_stride,
     cos_ptr,
@@ -193,7 +207,7 @@ def _rope_inplace_kernel(
     sin_batch_stride,
     sin_seq_stride,
     seq_len,
-    num_seq_blocks,
+    # num_seq_blocks,
     bs,
     n_qh: tl.constexpr,
     n_kh: tl.constexpr,
@@ -208,6 +222,7 @@ def _rope_inplace_kernel(
     pid = tl.program_id(axis=0)
     grid_size = tl.num_programs(axis=0)
 
+    num_seq_blocks = (seq_len + TOKEN_BLOCK_SIZE -1) // TOKEN_BLOCK_SIZE
     total_blocks = bs * num_seq_blocks
 
     for block_id in range(pid, total_blocks, grid_size):
@@ -247,19 +262,6 @@ def _rope_inplace_kernel(
             rope_dim_offsets = tl.arange(0, rope_dim)
             rope_dim_mask = rope_dim_offsets < rope_dim
 
-            q_offsets = (
-                batch_idx * q_batch_stride
-                + global_seq_offsets[:, None, None] * q_seq_stride
-                + head_q_offsets[None, :, None] * head_dim
-                + nope_dim
-                + rope_dim_offsets[None, None, :]
-            )
-            q_mask = seq_mask[:, None, None] & (head_q_offsets[None, :, None] < n_qh) & rope_dim_mask[None, None, :]
-
-            q_tile = tl.load(q_ptr + q_offsets, mask=q_mask, other=0.0).to(sin_block_2d.dtype)
-            q_tile = _compute_rope(q_tile, sin_tile, cos_tile, n_qh, half_rope_dim, TOKEN_BLOCK_SIZE, INVERSE)
-            tl.store(q_ptr + q_offsets, q_tile, mask=q_mask)
-
             k_offsets = (
                 batch_idx * k_batch_stride
                 + global_seq_offsets[:, None, None] * k_seq_stride
@@ -271,7 +273,20 @@ def _rope_inplace_kernel(
 
             k_tile = tl.load(k_ptr + k_offsets, mask=k_mask, other=0).to(sin_block_2d.dtype)
             k_tile = _compute_rope(k_tile, sin_tile, cos_tile, n_kh, half_rope_dim, TOKEN_BLOCK_SIZE, INVERSE)
-            tl.store(k_ptr + k_offsets, k_tile, mask=k_mask)
+            tl.store(k_out_ptr + k_offsets, k_tile, mask=k_mask)
+
+            q_offsets = (
+                batch_idx * q_batch_stride
+                + global_seq_offsets[:, None, None] * q_seq_stride
+                + head_q_offsets[None, :, None] * head_dim
+                + nope_dim
+                + rope_dim_offsets[None, None, :]
+            )
+            q_mask = seq_mask[:, None, None] & (head_q_offsets[None, :, None] < n_qh) & rope_dim_mask[None, None, :]
+
+            q_tile = tl.load(q_ptr + q_offsets, mask=q_mask, other=0.0).to(sin_block_2d.dtype)
+            q_tile = _compute_rope(q_tile, sin_tile, cos_tile, n_qh, half_rope_dim, TOKEN_BLOCK_SIZE, INVERSE)
+            tl.store(q_out_ptr + q_offsets, q_tile, mask=q_mask)
         else:
             q_offsets_half1 = (
                 batch_idx * q_batch_stride
@@ -295,8 +310,8 @@ def _rope_inplace_kernel(
             q_tile_1 = tl.load(q_ptr + q_offsets_half1, mask=q_half_mask, other=0.0).to(sin_block_2d.dtype)
             q_tile_2 = tl.load(q_ptr + q_offsets_half2, mask=q_half_mask, other=0.0).to(sin_block_2d.dtype)
             new_q_1, new_q_2 = _compute_rope_separated(q_tile_1, q_tile_2, sin_tile, cos_tile, INVERSE)
-            tl.store(q_ptr + q_offsets_half1, new_q_1, mask=q_half_mask)
-            tl.store(q_ptr + q_offsets_half2, new_q_2, mask=q_half_mask)
+            tl.store(q_out_ptr + q_offsets_half1, new_q_1, mask=q_half_mask)
+            tl.store(q_out_ptr + q_offsets_half2, new_q_2, mask=q_half_mask)
 
             k_offsets_half1 = (
                 batch_idx * k_batch_stride
@@ -320,8 +335,8 @@ def _rope_inplace_kernel(
             k_tile_1 = tl.load(k_ptr + k_offsets_half1, mask=k_half_mask, other=0.0).to(sin_block_2d.dtype)
             k_tile_2 = tl.load(k_ptr + k_offsets_half2, mask=k_half_mask, other=0.0).to(sin_block_2d.dtype)
             new_k_1, new_k_2 = _compute_rope_separated(k_tile_1, k_tile_2, sin_tile, cos_tile, INVERSE)
-            tl.store(k_ptr + k_offsets_half1, new_k_1, mask=k_half_mask)
-            tl.store(k_ptr + k_offsets_half2, new_k_2, mask=k_half_mask)
+            tl.store(k_out_ptr + k_offsets_half1, new_k_1, mask=k_half_mask)
+            tl.store(k_out_ptr + k_offsets_half2, new_k_2, mask=k_half_mask)
 
 
 def _normalize_to_bsnd(
@@ -443,8 +458,8 @@ def rope_fwd_impl(
     half_rope_dim = rope_dim // 2
 
     is_aligned = _is_half_rope_dim_aligned(half_rope_dim)
-    token_block_size = _get_token_block_size(n_q_head, n_kv_head)
-    num_seq_blocks = (seq_len + token_block_size - 1) // token_block_size
+    # token_block_size = _get_token_block_size(n_q_head, n_kv_head)
+    # num_seq_blocks = (seq_len + token_block_size - 1) // token_block_size
 
     num_programs = get_num_cores()
     grid = (num_programs,)
@@ -458,11 +473,15 @@ def rope_fwd_impl(
         cos_batch_stride = 0
         sin_batch_stride = 0
 
+    q_out = torch.clone(q)
+    k_out = torch.clone(k)
     _rope_inplace_kernel[grid](
         q,
+        q_out,
         q_batch_stride,
         q_seq_stride,
         k,
+        k_out,
         k_batch_stride,
         k_seq_stride,
         cos,
@@ -472,7 +491,7 @@ def rope_fwd_impl(
         sin_batch_stride,
         sin.stride(-2),
         seq_len,
-        num_seq_blocks,
+        # num_seq_blocks,
         batch_size,
         n_q_head,
         n_kv_head,
@@ -480,17 +499,17 @@ def rope_fwd_impl(
         nope_dim,
         rope_dim,
         half_rope_dim,
-        token_block_size,
-        is_aligned,
-        False,
+        # token_block_size,
+        ALIGNED=is_aligned,
+        INVERSE=False,
     )
 
     if head_first:
-        q = q.transpose(-2, -3).contiguous()
-        k = k.transpose(-2, -3).contiguous()
-    q = q.reshape(*orig_q_shape)
-    k = k.reshape(*orig_k_shape)
-    return q, k
+        q_out = q_out.transpose(-2, -3).contiguous()
+        k_out = k_out.transpose(-2, -3).contiguous()
+    q_out = q_out.reshape(*orig_q_shape)
+    k_out = k_out.reshape(*orig_k_shape)
+    return q_out, q_out
 
 
 def rope_bwd_impl(
