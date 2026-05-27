@@ -14,7 +14,7 @@ from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_torch_device
 
 
-SPARSE_BLOCK_SIZE = 16
+SPARSE_BLOCK_SIZE = 64
 HEAD_DIM = 128
 DEFAULT_SPARSE_RATIO = 0.25
 DEFAULT_FIXED_TAIL = 32
@@ -82,20 +82,40 @@ def _generate_sfa_data(num_query_heads, num_kv_heads, head_dim,
         group_q_start[i] = i * chunk_size
         group_q_len_t[i] = chunk_size if i < G - 1 else (q_seqlen - i * chunk_size)
 
+        ft, sort_n, topk, num_selected = 0, 0, 0, 0
         if max_blocks_needed > 0:
             ft = min(fixed_tail, max_blocks_needed)
             sort_n = max(max_blocks_needed - ft, 0)
             topk = max(1, int(sort_n * sparse_ratio + 0.5)) if sort_n > 0 else 0
             num_selected = min(topk + ft, max_blocks_needed, K)
-        else:
-            num_selected = 0
         if max_blocks_needed > 0 and num_selected > 0:
-            perm = torch.randperm(max_blocks_needed, device=device)[:num_selected]
-            actual = perm.shape[0]
+            if sort_n > 0 and num_selected > ft:
+                n_topk = min(topk, num_selected - ft, sort_n)
+            else:
+                n_topk = 0
+            n_recent = num_selected - n_topk
+
+            # topk part: random selection from sortable region [0, sort_n)
+            if n_topk > 0:
+                topk_perm = torch.randperm(sort_n, device=device, dtype=torch.int32)[:n_topk]
+            else:
+                topk_perm = torch.empty(0, dtype=torch.int32, device=device)
+
+            # recent part: contiguous blocks at the end [sort_n, sort_n + n_recent)
+            if n_recent > 0:
+                recent_idx = torch.arange(
+                    sort_n, sort_n + n_recent, device=device, dtype=torch.int32
+                )
+            else:
+                recent_idx = torch.empty(0, dtype=torch.int32, device=device)
+
+            idx = torch.cat([topk_perm, recent_idx])
+            pad_val = int(idx[-1].item()) if idx.numel() > 0 else 0
+
             for h in range(num_kv_heads):
-                indices_flat[i, h, :actual] = perm
-                if actual > 0 and actual < K:
-                    indices_flat[i, h, actual:] = perm[-1]
+                indices_flat[i, h, :num_selected] = idx
+                if num_selected < K:
+                    indices_flat[i, h, num_selected:] = pad_val
         seq_len_flat[i] = num_selected
 
     base_kv_len = torch.tensor([base_kv], dtype=torch.int32, device=device)

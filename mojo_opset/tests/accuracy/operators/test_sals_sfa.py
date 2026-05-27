@@ -17,7 +17,7 @@ from mojo_opset.utils.platform import get_torch_device
 from mojo_opset.tests.utils import auto_switch_platform, bypass_not_implemented
 
 
-SPARSE_BLOCK_SIZE = 16
+SPARSE_BLOCK_SIZE = 64
 HEAD_DIM = 128
 
 MODEL_SPECS = [
@@ -133,21 +133,43 @@ def _make_sfa_inputs(
         group_q_len_t[i] = chunk_size if i < G - 1 else (q_seqlen - i * chunk_size)
 
         max_logical_blocks = max_blocks_needed
+        ft, sort_n, topk, num_selected = 0, 0, 0, 0
         if max_logical_blocks > 0:
             ft = min(fixed_tail, max_logical_blocks)
             sort_n = max(max_logical_blocks - ft, 0)
             topk = max(1, int(sort_n * sparse_ratio + 0.5)) if sort_n > 0 else 0
             num_selected = min(topk + ft, max_logical_blocks, K)
-        else:
-            num_selected = 0
 
         if max_logical_blocks > 0 and num_selected > 0:
-            perm = torch.randperm(max_logical_blocks, device=device)[:num_selected]
-            actual = perm.shape[0]
+            if sort_n > 0 and num_selected > ft:
+                n_topk = min(topk, num_selected - ft, sort_n)
+            else:
+                n_topk = 0
+            n_recent = num_selected - n_topk
+
+            # topk part: random selection from sortable region [0, sort_n)
+            if n_topk > 0:
+                topk_perm = torch.randperm(
+                    sort_n, device=device, dtype=torch.int32
+                )[:n_topk]
+            else:
+                topk_perm = torch.empty(0, dtype=torch.int32, device=device)
+
+            # recent part: contiguous blocks at the end [sort_n, sort_n + n_recent)
+            if n_recent > 0:
+                recent_idx = torch.arange(
+                    sort_n, sort_n + n_recent, device=device, dtype=torch.int32
+                )
+            else:
+                recent_idx = torch.empty(0, dtype=torch.int32, device=device)
+
+            idx = torch.cat([topk_perm, recent_idx])
+            pad_val = int(idx[-1].item()) if idx.numel() > 0 else 0
+
             for h in range(num_kv_heads):
-                indices_flat[i, h, :actual] = perm
-                if actual > 0 and actual < K:
-                    indices_flat[i, h, actual:] = perm[-1]
+                indices_flat[i, h, :num_selected] = idx
+                if num_selected < K:
+                    indices_flat[i, h, num_selected:] = pad_val
         seq_len_flat[i] = num_selected
 
     return dict(
