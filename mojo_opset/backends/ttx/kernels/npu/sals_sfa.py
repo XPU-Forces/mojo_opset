@@ -171,22 +171,16 @@ def _union_unique_bitmap(
 
 @triton.jit
 def cube_qkt_sfa(
-    Q_ptr,
+    q,
     Wksp_K_ptr,
-    stride_q_t, stride_q_h, stride_q_d,
     stride_wk_slot, stride_wk_kv, stride_wk_d,
     head_dim: tl.constexpr,
-    offs_q,
     offs_kv,
-    q_base,
     wk_base,
     cur_kv,
 ):
     mask_kv = offs_kv < cur_kv
     offs_d = tl.arange(0, head_dim)
-    q = tl.load(
-        Q_ptr + q_base + offs_q[:, None] * stride_q_t + offs_d[None, :] * stride_q_d,
-    )
     k = tl.load(
         Wksp_K_ptr + wk_base + offs_kv[:, None] * stride_wk_kv + offs_d[None, :] * stride_wk_d,
         mask=mask_kv[:, None],
@@ -241,9 +235,19 @@ def _gather_kv_to_wksp(
     beg_blk, cur_blk, wksp_id, kv_offset,
 ):
     offs_sbs = tl.arange(0, sparse_block_size).to(tl.int32)
+    offs_d = tl.arange(0, head_dim)
     wk_base_k = wksp_id * stride_wk_slot + kv_offset * stride_wk_kv
     wk_base_v = wksp_id * stride_wv_slot + kv_offset * stride_wv_kv
     wk_base_p = wksp_id * stride_wp_slot + kv_offset * stride_wp_kv
+
+    if HAS_KSCALES:
+        k_scale = tl.load(
+            k_scales_ptr + hkv * stride_ks_h + offs_d[None, :] * stride_ks_d,
+        )
+    if HAS_VSCALES:
+        v_scale = tl.load(
+            v_scales_ptr + hkv * stride_vs_h + offs_d[None, :] * stride_vs_d,
+        )
 
     for j in range(BLOCK_RS2):
         blk_idx = beg_blk + j
@@ -268,7 +272,6 @@ def _gather_kv_to_wksp(
                     offs_token, mask=mask_token & valid_pages,
                 )
 
-                offs_d = tl.arange(0, head_dim)
                 if cache_layout == 0:
                     k_offset = (phys_pages[:, None] * stride_kc_blk + hkv * stride_kc_h
                                 + page_offsets[:, None] * stride_kc_s + offs_d[None, :] * stride_kc_d)
@@ -283,14 +286,8 @@ def _gather_kv_to_wksp(
                 k_vals = tl.load(K_cache_ptr + k_offset, mask=combined_mask)
                 v_vals = tl.load(V_cache_ptr + v_offset, mask=combined_mask)
                 if HAS_KSCALES:
-                    k_scale = tl.load(
-                        k_scales_ptr + hkv * stride_ks_h + offs_d[None, :] * stride_ks_d,
-                    )
                     k_vals = (k_vals.to(tl.float32) * k_scale).to(k_vals.dtype)
                 if HAS_VSCALES:
-                    v_scale = tl.load(
-                        v_scales_ptr + hkv * stride_vs_h + offs_d[None, :] * stride_vs_d,
-                    )
                     v_vals = (v_vals.to(tl.float32) * v_scale).to(v_vals.dtype)
                 tl.store(
                     Wksp_K_ptr + wk_base_k + ws_offs_token[:, None] * stride_wk_kv
@@ -437,6 +434,11 @@ def _sals_sfa_fwd_kernel(
                         l_i = tl.zeros([BLOCK_Q], dtype=tl.float32)
                         o_i = tl.zeros([BLOCK_Q, head_dim], dtype=tl.float32)
 
+                        offs_d_q = tl.arange(0, head_dim)
+                        q_vec = tl.load(
+                            Q_ptr + q_base + q_offs[:, None] * stride_q_t + offs_d_q[None, :] * stride_q_d,
+                        )
+
                         for blk_batch in range(num_blk_batches):
                             beg_blk = blk_batch * BLOCK_RS2
                             cur_blk = s_count - beg_blk
@@ -455,11 +457,10 @@ def _sals_sfa_fwd_kernel(
                             )
                             valid_kv = (offs_kv < cur_kv) & (token_pos >= 0) & (token_pos < total_kv_len)
                             scores = cube_qkt_sfa(
-                                Q_ptr, Wksp_K_ptr,
-                                stride_q_t, stride_q_h, stride_q_d,
+                                q_vec, Wksp_K_ptr,
                                 stride_wk_slot, stride_wk_kv, stride_wk_d,
                                 head_dim,
-                                q_offs, offs_kv, q_base, wk_base_k, cur_kv,
+                                offs_kv, wk_base_k, cur_kv,
                             )
                             scores = scores * softmax_scale
                             attn_mask = valid_kv[None, :] & mask_q[:, None] & (token_pos[None, :] <= causal_thresh[:, None])
