@@ -1150,7 +1150,9 @@ def _swa_paged_prefill_with_kv_dequant_kernel(
     - MxN block matrix multiplication using tl.dot
     - Online softmax accumulation for better numerical stability
     - Reduced KV cache traversals (single pass instead of double pass)
+    - Page-first block_tables lookup (one indirection per physical page)
     """
+    tl.static_assert(PAGE_SIZE % BLOCK_N == 0, "BLOCK_N must divide PAGE_SIZE")
     pid = tl.program_id(0)
     n_programs = tl.num_programs(0)
     has_global_window = GLOBAL_WINDOW_SIZE is not None
@@ -1158,7 +1160,6 @@ def _swa_paged_prefill_with_kv_dequant_kernel(
 
     cu_q_chunks = 0
     q_offsets = tl.arange(0, BLOCK_M)
-    kv_offsets = tl.arange(0, BLOCK_N)
 
     for b_id in range(seqlens_kv_ptr.shape[0]):
         q_start = tl.load(cu_seqlens_q_ptr + b_id).to(tl.int32)
@@ -1209,6 +1210,8 @@ def _swa_paged_prefill_with_kv_dequant_kernel(
                 mask=tl.arange(0, BLOCK_D) < HEAD_DIM, other=0.0,
             )
 
+            q_quant_scale = tl.zeros((BLOCK_M,), dtype=tl.float32)
+            q_quant = q_block
             if COMPUTE_INT8:
                 q_scaled = (q_block * k_scale_vec).to(tl.bfloat16).to(tl.float32)
                 q_amax = tl.max(tl.abs(q_scaled), axis=1)
@@ -1234,8 +1237,6 @@ def _swa_paged_prefill_with_kv_dequant_kernel(
             else:
                 kv_loop_end = kv_seq_len
 
-            num_total_blocks = tl.cdiv(kv_loop_end, BLOCK_N)
-
             num_global_window_blocks, non_global_window_start_block, _ = _swa_split_blocks(
                 q_block_start + kv_computed_len,
                 q_block_len,
@@ -1246,7 +1247,14 @@ def _swa_paged_prefill_with_kv_dequant_kernel(
                 LOCAL_WINDOW_SIZE,
             )
 
-            for kv_block_id in range(num_total_blocks):
+            kv_offsets = tl.arange(0, BLOCK_N)
+            num_total_blocks = tl.cdiv(kv_loop_end, BLOCK_N)
+
+            # Only scan KV blocks that can contribute under SWA windows:
+            #   - global blocks: [0, num_global_window_blocks)
+            #   - local (non-global) blocks: [non_global_window_start_block, num_total_blocks)
+            # This avoids iterating over a large masked middle range for long sequences.
+            for kv_block_id in range(num_global_window_blocks):
                 kv_block_start = kv_block_id * BLOCK_N
                 kv_block_end = min(kv_block_start + BLOCK_N, kv_loop_end)
                 kv_block_len = kv_block_end - kv_block_start
@@ -1293,14 +1301,88 @@ def _swa_paged_prefill_with_kv_dequant_kernel(
                     k_dequant = k_block * k_scale_vec
                     qk = tl.dot(q_block, tl.trans(k_dequant)) * sm_scale
 
-                if mask is not None:
-                    qk = tl.where(mask, qk, -float("inf"))
+                qk = tl.where(mask, qk, -float("inf"))
 
                 m_ij = tl.maximum(m_i, tl.max(qk, 1))
                 qk = qk - m_ij[:, None]
                 p = tl.math.exp(qk)
-                if mask is not None:
-                    p = tl.where(mask, p, 0.0)
+                p = tl.where(mask, p, 0.0)
+
+                v_block_ptr = tl.make_block_ptr(
+                    base=v_cache_ptr
+                    + physical_page_id * stride_vb
+                    + kv_head_id * stride_vh
+                    + kv_block_start_in_page * stride_vn,
+                    shape=(kv_block_len, HEAD_DIM),
+                    strides=(stride_vn, stride_vd),
+                    offsets=(0, 0),
+                    block_shape=(BLOCK_N, BLOCK_D),
+                    order=(1, 0),
+                )
+                v_block = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+                if not COMPUTE_INT8:
+                    v_block = v_block * v_scale_vec
+
+                l_ij = tl.sum(p, 1)
+                alpha = tl.math.exp(m_i - m_ij)
+                l_i = l_i * alpha + l_ij
+                acc = acc * alpha[:, None]
+                acc = tl.dot(p, v_block, acc)
+                m_i = m_ij
+
+            for kv_block_id in range(non_global_window_start_block, num_total_blocks):
+                kv_block_start = kv_block_id * BLOCK_N
+                kv_block_end = min(kv_block_start + BLOCK_N, kv_loop_end)
+                kv_block_len = kv_block_end - kv_block_start
+                logical_page_id = kv_block_start // PAGE_SIZE
+                kv_block_start_in_page = kv_block_start % PAGE_SIZE
+                kv_pos = kv_block_start + kv_offsets
+                kv_valid = kv_pos < kv_loop_end
+
+                mask = q_valid[:, None] & kv_valid[None, :]
+                if IS_CAUSAL:
+                    causal_mask = q_abs[:, None] >= kv_pos[None, :]
+                    if has_global_window and has_local_window:
+                        local_mask = q_abs[:, None] <= (kv_pos + LOCAL_WINDOW_SIZE)[None, :]
+                        global_mask = kv_pos[None, :] < GLOBAL_WINDOW_SIZE
+                        mask = mask & causal_mask & (global_mask | local_mask)
+                    elif has_global_window:
+                        mask = mask & causal_mask & (kv_pos[None, :] < GLOBAL_WINDOW_SIZE)
+                    elif has_local_window:
+                        local_mask = q_abs[:, None] <= (kv_pos + LOCAL_WINDOW_SIZE)[None, :]
+                        mask = mask & causal_mask & local_mask
+                    else:
+                        mask = mask & causal_mask
+
+                physical_page_id = tl.load(
+                    block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
+                )
+
+                k_block_ptr = tl.make_block_ptr(
+                    base=k_cache_ptr
+                    + physical_page_id * stride_kb
+                    + kv_head_id * stride_kh
+                    + kv_block_start_in_page * stride_kn,
+                    shape=(kv_block_len, HEAD_DIM),
+                    strides=(stride_kn, stride_kd),
+                    offsets=(0, 0),
+                    block_shape=(BLOCK_N, BLOCK_D),
+                    order=(1, 0),
+                )
+                k_block = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+
+                if COMPUTE_INT8:
+                    qk = tl.dot(q_quant, tl.trans(k_block)) * q_quant_scale[:, None] * sm_scale
+                else:
+                    k_dequant = k_block * k_scale_vec
+                    qk = tl.dot(q_block, tl.trans(k_dequant)) * sm_scale
+
+                qk = tl.where(mask, qk, -float("inf"))
+
+                m_ij = tl.maximum(m_i, tl.max(qk, 1))
+                qk = qk - m_ij[:, None]
+                p = tl.math.exp(qk)
+                p = tl.where(mask, p, 0.0)
 
                 v_block_ptr = tl.make_block_ptr(
                     base=v_cache_ptr
@@ -1393,7 +1475,13 @@ def swa_paged_prefill_with_kv_dequant_impl(
     block_tables_i32 = block_tables.to(torch.int32)
 
     BLOCK_D = triton.next_power_of_2(head_dim)
-    BLOCK_N = min(128, triton.next_power_of_2(page_size))
+    # NOTE: Decouple KV tile width (BLOCK_N) from page_size to avoid large-N
+    # tiles reducing occupancy on ILU when page_size is large (e.g. 128).
+    # We still require BLOCK_N | PAGE_SIZE for correct paging math.
+    if page_size >= 128:
+        BLOCK_N = 64
+    else:
+        BLOCK_N = min(64, triton.next_power_of_2(page_size))
 
     if page_size % BLOCK_N != 0:
         raise ValueError(
@@ -1464,7 +1552,11 @@ def swa_paged_prefill_impl(
     batch_size = cu_q_lens.shape[0] - 1
     if seqlens_kv is None:
         seqlens_kv = cu_q_lens[1:] - cu_q_lens[:-1]
-    block_n = min(128, triton.next_power_of_2(block_size))
+    # Keep KV tile width modest for better occupancy; still must divide page size.
+    if block_size >= 128:
+        block_n = 64
+    else:
+        block_n = min(64, triton.next_power_of_2(block_size))
     if block_size % block_n != 0:
         raise ValueError(
             f"KV block_size ({block_size}) must be divisible by Triton tile size ({block_n}); "
