@@ -101,6 +101,7 @@ int8_gemm_dequant_impl = _get_kernel_impl(ttx_backend_module, "int8_gemm_dequant
 prepare_b_impl = _get_kernel_impl(ttx_backend_module, "prepare_b_impl")
 
 store_paged_kv_impl = _get_kernel_impl(ttx_backend_module, "store_paged_kv_impl")
+store_paged_kv_opt_impl = _get_kernel_impl(ttx_backend_module, "store_paged_kv_opt_impl")
 
 store_label_cache_infer_impl = _get_kernel_impl(ttx_backend_module, "store_label_cache_infer_impl")
 
@@ -964,6 +965,7 @@ else:
     int8_gemm_dequant = int8_gemm_dequant_impl
     prepare_b = prepare_b_impl
     store_paged_kv = store_paged_kv_impl
+    store_paged_kv_opt = store_paged_kv_opt_impl
     store_label_cache_infer = store_label_cache_infer_impl
     fused_penalties_temp = fused_penalties_temp_impl
     join_prob_reject_sampling = join_prob_reject_sampling_impl
