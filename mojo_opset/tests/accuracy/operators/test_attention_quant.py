@@ -1,5 +1,5 @@
 import math
-from typing import Optional
+from typing import Optional, Sequence, Tuple, Union
 
 import pytest
 import torch
@@ -8,6 +8,7 @@ from mojo_opset.experimental import MojoPagedDecodeGQAWithKVDequant
 from mojo_opset.experimental import MojoPagedDecodeSWAWithKVDequant
 from mojo_opset.experimental import MojoPagedPrefillGQAWithKVDequant
 from mojo_opset.experimental import MojoPagedPrefillSWAWithKVDequant
+from mojo_opset.experimental import MojoPagedPrefillSageGQA
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 
@@ -181,6 +182,94 @@ def generate_paged_prefill_quant_data(
     max_total_seq_lens = int(kv_lens.max().item()) if kv_lens.numel() > 0 else 0
     return query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens
 
+def get_scale_and_quant(
+    x: torch.Tensor,
+    scale: Optional[torch.Tensor],
+    quant_dims,
+    q_max: int = 127,
+    q_min: int = -128,
+    eps: float = 1e-6,
+    quant_dtype: torch.dtype = torch.int8,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    assert scale is None or isinstance(scale, torch.Tensor), \
+        f"scale must be None or Tensor, got {type(scale)}"
+
+    if scale is None:
+        scale = x.abs().amax(dim=quant_dims, keepdim=True).float() / q_max
+        scale = scale.clamp(min=eps)
+
+    q = torch.clamp(torch.round(x.float() / scale), q_min, q_max).to(quant_dtype)
+    return q, scale
+
+def per_block_int8(
+    x: torch.Tensor,
+    xm: Optional[torch.Tensor] = None,
+    scale: Optional[torch.Tensor] = None,
+    *,
+    blk: int = 16,
+    dim1: int = -2,
+    dim2: int = -1,
+    q_max: int = 127,
+    q_min: int = -128,
+):
+    if xm is not None:
+        x = x - xm
+    dim1_norm = dim1 % x.ndim
+    dim2_norm = dim2 % x.ndim
+
+    seq_len = x.shape[dim1_norm]
+    assert seq_len % blk == 0, (
+        f"per_block_int8: dim {dim1_norm} (size {seq_len}) must be divisible by blk={blk}"
+    )
+    num_blocks = seq_len // blk
+
+    # Reshape seq_dim from S into (S // blk, blk) so the inner ``blk`` axis
+    # can be reduced independently.
+    new_shape = (
+        list(x.shape[:dim1_norm])
+        + [num_blocks, blk]
+        + list(x.shape[dim1_norm + 1:])
+    )
+    x_reshaped = x.reshape(new_shape)
+
+    q, scale_kd = get_scale_and_quant(
+        x_reshaped,
+        scale,
+        quant_dims=(dim1_norm, dim2_norm),
+        q_max=q_max,
+        q_min=q_min,
+    )
+
+    q = q.reshape(x.shape)
+    scale_out = scale_kd.squeeze(dim1_norm + 1).repeat_interleave(num_blocks, dim=dim1_norm)
+    return q, scale_out
+
+
+def per_token_int8(
+    x: torch.Tensor,
+    xm: Optional[torch.Tensor] = None,
+    scale: Optional[torch.Tensor] = None,
+    *,
+    q_max: int = 127,
+    q_min: int = -128,
+):
+    if xm is not None:
+        x = x - xm
+    return get_scale_and_quant(x, scale, quant_dims=-1, q_max=q_max, q_min=q_min)
+
+
+def per_channel_int8(
+    x: torch.Tensor,
+    xm: Optional[torch.Tensor] = None,
+    scale: Optional[torch.Tensor] = None,
+    *,
+    seq_dim: Union[int, Sequence[int]] = 0,
+    q_max: int = 127,
+    q_min: int = -128,
+):
+    if xm is not None:
+        x = x - xm
+    return get_scale_and_quant(x, scale, quant_dims=seq_dim, q_max=q_max, q_min=q_min)
 
 # ===========================================================================
 # MojoPagedPrefillGQAWithKVDequant
@@ -613,6 +702,112 @@ def test_paged_decode_swa_with_kv_dequant(
         block_tables,
         softmax_scale=softmax_scale,
         max_total_seq_len=max_total_seq_len,
+        atol=atol,
+        rtol=rtol,
+        ptol=0.90,
+    )
+
+
+# ===========================================================================
+# MojoPagedPrefillSageGQA
+# ===========================================================================
+
+test_configs_prefill_sage_gqa = [
+    (2, 16, 4, 128, 1024, 0, 32, torch.bfloat16, "M_BF16"),
+    (2, 8, 2, 128, 1024, 0, 128, torch.bfloat16, "M_BF16_GROUP"),
+    (2, 8, 1, 128, 512, 1024, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
+]
+
+
+@pytest.mark.parametrize(
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens",
+    [
+        pytest.param(
+            *generate_paged_prefill_quant_data(
+                batch_size=B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_q_len=Q_LEN,
+                max_kv_computed_len=KV_COMPUTED_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            id=ID,
+        )
+        for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_prefill_sage_gqa
+    ],
+)
+@pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
+@pytest.mark.parametrize(
+    "query_dtype, context_dtype, compute_dtype",
+    [
+        (torch.int8, torch.int8, torch.int8),
+    ],
+)
+@auto_switch_platform()
+@bypass_not_implemented
+def test_paged_prefill_sage_gqa(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cu_q_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    cu_total_seq_lens: Optional[torch.Tensor],
+    max_q_lens: int,
+    max_total_seq_lens: int,
+    gqa_layout: str,
+    query_dtype: torch.dtype,
+    context_dtype: torch.dtype,
+    compute_dtype: torch.dtype,
+):
+    # Sage runs dynamic per-token int8 quant *inside* its forward, so the
+    # caller still passes float K/V cache and ``None`` scales — the dtype
+    # arguments only configure the operator's internal quant matmul path.
+    op = MojoPagedPrefillSageGQA(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+        query_dtype=query_dtype,
+        context_dtype=context_dtype,
+        compute_dtype=compute_dtype,
+    )
+    op_ref = MojoPagedPrefillSageGQA._registry.get("torch")(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+        query_dtype=query_dtype,
+        context_dtype=context_dtype,
+        compute_dtype=compute_dtype,
+    )
+
+    head_dim = query.shape[-1]
+    softmax_scale = 1.0 / math.sqrt(head_dim)
+
+    # q/k: per-token int8 (quant along last dim D)
+    # v:   per-channel int8 (scale shared across blocks and tokens, kept per [Hkv, D])
+    query_int8, query_scale = per_token_int8(query, q_max=127, q_min=-128)
+    key_cache_int8, key_scale = per_token_int8(k_cache, q_max=127, q_min=-128)
+    value_cache_int8, value_scale = per_channel_int8(v_cache, seq_dim=[0, 2], q_max=127, q_min=-128)
+    # forward expects: query_scale [Hq, T], key_scale [N_blocks, Hkv, block_size], value_scale [Hkv, D]
+    query_scale = query_scale.squeeze(-1).transpose(0, 1)
+    key_scale = key_scale.squeeze(-1)
+    value_scale = value_scale.squeeze(2).squeeze(0)
+
+    atol = 5e-2 if query.dtype != torch.float32 else 1e-5
+    rtol = 5e-2 if query.dtype != torch.float32 else 1e-6
+    op.forward_diff_with(
+        op_ref,
+        query_int8,
+        query_scale,
+        key_cache_int8,
+        key_scale,
+        value_cache_int8,
+        value_scale,
+        cu_q_lens,
+        block_tables,
+        softmax_scale=softmax_scale,
+        cu_total_seq_lens=cu_total_seq_lens,
+        max_q_lens=max_q_lens,
+        max_total_seq_lens=max_total_seq_lens,
         atol=atol,
         rtol=rtol,
         ptol=0.90,
