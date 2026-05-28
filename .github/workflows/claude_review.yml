@@ -1,0 +1,83 @@
+name: Claude PR Review
+on:
+  pull_request:
+    branches:
+    - master
+    - feat/*
+    - dev/*
+    - release/*
+    types: [ opened, synchronize, reopened ]
+    paths-ignore:
+    - 'CHANGELOG.md'
+    - 'README.md'
+    - 'docs/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  MOJO_OPSET_PROXY: ${{ secrets.MOJO_OPSET_PROXY }}
+
+jobs:
+  review:
+    name: Claude review
+    runs-on: NPU
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Pre-cleanup workspace
+        run: |
+          docker run --rm --user 0:0 --entrypoint bash \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            hub.byted.org/aicompiler/npu.ci.debian12:cann8.2.rc1_py3.11_th27 \
+            -c 'shopt -s dotglob nullglob; rm -rf /workspace/*; ls -la /workspace'
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Claude review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          OUTBOUND_PROXY: ${{ env.MOJO_OPSET_PROXY }}
+        run: |
+          docker run --rm --user 0:0 --entrypoint bash \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            -e GITHUB_TOKEN \
+            -e ANTHROPIC_AUTH_TOKEN \
+            -e PR_NUMBER \
+            -e BASE_SHA \
+            -e HEAD_SHA \
+            -e REPO \
+            -e OUTBOUND_PROXY \
+            hub.byted.org/aicompiler/npu.ci.debian12:cann8.2.rc1_py3.11_th27 \
+            -c '
+              set -euo pipefail
+              git config --global --add safe.directory /workspace
+              cd /workspace
+              # Run the version of the review script that exists at the PR base
+              # ref, not the PR head, so a PR cannot modify the script to
+              # exfiltrate secrets. Fall back to the PR version only if the
+              # script does not yet exist at base (first-time bootstrap).
+              if git cat-file -e "$BASE_SHA:.github/scripts/claude_review.py" 2>/dev/null; then
+                git show "$BASE_SHA:.github/scripts/claude_review.py" > /tmp/claude_review.py
+                echo "using review script from BASE_SHA=$BASE_SHA"
+                python3 /tmp/claude_review.py
+              else
+                echo "WARN: review script not present at BASE_SHA, using PR head version (bootstrap)"
+                python3 /workspace/.github/scripts/claude_review.py
+              fi
+            '

@@ -55,6 +55,8 @@ def _repack_int4_tn_to_nn(packed_tn: torch.Tensor, N: int, K: int) -> torch.Tens
 def _swizzle_weights_post_hook(module, incompatible_keys):
     """load_state_dict post-hook: convert int4/int8 weights from TN (checkpoint) to NN (ixformer) format."""
     device = module.up_proj_weight.device
+    module.up_proj_quantize.inv_smooth_scale = torch.nn.Parameter(module.up_proj_quantize.inv_smooth_scale.data.to(dtype=torch.bfloat16))
+    
     if module.up_weight_dtype == "int4":
         N_up = module.intermediate_size * 2
         K_up = module.hidden_size
@@ -111,6 +113,12 @@ class IxformerMoEDynamicQuant(MojoMoEDynamicQuant):
 class IxformerMoEDispatch(MojoMoEDispatch):
     supported_platforms_list = ["ilu"]
 
+    def __init__(self, num_experts: int, **kwargs):
+        super().__init__(num_experts, **kwargs)
+        self.gdr_device_buffer = torch.zeros([self.num_experts + 1], dtype=torch.int, device="cuda")
+        torch.cuda.synchronize()
+        self.gdr_buffer_ptr = ixf_f.new_gdr_buffer(self.gdr_device_buffer)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -134,7 +142,12 @@ class IxformerMoEDispatch(MojoMoEDispatch):
         (src_to_dst, 
          sorted_token_ids,
          expert_sizes_gpu, 
-         expert_sizes_cpu) = ixf_f.moe_compute_token_index(top_k_indices, self.num_experts)
+         expert_sizes_cpu) = ixf_f.moe_compute_token_index(top_k_indices, self.num_experts, gdr_buffer_ptr=self.gdr_buffer_ptr if not enable_cuda_graph else None)
+        
+        if not enable_cuda_graph:
+            tokens_per_expert = expert_sizes_cpu
+        else:
+            tokens_per_expert = expert_sizes_gpu
         
         expand_tokens = num_tokens * top_k
 
@@ -152,7 +165,7 @@ class IxformerMoEDispatch(MojoMoEDispatch):
                 i8_hidden_states.view(-1, dim),
                 sorted_token_ids,
                 src_to_dst,
-                expert_sizes_gpu,
+                tokens_per_expert,
                 quant_scale,
             )
         else:
@@ -168,8 +181,10 @@ class IxformerMoEDispatch(MojoMoEDispatch):
                 hidden_states.view(-1, dim),
                 sorted_token_ids,
                 src_to_dst,
-                expert_sizes_gpu,
+                tokens_per_expert,
             )
+    def __del__(self):
+        ixf_f.delete_gdr_buffer(self.gdr_buffer_ptr)
 
 
 class IxformerExperts(MojoExperts):
@@ -289,6 +304,10 @@ class IxformerQuantExperts(MojoQuantExperts):
                 raise NotImplementedError(
                     f"IxformerQuantExperts: up_weight_dtype is 'int4' and up_quant_group_size must be 128, 256, 320, or 512, got {self.up_weight_dtype} and {self.up_quant_group_size}."
                 )
+            if self.hidden_size % self.up_quant_group_size != 0:
+                raise NotImplementedError(
+                    f"IxformerQuantExperts: up_weight_dtype is 'int4' and k (hidden_size) must be divisible by up_quant_group_size, got hidden_size={self.hidden_size} and up_quant_group_size={self.up_quant_group_size}."
+                )
             if self.intermediate_size * 2 < 256 or self.hidden_size < 256:
                 raise NotImplementedError(
                     f"IxformerQuantExperts: up_weight_dtype is 'int4' and intermediate_size * 2 must be >= 256, hidden_size must be >= 256, got {self.hidden_size} and {self.intermediate_size}."
@@ -297,6 +316,10 @@ class IxformerQuantExperts(MojoQuantExperts):
             if self.down_quant_group_size not in [128, 256, 320, 512]:
                 raise NotImplementedError(
                     f"IxformerQuantExperts: down_weight_dtype is 'int4' and down_quant_group_size must be 128, 256, 320, or 512, got {self.down_weight_dtype} and {self.down_quant_group_size}."
+                )
+            if self.intermediate_size % self.down_quant_group_size != 0:
+                raise NotImplementedError(
+                    f"IxformerQuantExperts: down_weight_dtype is 'int4' and k (intermediate_size) must be divisible by down_quant_group_size, got intermediate_size={self.intermediate_size} and down_quant_group_size={self.down_quant_group_size}."
                 )
             if self.intermediate_size < 256 or self.hidden_size < 256:
                 raise NotImplementedError(
@@ -309,6 +332,13 @@ class IxformerQuantExperts(MojoQuantExperts):
         self.register_load_state_dict_post_hook(_swizzle_weights_post_hook)
         
         self.output_dtype = torch.bfloat16
+
+        if self.up_weight_dtype == "int4" and self.down_weight_dtype == "int4": 
+            self.gdr_device_buffer1 = torch.zeros([8 * 1024 * 1024], dtype=torch.int8, device="cuda")
+            self.gdr_device_buffer2 = torch.zeros([8 * 1024 * 1024], dtype=torch.int8, device="cuda")
+            torch.cuda.synchronize()
+            self.gdr_buffer_ptr1 = ixf_f.new_gdr_buffer(self.gdr_device_buffer1)
+            self.gdr_buffer_ptr2 = ixf_f.new_gdr_buffer(self.gdr_device_buffer2)
 
     def forward(self, 
                 sorted_hidden_states: torch.Tensor,
@@ -354,6 +384,7 @@ class IxformerQuantExperts(MojoQuantExperts):
                     format=0,
                     version=1,
                     group_size=self.up_quant_group_size,
+                    gdr_buffer_ptr=self.gdr_buffer_ptr1,
                 )
             else:
                 group_gemm_output1 = ixf_f.moe_w4a8_group_gemv(
@@ -421,6 +452,7 @@ class IxformerQuantExperts(MojoQuantExperts):
                     version=1,
                     group_size=self.down_quant_group_size,
                     output=group_gemm_output2,
+                    gdr_buffer_ptr=self.gdr_buffer_ptr2,
                 )
             else:
                 ixf_f.moe_w4a8_group_gemv(
@@ -440,6 +472,12 @@ class IxformerQuantExperts(MojoQuantExperts):
             raise NotImplementedError(f"IxformerQuantExperts: down_weight_dtype must be 'torch.int8' or 'int4', got {self.down_weight_dtype}.")
         
         return group_gemm_output2
+    
+    def __del__(self):
+        if hasattr(self, "gdr_buffer_ptr1"):
+            ixf_f.delete_gdr_buffer(self.gdr_buffer_ptr1)
+        if hasattr(self, "gdr_buffer_ptr2"):
+            ixf_f.delete_gdr_buffer(self.gdr_buffer_ptr2)
 
 
 class IxformerMoECombine(MojoMoECombine):
@@ -532,6 +570,11 @@ class IxformerQuantMoE(MojoQuantMoE):
             raise NotImplementedError(f"IxformerQuantMoE: hidden_states dtype must be 'torch.bfloat16' or 'torch.float16', got {hidden_states.dtype}.")
 
         top_k_indices, top_k_gates = self.gating(hidden_states)
+        
+        if hidden_states.dtype == torch.float16:
+            self.experts.up_proj_quantize.inv_smooth_scale = torch.nn.Parameter(
+                self.experts.up_proj_quantize.inv_smooth_scale.to(dtype=torch.float32)
+            )
 
         i8_hs, sorted_token_ids, src_to_dst, tokens_per_expert, quant_scale = self.dispatch(
             hidden_states,
@@ -540,9 +583,6 @@ class IxformerQuantMoE(MojoQuantMoE):
             weight_dtype=self.up_weight_dtype,
             enable_cuda_graph=enable_cuda_graph
         )
-
-        if not enable_cuda_graph:
-            tokens_per_expert = tokens_per_expert.cpu()
 
         expert_outputs = self.experts(
             i8_hs,

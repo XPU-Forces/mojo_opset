@@ -909,7 +909,7 @@ def _paged_decode_gather_and_causal(
     return o
 
 
-@triton.autotune(
+@smart_triton_autotune(
     configs=[
         triton.Config({"BLOCK_N": 64}, num_warps=4, num_stages=2),
         triton.Config({"BLOCK_N": 64}, num_warps=4, num_stages=3),
@@ -918,6 +918,7 @@ def _paged_decode_gather_and_causal(
         triton.Config({"BLOCK_N": 128}, num_warps=4, num_stages=3),
         triton.Config({"BLOCK_N": 128}, num_warps=8, num_stages=2),
     ],
+    selected_idx=0,
     key=["HQ", "D", "PAGE_SIZE", "COMPUTE_INT8"],
 )
 @libentry()
