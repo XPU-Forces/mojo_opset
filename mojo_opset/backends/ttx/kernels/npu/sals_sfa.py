@@ -294,11 +294,11 @@ def _gather_kv_to_wksp(
                     v_vals = (v_vals.to(tl.float32) * v_scale).to(v_vals.dtype)
                 tl.store(
                     Wksp_K_ptr + wk_base_k + ws_offs_token[:, None] * stride_wk_kv
-                    + offs_d[None, :] * stride_wk_d, k_vals, mask=combined_mask,
+                    + offs_d[None, :] * stride_wk_d, k_vals,
                 )
                 tl.store(
                     Wksp_V_ptr + wk_base_v + ws_offs_token[:, None] * stride_wv_kv
-                    + offs_d[None, :] * stride_wv_d, v_vals, mask=combined_mask,
+                    + offs_d[None, :] * stride_wv_d, v_vals,
                 )
 
 

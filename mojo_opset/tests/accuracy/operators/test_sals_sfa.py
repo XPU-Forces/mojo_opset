@@ -43,12 +43,14 @@ MODEL_SPECS = [
 #   base_kv ∈ {0, 1024, 2048}
 #   q_seqlen ∈ {8k, 10k, 16k, 24k, 32k}
 SCENARIOS = [
+    (8193,   128, 3,    4, 8,  64,  torch.float16),
     (8192,   128, 0,    4, 8,  64,  torch.float16),
     (8192,   256, 2048, 2, 16, 256, torch.bfloat16),
     (10240,  256, 0,    4, 8,  256, torch.float16),
     (16384,  128, 1024, 4, 16, 64,  torch.bfloat16),
     (16384,  256, 0,    2, 8,  64,  torch.float16),
     (24576,  128, 2048, 2, 16, 256, torch.bfloat16),
+    (32771,  256, 1027, 4, 8,  256, torch.float16),
     (32768,  256, 0,    4, 8,  256, torch.float16),
 ]
 
