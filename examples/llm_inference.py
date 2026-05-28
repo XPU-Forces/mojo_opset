@@ -142,7 +142,7 @@ def pad_batch(encoded, pad_token_id, device):
     input_ids = torch.full((len(encoded), max_len), pad_token_id, dtype=torch.long)
     attention_mask = torch.zeros((len(encoded), max_len), dtype=torch.bool)
     for idx, ids in enumerate(encoded):
-        flat = ids.squeeze(0).cpu()
+        flat = ids.squeeze(0)
         input_ids[idx, : flat.shape[0]] = flat
         attention_mask[idx, : flat.shape[0]] = True
     return input_ids.to(device), attention_mask.to(device), lengths.to(device)
@@ -995,9 +995,11 @@ def main():
         from transformers.modeling_utils import no_init_weights
         origin_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.bfloat16)
-        with no_init_weights():
-            model = model_class(hf_config, num_layers=args.num_layers, ep_size=ep_size, ep_rank=ep_rank)
-        torch.set_default_dtype(origin_dtype)
+        try:
+            with no_init_weights():
+                model = model_class(hf_config, num_layers=args.num_layers, ep_size=ep_size, ep_rank=ep_rank)
+        finally:
+            torch.set_default_dtype(origin_dtype)
         _mem_snapshot("after model construct (CPU)", npu_device_idx)
         model = model.to(f"npu:{npu_device_idx}").eval()
         _mem_snapshot("after model.to(npu)", npu_device_idx)

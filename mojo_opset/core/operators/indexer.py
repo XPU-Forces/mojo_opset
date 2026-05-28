@@ -448,12 +448,6 @@ class MojoQuantLightningIndexerMetadata(MojoOperator):
             device=query.device,
         )
 
-        index_score = torch.zeros(
-            (batch_size, q_seq_len, k_seq_len),
-            dtype=torch.float32,
-            device=query.device,
-        )
-
         for batch_id in range(batch_size):
             key_batch = key[batch_id].to(torch.float32)
             key_scale_batch = key_dequant_scale[batch_id].unsqueeze(-1) if key_quant_mode != 0 else torch.ones(k_seq_len, 1, device=key.device)

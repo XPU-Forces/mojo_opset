@@ -40,11 +40,11 @@ class AscendcQuantLightningIndexer(MojoQuantLightningIndexer):
     ):
         # Ensure tensors are contiguous as required by the operator
         # Use clone() to create a guaranteed contiguous copy
-        query = query.clone().contiguous()
-        key = key.clone().contiguous()
-        weights = weights.clone().contiguous() if weights is not None else None
-        query_dequant_scale = query_dequant_scale.clone().contiguous()
-        key_dequant_scale = key_dequant_scale.clone().contiguous()
+        query = query.contiguous()
+        key = key.contiguous()
+        weights = weights.contiguous() if weights is not None else None
+        query_dequant_scale = query_dequant_scale.contiguous()
+        key_dequant_scale = key_dequant_scale.contiguous()
         return torch.ops.custom.npu_quant_lightning_indexer(
             query, key, weights, query_dequant_scale, key_dequant_scale,
             query_quant_mode, key_quant_mode,
@@ -117,7 +117,8 @@ class AscendcSparseAttnSharedkvMetadata(MojoSparseAttnSharedkvMetadata):
         layout_kv: str = 'PA_ND',
         has_ori_kv: bool = True,
         has_cmp_kv: bool = False,
-        device: str = 'npu:0',
+        device: str = f"npu:{torch.npu.current_device()}",
+
     ):
         return torch.ops.custom.npu_sparse_attn_sharedkv_metadata(
             num_heads_q=num_heads_q,

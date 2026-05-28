@@ -109,7 +109,6 @@ class MojoMoEGatingTopK(MojoOperator):
 
         # Kernel's 3rd output is always present. Keep it to preserve the signature.
         norm_out_fp32 = original_norm_out.to(dtype=torch.float32)
-        if not out_flag:
-            return y_out, expert_idx_out, norm_out_fp32
+       
         return y_out, expert_idx_out, norm_out_fp32
 
