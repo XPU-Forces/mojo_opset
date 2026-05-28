@@ -16,36 +16,36 @@ def get_aux_mask():
             [
                 torch.cat(
                     [
-                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE, device="mlu").bool(),
-                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE, device="mlu").bool(),
+                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE, dtype=torch.bool, device="mlu"),
+                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE, dtype=torch.bool, device="mlu"),
                     ],
                     dim=1,
                 ),
                 torch.cat(
                     [
-                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE, device="mlu").tril().bool(),
-                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE, device="mlu").bool(),
+                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE, dtype=torch.bool, device="mlu").tril(),
+                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE, dtype=torch.bool, device="mlu"),
                     ],
                     dim=1,
                 ),
                 torch.cat(
                     [
-                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE, device="mlu").bool(),
-                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE, device="mlu").bool(),
+                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE, dtype=torch.bool, device="mlu"),
+                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE, dtype=torch.bool, device="mlu"),
                     ],
                     dim=1,
                 ),
                 torch.cat(
                     [
-                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE, device="mlu").triu().bool(),
-                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE, device="mlu").bool(),
+                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE, dtype=torch.bool, device="mlu").triu(),
+                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE, dtype=torch.bool, device="mlu"),
                     ],
                     dim=1,
                 ),
                 torch.cat(
                     [
-                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE, device="mlu").bool(),
-                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE, device="mlu").bool(),
+                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE, dtype=torch.bool, device="mlu"),
+                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE, dtype=torch.bool, device="mlu"),
                     ],
                     dim=1,
                 ),
