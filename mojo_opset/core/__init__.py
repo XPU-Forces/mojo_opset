@@ -23,7 +23,6 @@ from .operators.attention import MojoPagedPrefillSWA
 from .operators.attention import MojoPrefillGQA
 from .operators.attention import MojoSdpa
 from .operators.attention import MojoSWA
-from .operators.attention_gate import MojoAttnOutputGate
 
 """ kvcache """
 from .operators.kv_cache import MojoStorePagedKVCache
@@ -122,7 +121,6 @@ __all__ = [
     "MojoPagedPrefillSWA",
     "MojoPagedDecodeSWA",
     "MojoSWA",
-    "MojoAttnOutputGate",
 
     "MojoStorePagedKVCache",
 
