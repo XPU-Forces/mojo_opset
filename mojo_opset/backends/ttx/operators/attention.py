@@ -366,6 +366,14 @@ class TTXPagedDecodeSWA(MojoPagedDecodeSWA):
     ) -> torch.Tensor:
         # Note: is_causal = False should never happen
         assert_paged_decode_contract(block_table, total_seq_lens)
+        max_slen = max_total_seq_len if max_total_seq_len is not None else total_seq_lens.max().item()
+        if self.global_window_size is not None and self.local_window_size is not None:
+            if self.global_window_size + self.local_window_size >= max_slen - 1:
+                o = paged_attention_decode(
+                    q, k_cache, v_cache, total_seq_lens, block_table,
+                    self.gqa_interleave, softmax_scale,
+                )
+                return o
         o = swa_paged_decode(
             q,
             k_cache,

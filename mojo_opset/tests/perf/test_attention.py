@@ -28,7 +28,8 @@ def generate_paged_decode_data(
 
     total_seq_lens = torch.randint(1, max_seq_len, (batch_size,), dtype=torch.int32)
 
-    max_num_blocks_per_seq = (total_seq_lens.max().item() + block_size - 1) // block_size
+    max_total_seq_len = total_seq_lens.max().item()
+    max_num_blocks_per_seq = (max_total_seq_len + block_size - 1) // block_size
     total_blocks_needed = int(torch.div(total_seq_lens + block_size - 1, block_size, rounding_mode="floor").sum().item())
 
     if total_blocks_needed == 0:
@@ -54,7 +55,7 @@ def generate_paged_decode_data(
         block_tables[i, :num_blocks_for_seq] = assigned_blocks
         current_block_offset += num_blocks_for_seq
 
-    return query, k_cache, v_cache, total_seq_lens, block_tables
+    return query, k_cache, v_cache, total_seq_lens, block_tables, max_total_seq_len
 
 
 test_configs_decode = [
@@ -65,7 +66,7 @@ test_configs_decode = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, total_seq_lens, block_tables",
+    "query, k_cache, v_cache, total_seq_lens, block_tables, max_total_seq_len",
     [
         pytest.param(
             *generate_paged_decode_data(
@@ -91,6 +92,7 @@ def test_paged_decode_gqa(
     v_cache: torch.Tensor,
     total_seq_lens: torch.Tensor,
     block_tables: torch.Tensor,
+    max_total_seq_len: int,
     gqa_layout: str,
 ):
     head_dim = query.shape[-1]
@@ -361,7 +363,7 @@ test_configs_swa_decode = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, total_seq_lens, block_tables",
+    "query, k_cache, v_cache, total_seq_lens, block_tables, max_total_seq_len",
     [
         pytest.param(
             *generate_paged_decode_data(
@@ -389,6 +391,7 @@ def test_paged_decode_swa(
     v_cache: torch.Tensor,
     total_seq_lens: torch.Tensor,
     block_tables: torch.Tensor,
+    max_total_seq_len: int,
     gqa_layout: str,
     global_window: int,
     local_window: int,
@@ -411,6 +414,7 @@ def test_paged_decode_swa(
             total_seq_lens,
             block_tables,
             softmax_scale=softmax_scale,
+            max_total_seq_len=max_total_seq_len,
         )
     )
 
