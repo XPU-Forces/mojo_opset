@@ -5,9 +5,6 @@ from typing import Optional
 import torch
 
 from mojo_opset.core import MojoCompressor
-from mojo_opset.utils.logging import get_logger
-
-logger = get_logger(__name__)
 
 
 class AscendcCompressor(MojoCompressor):
@@ -35,47 +32,24 @@ class AscendcCompressor(MojoCompressor):
         rotary_mode: int = 1,
         cache_mode: int = 1,
     ) -> torch.Tensor:
-        try:
-            return torch.ops.custom.compressor(
-                x,
-                wkv,
-                wgate,
-                state_cache,
-                ape,
-                norm_weight,
-                rope_sin,
-                rope_cos,
-                rope_head_dim=rope_head_dim,
-                cmp_ratio=cmp_ratio,
-                state_block_table=state_block_table,
-                cu_seqlens=cu_seqlens,
-                seqused=seqused,
-                start_pos=start_pos,
-                coff=coff,
-                norm_eps=norm_eps,
-                rotary_mode=rotary_mode,
-                cache_mode=cache_mode,
-            )
-        except Exception:
-            logger.warning("AscendC compressor kernel not available, falling back to reference implementation.")
-            return super().forward(
-                x,
-                wkv,
-                wgate,
-                state_cache,
-                ape,
-                norm_weight,
-                rope_sin,
-                rope_cos,
-                rope_head_dim,
-                cmp_ratio,
-                state_block_table=state_block_table,
-                cu_seqlens=cu_seqlens,
-                seqused=seqused,
-                start_pos=start_pos,
-                coff=coff,
-                norm_eps=norm_eps,
-                rotary_mode=rotary_mode,
-                cache_mode=cache_mode,
-            )
+        return torch.ops.custom.compressor(
+            x,
+            wkv,
+            wgate,
+            state_cache,
+            ape,
+            norm_weight,
+            rope_sin,
+            rope_cos,
+            rope_head_dim=rope_head_dim,
+            cmp_ratio=cmp_ratio,
+            state_block_table=state_block_table,
+            cu_seqlens=cu_seqlens,
+            seqused=seqused,
+            start_pos=start_pos,
+            coff=coff,
+            norm_eps=norm_eps,
+            rotary_mode=rotary_mode,
+            cache_mode=cache_mode,
+        )
 

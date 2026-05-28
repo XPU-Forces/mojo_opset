@@ -184,3 +184,8 @@ kernel_meta*
 *.pt
 
 npu_profiling*
+
+# Generated compile caches
+examples/compile_cache/
+static_kernel_compile_outputs
+

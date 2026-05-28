@@ -10,9 +10,6 @@ from mojo_opset.core import (
     MojoKvQuantSparseAttnSharedkvMetadata,
     MojoQuantLightningIndexerMetadata,
 )
-from mojo_opset.utils.logging import get_logger
-
-logger = get_logger(__name__)
 
 
 class AscendcQuantLightningIndexer(MojoQuantLightningIndexer):
@@ -76,11 +73,7 @@ class AscendcIndexerCompressEpilog(MojoIndexerCompressEpilog):
         residual: torch.Tensor,
         gamma: torch.Tensor,
     ):
-        try:
-            return torch.ops.custom.indexer_compress_epilog(attn, x, residual, gamma)
-        except Exception:
-            logger.warning("AscendC IndexerCompressEpilog kernel not available, falling back to reference implementation.")
-            return super().forward(attn, x, residual, gamma)
+        return torch.ops.custom.indexer_compress_epilog(attn, x, residual, gamma)
 
 
 class AscendcKvCompressEpilog(MojoKvCompressEpilog):
@@ -95,12 +88,7 @@ class AscendcKvCompressEpilog(MojoKvCompressEpilog):
         kv_s: torch.Tensor = None,
         kv_z: torch.Tensor = None,
     ):
-        try:
-            # print('[AscendcKvCompressEpilog] Calling torch.ops.custom.kv_compress_epilog')
-            return torch.ops.custom.kv_compress_epilog(attn, x, residual, gamma, kv_s, kv_z)
-        except Exception:
-            logger.warning("AscendC KvCompressEpilog kernel not available, falling back to reference implementation.")
-            return super().forward(attn, x, residual, gamma, kv_s, kv_z)
+        return torch.ops.custom.kv_compress_epilog(attn, x, residual, gamma, kv_s, kv_z)
 
 class AscendcSparseAttnSharedkvMetadata(MojoSparseAttnSharedkvMetadata):
     supported_platforms_list = ["npu", "meta_device"]
@@ -186,59 +174,31 @@ class AscendcSparseAttnSharedkv(MojoSparseAttnSharedkv):
         layout_kv: str = "PA_ND",
         return_softmax_lse: bool = False,
     ):
-        try:
-            return torch.ops.custom.npu_sparse_attn_sharedkv(
-                q,
-                ori_kv=ori_kv,
-                cmp_kv=cmp_kv,
-                ori_sparse_indices=ori_sparse_indices,
-                cmp_sparse_indices=cmp_sparse_indices,
-                ori_block_table=ori_block_table,
-                cmp_block_table=cmp_block_table,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_ori_kv=cu_seqlens_ori_kv,
-                cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-                seqused_q=seqused_q,
-                seqused_kv=seqused_kv,
-                sinks=sinks,
-                metadata=metadata,
-                softmax_scale=softmax_scale,
-                cmp_ratio=cmp_ratio,
-                ori_mask_mode=ori_mask_mode,
-                cmp_mask_mode=cmp_mask_mode,
-                ori_win_left=ori_win_left,
-                ori_win_right=ori_win_right,
-                layout_q=layout_q,
-                layout_kv=layout_kv,
-                return_softmax_lse=return_softmax_lse,
-            )
-        except Exception as e:
-            logger.warning("AscendC SparseAttnSharedkv kernel not available, falling back to reference implementation.")
-            return super().forward(
-                q,
-                ori_kv=ori_kv,
-                cmp_kv=cmp_kv,
-                ori_sparse_indices=ori_sparse_indices,
-                cmp_sparse_indices=cmp_sparse_indices,
-                ori_block_table=ori_block_table,
-                cmp_block_table=cmp_block_table,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_ori_kv=cu_seqlens_ori_kv,
-                cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-                seqused_q=seqused_q,
-                seqused_kv=seqused_kv,
-                sinks=sinks,
-                metadata=metadata,
-                softmax_scale=softmax_scale,
-                cmp_ratio=cmp_ratio,
-                ori_mask_mode=ori_mask_mode,
-                cmp_mask_mode=cmp_mask_mode,
-                ori_win_left=ori_win_left,
-                ori_win_right=ori_win_right,
-                layout_q=layout_q,
-                layout_kv=layout_kv,
-                return_softmax_lse=return_softmax_lse,
-            )
+        return torch.ops.custom.npu_sparse_attn_sharedkv(
+            q,
+            ori_kv=ori_kv,
+            cmp_kv=cmp_kv,
+            ori_sparse_indices=ori_sparse_indices,
+            cmp_sparse_indices=cmp_sparse_indices,
+            ori_block_table=ori_block_table,
+            cmp_block_table=cmp_block_table,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_ori_kv=cu_seqlens_ori_kv,
+            cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+            seqused_q=seqused_q,
+            seqused_kv=seqused_kv,
+            sinks=sinks,
+            metadata=metadata,
+            softmax_scale=softmax_scale,
+            cmp_ratio=cmp_ratio,
+            ori_mask_mode=ori_mask_mode,
+            cmp_mask_mode=cmp_mask_mode,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
+            layout_q=layout_q,
+            layout_kv=layout_kv,
+            return_softmax_lse=return_softmax_lse,
+        )
 
 
 class AscendcKvQuantSparseAttnSharedkv(MojoKvQuantSparseAttnSharedkv):
@@ -254,11 +214,7 @@ class AscendcKvQuantSparseAttnSharedkv(MojoKvQuantSparseAttnSharedkv):
         scale: float,
         causal: bool = False,
     ):
-        try:
-            return torch.ops.custom.npu_kv_quant_sparse_attn_sharedkv(query, key, value, kv_s, kv_z, scale, causal)
-        except Exception:
-            logger.warning("AscendC KvQuantSparseAttnSharedkv kernel not available, falling back to reference implementation.")
-            return super().forward(query, key, value, kv_s, kv_z, scale, causal)
+        return torch.ops.custom.npu_kv_quant_sparse_attn_sharedkv(query, key, value, kv_s, kv_z, scale, causal)
 
 
 class AscendcKvQuantSparseAttnSharedkvMetadata(MojoKvQuantSparseAttnSharedkvMetadata):
@@ -293,57 +249,30 @@ class AscendcKvQuantSparseAttnSharedkvMetadata(MojoKvQuantSparseAttnSharedkvMeta
         has_ori_kv: bool = True,
         has_cmp_kv: bool = True,
     ):
-        try:
-            return torch.ops.custom.npu_kv_quant_sparse_attn_sharedkv_metadata(
-                num_heads_q, num_heads_kv, head_dim, kv_quant_mode,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_ori_kv=cu_seqlens_ori_kv,
-                cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-                seqused_q=seqused_q,
-                seqused_kv=seqused_kv,
-                batch_size=batch_size,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_kv=max_seqlen_kv,
-                ori_topk=ori_topk,
-                cmp_topk=cmp_topk,
-                tile_size=tile_size,
-                rope_head_dim=rope_head_dim,
-                cmp_ratio=cmp_ratio,
-                ori_mask_mode=ori_mask_mode,
-                cmp_mask_mode=cmp_mask_mode,
-                ori_win_left=ori_win_left,
-                ori_win_right=ori_win_right,
-                layout_q=layout_q,
-                layout_kv=layout_kv,
-                has_ori_kv=has_ori_kv,
-                has_cmp_kv=has_cmp_kv,
-            )
-        except Exception as e:
-            logger.warning("AscendC KvQuantSparseAttnSharedkvMetadata kernel not available, falling back to reference implementation.")
-            return super().forward(
-                num_heads_q, num_heads_kv, head_dim, kv_quant_mode,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_ori_kv=cu_seqlens_ori_kv,
-                cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-                seqused_q=seqused_q,
-                seqused_kv=seqused_kv,
-                batch_size=batch_size,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_kv=max_seqlen_kv,
-                ori_topk=ori_topk,
-                cmp_topk=cmp_topk,
-                tile_size=tile_size,
-                rope_head_dim=rope_head_dim,
-                cmp_ratio=cmp_ratio,
-                ori_mask_mode=ori_mask_mode,
-                cmp_mask_mode=cmp_mask_mode,
-                ori_win_left=ori_win_left,
-                ori_win_right=ori_win_right,
-                layout_q=layout_q,
-                layout_kv=layout_kv,
-                has_ori_kv=has_ori_kv,
-                has_cmp_kv=has_cmp_kv,
-            )
+        return torch.ops.custom.npu_kv_quant_sparse_attn_sharedkv_metadata(
+            num_heads_q, num_heads_kv, head_dim, kv_quant_mode,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_ori_kv=cu_seqlens_ori_kv,
+            cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+            seqused_q=seqused_q,
+            seqused_kv=seqused_kv,
+            batch_size=batch_size,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            ori_topk=ori_topk,
+            cmp_topk=cmp_topk,
+            tile_size=tile_size,
+            rope_head_dim=rope_head_dim,
+            cmp_ratio=cmp_ratio,
+            ori_mask_mode=ori_mask_mode,
+            cmp_mask_mode=cmp_mask_mode,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
+            layout_q=layout_q,
+            layout_kv=layout_kv,
+            has_ori_kv=has_ori_kv,
+            has_cmp_kv=has_cmp_kv,
+        )
 
 
 class AscendcQuantLightningIndexerMetadata(MojoQuantLightningIndexerMetadata):
@@ -397,41 +326,23 @@ class AscendcQuantLightningIndexerMetadata(MojoQuantLightningIndexerMetadata):
             else:
                 max_seqlen_k = key.shape[1]
 
-        try:
-            return torch.ops.custom.npu_quant_lightning_indexer_metadata(
-                actual_seq_lengths_query=actual_seq_lengths_query,
-                actual_seq_lengths_key=actual_seq_lengths_key,
-                num_heads_q=num_heads_q,
-                num_heads_k=num_heads_k,
-                head_dim=head_dim,
-                query_quant_mode=query_quant_mode,
-                key_quant_mode=key_quant_mode,
-                batch_size=batch_size,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
-                layout_query=layout_query,
-                layout_key=layout_key,
-                sparse_count=sparse_count,
-                sparse_mode=sparse_mode,
-                pre_tokens=pre_tokens,
-                next_tokens=next_tokens,
-                cmp_ratio=cmp_ratio,
-                device='npu:0'
-            )
-        except Exception as e:
-            logger.warning("AscendC QuantLightningIndexerMetadata kernel not available, falling back to reference implementation.")
-            return super().forward(
-                query, key, weights, query_dequant_scale, key_dequant_scale,
-                query_quant_mode, key_quant_mode, metadata,
-                actual_seq_lengths_query=actual_seq_lengths_query,
-                actual_seq_lengths_key=actual_seq_lengths_key,
-                block_table=block_table,
-                layout_query=layout_query,
-                layout_key=layout_key,
-                sparse_count=sparse_count,
-                sparse_mode=sparse_mode,
-                pre_tokens=pre_tokens,
-                next_tokens=next_tokens,
-                cmp_ratio=cmp_ratio,
-                return_value=return_value,
-            )
+        return torch.ops.custom.npu_quant_lightning_indexer_metadata(
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_key=actual_seq_lengths_key,
+            num_heads_q=num_heads_q,
+            num_heads_k=num_heads_k,
+            head_dim=head_dim,
+            query_quant_mode=query_quant_mode,
+            key_quant_mode=key_quant_mode,
+            batch_size=batch_size,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            layout_query=layout_query,
+            layout_key=layout_key,
+            sparse_count=sparse_count,
+            sparse_mode=sparse_mode,
+            pre_tokens=pre_tokens,
+            next_tokens=next_tokens,
+            cmp_ratio=cmp_ratio,
+            device='npu:0'
+        )

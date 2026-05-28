@@ -446,7 +446,7 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
             position_ids = position_ids.masked_fill(~attention_mask.to(device=device, dtype=torch.bool), 1)
         else:
             past_len = int(context_lens.max().item()) if context_lens.numel() > 0 else 0
-            position_ids = torch.arange(past_len, past_len + seq_len, device=device, dtype=torch.long).unsqueeze(0)
+            position_ids = torch.arange(past_len, past_len + seq_len, device=device, dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
 
         cu_q_lens = torch.arange(
             0, (batch_size + 1) * seq_len, step=seq_len,
@@ -682,6 +682,98 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
             "attn_metadata": attn_metadata,
         }
 
+    def prepare_mtp_verify_inputs(self, input_ids, next_n):
+        """Prepare golden-style main-model verify metadata for MTP."""
+        pkv = self.paged_cache
+        batch_size, seq_len = input_ids.shape
+        device = input_ids.device
+        expected_seq_len = int(next_n) + 1
+        if seq_len != expected_seq_len:
+            raise ValueError(f"MTP verify expects seq_len={expected_seq_len}, got {seq_len}")
+
+        context_lens_i32 = pkv.get_seq_length(0).to(device=device, dtype=torch.int32)
+        q_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device=device)
+        cu_q_lens = torch.arange(
+            0, (batch_size + 1) * seq_len, step=seq_len,
+            dtype=torch.int32, device=device,
+        )
+
+        # Golden's kv_len is the position of the last query token. Rebuild
+        # position_ids by counting backwards from that value.
+        kv_len = context_lens_i32 + seq_len - 1
+        reverse_indices = torch.arange(seq_len - 1, -1, -1, device=device, dtype=torch.int32).unsqueeze(0)
+        position_ids_i32 = (kv_len.unsqueeze(1) - reverse_indices).clamp(min=0)
+        position_ids = position_ids_i32.to(dtype=torch.long)
+        current_seq_lens = kv_len + 1
+        start_pos = position_ids_i32[:, 0].to(dtype=torch.int32)
+        seq_used_q = q_lens
+
+        win_slot_mapping = pkv.get_win_slot_mapping(start_pos, seq_used_q)
+        kv_slot_mapping = pkv.get_all_kv_slot_mapping(start_pos, seq_used_q, seq_len)
+
+        unique_ratios = sorted(set(
+            self.config.compress_ratios[l] if l < len(self.config.compress_ratios) else 0
+            for l in range(pkv.num_layers)
+        ))
+        shared_metadata = {}
+        for ratio in unique_ratios:
+            attn_ratio = ratio if ratio > 1 else 1
+            sas_meta = self._compute_sas_metadata(cu_q_lens, current_seq_lens, batch_size, attn_ratio)
+            shared_metadata[ratio] = {"sas_metadata": sas_meta}
+            if ratio > 1:
+                compressed_len, position_ids_cmp = pkv.get_compressed_position_ids(
+                    start_pos, seq_used_q, cu_q_lens, ratio,
+                )
+                cmp_rope_position_ids = (position_ids_cmp * ratio).to(dtype=torch.long).unsqueeze(0)
+                shared_metadata[ratio].update({
+                    "compressed_len": compressed_len,
+                    "position_ids_cmp": position_ids_cmp,
+                    "cmp_rope_position_ids": cmp_rope_position_ids,
+                })
+            if ratio == 4:
+                c4a_block_table = pkv.get_c4a_cmp_kv_block_table(0)
+                li_meta = self._compute_li_metadata(cu_q_lens[1:], current_seq_lens, c4a_block_table)
+                shared_metadata[ratio]["li_metadata"] = li_meta
+
+        attn_metadata = self._build_golden_style_attn_metadata(
+            position_ids=position_ids,
+            context_lens=start_pos.to(dtype=torch.long),
+            q_lens=q_lens,
+            cu_q_lens=cu_q_lens,
+            current_seq_lens=current_seq_lens,
+            start_pos=start_pos,
+            seq_used_q=seq_used_q,
+            shared_metadata=shared_metadata,
+            win_slot_mapping=win_slot_mapping,
+            kv_slot_mapping=kv_slot_mapping,
+            is_prefill=False,
+            batch_size=batch_size,
+            decode_fast_path=False,
+        )
+
+        attn_inputs = None
+        if os.getenv("MOJO_BUILD_LEGACY_ATTN_INPUTS", "0") == "1":
+            attn_inputs = {}
+            for layer_idx in range(pkv.num_layers):
+                ratio = self.config.compress_ratios[layer_idx] if layer_idx < len(self.config.compress_ratios) else 0
+                attn_inputs[layer_idx] = self._prepare_layer_decode_inputs(
+                    layer_idx, ratio, start_pos.to(dtype=torch.long), q_lens, cu_q_lens,
+                    start_pos, seq_used_q, batch_size, seq_len, device,
+                    shared_metadata.get(ratio, {}), win_slot_mapping,
+                )
+
+        return {
+            "position_ids": position_ids,
+            "context_lens": start_pos.to(dtype=torch.long),
+            "current_seq_lens": current_seq_lens,
+            "cu_q_lens": cu_q_lens,
+            "q_lens": q_lens,
+            "start_pos": start_pos,
+            "seq_used_q": seq_used_q,
+            "attn_inputs": attn_inputs,
+            "attn_metadata": attn_metadata,
+        }
+
     def post_decode_step(self, seq_len=1):
         self.paged_cache.seq_lens += seq_len
 
@@ -758,6 +850,373 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
             ),
             "li_metadata": li_metadata,
         })
+        return layer_inputs
+
+    def _compute_kv_slot_mapping(self, layer_idx, context_lens, seq_len):
+        pkv = self.paged_cache
+        batch_size = context_lens.shape[0]
+        device = context_lens.device
+        positions = context_lens.to(torch.int32).unsqueeze(1) + torch.arange(
+            seq_len, dtype=torch.int32, device=device,
+        ).unsqueeze(0)
+        block_idx = positions // pkv.block_size
+        offset = positions % pkv.block_size
+        batch_indices = torch.arange(batch_size, dtype=torch.long, device=device).unsqueeze(1).expand(-1, seq_len)
+        max_blocks = pkv.block_tables.shape[2]
+        block_idx_clamped = block_idx.clamp(max=max_blocks - 1).to(torch.long)
+        phys_blocks = pkv.block_tables[layer_idx, batch_indices, block_idx_clamped]
+        slot_mapping = phys_blocks * pkv.block_size + offset
+        valid_mask = block_idx < max_blocks
+        slot_mapping = torch.where(valid_mask, slot_mapping, torch.full_like(slot_mapping, -1))
+        return slot_mapping.reshape(-1).to(torch.int32)
+
+    def _compute_li_metadata(self, actual_seq_q, actual_seq_k, block_table):
+        config = self.config
+        batch_size = actual_seq_q.shape[0]
+        max_seqlen_q = int(actual_seq_q.max().item())
+        max_seqlen_k = int(actual_seq_k.max().item())
+        try:
+            return torch.ops.custom.npu_quant_lightning_indexer_metadata(
+                actual_seq_lengths_query=actual_seq_q,
+                actual_seq_lengths_key=actual_seq_k,
+                num_heads_q=config.index_n_heads,
+                num_heads_k=1,
+                head_dim=config.index_head_dim,
+                query_quant_mode=0,
+                key_quant_mode=0,
+                batch_size=batch_size,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=config.index_topk,
+                sparse_mode=3,
+                pre_tokens=9223372036854775807,
+                next_tokens=9223372036854775807,
+                cmp_ratio=4,
+                device=f"npu:{torch.npu.current_device()}",
+            )
+        except Exception:
+            return None
+
+    def _compute_sas_metadata(self, cu_q_lens, seq_lens, batch_size, compress_ratio):
+        has_cmp_kv = compress_ratio > 1
+        metadata_kwargs = {
+            "cu_seqlens_q": cu_q_lens,
+            "seqused_kv": seq_lens,
+            "batch_size": batch_size,
+            "cmp_ratio": compress_ratio,
+            "ori_mask_mode": 4,
+            "cmp_mask_mode": 3,
+            "ori_win_left": self.config.sliding_window - 1,
+            "ori_win_right": 0,
+            "layout_q": "TND",
+            "layout_kv": "PA_ND",
+            "num_heads_q": self.config.num_attention_heads,
+            "num_heads_kv": 1,
+            "head_dim": self.config.head_dim,
+            "has_ori_kv": True,
+            "has_cmp_kv": has_cmp_kv,
+        }
+        if has_cmp_kv and compress_ratio == 4:
+            metadata_kwargs["cmp_topk"] = self.config.index_topk
+        try:
+            from mojo_opset import MojoSparseAttnSharedkvMetadata
+            return MojoSparseAttnSharedkvMetadata()(**metadata_kwargs)
+        except Exception:
+            return None
+
+
+class DeepseekMTPRuntimeState(MojoSession):
+    """Runtime state for DeepSeek-V4 MTP model.
+
+    Uses a PagedDummyCache with only 1 layer (the MTP layer).
+    Shares the same config as the main model but operates on a single layer.
+    """
+
+    def __init__(self, paged_cache, config, mtp_layer_idx):
+        self.paged_cache = paged_cache
+        self.config = config
+        self.mtp_layer_idx = mtp_layer_idx
+
+    @property
+    def kv_cache(self):
+        return self.paged_cache
+
+    @classmethod
+    def from_model(
+        cls,
+        mtp_model,
+        batch_size,
+        block_size=128,
+        device=None,
+        max_seq_len=None,
+        pa_max_length=None,
+        next_n=None,
+    ):
+        from mojo_opset.modeling.deepseekv4.mojo_deepseek_v4 import PagedDummyCache, DeepseekV4Config
+
+        if device is None:
+            device = mtp_model.lm_head.weight.device if mtp_model.lm_head is not None else torch.npu.current_device()
+        config = mtp_model.config
+        if max_seq_len is None:
+            max_seq_len = config.max_position_embeddings
+        if pa_max_length is None:
+            pa_max_length = config.pa_max_length
+        if next_n is None:
+            next_n = config.next_n
+
+        # Create a config for the MTP cache with only 1 layer
+        mtp_config_kwargs = {k: getattr(config, k) for k in [
+            "vocab_size", "hidden_size", "intermediate_size",
+            "num_attention_heads", "num_key_value_heads", "moe_intermediate_size",
+            "n_shared_experts", "n_routed_experts", "num_experts_per_tok",
+            "routed_scaling_factor", "n_group", "topk_group",
+            "first_k_dense_replace", "norm_topk_prob", "scoring_func", "topk_method",
+            "head_dim", "q_lora_rank", "qk_rope_head_dim", "o_lora_rank", "o_groups",
+            "sliding_window", "hc_mult", "hc_sinkhorn_iters",
+            "hc_eps", "index_n_heads", "index_head_dim", "index_topk",
+            "num_hash_layers", "attention_bias", "attention_dropout",
+            "rms_norm_eps", "hidden_act", "rope_theta", "compress_rope_theta",
+            "max_position_embeddings", "swiglu_limit", "rope_scaling",
+            "pa_max_length", "next_n",
+        ] if hasattr(config, k)}
+        mtp_config_kwargs["num_hidden_layers"] = 1
+        # MTP layer uses the compress_ratio of the last main layer
+        mtp_config_kwargs["compress_ratios"] = [config.compress_ratios[-1]] if config.compress_ratios else [0]
+        mtp_cache_config = DeepseekV4Config(**mtp_config_kwargs)
+
+        mtp_layer_idx = config.num_hidden_layers
+        cache_data = PagedDummyCache(
+            mtp_cache_config,
+            batch_size=batch_size,
+            device=str(device),
+            block_size=block_size,
+            max_seq_len=max_seq_len,
+            pa_max_length=pa_max_length,
+            next_n=next_n,
+        )
+        return cls(cache_data, config, mtp_layer_idx)
+
+    def prepare_prefill_inputs(self, input_ids, attention_mask=None, q_lens=None):
+        """Prepare prefill inputs for MTP model.
+
+        MTP model receives hidden_states from main model, not raw input_ids.
+        This method prepares the attn_inputs for the MTP layer.
+        """
+        pkv = self.paged_cache
+        batch_size, seq_len = input_ids.shape
+        device = input_ids.device
+
+        if q_lens is None:
+            if attention_mask is not None:
+                q_lens = attention_mask.to(device=device, dtype=torch.int32).sum(dim=-1).to(dtype=torch.int32)
+            else:
+                q_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device=device)
+
+        context_lens = pkv.get_seq_length(0).to(device=device, dtype=torch.long)
+        if attention_mask is not None:
+            position_ids = (attention_mask.to(device=device, dtype=torch.long).cumsum(dim=-1) - 1).clamp(min=0)
+            position_ids = position_ids.masked_fill(~attention_mask.to(device=device, dtype=torch.bool), 1)
+        else:
+            past_len = int(context_lens.max().item()) if context_lens.numel() > 0 else 0
+            position_ids = torch.arange(past_len, past_len + seq_len, device=device, dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
+
+        cu_q_lens = torch.arange(
+            0, (batch_size + 1) * seq_len, step=seq_len,
+            dtype=torch.int32, device=device,
+        )
+        start_pos = context_lens.to(dtype=torch.int32)
+        seq_used_q = q_lens
+        current_seq_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device=device)
+
+        # MTP layer uses layer_idx=0 in its own cache
+        layer_idx = 0
+        ratio = self.config.compress_ratios[self.mtp_layer_idx] if self.mtp_layer_idx < len(self.config.compress_ratios) else 0
+
+        attn_inputs = {0: self._prepare_layer_inputs(
+            layer_idx, ratio, context_lens, q_lens, cu_q_lens,
+            start_pos, seq_used_q, batch_size, seq_len, device,
+            is_prefill=True,
+        )}
+
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+            "context_lens": context_lens,
+            "cu_q_lens": cu_q_lens,
+            "q_lens": q_lens,
+            "attn_inputs": attn_inputs,
+        }
+
+    def prepare_decode_inputs(self, input_ids):
+        """Prepare decode inputs for MTP model."""
+        pkv = self.paged_cache
+        batch_size, seq_len = input_ids.shape
+        device = input_ids.device
+
+        context_lens = pkv.get_seq_length(0).to(device=device, dtype=torch.long)
+        position_offsets = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0)
+        position_ids = context_lens.to(dtype=torch.long).unsqueeze(1) + position_offsets
+        q_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device=device)
+        current_seq_lens = context_lens.to(torch.int32) + seq_len
+        cu_q_lens = torch.arange(
+            0, (batch_size + 1) * seq_len, step=seq_len,
+            dtype=torch.int32, device=device,
+        )
+        start_pos = context_lens.to(dtype=torch.int32)
+        seq_used_q = q_lens
+        win_slot_mapping = pkv.get_win_slot_mapping(context_lens, q_lens)
+
+        layer_idx = 0
+        ratio = self.config.compress_ratios[self.mtp_layer_idx] if self.mtp_layer_idx < len(self.config.compress_ratios) else 0
+
+        attn_inputs = {0: self._prepare_layer_inputs(
+            layer_idx, ratio, context_lens, q_lens, cu_q_lens,
+            start_pos, seq_used_q, batch_size, seq_len, device,
+            is_prefill=False, win_slot_mapping=win_slot_mapping,
+        )}
+
+        return {
+            "position_ids": position_ids,
+            "context_lens": context_lens,
+            "current_seq_lens": current_seq_lens,
+            "cu_q_lens": cu_q_lens,
+            "q_lens": q_lens,
+            "start_pos": start_pos,
+            "seq_used_q": seq_used_q,
+            "attn_inputs": attn_inputs,
+        }
+
+    def post_decode_step(self, seq_len=1):
+        self.paged_cache.seq_lens += seq_len
+
+    def _prepare_layer_inputs(
+        self, layer_idx, ratio, context_lens, q_lens, cu_q_lens,
+        start_pos, seq_used_q, batch_size, seq_len, device,
+        is_prefill=True, win_slot_mapping=None,
+    ):
+        pkv = self.paged_cache
+
+        if is_prefill:
+            # Prefill: compute metadata similar to main model's prefill
+            attn_ratio = ratio if ratio > 1 else 1
+            sas_meta = self._compute_sas_metadata(cu_q_lens, torch.full((batch_size,), seq_len, dtype=torch.int32, device=device), batch_size, attn_ratio)
+
+            layer_inputs = {
+                "q_lens": q_lens,
+                "cu_q_lens": cu_q_lens,
+                "start_pos": start_pos,
+                "seq_used_q": seq_used_q,
+                "sas_metadata": sas_meta,
+            }
+            if ratio > 1:
+                compressed_len, position_ids_cmp = pkv.get_compressed_position_ids(
+                    start_pos, seq_used_q, cu_q_lens, ratio,
+                )
+                cmp_rope_position_ids = (position_ids_cmp * ratio).to(dtype=torch.long).unsqueeze(0)
+                cmp_slot_mapping = pkv.get_cmp_slot_mapping(
+                    layer_idx, start_pos, seq_used_q,
+                    cu_seqlens_q=cu_q_lens,
+                    compressed_len=compressed_len,
+                    position_ids_cmp=position_ids_cmp,
+                )
+                layer_inputs.update({
+                    "sfa_state_cache": pkv.get_sfa_kv_state(layer_idx),
+                    "state_block_table": pkv.get_cmp_state_block_table(layer_idx, start_pos, seq_used_q, True),
+                    "cmp_slot_mapping": cmp_slot_mapping,
+                    "cmp_kv_cache": pkv.get_sfa_cmp_kv(layer_idx),
+                    "cmp_block_tables": pkv.get_cmp_kv_block_table(layer_idx),
+                    "compressed_len": compressed_len,
+                    "cmp_rope_position_ids": cmp_rope_position_ids,
+                })
+                if ratio == 4:
+                    c4a_block_table = pkv.get_c4a_cmp_kv_block_table(layer_idx)
+                    li_meta = self._compute_li_metadata(cu_q_lens[1:], torch.full((batch_size,), seq_len, dtype=torch.int32, device=device), c4a_block_table)
+                    layer_inputs.update({
+                        "li_cmp_kv": pkv.get_li_cmp_kv(layer_idx),
+                        "li_key_dequant_scale": pkv.get_li_key_dequant_scale(layer_idx),
+                        "c4a_cmp_kv_block_table": c4a_block_table,
+                        "li_state_cache": pkv.get_li_kv_state(layer_idx),
+                        "li_state_block_table": pkv.get_cmp_state_block_table(layer_idx, start_pos, seq_used_q, True),
+                        "li_cmp_slot_mapping": pkv.get_cmp_slot_mapping(
+                            layer_idx, start_pos, seq_used_q,
+                            cu_seqlens_q=cu_q_lens,
+                            compressed_len=compressed_len,
+                            position_ids_cmp=position_ids_cmp,
+                        ),
+                        "li_metadata": li_meta,
+                    })
+        else:
+            # Decode
+            kv_cache, block_tables = pkv.get_kv_for_decode(layer_idx)
+            win_kv_cache, win_block_table = pkv.get_win_kv_for_decode(layer_idx)
+            kv_slot_mapping = self._compute_kv_slot_mapping(layer_idx, context_lens, seq_len)
+
+            attn_ratio = ratio if ratio > 1 else 1
+            sas_meta = self._compute_sas_metadata(
+                cu_q_lens,
+                context_lens.to(torch.int32) + seq_len,
+                batch_size,
+                attn_ratio,
+            )
+
+            layer_inputs = {
+                "kv_cache": kv_cache,
+                "block_tables": block_tables,
+                "win_kv_cache": win_kv_cache,
+                "win_block_table": win_block_table,
+                "win_slot_mapping": win_slot_mapping,
+                "kv_slot_mapping": kv_slot_mapping,
+                "q_lens": q_lens,
+                "cu_q_lens": cu_q_lens,
+                "start_pos": start_pos,
+                "seq_used_q": seq_used_q,
+                "sas_metadata": sas_meta,
+            }
+            if ratio > 1:
+                compressed_len, position_ids_cmp = pkv.get_compressed_position_ids(
+                    start_pos, seq_used_q, cu_q_lens, ratio,
+                )
+                cmp_rope_position_ids = (position_ids_cmp * ratio).to(dtype=torch.long).unsqueeze(0)
+                cmp_slot_mapping = pkv.get_cmp_slot_mapping(
+                    layer_idx, start_pos, seq_used_q,
+                    cu_seqlens_q=cu_q_lens,
+                    compressed_len=compressed_len,
+                    position_ids_cmp=position_ids_cmp,
+                )
+                layer_inputs.update({
+                    "sfa_state_cache": pkv.get_sfa_kv_state(layer_idx),
+                    "state_block_table": pkv.get_cmp_state_block_table(layer_idx, start_pos, seq_used_q, False),
+                    "cmp_slot_mapping": cmp_slot_mapping,
+                    "cmp_kv_cache": pkv.get_sfa_cmp_kv(layer_idx),
+                    "cmp_block_tables": pkv.get_cmp_kv_block_table(layer_idx),
+                    "compressed_len": compressed_len,
+                    "cmp_rope_position_ids": cmp_rope_position_ids,
+                })
+                if ratio == 4:
+                    c4a_block_table = pkv.get_c4a_cmp_kv_block_table(layer_idx)
+                    li_meta = self._compute_li_metadata(
+                        cu_q_lens[1:],
+                        context_lens.to(torch.int32) + seq_len,
+                        c4a_block_table,
+                    )
+                    layer_inputs.update({
+                        "li_cmp_kv": pkv.get_li_cmp_kv(layer_idx),
+                        "li_key_dequant_scale": pkv.get_li_key_dequant_scale(layer_idx),
+                        "c4a_cmp_kv_block_table": c4a_block_table,
+                        "li_state_cache": pkv.get_li_kv_state(layer_idx),
+                        "li_state_block_table": pkv.get_cmp_state_block_table(layer_idx, start_pos, seq_used_q, True),
+                        "li_cmp_slot_mapping": pkv.get_cmp_slot_mapping(
+                            layer_idx, start_pos, seq_used_q,
+                            cu_seqlens_q=cu_q_lens,
+                            compressed_len=compressed_len,
+                            position_ids_cmp=position_ids_cmp,
+                        ),
+                        "li_metadata": li_meta,
+                    })
+
         return layer_inputs
 
     def _compute_kv_slot_mapping(self, layer_idx, context_lens, seq_len):

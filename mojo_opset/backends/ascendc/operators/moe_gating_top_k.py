@@ -5,9 +5,6 @@ from typing import Optional, Tuple
 import torch
 
 from mojo_opset.core import MojoMoEGatingTopK
-from mojo_opset.utils.logging import get_logger
-
-logger = get_logger(__name__)
 
 
 class AscendcMoEGatingTopK(MojoMoEGatingTopK):
@@ -30,39 +27,19 @@ class AscendcMoEGatingTopK(MojoMoEGatingTopK):
         routed_scaling_factor: float = 1.0,
         eps: float = 1e-20,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        try:
-            return torch.ops.custom.npu_moe_gating_top_k(
-                x,
-                k,
-                bias=bias,
-                input_ids=input_ids,
-                tid2eid=tid2eid,
-                k_group=k_group,
-                group_count=group_count,
-                routed_scaling_factor=routed_scaling_factor,
-                eps=eps,
-                group_select_mode=group_select_mode,
-                renorm=renorm,
-                norm_type=norm_type,
-                out_flag=out_flag,
-            )
-        except Exception:
-            logger.warning(
-                "AscendC MoEGatingTopK kernel not available, falling back to reference implementation."
-            )
-            return super().forward(
-                x,
-                k,
-                bias=bias,
-                input_ids=input_ids,
-                tid2eid=tid2eid,
-                k_group=k_group,
-                group_count=group_count,
-                group_select_mode=group_select_mode,
-                renorm=renorm,
-                norm_type=norm_type,
-                out_flag=out_flag,
-                routed_scaling_factor=routed_scaling_factor,
-                eps=eps,
-            )
+        return torch.ops.custom.npu_moe_gating_top_k(
+            x,
+            k,
+            bias=bias,
+            input_ids=input_ids,
+            tid2eid=tid2eid,
+            k_group=k_group,
+            group_count=group_count,
+            routed_scaling_factor=routed_scaling_factor,
+            eps=eps,
+            group_select_mode=group_select_mode,
+            renorm=renorm,
+            norm_type=norm_type,
+            out_flag=out_flag,
+        )
 

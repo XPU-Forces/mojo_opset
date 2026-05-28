@@ -1278,7 +1278,9 @@ class DeepseekV4Attention(nn.Module):
     def __init__(self, config: DeepseekV4Config, layer_idx: int):
         super().__init__()
         self.config = config
-        self.layer_idx = layer_idx
+        self.logical_layer_idx = layer_idx
+        self.is_mtp = layer_idx == config.num_hidden_layers
+        self.layer_idx = 0 if self.is_mtp else layer_idx
         self.num_heads = config.num_attention_heads
         self.q_lora_rank = config.q_lora_rank
         self.qk_rope_head_dim = config.qk_rope_head_dim
@@ -2238,7 +2240,7 @@ class DeepseekV4MoE(nn.Module):
         )
         self.combine = MojoMoECombine(multiply_by_gates=True)
         self.dynamic_quant = MojoDynamicQuant()
-        self.grouped_matmul = MojoGroupedMatmul()
+        self.grouped_matmul = MojoGroupedMatmul() 
         self.dequant_swiglu_quant = MojoFunctionalDequantSwiGLUQuant()
         self.format_cast = MojoFormatCast()
         self.moe_init_routing_v2 = MojoMoEInitRoutingV2()
@@ -2354,6 +2356,8 @@ class DeepseekV4MoE(nn.Module):
         residuals = hidden_states
         orig_shape = hidden_states.shape
         hidden_states_flat = hidden_states.view(-1, self.hidden_size).to(torch.bfloat16)
+        if input_ids is not None:
+            input_ids = input_ids.reshape(-1).contiguous()
 
         use_moe_multi_stream = self._use_moe_multi_stream()
         if use_moe_multi_stream:
@@ -2367,7 +2371,10 @@ class DeepseekV4MoE(nn.Module):
         topk_idx, topk_weight = self._gate_topk(logits, input_ids)
 
         if self.ep_size > 1 and self.ep_group is not None:
-            if is_prefill:
+            n_tokens = hidden_states_flat.shape[0]
+            # For small token counts (e.g., MTP model with 1-2 tokens),
+            # use decode path which handles small batches better with EP
+            if is_prefill and n_tokens > self.ep_size:
                 routed_out = self._moe_infer_ep(
                     hidden_states_flat, topk_idx, topk_weight,
                     shared_expert_out=shared_out_flat,
@@ -2800,6 +2807,347 @@ class DeepseekV4Model(nn.Module):
         return hidden_states, past_key_values
 
 
+class DeepseekV4MTPLayer(nn.Module):
+    """MTP layer for speculative decoding with enorm/hnorm/e_proj/h_proj projection."""
+
+    def __init__(self, config: DeepseekV4Config, ep_size: int = 1, ep_rank: int = 0):
+        super().__init__()
+        self.config = config
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
+        self.mtp_start_layer_idx = config.num_hidden_layers
+        num_mtp_layers = getattr(config, "num_nextn_predict_layers", 1)
+        self.hidden_size = config.hidden_size
+
+        self.enorm = MojoRMSNorm(config.hidden_size, config.rms_norm_eps, dtype=torch.bfloat16)
+        self.hnorm = MojoRMSNorm(config.hidden_size, config.rms_norm_eps, dtype=torch.bfloat16)
+        self.e_proj = MojoQuantGemm(in_features=config.hidden_size, out_features=config.hidden_size, trans_weight=True)
+        self.h_proj = MojoQuantGemm(in_features=config.hidden_size, out_features=config.hidden_size, trans_weight=True)
+
+        self.layers = nn.ModuleDict({
+            str(i):  # Use layer_idx=0 for MTP cache compatibility
+            DeepseekV4DecoderLayer(config, self.mtp_start_layer_idx + i, ep_size=ep_size, ep_rank=ep_rank)
+            for i in range(num_mtp_layers)
+        })
+        self.norm = MojoRMSNorm(eps=config.rms_norm_eps, norm_size=config.hidden_size)
+        self.rotary_emb = DeepseekV4RotaryEmbedding(config=config)
+        self.compress_rotary_emb = DeepseekV4RotaryEmbedding(config=config, base=config.compress_rope_theta)
+
+        self.hc_mult = config.hc_mult
+        self.hc_eps = config.hc_eps
+        self.norm_eps = config.rms_norm_eps
+        hc_dim = config.hc_mult * config.hidden_size
+        origin_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.float32)
+        self.hc_head_fn = nn.Parameter(torch.empty(config.hc_mult, hc_dim))
+        self.hc_head_base = nn.Parameter(torch.empty(config.hc_mult))
+        self.hc_head_scale = nn.Parameter(torch.empty(1))
+        torch.set_default_dtype(origin_dtype)
+
+    def _hc_head(self, x):
+        shape, dtype = x.size(), x.dtype
+        x = x.flatten(2).float()
+        rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
+        mixes = F.linear(x, self.hc_head_fn) * rsqrt
+        pre = torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
+        y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)
+        return y.to(dtype)
+
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, past_key_values=None,
+                use_cache=None, is_prefill=True, context_lens=None, attn_inputs=None,
+                q_lens=None, input_ids=None, mtp_layer_idx=0, **kwargs):
+        # hidden_states = prev_hidden_states [B, S, H] from main model
+        # input_ids [B, S] for computing embeddings via embed_tokens
+        #
+        # Following note:: RoPE is computed on the RAW embedding (before enorm/hnorm),
+        # then passed to decoder layer via position_embeddings.
+        # Flow: embed_tokens -> cos_sin on raw embed -> enorm/hnorm/e_proj/h_proj -> MHC -> decoder_layer
+
+        # Compute position_embeddings using RAW embedding (before norm+proj), matching note:
+        position_embeddings = None
+        if input_ids is not None and hasattr(self, 'embed_tokens') and self.embed_tokens is not None:
+            embed_states = self.embed_tokens(input_ids)  # [B, S, H] raw embedding
+
+            # Compute RoPE on raw embedding, BEFORE enorm/hnorm (matching note:)
+            if position_ids is not None and hasattr(self, 'rotary_emb'):
+                cos, sin = self.rotary_emb(embed_states, position_ids)
+                position_embeddings = (cos, sin)
+
+            normed_embed = self.enorm(embed_states)
+            normed_hidden = self.hnorm(hidden_states)
+
+            # Dynamic quantize for MojoQuantGemm (requires int8 input + scale)
+            ne = normed_embed.to(torch.bfloat16)
+            nh = normed_hidden.to(torch.bfloat16)
+            ne_scale = ne.abs().amax(dim=-1, keepdim=True) / 127.0
+            ne_i8 = (ne / ne_scale).to(torch.int8)
+            nh_scale = nh.abs().amax(dim=-1, keepdim=True) / 127.0
+            nh_i8 = (nh / nh_scale).to(torch.int8)
+            proj_embed = self.e_proj(ne_i8.reshape(-1, ne_i8.shape[-1]), ne_scale.reshape(-1, ne_scale.shape[-1]))
+            proj_hidden = self.h_proj(nh_i8.reshape(-1, nh_i8.shape[-1]), nh_scale.reshape(-1, nh_scale.shape[-1]))
+            proj_embed = proj_embed.view(*ne.shape[:-1], proj_embed.shape[-1])
+            proj_hidden = proj_hidden.view(*nh.shape[:-1], proj_hidden.shape[-1])
+            hidden_states = proj_embed + proj_hidden
+
+        if hidden_states.dim() == 3 and hidden_states.shape[2] != self.hc_mult * self.config.hidden_size:
+            hidden_states = hidden_states.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)
+
+        layer_key = str(mtp_layer_idx)
+        decoder_layer = self.layers[layer_key]
+
+        if attn_inputs is not None and mtp_layer_idx in attn_inputs:
+            layer_attn_inputs = attn_inputs[mtp_layer_idx]
+        elif attn_inputs is not None and self.mtp_start_layer_idx in attn_inputs:
+            layer_attn_inputs = attn_inputs[self.mtp_start_layer_idx]
+        else:
+            layer_attn_inputs = attn_inputs
+
+        hidden_states = decoder_layer(
+            hidden_states, attention_mask=attention_mask, position_embeddings=position_embeddings,
+            position_ids=position_ids, past_key_values=past_key_values, use_cache=use_cache,
+            input_ids=input_ids, is_prefill=is_prefill, context_lens=context_lens,
+            attn_inputs=layer_attn_inputs,
+        )
+        hidden_states = self._hc_head(hidden_states)
+        hidden_states = self.norm(hidden_states)
+        return hidden_states, past_key_values
+
+
+class DeepseekV4ForMTP(nn.Module):
+    """MTP model for speculative decoding. Shares embed_tokens, lm_head, rotary_emb with main model."""
+
+    def __init__(self, config, ep_size=1, ep_rank=0):
+        super().__init__()
+        if not isinstance(config, DeepseekV4Config):
+            config = DeepseekV4Config._from_hf_config(config)
+        self.config = config
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
+        self.model = DeepseekV4MTPLayer(config, ep_size=ep_size, ep_rank=ep_rank)
+        self.lm_head = None
+        self.hccl_comm_dict = {}
+
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, past_key_values=None,
+                use_cache=None, is_prefill=True, attn_inputs=None, context_lens=None,
+                q_lens=None, input_ids=None, mtp_layer_idx=0,
+                return_hidden=False, **kwargs):
+        hidden_states, past_key_values = self.model(
+            hidden_states, attention_mask=attention_mask, position_ids=position_ids,
+            past_key_values=past_key_values, use_cache=use_cache, is_prefill=is_prefill,
+            attn_inputs=attn_inputs, context_lens=context_lens, q_lens=q_lens,
+            input_ids=input_ids, mtp_layer_idx=mtp_layer_idx,
+        )
+        if self.lm_head is not None:
+            mtp_hidden = hidden_states  # hidden states before lm_head, for next MTP step
+            if is_prefill:
+                if q_lens is not None:
+                    gather_q_lens = q_lens
+                elif attention_mask is not None:
+                    gather_q_lens = attention_mask.to(dtype=torch.int32).sum(dim=-1)
+                else:
+                    gather_q_lens = None
+                if gather_q_lens is not None:
+                    gather_index = (gather_q_lens - 1).unsqueeze(1).unsqueeze(2).repeat(1, 1, hidden_states.shape[-1])
+                    hidden_states = torch.gather(hidden_states, 1, gather_index)
+            hidden_states_flat = hidden_states.view(-1, self.config.hidden_size).to(torch.bfloat16)
+            logits = self.lm_head(hidden_states_flat)
+            logits = logits.view(*hidden_states.shape[:-1], self.config.vocab_size)
+            if return_hidden:
+                return logits, past_key_values, mtp_hidden
+            return logits, past_key_values
+        if return_hidden:
+            return hidden_states, past_key_values, hidden_states
+        return hidden_states, past_key_values
+
+    def init_parallel_comm_group(self):
+        if not dist.is_initialized():
+            return
+        world_size = dist.get_world_size()
+        global_rank = dist.get_rank()
+        if self.ep_size > 1:
+            hccl_buffer_size = int(os.environ.get("HCCL_BUFFSIZE", "200"))
+            options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
+            options.hccl_config = {"hccl_buffer_size": hccl_buffer_size}
+            moe_ep_group = dist.new_group(ranks=list(range(world_size)), pg_options=options)
+            self.hccl_comm_dict["moe_ep_group"] = moe_ep_group
+            mc2_buffer_size = int(os.environ.get("MC2_BUFFSIZE", str(max(200, self.config.moe_intermediate_size * self.config.hidden_size * self.ep_size // (1024 * 1024) + 100))))
+            options_mc2 = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
+            options_mc2.hccl_config = {"hccl_buffer_size": mc2_buffer_size}
+            moe_ep_group_mc2 = dist.new_group(ranks=list(range(world_size)), pg_options=options_mc2)
+            self.hccl_comm_dict["moe_ep_group_mc2"] = moe_ep_group_mc2
+            self.hccl_comm_dict["moe_ep_group_mc2_name"] = moe_ep_group_mc2._get_backend(torch.device("npu")).get_hccl_comm_name(global_rank)
+
+    def set_ep_group(self):
+        moe_ep_group = self.hccl_comm_dict.get("moe_ep_group")
+        self.moe_ep_group = moe_ep_group
+        for layer_key, layer in self.model.layers.items():
+            layer.mlp.ep_group = moe_ep_group
+            layer.mlp.hccl_comm_dict = self.hccl_comm_dict
+
+    @staticmethod
+    def load_weights(model, weight_dir, main_model=None):
+        from safetensors.torch import load_file
+        DeepseekV4ForCausalLM._init_default_weights(model)
+        if main_model is not None:
+            model.lm_head = main_model.lm_head
+            model.model.rotary_emb = main_model.model.rotary_emb
+            model.model.compress_rotary_emb = main_model.model.compress_rotary_emb
+        index_path = os.path.join(weight_dir, "model.safetensors.index.json")
+        with open(index_path) as f:
+            index = json.load(f)
+        weight_map = index["weight_map"]
+        name_mapping = DeepseekV4ForMTP._build_mtp_name_mapping(model)
+        needed_checkpoint_keys = set(name_mapping.keys())
+        # Also include MTP expert weight keys so their files get loaded
+        ep_size = model.ep_size
+        ep_rank = model.ep_rank
+        experts_per_rank = model.config.n_routed_experts // ep_size
+        ep_start = ep_rank * experts_per_rank
+        pfx = "mtp.0"
+        for local_eid in range(experts_per_rank):
+            global_eid = ep_start + local_eid
+            for src in [f"{pfx}.ffn.experts.{global_eid}.w1",
+                        f"{pfx}.ffn.experts.{global_eid}.w3",
+                        f"{pfx}.ffn.experts.{global_eid}.w2"]:
+                needed_checkpoint_keys.add(f"{src}.weight")
+                needed_checkpoint_keys.add(f"{src}.scale")
+        file_to_keys = {}
+        for ck_key in needed_checkpoint_keys:
+            if ck_key in weight_map:
+                sf = weight_map[ck_key]
+                file_to_keys.setdefault(sf, []).append(ck_key)
+        params_dict = dict(model.named_parameters())
+        buffers_dict = dict(model.named_buffers())
+        modules_dict = dict(model.named_modules())
+        expert_weights = {}
+        for sf_file in sorted(file_to_keys.keys()):
+            fp = os.path.join(weight_dir, sf_file)
+            data = load_file(fp)
+            for ck_key in file_to_keys[sf_file]:
+                if ck_key not in data:
+                    continue
+                weight = data[ck_key]
+                if "experts." in ck_key and "shared_experts" not in ck_key:
+                    expert_weights[ck_key] = weight
+                    continue
+                model_name = name_mapping.get(ck_key)
+                if model_name is None:
+                    continue
+                if model_name in params_dict:
+                    param = params_dict[model_name]
+                    module_name = model_name.rsplit(".", 1)[0]
+                    module = modules_dict.get(module_name)
+                    weight = DeepseekV4ForCausalLM._align_quant_gemm_weight(weight, param, module)
+                    if param.shape == weight.shape:
+                        param.data.copy_(weight)
+                elif model_name in buffers_dict:
+                    buf = buffers_dict[model_name]
+                    module_name = model_name.rsplit(".", 1)[0]
+                    module = modules_dict.get(module_name)
+                    weight = DeepseekV4ForCausalLM._align_quant_gemm_weight(weight, buf, module)
+                    if buf.shape == weight.shape:
+                        buf.data.copy_(weight)
+            del data
+        DeepseekV4ForMTP._load_mtp_expert_weights(model, expert_weights)
+        for layer_key, layer in model.model.layers.items():
+            mlp = layer.mlp
+            if hasattr(mlp, 'process_expert_weights'):
+                mlp.process_expert_weights()
+
+        # Prepare quant projection weights for NPU kernel
+        for layer_key, layer in model.model.layers.items():
+            self_attn = layer.self_attn
+            self_attn.prepare_wo_a_weight()
+            self_attn.prepare_quant_proj_weights()
+            if self_attn.indexer is not None:
+                self_attn.indexer.prepare_quant_proj_weights()
+            layer.mlp.shared_experts.prepare_quant_proj_weights()
+
+        # Note: smooth_scale_1 all_gather is done in llm_inference.py after init_parallel_comm_group(),
+        # because load_weights() is called before comm groups are initialized.
+
+    @staticmethod
+    def _build_mtp_name_mapping(model):
+        mapping = {}
+        pfx = "mtp.0"
+        mpfx = "model.layers.0"  # MTP uses layer_idx=0 in its own cache
+        mapping[f"{pfx}.enorm.weight"] = "model.enorm.weight"
+        mapping[f"{pfx}.hnorm.weight"] = "model.hnorm.weight"
+        mapping[f"{pfx}.e_proj.weight"] = "model.e_proj.weight"
+        mapping[f"{pfx}.e_proj.scale"] = "model.e_proj.weight_scale"
+        mapping[f"{pfx}.h_proj.weight"] = "model.h_proj.weight"
+        mapping[f"{pfx}.h_proj.scale"] = "model.h_proj.weight_scale"
+        mapping[f"{pfx}.norm.weight"] = "model.norm.weight"
+        mapping[f"{pfx}.hc_head_fn"] = "model.hc_head_fn"
+        mapping[f"{pfx}.hc_head_base"] = "model.hc_head_base"
+        mapping[f"{pfx}.hc_head_scale"] = "model.hc_head_scale"
+        mapping[f"{pfx}.hc_attn_fn"] = f"{mpfx}.hc_attn_fn"
+        mapping[f"{pfx}.hc_attn_base"] = f"{mpfx}.hc_attn_base"
+        mapping[f"{pfx}.hc_attn_scale"] = f"{mpfx}.hc_attn_scale"
+        mapping[f"{pfx}.hc_ffn_fn"] = f"{mpfx}.hc_ffn_fn"
+        mapping[f"{pfx}.hc_ffn_base"] = f"{mpfx}.hc_ffn_base"
+        mapping[f"{pfx}.hc_ffn_scale"] = f"{mpfx}.hc_ffn_scale"
+        mapping[f"{pfx}.attn_norm.weight"] = f"{mpfx}.attn_norm.weight"
+        mapping[f"{pfx}.ffn_norm.weight"] = f"{mpfx}.ffn_norm.weight"
+        mapping[f"{pfx}.attn.wq_a.weight"] = f"{mpfx}.self_attn.wq_a.weight"
+        mapping[f"{pfx}.attn.q_norm.weight"] = f"{mpfx}.self_attn.q_norm.weight"
+        mapping[f"{pfx}.attn.wq_b.weight"] = f"{mpfx}.self_attn.wq_b.weight"
+        mapping[f"{pfx}.attn.wq_b.scale"] = f"{mpfx}.self_attn.wq_b.weight_scale"
+        mapping[f"{pfx}.attn.wkv.weight"] = f"{mpfx}.self_attn.wkv.weight"
+        mapping[f"{pfx}.attn.kv_norm.weight"] = f"{mpfx}.self_attn.kv_norm.weight"
+        mapping[f"{pfx}.attn.wo_a.weight"] = f"{mpfx}.self_attn.wo_a.weight"
+        mapping[f"{pfx}.attn.wo_b.weight"] = f"{mpfx}.self_attn.wo_b.weight"
+        mapping[f"{pfx}.attn.wo_b.scale"] = f"{mpfx}.self_attn.wo_b.weight_scale"
+        mapping[f"{pfx}.attn.attn_sink"] = f"{mpfx}.self_attn.attn_sink"
+        mapping[f"{pfx}.ffn.gate.weight"] = f"{mpfx}.mlp.gate"
+        mapping[f"{pfx}.ffn.gate.bias"] = f"{mpfx}.mlp.e_score_correction_bias"
+        mapping[f"{pfx}.ffn.shared_experts.w1.weight"] = f"{mpfx}.mlp.shared_experts.gate_proj.weight"
+        mapping[f"{pfx}.ffn.shared_experts.w1.scale"] = f"{mpfx}.mlp.shared_experts.gate_proj.weight_scale"
+        mapping[f"{pfx}.ffn.shared_experts.w3.weight"] = f"{mpfx}.mlp.shared_experts.up_proj.weight"
+        mapping[f"{pfx}.ffn.shared_experts.w3.scale"] = f"{mpfx}.mlp.shared_experts.up_proj.weight_scale"
+        mapping[f"{pfx}.ffn.shared_experts.w2.weight"] = f"{mpfx}.mlp.shared_experts.down_proj.weight"
+        mapping[f"{pfx}.ffn.shared_experts.w2.scale"] = f"{mpfx}.mlp.shared_experts.down_proj.weight_scale"
+        return mapping
+
+    @staticmethod
+    def _load_mtp_expert_weights(model, expert_weights):
+        ep_size = model.ep_size
+        ep_rank = model.ep_rank
+        experts_per_rank = model.config.n_routed_experts // ep_size
+        ep_start = ep_rank * experts_per_rank
+        intermediate_size = model.config.moe_intermediate_size
+        hidden_size = model.config.hidden_size
+        pfx = "mtp.0"
+        for layer_key, layer in model.model.layers.items():
+            experts_mod = layer.mlp.experts
+            up_proj_w = torch.zeros(experts_per_rank, intermediate_size * 2, hidden_size, dtype=torch.int8)
+            up_proj_s = torch.zeros(experts_per_rank, intermediate_size * 2, dtype=torch.bfloat16)
+            down_proj_w = torch.zeros(experts_per_rank, hidden_size, intermediate_size, dtype=torch.int8)
+            down_proj_s = torch.zeros(experts_per_rank, hidden_size, dtype=torch.bfloat16)
+            for local_eid in range(experts_per_rank):
+                global_eid = ep_start + local_eid
+                for src, dst_off, dst_len in [
+                    (f"{pfx}.ffn.experts.{global_eid}.w1", 0, intermediate_size),
+                    (f"{pfx}.ffn.experts.{global_eid}.w3", intermediate_size, intermediate_size),
+                ]:
+                    w_key = f"{src}.weight"
+                    s_key = f"{src}.scale"
+                    if w_key in expert_weights:
+                        up_proj_w[local_eid, dst_off:dst_off+dst_len, :] = expert_weights[w_key]
+                    if s_key in expert_weights:
+                        up_proj_s[local_eid, dst_off:dst_off+dst_len] = expert_weights[s_key].squeeze(-1).to(torch.bfloat16)
+                w2_key = f"{pfx}.ffn.experts.{global_eid}.w2.weight"
+                s2_key = f"{pfx}.ffn.experts.{global_eid}.w2.scale"
+                if w2_key in expert_weights:
+                    down_proj_w[local_eid] = expert_weights[w2_key]
+                if s2_key in expert_weights:
+                    down_proj_s[local_eid] = expert_weights[s2_key].squeeze(-1).to(torch.bfloat16)
+            experts_mod.up_proj_weight.copy_(up_proj_w)
+            experts_mod.up_proj_weight_scale.data.copy_(up_proj_s)
+            experts_mod.down_proj_weight.copy_(down_proj_w)
+            experts_mod.down_proj_weight_scale.data.copy_(down_proj_s)
+
+
 class DeepseekV4ForCausalLM(nn.Module):
 
     def __init__(self, config, num_layers=None, ep_size=1, ep_rank=0):
@@ -2842,13 +3190,14 @@ class DeepseekV4ForCausalLM(nn.Module):
         context_lens: Optional[torch.Tensor] = None,
         q_lens: Optional[torch.Tensor] = None,
         **kwargs,
-    ) -> Tuple[torch.Tensor, PagedDummyCache]:
+    ) -> Tuple[torch.Tensor, PagedDummyCache, torch.Tensor]:
         hidden_states, past_key_values = self.model(
             input_ids, attention_mask=attention_mask, position_ids=position_ids,
             past_key_values=past_key_values, use_cache=use_cache,
             is_prefill=is_prefill, attn_inputs=attn_inputs,
             attn_metadata=attn_metadata, context_lens=context_lens, q_lens=q_lens,
         )
+        mtp_hidden = hidden_states
         if is_prefill:
             if q_lens is not None:
                 gather_q_lens = q_lens
@@ -2862,7 +3211,7 @@ class DeepseekV4ForCausalLM(nn.Module):
         hidden_states_flat = hidden_states.view(-1, self.config.hidden_size).to(torch.bfloat16)
         logits = self.lm_head(hidden_states_flat)
         logits = logits.view(*hidden_states.shape[:-1], self.config.vocab_size)
-        return logits, past_key_values
+        return logits, past_key_values, mtp_hidden
 
     def init_parallel_comm_group(self):
         if not dist.is_initialized():
