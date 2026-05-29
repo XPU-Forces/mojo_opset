@@ -1,5 +1,6 @@
 from typing import Union
 
+import os
 import pytest
 import torch
 
@@ -9,7 +10,7 @@ from mojo_opset.experimental import MojoFusedSwiGLUMoEScaleDynamicQuantize
 from mojo_opset.experimental import MojoMoEInitRoutingDynamicQuant
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
-from mojo_opset.utils.platform import get_torch_device
+from mojo_opset.utils.platform import get_torch_device, get_platform
 
 
 def _pack_int4_to_int8_along_output(input: torch.Tensor) -> torch.Tensor:
@@ -484,6 +485,7 @@ def test_quant_moe_backend(
     dtype,
 ):
     device = get_torch_device()
+
     hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
     gate_weight = torch.randn(hidden_size, num_experts, dtype=torch.float32, device=device) * 0.2
     fc1_input_smooth_scale = torch.rand(num_experts, hidden_size, dtype=torch.float32, device=device) + 0.5
