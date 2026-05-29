@@ -176,7 +176,6 @@ detect_cuda_version.cc
 
 # benchmark & profiling
 *.nsys-rep
-*.csv
 
 # npu
 fusion_result.json
