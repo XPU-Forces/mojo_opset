@@ -70,10 +70,7 @@ jobs:
             python3 -m build .
             pip install dist/*.whl --force-reinstall --no-deps
             pip3 uninstall -y ixformer
-            curl -x http://sys-proxy-rd-relay.byted.org:3128 \
-                 -O \
-                 -u "${DEEPSPARK_USER}:${DEEPSPARK_PASS}" \
-                 http://files.deepspark.org.cn:880/upload/ixformer-0.7.0+corex.4.5.0.rc.5.20260416-cp310-cp310-linux_x86_64.whl
+            curl -O -u "${DEEPSPARK_USER}:${DEEPSPARK_PASS}" http://files.deepspark.org.cn:880/upload/ixformer-0.7.0+corex.4.5.0.rc.5.20260416-cp310-cp310-linux_x86_64.whl
             pip3 install ixformer*.whl
           "
 
