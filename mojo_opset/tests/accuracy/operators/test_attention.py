@@ -623,7 +623,6 @@ def generate_paged_prefill_data_with_graph(
         current_block_offset += num_blocks_for_seq
 
     total_seq_lens = kv_lens.clone()
-    max_q_len = max_q_len
     max_total_seq_len = int(kv_lens.max().item())
     return (
         query,
