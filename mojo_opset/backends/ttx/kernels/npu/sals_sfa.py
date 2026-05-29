@@ -534,7 +534,7 @@ def sals_sfa_impl(
         cache_block_size = k_cache.shape[1]
 
     g_ratio = num_query_heads // num_kv_heads
-    BLOCK_Q = 32
+    BLOCK_Q = 64
     if sparse_block_size >= 128:
         BLOCK_RS2 = 2
     elif sparse_block_size >= 64:
@@ -617,10 +617,10 @@ def sals_sfa_impl(
         BLOCK_Q=BLOCK_Q, BLOCK_RS2=BLOCK_RS2,
         multibuffer=True,
         enable_ubuf_saving=True,
-        # unit_flag=True, 
-        # limit_auto_multi_buffer_only_for_local_buffer=False,
-        # set_workspace_multibuffer=4, 
-        # tile_mix_vector_loop=4,
-        # tile_mix_cube_loop=4,
+        #unit_flag=True, 
+        limit_auto_multi_buffer_only_for_local_buffer=False,
+        set_workspace_multibuffer=4, 
+        tile_mix_vector_loop=4,
+        tile_mix_cube_loop=4,
     )
     return output
