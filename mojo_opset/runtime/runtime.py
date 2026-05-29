@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -285,9 +286,12 @@ class PagedAttentionGenerationModel(nn.Module):
 class DeepseekSparseAttentionRuntimeState(MojoSession):
     """DeepSeek-V4 runtime state that pre-computes decode metadata outside graph."""
 
-    def __init__(self, paged_cache, config):
+    def __init__(self, paged_cache, config, cp_size=1, global_rank=0, hccl_comm_dict=None):
         self.paged_cache = paged_cache
         self.config = config
+        self.cp_size = cp_size
+        self.global_rank = global_rank
+        self.hccl_comm_dict = hccl_comm_dict or {}
 
     @property
     def kv_cache(self):
@@ -299,6 +303,11 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
             if layer_ratio == ratio:
                 return layer_idx
         return None
+
+    def _get_cp_rank(self, cp_group) -> int:
+        if cp_group is None or not dist.is_initialized():
+            return 0
+        return dist.get_rank(group=cp_group)
 
     def _build_golden_style_attn_metadata(
         self,
@@ -393,6 +402,298 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
             "full_kv_cache": full_kv_cache,
         }
 
+    def _get_slot_mapping_from_block_table(self, seq_lens, position_ids, block_table):
+        seq_lens = seq_lens.to(dtype=torch.int32, device=position_ids.device)
+        batch_size = seq_lens.shape[0]
+        if batch_size == 0:
+            return torch.empty((0,), dtype=torch.int32, device=position_ids.device)
+        max_len = position_ids.shape[-1]
+        valid_mask = torch.arange(max_len, dtype=torch.int32, device=position_ids.device).unsqueeze(0) < seq_lens.unsqueeze(1)
+        block_idx = (position_ids // self.paged_cache.block_size).to(torch.long)
+        offset = (position_ids % self.paged_cache.block_size).to(torch.int32)
+        row_idx = torch.arange(batch_size, dtype=torch.long, device=position_ids.device).unsqueeze(1).expand_as(block_idx)
+        slots = block_table[row_idx, block_idx] * self.paged_cache.block_size + offset
+        return slots[valid_mask].to(dtype=torch.int32)
+
+    def _get_padded_slot_mapping_from_block_table(self, seq_lens, position_ids, block_table):
+        seq_lens = seq_lens.to(dtype=torch.int32, device=position_ids.device)
+        batch_size = seq_lens.shape[0]
+        if batch_size == 0:
+            return torch.empty((0,), dtype=torch.int32, device=position_ids.device)
+        flat_position_ids = position_ids.reshape(-1).to(dtype=torch.int32)
+        row_indices = torch.repeat_interleave(
+            torch.arange(batch_size, dtype=torch.int32, device=position_ids.device),
+            seq_lens,
+        )
+        pad_length = flat_position_ids.shape[0] - row_indices.shape[0]
+        if pad_length > 0:
+            valid_position_ids = flat_position_ids[:-pad_length]
+        else:
+            valid_position_ids = flat_position_ids
+        block_idx = (valid_position_ids // self.paged_cache.block_size).to(torch.long)
+        offset = (valid_position_ids % self.paged_cache.block_size).to(torch.int32)
+        row_indices = row_indices.to(torch.long)
+        slot_mapping = block_table[row_indices, block_idx] * self.paged_cache.block_size + offset
+        if pad_length > 0:
+            pad_tensor = torch.full(
+                (pad_length,),
+                -1,
+                dtype=torch.int32,
+                device=position_ids.device,
+            )
+            slot_mapping = torch.cat([slot_mapping.to(torch.int32), pad_tensor], dim=0)
+        return slot_mapping.to(dtype=torch.int32)
+
+    @staticmethod
+    def _get_zigzag_idx(origin_idx, cp_segment_num):
+        midpoint = cp_segment_num // 2 - 1
+        if origin_idx <= midpoint:
+            return origin_idx, "prev"
+        return midpoint + 1 - (origin_idx - midpoint), "next"
+
+    def _get_cp_cmp_param(
+        self,
+        segment_idx,
+        attn_metadata,
+        split_list_hidden,
+        split_position_ids,
+        split_kv_len,
+        ratio,
+    ):
+        batch_size = split_kv_len.shape[0]
+        cur_kv_len = split_kv_len[:, segment_idx]
+        cur_segment_len = split_list_hidden[segment_idx]
+        cur_position_ids = split_position_ids[segment_idx]
+        if segment_idx == 0 or cur_segment_len == 0:
+            comp_len = torch.zeros([batch_size], dtype=torch.int32, device=cur_position_ids.device)
+        else:
+            overlap_len = ratio if ratio == 4 else 0
+            comp_len = cur_position_ids[:, 0].to(dtype=torch.int32) % ratio + overlap_len
+        seq_used_q = cur_kv_len.to(dtype=torch.int32) + comp_len
+        seq_used_q = torch.where(cur_kv_len > 0, seq_used_q, torch.zeros_like(seq_used_q))
+        cu_seq_lens = torch.cat([
+            torch.zeros(1, dtype=torch.int32, device=cur_position_ids.device),
+            (torch.full_like(cur_kv_len, cur_segment_len, dtype=torch.int32) + comp_len),
+        ])
+        if segment_idx == 0:
+            start_pos = torch.zeros([batch_size], dtype=torch.int32, device=cur_position_ids.device)
+        else:
+            start_pos = torch.full(
+                [batch_size],
+                sum(split_list_hidden[:segment_idx]),
+                dtype=torch.int32,
+                device=cur_position_ids.device,
+            ) - comp_len
+        compressed_len, position_ids_cmp = self.paged_cache.get_compressed_position_ids(
+            start_pos, seq_used_q, cu_seq_lens, ratio
+        )
+        slot_mapping_cmp = self._get_padded_slot_mapping_from_block_table(
+            compressed_len,
+            position_ids_cmp.unsqueeze(0),
+            attn_metadata["block_table"][f"c{ratio}a_cmp_kv"],
+        )
+        if ratio == 4 and segment_idx > 0 and compressed_len.numel() > 0:
+            offsets = torch.nn.functional.pad(
+                torch.cumsum(compressed_len, dim=0, dtype=torch.int32), (1, 0)
+            )[:-1]
+            slot_mapping_cmp[offsets.to(torch.long)] = -1
+        return {
+            "compressed_len": compressed_len.to(dtype=torch.int32),
+            "cu_seq_lens": cu_seq_lens.to(dtype=torch.int32),
+            "seq_used_q": seq_used_q.to(dtype=torch.int32),
+            "start_pos": start_pos.to(dtype=torch.int32),
+            "position_ids_cmp_for_rope": (position_ids_cmp * ratio).to(dtype=torch.long).unsqueeze(0),
+            "slot_mapping_cmp": slot_mapping_cmp.to(dtype=torch.int32),
+            "comp_lens": comp_len.to(dtype=torch.int32),
+        }
+
+    def _build_cp_metadata(self, input_ids, attn_metadata):
+        if self.cp_size <= 1 or not dist.is_initialized():
+            attn_metadata["cp_metadata"] = None
+            return attn_metadata
+        batch_size, seq_len = input_ids.shape
+        if batch_size != 1:
+            raise NotImplementedError("Mojo CP prefill currently only supports batch_size=1.")
+        cp_group = self.hccl_comm_dict.get("cp_group")
+        if cp_group is None:
+            raise ValueError("cp_size > 1 requires cp_group to be initialized.")
+        cp_rank = self._get_cp_rank(cp_group)
+        cp_segment_num = self.cp_size * 2
+        if seq_len % cp_segment_num != 0:
+            raise ValueError(f"seq_len={seq_len} must be divisible by cp_segment_num={cp_segment_num}.")
+
+        kv_len = attn_metadata["kv_len"].to(dtype=torch.int32)
+        position_ids = attn_metadata["position_ids"]
+        segment_len = seq_len // cp_segment_num
+        split_list_hidden = [segment_len] * cp_segment_num
+        split_position_ids = list(position_ids.split(split_list_hidden, dim=-1))
+        zigzag_idx = [cp_rank, cp_segment_num - cp_rank - 1]
+        reverse_index = torch.tensor(
+            list(range(0, cp_segment_num, 2)) + list(range(cp_segment_num - 1, 0, -2)),
+            device=position_ids.device,
+            dtype=torch.long,
+        )
+        split_kv_len = (
+            torch.min(
+                (torch.arange(cp_segment_num, device=position_ids.device).unsqueeze(0) + 1) * segment_len,
+                kv_len.unsqueeze(1),
+            )
+            - torch.min(
+                torch.arange(cp_segment_num, device=position_ids.device).unsqueeze(0) * segment_len,
+                kv_len.unsqueeze(1),
+            )
+        ).to(dtype=torch.int32)
+        last_rank_before_zz = int(((split_kv_len > 0).sum(dim=1) - 1).item())
+        last_rank_zz, last_rank_flag = self._get_zigzag_idx(last_rank_before_zz, cp_segment_num)
+        cp_input_dict = {
+            "split_list": split_list_hidden,
+            "zigzag_idx": zigzag_idx,
+            "reverse_index": reverse_index,
+            "split_kv_len": split_kv_len,
+            "last_rank": last_rank_before_zz,
+            "last_rank_flag": last_rank_flag,
+            "last_rank_zz": last_rank_zz,
+        }
+        attn_metadata["cp_metadata"] = cp_input_dict
+        attn_metadata["prev"] = {}
+        attn_metadata["next"] = {}
+
+        ratios = sorted({r for r in self.config.compress_ratios if r > 1})
+        for zigzag_flag in ["prev", "next"]:
+            segment_idx = cp_rank if zigzag_flag == "prev" else 2 * self.cp_size - 1 - cp_rank
+            cur_position_ids = split_position_ids[segment_idx]
+            if segment_idx > 0:
+                prev_position_ids = split_position_ids[segment_idx - 1]
+                position_ids_with_pre_win = torch.cat(
+                    [prev_position_ids[:, -self.config.sliding_window:], cur_position_ids],
+                    dim=-1,
+                )
+            else:
+                position_ids_with_pre_win = cur_position_ids
+            last_kv_len = int(split_kv_len[0, last_rank_before_zz].item())
+            if last_kv_len >= self.config.sliding_window:
+                position_ids_last_src = split_position_ids[last_rank_before_zz][:, :last_kv_len]
+                position_ids_last_win = position_ids_last_src[:, last_kv_len - self.config.sliding_window:last_kv_len]
+            elif last_rank_before_zz > 0:
+                prev_last_kv_len = int(split_kv_len[0, last_rank_before_zz - 1].item())
+                prev_last_src = split_position_ids[last_rank_before_zz - 1][:, :prev_last_kv_len]
+                last_src = split_position_ids[last_rank_before_zz][:, :last_kv_len]
+                position_ids_last_win = torch.cat([
+                    prev_last_src[:, -(self.config.sliding_window - last_kv_len):],
+                    last_src[:, :last_kv_len],
+                ], dim=-1)
+            else:
+                position_ids_last_win = split_position_ids[last_rank_before_zz][:, :self.config.sliding_window]
+
+            ori_kv_len_val = segment_len + self.config.sliding_window if segment_idx > 0 else segment_len
+            ori_kv_len = torch.tensor([ori_kv_len_val], dtype=torch.int32, device=position_ids.device)
+            slot_mapping_ori_kv = self._get_slot_mapping_from_block_table(
+                ori_kv_len,
+                position_ids_with_pre_win,
+                attn_metadata["block_table"]["full_kv"],
+            )
+            actual_seq_k_val = (segment_idx + 1) * segment_len
+            actual_seq_k = torch.full([batch_size], actual_seq_k_val, dtype=torch.int32, device=position_ids.device)
+            actual_seq_q = torch.full([batch_size], segment_len, dtype=torch.int32, device=position_ids.device)
+            cu_seq_lens_q = torch.cat([torch.zeros(1, dtype=torch.int32, device=position_ids.device), actual_seq_q])
+
+            branch = {
+                "is_start": segment_idx == 0,
+                "is_end": segment_idx == last_rank_before_zz,
+                "cur_kv_len": int(split_kv_len[0, segment_idx].item()),
+                "block_table": dict(attn_metadata["block_table"]),
+                "full_kv_cache": attn_metadata["full_kv_cache"],
+                "kernel_metadata": {},
+                "position_ids_with_pre_win": position_ids_with_pre_win,
+                "position_ids_last_win": position_ids_last_win,
+                "position_ids_cur": split_position_ids[segment_idx],
+                "last_kv_len": last_kv_len,
+                "slot_mapping_ori_kv": slot_mapping_ori_kv,
+                "actual_seq_k": actual_seq_k,
+                "actual_seq_q": actual_seq_q,
+                "cu_seq_lens_q": cu_seq_lens_q,
+                "cmp_out_pad": {},
+                "cmp_in_offset": {},
+            }
+            branch["kernel_metadata"]["c1a_metadata"] = self._compute_sas_metadata(
+                cu_seq_lens_q, actual_seq_k, batch_size, 1
+            )
+
+            for ratio in ratios:
+                cmp_meta = self._get_cp_cmp_param(
+                    segment_idx, attn_metadata, split_list_hidden, split_position_ids, split_kv_len, ratio
+                )
+                branch.setdefault("cu_seq_lens", {})[str(ratio)] = cmp_meta["cu_seq_lens"]
+                branch.setdefault("seq_used_q_cmp", {})[str(ratio)] = cmp_meta["seq_used_q"]
+                branch.setdefault("start_pos_cmp", {})[str(ratio)] = cmp_meta["start_pos"]
+                branch.setdefault("position_ids_cmp_for_rope", {})[str(ratio)] = cmp_meta["position_ids_cmp_for_rope"]
+                branch.setdefault("slot_mapping_cmp_local", {})[str(ratio)] = cmp_meta["slot_mapping_cmp"]
+                branch.setdefault("comp_lens", {})[str(ratio)] = cmp_meta["comp_lens"]
+                branch["kernel_metadata"][f"c{ratio}a_metadata"] = self._compute_sas_metadata(
+                    branch["cu_seq_lens_q"],
+                    branch["actual_seq_k"],
+                    batch_size,
+                    ratio,
+                )
+                if ratio == 4 and attn_metadata["block_table"].get("c4a_cmp_kv") is not None:
+                    branch["kernel_metadata"]["lightning_indexer_quant"] = self._compute_li_metadata(
+                        branch["actual_seq_q"],
+                        branch["actual_seq_k"],
+                        attn_metadata["block_table"]["c4a_cmp_kv"],
+                    )
+            attn_metadata[zigzag_flag] = branch
+
+        slot_mapping_cmp_dict = {}
+        for ratio in ratios:
+            slot_mapping_cmp_list = []
+            in_lens = []
+            for segment_idx in range(cp_segment_num):
+                cur_position_ids = split_position_ids[segment_idx]
+                cur_in_len = segment_len
+                if segment_idx > 0:
+                    cur_in_len += int(cur_position_ids[:, 0].item() % ratio) + (ratio if ratio == 4 else 0)
+                in_lens.append(cur_in_len)
+            out_lens = [min(in_len, in_len // ratio + batch_size) for in_len in in_lens]
+            max_out_len = max(out_lens)
+            for zigzag_flag in ["prev", "next"]:
+                branch = attn_metadata[zigzag_flag]
+                segment_idx = cp_rank if zigzag_flag == "prev" else 2 * self.cp_size - 1 - cp_rank
+                cur_slot_mapping = attn_metadata[zigzag_flag]["slot_mapping_cmp_local"][str(ratio)]
+                pad_len = max_out_len - out_lens[segment_idx]
+                if pad_len > 0:
+                    pad_tensor = torch.full([pad_len], -1, dtype=torch.int32, device=position_ids.device)
+                    cur_slot_mapping = torch.cat([pad_tensor, cur_slot_mapping], dim=0)
+                branch.setdefault("cmp_pad_len", {})[str(ratio)] = pad_len
+                li_pad = torch.zeros(
+                    (pad_len, self.config.index_head_dim),
+                    dtype=torch.bfloat16,
+                    device=position_ids.device,
+                )
+                sfa_pad = torch.zeros(
+                    (pad_len, self.config.head_dim),
+                    dtype=torch.bfloat16,
+                    device=position_ids.device,
+                )
+                branch["cmp_out_pad"][str(ratio)] = (li_pad, sfa_pad)
+                if segment_idx == 0:
+                    cmp_in_offset = torch.zeros([batch_size], dtype=torch.int32, device=position_ids.device)
+                else:
+                    cmp_in_offset = torch.full(
+                        [batch_size],
+                        self.config.sliding_window,
+                        dtype=torch.int32,
+                        device=position_ids.device,
+                    ) - branch["comp_lens"][str(ratio)]
+                branch["cmp_in_offset"][str(ratio)] = int(cmp_in_offset[0].item())
+                slot_mapping_cmp_list.append(cur_slot_mapping)
+            cur_slot_mapping_cmp = torch.cat(slot_mapping_cmp_list, dim=0)
+            all_slot_mapping_cmp = cur_slot_mapping_cmp.new_empty([cur_slot_mapping_cmp.shape[0] * self.cp_size])
+            dist.all_gather_into_tensor(all_slot_mapping_cmp, cur_slot_mapping_cmp, group=cp_group)
+            all_slot_mapping_cmp = all_slot_mapping_cmp.view(-1, cur_slot_mapping_cmp.shape[0] // 2)[reverse_index]
+            slot_mapping_cmp_dict[str(ratio)] = all_slot_mapping_cmp.flatten(0, 1)
+        attn_metadata["cp_metadata"]["slot_mapping_cmp"] = slot_mapping_cmp_dict
+        return attn_metadata
+
     @classmethod
     def from_model(
         cls,
@@ -426,7 +727,13 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
             pa_max_length=pa_max_length,
             next_n=next_n,
         )
-        return cls(cache_data, config)
+        return cls(
+            cache_data,
+            config,
+            cp_size=getattr(model, "cp_size", 1),
+            global_rank=getattr(model, "global_rank", 0),
+            hccl_comm_dict=getattr(model, "hccl_comm_dict", {}),
+        )
 
     def prepare_prefill_inputs(self, input_ids, attention_mask=None, q_lens=None):
         pkv = self.paged_cache
@@ -454,7 +761,10 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
 
         start_pos = context_lens.to(dtype=torch.int32)
         seq_used_q = q_lens
-        current_seq_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device=device)
+        # Golden keeps kv_len as the real request length even when CP pads the
+        # prefill sequence to segment alignment. Treating padding as valid KV
+        # pollutes the tail window handed to decode.
+        current_seq_lens = q_lens.to(dtype=torch.int32)
 
         unique_ratios = sorted(set(
             self.config.compress_ratios[l] if l < len(self.config.compress_ratios) else 0
@@ -493,6 +803,7 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
             batch_size=batch_size,
             decode_fast_path=False,
         )
+        attn_metadata = self._build_cp_metadata(input_ids, attn_metadata)
 
         attn_inputs = None
         if os.getenv("MOJO_BUILD_LEGACY_ATTN_INPUTS", "0") == "1":
@@ -591,7 +902,10 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
         pkv = self.paged_cache
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
-        decode_fast_path = seq_len == 1 and batch_size == pkv.batch_size
+        # Keep decode metadata semantics aligned with Golden. The specialized
+        # fast path changes compressed position / slot mapping construction and
+        # is more brittle when batch has already been sharded for DP-style runs.
+        decode_fast_path = False
 
         context_lens_i32 = pkv.get_seq_length(0).to(device=device, dtype=torch.int32)
         context_lens = context_lens_i32.to(dtype=torch.long)

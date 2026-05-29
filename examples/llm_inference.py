@@ -4,6 +4,7 @@ import json
 import os
 import logging
 import time
+import traceback
 from typing import List
 
 import torch
@@ -35,6 +36,21 @@ def _mem_snapshot(tag, device=None):
     max_reserved = torch.npu.max_memory_reserved(device) / (1024 ** 3)
     rank = dist.get_rank() if dist.is_initialized() else 0
     print(f"[MEM][rank{rank}] {tag:50s} alloc={alloc:7.3f}GiB reserved={reserved:7.3f}GiB max_alloc={max_alloc:7.3f}GiB max_reserved={max_reserved:7.3f}GiB", flush=True)
+
+
+def _device_snapshot(tag, *, local_rank, global_rank, world_size, target_device, ep_rank=None):
+    current_device = torch.npu.current_device() if hasattr(torch, "npu") else "unknown"
+    logger.info(
+        "[DEVICE] %s | rank=%s local_rank=%s world_size=%s ep_rank=%s target_device=%s current_device=%s pid=%s",
+        tag,
+        global_rank,
+        local_rank,
+        world_size,
+        ep_rank,
+        target_device,
+        current_device,
+        os.getpid(),
+    )
 
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - [LLM](%(filename)s:%(lineno)d): %(message)s',
@@ -144,6 +160,98 @@ def pad_batch(encoded, pad_token_id, device):
     return input_ids.to(device), attention_mask.to(device), lengths.to(device)
 
 
+def _align_up(value: int, alignment: int) -> int:
+    if alignment <= 0:
+        raise ValueError(f"alignment must be > 0, got {alignment}")
+    return ((value + alignment - 1) // alignment) * alignment
+
+
+def pad_deepseek_v4_cp_prefill(input_ids, attention_mask, pad_token_id, cp_size):
+    if cp_size <= 1:
+        return input_ids, attention_mask
+
+    cp_segment_num = cp_size * 2
+    cp_window_alignment = cp_segment_num * 128
+    target_len = _align_up(input_ids.shape[1], cp_window_alignment)
+
+    if target_len == input_ids.shape[1]:
+        return input_ids, attention_mask
+
+    pad_width = target_len - input_ids.shape[1]
+    logger.warning(
+        "[INPUT_PAD] DeepseekV4 CP prefill pad: orig_len=%s target_len=%s cp_size=%s cp_segment_num=%s",
+        input_ids.shape[1],
+        target_len,
+        cp_size,
+        cp_segment_num,
+    )
+    input_ids = torch.nn.functional.pad(input_ids, (0, pad_width), value=pad_token_id)
+    attention_mask = torch.nn.functional.pad(attention_mask, (0, pad_width), value=False)
+    return input_ids, attention_mask
+
+
+def get_attn_dp_shard_range(total_batch, *, global_rank, world_size, attn_tp_size, cp_size=1):
+    if total_batch <= 0:
+        return 0, 0, 1, 0
+    if attn_tp_size <= 0:
+        raise ValueError(f"attn_tp_size must be > 0, got {attn_tp_size}")
+    if cp_size <= 0:
+        raise ValueError(f"cp_size must be > 0, got {cp_size}")
+
+    # CP ranks must keep the same batch shard; otherwise CP gather mixes different samples.
+    attn_group_size = attn_tp_size * cp_size
+    if world_size % attn_group_size != 0:
+        raise ValueError(
+            f"world_size={world_size} is not divisible by attn_tp_size * cp_size="
+            f"{attn_tp_size} * {cp_size} = {attn_group_size}"
+        )
+
+    dp_group_count = world_size // attn_group_size
+    if total_batch % dp_group_count != 0:
+        raise ValueError(
+            f"DeepseekV4 DP requires batch_size={total_batch} to be divisible by "
+            f"attn_dp_size={dp_group_count} (world_size={world_size}, attn_tp_size={attn_tp_size}, "
+            f"cp_size={cp_size})."
+        )
+
+    dp_rank = global_rank // attn_group_size
+    shard_size = total_batch // dp_group_count
+    start = dp_rank * shard_size
+    end = start + shard_size
+    return start, end, dp_group_count, dp_rank
+
+
+def shard_batch_for_attn_dp(
+    input_ids,
+    attention_mask,
+    lengths,
+    prompts,
+    rendered,
+    *,
+    global_rank,
+    world_size,
+    attn_tp_size,
+    cp_size=1,
+):
+    start, end, _, _ = get_attn_dp_shard_range(
+        input_ids.shape[0],
+        global_rank=global_rank,
+        world_size=world_size,
+        attn_tp_size=attn_tp_size,
+        cp_size=cp_size,
+    )
+    if start >= end:
+        return input_ids, attention_mask, lengths, prompts, rendered
+
+    return (
+        input_ids[start:end],
+        attention_mask[start:end],
+        lengths[start:end],
+        prompts[start:end],
+        rendered[start:end],
+    )
+
+
 def last_logits_from_output(logits, lengths):
     if logits.shape[1] == 1:
         return logits[:, 0, :]
@@ -245,6 +353,94 @@ def forward_prefill_mojo(model, input_ids, attention_mask, lengths, runtime_stat
     return last_logits_from_output(logits, lengths), past_key_values
 
 
+def _copy_paged_dummy_cache_batch(dst_cache, src_cache, dst_batch_idx: int) -> None:
+    dst_batch_size = int(dst_cache.batch_size)
+    src_batch_size = int(src_cache.batch_size)
+    if src_batch_size != 1:
+        raise ValueError(f"CP prefill mini-batch copy expects src batch size 1, got {src_batch_size}")
+    if not (0 <= dst_batch_idx < dst_batch_size):
+        raise ValueError(f"dst_batch_idx={dst_batch_idx} out of range for batch_size={dst_batch_size}")
+
+    dst_cache.seq_lens[:, dst_batch_idx].copy_(src_cache.seq_lens[:, 0])
+
+    for layer_idx in range(src_cache.num_layers):
+        src_layer = src_cache.cache_data[layer_idx]
+        dst_layer = dst_cache.cache_data[layer_idx]
+        for cache_name, src_tensor in src_layer.items():
+            if cache_name.endswith("_block_table"):
+                continue
+            if src_tensor is None or not torch.is_tensor(src_tensor):
+                continue
+            dst_tensor = dst_layer.get(cache_name)
+            if dst_tensor is None or not torch.is_tensor(dst_tensor):
+                continue
+            src_blocks_per_batch = (src_tensor.shape[0] - 1) // src_batch_size
+            dst_blocks_per_batch = (dst_tensor.shape[0] - 1) // dst_batch_size
+            blocks_to_copy = min(src_blocks_per_batch, dst_blocks_per_batch)
+            if blocks_to_copy <= 0:
+                continue
+            src_start = 1
+            dst_start = 1 + dst_batch_idx * dst_blocks_per_batch
+            dst_tensor[dst_start: dst_start + blocks_to_copy].copy_(
+                src_tensor[src_start: src_start + blocks_to_copy]
+            )
+
+
+def forward_cp_prefill_minibatch_mojo(
+    model,
+    input_ids,
+    attention_mask,
+    lengths,
+    runtime_state,
+    *,
+    local_shard_start,
+    local_shard_end,
+    max_seq_len,
+    use_attn_metadata=True,
+):
+    total_batch = input_ids.shape[0]
+    local_batch = local_shard_end - local_shard_start
+    runtime_batch = int(runtime_state.paged_cache.batch_size)
+    if runtime_batch != local_batch:
+        raise ValueError(
+            "CP prefill runtime batch size mismatch: "
+            f"runtime_batch={runtime_batch}, local_batch={local_batch}, "
+            f"owner_range=[{local_shard_start}, {local_shard_end})"
+        )
+    logits_chunks = []
+    for global_batch_idx in range(total_batch):
+        owns_sample = local_shard_start <= global_batch_idx < local_shard_end
+        minibatch_runtime = DeepseekSparseAttentionRuntimeState.from_model(
+            model,
+            batch_size=1,
+            max_seq_len=max_seq_len,
+        )
+        next_logits, _ = forward_prefill_mojo(
+            model,
+            input_ids[global_batch_idx: global_batch_idx + 1],
+            attention_mask[global_batch_idx: global_batch_idx + 1],
+            lengths[global_batch_idx: global_batch_idx + 1],
+            runtime_state=minibatch_runtime,
+            use_attn_metadata=use_attn_metadata,
+        )
+        if owns_sample:
+            local_slot = global_batch_idx - local_shard_start
+            _copy_paged_dummy_cache_batch(
+                runtime_state.paged_cache,
+                minibatch_runtime.paged_cache,
+                local_slot,
+            )
+            logits_chunks.append(next_logits)
+        del minibatch_runtime
+
+    if not logits_chunks:
+        raise RuntimeError(
+            "CP-aware prefill did not collect any owner logits for this rank. "
+            f"owner_range=[{local_shard_start}, {local_shard_end}), total_batch={total_batch}"
+        )
+    return torch.cat(logits_chunks, dim=0), runtime_state.paged_cache
+
+
 def forward_decode_mojo(model, token_ids, past_key_values, decode_fn=None, runtime_state=None, use_attn_metadata=True):
     if runtime_state is not None:
         decode_meta = runtime_state.prepare_decode_inputs(token_ids)
@@ -283,6 +479,7 @@ def generate(
     max_new_tokens,
     device,
     ep_size=1,
+    cp_size=1,
     batch_size=1,
     graph_mode="eager",
     prof=False,
@@ -299,6 +496,12 @@ def generate(
 
     is_main = (global_rank == 0)
     moe_ep_group = getattr(model, 'moe_ep_group', None)
+    lmhead_tp_size = getattr(model, "lmhead_tp_size", 1)
+    attn_tp_size = getattr(model, "attn_tp_size", 1)
+    shard_start = 0
+    shard_end = 0
+    attn_dp_size = 1
+    dp_rank = 0
     prompts = build_batch_prompts(prompt, batch_size, ep_size)
     batch_size = len(prompts)
 
@@ -313,13 +516,49 @@ def generate(
         ids, text = build_prompt_input_ids(model, tokenizer, p)
         encoded.append(ids)
         rendered.append(text)
-    input_ids, attention_mask, lengths = pad_batch(encoded, pad_token_id, device)
+    full_input_ids, full_attention_mask, full_lengths = pad_batch(encoded, pad_token_id, device)
+    if model.__class__.__name__ == "DeepseekV4ForCausalLM":
+        shard_start, shard_end, attn_dp_size, dp_rank = get_attn_dp_shard_range(
+            batch_size,
+            global_rank=global_rank,
+            world_size=dist.get_world_size() if dist.is_initialized() else 1,
+            attn_tp_size=attn_tp_size,
+            cp_size=cp_size,
+        )
+        full_input_ids, full_attention_mask = pad_deepseek_v4_cp_prefill(
+            full_input_ids, full_attention_mask, pad_token_id, cp_size
+        )
+        input_ids, attention_mask, lengths, prompts, rendered = shard_batch_for_attn_dp(
+            full_input_ids,
+            full_attention_mask,
+            full_lengths,
+            prompts,
+            rendered,
+            global_rank=global_rank,
+            world_size=dist.get_world_size() if dist.is_initialized() else 1,
+            attn_tp_size=attn_tp_size,
+            cp_size=cp_size,
+        )
+        batch_size = input_ids.shape[0]
+    else:
+        input_ids, attention_mask, lengths = full_input_ids, full_attention_mask, full_lengths
 
     _mem_snapshot("after input preparation")
 
-    if is_main:
+    should_print = is_main
+    if dist.is_initialized() and model.__class__.__name__ == "DeepseekV4ForCausalLM":
+        should_print = (global_rank % attn_tp_size) == 0
+
+    if should_print:
+        print(
+            f"[ATTN_DP_SHARD] rank={global_rank} dp_rank={dp_rank}/{attn_dp_size} "
+            f"attn_tp_size={attn_tp_size} lmhead_tp_size={lmhead_tp_size} "
+            f"shard=[{shard_start}, {shard_end}) decode_local_batch={batch_size} "
+            f"prefill_batch={full_input_ids.shape[0] if model.__class__.__name__ == 'DeepseekV4ForCausalLM' and cp_size > 1 else batch_size}",
+            flush=True,
+        )
         for i in range(batch_size):
-            print(f"\n[Batch {i}] Prompt: {prompts[i]}")
+            print(f"\n[Batch {shard_start + i}] Prompt: {prompts[i]}")
             print(f"  Rendered prefix: {repr(rendered[i][:200])}")
             print(f"  Input length: {lengths[i].item()}")
         print(f"Graph mode: {graph_mode}")
@@ -336,31 +575,54 @@ def generate(
             model, batch_size=batch_size,
             max_seq_len=max(input_ids.shape[1] * 4, 4096),
         )
-        if is_main:
+        if should_print:
             print("[RUNTIME] DeepseekSparseAttentionRuntimeState created before prefill")
         if graph_mode != "eager":
-            if is_main:
+            if should_print:
                 print(f"[GRAPH] Compiling decode with {graph_mode} backend...")
             compile_t0 = time.time()
             decode_fn = compile_deepseek_v4_decode(model, graph_mode)
-            if is_main:
+            if should_print:
                 print(f"[GRAPH] torch.compile() wrapped in {time.time() - compile_t0:.2f}s (lazy, actual compile on first call)")
 
     with torch.no_grad():
-        next_token_logits, past_key_values = forward_prefill_mojo(
-            model,
-            input_ids,
-            attention_mask,
-            lengths,
-            runtime_state=runtime_state,
-            use_attn_metadata=use_attn_metadata,
-        )
+        if (
+            model.__class__.__name__ == "DeepseekV4ForCausalLM"
+            and runtime_state is not None
+            and cp_size > 1
+            and full_input_ids.shape[0] > 1
+        ):
+            next_token_logits, past_key_values = forward_cp_prefill_minibatch_mojo(
+                model,
+                full_input_ids,
+                full_attention_mask,
+                full_lengths,
+                runtime_state,
+                local_shard_start=shard_start,
+                local_shard_end=shard_end,
+                max_seq_len=max(input_ids.shape[1] * 4, 4096),
+                use_attn_metadata=use_attn_metadata,
+            )
+        else:
+            next_token_logits, past_key_values = forward_prefill_mojo(
+                model,
+                input_ids,
+                attention_mask,
+                lengths,
+                runtime_state=runtime_state,
+                use_attn_metadata=use_attn_metadata,
+            )
     _mem_snapshot("after prefill")
 
     next_token_id = torch.argmax(next_token_logits, dim=-1).unsqueeze(-1)
 
-    if ep_size > 1 and dist.is_initialized():
-        dist.broadcast(next_token_id, src=0, group=moe_ep_group)
+    if dist.is_initialized() and model.__class__.__name__ != "DeepseekV4ForCausalLM":
+        if lmhead_tp_size > 1:
+            lmhead_tp_group = getattr(model, "hccl_comm_dict", {}).get("lmhead_tp_group")
+            src_rank = (global_rank // lmhead_tp_size) * lmhead_tp_size
+            dist.broadcast(next_token_id, src=src_rank, group=lmhead_tp_group)
+        elif ep_size > 1:
+            dist.broadcast(next_token_id, src=0, group=moe_ep_group)
 
     generated = [[int(x)] for x in next_token_id.squeeze(-1).detach().cpu().tolist()]
 
@@ -400,7 +662,7 @@ def generate(
                     use_attn_metadata=use_attn_metadata,
                 )
 
-            if step == 0 and decode_fn is not None and is_main:
+            if step == 0 and decode_fn is not None and should_print:
                 print("[GRAPH] First decode step done (compilation triggered on this step)")
                 print(
                     f"[MEM] After graph compile: allocated={torch.npu.memory_allocated()/1e9:.2f} GB, "
@@ -420,8 +682,13 @@ def generate(
 
             next_token_id = torch.argmax(next_token_logits, dim=-1).unsqueeze(-1)
 
-            if ep_size > 1 and dist.is_initialized():
-                dist.broadcast(next_token_id, src=0, group=moe_ep_group)
+            if dist.is_initialized() and model.__class__.__name__ != "DeepseekV4ForCausalLM":
+                if lmhead_tp_size > 1:
+                    lmhead_tp_group = getattr(model, "hccl_comm_dict", {}).get("lmhead_tp_group")
+                    src_rank = (global_rank // lmhead_tp_size) * lmhead_tp_size
+                    dist.broadcast(next_token_id, src=src_rank, group=lmhead_tp_group)
+                elif ep_size > 1:
+                    dist.broadcast(next_token_id, src=0, group=moe_ep_group)
 
             token_list = next_token_id.squeeze(-1).detach().cpu().tolist()
             for row, token_id in enumerate(token_list):
@@ -434,13 +701,13 @@ def generate(
 
     _mem_snapshot("after all decode steps")
 
-    if is_main:
+    if should_print:
         print("-" * 40)
         for i, output_ids in enumerate(generated):
             res = tokenizer.decode(output_ids, skip_special_tokens=False)
             if tokenizer.eos_token in res:
                 res = res.split(tokenizer.eos_token)[0]
-            print(f"[Batch {i}] Generated text: {res}")
+            print(f"[Batch {shard_start + i}] Generated text: {res}")
 
 
 def parse_args():
@@ -451,8 +718,14 @@ def parse_args():
     parser.add_argument("--prompt", type=str, default="今天天气怎么样？")
     parser.add_argument("--max_new_tokens", type=int, default=100)
     parser.add_argument("--pa_max_length", type=int, default=int(os.getenv("PA_MAX_LENGTH", "2048")))
+    parser.add_argument("--next_n", type=int, default=int(os.getenv("NEXT_N", "0")),
+                        help="MTP speculative steps. Use 0 for non-MTP inference.")
     parser.add_argument("--transformers", action="store_true", help="Use Transformers model")
     parser.add_argument("--ep_size", type=int, default=int(os.getenv("EP_SIZE", "1")))
+    parser.add_argument("--cp_size", type=int, default=int(os.getenv("CP_SIZE", "1")))
+    parser.add_argument("--attn_tp_size", type=int, default=int(os.getenv("ATTN_TP_SIZE", "1")))
+    parser.add_argument("--lmhead_tp_size", type=int, default=int(os.getenv("LMHEAD_TP_SIZE", "1")))
+    parser.add_argument("--o_proj_tp_size", type=int, default=int(os.getenv("O_PROJ_TP_SIZE", "1")))
     parser.add_argument("--batch_size", type=int, default=int(os.getenv("BATCH_SIZE", "1")),
                         help="Batch size for inference (default: 1, single-batch)")
     parser.add_argument("--prof", action="store_true", default=bool(int(os.getenv("MOJO_PROF", "0"))),
@@ -471,8 +744,19 @@ def main():
     if not args.model_path and not os.getenv("QWEN3_MODEL_PATH"):
         raise ValueError("Please pass --model_path or set QWEN3_MODEL_PATH")
 
+    local_rank, global_rank, world_size = init_distributed()
     ep_size = args.ep_size
-    local_rank, global_rank, _ = init_distributed()
+    cp_size = args.cp_size
+    attn_tp_size = args.attn_tp_size
+    lmhead_tp_size = args.lmhead_tp_size
+    o_proj_tp_size = args.o_proj_tp_size
+    if world_size > 1 and lmhead_tp_size > 1 and world_size % lmhead_tp_size != 0:
+        raise ValueError(f"WORLD_SIZE={world_size} must be divisible by LMHEAD_TP_SIZE={lmhead_tp_size}")
+    if world_size > 1 and world_size % (attn_tp_size * max(cp_size, 1)) != 0:
+        raise ValueError(
+            "WORLD_SIZE must be divisible by ATTN_TP_SIZE * CP_SIZE, got "
+            f"WORLD_SIZE={world_size}, ATTN_TP_SIZE={attn_tp_size}, CP_SIZE={cp_size}"
+        )
     npu_device_idx = int(os.getenv("NPU_DEVICE_IDX", local_rank))
 
     torch_npu.npu.config.allow_internal_format = True
@@ -507,28 +791,111 @@ def main():
             hf_config = DeepseekV4Config(**cfg_dict)
 
         hf_config.pa_max_length = args.pa_max_length
+        hf_config.next_n = args.next_n
+        logger.info("[CONFIG] DeepSeek-V4 runtime config: pa_max_length=%s next_n=%s", args.pa_max_length, args.next_n)
 
         ep_rank = global_rank % ep_size if ep_size > 1 else 0
+        attn_dp_size = world_size // (attn_tp_size * max(cp_size, 1))
+        parallel_config = {
+            "cp_size": cp_size,
+            "attn_dp_size": attn_dp_size,
+            "attn_tp_size": attn_tp_size,
+            "lmhead_tp_size": lmhead_tp_size,
+            "o_proj_tp_size": o_proj_tp_size,
+        }
 
     _mem_snapshot("before model construct", npu_device_idx)
+    _device_snapshot(
+        "before model construct",
+        local_rank=local_rank,
+        global_rank=global_rank,
+        world_size=world_size,
+        ep_rank=ep_rank if not args.transformers else None,
+        target_device=f"npu:{npu_device_idx}",
+    )
 
     if hasattr(model_class, "load_weights"):
         from transformers.modeling_utils import no_init_weights
         origin_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.bfloat16)
         with no_init_weights():
-            model = model_class(hf_config, num_layers=args.num_layers, ep_size=ep_size, ep_rank=ep_rank)
+            model = model_class(
+                hf_config,
+                num_layers=args.num_layers,
+                ep_size=ep_size,
+                ep_rank=ep_rank,
+                global_rank=global_rank,
+                parallel_config=parallel_config,
+            )
         torch.set_default_dtype(origin_dtype)
         _mem_snapshot("after model construct (CPU)", npu_device_idx)
+        _device_snapshot(
+            "before model.to(npu)",
+            local_rank=local_rank,
+            global_rank=global_rank,
+            world_size=world_size,
+            ep_rank=ep_rank,
+            target_device=f"npu:{npu_device_idx}",
+        )
+        model_to_start = time.perf_counter()
         model = model.to(f"npu:{npu_device_idx}").eval()
+        logger.info(
+            "[DEVICE] after model.to(npu) | rank=%s local_rank=%s elapsed=%.3fs current_device=%s",
+            global_rank,
+            local_rank,
+            time.perf_counter() - model_to_start,
+            torch.npu.current_device(),
+        )
         _mem_snapshot("after model.to(npu)", npu_device_idx)
 
-        if ep_size > 1 and dist.is_initialized():
+        if dist.is_initialized():
+            _device_snapshot(
+                "before init_parallel_comm_group",
+                local_rank=local_rank,
+                global_rank=global_rank,
+                world_size=world_size,
+                ep_rank=ep_rank,
+                target_device=f"npu:{npu_device_idx}",
+            )
+            init_group_start = time.perf_counter()
             model.init_parallel_comm_group()
             model.set_ep_group()
+            logger.info(
+                "[DEVICE] after init_parallel_comm_group | rank=%s local_rank=%s elapsed=%.3fs current_device=%s",
+                global_rank,
+                local_rank,
+                time.perf_counter() - init_group_start,
+                torch.npu.current_device(),
+            )
         _mem_snapshot("after init_parallel_comm_group", npu_device_idx)
 
-        model_class.load_weights(model, args.model_path)
+        _device_snapshot(
+            "before load_weights",
+            local_rank=local_rank,
+            global_rank=global_rank,
+            world_size=world_size,
+            ep_rank=ep_rank,
+            target_device=f"npu:{npu_device_idx}",
+        )
+        load_weights_start = time.perf_counter()
+        try:
+            model_class.load_weights(model, args.model_path)
+        except Exception:
+            logger.exception(
+                "[DEVICE] load_weights failed | rank=%s local_rank=%s elapsed=%.3fs traceback=%s",
+                global_rank,
+                local_rank,
+                time.perf_counter() - load_weights_start,
+                traceback.format_exc(),
+            )
+            raise
+        logger.info(
+            "[DEVICE] after load_weights | rank=%s local_rank=%s elapsed=%.3fs current_device=%s",
+            global_rank,
+            local_rank,
+            time.perf_counter() - load_weights_start,
+            torch.npu.current_device(),
+        )
         _mem_snapshot("after load_weights", npu_device_idx)
     else:
         model = build_model_from_hf(
@@ -552,7 +919,7 @@ def main():
 
     generate(
         model, tokenizer, args.prompt, args.max_new_tokens, f"npu:{npu_device_idx}",
-        ep_size=ep_size, batch_size=args.batch_size, graph_mode=args.graph_mode, prof=args.prof,
+        ep_size=ep_size, cp_size=cp_size, batch_size=args.batch_size, graph_mode=args.graph_mode, prof=args.prof,
         use_attn_metadata=bool(args.use_attn_metadata),
     )
 

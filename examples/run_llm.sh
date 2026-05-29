@@ -8,10 +8,10 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DEFAULT_LOCAL_PATH="/data00/dpskv4-flash-quant"
 export MOJO_BACKEND="ascendc"
 export MOJO_GRAPH_MODE="${MOJO_GRAPH_MODE:-npugraph_ex}"
-export MOJO_PROF="1"
+export MOJO_PROF="${MOJO_PROF:-1}"
 export MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-128}"
 
-export PROMPT="${PROMPT:-[\"请用一句话介绍量子计算的核心原理。\", \"在昇腾NPU平台上部署大语言模型进行推理时，需要综合考虑多个技术维度的优化策略。首先，在并行策略方面，张量并行适用于低时延场景，专家并行适用于高吞吐的MoE架构模型，数据并行则用于提升整体吞吐量。对于DeepSeek这 类MoE模型，通常采用专家并行加张量并行的混合并行策略，其中专家并行用于专家层的分布式计算，张量并行用于注意力层和共享层的切分。其次，在算子优化方面，FlashAttention可以显著降低注意力计算的显存占用和计算延迟，而融合算子则能减少算子间的访存开销和任务调度开销。第三，在显存管理方面，KVCache的优化至关重要，包括PagedAttention的块管理策略和KV缓存的量化压缩。第四，在图模式优化方面，torch.compile和GE图模式可以将动态图转换为静态图，消除Python解释器开销。第五，在多流并行方面，可以将 注意力计算和前馈网络计算分别放到不同的NPU流上执行，实现流水线重叠。第六，在权重预取方面，可以在计算当前层的同时预取下一层的权重，隐藏访存延迟。请基于以上背景 ，详细分析在昇腾NPU上部署DeepSeek模型时应该如何选择和组合这些优化技术。\"]}"
+export PROMPT="${PROMPT:-[\"请用一句话介绍量子计算的核心原理。\"]}"
 # export PROMPT="${PROMPT:-[\"请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。\"]}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
@@ -110,6 +110,7 @@ EP_SIZE="${EP_SIZE:-8}"
 NUM_LAYERS="${LLM_NUM_LAYERS:-43}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-1024}"
 PA_MAX_LENGTH="${PA_MAX_LENGTH:-2048}"
+NEXT_N="${NEXT_N:-0}"
 BATCH_SIZE="${BATCH_SIZE:-2}"
 export USE_ATTN_METADATA=1
 USE_ATTN_METADATA="${MOJO_USE_ATTN_METADATA:-1}"
@@ -124,7 +125,7 @@ fi
 cd "$PROJECT_ROOT" || exit 1
 
 if [ "$EP_SIZE" -eq 1 ]; then
-    echo "EP=1, single card inference, batch_size=${BATCH_SIZE}, use_attn_metadata=${USE_ATTN_METADATA}, build_legacy_attn_inputs=${MOJO_BUILD_LEGACY_ATTN_INPUTS}, moe_multi_stream=${MOJO_MOE_MULTI_STREAM}, attn_mla_multi_stream=${MOJO_ATTN_MLA_MULTI_STREAM}, attn_compressor_multi_stream=${MOJO_ATTN_COMPRESSOR_MULTI_STREAM}"
+    echo "EP=1, single card inference, batch_size=${BATCH_SIZE}, next_n=${NEXT_N}, use_attn_metadata=${USE_ATTN_METADATA}, build_legacy_attn_inputs=${MOJO_BUILD_LEGACY_ATTN_INPUTS}, moe_multi_stream=${MOJO_MOE_MULTI_STREAM}, attn_mla_multi_stream=${MOJO_ATTN_MLA_MULTI_STREAM}, attn_compressor_multi_stream=${MOJO_ATTN_COMPRESSOR_MULTI_STREAM}"
     ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0}" \
     "${PYTHON_BIN}" -m examples.llm_inference \
         --model_path "${MODEL_PATH}" \
@@ -132,12 +133,13 @@ if [ "$EP_SIZE" -eq 1 ]; then
         --num_layers "${NUM_LAYERS}" \
         --max_new_tokens "${MAX_NEW_TOKENS}" \
         --pa_max_length "${PA_MAX_LENGTH}" \
+        --next_n "${NEXT_N}" \
         --prompt "${PROMPT}" \
         --ep_size 1 \
         --batch_size "${BATCH_SIZE}" \
         --use_attn_metadata "${USE_ATTN_METADATA}"
 else
-    echo "EP=${EP_SIZE}, multi-card inference, batch_size=${BATCH_SIZE}, use_attn_metadata=${USE_ATTN_METADATA}, build_legacy_attn_inputs=${MOJO_BUILD_LEGACY_ATTN_INPUTS}, moe_multi_stream=${MOJO_MOE_MULTI_STREAM}, attn_mla_multi_stream=${MOJO_ATTN_MLA_MULTI_STREAM}, attn_compressor_multi_stream=${MOJO_ATTN_COMPRESSOR_MULTI_STREAM}"
+    echo "EP=${EP_SIZE}, multi-card inference, batch_size=${BATCH_SIZE}, next_n=${NEXT_N}, use_attn_metadata=${USE_ATTN_METADATA}, build_legacy_attn_inputs=${MOJO_BUILD_LEGACY_ATTN_INPUTS}, moe_multi_stream=${MOJO_MOE_MULTI_STREAM}, attn_mla_multi_stream=${MOJO_ATTN_MLA_MULTI_STREAM}, attn_compressor_multi_stream=${MOJO_ATTN_COMPRESSOR_MULTI_STREAM}"
 
     MA_NUM_GPUS="$EP_SIZE"
 
@@ -169,6 +171,7 @@ else
             --num_layers "${NUM_LAYERS}" \
             --max_new_tokens "${MAX_NEW_TOKENS}" \
             --pa_max_length "${PA_MAX_LENGTH}" \
+            --next_n "${NEXT_N}" \
             --prompt "${PROMPT}" \
             --ep_size "${EP_SIZE}" \
             --batch_size "${BATCH_SIZE}" \
