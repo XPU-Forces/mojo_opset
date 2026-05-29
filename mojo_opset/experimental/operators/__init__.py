@@ -11,6 +11,7 @@ from .attention import MojoPagedPrefillNSA
 from .attention import MojoPagedPrefillSWAWithKVDequant
 from .attention import MojoPrefillMLA
 from .attention import MojoPrefillNSA
+from .attention_gate import MojoFusedAttnOutputGate
 from .gemm import MojoQuantBatchGemmReduceSum
 from .indexer import MojoIndexer
 from .indexer import MojoLightningIndexer
@@ -25,6 +26,7 @@ from .store_lowrank import MojoStoreLowrank
 
 __all__ = [
     "MojoRotateActivation",
+    "MojoFusedAttnOutputGate",
     "MojoIndexer",
     "MojoLightningIndexer",
     "MojoPrefillMLA",

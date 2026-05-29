@@ -18,6 +18,7 @@ from .operators.attention import MojoPagedPrefillNSA
 from .operators.attention import MojoPagedPrefillSWAWithKVDequant
 from .operators.attention import MojoPrefillMLA
 from .operators.attention import MojoPrefillNSA
+from .operators.attention_gate import MojoFusedAttnOutputGate
 from .operators.attention import MojoPagedPrefillSageGQA
 from .operators.gemm import MojoQuantBatchGemmReduceSum
 from .operators.indexer import MojoIndexer
@@ -49,6 +50,7 @@ __all__ = [
     "MojoPagedDecodeGQAWithKVDequant",
     "MojoPagedPrefillSWAWithKVDequant",
     "MojoPagedDecodeSWAWithKVDequant",
+    "MojoFusedAttnOutputGate",
     "MojoPagedPrefillSageGQA",
     "MojoStorePagedMLAKVCache",
     "MojoMoEInitRoutingDynamicQuant",
