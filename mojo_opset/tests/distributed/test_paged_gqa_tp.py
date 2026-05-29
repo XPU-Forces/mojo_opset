@@ -203,7 +203,7 @@ class FlashAttentionBlock(torch.nn.Module):
         context_shifts: torch.Tensor = None,
         decode_kv_len: torch.Tensor = None,
         context_cu_seqs: torch.Tensor = None,
-        max_q_lens: torch.Tensor = None,
+        max_q_len: torch.Tensor = None,
         kv_cache: SimplePagedKVCache = None,
     ):
         # dist_breakpoint()

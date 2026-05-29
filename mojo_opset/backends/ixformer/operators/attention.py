@@ -72,8 +72,8 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> Tuple[Any]:
         """
         Paged prefill attention with grouped query heads (GQA) using a blocked KV cache.
@@ -99,8 +99,8 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
             softmax_scale (Optional[float]): Attention scaling factor; defaults to 1/sqrt(D).
             mask (Optional[torch.Tensor]): Attention mask; defaults to None.
                 Not support custom mask yet.
-            max_q_lens (int): Maximum query sequence length across the batch. >0 and must be int.
-            max_total_seq_lens (int): Maximum total visible key/value sequence length across the batch. >0 and must be int.
+            max_q_len (int): Maximum query sequence length across the batch. >0 and must be int.
+            max_total_seq_len (int): Maximum total visible key/value sequence length across the batch. >0 and must be int.
         Returns:
             torch.Tensor: Attention output of shape (T, Hq, D).
 
@@ -125,13 +125,13 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
                 f"IxformerPagedPrefillGQA only supports page_block_size <= 256 and % 16 == 0, got {page_block_size}."
             )
 
-        if not isinstance(max_q_lens, int) or max_q_lens <= 0:
+        if not isinstance(max_q_len, int) or max_q_len <= 0:
             raise ValueError(
-                f"max_q_lens must be a positive int, got {max_q_lens} ({type(max_q_lens)})."
+                f"max_q_len must be a positive int, got {max_q_len} ({type(max_q_len)})."
             )
-        if not isinstance(max_total_seq_lens, int) or max_total_seq_lens <= 0:
+        if not isinstance(max_total_seq_len, int) or max_total_seq_len <= 0:
             raise ValueError(
-                f"max_total_seq_lens must be a positive int, got {max_total_seq_lens} ({type(max_total_seq_lens)})."
+                f"max_total_seq_len must be a positive int, got {max_total_seq_len} ({type(max_total_seq_len)})."
             )
 
         if softmax_scale is None:
@@ -144,8 +144,8 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
             value_cache,
             cu_q_lens,
             cu_kv_lens,
-            max_q_lens,
-            max_total_seq_lens,
+            max_q_len,
+            max_total_seq_len,
             causal=self.is_causal,
             softmax_scale=softmax_scale,
             block_table=block_tables,
@@ -187,8 +187,8 @@ class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,
         *,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Paged prefill attention with sliding window (SWA) using a blocked KV cache.
@@ -230,8 +230,8 @@ class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
                 defaults to 1/sqrt(D).
             cu_total_seq_lens (Optional[torch.Tensor]): Cumulative total visible KV lengths, shape (B+1,).
                 If None, defaults to cu_q_lens (same as the reference MojoPagedPrefillSWA).
-            max_q_lens (Optional[int]): Ixformer kernel hint; if None, derived from cu_q_lens.
-            max_total_seq_lens (Optional[int]): Ixformer kernel hint; if None, derived from cu_kv.
+            max_q_len (Optional[int]): Ixformer kernel hint; if None, derived from cu_q_lens.
+            max_total_seq_len (Optional[int]): Ixformer kernel hint; if None, derived from cu_kv.
 
         Returns:
             torch.Tensor: Attention output of shape (T, Hq, D).
@@ -259,13 +259,13 @@ class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
 
         assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
         cu_kv_lens = cu_total_seq_lens if cu_total_seq_lens is not None else cu_q_lens
-        if not isinstance(max_q_lens, int) or max_q_lens <= 0:
+        if not isinstance(max_q_len, int) or max_q_len <= 0:
             raise ValueError(
-                f"max_q_lens must be a positive int, got {max_q_lens} ({type(max_q_lens)})."
+                f"max_q_len must be a positive int, got {max_q_len} ({type(max_q_len)})."
             )
-        if not isinstance(max_total_seq_lens, int) or max_total_seq_lens <= 0:
+        if not isinstance(max_total_seq_len, int) or max_total_seq_len <= 0:
             raise ValueError(
-                f"max_total_seq_lens must be a positive int, got {max_total_seq_lens} ({type(max_total_seq_lens)})."
+                f"max_total_seq_len must be a positive int, got {max_total_seq_len} ({type(max_total_seq_len)})."
             )
 
         window_size = (self.local_window_size, 0) if self.local_window_size is not None else (-1, -1)
@@ -281,8 +281,8 @@ class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
             v_cache,
             cu_q_lens,
             cu_kv_lens,
-            max_q_lens,
-            max_total_seq_lens,
+            max_q_len,
+            max_total_seq_len,
             causal=self.is_causal,
             softmax_scale=softmax_scale,
             block_table=block_table,
@@ -321,11 +321,11 @@ class IxformerPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         *,
-        max_total_seq_lens: int,
+        max_total_seq_len: int,
         batch_size: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         output_shape = (
-            batch_size * max_total_seq_lens,
+            batch_size * max_total_seq_len,
             key_cache.shape[1],
             key_cache.shape[-1],
         )
@@ -365,8 +365,8 @@ class IxformerPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         """Paged prefill GQA with int8-quantized KV cache.
 
@@ -396,8 +396,8 @@ class IxformerPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
                 lengths, shape (B+1,). If None, defaults to cu_q_lens.
                 dtype must be int32.
             mask (Optional[torch.Tensor]): Not supported, must be None.
-            max_q_lens (int): Maximum query length across the batch. Must be > 0.
-            max_total_seq_lens (int): Maximum total KV length across the batch.
+            max_q_len (int): Maximum query length across the batch. Must be > 0.
+            max_total_seq_len (int): Maximum total KV length across the batch.
 
         Returns:
             torch.Tensor: Attention output, shape (T, Hq, D).
@@ -432,13 +432,13 @@ class IxformerPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
             )
 
         cu_kv_lens = cu_total_seq_lens if cu_total_seq_lens is not None else cu_q_lens
-        if not isinstance(max_q_lens, int) or max_q_lens <= 0:
+        if not isinstance(max_q_len, int) or max_q_len <= 0:
             raise ValueError(
-                f"max_q_lens must be a positive int, got {max_q_lens} ({type(max_q_lens)})."
+                f"max_q_len must be a positive int, got {max_q_len} ({type(max_q_len)})."
             )
-        if not isinstance(max_total_seq_lens, int) or max_total_seq_lens <= 0:
+        if not isinstance(max_total_seq_len, int) or max_total_seq_len <= 0:
             raise ValueError(
-                f"max_total_seq_lens must be a positive int, got {max_total_seq_lens} ({type(max_total_seq_lens)})."
+                f"max_total_seq_len must be a positive int, got {max_total_seq_len} ({type(max_total_seq_len)})."
             )
 
         if softmax_scale is None:
@@ -448,7 +448,7 @@ class IxformerPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
         key_cache_f16, value_cache_f16 = self._get_dequant_buffers(
             key_cache,
             value_cache,
-            max_total_seq_lens=max_total_seq_lens,
+            max_total_seq_len=max_total_seq_len,
             batch_size=batch_size,
         )
         ixf_f.paged_kv_cache_dequant_varlen(
@@ -460,7 +460,7 @@ class IxformerPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
             cu_kv_lens,
             key_cache_f16,
             value_cache_f16,
-            max_total_seq_lens,
+            max_total_seq_len,
         )
 
         # 传入连续的kvcache ， 不再传入block_table
@@ -470,8 +470,8 @@ class IxformerPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
             value_cache_f16,
             cu_q_lens,
             cu_kv_lens,
-            max_q_lens,
-            max_total_seq_lens,
+            max_q_len,
+            max_total_seq_len,
             causal=self.is_causal,
             softmax_scale=softmax_scale,
         )
@@ -518,18 +518,18 @@ class IxformerPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
         value_cache: torch.Tensor,
         cu_kv_lens: torch.Tensor,
         *,
-        max_q_lens: int,
-        max_total_seq_lens: int,
+        max_q_len: int,
+        max_total_seq_len: int,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
         batch_size = cu_kv_lens.numel() - 1
-        max_dequant_seq_lens = max_total_seq_lens
+        max_dequant_seq_len = max_total_seq_len
         if self.local_window_size is not None:
             global_window = 0 if self.global_window_size is None else int(self.global_window_size)
-            window_bound = max_q_lens + int(self.local_window_size) + global_window
-            max_dequant_seq_lens = min(max_total_seq_lens, window_bound)
+            window_bound = max_q_len + int(self.local_window_size) + global_window
+            max_dequant_seq_len = min(max_total_seq_len, window_bound)
 
         output_shape = (
-            batch_size * max_dequant_seq_lens,
+            batch_size * max_dequant_seq_len,
             key_cache.shape[1],
             key_cache.shape[-1],
         )
@@ -566,7 +566,7 @@ class IxformerPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
             self._dequant_key_buffer,
             self._dequant_value_buffer,
             self._dequant_cu_out_lens,
-            max_dequant_seq_lens,
+            max_dequant_seq_len,
         )
 
     def forward(
@@ -581,8 +581,8 @@ class IxformerPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
         block_table: torch.Tensor,
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         """Paged prefill SWA with int8-quantized KV cache.
 
@@ -612,8 +612,8 @@ class IxformerPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
             cu_total_seq_lens (Optional[torch.Tensor]): Cumulative total KV
                 lengths, shape (B+1,). If None, defaults to cu_q_lens.
                 dtype must be int32.
-            max_q_lens (int): Maximum query length across the batch. Must be > 0.
-            max_total_seq_lens (int): Maximum total KV length across the batch.
+            max_q_len (int): Maximum query length across the batch. Must be > 0.
+            max_total_seq_len (int): Maximum total KV length across the batch.
 
         Returns:
             torch.Tensor: Attention output, shape (T, Hq, D).
@@ -648,13 +648,13 @@ class IxformerPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
 
         assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
         cu_kv_lens = cu_total_seq_lens if cu_total_seq_lens is not None else cu_q_lens
-        if not isinstance(max_q_lens, int) or max_q_lens <= 0:
+        if not isinstance(max_q_len, int) or max_q_len <= 0:
             raise ValueError(
-                f"max_q_lens must be a positive int, got {max_q_lens} ({type(max_q_lens)})."
+                f"max_q_len must be a positive int, got {max_q_len} ({type(max_q_len)})."
             )
-        if not isinstance(max_total_seq_lens, int) or max_total_seq_lens <= 0:
+        if not isinstance(max_total_seq_len, int) or max_total_seq_len <= 0:
             raise ValueError(
-                f"max_total_seq_lens must be a positive int, got {max_total_seq_lens} ({type(max_total_seq_lens)})."
+                f"max_total_seq_len must be a positive int, got {max_total_seq_len} ({type(max_total_seq_len)})."
             )
 
         if softmax_scale is None:
@@ -669,10 +669,10 @@ class IxformerPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
         local_window = -1 if self.local_window_size is None else int(self.local_window_size)
         global_window = 0 if self.global_window_size is None else int(self.global_window_size)
 
-        key_cache_f16, value_cache_f16, trimmed_cu_kv_lens, max_dequant_seq_lens = self._get_dequant_buffers(
+        key_cache_f16, value_cache_f16, trimmed_cu_kv_lens, max_dequant_seq_len = self._get_dequant_buffers(
             key_cache, value_cache, cu_kv_lens,
-            max_q_lens=max_q_lens,
-            max_total_seq_lens=max_total_seq_lens,
+            max_q_len=max_q_len,
+            max_total_seq_len=max_total_seq_len,
         )
         ixf_f.paged_kv_cache_dequant_varlen_window(
             key_cache,
@@ -687,7 +687,7 @@ class IxformerPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
             value_cache_f16,
             local_window,
             global_window,
-            max_dequant_seq_lens,
+            max_dequant_seq_len,
         )
 
         output = ix_fa.flash_attn_varlen_func(
@@ -696,8 +696,8 @@ class IxformerPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
             value_cache_f16,
             cu_q_lens,
             trimmed_cu_kv_lens,
-            max_q_lens,
-            max_dequant_seq_lens,
+            max_q_len,
+            max_dequant_seq_len,
             causal=self.is_causal,
             softmax_scale=softmax_scale,
             window_size=window_size,
@@ -924,8 +924,8 @@ class IxformerPagedPrefillSageGQA(MojoPagedPrefillSageGQA):
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         """Paged prefill sage GQA with int8 Q/K/V and paged int8 KV cache.
 
@@ -944,8 +944,8 @@ class IxformerPagedPrefillSageGQA(MojoPagedPrefillSageGQA):
             softmax_scale: attention scale; defaults to 1/sqrt(D).
             cu_total_seq_lens: cumulative total KV lengths, shape (B + 1), int32.
             mask: not supported.
-            max_q_lens: max query length in batch.
-            max_total_seq_lens: max total KV length in batch.
+            max_q_len: max query length in batch.
+            max_total_seq_len: max total KV length in batch.
 
         Returns:
             Attention output, shape (T, Hq, D), dtype bfloat16.
@@ -1002,14 +1002,14 @@ class IxformerPagedPrefillSageGQA(MojoPagedPrefillSageGQA):
                 f"and % 16 == 0, got {page_block_size}."
             )
 
-        if not isinstance(max_q_lens, int) or max_q_lens <= 0:
+        if not isinstance(max_q_len, int) or max_q_len <= 0:
             raise ValueError(
-                f"max_q_lens must be a positive int, got {max_q_lens} ({type(max_q_lens)})."
+                f"max_q_len must be a positive int, got {max_q_len} ({type(max_q_len)})."
             )
-        if not isinstance(max_total_seq_lens, int) or max_total_seq_lens <= 0:
+        if not isinstance(max_total_seq_len, int) or max_total_seq_len <= 0:
             raise ValueError(
-                f"max_total_seq_lens must be a positive int, got {max_total_seq_lens} "
-                f"({type(max_total_seq_lens)})."
+                f"max_total_seq_len must be a positive int, got {max_total_seq_len} "
+                f"({type(max_total_seq_len)})."
             )
 
         if softmax_scale is None:
@@ -1031,8 +1031,8 @@ class IxformerPagedPrefillSageGQA(MojoPagedPrefillSageGQA):
             v_scale=value_scale,
             cu_seqlens_q=cu_q_lens,
             cu_seqlens_k=cu_kv_lens,
-            max_seqlen_q=max_q_lens,
-            max_seqlen_k=max_total_seq_lens,
+            max_seqlen_q=max_q_len,
+            max_seqlen_k=max_total_seq_len,
             softmax_scale=softmax_scale,
             causal=self.is_causal,
             block_table=block_tables,
