@@ -79,8 +79,8 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
         _, num_q_heads, head_dim = query.shape
@@ -108,8 +108,8 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
                 softmax_scale=softmax_scale,
                 cu_total_seq_lens=cu_total_seq_lens,
                 mask=mask,
-                max_q_lens=max_q_lens,
-                max_total_seq_lens=max_total_seq_lens,
+                max_q_len=max_q_len,
+                max_total_seq_len=max_total_seq_len,
             )
 
         if softmax_scale is None:
