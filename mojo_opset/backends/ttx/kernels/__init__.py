@@ -89,12 +89,19 @@ diffusion_attention_bwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_a
 
 m_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "m_grouped_matmul_impl")
 k_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "k_grouped_matmul_impl")
+
+moe_gating_impl = _get_kernel_impl(ttx_backend_module, "moe_gating_impl")
+moe_dispatch_impl = _get_kernel_impl(ttx_backend_module, "moe_dispatch_impl")
+moe_experts_impl = _get_kernel_impl(ttx_backend_module, "moe_experts_impl")
+moe_combine_impl = _get_kernel_impl(ttx_backend_module, "moe_combine_impl")
+quant_moe_experts_impl = _get_kernel_impl(ttx_backend_module, "quant_moe_experts_impl")
 quant_batch_gemm_reduce_sum_impl = _get_kernel_impl(ttx_backend_module, "quant_batch_gemm_reduce_sum_impl")
 
 int8_gemm_dequant_impl = _get_kernel_impl(ttx_backend_module, "int8_gemm_dequant_impl")
 prepare_b_impl = _get_kernel_impl(ttx_backend_module, "prepare_b_impl")
 
 store_paged_kv_impl = _get_kernel_impl(ttx_backend_module, "store_paged_kv_impl")
+store_paged_kv_opt_impl = _get_kernel_impl(ttx_backend_module, "store_paged_kv_opt_impl")
 
 store_label_cache_infer_impl = _get_kernel_impl(ttx_backend_module, "store_label_cache_infer_impl")
 
@@ -243,13 +250,13 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         gqa_interleave: bool,
         softmax_scale: Optional[float] = None,
         aux_mask: Optional[torch.Tensor] = None,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         return paged_attention_prefill_impl(
             q, key_cache, value_cache, cu_q_lens, seqlens_kv, block_tables, gqa_interleave, softmax_scale, aux_mask,
-            max_q_lens=max_q_lens,
-            max_total_seq_lens=max_total_seq_lens,
+            max_q_len=max_q_len,
+            max_total_seq_len=max_total_seq_len,
         )
 
     @paged_attention_prefill.register_fake
@@ -263,8 +270,8 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         gqa_interleave: bool,
         softmax_scale: Optional[float] = None,
         aux_mask: Optional[torch.Tensor] = None,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         return torch.empty_like(q)
 
@@ -950,9 +957,15 @@ else:
     diffusion_attention_bwd = diffusion_attention_bwd_impl
     m_grouped_matmul = m_grouped_matmul_impl
     k_grouped_matmul = k_grouped_matmul_impl
+    moe_gating = moe_gating_impl
+    moe_dispatch = moe_dispatch_impl
+    moe_experts = moe_experts_impl
+    moe_combine = moe_combine_impl
+    quant_moe_experts = quant_moe_experts_impl
     int8_gemm_dequant = int8_gemm_dequant_impl
     prepare_b = prepare_b_impl
     store_paged_kv = store_paged_kv_impl
+    store_paged_kv_opt = store_paged_kv_opt_impl
     store_label_cache_infer = store_label_cache_infer_impl
     fused_penalties_temp = fused_penalties_temp_impl
     join_prob_reject_sampling = join_prob_reject_sampling_impl

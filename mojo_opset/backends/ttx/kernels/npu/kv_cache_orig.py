@@ -1,5 +1,3 @@
-import math
-
 import torch
 import triton
 import triton.language as tl
@@ -18,25 +16,30 @@ def _store_paged_kv_cache_kernel(
     kv_lens_ptr,
     batch_size,
     stride_k_tok,
+    stride_k_head,
+    stride_k_dim,
     stride_v_tok,
+    stride_v_head,
+    stride_v_dim,
     stride_kc_blk,
+    stride_kc_head,
     stride_kc_tok,
+    stride_kc_dim,
     stride_vc_blk,
+    stride_vc_head,
     stride_vc_tok,
+    stride_vc_dim,
     stride_bt_batch,
     stride_bt_blk,
-    kv_dim: tl.constexpr,
+    num_kv_heads,
+    head_dim: tl.constexpr,
     block_size: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
     IS_DECODE: tl.constexpr,
     HAS_KV_LENS: tl.constexpr,
-    TOKEN_STEP: tl.constexpr,
 ):
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
-
-    offs_kv = tl.arange(0, kv_dim)
-    offs_step = tl.arange(0, TOKEN_STEP)
 
     prev_chunks = 0
     for batch_idx in range(batch_size):
@@ -56,8 +59,6 @@ def _store_paged_kv_cache_kernel(
         start_chunk = (pid + num_programs - prev_chunks % num_programs) % num_programs
         prev_chunks += cur_chunks
 
-        bt_base = batch_idx * stride_bt_batch
-
         for chunk_idx in range(start_chunk, cur_chunks, num_programs):
             token_offset_in_seq = chunk_idx * CHUNK_SIZE
             valid_len = seq_len_curr - token_offset_in_seq
@@ -72,7 +73,7 @@ def _store_paged_kv_cache_kernel(
                 block_inner_off = curr_log_pos % block_size
 
                 physical_block_id = tl.load(
-                    block_table_ptr + bt_base + block_table_idx * stride_bt_blk
+                    block_table_ptr + batch_idx * stride_bt_batch + block_table_idx * stride_bt_blk
                 )
                 valid_block = physical_block_id >= 0
                 physical_block_id = tl.maximum(physical_block_id, 0)
@@ -80,27 +81,49 @@ def _store_paged_kv_cache_kernel(
                 space_in_block = block_size - block_inner_off
                 sub_len = tl.minimum(remain_chunk_len - processed, space_in_block).to(tl.int32)
 
-                kc_blk = key_cache_ptr + physical_block_id * stride_kc_blk
-                vc_blk = value_cache_ptr + physical_block_id * stride_vc_blk
+                offs_sub = tl.arange(0, CHUNK_SIZE)
+                mask_sub = offs_sub < sub_len
 
-                step = 0
-                while step < sub_len:
-                    actual = tl.minimum(TOKEN_STEP, sub_len - step).to(tl.int32)
-                    mask_step = offs_step < actual
-                    mask_2d = valid_block & mask_step[:, None]
-                    step_off = block_inner_off + step
+                offs_d = tl.arange(0, head_dim)
 
-                    src_k_ptr = k_ptr + (curr_kv_pos + step + offs_step[:, None]) * stride_k_tok + offs_kv[None, :]
-                    src_v_ptr = v_ptr + (curr_kv_pos + step + offs_step[:, None]) * stride_v_tok + offs_kv[None, :]
-                    k_val = tl.load(src_k_ptr, mask=mask_2d, other=0.0)
-                    v_val = tl.load(src_v_ptr, mask=mask_2d, other=0.0)
+                for h in range(num_kv_heads):
+                    src_k_ptr = (
+                        k_ptr
+                        + (curr_kv_pos + offs_sub[:, None]) * stride_k_tok
+                        + h * stride_k_head
+                        + offs_d[None, :] * stride_k_dim
+                    )
 
-                    dst_k_ptr = kc_blk + (step_off + offs_step[:, None]) * stride_kc_tok + offs_kv[None, :]
-                    dst_v_ptr = vc_blk + (step_off + offs_step[:, None]) * stride_vc_tok + offs_kv[None, :]
-                    tl.store(dst_k_ptr, k_val, mask=mask_2d)
-                    tl.store(dst_v_ptr, v_val, mask=mask_2d)
+                    k_val = tl.load(src_k_ptr, mask=mask_sub[:, None], other=0.0)
 
-                    step += actual
+                    dst_k_ptr = (
+                        key_cache_ptr
+                        + physical_block_id * stride_kc_blk
+                        + h * stride_kc_head
+                        + (block_inner_off + offs_sub[:, None]) * stride_kc_tok
+                        + offs_d[None, :] * stride_kc_dim
+                    )
+
+                    tl.store(dst_k_ptr, k_val, mask=valid_block & mask_sub[:, None])
+
+                    src_v_ptr = (
+                        v_ptr
+                        + (curr_kv_pos + offs_sub[:, None]) * stride_v_tok
+                        + h * stride_v_head
+                        + offs_d[None, :] * stride_v_dim
+                    )
+
+                    v_val = tl.load(src_v_ptr, mask=mask_sub[:, None], other=0.0)
+
+                    dst_v_ptr = (
+                        value_cache_ptr
+                        + physical_block_id * stride_vc_blk
+                        + h * stride_vc_head
+                        + (block_inner_off + offs_sub[:, None]) * stride_vc_tok
+                        + offs_d[None, :] * stride_vc_dim
+                    )
+
+                    tl.store(dst_v_ptr, v_val, mask=valid_block & mask_sub[:, None])
 
                 processed += sub_len
                 curr_log_pos += sub_len
@@ -125,61 +148,43 @@ def store_paged_kv_impl(
 
     num_kv_heads = k_states.shape[1]
     head_dim = k_states.shape[2]
-    kv_dim = num_kv_heads * head_dim
 
     block_size = key_cache.shape[2]
-
-    # Source: [tokens, num_kv_heads, head_dim] → [tokens, kv_dim] (view, zero-copy)
-    k_flat = k_states.view(k_states.shape[0], kv_dim)
-    v_flat = v_states.view(v_states.shape[0], kv_dim)
-
-    # Cache: NHSD [blocks, heads, block_size, dim] → NSHD [blocks, block_size, kv_dim]
-    kc_work = key_cache.permute(0, 2, 1, 3).contiguous()
-    vc_work = value_cache.permute(0, 2, 1, 3).contiguous()
-
-    # TOKEN_STEP: fit within UB budget (each step holds K+V buffers of [TOKEN_STEP, kv_dim])
-    UB_AVAILABLE = 224 * 1024
-    bytes_per_step_kv = 2 * kv_dim * k_states.element_size()
-    max_step = UB_AVAILABLE // bytes_per_step_kv
-    TOKEN_STEP = max(1, min(max_step, block_size))
 
     num_programs = get_num_cores("vector")
     grid = (num_programs,)
 
-    total_tokens = int(cu_seqlens[-1])
-
-    # 让总 chunk 数 ≈ num_programs，使 grid-stride 轮转后每个核分到的 chunk 数尽量均匀。
-    # CHUNK_SIZE 越接近 total_tokens / num_programs 越均匀，再 clamp 到 [32, block_size]。
-    ideal_chunk = math.ceil(total_tokens / num_programs)
-    CHUNK_SIZE = max(32, min(ideal_chunk, block_size))
-    
     _store_paged_kv_cache_kernel[grid](
-        k_flat,
-        v_flat,
-        kc_work,
-        vc_work,
+        k_states,
+        v_states,
+        key_cache,
+        value_cache,
         block_table,
         cu_seqlens,
         kv_lens_before_store,
         batch_size,
-        k_flat.stride(0),
-        v_flat.stride(0),
-        kc_work.stride(0),
-        kc_work.stride(1),
-        vc_work.stride(0),
-        vc_work.stride(1),
+        k_states.stride(0),
+        k_states.stride(1),
+        k_states.stride(2),
+        v_states.stride(0),
+        v_states.stride(1),
+        v_states.stride(2),
+        key_cache.stride(0),
+        key_cache.stride(1),
+        key_cache.stride(2),
+        key_cache.stride(3),
+        value_cache.stride(0),
+        value_cache.stride(1),
+        value_cache.stride(2),
+        value_cache.stride(3),
         block_table.stride(0),
         block_table.stride(1),
-        kv_dim,
+        num_kv_heads,
+        head_dim,
         block_size,
-        CHUNK_SIZE,
+        CHUNK_SIZE=block_size,
         IS_DECODE=is_decode,
         HAS_KV_LENS=kv_lens_before_store is not None,
-        TOKEN_STEP=TOKEN_STEP,
     )
-
-    # NSHD [blocks, block_size, heads, dim] → NHSD [blocks, heads, block_size, dim]
-    key_cache.copy_(kc_work.permute(0, 2, 1, 3))
-    value_cache.copy_(vc_work.permute(0, 2, 1, 3))
 
     return key_cache, value_cache

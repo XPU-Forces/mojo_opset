@@ -342,8 +342,8 @@ class MojoPagedPrefillGQA(MojoOperator):
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> Tuple[Any]:
         """
         Paged prefill attention with grouped query heads (GQA) using a blocked KV cache.
@@ -552,6 +552,7 @@ class MojoPagedPrefillSWA(MojoOperator):
             raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
 
         self.is_causal = is_causal
+        self.gqa_layout = gqa_layout
         self.gqa_interleave = gqa_layout == "ABAB"
         self.global_window_size = global_window_size
         self.local_window_size = local_window_size
@@ -566,11 +567,11 @@ class MojoPagedPrefillSWA(MojoOperator):
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,  # [bsz + 1]
         *,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         # Note: if is_causal = False, local_window_size and global_window_size are not used.
-        # max_q_lens / max_total_seq_lens match fused backends (e.g. ixformer); unused here.
+        # max_q_len / max_total_seq_len match fused backends (e.g. ixformer); unused here.
 
         assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
         total_q_len, n_q_heads, head_dim = query.shape
@@ -636,6 +637,9 @@ class MojoPagedPrefillSWA(MojoOperator):
             o_i = o_i.permute(1, 0, 2)  # -> [q_seq_len, n_q_heads, head_dim]
             o[cu_q_lens[i] : cu_q_lens[i + 1]] = o_i.to(o.dtype)
         return o
+    
+    def extra_repr(self) -> str:
+        return f"is_causal={self.is_causal}, gqa_layout={self.gqa_layout}, global_window_size={self.global_window_size}, local_window_size={self.local_window_size}"
 
 
 class MojoPagedDecodeSWA(MojoOperator):
@@ -660,6 +664,7 @@ class MojoPagedDecodeSWA(MojoOperator):
             raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
 
         self.is_causal = is_causal
+        self.gqa_layout = gqa_layout
         self.gqa_interleave = gqa_layout == "ABAB"
         self.global_window_size = global_window_size
         self.local_window_size = local_window_size
@@ -735,6 +740,9 @@ class MojoPagedDecodeSWA(MojoOperator):
             o[i] = o_i.to(o.dtype)
         return o
 
+    def extra_repr(self) -> str:
+        return f"is_causal={self.is_causal}, gqa_layout={self.gqa_layout}, global_window_size={self.global_window_size}, local_window_size={self.local_window_size}"
+
 
 class MojoSWA(MojoOperator):
     def __init__(
@@ -758,6 +766,7 @@ class MojoSWA(MojoOperator):
             raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
 
         self.is_causal = is_causal
+        self.gqa_layout = gqa_layout
         self.gqa_interleave = gqa_layout == "ABAB"
         self.global_window_size = global_window_size
         self.local_window_size = local_window_size
@@ -824,3 +833,6 @@ class MojoSWA(MojoOperator):
             o_i = o_i.permute(1, 0, 2)  # -> [q_seq_len, n_q_heads, head_dim]
             o[cu_q_lens[i] : cu_q_lens[i + 1]] = o_i.to(o.dtype)
         return o
+
+    def extra_repr(self) -> str:
+        return f"is_causal={self.is_causal}, gqa_layout={self.gqa_layout}, global_window_size={self.global_window_size}, local_window_size={self.local_window_size}"

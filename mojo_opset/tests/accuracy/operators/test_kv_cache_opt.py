@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from mojo_opset import MojoStorePagedKVCache
-from mojo_opset import MojoStorePagedMLAKVCache
+from mojo_opset.backends.ttx.kernels import store_paged_kv_opt_impl
 from mojo_opset.tests.utils import assert_close
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
@@ -76,7 +76,7 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, context_kv_l
         cu_q_lens,
         context_kv_lens,
     )
-    k_cache, v_cache = store_paged_kv(
+    k_cache, v_cache = store_paged_kv_opt_impl(
         key_states,
         value_states,
         k_cache,
@@ -137,7 +137,7 @@ def test_store_paged_kv_bucket_padded_varlen():
         cu_q_lens,
         context_kv_lens,
     )
-    k_cache, v_cache = store_paged_kv(
+    k_cache, v_cache = store_paged_kv_opt_impl(
         key_states,
         value_states,
         k_cache,
@@ -160,94 +160,3 @@ def test_store_paged_kv_bucket_padded_varlen():
             v_cache[phys_block, :, block_offset : block_offset + 1, :],
             v_cache_ref[phys_block, :, block_offset : block_offset + 1, :],
         )
-
-
-# # ===========================================================================
-# # MojoStorePagedMLAKVCache
-# # ===========================================================================
-
-# @pytest.mark.parametrize(
-#     "batch_size, kv_lora_rank, qk_rope_head_dim, block_size, context_kv_lens_val, q_lens_val",
-#     [
-#         (2, 64, 32, 128, [0, 0], [130, 33]),
-#         (2, 64, 32, 128, [32, 35], [1, 1]),
-#         (2, 128, 64, 128, [15, 40], [788, 126]),
-#         (1, 64, 32, 128, [0], [5]),
-#         (1, 64, 32, 128, [5], [1]),
-#         (3, 64, 32, 128, [32, -1, 35], [1, 1, 1]),
-#         (3, 64, 32, 128, [0, -1, 5], [4, 0, 2]),
-#         (4, 64, 32, 256, [224, 0, 34, 41], [432, 84, 977, 93]),
-#         (4, 64, 32, 128, [772, 974, 43, 77], [1, 1, 1, 1]),
-#     ],
-# )
-# @bypass_not_implemented
-# def test_store_paged_mla_kv(
-#     batch_size,
-#     kv_lora_rank,
-#     qk_rope_head_dim,
-#     block_size,
-#     context_kv_lens_val,
-#     q_lens_val,
-# ):
-#     context_kv_lens = torch.tensor(context_kv_lens_val, dtype=torch.int32)
-#     q_lens = torch.tensor(q_lens_val, dtype=torch.int32)
-
-#     is_decode = torch.all(q_lens == 1)
-#     cu_q_lens = (
-#         torch.cat(
-#             [
-#                 torch.zeros(1, dtype=torch.int32),
-#                 torch.cumsum(q_lens, dim=0, dtype=torch.int32),
-#             ]
-#         )
-#         if not is_decode
-#         else None
-#     )
-
-#     total_tokens = cu_q_lens[-1].item() if not is_decode else len(context_kv_lens_val)
-#     ckv_states = torch.randn(total_tokens, kv_lora_rank, dtype=torch.bfloat16)
-#     kpe_states = torch.randn(total_tokens, qk_rope_head_dim, dtype=torch.bfloat16)
-
-#     max_kv_len = torch.clamp(context_kv_lens + q_lens, min=0).max().item()
-#     max_blocks_per_seq = (max_kv_len + block_size - 1) // block_size + 2
-#     total_blocks_needed = sum(
-#         max(0, context_kv_len + q_len + block_size - 1) // block_size
-#         for context_kv_len, q_len in zip(context_kv_lens_val, q_lens_val)
-#     )
-#     total_phys_blocks = total_blocks_needed + 10
-
-#     ckv_cache_ref = torch.zeros(total_phys_blocks, 1, block_size, kv_lora_rank, dtype=torch.bfloat16)
-#     kpe_cache_ref = torch.zeros(total_phys_blocks, 1, block_size, qk_rope_head_dim, dtype=torch.bfloat16)
-#     ckv_cache = ckv_cache_ref.clone()
-#     kpe_cache = kpe_cache_ref.clone()
-
-#     block_table = torch.full((batch_size, max_blocks_per_seq), -1, dtype=torch.int32)
-#     curr = 0
-#     for i in range(batch_size):
-#         needed = max(0, context_kv_lens_val[i] + q_lens_val[i] + block_size - 1) // block_size
-#         block_table[i, :needed] = torch.arange(curr, curr + needed)
-#         curr += needed
-
-#     op_ref = MojoStorePagedMLAKVCache._registry.get("torch")()
-#     op = MojoStorePagedMLAKVCache()
-#     ckv_cache_ref, kpe_cache_ref = op_ref(
-#         ckv_states,
-#         kpe_states,
-#         ckv_cache_ref,
-#         kpe_cache_ref,
-#         block_table,
-#         cu_q_lens,
-#         context_kv_lens,
-#     )
-#     ckv_cache, kpe_cache = op(
-#         ckv_states,
-#         kpe_states,
-#         ckv_cache,
-#         kpe_cache,
-#         block_table,
-#         cu_q_lens,
-#         context_kv_lens,
-#     )
-
-#     assert_close(ckv_cache, ckv_cache_ref)
-#     assert_close(kpe_cache, kpe_cache_ref)

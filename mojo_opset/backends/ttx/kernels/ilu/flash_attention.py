@@ -663,8 +663,8 @@ def paged_attention_prefill_impl(
     gqa_interleave: bool,
     softmax_scale: Optional[float] = None,
     aux_mask: Optional[torch.Tensor] = None,
-    max_q_lens: Optional[int] = None,
-    max_total_seq_lens: Optional[int] = None,
+    max_q_len: Optional[int] = None,
+    max_total_seq_len: Optional[int] = None,
     out: Optional[torch.Tensor] = None,
     block_tables_i32: Optional[torch.Tensor] = None,
     max_q_blocks: Optional[int] = None,
@@ -704,10 +704,10 @@ def paged_attention_prefill_impl(
         _max_q_blocks = max_q_blocks
         def grid(META):
             return (_max_q_blocks, num_q_heads, batch_size)
-    elif max_q_lens is not None:
+    elif max_q_len is not None:
         def grid(META):
             bm = META["BLOCK_M"]
-            _mqb = (max_q_lens + bm - 1) // bm
+            _mqb = (max_q_len + bm - 1) // bm
             return (_mqb, num_q_heads, batch_size)
     else:
         def grid(META):
@@ -909,7 +909,7 @@ def _paged_decode_gather_and_causal(
     return o
 
 
-@triton.autotune(
+@smart_triton_autotune(
     configs=[
         triton.Config({"BLOCK_N": 64}, num_warps=4, num_stages=2),
         triton.Config({"BLOCK_N": 64}, num_warps=4, num_stages=3),
@@ -918,6 +918,7 @@ def _paged_decode_gather_and_causal(
         triton.Config({"BLOCK_N": 128}, num_warps=4, num_stages=3),
         triton.Config({"BLOCK_N": 128}, num_warps=8, num_stages=2),
     ],
+    selected_idx=0,
     key=["HQ", "D", "PAGE_SIZE", "COMPUTE_INT8"],
 )
 @libentry()

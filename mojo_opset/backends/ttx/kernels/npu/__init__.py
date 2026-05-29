@@ -17,6 +17,7 @@ from .gelu import gelu_fwd_impl
 from .group_gemm import k_grouped_matmul_impl
 from .group_gemm import m_grouped_matmul_impl
 from .kv_cache import store_paged_kv_impl
+from .kv_cache_opt import store_paged_kv_opt_impl
 from .layernorm import layernorm_bwd_impl
 from .layernorm import layernorm_fwd_impl
 from .layernorm import layernorm_infer_impl
@@ -97,6 +98,7 @@ __all__ = [
     "m_grouped_matmul_impl",
     "k_grouped_matmul_impl",
     "store_paged_kv_impl",
+    "store_paged_kv_opt_impl",
     "store_label_cache_infer_impl",
     "fused_penalties_temp_impl",
     "join_prob_reject_sampling_impl",
