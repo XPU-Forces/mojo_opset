@@ -31,24 +31,15 @@ def _store_paged_kv_cache_kernel(
     stride_vc_dim,
     stride_bt_batch,
     stride_bt_blk,
-    num_kv_heads: tl.constexpr,
+    num_kv_heads,
     head_dim: tl.constexpr,
     block_size: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
     IS_DECODE: tl.constexpr,
     HAS_KV_LENS: tl.constexpr,
-    TOKEN_STEP: tl.constexpr,
 ):
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
-
-    offs_d = tl.arange(0, head_dim)
-    offs_h = tl.arange(0, num_kv_heads)
-    offs_step = tl.arange(0, TOKEN_STEP)
-
-    step_3d = offs_step[:, None, None]
-    heads_3d = offs_h[None, :, None]
-    dim_3d = offs_d[None, None, :]
 
     prev_chunks = 0
     for batch_idx in range(batch_size):
@@ -68,8 +59,6 @@ def _store_paged_kv_cache_kernel(
         start_chunk = (pid + num_programs - prev_chunks % num_programs) % num_programs
         prev_chunks += cur_chunks
 
-        bt_base = batch_idx * stride_bt_batch
-
         for chunk_idx in range(start_chunk, cur_chunks, num_programs):
             token_offset_in_seq = chunk_idx * CHUNK_SIZE
             valid_len = seq_len_curr - token_offset_in_seq
@@ -84,7 +73,7 @@ def _store_paged_kv_cache_kernel(
                 block_inner_off = curr_log_pos % block_size
 
                 physical_block_id = tl.load(
-                    block_table_ptr + bt_base + block_table_idx * stride_bt_blk
+                    block_table_ptr + batch_idx * stride_bt_batch + block_table_idx * stride_bt_blk
                 )
                 valid_block = physical_block_id >= 0
                 physical_block_id = tl.maximum(physical_block_id, 0)
@@ -92,47 +81,49 @@ def _store_paged_kv_cache_kernel(
                 space_in_block = block_size - block_inner_off
                 sub_len = tl.minimum(remain_chunk_len - processed, space_in_block).to(tl.int32)
 
-                dst_k_blk = key_cache_ptr + physical_block_id * stride_kc_blk
-                dst_v_blk = value_cache_ptr + physical_block_id * stride_vc_blk
+                offs_sub = tl.arange(0, CHUNK_SIZE)
+                mask_sub = offs_sub < sub_len
 
-                step = 0
-                while step < sub_len:
-                    actual = tl.minimum(TOKEN_STEP, sub_len - step).to(tl.int32)
-                    mask_step = offs_step < actual
-                    mask_3d = valid_block & mask_step[:, None, None]
-                    step_off = step + block_inner_off
+                offs_d = tl.arange(0, head_dim)
 
+                for h in range(num_kv_heads):
                     src_k_ptr = (
                         k_ptr
-                        + (curr_kv_pos + step + step_3d) * stride_k_tok
-                        + heads_3d * stride_k_head
-                        + dim_3d * stride_k_dim
+                        + (curr_kv_pos + offs_sub[:, None]) * stride_k_tok
+                        + h * stride_k_head
+                        + offs_d[None, :] * stride_k_dim
                     )
-                    src_v_ptr = (
-                        v_ptr
-                        + (curr_kv_pos + step + step_3d) * stride_v_tok
-                        + heads_3d * stride_v_head
-                        + dim_3d * stride_v_dim
-                    )
-                    k_val = tl.load(src_k_ptr, mask=mask_3d, other=0.0)
-                    v_val = tl.load(src_v_ptr, mask=mask_3d, other=0.0)
+
+                    k_val = tl.load(src_k_ptr, mask=mask_sub[:, None], other=0.0)
 
                     dst_k_ptr = (
-                        dst_k_blk
-                        + heads_3d * stride_kc_head
-                        + (step_off + step_3d) * stride_kc_tok
-                        + dim_3d * stride_kc_dim
+                        key_cache_ptr
+                        + physical_block_id * stride_kc_blk
+                        + h * stride_kc_head
+                        + (block_inner_off + offs_sub[:, None]) * stride_kc_tok
+                        + offs_d[None, :] * stride_kc_dim
                     )
-                    dst_v_ptr = (
-                        dst_v_blk
-                        + heads_3d * stride_vc_head
-                        + (step_off + step_3d) * stride_vc_tok
-                        + dim_3d * stride_vc_dim
-                    )
-                    tl.store(dst_k_ptr, k_val, mask=mask_3d)
-                    tl.store(dst_v_ptr, v_val, mask=mask_3d)
 
-                    step += actual
+                    tl.store(dst_k_ptr, k_val, mask=valid_block & mask_sub[:, None])
+
+                    src_v_ptr = (
+                        v_ptr
+                        + (curr_kv_pos + offs_sub[:, None]) * stride_v_tok
+                        + h * stride_v_head
+                        + offs_d[None, :] * stride_v_dim
+                    )
+
+                    v_val = tl.load(src_v_ptr, mask=mask_sub[:, None], other=0.0)
+
+                    dst_v_ptr = (
+                        value_cache_ptr
+                        + physical_block_id * stride_vc_blk
+                        + h * stride_vc_head
+                        + (block_inner_off + offs_sub[:, None]) * stride_vc_tok
+                        + offs_d[None, :] * stride_vc_dim
+                    )
+
+                    tl.store(dst_v_ptr, v_val, mask=valid_block & mask_sub[:, None])
 
                 processed += sub_len
                 curr_log_pos += sub_len
@@ -159,14 +150,6 @@ def store_paged_kv_impl(
     head_dim = k_states.shape[2]
 
     block_size = key_cache.shape[2]
-
-    # Compute TOKEN_STEP: maximize tokens per iteration within UB budget
-    # Each step loads K+V buffers of shape [TOKEN_STEP, num_kv_heads, head_dim]
-    # Peak UB usage: 2 * TOKEN_STEP * num_kv_heads * head_dim * element_size
-    UB_AVAILABLE = 224 * 1024  # 256KB UB - 32KB reserved for compiler overhead
-    bytes_per_token_kv = 2 * num_kv_heads * head_dim * k_states.element_size()
-    max_step = UB_AVAILABLE // bytes_per_token_kv
-    TOKEN_STEP = max(1, min(max_step, block_size))
 
     num_programs = get_num_cores("vector")
     grid = (num_programs,)
@@ -202,7 +185,6 @@ def store_paged_kv_impl(
         CHUNK_SIZE=block_size,
         IS_DECODE=is_decode,
         HAS_KV_LENS=kv_lens_before_store is not None,
-        TOKEN_STEP=TOKEN_STEP,
     )
 
     return key_cache, value_cache
