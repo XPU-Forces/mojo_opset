@@ -144,6 +144,15 @@ def store_paged_kv_impl(
     num_programs = get_num_cores("vector")
     grid = (num_programs,)
 
+    total_tokens = int(cu_seqlens[-1])
+    units_per_chunk = num_kv_heads
+    target_chunks = max(num_programs // units_per_chunk, 1)
+
+    raw = total_tokens / target_chunks
+    import math
+    chunk = 1 << int(math.floor(math.log2(max(raw,1 ))))
+    CHUNK_SIZE = max(32,min(chunk, block_size))
+    
     _store_paged_kv_cache_kernel[grid](
         k_flat,
         v_flat,
@@ -163,7 +172,7 @@ def store_paged_kv_impl(
         block_table.stride(1),
         kv_dim,
         block_size,
-        CHUNK_SIZE=block_size,
+        CHUNK_SIZE,
         IS_DECODE=is_decode,
         HAS_KV_LENS=kv_lens_before_store is not None,
         TOKEN_STEP=TOKEN_STEP,
