@@ -250,7 +250,6 @@ def generate_paged_prefill_data_with_graph(
         block_tables[i, :num_blocks_for_seq] = assigned_blocks
         current_block_offset += num_blocks_for_seq
 
-    max_q_len = max_q_len
     max_total_seq_len = int(kv_lens.max().item())
     return query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_len, max_total_seq_len
 
