@@ -178,9 +178,9 @@ def generate_paged_prefill_quant_data(
         block_tables[i, :num_blocks_for_seq] = assigned_blocks
         current_block_offset += num_blocks_for_seq
 
-    max_q_lens = int(q_lens.max().item()) if q_lens.numel() > 0 else 0
-    max_total_seq_lens = int(kv_lens.max().item()) if kv_lens.numel() > 0 else 0
-    return query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens
+    max_q_len = int(q_lens.max().item()) if q_lens.numel() > 0 else 0
+    max_total_seq_len = int(kv_lens.max().item()) if kv_lens.numel() > 0 else 0
+    return query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_len, max_total_seq_len
 
 def get_scale_and_quant(
     x: torch.Tensor,
@@ -296,7 +296,7 @@ test_configs_prefill_gqa_with_kv_dequant = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens",
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_len, max_total_seq_len",
     [
         pytest.param(
             *generate_paged_prefill_quant_data(
@@ -330,8 +330,8 @@ def test_paged_prefill_gqa_with_kv_dequant(
     cu_q_lens: torch.Tensor,
     block_tables: torch.Tensor,
     cu_total_seq_lens: Optional[torch.Tensor],
-    max_q_lens: int,
-    max_total_seq_lens: int,
+    max_q_len: int,
+    max_total_seq_len: int,
     gqa_layout: str,
     query_dtype: torch.dtype,
     context_dtype: torch.dtype,
@@ -371,8 +371,8 @@ def test_paged_prefill_gqa_with_kv_dequant(
         block_tables,
         softmax_scale=softmax_scale,
         cu_total_seq_lens=cu_total_seq_lens,
-        max_q_lens=max_q_lens,
-        max_total_seq_lens=max_total_seq_lens,
+        max_q_len=max_q_len,
+        max_total_seq_len=max_total_seq_len,
         atol=5e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=5e-2 if query.dtype != torch.float32 else 1e-6,
         ptol=0.90,
@@ -502,7 +502,7 @@ test_configs_prefill_swa_with_kv_dequant = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens",
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_len, max_total_seq_len",
     [
         pytest.param(
             *generate_paged_prefill_quant_data(
@@ -542,8 +542,8 @@ def test_paged_prefill_swa_with_kv_dequant(
     cu_q_lens: torch.Tensor,
     block_tables: torch.Tensor,
     cu_total_seq_lens: Optional[torch.Tensor],
-    max_q_lens: int,
-    max_total_seq_lens: int,
+    max_q_len: int,
+    max_total_seq_len: int,
     gqa_layout: str,
     global_window: int,
     local_window: int,
@@ -589,8 +589,8 @@ def test_paged_prefill_swa_with_kv_dequant(
         block_tables,
         softmax_scale=softmax_scale,
         cu_total_seq_lens=cu_total_seq_lens,
-        max_q_lens=max_q_lens,
-        max_total_seq_lens=max_total_seq_lens,
+        max_q_len=max_q_len,
+        max_total_seq_len=max_total_seq_len,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
         # int8 compute can have a few round-boundary outliers across millions of elements.
@@ -720,7 +720,7 @@ test_configs_prefill_sage_gqa = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens",
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_len, max_total_seq_len",
     [
         pytest.param(
             *generate_paged_prefill_quant_data(
@@ -754,8 +754,8 @@ def test_paged_prefill_sage_gqa(
     cu_q_lens: torch.Tensor,
     block_tables: torch.Tensor,
     cu_total_seq_lens: Optional[torch.Tensor],
-    max_q_lens: int,
-    max_total_seq_lens: int,
+    max_q_len: int,
+    max_total_seq_len: int,
     gqa_layout: str,
     query_dtype: torch.dtype,
     context_dtype: torch.dtype,
@@ -806,8 +806,8 @@ def test_paged_prefill_sage_gqa(
         block_tables,
         softmax_scale=softmax_scale,
         cu_total_seq_lens=cu_total_seq_lens,
-        max_q_lens=max_q_lens,
-        max_total_seq_lens=max_total_seq_lens,
+        max_q_len=max_q_len,
+        max_total_seq_len=max_total_seq_len,
         atol=atol,
         rtol=rtol,
         ptol=0.90,

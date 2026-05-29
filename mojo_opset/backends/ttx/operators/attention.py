@@ -44,8 +44,8 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ):
         assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
 
@@ -58,7 +58,7 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
             if cu_total_seq_lens is None
             else cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
         )
-        # max_q_lens / max_total_seq_lens / kwargs: core·Ixformer API compatibility.
+        # max_q_len / max_total_seq_len / kwargs: core·Ixformer API compatibility.
         if self.aux_mask is None:
             self.aux_mask = torch.ones(
                 self.AUX_MASK_SIZE,
@@ -77,8 +77,8 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
             gqa_interleave=self.gqa_layout == "ABAB",
             softmax_scale=softmax_scale,
             aux_mask=self.aux_mask,
-            max_q_lens=max_q_lens,
-            max_total_seq_lens=max_total_seq_lens,
+            max_q_len=max_q_len,
+            max_total_seq_len=max_total_seq_len,
         )
 
         return output
@@ -102,8 +102,8 @@ class TTXPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         assert query_scale is None, "[TTXPagedPrefillGQAWithKVDequant] quantized query is not supported"
         assert cu_q_lens.dtype == torch.int32
@@ -146,8 +146,8 @@ class TTXPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
             block_tables=block_tables,
             gqa_interleave=self.gqa_layout == "ABAB",
             softmax_scale=softmax_scale,
-            max_seqlen_q=max_q_lens,
-            max_seqlen_k=max_total_seq_lens,
+            max_seqlen_q=max_q_len,
+            max_seqlen_k=max_total_seq_len,
         )
 
         return output
@@ -263,8 +263,8 @@ class TTXPagedPrefillSWA(MojoPagedPrefillSWA):
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,  # [bsz + 1]
         *,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)
         total_seq_lens = (
@@ -306,8 +306,8 @@ class TTXPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
         block_table: torch.Tensor,
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         assert query_scale is None, "[TTXPagedPrefillSWAWithKVDequant] quantized query is not supported"
         assert_paged_prefill_contract(cu_q_lens, block_table, cu_total_seq_lens)

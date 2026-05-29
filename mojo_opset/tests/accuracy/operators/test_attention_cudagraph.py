@@ -162,9 +162,9 @@ def generate_paged_prefill_data(
             v_cache[physical_block_id, :, :tokens_in_block, :] = v_slice
 
     cu_total_seq_lens = None if kv_cache_lens is None else cu_total_seq_lens
-    max_q_lens = int((cu_q_lens[1:] - cu_q_lens[:-1]).max().item()) if cu_q_lens.numel() > 1 else 0
-    max_total_seq_lens = int(kv_lens.max().item()) if kv_lens.numel() > 0 else 0
-    return query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens
+    max_q_len = int((cu_q_lens[1:] - cu_q_lens[:-1]).max().item()) if cu_q_lens.numel() > 1 else 0
+    max_total_seq_len = int(kv_lens.max().item()) if kv_lens.numel() > 0 else 0
+    return query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_len, max_total_seq_len
 
 
 def generate_paged_decode_data_with_graph(
@@ -250,9 +250,9 @@ def generate_paged_prefill_data_with_graph(
         block_tables[i, :num_blocks_for_seq] = assigned_blocks
         current_block_offset += num_blocks_for_seq
 
-    max_q_lens = max_q_len
-    max_total_seq_lens = int(kv_lens.max().item())
-    return query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens
+    max_q_len = max_q_len
+    max_total_seq_len = int(kv_lens.max().item())
+    return query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_len, max_total_seq_len
 
 
 test_configs_decode_with_graph = [
@@ -420,7 +420,7 @@ test_configs_prefill_with_graph = [
 
 
 @pytest.mark.parametrize(
-    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens",
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_len, max_total_seq_len",
     [
         pytest.param(
             *generate_paged_prefill_data_with_graph(
@@ -448,8 +448,8 @@ def test_paged_prefill_gqa_with_graph(
     cu_q_lens: torch.Tensor,
     block_tables: torch.Tensor,
     cu_total_seq_lens: torch.Tensor,
-    max_q_lens: int,
-    max_total_seq_lens: int,
+    max_q_len: int,
+    max_total_seq_len: int,
     gqa_layout: str,
 ):
     head_dim = query.shape[-1]
@@ -468,8 +468,8 @@ def test_paged_prefill_gqa_with_graph(
             block_tables=block_tables,
             softmax_scale=softmax_scale,
             cu_total_seq_lens=cu_total_seq_lens,
-            max_q_lens=max_q_lens,
-            max_total_seq_lens=max_total_seq_lens,
+            max_q_len=max_q_len,
+            max_total_seq_len=max_total_seq_len,
         )
         torch.cuda.synchronize()
 
@@ -484,8 +484,8 @@ def test_paged_prefill_gqa_with_graph(
                     block_tables=block_tables,
                     softmax_scale=softmax_scale,
                     cu_total_seq_lens=cu_total_seq_lens,
-                    max_q_lens=max_q_lens,
-                    max_total_seq_lens=max_total_seq_lens,
+                    max_q_len=max_q_len,
+                    max_total_seq_len=max_total_seq_len,
                 )
             torch.cuda.synchronize()
         except Exception as e:
@@ -512,8 +512,8 @@ def test_paged_prefill_gqa_with_graph(
         block_tables=block_tables,
         softmax_scale=softmax_scale,
         cu_total_seq_lens=cu_total_seq_lens,
-        max_q_lens=max_q_lens,
-        max_total_seq_lens=max_total_seq_lens,
+        max_q_len=max_q_len,
+        max_total_seq_len=max_total_seq_len,
     )
 
     # Workaround: Triton bf16 paged prefill kernel has severe precision issues with
@@ -528,7 +528,7 @@ def test_paged_prefill_gqa_with_graph(
     max_total_q_tokens, num_q_heads, head_dim = query.shape
     _, num_kv_heads, block_size, _ = k_cache.shape
     max_q_len_cfg = max_total_q_tokens // max_batch_size
-    max_kv_computed_len_cfg = max_total_seq_lens - max_q_len_cfg
+    max_kv_computed_len_cfg = max_total_seq_len - max_q_len_cfg
 
     for _ in range(5):
         current_batch_size = torch.randint(1, max_batch_size + 1, ()).item()
@@ -540,8 +540,8 @@ def test_paged_prefill_gqa_with_graph(
             cur_cu_q_lens,
             cur_block_tables,
             cur_cu_total_seq_lens,
-            cur_max_q_lens,
-            cur_max_total_seq_lens,
+            cur_max_q_len,
+            cur_max_total_seq_len,
         ) = generate_paged_prefill_data(
             batch_size=current_batch_size,
             num_q_heads=num_q_heads,
@@ -592,8 +592,8 @@ def test_paged_prefill_gqa_with_graph(
             block_tables=cur_block_tables,
             softmax_scale=softmax_scale,
             cu_total_seq_lens=cur_cu_total_seq_lens,
-            max_q_lens=cur_max_q_lens,
-            max_total_seq_lens=cur_max_total_seq_lens,
+            max_q_len=cur_max_q_len,
+            max_total_seq_len=cur_max_total_seq_len,
         )
 
         reserved_unused_output = output[cur_total_q_tokens:].clone()
@@ -621,7 +621,7 @@ def generate_paged_prefill_swa_data_with_graph(
     block_size: int,
     dtype: torch.dtype,
 ):
-    query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_lens, max_total_seq_lens = (
+    query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_len, max_total_seq_len = (
         generate_paged_prefill_data_with_graph(
             batch_size=batch_size,
             num_q_heads=num_q_heads,
@@ -642,8 +642,8 @@ def generate_paged_prefill_swa_data_with_graph(
         cu_total_seq_lens,
         block_tables,
         seqlens_kv,
-        max_q_lens,
-        max_total_seq_lens,
+        max_q_len,
+        max_total_seq_len,
     )
 
 

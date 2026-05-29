@@ -511,8 +511,8 @@ class MojoPagedPrefillGQAWithKVDequant(MojoOperator):
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Paged prefill attention with grouped query heads (GQA) using a blocked KV cache.
@@ -536,8 +536,8 @@ class MojoPagedPrefillGQAWithKVDequant(MojoOperator):
             mask (Optional[torch.Tensor]): Attention mask; defaults to None.
                 If mask is None, it means a full mask or causal mask based on `is_causal`.
                 If mask is not None, and is_causal=False, applies the mask to the attention scores.
-            max_q_lens (Optional[int]): Hint for the maximum query length (unused).
-            max_total_seq_lens (Optional[int]): Hint for the maximum total KV length (unused).
+            max_q_len (Optional[int]): Hint for the maximum query length (unused).
+            max_total_seq_len (Optional[int]): Hint for the maximum total KV length (unused).
 
         Returns:
             torch.Tensor: Attention output of shape (T, Hq, D).
@@ -859,8 +859,8 @@ class MojoPagedPrefillSWAWithKVDequant(MojoOperator):
         block_table: torch.Tensor,  # [bsz, max_num_blocks]
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,  # [bsz + 1]
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Paged prefill attention with grouped query heads (GQA) using a blocked KV cache.
@@ -1576,8 +1576,8 @@ class MojoPagedPrefillSageGQA(MojoOperator):
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ):
         """
         Paged prefill sage attention with grouped query heads (GQA) using a blocked KV cache.
