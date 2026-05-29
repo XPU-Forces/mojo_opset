@@ -51,8 +51,7 @@ def _decode_store_kv_fast_path(
         write_start = 0
         if HAS_KV_LENS:
             write_start = tl.load(kv_lens_ptr + batch_idx)
-        if write_start < 0:
-            continue
+        valid_write = write_start >= 0
 
         block_table_idx = write_start // block_size
         block_inner_off = write_start % block_size
@@ -62,6 +61,7 @@ def _decode_store_kv_fast_path(
         )
         valid_block = physical_block_id >= 0
         physical_block_id = tl.maximum(physical_block_id, 0)
+        valid_all = valid_write & valid_block
 
         src_k_pos = batch_idx
         src_k_ptr = (
@@ -70,7 +70,7 @@ def _decode_store_kv_fast_path(
             + head_pid * stride_k_head
             + offs_d * stride_k_dim
         )
-        k_val = tl.load(src_k_ptr, mask=valid_block, other=0.0)
+        k_val = tl.load(src_k_ptr, mask=valid_all, other=0.0)
 
         dst_k_ptr = (
             key_cache_ptr
@@ -79,7 +79,7 @@ def _decode_store_kv_fast_path(
             + block_inner_off * stride_kc_tok
             + offs_d * stride_kc_dim
         )
-        tl.store(dst_k_ptr, k_val, mask=valid_block)
+        tl.store(dst_k_ptr, k_val, mask=valid_all)
 
         src_v_ptr = (
             v_ptr
@@ -87,7 +87,7 @@ def _decode_store_kv_fast_path(
             + head_pid * stride_v_head
             + offs_d * stride_v_dim
         )
-        v_val = tl.load(src_v_ptr, mask=valid_block, other=0.0)
+        v_val = tl.load(src_v_ptr, mask=valid_all, other=0.0)
 
         dst_v_ptr = (
             value_cache_ptr
@@ -96,7 +96,7 @@ def _decode_store_kv_fast_path(
             + block_inner_off * stride_vc_tok
             + offs_d * stride_vc_dim
         )
-        tl.store(dst_v_ptr, v_val, mask=valid_block)
+        tl.store(dst_v_ptr, v_val, mask=valid_all)
 
 
 @triton.jit
