@@ -12,6 +12,16 @@ from mojo_opset.core import MojoQuantMoE
 
 from ixformer import functions as ixf_f
 
+def decompose_fp32_to_3bf16(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+    x0 = x.bfloat16()
+    r1 = x - x0.float()
+    x1 = r1.bfloat16()
+    r2 = r1 - x1.float()
+    x2 = r2.bfloat16()
+
+    return x0, x1, x2
+
 def _repack_int4_tn_to_nn(packed_tn: torch.Tensor, N: int, K: int) -> torch.Tensor:
     """
     Pure layout conversion: TN-packed int4 -> NN-packed int4 with tensor-core swizzle.
@@ -89,17 +99,23 @@ class IxformerMoEGating(MojoMoEGating):
 
     def __init__(self, hidden_size: int, num_experts: int, top_k: int, **kwargs):
         super().__init__(hidden_size, num_experts, top_k, **kwargs)
+        for name in ("gate_weight_bf16_tn_0", "gate_weight_bf16_tn_1", "gate_weight_bf16_tn_2"):
+            self.register_buffer(
+                name,
+                torch.empty((num_experts, hidden_size), dtype=torch.bfloat16, device=self.gate_weight.device),
+                persistent=False,
+            )
         self.register_load_state_dict_post_hook(self._transform_gate_weight_post_hook)
 
     @staticmethod
     def _transform_gate_weight_post_hook(module, incompatible_keys):
-        device = module.gate_weight.device
-        gate_weight_tn = module.gate_weight.data.T.contiguous()
-        module.gate_weight = torch.nn.Parameter(gate_weight_tn.to(device=device, dtype=torch.float32))
+        gw0, gw1, gw2 = decompose_fp32_to_3bf16(module.gate_weight.data.T.contiguous())
+        module.gate_weight_bf16_tn_0.copy_(gw0)
+        module.gate_weight_bf16_tn_1.copy_(gw1)
+        module.gate_weight_bf16_tn_2.copy_(gw2)
 
     def forward(self, hidden_states: torch.Tensor):
-        assert self.gate_weight.dtype == torch.float32
-        gate_logits = ixf_f.mixed_type_linear(hidden_states, self.gate_weight)
+        gate_logits = ixf_f.triple_gemm_bf16_bf16_fp32(hidden_states, self.gate_weight_bf16_tn_2, self.gate_weight_bf16_tn_1, self.gate_weight_bf16_tn_0)
         top_k_gates, top_k_indices = ixf_f.moe_topk_softmax(gate_logits, self.top_k, renormalize=True)
 
         return top_k_indices, top_k_gates
@@ -564,17 +580,10 @@ class IxformerQuantMoE(MojoQuantMoE):
         else:
             enable_cuda_graph = False
         
-        if hidden_states.dtype in [torch.bfloat16, torch.float16]:
-            self.experts.output_dtype = hidden_states.dtype
-        else:
-            raise NotImplementedError(f"IxformerQuantMoE: hidden_states dtype must be 'torch.bfloat16' or 'torch.float16', got {hidden_states.dtype}.")
+        if hidden_states.dtype == torch.float16:
+            raise NotImplementedError(f"IxformerQuantMoE: hidden_states dtype must be 'torch.bfloat16', got {hidden_states.dtype}.")
 
         top_k_indices, top_k_gates = self.gating(hidden_states)
-        
-        if hidden_states.dtype == torch.float16:
-            self.experts.up_proj_quantize.inv_smooth_scale = torch.nn.Parameter(
-                self.experts.up_proj_quantize.inv_smooth_scale.to(dtype=torch.float32)
-            )
 
         i8_hs, sorted_token_ids, src_to_dst, tokens_per_expert, quant_scale = self.dispatch(
             hidden_states,
