@@ -69,9 +69,10 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, context_kv_l
     v_cache = v_cache_ref.clone()
 
     store_paged_kv = MojoStorePagedKVCache()
+    store_paged_kv_opt = store_paged_kv_opt_impl
 
     perf(  # noqa: F821
-        lambda: store_paged_kv_opt_impl(
+        lambda: store_paged_kv_opt(
             key_states,
             value_states,
             k_cache,
@@ -121,9 +122,10 @@ def test_store_paged_kv_bucket_padded_varlen():
         next_block += needed
 
     store_paged_kv = MojoStorePagedKVCache()
+    store_paged_kv_opt = store_paged_kv_opt_impl
 
     perf(  # noqa: F821
-        lambda: store_paged_kv_opt_impl(
+        lambda: store_paged_kv_opt(
             key_states,
             value_states,
             k_cache,
