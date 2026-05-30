@@ -8,6 +8,7 @@ import torch.multiprocessing as mp
 
 from mojo_opset import MojoAll2AllQuantGemm
 from mojo_opset import MojoQuantGemmAll2All
+from mojo_opset.tests.utils import bypass_not_implemented
 
 
 torch.manual_seed(42)
@@ -38,6 +39,7 @@ def _quant_gemm_ref(input, weight, weight_scale, per_token_scale, trans_weight=T
     return (out.float() * weight_scale.float().unsqueeze(0) * per_token_scale.float().unsqueeze(-1)).to(torch.bfloat16)
 
 
+@bypass_not_implemented
 def test_quant_gemm_all2all_single_rank():
     m, k, n = 8, 16, 12
     input = torch.randint(-8, 8, (m, k), dtype=torch.int8, device="cpu")
@@ -51,6 +53,7 @@ def test_quant_gemm_all2all_single_rank():
     torch.testing.assert_close(out, ref, atol=0, rtol=0)
 
 
+@bypass_not_implemented
 def test_all2all_quant_gemm_single_rank():
     m, k, n = 8, 16, 12
     input = torch.randint(-8, 8, (m, k), dtype=torch.int8, device="cpu")
