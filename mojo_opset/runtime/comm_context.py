@@ -60,7 +60,7 @@ class MojoSymmetricMemoryManager:
     def _resolve_heap_size_mb(shmem_heap_size_mb: Optional[int]) -> int:
         if shmem_heap_size_mb is not None:
             return int(shmem_heap_size_mb)
-        return int(os.getenv("MOJO_XOPS_SHMEM_SIZE_MB", "256"))
+        return int(os.getenv("MOJO_SHMEM_SIZE_MB", os.getenv("MOJO_XOPS_SHMEM_SIZE_MB", "256")))
 
     def __init__(
         self,
@@ -69,7 +69,7 @@ class MojoSymmetricMemoryManager:
         backend: str = "xops",
         shmem_heap_size_mb: int = 256,
     ):
-        if backend != "xops":
+        if backend not in ("xops", "ttx"):
             raise NotImplementedError(f"Unsupported symmetric memory backend: {backend}")
         self.process_group = process_group
         self.backend = backend
@@ -88,15 +88,69 @@ class MojoSymmetricMemoryManager:
         with self._lock:
             self._ensure_open()
             if self._backend_manager is None:
-                import xpu_ops
-                from xpu_ops.modules import ShmemManager
-
-                xpu_ops.load_xpu_ops(False)
-                self._backend_manager = ShmemManager(
-                    mem_size=self.shmem_heap_size_bytes,
-                    process_group=self.process_group,
-                )
+                if self.backend == "xops":
+                    self._init_xops_backend()
+                elif self.backend == "ttx":
+                    self._init_ttx_backend()
             return self._backend_manager
+
+    def _init_xops_backend(self):
+        import xpu_ops
+        from xpu_ops.modules import ShmemManager
+
+        xpu_ops.load_xpu_ops(False)
+        self._backend_manager = ShmemManager(
+            mem_size=self.shmem_heap_size_bytes,
+            process_group=self.process_group,
+        )
+
+    def _init_ttx_backend(self):
+        import ctypes
+        import importlib.util
+
+        spec = importlib.util.find_spec("shmem")
+        if spec is None:
+            raise ImportError("shmem package not found; required for TTX backend")
+        shmem_dir = os.path.dirname(spec.origin)
+        ctypes.CDLL(os.path.join(shmem_dir, "libshmem_utils.so"), mode=ctypes.RTLD_GLOBAL)
+        ctypes.CDLL(os.path.join(shmem_dir, "libshmem.so"), mode=ctypes.RTLD_GLOBAL)
+        import shmem as ash
+
+        process_group = self.process_group or dist.group.WORLD
+        _UID_SIZE = 136
+        uid_tensor = torch.zeros(_UID_SIZE, dtype=torch.uint8, device=f"npu:{self.rank}")
+        if self.rank == 0:
+            uid_bytes = ash.aclshmem_get_unique_id()
+            uid_tensor.copy_(torch.tensor(list(uid_bytes), dtype=torch.uint8))
+        dist.broadcast(uid_tensor, src=0, group=process_group)
+        uid = bytes(uid_tensor.cpu().tolist())
+
+        ret = ash.aclshmem_init_using_unique_id(
+            self.rank, self.world_size,
+            self.shmem_heap_size_bytes, uid,
+        )
+        if ret != 0:
+            raise RuntimeError(f"aclshmem_init_using_unique_id failed: ret={ret}")
+        self._backend_manager = ash
+
+    def allocate_peer_mem(self, flat_size: int, dtype: torch.dtype) -> torch.Tensor:
+        """Allocate or reuse a symmetric tensor from the shmem heap (TTX backend).
+
+        Returns a cached tensor if one exists with sufficient size and matching dtype.
+        Only one peer_mem buffer is active per dtype at a time.
+        """
+        with self._lock:
+            self._ensure_open()
+            if self.backend != "ttx":
+                raise RuntimeError("allocate_peer_mem is only supported for TTX backend")
+            cache_key = ("_peer_mem", dtype)
+            existing = self._team_cache.get(cache_key)
+            if existing is not None and existing.numel() >= flat_size:
+                return existing
+            import shmem as ash
+            tensor = ash.aclshmem_create_tensor([flat_size], dtype=dtype, device_id=self.rank)
+            self._team_cache[cache_key] = tensor
+            return tensor
 
     def get_or_create_team(
         self,
@@ -128,7 +182,9 @@ class MojoSymmetricMemoryManager:
             self._closed = True
 
         if manager is not None:
-            if hasattr(manager, "finalize"):
+            if self.backend == "ttx":
+                manager.aclshmem_finialize()
+            elif hasattr(manager, "finalize"):
                 manager.finalize()
             elif hasattr(manager, "destory"):
                 manager.destory()

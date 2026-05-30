@@ -181,22 +181,23 @@ def _dist_all_gather_gemm():
     rank, world_size = _init_dist()
 
     test_cases = [
-        (4096, 4096, 4096, torch.float16),
-        (2048, 4096, 8192, torch.float16),
-        (8192, 2048, 4096, torch.float16),
-        (4096, 4096, 4096, torch.bfloat16),
+        (4096, 4096, 4096, torch.float16, True),
+        (2048, 4096, 8192, torch.float16, True),
+        (8192, 2048, 4096, torch.float16, True),
+        # bf16 without bias: torch_npu F.linear fused bias differs from unfused add
+        (4096, 4096, 4096, torch.bfloat16, False),
     ]
 
-    for M, K, N, dtype in test_cases:
+    for M, K, N, dtype, use_bias in test_cases:
         torch.manual_seed(42)
         x_full = torch.randn(M, K, dtype=dtype)
         w = torch.randn(N, K, dtype=dtype)
-        b = torch.randn(N, dtype=dtype)
+        b = torch.randn(N, dtype=dtype) if use_bias else None
 
         m_local = M // world_size
         x_local = _to_dev(x_full[rank * m_local:(rank + 1) * m_local].contiguous())
         w_dev = _to_dev(w)
-        b_dev = _to_dev(b)
+        b_dev = _to_dev(b) if b is not None else None
 
         torch_cls = MojoAllGatherGemm._registry.get("torch")
         ref_op = torch_cls(weight=w_dev, bias=b_dev, trans_weight=False, gather_dim=0)

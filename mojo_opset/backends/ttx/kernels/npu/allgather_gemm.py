@@ -1,9 +1,4 @@
-import os
-import threading
-from typing import Optional
-
 import torch
-import torch.distributed as dist
 import triton
 import triton.language as tl
 import triton_dist.language as dl
@@ -15,38 +10,6 @@ from triton_dist.language.extra.ascend.algorithm import (
 from triton.language.extra.cann.extension import sub_vec_id
 
 from .utils import get_num_cores
-
-
-_ash_init_lock = threading.Lock()
-_ash_initialized = False
-
-
-def _ensure_ash_init(rank: int, world_size: int) -> None:
-    # TODO: upgrade to unique_id mode (like xops backend) once shmem package supports it,
-    # to avoid requiring ip_port env vars and enable multi-job coexistence.
-    global _ash_initialized
-    if _ash_initialized:
-        return
-    with _ash_init_lock:
-        if _ash_initialized:
-            return
-        import shmem as ash
-
-        addr = os.environ.get("ASH_MASTER_ADDR", "127.0.0.1")
-        port = os.environ.get("ASH_MASTER_PORT", "8666")
-        mem_mb = int(os.environ.get("MOJO_TTX_SHMEM_SIZE_MB", "1024"))
-
-        ash.set_conf_store_tls(False, "")
-        attr = ash.InitAttr()
-        attr.my_rank = rank
-        attr.n_ranks = world_size
-        attr.local_mem_size = mem_mb * 1024 * 1024
-        attr.ip_port = f"tcp://{addr}:{port}"
-        attr.option_attr.data_op_engine_type = ash.OpEngineType.MTE
-        ret = ash.aclshmem_init(attr)
-        if ret != 0:
-            raise RuntimeError(f"aclshmem_init failed: ret={ret}")
-        _ash_initialized = True
 
 
 @triton.jit

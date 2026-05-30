@@ -3,7 +3,6 @@ from typing import Optional
 
 import torch
 import torch.distributed as dist
-from torch.distributed.distributed_c10d import _get_default_group
 
 from mojo_opset.backends.ttx.kernels import allgather_gemm_impl
 from mojo_opset.backends.ttx.kernels import gemm_allreduce_impl
@@ -12,15 +11,14 @@ from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 from mojo_opset.core import MojoAllGatherGemm
 from mojo_opset.core import MojoGemmAllReduce
 from mojo_opset.core import MojoGemmReduceScatter
+from mojo_opset.runtime import MojoSymmetricMemoryManager
+
+
+_TTX_SHMEM_SIZE_MB = int(os.environ.get("MOJO_TTX_SHMEM_SIZE_MB", "1024"))
 
 
 class TTXAllGatherGemm(MojoAllGatherGemm):
-    """Triton-based fused AllGather + GEMM on Ascend NPU via aclshmem.
-
-    Uses a hand-tuned Triton kernel that performs distributed AllGather through
-    symmetric shared memory (aclshmem) and fuses it with GEMM computation.
-    Currently supports fp16, gather_dim=0 only.
-    """
+    """Triton-based fused AllGather + GEMM on Ascend NPU via aclshmem."""
 
     supported_platforms_list = ["npu"]
 
@@ -37,30 +35,23 @@ class TTXAllGatherGemm(MojoAllGatherGemm):
         self._rank = None
         self._world_size = None
 
-    def _ensure_shmem(self, K: int, dtype: torch.dtype = torch.float16) -> None:
+    def _ensure_shmem(self, K: int, dtype: torch.dtype) -> None:
         if self._peer_mem is not None:
             return
 
-        _preload_shmem_libs()
-        import shmem as ash
-        from mojo_opset.backends.ttx.kernels.npu.allgather_gemm import _ensure_ash_init
-
-        process_group = self.process_group or _get_default_group()
-        rank = dist.get_rank(process_group)
-        world_size = dist.get_world_size(process_group)
-
-        _ensure_ash_init(rank, world_size)
-
-        BLOCK_SIZE_M = 128
-        BLOCK_SIZE_K = 256
-        pvalue = 4
-        buffer_num = 2
-        flat_size = BLOCK_SIZE_M * pvalue * world_size * buffer_num * max(K, BLOCK_SIZE_K)
-        self._peer_mem = ash.aclshmem_create_tensor(
-            [flat_size], dtype=dtype, device_id=rank
+        runtime = MojoSymmetricMemoryManager.get_or_create(
+            process_group=self.process_group,
+            backend="ttx",
+            shmem_heap_size_mb=_TTX_SHMEM_SIZE_MB,
         )
-        self._rank = rank
-        self._world_size = world_size
+        runtime.get_backend_manager()
+
+        self._rank = runtime.rank
+        self._world_size = runtime.world_size
+
+        BLOCK_SIZE_M, pvalue, buffer_num, BLOCK_SIZE_K = 128, 4, 2, 256
+        flat_size = BLOCK_SIZE_M * pvalue * self._world_size * buffer_num * max(K, BLOCK_SIZE_K)
+        self._peer_mem = runtime.allocate_peer_mem(flat_size, dtype)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if not (dist.is_available() and dist.is_initialized()):
@@ -107,16 +98,6 @@ class TTXAllGatherGemm(MojoAllGatherGemm):
         return output
 
 
-def _preload_shmem_libs():
-    """Preload shmem shared libraries to avoid symbol conflicts with xpu_ops."""
-    import ctypes
-    import importlib.util
-    spec = importlib.util.find_spec("shmem")
-    shmem_dir = os.path.dirname(spec.origin)
-    ctypes.CDLL(os.path.join(shmem_dir, "libshmem_utils.so"), mode=ctypes.RTLD_GLOBAL)
-    ctypes.CDLL(os.path.join(shmem_dir, "libshmem.so"), mode=ctypes.RTLD_GLOBAL)
-
-
 class TTXGemmAllReduce(MojoGemmAllReduce):
     """Triton-based fused GEMM + AllReduce on Ascend NPU via aclshmem."""
 
@@ -134,31 +115,25 @@ class TTXGemmAllReduce(MojoGemmAllReduce):
         self._rank = None
         self._world_size = None
 
-    def _ensure_shmem(self, dtype: torch.dtype = torch.float16) -> None:
+    def _ensure_shmem(self, dtype: torch.dtype) -> None:
         if self._peer_mem is not None:
             return
 
-        _preload_shmem_libs()
-        import shmem as ash
-        from mojo_opset.backends.ttx.kernels.npu.allgather_gemm import _ensure_ash_init
-
-        process_group = self.process_group or _get_default_group()
-        rank = dist.get_rank(process_group)
-        world_size = dist.get_world_size(process_group)
-
-        _ensure_ash_init(rank, world_size)
-
-        BLOCK_SIZE_M = 128
-        BLOCK_SIZE_N = 256
-        ncore = get_num_cores("cube")
-        pvalue = 4
-        buffer_num = 2
-        flat_size = BLOCK_SIZE_M * pvalue * ncore * buffer_num * BLOCK_SIZE_N
-        self._peer_mem = ash.aclshmem_create_tensor(
-            [flat_size], dtype=dtype, device_id=rank
+        runtime = MojoSymmetricMemoryManager.get_or_create(
+            process_group=self.process_group,
+            backend="ttx",
+            shmem_heap_size_mb=_TTX_SHMEM_SIZE_MB,
         )
-        self._rank = rank
-        self._world_size = world_size
+        runtime.get_backend_manager()
+
+        self._rank = runtime.rank
+        self._world_size = runtime.world_size
+
+        BLOCK_SIZE_M, BLOCK_SIZE_N = 128, 256
+        ncore = get_num_cores("cube")
+        pvalue, buffer_num = 4, 2
+        flat_size = BLOCK_SIZE_M * pvalue * ncore * buffer_num * BLOCK_SIZE_N
+        self._peer_mem = runtime.allocate_peer_mem(flat_size, dtype)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if not (dist.is_available() and dist.is_initialized()):
@@ -212,31 +187,25 @@ class TTXGemmReduceScatter(MojoGemmReduceScatter):
         self._rank = None
         self._world_size = None
 
-    def _ensure_shmem(self, dtype: torch.dtype = torch.float16) -> None:
+    def _ensure_shmem(self, dtype: torch.dtype) -> None:
         if self._peer_mem is not None:
             return
 
-        _preload_shmem_libs()
-        import shmem as ash
-        from mojo_opset.backends.ttx.kernels.npu.allgather_gemm import _ensure_ash_init
-
-        process_group = self.process_group or _get_default_group()
-        rank = dist.get_rank(process_group)
-        world_size = dist.get_world_size(process_group)
-
-        _ensure_ash_init(rank, world_size)
-
-        BLOCK_SIZE_M = 128
-        BLOCK_SIZE_N = 256
-        ncore = get_num_cores("cube")
-        pvalue = 4
-        buffer_num = 2
-        flat_size = BLOCK_SIZE_M * pvalue * ncore * buffer_num * BLOCK_SIZE_N
-        self._peer_mem = ash.aclshmem_create_tensor(
-            [flat_size], dtype=dtype, device_id=rank
+        runtime = MojoSymmetricMemoryManager.get_or_create(
+            process_group=self.process_group,
+            backend="ttx",
+            shmem_heap_size_mb=_TTX_SHMEM_SIZE_MB,
         )
-        self._rank = rank
-        self._world_size = world_size
+        runtime.get_backend_manager()
+
+        self._rank = runtime.rank
+        self._world_size = runtime.world_size
+
+        BLOCK_SIZE_M, BLOCK_SIZE_N = 128, 256
+        ncore = get_num_cores("cube")
+        pvalue, buffer_num = 4, 2
+        flat_size = BLOCK_SIZE_M * pvalue * ncore * buffer_num * BLOCK_SIZE_N
+        self._peer_mem = runtime.allocate_peer_mem(flat_size, dtype)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if not (dist.is_available() and dist.is_initialized()):
@@ -249,7 +218,7 @@ class TTXGemmReduceScatter(MojoGemmReduceScatter):
         K = input.shape[-1]
         input_2d = input.reshape(-1, K).contiguous()
 
-        self._ensure_shmem()
+        self._ensure_shmem(input.dtype)
 
         if self.trans_weight:
             weight = self.weight
