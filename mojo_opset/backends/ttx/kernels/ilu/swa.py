@@ -1116,6 +1116,8 @@ def _swa_paged_prefill_with_kv_dequant_kernel(
     k_qscale_ptr,
     v_qscale_ptr,
     cu_seqlens_q_ptr,
+    cu_q_blocks_64_ptr,
+    cu_q_blocks_128_ptr,
     seqlens_kv_ptr,
     block_tables_ptr,
     bsz,
@@ -1139,291 +1141,304 @@ def _swa_paged_prefill_with_kv_dequant_kernel(
     LOCAL_WINDOW_SIZE: tl.constexpr,
     GLOBAL_WINDOW_SIZE: tl.constexpr,
     COMPUTE_INT8: tl.constexpr,
+    MAX_BATCH: tl.constexpr,
+    USE_BF16: tl.constexpr,
 ):
-    """Paged prefill SWA attention with int8 KV cache (MxN optimized version).
+    """Paged prefill SWA attention with int8 KV cache (MxN tile optimized).
 
-    This optimized version processes BLOCK_M query tokens per program using
-    tl.dot for efficient matrix multiplication, significantly improving
-    performance compared to the previous per-token processing approach.
-
-    Key optimizations:
-    - BLOCK_M query tokens processed in parallel per program
-    - MxN block matrix multiplication using tl.dot
-    - Online softmax accumulation for better numerical stability
-    - Reduced KV cache traversals (single pass instead of double pass)
-    - Page-first block_tables lookup (one indirection per physical page)
+    Processes BLOCK_M query tokens per program using tl.dot for efficiency.
+    Supports:
+    - Per-channel int8 KV dequantization (COMPUTE_INT8=False path) or
+      int8 Q@K matmul (COMPUTE_INT8=True path).
+    - Causal masking with optional local and global sliding windows.
+    - GQA with AABB (repeat_interleave) or ABAB (interleaved) layouts.
     """
     tl.static_assert(PAGE_SIZE % BLOCK_N == 0, "BLOCK_N must divide PAGE_SIZE")
-    pid = tl.program_id(0)
-    n_programs = tl.num_programs(0)
+    pid_qblock = tl.program_id(0)
+    pid_head = tl.program_id(1)
     has_global_window = GLOBAL_WINDOW_SIZE is not None
     has_local_window = LOCAL_WINDOW_SIZE is not None
 
-    cu_q_chunks = 0
+    cu_q_blocks_ptr = cu_q_blocks_64_ptr
+    if BLOCK_M == 128:
+        cu_q_blocks_ptr = cu_q_blocks_128_ptr
+
+    tl.static_assert(MAX_BATCH > 0, "MAX_BATCH must be positive")
+    b_range = tl.arange(0, MAX_BATCH)
+    b_valid = b_range < bsz
+    b_starts = tl.load(cu_q_blocks_ptr + b_range, mask=b_valid, other=2147483647).to(tl.int32)
+    b_ends = tl.load(cu_q_blocks_ptr + b_range + 1, mask=b_valid, other=-1).to(tl.int32)
+    b_match = (pid_qblock >= b_starts) & (pid_qblock < b_ends) & b_valid
+    b_id = tl.max(tl.where(b_match, b_range, 0), axis=0).to(tl.int32)
+    in_range = tl.sum(b_match.to(tl.int32), axis=0) > 0
+    if not in_range:
+        return
+
+    q_block_id = (pid_qblock - tl.load(cu_q_blocks_ptr + b_id).to(tl.int32)).to(tl.int32)
+    q_head_id = pid_head.to(tl.int32)
+    if q_head_id >= NUM_Q_HEADS:
+        return
+    if GQA_INTERLEAVE:
+        kv_head_id = q_head_id % NUM_KV_HEADS
+    else:
+        kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
+
     q_offsets = tl.arange(0, BLOCK_M)
 
-    for b_id in range(bsz):
-        q_start = tl.load(cu_seqlens_q_ptr + b_id).to(tl.int32)
-        q_end = tl.load(cu_seqlens_q_ptr + b_id + 1).to(tl.int32)
-        kv_seq_len = tl.load(seqlens_kv_ptr + b_id).to(tl.int32)
-        q_seq_len = q_end - q_start
+    q_start = tl.load(cu_seqlens_q_ptr + b_id).to(tl.int32)
+    q_end = tl.load(cu_seqlens_q_ptr + b_id + 1).to(tl.int32)
+    kv_seq_len = tl.load(seqlens_kv_ptr + b_id).to(tl.int32)
+    q_seq_len = q_end - q_start
+    kv_computed_len = kv_seq_len - q_seq_len
 
-        if q_seq_len > 0 and kv_seq_len > 0:
-            num_q_chunks = tl.cdiv(q_seq_len, BLOCK_M)
+    q_block_start = q_block_id * BLOCK_M
+    if q_block_start >= q_seq_len:
+        return
+    q_block_end = min(q_block_start + BLOCK_M, q_seq_len)
+    q_block_len = q_block_end - q_block_start
+    q_valid = (q_block_start + q_offsets) < q_seq_len
+    q_abs = q_block_start + q_offsets + kv_computed_len
+
+    q_block_ptr = tl.make_block_ptr(
+        base=q_ptr + q_start * stride_qt + q_head_id * stride_qh,
+        shape=(q_seq_len, HEAD_DIM),
+        strides=(stride_qt, stride_qd),
+        offsets=(q_block_start.to(tl.int32), 0),
+        block_shape=(BLOCK_M, BLOCK_D),
+        order=(1, 0),
+    )
+    q_dtype = tl.bfloat16 if USE_BF16 else tl.float16
+    q_block = tl.load(q_block_ptr, boundary_check=(0, 1), padding_option="zero").to(q_dtype)
+    q_block_f32 = q_block.to(tl.float32)
+
+    k_scale_vec = tl.load(
+        k_qscale_ptr + q_head_id * stride_ks_h + tl.arange(0, BLOCK_D) * stride_ks_d,
+        mask=tl.arange(0, BLOCK_D) < HEAD_DIM, other=0.0,
+    )
+    v_scale_vec = tl.load(
+        v_qscale_ptr + q_head_id * stride_vs_h + tl.arange(0, BLOCK_D) * stride_vs_d,
+        mask=tl.arange(0, BLOCK_D) < HEAD_DIM, other=0.0,
+    )
+    k_scale_vec = k_scale_vec.to(q_dtype)
+    v_scale_vec = v_scale_vec.to(q_dtype)
+
+    q_quant_scale = tl.zeros((BLOCK_M,), dtype=tl.float32)
+    q_quant = q_block_f32
+    if COMPUTE_INT8:
+        q_scaled = (q_block_f32 * k_scale_vec.to(tl.float32)).to(tl.bfloat16).to(tl.float32)
+        q_amax = tl.max(tl.abs(q_scaled), axis=1)
+        q_quant_scale = (q_amax.to(tl.bfloat16) / 127.0).to(tl.bfloat16).to(tl.float32)
+        q_quant_scale = tl.where(q_quant_scale < 1.0e-6, 1.0, q_quant_scale)
+        q_scaled_norm = (q_scaled / q_quant_scale[:, None]).to(tl.bfloat16).to(tl.float32)
+        q_abs_val = tl.abs(q_scaled_norm)
+        q_base = tl.floor(q_abs_val)
+        q_floor_round = tl.floor(q_abs_val + 0.5)
+        q_base_is_even = (q_base - 2.0 * tl.floor(q_base * 0.5)) == 0.0
+        q_is_half = (q_abs_val - q_base) == 0.5
+        q_rounded_abs = tl.where(q_is_half & q_base_is_even, q_base, q_floor_round)
+        q_rounded = tl.where(q_scaled_norm < 0, -q_rounded_abs, q_rounded_abs)
+        q_rounded = tl.minimum(tl.maximum(q_rounded, -128.0), 127.0)
+        q_quant = q_rounded.to(tl.int8).to(tl.float32)
+
+    qk_scale = sm_scale * LOG2E
+
+    m_i = tl.zeros((BLOCK_M,), dtype=tl.float32) - float("inf")
+    l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
+    acc = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
+
+    if IS_CAUSAL:
+        q_abs_end = q_block_start + q_block_len - 1 + kv_computed_len
+        kv_loop_end = tl.minimum(kv_seq_len, q_abs_end + 1)
+    else:
+        kv_loop_end = kv_seq_len
+
+    num_global_window_blocks, non_global_window_start_block, _ = _swa_split_blocks(
+        q_block_start + kv_computed_len,
+        q_block_len,
+        kv_loop_end,
+        BLOCK_N,
+        IS_CAUSAL,
+        GLOBAL_WINDOW_SIZE,
+        LOCAL_WINDOW_SIZE,
+    )
+
+    kv_offsets = tl.arange(0, BLOCK_N)
+    num_total_blocks = tl.cdiv(kv_loop_end, BLOCK_N)
+
+    for kv_block_id in range(num_global_window_blocks):
+        kv_block_start = kv_block_id * BLOCK_N
+        kv_block_end = min(kv_block_start + BLOCK_N, kv_loop_end)
+        kv_block_len = kv_block_end - kv_block_start
+        logical_page_id = kv_block_start // PAGE_SIZE
+        kv_block_start_in_page = kv_block_start % PAGE_SIZE
+        kv_pos = kv_block_start + kv_offsets
+        kv_valid = kv_pos < kv_loop_end
+
+        mask = q_valid[:, None] & kv_valid[None, :]
+        if IS_CAUSAL:
+            causal_mask = kv_pos[None, :] <= q_abs[:, None]
+            if has_global_window and has_local_window:
+                local_mask = kv_pos[None, :] >= (q_abs - LOCAL_WINDOW_SIZE)[:, None]
+                global_mask = kv_pos[None, :] < GLOBAL_WINDOW_SIZE
+                mask = mask & causal_mask & (global_mask | local_mask)
+            elif has_global_window:
+                mask = mask & causal_mask & (kv_pos[None, :] < GLOBAL_WINDOW_SIZE)
+            elif has_local_window:
+                local_mask = kv_pos[None, :] >= (q_abs - LOCAL_WINDOW_SIZE)[:, None]
+                mask = mask & causal_mask & local_mask
+            else:
+                mask = mask & causal_mask
+
+        physical_page_id = tl.load(
+            block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
+        )
+
+        k_block_ptr = tl.make_block_ptr(
+            base=k_cache_ptr
+            + physical_page_id * stride_kb
+            + kv_head_id * stride_kh
+            + kv_block_start_in_page * stride_kn,
+            shape=(kv_block_len, HEAD_DIM),
+            strides=(stride_kn, stride_kd),
+            offsets=(0, 0),
+            block_shape=(BLOCK_N, BLOCK_D),
+            order=(1, 0),
+        )
+        k_int8 = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option="zero")
+        k_fp = k_int8.to(q_dtype)
+
+        if COMPUTE_INT8:
+            q_quant_fp = q_quant.to(q_dtype)
+            qk = tl.dot(q_quant_fp, tl.trans(k_fp)) * q_quant_scale[:, None] * qk_scale
         else:
-            num_q_chunks = 0
-        kv_computed_len = kv_seq_len - q_seq_len
+            k_dequant = k_fp * k_scale_vec[None, :]
+            qk = tl.dot(q_block, tl.trans(k_dequant)) * qk_scale
 
-        prev_q_tasks = cu_q_chunks * NUM_Q_HEADS
-        cu_q_chunks += num_q_chunks
-        new_q_tasks = num_q_chunks * NUM_Q_HEADS
+        qk = tl.where(mask, qk, -float("inf"))
 
-        for q_task_id in range((prev_q_tasks + pid) % n_programs, new_q_tasks, n_programs):
-            q_block_id = q_task_id // NUM_Q_HEADS
-            q_head_id = q_task_id % NUM_Q_HEADS
-            if GQA_INTERLEAVE:
-                kv_head_id = q_head_id % NUM_KV_HEADS
+        m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        qk = qk - m_ij[:, None]
+        p = tl.math.exp2(qk)
+        p = tl.where(mask, p, 0.0)
+
+        v_block_ptr = tl.make_block_ptr(
+            base=v_cache_ptr
+            + physical_page_id * stride_vb
+            + kv_head_id * stride_vh
+            + kv_block_start_in_page * stride_vn,
+            shape=(kv_block_len, HEAD_DIM),
+            strides=(stride_vn, stride_vd),
+            offsets=(0, 0),
+            block_shape=(BLOCK_N, BLOCK_D),
+            order=(1, 0),
+        )
+        v_int8 = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero")
+        v_fp = v_int8.to(q_dtype)
+        if not COMPUTE_INT8:
+            v_fp = v_fp * v_scale_vec[None, :]
+
+        l_ij = tl.sum(p, 1)
+        alpha = tl.math.exp2(m_i - m_ij)
+        l_i = l_i * alpha + l_ij
+        acc = acc * alpha[:, None]
+        acc = tl.dot(p.to(q_dtype), v_fp, acc)
+        m_i = m_ij
+
+    for kv_block_id in range(non_global_window_start_block, num_total_blocks):
+        kv_block_start = kv_block_id * BLOCK_N
+        kv_block_end = min(kv_block_start + BLOCK_N, kv_loop_end)
+        kv_block_len = kv_block_end - kv_block_start
+        logical_page_id = kv_block_start // PAGE_SIZE
+        kv_block_start_in_page = kv_block_start % PAGE_SIZE
+        kv_pos = kv_block_start + kv_offsets
+        kv_valid = kv_pos < kv_loop_end
+
+        mask = q_valid[:, None] & kv_valid[None, :]
+        if IS_CAUSAL:
+            causal_mask = kv_pos[None, :] <= q_abs[:, None]
+            if has_global_window and has_local_window:
+                local_mask = kv_pos[None, :] >= (q_abs - LOCAL_WINDOW_SIZE)[:, None]
+                global_mask = kv_pos[None, :] < GLOBAL_WINDOW_SIZE
+                mask = mask & causal_mask & (global_mask | local_mask)
+            elif has_global_window:
+                mask = mask & causal_mask & (kv_pos[None, :] < GLOBAL_WINDOW_SIZE)
+            elif has_local_window:
+                local_mask = kv_pos[None, :] >= (q_abs - LOCAL_WINDOW_SIZE)[:, None]
+                mask = mask & causal_mask & local_mask
             else:
-                kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
+                mask = mask & causal_mask
 
-            q_block_start = q_block_id * BLOCK_M
-            q_block_end = min(q_block_start + BLOCK_M, q_seq_len)
-            q_block_len = q_block_end - q_block_start
-            q_valid = (q_block_start + q_offsets) < q_seq_len
-            q_abs = q_block_start + q_offsets + kv_computed_len
+        physical_page_id = tl.load(
+            block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
+        )
 
-            q_block_ptr = tl.make_block_ptr(
-                base=q_ptr + q_start * stride_qt + q_head_id * stride_qh,
-                shape=(q_seq_len, HEAD_DIM),
-                strides=(stride_qt, stride_qd),
-                offsets=(q_block_start.to(tl.int32), 0),
-                block_shape=(BLOCK_M, BLOCK_D),
-                order=(1, 0),
-            )
-            q_block = tl.load(q_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+        k_block_ptr = tl.make_block_ptr(
+            base=k_cache_ptr
+            + physical_page_id * stride_kb
+            + kv_head_id * stride_kh
+            + kv_block_start_in_page * stride_kn,
+            shape=(kv_block_len, HEAD_DIM),
+            strides=(stride_kn, stride_kd),
+            offsets=(0, 0),
+            block_shape=(BLOCK_N, BLOCK_D),
+            order=(1, 0),
+        )
+        k_int8 = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option="zero")
+        k_fp = k_int8.to(q_dtype)
 
-            k_scale_vec = tl.load(
-                k_qscale_ptr + q_head_id * stride_ks_h + tl.arange(0, BLOCK_D) * stride_ks_d,
-                mask=tl.arange(0, BLOCK_D) < HEAD_DIM, other=0.0,
-            )
-            v_scale_vec = tl.load(
-                v_qscale_ptr + q_head_id * stride_vs_h + tl.arange(0, BLOCK_D) * stride_vs_d,
-                mask=tl.arange(0, BLOCK_D) < HEAD_DIM, other=0.0,
-            )
+        if COMPUTE_INT8:
+            q_quant_fp = q_quant.to(q_dtype)
+            qk = tl.dot(q_quant_fp, tl.trans(k_fp)) * q_quant_scale[:, None] * qk_scale
+        else:
+            k_dequant = k_fp * k_scale_vec[None, :]
+            qk = tl.dot(q_block, tl.trans(k_dequant)) * qk_scale
 
-            q_quant_scale = tl.zeros((BLOCK_M,), dtype=tl.float32)
-            q_quant = q_block
-            if COMPUTE_INT8:
-                q_scaled = (q_block * k_scale_vec).to(tl.bfloat16).to(tl.float32)
-                q_amax = tl.max(tl.abs(q_scaled), axis=1)
-                q_quant_scale = (q_amax.to(tl.bfloat16) / 127.0).to(tl.bfloat16).to(tl.float32)
-                q_quant_scale = tl.where(q_quant_scale < 1.0e-6, 1.0, q_quant_scale)
-                q_scaled_norm = (q_scaled / q_quant_scale[:, None]).to(tl.bfloat16).to(tl.float32)
-                q_abs_val = tl.abs(q_scaled_norm)
-                q_base = tl.floor(q_abs_val)
-                q_floor_round = tl.floor(q_abs_val + 0.5)
-                q_base_is_even = (q_base - 2.0 * tl.floor(q_base * 0.5)) == 0.0
-                q_is_half = (q_abs_val - q_base) == 0.5
-                q_rounded_abs = tl.where(q_is_half & q_base_is_even, q_base, q_floor_round)
-                q_rounded = tl.where(q_scaled_norm < 0, -q_rounded_abs, q_rounded_abs)
-                q_rounded = tl.minimum(tl.maximum(q_rounded, -128.0), 127.0)
-                q_quant = q_rounded.to(tl.int8).to(tl.float32)
+        qk = tl.where(mask, qk, -float("inf"))
 
-            m_i = tl.zeros((BLOCK_M,), dtype=tl.float32) - float("inf")
-            l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
-            acc = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
+        m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        qk = qk - m_ij[:, None]
+        p = tl.math.exp2(qk)
+        p = tl.where(mask, p, 0.0)
 
-            if IS_CAUSAL:
-                q_abs_end = q_block_start + q_block_len - 1 + kv_computed_len
-                kv_loop_end = tl.minimum(kv_seq_len, q_abs_end + 1)
-            else:
-                kv_loop_end = kv_seq_len
+        v_block_ptr = tl.make_block_ptr(
+            base=v_cache_ptr
+            + physical_page_id * stride_vb
+            + kv_head_id * stride_vh
+            + kv_block_start_in_page * stride_vn,
+            shape=(kv_block_len, HEAD_DIM),
+            strides=(stride_vn, stride_vd),
+            offsets=(0, 0),
+            block_shape=(BLOCK_N, BLOCK_D),
+            order=(1, 0),
+        )
+        v_int8 = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero")
+        v_fp = v_int8.to(q_dtype)
+        if not COMPUTE_INT8:
+            v_fp = v_fp * v_scale_vec[None, :]
 
-            num_global_window_blocks, non_global_window_start_block, _ = _swa_split_blocks(
-                q_block_start + kv_computed_len,
-                q_block_len,
-                kv_loop_end,
-                BLOCK_N,
-                IS_CAUSAL,
-                GLOBAL_WINDOW_SIZE,
-                LOCAL_WINDOW_SIZE,
-            )
+        l_ij = tl.sum(p, 1)
+        alpha = tl.math.exp2(m_i - m_ij)
+        l_i = l_i * alpha + l_ij
+        acc = acc * alpha[:, None]
+        acc = tl.dot(p.to(q_dtype), v_fp, acc)
+        m_i = m_ij
 
-            kv_offsets = tl.arange(0, BLOCK_N)
-            num_total_blocks = tl.cdiv(kv_loop_end, BLOCK_N)
+    l_i_safe = tl.where(l_i > 0, l_i, 1.0)
+    out_block = tl.where(l_i[:, None] > 0, acc / l_i_safe[:, None], 0.0)
 
-            # Only scan KV blocks that can contribute under SWA windows:
-            #   - global blocks: [0, num_global_window_blocks)
-            #   - local (non-global) blocks: [non_global_window_start_block, num_total_blocks)
-            # This avoids iterating over a large masked middle range for long sequences.
-            for kv_block_id in range(num_global_window_blocks):
-                kv_block_start = kv_block_id * BLOCK_N
-                kv_block_end = min(kv_block_start + BLOCK_N, kv_loop_end)
-                kv_block_len = kv_block_end - kv_block_start
-                logical_page_id = kv_block_start // PAGE_SIZE
-                kv_block_start_in_page = kv_block_start % PAGE_SIZE
-                kv_pos = kv_block_start + kv_offsets
-                kv_valid = kv_pos < kv_loop_end
+    if COMPUTE_INT8:
+        out_block = out_block * v_scale_vec
 
-                mask = q_valid[:, None] & kv_valid[None, :]
-                if IS_CAUSAL:
-                    causal_mask = q_abs[:, None] >= kv_pos[None, :]
-                    if has_global_window and has_local_window:
-                        local_mask = q_abs[:, None] <= (kv_pos + LOCAL_WINDOW_SIZE)[None, :]
-                        global_mask = kv_pos[None, :] < GLOBAL_WINDOW_SIZE
-                        mask = mask & causal_mask & (global_mask | local_mask)
-                    elif has_global_window:
-                        mask = mask & causal_mask & (kv_pos[None, :] < GLOBAL_WINDOW_SIZE)
-                    elif has_local_window:
-                        local_mask = q_abs[:, None] <= (kv_pos + LOCAL_WINDOW_SIZE)[None, :]
-                        mask = mask & causal_mask & local_mask
-                    else:
-                        mask = mask & causal_mask
-
-                physical_page_id = tl.load(
-                    block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
-                )
-
-                k_block_ptr = tl.make_block_ptr(
-                    base=k_cache_ptr
-                    + physical_page_id * stride_kb
-                    + kv_head_id * stride_kh
-                    + kv_block_start_in_page * stride_kn,
-                    shape=(kv_block_len, HEAD_DIM),
-                    strides=(stride_kn, stride_kd),
-                    offsets=(0, 0),
-                    block_shape=(BLOCK_N, BLOCK_D),
-                    order=(1, 0),
-                )
-                k_block = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
-
-                if COMPUTE_INT8:
-                    qk = tl.dot(q_quant, tl.trans(k_block)) * q_quant_scale[:, None] * sm_scale
-                else:
-                    k_dequant = k_block * k_scale_vec
-                    qk = tl.dot(q_block, tl.trans(k_dequant)) * sm_scale
-
-                qk = tl.where(mask, qk, -float("inf"))
-
-                m_ij = tl.maximum(m_i, tl.max(qk, 1))
-                qk = qk - m_ij[:, None]
-                p = tl.math.exp(qk)
-                p = tl.where(mask, p, 0.0)
-
-                v_block_ptr = tl.make_block_ptr(
-                    base=v_cache_ptr
-                    + physical_page_id * stride_vb
-                    + kv_head_id * stride_vh
-                    + kv_block_start_in_page * stride_vn,
-                    shape=(kv_block_len, HEAD_DIM),
-                    strides=(stride_vn, stride_vd),
-                    offsets=(0, 0),
-                    block_shape=(BLOCK_N, BLOCK_D),
-                    order=(1, 0),
-                )
-                v_block = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
-                if not COMPUTE_INT8:
-                    v_block = v_block * v_scale_vec
-
-                l_ij = tl.sum(p, 1)
-                alpha = tl.math.exp(m_i - m_ij)
-                l_i = l_i * alpha + l_ij
-                acc = acc * alpha[:, None]
-                acc = tl.dot(p, v_block, acc)
-                m_i = m_ij
-
-            for kv_block_id in range(non_global_window_start_block, num_total_blocks):
-                kv_block_start = kv_block_id * BLOCK_N
-                kv_block_end = min(kv_block_start + BLOCK_N, kv_loop_end)
-                kv_block_len = kv_block_end - kv_block_start
-                logical_page_id = kv_block_start // PAGE_SIZE
-                kv_block_start_in_page = kv_block_start % PAGE_SIZE
-                kv_pos = kv_block_start + kv_offsets
-                kv_valid = kv_pos < kv_loop_end
-
-                mask = q_valid[:, None] & kv_valid[None, :]
-                if IS_CAUSAL:
-                    causal_mask = q_abs[:, None] >= kv_pos[None, :]
-                    if has_global_window and has_local_window:
-                        local_mask = q_abs[:, None] <= (kv_pos + LOCAL_WINDOW_SIZE)[None, :]
-                        global_mask = kv_pos[None, :] < GLOBAL_WINDOW_SIZE
-                        mask = mask & causal_mask & (global_mask | local_mask)
-                    elif has_global_window:
-                        mask = mask & causal_mask & (kv_pos[None, :] < GLOBAL_WINDOW_SIZE)
-                    elif has_local_window:
-                        local_mask = q_abs[:, None] <= (kv_pos + LOCAL_WINDOW_SIZE)[None, :]
-                        mask = mask & causal_mask & local_mask
-                    else:
-                        mask = mask & causal_mask
-
-                physical_page_id = tl.load(
-                    block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
-                )
-
-                k_block_ptr = tl.make_block_ptr(
-                    base=k_cache_ptr
-                    + physical_page_id * stride_kb
-                    + kv_head_id * stride_kh
-                    + kv_block_start_in_page * stride_kn,
-                    shape=(kv_block_len, HEAD_DIM),
-                    strides=(stride_kn, stride_kd),
-                    offsets=(0, 0),
-                    block_shape=(BLOCK_N, BLOCK_D),
-                    order=(1, 0),
-                )
-                k_block = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
-
-                if COMPUTE_INT8:
-                    qk = tl.dot(q_quant, tl.trans(k_block)) * q_quant_scale[:, None] * sm_scale
-                else:
-                    k_dequant = k_block * k_scale_vec
-                    qk = tl.dot(q_block, tl.trans(k_dequant)) * sm_scale
-
-                qk = tl.where(mask, qk, -float("inf"))
-
-                m_ij = tl.maximum(m_i, tl.max(qk, 1))
-                qk = qk - m_ij[:, None]
-                p = tl.math.exp(qk)
-                p = tl.where(mask, p, 0.0)
-
-                v_block_ptr = tl.make_block_ptr(
-                    base=v_cache_ptr
-                    + physical_page_id * stride_vb
-                    + kv_head_id * stride_vh
-                    + kv_block_start_in_page * stride_vn,
-                    shape=(kv_block_len, HEAD_DIM),
-                    strides=(stride_vn, stride_vd),
-                    offsets=(0, 0),
-                    block_shape=(BLOCK_N, BLOCK_D),
-                    order=(1, 0),
-                )
-                v_block = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
-                if not COMPUTE_INT8:
-                    v_block = v_block * v_scale_vec
-
-                l_ij = tl.sum(p, 1)
-                alpha = tl.math.exp(m_i - m_ij)
-                l_i = l_i * alpha + l_ij
-                acc = acc * alpha[:, None]
-                acc = tl.dot(p, v_block, acc)
-                m_i = m_ij
-
-            l_i_safe = tl.where(l_i > 0, l_i, 1.0)
-            out_block = tl.where(l_i[:, None] > 0, acc / l_i_safe[:, None], 0.0)
-
-            if COMPUTE_INT8:
-                out_block = out_block * v_scale_vec
-
-            out_block = tl.where(q_valid[:, None], out_block, 0.0)
-            o_block_ptr = tl.make_block_ptr(
-                base=o_ptr + q_start * stride_ot + q_head_id * stride_oh,
-                shape=(q_seq_len, HEAD_DIM),
-                strides=(stride_ot, stride_od),
-                offsets=(q_block_start.to(tl.int32), 0),
-                block_shape=(BLOCK_M, BLOCK_D),
-                order=(1, 0),
-            )
-            tl.store(o_block_ptr, out_block.to(o_ptr.type.element_ty), boundary_check=(0, 1))
+    out_block = tl.where(q_valid[:, None], out_block, 0.0)
+    o_block_ptr = tl.make_block_ptr(
+        base=o_ptr + q_start * stride_ot + q_head_id * stride_oh,
+        shape=(q_seq_len, HEAD_DIM),
+        strides=(stride_ot, stride_od),
+        offsets=(q_block_start.to(tl.int32), 0),
+        block_shape=(BLOCK_M, BLOCK_D),
+        order=(1, 0),
+    )
+    tl.store(o_block_ptr, out_block.to(o_ptr.type.element_ty), boundary_check=(0, 1))
 
 
 def swa_paged_prefill_with_kv_dequant_impl(
@@ -1491,11 +1506,25 @@ def swa_paged_prefill_with_kv_dequant_impl(
             "use a compatible page size (e.g. power of two, multiple of 128 for large pages)."
         )
 
+    q_lens_i32 = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(torch.int32)
+
+    q_blocks_64 = (q_lens_i32 + 64 - 1) // 64
+    cu_q_blocks_64 = torch.empty((batch_size + 1,), device=q.device, dtype=torch.int32)
+    cu_q_blocks_64[0] = 0
+    cu_q_blocks_64[1:] = torch.cumsum(q_blocks_64, dim=0)
+
+    q_blocks_128 = (q_lens_i32 + 128 - 1) // 128
+    cu_q_blocks_128 = torch.empty((batch_size + 1,), device=q.device, dtype=torch.int32)
+    cu_q_blocks_128[0] = 0
+    cu_q_blocks_128[1:] = torch.cumsum(q_blocks_128, dim=0)
+
     def grid(meta):
         block_m = meta["BLOCK_M"]
-        q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-        max_q_chunks = (q_lens + block_m - 1).sum().item() // block_m + batch_size
-        return (ilu_grid_dim_from_row_tasks(max_q_chunks * num_q_heads),)
+        if block_m == 64:
+            total_q_blocks = int(cu_q_blocks_64[-1].item())
+        else:
+            total_q_blocks = int(cu_q_blocks_128[-1].item())
+        return (total_q_blocks, num_q_heads)
 
     _swa_paged_prefill_with_kv_dequant_kernel[grid](
         out,
@@ -1505,6 +1534,8 @@ def swa_paged_prefill_with_kv_dequant_impl(
         k_qscale,
         v_qscale,
         cu_seqlens_q,
+        cu_q_blocks_64,
+        cu_q_blocks_128,
         seqlens_kv,
         block_tables_i32,
         batch_size,
@@ -1527,6 +1558,8 @@ def swa_paged_prefill_with_kv_dequant_impl(
         LOCAL_WINDOW_SIZE=local_window_size,
         GLOBAL_WINDOW_SIZE=global_window_size,
         COMPUTE_INT8=compute_dtype == torch.int8,
+        MAX_BATCH=128,
+        USE_BF16=q.dtype == torch.bfloat16,
     )
 
     return out
