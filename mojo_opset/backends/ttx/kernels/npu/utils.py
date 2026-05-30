@@ -4,17 +4,15 @@ import triton
 import triton.language as tl
 
 try:
-    from triton.runtime.libentry import libentry as _libentry_impl
+    from triton.runtime.libentry import libentry
 except ImportError:
 
-    def _libentry_impl():
+    def libentry():
+        """No-op fallback when triton.runtime.libentry is unavailable."""
         def _decorator(fn):
             return fn
 
         return _decorator
-
-
-libentry = _libentry_impl
 
 VEC_ALIGN_BYTES = 256
 SRAM_ALIGN_BYTES = 32

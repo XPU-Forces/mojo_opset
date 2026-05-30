@@ -49,15 +49,14 @@ from .swa import swa_paged_decode_impl
 from .swa import swa_paged_prefill_impl
 from .swiglu import swiglu_bwd_impl
 from .swiglu import swiglu_fwd_impl
+
+# triton-dist based comm kernels — optional dependency
+allgather_gemm_impl = None
+gemm_allreduce_impl = None
+gemm_reduce_scatter_impl = None
 try:
     from .allgather_gemm import allgather_gemm_impl
-except ImportError:
-    pass
-try:
     from .gemm_allreduce import gemm_allreduce_impl
-except ImportError:
-    pass
-try:
     from .gemm_reduce_scatter import gemm_reduce_scatter_impl
 except ImportError:
     pass

@@ -85,7 +85,7 @@ class TTXAllGatherGemm(MojoAllGatherGemm):
         )
 
         if self.bias is not None:
-            output = output + self.bias
+            output.add_(self.bias)
 
         out_shape = list(orig_shape)
         out_shape[0] *= self._world_size
@@ -152,6 +152,7 @@ class TTXGemmAllReduce(MojoGemmAllReduce):
 
         N = weight.shape[1]
         M = input_2d.shape[0]
+        # zero-init required: kernel uses tl.atomic_add to accumulate from all ranks
         output = torch.zeros(
             [M, N], dtype=input.dtype, device=input.device,
         )
@@ -162,7 +163,7 @@ class TTXGemmAllReduce(MojoGemmAllReduce):
         )
 
         if self.bias is not None:
-            output = output + self.bias
+            output.add_(self.bias)
 
         out_shape = list(orig_shape)
         out_shape[-1] = N
@@ -228,6 +229,7 @@ class TTXGemmReduceScatter(MojoGemmReduceScatter):
         N = weight.shape[1]
         M = input_2d.shape[0]
         M_local = M // self._world_size
+        # zero-init required: kernel uses tl.atomic_add to accumulate from all ranks
         output = torch.zeros(
             [M_local, N], dtype=input.dtype, device=input.device,
         )
@@ -238,7 +240,7 @@ class TTXGemmReduceScatter(MojoGemmReduceScatter):
         )
 
         if self.bias is not None:
-            output = output + self.bias
+            output.add_(self.bias)
 
         out_shape = list(orig_shape)
         out_shape[0] = M_local
