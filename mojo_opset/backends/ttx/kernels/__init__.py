@@ -255,12 +255,11 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         block_tables: torch.Tensor,
         gqa_interleave: bool,
         softmax_scale: Optional[float] = None,
-        aux_mask: Optional[torch.Tensor] = None,
         max_q_len: Optional[int] = None,
         max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         return paged_attention_prefill_impl(
-            q, key_cache, value_cache, cu_q_lens, seqlens_kv, block_tables, gqa_interleave, softmax_scale, aux_mask,
+            q, key_cache, value_cache, cu_q_lens, seqlens_kv, block_tables, gqa_interleave, softmax_scale,
             max_q_len=max_q_len,
             max_total_seq_len=max_total_seq_len,
         )
@@ -275,7 +274,6 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         block_tables: torch.Tensor,
         gqa_interleave: bool,
         softmax_scale: Optional[float] = None,
-        aux_mask: Optional[torch.Tensor] = None,
         max_q_len: Optional[int] = None,
         max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
