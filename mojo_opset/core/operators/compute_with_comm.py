@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch.distributed.distributed_c10d import _get_default_group
-import torch.distributed._functional_collectives as fc  
+import torch.distributed._functional_collectives as fc
 
 from ..operator import MojoOperator
 
@@ -22,6 +22,32 @@ def _gemm(
     else:
         output = F.linear(input, weight, bias)
     return output
+
+
+def _quant_gemm(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    per_token_scale: torch.Tensor,
+    trans_weight: bool,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    input_fp = input.float()
+    weight_fp = weight.float()
+    if trans_weight:
+        output = input_fp @ weight_fp
+    else:
+        output = input_fp @ weight_fp.transpose(-2, -1)
+
+    scale = weight_scale.float()
+    while scale.dim() < output.dim():
+        scale = scale.unsqueeze(0)
+
+    token_scale = per_token_scale.float()
+    while token_scale.dim() < output.dim():
+        token_scale = token_scale.unsqueeze(-1)
+
+    return (output * scale * token_scale).to(output_dtype)
 
 
 def _is_dist_initialized() -> bool:
@@ -311,4 +337,153 @@ class MojoGemmReduceScatter(MojoOperator):
         return (
             f"{weight_shape=}, {has_bias=}, {self.trans_weight=}, "
             f"scatter_dim={self.scatter_dim}"
+        ).replace("self.", "")
+
+
+class MojoQuantGemmAll2All(MojoOperator):
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        trans_weight: bool = False,
+        process_group: Optional[dist.ProcessGroup] = None,
+        output_dtype: torch.dtype = torch.bfloat16,
+        use_internal_format: bool = True,
+        comm_context=None,
+    ):
+        """
+        Quantized fused GEMM + All2All.
+
+        Semantics::
+
+            gemm_out = quant_gemm(input, weight, weight_scale, per_token_scale)
+            output   = all_to_all(gemm_out split by output columns, gathered by rows)
+
+        Args:
+            weight (torch.Tensor): Int8 weight. ``trans_weight=True`` expects
+                ``(K, N)``; ``False`` expects ``(N, K)``.
+            weight_scale (torch.Tensor): Per-output-channel scale, shape ``(N,)``.
+            trans_weight (bool): Whether weight layout is transposed.
+            process_group (Optional[ProcessGroup]): Distributed group.
+            output_dtype (torch.dtype): Output dtype for reference path.
+            use_internal_format (bool): Backend hint for xops, ignored by torch reference.
+            comm_context: Optional runtime/context object for backend implementations.
+        """
+        super().__init__()
+        if not isinstance(trans_weight, bool):
+            raise TypeError("trans_weight must be bool.")
+        self.weight = weight
+        self.weight_scale = weight_scale
+        self.trans_weight = trans_weight
+        self.process_group = process_group
+        self.output_dtype = output_dtype
+        self.use_internal_format = use_internal_format
+        self.comm_context = comm_context
+
+    def forward(self, input: torch.Tensor, per_token_scale: torch.Tensor, workspace: Optional[torch.Tensor] = None):
+        output = _quant_gemm(
+            input,
+            self.weight,
+            self.weight_scale,
+            per_token_scale,
+            self.trans_weight,
+            self.output_dtype,
+        )
+        if _is_dist_initialized():
+            process_group = self.process_group or _get_default_group()
+            world_size = dist.get_world_size(group=process_group)
+            if output.shape[-1] % world_size != 0:
+                raise ValueError(f"output columns {output.shape[-1]} must be divisible by world_size {world_size}.")
+            rank = dist.get_rank(group=process_group)
+            send = torch.stack(list(output.chunk(world_size, dim=-1)), dim=0).contiguous()
+            gathered = [torch.empty_like(send) for _ in range(world_size)]
+            dist.all_gather(gathered, send, group=process_group)
+            output = torch.cat([peer_chunks[rank] for peer_chunks in gathered], dim=0)
+        return output
+
+    def estimate_shmem_size_mb(self, *, process_group: Optional[dist.ProcessGroup] = None, max_tokens: Optional[int] = None) -> int:
+        del process_group, max_tokens
+        return 20
+
+    def extra_repr(self) -> str:
+        weight_shape = tuple(self.weight.shape) if isinstance(self.weight, torch.Tensor) else None
+        return (
+            f"{weight_shape=}, weight_scale_shape={tuple(self.weight_scale.shape)}, "
+            f"{self.trans_weight=}, output_dtype={self.output_dtype}"
+        ).replace("self.", "")
+
+
+class MojoAll2AllQuantGemm(MojoOperator):
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        trans_weight: bool = False,
+        process_group: Optional[dist.ProcessGroup] = None,
+        output_dtype: torch.dtype = torch.bfloat16,
+        use_internal_format: bool = True,
+        comm_context=None,
+    ):
+        """
+        Quantized fused All2All + GEMM.
+
+        Semantics::
+
+            gathered = all_to_all(input split by rows, gathered by K shards)
+            output   = quant_gemm(gathered, weight, weight_scale, per_token_scale)
+
+        Args:
+            weight (torch.Tensor): Int8 weight. ``trans_weight=True`` expects
+                ``(K, N)``; ``False`` expects ``(N, K)``.
+            weight_scale (torch.Tensor): Per-output-channel scale, shape ``(N,)``.
+            trans_weight (bool): Whether weight layout is transposed.
+            process_group (Optional[ProcessGroup]): Distributed group.
+            output_dtype (torch.dtype): Output dtype for reference path.
+            use_internal_format (bool): Backend hint for xops, ignored by torch reference.
+            comm_context: Optional runtime/context object for backend implementations.
+        """
+        super().__init__()
+        if not isinstance(trans_weight, bool):
+            raise TypeError("trans_weight must be bool.")
+        self.weight = weight
+        self.weight_scale = weight_scale
+        self.trans_weight = trans_weight
+        self.process_group = process_group
+        self.output_dtype = output_dtype
+        self.use_internal_format = use_internal_format
+        self.comm_context = comm_context
+
+    def forward(self, input: torch.Tensor, per_token_scale: torch.Tensor, workspace: Optional[torch.Tensor] = None):
+        if _is_dist_initialized():
+            process_group = self.process_group or _get_default_group()
+            world_size = dist.get_world_size(group=process_group)
+            rank = dist.get_rank(group=process_group)
+            if input.shape[0] % world_size != 0:
+                raise ValueError(f"input rows {input.shape[0]} must be divisible by world_size {world_size}.")
+            send = torch.stack(list(input.chunk(world_size, dim=0)), dim=0).contiguous()
+            gathered = [torch.empty_like(send) for _ in range(world_size)]
+            dist.all_gather(gathered, send, group=process_group)
+            input = torch.cat([peer_chunks[rank] for peer_chunks in gathered], dim=-1)
+            rows_per_rank = per_token_scale.shape[0] // world_size
+            per_token_scale = per_token_scale[rank * rows_per_rank:(rank + 1) * rows_per_rank]
+
+        output = _quant_gemm(
+            input,
+            self.weight,
+            self.weight_scale,
+            per_token_scale,
+            self.trans_weight,
+            self.output_dtype,
+        )
+        return output
+
+    def estimate_shmem_size_mb(self, *, process_group: Optional[dist.ProcessGroup] = None, max_tokens: Optional[int] = None) -> int:
+        del process_group, max_tokens
+        return 20
+
+    def extra_repr(self) -> str:
+        weight_shape = tuple(self.weight.shape) if isinstance(self.weight, torch.Tensor) else None
+        return (
+            f"{weight_shape=}, weight_scale_shape={tuple(self.weight_scale.shape)}, "
+            f"{self.trans_weight=}, output_dtype={self.output_dtype}"
         ).replace("self.", "")

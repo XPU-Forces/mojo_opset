@@ -121,6 +121,13 @@ n_gram_decode_impl = _get_kernel_impl(ttx_backend_module, "n_gram_decode_impl")
 n_gram_prefill_impl = _get_kernel_impl(ttx_backend_module, "n_gram_prefill_impl")
 over_encoding_decode_impl = _get_kernel_impl(ttx_backend_module, "over_encoding_decode_impl")
 
+allgather_gemm_impl = _get_kernel_impl(ttx_backend_module, "allgather_gemm_impl")
+allgather_gemm_peer_mem_size = _get_kernel_impl(ttx_backend_module, "allgather_gemm_peer_mem_size")
+gemm_allreduce_impl = _get_kernel_impl(ttx_backend_module, "gemm_allreduce_impl")
+gemm_allreduce_peer_mem_size = _get_kernel_impl(ttx_backend_module, "gemm_allreduce_peer_mem_size")
+gemm_reduce_scatter_impl = _get_kernel_impl(ttx_backend_module, "gemm_reduce_scatter_impl")
+gemm_reduce_scatter_peer_mem_size = _get_kernel_impl(ttx_backend_module, "gemm_reduce_scatter_peer_mem_size")
+
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
 
@@ -910,6 +917,9 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     n_gram_decode = n_gram_decode_impl
     n_gram_prefill = n_gram_prefill_impl
     over_encoding_decode = over_encoding_decode_impl
+    allgather_gemm = allgather_gemm_impl
+    gemm_allreduce = gemm_allreduce_impl
+    gemm_reduce_scatter = gemm_reduce_scatter_impl
 
 else:
     causal_conv1d_fwd = causal_conv1d_fwd_impl
@@ -980,3 +990,6 @@ else:
     n_gram_decode = n_gram_decode_impl
     n_gram_prefill = n_gram_prefill_impl
     over_encoding_decode = over_encoding_decode_impl
+    allgather_gemm = allgather_gemm_impl
+    gemm_allreduce = gemm_allreduce_impl
+    gemm_reduce_scatter = gemm_reduce_scatter_impl
