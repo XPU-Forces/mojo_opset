@@ -326,7 +326,8 @@ class DeepseekV4MTPDecodeWrapper(torch.nn.Module):
         super().__init__()
         self.model = model
 
-    def forward(self, hidden_states, past_key_values, position_ids, context_lens, q_lens, input_ids, attn_inputs):
+    def forward(self, hidden_states, past_key_values, position_ids, context_lens, q_lens,
+                input_ids, attn_inputs, attn_metadata=None):
         logits, past_key_values, mtp_hidden = self.model(
             hidden_states=hidden_states,
             position_ids=position_ids,
@@ -334,12 +335,290 @@ class DeepseekV4MTPDecodeWrapper(torch.nn.Module):
             use_cache=True,
             is_prefill=False,
             attn_inputs=attn_inputs,
+            attn_metadata=attn_metadata,
             context_lens=context_lens,
             q_lens=q_lens,
             input_ids=input_ids,
             return_hidden=True,
         )
         return logits, past_key_values, mtp_hidden
+
+
+
+def sample_last_token(logits, *, sync_tokens=False, group=None):
+    token = torch.argmax(logits, dim=-1)[:, -1:]
+    if sync_tokens:
+        token = token.contiguous()
+        dist.broadcast(token, src=0, group=group)
+    return token
+
+
+def verify_mtp_spec_tokens(mtp_spec_tokens, all_logits, next_n, *, sync_tokens=False, group=None):
+    main_greedy = torch.argmax(all_logits, dim=-1)
+    if sync_tokens:
+        main_greedy = main_greedy.contiguous()
+        dist.broadcast(main_greedy, src=0, group=group)
+
+    token_mask = mtp_spec_tokens == main_greedy[:, :next_n]
+    has_invalid = (token_mask == False).any(dim=-1)
+    invalid_pos = (token_mask == False).int().argmax(dim=-1)
+    accepted_num = torch.where(has_invalid, invalid_pos, token_mask.shape[-1])
+    if sync_tokens:
+        accepted_num = accepted_num.contiguous()
+        dist.broadcast(accepted_num, src=0, group=group)
+    return main_greedy, accepted_num
+
+
+def mtp_post_process(
+    mtp_model,
+    mtp_runtime_state,
+    mtp_prev_hidden,
+    mtp_generate_ids,
+    *,
+    next_n,
+    spec_len,
+    batch_size,
+    mtp_decode_fn=None,
+    mtp_decode_fns=None,
+    mtp_decode_graph_warmed=False,
+    mtp_decode_graph_warmed_steps=None,
+    enable_mtp_cache_compile=False,
+    sync_tokens=False,
+    moe_ep_group=None,
+    allow_decode_graph=True,
+    initial_decode_input_ids=None,
+):
+    mtp_spec_tokens = None
+    if initial_decode_input_ids is None:
+        mtp_decode_input_ids = mtp_generate_ids[:, -spec_len:].contiguous().reshape(batch_size, spec_len)
+    else:
+        mtp_decode_input_ids = initial_decode_input_ids.contiguous().reshape(batch_size, spec_len)
+    for mtp_step_idx in range(next_n):
+        with torch.no_grad():
+            if sync_tokens:
+                mtp_decode_input_ids = mtp_decode_input_ids.contiguous().reshape(batch_size, spec_len)
+                dist.broadcast(mtp_decode_input_ids, src=0, group=moe_ep_group)
+            current_mtp_decode_fn = mtp_decode_fns[mtp_step_idx] if mtp_decode_fns is not None else mtp_decode_fn
+            if not allow_decode_graph:
+                current_mtp_decode_fn = None
+            current_mtp_warmed = (
+                mtp_decode_graph_warmed_steps[mtp_step_idx]
+                if mtp_decode_graph_warmed_steps is not None else mtp_decode_graph_warmed
+            )
+            mtp_logits, _, mtp_hidden = forward_mtp_decode_mojo(
+                mtp_model,
+                mtp_prev_hidden,
+                mtp_decode_input_ids,
+                mtp_runtime_state,
+                decode_fn=current_mtp_decode_fn,
+                skip_guard_eval=(
+                    allow_decode_graph and
+                    enable_mtp_cache_compile and
+                    current_mtp_decode_fn is not None and
+                    current_mtp_warmed
+                ),
+            )
+            if allow_decode_graph and enable_mtp_cache_compile and current_mtp_decode_fn is not None:
+                if mtp_decode_graph_warmed_steps is not None:
+                    mtp_decode_graph_warmed_steps[mtp_step_idx] = True
+                else:
+                    mtp_decode_graph_warmed = True
+
+        mtp_spec_token = sample_last_token(mtp_logits)
+        mtp_spec_tokens = mtp_spec_token if mtp_spec_tokens is None else torch.cat([mtp_spec_tokens, mtp_spec_token], dim=-1)
+        mtp_prev_hidden = mtp_hidden[:, -spec_len:, :].contiguous().reshape(batch_size, spec_len, -1)
+        mtp_generate_ids = torch.cat([mtp_generate_ids, mtp_spec_token], dim=-1)
+        mtp_decode_input_ids = torch.cat(
+            [mtp_decode_input_ids[:, 1:], mtp_spec_token],
+            dim=-1,
+        ).contiguous().reshape(batch_size, spec_len)
+
+    return mtp_spec_tokens, mtp_prev_hidden, mtp_generate_ids, mtp_decode_graph_warmed, mtp_decode_graph_warmed_steps
+
+
+def initialize_mtp_speculation_after_prefill(
+    *,
+    mtp_model,
+    mtp_runtime_state,
+    input_ids,
+    attention_mask,
+    full_input_ids,
+    full_attention_mask,
+    next_token_id,
+    full_next_token_id,
+    prev_hidden,
+    prev_hidden_all_for_mtp,
+    pad_token_id,
+    batch_size,
+    cp_size,
+    shard_start,
+    shard_end,
+    spec_len,
+    next_n,
+    use_attn_metadata,
+    sync_tokens,
+    moe_ep_group,
+    mtp_decode_fn=None,
+):
+    mtp_prefill_source_input_ids = full_input_ids if cp_size > 1 else input_ids
+    mtp_prefill_source_attention_mask = full_attention_mask if cp_size > 1 else attention_mask
+    mtp_prefill_next_token_id = full_next_token_id if cp_size > 1 else next_token_id
+    mtp_input_ids, mtp_attention_mask, confirmed_generate_ids_full = build_mtp_prefill_inputs(
+        mtp_prefill_source_input_ids,
+        mtp_prefill_source_attention_mask,
+        mtp_prefill_next_token_id,
+        pad_token_id,
+    )
+    if cp_size > 1:
+        confirmed_generate_ids = confirmed_generate_ids_full[shard_start:shard_end]
+        mtp_prev_hidden_for_prefill = prev_hidden_all_for_mtp
+    else:
+        confirmed_generate_ids = confirmed_generate_ids_full
+        mtp_prev_hidden_for_prefill = prev_hidden
+    mtp_generate_ids = confirmed_generate_ids
+
+    with torch.no_grad():
+        if sync_tokens:
+            mtp_input_ids = mtp_input_ids.contiguous()
+            dist.broadcast(mtp_input_ids, src=0, group=moe_ep_group)
+            mtp_attention_mask = mtp_attention_mask.contiguous()
+            dist.broadcast(mtp_attention_mask, src=0, group=moe_ep_group)
+        if cp_size > 1:
+            mtp_out = forward_mtp_cp_prefill_minibatch_mojo(
+                mtp_model,
+                mtp_prev_hidden_for_prefill,
+                mtp_input_ids,
+                mtp_attention_mask,
+                mtp_runtime_state,
+                local_shard_start=shard_start,
+                local_shard_end=shard_end,
+                max_seq_len=max(input_ids.shape[1] * 4, 4096),
+                next_n=next_n,
+                use_attn_metadata=use_attn_metadata,
+            )
+        else:
+            mtp_out = forward_mtp_prefill_mojo(
+                mtp_model,
+                mtp_prev_hidden_for_prefill,
+                mtp_input_ids,
+                mtp_attention_mask,
+                mtp_runtime_state,
+                max_seq_len=max(input_ids.shape[1] * 4, 4096),
+                next_n=next_n,
+                use_attn_metadata=use_attn_metadata,
+            )
+        mtp_logits, _, mtp_hidden = mtp_out
+
+    mtp_spec_token = sample_last_token(mtp_logits, sync_tokens=sync_tokens, group=moe_ep_group)
+    mtp_spec_tokens = mtp_spec_token
+    confirmed_prev_hidden = mtp_hidden[:, -spec_len:, :].contiguous() if cp_size > 1 else prev_hidden[:, -spec_len:, :].contiguous()
+    mtp_prev_hidden = mtp_hidden[:, -spec_len:, :].contiguous().reshape(batch_size, spec_len, -1)
+    mtp_generate_ids = torch.cat([mtp_generate_ids, mtp_spec_token], dim=-1)
+
+    if next_n > 1:
+        extra_spec_tokens, mtp_prev_hidden, mtp_generate_ids, _, _ = mtp_post_process(
+            mtp_model,
+            mtp_runtime_state,
+            mtp_prev_hidden,
+            mtp_generate_ids,
+            next_n=next_n - 1,
+            spec_len=spec_len,
+            batch_size=batch_size,
+            mtp_decode_fn=mtp_decode_fn,
+            enable_mtp_cache_compile=False,
+            sync_tokens=False,
+            moe_ep_group=moe_ep_group,
+            allow_decode_graph=False,
+            initial_decode_input_ids=torch.cat([mtp_generate_ids[:, -(spec_len - 1):], mtp_spec_token], dim=-1),
+        )
+        mtp_spec_tokens = torch.cat([mtp_spec_tokens, extra_spec_tokens], dim=-1)
+
+    mtp_seq_lens_cached = mtp_runtime_state.paged_cache.seq_lens.clone()
+    verify_input_ids = torch.cat([next_token_id, mtp_spec_tokens], dim=-1)
+    if sync_tokens:
+        dist.broadcast(verify_input_ids, src=0, group=moe_ep_group)
+
+    return {
+        'input_ids': verify_input_ids,
+        'mtp_spec_tokens': mtp_spec_tokens,
+        'confirmed_prev_hidden': confirmed_prev_hidden,
+        'mtp_prev_hidden': mtp_prev_hidden,
+        'confirmed_generate_ids': confirmed_generate_ids,
+        'mtp_generate_ids': mtp_generate_ids,
+        'mtp_seq_lens_cached': mtp_seq_lens_cached,
+    }
+
+
+def update_mtp_after_verify(
+    *,
+    main_greedy,
+    main_hidden,
+    accepted_num,
+    generated,
+    runtime_state,
+    mtp_runtime_state,
+    main_seq_lens_before_verify,
+    mtp_seq_lens_cached,
+    confirmed_prev_hidden,
+    confirmed_generate_ids,
+    pad_token_id,
+    next_n,
+    batch_size,
+    spec_len,
+    sync_tokens=False,
+    moe_ep_group=None,
+):
+    for row in range(batch_size):
+        cur_accepted = accepted_num[row].item() + 1
+        for j in range(cur_accepted):
+            generated[row].append(int(main_greedy[row, j].item()))
+
+    accepted_step = (1 + accepted_num.unsqueeze(0)).squeeze(0)
+    if next_n == 1:
+        runtime_state.paged_cache.seq_lens += accepted_step
+    elif main_seq_lens_before_verify is not None:
+        runtime_state.paged_cache.seq_lens.copy_(main_seq_lens_before_verify + accepted_step)
+    else:
+        runtime_state.paged_cache.seq_lens += accepted_step
+
+    next_token_id = torch.stack(
+        [main_greedy[row, accepted_num[row].item()] for row in range(batch_size)], dim=0
+    ).unsqueeze(-1)
+    if sync_tokens:
+        next_token_id = next_token_id.contiguous()
+        dist.broadcast(next_token_id, src=0, group=moe_ep_group)
+
+    mtp_prev_hidden_list = []
+    confirmed_generate_ids_list = []
+    for row in range(batch_size):
+        cur_len = accepted_num[row].item() + 1
+        cur_accepted_hidden = main_hidden[row, :cur_len, :].unsqueeze(0)
+        mtp_prev_hid = torch.cat([confirmed_prev_hidden[row:row+1], cur_accepted_hidden], dim=1)[:, -spec_len:, :]
+        mtp_prev_hidden_list.append(mtp_prev_hid)
+        cur_accepted_ids = main_greedy[row, :cur_len]
+        confirmed_generate_ids_list.append(torch.cat([confirmed_generate_ids[row], cur_accepted_ids]))
+    mtp_prev_hidden = torch.cat(mtp_prev_hidden_list, dim=0).reshape(batch_size, spec_len, -1)
+    confirmed_prev_hidden = mtp_prev_hidden
+
+    from torch.nn.utils.rnn import pad_sequence
+    confirmed_generate_ids_rev = [ids.flip(0) for ids in confirmed_generate_ids_list]
+    confirmed_generate_ids = pad_sequence(
+        confirmed_generate_ids_rev,
+        batch_first=True,
+        padding_value=pad_token_id,
+    ).flip(1).contiguous()
+
+    mtp_runtime_state.paged_cache.seq_lens.copy_(mtp_seq_lens_cached + 1 + accepted_num)
+    mtp_seq_lens_cached = mtp_runtime_state.paged_cache.seq_lens.clone()
+
+    return {
+        'next_token_id': next_token_id,
+        'confirmed_prev_hidden': confirmed_prev_hidden,
+        'mtp_prev_hidden': mtp_prev_hidden,
+        'confirmed_generate_ids': confirmed_generate_ids,
+        'mtp_generate_ids': confirmed_generate_ids,
+        'mtp_seq_lens_cached': mtp_seq_lens_cached,
+    }
 
 
 def _npugraph_cache_dir(cache_name):
@@ -370,7 +649,7 @@ def _compile_deepseek_v4_wrapper(wrapper, graph_mode, enable_cache_compile=False
                 raise ValueError("cache_name must be provided when enable_cache_compile=True")
             cache_compile_options = {
                 "frozen_parameter": True,
-                "static_kernel_compile": False,
+                "static_kernel_compile": True,
             }
             return torch.npu.npugraph_ex.inference.cache_compile(
                 wrapper.forward,
@@ -388,7 +667,7 @@ def _compile_deepseek_v4_wrapper(wrapper, graph_mode, enable_cache_compile=False
         }
         return torch.compile(
             wrapper,
-            dynamic=True,
+            dynamic=False,
             fullgraph=True,
             backend="npugraph_ex",
             options=compile_options,
@@ -741,24 +1020,41 @@ def forward_cp_prefill_minibatch_mojo(
     return torch.cat(logits_chunks, dim=0), runtime_state.paged_cache, hidden_out
 
 
-def forward_decode_mojo(
+def forward_main_decode_mojo(
     model,
     token_ids,
     past_key_values,
-    decode_fn=None,
+    *,
     runtime_state=None,
+    decode_fn=None,
+    expected_seq_len=None,
     use_attn_metadata=True,
-    update_runtime_state=True,
+    advance_cache=True,
+    return_last_logits=True,
     skip_guard_eval=False,
 ):
-    if runtime_state is not None:
-        decode_meta = runtime_state.prepare_decode_inputs(token_ids)
+    """Run the main model decode path.
+
+    The same main-model decode call is used for normal decode and MTP verify.
+    MTP verify passes a wider token window and delays cache advancement until
+    accepted tokens are known.
+    """
+    if runtime_state is None:
+        outputs = model(token_ids, past_key_values=past_key_values, use_cache=True, is_prefill=False)
+        logits, past_key_values = _extract_outputs(outputs)
+        hidden_states = None
+    else:
+        prepare_kwargs = {}
+        if expected_seq_len is not None:
+            prepare_kwargs["expected_seq_len"] = expected_seq_len
+        decode_meta = runtime_state.prepare_decode_inputs(token_ids, **prepare_kwargs)
         attn_metadata = decode_meta.get("attn_metadata") if use_attn_metadata else None
+
         if decode_fn is not None:
             with _skip_guard_eval_context(skip_guard_eval):
                 logits, past_key_values, hidden_states = decode_fn(
                     token_ids,
-                    past_key_values,
+                    runtime_state.paged_cache,
                     decode_meta["position_ids"],
                     decode_meta["context_lens"],
                     decode_meta["attn_inputs"],
@@ -775,49 +1071,11 @@ def forward_decode_mojo(
                 use_cache=True,
                 is_prefill=False,
             )
-        if update_runtime_state:
+        if advance_cache:
             runtime_state.post_decode_step(seq_len=token_ids.shape[1])
-            return logits[:, -1, :], past_key_values, hidden_states
-        return logits, past_key_values, hidden_states
-    else:
-        outputs = model(token_ids, past_key_values=past_key_values, use_cache=True, is_prefill=False)
-    logits, past_key_values = _extract_outputs(outputs)
-    return logits[:, -1, :], past_key_values, None
 
-
-def forward_mtp_verify_mojo(
-    model,
-    input_ids,
-    past_key_values,
-    runtime_state,
-    next_n,
-    decode_fn=None,
-    use_attn_metadata=True,
-    skip_guard_eval=False,
-):
-    verify_meta = runtime_state.prepare_mtp_verify_inputs(input_ids, next_n)
-    attn_metadata = verify_meta.get("attn_metadata") if use_attn_metadata else None
-    if decode_fn is not None:
-        with _skip_guard_eval_context(skip_guard_eval):
-            logits, past_key_values, hidden_states = decode_fn(
-                input_ids,
-                past_key_values,
-                verify_meta["position_ids"],
-                verify_meta["context_lens"],
-                verify_meta["attn_inputs"],
-                attn_metadata,
-            )
-    else:
-        logits, past_key_values, hidden_states = model(
-            input_ids,
-            past_key_values=runtime_state.paged_cache,
-            position_ids=verify_meta["position_ids"],
-            context_lens=verify_meta["context_lens"],
-            attn_inputs=verify_meta["attn_inputs"],
-            attn_metadata=attn_metadata,
-            use_cache=True,
-            is_prefill=False,
-        )
+    if return_last_logits:
+        logits = logits[:, -1, :]
     return logits, past_key_values, hidden_states
 
 
@@ -829,7 +1087,14 @@ def forward_mtp_decode_mojo(
     decode_fn=None,
     skip_guard_eval=False,
 ):
+    """Run the MTP draft model decode path.
+
+    This is intentionally separate from main decode: the MTP model consumes the
+    previous main/MTP hidden states and advances its own draft cache.
+    """
     decode_meta = runtime_state.prepare_decode_inputs(input_ids)
+    attn_metadata = decode_meta.get("attn_metadata")
+
     if decode_fn is not None:
         with _skip_guard_eval_context(skip_guard_eval):
             logits, past_key_values, mtp_hidden = decode_fn(
@@ -840,6 +1105,7 @@ def forward_mtp_decode_mojo(
                 decode_meta["q_lens"],
                 input_ids,
                 decode_meta["attn_inputs"],
+                attn_metadata,
             )
     else:
         logits, past_key_values, mtp_hidden = mtp_model(
@@ -849,20 +1115,18 @@ def forward_mtp_decode_mojo(
             use_cache=True,
             is_prefill=False,
             attn_inputs=decode_meta["attn_inputs"],
+            attn_metadata=attn_metadata,
             context_lens=decode_meta["context_lens"],
             q_lens=decode_meta["q_lens"],
             input_ids=input_ids,
             return_hidden=True,
         )
-    # NEXT_N=1 follows the stable cache_compile path from mojo_opset_AI:
-    # the MTP cache advances by the full input window. For NEXT_N>=2, keep the
-    # note: draft semantics where each speculative step commits one token.
+
     if getattr(runtime_state.paged_cache, "next_n", 1) == 1:
         runtime_state.post_decode_step(seq_len=input_ids.shape[1])
     else:
         runtime_state.post_decode_step(seq_len=1)
     return logits, past_key_values, mtp_hidden
-
 
 def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_size=1, batch_size=1, graph_mode="eager", prof=False,
              use_attn_metadata=True, mtp_model=None, mtp_runtime_state=None, next_n=0, prof_prefill=False):
@@ -1112,120 +1376,38 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
     mtp_seq_lens_cached = None
 
     if use_mtp:
-        # ---- MTP Prefill: generate initial spec tokens ----
-        # Following note:: after main model prefill, append next_token to generate_ids,
-        # then MTP prefill uses generate_ids[:, 1:] as input_ids and main_hidden as prev_hidden_states.
-        # This means MTP sees the next_token that main model just sampled.
-        mtp_prefill_source_input_ids = full_input_ids if cp_size > 1 else input_ids
-        mtp_prefill_source_attention_mask = full_attention_mask if cp_size > 1 else attention_mask
-        mtp_prefill_next_token_id = full_next_token_id if cp_size > 1 else next_token_id
-        mtp_input_ids, mtp_attention_mask, confirmed_generate_ids_full = build_mtp_prefill_inputs(
-            mtp_prefill_source_input_ids,
-            mtp_prefill_source_attention_mask,
-            mtp_prefill_next_token_id,
-            pad_token_id,
+        mtp_state = initialize_mtp_speculation_after_prefill(
+            mtp_model=mtp_model,
+            mtp_runtime_state=mtp_runtime_state,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            full_input_ids=full_input_ids,
+            full_attention_mask=full_attention_mask,
+            next_token_id=next_token_id,
+            full_next_token_id=full_next_token_id,
+            prev_hidden=prev_hidden,
+            prev_hidden_all_for_mtp=prev_hidden_all_for_mtp,
+            pad_token_id=pad_token_id,
+            batch_size=batch_size,
+            cp_size=cp_size,
+            shard_start=shard_start,
+            shard_end=shard_end,
+            spec_len=spec_len,
+            next_n=next_n,
+            use_attn_metadata=use_attn_metadata,
+            sync_tokens=sync_mtp_tokens_across_ep,
+            moe_ep_group=moe_ep_group,
+            mtp_decode_fn=mtp_decode_fn,
         )
-        if cp_size > 1:
-            confirmed_generate_ids = confirmed_generate_ids_full[shard_start:shard_end]
-            mtp_prev_hidden_for_prefill = prev_hidden_all_for_mtp
-        else:
-            confirmed_generate_ids = confirmed_generate_ids_full
-            mtp_prev_hidden_for_prefill = prev_hidden  # [B, S, H] (all positions from main model)
-        mtp_generate_ids = confirmed_generate_ids
-
-        with torch.no_grad():
-            if sync_mtp_tokens_across_ep:
-                mtp_input_ids = mtp_input_ids.contiguous()
-                dist.broadcast(mtp_input_ids, src=0, group=moe_ep_group)
-                mtp_attention_mask = mtp_attention_mask.contiguous()
-                dist.broadcast(mtp_attention_mask, src=0, group=moe_ep_group)
-            if cp_size > 1:
-                mtp_out = forward_mtp_cp_prefill_minibatch_mojo(
-                    mtp_model,
-                    mtp_prev_hidden_for_prefill,
-                    mtp_input_ids,
-                    mtp_attention_mask,
-                    mtp_runtime_state,
-                    local_shard_start=shard_start,
-                    local_shard_end=shard_end,
-                    max_seq_len=max(input_ids.shape[1] * 4, 4096),
-                    next_n=next_n,
-                    use_attn_metadata=use_attn_metadata,
-                )
-            else:
-                mtp_out = forward_mtp_prefill_mojo(
-                    mtp_model,
-                    mtp_prev_hidden_for_prefill,
-                    mtp_input_ids,
-                    mtp_attention_mask,
-                    mtp_runtime_state,
-                    max_seq_len=max(input_ids.shape[1] * 4, 4096),
-                    next_n=next_n,
-                    use_attn_metadata=use_attn_metadata,
-                )
-            mtp_logits, _, mtp_hidden = mtp_out
-
-        # Sample first spec token
-        mtp_spec_token = torch.argmax(mtp_logits, dim=-1)[:, -1:]  # [B, 1]
-        if sync_mtp_tokens_across_ep:
-            mtp_spec_token = mtp_spec_token.contiguous()
-            dist.broadcast(mtp_spec_token, src=0, group=moe_ep_group)
-        mtp_spec_tokens = mtp_spec_token
-        if cp_size > 1:
-            confirmed_prev_hidden = mtp_hidden[:, -spec_len:, :].contiguous()
-        else:
-            confirmed_prev_hidden = prev_hidden[:, -spec_len:, :].contiguous()
-        # Update prev_hidden for next MTP step: keep last spec_len positions
-        mtp_prev_hidden = mtp_hidden[:, -spec_len:, :].contiguous().reshape(batch_size, spec_len, -1)  # [B, spec_len, H]
-        # Note: mtp_generate_ids already contains next_token_id,
-        # so we don't need to append it again here.
-        # Following note:: append spec_token to generate_ids for sliding window
-        mtp_generate_ids = torch.cat([mtp_generate_ids, mtp_spec_token], dim=-1)
-
-        # For next_n > 1, run additional MTP decode steps
-        mtp_decode_input_ids = torch.cat(
-            [mtp_generate_ids[:, -(spec_len - 1):], mtp_spec_token],
-            dim=-1,
-        ).contiguous()
-        for _mtp_step in range(1, next_n):
-            with torch.no_grad():
-                # MTP decode: input_ids = [B, spec_len], prev_hidden = [B, spec_len, H]
-                # This prefill-side supplement path only exists when next_n > 1.
-                # Keep it eager: its cache/sliding-window semantics differ from
-                # the steady speculate loop and can crash when captured.
-                current_mtp_decode_fn = None if next_n > 1 else mtp_decode_fn
-                mtp_logits, _, mtp_hidden = forward_mtp_decode_mojo(
-                    mtp_model,
-                    mtp_prev_hidden,
-                    mtp_decode_input_ids,
-                    mtp_runtime_state,
-                    decode_fn=current_mtp_decode_fn,
-                    # Prefill-side supplement is a one-off graph pattern; do not
-                    # use it to warm steady speculate decode steps.
-                    skip_guard_eval=False,
-                )
-
-            mtp_spec_token = torch.argmax(mtp_logits, dim=-1)[:, -1:]  # [B, 1]
-            mtp_spec_tokens = torch.cat([mtp_spec_tokens, mtp_spec_token], dim=-1)
-            mtp_prev_hidden = mtp_hidden[:, -spec_len:, :].contiguous().reshape(batch_size, spec_len, -1)  # [B, spec_len, H]
-            mtp_generate_ids = torch.cat([mtp_generate_ids, mtp_spec_token], dim=-1)
-            mtp_decode_input_ids = torch.cat(
-                [mtp_decode_input_ids[:, 1:], mtp_spec_token],
-                dim=-1,
-            ).contiguous().reshape(batch_size, spec_len)
-
-        # Save MTP cache seq_lens for rollback after verification
-        mtp_seq_lens_cached = mtp_runtime_state.paged_cache.seq_lens.clone()
-
-        # Feed [next_token + spec_tokens] to main model in next iteration
-        input_ids = torch.cat([next_token_id, mtp_spec_tokens], dim=-1)  # [B, spec_len]
-
-        # Keep token sync opt-in for legacy EP-only paths. DeepSeekV4 DP shards
-        # carry different samples and must not broadcast rank0 draft tokens.
-        if sync_mtp_tokens_across_ep:
-            dist.broadcast(input_ids, src=0, group=moe_ep_group)
+        input_ids = mtp_state["input_ids"]
+        mtp_spec_tokens = mtp_state["mtp_spec_tokens"]
+        confirmed_prev_hidden = mtp_state["confirmed_prev_hidden"]
+        mtp_prev_hidden = mtp_state["mtp_prev_hidden"]
+        confirmed_generate_ids = mtp_state["confirmed_generate_ids"]
+        mtp_generate_ids = mtp_state["mtp_generate_ids"]
+        mtp_seq_lens_cached = mtp_state["mtp_seq_lens_cached"]
         if is_main:
-            print(f"[MTP] Prefill: generated {mtp_spec_tokens.shape[-1]} spec token(s)")
+            print(f"[MTP] Prefill end: generated {mtp_spec_tokens.shape[-1]} spec token(s)")
     else:
         input_ids = next_token_id
 
@@ -1258,22 +1440,30 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
                 if use_mtp:
                     main_seq_lens_before_verify = runtime_state.paged_cache.seq_lens.clone()
                     if next_n > 1:
-                        all_logits, past_key_values, main_hidden = forward_mtp_verify_mojo(
+                        all_logits, past_key_values, main_hidden = forward_main_decode_mojo(
                             model,
                             input_ids.contiguous().reshape(batch_size, spec_len),
                             past_key_values,
-                            runtime_state,
-                            next_n,
+                            runtime_state=runtime_state,
                             decode_fn=decode_fn,
+                            expected_seq_len=next_n + 1,
                             use_attn_metadata=use_attn_metadata,
+                            advance_cache=False,
+                            return_last_logits=False,
                             skip_guard_eval=False,
                         )
                     else:
-                        # MTP mode: decode spec_len tokens, return all logits + hidden states
-                        all_logits, past_key_values, main_hidden = forward_decode_mojo(
-                            model, input_ids, past_key_values, decode_fn=decode_fn, runtime_state=runtime_state,
+                        # MTP verify with NEXT_N=1 still uses the main decode path,
+                        # but cache advancement waits for accepted-token handling.
+                        all_logits, past_key_values, main_hidden = forward_main_decode_mojo(
+                            model,
+                            input_ids,
+                            past_key_values,
+                            runtime_state=runtime_state,
+                            decode_fn=decode_fn,
                             use_attn_metadata=use_attn_metadata,
-                            update_runtime_state=False,
+                            advance_cache=False,
+                            return_last_logits=False,
                             skip_guard_eval=(
                                 enable_mtp_cache_compile and
                                 decode_fn is not None and
@@ -1283,8 +1473,12 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
                         if enable_mtp_cache_compile and decode_fn is not None:
                             main_decode_graph_warmed = True
                 else:
-                    next_token_logits, past_key_values, _ = forward_decode_mojo(
-                        model, input_ids, past_key_values, decode_fn=decode_fn, runtime_state=runtime_state,
+                    next_token_logits, past_key_values, _ = forward_main_decode_mojo(
+                        model,
+                        input_ids,
+                        past_key_values,
+                        runtime_state=runtime_state,
+                        decode_fn=decode_fn,
                         use_attn_metadata=use_attn_metadata,
                     )
 
@@ -1308,145 +1502,68 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
 
             # ==================== MTP Verify & Speculate ====================
             if use_mtp and mtp_spec_tokens is not None:
-                # all_logits: [B, spec_len, V], main_hidden: [B, spec_len, H]
-                main_greedy = torch.argmax(all_logits, dim=-1)  # [B, spec_len]
-                if sync_mtp_tokens_across_ep:
-                    main_greedy = main_greedy.contiguous()
-                    dist.broadcast(main_greedy, src=0, group=moe_ep_group)
+                main_greedy, accepted_num = verify_mtp_spec_tokens(
+                    mtp_spec_tokens,
+                    all_logits,
+                    next_n,
+                    sync_tokens=sync_mtp_tokens_across_ep,
+                    group=moe_ep_group,
+                )
 
-                # Verify spec tokens: compare MTP spec tokens with main model's greedy output
-                # main_greedy[:, 0] predicts token after real_token -> should match spec_tokens[:, 0]
-                # main_greedy[:, i] predicts token after spec_tokens[:, i-1] -> should match spec_tokens[:, i]
-                token_mask = mtp_spec_tokens == main_greedy[:, :next_n]  # [B, next_n]
-                has_invalid = (token_mask == False).any(dim=-1)
-                invalid_pos = (token_mask == False).int().argmax(dim=-1)
-                accepted_num = torch.where(has_invalid, invalid_pos, token_mask.shape[-1])  # [B]
-
-                # Debug: print MTP vs main model comparison
                 if is_main and step < 3:
-                    print(f"[MTP DEBUG step={step}] spec_tokens={mtp_spec_tokens[0].tolist()}, main_greedy={main_greedy[0, :next_n].tolist()}, accepted={accepted_num[0].item()}", flush=True)
-
-                # Some legacy EP-only paths require token sync; DeepSeekV4 DP shards must keep
-                # per-rank tokens independent to avoid all samples following rank0.
-                if sync_mtp_tokens_across_ep:
-                    accepted_num = accepted_num.contiguous()
-                    dist.broadcast(accepted_num, src=0, group=moe_ep_group)
+                    print(
+                        f"[MTP DEBUG step={step}] spec_tokens={mtp_spec_tokens[0].tolist()}, "
+                        f"main_greedy={main_greedy[0, :next_n].tolist()}, accepted={accepted_num[0].item()}",
+                        flush=True,
+                    )
 
                 mtp_total_accepted += accepted_num.sum().item()
                 mtp_total_spec += next_n * batch_size
                 mtp_step_count += 1
 
-                # Collect accepted tokens: accepted_num spec tokens + 1 next token
-                for row in range(batch_size):
-                    cur_accepted = accepted_num[row].item() + 1  # +1 for the next token (first rejected or bonus)
-                    for j in range(cur_accepted):
-                        generated[row].append(int(main_greedy[row, j].item()))
+                mtp_state = update_mtp_after_verify(
+                    main_greedy=main_greedy,
+                    main_hidden=main_hidden,
+                    accepted_num=accepted_num,
+                    generated=generated,
+                    runtime_state=runtime_state,
+                    mtp_runtime_state=mtp_runtime_state,
+                    main_seq_lens_before_verify=main_seq_lens_before_verify,
+                    mtp_seq_lens_cached=mtp_seq_lens_cached,
+                    confirmed_prev_hidden=confirmed_prev_hidden,
+                    confirmed_generate_ids=confirmed_generate_ids,
+                    pad_token_id=pad_token_id,
+                    next_n=next_n,
+                    batch_size=batch_size,
+                    spec_len=spec_len,
+                    sync_tokens=sync_mtp_tokens_across_ep,
+                    moe_ep_group=moe_ep_group,
+                )
+                next_token_id = mtp_state["next_token_id"]
+                confirmed_prev_hidden = mtp_state["confirmed_prev_hidden"]
+                mtp_prev_hidden = mtp_state["mtp_prev_hidden"]
+                confirmed_generate_ids = mtp_state["confirmed_generate_ids"]
+                mtp_generate_ids = mtp_state["mtp_generate_ids"]
+                mtp_seq_lens_cached = mtp_state["mtp_seq_lens_cached"]
 
-                # ---- Update main model cache seq_lens (per-batch) ----
-                accepted_step = (1 + accepted_num.unsqueeze(0)).squeeze(0)
-                if next_n == 1:
-                    runtime_state.paged_cache.seq_lens += accepted_step
-                elif main_seq_lens_before_verify is not None:
-                    runtime_state.paged_cache.seq_lens.copy_(main_seq_lens_before_verify + accepted_step)
-                else:
-                    runtime_state.paged_cache.seq_lens += accepted_step
+                mtp_spec_tokens, mtp_prev_hidden, mtp_generate_ids, mtp_decode_graph_warmed, mtp_decode_graph_warmed_steps = mtp_post_process(
+                    mtp_model,
+                    mtp_runtime_state,
+                    mtp_prev_hidden,
+                    mtp_generate_ids,
+                    next_n=next_n,
+                    spec_len=spec_len,
+                    batch_size=batch_size,
+                    mtp_decode_fn=mtp_decode_fn,
+                    mtp_decode_fns=mtp_decode_fns,
+                    mtp_decode_graph_warmed=mtp_decode_graph_warmed,
+                    mtp_decode_graph_warmed_steps=mtp_decode_graph_warmed_steps,
+                    enable_mtp_cache_compile=enable_mtp_cache_compile,
+                    sync_tokens=sync_mtp_tokens_across_ep,
+                    moe_ep_group=moe_ep_group,
+                )
 
-                # ---- Determine next_token_id: the token after accepted positions ----
-                next_token_id = torch.stack(
-                    [main_greedy[row, accepted_num[row].item()] for row in range(batch_size)], dim=0
-                ).unsqueeze(-1)  # [B, 1]
-
-                if sync_mtp_tokens_across_ep:
-                    next_token_id = next_token_id.contiguous()
-                    dist.broadcast(next_token_id, src=0, group=moe_ep_group)
-
-                # ---- Update MTP prev_hidden and generate_ids ----
-                # Following note:: concat last_step_hidden with accepted hidden, take last spec_len
-                mtp_prev_hidden_list = []
-                confirmed_generate_ids_list = []
-                for row in range(batch_size):
-                    cur_len = accepted_num[row].item() + 1
-                    cur_accepted_hidden = main_hidden[row, :cur_len, :].unsqueeze(0)  # [1, cur_len, H]
-                    mtp_prev_hid = torch.cat([confirmed_prev_hidden[row:row+1], cur_accepted_hidden], dim=1)[:, -spec_len:, :]
-                    mtp_prev_hidden_list.append(mtp_prev_hid)
-                    # Match note:: only confirmed tokens are kept in generate_ids.
-                    cur_accepted_ids = main_greedy[row, :cur_len]
-                    confirmed_generate_ids_list.append(torch.cat([confirmed_generate_ids[row], cur_accepted_ids]))
-                mtp_prev_hidden = torch.cat(mtp_prev_hidden_list, dim=0).reshape(batch_size, spec_len, -1)  # [B, spec_len, H]
-                confirmed_prev_hidden = mtp_prev_hidden
-                # Pad generate_ids to same length (different batches may have different accepted_num)
-                from torch.nn.utils.rnn import pad_sequence
-                # Match note:: left-pad variable-length histories so the
-                # newest suffix always stays aligned in the last `spec_len` positions.
-                confirmed_generate_ids_rev = [ids.flip(0) for ids in confirmed_generate_ids_list]
-                confirmed_generate_ids = pad_sequence(
-                    confirmed_generate_ids_rev,
-                    batch_first=True,
-                    padding_value=pad_token_id,
-                ).flip(1).contiguous()
-                mtp_generate_ids = confirmed_generate_ids
-
-                # ---- Update MTP cache seq_lens (per-batch) ----
-                mtp_runtime_state.paged_cache.seq_lens.copy_(mtp_seq_lens_cached + 1 + accepted_num)
-                # Match note: `kv_len_cached`: cache the confirmed
-                # sequence length before this round's new draft tokens are appended.
-                mtp_seq_lens_cached = mtp_runtime_state.paged_cache.seq_lens.clone()
-
-                # ---- MTP Post-Process: generate new spec tokens ----
-                mtp_spec_tokens = None
-                mtp_decode_input_ids = mtp_generate_ids[:, -spec_len:].contiguous().reshape(batch_size, spec_len)
-                for mtp_step_idx in range(next_n):
-                    with torch.no_grad():
-                        # MTP decode: input_ids = [B, spec_len], prev_hidden = [B, spec_len, H]
-                        # Keep token sync opt-in for legacy EP-only paths. DeepSeekV4 DP shards
-                        # carry different samples and must not broadcast rank0 inputs.
-                        if sync_mtp_tokens_across_ep:
-                            mtp_decode_input_ids = mtp_decode_input_ids.contiguous().reshape(batch_size, spec_len)
-                            dist.broadcast(mtp_decode_input_ids, src=0, group=moe_ep_group)
-                        current_mtp_decode_fn = (
-                            mtp_decode_fns[mtp_step_idx]
-                            if mtp_decode_fns is not None else mtp_decode_fn
-                        )
-                        current_mtp_warmed = (
-                            mtp_decode_graph_warmed_steps[mtp_step_idx]
-                            if mtp_decode_graph_warmed_steps is not None else mtp_decode_graph_warmed
-                        )
-                        mtp_logits, _, mtp_hidden = forward_mtp_decode_mojo(
-                            mtp_model,
-                            mtp_prev_hidden,
-                            mtp_decode_input_ids,
-                            mtp_runtime_state,
-                            decode_fn=current_mtp_decode_fn,
-                            skip_guard_eval=(
-                                enable_mtp_cache_compile and
-                                current_mtp_decode_fn is not None and
-                                current_mtp_warmed
-                            ),
-                        )
-                        if enable_mtp_cache_compile and current_mtp_decode_fn is not None:
-                            if mtp_decode_graph_warmed_steps is not None:
-                                mtp_decode_graph_warmed_steps[mtp_step_idx] = True
-                            else:
-                                mtp_decode_graph_warmed = True
-                    mtp_spec_token = torch.argmax(mtp_logits, dim=-1)[:, -1:]  # [B, 1]
-                    if mtp_spec_tokens is None:
-                        mtp_spec_tokens = mtp_spec_token
-                    else:
-                        mtp_spec_tokens = torch.cat([mtp_spec_tokens, mtp_spec_token], dim=-1)
-
-                    # Update mtp_prev_hidden for next MTP step
-                    mtp_prev_hidden = mtp_hidden[:, -spec_len:, :].contiguous().reshape(batch_size, spec_len, -1)  # [B, spec_len, H]
-                    # Update generate_ids
-                    mtp_generate_ids = torch.cat([mtp_generate_ids, mtp_spec_token], dim=-1)
-                    mtp_decode_input_ids = torch.cat(
-                        [mtp_decode_input_ids[:, 1:], mtp_spec_token],
-                        dim=-1,
-                    ).contiguous().reshape(batch_size, spec_len)
-
-                # Feed [next_token + spec_tokens] to main model
-                input_ids = torch.cat([next_token_id, mtp_spec_tokens], dim=-1)  # [B, spec_len]
-
-                # Keep token sync opt-in for legacy EP-only paths.
+                input_ids = torch.cat([next_token_id, mtp_spec_tokens], dim=-1)
                 if sync_mtp_tokens_across_ep:
                     input_ids = input_ids.contiguous()
                     dist.broadcast(input_ids, src=0, group=moe_ep_group)

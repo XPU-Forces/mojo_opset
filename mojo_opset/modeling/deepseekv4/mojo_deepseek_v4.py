@@ -1080,7 +1080,7 @@ class DeepseekV4Indexer(nn.Module):
         li_cmp_kv_cache = attn_inputs["li_cmp_kv"]
         li_scale_cache = attn_inputs["li_key_dequant_scale"]
         kv_flat = li_kv.reshape(-1, self.head_dim).contiguous()
-        kv_quant, k_scale = torch_npu.npu_dynamic_quant(kv_flat)
+        kv_quant, k_scale = _dynamic_quant_per_token(kv_flat)
         k_scale = k_scale.to(torch.float16)
         self.scatter_nd_update(
             li_scale_cache.view(-1, li_scale_cache.shape[-1]),
@@ -1106,7 +1106,7 @@ class DeepseekV4Indexer(nn.Module):
 
         q_flat = q.flatten(0, 1)
         with _profile_timer(layer_idx, "indexer_q_quant"):
-            q_quant, q_scale = torch_npu.npu_dynamic_quant(q_flat)
+            q_quant, q_scale = _dynamic_quant_per_token(q_flat)
             q_scale = q_scale.to(torch.float16)
 
         actual_seq_q = cu_seqlens_q[1:]
@@ -1155,6 +1155,18 @@ class DeepseekV4Indexer(nn.Module):
 def _dynamic_quant_per_token(x: torch.Tensor):
     quant, scale = _DYNAMIC_QUANT_PER_TOKEN(x)
     return quant, scale.squeeze(-1)
+
+
+def _apply_hc_head(x: torch.Tensor, hc_head_fn: torch.Tensor, hc_head_base: torch.Tensor,
+                   hc_head_scale: torch.Tensor, norm_eps: float, hc_eps: float) -> torch.Tensor:
+    shape, dtype = x.size(), x.dtype
+    x = x.flatten(2).float()
+    rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + norm_eps)
+    mixes = F.linear(x, hc_head_fn) * rsqrt
+    pre = torch.sigmoid(mixes * hc_head_scale + hc_head_base) + hc_eps
+    y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)
+    return y.to(dtype)
+
 
 class DeepseekV4Attention(nn.Module):
 
@@ -1721,7 +1733,7 @@ class DeepseekV4Attention(nn.Module):
         all_li = torch.cat([li_segments[int(idx)] for idx in reverse_index.tolist()], dim=0)
         if all_li.numel() > 0:
             all_li = _rotate_activation(all_li, self.indexer.hadamard_matrix)
-        kv_quant, k_scale = torch_npu.npu_dynamic_quant(all_li.contiguous())
+        kv_quant, k_scale = _dynamic_quant_per_token(all_li.contiguous())
         k_scale = k_scale.squeeze(-1).to(torch.float16)
 
         all_ks = cur_kv_state.new_empty((cur_kv_state.shape[0] * self.cp_size, cur_kv_state.shape[-1]))
@@ -1759,7 +1771,7 @@ class DeepseekV4Attention(nn.Module):
             q_li = _apply_partial_rotary(q_li, cos_cur, sin_cur, self.indexer.partial_slice)
             q_li = _rotate_activation(q_li, self.indexer.hadamard_matrix)
             q_flat = q_li.flatten(0, 1)
-            q_quant, q_scale = torch_npu.npu_dynamic_quant(q_flat)
+            q_quant, q_scale = _dynamic_quant_per_token(q_flat)
             q_scale = q_scale.to(torch.float16)
             li_metadata = attn_inputs[flag]["kernel_metadata"]["lightning_indexer_quant"]
             topk_idxs, _ = self.indexer.quant_lightning_indexer(
@@ -2821,13 +2833,7 @@ class DeepseekV4Model(nn.Module):
         torch.set_default_dtype(origin_dtype)
 
     def _hc_head(self, x: torch.Tensor) -> torch.Tensor:
-        shape, dtype = x.size(), x.dtype
-        x = x.flatten(2).float()
-        rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x, self.hc_head_fn) * rsqrt
-        pre = torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
-        y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)
-        return y.to(dtype)
+        return _apply_hc_head(x, self.hc_head_fn, self.hc_head_base, self.hc_head_scale, self.norm_eps, self.hc_eps)
 
     def forward(
         self,
@@ -2913,6 +2919,29 @@ class DeepseekV4Model(nn.Module):
         return hidden_states, past_key_values
 
 
+class MojoDynamicQuantLinear(nn.Module):
+    """Replicated W8A8 linear with the same call style as golden ReplicatedLinear."""
+
+    def __init__(self, in_features: int, out_features: int, output_dtype: torch.dtype = torch.bfloat16):
+        super().__init__()
+        self.quant = MojoDynamicQuant()
+        self.gemm = MojoQuantGemm(
+            in_features=in_features,
+            out_features=out_features,
+            output_dtype=output_dtype,
+            trans_weight=True,
+        )
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        origin_shape = input.shape[:-1]
+        input_i8, input_scale = self.quant(input)
+        output = self.gemm(
+            input_i8.reshape(-1, input_i8.shape[-1]),
+            input_scale.reshape(-1, input_scale.shape[-1]),
+        )
+        return output.view(*origin_shape, output.shape[-1])
+
+
 class DeepseekV4MTPLayer(nn.Module):
     """MTP layer for speculative decoding with enorm/hnorm/e_proj/h_proj projection."""
 
@@ -2927,8 +2956,8 @@ class DeepseekV4MTPLayer(nn.Module):
 
         self.enorm = MojoRMSNorm(config.hidden_size, config.rms_norm_eps, dtype=torch.bfloat16)
         self.hnorm = MojoRMSNorm(config.hidden_size, config.rms_norm_eps, dtype=torch.bfloat16)
-        self.e_proj = MojoQuantGemm(in_features=config.hidden_size, out_features=config.hidden_size, trans_weight=True)
-        self.h_proj = MojoQuantGemm(in_features=config.hidden_size, out_features=config.hidden_size, trans_weight=True)
+        self.e_proj = MojoDynamicQuantLinear(config.hidden_size, config.hidden_size)
+        self.h_proj = MojoDynamicQuantLinear(config.hidden_size, config.hidden_size)
 
         self.layers = nn.ModuleDict({
             str(i):  # Use layer_idx=0 for MTP cache compatibility
@@ -2951,13 +2980,7 @@ class DeepseekV4MTPLayer(nn.Module):
         torch.set_default_dtype(origin_dtype)
 
     def _hc_head(self, x):
-        shape, dtype = x.size(), x.dtype
-        x = x.flatten(2).float()
-        rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x, self.hc_head_fn) * rsqrt
-        pre = torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
-        y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)
-        return y.to(dtype)
+        return _apply_hc_head(x, self.hc_head_fn, self.hc_head_base, self.hc_head_scale, self.norm_eps, self.hc_eps)
 
     def forward(self, hidden_states, attention_mask=None, position_ids=None, past_key_values=None,
                 use_cache=None, is_prefill=True, context_lens=None, attn_inputs=None,
@@ -2992,18 +3015,7 @@ class DeepseekV4MTPLayer(nn.Module):
             normed_embed = self.enorm(embed_states)
             normed_hidden = self.hnorm(hidden_states)
 
-            # Dynamic quantize for MojoQuantGemm (requires int8 input + scale)
-            ne = normed_embed.to(torch.bfloat16)
-            nh = normed_hidden.to(torch.bfloat16)
-            ne_scale = ne.abs().amax(dim=-1, keepdim=True) / 127.0
-            ne_i8 = (ne / ne_scale).to(torch.int8)
-            nh_scale = nh.abs().amax(dim=-1, keepdim=True) / 127.0
-            nh_i8 = (nh / nh_scale).to(torch.int8)
-            proj_embed = self.e_proj(ne_i8.reshape(-1, ne_i8.shape[-1]), ne_scale.reshape(-1, ne_scale.shape[-1]))
-            proj_hidden = self.h_proj(nh_i8.reshape(-1, nh_i8.shape[-1]), nh_scale.reshape(-1, nh_scale.shape[-1]))
-            proj_embed = proj_embed.view(*ne.shape[:-1], proj_embed.shape[-1])
-            proj_hidden = proj_hidden.view(*nh.shape[:-1], proj_hidden.shape[-1])
-            hidden_states = proj_embed + proj_hidden
+            hidden_states = self.e_proj(normed_embed) + self.h_proj(normed_hidden)
 
         if hidden_states.dim() == 3 and hidden_states.shape[2] != self.hc_mult * self.config.hidden_size:
             hidden_states = hidden_states.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)
@@ -3174,128 +3186,23 @@ class DeepseekV4ForMTP(nn.Module):
 
     @staticmethod
     def load_weights(model, weight_dir, main_model=None):
-        from safetensors.torch import load_file
         DeepseekV4ForCausalLM._init_default_weights(model)
         if main_model is not None:
             model.lm_head = main_model.lm_head
             model.model.rotary_emb = main_model.model.rotary_emb
             model.model.compress_rotary_emb = main_model.model.compress_rotary_emb
-        index_path = os.path.join(weight_dir, "model.safetensors.index.json")
-        with open(index_path) as f:
-            index = json.load(f)
-        weight_map = index["weight_map"]
-        name_mapping = DeepseekV4ForMTP._build_mtp_name_mapping(model)
-        needed_checkpoint_keys = set(name_mapping.keys())
-        # Also include MTP expert weight keys so their files get loaded
-        ep_size = model.ep_size
-        ep_rank = model.ep_rank
-        experts_per_rank = model.config.n_routed_experts // ep_size
-        ep_start = ep_rank * experts_per_rank
-        pfx = "mtp.0"
-        for local_eid in range(experts_per_rank):
-            global_eid = ep_start + local_eid
-            for src in [f"{pfx}.ffn.experts.{global_eid}.w1",
-                        f"{pfx}.ffn.experts.{global_eid}.w3",
-                        f"{pfx}.ffn.experts.{global_eid}.w2"]:
-                needed_checkpoint_keys.add(f"{src}.weight")
-                needed_checkpoint_keys.add(f"{src}.scale")
-        file_to_keys = {}
-        for ck_key in needed_checkpoint_keys:
-            if ck_key in weight_map:
-                sf = weight_map[ck_key]
-                file_to_keys.setdefault(sf, []).append(ck_key)
-        params_dict = dict(model.named_parameters())
-        buffers_dict = dict(model.named_buffers())
-        modules_dict = dict(model.named_modules())
-        expert_weights = {}
-        for sf_file in sorted(file_to_keys.keys()):
-            fp = os.path.join(weight_dir, sf_file)
-            data = load_file(fp)
-            for ck_key in file_to_keys[sf_file]:
-                if ck_key not in data:
-                    continue
-                weight = data[ck_key]
-                if "experts." in ck_key and "shared_experts" not in ck_key:
-                    expert_weights[ck_key] = weight
-                    continue
-                model_name = name_mapping.get(ck_key)
-                if model_name is None:
-                    continue
-                if model_name in params_dict:
-                    param = params_dict[model_name]
-                    module_name = model_name.rsplit(".", 1)[0]
-                    module = modules_dict.get(module_name)
-                    weight = DeepseekV4ForCausalLM._align_quant_gemm_weight(weight, param, module)
-                    if param.shape == weight.shape:
-                        param.data.copy_(weight)
-                elif model_name in buffers_dict:
-                    buf = buffers_dict[model_name]
-                    module_name = model_name.rsplit(".", 1)[0]
-                    module = modules_dict.get(module_name)
-                    weight = DeepseekV4ForCausalLM._align_quant_gemm_weight(weight, buf, module)
-                    if buf.shape == weight.shape:
-                        buf.data.copy_(weight)
-            del data
+
+        name_mapping = DeepseekV4ForCausalLM._build_name_mapping(model, is_mtp=True)
+        expert_key_prefixes = ["mtp.0"]
+        expert_weights = DeepseekV4ForCausalLM._load_mapped_weights_from_dir(
+            model, weight_dir, name_mapping, expert_key_prefixes, is_mtp=True,
+        )
+
         DeepseekV4ForMTP._load_mtp_expert_weights(model, expert_weights)
-        for layer_key, layer in model.model.layers.items():
-            mlp = layer.mlp
-            if hasattr(mlp, 'process_expert_weights'):
-                mlp.process_expert_weights()
 
-        # Prepare quant projection weights for NPU kernel
-        for layer_key, layer in model.model.layers.items():
-            self_attn = layer.self_attn
-            self_attn.prepare_wo_a_weight()
-            self_attn.prepare_quant_proj_weights()
-            if self_attn.indexer is not None:
-                self_attn.indexer.prepare_quant_proj_weights()
-            layer.mlp.shared_experts.prepare_quant_proj_weights()
-
-        # Note: smooth_scale_1 all_gather is done in llm_inference.py after init_parallel_comm_group(),
-        # because load_weights() is called before comm groups are initialized.
-
-    @staticmethod
-    def _build_mtp_name_mapping(model):
-        mapping = {}
-        pfx = "mtp.0"
-        mpfx = "model.layers.0"  # MTP uses layer_idx=0 in its own cache
-        mapping[f"{pfx}.enorm.weight"] = "model.enorm.weight"
-        mapping[f"{pfx}.hnorm.weight"] = "model.hnorm.weight"
-        mapping[f"{pfx}.e_proj.weight"] = "model.e_proj.weight"
-        mapping[f"{pfx}.e_proj.scale"] = "model.e_proj.weight_scale"
-        mapping[f"{pfx}.h_proj.weight"] = "model.h_proj.weight"
-        mapping[f"{pfx}.h_proj.scale"] = "model.h_proj.weight_scale"
-        mapping[f"{pfx}.norm.weight"] = "model.norm.weight"
-        mapping[f"{pfx}.hc_head_fn"] = "model.hc_head_fn"
-        mapping[f"{pfx}.hc_head_base"] = "model.hc_head_base"
-        mapping[f"{pfx}.hc_head_scale"] = "model.hc_head_scale"
-        mapping[f"{pfx}.hc_attn_fn"] = f"{mpfx}.hc_attn_fn"
-        mapping[f"{pfx}.hc_attn_base"] = f"{mpfx}.hc_attn_base"
-        mapping[f"{pfx}.hc_attn_scale"] = f"{mpfx}.hc_attn_scale"
-        mapping[f"{pfx}.hc_ffn_fn"] = f"{mpfx}.hc_ffn_fn"
-        mapping[f"{pfx}.hc_ffn_base"] = f"{mpfx}.hc_ffn_base"
-        mapping[f"{pfx}.hc_ffn_scale"] = f"{mpfx}.hc_ffn_scale"
-        mapping[f"{pfx}.attn_norm.weight"] = f"{mpfx}.attn_norm.weight"
-        mapping[f"{pfx}.ffn_norm.weight"] = f"{mpfx}.ffn_norm.weight"
-        mapping[f"{pfx}.attn.wq_a.weight"] = f"{mpfx}.self_attn.wq_a.weight"
-        mapping[f"{pfx}.attn.q_norm.weight"] = f"{mpfx}.self_attn.q_norm.weight"
-        mapping[f"{pfx}.attn.wq_b.weight"] = f"{mpfx}.self_attn.wq_b.weight"
-        mapping[f"{pfx}.attn.wq_b.scale"] = f"{mpfx}.self_attn.wq_b.weight_scale"
-        mapping[f"{pfx}.attn.wkv.weight"] = f"{mpfx}.self_attn.wkv.weight"
-        mapping[f"{pfx}.attn.kv_norm.weight"] = f"{mpfx}.self_attn.kv_norm.weight"
-        mapping[f"{pfx}.attn.wo_a.weight"] = f"{mpfx}.self_attn.wo_a.weight"
-        mapping[f"{pfx}.attn.wo_b.weight"] = f"{mpfx}.self_attn.wo_b.weight"
-        mapping[f"{pfx}.attn.wo_b.scale"] = f"{mpfx}.self_attn.wo_b.weight_scale"
-        mapping[f"{pfx}.attn.attn_sink"] = f"{mpfx}.self_attn.attn_sink"
-        mapping[f"{pfx}.ffn.gate.weight"] = f"{mpfx}.mlp.gate"
-        mapping[f"{pfx}.ffn.gate.bias"] = f"{mpfx}.mlp.e_score_correction_bias"
-        mapping[f"{pfx}.ffn.shared_experts.w1.weight"] = f"{mpfx}.mlp.shared_experts.gate_proj.weight"
-        mapping[f"{pfx}.ffn.shared_experts.w1.scale"] = f"{mpfx}.mlp.shared_experts.gate_proj.weight_scale"
-        mapping[f"{pfx}.ffn.shared_experts.w3.weight"] = f"{mpfx}.mlp.shared_experts.up_proj.weight"
-        mapping[f"{pfx}.ffn.shared_experts.w3.scale"] = f"{mpfx}.mlp.shared_experts.up_proj.weight_scale"
-        mapping[f"{pfx}.ffn.shared_experts.w2.weight"] = f"{mpfx}.mlp.shared_experts.down_proj.weight"
-        mapping[f"{pfx}.ffn.shared_experts.w2.scale"] = f"{mpfx}.mlp.shared_experts.down_proj.weight_scale"
-        return mapping
+        mtp_layers = list(model.model.layers.values())
+        DeepseekV4ForCausalLM._process_expert_weights(model, mtp_layers)
+        DeepseekV4ForCausalLM._prepare_quant_weights(model, mtp_layers)
 
     @staticmethod
     def _load_mtp_expert_weights(model, expert_weights):
@@ -3602,32 +3509,26 @@ class DeepseekV4ForCausalLM(nn.Module):
                     module.inv_smooth_scale.data.fill_(1.0)
 
     @staticmethod
-    def load_weights(model, weight_dir: str):
+    def _load_mapped_weights_from_dir(model, weight_dir, name_mapping, expert_key_prefixes, *, is_mtp=False):
         from safetensors.torch import load_file
-
-        DeepseekV4ForCausalLM._init_default_weights(model)
 
         index_path = os.path.join(weight_dir, "model.safetensors.index.json")
         with open(index_path) as f:
             index = json.load(f)
         weight_map = index["weight_map"]
 
-        name_mapping = DeepseekV4ForCausalLM._build_name_mapping(model)
         needed_checkpoint_keys = set(name_mapping.keys())
 
-        max_layer_idx = model.config.num_hidden_layers - 1
-        needed_checkpoint_keys = {
-            k for k in needed_checkpoint_keys
-            if not k.startswith("layers.") or int(k.split(".")[1]) <= max_layer_idx
-        }
+        ep_size = model.ep_size
+        ep_rank = model.ep_rank
+        experts_per_rank = model.config.n_routed_experts // ep_size
+        ep_start = ep_rank * experts_per_rank
 
-        for layer_idx in range(model.config.num_hidden_layers):
-            pfx = f"layers.{layer_idx}.ffn.experts"
-            ep_start = model.ep_rank * (model.config.n_routed_experts // model.ep_size)
-            ep_end = ep_start + model.config.n_routed_experts // model.ep_size
-            for eid in range(ep_start, ep_end):
+        for pfx in expert_key_prefixes:
+            for local_eid in range(experts_per_rank):
+                global_eid = ep_start + local_eid
                 for w in ["w1.weight", "w1.scale", "w2.weight", "w2.scale", "w3.weight", "w3.scale"]:
-                    needed_checkpoint_keys.add(f"{pfx}.{eid}.{w}")
+                    needed_checkpoint_keys.add(f"{pfx}.ffn.experts.{global_eid}.{w}")
 
         file_to_keys = {}
         for ck_key in needed_checkpoint_keys:
@@ -3647,9 +3548,9 @@ class DeepseekV4ForCausalLM(nn.Module):
                 if ck_key not in data:
                     continue
                 weight = data[ck_key]
-                if ck_key == "head.weight" and model.lmhead_tp_size > 1:
+                if not is_mtp and ck_key == "head.weight" and model.lmhead_tp_size > 1:
                     weight = weight[model.lmhead_vocab_start:model.lmhead_vocab_end]
-                if "experts." in ck_key and ".ffn." in ck_key and "shared_experts" not in ck_key:
+                if "experts." in ck_key and "shared_experts" not in ck_key:
                     expert_weights[ck_key] = weight
                     continue
                 model_name = name_mapping.get(ck_key)
@@ -3657,7 +3558,9 @@ class DeepseekV4ForCausalLM(nn.Module):
                     continue
                 if model_name in params_dict:
                     param = params_dict[model_name]
-                    weight = DeepseekV4ForCausalLM._align_weight(weight, param)
+                    module_name = model_name.rsplit(".", 1)[0]
+                    module = modules_dict.get(module_name)
+                    weight = DeepseekV4ForCausalLM._align_quant_gemm_weight(weight, param, module)
                     if param.shape == weight.shape:
                         param.data.copy_(weight)
                 elif model_name in buffers_dict:
@@ -3669,20 +3572,50 @@ class DeepseekV4ForCausalLM(nn.Module):
                         buf.data.copy_(weight)
             del data
 
-        DeepseekV4ForCausalLM._load_expert_weights(model, expert_weights)
+        return expert_weights
 
-        for layer_idx in range(model.config.num_hidden_layers):
-            mlp = model.model.layers[layer_idx].mlp
-            if hasattr(mlp, 'process_expert_weights'):
-                mlp.process_expert_weights()
-
-        for layer_idx in range(model.config.num_hidden_layers):
-            self_attn = model.model.layers[layer_idx].self_attn
+    @staticmethod
+    def _prepare_quant_weights(model, layer_iter):
+        for layer in layer_iter:
+            self_attn = layer.self_attn
             self_attn.prepare_wo_a_weight()
             self_attn.prepare_quant_proj_weights()
             if self_attn.indexer is not None:
                 self_attn.indexer.prepare_quant_proj_weights()
-            model.model.layers[layer_idx].mlp.shared_experts.prepare_quant_proj_weights()
+            layer.mlp.shared_experts.prepare_quant_proj_weights()
+
+    @staticmethod
+    def _process_expert_weights(model, layer_iter):
+        for layer in layer_iter:
+            mlp = layer.mlp
+            if hasattr(mlp, 'process_expert_weights'):
+                mlp.process_expert_weights()
+
+    @staticmethod
+    def load_weights(model, weight_dir: str):
+        DeepseekV4ForCausalLM._init_default_weights(model)
+
+        name_mapping = DeepseekV4ForCausalLM._build_name_mapping(model)
+
+        max_layer_idx = model.config.num_hidden_layers - 1
+        name_mapping = {
+            k: v for k, v in name_mapping.items()
+            if not k.startswith("layers.") or int(k.split(".")[1]) <= max_layer_idx
+        }
+
+        expert_key_prefixes = [f"layers.{layer_idx}" for layer_idx in range(model.config.num_hidden_layers)]
+        expert_weights = DeepseekV4ForCausalLM._load_mapped_weights_from_dir(
+            model, weight_dir, name_mapping, expert_key_prefixes,
+        )
+
+        DeepseekV4ForCausalLM._load_expert_weights(model, expert_weights)
+
+        DeepseekV4ForCausalLM._process_expert_weights(
+            model, [model.model.layers[layer_idx] for layer_idx in range(model.config.num_hidden_layers)],
+        )
+        DeepseekV4ForCausalLM._prepare_quant_weights(
+            model, [model.model.layers[layer_idx] for layer_idx in range(model.config.num_hidden_layers)],
+        )
 
         if model.ep_size > 1 and dist.is_initialized():
             moe_ep_group = model.hccl_comm_dict.get("moe_ep_group")
@@ -3699,8 +3632,81 @@ class DeepseekV4ForCausalLM(nn.Module):
                         mlp.smooth_scale_1.data = all_smooth_scale_1
 
     @staticmethod
-    def _build_name_mapping(model):
+    def _add_layer_name_mapping(
+        mapping,
+        pfx,
+        mpfx,
+        *,
+        include_compressor=False,
+        include_indexer=False,
+        include_tid2eid=False,
+    ):
+        mapping[f"{pfx}.hc_attn_fn"] = f"{mpfx}.hc_attn_fn"
+        mapping[f"{pfx}.hc_attn_base"] = f"{mpfx}.hc_attn_base"
+        mapping[f"{pfx}.hc_attn_scale"] = f"{mpfx}.hc_attn_scale"
+        mapping[f"{pfx}.hc_ffn_fn"] = f"{mpfx}.hc_ffn_fn"
+        mapping[f"{pfx}.hc_ffn_base"] = f"{mpfx}.hc_ffn_base"
+        mapping[f"{pfx}.hc_ffn_scale"] = f"{mpfx}.hc_ffn_scale"
+        mapping[f"{pfx}.attn_norm.weight"] = f"{mpfx}.attn_norm.weight"
+        mapping[f"{pfx}.ffn_norm.weight"] = f"{mpfx}.ffn_norm.weight"
+
+        mapping[f"{pfx}.attn.wq_a.weight"] = f"{mpfx}.self_attn.wq_a.weight"
+        mapping[f"{pfx}.attn.q_norm.weight"] = f"{mpfx}.self_attn.q_norm.weight"
+        mapping[f"{pfx}.attn.wq_b.weight"] = f"{mpfx}.self_attn.wq_b.weight"
+        mapping[f"{pfx}.attn.wq_b.scale"] = f"{mpfx}.self_attn.wq_b.weight_scale"
+        mapping[f"{pfx}.attn.wkv.weight"] = f"{mpfx}.self_attn.wkv.weight"
+        mapping[f"{pfx}.attn.kv_norm.weight"] = f"{mpfx}.self_attn.kv_norm.weight"
+        mapping[f"{pfx}.attn.wo_a.weight"] = f"{mpfx}.self_attn.wo_a.weight"
+        mapping[f"{pfx}.attn.wo_b.weight"] = f"{mpfx}.self_attn.wo_b.weight"
+        mapping[f"{pfx}.attn.wo_b.scale"] = f"{mpfx}.self_attn.wo_b.weight_scale"
+        mapping[f"{pfx}.attn.attn_sink"] = f"{mpfx}.self_attn.attn_sink"
+
+        if include_compressor:
+            mapping[f"{pfx}.attn.compressor.wkv.weight"] = f"{mpfx}.self_attn.sfa_compressor.wkv.weight"
+            mapping[f"{pfx}.attn.compressor.wgate.weight"] = f"{mpfx}.self_attn.sfa_compressor.wgate.weight"
+            mapping[f"{pfx}.attn.compressor.ape"] = f"{mpfx}.self_attn.sfa_compressor.ape"
+            mapping[f"{pfx}.attn.compressor.norm.weight"] = f"{mpfx}.self_attn.sfa_compressor.norm.weight"
+
+        if include_indexer:
+            mapping[f"{pfx}.attn.indexer.wq_b.weight"] = f"{mpfx}.self_attn.indexer.wq_b.weight"
+            mapping[f"{pfx}.attn.indexer.wq_b.scale"] = f"{mpfx}.self_attn.indexer.wq_b.weight_scale"
+            mapping[f"{pfx}.attn.indexer.weights_proj.weight"] = f"{mpfx}.self_attn.indexer.weights_proj.weight"
+            mapping[f"{pfx}.attn.indexer.compressor.wkv.weight"] = f"{mpfx}.self_attn.indexer.compressor.wkv.weight"
+            mapping[f"{pfx}.attn.indexer.compressor.wgate.weight"] = f"{mpfx}.self_attn.indexer.compressor.wgate.weight"
+            mapping[f"{pfx}.attn.indexer.compressor.ape"] = f"{mpfx}.self_attn.indexer.compressor.ape"
+            mapping[f"{pfx}.attn.indexer.compressor.norm.weight"] = f"{mpfx}.self_attn.indexer.compressor.norm.weight"
+
+        mapping[f"{pfx}.ffn.gate.weight"] = f"{mpfx}.mlp.gate"
+        mapping[f"{pfx}.ffn.gate.bias"] = f"{mpfx}.mlp.e_score_correction_bias"
+        if include_tid2eid:
+            mapping[f"{pfx}.ffn.gate.tid2eid"] = f"{mpfx}.mlp.tid2eid"
+
+        mapping[f"{pfx}.ffn.shared_experts.w1.weight"] = f"{mpfx}.mlp.shared_experts.gate_proj.weight"
+        mapping[f"{pfx}.ffn.shared_experts.w1.scale"] = f"{mpfx}.mlp.shared_experts.gate_proj.weight_scale"
+        mapping[f"{pfx}.ffn.shared_experts.w3.weight"] = f"{mpfx}.mlp.shared_experts.up_proj.weight"
+        mapping[f"{pfx}.ffn.shared_experts.w3.scale"] = f"{mpfx}.mlp.shared_experts.up_proj.weight_scale"
+        mapping[f"{pfx}.ffn.shared_experts.w2.weight"] = f"{mpfx}.mlp.shared_experts.down_proj.weight"
+        mapping[f"{pfx}.ffn.shared_experts.w2.scale"] = f"{mpfx}.mlp.shared_experts.down_proj.weight_scale"
+
+    @staticmethod
+    def _build_name_mapping(model, *, is_mtp=False):
         mapping = {}
+        if is_mtp:
+            pfx = "mtp.0"
+            mpfx = "model.layers.0"  # MTP uses layer_idx=0 in its own cache
+            mapping[f"{pfx}.enorm.weight"] = "model.enorm.weight"
+            mapping[f"{pfx}.hnorm.weight"] = "model.hnorm.weight"
+            mapping[f"{pfx}.e_proj.weight"] = "model.e_proj.gemm.weight"
+            mapping[f"{pfx}.e_proj.scale"] = "model.e_proj.gemm.weight_scale"
+            mapping[f"{pfx}.h_proj.weight"] = "model.h_proj.gemm.weight"
+            mapping[f"{pfx}.h_proj.scale"] = "model.h_proj.gemm.weight_scale"
+            mapping[f"{pfx}.norm.weight"] = "model.norm.weight"
+            mapping[f"{pfx}.hc_head_fn"] = "model.hc_head_fn"
+            mapping[f"{pfx}.hc_head_base"] = "model.hc_head_base"
+            mapping[f"{pfx}.hc_head_scale"] = "model.hc_head_scale"
+            DeepseekV4ForCausalLM._add_layer_name_mapping(mapping, pfx, mpfx)
+            return mapping
+
         mapping["embed.weight"] = "model.embed_tokens.weight"
         mapping["head.weight"] = "lm_head.weight"
         mapping["norm.weight"] = "model.norm.weight"
@@ -3712,49 +3718,14 @@ class DeepseekV4ForCausalLM(nn.Module):
             pfx = f"layers.{layer_idx}"
             mpfx = f"model.layers.{layer_idx}"
 
-            mapping[f"{pfx}.hc_attn_fn"] = f"{mpfx}.hc_attn_fn"
-            mapping[f"{pfx}.hc_attn_base"] = f"{mpfx}.hc_attn_base"
-            mapping[f"{pfx}.hc_attn_scale"] = f"{mpfx}.hc_attn_scale"
-            mapping[f"{pfx}.hc_ffn_fn"] = f"{mpfx}.hc_ffn_fn"
-            mapping[f"{pfx}.hc_ffn_base"] = f"{mpfx}.hc_ffn_base"
-            mapping[f"{pfx}.hc_ffn_scale"] = f"{mpfx}.hc_ffn_scale"
-            mapping[f"{pfx}.attn_norm.weight"] = f"{mpfx}.attn_norm.weight"
-            mapping[f"{pfx}.ffn_norm.weight"] = f"{mpfx}.ffn_norm.weight"
-
-            mapping[f"{pfx}.attn.wq_a.weight"] = f"{mpfx}.self_attn.wq_a.weight"
-            mapping[f"{pfx}.attn.q_norm.weight"] = f"{mpfx}.self_attn.q_norm.weight"
-            mapping[f"{pfx}.attn.wq_b.weight"] = f"{mpfx}.self_attn.wq_b.weight"
-            mapping[f"{pfx}.attn.wq_b.scale"] = f"{mpfx}.self_attn.wq_b.weight_scale"
-            mapping[f"{pfx}.attn.wkv.weight"] = f"{mpfx}.self_attn.wkv.weight"
-            mapping[f"{pfx}.attn.kv_norm.weight"] = f"{mpfx}.self_attn.kv_norm.weight"
-            mapping[f"{pfx}.attn.wo_a.weight"] = f"{mpfx}.self_attn.wo_a.weight"
-            mapping[f"{pfx}.attn.wo_b.weight"] = f"{mpfx}.self_attn.wo_b.weight"
-            mapping[f"{pfx}.attn.wo_b.scale"] = f"{mpfx}.self_attn.wo_b.weight_scale"
-            mapping[f"{pfx}.attn.attn_sink"] = f"{mpfx}.self_attn.attn_sink"
-
-            mapping[f"{pfx}.attn.compressor.wkv.weight"] = f"{mpfx}.self_attn.sfa_compressor.wkv.weight"
-            mapping[f"{pfx}.attn.compressor.wgate.weight"] = f"{mpfx}.self_attn.sfa_compressor.wgate.weight"
-            mapping[f"{pfx}.attn.compressor.ape"] = f"{mpfx}.self_attn.sfa_compressor.ape"
-            mapping[f"{pfx}.attn.compressor.norm.weight"] = f"{mpfx}.self_attn.sfa_compressor.norm.weight"
-
-            mapping[f"{pfx}.attn.indexer.wq_b.weight"] = f"{mpfx}.self_attn.indexer.wq_b.weight"
-            mapping[f"{pfx}.attn.indexer.wq_b.scale"] = f"{mpfx}.self_attn.indexer.wq_b.weight_scale"
-            mapping[f"{pfx}.attn.indexer.weights_proj.weight"] = f"{mpfx}.self_attn.indexer.weights_proj.weight"
-            mapping[f"{pfx}.attn.indexer.compressor.wkv.weight"] = f"{mpfx}.self_attn.indexer.compressor.wkv.weight"
-            mapping[f"{pfx}.attn.indexer.compressor.wgate.weight"] = f"{mpfx}.self_attn.indexer.compressor.wgate.weight"
-            mapping[f"{pfx}.attn.indexer.compressor.ape"] = f"{mpfx}.self_attn.indexer.compressor.ape"
-            mapping[f"{pfx}.attn.indexer.compressor.norm.weight"] = f"{mpfx}.self_attn.indexer.compressor.norm.weight"
-
-            mapping[f"{pfx}.ffn.gate.weight"] = f"{mpfx}.mlp.gate"
-            mapping[f"{pfx}.ffn.gate.bias"] = f"{mpfx}.mlp.e_score_correction_bias"
-            mapping[f"{pfx}.ffn.gate.tid2eid"] = f"{mpfx}.mlp.tid2eid"
-
-            mapping[f"{pfx}.ffn.shared_experts.w1.weight"] = f"{mpfx}.mlp.shared_experts.gate_proj.weight"
-            mapping[f"{pfx}.ffn.shared_experts.w1.scale"] = f"{mpfx}.mlp.shared_experts.gate_proj.weight_scale"
-            mapping[f"{pfx}.ffn.shared_experts.w3.weight"] = f"{mpfx}.mlp.shared_experts.up_proj.weight"
-            mapping[f"{pfx}.ffn.shared_experts.w3.scale"] = f"{mpfx}.mlp.shared_experts.up_proj.weight_scale"
-            mapping[f"{pfx}.ffn.shared_experts.w2.weight"] = f"{mpfx}.mlp.shared_experts.down_proj.weight"
-            mapping[f"{pfx}.ffn.shared_experts.w2.scale"] = f"{mpfx}.mlp.shared_experts.down_proj.weight_scale"
+            DeepseekV4ForCausalLM._add_layer_name_mapping(
+                mapping,
+                pfx,
+                mpfx,
+                include_compressor=True,
+                include_indexer=True,
+                include_tid2eid=True,
+            )
 
         return mapping
 
