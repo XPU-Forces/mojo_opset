@@ -25,10 +25,10 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DEFAULT_LOCAL_PATH="/data00/dpskv4-flash-quant"
 export MOJO_BACKEND="ascendc"
 export MOJO_GRAPH_MODE="${MOJO_GRAPH_MODE:-npugraph_ex}"
-export MOJO_PROF="${MOJO_PROF:-0}"
+export MOJO_PROF="${MOJO_PROF:-1}"
 export MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-1024}"
-export PROMPT="${PROMPT:-[\"请用一句话介绍量子计算的核心原理。\"]}"
-# export PROMPT="${PROMPT:-[\"请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。\"]}"
+# export PROMPT="${PROMPT:-[\"请用一句话介绍量子计算的核心原理。\"]}"
+export PROMPT="${PROMPT:-[\"请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。请用一句话介绍量子计算的核心原理。\"]}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
     echo "Python interpreter not found: ${PYTHON_BIN}"
@@ -123,6 +123,12 @@ export MOJO_ATTN_MLA_MULTI_STREAM="${MOJO_ATTN_MLA_MULTI_STREAM:-1}"
 export MOJO_ATTN_COMPRESSOR_MULTI_STREAM="${MOJO_ATTN_COMPRESSOR_MULTI_STREAM:-1}"
 
 EP_SIZE="${EP_SIZE:-8}"
+CP_SIZE="${CP_SIZE:-${EP_SIZE}}"
+ATTN_TP_SIZE="${ATTN_TP_SIZE:-1}"
+LMHEAD_TP_SIZE="${LMHEAD_TP_SIZE:-1}"
+O_PROJ_TP_SIZE="${O_PROJ_TP_SIZE:-1}"
+MOJO_USE_PARALLELIZE_MODULE_TP="${MOJO_USE_PARALLELIZE_MODULE_TP:-0}"
+MOJO_USE_PARALLELIZE_MODULE_EP="${MOJO_USE_PARALLELIZE_MODULE_EP:-0}"
 # npugraph_ex static kernel needs LOCAL_WORLD_SIZE in multi-card launches.
 export LOCAL_WORLD_SIZE="${LOCAL_WORLD_SIZE:-${EP_SIZE}}"
 NUM_LAYERS="${LLM_NUM_LAYERS:-43}"
@@ -143,7 +149,7 @@ fi
 cd "$PROJECT_ROOT" || exit 1
 
 if [ "$EP_SIZE" -eq 1 ]; then
-    echo "EP=1, single card inference, batch_size=${BATCH_SIZE}, next_n=${NEXT_N}, use_attn_metadata=${USE_ATTN_METADATA}, build_legacy_attn_inputs=${MOJO_BUILD_LEGACY_ATTN_INPUTS}, moe_multi_stream=${MOJO_MOE_MULTI_STREAM}, attn_mla_multi_stream=${MOJO_ATTN_MLA_MULTI_STREAM}, attn_compressor_multi_stream=${MOJO_ATTN_COMPRESSOR_MULTI_STREAM}"
+    echo "EP=1, CP=${CP_SIZE}, ATTN_TP=${ATTN_TP_SIZE}, LMHEAD_TP=${LMHEAD_TP_SIZE}, O_PROJ_TP=${O_PROJ_TP_SIZE}, use_parallelize_module_tp=${MOJO_USE_PARALLELIZE_MODULE_TP}, use_parallelize_module_ep=${MOJO_USE_PARALLELIZE_MODULE_EP}, batch_size=${BATCH_SIZE}, next_n=${NEXT_N}, use_attn_metadata=${USE_ATTN_METADATA}, build_legacy_attn_inputs=${MOJO_BUILD_LEGACY_ATTN_INPUTS}, moe_multi_stream=${MOJO_MOE_MULTI_STREAM}, attn_mla_multi_stream=${MOJO_ATTN_MLA_MULTI_STREAM}, attn_compressor_multi_stream=${MOJO_ATTN_COMPRESSOR_MULTI_STREAM}"
     ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0}" \
     "${PYTHON_BIN}" -m examples.llm_inference \
         --model_path "${MODEL_PATH}" \
@@ -154,11 +160,17 @@ if [ "$EP_SIZE" -eq 1 ]; then
         --next_n "${NEXT_N}" \
         --prompt "${PROMPT}" \
         --ep_size 1 \
+        --cp_size "${CP_SIZE}" \
+        --attn_tp_size "${ATTN_TP_SIZE}" \
+        --lmhead_tp_size "${LMHEAD_TP_SIZE}" \
+        --o_proj_tp_size "${O_PROJ_TP_SIZE}" \
         --batch_size "${BATCH_SIZE}" \
         --use_attn_metadata "${USE_ATTN_METADATA}" \
-        --next_n "${NEXT_N}"
+        --next_n "${NEXT_N}" \
+        --use_parallelize_module_tp "${MOJO_USE_PARALLELIZE_MODULE_TP}" \
+        --use_parallelize_module_ep "${MOJO_USE_PARALLELIZE_MODULE_EP}"
 else
-    echo "EP=${EP_SIZE}, multi-card inference, batch_size=${BATCH_SIZE}, next_n=${NEXT_N}, use_attn_metadata=${USE_ATTN_METADATA}, build_legacy_attn_inputs=${MOJO_BUILD_LEGACY_ATTN_INPUTS}, moe_multi_stream=${MOJO_MOE_MULTI_STREAM}, attn_mla_multi_stream=${MOJO_ATTN_MLA_MULTI_STREAM}, attn_compressor_multi_stream=${MOJO_ATTN_COMPRESSOR_MULTI_STREAM}"
+    echo "EP=${EP_SIZE}, CP=${CP_SIZE}, ATTN_TP=${ATTN_TP_SIZE}, LMHEAD_TP=${LMHEAD_TP_SIZE}, O_PROJ_TP=${O_PROJ_TP_SIZE}, use_parallelize_module_tp=${MOJO_USE_PARALLELIZE_MODULE_TP}, use_parallelize_module_ep=${MOJO_USE_PARALLELIZE_MODULE_EP}, multi-card inference, batch_size=${BATCH_SIZE}, next_n=${NEXT_N}, use_attn_metadata=${USE_ATTN_METADATA}, build_legacy_attn_inputs=${MOJO_BUILD_LEGACY_ATTN_INPUTS}, moe_multi_stream=${MOJO_MOE_MULTI_STREAM}, attn_mla_multi_stream=${MOJO_ATTN_MLA_MULTI_STREAM}, attn_compressor_multi_stream=${MOJO_ATTN_COMPRESSOR_MULTI_STREAM}"
 
     MA_NUM_GPUS="$EP_SIZE"
 
@@ -193,9 +205,15 @@ else
             --next_n "${NEXT_N}" \
             --prompt "${PROMPT}" \
             --ep_size "${EP_SIZE}" \
+            --cp_size "${CP_SIZE}" \
+            --attn_tp_size "${ATTN_TP_SIZE}" \
+            --lmhead_tp_size "${LMHEAD_TP_SIZE}" \
+            --o_proj_tp_size "${O_PROJ_TP_SIZE}" \
             --batch_size "${BATCH_SIZE}" \
             --use_attn_metadata "${USE_ATTN_METADATA}" \
-            --next_n "${NEXT_N}" &
+            --next_n "${NEXT_N}" \
+            --use_parallelize_module_tp "${MOJO_USE_PARALLELIZE_MODULE_TP}" \
+            --use_parallelize_module_ep "${MOJO_USE_PARALLELIZE_MODULE_EP}" &
 
         PIDS+=($!)
     done

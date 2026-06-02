@@ -2,6 +2,7 @@ from typing import Dict
 from typing import List
 
 import torch
+import torch.distributed as dist
 
 from torch.distributed._functional_collectives import AsyncCollectiveTensor
 from torch.distributed.tensor import DeviceMesh
@@ -107,3 +108,95 @@ class MojoDataParallel(MojoRegisterableParallelStyle):
             self.prepare_output_fn,
             parallel_style_name=self.__class__.__name__,
         )
+
+
+def get_attn_dp_shard_range(total_batch, *, global_rank, world_size, attn_tp_size, cp_size=1):
+    if total_batch <= 0:
+        return 0, 0, 1, 0
+    if attn_tp_size <= 0:
+        raise ValueError(f"attn_tp_size must be > 0, got {attn_tp_size}")
+    if cp_size <= 0:
+        raise ValueError(f"cp_size must be > 0, got {cp_size}")
+
+    # Golden-style split: decode/batch ownership is controlled by attention DP
+    # only. CP prefill uses a separate prefill_dp_size and, when cp_size > 1,
+    # requires cp_size == world_size so all ranks form one CP group.
+    if cp_size > 1 and world_size != cp_size:
+        raise ValueError(
+            f"Golden-style CP requires cp_size == world_size when CP is enabled, "
+            f"got cp_size={cp_size}, world_size={world_size}."
+        )
+    if world_size % attn_tp_size != 0:
+        raise ValueError(f"world_size={world_size} is not divisible by attn_tp_size={attn_tp_size}")
+
+    if cp_size > 1:
+        if world_size % (cp_size * attn_tp_size) != 0:
+            raise ValueError(
+                f"world_size={world_size} must be divisible by cp_size*attn_tp_size="
+                f"{cp_size * attn_tp_size} when CP is enabled"
+            )
+        # Golden CP prefill semantics: CP ranks cooperate on the same sequence,
+        # so batch ownership is controlled by prefill DP, not decode attention DP.
+        dp_group_count = world_size // cp_size // attn_tp_size
+        dp_rank = global_rank // (cp_size * attn_tp_size)
+    else:
+        dp_group_count = world_size // attn_tp_size
+        dp_rank = global_rank // attn_tp_size
+    if total_batch % dp_group_count != 0:
+        raise ValueError(
+            f"DeepseekV4 DP requires batch_size={total_batch} to be divisible by "
+            f"attn_dp_size={dp_group_count} (world_size={world_size}, attn_tp_size={attn_tp_size})."
+        )
+
+    shard_size = total_batch // dp_group_count
+    start = dp_rank * shard_size
+    end = start + shard_size
+    return start, end, dp_group_count, dp_rank
+
+
+def gather_decode_shard_tensor(tensor, total_batch, shard_start, attn_dp_size):
+    del shard_start
+    if not dist.is_initialized() or attn_dp_size <= 1:
+        return tensor
+    if tensor.shape[0] == total_batch:
+        return tensor
+    local_batch = tensor.shape[0]
+    if total_batch != local_batch * attn_dp_size:
+        raise ValueError(
+            "Cannot gather decode shards with uneven local batch: "
+            f"total_batch={total_batch}, local_batch={local_batch}, attn_dp_size={attn_dp_size}"
+        )
+    gathered = tensor.new_empty((attn_dp_size, *tensor.shape))
+    dist.all_gather_into_tensor(gathered, tensor.contiguous())
+    return gathered.reshape(total_batch, *tensor.shape[1:])
+
+
+def shard_batch_for_attn_dp(
+    input_ids,
+    attention_mask,
+    lengths,
+    prompts,
+    rendered,
+    *,
+    global_rank,
+    world_size,
+    attn_tp_size,
+    cp_size=1,
+):
+    start, end, _, _ = get_attn_dp_shard_range(
+        input_ids.shape[0],
+        global_rank=global_rank,
+        world_size=world_size,
+        attn_tp_size=attn_tp_size,
+        cp_size=cp_size,
+    )
+    if start >= end:
+        return input_ids, attention_mask, lengths, prompts, rendered
+
+    return (
+        input_ids[start:end],
+        attention_mask[start:end],
+        lengths[start:end],
+        prompts[start:end],
+        rendered[start:end],
+    )

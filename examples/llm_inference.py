@@ -18,6 +18,14 @@ from mojo_opset.utils.hf_utils import _resolve_local_files_only
 from mojo_opset.utils.hf_utils import build_model_from_hf
 from mojo_opset.runtime import DeepseekSparseAttentionRuntimeState
 from mojo_opset.runtime import DeepseekMTPRuntimeState
+from mojo_opset.distributed.parallel import apply_llm_parallelize_plan
+from mojo_opset.distributed.parallel import copy_paged_dummy_cache_batch
+from mojo_opset.distributed.parallel import forward_cp_prefill_minibatch_mojo
+from mojo_opset.distributed.parallel import gather_decode_shard_tensor
+from mojo_opset.distributed.parallel import get_attn_dp_shard_range
+from mojo_opset.distributed.parallel import LLMParallelConfig
+from mojo_opset.distributed.parallel import pad_deepseek_v4_cp_prefill
+from mojo_opset.distributed.parallel import shard_batch_for_attn_dp
 
 ARCH_MAP = {
     "Qwen3ForCausalLM": ("mojo_opset.modeling.qwen3.mojo_qwen3_dense", "Qwen3ForCausalLM"),
@@ -162,130 +170,6 @@ def pad_batch(encoded, pad_token_id, device):
         input_ids[idx, : flat.shape[0]] = flat
         attention_mask[idx, : flat.shape[0]] = True
     return input_ids.to(device), attention_mask.to(device), lengths.to(device)
-
-
-def _align_up(value: int, alignment: int) -> int:
-    if alignment <= 0:
-        raise ValueError(f"alignment must be > 0, got {alignment}")
-    return ((value + alignment - 1) // alignment) * alignment
-
-
-def pad_deepseek_v4_cp_prefill(input_ids, attention_mask, pad_token_id, cp_size):
-    if cp_size <= 1:
-        return input_ids, attention_mask
-
-    cp_segment_num = cp_size * 2
-    cp_window_alignment = cp_segment_num * 128
-    target_len = _align_up(input_ids.shape[1], cp_window_alignment)
-
-    if target_len == input_ids.shape[1]:
-        return input_ids, attention_mask
-
-    pad_width = target_len - input_ids.shape[1]
-    logger.warning(
-        "[INPUT_PAD] DeepseekV4 CP prefill pad: orig_len=%s target_len=%s cp_size=%s cp_segment_num=%s",
-        input_ids.shape[1],
-        target_len,
-        cp_size,
-        cp_segment_num,
-    )
-    input_ids = torch.nn.functional.pad(input_ids, (0, pad_width), value=pad_token_id)
-    attention_mask = torch.nn.functional.pad(attention_mask, (0, pad_width), value=False)
-    return input_ids, attention_mask
-
-
-def get_attn_dp_shard_range(total_batch, *, global_rank, world_size, attn_tp_size, cp_size=1):
-    if total_batch <= 0:
-        return 0, 0, 1, 0
-    if attn_tp_size <= 0:
-        raise ValueError(f"attn_tp_size must be > 0, got {attn_tp_size}")
-    if cp_size <= 0:
-        raise ValueError(f"cp_size must be > 0, got {cp_size}")
-
-    # Golden-style split: decode/batch ownership is controlled by attention DP
-    # only. CP prefill uses a separate prefill_dp_size and, when cp_size > 1,
-    # requires cp_size == world_size so all ranks form one CP group.
-    if cp_size > 1 and world_size != cp_size:
-        raise ValueError(
-            f"Golden-style CP requires cp_size == world_size when CP is enabled, "
-            f"got cp_size={cp_size}, world_size={world_size}."
-        )
-    if world_size % attn_tp_size != 0:
-        raise ValueError(
-            f"world_size={world_size} is not divisible by attn_tp_size={attn_tp_size}"
-        )
-
-    if cp_size > 1:
-        if world_size % (cp_size * attn_tp_size) != 0:
-            raise ValueError(
-                f"world_size={world_size} must be divisible by cp_size*attn_tp_size="
-                f"{cp_size * attn_tp_size} when CP is enabled"
-            )
-        # Golden CP prefill semantics: CP ranks cooperate on the same sequence,
-        # so batch ownership is controlled by prefill DP, not decode attention DP.
-        dp_group_count = world_size // cp_size // attn_tp_size
-        dp_rank = global_rank // (cp_size * attn_tp_size)
-    else:
-        dp_group_count = world_size // attn_tp_size
-        dp_rank = global_rank // attn_tp_size
-    if total_batch % dp_group_count != 0:
-        raise ValueError(
-            f"DeepseekV4 DP requires batch_size={total_batch} to be divisible by "
-            f"attn_dp_size={dp_group_count} (world_size={world_size}, attn_tp_size={attn_tp_size})."
-        )
-
-    shard_size = total_batch // dp_group_count
-    start = dp_rank * shard_size
-    end = start + shard_size
-    return start, end, dp_group_count, dp_rank
-
-
-def gather_decode_shard_tensor(tensor, total_batch, shard_start, attn_dp_size):
-    del shard_start
-    if not dist.is_initialized() or attn_dp_size <= 1:
-        return tensor
-    if tensor.shape[0] == total_batch:
-        return tensor
-    local_batch = tensor.shape[0]
-    if total_batch != local_batch * attn_dp_size:
-        raise ValueError(
-            "Cannot gather decode shards with uneven local batch: "
-            f"total_batch={total_batch}, local_batch={local_batch}, attn_dp_size={attn_dp_size}"
-        )
-    gathered = tensor.new_empty((attn_dp_size, *tensor.shape))
-    dist.all_gather_into_tensor(gathered, tensor.contiguous())
-    return gathered.reshape(total_batch, *tensor.shape[1:])
-
-
-def shard_batch_for_attn_dp(
-    input_ids,
-    attention_mask,
-    lengths,
-    prompts,
-    rendered,
-    *,
-    global_rank,
-    world_size,
-    attn_tp_size,
-    cp_size=1,
-):
-    start, end, _, _ = get_attn_dp_shard_range(
-        input_ids.shape[0],
-        global_rank=global_rank,
-        world_size=world_size,
-        attn_tp_size=attn_tp_size,
-        cp_size=cp_size,
-    )
-    if start >= end:
-        return input_ids, attention_mask, lengths, prompts, rendered
-
-    return (
-        input_ids[start:end],
-        attention_mask[start:end],
-        lengths[start:end],
-        prompts[start:end],
-        rendered[start:end],
-    )
 
 
 def last_logits_from_output(logits, lengths):
@@ -459,39 +343,6 @@ def forward_prefill_mojo(model, input_ids, attention_mask, lengths, runtime_stat
     return last_logits_from_output(logits, lengths), past_key_values, None
 
 
-def _copy_paged_dummy_cache_batch(dst_cache, src_cache, dst_batch_idx: int) -> None:
-    dst_batch_size = int(dst_cache.batch_size)
-    src_batch_size = int(src_cache.batch_size)
-    if src_batch_size != 1:
-        raise ValueError(f"CP prefill mini-batch copy expects src batch size 1, got {src_batch_size}")
-    if not (0 <= dst_batch_idx < dst_batch_size):
-        raise ValueError(f"dst_batch_idx={dst_batch_idx} out of range for batch_size={dst_batch_size}")
-
-    dst_cache.seq_lens[:, dst_batch_idx].copy_(src_cache.seq_lens[:, 0])
-
-    for layer_idx in range(src_cache.num_layers):
-        src_layer = src_cache.cache_data[layer_idx]
-        dst_layer = dst_cache.cache_data[layer_idx]
-        for cache_name, src_tensor in src_layer.items():
-            if cache_name.endswith("_block_table"):
-                continue
-            if src_tensor is None or not torch.is_tensor(src_tensor):
-                continue
-            dst_tensor = dst_layer.get(cache_name)
-            if dst_tensor is None or not torch.is_tensor(dst_tensor):
-                continue
-            src_blocks_per_batch = (src_tensor.shape[0] - 1) // src_batch_size
-            dst_blocks_per_batch = (dst_tensor.shape[0] - 1) // dst_batch_size
-            blocks_to_copy = min(src_blocks_per_batch, dst_blocks_per_batch)
-            if blocks_to_copy <= 0:
-                continue
-            src_start = 1
-            dst_start = 1 + dst_batch_idx * dst_blocks_per_batch
-            dst_tensor[dst_start: dst_start + blocks_to_copy].copy_(
-                src_tensor[src_start: src_start + blocks_to_copy]
-            )
-
-
 def build_mtp_prefill_inputs(input_ids, attention_mask, next_token_id, pad_token_id):
     batch_size, seq_len = input_ids.shape
     mtp_input_ids = torch.full_like(input_ids, pad_token_id)
@@ -591,7 +442,7 @@ def forward_mtp_prefill_mojo(
             input_ids=input_ids[local_slot: local_slot + 1],
             return_hidden=True,
         )
-        _copy_paged_dummy_cache_batch(runtime_state.paged_cache, minibatch_runtime.paged_cache, local_slot)
+        copy_paged_dummy_cache_batch(runtime_state.paged_cache, minibatch_runtime.paged_cache, local_slot)
         logits_chunks.append(mtp_logits)
         hidden_chunks.append(mtp_hidden)
         del minibatch_runtime
@@ -660,7 +511,7 @@ def forward_mtp_cp_prefill_minibatch_mojo(
         )
         if owns_sample:
             local_slot = global_batch_idx - local_shard_start
-            _copy_paged_dummy_cache_batch(runtime_state.paged_cache, minibatch_runtime.paged_cache, local_slot)
+            copy_paged_dummy_cache_batch(runtime_state.paged_cache, minibatch_runtime.paged_cache, local_slot)
             logits_chunks.append(mtp_logits)
             hidden_chunks.append(mtp_hidden)
         del minibatch_runtime
@@ -671,74 +522,6 @@ def forward_mtp_cp_prefill_minibatch_mojo(
             f"owner_range=[{local_shard_start}, {local_shard_end}), total_batch={total_batch}"
         )
     return torch.cat(logits_chunks, dim=0), past_key_values, torch.cat(hidden_chunks, dim=0)
-
-
-def forward_cp_prefill_minibatch_mojo(
-    model,
-    input_ids,
-    attention_mask,
-    lengths,
-    runtime_state,
-    *,
-    local_shard_start,
-    local_shard_end,
-    max_seq_len,
-    use_attn_metadata=True,
-    return_all_hidden=False,
-):
-    total_batch = input_ids.shape[0]
-    local_batch = local_shard_end - local_shard_start
-    runtime_batch = int(runtime_state.paged_cache.batch_size)
-    if runtime_batch != local_batch:
-        raise ValueError(
-            "CP prefill runtime batch size mismatch: "
-            f"runtime_batch={runtime_batch}, local_batch={local_batch}, "
-            f"owner_range=[{local_shard_start}, {local_shard_end})"
-        )
-    logits_chunks = []
-    hidden_chunks = []
-    all_hidden_chunks = []
-    for global_batch_idx in range(total_batch):
-        owns_sample = local_shard_start <= global_batch_idx < local_shard_end
-        minibatch_runtime = DeepseekSparseAttentionRuntimeState.from_model(
-            model,
-            batch_size=1,
-            max_seq_len=max_seq_len,
-        )
-        next_logits, _, hidden_states = forward_prefill_mojo(
-            model,
-            input_ids[global_batch_idx: global_batch_idx + 1],
-            attention_mask[global_batch_idx: global_batch_idx + 1],
-            lengths[global_batch_idx: global_batch_idx + 1],
-            runtime_state=minibatch_runtime,
-            use_attn_metadata=use_attn_metadata,
-        )
-        if return_all_hidden:
-            if hidden_states is None:
-                raise RuntimeError("CP prefill did not return hidden_states required by MTP.")
-            all_hidden_chunks.append(hidden_states)
-        if owns_sample:
-            local_slot = global_batch_idx - local_shard_start
-            _copy_paged_dummy_cache_batch(
-                runtime_state.paged_cache,
-                minibatch_runtime.paged_cache,
-                local_slot,
-            )
-            logits_chunks.append(next_logits)
-            if hidden_states is not None:
-                hidden_chunks.append(hidden_states)
-        del minibatch_runtime
-
-    if not logits_chunks:
-        raise RuntimeError(
-            "CP-aware prefill did not collect any owner logits for this rank. "
-            f"owner_range=[{local_shard_start}, {local_shard_end}), total_batch={total_batch}"
-        )
-    hidden_out = torch.cat(hidden_chunks, dim=0) if hidden_chunks else None
-    if return_all_hidden:
-        all_hidden_out = torch.cat(all_hidden_chunks, dim=0) if all_hidden_chunks else None
-        return torch.cat(logits_chunks, dim=0), runtime_state.paged_cache, hidden_out, all_hidden_out
-    return torch.cat(logits_chunks, dim=0), runtime_state.paged_cache, hidden_out
 
 
 def forward_decode_mojo(
@@ -1030,9 +813,10 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
         )
         prefill_prof_ctx = prof_mod.profile(
             activities=[prof_mod.ProfilerActivity.CPU, prof_mod.ProfilerActivity.NPU],
+            schedule=prof_mod.schedule(wait=0, warmup=0, active=prof_steps, repeat=1),
             on_trace_ready=prof_mod.tensorboard_trace_handler(prefill_prof_dir),
             record_shapes=True,
-            with_stack=False,
+            with_stack=True,
             with_flops=True,
         )
         prefill_prof_ctx.__enter__()
@@ -1055,6 +839,8 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
                 local_shard_start=shard_start,
                 local_shard_end=shard_end,
                 max_seq_len=max(input_ids.shape[1] * 4, 4096),
+                runtime_state_factory=DeepseekSparseAttentionRuntimeState.from_model,
+                forward_prefill_fn=forward_prefill_mojo,
                 use_attn_metadata=use_attn_metadata,
                 return_all_hidden=use_mtp,
             )
@@ -1511,6 +1297,12 @@ def parse_args():
                         help="Use runtime attn_metadata in DeepSeek-V4 attention path (default: 1)")
     parser.add_argument("--next_n", type=int, default=int(os.getenv("NEXT_N", "0")),
                         help="Number of MTP speculative tokens (0=disabled, 1-3 enabled)")
+    parser.add_argument("--use_parallelize_module_tp", type=int, choices=[0, 1],
+                        default=int(os.getenv("MOJO_USE_PARALLELIZE_MODULE_TP", "0")),
+                        help="Use distributed.parallel mojo_parallelize_module for TP plan")
+    parser.add_argument("--use_parallelize_module_ep", type=int, choices=[0, 1],
+                        default=int(os.getenv("MOJO_USE_PARALLELIZE_MODULE_EP", "0")),
+                        help="Use distributed.parallel mojo_parallelize_module for DeepSeekV4 MoE EP binding")
     return parser.parse_args()
 
 
@@ -1526,33 +1318,15 @@ def main():
     attn_tp_size = args.attn_tp_size
     lmhead_tp_size = args.lmhead_tp_size
     o_proj_tp_size = args.o_proj_tp_size
-    if world_size > 1:
-        if world_size % ep_size != 0:
-            raise ValueError(f"WORLD_SIZE={world_size} must be divisible by EP_SIZE={ep_size}")
-        if ep_size != world_size:
-            raise ValueError(
-                "DeepSeek-V4 EP migration currently supports pure EP only, "
-                f"got EP_SIZE={ep_size}, WORLD_SIZE={world_size}"
-            )
-    if world_size > 1 and lmhead_tp_size > 1 and world_size % lmhead_tp_size != 0:
-        raise ValueError(f"WORLD_SIZE={world_size} must be divisible by LMHEAD_TP_SIZE={lmhead_tp_size}")
-    if world_size > 1 and world_size % attn_tp_size != 0:
-        raise ValueError(
-            "WORLD_SIZE must be divisible by ATTN_TP_SIZE, got "
-            f"WORLD_SIZE={world_size}, ATTN_TP_SIZE={attn_tp_size}"
-        )
-    if cp_size > 1 and cp_size != world_size:
-        raise ValueError(
-            "Golden-style CP requires CP_SIZE == WORLD_SIZE when CP is enabled, got "
-            f"CP_SIZE={cp_size}, WORLD_SIZE={world_size}"
-        )
-    prefill_dp_size = world_size // max(cp_size, 1) // attn_tp_size
-    if cp_size > 1 and prefill_dp_size < 1:
-        raise ValueError(
-            "Invalid Golden-style CP prefill parallel config: "
-            f"prefill_dp_size={prefill_dp_size}, WORLD_SIZE={world_size}, "
-            f"CP_SIZE={cp_size}, ATTN_TP_SIZE={attn_tp_size}"
-        )
+    parallel_layout_config = LLMParallelConfig(
+        ep_size=ep_size,
+        cp_size=cp_size,
+        attn_tp_size=attn_tp_size,
+        lmhead_tp_size=lmhead_tp_size,
+        o_proj_tp_size=o_proj_tp_size,
+    )
+    parallel_layout_config.validate(world_size, require_pure_ep=True)
+    ep_rank = parallel_layout_config.ep_rank(global_rank)
     npu_device_idx = int(os.getenv("NPU_DEVICE_IDX", local_rank))
 
     torch_npu.npu.config.allow_internal_format = True
@@ -1601,17 +1375,9 @@ def main():
             args.next_n,
         )
 
-        ep_rank = global_rank % ep_size if ep_size > 1 else 0
-        attn_dp_size = world_size // attn_tp_size
-        prefill_dp_size = world_size // max(cp_size, 1) // attn_tp_size
-        parallel_config = {
-            "cp_size": cp_size,
-            "attn_dp_size": attn_dp_size,
-            "prefill_dp_size": prefill_dp_size,
-            "attn_tp_size": attn_tp_size,
-            "lmhead_tp_size": lmhead_tp_size,
-            "o_proj_tp_size": o_proj_tp_size,
-        }
+        parallel_config = parallel_layout_config.as_model_parallel_config(world_size)
+        parallel_config["use_parallelize_module_tp"] = int(args.use_parallelize_module_tp)
+        parallel_config["use_parallelize_module_ep"] = int(args.use_parallelize_module_ep)
 
     _mem_snapshot("before model construct", npu_device_idx)
     _device_snapshot(
@@ -1670,7 +1436,7 @@ def main():
             )
             init_group_start = time.perf_counter()
             model.init_parallel_comm_group()
-            model.set_ep_group()
+            model.set_ep_group(bind_moe=not args.use_parallelize_module_ep)
             logger.info(
                 "[DEVICE] after init_parallel_comm_group | rank=%s local_rank=%s elapsed=%.3fs current_device=%s",
                 global_rank,
@@ -1708,6 +1474,16 @@ def main():
             torch.npu.current_device(),
         )
         _mem_snapshot("after load_weights", npu_device_idx)
+        if args.use_parallelize_module_tp or args.use_parallelize_module_ep:
+            model = apply_llm_parallelize_plan(
+                model,
+                parallel_layout_config,
+                enable_lmhead_tp=True,
+                enable_attention_tp=True,
+                enable_moe_ep=bool(args.use_parallelize_module_ep),
+                device_type="npu",
+            )
+            _mem_snapshot("after apply_llm_parallelize_plan", npu_device_idx)
     else:
         model = build_model_from_hf(
             model_class,
@@ -1762,6 +1538,8 @@ def main():
         mtp_model.cp_size = getattr(model, "cp_size", cp_size)
         mtp_model.global_rank = getattr(model, "global_rank", global_rank)
         mtp_model.hccl_comm_dict = model.hccl_comm_dict.copy()
+        if args.use_parallelize_module_ep:
+            mtp_model.set_ep_group(bind_moe=False)
 
         DeepseekV4ForMTP.load_weights(mtp_model, args.model_path, main_model=model)
         _mem_snapshot("after MTP load_weights", npu_device_idx)
@@ -1771,7 +1549,8 @@ def main():
             # Creating independent comm groups via dist.new_group() causes HCCL communication mismatch
             # between MTP and main model, leading to npu_moe_distribute_dispatch_v2 aicore timeout (507014).
             # This matches note: behavior where comm groups are implicitly shared via caching.
-            mtp_model.set_ep_group()
+            if not args.use_parallelize_module_ep:
+                mtp_model.set_ep_group(bind_moe=True)
             # Only smooth_scale_1 needs all_gather (used by moe_init_routing_v2 before all_to_all,
             # indexed by global expert_num=256). smooth_scale_2 must stay local [experts_per_rank, ...]
             # (used by npu_dequant_swiglu_quant after all_to_all, indexed by local group_index len=32).
@@ -1788,6 +1567,16 @@ def main():
                             all_smooth_scale_1, mlp.smooth_scale_1.data,
                             group=moe_ep_group)
                         mlp.smooth_scale_1.data = all_smooth_scale_1
+
+        if args.use_parallelize_module_ep:
+            mtp_model = apply_llm_parallelize_plan(
+                mtp_model,
+                parallel_layout_config,
+                enable_lmhead_tp=False,
+                enable_attention_tp=False,
+                enable_moe_ep=True,
+                device_type="npu",
+            )
 
         if is_main:
             print("[MTP] MTP model created; runtime state will be created after local batch sharding")

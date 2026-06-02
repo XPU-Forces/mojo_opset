@@ -127,11 +127,43 @@ def _ep_partition_fn(src_data_rank, name, module, device_mesh):
 
 
 class MojoExpertParallel(MojoRegisterableParallelStyle):
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        hccl_comm_dict: dict | None = None,
+        ep_size: int | None = None,
+        ep_rank: int | None = None,
+        global_rank: int | None = None,
+    ):
         super().__init__()
+        self.hccl_comm_dict = hccl_comm_dict
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
+        self.global_rank = global_rank
+
+    def _deepseek_v4_moe_partition_fn(self, src_data_rank, name, module, device_mesh):
+        del src_data_rank
+        del device_mesh
+        if name or module.__class__.__name__ != "DeepseekV4MoE":
+            return
+        if self.hccl_comm_dict is not None:
+            module.hccl_comm_dict = self.hccl_comm_dict
+            module.ep_group = self.hccl_comm_dict.get("moe_ep_group")
+        if self.ep_size is not None:
+            module.ep_size = self.ep_size
+        if self.ep_rank is not None:
+            module.ep_rank = self.ep_rank
+        if self.ep_size is not None and self.ep_rank is not None:
+            module.experts_per_rank = module.n_routed_experts // module.ep_size
+            module.ep_start = module.ep_rank * module.experts_per_rank
+            module.ep_end = module.ep_start + module.experts_per_rank
+        module.dispatch_kwargs = None
+        module.combine_kwargs = None
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         partition_fn, _, _, _, _ = self.get_dist_info(module)
+        if partition_fn is None and module.__class__.__name__ == "DeepseekV4MoE":
+            partition_fn = self._deepseek_v4_moe_partition_fn
 
         return MojoDistributedModule(
             module,

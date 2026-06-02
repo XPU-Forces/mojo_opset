@@ -46,6 +46,8 @@ from mojo_opset import MojoCompressor
 from mojo_opset import MojoScatterNdUpdateAsc
 from mojo_opset import MojoSparseAttnSharedkv
 from mojo_opset import MojoSparseAttnSharedkvMetadata
+from mojo_opset.distributed.parallel.mesh import LLMParallelConfig
+from mojo_opset.distributed.parallel.mesh import init_llm_parallel_groups
 
 
 _INPLACE_PARTIAL_ROTARY_MUL = MojoInplacePartialRotaryMul()
@@ -3045,6 +3047,7 @@ class DeepseekV4ForMTP(nn.Module):
         self.hccl_comm_dict = {}
         self.cp_size = 1
         self.global_rank = 0
+        self.attn_tp_size = 1
         self.attn_dp_size = 1
         self.prefill_dp_size = 1
         self.lmhead_tp_size = 1
@@ -3123,26 +3126,32 @@ class DeepseekV4ForMTP(nn.Module):
             return
         world_size = dist.get_world_size()
         global_rank = dist.get_rank()
-        if self.ep_size > 1:
-            hccl_buffer_size = int(os.environ.get("HCCL_BUFFSIZE", "200"))
-            options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
-            options.hccl_config = {"hccl_buffer_size": hccl_buffer_size}
-            moe_ep_group = dist.new_group(ranks=list(range(world_size)), pg_options=options)
-            self.hccl_comm_dict["moe_ep_group"] = moe_ep_group
-            mc2_buffer_size = int(os.environ.get("MC2_BUFFSIZE", str(max(200, self.config.moe_intermediate_size * self.config.hidden_size * self.ep_size // (1024 * 1024) + 100))))
-            options_mc2 = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
-            options_mc2.hccl_config = {"hccl_buffer_size": mc2_buffer_size}
-            moe_ep_group_mc2 = dist.new_group(ranks=list(range(world_size)), pg_options=options_mc2)
-            self.hccl_comm_dict["moe_ep_group_mc2"] = moe_ep_group_mc2
-            self.hccl_comm_dict["moe_ep_group_mc2_name"] = moe_ep_group_mc2._get_backend(torch.device("npu")).get_hccl_comm_name(global_rank)
+        self.global_rank = global_rank
+        parallel_layout_config = LLMParallelConfig(
+            ep_size=self.ep_size,
+            cp_size=self.cp_size,
+            attn_tp_size=self.attn_tp_size,
+            lmhead_tp_size=self.lmhead_tp_size,
+        )
+        parallel_layout_config.validate(world_size)
+        self.attn_dp_size = parallel_layout_config.attn_dp_size(world_size)
+        self.prefill_dp_size = parallel_layout_config.prefill_dp_size(world_size)
+        self.hccl_comm_dict = init_llm_parallel_groups(
+            parallel_layout_config,
+            moe_intermediate_size=self.config.moe_intermediate_size,
+            hidden_size=self.config.hidden_size,
+            world_size=world_size,
+            global_rank=global_rank,
+        )
 
-    def set_ep_group(self):
+    def set_ep_group(self, bind_moe: bool = True):
         moe_ep_group = self.hccl_comm_dict.get("moe_ep_group")
         self.moe_ep_group = moe_ep_group
         self.model.hccl_comm_dict = self.hccl_comm_dict
         for layer_key, layer in self.model.layers.items():
-            layer.mlp.ep_group = moe_ep_group
-            layer.mlp.hccl_comm_dict = self.hccl_comm_dict
+            if bind_moe:
+                layer.mlp.ep_group = moe_ep_group
+                layer.mlp.hccl_comm_dict = self.hccl_comm_dict
             layer.self_attn.hccl_comm_dict = self.hccl_comm_dict
             layer.self_attn.cp_size = self.cp_size
             layer.self_attn.global_rank = self.global_rank
@@ -3368,10 +3377,12 @@ class DeepseekV4ForCausalLM(nn.Module):
         self.attn_dp_size = int(self.parallel_config.get("attn_dp_size", 1))
         self.prefill_dp_size = int(self.parallel_config.get("prefill_dp_size", 1))
         self.lmhead_tp_size = int(self.parallel_config.get("lmhead_tp_size", 1))
+        self.use_parallelize_module_tp = bool(int(self.parallel_config.get("use_parallelize_module_tp", 0)))
         self.o_proj_tp_size = int(self.parallel_config.get("o_proj_tp_size", self.attn_tp_size))
-        self.lmhead_tp_rank = global_rank % self.lmhead_tp_size if self.lmhead_tp_size > 1 else 0
+        lmhead_init_tp_size = 1 if self.use_parallelize_module_tp and self.lmhead_tp_size > 1 else self.lmhead_tp_size
+        self.lmhead_tp_rank = global_rank % lmhead_init_tp_size if lmhead_init_tp_size > 1 else 0
         self.lmhead_vocab_start, self.lmhead_vocab_end = _split_even_range(
-            config.vocab_size, self.lmhead_tp_size, self.lmhead_tp_rank
+            config.vocab_size, lmhead_init_tp_size, self.lmhead_tp_rank
         )
         self.local_vocab_size = self.lmhead_vocab_end - self.lmhead_vocab_start
         self.model = DeepseekV4Model(config, ep_size=ep_size, ep_rank=ep_rank, parallel_config=self.parallel_config)
@@ -3476,85 +3487,36 @@ class DeepseekV4ForCausalLM(nn.Module):
         world_size = dist.get_world_size()
         global_rank = dist.get_rank()
         self.global_rank = global_rank
-        if world_size % self.attn_tp_size != 0:
-            raise ValueError(
-                "world_size must be divisible by attn_tp_size, got "
-                f"world_size={world_size}, attn_tp_size={self.attn_tp_size}"
-            )
-        if self.cp_size > 1 and self.cp_size != world_size:
-            raise ValueError(
-                "Golden-style CP requires cp_size == world_size when CP is enabled, got "
-                f"cp_size={self.cp_size}, world_size={world_size}"
-            )
-        self.attn_dp_size = world_size // self.attn_tp_size
-        self.prefill_dp_size = world_size // max(self.cp_size, 1) // self.attn_tp_size
-        if self.cp_size > 1 and self.prefill_dp_size < 1:
-            raise ValueError(
-                "Invalid Golden-style CP prefill parallel config: "
-                f"prefill_dp_size={self.prefill_dp_size}, world_size={world_size}, "
-                f"cp_size={self.cp_size}, attn_tp_size={self.attn_tp_size}"
-            )
-        if self.cp_size > 1:
-            self.hccl_comm_dict["cp_group"] = _create_contiguous_subgroup(
-                self.cp_size, global_rank, world_size
-            )
-        else:
-            self.hccl_comm_dict["cp_group"] = None
-        if self.attn_tp_size > 1:
-            self.hccl_comm_dict["attn_tp_group"] = _create_contiguous_subgroup(
-                self.attn_tp_size, global_rank, world_size
-            )
-        else:
-            self.hccl_comm_dict["attn_tp_group"] = None
-        if self.lmhead_tp_size > 1:
-            self.hccl_comm_dict["lmhead_tp_group"] = _create_contiguous_subgroup(
-                self.lmhead_tp_size, global_rank, world_size
-            )
-        else:
-            self.hccl_comm_dict["lmhead_tp_group"] = None
-        if self.o_proj_tp_size > 1:
-            self.hccl_comm_dict["o_proj_tp_group"] = _create_contiguous_subgroup(
-                self.o_proj_tp_size, global_rank, world_size
-            )
-        else:
-            self.hccl_comm_dict["o_proj_tp_group"] = None
-        if self.ep_size > 1:
-            hccl_buffer_size = int(os.environ.get("HCCL_BUFFSIZE", "200"))
-            options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
-            options.hccl_config = {"hccl_buffer_size": hccl_buffer_size}
-            moe_ep_group = _create_contiguous_subgroup(
-                self.ep_size,
-                global_rank,
-                world_size,
-                pg_options=options,
-            )
-            self.hccl_comm_dict["moe_ep_group"] = moe_ep_group
+        parallel_layout_config = LLMParallelConfig(
+            ep_size=self.ep_size,
+            cp_size=self.cp_size,
+            attn_tp_size=self.attn_tp_size,
+            lmhead_tp_size=self.lmhead_tp_size,
+            o_proj_tp_size=self.o_proj_tp_size,
+        )
+        parallel_layout_config.validate(world_size)
+        self.attn_dp_size = parallel_layout_config.attn_dp_size(world_size)
+        self.prefill_dp_size = parallel_layout_config.prefill_dp_size(world_size)
+        self.hccl_comm_dict = init_llm_parallel_groups(
+            parallel_layout_config,
+            moe_intermediate_size=self.config.moe_intermediate_size,
+            hidden_size=self.config.hidden_size,
+            world_size=world_size,
+            global_rank=global_rank,
+        )
+        logging.info(
+            "Created LLM parallel groups via distributed.parallel: "
+            f"world_size={world_size}, ep_size={self.ep_size}, rank={global_rank}"
+        )
 
-            mc2_buffer_size = int(os.environ.get("MC2_BUFFSIZE", str(max(200, self.config.moe_intermediate_size * self.config.hidden_size * self.ep_size // (1024 * 1024) + 100))))
-            options_mc2 = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
-            options_mc2.hccl_config = {"hccl_buffer_size": mc2_buffer_size}
-            moe_ep_group_mc2 = _create_contiguous_subgroup(
-                self.ep_size,
-                global_rank,
-                world_size,
-                pg_options=options_mc2,
-            )
-            moe_ep_group_mc2_name = moe_ep_group_mc2._get_backend(torch.device("npu")).get_hccl_comm_name(global_rank)
-            self.hccl_comm_dict["moe_ep_group_mc2"] = moe_ep_group_mc2
-            self.hccl_comm_dict["moe_ep_group_mc2_name"] = moe_ep_group_mc2_name
-            logging.info(f"Created moe_ep_group and moe_ep_group_mc2: world_size={world_size}, ep_size={self.ep_size}, rank={global_rank}")
-        else:
-            self.hccl_comm_dict["moe_ep_group"] = None
-            self.hccl_comm_dict["moe_ep_group_mc2"] = None
-            self.hccl_comm_dict["moe_ep_group_mc2_name"] = None
-
-    def set_ep_group(self):
+    def set_ep_group(self, bind_moe: bool = True):
         moe_ep_group = self.hccl_comm_dict.get("moe_ep_group")
         self.moe_ep_group = moe_ep_group
         self.model.hccl_comm_dict = self.hccl_comm_dict
         for layer in self.model.layers:
-            layer.mlp.ep_group = moe_ep_group
-            layer.mlp.hccl_comm_dict = self.hccl_comm_dict
+            if bind_moe:
+                layer.mlp.ep_group = moe_ep_group
+                layer.mlp.hccl_comm_dict = self.hccl_comm_dict
             layer.self_attn.hccl_comm_dict = self.hccl_comm_dict
             layer.self_attn.cp_size = self.cp_size
             layer.self_attn.global_rank = self.global_rank
@@ -3647,7 +3609,7 @@ class DeepseekV4ForCausalLM(nn.Module):
                 if ck_key not in data:
                     continue
                 weight = data[ck_key]
-                if ck_key == "head.weight" and model.lmhead_tp_size > 1:
+                if ck_key == "head.weight" and model.lmhead_tp_size > 1 and not getattr(model, "use_parallelize_module_tp", False):
                     weight = weight[model.lmhead_vocab_start:model.lmhead_vocab_end]
                 if "experts." in ck_key and ".ffn." in ck_key and "shared_experts" not in ck_key:
                     expert_weights[ck_key] = weight
