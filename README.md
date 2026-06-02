@@ -33,6 +33,10 @@ export MOJO_RUN_MODE="EAGER"
 
 source code: mojo_opset/backends/ttx/kernels
 
+### UC NPU
+
+UC NPU is a Unified Compiler based backend for Ascend NPU kernels. It is selected with `MOJO_BACKEND="uc"`; the support matrix labels it as `uc_npu`.
+
 ### Ixformer
 
 Ixformer is a backend powered by the [ixformer](https://github.com/AIsoftwareFactory/ixformer) library, providing high-performance fused operator implementations for Iluvatar GPUs.
@@ -49,6 +53,7 @@ You can control the backend you want to use via the `MOJO_BACKEND` environment v
 
 - "ixformer"
 - "ttx"
+- "uc"
 - "torch_npu"
 - "torch"
 
@@ -58,94 +63,94 @@ When multiple backends are added, Mojo Opset selects the backend implementation 
 
 ### Core Mojo Operator List
 
-| Op Category | Op Name | torch native | torch_npu | ttx | ixformer |
-| :---------- | :------ | :----------- | :-------- | :-- | :------- |
-| Activation | `MojoGelu` | ✅ | ✅ | ✅ | TBD |
-| Activation | `MojoSilu` | ✅ | ✅ | ✅ | TBD |
-| Activation | `MojoSwiGLU` | ✅ | ✅ | ✅ | TBD |
-| Activation | `MojoRotateActivation` | ✅ | TBD | TBD | TBD |
-| Attention | `MojoPrefillGQA` | ✅ | ✅ | TBD | TBD |
-| Attention | `MojoPagedPrefillGQA` | ✅ | ✅ | ✅ | ✅ |
-| Attention | `MojoPrefillMLA` | ✅ | TBD | TBD | TBD |
-| Attention | `MojoPagedPrefillMLA` | ✅ | TBD | TBD | TBD |
-| Attention | `MojoPrefillNSA` | ✅ | TBD | TBD | TBD |
-| Attention | `MojoPagedPrefillNSA` | ✅ | TBD | TBD | TBD |
-| Attention | `MojoDecodeGQA` | ✅ | TBD | TBD | TBD |
-| Attention | `MojoPagedDecodeGQA` | ✅ | ✅ | ✅ | ✅ |
-| Attention | `MojoDecodeMLA` | ✅ | TBD | TBD | TBD |
-| Attention | `MojoPagedDecodeMLA` | ✅ | TBD | TBD | TBD |
-| Attention | `MojoDecodeNSA` | ✅ | TBD | TBD | TBD |
-| Attention | `MojoPagedDecodeNSA` | ✅ | TBD | TBD | TBD |
-| Attention | `MojoSdpa` | ✅ | TBD | ✅ | TBD |
-| Attention | `MojoPagedPrefillSWA` | ✅ | TBD | ✅ | TBD |
-| Attention | `MojoPagedDecodeSWA` | ✅ | TBD | ✅ | TBD |
-| Attention | `MojoSWA` | ✅ | TBD | ✅ | TBD |
-| KVCache | `MojoStorePagedKVCache` | ✅ | TBD | ✅ | TBD |
-| KVCache | `MojoStoreMLAKVCache` | ✅ | TBD | TBD | TBD |
-| KVCache | `MojoStorePagedMLAKVCache` | ✅ | TBD | TBD | TBD |
-| Gemm | `MojoGemm` | ✅ | TBD | TBD | TBD |
-| Gemm | `MojoQuantGemm` | ✅ | ✅ | ✅ | TBD |
-| Gemm | `MojoGroupGemm` | ✅ | ✅ | ✅ | TBD |
-| ComputeComm | `MojoGemmAll2All` | ✅ | TBD | TBD | TBD |
-| ComputeComm | `MojoAllGatherGemm` | ✅ | TBD | TBD | TBD |
-| ComputeComm | `MojoGemmAllReduce` | ✅ | TBD | TBD | TBD |
-| ComputeComm | `MojoGemmReduceScatter` | ✅ | TBD | TBD | TBD |
-| ComputeComm | `MojoQuantGemmAll2All` | ✅ | TBD | TBD | TBD |
-| ComputeComm | `MojoAll2AllQuantGemm` | ✅ | TBD | TBD | TBD |
-| Embedding | `MojoEmbedding` | ✅ | TBD | TBD | TBD |
-| Embedding | `MojoParallelEmbedding` | ✅ | TBD | TBD | TBD |
-| OverEncoding | `MojoOverEncoding` | ✅ | TBD | ✅ | TBD |
-| OverEncoding | `MojoOverEncodingNGram` | ✅ | TBD | ✅ | TBD |
-| Quantize | `MojoStaticQuant` | ✅ | TBD | ✅ | TBD |
-| Quantize | `MojoDequant` | ✅ | TBD | TBD | TBD |
-| Quantize | `MojoDynamicQuant` | ✅ | ✅ | ✅ | TBD |
-| Quantize | `MojoMoEDynamicQuant` | ✅ | ✅ | ✅ | TBD |
-| Quantize | `MojoDequantSwiGLUQuant` | ✅ | ✅ | TBD | TBD |
-| MoE | `MojoMoE` | ✅ | TBD | TBD | TBD |
-| MoE | `MojoMoEGating` | ✅ | TBD | TBD | TBD |
-| MoE | `MojoMoEDispatch` | ✅ | TBD | TBD | TBD |
-| MoE | `MojoMoEInitRoutingDynamicQuant` | ✅ | TBD | TBD | TBD |
-| MoE | `MojoFusedSwiGLUMoEScaleDynamicQuantize` | ✅ | TBD | TBD | TBD |
-| MoE | `MojoExperts` | ✅ | TBD | TBD | TBD |
-| MoE | `MojoMoECombine` | ✅ | TBD | TBD | TBD |
-| MoE | `MojoQuantExperts` | ✅ | TBD | TBD | TBD |
-| MoE | `MojoQuantMoE` | ✅ | TBD | TBD | TBD |
-| Norm | `MojoLayerNorm` | ✅ | TBD | ✅ | ✅ |
-| Norm | `MojoRMSNorm` | ✅ | ✅ | ✅ | ✅ |
-| Norm | `MojoGroupLayerNorm` | ✅ | TBD | TBD | TBD |
-| Norm | `MojoGroupRMSNorm` | ✅ | TBD | ✅ | TBD |
-| Norm | `MojoChannelRMSNorm` | ✅ | TBD | TBD | TBD |
-| Norm | `MojoRMSNormQuant` | ✅ | ✅ | TBD | TBD |
-| Norm | `MojoLayerNormQuant` | ✅ | ✅ | TBD | TBD |
-| Norm | `MojoResidualAddRMSNorm` | ✅ | ✅ | ✅ | ✅ |
-| Norm | `MojoResidualAddLayerNorm` | ✅ | TBD | ✅ | ✅ |
-| Norm | `MojoResidualAddRMSNormQuant` | ✅ | ✅ | TBD | TBD |
-| Norm | `MojoResidualAddLayerNormQuant` | ✅ | ✅ | TBD | TBD |
-| Norm | `MojoResidualAddNormCast` | ✅ | TBD | TBD | TBD |
-| PositionEmb | `MojoRotaryEmbedding` | ✅ | TBD | ✅ | TBD |
-| PositionEmb | `MojoRelativeEmbedding` | ✅ | TBD | ✅ | TBD |
-| PositionEmb | `MojoApplyRoPE` | ✅ | ✅ | ✅ | TBD |
-| PositionEmb | `MojoRoPEStoreKV` | ✅ | TBD | TBD | TBD |
-| PositionEmb | `MojoNormRoPE` | ✅ | TBD | TBD | TBD |
-| PositionEmb | `MojoNormRoPEStoreKV` | ✅ | TBD | TBD | TBD |
-| PositionEmb | `MojoGridRoPE` | ✅ | TBD | TBD | TBD |
-| Sampling | `MojoTopPSampling` | ✅ | TBD | ✅ | TBD |
-| Sampling | `MojoTopKSampling` | ✅ | TBD | ✅ | TBD |
-| Sampling | `MojoRejectSampling` | ✅ | TBD | ✅ | TBD |
-| Sampling | `MojoJoinProbRejectSampling` | ✅ | TBD | ✅ | TBD |
-| Sampling | `MojoApplyPenaltiesTempurate` | ✅ | TBD | ✅ | TBD |
-| Sampling | `MojoTopPFilter` | ✅ | TBD | ✅ | TBD |
-| Convolution | `MojoCausalConv1dUpdateState` | ✅ | TBD | ✅ | TBD |
-| MLP | `MojoSwiGLUMLP` | ✅ | TBD | TBD | TBD |
-| Indexer | `MojoLightningIndexer` | ✅ | TBD | ✅ | TBD |
+| Op Category | Op Name | torch native | torch_npu | ttx | ixformer | uc_npu |
+| :---------- | :------ | :----------- | :-------- | :-- | :------- | :----- |
+| Activation | `MojoGelu` | ✅ | ✅ | ✅ | TBD | ✅ |
+| Activation | `MojoSilu` | ✅ | ✅ | ✅ | TBD | ✅ |
+| Activation | `MojoSwiGLU` | ✅ | ✅ | ✅ | TBD | ✅ |
+| Activation | `MojoRotateActivation` | ✅ | TBD | TBD | TBD | TBD |
+| Attention | `MojoPrefillGQA` | ✅ | ✅ | TBD | TBD | TBD |
+| Attention | `MojoPagedPrefillGQA` | ✅ | ✅ | ✅ | ✅ | TBD |
+| Attention | `MojoPrefillMLA` | ✅ | TBD | TBD | TBD | TBD |
+| Attention | `MojoPagedPrefillMLA` | ✅ | TBD | TBD | TBD | TBD |
+| Attention | `MojoPrefillNSA` | ✅ | TBD | TBD | TBD | TBD |
+| Attention | `MojoPagedPrefillNSA` | ✅ | TBD | TBD | TBD | TBD |
+| Attention | `MojoDecodeGQA` | ✅ | TBD | TBD | TBD | TBD |
+| Attention | `MojoPagedDecodeGQA` | ✅ | ✅ | ✅ | ✅ | TBD |
+| Attention | `MojoDecodeMLA` | ✅ | TBD | TBD | TBD | TBD |
+| Attention | `MojoPagedDecodeMLA` | ✅ | TBD | TBD | TBD | TBD |
+| Attention | `MojoDecodeNSA` | ✅ | TBD | TBD | TBD | TBD |
+| Attention | `MojoPagedDecodeNSA` | ✅ | TBD | TBD | TBD | TBD |
+| Attention | `MojoSdpa` | ✅ | TBD | ✅ | TBD | TBD |
+| Attention | `MojoPagedPrefillSWA` | ✅ | TBD | ✅ | TBD | TBD |
+| Attention | `MojoPagedDecodeSWA` | ✅ | TBD | ✅ | TBD | TBD |
+| Attention | `MojoSWA` | ✅ | TBD | ✅ | TBD | TBD |
+| KVCache | `MojoStorePagedKVCache` | ✅ | TBD | ✅ | TBD | TBD |
+| KVCache | `MojoStoreMLAKVCache` | ✅ | TBD | TBD | TBD | TBD |
+| KVCache | `MojoStorePagedMLAKVCache` | ✅ | TBD | TBD | TBD | TBD |
+| Gemm | `MojoGemm` | ✅ | TBD | TBD | TBD | TBD |
+| Gemm | `MojoQuantGemm` | ✅ | ✅ | ✅ | TBD | ✅ |
+| Gemm | `MojoGroupGemm` | ✅ | ✅ | ✅ | TBD | TBD |
+| ComputeComm | `MojoGemmAll2All` | ✅ | TBD | TBD | TBD | TBD |
+| ComputeComm | `MojoAllGatherGemm` | ✅ | TBD | TBD | TBD | TBD |
+| ComputeComm | `MojoGemmAllReduce` | ✅ | TBD | TBD | TBD | TBD |
+| ComputeComm | `MojoGemmReduceScatter` | ✅ | TBD | TBD | TBD | TBD |
+| ComputeComm | `MojoQuantGemmAll2All` | ✅ | TBD | TBD | TBD | TBD |
+| ComputeComm | `MojoAll2AllQuantGemm` | ✅ | TBD | TBD | TBD | TBD |
+| Embedding | `MojoEmbedding` | ✅ | TBD | TBD | TBD | TBD |
+| Embedding | `MojoParallelEmbedding` | ✅ | TBD | TBD | TBD | TBD |
+| OverEncoding | `MojoOverEncoding` | ✅ | TBD | ✅ | TBD | TBD |
+| OverEncoding | `MojoOverEncodingNGram` | ✅ | TBD | ✅ | TBD | TBD |
+| Quantize | `MojoStaticQuant` | ✅ | TBD | ✅ | TBD | TBD |
+| Quantize | `MojoDequant` | ✅ | TBD | TBD | TBD | TBD |
+| Quantize | `MojoDynamicQuant` | ✅ | ✅ | ✅ | TBD | ✅ |
+| Quantize | `MojoMoEDynamicQuant` | ✅ | ✅ | ✅ | TBD | ✅ |
+| Quantize | `MojoDequantSwiGLUQuant` | ✅ | ✅ | TBD | TBD | TBD |
+| MoE | `MojoMoE` | ✅ | TBD | TBD | TBD | TBD |
+| MoE | `MojoMoEGating` | ✅ | TBD | TBD | TBD | TBD |
+| MoE | `MojoMoEDispatch` | ✅ | TBD | TBD | TBD | TBD |
+| MoE | `MojoMoEInitRoutingDynamicQuant` | ✅ | TBD | TBD | TBD | TBD |
+| MoE | `MojoFusedSwiGLUMoEScaleDynamicQuantize` | ✅ | TBD | TBD | TBD | TBD |
+| MoE | `MojoExperts` | ✅ | TBD | TBD | TBD | TBD |
+| MoE | `MojoMoECombine` | ✅ | TBD | TBD | TBD | TBD |
+| MoE | `MojoQuantExperts` | ✅ | TBD | TBD | TBD | TBD |
+| MoE | `MojoQuantMoE` | ✅ | TBD | TBD | TBD | TBD |
+| Norm | `MojoLayerNorm` | ✅ | TBD | ✅ | ✅ | ✅ |
+| Norm | `MojoRMSNorm` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Norm | `MojoGroupLayerNorm` | ✅ | TBD | TBD | TBD | TBD |
+| Norm | `MojoGroupRMSNorm` | ✅ | TBD | ✅ | TBD | TBD |
+| Norm | `MojoChannelRMSNorm` | ✅ | TBD | TBD | TBD | TBD |
+| Norm | `MojoRMSNormQuant` | ✅ | ✅ | TBD | TBD | TBD |
+| Norm | `MojoLayerNormQuant` | ✅ | ✅ | TBD | TBD | TBD |
+| Norm | `MojoResidualAddRMSNorm` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Norm | `MojoResidualAddLayerNorm` | ✅ | TBD | ✅ | ✅ | ✅ |
+| Norm | `MojoResidualAddRMSNormQuant` | ✅ | ✅ | TBD | TBD | TBD |
+| Norm | `MojoResidualAddLayerNormQuant` | ✅ | ✅ | TBD | TBD | TBD |
+| Norm | `MojoResidualAddNormCast` | ✅ | TBD | TBD | TBD | TBD |
+| PositionEmb | `MojoRotaryEmbedding` | ✅ | TBD | ✅ | TBD | ✅ |
+| PositionEmb | `MojoRelativeEmbedding` | ✅ | TBD | ✅ | TBD | TBD |
+| PositionEmb | `MojoApplyRoPE` | ✅ | ✅ | ✅ | TBD | ✅ |
+| PositionEmb | `MojoRoPEStoreKV` | ✅ | TBD | TBD | TBD | TBD |
+| PositionEmb | `MojoNormRoPE` | ✅ | TBD | TBD | TBD | TBD |
+| PositionEmb | `MojoNormRoPEStoreKV` | ✅ | TBD | TBD | TBD | TBD |
+| PositionEmb | `MojoGridRoPE` | ✅ | TBD | TBD | TBD | TBD |
+| Sampling | `MojoTopPSampling` | ✅ | TBD | ✅ | TBD | TBD |
+| Sampling | `MojoTopKSampling` | ✅ | TBD | ✅ | TBD | TBD |
+| Sampling | `MojoRejectSampling` | ✅ | TBD | ✅ | TBD | TBD |
+| Sampling | `MojoJoinProbRejectSampling` | ✅ | TBD | ✅ | TBD | TBD |
+| Sampling | `MojoApplyPenaltiesTempurate` | ✅ | TBD | ✅ | TBD | TBD |
+| Sampling | `MojoTopPFilter` | ✅ | TBD | ✅ | TBD | TBD |
+| Convolution | `MojoCausalConv1dUpdateState` | ✅ | TBD | ✅ | TBD | TBD |
+| MLP | `MojoSwiGLUMLP` | ✅ | TBD | TBD | TBD | TBD |
+| Indexer | `MojoLightningIndexer` | ✅ | TBD | ✅ | TBD | TBD |
 
 ### Experimental Mojo Operator List
 
-| Op Category | Op Name | torch native | torch_npu | ttx | ixformer |
-| :---------- | :------ | :----------- | :-------- | :-- | :------- |
-| Experimental | `MojoQuantBatchGemmReduceSum` | ✅ | ✅ | ✅ | TBD |
-| Experimental | `MojoIndexer` | ✅ | TBD | ✅ | TBD |
-| Experimental | `MojoStoreLowrank` | ✅ | TBD | ✅ | TBD |
+| Op Category | Op Name | torch native | torch_npu | ttx | ixformer | uc_npu |
+| :---------- | :------ | :----------- | :-------- | :-- | :------- | :----- |
+| Experimental | `MojoQuantBatchGemmReduceSum` | ✅ | ✅ | ✅ | TBD | TBD |
+| Experimental | `MojoIndexer` | ✅ | TBD | ✅ | TBD | TBD |
+| Experimental | `MojoStoreLowrank` | ✅ | TBD | ✅ | TBD | TBD |
 
 ### Core Mojo Function List
 
