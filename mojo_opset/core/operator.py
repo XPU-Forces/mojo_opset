@@ -69,11 +69,13 @@ class MojoOperator(ABC, torch.nn.Module):
         self.tensor_factory_kwargs = get_tensor_factory_kwargs(**kwargs)
 
     def _call_impl(self, *args, **kwargs):
-        sig = self._get_forward_signature_repr()
-        shape_repr = self._build_mojo_shape_repr(args, kwargs)
-        name = f"{type(self).__name__}{sig}[{shape_repr}]"
-        with torch.profiler.record_function(f"{name}"):
-            return super()._call_impl(*args, **kwargs)
+        if torch.autograd._profiler_enabled():
+            sig = self._get_forward_signature_repr()
+            shape_repr = self._build_mojo_shape_repr(args, kwargs)
+            name = f"{type(self).__name__}{sig}[{shape_repr}]"
+            with torch.profiler.record_function(name):
+                return super()._call_impl(*args, **kwargs)
+        return super()._call_impl(*args, **kwargs)
 
     @abstractmethod
     def forward(self, *args, **kwargs) -> Tuple[Any]:
@@ -97,19 +99,8 @@ class MojoOperator(ABC, torch.nn.Module):
     @staticmethod
     def _format_tensor_meta(t: torch.Tensor) -> str:
         dtype_str = str(t.dtype).replace("torch.", "")
-        short = {
-            "bfloat16": "bf16",
-            "float16": "fp16",
-            "float32": "fp32",
-            "float64": "fp64",
-            "int32": "i32",
-            "int64": "i64",
-            "int8": "i8",
-            "uint8": "u8",
-            "bool": "b1",
-        }.get(dtype_str, dtype_str)
         shape = ",".join(str(s) for s in t.shape)
-        return f"({shape}){short}"
+        return f"({shape}){dtype_str}"
 
     def _build_mojo_shape_repr(self, args, kwargs) -> str:
         parts = []
