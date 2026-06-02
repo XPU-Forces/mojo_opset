@@ -39,10 +39,16 @@ class UCRotaryEmbedding(MojoRotaryEmbedding):
             assert position_ids.dtype == torch.int32
         assert position_ids is None or cu_q_lens is None, "At most one of cu_q_lens or position_ids should be provided"
 
-        if cu_q_lens is not None or position_ids is not None:
-            # TODO(tilelang-uc): replace with a UC gather kernel once BufferLoad-backed DRAM indices are supported.
-            return super().forward(x, cu_q_lens, total_seq_lens, position_ids)
-        return self._arange_cache(x)
+        if cu_q_lens is not None:
+            assert x.dim() == 2, "x must be 2D: [T, D]"
+            position_ids = self._varlen_position_ids(x, cu_q_lens, total_seq_lens)
+        elif position_ids is not None:
+            assert position_ids.shape == x.shape[:-1], "position_ids must have the same shape as x except the hidden dimension"
+            position_ids = position_ids.contiguous()
+        else:
+            return self._arange_cache(x)
+
+        return self._position_ids_cache(position_ids)
 
     def _arange_cache(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if x.dim() < 2:
@@ -66,8 +72,50 @@ class UCRotaryEmbedding(MojoRotaryEmbedding):
             cos_out,
             sin_out,
             self.cos.shape[0],
-            seq_len,
             rope_dim,
+            seq_len,
+        )
+        return cos_out, sin_out
+
+    @staticmethod
+    def _varlen_position_ids(
+        x: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        total_seq_lens: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        position_ids = torch.empty((x.shape[0],), device=x.device, dtype=torch.int32)
+        q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
+        for i in range(q_lens.numel()):
+            q_len = q_lens[i].item()
+            context_len = 0 if total_seq_lens is None else total_seq_lens[i].item() - q_len
+            position_ids[cu_q_lens[i]:cu_q_lens[i + 1]] = torch.arange(
+                context_len,
+                context_len + q_len,
+                device=cu_q_lens.device,
+                dtype=torch.int32,
+            )
+        return position_ids
+
+    def _position_ids_cache(self, position_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        rope_dim = self.cos.shape[-1]
+        rows = position_ids.numel()
+        output_shape = tuple(position_ids.shape) + (rope_dim,)
+        cos_out = torch.empty(output_shape, device=self.cos.device, dtype=self.cos.dtype)
+        sin_out = torch.empty(output_shape, device=self.sin.device, dtype=self.sin.dtype)
+        if rows == 0 or rope_dim == 0:
+            return cos_out, sin_out
+
+        run_kernel(
+            "mojo_rotary_embedding_position_ids",
+            self.cos.dtype,
+            self.cos.contiguous(),
+            self.sin.contiguous(),
+            position_ids.reshape(-1).contiguous(),
+            cos_out.reshape(rows, rope_dim),
+            sin_out.reshape(rows, rope_dim),
+            self.cos.shape[0],
+            rope_dim,
+            rows,
         )
         return cos_out, sin_out
 
