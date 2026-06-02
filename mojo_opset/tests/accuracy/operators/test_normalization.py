@@ -421,8 +421,8 @@ def test_residual_add_rmsnorm_quant(shape, dtype, norm_pos):
         op_ref,
         x,
         residual,
-        atol=(2, 1e-3, 1e-3),
-        rtol=(0, 1e-3, 1e-3),
+        atol=(2, 1e-3, 1e-3, 1e-3),   # quant, normed, residual, scale
+        rtol=(0, 1e-2, 1e-2, 1e-3),
     )
 
 

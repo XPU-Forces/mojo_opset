@@ -52,19 +52,19 @@ class MojoFusedNormRoPEQuantStore(MojoOperator):
 
         num_norm_groups = (2 if use_query_norm else 0) + (2 if use_key_norm else 0)
         if num_norm_groups > 0:
-            self.qk_norm = MojoGroupRMSNorm(num_norm_groups, head_dim, eps=norm_eps)
+            self.qk_norm = MojoGroupRMSNorm._registry.get(self._backend)(num_norm_groups, head_dim, eps=norm_eps)
         else:
             self.qk_norm = None
 
-        self.apply_rope = MojoApplyRoPE()
+        self.apply_rope = MojoApplyRoPE._registry.get(self._backend)()
 
-        self.full_k_quantize = MojoStaticQuant((num_heads_full_k, head_dim), quant_dtype=quant_dtype)
-        self.full_v_quantize = MojoStaticQuant((num_heads_full_k, head_dim), quant_dtype=quant_dtype)
-        self.swa_k_quantize = MojoStaticQuant((num_heads_swa_k, head_dim), quant_dtype=quant_dtype)
-        self.swa_v_quantize = MojoStaticQuant((num_heads_swa_k, head_dim), quant_dtype=quant_dtype)
+        self.full_k_quantize = MojoStaticQuant._registry.get(self._backend)((num_heads_full_k, head_dim), quant_dtype=quant_dtype)
+        self.full_v_quantize = MojoStaticQuant._registry.get(self._backend)((num_heads_full_k, head_dim), quant_dtype=quant_dtype)
+        self.swa_k_quantize = MojoStaticQuant._registry.get(self._backend)((num_heads_swa_k, head_dim), quant_dtype=quant_dtype)
+        self.swa_v_quantize = MojoStaticQuant._registry.get(self._backend)((num_heads_swa_k, head_dim), quant_dtype=quant_dtype)
 
-        self.store_full_kvcache = MojoStorePagedKVCache()
-        self.store_swa_kvcache = MojoStorePagedKVCache()
+        self.store_full_kvcache = MojoStorePagedKVCache._registry.get(self._backend)()
+        self.store_swa_kvcache = MojoStorePagedKVCache._registry.get(self._backend)()
 
     def forward(
         self,

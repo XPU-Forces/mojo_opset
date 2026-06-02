@@ -5,6 +5,7 @@ from ixformer import functions as ixf_f
 from mojo_opset.core import MojoLayerNorm
 from mojo_opset.core import MojoResidualAddLayerNorm
 from mojo_opset.core import MojoResidualAddRMSNorm
+from mojo_opset.core import MojoResidualAddRMSNormQuant
 from mojo_opset.core import MojoRMSNorm
 from mojo_opset.core import MojoGroupRMSNorm
 
@@ -29,6 +30,51 @@ class IxformerResidualAddRMSNorm(MojoResidualAddRMSNorm):
             is_post=is_post,
         )
         return out, res_out
+
+
+class IxformerResidualAddRMSNormQuant(MojoResidualAddRMSNormQuant):
+    supported_platforms_list = ["ilu"]
+    def __init__(
+        self,
+        norm_size: int,
+        eps: float = 1e-5,
+        norm_pos: str = "pre",
+        quant_dtype: torch.dtype = torch.int8,
+        symmetric: bool = True,
+        **kwargs,
+    ):
+        super().__init__(norm_size, eps, norm_pos, quant_dtype, symmetric, **kwargs)
+
+        if self.quant_dtype != torch.int8:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} only supports int8 quantization "
+                f"(got quant_dtype={self.quant_dtype})."
+            )
+
+        setattr(self.weight, "force_dtype", torch.bfloat16)
+
+    def forward(
+        self,
+        hidden_state: torch.Tensor,
+        residual=None,
+        smooth_scale=None,
+    ):
+
+        is_post = self.norm_pos == "post"
+
+        quant_output, normed_output, residual_output, scale = ixf_f.residual_rms_norm_with_quant(
+            hidden_state,
+            self.weight,
+            residual=residual,
+            residual_bias=None,
+            eps=self.variance_epsilon,
+            smooth_scales=smooth_scale,
+            is_post=is_post,
+            return_normed=True,
+        )
+
+        scale = scale.reshape(*hidden_state.shape[:-1], 1)
+        return quant_output, normed_output, residual_output, scale
 
 
 class IxformerResidualAddLayerNorm(MojoResidualAddLayerNorm):
