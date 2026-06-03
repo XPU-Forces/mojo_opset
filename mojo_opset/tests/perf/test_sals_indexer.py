@@ -9,7 +9,7 @@ from mojo_opset.tests.utils import bypass_not_implemented
 HEAD_DIM = 128
 SPARSE_BLOCK_SIZE = 64
 DEFAULT_SPARSE_RATIO = 0.25
-DEFAULT_FIXED_TAIL = 8
+DEFAULT_FIXED_TAIL = 4
 
 MODEL_SPECS = [
     ("new_model_1", 2),
@@ -38,6 +38,25 @@ LARGE_PREFILL_SCENARIOS = [
     (81920,  256, 1024, 256),
     (131072, 256, 256,  64),
 ]
+
+# Custom test cases as specified:
+# q_len = 4096, kv_len = 16384/32768/65536, q_head_num = 3/4, kv_head_num = 1, sparse_block_size = 64, fixed_tail_blocks = 4
+CUSTOM_SCENARIOS = [
+    (4096, 3, 1, 16384, 64, 4),
+    (4096, 3, 1, 32768, 64, 4),
+    (4096, 3, 1, 65536, 64, 4),
+    (4096, 4, 1, 16384, 64, 4),
+    (4096, 4, 1, 32768, 64, 4),
+    (4096, 4, 1, 65536, 64, 4),
+]
+
+_CUSTOM_PARAMS = []
+for _s in CUSTOM_SCENARIOS:
+    q_seqlen, q_head_num, kv_head_num, kv_seqlen, cache_block_size, fixed_tail = _s
+    _CUSTOM_PARAMS.append(pytest.param(
+        q_seqlen, q_head_num, kv_head_num, kv_seqlen, cache_block_size, fixed_tail,
+        id=f"q{q_seqlen}-qhead{q_head_num}-kvhead{kv_head_num}-kv{kv_seqlen}-cache_block_size{cache_block_size}-fixed_tail{fixed_tail}",
+    ))
 
 _SMALL_MODEL = MODEL_SPECS[0]  # new_model_1
 
@@ -108,3 +127,49 @@ def test_sals_indexer_large_perf(q_seqlen, share_len, kv_seqlen, cache_block_siz
     perf(lambda: indexer(query, key, block_table, actual_seq_lengths_key, act_n_counts,
                          sbs, sparse_ratio, fixed_tail_count, sparse_count,
                          score_mode, max_seqlen_key))
+
+
+@pytest.mark.parametrize(
+    "q_seqlen,q_head_num,kv_head_num,kv_seqlen,cache_block_size,fixed_tail",
+    _CUSTOM_PARAMS,
+)
+@auto_switch_platform(set_perf=True)
+@bypass_not_implemented
+def test_sals_indexer_custom_perf(q_seqlen, q_head_num, kv_head_num, kv_seqlen, cache_block_size, fixed_tail):
+    G = q_head_num
+    sparse_ratio = 0.25
+    sbs = SPARSE_BLOCK_SIZE
+    device = "npu" if torch.npu.is_available() else "cpu"
+    
+    max_seqlen = kv_seqlen
+    max_bpg = max((max_seqlen + cache_block_size - 1) // cache_block_size, 1)
+    num_phys = max_bpg * G + 4
+    
+    max_count = max((max_seqlen + sbs - 1) // sbs, 0)
+    fixed_tail_count = min(fixed_tail, max_count)
+    sparse_count = max(1, min(
+        int((max_count - fixed_tail_count) * sparse_ratio + 0.5) + fixed_tail_count,
+        max_count,
+    ))
+    
+    query = torch.randn(G, kv_head_num, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    key = torch.randn(num_phys, cache_block_size, kv_head_num, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    
+    block_table = torch.zeros(G, max_bpg, dtype=torch.int32, device=device)
+    for g in range(G):
+        n_blks = min(max_bpg, num_phys)
+        perm = torch.randperm(num_phys, device=device)[:n_blks].to(torch.int32)
+        block_table[g, :n_blks] = perm
+        if n_blks < max_bpg:
+            block_table[g, n_blks:] = perm[-1]
+    
+    actual_seq_lengths_key = torch.tensor([kv_seqlen] * G, dtype=torch.int32, device=device)
+    act_n_counts = torch.tensor(
+        [(max(kv_seqlen, 0) + sbs - 1) // sbs] * G,
+        dtype=torch.int32, device=device,
+    )
+    
+    indexer = MojoSALSIndexer()
+    perf(lambda: indexer(query, key, block_table, actual_seq_lengths_key, act_n_counts,
+                         sbs, sparse_ratio, fixed_tail_count, sparse_count,
+                         "lse", max_seqlen))
