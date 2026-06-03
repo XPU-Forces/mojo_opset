@@ -25,6 +25,11 @@ class IxformerFusedNormRoPEQuantStore(MojoFusedNormRoPEQuantStore):
             raise NotImplementedError(
                 f"ixformer fused kernel only supports head_dim=128, got {self.head_dim}"
             )
+        if not (self.use_query_norm and self.use_key_norm):
+            raise NotImplementedError(
+                f"ixformer fused kernel only supports use_query_norm and use_key_norm, got {self.use_query_norm} and {self.use_key_norm}"
+            )
+
         self.register_load_state_dict_post_hook(self._convert_norm_weight_to_bf16)
 
     @staticmethod
@@ -46,7 +51,7 @@ class IxformerFusedNormRoPEQuantStore(MojoFusedNormRoPEQuantStore):
             cu_q_lens = torch.arange(
                 batch_size + 1, dtype=torch.int32, device=query.device
             )
-        output_q, key_quant, key_scale, value_quant, value_scale = (
+        output_q, key_quant, value_quant = (
             ixf_f.rms_norm_qk_rotary_embedding_quant_kv_and_store(
                 cos, sin,
                 query, key, value,
@@ -58,7 +63,7 @@ class IxformerFusedNormRoPEQuantStore(MojoFusedNormRoPEQuantStore):
                 eps=eps, is_neox_style=True, rotary_dim=rotary_dim,
             )
         )
-        return output_q, key_quant, key_scale, value_quant, value_scale
+        return output_q, key_quant, value_quant
 
     def _run_stream_no_update(
         self, query, key, weight_q, weight_k,
@@ -114,7 +119,7 @@ class IxformerFusedNormRoPEQuantStore(MojoFusedNormRoPEQuantStore):
                 None, None, None, None, None, None, None, None,
             )
 
-        swa_q_out, swa_key_q, swa_k_scale, swa_val_q, swa_v_scale = self._run_stream_update_kv(
+        swa_q_out, swa_key_q, swa_val_q = self._run_stream_update_kv(
             swa_query, swa_key, swa_value, swa_wq, swa_wk,
             swa_ks, swa_vs,
             cos, sin, rotary_dim,
@@ -122,7 +127,7 @@ class IxformerFusedNormRoPEQuantStore(MojoFusedNormRoPEQuantStore):
             block_tables_sparse, cu_q_lens_sparse, context_kv_lens_sparse, eps,
         )
 
-        full_q_out, full_key_q, full_k_scale, full_val_q, full_v_scale = self._run_stream_update_kv(
+        full_q_out, full_key_q, full_val_q = self._run_stream_update_kv(
             full_query, full_key, full_value, full_wq, full_wk,
             full_ks, full_vs,
             cos, sin, rotary_dim,
@@ -132,8 +137,8 @@ class IxformerFusedNormRoPEQuantStore(MojoFusedNormRoPEQuantStore):
 
         return (
             swa_q_out, full_q_out,
-            full_key_q, full_k_scale,
-            swa_key_q, swa_k_scale,
-            full_val_q, full_v_scale,
-            swa_val_q, swa_v_scale,
+            full_key_q, full_ks,
+            swa_key_q, swa_ks,
+            full_val_q, full_vs,
+            swa_val_q, swa_vs,
         )
