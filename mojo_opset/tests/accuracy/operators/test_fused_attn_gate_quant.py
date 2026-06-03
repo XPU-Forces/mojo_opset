@@ -65,13 +65,22 @@ def test_fused_attn_gate_quant(seq_len, hidden_size, num_heads_full, num_heads_s
         bias=bias,
         dtype=dtype,
     )
-    for p in op_ref.parameters():
-        nn.init.normal_(p, std=0.02)
 
-    op.load_state_dict(op_ref.state_dict())
+    for name, p in op_ref.named_parameters():
+        if name != "o_quantize.inv_smooth_scale":
+            nn.init.normal_(p, std=0.02)
+    
+    output_size = (num_heads_full + num_heads_swa) * head_dim
+    smooth_scale = torch.rand(output_size, dtype=torch.float32) + 0.1
+    inv_smooth_scale = 1.0 / smooth_scale
+    state_dict = op_ref.state_dict()
+    state_dict["o_quantize.inv_smooth_scale"] = inv_smooth_scale
+    op_ref.load_state_dict(state_dict)
+    op.load_state_dict(state_dict)
+    assert op.attn_gate._cached_weight is not None
 
     hidden_states = torch.randn(seq_len, hidden_size, dtype=dtype)
     full_attn_output = torch.randn(seq_len, num_heads_full, head_dim, dtype=dtype)
     swa_attn_output = torch.randn(seq_len, num_heads_swa, head_dim, dtype=dtype)
 
-    op.forward_diff_with(op_ref, hidden_states, full_attn_output, swa_attn_output, mixed_tol=True)
+    op.forward_diff_with(op_ref, hidden_states, full_attn_output, swa_attn_output, atol=(1, 1e-3), rtol=(0, 1e-3))
