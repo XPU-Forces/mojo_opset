@@ -15,7 +15,7 @@ class UCDynamicQuant(MojoDynamicQuant):
             raise ValueError("input must have at least one dimension.")
         if input.numel() == 0:
             output = torch.empty_like(input, dtype=torch.int8)
-            scale = torch.empty(*input.shape[:-1], 1, dtype=torch.float32, device=input.device)
+            scale = torch.empty((*input.shape[:-1], 1), dtype=torch.float32, device=input.device)
             return output, scale
 
         kernel_input = input.contiguous()
@@ -38,7 +38,6 @@ class UCDynamicQuant(MojoDynamicQuant):
             rows,
             cols,
         )
-        torch.npu.synchronize()
         return kernel_output.reshape(input.shape), kernel_scale.reshape(*input.shape[:-1], 1)
 
 
@@ -61,13 +60,6 @@ class UCMoEDynamicQuant(MojoMoEDynamicQuant):
         rows, cols = _matrix_shape(kernel_input)
         if cols != self.input_size:
             raise ValueError(f"input last dimension must equal input_size {self.input_size}, got {cols}.")
-        kernel_api = {
-            64: "mojo_moe_dynamic_quant_64",
-            128: "mojo_moe_dynamic_quant_128",
-            256: "mojo_moe_dynamic_quant_256",
-        }.get(cols)
-        if kernel_api is None:
-            raise NotImplementedError("UC MoE dynamic quant currently supports input_size 64, 128, or 256.")
 
         token_total = int(token_count.sum().item())
         if token_total != rows:
@@ -75,25 +67,27 @@ class UCMoEDynamicQuant(MojoMoEDynamicQuant):
 
         if input.numel() == 0:
             output = torch.empty_like(input, dtype=torch.int8)
-            scale = torch.empty(*input.shape[:-1], 1, dtype=torch.float32, device=input.device)
+            scale = torch.empty((*input.shape[:-1], 1), dtype=torch.float32, device=input.device)
             return output, scale
 
-        kernel_input_2d = kernel_input.reshape(rows, cols)
-        kernel_output = torch.empty_like(kernel_input_2d, dtype=torch.int8)
-        kernel_scale = torch.empty((rows,), dtype=torch.float32, device=kernel_input.device)
         inv_smooth_scale = self.inv_smooth_scale.to(device=kernel_input.device, dtype=torch.float32).contiguous()
         token_count_device = token_count.to(device=kernel_input.device, dtype=torch.int64)
         expanded_inv_smooth_scale = inv_smooth_scale.repeat_interleave(token_count_device, dim=0).contiguous()
+        scaled_input = (kernel_input.float().reshape(rows, cols) * expanded_inv_smooth_scale).to(kernel_input.dtype)
+
+        kernel_input_2d = scaled_input.contiguous()
+        kernel_output = torch.empty_like(kernel_input_2d, dtype=torch.int8)
+        kernel_scale = torch.empty((rows,), dtype=torch.float32, device=kernel_input.device)
+        dynamic_inv_smooth_scale = torch.ones((cols,), dtype=torch.float32, device=kernel_input.device)
 
         run_kernel(
-            kernel_api,
-            kernel_input.dtype,
+            "mojo_dynamic_quant",
+            kernel_input_2d.dtype,
             kernel_input_2d,
-            expanded_inv_smooth_scale,
+            dynamic_inv_smooth_scale,
             kernel_output,
             kernel_scale,
             rows,
             cols,
         )
-        torch.npu.synchronize()
         return kernel_output.reshape(input.shape), kernel_scale.reshape(*input.shape[:-1], 1)

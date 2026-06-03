@@ -5,8 +5,12 @@ import torch
 
 from mojo_opset.core import MojoApplyRoPE
 from mojo_opset.core import MojoRotaryEmbedding
+from mojo_opset.utils.logging import get_logger
 
 from ._utils import run_kernel
+
+
+logger = get_logger(__name__)
 
 
 class UCRotaryEmbedding(MojoRotaryEmbedding):
@@ -40,8 +44,10 @@ class UCRotaryEmbedding(MojoRotaryEmbedding):
         assert position_ids is None or cu_q_lens is None, "At most one of cu_q_lens or position_ids should be provided"
 
         if cu_q_lens is not None:
-            assert x.dim() == 2, "x must be 2D: [T, D]"
-            position_ids = self._varlen_position_ids(x, cu_q_lens, total_seq_lens)
+            logger.warning_once(
+                "UC rotary embedding does not support varlen mode yet; falling back to torch implementation."
+            )
+            return super().forward(x, cu_q_lens, total_seq_lens, position_ids)
         elif position_ids is not None:
             assert position_ids.shape == x.shape[:-1], "position_ids must have the same shape as x except the hidden dimension"
             position_ids = position_ids.contiguous()
@@ -77,25 +83,6 @@ class UCRotaryEmbedding(MojoRotaryEmbedding):
         )
         return cos_out, sin_out
 
-    @staticmethod
-    def _varlen_position_ids(
-        x: torch.Tensor,
-        cu_q_lens: torch.Tensor,
-        total_seq_lens: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        position_ids = torch.empty((x.shape[0],), device=x.device, dtype=torch.int32)
-        q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
-        for i in range(q_lens.numel()):
-            q_len = q_lens[i].item()
-            context_len = 0 if total_seq_lens is None else total_seq_lens[i].item() - q_len
-            position_ids[cu_q_lens[i]:cu_q_lens[i + 1]] = torch.arange(
-                context_len,
-                context_len + q_len,
-                device=cu_q_lens.device,
-                dtype=torch.int32,
-            )
-        return position_ids
-
     def _position_ids_cache(self, position_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         rope_dim = self.cos.shape[-1]
         rows = position_ids.numel()
@@ -122,6 +109,13 @@ class UCRotaryEmbedding(MojoRotaryEmbedding):
 
 class UCApplyRoPE(MojoApplyRoPE):
     supported_platforms_list = ["npu"]
+    _STATIC_APPLY_ROPE_CONFIGS = frozenset(
+        {
+            (32, 8, 96, 96, torch.float16),
+            (8, 2, 96, 32, torch.bfloat16),
+            (16, 8, 128, 128, torch.float16),
+        }
+    )
 
     @staticmethod
     def _normalize_to_token_head(
@@ -131,28 +125,27 @@ class UCApplyRoPE(MojoApplyRoPE):
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[int], Optional[int]]:
         if q.ndim == 3:
             if head_first:
-                q_norm = q.transpose(0, 1).contiguous()
-                k_norm = k.transpose(0, 1).contiguous()
+                q = q.transpose(0, 1).contiguous()
+                k = k.transpose(0, 1).contiguous()
             else:
-                q_norm = q.contiguous()
-                k_norm = k.contiguous()
-            return q_norm, k_norm, None, None
+                q = q.contiguous()
+                k = k.contiguous()
+            return q, k, None, None
 
         if head_first:
-            q_norm = q.transpose(1, 2).contiguous()
-            k_norm = k.transpose(1, 2).contiguous()
+            q = q.transpose(1, 2).contiguous()
+            k = k.transpose(1, 2).contiguous()
         else:
-            q_norm = q.contiguous()
-            k_norm = k.contiguous()
+            q = q.contiguous()
+            k = k.contiguous()
 
-        batch_size, seq_len, q_heads, head_dim = q_norm.shape
-        k_heads = k_norm.shape[2]
-        q_norm = q_norm.reshape(batch_size * seq_len, q_heads, head_dim).contiguous()
-        k_norm = k_norm.reshape(batch_size * seq_len, k_heads, head_dim).contiguous()
-        return q_norm, k_norm, batch_size, seq_len
+        batch_size, seq_len = q.shape[0], q.shape[1]
+        q = q.reshape(batch_size * seq_len, q.shape[2], q.shape[3]).contiguous()
+        k = k.reshape(k.shape[0] * k.shape[1], k.shape[2], k.shape[3]).contiguous()
+        return q, k, batch_size, seq_len
 
     @staticmethod
-    def _restore_layout(
+    def _restore_from_token_head(
         x: torch.Tensor,
         original_shape: torch.Size,
         head_first: bool,
@@ -161,87 +154,27 @@ class UCApplyRoPE(MojoApplyRoPE):
     ) -> torch.Tensor:
         if len(original_shape) == 3:
             if head_first:
-                return x.transpose(0, 1).contiguous().reshape(original_shape)
+                x = x.transpose(0, 1).contiguous()
             return x.reshape(original_shape)
 
-        assert batch_size is not None and seq_len is not None
         x = x.reshape(batch_size, seq_len, x.shape[1], x.shape[2])
         if head_first:
             x = x.transpose(1, 2).contiguous()
         return x.reshape(original_shape)
 
     @staticmethod
-    def _flatten_cos_sin(
+    def _run_static_token_head_kernel(
+        api: str,
+        q: torch.Tensor,
+        k: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        rows: int,
-        batch_size: Optional[int],
-        seq_len: Optional[int],
-        half_dim: int,
+        *shape_args: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if cos.dtype != torch.float32 or sin.dtype != torch.float32:
-            raise NotImplementedError("UC backend MojoApplyRoPE expects float32 cos/sin tensors.")
-
-        if cos.ndim == 2:
-            if cos.shape[0] == rows:
-                cos_flat = cos
-                sin_flat = sin
-            elif batch_size is not None and seq_len is not None and cos.shape[0] == seq_len:
-                cos_flat = cos.unsqueeze(0).expand(batch_size, seq_len, cos.shape[1]).reshape(rows, cos.shape[1])
-                sin_flat = sin.unsqueeze(0).expand(batch_size, seq_len, sin.shape[1]).reshape(rows, sin.shape[1])
-            else:
-                raise ValueError(
-                    f"cos/sin first dimension must be {rows} or padded seq_len {seq_len}, got {cos.shape}."
-                )
-        elif cos.ndim == 3:
-            if batch_size is None or seq_len is None:
-                raise ValueError("3D cos/sin are only valid for 4D q/k inputs.")
-            if cos.shape[0] != batch_size or cos.shape[1] != seq_len:
-                raise ValueError(f"3D cos/sin must have shape [B, S, D], got {cos.shape}.")
-            cos_flat = cos.reshape(rows, cos.shape[-1])
-            sin_flat = sin.reshape(rows, sin.shape[-1])
-        else:
-            raise ValueError(f"cos/sin must be 2D or 3D, got {cos.ndim}D.")
-
-        return cos_flat[:, :half_dim].contiguous(), sin_flat[:, :half_dim].contiguous()
-
-    @staticmethod
-    def _apply_one(
-        x: torch.Tensor,
-        cos_half: torch.Tensor,
-        sin_half: torch.Tensor,
-        rope_dim: int,
-    ) -> torch.Tensor:
-        rows, heads, head_dim = x.shape
-        half_dim = rope_dim // 2
-        nope_dim = head_dim - rope_dim
-
-        if half_dim == 0:
-            return x.clone(memory_format=torch.contiguous_format)
-
-        x_rope = x[..., nope_dim:]
-        x1 = x_rope[..., :half_dim].contiguous()
-        x2 = x_rope[..., half_dim:].contiguous()
-        y1 = torch.empty_like(x1)
-        y2 = torch.empty_like(x2)
-
-        run_kernel(
-            "mojo_apply_rope",
-            x.dtype,
-            x1,
-            x2,
-            cos_half,
-            sin_half,
-            y1,
-            y2,
-            rows,
-            heads,
-            half_dim,
-        )
-
-        if nope_dim > 0:
-            return torch.cat((x[..., :nope_dim], y1, y2), dim=-1)
-        return torch.cat((y1, y2), dim=-1)
+        q_out = q.clone(memory_format=torch.contiguous_format)
+        k_out = k.clone(memory_format=torch.contiguous_format)
+        run_kernel(api, q.dtype, q, k, cos, sin, q_out, k_out, *shape_args)
+        return q_out, k_out
 
     def forward(
         self,
@@ -254,35 +187,50 @@ class UCApplyRoPE(MojoApplyRoPE):
         assert q.ndim == k.ndim, "q and k must have the same dimension"
         assert q.ndim == 3 or q.ndim == 4, "q and k must be 3D or 4D"
         assert cos.shape == sin.shape, "cos and sin must have the same shape"
-        assert q.shape[-1] == k.shape[-1], "q and k must have the same head dimension"
+        if q.ndim == 3:
+            assert cos.ndim == 2, "3D q/k inputs expect 2D cos/sin"
+        elif cos.ndim not in (2, 3):
+            raise ValueError("4D q/k inputs expect 2D or 3D cos/sin")
+
+        if q.dtype != k.dtype:
+            raise ValueError(f"q and k must have the same dtype, got {q.dtype} and {k.dtype}.")
+        if cos.dtype != torch.float32 or sin.dtype != torch.float32:
+            raise NotImplementedError("UC backend MojoApplyRoPE expects float32 cos/sin tensors.")
 
         if q.numel() == 0 or k.numel() == 0:
             return torch.empty_like(q), torch.empty_like(k)
 
         rope_dim = cos.shape[-1]
-        head_dim = q.shape[-1]
-        if rope_dim % 2 != 0:
-            raise ValueError(f"rope_dim must be even, got {rope_dim}.")
-        if rope_dim > head_dim:
-            raise ValueError(f"rope_dim {rope_dim} exceeds head_dim {head_dim}.")
-
         q_norm, k_norm, batch_size, seq_len = self._normalize_to_token_head(q, k, head_first)
-        if q_norm.shape[0] != k_norm.shape[0]:
-            raise ValueError(f"q and k token counts must match, got {q_norm.shape[0]} and {k_norm.shape[0]}.")
+        rows, q_heads, head_dim = q_norm.shape
+        k_rows, k_heads, k_head_dim = k_norm.shape
+        if rows != k_rows or head_dim != k_head_dim:
+            raise ValueError("q and k must have matching token count and head dimension")
 
-        cos_half, sin_half = self._flatten_cos_sin(
-            cos,
-            sin,
-            q_norm.shape[0],
-            batch_size,
-            seq_len,
-            rope_dim // 2,
+        config_key = (q_heads, k_heads, head_dim, rope_dim, q_norm.dtype)
+        if config_key not in self._STATIC_APPLY_ROPE_CONFIGS:
+            raise NotImplementedError(
+                "UC backend MojoApplyRoPE does not provide an aligned static kernel for "
+                f"q_heads={q_heads}, k_heads={k_heads}, head_dim={head_dim}, "
+                f"rope_dim={rope_dim}, dtype={q_norm.dtype}."
+            )
+
+        if cos.ndim == 2:
+            cos_kind = "cos2d"
+            cos_kernel = cos.contiguous()
+            sin_kernel = sin.contiguous()
+            shape_args = (rows, cos.shape[0])
+        else:
+            cos_kind = "costoken"
+            cos_kernel = cos.reshape(rows, rope_dim).contiguous()
+            sin_kernel = sin.reshape(rows, rope_dim).contiguous()
+            shape_args = (rows,)
+
+        api = f"mojo_apply_rope_tnh_q{q_heads}_k{k_heads}_d{head_dim}_r{rope_dim}_{cos_kind}"
+        q_out, k_out = self._run_static_token_head_kernel(
+            api, q_norm, k_norm, cos_kernel, sin_kernel, *shape_args
         )
-
-        q_out = self._apply_one(q_norm, cos_half, sin_half, rope_dim)
-        k_out = self._apply_one(k_norm, cos_half, sin_half, rope_dim)
-
         return (
-            self._restore_layout(q_out, q.shape, head_first, batch_size, seq_len),
-            self._restore_layout(k_out, k.shape, head_first, batch_size, seq_len),
+            self._restore_from_token_head(q_out, q.shape, head_first, batch_size, seq_len),
+            self._restore_from_token_head(k_out, k.shape, head_first, batch_size, seq_len),
         )

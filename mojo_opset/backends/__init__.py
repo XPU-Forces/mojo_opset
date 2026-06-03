@@ -12,12 +12,13 @@ if is_deterministic:
     if platform == "npu":
         import os
 
-        # special setting for npu deterministic matmul
-        os.environ["CLOSE_MATMUL_K_SHIFT"] = "1"
+        # Default for deterministic NPU matmul; respect explicit user/CANN settings.
+        os.environ.setdefault("CLOSE_MATMUL_K_SHIFT", "1")
     configure_torch_deterministic()
 
 _SUPPORT_TTX_PLATFROM = ["npu", "ilu", "mlu"]
 _SUPPORT_TORCH_NPU_PLATFROM = ["npu"]
+_SUPPORT_UC_PLATFORM = ["npu"]
 _SUPPORT_IXFORMER_PLATFORM = ["ilu"]
 
 if platform in _SUPPORT_IXFORMER_PLATFORM:
@@ -35,14 +36,8 @@ if platform in _SUPPORT_TTX_PLATFROM:
 if platform in _SUPPORT_TORCH_NPU_PLATFROM:
     from .torch_npu import *
 
-if platform in _SUPPORT_TORCH_NPU_PLATFROM:
+if platform in _SUPPORT_UC_PLATFORM:
     try:
         from .uc import *
     except ImportError as e:
         logger.warning("Skipping uc backend (import failed): %s", e)
-
-if platform == "npu" and get_bool_env("MOJO_DETERMINISTIC", default=False):
-    import os
-
-    # special setting for npu deterministic matmul
-    os.environ["CLOSE_MATMUL_K_SHIFT"] = "1"

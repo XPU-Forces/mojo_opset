@@ -19,17 +19,17 @@ class UCRMSNorm(MojoRMSNorm):
         kernel_input = hidden_state.contiguous()
         rows, cols = _matrix_shape(kernel_input)
         kernel_output = torch.empty_like(kernel_input)
-        eps = torch.full((rows,), float(self.variance_epsilon), dtype=torch.float32, device=kernel_input.device)
+        eps = float(self.variance_epsilon)
 
         run_kernel(
             "mojo_rmsnorm",
             kernel_input.dtype,
             kernel_input,
             self.weight.contiguous(),
-            eps,
             kernel_output,
             rows,
             cols,
+            eps,
         )
         return kernel_output.reshape(hidden_state.shape)
 
@@ -59,7 +59,7 @@ class UCResidualAddRMSNorm(MojoResidualAddRMSNorm):
         rows, cols = _matrix_shape(kernel_input)
         kernel_output = torch.empty_like(kernel_input)
         kernel_residual_output = torch.empty_like(kernel_input)
-        eps = torch.full((rows,), float(self.variance_epsilon), dtype=torch.float32, device=kernel_input.device)
+        eps = float(self.variance_epsilon)
 
         run_kernel(
             "mojo_residual_add_rmsnorm",
@@ -67,11 +67,11 @@ class UCResidualAddRMSNorm(MojoResidualAddRMSNorm):
             kernel_input,
             kernel_residual,
             self.weight.contiguous(),
-            eps,
             kernel_output,
             kernel_residual_output,
             rows,
             cols,
+            eps,
         )
 
         output = kernel_output.reshape(hidden_state.shape)
@@ -108,7 +108,7 @@ class UCResidualAddLayerNorm(MojoResidualAddLayerNorm):
         rows, cols = _matrix_shape(kernel_input)
         kernel_output = torch.empty_like(kernel_input)
         kernel_residual_output = torch.empty_like(kernel_input)
-        eps = torch.full((rows,), float(self.variance_epsilon), dtype=torch.float32, device=kernel_input.device)
+        eps = float(self.variance_epsilon)
 
         run_kernel(
             "mojo_residual_add_layernorm",
@@ -117,11 +117,11 @@ class UCResidualAddLayerNorm(MojoResidualAddLayerNorm):
             kernel_residual,
             self.weight.contiguous(),
             self.bias.contiguous(),
-            eps,
             kernel_output,
             kernel_residual_output,
             rows,
             cols,
+            eps,
         )
 
         output = kernel_output.reshape(hidden_state.shape)
@@ -143,7 +143,7 @@ class UCLayerNorm(MojoLayerNorm):
         kernel_input = hidden_state.contiguous()
         rows, cols = _matrix_shape(kernel_input)
         kernel_output = torch.empty_like(kernel_input)
-        eps = torch.full((rows,), float(self.variance_epsilon), dtype=torch.float32, device=kernel_input.device)
+        eps = float(self.variance_epsilon)
 
         run_kernel(
             "mojo_layernorm",
@@ -151,9 +151,9 @@ class UCLayerNorm(MojoLayerNorm):
             kernel_input,
             self.weight.contiguous(),
             self.bias.contiguous(),
-            eps,
             kernel_output,
             rows,
             cols,
+            eps,
         )
         return kernel_output.reshape(hidden_state.shape)

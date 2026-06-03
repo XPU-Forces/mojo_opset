@@ -4,11 +4,6 @@ from mojo_opset.core import MojoQuantGemm
 
 from ._utils import _uc_kernels
 
-try:
-    from torch.distributed.tensor import DTensor
-except ImportError:  # pragma: no cover - older torch builds
-    DTensor = ()
-
 
 _OUTPUT_DTYPE_SUFFIX = {
     torch.float16: "fp16",
@@ -26,12 +21,6 @@ def _require_kernel(api: str):
     return kernels[api]
 
 
-def _to_local_tensor(tensor: torch.Tensor) -> torch.Tensor:
-    if DTensor and isinstance(tensor, DTensor):
-        return tensor.to_local()
-    return tensor
-
-
 class UCQuantGemm(MojoQuantGemm):
     supported_platforms_list = ["npu"]
 
@@ -44,10 +33,8 @@ class UCQuantGemm(MojoQuantGemm):
             weight = self.weight.t().contiguous()
         else:
             weight = self.weight
-        weight = _to_local_tensor(weight)
-        input = _to_local_tensor(input)
-        input_scale = _to_local_tensor(input_scale).flatten().float().contiguous()
-        weight_scale = _to_local_tensor(self.weight_scale).flatten().float().contiguous()
+        input_scale = input_scale.flatten().float().contiguous()
+        weight_scale = self.weight_scale.flatten().float().contiguous()
         if not input.is_contiguous():
             input = input.contiguous()
         if not weight.is_contiguous():

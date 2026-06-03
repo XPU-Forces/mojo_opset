@@ -34,8 +34,6 @@ def _typed_api(api: str, dtype: torch.dtype) -> str:
     typed_api = f"{api}_{suffix}"
     if typed_api in kernels.keys():
         return typed_api
-    if dtype == torch.float16 and api in kernels.keys():
-        return api
     raise NotImplementedError(f"UC backend {api} does not provide a {suffix} kernel artifact.")
 
 
