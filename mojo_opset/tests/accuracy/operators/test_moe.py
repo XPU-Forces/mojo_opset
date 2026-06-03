@@ -4,10 +4,57 @@ import pytest
 import torch
 import torch.nn as nn
 
+from mojo_opset import MojoExperts
 from mojo_opset import MojoMoE
+from mojo_opset import MojoExperts
 from mojo_opset import MojoMoEGating
 from mojo_opset.utils.platform import get_torch_device
 from mojo_opset.tests.utils import bypass_not_implemented
+
+
+@pytest.mark.parametrize(
+    "num_experts, top_k, hidden_size, intermediate_size, num_tokens",
+    [
+        (16, 4, 1024, 2048, 64),
+        (32, 8, 1024, 4096, 128),
+        (64, 8, 1024, 4096, 256),
+        (64, 8, 1024, 4096, 1024),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@bypass_not_implemented
+def test_experts(num_experts, top_k, hidden_size, intermediate_size, num_tokens, dtype):
+    device = get_torch_device()
+    torch.manual_seed(0)
+
+    # Note: use 2 * num_experts to mimic EP scenarios
+    expert_indices = torch.randint(0, num_experts * 2, (num_tokens, top_k))
+
+    token_count = torch.bincount(expert_indices.flatten())[:num_experts].to(torch.int32).to(device)
+    total_tokens = int(token_count.sum().item())
+    input_fp = torch.randn(total_tokens, hidden_size, dtype=dtype, device=device)
+
+    moe = MojoExperts(
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+    )
+
+    moe_ref = MojoExperts._registry.get("torch")(
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+    )
+
+    moe = moe.to(dtype).to(device)
+    moe_ref = moe_ref.to(dtype).to(device)
+
+    for p in moe_ref.parameters():
+        nn.init.normal_(p, std=0.02)
+
+    moe.load_state_dict(moe_ref.state_dict())
+
+    moe.forward_diff_with(moe_ref, input_fp, token_count, mixed_tol=True)
 
 
 @pytest.mark.parametrize(
@@ -39,16 +86,16 @@ def test_moe(num_experts, top_k, hidden_size, intermediate_size, num_tokens, dty
         intermediate_size=intermediate_size,
     )
 
-    for p in moe_ref.parameters():
-        nn.init.normal_(p, std=0.02)
-
     moe = moe.to(dtype).to(device)
     moe_ref = moe_ref.to(dtype).to(device)
-    moe.load_state_dict(moe_ref.state_dict())
-
     # FIXME: moe.gating.gate_weight.data should not be casted to float32
     moe.gating.gate_weight.data = moe.gating.gate_weight.data.float()
     moe_ref.gating.gate_weight.data = moe_ref.gating.gate_weight.data.float()
+
+    for p in moe_ref.parameters():
+        nn.init.normal_(p, std=0.02)
+
+    moe.load_state_dict(moe_ref.state_dict())
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device=device)
     moe.forward_diff_with(moe_ref, x, mixed_tol=True)
