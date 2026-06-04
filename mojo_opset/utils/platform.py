@@ -86,12 +86,19 @@ def get_impl_by_platform():
         caller_frame = inspect.stack()[1]
         caller_module = inspect.getmodule(caller_frame[0])
 
-        if not caller_module or not hasattr(caller_module, "__file__"):
+        caller_file = getattr(caller_module, "__file__", None) if caller_module else None
+        caller_file = caller_file or caller_frame.filename
+        if not caller_file:
             logger.error("Could not determine the caller's module file path. Cannot discover operators.")
             return {}
 
-        caller_dir = os.path.dirname(caller_module.__file__)
-        package_name = getattr(caller_module, "__package__", "")
+        caller_dir = os.path.dirname(caller_file)
+        package_name = getattr(caller_module, "__package__", "") if caller_module else ""
+        if not package_name:
+            path_parts = os.path.normpath(caller_dir).split(os.sep)
+            package_root = next((part for part in path_parts if part in ("mojo_opset", "mojo_opset_ext")), None)
+            if package_root:
+                package_name = ".".join(path_parts[path_parts.index(package_root) :])
 
         api_dir_lists = ["operators", "functions"]
 
@@ -101,7 +108,11 @@ def get_impl_by_platform():
 
             for _, module_name, _ in pkgutil.iter_modules([api_dir_path]):
                 full_module_name = f"{api_package_name}.{module_name}"
-                module = importlib.import_module(full_module_name)
+                try:
+                    module = importlib.import_module(full_module_name)
+                except Exception as err:
+                    logger.warning("Skipping %s during backend discovery: %s", full_module_name, err)
+                    continue
 
                 for name, op in inspect.getmembers(module, inspect.isclass):
                     if (

@@ -97,12 +97,14 @@ class MojoBackendRegistry:
         # of a specific backend.
         backend_name = _normalize_backend_name(backend_name)
 
+        requested_backend = backend_name or "<default>"
+
         if (backend_name is None) or (backend_name not in self._registry.keys()):  # get first class
             assert len(self._registry) > 0, f"{self._operator_name} does not implement any backend."
             fallback = list(self._registry.values())[0]
             logger.debug(
                 "Backend '%s' is not registered, falling back to %s.",
-                backend_name or "<default>",
+                requested_backend,
                 fallback.__name__,
             )
             return fallback

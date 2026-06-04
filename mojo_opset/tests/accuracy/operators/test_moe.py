@@ -6,6 +6,7 @@ import torch.nn as nn
 
 from mojo_opset import MojoMoE
 from mojo_opset import MojoMoEGating
+from mojo_opset import MojoExperts
 from mojo_opset.utils.platform import get_torch_device
 from mojo_opset.tests.utils import bypass_not_implemented
 
@@ -90,3 +91,41 @@ def test_moe_gating(num_experts, top_k, hidden_size, num_tokens, dtype):
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device=device)
     moe_gating.forward_diff_with(moe_gating_ref, x, mixed_tol=True)
+
+
+@pytest.mark.parametrize(
+    "num_experts, hidden_size, intermediate_size, tokens_per_expert",
+    [
+        (4, 128, 256, [8, 4, 0, 6]),
+        (16, 256, 512, [2] * 16),
+        (129, 128, 256, [1] * 129),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@bypass_not_implemented
+def test_moe_experts(num_experts, hidden_size, intermediate_size, tokens_per_expert, dtype):
+    device = get_torch_device()
+    torch.manual_seed(0)
+
+    experts = MojoExperts(
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+    )
+    for p in experts.parameters():
+        nn.init.normal_(p, std=0.02)
+
+    experts_ref = MojoExperts._registry.get("torch")(
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+    )
+
+    experts = experts.to(dtype).to(device)
+    experts_ref = experts_ref.to(dtype).to(device)
+    experts_ref.load_state_dict(experts.state_dict())
+
+    token_count = torch.tensor(tokens_per_expert, dtype=torch.int32, device=device)
+    total_tokens = int(token_count.sum().item())
+    x = torch.rand(total_tokens, hidden_size, dtype=dtype, device=device)
+    experts.forward_diff_with(experts_ref, x, token_count, mixed_tol=True)

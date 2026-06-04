@@ -1,6 +1,7 @@
 from typing import Any
 from typing import Optional
 from typing import Tuple
+import logging
 
 import numpy as np
 import torch
@@ -11,6 +12,8 @@ from mojo_opset.core import MojoPagedPrefillGQA
 from mojo_opset.core import MojoPrefillGQA
 from mojo_opset.core.operators.attention import assert_paged_decode_contract
 from mojo_opset.core.operators.attention import assert_paged_prefill_contract
+
+logger = logging.getLogger(__name__)
 
 
 class TorchNpuPrefillGQA(MojoPrefillGQA, default_priority=0):
@@ -69,6 +72,32 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
     ):
         super().__init__(is_causal=is_causal, gqa_layout=gqa_layout)
 
+    def _fallback_forward(
+        self,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        block_tables: torch.Tensor,
+        softmax_scale: Optional[float],
+        cu_total_seq_lens: Optional[torch.Tensor],
+        mask: Optional[torch.Tensor],
+        max_q_lens: Optional[int],
+        max_total_seq_lens: Optional[int],
+    ) -> torch.Tensor:
+        return super().forward(
+            query=query,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            cu_q_lens=cu_q_lens,
+            block_tables=block_tables,
+            softmax_scale=softmax_scale,
+            cu_total_seq_lens=cu_total_seq_lens,
+            mask=mask,
+            max_q_lens=max_q_lens,
+            max_total_seq_lens=max_total_seq_lens,
+        )
+
     def forward(
         self,
         query: torch.Tensor,
@@ -92,46 +121,95 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
         )
         
         if head_dim % 128 != 0:
-            raise NotImplementedError(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
+            logger.warning(
+                "TorchNpuPagedPrefillGQA: npu_fused_infer_attention_score does not support "
+                "head_dim=%s, fallback torch attention",
+                head_dim,
+            )
+            return self._fallback_forward(
+                query,
+                key_cache,
+                value_cache,
+                cu_q_lens,
+                block_tables,
+                softmax_scale,
+                cu_total_seq_lens,
+                mask,
+                max_q_lens,
+                max_total_seq_lens,
+            )
         if cu_total_seq_lens is not None:
-            raise NotImplementedError("NPU kernel npu_fused_infer_attention_score currently does not support TND layout with sparse_mode=3 (Page Attention), raising RuntimeError: call aclnnFusedInferAttentionScoreV3 failed.")
+            logger.warning(
+                "TorchNpuPagedPrefillGQA: npu_fused_infer_attention_score does not support "
+                "TND layout with cu_total_seq_lens, fallback torch attention"
+            )
+            return self._fallback_forward(
+                query,
+                key_cache,
+                value_cache,
+                cu_q_lens,
+                block_tables,
+                softmax_scale,
+                cu_total_seq_lens,
+                mask,
+                max_q_lens,
+                max_total_seq_lens,
+            )
 
 
         if block_size % 128 != 0 or block_size > 512:
             # high performance attention kernel only supports block_size % 128 == 0 and block_size <= 512
-            return super().forward(
-                query=query,
-                key_cache=key_cache,
-                value_cache=value_cache,
-                cu_q_lens=cu_q_lens,
-                block_tables=block_tables,
-                softmax_scale=softmax_scale,
-                cu_total_seq_lens=cu_total_seq_lens,
-                mask=mask,
-                max_q_lens=max_q_lens,
-                max_total_seq_lens=max_total_seq_lens,
+            return self._fallback_forward(
+                query,
+                key_cache,
+                value_cache,
+                cu_q_lens,
+                block_tables,
+                softmax_scale,
+                cu_total_seq_lens,
+                mask,
+                max_q_lens,
+                max_total_seq_lens,
             )
 
         if softmax_scale is None:
             softmax_scale = head_dim**-0.5
 
         compress_mask = torch.triu(torch.ones((2048, 2048), dtype=torch.bool, device=query.device), diagonal=1)
-        out, _ = torch_npu.npu_fused_infer_attention_score(
-            query=query,
-            key=key_cache,
-            value=value_cache,
-            atten_mask=compress_mask,
-            block_table=block_tables,
-            input_layout="TND",
-            block_size=block_size,
-            actual_seq_lengths=cu_q_lens[1:],
-            actual_seq_lengths_kv=total_seq_lens,
-            num_key_value_heads=num_kv_heads,
-            num_heads=num_q_heads,
-            scale=softmax_scale,
-            sparse_mode=3,
-        )
-        return out
+        try:
+            out, _ = torch_npu.npu_fused_infer_attention_score(
+                query=query,
+                key=key_cache,
+                value=value_cache,
+                atten_mask=compress_mask,
+                block_table=block_tables,
+                input_layout="TND",
+                block_size=block_size,
+                actual_seq_lengths=cu_q_lens[1:],
+                actual_seq_lengths_kv=total_seq_lens,
+                num_key_value_heads=num_kv_heads,
+                num_heads=num_q_heads,
+                scale=softmax_scale,
+                sparse_mode=3,
+            )
+            return out
+        except (RuntimeError, NotImplementedError) as exc:
+            logger.warning(
+                "TorchNpuPagedPrefillGQA: npu_fused_infer_attention_score failed (%s), fallback torch attention",
+                exc,
+            )
+            return self._fallback_forward(
+                query,
+                key_cache,
+                value_cache,
+                cu_q_lens,
+                block_tables,
+                softmax_scale,
+                cu_total_seq_lens,
+                mask,
+                max_q_lens,
+                max_total_seq_lens,
+            )
 
 
 class TorchNpuPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
@@ -141,6 +219,28 @@ class TorchNpuPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
         gqa_layout: str = "ABAB",
     ):
         super().__init__(is_causal=is_causal, gqa_layout=gqa_layout)
+
+    def _fallback_forward(
+        self,
+        query: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        total_seq_lens: torch.Tensor,
+        block_tables: torch.Tensor,
+        softmax_scale: Optional[float],
+        mask: Optional[torch.Tensor],
+        max_total_seq_len: Optional[int],
+    ) -> torch.Tensor:
+        return super().forward(
+            query,
+            k_cache,
+            v_cache,
+            total_seq_lens,
+            block_tables,
+            softmax_scale=softmax_scale,
+            mask=mask,
+            max_total_seq_len=max_total_seq_len,
+        )
 
     def forward(
         self,
@@ -160,18 +260,32 @@ class TorchNpuPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
         _, head_nums, block_size, _ = k_cache.shape
         assert_paged_decode_contract(block_tables, total_seq_lens)
         if head_dim % 128 != 0:
-            raise NotImplementedError(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
-
-        if block_size % 128 != 0 or block_size > 512:
-            return super().forward(
+            logger.warning(
+                "TorchNpuPagedDecodeGQA: npu_fused_infer_attention_score does not support "
+                "head_dim=%s, fallback torch attention",
+                head_dim,
+            )
+            return self._fallback_forward(
                 query,
                 k_cache,
                 v_cache,
                 total_seq_lens,
                 block_tables,
-                softmax_scale=softmax_scale,
-                mask=mask,
-                max_total_seq_len=max_total_seq_len,
+                softmax_scale,
+                mask,
+                max_total_seq_len,
+            )
+
+        if block_size % 128 != 0 or block_size > 512:
+            return self._fallback_forward(
+                query,
+                k_cache,
+                v_cache,
+                total_seq_lens,
+                block_tables,
+                softmax_scale,
+                mask,
+                max_total_seq_len,
             )
 
         if softmax_scale is None:
@@ -187,19 +301,37 @@ class TorchNpuPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
                 input_layout = "BNSD"
 
         actual_seq_lengths_q = torch.arange(1, batch_size + 1, dtype=torch.int32, device=query.device)
-        out, _ = torch_npu.npu_fused_infer_attention_score(
-            query,
-            k_cache,
-            v_cache,
-            input_layout=input_layout,
-            block_table=block_tables,
-            block_size=block_size,
-            num_heads=num_q_heads,
-            num_key_value_heads=head_nums,
-            actual_seq_lengths=actual_seq_lengths_q,
-            actual_seq_lengths_kv=total_seq_lens,
-            scale=softmax_scale,
-        )
+        try:
+            out, _ = torch_npu.npu_fused_infer_attention_score(
+                query,
+                k_cache,
+                v_cache,
+                input_layout=input_layout,
+                block_table=block_tables,
+                block_size=block_size,
+                num_heads=num_q_heads,
+                num_key_value_heads=head_nums,
+                actual_seq_lengths=actual_seq_lengths_q,
+                actual_seq_lengths_kv=total_seq_lens,
+                scale=softmax_scale,
+            )
+        except (RuntimeError, NotImplementedError) as exc:
+            logger.warning(
+                "TorchNpuPagedDecodeGQA: npu_fused_infer_attention_score failed (%s), fallback torch attention",
+                exc,
+            )
+            if is_unsqueezed:
+                query = query.squeeze(2)
+            return self._fallback_forward(
+                query,
+                k_cache,
+                v_cache,
+                total_seq_lens,
+                block_tables,
+                softmax_scale,
+                mask,
+                max_total_seq_len,
+            )
 
         if is_unsqueezed:
             out = out.squeeze(2)

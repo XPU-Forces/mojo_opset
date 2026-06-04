@@ -1,5 +1,6 @@
 from typing import Optional
 from typing import Tuple
+import logging
 
 import torch
 import torch.nn.functional as F
@@ -9,8 +10,11 @@ from mojo_opset.core import MojoLayerNormQuant
 from mojo_opset.core import MojoResidualAddLayerNormQuant
 from mojo_opset.core import MojoResidualAddRMSNormQuant
 from mojo_opset.core import MojoResidualAddRMSNorm
+from mojo_opset.core import MojoGroupRMSNorm
 from mojo_opset.core import MojoRMSNorm
 from mojo_opset.core import MojoRMSNormQuant
+
+logger = logging.getLogger(__name__)
 
 
 def _cast_smooth_scale(
@@ -49,7 +53,36 @@ class TorchNpuRMSNorm(MojoRMSNorm, default_priority=0):
         super().__init__(norm_size, eps, **kwargs)
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
-        return torch_npu.npu_rms_norm(hidden_state, self.weight, epsilon=self.variance_epsilon)[0]
+        try:
+            return torch_npu.npu_rms_norm(hidden_state, self.weight, epsilon=self.variance_epsilon)[0]
+        except (RuntimeError, NotImplementedError) as exc:
+            logger.warning("TorchNpuRMSNorm: npu_rms_norm failed (%s), fallback torch rms_norm", exc)
+            return super().forward(hidden_state)
+
+
+class TorchNpuGroupRMSNorm(MojoGroupRMSNorm, default_priority=0):
+    supported_platforms_list = ["npu"]
+
+    def forward(self, input_groups: list[torch.Tensor]) -> list[torch.Tensor]:
+        if not input_groups:
+            return []
+        if input_groups[0].device.type != "npu":
+            return super().forward(input_groups)
+
+        try:
+            outputs = []
+            for group_id in range(self.num_groups):
+                outputs.append(
+                    torch_npu.npu_rms_norm(
+                        input_groups[group_id],
+                        self.weight[group_id],
+                        epsilon=self.variance_epsilon,
+                    )[0]
+                )
+            return outputs
+        except (RuntimeError, NotImplementedError) as exc:
+            logger.warning("TorchNpuGroupRMSNorm: npu_rms_norm failed (%s), fallback torch rms_norm", exc)
+            return super().forward(input_groups)
 
 
 class TorchNpuResidualAddRMSNorm(MojoResidualAddRMSNorm, default_priority=0):

@@ -1,11 +1,30 @@
 import pytest
 import torch
+import torch_npu
 
 from mojo_opset import MojoStorePagedKVCache
 from mojo_opset import MojoStorePagedMLAKVCache
 from mojo_opset.tests.utils import assert_close
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.utils.platform import get_platform
+from mojo_opset.utils.platform import get_torch_device
+
+
+def _available_float8_dtypes():
+    return [
+        dtype
+        for name in ("float8_e4m3fn", "float8_e5m2")
+        if (dtype := getattr(torch, name, None)) is not None
+    ]
+
+
+def _rand_float8(shape, dtype, device):
+    return torch.randint(-2, 3, shape, dtype=torch.int8, device=device).to(torch.float16).to(dtype)
+
+
+def _assert_exact_float8_cache(actual, expected):
+    torch.testing.assert_close(actual.to(torch.float32), expected.to(torch.float32), atol=0, rtol=0)
 
 
 @pytest.mark.parametrize(
@@ -160,6 +179,129 @@ def test_store_paged_kv_bucket_padded_varlen():
             v_cache[phys_block, :, block_offset : block_offset + 1, :],
             v_cache_ref[phys_block, :, block_offset : block_offset + 1, :],
         )
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("is_decode", [False, True])
+@auto_switch_platform()
+@bypass_not_implemented
+def test_store_paged_kv_scatter_kernel_called(monkeypatch, dtype, is_decode):
+    if get_platform() != "npu":
+        pytest.skip("npu_scatter_pa_kv_cache kernel call check requires NPU.")
+
+    device = get_torch_device()
+    batch_size, kv_heads, head_dim, block_size = 2, 2, 128, 128
+    context_kv_lens = torch.tensor([0, 3], dtype=torch.int32, device=device)
+    if is_decode:
+        cu_q_lens = None
+        total_tokens = batch_size
+    else:
+        q_lens = torch.tensor([4, 2], dtype=torch.int32, device=device)
+        cu_q_lens = torch.cat(
+            [
+                torch.zeros(1, dtype=torch.int32, device=device),
+                torch.cumsum(q_lens, dim=0, dtype=torch.int32),
+            ]
+        )
+        total_tokens = int(cu_q_lens[-1].item())
+
+    key_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=dtype, device=device)
+    value_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=dtype, device=device)
+    cache_shape = (4, kv_heads, block_size, head_dim)
+    k_cache_ref = torch.zeros(cache_shape, dtype=dtype, device=device)
+    v_cache_ref = torch.zeros(cache_shape, dtype=dtype, device=device)
+    k_cache = k_cache_ref.clone()
+    v_cache = v_cache_ref.clone()
+    block_table = torch.tensor([[0], [1]], dtype=torch.int32, device=device)
+
+    calls = {"count": 0}
+    original_scatter = torch_npu.npu_scatter_pa_kv_cache
+
+    def _scatter_spy(*args, **kwargs):
+        result = original_scatter(*args, **kwargs)
+        calls["count"] += 1
+        return result
+
+    monkeypatch.setattr(torch_npu, "npu_scatter_pa_kv_cache", _scatter_spy)
+
+    op_ref = MojoStorePagedKVCache._registry.get("torch")()
+    op = MojoStorePagedKVCache()
+    k_cache_ref, v_cache_ref = op_ref(
+        key_states,
+        value_states,
+        k_cache_ref,
+        v_cache_ref,
+        block_table,
+        cu_q_lens,
+        context_kv_lens,
+    )
+    k_cache, v_cache = op(
+        key_states,
+        value_states,
+        k_cache,
+        v_cache,
+        block_table,
+        cu_q_lens,
+        context_kv_lens,
+    )
+
+    assert calls["count"] == 1
+    assert_close(k_cache, k_cache_ref)
+    assert_close(v_cache, v_cache_ref)
+
+
+@pytest.mark.parametrize("dtype", _available_float8_dtypes())
+@auto_switch_platform()
+@bypass_not_implemented
+def test_store_paged_kv_mxfp8(dtype):
+    if get_platform() != "npu":
+        pytest.skip("MXFP8 paged KV cache scatter is a torch_npu-only scenario.")
+
+    device = get_torch_device()
+    batch_size, kv_heads, head_dim, block_size = 2, 2, 128, 128
+    context_kv_lens = torch.tensor([0, 3], dtype=torch.int32, device=device)
+    q_lens = torch.tensor([4, 2], dtype=torch.int32, device=device)
+    cu_q_lens = torch.cat(
+        [
+            torch.zeros(1, dtype=torch.int32, device=device),
+            torch.cumsum(q_lens, dim=0, dtype=torch.int32),
+        ]
+    )
+    total_tokens = int(cu_q_lens[-1].item())
+
+    key_states = _rand_float8((total_tokens, kv_heads, head_dim), dtype, device)
+    value_states = _rand_float8((total_tokens, kv_heads, head_dim), dtype, device)
+    cache_shape = (4, kv_heads, block_size, head_dim)
+    k_cache_ref = torch.zeros(cache_shape, dtype=dtype, device=device)
+    v_cache_ref = torch.zeros(cache_shape, dtype=dtype, device=device)
+    k_cache = k_cache_ref.clone()
+    v_cache = v_cache_ref.clone()
+    block_table = torch.tensor([[0], [1]], dtype=torch.int32, device=device)
+
+    op_ref = MojoStorePagedKVCache._registry.get("torch")()
+    op = MojoStorePagedKVCache()
+
+    k_cache_ref, v_cache_ref = op_ref(
+        key_states,
+        value_states,
+        k_cache_ref,
+        v_cache_ref,
+        block_table,
+        cu_q_lens,
+        context_kv_lens,
+    )
+    k_cache, v_cache = op(
+        key_states,
+        value_states,
+        k_cache,
+        v_cache,
+        block_table,
+        cu_q_lens,
+        context_kv_lens,
+    )
+
+    _assert_exact_float8_cache(k_cache, k_cache_ref)
+    _assert_exact_float8_cache(v_cache, v_cache_ref)
 
 
 # ===========================================================================
