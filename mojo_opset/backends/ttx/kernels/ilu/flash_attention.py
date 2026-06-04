@@ -13,6 +13,11 @@ import triton.language as tl
 
 from .utils import LOG2E, libentry, smart_triton_autotune
 
+# Max page size for int8 dequant + bf16 FA2 fast path. Larger pages (e.g. 256) fall
+# back to the scalar kernel because bf16 FA2 + int8 dequant drifts near the accuracy
+# threshold (see M_BF16_ODD_KV_333 in test_attention_quant.py).
+_DEQUANT_FA2_MAX_PAGE_SIZE = 128
+
 
 @triton.jit
 def inline_causal_mask(q_blk_start, kv_blk_start, kv_cache_len, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
@@ -541,11 +546,11 @@ def _paged_prefill_with_kv_dequant_kernel(
     ).to(tl.float32)
 
     k_scale_vec = tl.load(
-        K_qscale + q_head_id * stride_ks_h + offs_d * stride_ks_d,
+        K_qscale + kv_head_id * stride_ks_h + offs_d * stride_ks_d,
         mask=d_mask, other=0.0,
     )
     v_scale_vec = tl.load(
-        V_qscale + q_head_id * stride_vs_h + offs_d * stride_vs_d,
+        V_qscale + kv_head_id * stride_vs_h + offs_d * stride_vs_d,
         mask=d_mask, other=0.0,
     )
 
@@ -691,6 +696,91 @@ def paged_attention_prefill_impl(
     return out
 
 
+@triton.jit
+def _dequant_paged_kv_block_kernel(
+    K_in,
+    V_in,
+    K_out,
+    V_out,
+    K_scale,
+    V_scale,
+    seqlens_kv_ptr,
+    block_tables_ptr,
+    stride_kb, stride_kh, stride_kn, stride_kd,
+    stride_vb, stride_vh, stride_vn, stride_vd,
+    stride_kob, stride_koh, stride_kon, stride_kod,
+    stride_vob, stride_voh, stride_von, stride_vod,
+    stride_ks_h, stride_ks_d,
+    stride_vs_h, stride_vs_d,
+    stride_bt_batch, stride_bt_block,
+    MAX_BLOCKS,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    BLOCK_P: tl.constexpr,
+):
+    """Dequantize the int8 paged K/V blocks referenced by ``block_tables`` into
+    a bf16/fp16 paged cache of identical layout, applying per-channel scales.
+
+    Pure load/scale/store; no ``tl.dot`` so the ILU Triton int8->dot compiler
+    bug is avoided. Only physical blocks within ``seqlens_kv`` are touched, so a
+    large preallocated KV cache is not fully materialized.
+
+    Scales are promoted to fp32 before the multiply; fp32 scales are recommended
+    for the fast path, though bf16/fp16 scales are accepted.
+    """
+    pid = tl.program_id(0)
+    kv_head_id = tl.program_id(1)
+
+    b_id = pid // MAX_BLOCKS
+    logical_block = pid % MAX_BLOCKS
+
+    kv_seq_len = tl.load(seqlens_kv_ptr + b_id).to(tl.int32)
+    if logical_block * PAGE_SIZE >= kv_seq_len:
+        return
+
+    physical_block = tl.load(
+        block_tables_ptr + b_id * stride_bt_batch + logical_block * stride_bt_block
+    ).to(tl.int32)
+
+    offs_d = tl.arange(0, BLOCK_D)
+    d_mask = offs_d < HEAD_DIM
+
+    k_scale = tl.load(
+        K_scale + kv_head_id * stride_ks_h + offs_d * stride_ks_d, mask=d_mask, other=0.0
+    ).to(tl.float32)
+    v_scale = tl.load(
+        V_scale + kv_head_id * stride_vs_h + offs_d * stride_vs_d, mask=d_mask, other=0.0
+    ).to(tl.float32)
+
+    for p_start in tl.range(0, PAGE_SIZE, BLOCK_P):
+        offs_p = p_start + tl.arange(0, BLOCK_P)
+        p_mask = offs_p < PAGE_SIZE
+        mask = p_mask[:, None] & d_mask[None, :]
+
+        k_in_ptrs = (
+            K_in + physical_block * stride_kb + kv_head_id * stride_kh
+            + offs_p[:, None] * stride_kn + offs_d[None, :] * stride_kd
+        )
+        v_in_ptrs = (
+            V_in + physical_block * stride_vb + kv_head_id * stride_vh
+            + offs_p[:, None] * stride_vn + offs_d[None, :] * stride_vd
+        )
+        k = tl.load(k_in_ptrs, mask=mask, other=0).to(tl.float32) * k_scale[None, :]
+        v = tl.load(v_in_ptrs, mask=mask, other=0).to(tl.float32) * v_scale[None, :]
+
+        k_out_ptrs = (
+            K_out + physical_block * stride_kob + kv_head_id * stride_koh
+            + offs_p[:, None] * stride_kon + offs_d[None, :] * stride_kod
+        )
+        v_out_ptrs = (
+            V_out + physical_block * stride_vob + kv_head_id * stride_voh
+            + offs_p[:, None] * stride_von + offs_d[None, :] * stride_vod
+        )
+        tl.store(k_out_ptrs, k.to(K_out.dtype.element_ty), mask=mask)
+        tl.store(v_out_ptrs, v.to(V_out.dtype.element_ty), mask=mask)
+
+
 def paged_attention_prefill_with_kv_dequant_impl(
     q: torch.Tensor,
     key_cache: torch.Tensor,
@@ -706,15 +796,22 @@ def paged_attention_prefill_with_kv_dequant_impl(
     max_seqlen_k: Optional[int] = None,
     out: Optional[torch.Tensor] = None,
     block_tables_i32: Optional[torch.Tensor] = None,
+    key_cache_dequant: Optional[torch.Tensor] = None,
+    value_cache_dequant: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Paged prefill attention with int8 KV cache and per-channel scales.
+
+    The int8 KV blocks referenced by ``block_tables`` are first dequantized into
+    a bf16/fp16 paged cache of identical layout, then the regular bf16 FA2 paged
+    prefill kernel runs on it (same path as bf16 ``paged_attention_prefill_impl``).
 
     Args:
         q: (T, Hq, D) bf16/fp16 query tokens.
         key_cache: (N_blocks, Hkv, block_size, D) int8 key cache.
-        k_qscale: (Hkv, D) float32 per-channel key scale.
+        k_qscale: (Hkv, D) per-channel key scale indexed by ``kv_head_id`` in the
+            dequant kernel; fp32 recommended for the fast path.
         value_cache: (N_blocks, Hkv, block_size, D) int8 value cache.
-        v_qscale: (Hkv, D) float32 per-channel value scale.
+        v_qscale: (Hkv, D) per-channel value scale (same indexing as ``k_qscale``).
         cu_seqlens_q: (B+1,) int32.
         seqlens_kv: (B,) int32 or None.
         block_tables: (B, num_blocks) int32.
@@ -724,10 +821,11 @@ def paged_attention_prefill_with_kv_dequant_impl(
         max_seqlen_k: max KV length hint.
         out: pre-allocated output tensor (T, Hq, D).
         block_tables_i32: pre-converted int32 block_tables.
+        key_cache_dequant: optional reusable bf16/fp16 K cache buffer.
+        value_cache_dequant: optional reusable bf16/fp16 V cache buffer.
     """
     total_q_tokens, num_q_heads, head_dim = q.shape
     _, num_kv_heads, block_size, _ = key_cache.shape
-    batch_size = cu_seqlens_q.shape[0] - 1
 
     sm_scale = softmax_scale if softmax_scale is not None else 1.0 / math.sqrt(head_dim)
 
@@ -743,14 +841,84 @@ def paged_attention_prefill_with_kv_dequant_impl(
 
     BLOCK_D = triton.next_power_of_2(head_dim)
 
+    # Fast path: dequant int8 KV to bf16, then reuse the same bf16 FA2 prefill kernel
+    # as non-quant (per-q-head). Feasible when head_dim is power-of-two and
+    # page_size <= _DEQUANT_FA2_MAX_PAGE_SIZE (see module constant).
+    fast_path = (head_dim == BLOCK_D) and (block_size <= _DEQUANT_FA2_MAX_PAGE_SIZE)
+
+    if fast_path:
+        if key_cache_dequant is not None:
+            assert key_cache_dequant.dtype == q.dtype, (
+                "key_cache_dequant dtype must match query dtype for the FA2 fast path"
+            )
+        if value_cache_dequant is not None:
+            assert value_cache_dequant.dtype == q.dtype, (
+                "value_cache_dequant dtype must match query dtype for the FA2 fast path"
+            )
+        # Default buffers are full-sized (N_blocks, Hkv, block_size, D) mirrors of the
+        # int8 cache; only block_tables-referenced slots are written. For long context
+        # this allocates O(N_blocks) bf16 memory — pass key_cache_dequant /
+        # value_cache_dequant to reuse buffers across calls when possible.
+        if key_cache_dequant is None:
+            key_cache_dequant = torch.empty_like(key_cache, dtype=q.dtype)
+        if value_cache_dequant is None:
+            value_cache_dequant = torch.empty_like(value_cache, dtype=q.dtype)
+
+        # ILU Triton needs power-of-2 vector tiles; the page mask covers any tail.
+        BLOCK_P = min(triton.next_power_of_2(block_size), 128)
+        max_blocks = block_tables_i32.shape[1]
+        if max_blocks == 0:
+            return out
+
+        dequant_grid = (block_tables_i32.shape[0] * max_blocks, num_kv_heads)
+        _dequant_paged_kv_block_kernel[dequant_grid](
+            key_cache,
+            value_cache,
+            key_cache_dequant,
+            value_cache_dequant,
+            k_qscale,
+            v_qscale,
+            seqlens_kv,
+            block_tables_i32,
+            key_cache.stride(0), key_cache.stride(1), key_cache.stride(2), key_cache.stride(3),
+            value_cache.stride(0), value_cache.stride(1), value_cache.stride(2), value_cache.stride(3),
+            key_cache_dequant.stride(0), key_cache_dequant.stride(1),
+            key_cache_dequant.stride(2), key_cache_dequant.stride(3),
+            value_cache_dequant.stride(0), value_cache_dequant.stride(1),
+            value_cache_dequant.stride(2), value_cache_dequant.stride(3),
+            k_qscale.stride(0), k_qscale.stride(1),
+            v_qscale.stride(0), v_qscale.stride(1),
+            block_tables_i32.stride(0), block_tables_i32.stride(1),
+            max_blocks,
+            HEAD_DIM=head_dim,
+            BLOCK_D=BLOCK_D,
+            PAGE_SIZE=block_size,
+            BLOCK_P=BLOCK_P,
+        )
+
+        return paged_attention_prefill_impl(
+            q,
+            key_cache_dequant,
+            value_cache_dequant,
+            cu_seqlens_q,
+            seqlens_kv,
+            block_tables_i32,
+            gqa_interleave,
+            sm_scale,
+            max_q_len=max_seqlen_q,
+            max_total_seq_len=max_seqlen_k,
+            out=out,
+            block_tables_i32=block_tables_i32,
+        )
+
+    # Fallback: scalar per-token dequant attention (handles any head_dim / page).
     if max_seqlen_q is not None:
         max_q_len = max_seqlen_q
     else:
         q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-        max_q_len = q_lens.max().item()
+        max_q_len = int(q_lens.max().item())
 
-    grid = (max_q_len, num_q_heads, batch_size)
-
+    grid = (max_q_len, num_q_heads, cu_seqlens_q.shape[0] - 1)
     _paged_prefill_with_kv_dequant_kernel[grid](
         q,
         key_cache,
@@ -777,7 +945,6 @@ def paged_attention_prefill_with_kv_dequant_impl(
         PAGE_SIZE=block_size,
         IS_CAUSAL=True,
     )
-
     return out
 
 

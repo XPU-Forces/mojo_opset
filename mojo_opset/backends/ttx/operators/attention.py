@@ -107,26 +107,14 @@ class TTXPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
             else cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
         )
 
-        num_q_heads = query.shape[1]
-        num_kv_heads = key_cache.shape[1]
-
-        if num_q_heads != num_kv_heads:
-            if self.gqa_layout == "AABB":
-                k_qscale_expanded = key_scale.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
-                v_qscale_expanded = value_scale.repeat_interleave(num_q_heads // num_kv_heads, dim=0)
-            else:
-                k_qscale_expanded = key_scale.repeat((num_q_heads // num_kv_heads, 1))
-                v_qscale_expanded = value_scale.repeat((num_q_heads // num_kv_heads, 1))
-        else:
-            k_qscale_expanded = key_scale
-            v_qscale_expanded = value_scale
-
+        # Dequant kernel and scalar fallback index scales by kv_head_id, so pass
+        # per-channel (Hkv, D) scales directly (no expansion to Hq).
         output = paged_attention_prefill_with_kv_dequant(
             q=query,
             key_cache=key_cache,
-            k_qscale=k_qscale_expanded,
+            k_qscale=key_scale,
             value_cache=value_cache,
-            v_qscale=v_qscale_expanded,
+            v_qscale=value_scale,
             cu_seqlens_q=cu_q_lens,
             seqlens_kv=seqlens_kv,
             block_tables=block_tables,
