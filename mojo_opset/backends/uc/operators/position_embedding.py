@@ -109,11 +109,13 @@ class UCRotaryEmbedding(MojoRotaryEmbedding):
 
 class UCApplyRoPE(MojoApplyRoPE):
     supported_platforms_list = ["npu"]
-    _STATIC_APPLY_ROPE_CONFIGS = frozenset(
+    _STATIC_APPLY_ROPE_KERNELS = frozenset(
         {
-            (32, 8, 96, 96, torch.float16),
-            (8, 2, 96, 32, torch.bfloat16),
-            (16, 8, 128, 128, torch.float16),
+            (96, 96, torch.float16),
+            (96, 32, torch.bfloat16),
+            (88, 88, torch.bfloat16),
+            (128, 48, torch.float16),
+            (128, 128, torch.float16),
         }
     )
 
@@ -207,26 +209,25 @@ class UCApplyRoPE(MojoApplyRoPE):
         if rows != k_rows or head_dim != k_head_dim:
             raise ValueError("q and k must have matching token count and head dimension")
 
-        config_key = (q_heads, k_heads, head_dim, rope_dim, q_norm.dtype)
-        if config_key not in self._STATIC_APPLY_ROPE_CONFIGS:
+        config_key = (head_dim, rope_dim, q_norm.dtype)
+        if config_key not in self._STATIC_APPLY_ROPE_KERNELS:
             raise NotImplementedError(
                 "UC backend MojoApplyRoPE does not provide an aligned static kernel for "
-                f"q_heads={q_heads}, k_heads={k_heads}, head_dim={head_dim}, "
-                f"rope_dim={rope_dim}, dtype={q_norm.dtype}."
+                f"head_dim={head_dim}, rope_dim={rope_dim}, dtype={q_norm.dtype}."
             )
 
         if cos.ndim == 2:
             cos_kind = "cos2d"
             cos_kernel = cos.contiguous()
             sin_kernel = sin.contiguous()
-            shape_args = (rows, cos.shape[0])
+            shape_args = (rows, q_heads, k_heads, cos.shape[0])
         else:
             cos_kind = "costoken"
             cos_kernel = cos.reshape(rows, rope_dim).contiguous()
             sin_kernel = sin.reshape(rows, rope_dim).contiguous()
-            shape_args = (rows,)
+            shape_args = (rows, q_heads, k_heads)
 
-        api = f"mojo_apply_rope_tnh_q{q_heads}_k{k_heads}_d{head_dim}_r{rope_dim}_{cos_kind}"
+        api = f"mojo_apply_rope_tnh_d{head_dim}_r{rope_dim}_{cos_kind}"
         q_out, k_out = self._run_static_token_head_kernel(
             api, q_norm, k_norm, cos_kernel, sin_kernel, *shape_args
         )
