@@ -12,8 +12,8 @@ if [ -f "${CANN_PATH}/opp/vendors/custom_transformer/bin/set_env.bash" ]; then
     source "${CANN_PATH}/opp/vendors/custom_transformer/bin/set_env.bash"
 fi
 rm -rf /tmp/torchinductor_root
-export MOJO_GRAPH_CACHE_DIR=/data01/tbw/mojo_opset_info/compile_cache_smoke_1780105319
-rm -rf ${MOJO_GRAPH_CACHE_DIR}
+# export MOJO_GRAPH_CACHE_DIR=/data01/tbw/mojo_opset_info/compile_cache_smoke_1780105319
+# rm -rf ${MOJO_GRAPH_CACHE_DIR}
 # Ensure /usr/local/lib64 is searched first for GLIBCXX compatibility
 export LD_LIBRARY_PATH="/usr/local/lib64:${LD_LIBRARY_PATH:-}"
 
@@ -135,7 +135,7 @@ MOJO_USE_PARALLELIZE_MODULE_EP="${MOJO_USE_PARALLELIZE_MODULE_EP:-0}"
 export LOCAL_WORLD_SIZE="${LOCAL_WORLD_SIZE:-${EP_SIZE}}"
 NUM_LAYERS="${LLM_NUM_LAYERS:-43}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-1024}"
-PA_MAX_LENGTH="${PA_MAX_LENGTH:-2048}"
+PA_MAX_LENGTH="${PA_MAX_LENGTH:-4096}"
 NEXT_N="${NEXT_N:-1}"
 BATCH_SIZE="${BATCH_SIZE:-2}"
 export USE_ATTN_METADATA=1

@@ -264,9 +264,7 @@ def mtp_post_process(
     spec_len,
     batch_size,
     mtp_decode_fn=None,
-    mtp_decode_fns=None,
     mtp_decode_graph_warmed=False,
-    mtp_decode_graph_warmed_steps=None,
     enable_mtp_cache_compile=False,
     sync_tokens=False,
     moe_ep_group=None,
@@ -278,18 +276,12 @@ def mtp_post_process(
         mtp_decode_input_ids = mtp_generate_ids[:, -spec_len:].contiguous().reshape(batch_size, spec_len)
     else:
         mtp_decode_input_ids = initial_decode_input_ids.contiguous().reshape(batch_size, spec_len)
-    for mtp_step_idx in range(next_n):
+    for _ in range(next_n):
         with torch.no_grad():
             if sync_tokens:
                 mtp_decode_input_ids = mtp_decode_input_ids.contiguous().reshape(batch_size, spec_len)
                 dist.broadcast(mtp_decode_input_ids, src=0, group=moe_ep_group)
-            current_mtp_decode_fn = mtp_decode_fns[mtp_step_idx] if mtp_decode_fns is not None else mtp_decode_fn
-            if not allow_decode_graph:
-                current_mtp_decode_fn = None
-            current_mtp_warmed = (
-                mtp_decode_graph_warmed_steps[mtp_step_idx]
-                if mtp_decode_graph_warmed_steps is not None else mtp_decode_graph_warmed
-            )
+            current_mtp_decode_fn = mtp_decode_fn if allow_decode_graph else None
             mtp_logits, _, mtp_hidden = forward_mtp_decode_mojo(
                 mtp_model,
                 mtp_prev_hidden,
@@ -300,14 +292,11 @@ def mtp_post_process(
                     allow_decode_graph and
                     enable_mtp_cache_compile and
                     current_mtp_decode_fn is not None and
-                    current_mtp_warmed
+                    mtp_decode_graph_warmed
                 ),
             )
             if allow_decode_graph and enable_mtp_cache_compile and current_mtp_decode_fn is not None:
-                if mtp_decode_graph_warmed_steps is not None:
-                    mtp_decode_graph_warmed_steps[mtp_step_idx] = True
-                else:
-                    mtp_decode_graph_warmed = True
+                mtp_decode_graph_warmed = True
 
         mtp_spec_token = sample_last_token(mtp_logits)
         mtp_spec_tokens_list.append(mtp_spec_token)
@@ -319,7 +308,7 @@ def mtp_post_process(
         ).contiguous().reshape(batch_size, spec_len)
 
     mtp_spec_tokens = torch.cat(mtp_spec_tokens_list, dim=-1)
-    return mtp_spec_tokens, mtp_prev_hidden, mtp_generate_ids, mtp_decode_graph_warmed, mtp_decode_graph_warmed_steps
+    return mtp_spec_tokens, mtp_prev_hidden, mtp_generate_ids, mtp_decode_graph_warmed
 
 
 def initialize_mtp_speculation_after_prefill(
@@ -402,7 +391,7 @@ def initialize_mtp_speculation_after_prefill(
     mtp_generate_ids = torch.cat([mtp_generate_ids, mtp_spec_token], dim=-1)
 
     if next_n > 1:
-        extra_spec_tokens, mtp_prev_hidden, mtp_generate_ids, _, _ = mtp_post_process(
+        extra_spec_tokens, mtp_prev_hidden, mtp_generate_ids, _ = mtp_post_process(
             mtp_model,
             mtp_runtime_state,
             mtp_prev_hidden,
@@ -415,7 +404,7 @@ def initialize_mtp_speculation_after_prefill(
             sync_tokens=False,
             moe_ep_group=moe_ep_group,
             allow_decode_graph=False,
-            initial_decode_input_ids=torch.cat([mtp_generate_ids[:, -(spec_len - 1):], mtp_spec_token], dim=-1),
+            initial_decode_input_ids=mtp_generate_ids[:, -spec_len:],
         )
         mtp_spec_tokens = torch.cat([mtp_spec_tokens, extra_spec_tokens], dim=-1)
 
@@ -540,27 +529,20 @@ def _compile_deepseek_v4_wrapper(wrapper, graph_mode, enable_cache_compile=False
     torch._dynamo.config.cache_size_limit = 128
 
     if graph_mode == "npugraph_ex":
+        compile_options = {
+            "frozen_parameter": True,
+            "static_kernel_compile": True,
+        }
         if enable_cache_compile:
             if cache_name is None:
                 raise ValueError("cache_name must be provided when enable_cache_compile=True")
-            cache_compile_options = {
-                "frozen_parameter": True,
-                "static_kernel_compile": True,
-            }
             return torch.npu.npugraph_ex.inference.cache_compile(
                 wrapper.forward,
                 cache_dir=_npugraph_cache_dir(cache_name),
                 dynamic=False,
-                options=cache_compile_options,
+                options=compile_options,
             )
 
-        graph_pool = torch.npu.graph_pool_handle()
-        compile_options = {
-           "frozen_parameter": True,
-            "static_kernel_compile": True,
-            "clone_input": False,
-            "use_graph_pool": graph_pool,
-        }
         return torch.compile(
             wrapper,
             dynamic=False,
@@ -1014,6 +996,10 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
     should_print = is_main
     if dist.is_initialized() and model.__class__.__name__ == "DeepseekV4ForCausalLM":
         should_print = (global_rank % attn_tp_size) == 0
+    enable_cache_compile = (
+        graph_mode == "npugraph_ex"
+        and os.getenv("MOJO_ENABLE_CACHE_COMPILE", "0") == "1"
+    )
 
     if should_print:
         print(
@@ -1026,6 +1012,7 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
         for i in range(batch_size):
             print(f"\n[Batch {shard_start + i}] Prompt: {prompts[i]}")
         print(f"Graph mode: {graph_mode}")
+        print(f"Enable cache_compile: {enable_cache_compile}")
         print(f"Use attn_metadata: {use_attn_metadata}")
         if use_mtp:
             print(f"MTP enabled: next_n={next_n}, spec_len={spec_len}")
@@ -1038,12 +1025,10 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
     runtime_state = None
     decode_fn = None
     mtp_decode_fn = None
-    mtp_decode_fns = None
-    enable_main_cache_compile = graph_mode == "npugraph_ex" and use_mtp
-    enable_mtp_cache_compile = graph_mode == "npugraph_ex" and use_mtp and next_n == 1
+    enable_main_cache_compile = enable_cache_compile
+    enable_mtp_cache_compile = enable_cache_compile and use_mtp
     main_decode_graph_warmed = False
     mtp_decode_graph_warmed = False
-    mtp_decode_graph_warmed_steps = None
     if model.__class__.__name__ == "DeepseekV4ForCausalLM":
         runtime_state = DeepseekSparseAttentionRuntimeState.from_model(
             model, batch_size=batch_size,
@@ -1065,24 +1050,12 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
                 cache_name=f"main_decode_hidden_next{next_n}" if use_mtp else "main_decode",
             )
             if use_mtp:
-                if next_n > 1:
-                    mtp_decode_fns = [
-                        compile_deepseek_v4_decode(
-                            mtp_model,
-                            graph_mode,
-                            enable_cache_compile=False,
-                            cache_name=f"mtp_decode_next{next_n}_step{step_idx}",
-                        )
-                        for step_idx in range(next_n)
-                    ]
-                    mtp_decode_graph_warmed_steps = [False] * next_n
-                else:
-                    mtp_decode_fn = compile_deepseek_v4_decode(
-                        mtp_model,
-                        graph_mode,
-                        enable_cache_compile=enable_mtp_cache_compile,
-                        cache_name=f"mtp_decode_next{next_n}",
-                    )
+                mtp_decode_fn = compile_deepseek_v4_decode(
+                    mtp_model,
+                    graph_mode,
+                    enable_cache_compile=enable_mtp_cache_compile,
+                    cache_name=f"mtp_decode_next{next_n}",
+                )
             if should_print:
                 print(f"[GRAPH] Decode graph callable prepared in {time.time() - compile_t0:.2f}s (actual compilation happens on first call)")
 
@@ -1244,39 +1217,28 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
             with torch.no_grad():
                 if use_mtp:
                     main_seq_lens_before_verify = runtime_state.paged_cache.seq_lens.clone()
-                    if next_n > 1:
-                        all_logits, past_key_values, main_hidden = forward_main_decode_mojo(
-                            model,
-                            input_ids.contiguous().reshape(batch_size, spec_len),
-                            past_key_values,
-                            runtime_state=runtime_state,
-                            decode_fn=decode_fn,
-                            expected_seq_len=next_n + 1,
-                            use_attn_metadata=use_attn_metadata,
-                            advance_cache=False,
-                            return_last_logits=False,
-                            skip_guard_eval=False,
-                        )
-                    else:
-                        # MTP verify with NEXT_N=1 still uses the main decode path,
-                        # but cache advancement waits for accepted-token handling.
-                        all_logits, past_key_values, main_hidden = forward_main_decode_mojo(
-                            model,
-                            input_ids,
-                            past_key_values,
-                            runtime_state=runtime_state,
-                            decode_fn=decode_fn,
-                            use_attn_metadata=use_attn_metadata,
-                            advance_cache=False,
-                            return_last_logits=False,
-                            skip_guard_eval=(
-                                enable_mtp_cache_compile and
-                                decode_fn is not None and
-                                main_decode_graph_warmed
-                            ),
-                        )
-                        if enable_mtp_cache_compile and decode_fn is not None:
-                            main_decode_graph_warmed = True
+                    verify_input_ids = (
+                        input_ids.contiguous().reshape(batch_size, spec_len)
+                        if next_n > 1 else input_ids
+                    )
+                    all_logits, past_key_values, main_hidden = forward_main_decode_mojo(
+                        model,
+                        verify_input_ids,
+                        past_key_values,
+                        runtime_state=runtime_state,
+                        decode_fn=decode_fn,
+                        expected_seq_len=spec_len if next_n > 1 else None,
+                        use_attn_metadata=use_attn_metadata,
+                        advance_cache=False,
+                        return_last_logits=False,
+                        skip_guard_eval=(
+                            enable_main_cache_compile and
+                            decode_fn is not None and
+                            main_decode_graph_warmed
+                        ),
+                    )
+                    if enable_main_cache_compile and decode_fn is not None:
+                        main_decode_graph_warmed = True
                 else:
                     next_token_logits, past_key_values, _ = forward_main_decode_mojo(
                         model,
@@ -1351,7 +1313,7 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
                 mtp_generate_ids = mtp_state["mtp_generate_ids"]
                 mtp_seq_lens_cached = mtp_state["mtp_seq_lens_cached"]
 
-                mtp_spec_tokens, mtp_prev_hidden, mtp_generate_ids, mtp_decode_graph_warmed, mtp_decode_graph_warmed_steps = mtp_post_process(
+                mtp_spec_tokens, mtp_prev_hidden, mtp_generate_ids, mtp_decode_graph_warmed = mtp_post_process(
                     mtp_model,
                     mtp_runtime_state,
                     mtp_prev_hidden,
@@ -1360,9 +1322,7 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
                     spec_len=spec_len,
                     batch_size=batch_size,
                     mtp_decode_fn=mtp_decode_fn,
-                    mtp_decode_fns=mtp_decode_fns,
                     mtp_decode_graph_warmed=mtp_decode_graph_warmed,
-                    mtp_decode_graph_warmed_steps=mtp_decode_graph_warmed_steps,
                     enable_mtp_cache_compile=enable_mtp_cache_compile,
                     sync_tokens=sync_mtp_tokens_across_ep,
                     moe_ep_group=moe_ep_group,
