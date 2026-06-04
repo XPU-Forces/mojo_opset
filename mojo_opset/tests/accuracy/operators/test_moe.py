@@ -6,7 +6,6 @@ import torch.nn as nn
 
 from mojo_opset import MojoExperts
 from mojo_opset import MojoMoE
-from mojo_opset import MojoExperts
 from mojo_opset import MojoMoEGating
 from mojo_opset.utils.platform import get_torch_device
 from mojo_opset.tests.utils import bypass_not_implemented
@@ -30,7 +29,7 @@ def test_experts(num_experts, top_k, hidden_size, intermediate_size, num_tokens,
     # Note: use 2 * num_experts to mimic EP scenarios
     expert_indices = torch.randint(0, num_experts * 2, (num_tokens, top_k))
 
-    token_count = torch.bincount(expert_indices.flatten())[:num_experts].to(torch.int32).to(device)
+    token_count = torch.bincount(expert_indices.flatten(), minlength=num_experts)[:num_experts].to(torch.int32).to(device)
     total_tokens = int(token_count.sum().item())
     input_fp = torch.randn(total_tokens, hidden_size, dtype=dtype, device=device)
 
