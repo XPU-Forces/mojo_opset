@@ -88,6 +88,7 @@ diffusion_attention_fwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_a
 diffusion_attention_bwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_attention_bwd_impl")
 
 m_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "m_grouped_matmul_impl")
+m_grouped_matmul_capturable_impl = _get_kernel_impl(ttx_backend_module, "m_grouped_matmul_capturable_impl")
 k_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "k_grouped_matmul_impl")
 
 moe_gating_impl = _get_kernel_impl(ttx_backend_module, "moe_gating_impl")
@@ -786,6 +787,50 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     ) -> torch.Tensor:
         return torch.empty_like(C)
 
+    @torch.library.custom_op("ttx::m_grouped_matmul_capturable", mutates_args={})
+    def m_grouped_matmul_capturable(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        size_per_group: torch.Tensor,
+        num_groups: int,
+        M: int,
+        N: int,
+        K: int,
+        strideBN: int,
+        strideBK: int,
+        trans_b: bool = False,
+    ) -> torch.Tensor:
+        return m_grouped_matmul_capturable_impl(
+            A,
+            B,
+            C,
+            size_per_group,
+            num_groups,
+            M,
+            N,
+            K,
+            strideBN,
+            strideBK,
+            trans_b,
+        )
+
+    @m_grouped_matmul_capturable.register_fake
+    def m_grouped_matmul_capturable_fake(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        size_per_group: torch.Tensor,
+        num_groups: int,
+        M: int,
+        N: int,
+        K: int,
+        strideBN: int,
+        strideBK: int,
+        trans_b: bool = False,
+    ) -> torch.Tensor:
+        return torch.empty_like(C)
+
     @torch.library.custom_op("ttx::k_grouped_matmul", mutates_args={})
     def k_grouped_matmul(
         A: torch.Tensor,
@@ -963,6 +1008,7 @@ else:
     diffusion_attention_fwd = diffusion_attention_fwd_impl
     diffusion_attention_bwd = diffusion_attention_bwd_impl
     m_grouped_matmul = m_grouped_matmul_impl
+    m_grouped_matmul_capturable = m_grouped_matmul_capturable_impl
     k_grouped_matmul = k_grouped_matmul_impl
     moe_gating = moe_gating_impl
     moe_dispatch = moe_dispatch_impl
