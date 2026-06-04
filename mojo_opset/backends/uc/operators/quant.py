@@ -1,10 +1,50 @@
 import torch
 
 from mojo_opset.core import MojoDynamicQuant
+from mojo_opset.core import MojoStaticQuant
 from mojo_opset.core import MojoMoEDynamicQuant
 
 from ._utils import _matrix_shape
 from ._utils import run_kernel
+
+
+class UCStaticQuant(MojoStaticQuant):
+    supported_platforms_list = ["npu"]
+
+    def forward(self, input: torch.Tensor):
+        if self.quant_dtype != torch.int8:
+            raise NotImplementedError(f"UCStaticQuant only supports torch.int8, got {self.quant_dtype}.")
+        if input.dim() < len(self.input_size):
+            raise ValueError(
+                f"input must have at least {len(self.input_size)} dims for scale shape "
+                f"{self.input_size}, got {tuple(input.shape)}."
+            )
+        if tuple(input.shape[-len(self.input_size):]) != self.input_size:
+            raise ValueError(
+                f"input trailing dims {tuple(input.shape[-len(self.input_size):])} must "
+                f"match scale shape {self.input_size}."
+            )
+        if input.numel() == 0:
+            return torch.empty_like(input, dtype=self.quant_dtype), self.scale
+
+        kernel_input = input.contiguous()
+        scale = self.scale.to(device=kernel_input.device, dtype=torch.float32).contiguous()
+        cols = scale.numel()
+        rows = kernel_input.numel() // cols
+        kernel_input_2d = kernel_input.reshape(rows, cols)
+        scale_1d = scale.reshape(cols)
+        kernel_output = torch.empty_like(kernel_input_2d, dtype=self.quant_dtype)
+
+        run_kernel(
+            "mojo_static_quant",
+            kernel_input.dtype,
+            kernel_input_2d,
+            scale_1d,
+            kernel_output,
+            rows,
+            cols,
+        )
+        return kernel_output.reshape(input.shape), self.scale
 
 
 class UCDynamicQuant(MojoDynamicQuant):
