@@ -17,6 +17,7 @@ from .gelu import gelu_bwd_impl
 from .gelu import gelu_fwd_impl
 from .group_gemm import k_grouped_matmul_impl
 from .group_gemm import m_grouped_matmul_impl
+from .group_gemm import m_grouped_matmul_capturable_impl
 from .moe import moe_gating_impl
 from .moe import moe_dispatch_impl
 from .moe import moe_experts_impl
@@ -80,6 +81,7 @@ __all__ = [
     "gelu_bwd_impl",
     "gelu_fwd_impl",
     "m_grouped_matmul_impl",
+    "m_grouped_matmul_capturable_impl",
     "k_grouped_matmul_impl",
     "moe_gating_impl",
     "moe_dispatch_impl",

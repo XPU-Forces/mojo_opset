@@ -4,6 +4,7 @@ from torch.distributed.tensor import DTensor
 
 from mojo_opset.backends.ttx.kernels import int8_gemm_dequant
 from mojo_opset.backends.ttx.kernels import m_grouped_matmul
+from mojo_opset.backends.ttx.kernels import m_grouped_matmul_capturable
 from mojo_opset.backends.ttx.kernels import prepare_b
 from mojo_opset.backends.ttx.kernels import quant_batch_gemm_reduce_sum_impl
 from mojo_opset.core import MojoQuantGemm
@@ -81,7 +82,12 @@ class TTXGroupGemm(MojoGroupGemm):
         if isinstance(C, DTensor):
             C = C.to_local()
 
-        m_grouped_matmul(input, weight, C, group_list, num_groups, M, N, K, strideBN, strideBK, not self.trans_weight)
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            m_grouped_matmul_capturable(
+                input, weight, C, group_list, num_groups, M, N, K, strideBN, strideBK, not self.trans_weight
+            )
+        else:
+            m_grouped_matmul(input, weight, C, group_list, num_groups, M, N, K, strideBN, strideBK, not self.trans_weight)
 
         return C
 
