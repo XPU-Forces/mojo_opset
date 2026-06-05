@@ -1,5 +1,5 @@
 import torch
-from typing import Optional, Tuple, Union
+from typing import Union
 
 from mojo_opset.core import MojoMoEGating
 from mojo_opset.core import MojoMoEDispatch
@@ -129,78 +129,34 @@ class IxformerMoEDynamicQuant(MojoMoEDynamicQuant):
 class IxformerMoEDispatch(MojoMoEDispatch):
     supported_platforms_list = ["ilu"]
 
-    def __init__(self, num_experts: int, **kwargs):
-        super().__init__(num_experts, **kwargs)
-        self.gdr_device_buffer = torch.zeros([self.num_experts + 1], dtype=torch.int, device="cuda")
-        torch.cuda.synchronize()
-        self.gdr_buffer_ptr = ixf_f.new_gdr_buffer(self.gdr_device_buffer)
-
     def forward(
         self,
         hidden_states: torch.Tensor,
+        top_k_gates: torch.Tensor,
         top_k_indices: torch.Tensor,
-        smooth_scale: Optional[torch.Tensor] = None,
-        weight_dtype: Union[str, torch.dtype] = torch.int8,
-        enable_cuda_graph: bool = False
     ):
-        if enable_cuda_graph:
-            assert torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+        """Sort tokens by expert id and gather into contiguous layout.
 
+        Matches the core ``MojoMoEDispatch`` contract, implemented with a single
+        fused ixformer kernel (``moe_dispatch``).
+
+        Returns:
+            sorted_hidden_states: (num_tokens * top_k, hidden_size).
+            tokens_per_expert:    (num_experts,), int32.
+            sorted_gates:         (num_tokens * top_k, 1).
+            token_indices:        (num_tokens * top_k,), original token id per slot.
+        """
         if hidden_states.dim() == 3:
-            num_tokens = hidden_states.shape[0] * hidden_states.shape[1]
-            dim = hidden_states.shape[-1]
-            hidden_states = hidden_states.view(num_tokens, dim)
-        elif hidden_states.dim() == 2:
-            dim = hidden_states.shape[-1]
+            hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
 
-        num_tokens, top_k = top_k_indices.shape
+        sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = ixf_f.moe_dispatch(
+            hidden_states,
+            top_k_gates,
+            top_k_indices,
+            self.num_experts,
+        )
 
-        (src_to_dst, 
-         sorted_token_ids,
-         expert_sizes_gpu, 
-         expert_sizes_cpu) = ixf_f.moe_compute_token_index(top_k_indices, self.num_experts, gdr_buffer_ptr=self.gdr_buffer_ptr if not enable_cuda_graph else None)
-        
-        if not enable_cuda_graph:
-            tokens_per_expert = expert_sizes_cpu
-        else:
-            tokens_per_expert = expert_sizes_gpu
-        
-        expand_tokens = num_tokens * top_k
-
-        if weight_dtype in [torch.int8, "int4"]:
-            i8_hidden_states, quant_scale = ixf_f.moe_expand_input_dynamic_scaled_int8(
-                                                hidden_states=hidden_states,
-                                                dst_to_src=sorted_token_ids,
-                                                dst_tokens=expand_tokens, 
-                                                topk=top_k,
-                                                src_to_dst=src_to_dst,
-                                                topk_ids=top_k_indices,
-                                                smooth_scales=smooth_scale,
-                                                output_format=1 if enable_cuda_graph and weight_dtype == "int4" else 0)
-            return (
-                i8_hidden_states.view(-1, dim),
-                sorted_token_ids,
-                src_to_dst,
-                tokens_per_expert,
-                quant_scale,
-            )
-        else:
-            assert smooth_scale is None
-            hidden_states = ixf_f.moe_expand_input(
-                hidden_states=hidden_states,
-                dst_to_src=sorted_token_ids,
-                dst_tokens=expand_tokens,
-                topk=top_k,
-                src_to_dst=src_to_dst,
-            )
-            return (
-                hidden_states.view(-1, dim),
-                sorted_token_ids,
-                src_to_dst,
-                tokens_per_expert,
-            )
-    def __del__(self):
-        ixf_f.delete_gdr_buffer(self.gdr_buffer_ptr)
+        return sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices
 
 
 class IxformerExperts(MojoExperts):
@@ -217,15 +173,11 @@ class IxformerExperts(MojoExperts):
 
     def forward(self,
                 sorted_hidden_states: torch.Tensor,
-                tokens_per_expert: torch.Tensor,
-                sorted_token_ids: torch.Tensor,
-                topk_indices: torch.Tensor,
-                enable_cuda_graph: bool = False):
+                tokens_per_expert: torch.Tensor):
+        enable_cuda_graph = torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
         
-        if enable_cuda_graph:
-            assert torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
-
         if not enable_cuda_graph:
+            tokens_per_expert = tokens_per_expert.cpu()
 
             group_gemm_output1 = ixf_f.moe_w16a16_group_gemm(
                 input=sorted_hidden_states,
@@ -248,9 +200,7 @@ class IxformerExperts(MojoExperts):
 
         act = ixf_f.silu_and_mul(group_gemm_output1)
 
-        num_tokens, top_k = topk_indices.shape
-
-        group_gemm_output2 = torch.empty(num_tokens * top_k, self.hidden_size, dtype=sorted_hidden_states.dtype, device=sorted_hidden_states.device)
+        group_gemm_output2 = torch.empty(sorted_hidden_states.shape[0], self.hidden_size, dtype=sorted_hidden_states.dtype, device=sorted_hidden_states.device)
 
         if not enable_cuda_graph:
             ixf_f.moe_w16a16_group_gemm(
@@ -258,7 +208,7 @@ class IxformerExperts(MojoExperts):
                 weight=self.down_proj_weight,
                 output_dtype=sorted_hidden_states.dtype,
                 tokens_per_experts=tokens_per_expert,
-                dst_to_src=sorted_token_ids,
+                dst_to_src=None,
                 format="TN",
                 output=group_gemm_output2,
             )
@@ -268,12 +218,12 @@ class IxformerExperts(MojoExperts):
                 weight=self.down_proj_weight,
                 output_dtype=sorted_hidden_states.dtype,
                 tokens_per_experts_gpu=tokens_per_expert,
-                dst_to_src=sorted_token_ids,
+                dst_to_src=None,
                 format="TN",
                 output=group_gemm_output2,
             )
 
-        return group_gemm_output2.view(num_tokens, top_k, -1)
+        return group_gemm_output2
 
 
 class IxformerQuantExperts(MojoQuantExperts):
@@ -501,43 +451,51 @@ class IxformerMoECombine(MojoMoECombine):
 
     def forward(
         self,
+        output_buffer: torch.Tensor,
         expert_outputs: torch.Tensor,
-        top_k_gates: torch.Tensor,
-        src_to_dst: torch.Tensor,
+        sorted_gates: torch.Tensor,
+        token_indices: torch.Tensor,
     ) -> torch.Tensor:
-        reduce_mask = src_to_dst == -1
-        combined_output = ixf_f.moe_output_reduce_sum(
-            input=expert_outputs,
-            topk_weight=top_k_gates,
-            mask=reduce_mask,
+        """Weighted scatter-reduce of expert outputs back to token positions.
+
+        Args:
+            output_buffer:  (num_tokens, hidden_size), include-self buffer. It is
+                converted to float32 accumulator by ixformer.
+            expert_outputs: (num_tokens * top_k, hidden_size), fp16/bf16/fp32.
+            sorted_gates:   (num_tokens * top_k, 1), float32.
+            token_indices:  (num_tokens * top_k,), int32. Maps each expert-sorted
+                slot back to its original token id.
+
+        Returns:
+            combined: (num_tokens, hidden_size), same dtype as expert_outputs.
+        """
+        return ixf_f.moe_combine(
+            output_buffer,
+            expert_outputs,
+            sorted_gates,
+            token_indices,
+            multiply_by_gates=self.multiply_by_gates,
         )
-        return combined_output
 
 
 class IxformerMoE(MojoMoE):
     supported_platforms_list = ["ilu"]
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
-            enable_cuda_graph = True
-        else:
-            enable_cuda_graph = False
-
         top_k_indices, top_k_gates = self.gating(hidden_states)
 
-        sorted_hidden_states, sorted_token_ids, src_to_dst, tokens_per_expert = self.dispatch(
+        sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = self.dispatch(
             hidden_states,
+            top_k_gates,
             top_k_indices,
-            weight_dtype=torch.bfloat16,
-            enable_cuda_graph=enable_cuda_graph
         )
 
-        if not enable_cuda_graph:
-            tokens_per_expert = tokens_per_expert.cpu()
-
-        expert_outputs = self.experts(sorted_hidden_states, tokens_per_expert, sorted_token_ids, top_k_indices, enable_cuda_graph)
-        
-        combined = self.combine(expert_outputs, top_k_gates, src_to_dst)
+        expert_outputs = self.experts(
+            sorted_hidden_states,
+            tokens_per_expert,
+        )
+        output_buffer = torch.zeros_like(hidden_states, memory_format=torch.contiguous_format)
+        combined = self.combine(output_buffer, expert_outputs, sorted_gates, token_indices)
 
         return combined
 
