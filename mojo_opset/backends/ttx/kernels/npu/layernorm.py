@@ -20,6 +20,40 @@ TOKEN_BLOCK_SIZE_TABLE = {
 
 def layer_norm_fwd_heuristics(args):
     hidden_dim = args["n_cols"]
+    n_rows = args["n_rows"] if "n_rows" in args else 0
+    x_dtype = args["x_dtype"] if "x_dtype" in args else args["X_ptr"].dtype
+
+    if hidden_dim > 8192:
+        if x_dtype != torch.float32:
+            return 4
+        return 8
+
+    if hidden_dim >= 8192:
+        if n_rows <= 16:
+            return 1
+        if x_dtype != torch.float32:
+            return 4
+        return 8
+
+    if hidden_dim >= 4096:
+        if n_rows <= 16:
+            return 1
+        return 4
+
+    if hidden_dim >= 2048:
+        return 4
+
+    if hidden_dim >= 1024:
+        return 8
+
+    if hidden_dim >= 512:
+        return 12
+
+    if hidden_dim <= 128:
+        if n_rows >= 256:
+            return 32
+        return 16
+
     if hidden_dim <= COL_BLOCKING_THRESHOLD:
         if hidden_dim in TOKEN_BLOCK_SIZE_TABLE:
             return TOKEN_BLOCK_SIZE_TABLE[hidden_dim]
@@ -28,8 +62,7 @@ def layer_norm_fwd_heuristics(args):
             if hidden_dim <= dim_thresh:
                 return block_size
         return 1
-    else:
-        return 4
+    return 4
 
 
 @triton.heuristics({"BLOCK_SIZE_M": layer_norm_fwd_heuristics})
@@ -49,6 +82,7 @@ def _layernorm_fwd_kernel(
     eps,
     DROP_COLS_MASK: tl.constexpr,
     DROP_ROWS_MASK: tl.constexpr,
+    STORE_STATS: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
 ):
@@ -102,12 +136,13 @@ def _layernorm_fwd_kernel(
         var = tl.maximum(var, 0.0)
         rstd = rsqrt(var + eps)
 
-        if DROP_ROWS_MASK:
-            tl.store(Mean_ptr + rows_off, mean)
-            tl.store(RSTD_ptr + rows_off, rstd)
-        else:
-            tl.store(Mean_ptr + rows_off, mean, mask=rows_mask)
-            tl.store(RSTD_ptr + rows_off, rstd, mask=rows_mask)
+        if STORE_STATS:
+            if DROP_ROWS_MASK:
+                tl.store(Mean_ptr + rows_off, mean)
+                tl.store(RSTD_ptr + rows_off, rstd)
+            else:
+                tl.store(Mean_ptr + rows_off, mean, mask=rows_mask)
+                tl.store(RSTD_ptr + rows_off, rstd, mask=rows_mask)
 
         for col_offset in range(0, n_cols, BLOCK_SIZE_N):
             cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
@@ -187,6 +222,7 @@ def _layernorm_fwd_single_pass_kernel(
     eps,
     DROP_COLS_MASK: tl.constexpr,
     DROP_ROWS_MASK: tl.constexpr,
+    STORE_STATS: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
 ):
@@ -229,16 +265,21 @@ def _layernorm_fwd_single_pass_kernel(
 
         x_chunk = x_chunk.to(tl.float32)
         mean = tl.sum(x_chunk, axis=1) / n_cols
-        var = tl.sum(x_chunk * x_chunk, axis=1) / n_cols - mean * mean
-        var = tl.maximum(var, 0.0)
+        x_centered = x_chunk - mean[:, None]
+        if DROP_COLS_MASK:
+            var = tl.sum(x_centered * x_centered, axis=1) / n_cols
+        else:
+            x_centered_for_var = tl.where(cols_mask[None, :], x_centered, 0.0)
+            var = tl.sum(x_centered_for_var * x_centered_for_var, axis=1) / n_cols
         rstd = rsqrt(var + eps)
 
-        if DROP_ROWS_MASK:
-            tl.store(Mean_ptr + rows_off, mean)
-            tl.store(RSTD_ptr + rows_off, rstd)
-        else:
-            tl.store(Mean_ptr + rows_off, mean, mask=rows_mask)
-            tl.store(RSTD_ptr + rows_off, rstd, mask=rows_mask)
+        if STORE_STATS:
+            if DROP_ROWS_MASK:
+                tl.store(Mean_ptr + rows_off, mean)
+                tl.store(RSTD_ptr + rows_off, rstd)
+            else:
+                tl.store(Mean_ptr + rows_off, mean, mask=rows_mask)
+                tl.store(RSTD_ptr + rows_off, rstd, mask=rows_mask)
 
         if DROP_COLS_MASK:
             w_chunk = tl.load(W_ptr + cols_off).to(tl.float32)
@@ -251,9 +292,7 @@ def _layernorm_fwd_single_pass_kernel(
                 tl.float32
             )
 
-        y_chunk = (x_chunk - mean[:, None]) * rstd[:, None] * w_chunk[
-            None, :
-        ] + b_chunk[None, :]
+        y_chunk = x_centered * rstd[:, None] * w_chunk[None, :] + b_chunk[None, :]
 
         if DROP_ROWS_MASK:
             if DROP_COLS_MASK:
@@ -451,8 +490,10 @@ def _layernorm_bwd_large_cols_kernel(
             tl.atomic_add(DB_ptr + cols_off, dB_chunk, mask=cols_mask)
 
 
-def _layernorm_fwd_grid(n_rows: int, n_cols: int) -> tuple[int]:
-    block_m = layer_norm_fwd_heuristics({"n_cols": n_cols})
+def _layernorm_fwd_grid(n_rows: int, n_cols: int, x_dtype: torch.dtype) -> tuple[int]:
+    block_m = layer_norm_fwd_heuristics(
+        {"n_rows": n_rows, "n_cols": n_cols, "x_dtype": x_dtype}
+    )
     num_row_tasks = ceil_div(n_rows, block_m)
     num_vectorcores = triton.runtime.driver.active.utils.get_device_properties("npu")[
         "num_vectorcore"
@@ -461,13 +502,25 @@ def _layernorm_fwd_grid(n_rows: int, n_cols: int) -> tuple[int]:
 
 
 def _launch_layernorm_fwd_kernel(
-    x_2d, y, weight, bias, mean, rstd, n_rows, n_cols, eps, block_size_n
+    x_2d,
+    y,
+    weight,
+    bias,
+    mean,
+    rstd,
+    n_rows,
+    n_cols,
+    eps,
+    block_size_n,
+    store_stats: bool,
 ):
-    block_size_m = layer_norm_fwd_heuristics({"n_cols": n_cols})
+    block_size_m = layer_norm_fwd_heuristics(
+        {"n_rows": n_rows, "n_cols": n_cols, "x_dtype": x_2d.dtype}
+    )
     drop_cols_mask = n_cols % block_size_n == 0
     drop_rows_mask = drop_cols_mask and n_rows % block_size_m == 0
     use_single_pass = n_cols <= block_size_n
-    grid = _layernorm_fwd_grid(n_rows, n_cols)
+    grid = _layernorm_fwd_grid(n_rows, n_cols, x_2d.dtype)
 
     if use_single_pass:
         _layernorm_fwd_single_pass_kernel[grid](
@@ -484,6 +537,7 @@ def _launch_layernorm_fwd_kernel(
             eps,
             DROP_COLS_MASK=drop_cols_mask,
             DROP_ROWS_MASK=drop_rows_mask,
+            STORE_STATS=store_stats,
             BLOCK_SIZE_N=block_size_n,
         )
         return
@@ -502,6 +556,7 @@ def _launch_layernorm_fwd_kernel(
         eps,
         DROP_COLS_MASK=drop_cols_mask,
         DROP_ROWS_MASK=drop_rows_mask,
+        STORE_STATS=store_stats,
         BLOCK_SIZE_N=block_size_n,
     )
 
@@ -523,11 +578,19 @@ def layernorm_infer_impl(
         BLOCK_SIZE_N = align(hidden_states, n_cols, VEC_ALIGN_BYTES)
 
     y = torch.empty_like(x_2d)
-    mean = torch.empty(n_rows, dtype=torch.float32, device=hidden_states.device)
-    rstd = torch.empty(n_rows, dtype=torch.float32, device=hidden_states.device)
 
     _launch_layernorm_fwd_kernel(
-        x_2d, y, weight, bias, mean, rstd, n_rows, n_cols, eps, BLOCK_SIZE_N
+        x_2d,
+        y,
+        weight,
+        bias,
+        y,
+        y,
+        n_rows,
+        n_cols,
+        eps,
+        BLOCK_SIZE_N,
+        store_stats=False,
     )
 
     return y.reshape(*shape)
@@ -549,7 +612,7 @@ def layernorm_fwd_impl(x, w, b, eps):
     rstd = torch.empty(n_rows, dtype=torch.float32, device=x.device)
 
     _launch_layernorm_fwd_kernel(
-        x_2d, y, w, b, mean, rstd, n_rows, n_cols, eps, BLOCK_SIZE_N
+        x_2d, y, w, b, mean, rstd, n_rows, n_cols, eps, BLOCK_SIZE_N, store_stats=True
     )
 
     return y.reshape(*shape), x_2d, mean, rstd
