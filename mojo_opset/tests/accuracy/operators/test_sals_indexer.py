@@ -18,6 +18,7 @@ from mojo_opset.tests.utils import auto_switch_platform, bypass_not_implemented
 
 HEAD_DIM = 128
 SPARSE_BLOCK_SIZE = 64
+MIN_SPARSE_LEN = 512
 
 MODEL_SPECS = [
     ("new_model_1", 2, 128),
@@ -31,14 +32,14 @@ MODEL_SPECS = [
 ]
 
 # Custom test cases as specified:
-# q_len = 4096, kv_len = 16384/32768/65536, q_head_num = 3/4, kv_head_num = 1, sparse_block_size = 64, fixed_tail_blocks = 4
+# q_len = 4096, kv_len = 16384/32768/65536,share_len, q_head_num = 3/4, kv_head_num = 1, sparse_block_size = 64, fixed_tail_blocks = 4
 CUSTOM_SCENARIOS = [
-    (4096, 3, 1, 16384, 64, 4, torch.bfloat16),
-    (4096, 3, 1, 32768, 64, 4, torch.bfloat16),
-    (4096, 3, 1, 65536, 64, 4, torch.bfloat16),
-    (4096, 4, 1, 16384, 64, 4, torch.bfloat16),
-    (4096, 4, 1, 32768, 64, 4, torch.bfloat16),
-    (4096, 4, 1, 65536, 64, 4, torch.bfloat16),
+    (4096, 3, 1, 256,16384, 64, 4, torch.bfloat16),
+    (4096, 3, 1, 256,32768, 64, 4, torch.bfloat16),
+    (4096, 3, 1, 256,65536, 64, 4, torch.bfloat16),
+    (4096, 4, 1, 256,16384, 64, 4, torch.bfloat16),
+    (4096, 4, 1, 256,32768, 64, 4, torch.bfloat16),
+    (4096, 4, 1, 256,65536, 64, 4, torch.bfloat16),
 ]
 
 # (q_seqlen, share_len, kv_seqlen, sparsity, fixed_tail, cache_block_size, dtype)
@@ -75,9 +76,9 @@ for _s in LARGE_SCENARIOS:
 
 _CUSTOM_PARAMS = []
 for _s in CUSTOM_SCENARIOS:
-    q_seqlen, q_head_num, kv_head_num, kv_seqlen, cache_block_size, fixed_tail, dtype = _s
+    q_seqlen, q_head_num, kv_head_num, share_len,kv_seqlen, cache_block_size, fixed_tail, dtype = _s
     _CUSTOM_PARAMS.append(pytest.param(
-        q_seqlen, q_head_num, kv_head_num, kv_seqlen, cache_block_size, fixed_tail, dtype,
+        q_seqlen, q_head_num, kv_head_num,share_len, kv_seqlen, cache_block_size, fixed_tail, dtype,
         id=f"q{q_seqlen}-qh{q_head_num}-kh{kv_head_num}-kv{kv_seqlen}-cb{cache_block_size}-ft{fixed_tail}",
     ))
 
@@ -262,7 +263,7 @@ def test_sals_indexer_model_specs(
     model_name, kv_heads, head_dim,
     q_seqlen, share_len, kv_seqlen, sparsity, fixed_tail, cache_block_size, dtype,
 ):
-    G = q_seqlen // share_len
+    G = (q_seqlen - MIN_SPARSE_LEN) // share_len
     kw = _make_inputs(
         G=G, seq_lengths=[kv_seqlen] * G,
         dtype=dtype, sparsity=sparsity,
@@ -278,65 +279,27 @@ def test_sals_indexer_model_specs(
 
 
 @pytest.mark.parametrize(
-    "q_seqlen,q_head_num,kv_head_num,kv_seqlen,cache_block_size,fixed_tail,dtype",
+    "q_seqlen,q_head_num,kv_head_num,share_len,kv_seqlen,cache_block_size,fixed_tail,dtype",
     _CUSTOM_PARAMS,
 )
 @auto_switch_platform()
 @bypass_not_implemented
 def test_sals_indexer_custom(
-    q_seqlen, q_head_num, kv_head_num, kv_seqlen, cache_block_size, fixed_tail, dtype,
+    q_seqlen, q_head_num, kv_head_num, share_len,kv_seqlen, cache_block_size, fixed_tail, dtype,
 ):
-    G = q_head_num
-    sparse_ratio = 0.25
-    sbs = SPARSE_BLOCK_SIZE
-    device = _device()
-    
-    max_seqlen = kv_seqlen
-    max_bpg = max((max_seqlen + cache_block_size - 1) // cache_block_size, 1)
-    num_phys = max_bpg * G + 4
-    
-    max_count = max((max_seqlen + sbs - 1) // sbs, 0)
-    fixed_tail_count = min(fixed_tail, max_count)
-    sparse_count = max(1, min(
-        int((max_count - fixed_tail_count) * sparse_ratio + 0.5) + fixed_tail_count,
-        max_count,
-    ))
-    
-    query = torch.randn(G, kv_head_num, HEAD_DIM, dtype=dtype, device=device)
-    key = torch.randn(num_phys, cache_block_size, kv_head_num, HEAD_DIM, dtype=dtype, device=device)
-    
-    block_table = torch.zeros(G, max_bpg, dtype=torch.int32, device=device)
-    for g in range(G):
-        n_blks = min(max_bpg, num_phys)
-        perm = torch.randperm(num_phys, device=device)[:n_blks].to(torch.int32)
-        block_table[g, :n_blks] = perm
-        if n_blks < max_bpg:
-            block_table[g, n_blks:] = perm[-1]
-    
-    actual_seq_lengths_key = torch.tensor([kv_seqlen] * G, dtype=torch.int32, device=device)
-    act_n_counts = torch.tensor(
-        [(max(kv_seqlen, 0) + sbs - 1) // sbs] * G,
-        dtype=torch.int32, device=device,
-    )
-    
-    kw = dict(
-        query=query,
-        key=key,
-        block_table=block_table,
-        actual_seq_lengths_key=actual_seq_lengths_key,
-        act_n_counts=act_n_counts,
-        sparse_block_size=sbs,
-        sparse_ratio=sparse_ratio,
-        fixed_tail_count=fixed_tail_count,
-        sparse_count=sparse_count,
-        score_mode="lse",
-        max_seqlen_key=max_seqlen,
+    G = (q_seqlen - MIN_SPARSE_LEN) // share_len
+    sparsity = 4
+    kw = _make_inputs(
+        G=G, seq_lengths=[kv_seqlen] * G,
+        dtype=dtype, sparsity=sparsity,
+        fixed_tail_count=fixed_tail, kv_heads=kv_head_num,
+        cache_block_size=cache_block_size,
     )
     
     indexer = MojoSALSIndexer()
     torch_out = indexer._registry.get("torch")().forward(**kw)
     ttx_out = indexer._registry.get("ttx")().forward(**kw)
-    _assert_match(torch_out, ttx_out, G, kv_head_num, fixed_tail_count)
+    _assert_match(torch_out, ttx_out, G, kv_head_num, kw["fixed_tail_count"])
 
 
 if __name__ == "__main__":
