@@ -24,6 +24,7 @@ def generate_paged_decode_data(
     block_size: int,
     dtype: torch.dtype,
 ):
+    torch.manual_seed(43)
     query = torch.randn(batch_size, num_q_heads, head_dim, dtype=dtype)
 
     total_seq_lens = torch.randint(1, max_seq_len, (batch_size,), dtype=torch.int32)
@@ -123,6 +124,7 @@ def generate_paged_prefill_data(
     block_size: int,
     dtype: torch.dtype,
 ):
+    torch.manual_seed(43)
     q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
     q_lens = torch.clamp(q_lens, min=1)
     cu_q_lens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0, dtype=torch.int32)])
