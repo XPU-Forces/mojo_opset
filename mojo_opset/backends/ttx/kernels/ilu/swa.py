@@ -2151,6 +2151,7 @@ def _paged_decode_kernel(
     BLOCK_SIZE_D: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     OUT_T: tl.constexpr,
+    PIPELINE_STAGES: tl.constexpr,
 ):
     tl.static_assert(HEAD_DIM <= BLOCK_SIZE_D, "HEAD_DIM should be <= BLOCK_SIZE_D")
     tl.static_assert(
@@ -2190,7 +2191,60 @@ def _paged_decode_kernel(
             LOCAL_WINDOW,
         )
 
-        for kv_block_id in tl.range(0, num_global_window_blocks):
+        gw_loop_end = num_global_window_blocks
+        local_loop_start = non_global_window_start_block
+        fast_loop_end = 0
+        if (GLOBAL_WINDOW is not None) and (LOCAL_WINDOW is not None):
+            if (GLOBAL_WINDOW + LOCAL_WINDOW) >= kv_seq_len:
+                gw_loop_end = 0
+                local_loop_start = num_total_blocks
+                fast_loop_end = num_total_blocks
+
+        for kv_block_id in tl.range(0, fast_loop_end, num_stages=PIPELINE_STAGES):
+            kv_block_start = kv_block_id * BLOCK_SIZE_N
+            kv_block_end = tl.minimum(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
+            kv_block_len = kv_block_end - kv_block_start
+            logical_page_id = kv_block_start // PAGE_SIZE
+            kv_block_start_in_page = kv_block_start % PAGE_SIZE
+            physical_page_id = tl.load(
+                block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
+            )
+            k_block_ptr = tl.make_block_ptr(
+                base=k_cache_ptr
+                + physical_page_id * stride_k_block
+                + kv_head_id * stride_k_head
+                + kv_block_start_in_page * stride_k_blksz,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_k_blksz, stride_k_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            v_block_ptr = tl.make_block_ptr(
+                base=v_cache_ptr
+                + physical_page_id * stride_v_block
+                + kv_head_id * stride_v_head
+                + kv_block_start_in_page * stride_v_blksz,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_v_blksz, stride_v_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            kv_mask = tl.arange(0, BLOCK_SIZE_N) < kv_block_len
+
+            acc, l_i, m_i = _sdpa_acc_fwd_1xN(
+                acc,
+                l_i,
+                m_i,
+                q,
+                k_block_ptr,
+                v_block_ptr,
+                kv_mask,
+                softmax_scale,
+            )
+
+        for kv_block_id in tl.range(0, gw_loop_end):
             kv_block_start = kv_block_id * BLOCK_SIZE_N
             kv_block_end = tl.minimum(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
             kv_block_len = kv_block_end - kv_block_start
@@ -2239,7 +2293,7 @@ def _paged_decode_kernel(
                 softmax_scale,
             )
 
-        for kv_block_id in tl.range(non_global_window_start_block, num_total_blocks):
+        for kv_block_id in tl.range(local_loop_start, num_total_blocks):
             kv_block_start = kv_block_id * BLOCK_SIZE_N
             kv_block_end = tl.minimum(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
             kv_block_len = kv_block_end - kv_block_start
@@ -2336,6 +2390,7 @@ def _paged_decode_kernel_tiny_global(
     BLOCK_SIZE_N: tl.constexpr,
     TINY_GLOBAL_N: tl.constexpr,
     OUT_T: tl.constexpr,
+    PIPELINE_STAGES: tl.constexpr,
 ):
     tl.static_assert(HEAD_DIM <= BLOCK_SIZE_D, "HEAD_DIM should be <= BLOCK_SIZE_D")
     tl.static_assert(
@@ -2377,7 +2432,63 @@ def _paged_decode_kernel_tiny_global(
             LOCAL_WINDOW,
         )
 
-        if num_global_window_blocks > 0:
+        full_cover = False
+        if (GLOBAL_WINDOW is not None) and (LOCAL_WINDOW is not None):
+            full_cover = (GLOBAL_WINDOW + LOCAL_WINDOW) >= kv_seq_len
+
+        gw_loop_end = num_global_window_blocks
+        local_loop_start = non_global_window_start_block
+        fast_loop_end = 0
+        if full_cover:
+            gw_loop_end = 0
+            local_loop_start = num_total_blocks
+            fast_loop_end = num_total_blocks
+
+        for kv_block_id in tl.range(0, fast_loop_end, num_stages=PIPELINE_STAGES):
+            kv_block_start = kv_block_id * BLOCK_SIZE_N
+            kv_block_end = tl.minimum(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
+            kv_block_len = kv_block_end - kv_block_start
+            logical_page_id = kv_block_start // PAGE_SIZE
+            kv_block_start_in_page = kv_block_start % PAGE_SIZE
+            physical_page_id = tl.load(
+                block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
+            )
+            k_block_ptr = tl.make_block_ptr(
+                base=k_cache_ptr
+                + physical_page_id * stride_k_block
+                + kv_head_id * stride_k_head
+                + kv_block_start_in_page * stride_k_blksz,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_k_blksz, stride_k_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            v_block_ptr = tl.make_block_ptr(
+                base=v_cache_ptr
+                + physical_page_id * stride_v_block
+                + kv_head_id * stride_v_head
+                + kv_block_start_in_page * stride_v_blksz,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_v_blksz, stride_v_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            kv_mask = offs_n < kv_block_len
+
+            acc, l_i, m_i = _sdpa_acc_fwd_1xN(
+                acc,
+                l_i,
+                m_i,
+                q,
+                k_block_ptr,
+                v_block_ptr,
+                kv_mask,
+                softmax_scale,
+            )
+
+        if gw_loop_end > 0:
             block0_fully_covered_by_local = False
             if LOCAL_WINDOW is not None:
                 block0_fully_covered_by_local = (BLOCK_SIZE_N + LOCAL_WINDOW) >= kv_seq_len
@@ -2448,7 +2559,7 @@ def _paged_decode_kernel_tiny_global(
                     softmax_scale,
                 )
 
-        for kv_block_id in tl.range(1, num_global_window_blocks):
+        for kv_block_id in tl.range(1, gw_loop_end):
             kv_block_start = kv_block_id * BLOCK_SIZE_N
             kv_block_end = tl.minimum(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
             kv_block_len = kv_block_end - kv_block_start
@@ -2498,8 +2609,11 @@ def _paged_decode_kernel_tiny_global(
         else:
             nomask_start = non_global_window_start_block
         nomask_end = tl.maximum(nomask_start, num_full_pages)
+        if full_cover:
+            nomask_start = num_total_blocks
+            nomask_end = num_total_blocks
 
-        for kv_block_id in tl.range(non_global_window_start_block, nomask_start):
+        for kv_block_id in tl.range(local_loop_start, nomask_start):
             kv_block_start = kv_block_id * BLOCK_SIZE_N
             kv_block_end = tl.minimum(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
             kv_block_len = kv_block_end - kv_block_start
@@ -2690,6 +2804,7 @@ def _paged_decode_quant_kernel(
     BLOCK_SIZE_D: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     OUT_T: tl.constexpr,
+    PIPELINE_STAGES: tl.constexpr,
 ):
     tl.static_assert(HEAD_DIM <= BLOCK_SIZE_D, "HEAD_DIM should be <= BLOCK_SIZE_D")
     tl.static_assert(
@@ -2742,8 +2857,70 @@ def _paged_decode_quant_kernel(
             LOCAL_WINDOW,
         )
 
+        gw_loop_end = num_global_window_blocks
+        local_loop_start = non_global_window_start_block
+        fast_loop_end = 0
+        if (GLOBAL_WINDOW is not None) and (LOCAL_WINDOW is not None):
+            if (GLOBAL_WINDOW + LOCAL_WINDOW) >= kv_seq_len:
+                gw_loop_end = 0
+                local_loop_start = num_total_blocks
+                fast_loop_end = num_total_blocks
+
+        # Fast-path dense loop (boundary mask only)
+        for kv_block_id in tl.range(0, fast_loop_end, num_stages=PIPELINE_STAGES):
+            kv_block_start = kv_block_id * BLOCK_SIZE_N
+            kv_block_end = tl.minimum(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
+            kv_block_len = kv_block_end - kv_block_start
+            logical_page_id = kv_block_start // PAGE_SIZE
+            kv_block_start_in_page = kv_block_start % PAGE_SIZE
+            physical_page_id = tl.load(
+                block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
+            )
+            k_block_ptr = tl.make_block_ptr(
+                base=k_cache_ptr
+                + physical_page_id * stride_k_block
+                + kv_head_id * stride_k_head
+                + kv_block_start_in_page * stride_k_blksz,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_k_blksz, stride_k_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            k_block = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+            qk = tl.sum(q_int8.to(tl.float32)[None, :] * k_block, axis=1) * q_q_scale * softmax_scale
+
+            mask = offs_n < kv_block_len
+            qk = tl.where(mask, qk, float("-inf"))
+
+            m_ij = tl.maximum(m_i, tl.max(qk, axis=0))
+            row_is_all_masked = m_ij == -float("inf")
+            p = tl.math.exp(tl.where(row_is_all_masked, 0.0, qk - m_ij))
+            p = tl.where(row_is_all_masked, 0.0, p)
+            p = tl.where(mask, p, 0.0)
+            l_ij = tl.sum(p, axis=0)
+            alpha = tl.math.exp(tl.where(row_is_all_masked, 0.0, m_i - m_ij))
+            alpha = tl.where(row_is_all_masked, 0.0, alpha)
+            l_i = l_i * alpha + l_ij
+            acc = acc * alpha
+
+            v_block_ptr = tl.make_block_ptr(
+                base=v_cache_ptr
+                + physical_page_id * stride_v_block
+                + kv_head_id * stride_v_head
+                + kv_block_start_in_page * stride_v_blksz,
+                shape=(kv_block_len, HEAD_DIM),
+                strides=(stride_v_blksz, stride_v_dim),
+                offsets=(0, 0),
+                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
+                order=(1, 0),
+            )
+            v_block = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+            acc += tl.sum(p[:, None] * v_block, axis=0)
+            m_i = m_ij
+
         # Global window blocks
-        for kv_block_id in tl.range(0, num_global_window_blocks):
+        for kv_block_id in tl.range(0, gw_loop_end):
             kv_block_start = kv_block_id * BLOCK_SIZE_N
             kv_block_end = tl.minimum(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
             kv_block_len = kv_block_end - kv_block_start
@@ -2801,7 +2978,7 @@ def _paged_decode_quant_kernel(
             m_i = m_ij
 
         # Local window blocks
-        for kv_block_id in tl.range(non_global_window_start_block, num_total_blocks):
+        for kv_block_id in tl.range(local_loop_start, num_total_blocks):
             kv_block_start = kv_block_id * BLOCK_SIZE_N
             kv_block_end = tl.minimum(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
             kv_block_len = kv_block_end - kv_block_start
@@ -2880,6 +3057,14 @@ def _paged_decode_launch_config(head_dim: int, page_size: int) -> int:
     return num_warps
 
 
+def _paged_decode_pipeline_stages(block_size_n: int, block_size_d: int, elem_bytes: int) -> int:
+    smem_budget = 112 * 1024 # smem limit 128KB
+    per_stage_bytes = 2 * block_size_n * block_size_d * elem_bytes  # K and V tiles
+    if per_stage_bytes * 2 <= smem_budget:
+        return 2
+    return 1
+
+
 def swa_paged_decode_impl(
     q: torch.Tensor,
     key_cache: torch.Tensor,
@@ -2929,6 +3114,9 @@ def swa_paged_decode_impl(
         out_t = tl.float32
 
     num_warps = _paged_decode_launch_config(head_dim, block_size)
+    pipeline_stages = _paged_decode_pipeline_stages(
+        block_size_n, BLOCK_SIZE_D, key_cache.element_size()
+    )
     use_tiny_global = (
         global_window_size is not None
         and global_window_size <= 8
@@ -2974,6 +3162,7 @@ def swa_paged_decode_impl(
             BLOCK_SIZE_N=block_size_n,
             TINY_GLOBAL_N=8,
             OUT_T=out_t,
+            PIPELINE_STAGES=pipeline_stages,
             num_warps=num_warps,
         )
     else:
@@ -3014,6 +3203,7 @@ def swa_paged_decode_impl(
             BLOCK_SIZE_D=BLOCK_SIZE_D,
             BLOCK_SIZE_N=block_size_n,
             OUT_T=out_t,
+            PIPELINE_STAGES=pipeline_stages,
             num_warps=num_warps,
         )
     return o
@@ -3062,6 +3252,10 @@ def swa_paged_decode_quant_impl(
         out_t = tl.float32
 
     num_warps = _paged_decode_launch_config(head_dim, block_size)
+    FP32_BYTES = 4
+    pipeline_stages = _paged_decode_pipeline_stages(
+        block_size_n, BLOCK_SIZE_D, FP32_BYTES
+    )
 
     _paged_decode_quant_kernel[grid](
         q,
@@ -3106,6 +3300,7 @@ def swa_paged_decode_quant_impl(
         BLOCK_SIZE_D=BLOCK_SIZE_D,
         BLOCK_SIZE_N=block_size_n,
         OUT_T=out_t,
+        PIPELINE_STAGES=pipeline_stages,
         num_warps=num_warps,
     )
     return o
