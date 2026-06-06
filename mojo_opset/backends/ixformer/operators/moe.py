@@ -461,7 +461,10 @@ class IxformerQuantMoE(MojoQuantMoE):
             expand_tokens = num_tokens * top_k
         tokens_per_expert = expert_sizes_gpu if need_gpu_size else expert_sizes_cpu
 
+        graph_mode = self.disable_sync or enable_cuda_graph
+
         # Fuses expert-sort, expansion, smooth-quant scaling, and dynamic-int8 quantization into one kernel.
+        # output_format=1 emits the layout the w4a8 gemv path expects under graph capture.
         i8_hs, quant_scale = ixf_f.moe_expand_input_dynamic_scaled_int8(
             hidden_states=dispatch_input,
             dst_to_src=sorted_token_ids,
@@ -470,6 +473,7 @@ class IxformerQuantMoE(MojoQuantMoE):
             src_to_dst=src_to_dst,
             topk_ids=top_k_indices,
             smooth_scales=self.experts.up_proj_quantize.inv_smooth_scale,
+            output_format=1 if graph_mode and self.up_weight_dtype == "int4" else 0,
         )
         i8_hs = i8_hs.view(-1, dim)
 
@@ -482,7 +486,7 @@ class IxformerQuantMoE(MojoQuantMoE):
         else:
             # gemv variant takes GPU-side sizes so kernel shapes don't depend on CPU values during graph capture.
             if self.up_weight_dtype == torch.int8:
-                if not enable_cuda_graph:
+                if not graph_mode:
                     group_gemm_output1 = ixf_f.moe_w8a8_group_gemm(
                         input=i8_hs,
                         weight=self.experts.up_proj_weight,
@@ -503,26 +507,31 @@ class IxformerQuantMoE(MojoQuantMoE):
                         format=0,
                     )
             elif self.up_weight_dtype == "int4":
-                # w4a8 kernel writes into a caller-allocated buffer; output dim equals weight_scale's last dim.
-                group_gemm_output1 = torch.empty(
-                    (i8_hs.shape[0], self.experts.up_proj_weight_scale.shape[-1]),
-                    dtype=self.output_dtype,
-                    device=i8_hs.device,
-                )
-                ixf_f.moe_w4a8_group_gemm(
-                    input=i8_hs,
-                    weight=self.experts.up_proj_weight,
-                    i_scales=quant_scale,
-                    w_scales=self.experts.up_proj_weight_scale,
-                    output_dtype=self.output_dtype,
-                    tokens_per_experts=tokens_per_expert,
-                    format=0,
-                    version=1,
-                    group_size=self.up_quant_group_size,
-                    gdr_buffer_ptr=self.gdr_buffer_ptr1 if not (self.disable_sync or enable_cuda_graph) else None,
-                    output=group_gemm_output1,
-                    enable_cuda_graph=(self.disable_sync or enable_cuda_graph),
-                )
+                if not graph_mode:
+                    group_gemm_output1 = ixf_f.moe_w4a8_group_gemm(
+                        input=i8_hs,
+                        weight=self.experts.up_proj_weight,
+                        i_scales=quant_scale,
+                        w_scales=self.experts.up_proj_weight_scale,
+                        output_dtype=self.output_dtype,
+                        tokens_per_experts=tokens_per_expert,
+                        format=0,
+                        version=1,
+                        group_size=self.up_quant_group_size,
+                        gdr_buffer_ptr=self.gdr_buffer_ptr1,
+                    )
+                else:
+                    group_gemm_output1 = ixf_f.moe_w4a8_group_gemv(
+                        input=i8_hs,
+                        weight=self.experts.up_proj_weight,
+                        i_scales=quant_scale,
+                        w_scales=self.experts.up_proj_weight_scale,
+                        output_dtype=self.output_dtype,
+                        tokens_per_experts=tokens_per_expert,
+                        format=0,
+                        version=1,
+                        group_size=self.up_quant_group_size,
+                    )
             else:
                 raise NotImplementedError(f"IxformerQuantMoE: up_weight_dtype must be 'torch.int8' or 'int4', got {self.up_weight_dtype}.")
 
@@ -533,6 +542,7 @@ class IxformerQuantMoE(MojoQuantMoE):
                 dst_to_src=sorted_token_ids,
                 topk_ids=top_k_indices,
                 act_type="swiglu",
+                output_format=1 if graph_mode and self.down_weight_dtype == "int4" else 0,
             )
 
             group_gemm_output2 = torch.empty(
@@ -541,7 +551,7 @@ class IxformerQuantMoE(MojoQuantMoE):
             )
 
             if self.down_weight_dtype == torch.int8:
-                if not enable_cuda_graph:
+                if not graph_mode:
                     ixf_f.moe_w8a8_group_gemm(
                         input=act_i8,
                         weight=self.experts.down_proj_weight,
@@ -566,21 +576,35 @@ class IxformerQuantMoE(MojoQuantMoE):
                         output=group_gemm_output2,
                     )
             elif self.down_weight_dtype == "int4":
-                ixf_f.moe_w4a8_group_gemm(
-                    input=act_i8,
-                    weight=self.experts.down_proj_weight,
-                    i_scales=act_scale,
-                    w_scales=self.experts.down_proj_weight_scale,
-                    output_dtype=self.output_dtype,
-                    tokens_per_experts=tokens_per_expert,
-                    dst_to_src=sorted_token_ids,
-                    format=0,
-                    version=1,
-                    group_size=self.down_quant_group_size,
-                    output=group_gemm_output2,
-                    gdr_buffer_ptr=self.gdr_buffer_ptr2 if not (self.disable_sync or enable_cuda_graph) else None,
-                    enable_cuda_graph=(self.disable_sync or enable_cuda_graph),
-                )
+                if not graph_mode:
+                    ixf_f.moe_w4a8_group_gemm(
+                        input=act_i8,
+                        weight=self.experts.down_proj_weight,
+                        i_scales=act_scale,
+                        w_scales=self.experts.down_proj_weight_scale,
+                        output_dtype=self.output_dtype,
+                        tokens_per_experts=tokens_per_expert,
+                        dst_to_src=sorted_token_ids,
+                        format=0,
+                        version=1,
+                        group_size=self.down_quant_group_size,
+                        output=group_gemm_output2,
+                        gdr_buffer_ptr=self.gdr_buffer_ptr2,
+                    )
+                else:
+                    ixf_f.moe_w4a8_group_gemv(
+                        input=act_i8,
+                        weight=self.experts.down_proj_weight,
+                        i_scales=act_scale,
+                        w_scales=self.experts.down_proj_weight_scale,
+                        output_dtype=self.output_dtype,
+                        tokens_per_experts=tokens_per_expert,
+                        dst_to_src=sorted_token_ids,
+                        format=0,
+                        version=1,
+                        group_size=self.down_quant_group_size,
+                        output=group_gemm_output2,
+                    )
             else:
                 raise NotImplementedError(f"IxformerQuantMoE: down_weight_dtype must be 'torch.int8' or 'int4', got {self.down_weight_dtype}.")
 
