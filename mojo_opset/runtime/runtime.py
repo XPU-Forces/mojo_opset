@@ -440,6 +440,7 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
             "prefill_kv": self._build_prefill_kv_plan(
                 context_lens=context_lens,
                 q_lens=q_lens,
+                seq_len=position_ids.shape[-1],
                 batch_size=batch_size,
                 full_kv_cache=full_kv_cache,
                 win_kv_cache=win_kv_cache,
@@ -454,6 +455,7 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
         *,
         context_lens,
         q_lens,
+        seq_len,
         batch_size,
         full_kv_cache,
         win_kv_cache,
@@ -466,9 +468,8 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
 
         device = q_lens.device
         q_lens = q_lens.to(dtype=torch.int32, device=device)
-        max_q_len = int(q_lens.max().item()) if q_lens.numel() > 0 else 0
-        if max_q_len > 0:
-            token_offsets = torch.arange(max_q_len, dtype=torch.int32, device=device).unsqueeze(0)
+        if seq_len > 0:
+            token_offsets = torch.arange(seq_len, dtype=torch.int32, device=device).unsqueeze(0)
             full_valid_mask = token_offsets < q_lens.unsqueeze(1)
         else:
             full_valid_mask = torch.empty((batch_size, 0), dtype=torch.bool, device=device)
@@ -888,6 +889,7 @@ class DeepseekSparseAttentionRuntimeState(MojoSession):
         prefill_kv = self._build_prefill_kv_plan(
             context_lens=context_lens,
             q_lens=q_lens,
+            seq_len=seq_len,
             batch_size=batch_size,
             full_kv_cache=full_kv_cache,
             win_kv_cache=pkv.get_win_kv_for_decode(0)[0],

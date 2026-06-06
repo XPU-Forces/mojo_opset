@@ -34,6 +34,70 @@ ARCH_MAP = {
 }
 
 _MEM_PROFILING = os.getenv("MEM_PROFILING", "0") == "1"
+_PERF_PRINTING = os.getenv("MOJO_PRINT_PERF", "0") == "1"
+_PERF_SYNC = os.getenv("MOJO_PERF_SYNC", "1") == "1"
+
+
+def _perf_barrier():
+    if _PERF_PRINTING and dist.is_initialized():
+        if dist.is_initialized():
+            dist.barrier()
+
+
+def _perf_device_sync():
+    if _PERF_PRINTING and _PERF_SYNC and hasattr(torch, "npu"):
+        torch.npu.synchronize()
+
+
+def _perf_time_start(sync_ranks=True):
+    if sync_ranks:
+        _perf_barrier()
+    _perf_device_sync()
+    return time.time()
+
+
+def _perf_time_end(start_time):
+    _perf_device_sync()
+    return time.time() - start_time
+
+
+def _percentile(values, percentile):
+    if not values:
+        return 0.0
+    sorted_values = sorted(values)
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    position = (len(sorted_values) - 1) * percentile / 100.0
+    lower = int(position)
+    upper = min(lower + 1, len(sorted_values) - 1)
+    weight = position - lower
+    return sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight
+
+
+def process_infer_time_golden(infer_time_rec, token_count):
+    if len(infer_time_rec) == 0:
+        logger.info("process infer time receives empty time record")
+        return 0.0
+    if len(infer_time_rec) == 1 or token_count <= 1:
+        return infer_time_rec[0]
+
+    avg_token_per_round = token_count / len(infer_time_rec)
+    infer_time_rec = infer_time_rec[1:]
+    token_count -= 1
+
+    q1 = _percentile(infer_time_rec, 25)
+    q3 = _percentile(infer_time_rec, 75)
+    iqr_upper_threshold = q3 + 1.5 * (q3 - q1)
+    total_time = 0.0
+    for infer_time in infer_time_rec:
+        if infer_time > iqr_upper_threshold:
+            token_count -= avg_token_per_round
+            continue
+        total_time += infer_time
+    if token_count == 0:
+        return infer_time_rec[0]
+    return total_time / token_count
+
 
 def _mem_snapshot(tag, device=None):
     if not _MEM_PROFILING:
@@ -67,6 +131,107 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _fill_fake_parameter(name: str, param: torch.nn.Parameter) -> None:
+    tensor = param.data
+    if tensor is None or tensor.numel() == 0:
+        return
+
+    lname = name.lower()
+    with torch.no_grad():
+        if tensor.dtype.is_floating_point:
+            if any(key in lname for key in ("norm", "inv_smooth_scale", "smooth_scale")):
+                tensor.fill_(1.0)
+            elif "weight_scale" in lname or lname.endswith(".scale"):
+                tensor.fill_(0.01)
+            elif "bias" in lname or "base" in lname:
+                tensor.zero_()
+            elif lname.endswith(".gate") or ".mlp.gate" in lname:
+                try:
+                    tensor.normal_(mean=0.0, std=0.01)
+                except RuntimeError:
+                    tensor.fill_(0.01)
+            else:
+                tensor.fill_(0.01)
+        elif tensor.dtype == torch.bool:
+            tensor.zero_()
+        elif tensor.dtype in (torch.int8, torch.uint8):
+            tensor.fill_(1)
+        elif tensor.dtype in (torch.int16, torch.int32, torch.int64):
+            if "tid2eid" in lname:
+                routed_experts = int(os.getenv("MOJO_FAKE_TID2EID_EXPERTS", "256"))
+                values = torch.arange(tensor.numel(), device=tensor.device, dtype=tensor.dtype)
+                values = values.remainder(max(routed_experts, 1)).view_as(tensor)
+                tensor.copy_(values)
+            else:
+                tensor.zero_()
+        else:
+            tensor.zero_()
+
+
+def _fake_initialize_parameters(model: torch.nn.Module, *, skip_param_ids=None) -> None:
+    skip_param_ids = skip_param_ids or set()
+    for name, param in model.named_parameters():
+        if id(param) in skip_param_ids:
+            continue
+        _fill_fake_parameter(name, param)
+
+
+def _deepseek_v4_layer_iter(model: torch.nn.Module):
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        layers = model.model.layers
+        if isinstance(layers, torch.nn.ModuleDict):
+            return list(layers.values())
+        return [layers[layer_idx] for layer_idx in range(model.config.num_hidden_layers)]
+    return []
+
+
+def _all_gather_deepseek_v4_smooth_scale_1(model: torch.nn.Module) -> None:
+    if getattr(model, "ep_size", 1) <= 1 or not dist.is_initialized():
+        return
+    moe_ep_group = getattr(model, "hccl_comm_dict", {}).get("moe_ep_group")
+    if moe_ep_group is None:
+        return
+    for layer in _deepseek_v4_layer_iter(model):
+        mlp = getattr(layer, "mlp", None)
+        if mlp is None or not hasattr(mlp, "smooth_scale_1") or mlp.smooth_scale_1 is None:
+            continue
+        all_smooth_scale_1 = mlp.smooth_scale_1.data.new_empty(
+            mlp.smooth_scale_1.data.shape[0] * model.ep_size,
+            mlp.smooth_scale_1.data.shape[1],
+        )
+        dist.all_gather_into_tensor(all_smooth_scale_1, mlp.smooth_scale_1.data, group=moe_ep_group)
+        mlp.smooth_scale_1.data = all_smooth_scale_1
+
+
+def fake_load_model_weights(model_class, model: torch.nn.Module, *, skip_param_ids=None) -> None:
+    logger.warning(
+        "MOJO_FAKE_WEIGHTS=1: skip loading real checkpoint and initialize same-shape fake weights for %s",
+        model.__class__.__name__,
+    )
+    helper_class = model_class
+    if (
+        model.__class__.__name__ == "DeepseekV4ForMTP"
+        and not hasattr(helper_class, "_process_expert_weights")
+    ):
+        from mojo_opset.modeling.deepseekv4.mojo_deepseek_v4 import DeepseekV4ForCausalLM
+        helper_class = DeepseekV4ForCausalLM
+
+    if hasattr(helper_class, "_init_default_weights"):
+        helper_class._init_default_weights(model)
+    _fake_initialize_parameters(model, skip_param_ids=skip_param_ids)
+
+    if hasattr(helper_class, "_process_expert_weights") and hasattr(helper_class, "_prepare_quant_weights"):
+        layers = _deepseek_v4_layer_iter(model)
+        helper_class._process_expert_weights(model, layers)
+        helper_class._prepare_quant_weights(model, layers)
+    if model.__class__.__name__ == "DeepseekV4ForCausalLM":
+        _all_gather_deepseek_v4_smooth_scale_1(model)
 
 
 def encode_deepseek_v4_chat(prompt: str) -> str:
@@ -160,15 +325,16 @@ def _extract_outputs(outputs):
     return outputs
 
 
-def pad_batch(encoded, pad_token_id, device):
+def pad_batch(encoded, pad_token_id, device, target_len=None):
     lengths = torch.tensor([item.shape[-1] for item in encoded], dtype=torch.long)
-    max_len = int(lengths.max().item())
+    max_len = int(target_len) if target_len is not None and int(target_len) > 0 else int(lengths.max().item())
     input_ids = torch.full((len(encoded), max_len), pad_token_id, dtype=torch.long)
     attention_mask = torch.zeros((len(encoded), max_len), dtype=torch.bool)
     for idx, ids in enumerate(encoded):
-        flat = ids.squeeze(0)
+        flat = ids.squeeze(0)[:max_len]
         input_ids[idx, : flat.shape[0]] = flat
         attention_mask[idx, : flat.shape[0]] = True
+    lengths = torch.clamp(lengths, max=max_len)
     return input_ids.to(device), attention_mask.to(device), lengths.to(device)
 
 
@@ -594,12 +760,22 @@ def compile_deepseek_v4_decode(
     )
 
 
-def forward_prefill_mojo(model, input_ids, attention_mask, lengths, runtime_state=None, use_attn_metadata=True):
+def forward_prefill_mojo(
+    model,
+    input_ids,
+    attention_mask,
+    lengths,
+    runtime_state=None,
+    use_attn_metadata=True,
+    return_model_time=False,
+):
+    model_time = 0.0
     if runtime_state is not None:
         prefill_meta = runtime_state.prepare_prefill_inputs(input_ids, attention_mask=attention_mask, q_lens=None)
+        model_t0 = _perf_time_start(sync_ranks=True) if return_model_time else None
         logits, past_key_values, hidden_states = model(
             input_ids=prefill_meta["input_ids"],
-            attention_mask=attention_mask,
+            attention_mask=prefill_meta["attention_mask"],
             position_ids=prefill_meta["position_ids"],
             past_key_values=runtime_state.paged_cache,
             use_cache=True,
@@ -609,11 +785,18 @@ def forward_prefill_mojo(model, input_ids, attention_mask, lengths, runtime_stat
             context_lens=prefill_meta["context_lens"],
             q_lens=prefill_meta["q_lens"],
         )
-        return last_logits_from_output(logits, lengths), past_key_values, hidden_states
+        if return_model_time:
+            model_time = _perf_time_end(model_t0)
+        result = (last_logits_from_output(logits, lengths), past_key_values, hidden_states)
+        return (*result, model_time) if return_model_time else result
     else:
+        model_t0 = _perf_time_start(sync_ranks=True) if return_model_time else None
         outputs = model(input_ids, attention_mask=attention_mask, use_cache=True, is_prefill=True)
+        if return_model_time:
+            model_time = _perf_time_end(model_t0)
     logits, past_key_values = _extract_outputs(outputs)
-    return last_logits_from_output(logits, lengths), past_key_values, None
+    result = (last_logits_from_output(logits, lengths), past_key_values, None)
+    return (*result, model_time) if return_model_time else result
 
 
 def build_mtp_prefill_inputs(input_ids, attention_mask, next_token_id, pad_token_id):
@@ -809,6 +992,7 @@ def forward_main_decode_mojo(
     advance_cache=True,
     return_last_logits=True,
     skip_guard_eval=False,
+    return_model_time=False,
 ):
     """Run the main model decode path.
 
@@ -816,8 +1000,12 @@ def forward_main_decode_mojo(
     MTP verify passes a wider token window and delays cache advancement until
     accepted tokens are known.
     """
+    model_time = 0.0
     if runtime_state is None:
+        model_t0 = _perf_time_start(sync_ranks=True) if return_model_time else None
         outputs = model(token_ids, past_key_values=past_key_values, use_cache=True, is_prefill=False)
+        if return_model_time:
+            model_time = _perf_time_end(model_t0)
         logits, past_key_values = _extract_outputs(outputs)
         hidden_states = None
     else:
@@ -835,6 +1023,7 @@ def forward_main_decode_mojo(
         attn_metadata = decode_meta.get("attn_metadata") if use_attn_metadata else None
 
         if decode_fn is not None:
+            model_t0 = _perf_time_start(sync_ranks=True) if return_model_time else None
             with _skip_guard_eval_context(skip_guard_eval):
                 logits, past_key_values, hidden_states = decode_fn(
                     token_ids,
@@ -844,7 +1033,10 @@ def forward_main_decode_mojo(
                     decode_meta["attn_inputs"],
                     attn_metadata,
                 )
+            if return_model_time:
+                model_time = _perf_time_end(model_t0)
         else:
+            model_t0 = _perf_time_start(sync_ranks=True) if return_model_time else None
             logits, past_key_values, hidden_states = model(
                 token_ids,
                 past_key_values=runtime_state.paged_cache,
@@ -855,12 +1047,15 @@ def forward_main_decode_mojo(
                 use_cache=True,
                 is_prefill=False,
             )
+            if return_model_time:
+                model_time = _perf_time_end(model_t0)
         if advance_cache:
             runtime_state.post_decode_step(seq_len=token_ids.shape[1])
 
     if return_last_logits:
         logits = logits[:, -1, :]
-    return logits, past_key_values, hidden_states
+    result = (logits, past_key_values, hidden_states)
+    return (*result, model_time) if return_model_time else result
 
 
 def forward_mtp_decode_mojo(
@@ -913,7 +1108,8 @@ def forward_mtp_decode_mojo(
     return logits, past_key_values, mtp_hidden
 
 def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_size=1, batch_size=1, graph_mode="eager", prof=False,
-             use_attn_metadata=True, mtp_model=None, mtp_runtime_state=None, next_n=0, prof_prefill=False):
+             use_attn_metadata=True, mtp_model=None, mtp_runtime_state=None, next_n=0, prof_prefill=False,
+             warmup_run=False, input_max_len=0):
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
     os.environ["MOJO_BUILD_LEGACY_ATTN_INPUTS"] = "0" if use_attn_metadata else "1"
@@ -951,9 +1147,16 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
     rendered = []
     for p in prompts:
         ids, text = build_prompt_input_ids(model, tokenizer, p)
+        if input_max_len and input_max_len > 0:
+            ids = ids[:, :input_max_len]
         encoded.append(ids)
         rendered.append(text)
-    full_input_ids, full_attention_mask, full_lengths = pad_batch(encoded, pad_token_id, device)
+    full_input_ids, full_attention_mask, full_lengths = pad_batch(
+        encoded,
+        pad_token_id,
+        device,
+        target_len=input_max_len if input_max_len and input_max_len > 0 else None,
+    )
     if model.__class__.__name__ == "DeepseekV4ForCausalLM":
         shard_start, shard_end, attn_dp_size, dp_rank = get_attn_dp_shard_range(
             batch_size,
@@ -1001,7 +1204,7 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
         and os.getenv("MOJO_ENABLE_CACHE_COMPILE", "0") == "1"
     )
 
-    if should_print:
+    if should_print and not warmup_run:
         print(
             f"[ATTN_DP_SHARD] rank={global_rank} dp_rank={dp_rank}/{attn_dp_size} "
             f"attn_tp_size={attn_tp_size} lmhead_tp_size={lmhead_tp_size} "
@@ -1060,6 +1263,12 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
                 print(f"[GRAPH] Decode graph callable prepared in {time.time() - compile_t0:.2f}s (actual compilation happens on first call)")
 
     # ==================== Prefill ====================
+    prefill_e2e_time_rec = []
+    decode_e2e_time_rec = []
+    prefill_model_time_rec = []
+    decode_model_time_rec = []
+    prefill_cnt = 1
+    decode_cnt = 0
     prefill_prof_ctx = None
     if prof_prefill and is_main:
         import torch_npu.profiler as prof_mod
@@ -1085,6 +1294,8 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
             and runtime_state is not None
             and cp_size > 1
         )
+        prefill_t0 = _perf_time_start(sync_ranks=True)
+        prefill_model_time = 0.0
         if use_cp_minibatch_prefill:
             cp_prefill_out = forward_cp_prefill_minibatch_mojo(
                 model,
@@ -1105,9 +1316,10 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
             else:
                 next_token_logits, past_key_values, prev_hidden = cp_prefill_out
         else:
-            next_token_logits, past_key_values, prev_hidden = forward_prefill_mojo(
+            next_token_logits, past_key_values, prev_hidden, prefill_model_time = forward_prefill_mojo(
                 model, input_ids, attention_mask, lengths, runtime_state=runtime_state,
                 use_attn_metadata=use_attn_metadata,
+                return_model_time=True,
             )
         if not use_mtp:
             prev_hidden = None
@@ -1138,6 +1350,24 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
             dist.broadcast(next_token_id, src=src_rank, group=lmhead_tp_group)
         elif ep_size > 1:
             dist.broadcast(next_token_id, src=0, group=moe_ep_group)
+
+    prefill_e2e_time = _perf_time_end(prefill_t0)
+    prefill_e2e_time_rec.append(prefill_e2e_time)
+    prefill_model_time_rec.append(prefill_model_time if prefill_model_time > 0 else prefill_e2e_time)
+    avg_prefill_e2e_time = process_infer_time_golden(prefill_e2e_time_rec, prefill_cnt)
+    avg_prefill_model_time = process_infer_time_golden(prefill_model_time_rec, prefill_cnt)
+    prompt_lens = attention_mask.to(dtype=torch.int32).sum(dim=-1)
+    prompt_tokens_sum = int(prompt_lens.sum().item()) if prompt_lens.numel() > 0 else 0
+    prompt_tokens_max = int(prompt_lens.max().item()) if prompt_lens.numel() > 0 else 0
+    if _PERF_PRINTING and should_print and not warmup_run:
+        print(
+            f"[PERF] rank={global_rank} phase=prefill "
+            f"batch_size={batch_size} prompt_tokens_sum={prompt_tokens_sum} "
+            f"prompt_tokens_max={prompt_tokens_max} count={prefill_cnt} "
+            f"ttft_e2e_ms={avg_prefill_e2e_time * 1000:.2f} "
+            f"ttft_model_ms={avg_prefill_model_time * 1000:.2f}",
+            flush=True,
+        )
 
     generated = [[int(x)] for x in next_token_id.squeeze(-1).detach().cpu().tolist()]
 
@@ -1214,6 +1444,8 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
                 print(f"[PROF] Start profiling decode at step {step}, output -> {prof_dir}", flush=True)
 
             # ==================== Main Model Decode ====================
+            decode_step_t0 = _perf_time_start(sync_ranks=True)
+            decode_model_time = 0.0
             with torch.no_grad():
                 if use_mtp:
                     main_seq_lens_before_verify = runtime_state.paged_cache.seq_lens.clone()
@@ -1221,7 +1453,7 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
                         input_ids.contiguous().reshape(batch_size, spec_len)
                         if next_n > 1 else input_ids
                     )
-                    all_logits, past_key_values, main_hidden = forward_main_decode_mojo(
+                    all_logits, past_key_values, main_hidden, decode_model_time = forward_main_decode_mojo(
                         model,
                         verify_input_ids,
                         past_key_values,
@@ -1236,17 +1468,19 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
                             decode_fn is not None and
                             main_decode_graph_warmed
                         ),
+                        return_model_time=True,
                     )
                     if enable_main_cache_compile and decode_fn is not None:
                         main_decode_graph_warmed = True
                 else:
-                    next_token_logits, past_key_values, _ = forward_main_decode_mojo(
+                    next_token_logits, past_key_values, _, decode_model_time = forward_main_decode_mojo(
                         model,
                         input_ids,
                         past_key_values,
                         runtime_state=runtime_state,
                         decode_fn=decode_fn,
                         use_attn_metadata=use_attn_metadata,
+                        return_model_time=True,
                     )
 
             if step == 0 and decode_fn is not None and should_print:
@@ -1348,11 +1582,41 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
                     generated[row].append(int(token_id))
 
                 input_ids = next_token_id
+            decode_step_time = _perf_time_end(decode_step_t0)
+            decode_e2e_time_rec.append(decode_step_time)
+            decode_model_time_rec.append(decode_model_time if decode_model_time > 0 else decode_step_time)
+            decode_cnt += 1
     finally:
         if prof_ctx is not None:
             prof_ctx.__exit__(None, None, None)
 
     _mem_snapshot("after all decode steps")
+    generated_tokens = sum(len(row) for row in generated)
+    first_tokens = batch_size
+    decode_tokens = max(generated_tokens - first_tokens, 0)
+    avg_decode_e2e_time = process_infer_time_golden(decode_e2e_time_rec, decode_cnt)
+    avg_decode_model_time = process_infer_time_golden(decode_model_time_rec, decode_cnt)
+    if _PERF_PRINTING and should_print and not warmup_run:
+        print(
+            f"[PERF] rank={global_rank} phase=decode "
+            f"batch_size={batch_size} generated_tokens={generated_tokens} "
+            f"decode_tokens={decode_tokens} count={decode_cnt} "
+            f"tpot_e2e_ms={avg_decode_e2e_time * 1000:.2f} "
+            f"tpot_model_ms={avg_decode_model_time * 1000:.2f} "
+            f"tokens_per_s_e2e={((1.0 / avg_decode_e2e_time) if avg_decode_e2e_time > 0 else 0.0):.6f} "
+            f"tokens_per_s_model={((1.0 / avg_decode_model_time) if avg_decode_model_time > 0 else 0.0):.6f}",
+            flush=True,
+        )
+        print(
+            f"[PERF] rank={global_rank} phase=summary "
+            f"ttft_e2e_ms={avg_prefill_e2e_time * 1000:.2f} "
+            f"tpot_e2e_ms={avg_decode_e2e_time * 1000:.2f} "
+            f"ttft_model_ms={avg_prefill_model_time * 1000:.2f} "
+            f"tpot_model_ms={avg_decode_model_time * 1000:.2f} "
+            f"generated_tokens={generated_tokens} decode_tokens={decode_tokens} "
+            f"prefill_count={prefill_cnt} decode_count={decode_cnt}",
+            flush=True,
+        )
 
     if should_print:
         print("-" * 40)
@@ -1374,6 +1638,8 @@ def parse_args():
     parser.add_argument("--prompt", type=str, default="今天天气怎么样？")
     parser.add_argument("--max_new_tokens", type=int, default=100)
     parser.add_argument("--pa_max_length", type=int, default=int(os.getenv("PA_MAX_LENGTH", "2048")))
+    parser.add_argument("--input_max_len", type=int, default=int(os.getenv("INPUT_MAX_LEN", "0")),
+                        help="Optional fixed prompt length for benchmarking; 0 keeps natural prompt length")
     parser.add_argument("--transformers", action="store_true", help="Use Transformers model")
     parser.add_argument("--ep_size", type=int, default=int(os.getenv("EP_SIZE", "8")))
     parser.add_argument("--cp_size", type=int, default=int(os.getenv("CP_SIZE", "8")))
@@ -1399,11 +1665,16 @@ def parse_args():
     parser.add_argument("--use_parallelize_module_ep", type=int, choices=[0, 1],
                         default=int(os.getenv("MOJO_USE_PARALLELIZE_MODULE_EP", "0")),
                         help="Use distributed.parallel mojo_parallelize_module for DeepSeekV4 MoE EP binding")
+    parser.add_argument("--perf_warmup_runs", type=int, default=int(os.getenv("MOJO_PERF_WARMUP_RUNS", "1")),
+                        help="Number of unrecorded warmup generate runs before collecting perf metrics")
+    parser.add_argument("--perf_warmup_tokens", type=int, default=int(os.getenv("MOJO_PERF_WARMUP_TOKENS", "8")),
+                        help="max_new_tokens used by each unrecorded perf warmup run")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    fake_weights = _env_flag("MOJO_FAKE_WEIGHTS")
 
     if not args.model_path and not os.getenv("QWEN3_MODEL_PATH"):
         raise ValueError("Please pass --model_path or set QWEN3_MODEL_PATH")
@@ -1552,7 +1823,10 @@ def main():
         )
         load_weights_start = time.perf_counter()
         try:
-            model_class.load_weights(model, args.model_path)
+            if fake_weights:
+                fake_load_model_weights(model_class, model)
+            else:
+                model_class.load_weights(model, args.model_path)
         except Exception:
             logger.exception(
                 "[DEVICE] load_weights failed | rank=%s local_rank=%s elapsed=%.3fs traceback=%s",
@@ -1563,7 +1837,8 @@ def main():
             )
             raise
         logger.info(
-            "[DEVICE] after load_weights | rank=%s local_rank=%s elapsed=%.3fs current_device=%s",
+            "[DEVICE] after %s | rank=%s local_rank=%s elapsed=%.3fs current_device=%s",
+            "fake_load_weights" if fake_weights else "load_weights",
             global_rank,
             local_rank,
             time.perf_counter() - load_weights_start,
@@ -1637,7 +1912,11 @@ def main():
         if args.use_parallelize_module_ep:
             mtp_model.set_ep_group(bind_moe=False)
 
-        DeepseekV4ForMTP.load_weights(mtp_model, args.model_path, main_model=model)
+        if fake_weights:
+            shared_param_ids = {id(param) for param in model.parameters()}
+            fake_load_model_weights(DeepseekV4ForMTP, mtp_model, skip_param_ids=shared_param_ids)
+        else:
+            DeepseekV4ForMTP.load_weights(mtp_model, args.model_path, main_model=model)
         _mem_snapshot("after MTP load_weights", npu_device_idx)
 
         if ep_size > 1 and dist.is_initialized():
@@ -1677,12 +1956,35 @@ def main():
         if is_main:
             print("[MTP] MTP model created; runtime state will be created after local batch sharding")
 
+    if _PERF_PRINTING and args.perf_warmup_runs > 0:
+        warmup_tokens = max(2, int(args.perf_warmup_tokens))
+        for warmup_idx in range(args.perf_warmup_runs):
+            if global_rank == 0:
+                print(
+                    f"[PERF] warmup_start run={warmup_idx + 1}/{args.perf_warmup_runs} "
+                    f"max_new_tokens={warmup_tokens}",
+                    flush=True,
+                )
+            generate(
+                model, tokenizer, args.prompt, warmup_tokens, f"npu:{npu_device_idx}",
+                ep_size=ep_size, cp_size=cp_size, batch_size=args.batch_size, graph_mode=args.graph_mode, prof=False,
+                use_attn_metadata=bool(args.use_attn_metadata),
+                mtp_model=mtp_model, mtp_runtime_state=mtp_runtime_state, next_n=next_n,
+                prof_prefill=False,
+                warmup_run=True,
+                input_max_len=args.input_max_len,
+            )
+            if global_rank == 0:
+                print(f"[PERF] warmup_done run={warmup_idx + 1}/{args.perf_warmup_runs}", flush=True)
+
     generate(
         model, tokenizer, args.prompt, args.max_new_tokens, f"npu:{npu_device_idx}",
         ep_size=ep_size, cp_size=cp_size, batch_size=args.batch_size, graph_mode=args.graph_mode, prof=args.prof,
         use_attn_metadata=bool(args.use_attn_metadata),
         mtp_model=mtp_model, mtp_runtime_state=mtp_runtime_state, next_n=next_n,
         prof_prefill=args.prof_prefill,
+        warmup_run=False,
+        input_max_len=args.input_max_len,
     )
 
     if dist.is_initialized():

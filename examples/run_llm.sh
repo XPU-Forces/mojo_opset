@@ -136,6 +136,7 @@ export LOCAL_WORLD_SIZE="${LOCAL_WORLD_SIZE:-${EP_SIZE}}"
 NUM_LAYERS="${LLM_NUM_LAYERS:-43}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-1024}"
 PA_MAX_LENGTH="${PA_MAX_LENGTH:-4096}"
+INPUT_MAX_LEN="${INPUT_MAX_LEN:-0}"
 NEXT_N="${NEXT_N:-1}"
 BATCH_SIZE="${BATCH_SIZE:-2}"
 export USE_ATTN_METADATA=1
@@ -159,6 +160,7 @@ if [ "$EP_SIZE" -eq 1 ]; then
         --num_layers "${NUM_LAYERS}" \
         --max_new_tokens "${MAX_NEW_TOKENS}" \
         --pa_max_length "${PA_MAX_LENGTH}" \
+        --input_max_len "${INPUT_MAX_LEN}" \
         --next_n "${NEXT_N}" \
         --prompt "${PROMPT}" \
         --ep_size 1 \
@@ -204,6 +206,7 @@ else
             --num_layers "${NUM_LAYERS}" \
             --max_new_tokens "${MAX_NEW_TOKENS}" \
             --pa_max_length "${PA_MAX_LENGTH}" \
+            --input_max_len "${INPUT_MAX_LEN}" \
             --next_n "${NEXT_N}" \
             --prompt "${PROMPT}" \
             --ep_size "${EP_SIZE}" \
