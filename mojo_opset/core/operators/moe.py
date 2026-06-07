@@ -1,6 +1,7 @@
 from typing import Optional, Tuple, Union
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -18,15 +19,14 @@ class MojoMoE(MojoOperator):
         hidden_size,
         intermediate_size=None,
         activation: str = "swiglu",
+        ep_size: int = 1,
+        ep_rank: int = 0,
+        ep_group=None,
         **kwargs,
     ):
         super().__init__()
         if activation != "swiglu":
             raise NotImplementedError(f"MojoMoe: Activation {activation} is not supported.")
-
-        for k in ("ep_rank", "ep_size"):
-            if k in kwargs:
-                raise ValueError(f"MojoMoE: {k} is not supported; use ParallelStyle to set expert partition.")
 
         # NOTE: in some cases, branches may have different expert num or topk
         self.num_experts = num_experts
@@ -37,13 +37,23 @@ class MojoMoE(MojoOperator):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
 
+        # Expert parallelism slice: gating still uses the global expert set, but experts only hold the local slice.
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
+        self.ep_group = ep_group
+        base = num_experts // ep_size
+        rem = num_experts % ep_size
+        self.num_experts_local = base + 1 if ep_rank < rem else base
+        self.ep_start = base * ep_rank + min(ep_rank, rem)
+        self.ep_end = self.ep_start + self.num_experts_local
+
         if not self._use_fused_moe:
             self.gating = MojoMoEGating._registry.get(self._backend)(
                 hidden_size=self.hidden_size, num_experts=self.num_experts, top_k=self.top_k, **kwargs
             )
             self.dispatch = MojoMoEDispatch._registry.get(self._backend)(num_experts=self.num_experts, **kwargs)
             self.experts = MojoExperts._registry.get(self._backend)(
-                num_experts=self.num_experts,
+                num_experts=self.num_experts_local,
                 hidden_size=self.hidden_size,
                 intermediate_size=self.intermediate_size,
                 activation=activation,
@@ -56,7 +66,7 @@ class MojoMoE(MojoOperator):
                 hidden_size=self.hidden_size, num_experts=self.num_experts, top_k=self.top_k, **kwargs
             )
             self.experts = MojoExperts._registry.get("torch")(
-                num_experts=self.num_experts,
+                num_experts=self.num_experts_local,
                 hidden_size=self.hidden_size,
                 intermediate_size=self.intermediate_size,
                 activation=activation,
@@ -74,11 +84,27 @@ class MojoMoE(MojoOperator):
         # tokens_per_expert: [num_experts]
         # sorted_gates: [local_tokens, 1]
         # token_indices: [local_tokens]
+
+        # EP slice: keep only the token range routed to this rank's local experts.
+        if self.ep_size > 1:
+            cumsum = tokens_per_expert.cumsum(0)
+            tok_start = 0 if self.ep_start == 0 else cumsum[self.ep_start - 1].item()
+            tok_end = cumsum[self.ep_end - 1].item()
+            sorted_hidden_states = sorted_hidden_states[tok_start:tok_end]
+            tokens_per_expert = tokens_per_expert[self.ep_start:self.ep_end]
+            sorted_gates = sorted_gates[tok_start:tok_end]
+            token_indices = token_indices[tok_start:tok_end]
+
         expert_outputs = self.experts(sorted_hidden_states, tokens_per_expert)
         # expert_outputs: [local_tokens, H]
         output_buffer = torch.zeros_like(hidden_states, memory_format=torch.contiguous_format)
         combined = self.combine(output_buffer, expert_outputs, sorted_gates, token_indices)
         # combined: [num_tokens, H]
+
+        # Sum partial expert outputs across EP ranks to reconstruct the full result.
+        if self.ep_size > 1:
+            dist.all_reduce(combined, op=dist.ReduceOp.SUM, group=self.ep_group)
+
         return combined
 
 
@@ -97,6 +123,9 @@ class MojoQuantMoE(MojoOperator):
         up_weight_dtype: Union[torch.dtype, str] = torch.int8,
         down_quant_group_size: int = -1,
         down_weight_dtype: Union[torch.dtype, str] = torch.int8,
+        ep_size: int = 1,
+        ep_rank: int = 0,
+        ep_group=None,
         **kwargs,
     ):
         super().__init__()
@@ -120,10 +149,17 @@ class MojoQuantMoE(MojoOperator):
         self.down_quant_group_size = down_quant_group_size
         self.down_weight_dtype = down_weight_dtype
 
+        # Expert parallelism slice: gating still uses the global expert set, but experts only hold the local slice.
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
+        self.ep_group = ep_group
+        base = num_experts // ep_size
+        rem = num_experts % ep_size
+        self.num_experts_local = base + 1 if ep_rank < rem else base
+        self.ep_start = base * ep_rank + min(ep_rank, rem)
+        self.ep_end = self.ep_start + self.num_experts_local
+
         if not self._use_fused_moe:
-            for k in ("ep_rank", "ep_size"):
-                if k in kwargs:
-                    raise ValueError(f"MojoQuantMoE: {k} is not supported; use ParallelStyle to set expert partition.")
             self.gating = MojoMoEGating._registry.get(self._backend)(
                 hidden_size=self.hidden_size,
                 num_experts=self.num_experts,
@@ -132,7 +168,7 @@ class MojoQuantMoE(MojoOperator):
             )
             self.dispatch = MojoMoEDispatch._registry.get(self._backend)(num_experts=self.num_experts, **kwargs)
             self.experts = MojoQuantExperts._registry.get(self._backend)(
-                num_experts=self.num_experts,
+                num_experts=self.num_experts_local,
                 hidden_size=self.hidden_size,
                 intermediate_size=self.intermediate_size,
                 activation=activation,
@@ -154,7 +190,7 @@ class MojoQuantMoE(MojoOperator):
                 **kwargs,
             )
             self.experts = MojoQuantExperts._registry.get("torch")(
-                num_experts=self.num_experts,
+                num_experts=self.num_experts_local,
                 hidden_size=self.hidden_size,
                 intermediate_size=self.intermediate_size,
                 activation=activation,
@@ -173,9 +209,26 @@ class MojoQuantMoE(MojoOperator):
             top_k_gates,
             top_k_indices,
         )
+
+        # EP slice: keep only the token range routed to this rank's local experts.
+        if self.ep_size > 1:
+            cumsum = tokens_per_expert.cumsum(0)
+            tok_start = 0 if self.ep_start == 0 else cumsum[self.ep_start - 1].item()
+            tok_end = cumsum[self.ep_end - 1].item()
+            sorted_hidden_states = sorted_hidden_states[tok_start:tok_end]
+            tokens_per_expert = tokens_per_expert[self.ep_start:self.ep_end]
+            sorted_gates = sorted_gates[tok_start:tok_end]
+            token_indices = token_indices[tok_start:tok_end]
+
         expert_outputs = self.experts(sorted_hidden_states, tokens_per_expert)
         output_buffer = torch.zeros_like(hidden_states, memory_format=torch.contiguous_format)
-        return self.combine(output_buffer, expert_outputs, sorted_gates, token_indices)
+        combined = self.combine(output_buffer, expert_outputs, sorted_gates, token_indices)
+
+        # Sum partial expert outputs across EP ranks to reconstruct the full result.
+        if self.ep_size > 1:
+            dist.all_reduce(combined, op=dist.ReduceOp.SUM, group=self.ep_group)
+
+        return combined
 
 
 class MojoMoEGating(MojoOperator):
