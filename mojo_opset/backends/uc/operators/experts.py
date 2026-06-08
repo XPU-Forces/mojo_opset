@@ -164,9 +164,19 @@ class UCExperts(MojoExperts):
         tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
         if not _validate(self, sorted_hidden_states, tokens_per_expert):
-            return super().forward(sorted_hidden_states, tokens_per_expert)
+            raise NotImplementedError(
+                "UC backend cannot service this call (shape/dtype/contract not "
+                "honoured by the wheel kernel). Per project rule 'wheel 没实现的就直接给报错' "
+                "(2026-06-08), this wrapper does not silently fall back to torch — "
+                "use TTX / torch_npu / torch_native backend for unsupported inputs."
+            )
         if not _has_npu_grouped_matmul():
-            return super().forward(sorted_hidden_states, tokens_per_expert)
+            raise NotImplementedError(
+                "UC backend cannot service this call (shape/dtype/contract not "
+                "honoured by the wheel kernel). Per project rule 'wheel 没实现的就直接给报错' "
+                "(2026-06-08), this wrapper does not silently fall back to torch — "
+                "use TTX / torch_npu / torch_native backend for unsupported inputs."
+            )
 
         import torch_npu
 
@@ -189,7 +199,12 @@ class UCExperts(MojoExperts):
         # means values are cumsum of group sizes along the m-axis.
         counts_i64 = tokens_per_expert.detach().to(device=device, dtype=torch.int64)
         if counts_i64.numel() != num_experts:
-            return super().forward(sorted_hidden_states, tokens_per_expert)
+            raise NotImplementedError(
+                "UC backend cannot service this call (shape/dtype/contract not "
+                "honoured by the wheel kernel). Per project rule 'wheel 没实现的就直接给报错' "
+                "(2026-06-08), this wrapper does not silently fall back to torch — "
+                "use TTX / torch_npu / torch_native backend for unsupported inputs."
+            )
         group_list = torch.cumsum(counts_i64, dim=0)
 
         # ---- fc1: x @ up_w_T  -> (M, 2*I) ----

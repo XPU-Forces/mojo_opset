@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from mojo_opset import MojoLayerNorm
+from mojo_opset import MojoLayerNormQuant
 from mojo_opset import MojoResidualAddLayerNorm
 from mojo_opset import MojoResidualAddRMSNorm
 from mojo_opset import MojoRMSNorm
@@ -113,3 +114,37 @@ def test_layernorm(x, weight, bias, eps):
         layernorm.bias.copy_(bias.to(torch.float32))
 
     perf(lambda: layernorm(x))  # noqa: F821
+
+
+@pytest.mark.parametrize(
+    "x, weight, bias",
+    [
+        (
+            torch.randn(size=(2048, 2048), dtype=dtype),
+            torch.randn(size=(2048,), dtype=torch.float32),
+            torch.randn(size=(2048,), dtype=torch.float32),
+        )
+        for dtype in [torch.float16, torch.bfloat16]
+    ],
+)
+@pytest.mark.parametrize("eps", [1e-5])
+@auto_switch_platform(set_perf=True)
+@bypass_not_implemented
+def test_layernorm_quant(x, weight, bias, eps):
+    """Per-token int8 LayerNormQuant perf at the (2048, 2048) reference shape.
+
+    The op fuses LayerNorm + ``npu_dynamic_quant`` so the baseline
+    (``MOJO_BACKEND=torch_npu``) is the **sum** of those two kernels; UC's
+    target is ``min(torch_npu, ttx)``.  No TTX implementation registers a
+    ``LayerNormQuant`` op on NPU as of P-wave 2.
+    """
+    op = MojoLayerNormQuant(
+        norm_size=weight.size(0),
+        eps=eps,
+    ).to(x.device)
+
+    with torch.no_grad():
+        op.weight.copy_(weight.to(torch.float32))
+        op.bias.copy_(bias.to(torch.float32))
+
+    perf(lambda: op(x))  # noqa: F821

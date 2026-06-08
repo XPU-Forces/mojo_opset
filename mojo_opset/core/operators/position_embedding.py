@@ -2,8 +2,14 @@ from typing import Optional
 from typing import Tuple, List
 
 import torch
+import torch.nn.functional as F
 
 from ..operator import MojoOperator
+from .kv_cache import (
+    MojoStorePagedKVCache,
+    assert_paged_kv_layout_contract,
+    build_paged_kv_chunk_metadata,
+)
 
 
 class MojoRotaryEmbedding(MojoOperator):
@@ -173,6 +179,227 @@ class MojoApplyRoPE(MojoOperator):
             cos = cos.unsqueeze(-2)
             sin = sin.unsqueeze(-2)
         return self._apply_rope(q, k, cos, sin)
+
+
+# ---------------------------------------------------------------------------
+# NOTE: The next three operator classes (MojoRoPEStoreKV / MojoNormRoPE /
+# MojoNormRoPEStoreKV) were referenced as ✅ (torch native) in the
+# top-level README op matrix but were missing from this module on the
+# master/mazx/uc-kernel branches (only ``pass`` stubs exist on the
+# ``hht/m13_950pr`` branch). They are added here with a torch-native
+# composition forward so the parent-class fallback path works for any
+# backend that has not yet overridden them. The wrapper classes in
+# ``backends/uc/operators/position_embedding.py`` provide accelerated
+# fast-paths and fall back to these implementations on dtype/shape
+# mismatch. -- Worker C-27.
+# ---------------------------------------------------------------------------
+
+
+class MojoRoPEStoreKV(MojoOperator):
+    """Fused ApplyRoPE on (q, k) + ``MojoStorePagedKVCache`` on (k_rot, v).
+
+    Composes ``MojoApplyRoPE`` (registered for the active backend) with
+    ``MojoStorePagedKVCache`` so the rope'd K and the raw V are written
+    into the paged caches in a single op. The Q rope output is returned
+    to the caller for the current-token attention path; the rope'd K is
+    also returned so callers that need it for current-step attention can
+    reuse it directly.
+
+    Returns ``(q_rot, k_rot)``. ``key_cache`` and ``value_cache`` are
+    modified in place.
+    """
+
+    def __init__(self, interleaved: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        assert not interleaved, "interleaved impl is not supported yet."
+        self.interleaved = interleaved
+        self.apply_rope = MojoApplyRoPE._registry.get(self._backend)(interleaved=interleaved)
+        self.store_kv = MojoStorePagedKVCache._registry.get(self._backend)()
+
+    def extra_repr(self) -> str:
+        return f"{self.interleaved=}".replace("self.", "")
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        block_table: Optional[torch.Tensor] = None,
+        cu_q_lens: Optional[torch.Tensor] = None,
+        context_kv_lens: Optional[torch.Tensor] = None,
+        head_first: bool = False,
+        *,
+        chunk_metadata: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        q_rot, k_rot = self.apply_rope(q, k, cos, sin, head_first=head_first)
+        self.store_kv(
+            k_rot,
+            v,
+            key_cache,
+            value_cache,
+            block_table=block_table,
+            cu_q_lens=cu_q_lens,
+            context_kv_lens=context_kv_lens,
+            chunk_metadata=chunk_metadata,
+        )
+        return q_rot, k_rot
+
+
+def _rmsnorm_with_weight(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """Per-token, per-head RMSNorm over the last dim, applied independently."""
+    return F.rms_norm(x, (x.shape[-1],), weight=weight, eps=eps)
+
+
+class MojoNormRoPE(MojoOperator):
+    """Fused per-head RMSNorm + ApplyRoPE on Q and K (no KV store).
+
+    Applies a per-head RMSNorm to Q and K (each with its own gain
+    vector) followed by ``MojoApplyRoPE``. Returns ``(q_normed_rot,
+    k_normed_rot)``.
+
+    Args:
+        head_dim (int): Per-head hidden size; the gain vectors are
+            ``(head_dim,)``.
+        eps (float): Epsilon for RMSNorm stability.
+        use_query_norm (bool): If True, apply RMSNorm to Q (default
+            True). Set to False to skip Q-side norm.
+        use_key_norm (bool): If True, apply RMSNorm to K (default True).
+        interleaved (bool): Forwarded to ``MojoApplyRoPE``.
+    """
+
+    def __init__(
+        self,
+        head_dim: int,
+        eps: float = 1e-5,
+        use_query_norm: bool = True,
+        use_key_norm: bool = True,
+        interleaved: bool = False,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        assert not interleaved, "interleaved impl is not supported yet."
+        self.head_dim = head_dim
+        self.variance_epsilon = eps
+        self.use_query_norm = use_query_norm
+        self.use_key_norm = use_key_norm
+        self.interleaved = interleaved
+        if use_query_norm:
+            self.q_weight = torch.nn.Parameter(torch.empty(head_dim, **self.tensor_factory_kwargs))
+        else:
+            self.q_weight = None
+        if use_key_norm:
+            self.k_weight = torch.nn.Parameter(torch.empty(head_dim, **self.tensor_factory_kwargs))
+        else:
+            self.k_weight = None
+        self.apply_rope = MojoApplyRoPE._registry.get(self._backend)(interleaved=interleaved)
+
+    def extra_repr(self) -> str:
+        return (
+            f"{self.head_dim=}, {self.variance_epsilon=}, "
+            f"{self.use_query_norm=}, {self.use_key_norm=}, {self.interleaved=}"
+        ).replace("self.", "")
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        head_first: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.use_query_norm:
+            q = _rmsnorm_with_weight(q, self.q_weight, self.variance_epsilon)
+        if self.use_key_norm:
+            k = _rmsnorm_with_weight(k, self.k_weight, self.variance_epsilon)
+        return self.apply_rope(q, k, cos, sin, head_first=head_first)
+
+
+class MojoNormRoPEStoreKV(MojoOperator):
+    """Fused per-head RMSNorm + ApplyRoPE + ``MojoStorePagedKVCache``.
+
+    Combines :class:`MojoNormRoPE` (per-head RMSNorm on Q/K + RoPE) with
+    ``MojoStorePagedKVCache`` so the post-norm-rope K and the raw V are
+    written into the paged caches in a single op.
+
+    Returns ``(q_normed_rot, k_normed_rot)``. ``key_cache`` and
+    ``value_cache`` are modified in place.
+    """
+
+    def __init__(
+        self,
+        head_dim: int,
+        eps: float = 1e-5,
+        use_query_norm: bool = True,
+        use_key_norm: bool = True,
+        interleaved: bool = False,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        assert not interleaved, "interleaved impl is not supported yet."
+        self.head_dim = head_dim
+        self.variance_epsilon = eps
+        self.use_query_norm = use_query_norm
+        self.use_key_norm = use_key_norm
+        self.interleaved = interleaved
+        if use_query_norm:
+            self.q_weight = torch.nn.Parameter(torch.empty(head_dim, **self.tensor_factory_kwargs))
+        else:
+            self.q_weight = None
+        if use_key_norm:
+            self.k_weight = torch.nn.Parameter(torch.empty(head_dim, **self.tensor_factory_kwargs))
+        else:
+            self.k_weight = None
+        self.apply_rope = MojoApplyRoPE._registry.get(self._backend)(interleaved=interleaved)
+        self.store_kv = MojoStorePagedKVCache._registry.get(self._backend)()
+
+    def extra_repr(self) -> str:
+        return (
+            f"{self.head_dim=}, {self.variance_epsilon=}, "
+            f"{self.use_query_norm=}, {self.use_key_norm=}, {self.interleaved=}"
+        ).replace("self.", "")
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        block_table: Optional[torch.Tensor] = None,
+        cu_q_lens: Optional[torch.Tensor] = None,
+        context_kv_lens: Optional[torch.Tensor] = None,
+        head_first: bool = False,
+        *,
+        chunk_metadata: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.use_query_norm:
+            q = _rmsnorm_with_weight(q, self.q_weight, self.variance_epsilon)
+        if self.use_key_norm:
+            k = _rmsnorm_with_weight(k, self.k_weight, self.variance_epsilon)
+        q_rot, k_rot = self.apply_rope(q, k, cos, sin, head_first=head_first)
+        self.store_kv(
+            k_rot,
+            v,
+            key_cache,
+            value_cache,
+            block_table=block_table,
+            cu_q_lens=cu_q_lens,
+            context_kv_lens=context_kv_lens,
+            chunk_metadata=chunk_metadata,
+        )
+        return q_rot, k_rot
+
+
+# NOTE: MojoGridRoPE already exists in
+# ``mojo_opset/experimental/operators/position_embedding.py`` -- the UC
+# backend wrapper inherits from that experimental class directly to
+# avoid a duplicate-class shadow.
 
 
 class MojoMRoPE(MojoOperator):

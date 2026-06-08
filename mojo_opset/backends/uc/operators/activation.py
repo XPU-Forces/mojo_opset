@@ -27,5 +27,10 @@ class UCSwiGLU(MojoSwiGLU):
 
     def forward(self, gate_out: torch.Tensor, up_out: torch.Tensor) -> torch.Tensor:
         if self.swiglu_limit > 0:
-            return super().forward(gate_out, up_out)
+            raise NotImplementedError(
+                f"UCSwiGLU does not implement swiglu_limit > 0 (got {self.swiglu_limit}); "
+                "the UC kernel only supports the unclipped variant. "
+                "Per project rule 'wheel 没实现的就直接给报错', this wrapper does not "
+                "silently fall back to torch — use TTX / torch_npu / torch_native instead."
+            )
         return run_binary_kernel("mojo_swiglu", gate_out, up_out)
