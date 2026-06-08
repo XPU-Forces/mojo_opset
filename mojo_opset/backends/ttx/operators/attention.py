@@ -332,6 +332,7 @@ class TTXPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
             softmax_scale=softmax_scale,
             gqa_interleave=self.gqa_interleave,
             compute_dtype=self.compute_dtype,
+            max_seqlen_kv=max_total_seq_len,
         )
         return o
 
