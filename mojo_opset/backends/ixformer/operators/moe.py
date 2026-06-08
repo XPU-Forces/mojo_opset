@@ -162,6 +162,16 @@ class IxformerMoE(MojoMoE):
         if enable_cuda_graph and not self.disable_sync:
             raise RuntimeError("IxformerMoE: CUDA graph capture requires disable_sync=True (set IXFORMER_DISABLE_SYNC=1).")
 
+        # DP input: gather peer ranks' shards so gating/dispatch see the full token set.
+        if self.dp_input and self.ep_size > 1:
+            local_tokens = hidden_states.shape[0]
+            full = torch.empty(
+                local_tokens * self.ep_size, hidden_states.shape[1],
+                dtype=hidden_states.dtype, device=hidden_states.device,
+            )
+            ixfd.all_gather_into_tensor(full, hidden_states.contiguous(), group=self.ep_group, async_op=True)
+            hidden_states = full
+
         # triple_gemm uses 3 bf16 components of the fp32 gate weight to emulate fp32 matmul precision on bf16 HW.
         gate_logits = ixf_f.triple_gemm_bf16_bf16_fp32(
             hidden_states,
@@ -171,15 +181,7 @@ class IxformerMoE(MojoMoE):
         )
         top_k_gates, top_k_indices = ixf_f.moe_topk_softmax(gate_logits, self.gating.top_k, renormalize=True)
 
-        if hidden_states.dim() == 3:
-            num_tokens_in = hidden_states.shape[0] * hidden_states.shape[1]
-            dim = hidden_states.shape[-1]
-            dispatch_input = hidden_states.view(num_tokens_in, dim)
-        else:
-            dim = hidden_states.shape[-1]
-            dispatch_input = hidden_states
-
-        num_tokens, top_k = top_k_indices.shape
+        num_tokens, dim = hidden_states.shape
 
         need_gpu_size = self.disable_sync or enable_cuda_graph
 
@@ -206,80 +208,73 @@ class IxformerMoE(MojoMoE):
                 self.num_experts,
                 gdr_buffer_ptr=None if need_gpu_size else self.gdr_buffer_ptr,
             )
-            expand_tokens = num_tokens * top_k
+            expand_tokens = num_tokens * self.top_k
 
-        if not torch.any(sorted_token_ids):
+        if sorted_token_ids.shape[0] == 0:
             combined = torch.zeros(
                 num_tokens, self.hidden_size,
-                dtype=hidden_states.dtype, device=dispatch_input.device,
+                dtype=hidden_states.dtype, device=hidden_states.device,
             )
         else:
             tokens_per_expert = expert_sizes_gpu if need_gpu_size else expert_sizes_cpu
 
             sorted_hidden_states = ixf_f.moe_expand_input(
-                hidden_states=dispatch_input,
+                hidden_states=hidden_states,
                 dst_to_src=sorted_token_ids,
                 dst_tokens=expand_tokens,
-                topk=top_k,
+                topk=self.top_k,
                 src_to_dst=src_to_dst,
             ).view(-1, dim)
 
-            if sorted_hidden_states.shape[0] == 0:
-                # Empty fast path: this rank's local experts received no tokens; emit zeros and skip all kernels.
-                expert_outputs = torch.zeros(
-                    num_tokens, top_k, self.hidden_size,
-                    dtype=hidden_states.dtype, device=sorted_hidden_states.device,
+            # gemv variant takes GPU-side sizes so kernel shapes don't depend on CPU values during graph capture.
+            if not need_gpu_size:
+                group_gemm_output1 = ixf_f.moe_w16a16_group_gemm(
+                    input=sorted_hidden_states,
+                    weight=self.experts.up_proj_weight,
+                    output_dtype=sorted_hidden_states.dtype,
+                    tokens_per_experts=tokens_per_expert,
+                    dst_to_src=None,
+                    format="TN",
                 )
             else:
-                # gemv variant takes GPU-side sizes so kernel shapes don't depend on CPU values during graph capture.
-                if not need_gpu_size:
-                    group_gemm_output1 = ixf_f.moe_w16a16_group_gemm(
-                        input=sorted_hidden_states,
-                        weight=self.experts.up_proj_weight,
-                        output_dtype=sorted_hidden_states.dtype,
-                        tokens_per_experts=tokens_per_expert,
-                        dst_to_src=None,
-                        format="TN",
-                    )
-                else:
-                    group_gemm_output1 = ixf_f.moe_w16a16_group_gemv(
-                        input=sorted_hidden_states,
-                        weight=self.experts.up_proj_weight,
-                        output_dtype=sorted_hidden_states.dtype,
-                        tokens_per_experts_gpu=tokens_per_expert,
-                        dst_to_src=None,
-                        format="TN",
-                    )
-
-                act = ixf_f.silu_and_mul(group_gemm_output1)
-
-                group_gemm_output2 = torch.empty(
-                    num_tokens * top_k, self.hidden_size,
-                    dtype=sorted_hidden_states.dtype, device=sorted_hidden_states.device,
+                group_gemm_output1 = ixf_f.moe_w16a16_group_gemv(
+                    input=sorted_hidden_states,
+                    weight=self.experts.up_proj_weight,
+                    output_dtype=sorted_hidden_states.dtype,
+                    tokens_per_experts_gpu=tokens_per_expert,
+                    dst_to_src=None,
+                    format="TN",
                 )
 
-                if not need_gpu_size:
-                    ixf_f.moe_w16a16_group_gemm(
-                        input=act,
-                        weight=self.experts.down_proj_weight,
-                        output_dtype=sorted_hidden_states.dtype,
-                        tokens_per_experts=tokens_per_expert,
-                        dst_to_src=sorted_token_ids,
-                        format="TN",
-                        output=group_gemm_output2,
-                    )
-                else:
-                    ixf_f.moe_w16a16_group_gemv(
-                        input=act,
-                        weight=self.experts.down_proj_weight,
-                        output_dtype=sorted_hidden_states.dtype,
-                        tokens_per_experts_gpu=tokens_per_expert,
-                        dst_to_src=sorted_token_ids,
-                        format="TN",
-                        output=group_gemm_output2,
-                    )
+            act = ixf_f.silu_and_mul(group_gemm_output1)
 
-                expert_outputs = group_gemm_output2.view(num_tokens, top_k, -1)
+            group_gemm_output2 = torch.empty(
+                num_tokens * self.top_k, self.hidden_size,
+                dtype=sorted_hidden_states.dtype, device=sorted_hidden_states.device,
+            )
+
+            if not need_gpu_size:
+                ixf_f.moe_w16a16_group_gemm(
+                    input=act,
+                    weight=self.experts.down_proj_weight,
+                    output_dtype=sorted_hidden_states.dtype,
+                    tokens_per_experts=tokens_per_expert,
+                    dst_to_src=sorted_token_ids,
+                    format="TN",
+                    output=group_gemm_output2,
+                )
+            else:
+                ixf_f.moe_w16a16_group_gemv(
+                    input=act,
+                    weight=self.experts.down_proj_weight,
+                    output_dtype=sorted_hidden_states.dtype,
+                    tokens_per_experts_gpu=tokens_per_expert,
+                    dst_to_src=sorted_token_ids,
+                    format="TN",
+                    output=group_gemm_output2,
+                )
+
+            expert_outputs = group_gemm_output2.view(num_tokens, self.top_k, -1)
 
             # src_to_dst == -1 marks padding slots that must not be summed.
             reduce_mask = src_to_dst == -1
@@ -289,9 +284,17 @@ class IxformerMoE(MojoMoE):
                 mask=reduce_mask,
             )
 
-        # Sum partial expert outputs across EP ranks to reconstruct the full result.
+        # Sum partial expert outputs across EP ranks; reduce_scatter slices the result back to the rank's DP shard.
         if self.ep_size > 1:
-            ixfd.all_reduce(combined, group=self.ep_group, async_op=True)
+            if self.dp_input:
+                local_combined = torch.empty(
+                    combined.shape[0] // self.ep_size, combined.shape[1],
+                    dtype=combined.dtype, device=combined.device,
+                )
+                ixfd.reduce_scatter_tensor(local_combined, combined.contiguous(), group=self.ep_group, async_op=True)
+                combined = local_combined
+            else:
+                ixfd.all_reduce(combined, group=self.ep_group, async_op=True)
 
         return combined
 
@@ -422,6 +425,16 @@ class IxformerQuantMoE(MojoQuantMoE):
         if hidden_states.dtype == torch.float16:
             raise NotImplementedError(f"IxformerQuantMoE: hidden_states dtype must be 'torch.bfloat16', got {hidden_states.dtype}.")
 
+        # DP input: gather peer ranks' shards so gating/dispatch see the full token set.
+        if self.dp_input and self.ep_size > 1:
+            local_tokens = hidden_states.shape[0]
+            full = torch.empty(
+                local_tokens * self.ep_size, hidden_states.shape[1],
+                dtype=hidden_states.dtype, device=hidden_states.device,
+            )
+            ixfd.all_gather_into_tensor(full, hidden_states.contiguous(), group=self.ep_group, async_op=True)
+            hidden_states = full
+
         # triple_gemm uses 3 bf16 components of the fp32 gate weight to emulate fp32 matmul precision on bf16 HW.
         gate_logits = ixf_f.triple_gemm_bf16_bf16_fp32(
             hidden_states,
@@ -431,15 +444,7 @@ class IxformerQuantMoE(MojoQuantMoE):
         )
         top_k_gates, top_k_indices = ixf_f.moe_topk_softmax(gate_logits, self.gating.top_k, renormalize=True)
 
-        if hidden_states.dim() == 3:
-            num_tokens_in = hidden_states.shape[0] * hidden_states.shape[1]
-            dim = hidden_states.shape[-1]
-            dispatch_input = hidden_states.view(num_tokens_in, dim)
-        else:
-            dim = hidden_states.shape[-1]
-            dispatch_input = hidden_states
-
-        num_tokens, top_k = top_k_indices.shape
+        num_tokens, dim = hidden_states.shape
 
         need_gpu_size = self.disable_sync or enable_cuda_graph
 
@@ -469,12 +474,12 @@ class IxformerQuantMoE(MojoQuantMoE):
                 self.num_experts,
                 gdr_buffer_ptr=None if need_gpu_size else self.gdr_buffer_ptr,
             )
-            expand_tokens = num_tokens * top_k
+            expand_tokens = num_tokens * self.top_k
         
-        if not torch.any(sorted_token_ids):
+        if sorted_token_ids.shape[0] == 0:
             combined = torch.zeros(
                 num_tokens, self.hidden_size,
-                dtype=hidden_states.dtype, device=dispatch_input.device,
+                dtype=hidden_states.dtype, device=hidden_states.device,
             )
         else:
 
@@ -482,52 +487,30 @@ class IxformerQuantMoE(MojoQuantMoE):
 
             # Fuses expert-sort, expansion, smooth-quant scaling, and dynamic-int8 quantization into one kernel.
             i8_hs, quant_scale = ixf_f.moe_expand_input_dynamic_scaled_int8(
-                hidden_states=dispatch_input,
+                hidden_states=hidden_states,
                 dst_to_src=sorted_token_ids,
                 dst_tokens=expand_tokens,
-                topk=top_k,
+                topk=self.top_k,
                 src_to_dst=src_to_dst,
                 topk_ids=top_k_indices,
                 smooth_scales=self.experts.up_proj_quantize.inv_smooth_scale,
             )
             i8_hs = i8_hs.view(-1, dim)
 
-            if i8_hs.shape[0] == 0:
-                # Empty fast path: this rank's local experts received no tokens; emit zeros and skip all kernels.
-                expert_outputs = torch.zeros(
-                    num_tokens, top_k, self.hidden_size,
-                    dtype=self.output_dtype, device=sorted_token_ids.device,
-                )
-            else:
-                # gemv variant takes GPU-side sizes so kernel shapes don't depend on CPU values during graph capture.
-                if self.up_weight_dtype == torch.int8:
-                    if not need_gpu_size:
-                        group_gemm_output1 = ixf_f.moe_w8a8_group_gemm(
-                            input=i8_hs,
-                            weight=self.experts.up_proj_weight,
-                            i_scales=quant_scale,
-                            w_scales=self.experts.up_proj_weight_scale,
-                            output_dtype=self.output_dtype,
-                            tokens_per_experts=tokens_per_expert,
-                            format="NN",
-                        )
-                    else:
-                        group_gemm_output1 = ixf_f.moe_w8a8_group_gemv(
-                            input=i8_hs,
-                            weight=self.experts.up_proj_weight,
-                            i_scales=quant_scale,
-                            w_scales=self.experts.up_proj_weight_scale,
-                            output_dtype=self.output_dtype,
-                            tokens_per_experts=tokens_per_expert,
-                            format=0,
-                        )
-                elif self.up_weight_dtype == "int4":
-                    group_gemm_output1 = torch.empty(
-                        (i8_hs.shape[0], self.experts.up_proj_weight_scale.shape[-1]),
-                        dtype=self.output_dtype,
-                        device=i8_hs.device,
+            # gemv variant takes GPU-side sizes so kernel shapes don't depend on CPU values during graph capture.
+            if self.up_weight_dtype == torch.int8:
+                if not need_gpu_size:
+                    group_gemm_output1 = ixf_f.moe_w8a8_group_gemm(
+                        input=i8_hs,
+                        weight=self.experts.up_proj_weight,
+                        i_scales=quant_scale,
+                        w_scales=self.experts.up_proj_weight_scale,
+                        output_dtype=self.output_dtype,
+                        tokens_per_experts=tokens_per_expert,
+                        format="NN",
                     )
-                    ixf_f.moe_w4a8_group_gemm(
+                else:
+                    group_gemm_output1 = ixf_f.moe_w8a8_group_gemv(
                         input=i8_hs,
                         weight=self.experts.up_proj_weight,
                         i_scales=quant_scale,
@@ -535,56 +518,59 @@ class IxformerQuantMoE(MojoQuantMoE):
                         output_dtype=self.output_dtype,
                         tokens_per_experts=tokens_per_expert,
                         format=0,
-                        version=1,
-                        group_size=self.up_quant_group_size,
-                        gdr_buffer_ptr=self.gdr_buffer_ptr1 if not need_gpu_size else None,
-                        output=group_gemm_output1,
-                        enable_cuda_graph=need_gpu_size,
+                    )
+            elif self.up_weight_dtype == "int4":
+                group_gemm_output1 = torch.empty(
+                    (i8_hs.shape[0], self.experts.up_proj_weight_scale.shape[-1]),
+                    dtype=self.output_dtype,
+                    device=i8_hs.device,
+                )
+                ixf_f.moe_w4a8_group_gemm(
+                    input=i8_hs,
+                    weight=self.experts.up_proj_weight,
+                    i_scales=quant_scale,
+                    w_scales=self.experts.up_proj_weight_scale,
+                    output_dtype=self.output_dtype,
+                    tokens_per_experts=tokens_per_expert,
+                    format=0,
+                    version=1,
+                    group_size=self.up_quant_group_size,
+                    gdr_buffer_ptr=self.gdr_buffer_ptr1 if not need_gpu_size else None,
+                    output=group_gemm_output1,
+                    enable_cuda_graph=need_gpu_size,
+                )
+            else:
+                raise NotImplementedError(f"IxformerQuantMoE: up_weight_dtype must be 'torch.int8' or 'int4', got {self.up_weight_dtype}.")
+
+            # Fuses swiglu activation, smooth-quant scaling, and dynamic-int8 quant ahead of the down projection.
+            act_i8, act_scale = ixf_f.activation_dynamic_scaled_int8(
+                input=group_gemm_output1,
+                smooth_scales=self.experts.down_proj_quantize.inv_smooth_scale,
+                dst_to_src=sorted_token_ids,
+                topk_ids=top_k_indices,
+                act_type="swiglu",
+            )
+
+            group_gemm_output2 = torch.empty(
+                num_tokens * self.top_k, self.hidden_size,
+                dtype=self.output_dtype, device=sorted_token_ids.device,
+            )
+
+            if self.down_weight_dtype == torch.int8:
+                if not need_gpu_size:
+                    ixf_f.moe_w8a8_group_gemm(
+                        input=act_i8,
+                        weight=self.experts.down_proj_weight,
+                        i_scales=act_scale,
+                        w_scales=self.experts.down_proj_weight_scale,
+                        output_dtype=self.output_dtype,
+                        tokens_per_experts=tokens_per_expert,
+                        dst_to_src=sorted_token_ids,
+                        format="NN",
+                        output=group_gemm_output2,
                     )
                 else:
-                    raise NotImplementedError(f"IxformerQuantMoE: up_weight_dtype must be 'torch.int8' or 'int4', got {self.up_weight_dtype}.")
-
-                # Fuses swiglu activation, smooth-quant scaling, and dynamic-int8 quant ahead of the down projection.
-                act_i8, act_scale = ixf_f.activation_dynamic_scaled_int8(
-                    input=group_gemm_output1,
-                    smooth_scales=self.experts.down_proj_quantize.inv_smooth_scale,
-                    dst_to_src=sorted_token_ids,
-                    topk_ids=top_k_indices,
-                    act_type="swiglu",
-                )
-
-                group_gemm_output2 = torch.empty(
-                    num_tokens * top_k, self.hidden_size,
-                    dtype=self.output_dtype, device=sorted_token_ids.device,
-                )
-
-                if self.down_weight_dtype == torch.int8:
-                    if not need_gpu_size:
-                        ixf_f.moe_w8a8_group_gemm(
-                            input=act_i8,
-                            weight=self.experts.down_proj_weight,
-                            i_scales=act_scale,
-                            w_scales=self.experts.down_proj_weight_scale,
-                            output_dtype=self.output_dtype,
-                            tokens_per_experts=tokens_per_expert,
-                            dst_to_src=sorted_token_ids,
-                            format="NN",
-                            output=group_gemm_output2,
-                        )
-                    else:
-                        ixf_f.moe_w8a8_group_gemv(
-                            input=act_i8,
-                            weight=self.experts.down_proj_weight,
-                            i_scales=act_scale,
-                            w_scales=self.experts.down_proj_weight_scale,
-                            output_dtype=self.output_dtype,
-                            tokens_per_experts=tokens_per_expert,
-                            dst_to_src=sorted_token_ids,
-                            format=0,
-                            output=group_gemm_output2,
-                        )
-                elif self.down_weight_dtype == "int4":
-                    ixf_f.moe_w4a8_group_gemm(
+                    ixf_f.moe_w8a8_group_gemv(
                         input=act_i8,
                         weight=self.experts.down_proj_weight,
                         i_scales=act_scale,
@@ -593,17 +579,29 @@ class IxformerQuantMoE(MojoQuantMoE):
                         tokens_per_experts=tokens_per_expert,
                         dst_to_src=sorted_token_ids,
                         format=0,
-                        version=1,
-                        group_size=self.down_quant_group_size,
                         output=group_gemm_output2,
-                        gdr_buffer_ptr=self.gdr_buffer_ptr2 if not need_gpu_size else None,
-                        enable_cuda_graph=need_gpu_size,
                     )
+            elif self.down_weight_dtype == "int4":
+                ixf_f.moe_w4a8_group_gemm(
+                    input=act_i8,
+                    weight=self.experts.down_proj_weight,
+                    i_scales=act_scale,
+                    w_scales=self.experts.down_proj_weight_scale,
+                    output_dtype=self.output_dtype,
+                    tokens_per_experts=tokens_per_expert,
+                    dst_to_src=sorted_token_ids,
+                    format=0,
+                    version=1,
+                    group_size=self.down_quant_group_size,
+                    output=group_gemm_output2,
+                    gdr_buffer_ptr=self.gdr_buffer_ptr2 if not need_gpu_size else None,
+                    enable_cuda_graph=need_gpu_size,
+                )
 
-                else:
-                    raise NotImplementedError(f"IxformerQuantMoE: down_weight_dtype must be 'torch.int8' or 'int4', got {self.down_weight_dtype}.")
+            else:
+                raise NotImplementedError(f"IxformerQuantMoE: down_weight_dtype must be 'torch.int8' or 'int4', got {self.down_weight_dtype}.")
 
-                expert_outputs = group_gemm_output2.view(-1, self.top_k, self.hidden_size)
+            expert_outputs = group_gemm_output2.view(-1, self.top_k, self.hidden_size)
 
             # src_to_dst == -1 marks padding slots that must not be summed.
             reduce_mask = src_to_dst == -1
@@ -613,8 +611,16 @@ class IxformerQuantMoE(MojoQuantMoE):
                 mask=reduce_mask,
             )
 
-        # Sum partial expert outputs across EP ranks to reconstruct the full result.
+        # Sum partial expert outputs across EP ranks; reduce_scatter slices the result back to the rank's DP shard.
         if self.ep_size > 1:
-            ixfd.all_reduce(combined, group=self.ep_group, async_op=True)
+            if self.dp_input:
+                local_combined = torch.empty(
+                    combined.shape[0] // self.ep_size, combined.shape[1],
+                    dtype=combined.dtype, device=combined.device,
+                )
+                ixfd.reduce_scatter_tensor(local_combined, combined.contiguous(), group=self.ep_group, async_op=True)
+                combined = local_combined
+            else:
+                ixfd.all_reduce(combined, group=self.ep_group, async_op=True)
 
         return combined

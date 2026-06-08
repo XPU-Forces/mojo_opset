@@ -94,6 +94,19 @@ jobs:
               --ignore=mojo_opset/tests/accuracy/operators/test_compute_with_comm.py
           "
 
+      - name: test-Distributed
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            set -euo pipefail
+            cd /workspace
+            echo 'Running distributed MoE EP=2 tests (ttx + ixformer) on Iluvatar GPU...'
+            for backend in ttx ixformer; do
+              echo \"--- backend=\$backend ---\"
+              MOJO_BACKEND=\$backend torchrun --nproc-per-node=2 --rdzv-backend=c10d --rdzv-endpoint=localhost:0 \
+                -m pytest -v mojo_opset/tests/distributed/test_moe_ep.py
+            done
+          "
+
       - name: Cleanup
         if: always()
         run: |

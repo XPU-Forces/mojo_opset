@@ -22,6 +22,7 @@ class MojoMoE(MojoOperator):
         ep_size: int = 1,
         ep_rank: int = 0,
         ep_group=None,
+        dp_input: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -46,6 +47,8 @@ class MojoMoE(MojoOperator):
         self.num_experts_local = base + 1 if ep_rank < rem else base
         self.ep_start = base * ep_rank + min(ep_rank, rem)
         self.ep_end = self.ep_start + self.num_experts_local
+
+        self.dp_input = dp_input
 
         if not self._use_fused_moe:
             self.gating = MojoMoEGating._registry.get(self._backend)(
@@ -75,6 +78,16 @@ class MojoMoE(MojoOperator):
 
     def forward(self, hidden_states):
         # hidden_states: [num_tokens, H]
+        # DP input: gather peer ranks' shards so gating/dispatch see the full token set.
+        if self.dp_input and self.ep_size > 1:
+            local_tokens = hidden_states.shape[0]
+            full = torch.empty(
+                local_tokens * self.ep_size, *hidden_states.shape[1:],
+                dtype=hidden_states.dtype, device=hidden_states.device,
+            )
+            dist.all_gather_into_tensor(full, hidden_states.contiguous(), group=self.ep_group)
+            hidden_states = full
+
         top_k_indices, top_k_gates = self.gating(hidden_states)
         # top_k_indices, top_k_gates: [num_tokens, top_k]
         sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = self.dispatch(
@@ -101,9 +114,17 @@ class MojoMoE(MojoOperator):
         combined = self.combine(output_buffer, expert_outputs, sorted_gates, token_indices)
         # combined: [num_tokens, H]
 
-        # Sum partial expert outputs across EP ranks to reconstruct the full result.
+        # Sum partial expert outputs across EP ranks; reduce_scatter slices the result back to the rank's DP shard.
         if self.ep_size > 1:
-            dist.all_reduce(combined, op=dist.ReduceOp.SUM, group=self.ep_group)
+            if self.dp_input:
+                local_combined = torch.empty(
+                    combined.shape[0] // self.ep_size, *combined.shape[1:],
+                    dtype=combined.dtype, device=combined.device,
+                )
+                dist.reduce_scatter_tensor(local_combined, combined.contiguous(), op=dist.ReduceOp.SUM, group=self.ep_group)
+                combined = local_combined
+            else:
+                dist.all_reduce(combined, op=dist.ReduceOp.SUM, group=self.ep_group)
 
         return combined
 
@@ -126,6 +147,7 @@ class MojoQuantMoE(MojoOperator):
         ep_size: int = 1,
         ep_rank: int = 0,
         ep_group=None,
+        dp_input: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -158,6 +180,9 @@ class MojoQuantMoE(MojoOperator):
         self.num_experts_local = base + 1 if ep_rank < rem else base
         self.ep_start = base * ep_rank + min(ep_rank, rem)
         self.ep_end = self.ep_start + self.num_experts_local
+
+        # DP input mode: each rank holds 1/ep_size of the tokens (caller guarantees equal counts per rank).
+        self.dp_input = dp_input
 
         if not self._use_fused_moe:
             self.gating = MojoMoEGating._registry.get(self._backend)(
@@ -203,6 +228,16 @@ class MojoQuantMoE(MojoOperator):
             )
 
     def forward(self, hidden_states):
+        # DP input: gather peer ranks' shards so gating/dispatch see the full token set.
+        if self.dp_input and self.ep_size > 1:
+            local_tokens = hidden_states.shape[0]
+            full = torch.empty(
+                local_tokens * self.ep_size, *hidden_states.shape[1:],
+                dtype=hidden_states.dtype, device=hidden_states.device,
+            )
+            dist.all_gather_into_tensor(full, hidden_states.contiguous(), group=self.ep_group)
+            hidden_states = full
+
         top_k_indices, top_k_gates = self.gating(hidden_states)
         sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = self.dispatch(
             hidden_states,
@@ -224,9 +259,17 @@ class MojoQuantMoE(MojoOperator):
         output_buffer = torch.zeros_like(hidden_states, memory_format=torch.contiguous_format)
         combined = self.combine(output_buffer, expert_outputs, sorted_gates, token_indices)
 
-        # Sum partial expert outputs across EP ranks to reconstruct the full result.
+        # Sum partial expert outputs across EP ranks; reduce_scatter slices the result back to the rank's DP shard.
         if self.ep_size > 1:
-            dist.all_reduce(combined, op=dist.ReduceOp.SUM, group=self.ep_group)
+            if self.dp_input:
+                local_combined = torch.empty(
+                    combined.shape[0] // self.ep_size, *combined.shape[1:],
+                    dtype=combined.dtype, device=combined.device,
+                )
+                dist.reduce_scatter_tensor(local_combined, combined.contiguous(), op=dist.ReduceOp.SUM, group=self.ep_group)
+                combined = local_combined
+            else:
+                dist.all_reduce(combined, op=dist.ReduceOp.SUM, group=self.ep_group)
 
         return combined
 

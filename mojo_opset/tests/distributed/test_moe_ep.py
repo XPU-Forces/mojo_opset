@@ -14,10 +14,9 @@ from mojo_opset.utils.platform import get_torch_device
 
 
 def _get_world_size():
-    world_size = int(os.environ.get("WORLD_SIZE", "0"))
-    if world_size <= 0:
-        pytest.skip("This test requires launching with torchrun (WORLD_SIZE must be set).")
-    return world_size
+    # When launched via torchrun, WORLD_SIZE is set; otherwise fall back to single-rank
+    # (EP=1, no torch.distributed init) so the file is also runnable via plain pytest.
+    return int(os.environ.get("WORLD_SIZE", "1"))
 
 
 def _set_current_device(device_type: str, world_size: int) -> str:
@@ -91,7 +90,9 @@ def _make_quant_weights(
 
 def _broadcast_state(state, src: int = 0):
     """In-place broadcast of every persistent tensor in `state` from `src` to all ranks,
-    so the ref module is byte-identical across ranks."""
+    so the ref module is byte-identical across ranks. No-op when torch.distributed isn't initialized."""
+    if not dist.is_available() or not dist.is_initialized():
+        return
     for k in sorted(state.keys()):
         dist.broadcast(state[k], src=src)
 
@@ -122,14 +123,16 @@ def _replicated_input(num_tokens: int, hidden_size: int, dtype: torch.dtype, dev
         (32, 8, 1024, 4096, 128),
     ],
 )
+@pytest.mark.parametrize("dp_input", [False, True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @bypass_not_implemented
-def test_moe_ep(num_experts, top_k, hidden_size, intermediate_size, num_tokens, dtype):
+def test_moe_ep(num_experts, top_k, hidden_size, intermediate_size, num_tokens, dp_input, dtype):
     world_size = _get_world_size()
     rank = int(os.environ.get("RANK", "0"))
     device_type = get_torch_device()
     device = _set_current_device(device_type, world_size)
-    init_device_mesh(device_type, (world_size,))
+    if world_size > 1:
+        init_device_mesh(device_type, (world_size,))
 
     if num_experts % world_size != 0:
         pytest.skip(f"num_experts={num_experts} not divisible by world_size={world_size}.")
@@ -159,6 +162,7 @@ def test_moe_ep(num_experts, top_k, hidden_size, intermediate_size, num_tokens, 
         ep_size=world_size,
         ep_rank=rank,
         ep_group=None,
+        dp_input=dp_input,
     ).to(dtype).to(device)
     ref.gating.gate_weight.data = ref.gating.gate_weight.data.float()
     ref_state = _slice_state_for_ep(full_state, ref.ep_start, ref.ep_end, expert_dim0_keys)
@@ -173,12 +177,20 @@ def test_moe_ep(num_experts, top_k, hidden_size, intermediate_size, num_tokens, 
         ep_size=world_size,
         ep_rank=rank,
         ep_group=None,
+        dp_input=dp_input,
     ).to(dtype).to(device)
     moe.gating.gate_weight.data = moe.gating.gate_weight.data.float()
     moe_state = _slice_state_for_ep(full_state, moe.ep_start, moe.ep_end, expert_dim0_keys)
     moe.load_state_dict(moe_state)
 
     x = _replicated_input(num_tokens, hidden_size, dtype, device)
+    if dp_input:
+        # Pad up to a multiple of world_size, then take this rank's contiguous slice.
+        pad = (-num_tokens) % world_size
+        if pad:
+            x = torch.cat([x, x.new_zeros(pad, hidden_size)], dim=0)
+        tokens_per_rank = x.shape[0] // world_size
+        x = x[rank * tokens_per_rank : (rank + 1) * tokens_per_rank].contiguous()
     moe.forward_diff_with(ref, x, mixed_tol=True)
 
 
@@ -196,6 +208,7 @@ def test_moe_ep(num_experts, top_k, hidden_size, intermediate_size, num_tokens, 
         (torch.int8, -1, torch.int8, -1),
     ],
 )
+@pytest.mark.parametrize("dp_input", [False, True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @bypass_not_implemented
 def test_quant_moe_ep(
@@ -208,13 +221,15 @@ def test_quant_moe_ep(
     up_quant_group_size,
     down_weight_dtype,
     down_quant_group_size,
+    dp_input,
     dtype,
 ):
     world_size = _get_world_size()
     rank = int(os.environ.get("RANK", "0"))
     device_type = get_torch_device()
     device = _set_current_device(device_type, world_size)
-    init_device_mesh(device_type, (world_size,))
+    if world_size > 1:
+        init_device_mesh(device_type, (world_size,))
 
     if num_experts % world_size != 0:
         pytest.skip(f"num_experts={num_experts} not divisible by world_size={world_size}.")
@@ -259,6 +274,7 @@ def test_quant_moe_ep(
         ep_size=world_size,
         ep_rank=rank,
         ep_group=None,
+        dp_input=dp_input,
     ).to(device)
 
     # Active-backend EP QuantMoE — same expert split.
@@ -275,6 +291,7 @@ def test_quant_moe_ep(
         ep_size=world_size,
         ep_rank=rank,
         ep_group=None,
+        dp_input=dp_input,
     ).to(device)
 
     expert_dim0_keys = {
@@ -289,4 +306,11 @@ def test_quant_moe_ep(
     moe.load_state_dict(_slice_state_for_ep(full_state, moe.ep_start, moe.ep_end, expert_dim0_keys))
 
     x = _replicated_input(num_tokens, hidden_size, dtype, device)
+    if dp_input:
+        # Pad up to a multiple of world_size, then take this rank's contiguous slice.
+        pad = (-num_tokens) % world_size
+        if pad:
+            x = torch.cat([x, x.new_zeros(pad, hidden_size)], dim=0)
+        tokens_per_rank = x.shape[0] // world_size
+        x = x[rank * tokens_per_rank : (rank + 1) * tokens_per_rank].contiguous()
     moe.forward_diff_with(ref, x, mixed_tol=True)
