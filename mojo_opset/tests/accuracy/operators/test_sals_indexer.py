@@ -12,8 +12,9 @@ import pytest
 import torch
 
 from mojo_opset import MojoSALSIndexer
+from mojo_opset.tests.utils import auto_switch_platform
+from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_torch_device
-from mojo_opset.tests.utils import auto_switch_platform, bypass_not_implemented
 
 
 HEAD_DIM = 128
@@ -31,17 +32,6 @@ MODEL_SPECS = [
     ("M8-14B", 8, 128),
 ]
 
-# Custom test cases as specified:
-# q_len = 4096, kv_len = 16384/32768/65536,share_len, q_head_num = 3/4, kv_head_num = 1, sparse_block_size = 64, fixed_tail_blocks = 4
-CUSTOM_SCENARIOS = [
-    (4096, 3, 1, 256,16384, 64, 4, torch.bfloat16),
-    (4096, 3, 1, 256,32768, 64, 4, torch.bfloat16),
-    (4096, 3, 1, 256,65536, 64, 4, torch.bfloat16),
-    (4096, 4, 1, 256,16384, 64, 4, torch.bfloat16),
-    (4096, 4, 1, 256,32768, 64, 4, torch.bfloat16),
-    (4096, 4, 1, 256,65536, 64, 4, torch.bfloat16),
-]
-
 # (q_seqlen, share_len, kv_seqlen, sparsity, fixed_tail, cache_block_size, dtype)
 SCENARIOS = [
     (8192,   128, 1024, 4, 8,  64,  torch.float16),
@@ -53,32 +43,45 @@ SCENARIOS = [
     (32768,  256, 2048, 4, 8,  256, torch.float16),
 ]
 
-# 64k/80k/128k only with lightweight model to avoid OOM - enhanced
+# 64k/80k/128k only with lightweight model to avoid OOM
 LARGE_SCENARIOS = [
     (65536,  256, 512,  4, 16, 64,  torch.float16),
     (81920,  256, 1024, 2, 8,  256, torch.bfloat16),
     (131072, 256, 256,  2, 16, 64,  torch.float16),
 ]
 
+# Custom test cases:
+# q_len = 4096, kv_len = 16384/32768/65536, q_head_num = 3/4, kv_head_num = 1,
+# share_len = 256, cache_block_size = 64, fixed_tail_blocks = 4
+CUSTOM_SCENARIOS = [
+    (4096, 3, 1, 256, 16384, 64, 4, torch.bfloat16),
+    (4096, 3, 1, 256, 32768, 64, 4, torch.bfloat16),
+    (4096, 3, 1, 256, 65536, 64, 4, torch.bfloat16),
+    (4096, 4, 1, 256, 16384, 64, 4, torch.bfloat16),
+    (4096, 4, 1, 256, 32768, 64, 4, torch.bfloat16),
+    (4096, 4, 1, 256, 65536, 64, 4, torch.bfloat16),
+]
 
 _SMALL_MODEL = MODEL_SPECS[0]  # new_model_1
 
-_ALL_PARAMS = []
+_MODEL_SPEC_PARAMS = []
 for _m in MODEL_SPECS:
     for _s in SCENARIOS:
-        _ALL_PARAMS.append(pytest.param(
+        _MODEL_SPEC_PARAMS.append(pytest.param(
             *_m, *_s, id=f"{_m[0]}-q{_s[0]}-sl{_s[1]}",
         ))
+
+_LARGE_PARAMS = []
 for _s in LARGE_SCENARIOS:
-    _ALL_PARAMS.append(pytest.param(
+    _LARGE_PARAMS.append(pytest.param(
         *_SMALL_MODEL, *_s, id=f"{_SMALL_MODEL[0]}-q{_s[0]}-sl{_s[1]}",
     ))
 
 _CUSTOM_PARAMS = []
 for _s in CUSTOM_SCENARIOS:
-    q_seqlen, q_head_num, kv_head_num, share_len,kv_seqlen, cache_block_size, fixed_tail, dtype = _s
+    q_seqlen, q_head_num, kv_head_num, share_len, kv_seqlen, cache_block_size, fixed_tail, dtype = _s
     _CUSTOM_PARAMS.append(pytest.param(
-        q_seqlen, q_head_num, kv_head_num,share_len, kv_seqlen, cache_block_size, fixed_tail, dtype,
+        q_seqlen, q_head_num, kv_head_num, share_len, kv_seqlen, cache_block_size, fixed_tail, dtype,
         id=f"q{q_seqlen}-qh{q_head_num}-kh{kv_head_num}-kv{kv_seqlen}-cb{cache_block_size}-ft{fixed_tail}",
     ))
 
@@ -252,14 +255,38 @@ def test_sals_indexer_sparse_block_size_can_differ_from_cache_page_size():
     _assert_match(torch_out, ttx_out, G, kv_heads, fixed_tail_count)
 
 
-@pytest.mark.parametrize(
+_PARAM_NAMES = (
     "model_name,kv_heads,head_dim,"
-    "q_seqlen,share_len,kv_seqlen,sparsity,fixed_tail,cache_block_size,dtype",
-    _ALL_PARAMS,
+    "q_seqlen,share_len,kv_seqlen,sparsity,fixed_tail,cache_block_size,dtype"
 )
+
+
+@pytest.mark.parametrize(_PARAM_NAMES, _MODEL_SPEC_PARAMS)
 @auto_switch_platform()
 @bypass_not_implemented
-def test_sals_indexer_model_specs(
+def test_sals_indexer(
+    model_name, kv_heads, head_dim,
+    q_seqlen, share_len, kv_seqlen, sparsity, fixed_tail, cache_block_size, dtype,
+):
+    G = (q_seqlen - MIN_SPARSE_LEN) // share_len
+    kw = _make_inputs(
+        G=G, seq_lengths=[kv_seqlen] * G,
+        dtype=dtype, sparsity=sparsity,
+        fixed_tail_count=fixed_tail, kv_heads=kv_heads,
+        cache_block_size=cache_block_size,
+    )
+    indexer = MojoSALSIndexer()
+    torch_cls = indexer._registry.get("torch")
+    ttx_cls = indexer._registry.get("ttx")
+    torch_out = torch_cls().forward(**kw)
+    ttx_out = ttx_cls().forward(**kw)
+    _assert_match(torch_out, ttx_out, G, kv_heads, kw["fixed_tail_count"])
+
+
+@pytest.mark.parametrize(_PARAM_NAMES, _LARGE_PARAMS)
+@auto_switch_platform()
+@bypass_not_implemented
+def test_sals_indexer_large(
     model_name, kv_heads, head_dim,
     q_seqlen, share_len, kv_seqlen, sparsity, fixed_tail, cache_block_size, dtype,
 ):
@@ -285,17 +312,15 @@ def test_sals_indexer_model_specs(
 @auto_switch_platform()
 @bypass_not_implemented
 def test_sals_indexer_custom(
-    q_seqlen, q_head_num, kv_head_num, share_len,kv_seqlen, cache_block_size, fixed_tail, dtype,
+    q_seqlen, q_head_num, kv_head_num, share_len, kv_seqlen, cache_block_size, fixed_tail, dtype,
 ):
     G = (q_seqlen - MIN_SPARSE_LEN) // share_len
-    sparsity = 4
     kw = _make_inputs(
         G=G, seq_lengths=[kv_seqlen] * G,
-        dtype=dtype, sparsity=sparsity,
+        dtype=dtype, sparsity=4,
         fixed_tail_count=fixed_tail, kv_heads=kv_head_num,
         cache_block_size=cache_block_size,
     )
-    
     indexer = MojoSALSIndexer()
     torch_out = indexer._registry.get("torch")().forward(**kw)
     ttx_out = indexer._registry.get("ttx")().forward(**kw)
