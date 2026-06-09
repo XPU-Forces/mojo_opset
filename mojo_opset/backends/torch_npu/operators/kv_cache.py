@@ -4,7 +4,7 @@ import torch
 import torch_npu
 
 from mojo_opset.core import MojoStorePagedKVCache
-from mojo_opset.core.operators.kv_cache import assert_paged_kv_store_contract
+from mojo_opset.core.operators.kv_cache import assert_paged_kv_layout_contract
 
 
 def _build_slot_mapping(block_table, cu_q_lens, context_kv_lens, block_size, total_tokens):
