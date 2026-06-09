@@ -123,7 +123,17 @@ def _rmsnorm_infer_kernel(
                 mask=row_mask[:, None] & col_mask[None, :],
             )
 
+import triton.backends.ascend.runtime
+
 @libentry()
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_SIZE_M": BM, "multibuffer": MF})
+        for BM in [1, 2, 4, 8, 16, 32, 64, 128, 256]
+        for MF in [False, True]
+    ],
+    key=["n_rows", "n_cols"],
+)
 @triton.jit
 def _rmsnorm_infer_kernel_single(
     X_ptr,
@@ -225,8 +235,7 @@ def rmsnorm_infer_impl(
             n_rows=n_rows,
             n_cols=n_cols,
             eps=eps,
-            BLOCK_SIZE_M=sorted(TOKEN_BLOCK_SIZE_TABLE.items())[-1][1]*(torch.float32.itemsize//(x.element_size())),
-            BLOCK_SIZE_N=BLOCK_SIZE_N,
+            BLOCK_SIZE_N=n_cols,
         )
 
     return y.reshape(*shape)

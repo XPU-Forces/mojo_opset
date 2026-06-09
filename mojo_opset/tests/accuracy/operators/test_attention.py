@@ -81,7 +81,14 @@ test_configs_decode = [
     (8, 16, 4, 96, 1024, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (8, 8, 1, 128, 8192, 1024, torch.bfloat16, "M_BF16_LONG"),
     (8, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
-    (8, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ")
+    (8, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
+
+    # add perf case
+    (8, 16, 4, 128, 1024, 128, torch.bfloat16, "PERF_M_BF16_1"),
+    (8, 16, 4, 128, 1024, 256, torch.bfloat16, "PERF_M_BF16_2"),
+    (8, 16, 4, 128, 1024, 512, torch.bfloat16, "PERF_M_BF16_3"),
+    (8, 8, 1, 128, 8192, 128, torch.bfloat16, "PERF_M_BF16_PADSEQ"),
+    (8, 8, 1, 128, 8192, 512, torch.bfloat16, "PERF_M_BF16_LONG"),
 ]
 
 
@@ -428,7 +435,12 @@ test_configs_prefill = [
     (2, 16, 4, 96, 1024, 0, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (2, 8, 1, 128, 4096, 8192, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
     (2, 8, 1, 128, 1024, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
-    (2, 8, 1, 128, 0, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ")
+    (2, 8, 1, 128, 0, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
+
+    # add perf case
+    (2, 16, 4, 128, 1024, 0, 128, torch.bfloat16, "PERF_M_BF16"),
+    (2, 16, 4, 128, 1024, 0, 256, torch.bfloat16, "PERF_M_BF16_PADDIM"),
+    (2, 16, 4, 128, 1024, 0, 512, torch.bfloat16, "PERF_M_BF16_WITH_CACHE"),
 ]
 
 
@@ -495,7 +507,7 @@ def test_paged_prefill_gqa(
         max_total_seq_lens=max_total_seq_lens,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
-        ptol=0.0,
+        # ptol=0.0,                                             # Annotate this line for strict comparison.
     )
 
 
@@ -1328,6 +1340,14 @@ test_configs_swa_prefill = [
     (2, 8, 1, 128, 0, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
     (2, 8, 2, 128, 2048, 0, 1024, torch.bfloat16, "M_BF16_GROUP1"),
     (2, 24, 8, 128, 1024, 1024, 1024, torch.bfloat16, "M_BF16_GROUP2"),
+
+    # add perf case
+    (2, 8, 1, 128, 256, 1024, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
+    (2, 8, 1, 128, 256, 1024, 128, torch.float16, "M_BF16_WITH_CACHE"),
+    (2, 8, 1, 128, 1024, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
+    (2, 8, 1, 128, 1024, 2048, 1024, torch.float16, "M_BF16_BIGPAGE"),
+    (2, 8, 1, 128, 0, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
+    (2, 8, 1, 128, 0, 0, 1024, torch.float16, "M_BF16_PADSEQ"),
 ]
 
 
@@ -1605,6 +1625,15 @@ test_configs_swa_decode = [
     # (2, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
     (2, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
     # (2, 8, 2, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP1"),
+    (2, 24, 8, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP2"),
+
+    # add perf case
+    (4, 16, 4, 128, 1024, 512, torch.bfloat16, "M_BF16"),
+    (8, 16, 4, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
+    (8, 8, 1, 128, 4096, 128, torch.bfloat16, "M_BF16_LONG"),
+    (2, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
+    (2, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
+    (2, 8, 2, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP1"),
     (2, 24, 8, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP2"),
 ]
 

@@ -113,7 +113,6 @@ def _swa_transposed_range_blocks(
     return start_block, end_block
 
 
-
 @triton.jit
 def gen_mask_n_right_bound(mask_10_ptr, mask_size, mask_stride_m, mask_stride_n, M_BLOCK, N_BLOCK, n_start, right):
     # tl.arange(n_start, n_start + N_BLOCK)[None, :] < right
@@ -123,7 +122,7 @@ def gen_mask_n_right_bound(mask_10_ptr, mask_size, mask_stride_m, mask_stride_n,
         + tl.arange(0, M_BLOCK)[:, None] * mask_stride_m
         + (offset + tl.arange(0, N_BLOCK))[None, :] * mask_stride_n
     )
-    return mask.to(tl.int1)
+    return mask
 
 
 @triton.jit
@@ -135,7 +134,7 @@ def gen_mask_n_left_bound(mask_01_ptr, mask_size, mask_stride_m, mask_stride_n, 
         + tl.arange(0, M_BLOCK)[:, None] * mask_stride_m
         + (offset + tl.arange(0, N_BLOCK))[None, :] * mask_stride_n
     )
-    return mask.to(tl.int1)
+    return mask
 
 
 @triton.jit
@@ -147,7 +146,7 @@ def gen_mask_m_right_bound(mask_10t_ptr, mask_size, mask_stride_m, mask_stride_n
         + (offset + tl.arange(0, M_BLOCK)[:, None]) * mask_stride_m
         + tl.arange(0, N_BLOCK)[None, :] * mask_stride_n
     )
-    return mask.to(tl.int1)
+    return mask
 
 
 @triton.jit
@@ -159,7 +158,7 @@ def gen_mask_m_left_bound(mask_01t_ptr, mask_size, mask_stride_m, mask_stride_n,
         + (offset + tl.arange(0, M_BLOCK)[:, None]) * mask_stride_m
         + tl.arange(0, N_BLOCK)[None, :] * mask_stride_n
     )
-    return mask.to(tl.int1)
+    return mask
 
 
 @triton.jit
@@ -171,7 +170,7 @@ def gen_mask_tril(mask_ptr_tril, mask_size, mask_stride_m, mask_stride_n, M_BLOC
         + tl.arange(0, M_BLOCK)[:, None] * mask_stride_m
         + (offset + tl.arange(0, N_BLOCK))[None, :] * mask_stride_n
     )
-    return mask.to(tl.int1)
+    return mask
 
 
 @triton.jit
@@ -183,7 +182,7 @@ def gen_mask_triu(mask_ptr_triu, mask_size, mask_stride_m, mask_stride_n, M_BLOC
         + tl.arange(0, M_BLOCK)[:, None] * mask_stride_m
         + (len_offset + tl.arange(0, N_BLOCK))[None, :] * mask_stride_n
     )
-    return mask.to(tl.int1)
+    return mask
 
 
 @triton.jit
@@ -216,7 +215,7 @@ def _sdpa_acc_fwd_MxN(
     if mask is not None and mask is not True:
         qk = tl.where(mask, qk, -1e6)  # 32B # bool
 
-    m_ij = tl.maximum(m_i, tl.max(qk, 1))  # Scaled max
+    m_ij = tl.maximum(m_i, tl.max(qk, 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL)  # Scaled max
     qk = qk - m_ij[:, None]  # Stabilize
 
     # Softmax weights p = exp(qk)
@@ -1120,32 +1119,34 @@ def _swa_paged_decode_kernel(
     BLOCK_SIZE_D: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
 ):
+    GROUP_SIZE: tl.constexpr = NUM_Q_HEADS // NUM_KV_HEADS
     tl.static_assert(HEAD_DIM <= BLOCK_SIZE_D, "HEAD_DIM should be <= BLOCK_SIZE_D")
     tl.static_assert(PAGE_SIZE % BLOCK_SIZE_N == 0, "BLOCK_SIZE_N must be a divisor of PAGE_SIZE")
 
     pid = tl.program_id(0)
     n_progs = tl.num_programs(0)
 
-    num_tasks = BATCH_SIZE * NUM_Q_HEADS
+    num_tasks = BATCH_SIZE * NUM_KV_HEADS
 
-    for q_task_id in range(pid, num_tasks, n_progs):
-        q_head_id = q_task_id % NUM_Q_HEADS
-        b_id = q_task_id // NUM_Q_HEADS
-        if GQA_INTERLEAVE:
-            kv_head_id = q_head_id % NUM_KV_HEADS
-        else:
-            kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
+    for kv_task_id in range(pid, num_tasks, n_progs):
+        kv_head_id = kv_task_id % NUM_KV_HEADS
+        b_id = kv_task_id // NUM_KV_HEADS
 
         kv_seq_len = tl.load(seqlens_ptr + b_id)
 
+        g_offsets = tl.arange(0, GROUP_SIZE)
+        if GQA_INTERLEAVE:
+            q_head_ids = kv_head_id + g_offsets * NUM_KV_HEADS
+        else:
+            q_head_ids = kv_head_id * GROUP_SIZE + g_offsets
 
         offs_d = tl.arange(0, BLOCK_SIZE_D)
-        q_ptrs = q_ptr + b_id * stride_qb + q_head_id * stride_qh + offs_d * stride_qd
-        q = tl.load(q_ptrs, mask = offs_d < HEAD_DIM, other = 0.0)
+        q_ptrs = q_ptr + b_id * stride_qb + q_head_ids[:, None] * stride_qh + offs_d[None, :] * stride_qd
+        q = tl.load(q_ptrs, mask=offs_d[None, :] < HEAD_DIM, other=0.0)
 
-        m_i = -float("inf")
-        l_i = 0.0
-        acc = tl.zeros((BLOCK_SIZE_D,), dtype=tl.float32)
+        m_i = tl.zeros((GROUP_SIZE,), dtype=tl.float32) - float("inf")
+        l_i = tl.zeros((GROUP_SIZE,), dtype=tl.float32)
+        acc = tl.zeros((GROUP_SIZE, BLOCK_SIZE_D), dtype=tl.float32)
 
         num_global_window_blocks, non_global_window_start_block, num_total_blocks = _swa_split_blocks(
             kv_seq_len - 1,
@@ -1167,15 +1168,15 @@ def _swa_paged_decode_kernel(
             physical_page_id = tl.load(
                 block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
             )
-            k_block_ptr = tl.make_block_ptr(
+            K_T_block_ptr = tl.make_block_ptr(
                 base=k_cache_ptr + physical_page_id * stride_k_block + kv_head_id * stride_k_head + kv_block_start_in_page * stride_k_blksz,
-                shape=(kv_block_len, HEAD_DIM),
-                strides=(stride_k_blksz, stride_k_dim),
+                shape=(HEAD_DIM, kv_block_len),
+                strides=(stride_k_dim, stride_k_blksz),
                 offsets=(0, 0),
-                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
-                order=(1, 0),
+                block_shape=(BLOCK_SIZE_D, BLOCK_SIZE_N),
+                order=(0, 1),
             )
-            v_block_ptr = tl.make_block_ptr(
+            V_block_ptr = tl.make_block_ptr(
                 base=v_cache_ptr + physical_page_id * stride_v_block + kv_head_id * stride_v_head + kv_block_start_in_page * stride_v_blksz,
                 shape=(kv_block_len, HEAD_DIM),
                 strides=(stride_v_blksz, stride_v_dim),
@@ -1189,22 +1190,25 @@ def _swa_paged_decode_kernel(
                 gw_mask = gw_mask | sw_mask
             kv_mask = tl.arange(0, BLOCK_SIZE_N) < kv_block_len
             mask = gw_mask & kv_mask
-            
-            acc, l_i, m_i = _sdpa_acc_fwd_1xN(
-                acc, 
-                l_i, 
-                m_i, 
-                q, 
-                k_block_ptr, 
-                v_block_ptr, 
-                mask, 
-                softmax_scale, 
-                HEAD_DIM, 
-                BLOCK_SIZE_D, 
-                BLOCK_SIZE_N, 
-                BLOCK_SIZE_D, 
-                v_cache_ptr.dtype.element_ty == tl.float8e5,
-            )
+
+            k_T = tl.load(K_T_block_ptr, boundary_check=(0, 1), padding_option="zero")
+            v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
+
+            qk = tl.dot(q, k_T)
+            qk = qk * softmax_scale + tl.where(mask[None, :], 0.0, -2.0**30)
+
+            m_ij = tl.maximum(m_i, tl.max(qk, 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL)
+            p = tl.math.exp(qk - m_ij[:, None])
+
+            pv = tl.dot(p.to(k_T.dtype), v)
+
+            l_ij = tl.sum(p, 1)
+            alpha = tl.math.exp(m_i - m_ij)
+
+            l_i = l_i * alpha + l_ij
+            acc = acc * alpha[:, None] + pv
+
+            m_i = m_ij
 
         for kv_block_id in range(non_global_window_start_block, num_total_blocks):
             kv_block_start = kv_block_id * BLOCK_SIZE_N
@@ -1215,15 +1219,15 @@ def _swa_paged_decode_kernel(
             physical_page_id = tl.load(
                 block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block
             )
-            k_block_ptr = tl.make_block_ptr(
+            K_T_block_ptr = tl.make_block_ptr(
                 base=k_cache_ptr + physical_page_id * stride_k_block + kv_head_id * stride_k_head + kv_block_start_in_page * stride_k_blksz,
-                shape=(kv_block_len, HEAD_DIM),
-                strides=(stride_k_blksz, stride_k_dim),
+                shape=(HEAD_DIM, kv_block_len),
+                strides=(stride_k_dim, stride_k_blksz),
                 offsets=(0, 0),
-                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
-                order=(1, 0),
+                block_shape=(BLOCK_SIZE_D, BLOCK_SIZE_N),
+                order=(0, 1),
             )
-            v_block_ptr = tl.make_block_ptr(
+            V_block_ptr = tl.make_block_ptr(
                 base=v_cache_ptr + physical_page_id * stride_v_block + kv_head_id * stride_v_head + kv_block_start_in_page * stride_v_blksz,
                 shape=(kv_block_len, HEAD_DIM),
                 strides=(stride_v_blksz, stride_v_dim),
@@ -1238,29 +1242,31 @@ def _swa_paged_decode_kernel(
                 mask = kv_mask & sw_mask
             else:
                 mask = kv_mask
-            
-            acc, l_i, m_i = _sdpa_acc_fwd_1xN(
-                acc,
-                l_i, 
-                m_i, 
-                q, 
-                k_block_ptr, 
-                v_block_ptr, 
-                mask, 
-                softmax_scale, 
-                HEAD_DIM,
-                BLOCK_SIZE_D,
-                BLOCK_SIZE_N, 
-                BLOCK_SIZE_D,
-                v_cache_ptr.dtype.element_ty == tl.float8e5,
-            )
+
+            k_T = tl.load(K_T_block_ptr, boundary_check=(0, 1), padding_option="zero")
+            v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
+
+            qk = tl.dot(q, k_T)
+            qk = qk * softmax_scale + tl.where(mask[None, :], 0.0, -2.0**30)
+
+            m_ij = tl.maximum(m_i, tl.max(qk, 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL)
+            p = tl.math.exp(qk - m_ij[:, None])
+
+            pv = tl.dot(p.to(k_T.dtype), v)
+
+            l_ij = tl.sum(p, 1)
+            alpha = tl.math.exp(m_i - m_ij)
+
+            l_i = l_i * alpha + l_ij
+            acc = acc * alpha[:, None] + pv
+
+            m_i = m_ij
 
         if kv_seq_len > 0:
-            # avoid division by zero
-            acc = acc / l_i
+            acc = acc / l_i[:, None]
 
-        o_ptrs = o_ptr + b_id * stride_ob + q_head_id * stride_oh + offs_d * stride_od
-        tl.store(o_ptrs, acc.to(o_ptr.dtype.element_ty), mask=offs_d < HEAD_DIM)
+        o_ptrs = o_ptr + b_id * stride_ob + q_head_ids[:, None] * stride_oh + offs_d[None, :] * stride_od
+        tl.store(o_ptrs, acc.to(o_ptr.dtype.element_ty), mask=offs_d[None, :] < HEAD_DIM)
 
 
 def swa_paged_decode_impl(
@@ -1284,9 +1290,9 @@ def swa_paged_decode_impl(
         softmax_scale = 1.0 / (head_dim**0.5)
 
     o = torch.empty_like(q, memory_format=torch.contiguous_format)
-    
-    num_vectors = get_num_cores("vector")
-    grid = (num_vectors, )
+
+    cube_num = get_num_cores("cube")
+    grid = (cube_num, )
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     BLOCK_SIZE_N = min(128, triton.next_power_of_2(page_size))
 
@@ -1330,11 +1336,19 @@ def swa_paged_decode_impl(
         page_size,
         BLOCK_SIZE_D=BLOCK_SIZE_D,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
-        multibuffer=False,
     )
     return o
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_M": BM, "BLOCK_N": BN, "multibuffer": MF})
+        for BM in [64, 128]
+        for BN in [64, 128]
+        for MF in [True, False]
+    ],
+    key=["HEAD_DIM"],
+)
 @triton.jit
 def _swa_fwd_kernel(
     o_ptr,
@@ -1375,10 +1389,10 @@ def _swa_fwd_kernel(
     NUM_KV_HEADS: tl.constexpr,
     GQA_INTERLEAVE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     OUTPUT_F32: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
 ):
     tl.static_assert(HEAD_DIM <= BLOCK_D, "BLOCK_SIZE_D should not be less than HEAD_DIM")
     pid = tl.program_id(0)
@@ -1714,12 +1728,6 @@ def swa_fwd_impl(
         o_f32 = None
         of32_stride_t, of32_stride_h, of32_stride_d = 0, 0, 0
 
-    if q.dtype == torch.float32:
-        BLOCK_M = 64
-        BLOCK_N = 64
-    else:
-        BLOCK_M = 64
-        BLOCK_N = 64
     BLOCK_D = head_dim
 
     cube_num = get_num_cores("cube")
@@ -1764,8 +1772,6 @@ def swa_fwd_impl(
         num_kv_heads,
         gqa_interleave,
         head_dim,
-        BLOCK_M,
-        BLOCK_N,
         BLOCK_D,
         output_f32,
     )
@@ -1942,6 +1948,15 @@ def _sdpa_single_block_bwd_dq(
     return dq
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_M": BM, "BLOCK_N": BN, "multibuffer": MF})
+        for BM in [64, 128]
+        for BN in [64, 128]
+        for MF in [True, False]
+    ],
+    key=["HEAD_DIM"],
+)
 @triton.jit
 def _swa_bwd_dkdv_kernel(
     dk_ptr,
@@ -1989,9 +2004,9 @@ def _swa_bwd_dkdv_kernel(
     NUM_KV_HEADS: tl.constexpr,
     GQA_INTERLEAVE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    BLOCK_D: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    BLOCK_D: tl.constexpr,
 ):
     tl.static_assert(HEAD_DIM <= BLOCK_D, "BLOCK_SIZE_D should not be less than HEAD_DIM")
     pid = tl.program_id(0)
@@ -2264,6 +2279,15 @@ def _swa_bwd_dkdv_kernel(
             tl.store(cur_dv_block_ptr, dv.to(dv_ptr.type.element_ty), boundary_check=(0, 1))
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_M": BM, "BLOCK_N": BN, "multibuffer": MF})
+        for BM in [64, 128]
+        for BN in [64, 128]
+        for MF in [True, False]
+    ],
+    key=["HEAD_DIM"],
+)
 @triton.jit
 def _swa_bwd_dq_kernel(
     dq_ptr,
@@ -2307,9 +2331,9 @@ def _swa_bwd_dq_kernel(
     NUM_KV_HEADS: tl.constexpr,
     GQA_INTERLEAVE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    BLOCK_D: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    BLOCK_D: tl.constexpr,
 ):
     tl.static_assert(HEAD_DIM <= BLOCK_D, "BLOCK_SIZE_D should not be less than HEAD_DIM")
     pid = tl.program_id(0)
@@ -2657,13 +2681,6 @@ def swa_bwd_impl(
     dk = torch.zeros_like(k, memory_format=torch.contiguous_format)
     dv = torch.zeros_like(v, memory_format=torch.contiguous_format)
 
-    if q.dtype == torch.float32:
-        BLOCK_M = 64
-        BLOCK_N = 64
-    else:
-        BLOCK_M = 64
-        BLOCK_N = 64
-
     BLOCK_D = head_dim
     cube_num = get_num_cores("cube")
 
@@ -2715,8 +2732,6 @@ def swa_bwd_impl(
         num_kv_heads,
         gqa_interleave,
         head_dim,
-        BLOCK_M,
-        BLOCK_N,
         BLOCK_D,
     )
     _swa_bwd_dq_kernel[grid](
@@ -2761,8 +2776,6 @@ def swa_bwd_impl(
         num_kv_heads,
         gqa_interleave,
         head_dim,
-        BLOCK_M,
-        BLOCK_N,
         BLOCK_D,
     )
 

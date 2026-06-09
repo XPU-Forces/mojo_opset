@@ -180,7 +180,10 @@ def _store_paged_kv_cache_chunk_kernel(
     offs_sub = tl.arange(0, CHUNK_SIZE)
     offs_d = tl.arange(0, head_dim)
 
-    for chunk_idx in range(pid, num_chunks, num_programs):
+    for p_idx in range(pid, num_chunks, num_programs):
+        h = p_idx % num_kv_heads
+        chunk_idx = p_idx // num_kv_heads
+
         chunk_base = chunk_meta_ptr + chunk_idx * stride_cm_row
         src_token_start = tl.load(chunk_base + 0 * stride_cm_col)
         dst_block_id = tl.load(chunk_base + 1 * stride_cm_col)
@@ -192,35 +195,37 @@ def _store_paged_kv_cache_chunk_kernel(
             token_offsets = processed + offs_sub
             mask_sub = token_offsets < chunk_len
 
+            src_token_offset = src_token_start + token_offsets
+
             base_src_k_ptr = (
                 k_ptr
-                + (src_token_start + token_offsets[:, None]) * stride_k_tok
+                + src_token_offset[:, None] * stride_k_tok
                 + offs_d[None, :] * stride_k_dim
-            )
-            base_dst_k_ptr = (
-                key_cache_ptr
-                + dst_block_id * stride_kc_blk
-                + (dst_block_offset + token_offsets[:, None]) * stride_kc_tok
-                + offs_d[None, :] * stride_kc_dim
             )
             base_src_v_ptr = (
                 v_ptr
-                + (src_token_start + token_offsets[:, None]) * stride_v_tok
+                + src_token_offset[:, None] * stride_v_tok
                 + offs_d[None, :] * stride_v_dim
+            )
+
+            dst_token_offset = dst_block_offset + token_offsets
+            base_dst_k_ptr = (
+                key_cache_ptr
+                + dst_block_id * stride_kc_blk
+                + dst_token_offset[:, None] * stride_kc_tok
+                + offs_d[None, :] * stride_kc_dim
             )
             base_dst_v_ptr = (
                 value_cache_ptr
                 + dst_block_id * stride_vc_blk
-                + (dst_block_offset + token_offsets[:, None]) * stride_vc_tok
+                + dst_token_offset[:, None] * stride_vc_tok
                 + offs_d[None, :] * stride_vc_dim
             )
 
-            for h in range(num_kv_heads):
-                k_val = tl.load(base_src_k_ptr + h * stride_k_head, mask=mask_sub[:, None], other=0.0)
-                tl.store(base_dst_k_ptr + h * stride_kc_head, k_val, mask=mask_sub[:, None])
-
-                v_val = tl.load(base_src_v_ptr + h * stride_v_head, mask=mask_sub[:, None], other=0.0)
-                tl.store(base_dst_v_ptr + h * stride_vc_head, v_val, mask=mask_sub[:, None])
+            k_val = tl.load(base_src_k_ptr + h * stride_k_head, mask=mask_sub[:, None])
+            v_val = tl.load(base_src_v_ptr + h * stride_v_head, mask=mask_sub[:, None])
+            tl.store(base_dst_k_ptr + h * stride_kc_head, k_val, mask=mask_sub[:, None])
+            tl.store(base_dst_v_ptr + h * stride_vc_head, v_val, mask=mask_sub[:, None])
 
 def _get_chunk_num_programs(num_chunks: int) -> int:
     return max(1, min(get_num_cores("vector"), num_chunks))
@@ -298,11 +303,11 @@ def store_paged_kv_impl(
     assert chunk_metadata.dim() == 2
     assert chunk_metadata.shape[1] == 4
 
-    num_chunks = chunk_metadata.shape[0]
+    num_kv_heads = k_states.shape[1]
+    num_chunks = chunk_metadata.shape[0] * num_kv_heads
     if num_chunks == 0:
         return key_cache, value_cache
 
-    num_kv_heads = k_states.shape[1]
     head_dim = k_states.shape[2]
     block_size = key_cache.shape[2]
     chunk_size = _get_chunk_size(block_size, head_dim)

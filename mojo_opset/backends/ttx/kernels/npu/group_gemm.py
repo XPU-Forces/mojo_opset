@@ -103,14 +103,14 @@ def _m_grouped_matmul_bKmajor_kernel(
                     mask=msk_m[:, None] and (offs_k[None, :] < K - k * BLOCK_K),
                     other=0.0,
                 )
-                tl.compile_hint(a, "dot_pad_only_k")
+                # tl.compile_hint(a, "dot_pad_only_k")          # A5 do not need
                 b = tl.load(
                     b_ptrs,
                     mask=msk_n[:, None] and (offs_k[None, :] < (K - k * BLOCK_K)),
                     other=0.0,
                 )
                 b = tl.trans(b)
-                tl.compile_hint(b, "dot_pad_only_k")
+                # tl.compile_hint(b, "dot_pad_only_k")          # A5 do not need
                 accumulator = tl.dot(a, b, acc=accumulator)
 
             c = accumulator.to(C.dtype.element_ty)
@@ -178,13 +178,13 @@ def _m_grouped_matmul_bNmajor_kernel(
                     mask=msk_m[:, None] and (offs_ak[None, :] < K - k * BLOCK_K),
                     other=0.0,
                 )
-                tl.compile_hint(a, "dot_pad_only_k")
+                # tl.compile_hint(a, "dot_pad_only_k")      # A5 do not need
                 b = tl.load(
                     b_ptrs,
                     mask=(offs_bk[:, None] < (group_idx * K + K - k * BLOCK_K)) and msk_n[None, :],
                     other=0.0,
                 )
-                tl.compile_hint(b, "dot_pad_only_k")
+                # tl.compile_hint(b, "dot_pad_only_k")      # A5 do not need
                 accumulator = tl.dot(a, b, acc=accumulator)
 
             c = accumulator.to(C.dtype.element_ty)
