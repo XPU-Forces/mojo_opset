@@ -48,6 +48,12 @@ from mojo_opset import MojoSparseAttnSharedkv
 from mojo_opset import MojoSparseAttnSharedkvMetadata
 from mojo_opset.distributed.parallel.mesh import LLMParallelConfig
 from mojo_opset.distributed.parallel.mesh import init_llm_parallel_groups
+from mojo_opset.distributed.parallel.context_parallel import apply_cp_zigzag_to_prefill_inputs
+from mojo_opset.distributed.parallel.context_parallel import deepseek_v4_cp_get_window
+from mojo_opset.distributed.parallel.context_parallel import deepseek_v4_cp_run_indexer
+from mojo_opset.distributed.parallel.context_parallel import deepseek_v4_cp_run_prefill
+from mojo_opset.distributed.parallel.context_parallel import deepseek_v4_cp_run_sfa_compressor
+from mojo_opset.distributed.parallel.context_parallel import gather_cp_prefill_hidden_states
 
 
 _INPLACE_PARTIAL_ROTARY_MUL = MojoInplacePartialRotaryMul()
@@ -1684,349 +1690,43 @@ class DeepseekV4Attention(nn.Module):
         return rotary(x, position_ids.to(device=x.device, dtype=torch.long))
 
     def _get_cp_window(self, hidden_states: torch.Tensor, attn_inputs: dict):
-        cp_group = self.hccl_comm_dict.get("cp_group")
-        if cp_group is None:
-            raise ValueError("CP prefill requires cp_group.")
-        cp_rank = dist.get_rank(group=cp_group)
-        q_len = hidden_states.shape[1] // 2
-        x_prev_cur, x_next_cur = hidden_states.split(q_len, dim=1)
-        cur_segments = {}
-        cur_win_list = []
-        for flag, x_cur in (("prev", x_prev_cur), ("next", x_next_cur)):
-            cur_kv_len = int(attn_inputs[flag]["cur_kv_len"])
-            # Keep the current CP segment padded for projection/metadata parity
-            # with Golden. cur_kv_len is only used to extract valid tail windows.
-            cur_segments[flag] = x_cur
-            if cur_kv_len <= 0:
-                cur_win = x_cur.new_zeros((hidden_states.shape[0], self.sliding_window, hidden_states.shape[-1]))
-            else:
-                cur_segment = x_cur[:, :cur_kv_len, :]
-                if cur_kv_len >= self.sliding_window:
-                    cur_win = cur_segment[:, cur_kv_len - self.sliding_window:cur_kv_len, :]
-                else:
-                    pad = x_cur.new_zeros(
-                        (hidden_states.shape[0], self.sliding_window - cur_kv_len, hidden_states.shape[-1])
-                    )
-                    cur_win = torch.cat([cur_segment, pad], dim=1)
-            cur_win_list.append(cur_win)
-        local_win = torch.cat(cur_win_list, dim=0).contiguous()
-        all_win = local_win.new_empty((local_win.shape[0] * self.cp_size, *local_win.shape[1:]))
-        dist.all_gather_into_tensor(all_win, local_win, group=cp_group)
-        reverse_index = attn_inputs["cp_metadata"]["reverse_index"]
-        all_win = all_win.view(-1, hidden_states.shape[0], self.sliding_window, hidden_states.shape[-1])[reverse_index]
-
-        x_prev = cur_segments["prev"]
-        if not attn_inputs["prev"]["is_start"]:
-            prev_pre_win = all_win[cp_rank - 1]
-            x_prev = torch.cat([prev_pre_win, x_prev], dim=1)
-
-        x_next = cur_segments["next"]
-        if not attn_inputs["next"]["is_start"]:
-            next_pre_win = all_win[2 * self.cp_size - cp_rank - 2]
-            x_next = torch.cat([next_pre_win, x_next], dim=1)
-
-        # all_win has already been restored to original segment order by
-        # reverse_index, so use the original last segment index here.
-        last_rank = attn_inputs["cp_metadata"]["last_rank"]
-        prev_meta = attn_inputs["prev"]
-        last_kv_len = int(prev_meta["last_kv_len"])
-        if last_kv_len >= self.sliding_window:
-            last_win = all_win[last_rank]
-        elif last_rank == 0:
-            last_win = all_win[last_rank]
-        else:
-            last_win = all_win[last_rank, :, :last_kv_len, :]
-            second_last_win = all_win[last_rank - 1]
-            last_win = torch.cat([second_last_win[:, -(self.sliding_window - last_kv_len):, :], last_win], dim=1)
-
-        last_position_ids = prev_meta["position_ids_last_win"].to(device=last_win.device, dtype=torch.long)
-        cos_last, sin_last = self._get_rotary_by_position_ids(
-            last_win,
-            last_position_ids,
-            use_compress=self.compress_ratio > 1,
+        return deepseek_v4_cp_get_window(
+            self,
+            hidden_states,
+            attn_inputs,
+            apply_partial_rotary=_apply_partial_rotary,
         )
-        last_win_kv = self.wkv(last_win)
-        last_win_kv = self.kv_norm(last_win_kv)
-        last_win_kv = _apply_partial_rotary(last_win_kv, cos_last, sin_last, self.partial_slice)
-        return {"prev": x_prev, "next": x_next}, last_win_kv
 
     def _run_cp_sfa_compressor(self, x_segments: dict, past_key_values: PagedDummyCache, attn_inputs: dict):
-        ratio_key = str(self.compress_ratio)
-        cp_group = self.hccl_comm_dict.get("cp_group")
-        state_cache = attn_inputs["sfa_state_cache"]
-        cur_kv_state = state_cache.clone().flatten(0, -3).flatten(-2)
-        cmp_outputs = []
-        local_branch_lens = []
-        for flag in ["prev", "next"]:
-            branch = attn_inputs[flag]
-            cmp_in_offset = int(branch["cmp_in_offset"][ratio_key])
-            x_seg_full = x_segments[flag]
-            x_seg = x_seg_full[:, cmp_in_offset:] if cmp_in_offset > 0 else x_seg_full
-            cmp_cos, cmp_sin = self._get_rotary_by_position_ids(
-                x_seg, branch["position_ids_cmp_for_rope"][ratio_key], use_compress=True
-            )
-            state_block_table = past_key_values.get_cmp_state_block_table(
-                self.layer_idx,
-                branch["start_pos_cmp"][ratio_key],
-                branch["seq_used_q_cmp"][ratio_key],
-                True,
-            )
-            cmp_out = self.sfa_compressor(
-                x_seg,
-                cmp_cos,
-                cmp_sin,
-                state_cache=state_cache,
-                state_block_table=state_block_table,
-                cu_seqlens=branch["cu_seq_lens"][ratio_key],
-                seq_used_q=branch["seq_used_q_cmp"][ratio_key],
-                start_pos=branch["start_pos_cmp"][ratio_key],
-            ).squeeze(0)
-            cmp_pad = branch["cmp_out_pad"][ratio_key][1]
-            if cmp_pad.numel() > 0:
-                cmp_out = torch.cat([cmp_pad.to(dtype=cmp_out.dtype, device=cmp_out.device), cmp_out], dim=0)
-            if branch["is_end"]:
-                cur_kv_state = state_cache.flatten(0, -3).flatten(-2)
-            cmp_outputs.append(cmp_out)
-            local_branch_lens.append(cmp_out.shape[0])
-        local_cmp = torch.cat(cmp_outputs, dim=0).contiguous()
-        all_cmp = local_cmp.new_empty((local_cmp.shape[0] * self.cp_size, local_cmp.shape[-1]))
-        dist.all_gather_into_tensor(all_cmp, local_cmp, group=cp_group)
-        local_branch_lens_tensor = torch.tensor(local_branch_lens, dtype=torch.int32, device=local_cmp.device)
-        all_branch_lens = local_branch_lens_tensor.new_empty((self.cp_size * 2,))
-        dist.all_gather_into_tensor(all_branch_lens, local_branch_lens_tensor, group=cp_group)
-        all_branch_lens = all_branch_lens.view(self.cp_size, 2)
-        gathered_cmp = all_cmp.view(self.cp_size, local_cmp.shape[0], local_cmp.shape[-1])
-        cmp_segments = []
-        for rank_idx in range(self.cp_size):
-            prev_len = int(all_branch_lens[rank_idx, 0].item())
-            next_len = int(all_branch_lens[rank_idx, 1].item())
-            rank_cmp = gathered_cmp[rank_idx]
-            cmp_segments.append(rank_cmp[:prev_len])
-            cmp_segments.append(rank_cmp[prev_len: prev_len + next_len])
-        reverse_index = attn_inputs["cp_metadata"]["reverse_index"]
-        all_cmp = torch.cat([cmp_segments[int(idx)] for idx in reverse_index.tolist()], dim=0)
-        all_ks = cur_kv_state.new_empty((cur_kv_state.shape[0] * self.cp_size, cur_kv_state.shape[-1]))
-        dist.all_gather_into_tensor(all_ks, cur_kv_state, group=cp_group)
-        last_ks = all_ks.view(self.cp_size, -1, cur_kv_state.shape[-1])[attn_inputs["cp_metadata"]["last_rank_zz"]]
-        state_cache[:] = last_ks.view_as(state_cache)
-        slot_mapping = attn_inputs["cp_metadata"]["slot_mapping_cmp"][ratio_key]
-        valid_mask = slot_mapping >= 0
-        if valid_mask.any():
-            self.scatter_nd_update(
-                attn_inputs["cmp_kv_cache"].view(-1, self.head_dim),
-                slot_mapping[valid_mask].reshape(-1, 1),
-                all_cmp[valid_mask],
-            )
+        return deepseek_v4_cp_run_sfa_compressor(self, x_segments, past_key_values, attn_inputs)
 
     def _run_cp_indexer(self, hidden_states, qa, position_embeddings, x_segments, past_key_values, attn_inputs):
-        ratio_key = str(self.compress_ratio)
-        cp_group = self.hccl_comm_dict.get("cp_group")
-        li_state_cache = attn_inputs["li_state_cache"]
-        cur_kv_state = li_state_cache.clone().flatten(0, -3).flatten(-2)
-        q_len = hidden_states.shape[1] // 2
-        qa_prev, qa_next = qa.split(q_len, dim=1)
-        cos_main, sin_main = position_embeddings
-        cos_prev, cos_next = cos_main.split(q_len, dim=1)
-        sin_prev, sin_next = sin_main.split(q_len, dim=1)
-
-        # Golden order for CP LI cache:
-        # branch raw BF16 li_kv -> pad -> all_gather -> reverse -> rotate -> quantize -> scatter.
-        li_outputs = []
-        local_branch_lens = []
-        for flag in ["prev", "next"]:
-            branch = attn_inputs[flag]
-            cmp_in_offset = int(branch["cmp_in_offset"][ratio_key])
-            x_seg_full = x_segments[flag]
-            x_seg = x_seg_full[:, cmp_in_offset:] if cmp_in_offset > 0 else x_seg_full
-            cmp_cos, cmp_sin = self._get_rotary_by_position_ids(
-                x_seg, branch["position_ids_cmp_for_rope"][ratio_key], use_compress=True
-            )
-            state_block_table = past_key_values.get_cmp_state_block_table(
-                self.layer_idx,
-                branch["start_pos_cmp"][ratio_key],
-                branch["seq_used_q_cmp"][ratio_key],
-                True,
-            )
-            li_kv = self.indexer.compressor(
-                x_seg,
-                cmp_cos,
-                cmp_sin,
-                state_cache=li_state_cache,
-                state_block_table=state_block_table,
-                cu_seqlens=branch["cu_seq_lens"][ratio_key],
-                seq_used_q=branch["seq_used_q_cmp"][ratio_key],
-                start_pos=branch["start_pos_cmp"][ratio_key],
-                apply_indexer_rotate=False,
-            ).squeeze(0)
-            li_pad = branch["cmp_out_pad"][ratio_key][0]
-            if li_pad.numel() > 0:
-                li_kv = torch.cat([li_pad.to(dtype=li_kv.dtype, device=li_kv.device), li_kv], dim=0)
-            if branch["is_end"]:
-                cur_kv_state = li_state_cache.flatten(0, -3).flatten(-2)
-            li_outputs.append(li_kv)
-            local_branch_lens.append(li_kv.shape[0])
-
-        local_li = torch.cat(li_outputs, dim=0).contiguous()
-
-        all_li = local_li.new_empty((local_li.shape[0] * self.cp_size, local_li.shape[-1]))
-        dist.all_gather_into_tensor(all_li, local_li, group=cp_group)
-        local_branch_lens_tensor = torch.tensor(local_branch_lens, dtype=torch.int32, device=local_li.device)
-        all_branch_lens = local_branch_lens_tensor.new_empty((self.cp_size * 2,))
-        dist.all_gather_into_tensor(all_branch_lens, local_branch_lens_tensor, group=cp_group)
-        all_branch_lens = all_branch_lens.view(self.cp_size, 2)
-        gathered_li = all_li.view(self.cp_size, local_li.shape[0], local_li.shape[-1])
-        li_segments = []
-        for rank_idx in range(self.cp_size):
-            prev_len = int(all_branch_lens[rank_idx, 0].item())
-            next_len = int(all_branch_lens[rank_idx, 1].item())
-            rank_li = gathered_li[rank_idx]
-            li_segments.append(rank_li[:prev_len])
-            li_segments.append(rank_li[prev_len: prev_len + next_len])
-        reverse_index = attn_inputs["cp_metadata"]["reverse_index"]
-        all_li = torch.cat([li_segments[int(idx)] for idx in reverse_index.tolist()], dim=0)
-        if all_li.numel() > 0:
-            all_li = _rotate_activation(all_li, self.indexer.hadamard_matrix)
-        kv_quant, k_scale = _dynamic_quant_per_token(all_li.contiguous())
-        k_scale = k_scale.squeeze(-1).to(torch.float16)
-
-        all_ks = cur_kv_state.new_empty((cur_kv_state.shape[0] * self.cp_size, cur_kv_state.shape[-1]))
-        dist.all_gather_into_tensor(all_ks, cur_kv_state, group=cp_group)
-        last_ks = all_ks.view(self.cp_size, -1, cur_kv_state.shape[-1])[attn_inputs["cp_metadata"]["last_rank_zz"]]
-        li_state_cache[:] = last_ks.view_as(li_state_cache)
-        slot_mapping = attn_inputs["cp_metadata"]["slot_mapping_cmp"][ratio_key]
-        valid_mask = slot_mapping >= 0
-        if valid_mask.any():
-            self.scatter_nd_update(
-                attn_inputs["li_key_dequant_scale"].view(-1, attn_inputs["li_key_dequant_scale"].shape[-1]),
-                slot_mapping[valid_mask].reshape(-1, 1),
-                k_scale[valid_mask].view(-1, attn_inputs["li_key_dequant_scale"].shape[-1]),
-            )
-            self.scatter_nd_update(
-                attn_inputs["li_cmp_kv"].view(-1, self.indexer.head_dim),
-                slot_mapping[valid_mask].reshape(-1, 1),
-                kv_quant[valid_mask],
-            )
-
-        prev_weight_source = x_segments["prev"][:, :q_len] if attn_inputs["prev"].get("is_start") else x_segments["prev"][:, -q_len:]
-        next_weight_source = x_segments["next"][:, -q_len:]
-        branch_inputs = {
-            "prev": (prev_weight_source, qa_prev, cos_prev, sin_prev),
-            "next": (next_weight_source, qa_next, cos_next, sin_next),
-        }
-        topk_dict = {}
-        for flag, (x_cur, qa_cur, cos_cur, sin_cur) in branch_inputs.items():
-            weights = self.indexer.weights_proj(x_cur.reshape(-1, self.config.hidden_size).to(torch.bfloat16))
-            weights = weights.view(1, q_len, self.indexer.n_heads) * (self.indexer.softmax_scale * self.indexer.n_heads ** -0.5)
-            qr_flat = qa_cur.reshape(-1, self.q_lora_rank).to(torch.bfloat16)
-            qr_quant, qr_scale = _dynamic_quant_per_token(qr_flat)
-            q_li = self.indexer.wq_b(qr_quant, qr_scale)
-            q_li = q_li.view(1, q_len, self.indexer.n_heads, self.indexer.head_dim)
-            q_li = _apply_partial_rotary(q_li, cos_cur, sin_cur, self.indexer.partial_slice)
-            q_li = _rotate_activation(q_li, self.indexer.hadamard_matrix)
-            q_flat = q_li.flatten(0, 1)
-            q_quant, q_scale = _dynamic_quant_per_token(q_flat)
-            q_scale = q_scale.to(torch.float16)
-            li_metadata = attn_inputs[flag]["kernel_metadata"]["lightning_indexer_quant"]
-            topk_idxs, _ = self.indexer.quant_lightning_indexer(
-                query=q_quant,
-                key=attn_inputs["li_cmp_kv"],
-                weights=weights.flatten(0, 1).to(torch.float16),
-                query_dequant_scale=q_scale,
-                key_dequant_scale=attn_inputs["li_key_dequant_scale"].squeeze(-2),
-                actual_seq_lengths_query=attn_inputs[flag]["actual_seq_q"],
-                actual_seq_lengths_key=attn_inputs[flag]["actual_seq_k"],
-                block_table=attn_inputs["c4a_cmp_kv_block_table"],
-                layout_key='PA_BSND',
-                sparse_count=self.indexer.index_topk,
-                sparse_mode=3,
-                layout_query="TND",
-                cmp_ratio=self.indexer.compress_ratio,
-                key_quant_mode=0,
-                query_quant_mode=0,
-                metadata=li_metadata,
-            )
-            topk_view = topk_idxs.view(q_flat.shape[0], -1, self.indexer.index_topk)
-            topk_dict[flag] = topk_view
-        return topk_dict
+        return deepseek_v4_cp_run_indexer(
+            self,
+            hidden_states,
+            qa,
+            position_embeddings,
+            x_segments,
+            past_key_values,
+            attn_inputs,
+            rotate_activation=_rotate_activation,
+            dynamic_quant_per_token=_dynamic_quant_per_token,
+            apply_partial_rotary=_apply_partial_rotary,
+        )
 
     def _run_cp_prefill(self, hidden_states, qa, q, past_key_values, attn_inputs, position_embeddings):
-        batch_size, seq_length = hidden_states.shape[:2]
-        local_q_len = seq_length // 2
-        q_dict = {
-            "prev": q[:, :local_q_len],
-            "next": q[:, local_q_len:],
-        }
-        x_segments, last_win_kv = self._get_cp_window(hidden_states, attn_inputs)
-        kv_segments = {}
-        for flag in ["prev", "next"]:
-            x_seg = x_segments[flag]
-            branch = attn_inputs[flag]
-            cos_seg, sin_seg = self._get_rotary_by_position_ids(
-                x_seg,
-                branch["position_ids_with_pre_win"],
-                use_compress=self.compress_ratio > 1,
-            )
-            kv_seg = self.wkv(x_seg.reshape(-1, self.config.hidden_size).to(torch.bfloat16))
-            kv_seg = self.kv_norm(kv_seg).view(batch_size, x_seg.shape[1], self.head_dim)
-            kv_seg = _apply_partial_rotary(
-                kv_seg.view(batch_size, x_seg.shape[1], 1, self.head_dim),
-                cos_seg,
-                sin_seg,
-                self.partial_slice,
-            ).view(batch_size, x_seg.shape[1], self.head_dim)
-            kv_segments[flag] = kv_seg
-
-        full_kv_cache = attn_inputs["full_kv_cache"]
-        slot_mapping_ori = torch.cat(
-            [attn_inputs["prev"]["slot_mapping_ori_kv"], attn_inputs["next"]["slot_mapping_ori_kv"]],
-            dim=0,
+        return deepseek_v4_cp_run_prefill(
+            self,
+            hidden_states,
+            qa,
+            q,
+            past_key_values,
+            attn_inputs,
+            position_embeddings,
+            apply_partial_rotary=_apply_partial_rotary,
+            rotate_activation=_rotate_activation,
+            dynamic_quant_per_token=_dynamic_quant_per_token,
         )
-        kv_full = torch.cat([kv_segments["prev"], kv_segments["next"]], dim=1).reshape(-1, self.head_dim)
-        self.scatter_nd_update(full_kv_cache.view(-1, self.head_dim), slot_mapping_ori.reshape(-1, 1), kv_full)
-        win_slot_mapping = attn_inputs["win_slot_mapping"]
-        past_key_values.update_win_kv(
-            last_win_kv,
-            self.layer_idx,
-            slot_mapping=win_slot_mapping,
-        )
-
-        cmp_sparse_indices = {}
-        if self.compress_ratio > 1:
-            self._run_cp_sfa_compressor(x_segments, past_key_values, attn_inputs)
-            if self.indexer is not None:
-                cmp_sparse_indices = self._run_cp_indexer(
-                    hidden_states, qa, position_embeddings, x_segments, past_key_values, attn_inputs
-                )
-
-        out_list = []
-        cmp_block_key = f"c{self.compress_ratio}a_cmp_kv"
-        meta_key = f"c{self.compress_ratio}a_metadata" if self.compress_ratio > 1 else "c1a_metadata"
-        for flag in ["prev", "next"]:
-            q_flat = q_dict[flag].contiguous().view(-1, self.num_heads, self.head_dim)
-            branch = attn_inputs[flag]
-            out = self._run_attn(
-                q_flat,
-                full_kv_cache,
-                branch["block_table"]["full_kv"],
-                branch["actual_seq_k"],
-                batch_size,
-                local_q_len,
-                self.compress_ratio,
-                branch["cu_seq_lens_q"],
-                attn_inputs.get("cmp_kv_cache"),
-                branch["block_table"].get(cmp_block_key),
-                cmp_sparse_indices.get(flag),
-                q_lens=branch["actual_seq_q"],
-                sas_metadata=branch["kernel_metadata"][meta_key],
-            )
-            out_list.append(out)
-        past_key_values.update(
-            torch.zeros((batch_size, local_q_len, self.head_dim), dtype=torch.bfloat16, device=hidden_states.device),
-            self.layer_idx,
-            attn_inputs["cu_q_lens"],
-            actual_q_lens=attn_inputs["q_lens"],
-        )
-        return torch.cat(out_list, dim=1)
 
     def forward(
         self,
@@ -3046,14 +2746,12 @@ class DeepseekV4Model(nn.Module):
 
         hidden_states = self.embed_tokens(input_ids)
         if is_prefill and attn_metadata is not None and attn_metadata.get("cp_metadata") is not None:
-            split_list = attn_metadata["cp_metadata"]["split_list"]
-            zigzag_idx = attn_metadata["cp_metadata"]["zigzag_idx"]
-            hidden_segments = hidden_states.split(split_list, dim=1)
-            input_segments = input_ids.split(split_list, dim=1)
-            pos_segments = position_ids.split(split_list, dim=1)
-            hidden_states = torch.cat([hidden_segments[idx] for idx in zigzag_idx], dim=1)
-            input_ids = torch.cat([input_segments[idx] for idx in zigzag_idx], dim=1)
-            position_ids = torch.cat([pos_segments[idx] for idx in zigzag_idx], dim=1)
+            hidden_states, input_ids, position_ids = apply_cp_zigzag_to_prefill_inputs(
+                hidden_states,
+                input_ids,
+                position_ids,
+                attn_metadata["cp_metadata"],
+            )
         cos, sin = self.rotary_emb(hidden_states, position_ids)
         position_embeddings = (cos, sin)
         cmp_cos, cmp_sin = self.compress_rotary_emb(hidden_states, position_ids)
@@ -3339,21 +3037,12 @@ class DeepseekV4ForMTP(nn.Module):
                 layer.self_attn.indexer.hccl_comm_dict = self.hccl_comm_dict
 
     def _gather_cp_prefill_hidden_states(self, hidden_states: torch.Tensor, attn_metadata: dict) -> torch.Tensor:
-        cp_meta = attn_metadata.get("cp_metadata") if attn_metadata is not None else None
-        cp_group = self.hccl_comm_dict.get("cp_group")
-        if cp_meta is None or cp_group is None or self.cp_size <= 1:
-            return hidden_states
-        if hidden_states.shape[0] != 1:
-            raise NotImplementedError("MTP CP prefill currently expects minibatch size 1.")
-        local_seq = hidden_states.shape[1]
-        if local_seq % 2 != 0:
-            raise ValueError("MTP CP prefill expects local hidden states to split into prev/next evenly.")
-        segment_len = local_seq // 2
-        gathered = hidden_states.new_empty((self.cp_size, *hidden_states.shape))
-        dist.all_gather_into_tensor(gathered, hidden_states.contiguous(), group=cp_group)
-        gathered = gathered.view(self.cp_size * 2, hidden_states.shape[0], segment_len, hidden_states.shape[-1])
-        gathered = gathered[cp_meta["reverse_index"]]
-        return gathered.permute(1, 0, 2, 3).reshape(hidden_states.shape[0], -1, hidden_states.shape[-1])
+        return gather_cp_prefill_hidden_states(
+            hidden_states,
+            attn_metadata,
+            cp_size=self.cp_size,
+            cp_group=self.hccl_comm_dict.get("cp_group"),
+        )
 
     @staticmethod
     def load_weights(model, weight_dir, main_model=None):
@@ -3462,21 +3151,12 @@ class DeepseekV4ForCausalLM(nn.Module):
         )
         self.hccl_comm_dict = {}
     def _gather_cp_prefill_hidden_states(self, hidden_states: torch.Tensor, attn_metadata: dict) -> torch.Tensor:
-        cp_meta = attn_metadata.get("cp_metadata") if attn_metadata is not None else None
-        cp_group = self.hccl_comm_dict.get("cp_group")
-        if cp_meta is None or cp_group is None or self.cp_size <= 1:
-            return hidden_states
-        if hidden_states.shape[0] != 1:
-            raise NotImplementedError("Mojo CP prefill currently only supports batch_size=1.")
-        local_seq = hidden_states.shape[1]
-        if local_seq % 2 != 0:
-            raise ValueError("CP prefill expects local hidden states to split into prev/next evenly.")
-        segment_len = local_seq // 2
-        gathered = hidden_states.new_empty((self.cp_size, *hidden_states.shape))
-        dist.all_gather_into_tensor(gathered, hidden_states.contiguous(), group=cp_group)
-        gathered = gathered.view(self.cp_size * 2, hidden_states.shape[0], segment_len, hidden_states.shape[-1])
-        gathered = gathered[cp_meta["reverse_index"]]
-        return gathered.permute(1, 0, 2, 3).reshape(hidden_states.shape[0], -1, hidden_states.shape[-1])
+        return gather_cp_prefill_hidden_states(
+            hidden_states,
+            attn_metadata,
+            cp_size=self.cp_size,
+            cp_group=self.hccl_comm_dict.get("cp_group"),
+        )
 
     def forward(
         self,
