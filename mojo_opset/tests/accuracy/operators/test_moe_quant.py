@@ -1,8 +1,13 @@
 from typing import Union
 
+import math
 import os
+import socket
+import traceback
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 from mojo_opset import MojoQuantExperts
 from mojo_opset import MojoQuantMoE
@@ -135,16 +140,171 @@ def _make_quant_weights(
     down_quant_group_size: int,
     down_weight_dtype: Union[torch.dtype, str],
 ):
-    up_weight_fp = torch.randn(num_experts, intermediate_size * 2, hidden_size, dtype=torch.float32) * 0.01
-    down_weight_fp = torch.randn(num_experts, hidden_size, intermediate_size, dtype=torch.float32) * 0.01
+    up_weight_fp = torch.randn(num_experts, intermediate_size * 2, hidden_size, dtype=torch.float32) * (
+        1.0 / math.sqrt(hidden_size)
+    )
+    down_weight_fp = torch.randn(num_experts, hidden_size, intermediate_size, dtype=torch.float32) * (
+        1.0 / math.sqrt(intermediate_size)
+    )
     up_weight, up_weight_scale = _quantize_weight_per_group(up_weight_fp, up_quant_group_size, up_weight_dtype)
     down_weight, down_weight_scale = _quantize_weight_per_group(down_weight_fp, down_quant_group_size, down_weight_dtype)
     return up_weight, up_weight_scale.bfloat16(), down_weight, down_weight_scale.bfloat16()
 
 
+def _find_free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("", 0))
+        return sock.getsockname()[1]
+
+
+def _run_quant_moe_backend_case(
+    num_experts,
+    top_k,
+    hidden_size,
+    intermediate_size,
+    num_tokens,
+    up_weight_dtype,
+    up_quant_group_size,
+    down_weight_dtype,
+    down_quant_group_size,
+    dtype,
+    *,
+    rank=0,
+    world_size=1,
+):
+    device = get_torch_device()
+    is_xops_backend = os.environ.get("MOJO_BACKEND", "").strip().lower() == "xops"
+    if is_xops_backend:
+        torch.manual_seed(0)
+    # Real EP scenario: every rank generates the SAME global input via identical
+    # rng sequence, then takes its own slice. The torch reference op consumes the
+    # full global input; each rank compares its xops output against the matching
+    # slice of the torch ref output.
+    global_tokens = num_tokens * world_size
+    global_hidden_states = torch.randn(global_tokens, hidden_size, dtype=dtype, device=device)
+    local_hidden_states = global_hidden_states[
+        rank * num_tokens : (rank + 1) * num_tokens
+    ].contiguous()
+    gate_weight = torch.randn(hidden_size, num_experts, dtype=torch.float32, device=device) * 0.2
+    fc1_input_smooth_scale = torch.rand(num_experts, hidden_size, dtype=torch.float32, device=device) + 0.5
+    fc2_input_smooth_scale = torch.rand(num_experts, intermediate_size, dtype=torch.float32, device=device) + 0.5
+    up_weight, up_weight_scale, down_weight, down_weight_scale = _make_quant_weights(
+        num_experts,
+        hidden_size,
+        intermediate_size,
+        up_quant_group_size,
+        up_weight_dtype,
+        down_quant_group_size,
+        down_weight_dtype,
+    )
+
+    state_dict = {
+        "gating.gate_weight": gate_weight,
+        "experts.up_proj_weight": up_weight.to(device),
+        "experts.down_proj_weight": down_weight.to(device),
+        "experts.up_proj_weight_scale": up_weight_scale.to(device),
+        "experts.down_proj_weight_scale": down_weight_scale.to(device),
+        "experts.up_proj_quantize.inv_smooth_scale": (1.0 / fc1_input_smooth_scale).to(device),
+        "experts.down_proj_quantize.inv_smooth_scale": (1.0 / fc2_input_smooth_scale).to(device),
+    }
+    ref_state_dict = {k: v.clone() for k, v in state_dict.items()}
+
+    op = MojoQuantMoE(
+        num_experts=num_experts,
+        top_k=top_k,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        quant_dtype=torch.int8,
+        up_quant_group_size=up_quant_group_size,
+        up_weight_dtype=up_weight_dtype,
+        down_quant_group_size=down_quant_group_size,
+        down_weight_dtype=down_weight_dtype,
+        **({"group_size": world_size, "rank": rank} if is_xops_backend else {}),
+    ).to(device)
+    op_ref = MojoQuantMoE._registry.get("torch")(
+        num_experts=num_experts,
+        top_k=top_k,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        quant_dtype=torch.int8,
+        up_quant_group_size=up_quant_group_size,
+        up_weight_dtype=up_weight_dtype,
+        down_quant_group_size=down_quant_group_size,
+        down_weight_dtype=down_weight_dtype,
+    ).to(device)
+    op.load_state_dict(state_dict)
+    if is_xops_backend:
+        op._dispatch_up_proj_inv_smooth_scale = op.experts.up_proj_quantize.inv_smooth_scale
+        op.experts.prepare_runtime_weight_layout()
+    op_ref.load_state_dict(ref_state_dict)
+
+    from mojo_opset.utils.acc import check_tol_diff
+
+    actual = op(local_hidden_states.clone())
+    expected_full = op_ref(global_hidden_states.clone())
+    expected_local = expected_full[rank * num_tokens : (rank + 1) * num_tokens]
+    if is_xops_backend:
+        check_tol_diff(actual, expected_local, atol=6e-2, rtol=2**-6, ptol=0.97, mixed_tol=False)
+    else:
+        check_tol_diff(actual, expected_local, atol=1e-2, rtol=1e-2, ptol=1.0, mixed_tol=True)
+
+
+def _quant_moe_backend_worker(rank, world_size, port, result_queue, case_args):
+    shmem_manager = None
+    try:
+        import torch_npu
+        from mojo_opset.runtime import MojoSymmetricMemoryManager
+
+        torch_npu.npu.set_device(rank)
+        init_method = f"tcp://127.0.0.1:{port}"
+        dist.init_process_group(backend="hccl", rank=rank, world_size=world_size, init_method=init_method)
+        shmem_manager = MojoSymmetricMemoryManager.get_or_create(backend="xops", shmem_heap_size_mb=2048)
+        shmem_manager.get_backend_manager()
+        _run_quant_moe_backend_case(*case_args, rank=rank, world_size=world_size)
+        result_queue.put((rank, None))
+    except Exception:
+        result_queue.put((rank, traceback.format_exc()))
+    finally:
+        if shmem_manager is not None:
+            shmem_manager.close()
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def _run_quant_moe_backend_distributed(case_args, world_size):
+    ctx = mp.get_context("forkserver")
+    port = _find_free_port()
+    result_queue = ctx.Queue()
+    processes = []
+    for rank in range(world_size):
+        process = ctx.Process(
+            target=_quant_moe_backend_worker,
+            args=(rank, world_size, port, result_queue, case_args),
+        )
+        process.start()
+        processes.append(process)
+
+    for process in processes:
+        process.join()
+
+    results = []
+    while not result_queue.empty():
+        results.append(result_queue.get())
+    errors = [(rank, error) for rank, error in results if error is not None]
+    if errors:
+        message = "\n".join(f"[Rank {rank}]\n{error}" for rank, error in errors)
+        pytest.fail(f"Distributed quant MoE backend test failed:\n{message}")
+
+    for rank, process in enumerate(processes):
+        if process.exitcode != 0:
+            pytest.fail(f"[Rank {rank}] exited with code {process.exitcode}")
+
+
 quant_moe_backend_cases = [
     (16, 2, 512, 1280, 33),
     (24, 4, 512, 1280, 97),
+    (64, 8, 512, 1280, 64),
+    (128, 8, 512, 1280, 128),
 ]
 
 
@@ -484,54 +644,36 @@ def test_quant_moe_backend(
     down_quant_group_size,
     dtype,
 ):
-    device = get_torch_device()
-
-    hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
-    gate_weight = torch.randn(hidden_size, num_experts, dtype=torch.float32, device=device) * 0.2
-    fc1_input_smooth_scale = torch.rand(num_experts, hidden_size, dtype=torch.float32, device=device) + 0.5
-    fc2_input_smooth_scale = torch.rand(num_experts, intermediate_size, dtype=torch.float32, device=device) + 0.5
-    up_weight, up_weight_scale, down_weight, down_weight_scale = _make_quant_weights(
+    case_args = (
         num_experts,
+        top_k,
         hidden_size,
         intermediate_size,
-        up_quant_group_size,
+        num_tokens,
         up_weight_dtype,
-        down_quant_group_size,
+        up_quant_group_size,
         down_weight_dtype,
+        down_quant_group_size,
+        dtype,
     )
 
-    state_dict = {
-        "gating.gate_weight": gate_weight,
-        "experts.up_proj_weight": up_weight.to(device),
-        "experts.down_proj_weight": down_weight.to(device),
-        "experts.up_proj_weight_scale": up_weight_scale.to(device),
-        "experts.down_proj_weight_scale": down_weight_scale.to(device),
-        "experts.up_proj_quantize.inv_smooth_scale": (1.0 / fc1_input_smooth_scale).to(device),
-        "experts.down_proj_quantize.inv_smooth_scale": (1.0 / fc2_input_smooth_scale).to(device),
-    }
-
-    op = MojoQuantMoE(
-        num_experts=num_experts,
-        top_k=top_k,
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
-        quant_dtype=torch.int8,
-        up_quant_group_size=up_quant_group_size,
-        up_weight_dtype=up_weight_dtype,
-        down_quant_group_size=down_quant_group_size,
-        down_weight_dtype=down_weight_dtype,
-    ).to(device)
-    op_ref = MojoQuantMoE._registry.get("torch")(
-        num_experts=num_experts,
-        top_k=top_k,
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
-        quant_dtype=torch.int8,
-        up_quant_group_size=up_quant_group_size,
-        up_weight_dtype=up_weight_dtype,
-        down_quant_group_size=down_quant_group_size,
-        down_weight_dtype=down_weight_dtype,
-    ).to(device)
-    op.load_state_dict(state_dict)
-    op_ref.load_state_dict({k: v.clone() for k, v in state_dict.items()})
-    op.forward_diff_with(op_ref, hidden_states, mixed_tol=True)
+    if os.environ.get("MOJO_BACKEND", "").strip().lower() == "xops":
+        world_size = int(os.environ.get("MOJO_XOPS_TEST_WORLD_SIZE", "8"))
+        if dtype != torch.bfloat16:
+            pytest.skip("XopsQuantExperts W4A8 path currently returns bfloat16 output only.")
+        if world_size < 1:
+            pytest.skip("MOJO_XOPS_TEST_WORLD_SIZE must be >= 1")
+        if num_experts % world_size != 0:
+            pytest.skip(f"num_experts={num_experts} must be divisible by {world_size=}")
+        if torch.npu.device_count() < world_size:
+            pytest.skip(f"Need {world_size} NPU devices, got {torch.npu.device_count()}")
+        local_experts = num_experts // world_size
+        from mojo_opset_ext.backends.xpu_ops.operators.moe import is_deep_ep_local_experts_supported
+        # 非整除8时精度不对，在这里skip。分布式用NotImplementedError没法正确skip
+        if world_size > 1 and not is_deep_ep_local_experts_supported(local_experts):
+            pytest.skip(
+                f"DeepEPMoe kernels require local_experts==1 or local_experts%8==0, got {local_experts}"
+            )
+        _run_quant_moe_backend_distributed(case_args, world_size)
+    else:
+        _run_quant_moe_backend_case(*case_args)

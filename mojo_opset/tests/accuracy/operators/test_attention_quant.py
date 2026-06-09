@@ -525,6 +525,7 @@ test_configs_prefill_swa_with_kv_dequant = [
     [
         ("ABAB", 4, 255),
         ("AABB", 4, 1023),
+        ("ABAB", 4, 2047),
     ],
 )
 @pytest.mark.parametrize("query_dtype, context_dtype, compute_dtype", 

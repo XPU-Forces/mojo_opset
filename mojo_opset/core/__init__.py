@@ -57,6 +57,8 @@ from .operators.quantize import MojoMoEDynamicQuant
 from .operators.quantize import MojoStaticQuant
 
 """ moe """
+from .operators.deepep import MojoDeepEPCombine
+from .operators.deepep import MojoDeepEPDispatch
 from .operators.moe import MojoExperts
 from .operators.moe import MojoMoE
 from .operators.moe import MojoMoECombine
@@ -155,6 +157,8 @@ __all__ = [
     "MojoMoECombine",
     "MojoQuantExperts",
     "MojoQuantMoE",
+    "MojoDeepEPDispatch",
+    "MojoDeepEPCombine",
 
     "MojoLayerNorm",
     "MojoRMSNorm",

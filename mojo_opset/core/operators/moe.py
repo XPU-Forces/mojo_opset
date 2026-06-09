@@ -123,6 +123,7 @@ class MojoQuantMoE(MojoOperator):
             up_weight_dtype=up_weight_dtype,
             down_quant_group_size=down_quant_group_size,
             down_weight_dtype=down_weight_dtype,
+            top_k=self.top_k,
             **kwargs,
         )
         self.combine = MojoMoECombine._registry.get(self._backend)(multiply_by_gates=True, **kwargs)
