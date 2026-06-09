@@ -186,7 +186,8 @@ class TorchNpuPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
             else:
                 input_layout = "BNSD"
 
-        actual_seq_lengths_q = torch.arange(1, batch_size + 1, dtype=torch.int32, device=query.device)
+        # actual_seq_lengths_q = torch.arange(1, batch_size + 1, dtype=torch.int32, device=query.device)
+        actual_seq_lengths_q = torch.ones(batch_size, dtype=torch.int32, device=query.device)
         out, _ = torch_npu.npu_fused_infer_attention_score(
             query,
             k_cache,
