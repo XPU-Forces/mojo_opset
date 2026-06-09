@@ -447,6 +447,9 @@ def rope_fwd_impl(
     - 3D varlen:  q [T, N, D] or [N, T, D], cos [T, rope_dim]
     - 3D decode:  q [B, N, D] or [N, B, D], cos [B, rope_dim]
     """
+    cos = cos.to(q.dtype)
+    sin = sin.to(q.dtype)
+
     orig_q_shape = q.shape
     orig_k_shape = k.shape
     (
@@ -511,7 +514,7 @@ def rope_fwd_impl(
         k_out = k_out.transpose(-2, -3).contiguous()
     q_out = q_out.reshape(*orig_q_shape)
     k_out = k_out.reshape(*orig_k_shape)
-    return q_out, q_out
+    return q_out, k_out
 
 
 def rope_bwd_impl(

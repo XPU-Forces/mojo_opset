@@ -17,6 +17,7 @@ def generate_sdpa_data(
     max_kv_computed_len: int,
     dtype: torch.dtype,
 ):
+    torch.manual_seed(43)
     q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
     q_lens = torch.clamp(q_lens, min=1)
     cu_q_lens = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(q_lens, 0).to(torch.int32)])
@@ -128,6 +129,69 @@ def test_swa_function(
     assert_close(k.grad, k_ref.grad)
     assert_close(v.grad, v_ref.grad)
 
-    
 
 
+def test_swa_function_perf():
+    test_cases = [
+        ((2, 16, 4, 128, 1024, 0, torch.float32), True, 4, 255),
+        ((2, 16, 4, 96, 1024, 0, torch.bfloat16), True, 4, 255),
+        ((2, 16, 4, 128, 4096, 0, torch.bfloat16), True, 4, 255),
+        ((2, 16, 4, 128, 1024, 0, torch.float32), False, 4, 1023)
+    ]
+    import torch_npu
+
+    experimental_config = torch_npu.profiler._ExperimentalConfig(
+        aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
+        profiler_level=torch_npu.profiler.ProfilerLevel.Level2,
+        l2_cache=False,
+        data_simplification=False,
+    )
+
+    with torch_npu.profiler.profile(
+            activities=[torch_npu.profiler.ProfilerActivity.CPU, torch_npu.profiler.ProfilerActivity.NPU],
+            schedule=torch_npu.profiler.schedule(wait=0, warmup=5, active=5, repeat=1, skip_first=0),
+            on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./npu_profiling"),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+            with_flops=False,
+            with_modules=False,
+            experimental_config=experimental_config,
+    ) as prof:
+        for _ in range(10):
+            for input_shape, gqa_interleave, global_window, local_window in test_cases:
+                B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, dtype = input_shape
+                query, key, value, grad_out, cu_q_lens, cu_total_seq_lens \
+                    = generate_sdpa_data(
+                        batch_size=B,
+                        num_q_heads=Q_H,
+                        num_kv_heads=KV_H,
+                        head_dim=D,
+                        max_q_len=Q_LEN,
+                        max_kv_computed_len=KV_COMPUTED_LEN,
+                        dtype=dtype,
+                    )
+                swa_func = MojoSWAFunction.apply
+
+                head_dim = query.shape[-1]
+                softmax_scale = 1.0 / math.sqrt(head_dim)
+
+                q = query.clone().detach().requires_grad_(True)
+                k = key.clone().detach().requires_grad_(True)
+                v = value.clone().detach().requires_grad_(True)
+                o = swa_func(
+                    q,
+                    k,
+                    v,
+                    cu_q_lens,
+                    cu_total_seq_lens,
+                    True,
+                    local_window,
+                    global_window,
+                    softmax_scale,
+                    gqa_interleave,
+                    True,
+                )
+                o.backward(grad_out)
+            prof.step()
+            torch.npu.synchronize()

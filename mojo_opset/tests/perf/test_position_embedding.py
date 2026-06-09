@@ -13,13 +13,14 @@ from mojo_opset.tests.utils import bypass_not_implemented
 @pytest.mark.parametrize(
     "q_heads, k_heads",
     [
-        # (32, 32),
+        (32, 32),
         (32, 8),
-        # (16, 1),
+        (16, 1),
+        (1, 1),
     ],
 )
 @pytest.mark.parametrize("head_dim", [128])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_pos_emb(bs, seqlen, q_heads, k_heads, head_dim, dtype):

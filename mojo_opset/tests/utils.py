@@ -345,6 +345,8 @@ def device_perf_npu(executor, profiling_dir="./npu_profiling", active=5):
     if not os.path.exists(profiling_dir):
         os.makedirs(profiling_dir)
 
+    # warm up
+    executor()
     import torch_npu
 
     experimental_config = torch_npu.profiler._ExperimentalConfig(

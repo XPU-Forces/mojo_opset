@@ -50,7 +50,7 @@ def _sdpa_infer_single_block(
     if mask is not None:
         qk = tl.where(mask, qk, float("-inf"))  # 32B # bool
 
-    m_ij = tl.maximum(m_i, tl.max(qk, 1))  # Scaled max
+    m_ij = tl.maximum(m_i, tl.max(qk, 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL)    # Scaled max
     qk = qk - m_ij[:, None]  # Stabilize
 
     # Softmax weights p = exp(qk)
@@ -319,8 +319,6 @@ def paged_attention_prefill_impl(
         BLOCK_SIZE_M=CHUNK_SIZE,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
         BLOCK_SIZE_D=head_dim,
-        limit_auto_multi_buffer_only_for_local_buffer=False,
-        set_workspace_multibuffer=4,
     )
     return o
 
@@ -361,31 +359,36 @@ def paged_decode_kernel(
     BLOCK_SIZE_D: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
 ):
+    GROUP_SIZE: tl.constexpr = NUM_Q_HEADS // NUM_KV_HEADS
     tl.static_assert(HEAD_DIM <= BLOCK_SIZE_D, "HEAD_DIM should be less than BLOCK_SIZE_D")
     tl.static_assert(PAGE_SIZE % BLOCK_SIZE_N == 0, "BLOCK_SIZE_N must be a divisor of PAGE_SIZE")
     pid = tl.program_id(0)
     n_progs = tl.num_programs(0)
 
-    num_tasks = BATCH_SIZE * NUM_Q_HEADS
+    num_tasks = BATCH_SIZE * NUM_KV_HEADS
 
-    for q_task_id in range(pid, num_tasks, n_progs):
-        q_head_id = q_task_id % NUM_Q_HEADS
-        b_id = q_task_id // NUM_Q_HEADS
-        if GQA_INTERLEAVE:
-            kv_head_id = q_head_id % NUM_KV_HEADS
-        else:
-            kv_head_id = q_head_id // (NUM_Q_HEADS // NUM_KV_HEADS)
+    for kv_task_id in range(pid, num_tasks, n_progs):
+        kv_head_id = kv_task_id % NUM_KV_HEADS
+        b_id = kv_task_id // NUM_KV_HEADS
 
         kv_seq_len = tl.load(seqlens_ptr + b_id)
 
+        # Compute q_head_ids for this kv_head group
+        g_offsets = tl.arange(0, GROUP_SIZE)
+        if GQA_INTERLEAVE:
+            q_head_ids = kv_head_id + g_offsets * NUM_KV_HEADS
+        else:
+            q_head_ids = kv_head_id * GROUP_SIZE + g_offsets
 
+        # Load q for all heads in the group: [GROUP_SIZE, D]
         offs_d = tl.arange(0, BLOCK_SIZE_D)
-        q_ptrs = q_ptr + b_id * stride_qb + q_head_id * stride_qh + offs_d * stride_qd
-        q = tl.load(q_ptrs, mask = offs_d < HEAD_DIM, other = 0.0)
+        q_ptrs = q_ptr + b_id * stride_qb + q_head_ids[:, None] * stride_qh + offs_d[None, :] * stride_qd
+        q = tl.load(q_ptrs, mask=offs_d[None, :] < HEAD_DIM, other=0.0)
 
-        m_i = -float("inf")
-        l_i = 0.0
-        acc = tl.zeros((BLOCK_SIZE_D,), dtype=tl.float32)
+        # Initialize softmax state as vectors [GROUP_SIZE,]
+        m_i = tl.zeros((GROUP_SIZE,), dtype=tl.float32) - float("inf")
+        l_i = tl.zeros((GROUP_SIZE,), dtype=tl.float32)
+        acc = tl.zeros((GROUP_SIZE, BLOCK_SIZE_D), dtype=tl.float32)
 
         num_kv_blocks = tl.cdiv(kv_seq_len, BLOCK_SIZE_N)
 
@@ -397,16 +400,18 @@ def paged_decode_kernel(
             logical_page_id = kv_block_start_in_seq // PAGE_SIZE
             kv_block_start_in_page = kv_block_start_in_seq % PAGE_SIZE
             physical_page_id = tl.load(block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block)
-            
-            k_block_ptr = tl.make_block_ptr(
+
+            # Load K transposed: [D, BLOCK_N] for tl.dot(q, k_T)
+            K_T_block_ptr = tl.make_block_ptr(
                 base=k_cache_ptr + physical_page_id * stride_k_block + kv_head_id * stride_k_head + kv_block_start_in_page * stride_k_blksz,
-                shape=(kv_block_len, HEAD_DIM),
-                strides=(stride_k_blksz, stride_k_dim),
+                shape=(HEAD_DIM, kv_block_len),
+                strides=(stride_k_dim, stride_k_blksz),
                 offsets=(0, 0),
-                block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_D),
-                order=(1, 0),
+                block_shape=(BLOCK_SIZE_D, BLOCK_SIZE_N),
+                order=(0, 1),
             )
-            v_block_ptr = tl.make_block_ptr(
+            # Load V: [BLOCK_N, D] for tl.dot(p, v)
+            V_block_ptr = tl.make_block_ptr(
                 base=v_cache_ptr + physical_page_id * stride_v_block + kv_head_id * stride_v_head + kv_block_start_in_page * stride_v_blksz,
                 shape=(kv_block_len, HEAD_DIM),
                 strides=(stride_v_blksz, stride_v_dim),
@@ -417,43 +422,39 @@ def paged_decode_kernel(
 
             mask = tl.arange(0, BLOCK_SIZE_N) < kv_block_len
 
-            k = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option="zero")
+            k_T = tl.load(K_T_block_ptr, boundary_check=(0, 1), padding_option="zero")
+            v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
-            qk = tl.sum((q[None, :] * k).to(tl.float32), axis=1)
+            qk = tl.dot(q, k_T)
+
             qk *= softmax_scale
-            qk = tl.where(mask, qk, float("-inf"))
+            qk = tl.where(mask[None, :], qk, float("-inf"))
 
-            m_j = tl.max(qk, axis=0)
-            m_ij = tl.maximum(m_i, m_j)
-            qk = qk - m_ij
+            m_ij = tl.maximum(m_i, tl.max(qk, 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL)
+            qk = qk - m_ij[:, None]
 
             p = tl.math.exp(qk)
+            p_cast = p.to(k_T.dtype)
 
-            p_cast = p.to(k.dtype)
-            
-            v = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero")
+            pv = tl.dot(p_cast, v)
 
-            l_ij = tl.sum(p, axis=0)
-
+            # Softmax denominator and update (Vector: parallel with Cube)
+            l_ij = tl.sum(p, 1)
             alpha = tl.math.exp(m_i - m_ij)
 
             l_i = l_i * alpha + l_ij
-
-            acc = acc * alpha
-
-            # p = p.to(v.dtype)
-
-            acc += tl.sum((p_cast[:, None] * v).to(tl.float32), axis=0)
+            acc = acc * alpha[:, None] + pv
 
             m_i = m_ij
 
         m_i += tl.math.log(l_i)
         if kv_seq_len > 0:
             # avoid division by zero
-            acc = acc / l_i
+            acc = acc / l_i[:, None]
 
-        o_ptrs = o_ptr + b_id * stride_ob + q_head_id * stride_oh + offs_d * stride_od
-        tl.store(o_ptrs, acc.to(o_ptr.dtype.element_ty), mask=offs_d < HEAD_DIM)
+        # Store output for all heads in the group
+        o_ptrs = o_ptr + b_id * stride_ob + q_head_ids[:, None] * stride_oh + offs_d[None, :] * stride_od
+        tl.store(o_ptrs, acc.to(o_ptr.dtype.element_ty), mask=offs_d[None, :] < HEAD_DIM)
 
 
 def paged_attention_decode_impl(
@@ -475,9 +476,9 @@ def paged_attention_decode_impl(
         softmax_scale = 1.0 / math.sqrt(head_dim)
 
     o = torch.empty_like(q)
-    
-    num_vectors = get_num_cores("vector")
-    grid = (num_vectors, )
+
+    cube_num = get_num_cores("cube")
+    grid = (cube_num,)
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     BLOCK_SIZE_N = min(128, triton.next_power_of_2(page_size))
 
@@ -515,6 +516,5 @@ def paged_attention_decode_impl(
         page_size,
         BLOCK_SIZE_D=BLOCK_SIZE_D,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
-        multibuffer=False,
     )
     return o
