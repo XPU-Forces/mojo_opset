@@ -264,7 +264,7 @@ def paged_attention_prefill_impl(
         softmax_scale = 1.0 / math.sqrt(head_dim)
 
     if aux_mask is None:
-        aux_mask = torch.ones(1024, 1024 * 3, dtype=torch.bool).tril(1024).npu()
+        aux_mask = torch.ones(1024, 1024 * 3, device="npu", dtype=torch.bool).tril(1024)
 
     # Note(chenyifan):
     #   In general, this paged attention kernel works in a `split-q` style.
