@@ -3,6 +3,7 @@ import torch.distributed as dist
 
 import ixformer.distributed as ixfd
 from ixformer import functions as ixf_f
+from ixformer.distributed import symmetric_memory as symm
 
 from mojo_opset.core.operators.compute_with_comm import (
     MojoAllGatherQuantGemm,
@@ -11,6 +12,9 @@ from mojo_opset.core.operators.compute_with_comm import (
 
 
 def _cast_weight_scale_to_fp32(module, incompatible_keys):
+    if module.trans_weight:
+        module.weight = torch.nn.Parameter(module.weight.transpose(0, 1).contiguous(), requires_grad=module.weight.requires_grad)
+
     module.weight_scale = torch.nn.Parameter(
         module.weight_scale.detach().to(torch.float32),
         requires_grad=module.weight_scale.requires_grad,
@@ -81,7 +85,25 @@ class IxformerQuantGemmReduceScatter(MojoQuantGemmReduceScatter):
             raise NotImplementedError(
                 "IxformerQuantGemmReduceScatter does not support float32 output dtype"
             )
+        self._symm_group_name = "mojo_quant_gemm_reduce_scatter"
         self.register_load_state_dict_post_hook(_cast_weight_scale_to_fp32)
+        self._workspace = None
+        self._workspace_bytes = 0
+
+        if dist.is_available() and dist.is_initialized():
+            self.world_size = dist.get_world_size(group=self.process_group)
+            if not symm.is_initialized(group_name=self._symm_group_name):
+                symm.init_process_group(group=self.process_group, group_name=self._symm_group_name)
+            self._workspace_bytes = ixf_f.quant_matmul_reducescatter_workspace_bytes(
+                8192, self.out_features, self.in_features, self.world_size
+            )
+            self._workspace = symm.empty_p2p(
+                (self._workspace_bytes,),
+                dtype=torch.int8,
+                device=torch.device("cuda"),
+                group_name=self._symm_group_name,
+            )
+        
 
     def forward(self, input: torch.Tensor, input_scale: torch.Tensor) -> torch.Tensor:
         if input.dim() != 2:
@@ -91,26 +113,44 @@ class IxformerQuantGemmReduceScatter(MojoQuantGemmReduceScatter):
                 f"input K {input.shape[-1]} must match in_features {self.in_features}."
             )
 
-        partial = ixf_f.w8a8(
-            input, self.weight, input_scale, self.weight_scale,
-            format="TN" if self.trans_weight else "NN",
-            out_dtype=self.output_dtype,
-        )
-
         if dist.is_available() and dist.is_initialized():
             pg = self.process_group
             world_size = dist.get_world_size(group=pg)
-            seq_full = partial.shape[0]
+            seq_full = input.shape[0]
+            if seq_full > 8192:
+                raise ValueError(
+                    f"seq_full {seq_full} must be less than or equal to 8192"
+                )
             if seq_full % world_size != 0:
                 raise ValueError(
                     f"seq_full {seq_full} must be divisible by world_size {world_size}"
                 )
-            out = torch.empty(
-                (seq_full // world_size, partial.shape[1]),
-                dtype=partial.dtype, device=partial.device,
+            if (seq_full // world_size) % 256 != 0:
+                raise ValueError(
+                    "IxformerQuantGemmReduceScatter requires seq_full / world_size divisible by BM=256"
+                )
+            if self.output_dtype != torch.bfloat16:
+                raise NotImplementedError(
+                    "IxformerQuantGemmReduceScatter fused ixformer path only supports bfloat16 output dtype"
+                )
+            if input_scale.numel() != seq_full:
+                raise ValueError(
+                    f"input_scale must contain one scale per input row, got {input_scale.numel()} and {seq_full}"
+                )
+
+            return ixf_f.quant_matmul_reducescatter(
+                input,
+                self.weight,
+                input_scale,
+                self.weight_scale,
+                workspace=self._workspace,
+                group=self.process_group,
+                group_name=self._symm_group_name,
             )
-            ixfd.reduce_scatter_tensor(
-                out, partial.contiguous(), group=pg, async_op=True,
-            )
-            return out
+
+        partial = ixf_f.w8a8(
+            input, self.weight, input_scale, self.weight_scale,
+            format="NN",
+            out_dtype=self.output_dtype,
+        )
         return partial
