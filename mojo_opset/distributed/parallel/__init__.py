@@ -17,6 +17,10 @@ from .data_parallel import get_attn_dp_shard_range
 from .data_parallel import prepare_deepseek_v4_attn_dp_inputs
 from .data_parallel import prepare_lmhead_input_for_attn_dp
 from .data_parallel import shard_batch_for_attn_dp
+from .expert_parallel import build_deepseek_v4_moe_mc2_kwargs
+from .expert_parallel import deepseek_v4_moe_infer_ep_decode
+from .expert_parallel import deepseek_v4_moe_infer_ep_prefill
+from .expert_parallel import gather_deepseek_v4_moe_smooth_scale_1
 from .expert_parallel import MojoExpertParallel
 from .mesh import LLMParallelConfig
 from .mesh import build_contiguous_submesh

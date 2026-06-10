@@ -56,6 +56,10 @@ from mojo_opset.distributed.parallel.context_parallel import deepseek_v4_cp_run_
 from mojo_opset.distributed.parallel.context_parallel import gather_cp_prefill_hidden_states
 from mojo_opset.distributed.parallel.data_parallel import gather_lmhead_logits_for_attn_dp
 from mojo_opset.distributed.parallel.data_parallel import prepare_lmhead_input_for_attn_dp
+from mojo_opset.distributed.parallel.expert_parallel import build_deepseek_v4_moe_mc2_kwargs
+from mojo_opset.distributed.parallel.expert_parallel import deepseek_v4_moe_infer_ep_decode
+from mojo_opset.distributed.parallel.expert_parallel import deepseek_v4_moe_infer_ep_prefill
+from mojo_opset.distributed.parallel.expert_parallel import gather_deepseek_v4_moe_smooth_scale_1
 
 
 _INPLACE_PARTIAL_ROTARY_MUL = MojoInplacePartialRotaryMul()
@@ -2368,38 +2372,7 @@ class DeepseekV4MoE(nn.Module):
         return routed_out.view(*orig_shape)
 
     def set_mc2_kwargs(self):
-        global_rank = dist.get_rank()
-        moe_ep_group_name = self.hccl_comm_dict.get("moe_ep_group_mc2_name", None)
-        quant_mode = self.dispatch_quant_mode.get(self.gmm_quant_mode, self.dispatch_quant_mode["w16a16"])
-        enable_smooth_scale = quant_mode == self.dispatch_quant_mode["w8a8int8"]
-        self.dispatch_kwargs = {
-            "x_active_mask": None,
-            "expert_shard_type": 0,
-            "shared_expert_rank_num": 0,
-            "moe_expert_num": self.n_routed_experts,
-            "global_bs": 0,
-            "scales": self.smooth_scale_1 if enable_smooth_scale else None,
-            "quant_mode": quant_mode,
-            "group_ep": moe_ep_group_name,
-            "ep_world_size": self.ep_size,
-            "ep_rank_id": global_rank,
-            "group_tp": moe_ep_group_name,
-            "tp_world_size": 1,
-            "tp_rank_id": 0,
-        }
-        self.combine_kwargs = {
-            "x_active_mask": None,
-            "expert_shard_type": 0,
-            "shared_expert_rank_num": 0,
-            "moe_expert_num": self.n_routed_experts,
-            "global_bs": 0,
-            "group_ep": moe_ep_group_name,
-            "ep_world_size": self.ep_size,
-            "ep_rank_id": global_rank,
-            "group_tp": moe_ep_group_name,
-            "tp_world_size": 1,
-            "tp_rank_id": 0,
-        }
+        self.dispatch_kwargs, self.combine_kwargs = build_deepseek_v4_moe_mc2_kwargs(self)
 
     def forward_expert_gmm(self, x, expert_tokens, pertoken_scale=None, group_list_type=1):
         experts_mod = self.experts
@@ -2468,68 +2441,14 @@ class DeepseekV4MoE(nn.Module):
         shared_expert_out=None,
         shared_expert_event=None,
     ):
-        moe_ep_group = self.ep_group
-        n_tokens = hidden_states_flat.shape[0]
-
-        expanded_x, expanded_row_idx, tokens_per_expert, pertoken_scale = \
-            self.moe_init_routing_v2(
-                hidden_states_flat,
-                expert_idx=topk_idx,
-                active_num=n_tokens * self.top_k,
-                expert_num=self.n_routed_experts,
-                expert_tokens_num_type=1,
-                expert_tokens_num_flag=True,
-                active_expert_range=[0, self.n_routed_experts],
-                quant_mode=1,
-                scale=self.smooth_scale_1,
-            )
-
-        tokens_per_expert_group = tokens_per_expert.new_empty(tokens_per_expert.shape[0])
-        dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert, group=moe_ep_group)
-
-        combine_tokens = torch.stack([tokens_per_expert_group, tokens_per_expert], dim=0)
-        combine_tokens = combine_tokens.view(2, self.ep_size, -1).sum(2)
-        all_tokens = combine_tokens[0].sum()
-        combine_tokens_cpu = combine_tokens.cpu().tolist()
-        input_splits = combine_tokens_cpu[1]
-        output_splits = combine_tokens_cpu[0]
-
-        gathered_tokens = expanded_x.new_empty(all_tokens.item(), expanded_x.shape[1])
-        dist.all_to_all_single(gathered_tokens, expanded_x, output_splits, input_splits, group=moe_ep_group)
-
-        gathered_pertoken_scale = pertoken_scale.new_empty(gathered_tokens.shape[0])
-        dist.all_to_all_single(gathered_pertoken_scale, pertoken_scale, output_splits, input_splits, group=moe_ep_group)
-
-        hidden_states_ordered, gathered_pertoken_scale, gathered_ids_unsort, tokens_per_local_expert = \
-            self.moe_re_routing(
-                gathered_tokens,
-                tokens_per_expert_group.view(self.ep_size, -1),
-                per_token_scales=gathered_pertoken_scale,
-            )
-
-        expert_out = self.forward_expert_gmm(
-            hidden_states_ordered, tokens_per_local_expert,
-            pertoken_scale=gathered_pertoken_scale,
-            group_list_type=1,
+        return deepseek_v4_moe_infer_ep_prefill(
+            self,
+            hidden_states_flat,
+            topk_idx,
+            topk_weight,
+            shared_expert_out=shared_expert_out,
+            shared_expert_event=shared_expert_event,
         )
-
-        new_x = torch.index_select(expert_out, 0, gathered_ids_unsort.float().argsort().int())
-
-        combined_tokens = new_x.new_empty(expanded_x.shape[0], new_x.shape[1])
-        dist.all_to_all_single(combined_tokens, new_x, input_splits, output_splits, group=moe_ep_group)
-
-        self._wait_shared_expert(shared_expert_out, shared_expert_event)
-        routed_out = self.moe_finalize_routing(
-            combined_tokens,
-            skip1=shared_expert_out,
-            skip2=None,
-            bias=None,
-            scales=topk_weight.to(combined_tokens.dtype),
-            expanded_src_to_dst_row=expanded_row_idx,
-            export_for_source_row=None,
-            drop_pad_mode=2,
-        )
-        return routed_out
 
     def _moe_infer_ep_decode(
         self,
@@ -2539,38 +2458,14 @@ class DeepseekV4MoE(nn.Module):
         shared_expert_out=None,
         shared_expert_event=None,
     ):
-        if self.dispatch_kwargs is None:
-            self.set_mc2_kwargs()
-
-        dispatch_output = self.moe_distribute_dispatch_v2(
-            x=hidden_states_flat,
-            expert_ids=topk_idx,
-            **self.dispatch_kwargs,
+        return deepseek_v4_moe_infer_ep_decode(
+            self,
+            hidden_states_flat,
+            topk_idx,
+            topk_weight,
+            shared_expert_out=shared_expert_out,
+            shared_expert_event=shared_expert_event,
         )
-        expand_x, dynamic_scale, expand_idx, expert_token_num = dispatch_output[:4]
-        ep_recv_counts = dispatch_output[4] if len(dispatch_output) > 4 else None
-        tp_recv_counts = dispatch_output[5] if len(dispatch_output) > 5 else None
-
-        expert_out = self.forward_expert_gmm(expand_x, expert_token_num, pertoken_scale=dynamic_scale, group_list_type=1)
-
-        self._wait_shared_expert(shared_expert_out, shared_expert_event)
-        combine_input = {
-            "expand_x": expert_out,
-            "shared_expert_x": shared_expert_out,
-            "expert_ids": topk_idx,
-            "assist_info_for_combine": expand_idx,
-            "expert_scales": topk_weight.to(torch.float32),
-        }
-        if ep_recv_counts is not None:
-            combine_input["ep_send_counts"] = ep_recv_counts
-        if tp_recv_counts is not None:
-            combine_input["tp_send_counts"] = tp_recv_counts
-
-        routed_out = self.moe_distribute_combine_v2(
-            **combine_input,
-            **self.combine_kwargs,
-        )
-        return routed_out
 
 
 class DeepseekV4DecoderLayer(nn.Module):
@@ -3413,19 +3308,10 @@ class DeepseekV4ForCausalLM(nn.Module):
             model, [model.model.layers[layer_idx] for layer_idx in range(model.config.num_hidden_layers)],
         )
 
-        if model.ep_size > 1 and dist.is_initialized():
-            moe_ep_group = model.hccl_comm_dict.get("moe_ep_group")
-            if moe_ep_group is not None:
-                for layer_idx in range(model.config.num_hidden_layers):
-                    mlp = model.model.layers[layer_idx].mlp
-                    if hasattr(mlp, 'smooth_scale_1') and mlp.smooth_scale_1 is not None:
-                        all_smooth_scale_1 = mlp.smooth_scale_1.data.new_empty(
-                            mlp.smooth_scale_1.data.shape[0] * model.ep_size,
-                            mlp.smooth_scale_1.data.shape[1])
-                        dist.all_gather_into_tensor(
-                            all_smooth_scale_1, mlp.smooth_scale_1.data,
-                            group=moe_ep_group)
-                        mlp.smooth_scale_1.data = all_smooth_scale_1
+        gather_deepseek_v4_moe_smooth_scale_1(
+            model,
+            [model.model.layers[layer_idx] for layer_idx in range(model.config.num_hidden_layers)],
+        )
 
     @staticmethod
     def _add_layer_name_mapping(
