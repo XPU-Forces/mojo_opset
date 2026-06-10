@@ -12,7 +12,10 @@ from .context_parallel import get_zigzag_idx
 from .context_parallel import pad_deepseek_v4_cp_prefill
 from .data_parallel import MojoDataParallel
 from .data_parallel import gather_decode_shard_tensor
+from .data_parallel import gather_lmhead_logits_for_attn_dp
 from .data_parallel import get_attn_dp_shard_range
+from .data_parallel import prepare_deepseek_v4_attn_dp_inputs
+from .data_parallel import prepare_lmhead_input_for_attn_dp
 from .data_parallel import shard_batch_for_attn_dp
 from .expert_parallel import MojoExpertParallel
 from .mesh import LLMParallelConfig

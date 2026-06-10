@@ -22,10 +22,9 @@ from mojo_opset.distributed.parallel import apply_llm_parallelize_plan
 from mojo_opset.distributed.parallel import copy_paged_dummy_cache_batch
 from mojo_opset.distributed.parallel import forward_cp_prefill_minibatch_mojo
 from mojo_opset.distributed.parallel import gather_decode_shard_tensor
-from mojo_opset.distributed.parallel import get_attn_dp_shard_range
 from mojo_opset.distributed.parallel import LLMParallelConfig
 from mojo_opset.distributed.parallel import pad_deepseek_v4_cp_prefill
-from mojo_opset.distributed.parallel import shard_batch_for_attn_dp
+from mojo_opset.distributed.parallel import prepare_deepseek_v4_attn_dp_inputs
 
 ARCH_MAP = {
     "Qwen3ForCausalLM": ("mojo_opset.modeling.qwen3.mojo_qwen3_dense", "Qwen3ForCausalLM"),
@@ -1158,17 +1157,7 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
         target_len=input_max_len if input_max_len and input_max_len > 0 else None,
     )
     if model.__class__.__name__ == "DeepseekV4ForCausalLM":
-        shard_start, shard_end, attn_dp_size, dp_rank = get_attn_dp_shard_range(
-            batch_size,
-            global_rank=global_rank,
-            world_size=dist.get_world_size() if dist.is_initialized() else 1,
-            attn_tp_size=attn_tp_size,
-            cp_size=cp_size,
-        )
-        full_input_ids, full_attention_mask = pad_deepseek_v4_cp_prefill(
-            full_input_ids, full_attention_mask, pad_token_id, cp_size
-        )
-        input_ids, attention_mask, lengths, prompts, rendered = shard_batch_for_attn_dp(
+        dp_inputs = prepare_deepseek_v4_attn_dp_inputs(
             full_input_ids,
             full_attention_mask,
             full_lengths,
@@ -1178,7 +1167,20 @@ def generate(model, tokenizer, prompt, max_new_tokens, device, ep_size=1, cp_siz
             world_size=dist.get_world_size() if dist.is_initialized() else 1,
             attn_tp_size=attn_tp_size,
             cp_size=cp_size,
+            pad_token_id=pad_token_id,
+            cp_prefill_pad_fn=pad_deepseek_v4_cp_prefill,
         )
+        full_input_ids = dp_inputs["full_input_ids"]
+        full_attention_mask = dp_inputs["full_attention_mask"]
+        input_ids = dp_inputs["input_ids"]
+        attention_mask = dp_inputs["attention_mask"]
+        lengths = dp_inputs["lengths"]
+        prompts = dp_inputs["prompts"]
+        rendered = dp_inputs["rendered"]
+        shard_start = dp_inputs["shard_start"]
+        shard_end = dp_inputs["shard_end"]
+        attn_dp_size = dp_inputs["attn_dp_size"]
+        dp_rank = dp_inputs["dp_rank"]
         batch_size = input_ids.shape[0]
     else:
         input_ids, attention_mask, lengths = full_input_ids, full_attention_mask, full_lengths

@@ -54,6 +54,8 @@ from mojo_opset.distributed.parallel.context_parallel import deepseek_v4_cp_run_
 from mojo_opset.distributed.parallel.context_parallel import deepseek_v4_cp_run_prefill
 from mojo_opset.distributed.parallel.context_parallel import deepseek_v4_cp_run_sfa_compressor
 from mojo_opset.distributed.parallel.context_parallel import gather_cp_prefill_hidden_states
+from mojo_opset.distributed.parallel.data_parallel import gather_lmhead_logits_for_attn_dp
+from mojo_opset.distributed.parallel.data_parallel import prepare_lmhead_input_for_attn_dp
 
 
 _INPLACE_PARTIAL_ROTARY_MUL = MojoInplacePartialRotaryMul()
@@ -3193,39 +3195,24 @@ class DeepseekV4ForCausalLM(nn.Module):
                 hidden_states = torch.gather(hidden_states, 1, gather_index)
         local_bs, q_len, hidden_size = hidden_states.shape
         hidden_states_for_lm = hidden_states.view(local_bs * q_len, 1, hidden_size).to(torch.bfloat16)
-        if self.attn_dp_size > 1 and self.lmhead_tp_size > 1 and dist.is_initialized():
-            gathered_hidden = hidden_states_for_lm.new_empty(
-                self.lmhead_tp_size * hidden_states_for_lm.shape[0],
-                hidden_states_for_lm.shape[1],
-                hidden_states_for_lm.shape[2],
-            )
-            dist.all_gather_into_tensor(
-                gathered_hidden,
-                hidden_states_for_lm.contiguous(),
-                group=self.hccl_comm_dict.get("lmhead_tp_group"),
-            )
-            hidden_states_for_lm = gathered_hidden
+        hidden_states_for_lm = prepare_lmhead_input_for_attn_dp(
+            hidden_states_for_lm,
+            attn_dp_size=self.attn_dp_size,
+            lmhead_tp_size=self.lmhead_tp_size,
+            lmhead_tp_group=self.hccl_comm_dict.get("lmhead_tp_group"),
+        )
 
         logits_flat = self.lm_head(hidden_states_for_lm.view(-1, hidden_size))
         logits = logits_flat.view(*hidden_states_for_lm.shape[:-1], self.local_vocab_size)
-        if self.lmhead_tp_size > 1 and dist.is_initialized():
-            lmhead_tp_group = self.hccl_comm_dict.get("lmhead_tp_group")
-            if self.attn_dp_size == 1:
-                gathered_logits = logits.new_empty(
-                    self.lmhead_tp_size * logits.shape[0],
-                    logits.shape[1],
-                    logits.shape[2],
-                )
-                dist.all_gather_into_tensor(gathered_logits, logits.contiguous(), group=lmhead_tp_group)
-            else:
-                gathered_logits = logits.new_empty(logits.numel()).view(-1)
-                dist.all_to_all_single(gathered_logits, logits.contiguous().view(-1), group=lmhead_tp_group)
-                gathered_logits = gathered_logits.view_as(logits)
-
-            gathered_logits = gathered_logits.reshape(
-                self.lmhead_tp_size, local_bs * q_len, logits.shape[1], -1
-            ).permute(1, 2, 0, 3)
-            logits = gathered_logits.reshape(local_bs * q_len, logits.shape[1], -1)[..., : self.config.vocab_size]
+        logits = gather_lmhead_logits_for_attn_dp(
+            logits,
+            local_batch=local_bs,
+            q_len=q_len,
+            vocab_size=self.config.vocab_size,
+            attn_dp_size=self.attn_dp_size,
+            lmhead_tp_size=self.lmhead_tp_size,
+            lmhead_tp_group=self.hccl_comm_dict.get("lmhead_tp_group"),
+        )
         logits = logits.reshape(local_bs, q_len, -1).float()
         return logits, past_key_values, mtp_hidden
 
