@@ -15,27 +15,27 @@ def get_aux_mask():
             [
                 torch.cat(
                     [
-                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).triu().bool(),
-                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).tril().bool(),
-                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE, device="npu", dtype=torch.bool),
+                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE, device="npu", dtype=torch.bool).triu(),
+                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE, device="npu", dtype=torch.bool),
+                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE, device="npu", dtype=torch.bool).tril(),
+                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE, device="npu", dtype=torch.bool),
                     ],
                     dim=1,
                 ),
                 torch.cat(
                     [
-                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
-                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE).bool(),
+                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE, device="npu", dtype=torch.bool),
+                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE, device="npu", dtype=torch.bool),
+                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE, device="npu", dtype=torch.bool),
+                        torch.ones(AUX_MASK_SIZE, AUX_MASK_SIZE, device="npu", dtype=torch.bool),
+                        torch.zeros(AUX_MASK_SIZE, AUX_MASK_SIZE, device="npu", dtype=torch.bool),
                     ],
                     dim=1,
                 ),
             ],
             dim=0,
-        ).npu()
+        )
     return AUX_MASK_SIZE, AUX_MASK
 
 
