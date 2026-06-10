@@ -20,15 +20,15 @@ import torch.multiprocessing as mp
 from mojo_opset import MojoAllGatherQuantGemm
 from mojo_opset import MojoQuantGemmReduceScatter
 from mojo_opset.tests.utils import bypass_not_implemented
-from mojo_opset.utils.platform import get_dist_backend, get_platform
+from mojo_opset.utils.platform import get_dist_backend, get_platform, get_torch_device
 
 torch.manual_seed(42)
 
 dtypes = [torch.bfloat16]
 
 _PLATFORM = get_platform()
-COMM_BACKEND = get_dist_backend()
-DEVICE = _PLATFORM if _PLATFORM in ("npu", "mlu") else "cpu"
+DEVICE = get_torch_device()
+COMM_BACKEND = "nccl" if DEVICE == "cuda" else get_dist_backend()
 
 if _PLATFORM == "npu":
     _NPU_COUNT = torch.npu.device_count()
@@ -78,14 +78,33 @@ def _init_pg(rank, world_size, master_port):
     os.environ.pop("ASCEND_RT_VISIBLE_DEVICES", None)
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = str(master_port)
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["LOCAL_RANK"] = str(rank)
     if _PLATFORM == "npu":
         torch.npu.set_device(_TEST_NPU_IDS[rank])
-    dist.init_process_group(
-        backend=COMM_BACKEND,
-        init_method="env://",
-        rank=rank,
-        world_size=world_size,
-    )
+        dist.init_process_group(
+            backend=COMM_BACKEND,
+            init_method="env://",
+            rank=rank,
+            world_size=world_size,
+        )
+    elif DEVICE == "cuda":
+        torch.cuda.set_device(rank)
+        dist.init_process_group(
+            backend=COMM_BACKEND,
+            init_method="env://",
+            rank=rank,
+            world_size=world_size,
+            device_id=torch.device("cuda", rank),
+        )
+    else:
+        dist.init_process_group(
+            backend=COMM_BACKEND,
+            init_method="env://",
+            rank=rank,
+            world_size=world_size,
+        )
 
 
 def _destroy_pg():
@@ -128,10 +147,12 @@ def _build_pair_ag(in_features, out_features, trans_weight, weight_int8, weight_
         gather_dim=0,
     )
     op_ref = op_ref.to(DEVICE) if DEVICE != "cpu" else op_ref
-    op.weight.copy_(_to_dev(weight_int8))
-    op.weight_scale.copy_(_to_dev(weight_scale))
-    op_ref.weight.copy_(_to_dev(weight_int8))
-    op_ref.weight_scale.copy_(_to_dev(weight_scale))
+    state = {
+        "weight": _to_dev(weight_int8),
+        "weight_scale": _to_dev(weight_scale),
+    }
+    op.load_state_dict(state)
+    op_ref.load_state_dict(state)
     return op, op_ref
 
 
@@ -152,11 +173,56 @@ def _build_pair_rs(in_features, out_features, trans_weight, weight_int8, weight_
         scatter_dim=0,
     )
     op_ref = op_ref.to(DEVICE) if DEVICE != "cpu" else op_ref
-    op.weight.copy_(_to_dev(weight_int8))
-    op.weight_scale.copy_(_to_dev(weight_scale))
-    op_ref.weight.copy_(_to_dev(weight_int8))
-    op_ref.weight_scale.copy_(_to_dev(weight_scale))
+    state = {
+        "weight": _to_dev(weight_int8),
+        "weight_scale": _to_dev(weight_scale),
+    }
+    op.load_state_dict(state)
+    op_ref.load_state_dict(state)
     return op, op_ref
+
+
+# def _ixformer_quant_rs_reference(op, x_full, scale_full, group):
+#     from ixformer import functions as ixf_f
+
+#     partial = ixf_f.w8a8(
+#         x_full.contiguous(),
+#         op.weight.contiguous(),
+#         scale_full.reshape(-1).contiguous(),
+#         op.weight_scale.to(torch.float32).contiguous(),
+#         format="NN",
+#         out_dtype=op.output_dtype,
+#     )
+#     world_size = dist.get_world_size(group=group)
+#     out = torch.empty(
+#         (partial.shape[0] // world_size, partial.shape[1]),
+#         dtype=partial.dtype,
+#         device=partial.device,
+#     )
+#     dist.reduce_scatter_tensor(out, partial.contiguous(), group=group)
+#     return out
+
+
+def _init_ixformer_quant_rs_symm(op):
+    from ixformer.distributed import symmetric_memory as symm
+
+    group_name = op._symm_group_name
+    if not symm.is_initialized(group_name=group_name):
+        symm.init_process_group(group=dist.group.WORLD, group_name=group_name)
+
+
+def _destroy_ixformer_quant_rs_symm(op):
+    from ixformer.distributed import symmetric_memory as symm
+
+    if hasattr(op, "_workspace"):
+        op._workspace = None
+        op._workspace_bytes = 0
+        op._workspace_device = None
+        torch.cuda.synchronize()
+
+    group_name = op._symm_group_name
+    if symm.is_initialized(group_name=group_name):
+        symm.destroy_process_group(group_name=group_name)
 
 
 # ===========================================================================
@@ -262,11 +328,16 @@ def _worker_rs(rank, world_size, port, shape, trans_weight, non_contig):
             )
         scale_full = _to_dev(torch.rand(seq_full, dtype=torch.float32) + 0.1)
 
+        if _PLATFORM == "ilu":
+            _init_ixformer_quant_rs_symm(op)
+            
         op.forward_diff_with(
             op_ref, x_full, scale_full,
-            atol=(1, 2e-3), rtol=(0, 2e-3),
-        )
+            atol=1, rtol=2e-3,
+            )
     finally:
+        if _PLATFORM == "ilu" and "op" in locals():
+            _destroy_ixformer_quant_rs_symm(op)
         _destroy_pg()
 
 
@@ -278,6 +349,8 @@ def test_quant_gemm_reduce_scatter_comm(master_port, shape, trans_weight):
     seq_full, _, _ = shape
     if seq_full % WORLD_SIZE != 0:
         pytest.skip(f"seq_full={seq_full} not divisible by world_size={WORLD_SIZE}")
+    if _PLATFORM == "ilu" and (seq_full // WORLD_SIZE) % 256 != 0:
+        pytest.skip("Ixformer quant_matmul_reducescatter requires M / world_size divisible by BM=256.")
 
     mp.spawn(
         _worker_rs,
@@ -294,6 +367,8 @@ def test_quant_gemm_reduce_scatter_comm(master_port, shape, trans_weight):
 @bypass_not_implemented
 def test_quant_gemm_reduce_scatter_comm_non_contiguous(master_port, shape):
     _skip_if_no_specific_backend(MojoQuantGemmReduceScatter)
+    if _PLATFORM == "ilu":
+        pytest.skip("Ixformer quant_matmul_reducescatter requires contiguous input.")
     seq_full, _, _ = shape
     if seq_full % WORLD_SIZE != 0:
         pytest.skip(f"seq_full={seq_full} not divisible by world_size={WORLD_SIZE}")
@@ -340,7 +415,7 @@ def test_all_gather_quant_gemm_no_dist(in_features, out_features, trans_weight):
 
     x = torch.randint(-128, 127, (seq, in_features), dtype=torch.int8)
     scale = torch.rand(seq, dtype=torch.float32) + 0.1
-    op.forward_diff_with(op_ref, x, scale, atol=(1, 2e-3), rtol=(0, 2e-3))
+    op.forward_diff_with(op_ref, x, scale, atol=1, rtol=2e-3)
 
 
 @pytest.mark.parametrize(
@@ -362,15 +437,19 @@ def test_quant_gemm_reduce_scatter_no_dist(in_features, out_features, trans_weig
         in_features=in_features, out_features=out_features,
         trans_weight=trans_weight, process_group=None, scatter_dim=0,
     )
+    op = op.to(DEVICE) if DEVICE != "cpu" else op
     op_ref = MojoQuantGemmReduceScatter._registry.get("torch")(
         in_features=in_features, out_features=out_features,
         trans_weight=trans_weight, process_group=None, scatter_dim=0,
     )
-    op.weight.copy_(weight_int8)
-    op.weight_scale.copy_(weight_scale)
-    op_ref.weight.copy_(weight_int8)
-    op_ref.weight_scale.copy_(weight_scale)
+    op_ref = op_ref.to(DEVICE) if DEVICE != "cpu" else op_ref
+    state = {
+        "weight": _to_dev(weight_int8),
+        "weight_scale": _to_dev(weight_scale),
+    }
+    op.load_state_dict(state)
+    op_ref.load_state_dict(state)
 
-    x = torch.randint(-128, 127, (seq, in_features), dtype=torch.int8)
-    scale = torch.rand(seq, dtype=torch.float32) + 0.1
-    op.forward_diff_with(op_ref, x, scale, atol=(1, 2e-3), rtol=(0, 2e-3))
+    x = _to_dev(torch.randint(-128, 127, (seq, in_features), dtype=torch.int8))
+    scale = _to_dev(torch.rand(seq, dtype=torch.float32) + 0.1)
+    op.forward_diff_with(op_ref, x, scale, atol=1, rtol=2e-3)
