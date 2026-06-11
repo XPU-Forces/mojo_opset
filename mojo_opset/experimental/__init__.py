@@ -20,6 +20,8 @@ from .operators.attention import MojoPrefillMLA
 from .operators.attention import MojoPrefillNSA
 from .operators.attention_gate import MojoFusedAttnOutputGate
 from .operators.attention import MojoPagedPrefillSageGQA
+from .operators.deepep import MojoDeepEPCombine
+from .operators.deepep import MojoDeepEPDispatch
 from .operators.gemm import MojoQuantBatchGemmReduceSum
 from .operators.indexer import MojoIndexer
 from .operators.indexer import MojoLightningIndexer
@@ -61,4 +63,6 @@ __all__ = [
     "MojoGridRoPE",
     "MojoStoreLowrank",
     "MojoIndexer",
+    "MojoDeepEPDispatch",
+    "MojoDeepEPCombine",
 ]

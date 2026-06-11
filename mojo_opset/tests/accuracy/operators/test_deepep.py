@@ -9,8 +9,8 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from mojo_opset import MojoDeepEPCombine
-from mojo_opset import MojoDeepEPDispatch
+from mojo_opset.experimental import MojoDeepEPCombine
+from mojo_opset.experimental import MojoDeepEPDispatch
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.acc import check_tol_diff

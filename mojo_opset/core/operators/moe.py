@@ -1,6 +1,7 @@
 from typing import Optional, Tuple, Union
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -80,6 +81,7 @@ class MojoQuantMoE(MojoOperator):
         up_weight_dtype: Union[torch.dtype, str] = torch.int8,
         down_quant_group_size: int = -1,
         down_weight_dtype: Union[torch.dtype, str] = torch.int8,
+        process_group: Optional[dist.ProcessGroup] = None,
         **kwargs,
     ):
         super().__init__()
@@ -105,6 +107,7 @@ class MojoQuantMoE(MojoOperator):
         self.up_weight_dtype = up_weight_dtype
         self.down_quant_group_size = down_quant_group_size
         self.down_weight_dtype = down_weight_dtype
+        self.process_group = process_group
 
         self.gating = MojoMoEGating._registry.get(self._backend)(
             hidden_size=self.hidden_size,
