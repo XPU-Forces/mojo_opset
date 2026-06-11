@@ -11,6 +11,18 @@ from ._utils import run_kernel
 class UCStaticQuant(MojoStaticQuant):
     supported_platforms_list = ["npu"]
 
+    # P1-G4: small-shape gate (best-practices §C.1 / §I.4).
+    # Below the UC launch-overhead floor (~80-95 us per kernel call),
+    # the torch native fallback is faster and avoids the
+    # OOB-write-on-small-M risk of the X=16 kernel.
+    _UC_MIN_NUMEL = 64 * 1024
+
+    # The v2 kernel writes a full X=16-row block per program; M must be
+    # a multiple of this on entry.  Common transformer shapes
+    # (M = batch * seq) are; ragged shapes (e.g. (33, 4096)) fall back
+    # to the torch parent path.  Same value as UCDynamicQuant.
+    _UC_ROW_TILE = 16
+
     def forward(self, input: torch.Tensor):
         if self.quant_dtype != torch.int8:
             raise NotImplementedError(f"UCStaticQuant only supports torch.int8, got {self.quant_dtype}.")
@@ -27,10 +39,25 @@ class UCStaticQuant(MojoStaticQuant):
         if input.numel() == 0:
             return torch.empty_like(input, dtype=self.quant_dtype), self.scale
 
+        # P1-G4 small-shape fallback.
+        if input.numel() < self._UC_MIN_NUMEL:
+            return super().forward(input)
+
         kernel_input = input.contiguous()
         scale = self.scale.to(device=kernel_input.device, dtype=torch.float32).contiguous()
         cols = scale.numel()
         rows = kernel_input.numel() // cols
+
+        # P1-G4 ragged-M fallback.  We deliberately do not pad with
+        # torch.zeros + copy_ here: experimentally on torch_npu 2.x the
+        # freshly-allocated padding DMA does not retire before the
+        # kernel reads its DRAM ptr on the very next dispatch, producing
+        # one corrupted result per process.  See sibling
+        # docs/project-ops/perf-debug/op-MojoDynamicQuant-2026-06-11.md
+        # § 5 row "ragged-M padding".
+        if rows % self._UC_ROW_TILE != 0:
+            return super().forward(input)
+
         kernel_input_2d = kernel_input.reshape(rows, cols)
         scale_1d = scale.reshape(cols)
         kernel_output = torch.empty_like(kernel_input_2d, dtype=self.quant_dtype)
