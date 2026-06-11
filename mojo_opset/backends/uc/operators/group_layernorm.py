@@ -29,6 +29,15 @@ from ._utils import _uc_kernels
 
 _SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
 
+# Mirror the kernel inner tile width ``Y = 128`` defined in
+# ``uc-kernel/kernels/mojo_group_layernorm.py`` (P1-G1 rewrite, 2026-06-11).
+# The kernel always copies a full ``X x Y`` tile per inner ``tile_x``
+# iteration, so feeding it ``norm_size < Y`` would OOB-read the trailing
+# dim.  Per project rule 'wheel 没实现的就直接给报错' (2026-06-08), we
+# raise NotImplementedError instead of silently re-routing such inputs
+# through torch.
+_MIN_NORM_SIZE = 128
+
 
 def _can_use_kernel(
     op: MojoGroupLayerNorm,
@@ -39,6 +48,8 @@ def _can_use_kernel(
     if len(input_groups) != op.num_groups:
         return False
     if op.num_groups <= 0 or op.norm_size <= 0:
+        return False
+    if op.norm_size < _MIN_NORM_SIZE:
         return False
     if not op.elementwise_affine or op.weight is None or op.bias is None:
         return False
