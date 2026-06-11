@@ -355,15 +355,28 @@ class MojoMoEDispatch(MojoOperator):
 
         Input:
         - hidden_states (torch.Tensor): Input tensor.
-        - top_k_gates (torch.Tensor): Top-k gating weights.
-        - top_k_indices (torch.Tensor): Top-k expert indices.
+        - top_k_gates (torch.Tensor): Top-k gating weights, must be float32.
+        - top_k_indices (torch.Tensor): Top-k expert indices, must be int32.
 
         Output:
         - sorted_hidden_states: Sorted inputs for experts.
         - tokens_per_expert: Count of tokens for each expert.
-        - sorted_gates: Packed gating weights.
-        - token_indices: Indices for packing/unpacking.
+        - sorted_gates: Packed gating weights, float32.
+        - token_indices: Indices for packing/unpacking, int32.
+
+        Note: ordering of tokens *within* one expert's bucket is not part of the
+        contract — backends (e.g. ixformer's fused kernel) are free to permute
+        them. Downstream consumers must treat each bucket as an unordered set
+        and never rely on `token_indices[start:end]` being sorted by token id
+        or by top-k slot. Tests should verify the bucket as a set, not a
+        sequence.
         """
+        assert top_k_gates.dtype == torch.float32, (
+            f"MojoMoEDispatch: top_k_gates must be float32, got {top_k_gates.dtype}."
+        )
+        assert top_k_indices.dtype == torch.int32, (
+            f"MojoMoEDispatch: top_k_indices must be int32, got {top_k_indices.dtype}."
+        )
         batch_token_indices = (
             torch.arange(0, hidden_states.shape[0], device=hidden_states.device, dtype=top_k_indices.dtype)
             .unsqueeze(1)
@@ -373,6 +386,9 @@ class MojoMoEDispatch(MojoOperator):
         # batch_token_indices: [BS * top_k]
         flat_top_k_gates = top_k_gates.reshape(-1, 1)
         flat_top_k_indices = top_k_indices.flatten()
+        # Default torch.sort is non-stable; bucket-internal ordering is
+        # intentionally undefined here so backends can pick whatever order
+        # their fused kernel produces.
         sorted_experts, expert_sort_indices = flat_top_k_indices.sort()
 
         token_indices = batch_token_indices[expert_sort_indices]
