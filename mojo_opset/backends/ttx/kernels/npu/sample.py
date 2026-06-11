@@ -4,7 +4,7 @@ import math
 import importlib
 import triton.language as tl
 import triton.language.core as core
-from triton.runtime.libentry import libentry
+from .utils import libentry
 from triton.language.standard import _log2, zeros_like
 
 # TODO: Streaming verson implement still have some issues, need to be fixed and re-enabled.

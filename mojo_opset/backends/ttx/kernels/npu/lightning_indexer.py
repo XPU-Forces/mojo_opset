@@ -1,7 +1,7 @@
 import torch
 import triton
 import triton.language as tl
-from triton.runtime.libentry import libentry
+from .utils import libentry
 
 from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 

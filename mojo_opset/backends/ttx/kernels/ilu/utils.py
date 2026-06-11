@@ -61,7 +61,7 @@ def norm_fwd_heuristics(args):
     """BLOCK_SIZE_M heuristic for row tiling; shared by LayerNorm and RMSNorm kernels."""
     hidden_dim = args.get("n_cols", args.get("N_COLS"))
     if hidden_dim is None:
-        raise KeyError("n_cols")
+        raise KeyError("expected 'n_cols' or 'N_COLS' in kernel args")
     if hidden_dim <= COL_BLOCKING_THRESHOLD:
         if hidden_dim in TOKEN_BLOCK_SIZE_TABLE:
             return TOKEN_BLOCK_SIZE_TABLE[hidden_dim]
@@ -74,7 +74,23 @@ def norm_fwd_heuristics(args):
         return 4
 
 
-layer_norm_fwd_heuristics = norm_fwd_heuristics
+def layer_norm_fwd_heuristics(args):
+    """BLOCK_SIZE_M for the LayerNorm fwd kernel.
+
+    On the ILU backend the single-tile regime (hidden <= COL_BLOCKING_THRESHOLD,
+    where the whole row fits in one BLOCK_SIZE_N tile) parallelizes best with one
+    row per program: an empirical sweep shows BLOCK_SIZE_M=1 beats the old
+    TOKEN_BLOCK_SIZE_TABLE values (32/16/8/4) by 2-4x across hidden in
+    {128,256,512,1024,2048}. Multi-tile rows keep 4.
+    """
+    hidden_dim = args.get("n_cols", args.get("N_COLS"))
+    if hidden_dim is None:
+        raise KeyError("expected 'n_cols' or 'N_COLS' in kernel args")
+    if hidden_dim <= COL_BLOCKING_THRESHOLD:
+        return 1
+    return 4
+
+
 rms_norm_fwd_heuristics = norm_fwd_heuristics
 
 

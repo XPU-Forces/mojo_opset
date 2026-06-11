@@ -4,6 +4,8 @@ from .config import MojoDynamicConfig
 from .config import MojoModelConfig
 from .config import MojoParallelConfig
 from .config import MojoRunTimeConfig
+from .comm_context import MojoComputeCommContext
+from .comm_context import MojoSymmetricMemoryManager
 from .generation import DumpHook
 from .generation import GeneratorHook
 from .generation import MojoGenerator
@@ -20,6 +22,7 @@ __all__ = [
     "DumpHook",
     "GeneratorHook",
     "MojoConfig",
+    "MojoComputeCommContext",
     "MojoDynamicConfig",
     "MojoGenerator",
     "MojoModelConfig",
@@ -27,6 +30,7 @@ __all__ = [
     "MojoRunTimeConfig",
     "MojoSampler",
     "MojoSession",
+    "MojoSymmetricMemoryManager",
     "PerfHook",
     "PerfMojoGenerator",
     "dp_allreduce",
