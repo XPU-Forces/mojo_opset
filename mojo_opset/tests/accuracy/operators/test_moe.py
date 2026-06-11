@@ -190,6 +190,13 @@ def test_moe_dispatch(num_experts, top_k, hidden_size, num_tokens, dtype):
     torch.testing.assert_close(tokens_per_expert.to(device), ref_tokens_per_expert.to(device), atol=0, rtol=0)
     torch.testing.assert_close(sorted_hidden_states, hidden_states[token_indices.to(torch.int64)], atol=0, rtol=0)
 
+    # Bucket-internal order is intentionally not part of MojoMoEDispatch's contract:
+    # different backends (torch's non-stable sort, ixformer's fused kernel) are
+    # free to permute tokens routed to the same expert. So we do NOT compare
+    # sorted_hidden_states / sorted_gates / token_indices element-wise against
+    # the ref. Instead, for each expert bucket, treat it as an unordered set and
+    # verify that every entry routes to this expert and its gate matches the
+    # corresponding top-k slot.
     expert_offsets = torch.cumsum(tokens_per_expert.to(torch.int64), dim=0)
     expert_starts = torch.cat((expert_offsets.new_zeros(1), expert_offsets[:-1]))
     for expert_idx, (start, end) in enumerate(zip(expert_starts.tolist(), expert_offsets.tolist())):
