@@ -333,15 +333,16 @@ class MojoMoEGating(MojoOperator):
         assert self.gate_weight.dtype == torch.float32
         gate_logits = torch.matmul(hidden_states.float(), self.gate_weight)
         gate_logits = torch.softmax(gate_logits, dim=-1)
-        if forced_expert_ids is None:
-            top_k_logits, top_k_indices = torch.topk(gate_logits, self.top_k, dim=-1)
-        else:
+        top_k_logits, top_k_indices = torch.topk(gate_logits, self.top_k, dim=-1)
+        if forced_expert_ids is not None:
             expected_shape = (hidden_states.shape[0], self.top_k)
             if tuple(forced_expert_ids.shape) != expected_shape:
                 raise ValueError(
                     f"forced_expert_ids must have shape {expected_shape}, got {tuple(forced_expert_ids.shape)}."
                 )
-            top_k_indices = forced_expert_ids.to(device=hidden_states.device, dtype=torch.int64)
+            forced_expert_ids = forced_expert_ids.to(device=hidden_states.device, dtype=torch.int64)
+            forced_expert_mask = forced_expert_ids >= 0
+            top_k_indices = torch.where(forced_expert_mask, forced_expert_ids, top_k_indices)
             top_k_logits = torch.gather(gate_logits, dim=-1, index=top_k_indices)
         top_k_gates = top_k_logits / torch.sum(top_k_logits, dim=-1, keepdim=True)
         return top_k_indices.to(torch.int32), top_k_gates
