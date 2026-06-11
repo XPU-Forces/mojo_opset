@@ -541,7 +541,25 @@ def _rope_store_kv_fast_path_layout(
 
 
 class UCRoPEStoreKV(MojoRoPEStoreKV):
-    """UC fast-path: fused Q/K RoPE + paged KV SCATTER (single kernel)."""
+    """UC fast-path: fused Q/K RoPE + paged KV SCATTER (single kernel).
+
+    🚨 DISABLED 2026-06-11 by master batch sync gate after worker
+    480c5de9-33b P1-G3 NormRoPE family audit found that the kernel
+    ``mojo_rope_store_kv_d128_r128_costoken_bf16`` HANGS the GPU at
+    runtime on every shape (>10s, must be killed). Confirmed cluster
+    with ``mojo_norm_rope_store_kv`` and ``halfcos_hp1`` (existing
+    P3-06-B §3.1b cannot-opt) — ALL three are CCE codegen SQ-pipe sync
+    deadlock when prim_func has BOTH multi-Parallel compute AND
+    indirect-write SCATTER. Pure-compute siblings (``mojo_norm_rope``
+    full + halfcos) ✓; pure-SCATTER siblings (store_paged_kv_cache /
+    store_lowrank) ✓; only the fusion hangs.
+
+    Per project rule 'wheel 没实现的就直接给报错' (2026-06-08), this
+    wrapper now raises NotImplementedError instead of dispatching the
+    hanging kernel. Production traffic must use TTX / torch_npu /
+    torch_native backend until the compiler P0 (CCE compute+scatter
+    fusion barrier) lands. Tracked: P3-06-B §3.1b cannot-opt → P0.
+    """
 
     supported_platforms_list = ["npu"]
 
@@ -561,6 +579,20 @@ class UCRoPEStoreKV(MojoRoPEStoreKV):
         *,
         chunk_metadata: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # 🚨 GLOBAL HANG GUARD (master 2026-06-11 batch sync gate)
+        # mojo_rope_store_kv_d128_r128_costoken_bf16 hangs GPU at runtime
+        # on all shapes — production traffic that hits this path would
+        # require kill -9. Disable dispatch entirely until compiler P0
+        # (CCE compute+scatter fusion barrier) lands. See class docstring
+        # for cluster context (3 affected kernels: rope_store_kv,
+        # norm_rope_store_kv, halfcos_hp1).
+        raise NotImplementedError(
+            "UC backend mojo_rope_store_kv kernel HANGS GPU at runtime "
+            "(CCE codegen SQ-pipe sync deadlock on compute+scatter fusion). "
+            "Disabled by master 2026-06-11; use TTX / torch_npu / torch_native "
+            "until compiler P0 (P3-06-B §3.1b → P0) lands. "
+            "Worker audit: docs/project-ops/perf-debug/op-MojoNormRoPE-2026-06-11.md."
+        )
         # ---- 0. Cheap dtype/shape guards ------------------------------
         if head_first:
             raise NotImplementedError(
@@ -922,7 +954,21 @@ class UCNormRoPE(MojoNormRoPE):
 
 
 class UCNormRoPEStoreKV(MojoNormRoPEStoreKV):
-    """UC fast-path: full fusion of per-head RMSNorm + RoPE + paged KV SCATTER."""
+    """UC fast-path: full fusion of per-head RMSNorm + RoPE + paged KV SCATTER.
+
+    🚨 DISABLED 2026-06-11 by master batch sync gate after worker
+    480c5de9-33b P1-G3 NormRoPE family audit found that the kernel
+    ``mojo_norm_rope_store_kv_d128_r128_costoken_bf16`` HANGS the GPU
+    at runtime on every shape. Same CCE compute+scatter fusion deadlock
+    cluster as ``mojo_rope_store_kv`` and ``halfcos_hp1``. See
+    UCRoPEStoreKV docstring for cluster context.
+
+    Worker also tested a v2 rewrite (separate Q/K fragments + XQ=32 +
+    P-03 bulk cast) — built clean but **still hangs**, confirming the
+    issue is in CCE codegen for compute+scatter fusion, not in our
+    schedule. Production traffic must use TTX / torch_npu / torch_native
+    until compiler P0 (P3-06-B §3.1b → P0) lands.
+    """
 
     supported_platforms_list = ["npu"]
 
@@ -942,6 +988,17 @@ class UCNormRoPEStoreKV(MojoNormRoPEStoreKV):
         *,
         chunk_metadata: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # 🚨 GLOBAL HANG GUARD (master 2026-06-11 batch sync gate)
+        # mojo_norm_rope_store_kv_d128_r128_costoken_bf16 hangs GPU at runtime
+        # on all shapes. Disable dispatch entirely until compiler P0
+        # (CCE compute+scatter fusion barrier) lands.
+        raise NotImplementedError(
+            "UC backend mojo_norm_rope_store_kv kernel HANGS GPU at runtime "
+            "(CCE codegen SQ-pipe sync deadlock on compute+scatter fusion). "
+            "Disabled by master 2026-06-11; use TTX / torch_npu / torch_native "
+            "until compiler P0 (P3-06-B §3.1b → P0) lands. "
+            "Worker audit: docs/project-ops/perf-debug/op-MojoNormRoPE-2026-06-11.md."
+        )
         if head_first:
             raise NotImplementedError(
                 "UC backend cannot service this call (shape/dtype/contract not "
