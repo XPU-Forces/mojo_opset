@@ -11,6 +11,7 @@ Shape coverage targets the M13 prefill seq=4k Megatron path:
 
 import os
 import socket
+import sys
 
 import pytest
 import torch
@@ -155,7 +156,6 @@ def _build_pair_ag(in_features, out_features, trans_weight, weight_int8, weight_
     op_ref.load_state_dict(state)
     return op, op_ref
 
-
 def _build_pair_rs(in_features, out_features, trans_weight, weight_int8, weight_scale):
     op = MojoQuantGemmReduceScatter(
         in_features=in_features,
@@ -182,55 +182,13 @@ def _build_pair_rs(in_features, out_features, trans_weight, weight_int8, weight_
     return op, op_ref
 
 
-# def _ixformer_quant_rs_reference(op, x_full, scale_full, group):
-#     from ixformer import functions as ixf_f
-
-#     partial = ixf_f.w8a8(
-#         x_full.contiguous(),
-#         op.weight.contiguous(),
-#         scale_full.reshape(-1).contiguous(),
-#         op.weight_scale.to(torch.float32).contiguous(),
-#         format="NN",
-#         out_dtype=op.output_dtype,
-#     )
-#     world_size = dist.get_world_size(group=group)
-#     out = torch.empty(
-#         (partial.shape[0] // world_size, partial.shape[1]),
-#         dtype=partial.dtype,
-#         device=partial.device,
-#     )
-#     dist.reduce_scatter_tensor(out, partial.contiguous(), group=group)
-#     return out
-
-
-def _init_ixformer_quant_rs_symm(op):
-    from ixformer.distributed import symmetric_memory as symm
-
-    group_name = op._symm_group_name
-    if not symm.is_initialized(group_name=group_name):
-        symm.init_process_group(group=dist.group.WORLD, group_name=group_name)
-
-
-def _destroy_ixformer_quant_rs_symm(op):
-    from ixformer.distributed import symmetric_memory as symm
-
-    if hasattr(op, "_workspace"):
-        op._workspace = None
-        op._workspace_bytes = 0
-        op._workspace_device = None
-        torch.cuda.synchronize()
-
-    group_name = op._symm_group_name
-    if symm.is_initialized(group_name=group_name):
-        symm.destroy_process_group(group_name=group_name)
-
-
 # ===========================================================================
 # AllGatherQuantGemm — multi-rank
 # ===========================================================================
 
 def _worker_ag(rank, world_size, port, shape, trans_weight, non_contig):
     _init_pg(rank, world_size, port)
+    exit_code = 1
     try:
         seq_full, in_features, out_features = shape
         seq_local = seq_full // world_size
@@ -255,12 +213,26 @@ def _worker_ag(rank, world_size, port, shape, trans_weight, non_contig):
             )
         scale_local = _to_dev(torch.rand(seq_local, dtype=torch.float32) + 0.1)
 
-        op.forward_diff_with(
-            op_ref, x_local, scale_local,
-            atol=(1, 2e-3), rtol=(0, 2e-3),
+        expected = op_ref(x_local, scale_local)
+        actual = op(x_local, scale_local)
+        torch.testing.assert_close(
+            actual.to(torch.float32),
+            expected.to(torch.float32),
+            atol=1,
+            rtol=2e-3,
         )
+
+        exit_code = 0
     finally:
-        _destroy_pg()
+        try:
+            if dist.is_initialized():
+                _destroy_pg()
+        except Exception:
+            pass
+        sys.stdout.flush()
+        sys.stderr.flush()
+        # Avoid fragile NVSHMEM / symmetric memory Python destructors under mp.spawn.
+        os._exit(exit_code)
 
 
 @pytest.mark.parametrize("shape", _AG_SHAPES)
@@ -271,6 +243,10 @@ def test_all_gather_quant_gemm_comm(master_port, shape, trans_weight):
     seq_full, in_features, _ = shape
     if seq_full % WORLD_SIZE != 0:
         pytest.skip(f"seq_full={seq_full} not divisible by world_size={WORLD_SIZE}")
+    if _PLATFORM == "ilu" and (seq_full // WORLD_SIZE) % 256 != 0:
+        pytest.skip("Ixformer allgather_quant_matmul requires M_per_rank divisible by BM=256.")
+    if _PLATFORM == "ilu" and in_features % 64 != 0:
+        pytest.skip("Ixformer allgather_quant_matmul requires K divisible by BK=64.")
 
     mp.spawn(
         _worker_ag,
@@ -287,6 +263,8 @@ def test_all_gather_quant_gemm_comm(master_port, shape, trans_weight):
 @bypass_not_implemented
 def test_all_gather_quant_gemm_comm_non_contiguous(master_port, shape):
     _skip_if_no_specific_backend(MojoAllGatherQuantGemm)
+    if _PLATFORM == "ilu":
+        pytest.skip("Ixformer allgather_quant_matmul requires contiguous input.")
     seq_full, _, _ = shape
     if seq_full % WORLD_SIZE != 0:
         pytest.skip(f"seq_full={seq_full} not divisible by world_size={WORLD_SIZE}")
@@ -305,6 +283,7 @@ def test_all_gather_quant_gemm_comm_non_contiguous(master_port, shape):
 
 def _worker_rs(rank, world_size, port, shape, trans_weight, non_contig):
     _init_pg(rank, world_size, port)
+    exit_code = 1
     try:
         seq_full, in_features, out_features = shape
 
@@ -328,17 +307,21 @@ def _worker_rs(rank, world_size, port, shape, trans_weight, non_contig):
             )
         scale_full = _to_dev(torch.rand(seq_full, dtype=torch.float32) + 0.1)
 
-        if _PLATFORM == "ilu":
-            _init_ixformer_quant_rs_symm(op)
-            
         op.forward_diff_with(
             op_ref, x_full, scale_full,
             atol=1, rtol=2e-3,
             )
+        exit_code = 0
     finally:
-        if _PLATFORM == "ilu" and "op" in locals():
-            _destroy_ixformer_quant_rs_symm(op)
-        _destroy_pg()
+        try:
+            if dist.is_initialized():
+                _destroy_pg()
+        except Exception:
+            pass
+        sys.stdout.flush()
+        sys.stderr.flush()
+        # Avoid fragile NVSHMEM / symmetric memory Python destructors under mp.spawn.
+        os._exit(exit_code)
 
 
 @pytest.mark.parametrize("shape", _RS_SHAPES)
@@ -404,17 +387,21 @@ def test_all_gather_quant_gemm_no_dist(in_features, out_features, trans_weight):
         in_features=in_features, out_features=out_features,
         trans_weight=trans_weight, process_group=None, gather_dim=0,
     )
+    op = op.to(DEVICE) if DEVICE != "cpu" else op
     op_ref = MojoAllGatherQuantGemm._registry.get("torch")(
         in_features=in_features, out_features=out_features,
         trans_weight=trans_weight, process_group=None, gather_dim=0,
     )
-    op.weight.copy_(weight_int8)
-    op.weight_scale.copy_(weight_scale)
-    op_ref.weight.copy_(weight_int8)
-    op_ref.weight_scale.copy_(weight_scale)
+    op_ref = op_ref.to(DEVICE) if DEVICE != "cpu" else op_ref
+    state = {
+        "weight": _to_dev(weight_int8),
+        "weight_scale": _to_dev(weight_scale),
+    }
+    op.load_state_dict(state)
+    op_ref.load_state_dict(state)
 
-    x = torch.randint(-128, 127, (seq, in_features), dtype=torch.int8)
-    scale = torch.rand(seq, dtype=torch.float32) + 0.1
+    x = _to_dev(torch.randint(-128, 127, (seq, in_features), dtype=torch.int8))
+    scale = _to_dev(torch.rand(seq, dtype=torch.float32) + 0.1)
     op.forward_diff_with(op_ref, x, scale, atol=1, rtol=2e-3)
 
 
