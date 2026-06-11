@@ -76,7 +76,7 @@ class MojoMoE(MojoOperator):
                 **kwargs,
             )
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, forced_expert_ids: Optional[torch.Tensor] = None):
         # hidden_states: [num_tokens, H]
         # DP input: gather peer ranks' shards so gating/dispatch see the full token set.
         if self.dp_input and self.ep_size > 1:
@@ -87,8 +87,17 @@ class MojoMoE(MojoOperator):
             )
             dist.all_gather_into_tensor(full, hidden_states.contiguous(), group=self.ep_group)
             hidden_states = full
+            if forced_expert_ids is not None:
+                full_forced_expert_ids = torch.empty(
+                    local_tokens * self.ep_size,
+                    *forced_expert_ids.shape[1:],
+                    dtype=forced_expert_ids.dtype,
+                    device=forced_expert_ids.device,
+                )
+                dist.all_gather_into_tensor(full_forced_expert_ids, forced_expert_ids.contiguous(), group=self.ep_group)
+                forced_expert_ids = full_forced_expert_ids
 
-        top_k_indices, top_k_gates = self.gating(hidden_states)
+        top_k_indices, top_k_gates = self.gating(hidden_states, forced_expert_ids=forced_expert_ids)
         # top_k_indices, top_k_gates: [num_tokens, top_k]
         sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = self.dispatch(
             hidden_states, top_k_gates, top_k_indices
@@ -227,7 +236,7 @@ class MojoQuantMoE(MojoOperator):
                 **kwargs,
             )
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, forced_expert_ids: Optional[torch.Tensor] = None):
         # DP input: gather peer ranks' shards so gating/dispatch see the full token set.
         if self.dp_input and self.ep_size > 1:
             local_tokens = hidden_states.shape[0]
@@ -237,8 +246,17 @@ class MojoQuantMoE(MojoOperator):
             )
             dist.all_gather_into_tensor(full, hidden_states.contiguous(), group=self.ep_group)
             hidden_states = full
+            if forced_expert_ids is not None:
+                full_forced_expert_ids = torch.empty(
+                    local_tokens * self.ep_size,
+                    *forced_expert_ids.shape[1:],
+                    dtype=forced_expert_ids.dtype,
+                    device=forced_expert_ids.device,
+                )
+                dist.all_gather_into_tensor(full_forced_expert_ids, forced_expert_ids.contiguous(), group=self.ep_group)
+                forced_expert_ids = full_forced_expert_ids
 
-        top_k_indices, top_k_gates = self.gating(hidden_states)
+        top_k_indices, top_k_gates = self.gating(hidden_states, forced_expert_ids=forced_expert_ids)
         sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = self.dispatch(
             hidden_states,
             top_k_gates,
@@ -299,12 +317,14 @@ class MojoMoEGating(MojoOperator):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        forced_expert_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass for MoE Gating operator.
 
         Input:
         - hidden_states (torch.Tensor): Input tensor of shape [num_tokens, hidden_size].
+        - forced_expert_ids (Optional[torch.Tensor]): Expert ids of shape [num_tokens, top_k].
 
         Output:
         - top_k_indices (torch.Tensor): Output tensor of shape [num_tokens, top_k].
@@ -313,7 +333,16 @@ class MojoMoEGating(MojoOperator):
         assert self.gate_weight.dtype == torch.float32
         gate_logits = torch.matmul(hidden_states.float(), self.gate_weight)
         gate_logits = torch.softmax(gate_logits, dim=-1)
-        top_k_logits, top_k_indices = torch.topk(gate_logits, self.top_k, dim=-1)
+        if forced_expert_ids is None:
+            top_k_logits, top_k_indices = torch.topk(gate_logits, self.top_k, dim=-1)
+        else:
+            expected_shape = (hidden_states.shape[0], self.top_k)
+            if tuple(forced_expert_ids.shape) != expected_shape:
+                raise ValueError(
+                    f"forced_expert_ids must have shape {expected_shape}, got {tuple(forced_expert_ids.shape)}."
+                )
+            top_k_indices = forced_expert_ids.to(device=hidden_states.device, dtype=torch.int64)
+            top_k_logits = torch.gather(gate_logits, dim=-1, index=top_k_indices)
         top_k_gates = top_k_logits / torch.sum(top_k_logits, dim=-1, keepdim=True)
         return top_k_indices.to(torch.int32), top_k_gates
 
