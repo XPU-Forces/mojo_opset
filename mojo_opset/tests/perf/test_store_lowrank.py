@@ -25,8 +25,8 @@ shapes_key_lr = [
         (
             torch.zeros(size=shape0, dtype=torch.bfloat16),
             torch.randn(size=(slot_mapping.shape[0], *shape1), dtype=torch.bfloat16),
-            slot_mapping // 512,
-            slot_mapping % 512,
+            (slot_mapping // 512).to(torch.int32),
+            (slot_mapping % 512).to(torch.int32),
             slot_mapping.shape[0],
         )
         for shape0, shape1 in zip(shapes_label_cache, shapes_key_lr)
