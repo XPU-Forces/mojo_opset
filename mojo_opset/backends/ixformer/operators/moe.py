@@ -1,6 +1,7 @@
 import os
 import torch
 import torch.distributed as dist
+from typing import Optional
 from typing import Union
 
 from mojo_opset.core import MojoMoE
@@ -152,7 +153,11 @@ class IxformerMoE(MojoMoE):
         if hasattr(self, "gdr_buffer_ptr"):
             ixf_f.delete_gdr_buffer(self.gdr_buffer_ptr)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        forced_expert_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
             enable_cuda_graph = True
         else:
@@ -170,6 +175,20 @@ class IxformerMoE(MojoMoE):
             )
             ixfd.all_gather_into_tensor(full, hidden_states.contiguous(), group=self.ep_group, async_op=True)
             hidden_states = full
+            if forced_expert_ids is not None:
+                full_forced_expert_ids = torch.empty(
+                    local_tokens * self.ep_size,
+                    *forced_expert_ids.shape[1:],
+                    dtype=forced_expert_ids.dtype,
+                    device=forced_expert_ids.device,
+                )
+                ixfd.all_gather_into_tensor(
+                    full_forced_expert_ids,
+                    forced_expert_ids.contiguous(),
+                    group=self.ep_group,
+                    async_op=True,
+                )
+                forced_expert_ids = full_forced_expert_ids
 
         # triple_gemm uses 3 bf16 components of the fp32 gate weight to emulate fp32 matmul precision on bf16 HW.
         gate_logits = ixf_f.triple_gemm_bf16_bf16_fp32(
@@ -179,6 +198,20 @@ class IxformerMoE(MojoMoE):
             self.gating.gate_weight_bf16_tn_0,
         )
         top_k_gates, top_k_indices = ixf_f.moe_topk_softmax(gate_logits, self.gating.top_k, renormalize=True)
+        if forced_expert_ids is not None:
+            expected_shape = (hidden_states.shape[0], self.top_k)
+            if tuple(forced_expert_ids.shape) != expected_shape:
+                raise ValueError(
+                    f"forced_expert_ids must have shape {expected_shape}, got {tuple(forced_expert_ids.shape)}."
+                )
+            forced_expert_ids = forced_expert_ids.to(device=hidden_states.device, dtype=torch.int64)
+            top_k_indices = top_k_indices.to(torch.int64)
+            forced_expert_mask = forced_expert_ids >= 0
+            top_k_indices = torch.where(forced_expert_mask, forced_expert_ids, top_k_indices)
+            gate_probs = torch.softmax(gate_logits, dim=-1)
+            top_k_gates = torch.gather(gate_probs, dim=-1, index=top_k_indices)
+            top_k_gates = top_k_gates / torch.sum(top_k_gates, dim=-1, keepdim=True)
+            top_k_indices = top_k_indices.to(torch.int32)
 
         num_tokens, dim = hidden_states.shape
 
@@ -411,7 +444,11 @@ class IxformerQuantMoE(MojoQuantMoE):
         if hasattr(self, "gdr_buffer_ptr2"):
             ixf_f.delete_gdr_buffer(self.gdr_buffer_ptr2)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        forced_expert_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
 
         if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
             enable_cuda_graph = True
@@ -433,6 +470,20 @@ class IxformerQuantMoE(MojoQuantMoE):
             )
             ixfd.all_gather_into_tensor(full, hidden_states.contiguous(), group=self.ep_group, async_op=True)
             hidden_states = full
+            if forced_expert_ids is not None:
+                full_forced_expert_ids = torch.empty(
+                    local_tokens * self.ep_size,
+                    *forced_expert_ids.shape[1:],
+                    dtype=forced_expert_ids.dtype,
+                    device=forced_expert_ids.device,
+                )
+                ixfd.all_gather_into_tensor(
+                    full_forced_expert_ids,
+                    forced_expert_ids.contiguous(),
+                    group=self.ep_group,
+                    async_op=True,
+                )
+                forced_expert_ids = full_forced_expert_ids
 
         # triple_gemm uses 3 bf16 components of the fp32 gate weight to emulate fp32 matmul precision on bf16 HW.
         gate_logits = ixf_f.triple_gemm_bf16_bf16_fp32(
@@ -442,6 +493,20 @@ class IxformerQuantMoE(MojoQuantMoE):
             self.gating.gate_weight_bf16_tn_0,
         )
         top_k_gates, top_k_indices = ixf_f.moe_topk_softmax(gate_logits, self.gating.top_k, renormalize=True)
+        if forced_expert_ids is not None:
+            expected_shape = (hidden_states.shape[0], self.top_k)
+            if tuple(forced_expert_ids.shape) != expected_shape:
+                raise ValueError(
+                    f"forced_expert_ids must have shape {expected_shape}, got {tuple(forced_expert_ids.shape)}."
+                )
+            forced_expert_ids = forced_expert_ids.to(device=hidden_states.device, dtype=torch.int64)
+            top_k_indices = top_k_indices.to(torch.int64)
+            forced_expert_mask = forced_expert_ids >= 0
+            top_k_indices = torch.where(forced_expert_mask, forced_expert_ids, top_k_indices)
+            gate_probs = torch.softmax(gate_logits, dim=-1)
+            top_k_gates = torch.gather(gate_probs, dim=-1, index=top_k_indices)
+            top_k_gates = top_k_gates / torch.sum(top_k_gates, dim=-1, keepdim=True)
+            top_k_indices = top_k_indices.to(torch.int32)
 
         num_tokens, dim = hidden_states.shape
 

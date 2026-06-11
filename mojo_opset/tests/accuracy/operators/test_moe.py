@@ -208,3 +208,36 @@ def test_moe_gating_forced_expert_ids_gathers_requested_routes(dtype):
 
     torch.testing.assert_close(forced_indices, forced_expert_ids.to(torch.int32), atol=0, rtol=0)
     torch.testing.assert_close(forced_gates, expected_gates, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@bypass_not_implemented
+def test_moe_gating_forced_expert_ids_negative_one_keeps_topk_route(dtype):
+    device = get_torch_device()
+    torch.manual_seed(0)
+
+    moe_gating = MojoMoEGating(
+        hidden_size=8,
+        num_experts=4,
+        top_k=2,
+    )
+
+    for p in moe_gating.parameters():
+        nn.init.normal_(p, std=0.02)
+
+    moe_gating = moe_gating.to(device)
+    assert moe_gating.gate_weight.dtype == torch.float32
+
+    x = torch.rand(3, 8, dtype=dtype, device=device)
+    top_k_indices, _ = moe_gating(x)
+    forced_expert_ids = torch.tensor([[0, -1], [-1, 3], [2, -1]], dtype=torch.int64, device=device)
+    forced_indices, forced_gates = moe_gating(x, forced_expert_ids=forced_expert_ids)
+
+    forced_expert_mask = forced_expert_ids >= 0
+    expected_indices = torch.where(forced_expert_mask, forced_expert_ids, top_k_indices.to(torch.int64))
+    gate_probs = torch.softmax(torch.matmul(x.float(), moe_gating.gate_weight), dim=-1)
+    expected_gates = torch.gather(gate_probs, dim=-1, index=expected_indices)
+    expected_gates = expected_gates / torch.sum(expected_gates, dim=-1, keepdim=True)
+
+    torch.testing.assert_close(forced_indices, expected_indices.to(torch.int32), atol=0, rtol=0)
+    torch.testing.assert_close(forced_gates, expected_gates, atol=1e-5, rtol=1e-5)
