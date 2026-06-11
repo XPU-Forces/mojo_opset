@@ -332,6 +332,13 @@ def test_mrope_partial_rotation(
         (64, 64),
         (128, 512),
         (33, 97),
+        # UC fixed-shape contract bring-up: num_buckets=32, num_heads=16,
+        # lq*lk=256 — the only combination that exercises the UC wheel
+        # kernel ``mojo_relative_embedding_bf16`` (off-grid combinations
+        # correctly fall back to torch_native via @bypass_not_implemented).
+        # Two factorisations (16×16, 8×32) sanity-check non-square shapes.
+        (16, 16),
+        (8, 32),
     ],
 )
 @bypass_not_implemented
@@ -347,6 +354,44 @@ def test_relative_embedding(num_buckets, num_heads, bidirectional, lq, lk):
         emb_ref.embedding.weight.copy_(weight)
 
     emb.forward_diff_with(emb_ref, lq, lk, atol=1e-5, rtol=1e-6)
+
+
+# Dedicated bf16 path — UCRelativeEmbedding only services bf16 weight (matching
+# the wheel ABI ``mojo_relative_embedding_bf16``).  The default fp32 test above
+# is correctly skipped on UC via @bypass_not_implemented; this case exercises
+# the UC wheel kernel + wrapper cache (best-practices §D.2) end-to-end.
+# Off-grid combinations are still skipped (NotImplementedError) — only
+# num_buckets=32, num_heads=16, lq*lk=256 hits the UC kernel.
+@pytest.mark.parametrize("num_buckets", [32])
+@pytest.mark.parametrize("num_heads", [16])
+@pytest.mark.parametrize("bidirectional", [True, False])
+@pytest.mark.parametrize(
+    "lq, lk",
+    [
+        (16, 16),
+        (8, 32),
+    ],
+)
+@bypass_not_implemented
+def test_relative_embedding_bf16(num_buckets, num_heads, bidirectional, lq, lk):
+    device = get_torch_device()
+    emb = MojoRelativeEmbedding(
+        num_buckets=num_buckets, num_heads=num_heads, bidirectional=bidirectional,
+    ).to(device, dtype=torch.bfloat16)
+    emb.embedding = emb.embedding.to(dtype=torch.bfloat16)
+    emb_ref = MojoRelativeEmbedding._registry.get("torch")(
+        num_buckets=num_buckets, num_heads=num_heads, bidirectional=bidirectional,
+    ).to(device, dtype=torch.bfloat16)
+    emb_ref.embedding = emb_ref.embedding.to(dtype=torch.bfloat16)
+
+    # Same weight on both sides so any diff is purely from the gather kernel.
+    with torch.no_grad():
+        weight_fp32 = torch.randn(num_buckets, num_heads, dtype=torch.float32, device=device)
+        emb.embedding.weight.copy_(weight_fp32.to(torch.bfloat16))
+        emb_ref.embedding.weight.copy_(weight_fp32.to(torch.bfloat16))
+
+    # bf16 gather is exact (no compute), so we expect bit-identical results.
+    emb.forward_diff_with(emb_ref, lq, lk, atol=0.0, rtol=0.0)
 
 
 @pytest.mark.parametrize(
