@@ -1,4 +1,4 @@
-"""UC backend stub for UCPagedPrefillQuantGQA.
+"""UC backend stub for UCPagedPrefillGQAWithKVDequant.
 
 STATUS: DISABLED — kernel 不在当前 uc-kernel wheel 中.
 
@@ -18,10 +18,10 @@ from typing import Optional
 import torch
 from mojo_opset.experimental import MojoPagedPrefillGQAWithKVDequant
 
-class UCPagedPrefillQuantGQA(MojoPagedPrefillGQAWithKVDequant):
+class UCPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
     supported_platforms_list = ["npu"]
 
     def forward(self, *args, **kwargs):
         raise NotImplementedError(
-            "UC backend for UCPagedPrefillQuantGQA is disabled: mojo_paged_prefill_quant_gqa_bf16 not available in current uc-kernel wheel. Reason: unic Pattern A binary.cc:281 双轴 bcast 断言 (P0). See docs/project-ops/uc-kernel-fail-todo-2026-06-08.md. Per project rule '没实现的就直接报错', this wrapper does not silently fall back to torch. Use TTX / torch_npu / torch_native backend instead."
+            "UC backend for UCPagedPrefillGQAWithKVDequant is disabled: mojo_paged_prefill_quant_gqa_bf16 not available in current uc-kernel wheel. Reason: unic Pattern A binary.cc:281 双轴 bcast 断言 (P0). See docs/project-ops/uc-kernel-fail-todo-2026-06-08.md. Per project rule '没实现的就直接报错', this wrapper does not silently fall back to torch. Use TTX / torch_npu / torch_native backend instead."
         )
