@@ -436,14 +436,26 @@ class IxformerQuantMoE(MojoQuantMoE):
         # all_gather the (tiny) routing tensors afterwards. dispatch then sees the
         # full hidden_states + full routing.
         if self.dp_input and self.ep_size > 1:
+            comm_stream = torch.cuda.Stream()
+            curr_stream = torch.cuda.current_stream()
+            full_start = torch.cuda.Event()
+            full_stop = torch.cuda.Event()
+            index_start = torch.cuda.Event()
+            index_stop = torch.cuda.Event()
+            gates_start = torch.cuda.Event()
+            gates_stop = torch.cuda.Event()
             local_tokens = hidden_states.shape[0]
             full = torch.empty(
                 local_tokens * self.ep_size, hidden_states.shape[1],
                 dtype=hidden_states.dtype, device=hidden_states.device,
             )
-            h_hdl = dist.all_gather_into_tensor(
-                full, hidden_states.contiguous(), group=self.ep_group, async_op=True,
-            )
+            full_start.record(curr_stream)
+            comm_stream.wait_event(full_start)
+            with torch.cuda.stream(comm_stream):
+                ixfd.all_gather_into_tensor(
+                    full, hidden_states.contiguous(), group=self.ep_group, async_op=True,
+                )
+            full_stop.record(comm_stream)
 
             # gating on local hidden_states — runs on compute stream while AG(h) flies.
             local_gate_logits = ixf_f.triple_gemm_bf16_bf16_fp32(
@@ -460,26 +472,32 @@ class IxformerQuantMoE(MojoQuantMoE):
                 local_tokens * self.ep_size, *local_top_k_indices.shape[1:],
                 dtype=local_top_k_indices.dtype, device=local_top_k_indices.device,
             )
-            idx_hdl = dist.all_gather_into_tensor(
-                full_top_k_indices, local_top_k_indices.contiguous(),
-                group=self.ep_group, async_op=True,
-            )
+            index_start.record(curr_stream)
+            comm_stream.wait_event(index_start)
+            with torch.cuda.stream(comm_stream):
+                ixfd.all_gather_into_tensor(
+                    full_top_k_indices, local_top_k_indices.contiguous(),
+                    group=self.ep_group, async_op=True,
+                )
+            index_stop.record(comm_stream)
             full_top_k_gates = torch.empty(
                 local_tokens * self.ep_size, *local_top_k_gates.shape[1:],
                 dtype=local_top_k_gates.dtype, device=local_top_k_gates.device,
             )
-            gates_hdl = dist.all_gather_into_tensor(
-                full_top_k_gates, local_top_k_gates.contiguous(),
-                group=self.ep_group, async_op=True,
-            )
-
-            h_hdl.wait()
-            idx_hdl.wait()
-            gates_hdl.wait()
+            gates_start.record(curr_stream)
+            comm_stream.wait_event(gates_start)
+            with torch.cuda.stream(comm_stream):
+                ixfd.all_gather_into_tensor(
+                    full_top_k_gates, local_top_k_gates.contiguous(),
+                    group=self.ep_group, async_op=True,
+                )
+            gates_stop.record(comm_stream)
 
             hidden_states = full
             top_k_indices = full_top_k_indices
             top_k_gates = full_top_k_gates
+            curr_stream.wait_event(full_stop)
+            curr_stream.wait_event(index_stop)
         else:
             # triple_gemm uses 3 bf16 components of the fp32 gate weight to emulate fp32 matmul precision on bf16 HW.
             gate_logits = ixf_f.triple_gemm_bf16_bf16_fp32(
@@ -524,6 +542,8 @@ class IxformerQuantMoE(MojoQuantMoE):
         dispatch_tokens = num_tokens * self.top_k if graph_safe_ep else expand_tokens
 
         if sorted_token_ids.shape[0] == 0:
+            if self.dp_input and self.ep_size > 1:
+                curr_stream.wait_event(gates_stop)
             combined = torch.zeros(
                 num_tokens, self.hidden_size,
                 dtype=hidden_states.dtype, device=hidden_states.device,
@@ -654,6 +674,9 @@ class IxformerQuantMoE(MojoQuantMoE):
 
             # src_to_dst == -1 marks padding slots that must not be summed.
             reduce_mask = src_to_dst == -1
+
+            if self.dp_input and self.ep_size > 1:
+                curr_stream.wait_event(gates_stop)
 
             combined = ixf_f.moe_output_reduce_sum(
                 input=expert_outputs,
