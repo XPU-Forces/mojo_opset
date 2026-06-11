@@ -4,10 +4,15 @@ from typing import Union
 import pytest
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 
 from torch.distributed.device_mesh import init_device_mesh
 
+from mojo_opset import MojoExperts
 from mojo_opset import MojoMoE
+from mojo_opset import MojoMoECombine
+from mojo_opset import MojoMoEDispatch
+from mojo_opset import MojoMoEGating
 from mojo_opset import MojoQuantMoE
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_torch_device
@@ -314,3 +319,177 @@ def test_quant_moe_ep(
         tokens_per_rank = x.shape[0] // world_size
         x = x[rank * tokens_per_rank : (rank + 1) * tokens_per_rank].contiguous()
     moe.forward_diff_with(ref, x, mixed_tol=True)
+
+
+class _SmallOpMoEModule(nn.Module):
+    """Plain nn.Module assembled from MoE small operators.
+
+    Mirrors MojoMoE's interface and parameter layout (gating.gate_weight,
+    experts.up_proj_weight, experts.down_proj_weight) but is itself a regular
+    nn.Module rather than a MojoOperator. The four small operators are picked
+    from their default registry (active backend), so this validates that the
+    backend's small ops compose correctly into a full MoE.
+    """
+
+    def __init__(
+        self,
+        num_experts,
+        top_k,
+        hidden_size,
+        intermediate_size,
+        ep_size: int = 1,
+        ep_rank: int = 0,
+        ep_group=None,
+        dp_input: bool = False,
+    ):
+        super().__init__()
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
+        self.ep_group = ep_group
+        self.dp_input = dp_input
+
+        base = num_experts // ep_size
+        rem = num_experts % ep_size
+        self.num_experts_local = base + 1 if ep_rank < rem else base
+        self.ep_start = base * ep_rank + min(ep_rank, rem)
+        self.ep_end = self.ep_start + self.num_experts_local
+
+        self.gating = MojoMoEGating(hidden_size=hidden_size, num_experts=num_experts, top_k=top_k)
+        self.dispatch = MojoMoEDispatch(num_experts=num_experts)
+        self.experts = MojoExperts(
+            num_experts=self.num_experts_local,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+        )
+        self.combine = MojoMoECombine(multiply_by_gates=True)
+
+    def forward(self, hidden_states):
+        if self.dp_input and self.ep_size > 1:
+            local_tokens = hidden_states.shape[0]
+            full = torch.empty(
+                local_tokens * self.ep_size, *hidden_states.shape[1:],
+                dtype=hidden_states.dtype, device=hidden_states.device,
+            )
+            dist.all_gather_into_tensor(full, hidden_states.contiguous(), group=self.ep_group)
+            hidden_states = full
+
+        top_k_indices, top_k_gates = self.gating(hidden_states)
+        sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = self.dispatch(
+            hidden_states, top_k_gates, top_k_indices,
+        )
+
+        if self.ep_size > 1:
+            cumsum = tokens_per_expert.cumsum(0)
+            tok_start = 0 if self.ep_start == 0 else cumsum[self.ep_start - 1].item()
+            tok_end = cumsum[self.ep_end - 1].item()
+            local_sorted = sorted_hidden_states[tok_start:tok_end]
+            local_tokens_per_expert = tokens_per_expert[self.ep_start:self.ep_end]
+            local_expert_outputs = self.experts(local_sorted, local_tokens_per_expert)
+            # ixformer's moe_combine kernel requires expert_outputs of shape
+            # [num_tokens * top_k, hidden]. Pad non-local positions with zeros
+            # so they contribute nothing to the per-token reduction.
+            expert_outputs = local_expert_outputs.new_zeros(
+                sorted_hidden_states.shape[0], local_expert_outputs.shape[-1]
+            )
+            expert_outputs[tok_start:tok_end] = local_expert_outputs
+        else:
+            expert_outputs = self.experts(sorted_hidden_states, tokens_per_expert)
+        output_buffer = torch.zeros_like(hidden_states, memory_format=torch.contiguous_format)
+        combined = self.combine(output_buffer, expert_outputs, sorted_gates, token_indices)
+
+        if self.ep_size > 1:
+            if self.dp_input:
+                local_combined = torch.empty(
+                    combined.shape[0] // self.ep_size, *combined.shape[1:],
+                    dtype=combined.dtype, device=combined.device,
+                )
+                dist.reduce_scatter_tensor(
+                    local_combined, combined.contiguous(),
+                    op=dist.ReduceOp.SUM, group=self.ep_group,
+                )
+                combined = local_combined
+            else:
+                dist.all_reduce(combined, op=dist.ReduceOp.SUM, group=self.ep_group)
+
+        return combined
+
+
+@pytest.mark.parametrize(
+    "num_experts, top_k, hidden_size, intermediate_size, num_tokens",
+    [
+        (16, 4, 1024, 2048, 64),
+        (32, 8, 1024, 4096, 128),
+    ],
+)
+@pytest.mark.parametrize("dp_input", [False, True])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@bypass_not_implemented
+def test_small_op_moe_vs_mojo_torch(num_experts, top_k, hidden_size, intermediate_size, num_tokens, dp_input, dtype):
+    """A small-op-composed plain nn.Module must match MojoMoE(backend='torch') under EP=1 and EP>1."""
+    world_size = _get_world_size()
+    rank = int(os.environ.get("RANK", "0"))
+    device_type = get_torch_device()
+    device = _set_current_device(device_type, world_size)
+    if world_size > 1:
+        init_device_mesh(device_type, (world_size,))
+
+    if num_experts % world_size != 0:
+        pytest.skip(f"num_experts={num_experts} not divisible by world_size={world_size}.")
+
+    torch.manual_seed(0)
+    full_state = {
+        "gating.gate_weight": (torch.randn(hidden_size, num_experts, dtype=torch.float32, device=device) * 0.02),
+        "experts.up_proj_weight": (
+            torch.randn(num_experts, intermediate_size * 2, hidden_size, dtype=dtype, device=device) * 0.02
+        ),
+        "experts.down_proj_weight": (
+            torch.randn(num_experts, hidden_size, intermediate_size, dtype=dtype, device=device) * 0.02
+        ),
+    }
+    _broadcast_state(full_state, src=0)
+
+    expert_dim0_keys = {"experts.up_proj_weight", "experts.down_proj_weight"}
+
+    # Reference: MojoMoE with backend='torch'.
+    ref = MojoMoE._registry.get("torch")(
+        num_experts=num_experts,
+        top_k=top_k,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        ep_size=world_size,
+        ep_rank=rank,
+        ep_group=None,
+        dp_input=dp_input,
+    ).to(dtype).to(device)
+    ref.gating.gate_weight.data = ref.gating.gate_weight.data.float()
+    ref.load_state_dict(_slice_state_for_ep(full_state, ref.ep_start, ref.ep_end, expert_dim0_keys))
+
+    # Active-backend small ops composed in a plain nn.Module.
+    moe = _SmallOpMoEModule(
+        num_experts=num_experts,
+        top_k=top_k,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        ep_size=world_size,
+        ep_rank=rank,
+        ep_group=None,
+        dp_input=dp_input,
+    ).to(dtype).to(device)
+    moe.gating.gate_weight.data = moe.gating.gate_weight.data.float()
+    moe.load_state_dict(_slice_state_for_ep(full_state, moe.ep_start, moe.ep_end, expert_dim0_keys))
+
+    x = _replicated_input(num_tokens, hidden_size, dtype, device)
+    if dp_input:
+        pad = (-num_tokens) % world_size
+        if pad:
+            x = torch.cat([x, x.new_zeros(pad, hidden_size)], dim=0)
+        tokens_per_rank = x.shape[0] // world_size
+        x = x[rank * tokens_per_rank : (rank + 1) * tokens_per_rank].contiguous()
+
+    out = moe(x.clone())
+    out_ref = ref(x.clone())
+    torch.testing.assert_close(out, out_ref, atol=2e-2, rtol=2e-2)
