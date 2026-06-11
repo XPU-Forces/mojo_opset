@@ -228,7 +228,123 @@ class MojoGatherRopeStore(MojoOperator):
         return output
 
 
+class MojoPagedAttentionStoreKvCache(MojoOperator):
+    """Store packed paged-attention K/V states into paged KV cache."""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: Optional[torch.Tensor],
+        block_table: torch.Tensor,
+        seq_len: torch.Tensor,
+        kv_len: torch.Tensor,
+        k_scale: Optional[torch.Tensor],
+        v_scale: Optional[torch.Tensor],
+        query_head_num: int,
+        kv_head_num: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            qkv: Packed Q/K/V tensor with shape
+                ``[sum(seq_len), (query_head_num + kv_head_num + maybe value heads) * head_dim]``.
+            key_cache: Paged key cache, shape ``[num_blocks, kv_head_num, block_size, head_dim]``.
+            value_cache: Optional paged value cache with the same shape as ``key_cache``.
+            block_table: Logical-to-physical block table, shape ``[batch_size, max_blocks]``.
+                Negative block ids stop storing for that sequence.
+            seq_len: Current sequence lengths, shape ``[batch_size]``.
+            kv_len: Existing KV lengths before storing, shape ``[batch_size]``.
+            k_scale: Optional int8 key quantization scale, shape ``[kv_head_num, head_dim]``.
+            v_scale: Optional int8 value quantization scale, shape ``[kv_head_num, head_dim]``.
+            query_head_num: Number of query heads packed before key heads.
+            kv_head_num: Number of key/value heads.
+
+        Returns:
+            Tuple of updated ``(key_cache, value_cache)``. If ``value_cache`` is
+            ``None``, the second return value is ``key_cache`` for API compatibility.
+        """
+        if qkv.dim() != 2:
+            raise ValueError(f"qkv must be 2D, got {tuple(qkv.shape)}.")
+        if key_cache.dim() != 4:
+            raise ValueError(f"key_cache must be 4D, got {tuple(key_cache.shape)}.")
+        if value_cache is not None and value_cache.shape != key_cache.shape:
+            raise ValueError(
+                f"value_cache shape must match key_cache, got {tuple(value_cache.shape)} and {tuple(key_cache.shape)}."
+            )
+        if block_table.dim() != 2:
+            raise ValueError(f"block_table must be 2D, got {tuple(block_table.shape)}.")
+        if seq_len.dim() != 1 or kv_len.dim() != 1 or seq_len.numel() != kv_len.numel():
+            raise ValueError(
+                f"seq_len and kv_len must be 1D tensors with same length, got {tuple(seq_len.shape)} and {tuple(kv_len.shape)}."
+            )
+
+        _, _, block_size, head_dim = key_cache.shape
+        has_value = value_cache is not None
+        query_head_num = int(query_head_num)
+        kv_head_num = int(kv_head_num)
+        process_seq_len = 0
+
+        for batch_id in range(seq_len.numel()):
+            now_seq_len = int(seq_len[batch_id].item())
+            now_kv_len = int(kv_len[batch_id].item())
+            now_block_table = block_table[batch_id]
+
+            key_start = query_head_num * head_dim
+            key_end = (query_head_num + kv_head_num) * head_dim
+            now_key = qkv[process_seq_len : process_seq_len + now_seq_len, key_start:key_end]
+            now_key = now_key.reshape(-1, kv_head_num, head_dim).transpose(1, 0)
+
+            if has_value:
+                value_start = key_end
+                now_value = qkv[process_seq_len : process_seq_len + now_seq_len, value_start:]
+                now_value = now_value.reshape(-1, kv_head_num, head_dim).transpose(1, 0)
+
+            if key_cache.dtype == torch.int8:
+                if k_scale is None:
+                    raise ValueError("k_scale is required when key_cache dtype is torch.int8.")
+                now_key = torch.clamp(torch.round(now_key.to(torch.float32) * k_scale.unsqueeze(1)), -128, 127).to(
+                    torch.int8
+                )
+                if has_value:
+                    if v_scale is None:
+                        raise ValueError("v_scale is required when value_cache dtype is torch.int8.")
+                    now_value = torch.clamp(
+                        torch.round(now_value.to(torch.float32) * v_scale.unsqueeze(1)), -128, 127
+                    ).to(torch.int8)
+
+            start_block_table_idx = now_kv_len // block_size
+            block_offset = now_kv_len % block_size
+            remain_seq_len = now_seq_len
+            kv_offset = 0
+
+            for block_id in now_block_table[start_block_table_idx:]:
+                block_id = int(block_id.item())
+                if block_id < 0:
+                    break
+                store_kv_len = min(block_size - block_offset, remain_seq_len)
+                key_cache[block_id, :, block_offset : block_offset + store_kv_len, :] = now_key[
+                    :, kv_offset : kv_offset + store_kv_len, :
+                ]
+                if has_value:
+                    value_cache[block_id, :, block_offset : block_offset + store_kv_len, :] = now_value[
+                        :, kv_offset : kv_offset + store_kv_len, :
+                    ]
+                block_offset = 0
+                kv_offset += store_kv_len
+                remain_seq_len -= store_kv_len
+                if remain_seq_len <= 0:
+                    break
+
+            process_seq_len += now_seq_len
+
+        return key_cache, value_cache if has_value else key_cache
+
+
 __all__ = [
     "MojoGatherRopeStore",
+    "MojoPagedAttentionStoreKvCache",
     "MojoStorePagedMLAKVCache",
 ]

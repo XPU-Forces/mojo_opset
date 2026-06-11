@@ -16,6 +16,7 @@ from .gemm import MojoQuantBatchGemmReduceSum
 from .indexer import MojoIndexer
 from .indexer import MojoLightningIndexer
 from .kv_cache import MojoGatherRopeStore
+from .kv_cache import MojoPagedAttentionStoreKvCache
 from .kv_cache import MojoStorePagedMLAKVCache
 from .moe import MojoFusedSwiGLUMoEScaleDynamicQuantize
 from .moe import MojoMoEInitRoutingDynamicQuant
@@ -44,6 +45,7 @@ __all__ = [
     "MojoPagedPrefillSWAWithKVDequant",
     "MojoPagedDecodeSWAWithKVDequant",
     "MojoGatherRopeStore",
+    "MojoPagedAttentionStoreKvCache",
     "MojoStorePagedMLAKVCache",
     "MojoMoEInitRoutingDynamicQuant",
     "MojoFusedSwiGLUMoEScaleDynamicQuantize",
