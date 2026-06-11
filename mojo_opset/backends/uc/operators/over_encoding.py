@@ -46,6 +46,7 @@ correct even when the wheel kernel is absent / the call is off-grid:
 import torch
 
 from mojo_opset.core import MojoOverEncoding
+from mojo_opset.core import MojoOverEncodingNGram
 from mojo_opset.core.operators.over_encoding import n_gram_impl_torch
 
 from ._utils import _uc_kernels
@@ -58,6 +59,56 @@ _FIXED_OE_EMBED_DIM = 192
 _FIXED_NUM_LOOKUPS = 128
 _FIXED_WEIGHT_DTYPE = torch.bfloat16
 _API = "mojo_over_encoding_bf16"
+
+
+# ---------------------------------------------------------------------------
+# UCOverEncodingNGram — §35 silent-fallback guard.
+#
+# There is *no* UC wheel kernel for the pure n-gram-id computation today.
+# ``uc-kernel/kernels/mojo_over_encoding_ngram_bf16.py`` is a documented
+# ``DESIGNED BUT BLOCKED`` placeholder (lifter v0.3 rejects vectorised MOD /
+# GE which the per-step modular n-gram arithmetic requires; AscendC
+# additionally lacks ``BinaryOpType::MOD`` / integer ``DIV``). See:
+#   - ``uc-kernel/kernels/mojo_over_encoding_ngram_bf16.py`` (module docstring)
+#   - ``docs/project-ops/blocked-ops/over_encoding_ngram.md``
+#
+# Without an explicit ``UCOverEncodingNGram`` registration the dispatcher in
+# ``mojo_opset/core/backend_registry.py:get`` silently routes
+# ``MOJO_BACKEND=uc`` calls to the first registered backend
+# (``TTXOverEncodingNGram`` here).  R6 (2026-06-10) caught this masquerading
+# TTX perf as UC perf in the dashboard.  Per the 2026-06-08 project rule
+# ("wheel 没实现的就直接给报错") and §35 the UC backend MUST raise rather
+# than silently route to another backend.
+# ---------------------------------------------------------------------------
+class UCOverEncodingNGram(MojoOverEncodingNGram):
+    """Hard-raise stub for the n-gram-id stage.
+
+    The over-encoding n-gram arithmetic (per-step modular accumulation
+    across a history window) is blocked at the tilelang-uc lifter level
+    (vector MOD / GE) and additionally at the AscendC backend (no
+    ``BinaryOpType::MOD`` / integer ``DIV`` entries), so there is no
+    ``mojo_over_encoding_ngram_bf16`` wheel API to dispatch to. Silently
+    forwarding to ``MojoOverEncodingNGram.forward`` / ``TTXOverEncodingNGram``
+    would violate §35 — the dashboard cannot tell apart UC perf from TTX
+    perf in that case.
+    """
+
+    supported_platforms_list = ["npu"]
+
+    def forward(self, input_tensor, oe_history_input, q_lens=None):
+        raise NotImplementedError(
+            "UC backend has no kernel for MojoOverEncodingNGram — the "
+            "intended kernel ``mojo_over_encoding_ngram_bf16`` is blocked at "
+            "tilelang-uc lifter v0.3 (vectorised MOD / GE rejected) and at "
+            "the AscendC backend (no BinaryOpType::MOD / integer DIV "
+            "entries). Per project rule 'wheel 没实现的就直接给报错' "
+            "(2026-06-08) and §35, this wrapper does not silently fall back "
+            "to TTX / torch — use MOJO_BACKEND={ttx,torch_npu,torch} for "
+            "the n-gram-id stage. See "
+            "uc-kernel/kernels/mojo_over_encoding_ngram_bf16.py + "
+            "docs/project-ops/blocked-ops/over_encoding_ngram.md for the "
+            "enabler sequence."
+        )
 
 
 class UCOverEncoding(MojoOverEncoding):
