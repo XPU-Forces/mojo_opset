@@ -20,6 +20,7 @@ from .operators.attention import MojoPrefillMLA
 from .operators.attention import MojoPrefillNSA
 from .operators.attention_gate import MojoFusedAttnOutputGate
 from .operators.attention import MojoPagedPrefillSageGQA
+from .operators.compute_with_comm import MojoFusedAGScaleQuant
 from .operators.gemm import MojoQuantBatchGemmReduceSum
 from .operators.indexer import MojoIndexer
 from .operators.indexer import MojoLightningIndexer
@@ -28,6 +29,7 @@ from .operators.moe import MojoFusedSwiGLUMoEScaleDynamicQuantize
 from .operators.moe import MojoMoEInitRoutingDynamicQuant
 from .operators.normalization import MojoChannelRMSNorm
 from .operators.normalization import MojoGroupLayerNorm
+from .operators.normalization import MojoQKInplaceRMSNorm
 from .operators.position_embedding import MojoGridRoPE
 from .operators.position_embedding import MojoRelativeEmbedding
 from .operators.store_lowrank import MojoStoreLowrank
@@ -51,12 +53,14 @@ __all__ = [
     "MojoPagedPrefillSWAWithKVDequant",
     "MojoPagedDecodeSWAWithKVDequant",
     "MojoFusedAttnOutputGate",
+    "MojoFusedAGScaleQuant",
     "MojoPagedPrefillSageGQA",
     "MojoStorePagedMLAKVCache",
     "MojoMoEInitRoutingDynamicQuant",
     "MojoFusedSwiGLUMoEScaleDynamicQuantize",
     "MojoGroupLayerNorm",
     "MojoChannelRMSNorm",
+    "MojoQKInplaceRMSNorm",
     "MojoRelativeEmbedding",
     "MojoGridRoPE",
     "MojoStoreLowrank",

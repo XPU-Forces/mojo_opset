@@ -92,7 +92,84 @@ class MojoChannelRMSNorm(MojoOperator):
         )
 
 
+class MojoQKInplaceRMSNorm(MojoOperator):
+    def __init__(
+        self,
+        q_heads: int,
+        kv_heads: int,
+        qk_head_dim: int = 128,
+        v_head_dim: int = None,
+        eps: float = 1e-5,
+        **kwargs,
+    ):
+        """
+        Initialize in-place RMSNorm parameters for packed QKV tensors.
+
+        Args:
+            q_heads (int): Number of query heads in the packed QKV tensor.
+            kv_heads (int): Number of key/value heads in the packed QKV tensor.
+            qk_head_dim (int, default=128): Per-head dimension for query and key.
+            v_head_dim (int, optional): Per-head dimension for value. Defaults to ``qk_head_dim``.
+            eps (float, default=1e-5): Epsilon added for numerical stability.
+            **kwargs: The keyword arguments of torch.empty, such as device and dtype.
+        """
+        super().__init__(**kwargs)
+        self.q_heads = q_heads
+        self.kv_heads = kv_heads
+        self.qk_head_dim = qk_head_dim
+        self.v_head_dim = qk_head_dim if v_head_dim is None else v_head_dim
+        self.hidden_size = (q_heads + kv_heads) * qk_head_dim + kv_heads * self.v_head_dim
+        self.q_rms_weight = torch.nn.Parameter(torch.empty(qk_head_dim, **self.tensor_factory_kwargs))
+        self.k_rms_weight = torch.nn.Parameter(torch.empty(qk_head_dim, **self.tensor_factory_kwargs))
+        self.variance_epsilon = eps
+
+    def forward(self, qkv: torch.Tensor) -> torch.Tensor:
+        """
+        Apply RMSNorm to Q and K segments of a packed QKV tensor and write the results in-place.
+
+        Args:
+            qkv (torch.Tensor): 2-D packed QKV tensor shaped
+                ``(tokens, (q_heads + kv_heads) * qk_head_dim + kv_heads * v_head_dim)``.
+
+        Returns:
+            torch.Tensor: The same QKV tensor after in-place Q/K normalization. The V segment is unchanged.
+        """
+        if qkv.dim() != 2:
+            raise ValueError(f"qkv must be a 2-D packed tensor, but got dim={qkv.dim()}")
+        if qkv.shape[-1] != self.hidden_size:
+            raise ValueError(f"qkv last dimension must be {self.hidden_size}, but got {qkv.shape[-1]}")
+
+        q_end = self.q_heads * self.qk_head_dim
+        k_end = q_end + self.kv_heads * self.qk_head_dim
+
+        query = qkv[:, :q_end].reshape(-1, self.q_heads, self.qk_head_dim)
+        key = qkv[:, q_end:k_end].reshape(-1, self.kv_heads, self.qk_head_dim)
+        query_norm = F.rms_norm(
+            query,
+            (self.qk_head_dim,),
+            weight=self.q_rms_weight,
+            eps=self.variance_epsilon,
+        )
+        key_norm = F.rms_norm(
+            key,
+            (self.qk_head_dim,),
+            weight=self.k_rms_weight,
+            eps=self.variance_epsilon,
+        )
+
+        qkv[:, :q_end].copy_(query_norm.reshape(qkv.shape[0], q_end))
+        qkv[:, q_end:k_end].copy_(key_norm.reshape(qkv.shape[0], k_end - q_end))
+        return qkv
+
+    def extra_repr(self) -> str:
+        return (
+            f"{self.q_heads=}, {self.kv_heads=}, {self.qk_head_dim=}, "
+            f"{self.v_head_dim=}, {self.variance_epsilon=}"
+        ).replace("self.", "")
+
+
 __all__ = [
     "MojoGroupLayerNorm",
     "MojoChannelRMSNorm",
+    "MojoQKInplaceRMSNorm",
 ]

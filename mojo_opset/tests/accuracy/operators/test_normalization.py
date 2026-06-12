@@ -16,6 +16,7 @@ from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoRMSNormQuant
 from mojo_opset.experimental import MojoChannelRMSNorm
 from mojo_opset.experimental import MojoGroupLayerNorm
+from mojo_opset.experimental import MojoQKInplaceRMSNorm
 
 torch.manual_seed(43)
 
@@ -332,6 +333,63 @@ def test_channel_rmsnorm(x, norm_size, channel_first, images):
     else:
         atol, rtol = 3e-2, 6e-3
     norm.forward_diff_with(norm_ref, x, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("tokens", [4, 17])
+@pytest.mark.parametrize("q_heads,kv_heads", [(2, 1), (4, 2)])
+@pytest.mark.parametrize("v_head_dim", [64, 128, 256])
+@pytest.mark.parametrize("dtype", dtypes)
+@bypass_not_implemented
+def test_qk_inplace_rmsnorm(tokens, q_heads, kv_heads, v_head_dim, dtype):
+    qk_head_dim = 128
+    hidden_size = (q_heads + kv_heads) * qk_head_dim + kv_heads * v_head_dim
+    qkv = torch.randn(size=(tokens, hidden_size), dtype=dtype)
+    qkv_ref = qkv.clone()
+    qkv_before = qkv.clone()
+
+    op = MojoQKInplaceRMSNorm(
+        q_heads=q_heads,
+        kv_heads=kv_heads,
+        qk_head_dim=qk_head_dim,
+        v_head_dim=v_head_dim,
+        device=qkv.device,
+        dtype=qkv.dtype,
+    )
+    op_ref = (
+        MojoQKInplaceRMSNorm._registry.get("torch")(
+            q_heads=q_heads,
+            kv_heads=kv_heads,
+            qk_head_dim=qk_head_dim,
+            v_head_dim=v_head_dim,
+        )
+        .to(qkv.device)
+        .to(qkv.dtype)
+    )
+
+    with torch.no_grad():
+        q_weight = torch.randn(size=(qk_head_dim,), dtype=torch.float32, device=qkv.device)
+        k_weight = torch.randn(size=(qk_head_dim,), dtype=torch.float32, device=qkv.device)
+        op.q_rms_weight.copy_(q_weight)
+        op.k_rms_weight.copy_(k_weight)
+        op_ref.q_rms_weight.copy_(q_weight)
+        op_ref.k_rms_weight.copy_(k_weight)
+
+    qkv_ptr = qkv.data_ptr()
+    out = op(qkv)
+    out_ref = op_ref(qkv_ref)
+
+    assert out.data_ptr() == qkv_ptr
+    assert qkv.data_ptr() == qkv_ptr
+
+    q_end = q_heads * qk_head_dim
+    k_end = q_end + kv_heads * qk_head_dim
+    torch.testing.assert_close(out[:, k_end:], qkv_before[:, k_end:], atol=0, rtol=0)
+
+    if dtype == torch.float16:
+        atol, rtol = 2e-2, 1e-2
+    else:
+        atol, rtol = 5e-2, 1e-2
+    torch.testing.assert_close(out.float(), out_ref.float(), atol=atol, rtol=rtol)
 
 
 # ===========================================================================
