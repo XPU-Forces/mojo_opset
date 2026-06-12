@@ -1,9 +1,10 @@
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch.distributed.distributed_c10d import _get_default_group
+import torch.distributed._functional_collectives as fc
 import torch.distributed._functional_collectives as fc
 
 from ..operator import MojoOperator
@@ -25,33 +26,29 @@ def _gemm(
 
 
 def _quant_gemm(
-    input: torch.Tensor,
+    input_i8: torch.Tensor,
+    input_scale: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
-    per_token_scale: torch.Tensor,
     trans_weight: bool,
     output_dtype: torch.dtype,
 ) -> torch.Tensor:
-    input_fp = input.float()
-    weight_fp = weight.float()
-    if trans_weight:
-        output = input_fp @ weight_fp
-    else:
-        output = input_fp @ weight_fp.transpose(-2, -1)
+    """Reference int8 GEMM emulated in float32, mirroring MojoQuantGemm.
 
-    scale = weight_scale.float()
-    while scale.dim() < output.dim():
-        scale = scale.unsqueeze(0)
-
-    token_scale = per_token_scale.float()
-    while token_scale.dim() < output.dim():
-        token_scale = token_scale.unsqueeze(-1)
-
-    return (output * scale * token_scale).to(output_dtype)
+    Computation: ``output = (input_i8 @ weight_i8) * input_scale[:, None] * weight_scale``.
+    ``trans_weight=True`` means the weight is stored as ``(N, K)``; otherwise
+    ``(K, N)`` and is transposed via ``.mT`` to align with the int8-GEMM
+    contract.
+    """
+    w = weight if trans_weight else weight.mT
+    out = torch.mul(input_i8.int().unsqueeze(-2), w.int()).float().sum(dim=-1)
+    out = out * input_scale.float().unsqueeze(-1) * weight_scale.float()
+    return out.to(output_dtype)
 
 
 def _is_dist_initialized() -> bool:
     return dist.is_available() and dist.is_initialized()
+
 
 
 class MojoGemmAllReduce(MojoOperator):
@@ -340,150 +337,205 @@ class MojoGemmReduceScatter(MojoOperator):
         ).replace("self.", "")
 
 
-class MojoQuantGemmAll2All(MojoOperator):
+class MojoAllGatherQuantGemm(MojoOperator):
     def __init__(
         self,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
-        trans_weight: bool = False,
-        process_group: Optional[dist.ProcessGroup] = None,
+        in_features: int,
+        out_features: int,
         output_dtype: torch.dtype = torch.bfloat16,
-        use_internal_format: bool = True,
-        comm_context=None,
+        trans_weight: bool = False,
+        quant_dtype: torch.dtype = torch.int8,
+        process_group: Optional[dist.ProcessGroup] = None,
+        gather_dim: int = 0,
+        **kwargs,
     ):
-        """
-        Quantized fused GEMM + All2All.
+        """SP-fused AllGather + quantized (int8) GEMM.
+
+        Each rank holds an int8 sequence shard plus its per-token scale.
+        AllGather reconstructs the full sequence + scale across TP ranks, then
+        an int8 @ int8 GEMM with the per-channel weight scale produces the
+        bf16 output. Typical use: Megatron QKV projection on a smooth-quant
+        path where activations are pre-quantized to int8 with a per-token
+        scale.
 
         Semantics::
 
-            gemm_out = quant_gemm(input, weight, weight_scale, per_token_scale)
-            output   = all_to_all(gemm_out split by output columns, gathered by rows)
+            x_full     = all_gather(x_local,     dim=gather_dim)   # int8
+            scale_full = all_gather(scale_local, dim=gather_dim)   # fp32
+            output     = quant_gemm(x_full, scale_full,
+                                    weight, weight_scale)          # output_dtype
+
+        When ``torch.distributed`` is not initialised, AllGather is identity.
 
         Args:
-            weight (torch.Tensor): Int8 weight. ``trans_weight=True`` expects
-                ``(K, N)``; ``False`` expects ``(N, K)``.
-            weight_scale (torch.Tensor): Per-output-channel scale, shape ``(N,)``.
-            trans_weight (bool): Whether weight layout is transposed.
-            process_group (Optional[ProcessGroup]): Distributed group.
-            output_dtype (torch.dtype): Output dtype for reference path.
-            use_internal_format (bool): Backend hint for xops, ignored by torch reference.
-            comm_context: Optional runtime/context object for backend implementations.
+            in_features (int): Logical K dim of the int8 weight.
+            out_features (int): Logical N dim of the int8 weight and weight_scale.
+            output_dtype (torch.dtype): Dequantized output dtype (default bf16).
+            trans_weight (bool): If True the weight is stored as (N, K).
+            quant_dtype (torch.dtype): Quantized dtype, only ``int8`` supported.
+            process_group (Optional[ProcessGroup]): TP group for AllGather.
+            gather_dim (int): Dimension to AllGather along (default 0 = sequence).
+            **kwargs: Tensor factory kwargs forwarded to the weight buffers.
         """
-        super().__init__()
+        super().__init__(**kwargs)
+        if quant_dtype != torch.int8:
+            raise NotImplementedError(
+                f"Unsupported quant_dtype: {quant_dtype}, expected torch.int8."
+            )
         if not isinstance(trans_weight, bool):
             raise TypeError("trans_weight must be bool.")
-        self.weight = weight
-        self.weight_scale = weight_scale
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight_shape = (out_features, in_features) if trans_weight else (in_features, out_features)
+        weight_factory_kwargs = {**self.tensor_factory_kwargs, "dtype": quant_dtype}
+        weight_scale_factory_kwargs = {**self.tensor_factory_kwargs, "dtype": torch.bfloat16}
+        self.quant_dtype = quant_dtype
+        self.output_dtype = output_dtype
         self.trans_weight = trans_weight
         self.process_group = process_group
-        self.output_dtype = output_dtype
-        self.use_internal_format = use_internal_format
-        self.comm_context = comm_context
+        self.gather_dim = gather_dim
+        self.register_buffer("weight", torch.empty(self.weight_shape, **weight_factory_kwargs))
+        self.register_buffer("weight_scale", torch.empty(out_features, **weight_scale_factory_kwargs))
 
-    def forward(self, input: torch.Tensor, per_token_scale: torch.Tensor, workspace: Optional[torch.Tensor] = None):
-        output = _quant_gemm(
-            input,
-            self.weight,
-            self.weight_scale,
-            per_token_scale,
-            self.trans_weight,
-            self.output_dtype,
-        )
+    def forward(
+        self,
+        input: torch.Tensor,
+        input_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            input (torch.Tensor): int8 ``(seq_local, in_features)`` — local
+                sequence shard of the quantized activation.
+            input_scale (torch.Tensor): fp32 ``(seq_local,)`` — per-token
+                runtime activation scale, also sequence-sharded.
+
+        Returns:
+            torch.Tensor: ``output_dtype`` ``(seq_full, out_features)`` after
+                AllGather along ``gather_dim`` and the quantized GEMM. In the
+                single-rank fallback, ``seq_full == seq_local``.
+        """
+        if input.dim() != 2:
+            raise ValueError(f"input must be 2D, got shape {tuple(input.shape)}.")
+        if input.shape[-1] != self.in_features:
+            raise ValueError(
+                f"input K {input.shape[-1]} must match in_features {self.in_features}."
+            )
         if _is_dist_initialized():
-            process_group = self.process_group or _get_default_group()
-            world_size = dist.get_world_size(group=process_group)
-            if output.shape[-1] % world_size != 0:
-                raise ValueError(f"output columns {output.shape[-1]} must be divisible by world_size {world_size}.")
-            rank = dist.get_rank(group=process_group)
-            send = torch.stack(list(output.chunk(world_size, dim=-1)), dim=0).contiguous()
-            gathered = [torch.empty_like(send) for _ in range(world_size)]
-            dist.all_gather(gathered, send, group=process_group)
-            output = torch.cat([peer_chunks[rank] for peer_chunks in gathered], dim=0)
-        return output
-
-    def estimate_shmem_size_mb(self, *, process_group: Optional[dist.ProcessGroup] = None, max_tokens: Optional[int] = None) -> int:
-        del process_group, max_tokens
-        return 20
+            pg = self.process_group or _get_default_group()
+            input = fc.all_gather_tensor(input, gather_dim=self.gather_dim, group=pg)
+            input_scale = fc.all_gather_tensor(input_scale, gather_dim=self.gather_dim, group=pg)
+        return _quant_gemm(
+            input, input_scale, self.weight, self.weight_scale,
+            self.trans_weight, self.output_dtype,
+        )
 
     def extra_repr(self) -> str:
         weight_shape = tuple(self.weight.shape) if isinstance(self.weight, torch.Tensor) else None
         return (
-            f"{weight_shape=}, weight_scale_shape={tuple(self.weight_scale.shape)}, "
-            f"{self.trans_weight=}, output_dtype={self.output_dtype}"
-        ).replace("self.", "")
+            f"{weight_shape=}, in={self.in_features}, out={self.out_features}, "
+            f"trans_weight={self.trans_weight}, gather_dim={self.gather_dim}"
+        )
 
 
-class MojoAll2AllQuantGemm(MojoOperator):
+class MojoQuantGemmReduceScatter(MojoOperator):
     def __init__(
         self,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
-        trans_weight: bool = False,
-        process_group: Optional[dist.ProcessGroup] = None,
+        in_features: int,
+        out_features: int,
         output_dtype: torch.dtype = torch.bfloat16,
-        use_internal_format: bool = True,
-        comm_context=None,
+        trans_weight: bool = False,
+        quant_dtype: torch.dtype = torch.int8,
+        process_group: Optional[dist.ProcessGroup] = None,
+        scatter_dim: int = 0,
+        **kwargs,
     ):
-        """
-        Quantized fused All2All + GEMM.
+        """SP-fused quantized (int8) GEMM + ReduceScatter.
+
+        Each rank computes a local quantized GEMM on its column-shard of the
+        input; the resulting bf16 partial output is reduce-scattered along
+        ``scatter_dim`` so each rank ends up with its sequence shard of the
+        summed result. Typical use: Megatron output projection on a
+        smooth-quant path.
 
         Semantics::
 
-            gathered = all_to_all(input split by rows, gathered by K shards)
-            output   = quant_gemm(gathered, weight, weight_scale, per_token_scale)
+            partial = quant_gemm(input_local, input_scale,
+                                 weight_local, weight_scale)   # bf16, full seq
+            output  = reduce_scatter(partial, dim=scatter_dim)
+                    # shape along scatter_dim shrinks by world_size
+
+        When ``torch.distributed`` is not initialised, ReduceScatter is identity.
 
         Args:
-            weight (torch.Tensor): Int8 weight. ``trans_weight=True`` expects
-                ``(K, N)``; ``False`` expects ``(N, K)``.
-            weight_scale (torch.Tensor): Per-output-channel scale, shape ``(N,)``.
-            trans_weight (bool): Whether weight layout is transposed.
-            process_group (Optional[ProcessGroup]): Distributed group.
-            output_dtype (torch.dtype): Output dtype for reference path.
-            use_internal_format (bool): Backend hint for xops, ignored by torch reference.
-            comm_context: Optional runtime/context object for backend implementations.
+            in_features (int): Local K dim of the int8 weight (= K_global / tp).
+            out_features (int): Logical N dim of the int8 weight and weight_scale.
+            output_dtype (torch.dtype): Dequantized output dtype (default bf16).
+            trans_weight (bool): If True the weight is stored as (N, K).
+            quant_dtype (torch.dtype): Quantized dtype, only ``int8`` supported.
+            process_group (Optional[ProcessGroup]): TP group for ReduceScatter.
+            scatter_dim (int): Dimension to scatter along (default 0 = sequence).
+            **kwargs: Tensor factory kwargs forwarded to the weight buffers.
         """
-        super().__init__()
+        super().__init__(**kwargs)
+        if quant_dtype != torch.int8:
+            raise NotImplementedError(
+                f"Unsupported quant_dtype: {quant_dtype}, expected torch.int8."
+            )
         if not isinstance(trans_weight, bool):
             raise TypeError("trans_weight must be bool.")
-        self.weight = weight
-        self.weight_scale = weight_scale
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight_shape = (out_features, in_features) if trans_weight else (in_features, out_features)
+        weight_factory_kwargs = {**self.tensor_factory_kwargs, "dtype": quant_dtype}
+        weight_scale_factory_kwargs = {**self.tensor_factory_kwargs, "dtype": torch.bfloat16}
+        self.quant_dtype = quant_dtype
+        self.output_dtype = output_dtype
         self.trans_weight = trans_weight
         self.process_group = process_group
-        self.output_dtype = output_dtype
-        self.use_internal_format = use_internal_format
-        self.comm_context = comm_context
+        self.scatter_dim = scatter_dim
+        self.register_buffer("weight", torch.empty(self.weight_shape, **weight_factory_kwargs))
+        self.register_buffer("weight_scale", torch.empty(out_features, **weight_scale_factory_kwargs))
 
-    def forward(self, input: torch.Tensor, per_token_scale: torch.Tensor, workspace: Optional[torch.Tensor] = None):
-        if _is_dist_initialized():
-            process_group = self.process_group or _get_default_group()
-            world_size = dist.get_world_size(group=process_group)
-            rank = dist.get_rank(group=process_group)
-            if input.shape[0] % world_size != 0:
-                raise ValueError(f"input rows {input.shape[0]} must be divisible by world_size {world_size}.")
-            send = torch.stack(list(input.chunk(world_size, dim=0)), dim=0).contiguous()
-            gathered = [torch.empty_like(send) for _ in range(world_size)]
-            dist.all_gather(gathered, send, group=process_group)
-            input = torch.cat([peer_chunks[rank] for peer_chunks in gathered], dim=-1)
-            rows_per_rank = per_token_scale.shape[0] // world_size
-            per_token_scale = per_token_scale[rank * rows_per_rank:(rank + 1) * rows_per_rank]
+    def forward(
+        self,
+        input: torch.Tensor,
+        input_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            input (torch.Tensor): int8 ``(seq_full, in_features)`` — each rank's
+                column-shard of the quantized activation, full sequence.
+            input_scale (torch.Tensor): fp32 ``(seq_full,)`` — per-token scale,
+                same on every rank for the full sequence.
 
-        output = _quant_gemm(
-            input,
-            self.weight,
-            self.weight_scale,
-            per_token_scale,
-            self.trans_weight,
-            self.output_dtype,
+        Returns:
+            torch.Tensor: ``output_dtype`` ``(seq_full / world_size, out_features)``
+                after the quantized GEMM and ReduceScatter along ``scatter_dim``.
+                Single-rank fallback returns the full unscattered output.
+        """
+        if input.dim() != 2:
+            raise ValueError(f"input must be 2D, got shape {tuple(input.shape)}.")
+        if input.shape[-1] != self.in_features:
+            raise ValueError(
+                f"input K {input.shape[-1]} must match in_features {self.in_features}."
+            )
+        partial = _quant_gemm(
+            input, input_scale, self.weight, self.weight_scale,
+            self.trans_weight, self.output_dtype,
         )
-        return output
-
-    def estimate_shmem_size_mb(self, *, process_group: Optional[dist.ProcessGroup] = None, max_tokens: Optional[int] = None) -> int:
-        del process_group, max_tokens
-        return 20
+        if _is_dist_initialized():
+            pg = self.process_group or _get_default_group()
+            world_size = dist.get_world_size(group=pg)
+            rank = dist.get_rank(group=pg)
+            chunks = list(partial.chunk(world_size, dim=self.scatter_dim))
+            reduced = torch.empty_like(chunks[rank])
+            dist.reduce_scatter(reduced, chunks, op=dist.ReduceOp.SUM, group=pg)
+            return reduced
+        return partial
 
     def extra_repr(self) -> str:
         weight_shape = tuple(self.weight.shape) if isinstance(self.weight, torch.Tensor) else None
         return (
-            f"{weight_shape=}, weight_scale_shape={tuple(self.weight_scale.shape)}, "
-            f"{self.trans_weight=}, output_dtype={self.output_dtype}"
-        ).replace("self.", "")
+            f"{weight_shape=}, in={self.in_features}, out={self.out_features}, "
+            f"trans_weight={self.trans_weight}, scatter_dim={self.scatter_dim}"
+        )

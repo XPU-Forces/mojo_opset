@@ -436,12 +436,12 @@ class MojoResidualAddRMSNormQuant(MojoOperator):
 
     Semantics (``norm_pos="pre"``, the common case)::
 
-        residual = hidden_state + residual
+        residual = hidden_state + residual   (skipped if residual is None)
         normed   = rms_norm(residual)
         scale    = amax(|normed|, dim=-1) / q_max
         output   = clamp(round(normed / scale), q_min, q_max)
 
-    Returns ``(quant_output, residual, scale)``.
+    Returns ``(quant_output, normed_output, residual, scale)``.
     """
 
     def __init__(
@@ -488,22 +488,30 @@ class MojoResidualAddRMSNormQuant(MojoOperator):
     def forward(
         self,
         hidden_state: torch.Tensor,
-        residual: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
         smooth_scale: Optional[torch.Tensor] = None,
     ):
         """
         Args:
             hidden_state (torch.Tensor): ``(*, D)`` input.
-            residual (torch.Tensor): ``(*, D)`` residual tensor.
+            residual (torch.Tensor or None): ``(*, D)`` residual tensor.
+                If None, no residual add is performed (just norm + quant).
+            smooth_scale (torch.Tensor or None): ``(D,)`` optional SmoothQuant scale.
 
         Returns:
-            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-                - ``quant_output`` in ``quant_dtype``.
-                - Updated ``residual``.
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+                - ``quant_output`` in ``quant_dtype``, shape ``(*, D)``.
+                - ``normed_output`` in input dtype, shape ``(*, D)`` — the RMS-normed
+                  result before quantization (useful as attention residual).
+                - Updated ``residual`` in input dtype, shape ``(*, D)``.
                 - ``scale`` of shape ``(*, 1)`` (per-token).
         """
+        input_dtype = hidden_state.dtype
         if self.norm_pos == "pre":
-            residual = hidden_state + residual
+            if residual is not None:
+                residual = hidden_state + residual
+            else:
+                residual = hidden_state
             normed = F.rms_norm(
                 residual.float(),
                 (residual.shape[-1],),
@@ -511,19 +519,21 @@ class MojoResidualAddRMSNormQuant(MojoOperator):
                 eps=self.variance_epsilon,
             )
         else:
-            hidden_state = hidden_state + residual
+            if residual is not None:
+                hidden_state = hidden_state + residual
             normed = F.rms_norm(
                 hidden_state.float(),
                 (hidden_state.shape[-1],),
                 weight=self.weight,
                 eps=self.variance_epsilon,
             )
-            residual = hidden_state
+            residual = normed.to(input_dtype)
 
+        normed_output = normed.to(input_dtype)
         normed_fp = _apply_optional_smooth_scale(normed, smooth_scale)
         scale = normed_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
         output = torch.clamp(torch.round(normed_fp / scale), self.q_min, self.q_max)
-        return output.to(self.quant_dtype), residual, scale
+        return output.to(self.quant_dtype), normed_output, residual, scale
 
     def extra_repr(self) -> str:
         return (

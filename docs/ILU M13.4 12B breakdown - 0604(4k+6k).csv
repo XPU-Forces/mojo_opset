@@ -1,0 +1,38 @@
+standard_op,profiling_kernel,shape_details,kernel_latency_us
+ATTN_PRE_NORM_QUANT,residual_rms_norm_smoothquant_kernel,[4096x3584] residual+rmsnorm+smoothquant fused bf16→int8+scale,119.846
+QKV_MATMUL,mr_fast_gemm_i8_i8 (W8A8),[4096x3584]×[3584x12288]→bf16,1276.942
+FUSED_NORM_ROPE_QUANT_STORE,rms_norm_qk_rotary_embedding_quant_kv(swa),[4096x40x128] swa norm+rope+quant,154.615
+,paged_store_kv_cache(swa),[4096 tokens → pages],41.538
+,rms_norm_qk_rotary_embedding_quant_kv(full),[4096x40x128] full norm+rope+quant,165.365
+,paged_store_kv_cache(full),[4096 tokens → pages],41.000
+FLASH_ATTENTION,unrolled_elementwise(fill),[misc] zero-fill,3.576
+,build_window_cu_lens,[4096] window cu_seqlens,3.576
+,paged_kv_cache_dequant_varlen_window(SWA),[window] int8→bf16 kv dequant,55.461
+,compute_flash_attn(SWA),"q=4096 kv=window(~5k), 32 heads",1866.923
+,unrolled_elementwise(fill#2),[misc] zero-fill,3.634
+,paged_kv_cache_dequant_varlen_head_dim(Full),[10240x8x128] int8→bf16 kv dequant,104.134
+,compute_flash_attn(Full),"q=4096 kv=10240, 32 heads",7103.346
+ATTN_OUTPUT_GATE,general_gemm_bf16(attn_gate),[4096x4096]×[4096x32]→gate,114.557
+,fused_concat_sigmoid_mul_dynamic_smoothquant,[4096x4096]+[4096x4096] cat+gate+quant→int8,189.788
+O_PROJ,mr_fast_gemm_i8_i8,[4096x8192]×[8192x3584]→bf16,796.846
+ATTN_POST_NORM_QUANT,residual_rms_norm(res_add),[4096x3584] residual add + rmsnorm,87.288
+,residual_rms_norm(router_norm+smoothquant),[4096x3584] norm+quant for router,202.326
+MOE_GATING,triple_gemm_bf16_fp32,[4096x3584]×[3584x384]→fp32,345.134
+,topkGatingSoftmaxUnaligned,[4096x384]→top8 indices+gates,84.730
+MOE_DISPATCH,moe_compute_large_token_index,[4096×8→T'] dispatch index,101.750
+,(sync bubble),[device idle ~109us],109.079
+MOE_EXPERTS,moe_input_dynamic_smooth_int8,[T'x3584]→int8 expand+smooth+quant,338.288
+,mr_fast_group_gemm_w4a8(fc1_g256),[T'x3584]×[3584x2560] top experts (grid=970),1150.615
+,mr_fast_group_gemm_w4a8(fc1_tail_untraced),[T'x3584]×[3584x2560] untraced group gemm,1845.777
+,mr_fast_group_gemm_w4a8(fc1_g320),[T'x3584]×[3584x2560] tail experts (grid=165),889.576
+,activation_dynamic_scaled_int8,swiglu+quant [T'x2560]→[T'x1280],344.673
+,mr_fast_group_gemm_w4a8(fc2_g256),[T'x1280]×[1280x3584] top experts (grid=1358),654.307
+,mr_fast_group_gemm_w4a8(fc2_tail_untraced),[T'x1280]×[1280x3584] untraced group gemm,1078.267
+,mr_fast_group_gemm_w4a8(fc2_g320),[T'x1280]×[1280x3584] tail experts (grid=231),477.250
+MOE_COMBINE,moe_output_reduce_sum,[T'x3584]→[4096x3584] weighted sum,416.826
+,,,
+SUM,,,20199.321
+kernel_total,,,17139.621
+sync_bubble,,,109.079
+untraced_group_gemm_total,,,2924.044
+other_overhead,,,26.577

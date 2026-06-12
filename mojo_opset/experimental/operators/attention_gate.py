@@ -58,8 +58,17 @@ class MojoFusedAttnOutputGate(MojoOperator):
             self.register_parameter("full_gate_bias", None)
             self.register_parameter("swa_gate_bias", None)
 
-        self._cached_weight: torch.Tensor | None = None
-        self._cached_bias: torch.Tensor | None = None
+        self.register_buffer(
+                "_cached_weight",
+                None,
+                persistent=False,
+            )
+
+        self.register_buffer(
+                "_cached_bias",
+                None,
+                persistent=False,
+            )
 
     def _get_fused_weight(self) -> torch.Tensor:
         if self._cached_weight is None:

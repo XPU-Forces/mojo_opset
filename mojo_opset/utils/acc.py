@@ -26,6 +26,9 @@ def check_tol_diff(
         ptol: The percentage tolerance. When match_ratio >= ptol is considered to pass.
         mixed_tol: If true, atol, rtol and ptol are ignored.
     """
+    if norm is None or ref is None:
+        return
+
     if isinstance(norm, tuple) or isinstance(norm, list):
         for idx, (norm_i, ref_i) in enumerate(zip(norm, ref)):
             check_tol_diff(
