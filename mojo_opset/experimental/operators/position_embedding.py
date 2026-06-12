@@ -226,6 +226,8 @@ class MojoRotaryEmbedding(MojoOperator):
             Implementations may return ``qkv_input`` updated in-place or a newly
             constructed tensor.
         """
+        if not qkv_input.is_contiguous():
+            raise NotImplementedError("Torch MojoRotaryEmbedding currently supports qkv_input is contiguous only.")
         if qkv_input.dim() != 2:
             raise NotImplementedError("Torch MojoRotaryEmbedding currently supports packed 2D qkv_input only.")
         if cu_seq_lens is None:

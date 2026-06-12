@@ -146,6 +146,8 @@ class MojoFusedAttnGateConcat(MojoOperator):
             ``[total_seq, full_head_num + swa_head_num, head_dim]`` and the
             same dtype as ``full_attn_out``.
         """
+        if full_attn_gate_score is None:
+            raise ValueError("full_attn_gate_score is required.")
         if swa_attn_gate_score is None:
             raise ValueError("swa_attn_gate_score is required.")
         if full_attn_out.dim() != 3:

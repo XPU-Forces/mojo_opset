@@ -218,7 +218,7 @@ class MojoGatherRopeStore(MojoOperator):
                     if rope_cache.dtype == torch.int8:
                         if quant_scale is None:
                             raise ValueError("quant_scale is required when rope_cache dtype is torch.int8.")
-                        quant = out_block.float() * self._reshape_scale(quant_scale, kv_head_num, head_dim).squeeze(0)
+                        quant = torch.round(out_block.float() * self._reshape_scale(quant_scale, kv_head_num, head_dim).squeeze(0))
                         rope_cache[page_id] = torch.clamp(quant, -128, 127).to(torch.int8)
                     else:
                         rope_cache[page_id] = out_block
