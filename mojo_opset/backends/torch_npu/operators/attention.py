@@ -381,3 +381,81 @@ class TorchNpuPagedPrefillSWA(MojoPagedPrefillSWA, default_priority=0):
         # convert output from bnsd to tnd
         out_tnd = bnsd_to_tnd(out, cu_q_lens)
         return out_tnd
+
+
+class TorchNpuPagedDecodeSWA(MojoPagedDecodeSWA, default_priority=0):
+    def forward(
+        self,
+        query: torch.Tensor,  # [bsz, n_q_heads, head_dim]
+        key_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
+        value_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
+        total_seq_lens: torch.Tensor,  # [bsz]
+        block_table: torch.Tensor,  # [bsz, max_num_blocks]
+        softmax_scale: Optional[float] = None,
+        input_layout: Optional[str] = None,
+        *,
+        max_total_seq_len: Optional[int] = None,
+    ) -> torch.Tensor:
+        batch_size, num_q_heads, head_dim = query.shape
+        _, head_nums, block_size, _ = key_cache.shape
+
+        if head_dim % 128 != 0:
+            raise NotImplementedError(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
+
+        if block_size % 128 != 0 or block_size > 512:
+            return super().forward(
+                query,
+                key_cache,
+                value_cache,
+                total_seq_lens,
+                block_table,
+                softmax_scale=softmax_scale,
+                max_total_seq_len=max_total_seq_len,
+            )
+
+        max_total_seq_len = max_total_seq_len if max_total_seq_len else total_seq_lens.max().item()
+        if softmax_scale is None:
+            softmax_scale = head_dim**-0.5
+
+        is_unsqueezed = False
+        if input_layout is None:
+            if query.dim() == 3:
+                query = query.unsqueeze(2) # (B, N, D) -> (B, N, 1, D)
+                input_layout = "BNSD"
+                is_unsqueezed = True
+            else:
+                input_layout = "BNSD"
+
+        # actual_seq_lengths_q = torch.arange(1, batch_size + 1, dtype=torch.int32, device=query.device)
+        actual_seq_lengths_q = torch.ones(batch_size, dtype=torch.int32, device=query.device)
+        # print(f"query shape: {query.shape}")
+        # print(f"key shape: {key_cache.shape}")
+        # print(f"block_table: {block_table}")
+        # print(f"total_seq_lens: {total_seq_lens}")
+        
+        block_table_max_kv_len = block_table.shape[1] * block_size
+        mask_kv_len = max(max_total_seq_len, block_table_max_kv_len)
+
+        attn_mask = ~(_generate_window_mask(1, mask_kv_len, self.local_window_size, self.global_window_size).to(query.device))
+        attn_mask = attn_mask.unsqueeze(0).expand(batch_size, -1, -1)
+        out, _ = torch_npu.npu_fused_infer_attention_score(
+            query=query,
+            key=key_cache,
+            value=value_cache,
+            block_table=block_table,
+            input_layout=input_layout,
+            block_size=block_size,
+            actual_seq_lengths=actual_seq_lengths_q,
+            actual_seq_lengths_kv=total_seq_lens,
+            num_key_value_heads=head_nums,
+            num_heads=num_q_heads,
+            scale=softmax_scale,
+
+            # seq_len mask for mode 0, support mask
+            atten_mask=attn_mask,
+            sparse_mode=0,
+        )
+
+        if is_unsqueezed:
+            out = out.squeeze(2)
+        return out
