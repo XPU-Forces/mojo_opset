@@ -1,0 +1,41 @@
+sim_op,sim_latency_us,profiling_kernel,shape_details,kernel_latency_us,measured_total_us,delta
+ATTN_PRE_NORM_QUANT,178.81,residual_rms_norm_kernel,[4096x3584]fp32→bf16,96.10,,
+ATTN_PRE_NORM_QUANT,178.81,dynamic_smoothquant_opt1,[4096x3584]bf16→int8+scale,105.04,201.13,+12%
+QKV_MATMUL,1260.57,mr_fast_gemm_i8_i8 (W8A8),[4096x3584]×[3584x12288]→bf16,1271.29,1271.29,+1%
+FUSED_KV_NORM_QUANT,800.48,fused_rms_norm_qk(swa),[4096x32x128]+[4096x8x128],515.21,,
+FUSED_KV_NORM_QUANT,800.48,fused_rms_norm_qk(full),[4096x32x128]+[4096x8x128],515.35,,
+FUSED_KV_NORM_QUANT,800.48,apply_rope_inplace(swa),[4096x32/8x128],125.75,,
+FUSED_KV_NORM_QUANT,800.48,apply_rope_inplace(full),[4096x32/8x128],135.75,,
+FUSED_KV_NORM_QUANT,800.48,static_quant_int8 × 4,[4096xNx128]bf16→int8,420.33,,
+FUSED_KV_NORM_QUANT,800.48,paged_store_kv_cache × 2,[4096xNx128]int8→cache,83.94,1796.33,+124%
+FLASH_ATTENTION,8098.40,kv_dequant_window(swa),cache int8→bf16,77.92,,
+FLASH_ATTENTION,8098.40,compute_flash_attn(SWA),q[4096x32x128] kv=12k window,1917.63,,
+FLASH_ATTENTION,8098.40,kv_dequant_head_dim(full),cache int8→bf16,122.13,,
+FLASH_ATTENTION,8098.40,compute_flash_attn(Full),q[4096x32x128] kv=12288,8831.33,,
+FLASH_ATTENTION,8098.40,misc: fill+scan+cat+add,cu_total_seq_lens prep,28.52,10977.53,+26%
+CONTEXT_RMSNORM_QUANT,460.43,elementwise(fp32 cast),[4096x8192],154.87,,
+CONTEXT_RMSNORM_QUANT,460.43,gemm_tcu_h(gate_proj),[4096x3584]×[3584x32]→gate,138.63,,
+CONTEXT_RMSNORM_QUANT,460.43,sigmoid,[4096x32],5.92,,
+CONTEXT_RMSNORM_QUANT,460.43,CatAllContiguous(full+swa),[4096x4096]+[4096x4096]→8192,391.54,,
+CONTEXT_RMSNORM_QUANT,460.43,mul(gate*attn) × 2,[4096x32x128]*[4096x32x1],809.90,,
+CONTEXT_RMSNORM_QUANT,460.43,bfloat16_copy,[4096x8192] fp32→bf16,453.71,,
+CONTEXT_RMSNORM_QUANT,460.43,small bias add,,8.25,1962.82,+326%
+O_PROJ,963.09,dynamic_smoothquant_opt1,[4096x8192]bf16→int8,179.33,,
+O_PROJ,963.09,mr_fast_gemm_i8_i8,[4096x8192]×[8192x3584]→bf16,800.29,979.61,+2%
+o_norm (not in sim),,residual_rms_norm (o_norm),[4096x3584]bf16→bf16,86.12,86.12,N/A
+all_reduce,0.00,(single device no allreduce),,0.00,0.00,
+MOE_PRE_NORM_QUANT,178.81,vectorized_elementwise(res_add),[4096x3584] fp32+bf16→fp32,164.54,,
+MOE_PRE_NORM_QUANT,178.81,residual_rms_norm(post_attn),[4096x3584]fp32→bf16,99.58,264.11,+48%
+MOE_TOPK_SOFTMAX,753.63,general_gemm_bf16(gate),[4096x3584]×[3584x384]→bf16,513.44,,
+MOE_TOPK_SOFTMAX,753.63,topkGatingSoftmaxUnaligned,[4096x384]→top8,87.04,600.48,-20%
+moe_dispatch (not in sim),,moe_compute_token_index,dispatch index compute,100.35,100.35,N/A
+MOE_EP,6473.52,moe_input_dynamic_smooth_int8,"[T'x3584]→int8 (fc1_quant)",334.60,,
+MOE_EP,6473.52,mr_fast_group_gemm_i4_i8(fc1),"[T'x3584]×[3584x2560] int4",696.02,,
+MOE_EP,6473.52,mr_fast_group_gemm_i4_i8(fc1t),(tail experts),183.44,,
+MOE_EP,6473.52,activation_dynamic_scaled_int8,"silu+quant [T'x2560]→[T'x1280]",339.40,,
+MOE_EP,6473.52,mr_fast_group_gemm_i4_i8(fc2),"[T'x1280]×[1280x3584] int4",390.02,,
+MOE_EP,6473.52,mr_fast_group_gemm_i4_i8(fc2t),(tail experts),95.52,,
+MOE_EP,6473.52,vectorized_elementwise(small),,5.50,,
+MOE_EP,6473.52,moe_output_reduce_sum,"[T'x3584]→[4096x3584]",416.38,2460.89,-62%
+all_reduce#2,0.00,(single device),,0.00,0.00,
+TOTAL,19167.24,,,,20700.66,+8%

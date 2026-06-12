@@ -99,29 +99,6 @@ class TTXMoECombine(MojoMoECombine):
         )
 
 
-class TTXMoE(MojoMoE):
-    """Staged MoE forward: ``gating`` -> ``dispatch`` -> ``experts`` -> ``combine``."""
-
-    supported_platforms_list = ["ilu"]
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,  # (num_tokens, hidden_size)
-    ) -> torch.Tensor:
-        """Full MoE forward.
-
-        Returns:
-            output: (num_tokens, hidden_size), same dtype as hidden_states.
-        """
-        top_k_indices, top_k_gates = self.gating(hidden_states)
-        sorted_hidden_states, tokens_per_expert, sorted_gates, token_indices = self.dispatch(
-            hidden_states, top_k_gates, top_k_indices
-        )
-        expert_outputs = self.experts(sorted_hidden_states, tokens_per_expert)
-        output_buffer = torch.empty_like(hidden_states, memory_format=torch.contiguous_format)
-        return self.combine(output_buffer, expert_outputs, sorted_gates, token_indices)
-
-
 class TTXQuantExperts(MojoQuantExperts):
     supported_platforms_list = ["ilu"]
 
@@ -144,5 +121,12 @@ class TTXQuantExperts(MojoQuantExperts):
         return quant_moe_experts(self, sorted_hidden_states, tokens_per_expert)
 
 
+class TTXMoE(MojoMoE):
+    """Staged MoE forward: ``gating`` -> ``dispatch`` -> ``experts`` -> ``combine``."""
+    supported_platforms_list = ["ilu"]
+    _use_fused_moe = False
+
+
 class TTXQuantMoE(MojoQuantMoE):
     supported_platforms_list = ["ilu"]
+    _use_fused_moe = False

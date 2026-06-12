@@ -19,6 +19,9 @@ from .operators.attention import MojoPagedPrefillSWAWithKVDequant
 from .operators.attention import MojoPrefillMLA
 from .operators.attention import MojoPrefillNSA
 from .operators.attention_gate import MojoFusedAttnOutputGate
+from .operators.fused_attn_gate_quant import MojoFusedAttnGateQuant
+from .operators.dist_fused_attn_gate_quant import MojoDistFusedAttnGateQuant
+from .operators.a2a_quant_gemm_dual_head import MojoA2AQuantGemmDualHead
 from .operators.attention import MojoPagedPrefillSageGQA
 from .operators.gemm import MojoQuantBatchGemmReduceSum
 from .operators.indexer import MojoIndexer
@@ -30,6 +33,7 @@ from .operators.normalization import MojoChannelRMSNorm
 from .operators.normalization import MojoGroupLayerNorm
 from .operators.position_embedding import MojoGridRoPE
 from .operators.position_embedding import MojoRelativeEmbedding
+from .operators.fused_norm_rope_quant_store import MojoFusedNormRoPEQuantStore
 from .operators.store_lowrank import MojoStoreLowrank
 
 __all__ = [
@@ -51,6 +55,9 @@ __all__ = [
     "MojoPagedPrefillSWAWithKVDequant",
     "MojoPagedDecodeSWAWithKVDequant",
     "MojoFusedAttnOutputGate",
+    "MojoFusedAttnGateQuant",
+    "MojoDistFusedAttnGateQuant",
+    "MojoA2AQuantGemmDualHead",
     "MojoPagedPrefillSageGQA",
     "MojoStorePagedMLAKVCache",
     "MojoMoEInitRoutingDynamicQuant",
@@ -60,5 +67,6 @@ __all__ = [
     "MojoRelativeEmbedding",
     "MojoGridRoPE",
     "MojoStoreLowrank",
+    "MojoFusedNormRoPEQuantStore",
     "MojoIndexer",
 ]

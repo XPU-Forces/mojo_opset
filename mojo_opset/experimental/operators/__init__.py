@@ -12,6 +12,7 @@ from .attention import MojoPagedPrefillSWAWithKVDequant
 from .attention import MojoPrefillMLA
 from .attention import MojoPrefillNSA
 from .attention_gate import MojoFusedAttnOutputGate
+from .fused_attn_gate_quant import MojoFusedAttnGateQuant
 from .gemm import MojoQuantBatchGemmReduceSum
 from .indexer import MojoIndexer
 from .indexer import MojoLightningIndexer
@@ -22,11 +23,13 @@ from .normalization import MojoChannelRMSNorm
 from .normalization import MojoGroupLayerNorm
 from .position_embedding import MojoGridRoPE
 from .position_embedding import MojoRelativeEmbedding
+from .fused_norm_rope_quant_store import MojoFusedNormRoPEQuantStore
 from .store_lowrank import MojoStoreLowrank
 
 __all__ = [
     "MojoRotateActivation",
     "MojoFusedAttnOutputGate",
+    "MojoFusedAttnGateQuant",
     "MojoIndexer",
     "MojoLightningIndexer",
     "MojoPrefillMLA",
@@ -50,4 +53,5 @@ __all__ = [
     "MojoGridRoPE",
     "MojoStoreLowrank",
     "MojoQuantBatchGemmReduceSum",
+    "MojoFusedNormRoPEQuantStore",
 ]

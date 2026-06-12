@@ -1125,7 +1125,8 @@ class IxformerPagedDecodeGQAWithKVDequant(MojoPagedDecodeGQAWithKVDequant):
             value_scale (torch.Tensor): Per-channel dequantization scale for values
                 (same shape convention as key_scale).
             total_seq_lens (torch.Tensor): Per-batch KV lengths, shape (B,).
-                dtype must be int32. All entries must be > 0.
+                dtype must be int32. Entries may be 0 (those rows produce an
+                all-zero output).
             block_tables (torch.Tensor): Logical-to-physical block IDs,
                 shape (B, num_blocks). dtype must be int32.
             softmax_scale (Optional[float]): Attention scaling factor;
@@ -1142,10 +1143,8 @@ class IxformerPagedDecodeGQAWithKVDequant(MojoPagedDecodeGQAWithKVDequant):
         """
         assert_paged_decode_contract(block_tables, total_seq_lens)
 
-        if bool((total_seq_lens <= 0).any().item()):
-            raise NotImplementedError(
-                "IxformerPagedDecodeGQAWithKVDequant does not support batch rows with zero KV length (PADSEQ)."
-            )
+        empty_seq_mask = (total_seq_lens <= 0).view(-1, 1, 1)
+
         if mask is not None:
             raise NotImplementedError("IxformerPagedDecodeGQAWithKVDequant does not support custom mask yet.")
 
@@ -1212,6 +1211,8 @@ class IxformerPagedDecodeGQAWithKVDequant(MojoPagedDecodeGQAWithKVDequant):
             max_context_len=max_total_seq_len,
             causal=self.is_causal,
         )
+
+        output.masked_fill_(empty_seq_mask, 0)
         return output
 
 
@@ -1339,7 +1340,8 @@ class IxformerPagedDecodeSWAWithKVDequant(MojoPagedDecodeSWAWithKVDequant):
             value_scale (torch.Tensor): Per-channel dequantization scale for values
                 (same shape convention as key_scale).
             total_seq_lens (torch.Tensor): Per-batch KV lengths, shape (B,).
-                dtype must be int32. All entries must be > 0.
+                dtype must be int32. Entries may be 0 (those rows produce an
+                all-zero output).
             block_table (torch.Tensor): Logical-to-physical block IDs,
                 shape (B, num_blocks). dtype must be int32.
             softmax_scale (Optional[float]): Attention scaling factor;
@@ -1355,10 +1357,7 @@ class IxformerPagedDecodeSWAWithKVDequant(MojoPagedDecodeSWAWithKVDequant):
         """
         assert_paged_decode_contract(block_table, total_seq_lens)
 
-        if bool((total_seq_lens <= 0).any().item()):
-            raise NotImplementedError(
-                "IxformerPagedDecodeSWAWithKVDequant does not support batch rows with zero KV length (PADSEQ)."
-            )
+        empty_seq_mask = (total_seq_lens <= 0).view(-1, 1, 1)
 
         if query_scale is not None:
             raise ValueError("query_scale must be None for non-quantized query.")
@@ -1447,4 +1446,6 @@ class IxformerPagedDecodeSWAWithKVDequant(MojoPagedDecodeSWAWithKVDequant):
             max_context_len=max_window_context,
             causal=self.is_causal,
         )
+
+        output.masked_fill_(empty_seq_mask, 0)
         return output

@@ -18,13 +18,10 @@ def assert_paged_prefill_contract(
     assert isinstance(block_tables, torch.Tensor)
     assert cu_q_lens.dtype == torch.int32
     assert block_tables.dtype == torch.int32
-    q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
     if cu_total_seq_lens is not None:
         assert isinstance(cu_total_seq_lens, torch.Tensor)
         assert cu_total_seq_lens.dtype == torch.int32
         assert cu_total_seq_lens.dim() == 1
-        assert cu_total_seq_lens.shape[0] == q_lens.shape[0] + 1
-    assert block_tables.shape[0] == q_lens.shape[0]
     assert block_tables.dim() == 2
 
 

@@ -37,9 +37,7 @@ class IxformerFusedAttnOutputGate(MojoFusedAttnOutputGate):
         full_attn_output = full_attn_output.view(-1, self.num_heads_full, self.head_dim)
         swa_attn_output = swa_attn_output.view(-1, self.num_heads_swa, self.head_dim)
 
-        attn_cat = torch.cat([full_attn_output, swa_attn_output], dim=1)
-
-        gated = ixf_f.fused_sigmoid_mul(attn_cat, gate, self._cached_bias)
+        gated = ixf_f.fused_concat_sigmoid_mul(full_attn_output, swa_attn_output, gate, self._cached_bias)
 
         return gated.view(-1, self.num_heads_total * self.head_dim)
 

@@ -70,7 +70,7 @@ jobs:
             python3 -m build .
             pip install dist/*.whl --force-reinstall --no-deps
             pip3 uninstall -y ixformer
-            curl -O -u "${DEEPSPARK_USER}:${DEEPSPARK_PASS}" http://files.deepspark.org.cn:880/upload/ixformer-0.7.0+corex.4.5.0.rc.5.20260416-cp310-cp310-linux_x86_64.whl
+            curl -O -u "${DEEPSPARK_USER}:${DEEPSPARK_PASS}" http://files.deepspark.org.cn:880/upload/ixformer-0.7.0+corex.4.5.0.rc.5.20260601-cp310-cp310-linux_x86_64.whl
             pip3 install ixformer*.whl
           "
 
@@ -92,6 +92,19 @@ jobs:
             echo 'Running ixformer tests on Iluvatar GPU...'
             MOJO_BACKEND=ixformer python3 -m pytest -n 8 mojo_opset/tests/accuracy/operators/ \
               --ignore=mojo_opset/tests/accuracy/operators/test_compute_with_comm.py
+          "
+
+      - name: test-Distributed
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            set -euo pipefail
+            cd /workspace
+            echo 'Running distributed MoE EP=2 tests (ttx + ixformer) on Iluvatar GPU...'
+            for backend in ttx ixformer; do
+              echo \"--- backend=\$backend ---\"
+              MOJO_BACKEND=\$backend torchrun --nproc-per-node=2 --rdzv-backend=c10d --rdzv-endpoint=localhost:0 \
+                -m pytest -v mojo_opset/tests/distributed/test_moe_ep.py
+            done
           "
 
       - name: Cleanup

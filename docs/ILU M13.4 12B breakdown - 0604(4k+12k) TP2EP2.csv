@@ -1,0 +1,38 @@
+standard_op,profiling_kernel,shape_details,kernel_latency_us
+ATTN_PRE_NORM_QUANT,residual_rms_norm_smoothquant_kernel,[4096x3584] residual+rmsnorm+smoothquant fused bf16→int8+scale,131.609
+QKV_MATMUL,mr_fast_gemm_i8_i8 (W8A8),[4096x3584]×[3584x6144]→bf16 (TP=2: 48 heads×128),642.102
+FUSED_NORM_ROPE_QUANT_STORE,rms_norm_qk_rotary_embedding_quant_kv(swa),[4096x24x128] swa norm+rope+quant (16q+4k+4v),87.576
+,paged_store_kv_cache(swa),[4096 tokens → pages] 4 kv_heads,26.083
+,rms_norm_qk_rotary_embedding_quant_kv(full),[4096x24x128] full norm+rope+quant (16q+4k+4v),92.320
+,paged_store_kv_cache(full),[4096 tokens → pages] 4 kv_heads,26.698
+FLASH_ATTENTION,unrolled_elementwise(fill),[misc] zero-fill,3.685
+,build_window_cu_lens,[4096] window cu_seqlens,3.750
+,paged_kv_cache_dequant_varlen_window(SWA),[window] int8→bf16 kv dequant 4 heads,33.852
+,compute_flash_attn(SWA),"q=4096 kv=window(~5k), 16 heads",950.827
+,unrolled_elementwise(fill#2),[misc] zero-fill,3.737
+,paged_kv_cache_dequant_varlen_head_dim(Full),[16384x4x128] int8→bf16 kv dequant,83.564
+,compute_flash_attn(Full),"q=4096 kv=16384, 16 heads",6242.788
+ATTN_OUTPUT_GATE,general_gemm_bf16(attn_gate),[4096x4096]×[4096x32]→gate,74.788
+,fused_concat_sigmoid_mul_dynamic_smoothquant,[4096x2048]+[4096x2048] cat+gate+quant→int8,196.198
+O_PROJ,mr_fast_gemm_i8_i8,[4096x4096]×[4096x3584]→bf16 (TP=2),410.480
+ATTN_ALLREDUCE,ncclAllReduce(attn_tp),[4096x3584] bf16 all_reduce over TP=2,1343.685
+ATTN_POST_NORM,residual_rms_norm(res_add),[4096x3584] residual add + rmsnorm,108.859
+,residual_rms_norm(router_norm+smoothquant),[4096x3584] norm+quant for router,203.532
+MOE_GATING,triple_gemm_bf16_fp32,[4096x3584]×[3584x384]→fp32,341.403
+,topkGatingSoftmaxUnaligned,[4096x384]→top8 indices+gates,86.044
+MOE_DISPATCH,moe_compute_token_index,[4096×8→T'] dispatch index (EP=2 local 192 experts),333.986
+MOE_EXPERTS,moe_input_dynamic_smooth_int8,[T'x3584]→int8 expand+smooth+quant,282.051
+,mr_fast_group_gemm_w4a8(fc1_g256),"[T'x3584]×[3584x2560] top experts (grid=490, BM128×BN256)",588.179
+,mr_fast_group_gemm_w4a8(fc1_g256_tail),"[T'x3584]×[3584x2560] tail experts (grid=90, BM96×BN512)",518.044
+,activation_dynamic_scaled_int8,swiglu+quant [T'x2560]→[T'x1280],163.006
+,mr_fast_group_gemm_w4a8(fc2_g320),"[T'x1280]×[1280x3584] top experts (grid=686, BM128×BN256)",334.820
+,mr_fast_group_gemm_w4a8(fc2_g320_tail),"[T'x1280]×[1280x3584] tail experts (grid=126, BM96×BN512)",284.211
+,vectorized_elementwise(cmp),[misc] compare mask,8.205
+MOE_COMBINE,moe_output_reduce_sum,[T'x3584]→[4096x3584] weighted sum,230.916
+MOE_ALLREDUCE,ncclAllReduce(moe_ep),[4096x3584] bf16 all_reduce over EP=2,1878.698
+,,
+SUM,,,15715.697
+step_wall_clock(avg),,,18826.039
+kernel_total,,,15715.697
+nccl_total(attn+moe),,,3222.383
+overhead(step-kernel),,,3110.342
