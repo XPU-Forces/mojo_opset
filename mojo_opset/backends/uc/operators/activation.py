@@ -69,6 +69,13 @@ class UCSilu(MojoSilu):
 
 class UCSwiGLU(MojoSwiGLU):
     supported_platforms_list = ["npu"]
+    # P1-G5 (2026-06-11): kernel retuned to (X=4, Y=2048) wins at >=64K elements
+    # but pays ~3 µs Device launch-overhead at <32K shapes. Below ``_UC_MIN_NUMEL``
+    # torch native (silu+mul) takes ~5 µs Device on (256, 128) bf16 — strictly
+    # faster than UC at that size — so fall back per best-practices §C.1.
+    # See ``docs/project-ops/perf-debug/op-MojoSwiGLU-2026-06-11.md`` for full
+    # 4-backend per-shape table.
+    _UC_MIN_NUMEL = 64 * 1024  # 64K elements
 
     def forward(self, gate_out: torch.Tensor, up_out: torch.Tensor) -> torch.Tensor:
         if self.swiglu_limit > 0:
@@ -78,4 +85,7 @@ class UCSwiGLU(MojoSwiGLU):
                 "Per project rule 'wheel 没实现的就直接给报错', this wrapper does not "
                 "silently fall back to torch — use TTX / torch_npu / torch_native instead."
             )
+        if gate_out.numel() < self._UC_MIN_NUMEL:
+            # Launch-overhead-floor fallback (best-practices §C.1).
+            return super().forward(gate_out, up_out)
         return run_binary_kernel("mojo_swiglu", gate_out, up_out)
