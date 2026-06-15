@@ -1,7 +1,6 @@
 import torch
 import torch.distributed as dist
 
-import ixformer.distributed as ixfd
 from ixformer import functions as ixf_f
 from ixformer.distributed import symmetric_memory as symm
 
@@ -19,6 +18,19 @@ def _cast_weight_scale_to_fp32(module, incompatible_keys):
         module.weight_scale.detach().to(torch.float32),
         requires_grad=module.weight_scale.requires_grad,
     )
+
+
+def _destroy_symm_workspace(module):
+    if getattr(module, "_workspace", None) is None:
+        return
+
+    try:
+        group = getattr(module, "process_group", None)
+        group_name = getattr(group, "group_name", None)
+        module._workspace = None
+        symm.destroy(group_name=group_name)
+    except Exception:
+        pass
 
 
 class IxformerAllGatherQuantGemm(MojoAllGatherQuantGemm):
@@ -57,6 +69,9 @@ class IxformerAllGatherQuantGemm(MojoAllGatherQuantGemm):
         if symm.is_nvshmem_available():
             symm.set_backend("NVSHMEM")
         symm.enable_symm_mem_for_group(pg.group_name)
+
+    def __del__(self):
+        _destroy_symm_workspace(self)
 
     def forward(self, input: torch.Tensor, input_scale: torch.Tensor) -> torch.Tensor:
         if input.dim() != 2:
@@ -126,7 +141,9 @@ class IxformerQuantGemmReduceScatter(MojoQuantGemmReduceScatter):
         if symm.is_nvshmem_available():
             symm.set_backend("NVSHMEM")
         symm.enable_symm_mem_for_group(pg.group_name)
-        
+
+    def __del__(self):
+        _destroy_symm_workspace(self)
 
     def forward(self, input: torch.Tensor, input_scale: torch.Tensor) -> torch.Tensor:
         if input.dim() != 2:

@@ -188,7 +188,6 @@ def _build_pair_rs(in_features, out_features, trans_weight, weight_int8, weight_
 
 def _worker_ag(rank, world_size, port, shape, trans_weight, non_contig):
     _init_pg(rank, world_size, port)
-    exit_code = 1
     try:
         seq_full, in_features, out_features = shape
         seq_local = seq_full // world_size
@@ -222,17 +221,9 @@ def _worker_ag(rank, world_size, port, shape, trans_weight, non_contig):
             rtol=2e-3,
         )
 
-        exit_code = 0
     finally:
-        try:
-            if dist.is_initialized():
-                _destroy_pg()
-        except Exception:
-            pass
-        sys.stdout.flush()
-        sys.stderr.flush()
-        # Avoid fragile NVSHMEM / symmetric memory Python destructors under mp.spawn.
-        os._exit(exit_code)
+        if dist.is_initialized():
+            _destroy_pg()
 
 
 @pytest.mark.parametrize("shape", _AG_SHAPES)
@@ -283,7 +274,6 @@ def test_all_gather_quant_gemm_comm_non_contiguous(master_port, shape):
 
 def _worker_rs(rank, world_size, port, shape, trans_weight, non_contig):
     _init_pg(rank, world_size, port)
-    exit_code = 1
     try:
         seq_full, in_features, out_features = shape
 
@@ -311,17 +301,9 @@ def _worker_rs(rank, world_size, port, shape, trans_weight, non_contig):
             op_ref, x_full, scale_full,
             atol=1, rtol=2e-3,
             )
-        exit_code = 0
     finally:
-        try:
-            if dist.is_initialized():
-                _destroy_pg()
-        except Exception:
-            pass
-        sys.stdout.flush()
-        sys.stderr.flush()
-        # Avoid fragile NVSHMEM / symmetric memory Python destructors under mp.spawn.
-        os._exit(exit_code)
+        if dist.is_initialized():
+            _destroy_pg()
 
 
 @pytest.mark.parametrize("shape", _RS_SHAPES)
