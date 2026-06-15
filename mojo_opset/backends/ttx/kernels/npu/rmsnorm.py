@@ -82,13 +82,10 @@ def _rmsnorm_infer_small_cols_kernel(
         rrms = tl.where(row_mask, rrms, 0.0)
 
         y = x * rrms[:, None] * w[None, :]
-        tl.store(
-            y_ptrs,
-            y.to(Y_ptr.dtype.element_ty),
-            mask=block_mask,
-        )
+        tl.store(y_ptrs, y.to(Y_ptr.dtype.element_ty), mask=block_mask)
 
 
+@triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
 @libentry()
 @triton.jit
 def _rmsnorm_infer_kernel(
@@ -168,7 +165,6 @@ def rmsnorm_infer_impl(
     dim = shape[-1]
     X_2d = x.reshape(-1, dim)
     n_rows, n_cols = X_2d.shape
-    work_items = n_rows * n_cols
 
     y = torch.empty_like(X_2d)
 
@@ -178,21 +174,22 @@ def rmsnorm_infer_impl(
         BLOCK_SIZE_N = align(x, n_cols, VEC_ALIGN_BYTES)
 
     num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
-    # BLOCK_SIZE_M = rms_norm_fwd_heuristics({"n_cols": n_cols})
-    # BLOCK_SIZE_M 同时看 hidden dim 和总 work size
-    if work_items <= 4096:
-        BLOCK_SIZE_M = 1
-    elif work_items <= 16384:
-        BLOCK_SIZE_M = 2 if n_cols >= 1024 else 4
-    elif work_items <= 65536:
-        BLOCK_SIZE_M = 4 if n_cols >= 1024 else 8
-    else:
-        BLOCK_SIZE_M = rms_norm_fwd_heuristics({"n_cols": n_cols})
-    num_row_tasks = ceil_div(n_rows, BLOCK_SIZE_M)
-
-    grid = (min(num_programs, num_row_tasks),)
 
     if n_cols <= COL_BLOCKING_THRESHOLD:
+        work_items = n_rows * n_cols
+        # BLOCK_SIZE_M 同时看 hidden dim 和总 work size
+        if work_items <= 4096:
+            BLOCK_SIZE_M = 1
+        elif work_items <= 16384:
+            BLOCK_SIZE_M = 2 if n_cols >= 1024 else 4
+        elif work_items <= 65536:
+            BLOCK_SIZE_M = 4 if n_cols >= 1024 else 8
+        else:
+            heur_m = rms_norm_fwd_heuristics({"n_cols": n_cols})
+            BLOCK_SIZE_M = 1 << (heur_m.bit_length() - 1)
+        num_row_tasks = ceil_div(n_rows, BLOCK_SIZE_M)
+        grid = (min(num_programs, num_row_tasks),)
+
         _rmsnorm_infer_small_cols_kernel[grid](
             x,
             y,
@@ -202,10 +199,12 @@ def rmsnorm_infer_impl(
             n_rows=n_rows,
             n_cols=n_cols,
             eps=eps,
-            BLOCK_SIZE_N=BLOCK_SIZE_N,
+            BLOCK_SIZE_N=triton.next_power_of_2(n_cols),
             BLOCK_SIZE_M=BLOCK_SIZE_M,
         )
     else:
+        grid = (num_programs,)
+
         _rmsnorm_infer_kernel[grid](
             x,
             y,
@@ -216,7 +215,6 @@ def rmsnorm_infer_impl(
             n_cols=n_cols,
             eps=eps,
             BLOCK_SIZE_N=BLOCK_SIZE_N,
-            BLOCK_SIZE_M=BLOCK_SIZE_M,
         )
 
     return y.reshape(*shape)
