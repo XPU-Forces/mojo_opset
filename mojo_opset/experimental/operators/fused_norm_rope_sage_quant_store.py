@@ -136,7 +136,7 @@ class MojoFusedNormRoPESageQuantStore(MojoOperator):
             cu_q_lens_sparse: [B+1] cumulative query lengths for SWA
             context_kv_lens_sparse: [B] existing KV lengths for SWA
             sage_full_k_pt_cache: paged cache for the SAGE per-token int8 K
-            sage_full_k_pt_scale_cache: paged cache for the SAGE per-token (bf16) scale.
+            sage_full_k_pt_scale_cache: paged cache for the SAGE per-token float32 scale.
             update_kv: if True, run full pipeline (norm+rope+quant+store);
                        if False, only compute Q norm+rope (skip K/V entirely)
 
@@ -212,7 +212,7 @@ class MojoFusedNormRoPESageQuantStore(MojoOperator):
 
         # --- 4b. Store the SAGE per-token K snapshot + scale into the paged
         # "Bypass" caches, just like the main K/V store above. The int8 K and
-        # the (bf16) scale go into two separate caches, each dispatched with the
+        # the float32 scale go into two separate caches, each dispatched with the
         # tensor acting as both "key" and "value". This mirrors the model-side
         # Bypass cache write so the operator owns the snapshot store internally
         # while still returning the per-token K + scale to the caller.
@@ -223,14 +223,13 @@ class MojoFusedNormRoPESageQuantStore(MojoOperator):
             and sage_full_k_pt_cache is not None
             and sage_full_k_pt_scale_cache is not None
         ):
-            full_key_pt_scale_bf16 = full_key_pt_scale.to(torch.bfloat16)
             self.store_sage_full_kpt_cache(
                 full_key_pt_int8, full_key_pt_int8,
                 sage_full_k_pt_cache, sage_full_k_pt_cache,
                 block_tables, cu_q_lens, context_kv_lens,
             )
             self.store_sage_full_kpt_scale_cache(
-                full_key_pt_scale_bf16, full_key_pt_scale_bf16,
+                full_key_pt_scale, full_key_pt_scale,
                 sage_full_k_pt_scale_cache, sage_full_k_pt_scale_cache,
                 block_tables, cu_q_lens, context_kv_lens,
             )

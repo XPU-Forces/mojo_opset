@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 
 from mojo_opset.experimental import MojoFusedNormRoPESageQuantStore
+from mojo_opset.tests.utils import assert_close
 from mojo_opset.tests.utils import assert_deterministic
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.tests.utils import get_torch_device
@@ -121,6 +122,18 @@ def _forward_args(inputs, full_kv_case, swa_kv_case):
     )
 
 
+def _build_sage_caches(full_kv_case):
+    key_cache = full_kv_case["k_cache"]
+    key_pt_cache = torch.zeros_like(key_cache)
+    key_pt_scale_cache = torch.zeros(
+        key_cache.shape[:-1] + (1,), dtype=torch.float32, device=key_cache.device
+    )
+    return key_pt_cache, key_pt_scale_cache
+
+
+SAGE_CONFIGS = [cfg for cfg in CONFIGS if cfg[4] == 128]
+
+
 @pytest.mark.parametrize("num_heads_swa_q, num_heads_swa_k, num_heads_full_q, num_heads_full_k, head_dim, rope_dim", CONFIGS)
 @pytest.mark.parametrize("batch_size, q_lens_val, context_kv_lens_val", SEQ_CONFIGS)
 @pytest.mark.parametrize("update_kv", [True, False])
@@ -192,6 +205,115 @@ def test_diff_vs_torch_no_sage(
         update_kv=update_kv,
         atol=1, rtol=0.05, ptol=0.999,
     )
+
+
+@pytest.mark.parametrize("num_heads_swa_q, num_heads_swa_k, num_heads_full_q, num_heads_full_k, head_dim, rope_dim", SAGE_CONFIGS)
+@pytest.mark.parametrize("batch_size, q_lens_val, context_kv_lens_val", SEQ_CONFIGS)
+@pytest.mark.parametrize("update_kv", [True, False])
+@bypass_not_implemented
+def test_diff_vs_torch_with_sage(
+    num_heads_swa_q, num_heads_swa_k, num_heads_full_q, num_heads_full_k, head_dim, rope_dim,
+    batch_size, q_lens_val, context_kv_lens_val,
+    update_kv,
+):
+    """Dedicated ixformer SAGE path matches torch reference, including SAGE caches."""
+    torch.manual_seed(42)
+    device = get_torch_device()
+    cfg = (num_heads_swa_q, num_heads_swa_k, num_heads_full_q, num_heads_full_k, head_dim, rope_dim)
+    seq_cfg = (batch_size, q_lens_val, context_kv_lens_val)
+
+    op = MojoFusedNormRoPESageQuantStore(
+        num_heads_swa_q=num_heads_swa_q,
+        num_heads_swa_k=num_heads_swa_k,
+        num_heads_full_q=num_heads_full_q,
+        num_heads_full_k=num_heads_full_k,
+        head_dim=head_dim,
+        norm_eps=1e-5,
+        use_query_norm=True,
+        use_key_norm=True,
+        quant_dtype=torch.int8,
+        enable_sage=True,
+    ).to(device)
+    op_ref = MojoFusedNormRoPESageQuantStore._registry.get("torch")(
+        num_heads_swa_q=num_heads_swa_q,
+        num_heads_swa_k=num_heads_swa_k,
+        num_heads_full_q=num_heads_full_q,
+        num_heads_full_k=num_heads_full_k,
+        head_dim=head_dim,
+        norm_eps=1e-5,
+        use_query_norm=True,
+        use_key_norm=True,
+        quant_dtype=torch.int8,
+        enable_sage=True,
+    ).to(device)
+
+    for p in op_ref.parameters():
+        nn.init.normal_(p, mean=1.0, std=0.1)
+    op.load_state_dict(op_ref.state_dict())
+
+    inputs, full_kv_case, swa_kv_case, T = _build_inputs(cfg, seq_cfg, device)
+    fused_kpt_cache, fused_scale_cache = _build_sage_caches(full_kv_case)
+    ref_kpt_cache, ref_scale_cache = _build_sage_caches(full_kv_case)
+
+    fused_out = op(
+        *_forward_args(inputs, full_kv_case, swa_kv_case),
+        sage_full_k_pt_cache=fused_kpt_cache,
+        sage_full_k_pt_scale_cache=fused_scale_cache,
+        update_kv=update_kv,
+    )
+    ref_out = op_ref(
+        *_forward_args(inputs, full_kv_case, swa_kv_case),
+        sage_full_k_pt_cache=ref_kpt_cache,
+        sage_full_k_pt_scale_cache=ref_scale_cache,
+        update_kv=update_kv,
+    )
+
+    assert len(fused_out) == len(ref_out) == 12
+    output_names = (
+        "swa_q", "full_q", "full_key", "full_k_scale",
+        "swa_key", "swa_k_scale", "full_value", "full_v_scale",
+        "swa_value", "swa_v_scale", "full_key_pt", "full_key_pt_scale",
+    )
+    for name, fused, ref in zip(output_names, fused_out, ref_out):
+        if fused is None or ref is None:
+            assert fused is ref, name
+        elif fused.dtype == torch.int8:
+            diff = (fused.to(torch.int32) - ref.to(torch.int32)).abs().float()
+            assert (diff <= 1).float().mean().item() >= 0.99, name
+        elif name.endswith("scale"):
+            torch.testing.assert_close(
+                fused.float(), ref.float(), atol=1e-3, rtol=1e-2
+            )
+        else:
+            assert_close(fused, ref)
+
+    full_key_pt_int8, full_key_pt_scale = fused_out[-2], fused_out[-1]
+    if not update_kv:
+        assert full_key_pt_int8 is None
+        assert full_key_pt_scale is None
+        assert not bool((fused_kpt_cache != 0).any().item())
+        assert not bool((fused_scale_cache != 0).any().item())
+        return
+
+    assert full_key_pt_int8.shape == (T, num_heads_full_k, head_dim)
+    assert full_key_pt_int8.dtype == torch.int8
+    assert full_key_pt_scale.shape == (T, num_heads_full_k, 1)
+    assert full_key_pt_scale.dtype == torch.float32
+
+    kpt_written = ref_kpt_cache != 0
+    if bool(kpt_written.any().item()):
+        diff = (fused_kpt_cache.to(torch.int32) - ref_kpt_cache.to(torch.int32)).abs().float()[kpt_written]
+        assert (diff <= 1).float().mean().item() >= 0.99
+
+    scale_written = ref_scale_cache != 0
+    if bool(scale_written.any().item()):
+        torch.testing.assert_close(
+            fused_scale_cache[scale_written],
+            ref_scale_cache[scale_written],
+            atol=1e-2,
+            rtol=5e-2,
+        )
+
 
 @pytest.mark.parametrize("num_heads_swa_q, num_heads_swa_k, num_heads_full_q, num_heads_full_k, head_dim, rope_dim", CONFIGS)
 @pytest.mark.parametrize("batch_size, q_lens_val, context_kv_lens_val", SEQ_CONFIGS)

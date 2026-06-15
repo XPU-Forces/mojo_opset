@@ -86,7 +86,7 @@ class IxformerFusedNormRoPESageQuantStore(MojoFusedNormRoPESageQuantStore):
           - ``key_quant``   : [T, nkv, head_dim] static per-channel int8 key
           - ``value_quant`` : [T, nkv, head_dim] static per-channel int8 value
           - ``key_pt_int8`` : [T, nkv, head_dim] per-token int8 key
-          - ``key_pt_scale``: [T, nkv, 1] per-token bf16 scale
+          - ``key_pt_scale``: [T, nkv, 1] per-token float32 scale
         """
         head_size = self.head_dim
         if cu_q_lens is None:
