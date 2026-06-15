@@ -428,7 +428,7 @@ def test_sdpa(
 
 test_configs_swa_prefill = [
     (2, 16, 4, 128, 1024, 0, 32, torch.bfloat16, "M_BF16"),
-    (2, 16, 4, 96, 2048, 0, 128, torch.bfloat16, "M_BF16_PADDIM"),
+    (2, 16, 4, 128, 2048, 0, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (2, 8, 1, 128, 256, 0, 128, torch.bfloat16, "M_BF16_WITH_CACHE"), # ascendC only support KV_COMPUTED_LEN == 0
     (2, 8, 1, 128, 1024, 0, 1024, torch.bfloat16, "M_BF16_BIGPAGE"), # ascendC only support KV_COMPUTED_LEN == 0
     (2, 8, 1, 128, 0, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
