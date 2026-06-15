@@ -4,11 +4,10 @@ import torch
 import triton
 import triton.language as tl
 
-from .utils import libentry
-
 from mojo_opset.backends.ttx.kernels.npu.utils import VEC_ALIGN_BYTES
-from mojo_opset.backends.ttx.kernels.utils import align
-from mojo_opset.backends.ttx.kernels.utils import ceil_div
+from mojo_opset.backends.ttx.kernels.utils import align, ceil_div
+
+from .utils import libentry
 
 COL_BLOCKING_THRESHOLD = 2048
 
@@ -57,7 +56,9 @@ def rms_norm_fwd_heuristics(args):
 
 
 def _num_vectorcores():
-    return triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
+    return triton.runtime.driver.active.utils.get_device_properties("npu")[
+        "num_vectorcore"
+    ]
 
 
 @triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
@@ -113,15 +114,27 @@ def _fused_add_rmsnorm_fwd_kernel(
                     R_chunk = tl.load(R_ptr_row_block + cols_off[None, :])
                 else:
                     cols_mask = cols_off < n_cols
-                    X_chunk = tl.load(X_ptr_row_block + cols_off[None, :], mask=cols_mask[None, :], other=0.0)
-                    R_chunk = tl.load(R_ptr_row_block + cols_off[None, :], mask=cols_mask[None, :], other=0.0)
+                    X_chunk = tl.load(
+                        X_ptr_row_block + cols_off[None, :],
+                        mask=cols_mask[None, :],
+                        other=0.0,
+                    )
+                    R_chunk = tl.load(
+                        R_ptr_row_block + cols_off[None, :],
+                        mask=cols_mask[None, :],
+                        other=0.0,
+                    )
             else:
                 if DROP_COLS_MASK:
                     block_mask = rows_mask[:, None]
                 else:
                     block_mask = rows_mask[:, None] & (cols_off[None, :] < n_cols)
-                X_chunk = tl.load(X_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
-                R_chunk = tl.load(R_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
+                X_chunk = tl.load(
+                    X_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0
+                )
+                R_chunk = tl.load(
+                    R_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0
+                )
 
             S_chunk = X_chunk + R_chunk
             if STORE_S:
@@ -129,9 +142,15 @@ def _fused_add_rmsnorm_fwd_kernel(
                     if DROP_COLS_MASK:
                         tl.store(S_ptr_row_block + cols_off[None, :], S_chunk)
                     else:
-                        tl.store(S_ptr_row_block + cols_off[None, :], S_chunk, mask=cols_mask[None, :])
+                        tl.store(
+                            S_ptr_row_block + cols_off[None, :],
+                            S_chunk,
+                            mask=cols_mask[None, :],
+                        )
                 else:
-                    tl.store(S_ptr_row_block + cols_off[None, :], S_chunk, mask=block_mask)
+                    tl.store(
+                        S_ptr_row_block + cols_off[None, :], S_chunk, mask=block_mask
+                    )
 
             S_chunk_f32 = S_chunk.to(tl.float32)
             var_acc += tl.sum(S_chunk_f32 * S_chunk_f32, axis=1)
@@ -142,7 +161,9 @@ def _fused_add_rmsnorm_fwd_kernel(
             if DROP_ROWS_MASK:
                 tl.store(RSTD_ptr + rows_off * RSTD_row_stride, rstd_vec)
             else:
-                tl.store(RSTD_ptr + rows_off * RSTD_row_stride, rstd_vec, mask=rows_mask)
+                tl.store(
+                    RSTD_ptr + rows_off * RSTD_row_stride, rstd_vec, mask=rows_mask
+                )
 
         for col_offset in range(0, n_cols, BLOCK_SIZE_N):
             cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
@@ -160,10 +181,22 @@ def _fused_add_rmsnorm_fwd_kernel(
                     cols_mask = cols_off < n_cols
                     W_chunk = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0)
                     if STORE_S:
-                        S_chunk = tl.load(S_ptr_row_block + cols_off[None, :], mask=cols_mask[None, :], other=0.0)
+                        S_chunk = tl.load(
+                            S_ptr_row_block + cols_off[None, :],
+                            mask=cols_mask[None, :],
+                            other=0.0,
+                        )
                     else:
-                        X_chunk = tl.load(X_ptr_row_block + cols_off[None, :], mask=cols_mask[None, :], other=0.0)
-                        R_chunk = tl.load(R_ptr_row_block + cols_off[None, :], mask=cols_mask[None, :], other=0.0)
+                        X_chunk = tl.load(
+                            X_ptr_row_block + cols_off[None, :],
+                            mask=cols_mask[None, :],
+                            other=0.0,
+                        )
+                        R_chunk = tl.load(
+                            R_ptr_row_block + cols_off[None, :],
+                            mask=cols_mask[None, :],
+                            other=0.0,
+                        )
                         S_chunk = X_chunk + R_chunk
             else:
                 if DROP_COLS_MASK:
@@ -175,10 +208,16 @@ def _fused_add_rmsnorm_fwd_kernel(
                     W_chunk = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0)
 
                 if STORE_S:
-                    S_chunk = tl.load(S_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
+                    S_chunk = tl.load(
+                        S_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0
+                    )
                 else:
-                    X_chunk = tl.load(X_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
-                    R_chunk = tl.load(R_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
+                    X_chunk = tl.load(
+                        X_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0
+                    )
+                    R_chunk = tl.load(
+                        R_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0
+                    )
                     S_chunk = X_chunk + R_chunk
 
             if casting_mode == _CASTING_MODE_GEMMA:
@@ -189,9 +228,13 @@ def _fused_add_rmsnorm_fwd_kernel(
 
             if casting_mode == _CASTING_MODE_LLAMA:
                 if STORE_S:
-                    normed_S_chunk = (S_chunk * rstd_vec[:, None]).to(S_ptr.dtype.element_ty)
+                    normed_S_chunk = (S_chunk * rstd_vec[:, None]).to(
+                        S_ptr.dtype.element_ty
+                    )
                 else:
-                    normed_S_chunk = (S_chunk * rstd_vec[:, None]).to(Y_ptr.dtype.element_ty)
+                    normed_S_chunk = (S_chunk * rstd_vec[:, None]).to(
+                        Y_ptr.dtype.element_ty
+                    )
             else:
                 normed_S_chunk = S_chunk * rstd_vec[:, None]
 
@@ -207,7 +250,11 @@ def _fused_add_rmsnorm_fwd_kernel(
                 if DROP_COLS_MASK:
                     tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk)
                 else:
-                    tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk, mask=cols_mask[None, :])
+                    tl.store(
+                        Y_ptr_row_block + cols_off[None, :],
+                        Y_chunk,
+                        mask=cols_mask[None, :],
+                    )
             else:
                 tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk, mask=block_mask)
 
@@ -260,8 +307,16 @@ def _fused_add_rmsnorm_fwd_single_pass_kernel(
                 R_chunk = tl.load(R_ptr_row_block + cols_off[None, :])
             else:
                 cols_mask = cols_off < n_cols
-                X_chunk = tl.load(X_ptr_row_block + cols_off[None, :], mask=cols_mask[None, :], other=0.0)
-                R_chunk = tl.load(R_ptr_row_block + cols_off[None, :], mask=cols_mask[None, :], other=0.0)
+                X_chunk = tl.load(
+                    X_ptr_row_block + cols_off[None, :],
+                    mask=cols_mask[None, :],
+                    other=0.0,
+                )
+                R_chunk = tl.load(
+                    R_ptr_row_block + cols_off[None, :],
+                    mask=cols_mask[None, :],
+                    other=0.0,
+                )
         else:
             rows_mask = rows_off < n_rows
             if DROP_COLS_MASK:
@@ -269,8 +324,12 @@ def _fused_add_rmsnorm_fwd_single_pass_kernel(
             else:
                 cols_mask = cols_off < n_cols
                 block_mask = rows_mask[:, None] & cols_mask[None, :]
-            X_chunk = tl.load(X_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
-            R_chunk = tl.load(R_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
+            X_chunk = tl.load(
+                X_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0
+            )
+            R_chunk = tl.load(
+                R_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0
+            )
 
         S_chunk = X_chunk + R_chunk
 
@@ -279,7 +338,11 @@ def _fused_add_rmsnorm_fwd_single_pass_kernel(
                 if DROP_COLS_MASK:
                     tl.store(S_ptr_row_block + cols_off[None, :], S_chunk)
                 else:
-                    tl.store(S_ptr_row_block + cols_off[None, :], S_chunk, mask=cols_mask[None, :])
+                    tl.store(
+                        S_ptr_row_block + cols_off[None, :],
+                        S_chunk,
+                        mask=cols_mask[None, :],
+                    )
             else:
                 tl.store(S_ptr_row_block + cols_off[None, :], S_chunk, mask=block_mask)
 
@@ -292,7 +355,9 @@ def _fused_add_rmsnorm_fwd_single_pass_kernel(
             if DROP_ROWS_MASK:
                 tl.store(RSTD_ptr + rows_off * RSTD_row_stride, rstd_vec)
             else:
-                tl.store(RSTD_ptr + rows_off * RSTD_row_stride, rstd_vec, mask=rows_mask)
+                tl.store(
+                    RSTD_ptr + rows_off * RSTD_row_stride, rstd_vec, mask=rows_mask
+                )
 
         if DROP_COLS_MASK:
             W_chunk = tl.load(W_ptr + cols_off)
@@ -307,9 +372,13 @@ def _fused_add_rmsnorm_fwd_single_pass_kernel(
 
         if casting_mode == _CASTING_MODE_LLAMA:
             if STORE_S:
-                normed_S_chunk = (S_chunk * rstd_vec[:, None]).to(S_ptr.dtype.element_ty)
+                normed_S_chunk = (S_chunk * rstd_vec[:, None]).to(
+                    S_ptr.dtype.element_ty
+                )
             else:
-                normed_S_chunk = (S_chunk * rstd_vec[:, None]).to(Y_ptr.dtype.element_ty)
+                normed_S_chunk = (S_chunk * rstd_vec[:, None]).to(
+                    Y_ptr.dtype.element_ty
+                )
         else:
             normed_S_chunk = S_chunk * rstd_vec[:, None]
 
@@ -325,10 +394,13 @@ def _fused_add_rmsnorm_fwd_single_pass_kernel(
             if DROP_COLS_MASK:
                 tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk)
             else:
-                tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk, mask=cols_mask[None, :])
+                tl.store(
+                    Y_ptr_row_block + cols_off[None, :],
+                    Y_chunk,
+                    mask=cols_mask[None, :],
+                )
         else:
             tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk, mask=block_mask)
-
 
 
 @triton.heuristics({"BLOCK_SIZE_M": lambda args: ceil_div(4096, args["n_cols"])})
@@ -374,9 +446,19 @@ def _fused_add_rmsnorm_bwd_kernel(
         rows_mask = rows_off < n_rows
         block_mask = rows_mask[:, None] & cols_mask[None, :]
 
-        dY_block = tl.load(dY_ptr + rows_off[:, None] * dY_row_stride + cols_off[None, :], mask=block_mask, other=0.0)
-        S_block = tl.load(S_ptr + rows_off[:, None] * S_row_stride + cols_off[None, :], mask=block_mask, other=0.0)
-        rstd_vec = tl.load(RSTD_ptr + rows_off * RSTD_row_stride, mask=rows_mask, other=0.0)
+        dY_block = tl.load(
+            dY_ptr + rows_off[:, None] * dY_row_stride + cols_off[None, :],
+            mask=block_mask,
+            other=0.0,
+        )
+        S_block = tl.load(
+            S_ptr + rows_off[:, None] * S_row_stride + cols_off[None, :],
+            mask=block_mask,
+            other=0.0,
+        )
+        rstd_vec = tl.load(
+            RSTD_ptr + rows_off * RSTD_row_stride, mask=rows_mask, other=0.0
+        )
 
         S_block_f32 = S_block.to(tl.float32)
         normed_S_block = S_block_f32 * rstd_vec[:, None]
@@ -397,18 +479,30 @@ def _fused_add_rmsnorm_bwd_kernel(
         rstd_vec_sq = rstd_vec * rstd_vec
 
         term1 = rstd_vec[:, None] * m_block
-        term2 = -(1 / n_cols) * rstd_vec_sq[:, None] * rstd_vec[:, None] * dot_product_vec[:, None] * S_block_f32
+        term2 = (
+            -(1 / n_cols)
+            * rstd_vec_sq[:, None]
+            * rstd_vec[:, None]
+            * dot_product_vec[:, None]
+            * S_block_f32
+        )
 
         grad_after_norm = term1 + term2
 
         dS_block = grad_after_norm
         if has_dS_out:
             dS_out_block = tl.load(
-                dS_out_ptr + rows_off[:, None] * dS_out_row_stride + cols_off[None, :], mask=block_mask, other=0.0
+                dS_out_ptr + rows_off[:, None] * dS_out_row_stride + cols_off[None, :],
+                mask=block_mask,
+                other=0.0,
             )
             dS_block += dS_out_block.to(dS_block.dtype)
 
-        tl.store(dX_ptr + rows_off[:, None] * dX_row_stride + cols_off[None, :], dS_block.to(S_dtype), mask=block_mask)
+        tl.store(
+            dX_ptr + rows_off[:, None] * dX_row_stride + cols_off[None, :],
+            dS_block.to(S_dtype),
+            mask=block_mask,
+        )
 
     dW_ptr_prog = dW_ptr + pid * dW_row_stride + cols_off
     tl.store(dW_ptr_prog, dW_acc, mask=cols_mask)
