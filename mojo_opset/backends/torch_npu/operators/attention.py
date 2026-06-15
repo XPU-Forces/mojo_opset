@@ -312,9 +312,8 @@ class TorchNpuPagedPrefillSWA(MojoPagedPrefillSWA, default_priority=0):
 
         q_seq_lens = cu_q_lens[1:] - cu_q_lens[:-1]
         total_seq_lens = q_seq_lens if cu_total_seq_lens is None else cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
-        
-        # print(f"cu_q_lens: {cu_q_lens}")
-        # print(f"cu_total_seq_lens: {cu_total_seq_lens}")
+
+        # for comparing with ascendc
         # if block_size % 128 != 0 or block_size > 512:
         if cu_total_seq_lens is not None and not torch.equal(cu_q_lens, cu_total_seq_lens):
             print(f"[Warning] NPU kernel npu_fused_infer_attention_score don't support 'seq_kv != seq_q' temporarily")
@@ -342,41 +341,23 @@ class TorchNpuPagedPrefillSWA(MojoPagedPrefillSWA, default_priority=0):
         # convert query from tnd to bnsd
         query_bnsd = tnd_to_bnsd(query, cu_q_lens, max_seq_len)
         batch_size, _, _, _ = query_bnsd.shape
-        # print(f"query_bnsd shape: {query_bnsd.shape}")
-        # print(f"key shape: {key_cache.shape}")
-        # print(f"block_table: {block_table}")
-        # print(f"total_seq_lens: {total_seq_lens}")
 
         attn_mask = ~(_generate_window_mask(mask_kv_len, mask_kv_len, self.local_window_size, self.global_window_size).to(query.device))
         attn_mask = attn_mask.unsqueeze(0).expand(batch_size, -1, -1)
         out, _ = torch_npu.npu_fused_infer_attention_score(
-            # query=query,
-            # input_layout="TND",
-
             query=query_bnsd,
             input_layout="BNSD",
             key=key_cache,
             value=value_cache,
             block_table=block_table,
             block_size=block_size,
-
-            # actual_seq_lengths=cu_q_lens[1:],
             actual_seq_lengths=q_seq_lens,
             actual_seq_lengths_kv=total_seq_lens,
-
             num_key_value_heads=num_kv_heads,
             num_heads=num_q_heads,
             scale=softmax_scale,
-
-            # seq_len mask for mode 0, support mask
             atten_mask=attn_mask,
-            sparse_mode=0,
-
-            # 2048 mask for mode 4, only support local window
-            # atten_mask=~(_generate_window_mask_static(self.local_window_size, self.global_window_size).to(query.device)),
-            # sparse_mode=4,
-            # pre_tokens=self.local_window_size,
-            # next_tokens=0,
+            sparse_mode=0, # seq_len mask for mode 0, support mask
         )
         # convert output from bnsd to tnd
         out_tnd = bnsd_to_tnd(out, cu_q_lens)
@@ -426,12 +407,7 @@ class TorchNpuPagedDecodeSWA(MojoPagedDecodeSWA, default_priority=0):
             else:
                 input_layout = "BNSD"
 
-        # actual_seq_lengths_q = torch.arange(1, batch_size + 1, dtype=torch.int32, device=query.device)
         actual_seq_lengths_q = torch.ones(batch_size, dtype=torch.int32, device=query.device)
-        # print(f"query shape: {query.shape}")
-        # print(f"key shape: {key_cache.shape}")
-        # print(f"block_table: {block_table}")
-        # print(f"total_seq_lens: {total_seq_lens}")
         
         block_table_max_kv_len = block_table.shape[1] * block_size
         mask_kv_len = max(max_total_seq_len, block_table_max_kv_len)
@@ -450,10 +426,8 @@ class TorchNpuPagedDecodeSWA(MojoPagedDecodeSWA, default_priority=0):
             num_key_value_heads=head_nums,
             num_heads=num_q_heads,
             scale=softmax_scale,
-
-            # seq_len mask for mode 0, support mask
             atten_mask=attn_mask,
-            sparse_mode=0,
+            sparse_mode=0, # seq_len mask for mode 0, support mask
         )
 
         if is_unsqueezed:
