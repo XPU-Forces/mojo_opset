@@ -92,14 +92,9 @@ def _mojo_limit_token_block_size_by_ub(
     rope_dim: int,
     compute_dtype_size: int,
 ) -> int:
-    while token_block_size > 1:
-        estimated_ub_bytes = _mojo_estimate_rope_ub_bytes(
-            token_block_size, n_qh, n_kh, rope_dim, compute_dtype_size
-        )
-        if estimated_ub_bytes <= _MOJO_UB_LIMIT_BYTES:
-            return token_block_size
-        token_block_size -= 1
-    return 1
+    denominator = (n_qh + n_kh) * rope_dim * compute_dtype_size * _MOJO_ROPE_UB_SAFETY_FACTOR
+    max_allowed_block_size = _MOJO_UB_LIMIT_BYTES // denominator
+    return max(1, min(token_block_size, max_allowed_block_size))
 
 
 @tensor_cache
