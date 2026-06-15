@@ -510,8 +510,6 @@ def rope_fwd_impl(
 
     is_aligned = _is_half_rope_dim_aligned(half_rope_dim, q.element_size())
     token_block_size = _get_token_block_size_opt(n_q_head, n_kv_head, rope_dim, 4)
-    # num_seq_blocks = (seq_len + token_block_size - 1) // token_block_size
-
     num_seq_blocks = triton.cdiv(seq_len, token_block_size)
     num_programs = get_num_cores()
     num_programs = min(num_programs, batch_size * num_seq_blocks)
