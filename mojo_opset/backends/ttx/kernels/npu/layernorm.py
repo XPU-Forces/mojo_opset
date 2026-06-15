@@ -95,6 +95,7 @@ def _layernorm_fwd_kernel(
             b_chunk = tl.load(B_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
 
             x_centered = x_chunk - mean[:, None]
+            x_centered = tl.where(block_mask, x_centered, 0.0) # Filter out invalid columns
 
             var_acc += tl.sum(x_centered * x_centered, axis=1)
 
