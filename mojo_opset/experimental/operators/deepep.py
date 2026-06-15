@@ -48,6 +48,9 @@ class MojoDeepEPDispatch(MojoOperator):
     - group_size (int): Number of ranks (a.k.a. ep_size). Defaults to 1.
     - rank (int): Local rank id in [0, group_size). Defaults to 0.
     - buffer_size (int): Symmetric-memory scratch in bytes.
+    - process_group (dist.ProcessGroup, optional): EP communication group used by all
+      collectives. When None, collectives run on the default group (dist.group.WORLD).
+      Caller is responsible for passing group_size/rank consistent with the group.
 
     Forward returns a 6-tuple ``(expand_hidden_states, expert_token_cnt_per_rank,
     expert_token_cnt_cumsum, expand_scale, scatter_index, expert_token_count)``:
@@ -68,6 +71,7 @@ class MojoDeepEPDispatch(MojoOperator):
         group_size: int = 1,
         rank: int = 0,
         buffer_size: int = 256 * 1024 * 1024,
+        process_group: Optional[dist.ProcessGroup] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -76,6 +80,7 @@ class MojoDeepEPDispatch(MojoOperator):
                 f"MojoDeepEPDispatch: num_experts must be divisible by group_size, "
                 f"got num_experts={num_experts}, group_size={group_size}."
             )
+        self.process_group = process_group
         self.num_experts = num_experts
         self.top_k = top_k
         self.group_size = group_size
@@ -119,14 +124,14 @@ class MojoDeepEPDispatch(MojoOperator):
                 dtype=hidden_states.dtype,
                 device=device,
             )
-            dist.all_gather_into_tensor(global_hidden, hidden_states.contiguous())
+            dist.all_gather_into_tensor(global_hidden, hidden_states.contiguous(), group=self.process_group)
             global_top_k = torch.empty(
                 self.group_size * q_len,
                 top_k,
                 dtype=top_k_indices.dtype,
                 device=device,
             )
-            dist.all_gather_into_tensor(global_top_k, top_k_indices.contiguous())
+            dist.all_gather_into_tensor(global_top_k, top_k_indices.contiguous(), group=self.process_group)
 
         global_q = global_hidden.size(0)
         global_flat = global_top_k.reshape(-1).to(torch.int64)
@@ -185,7 +190,7 @@ class MojoDeepEPCombine(MojoOperator):
     scatters back to the original [q_len, hidden] layout.
 
     Init params (must match the paired MojoDeepEPDispatch):
-    - num_experts, top_k, group_size, rank, buffer_size.
+    - num_experts, top_k, group_size, rank, buffer_size, process_group.
 
     Forward args:
     - expert_outputs: [R, hidden] — local experts' outputs (sorted by local expert id).
@@ -203,6 +208,7 @@ class MojoDeepEPCombine(MojoOperator):
         group_size: int = 1,
         rank: int = 0,
         buffer_size: int = 256 * 1024 * 1024,
+        process_group: Optional[dist.ProcessGroup] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -211,6 +217,7 @@ class MojoDeepEPCombine(MojoOperator):
                 f"MojoDeepEPCombine: num_experts must be divisible by group_size, "
                 f"got num_experts={num_experts}, group_size={group_size}."
             )
+        self.process_group = process_group
         self.num_experts = num_experts
         self.top_k = top_k
         self.group_size = group_size
@@ -258,11 +265,11 @@ class MojoDeepEPCombine(MojoOperator):
                 dtype=top_k_indices_local.dtype,
                 device=device,
             )
-            dist.all_gather_into_tensor(global_top_k, top_k_indices_local.contiguous())
+            dist.all_gather_into_tensor(global_top_k, top_k_indices_local.contiguous(), group=self.process_group)
 
             # Variable-size all_gather of expert_outputs: pad to max R, gather, trim.
             global_expert_count = expert_token_count.clone()
-            dist.all_reduce(global_expert_count, op=dist.ReduceOp.SUM)
+            dist.all_reduce(global_expert_count, op=dist.ReduceOp.SUM, group=self.process_group)
             cum_global = global_expert_count.to(torch.int64).cumsum(0)
             r_per_rank = []
             for r in range(self.group_size):
@@ -282,7 +289,7 @@ class MojoDeepEPCombine(MojoOperator):
             if expert_outputs.size(0) > 0:
                 padded[: expert_outputs.size(0)] = expert_outputs
             gathered_padded = [torch.zeros_like(padded) for _ in range(self.group_size)]
-            dist.all_gather(gathered_padded, padded)
+            dist.all_gather(gathered_padded, padded, group=self.process_group)
             global_expand = torch.cat(
                 [gathered_padded[r][: r_per_rank[r]] for r in range(self.group_size)],
                 dim=0,

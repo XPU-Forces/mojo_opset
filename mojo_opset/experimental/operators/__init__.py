@@ -11,11 +11,15 @@ from .attention import MojoPagedPrefillNSA
 from .attention import MojoPagedPrefillSWAWithKVDequant
 from .attention import MojoPrefillMLA
 from .attention import MojoPrefillNSA
+from .attention_gate import MojoFusedAttnGateConcat
 from .attention_gate import MojoFusedAttnOutputGate
 from .compute_with_comm import MojoFusedAGScaleQuant
 from .gemm import MojoQuantBatchGemmReduceSum
 from .indexer import MojoIndexer
 from .indexer import MojoLightningIndexer
+from .kv_cache import MojoGatherRopeStore
+from .kv_cache import MojoPagedAttentionStoreKvCache
+from .kv_cache import MojoPagedCacheDequant
 from .kv_cache import MojoStorePagedMLAKVCache
 from .moe import MojoFusedSwiGLUMoEScaleDynamicQuantize
 from .moe import MojoMoEInitRoutingDynamicQuant
@@ -24,10 +28,12 @@ from .normalization import MojoGroupLayerNorm
 from .normalization import MojoQKInplaceRMSNorm
 from .position_embedding import MojoGridRoPE
 from .position_embedding import MojoRelativeEmbedding
+from .position_embedding import MojoRotaryEmbedding
 from .store_lowrank import MojoStoreLowrank
 
 __all__ = [
     "MojoRotateActivation",
+    "MojoFusedAttnGateConcat",
     "MojoFusedAttnOutputGate",
     "MojoFusedAGScaleQuant",
     "MojoIndexer",
@@ -44,6 +50,9 @@ __all__ = [
     "MojoPagedDecodeGQAWithKVDequant",
     "MojoPagedPrefillSWAWithKVDequant",
     "MojoPagedDecodeSWAWithKVDequant",
+    "MojoGatherRopeStore",
+    "MojoPagedAttentionStoreKvCache",
+    "MojoPagedCacheDequant",
     "MojoStorePagedMLAKVCache",
     "MojoMoEInitRoutingDynamicQuant",
     "MojoFusedSwiGLUMoEScaleDynamicQuantize",
@@ -52,6 +61,7 @@ __all__ = [
     "MojoQKInplaceRMSNorm",
     "MojoRelativeEmbedding",
     "MojoGridRoPE",
+    "MojoRotaryEmbedding",
     "MojoStoreLowrank",
     "MojoQuantBatchGemmReduceSum",
 ]

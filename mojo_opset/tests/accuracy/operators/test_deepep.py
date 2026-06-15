@@ -9,10 +9,11 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from mojo_opset import MojoDeepEPCombine
-from mojo_opset import MojoDeepEPDispatch
+from mojo_opset.experimental import MojoDeepEPCombine
+from mojo_opset.experimental import MojoDeepEPDispatch
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.utils.acc import check_tol_diff
 from mojo_opset.utils.platform import get_torch_device
 
 
@@ -139,25 +140,32 @@ def _dispatch_compare(rank, world_size, port, queue, case_args):
 
         op = MojoDeepEPDispatch(
             num_experts=num_experts, top_k=top_k, group_size=world_size, rank=rank,
+            quant_mode="per_token" if use_smooth_scale else "none",
         ).to(device)
         op_ref = MojoDeepEPDispatch._registry.get("torch")(
             num_experts=num_experts, top_k=top_k, group_size=world_size, rank=rank,
         ).to(device)
 
-        # Return tuple = (expand_hidden_states, expert_token_cnt_per_rank,
-        # expert_token_cnt_cumsum, expand_scale, scatter_index, expert_token_count).
-        # Index 3 (expand_scale) is a meaningless placeholder when smooth_scale is None;
-        # widen its tolerance so the rest of the tuple still gates the comparison.
-        scale_tol = 1e-5 if use_smooth_scale else float("inf")
-        op.forward_diff_with(
-            op_ref,
-            local_hidden,
-            local_gates,
-            local_indices,
-            smooth_scale=smooth_scale,
-            atol=(0, 0, 0, scale_tol, 0, 0),
-            rtol=(0, 0, 0, scale_tol, 0, 0),
-        )
+        # xops dispatch returns an upper-bound buffer (q_len*group_size*top_k rows);
+        # only the first R rows are valid where R = sum(expert_token_cnt_per_rank).
+        # The torch reference returns exactly R rows. Trim before comparing index 0 / 3.
+        out = op.forward(local_hidden, local_gates, local_indices, smooth_scale=smooth_scale)
+        ref = op_ref.forward(local_hidden, local_gates, local_indices, smooth_scale=smooth_scale)
+
+        r_actual = int(out[1].sum().item())
+        r_ref = ref[0].size(0)
+        assert r_actual == r_ref, f"R mismatch: xops={r_actual}, ref={r_ref}"
+
+        # idx 0: int8 quant rounding can differ by ±1 between hw kernel and torch ref.
+        hidden_atol = 1 if use_smooth_scale else 0
+        torch.testing.assert_close(out[0][:r_actual], ref[0], atol=hidden_atol, rtol=0)
+        torch.testing.assert_close(out[1], ref[1], atol=0, rtol=0)
+        # xops cumsum dtype is int32 (wrapper init), torch ref is int64 — values must agree.
+        torch.testing.assert_close(out[2].to(torch.int64), ref[2], atol=0, rtol=0)
+        if use_smooth_scale:
+            torch.testing.assert_close(out[3][:r_actual], ref[3], atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(out[4], ref[4], atol=0, rtol=0)
+        torch.testing.assert_close(out[5], ref[5], atol=0, rtol=0)
 
         if queue is not None:
             queue.put((rank, None))
@@ -245,11 +253,24 @@ def _combine_compare(rank, world_size, port, queue, case_args):
             num_experts=num_experts, top_k=top_k, group_size=world_size, rank=rank,
         ).to(device)
 
-        op.forward_diff_with(
-            op_ref,
-            expand, local_gates, scatter_index, expert_token_count, num_tokens_sp,
-            atol=2**-6, rtol=2**-6, mixed_tol=True,
+        # xops combine asserts expand.size(0) >= q_len * top_k (deep_ep.cpp:468).
+        # Torch dispatch returns R-sized expand; pad to the required upper bound for
+        # xops, but keep the R-sized version for torch combine which expects it.
+        upper = num_tokens_sp * world_size * top_k
+        if expand.size(0) < upper:
+            padded = torch.zeros(upper, expand.size(1), dtype=expand.dtype, device=device)
+            padded[: expand.size(0)] = expand
+            expand_for_xops = padded
+        else:
+            expand_for_xops = expand
+
+        xops_out = op.forward(
+            expand_for_xops, local_gates, scatter_index, expert_token_count, num_tokens_sp,
         )
+        ref_out = op_ref.forward(
+            expand, local_gates, scatter_index, expert_token_count, num_tokens_sp,
+        )
+        check_tol_diff(xops_out, ref_out, mixed_tol=True)
 
         if queue is not None:
             queue.put((rank, None))

@@ -115,3 +115,66 @@ class MojoFusedAttnOutputGate(MojoOperator):
             f"head_dim={self.head_dim}, "
             f"bias={self.full_gate_bias is not None}"
         )
+
+
+class MojoFusedAttnGateConcat(MojoOperator):
+    """Apply full/SWA attention gates and concatenate the gated outputs."""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(
+        self,
+        full_attn_out: torch.Tensor,
+        full_attn_gate_score: torch.Tensor,
+        swa_attn_out: torch.Tensor,
+        swa_attn_gate_score: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            full_attn_out: Full attention output with shape
+                ``[total_seq, full_head_num, head_dim]``.
+            full_attn_gate_score: Gate score for full attention with shape
+                ``[total_seq, full_head_num]``.
+            swa_attn_out: SWA attention output with shape
+                ``[total_seq, swa_head_num, head_dim]``.
+            swa_attn_gate_score: Gate score for SWA attention with shape
+                ``[total_seq, swa_head_num]``.
+
+        Returns:
+            Gated concatenated attention output with shape
+            ``[total_seq, full_head_num + swa_head_num, head_dim]`` and the
+            same dtype as ``full_attn_out``.
+        """
+        if full_attn_gate_score is None:
+            raise ValueError("full_attn_gate_score is required.")
+        if swa_attn_gate_score is None:
+            raise ValueError("swa_attn_gate_score is required.")
+        if full_attn_out.dim() != 3:
+            raise ValueError(f"full_attn_out must be 3D, got {tuple(full_attn_out.shape)}.")
+        if swa_attn_out.dim() != 3:
+            raise ValueError(f"swa_attn_out must be 3D, got {tuple(swa_attn_out.shape)}.")
+        if full_attn_gate_score.dim() != 2:
+            raise ValueError(f"full_attn_gate_score must be 2D, got {tuple(full_attn_gate_score.shape)}.")
+        if swa_attn_gate_score.dim() != 2:
+            raise ValueError(f"swa_attn_gate_score must be 2D, got {tuple(swa_attn_gate_score.shape)}.")
+
+        total_seq, full_head_num, head_dim = full_attn_out.shape
+        swa_total_seq, swa_head_num, swa_head_dim = swa_attn_out.shape
+        if swa_total_seq != total_seq or swa_head_dim != head_dim:
+            raise ValueError(
+                "full_attn_out and swa_attn_out must have matching total_seq and head_dim, "
+                f"got {tuple(full_attn_out.shape)} and {tuple(swa_attn_out.shape)}."
+            )
+        if full_attn_gate_score.shape != (total_seq, full_head_num):
+            raise ValueError(
+                f"full_attn_gate_score must have shape [{total_seq}, {full_head_num}], got {tuple(full_attn_gate_score.shape)}."
+            )
+        if swa_attn_gate_score.shape != (total_seq, swa_head_num):
+            raise ValueError(
+                f"swa_attn_gate_score must have shape [{total_seq}, {swa_head_num}], got {tuple(swa_attn_gate_score.shape)}."
+            )
+
+        full_out = full_attn_out.float() * torch.sigmoid(full_attn_gate_score.float()).unsqueeze(-1)
+        swa_out = swa_attn_out.float() * torch.sigmoid(swa_attn_gate_score.float()).unsqueeze(-1)
+        return torch.cat((full_out, swa_out), dim=1).to(full_attn_out.dtype)
