@@ -1,7 +1,7 @@
 import torch
 import triton
 import triton.language as tl
-from .utils import libentry
+from .utils import get_num_cores, libentry
 
 """
 This file contains the implementation of SiLU (Sigmoid Linear Unit) for NPU.
@@ -225,15 +225,9 @@ def _rowwise_block_size_n(n_cols):
     return min(triton.next_power_of_2(n_cols), MAX_BLOCK_SIZE_N)
 
 
-def _num_vectorcores():
-    return triton.runtime.driver.active.utils.get_device_properties("npu")[
-        "num_vectorcore"
-    ]
-
-
 def _rowwise_grid(n_rows, block_size_m):
     num_row_tasks = (n_rows + block_size_m - 1) // block_size_m
-    return (min(_num_vectorcores(), num_row_tasks),)
+    return (max(1, min(get_num_cores("vector"), num_row_tasks)),)
 
 
 def _rowwise_autotune_grid(n_rows):
