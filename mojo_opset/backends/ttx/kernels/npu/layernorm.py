@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from triton.language.math import rsqrt
-from .utils import libentry
+from .utils import get_num_cores, libentry
 
 from mojo_opset.backends.ttx.kernels.npu.utils import VEC_ALIGN_BYTES
 from mojo_opset.backends.ttx.kernels.utils import align, ceil_div, torch_to_triton_dtype
@@ -147,36 +147,31 @@ def _layernorm_fwd_kernel(
         for col_offset in range(0, n_cols, BLOCK_SIZE_N):
             cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
 
+            if DROP_COLS_MASK:
+                w_chunk = tl.load(W_ptr + cols_off)
+                b_chunk = tl.load(B_ptr + cols_off)
+            else:
+                cols_mask = cols_off < n_cols
+                w_chunk = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0)
+                b_chunk = tl.load(B_ptr + cols_off, mask=cols_mask, other=0.0)
+
             if DROP_ROWS_MASK:
                 if DROP_COLS_MASK:
                     x_chunk = tl.load(X_ptr_row_block + cols_off[None, :])
-                    w_chunk = tl.load(W_ptr + cols_off)
-                    b_chunk = tl.load(B_ptr + cols_off)
                 else:
-                    cols_mask = cols_off < n_cols
                     x_chunk = tl.load(
                         X_ptr_row_block + cols_off[None, :],
                         mask=cols_mask[None, :],
                         other=0.0,
                     )
-                    w_chunk = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0)
-                    b_chunk = tl.load(B_ptr + cols_off, mask=cols_mask, other=0.0)
             else:
                 if DROP_COLS_MASK:
                     block_mask = rows_mask[:, None]
-                    x_chunk = tl.load(
-                        X_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0
-                    )
-                    w_chunk = tl.load(W_ptr + cols_off)
-                    b_chunk = tl.load(B_ptr + cols_off)
                 else:
-                    cols_mask = cols_off < n_cols
                     block_mask = rows_mask[:, None] & cols_mask[None, :]
-                    x_chunk = tl.load(
-                        X_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0
-                    )
-                    w_chunk = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0)
-                    b_chunk = tl.load(B_ptr + cols_off, mask=cols_mask, other=0.0)
+                x_chunk = tl.load(
+                    X_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0
+                )
 
             x_chunk = x_chunk.to(tl.float32)
             w_chunk = w_chunk.to(tl.float32)
@@ -495,10 +490,8 @@ def _layernorm_fwd_grid(n_rows: int, n_cols: int, x_dtype: torch.dtype) -> tuple
         {"n_rows": n_rows, "n_cols": n_cols, "x_dtype": x_dtype}
     )
     num_row_tasks = ceil_div(n_rows, block_m)
-    num_vectorcores = triton.runtime.driver.active.utils.get_device_properties("npu")[
-        "num_vectorcore"
-    ]
-    return (min(num_vectorcores, num_row_tasks),)
+    num_vectorcores = get_num_cores("vector")
+    return (max(1, min(num_vectorcores, num_row_tasks)),)
 
 
 def _launch_layernorm_fwd_kernel(
@@ -518,7 +511,7 @@ def _launch_layernorm_fwd_kernel(
         {"n_rows": n_rows, "n_cols": n_cols, "x_dtype": x_2d.dtype}
     )
     drop_cols_mask = n_cols % block_size_n == 0
-    drop_rows_mask = drop_cols_mask and n_rows % block_size_m == 0
+    drop_rows_mask = n_rows % block_size_m == 0
     use_single_pass = n_cols <= block_size_n
     grid = _layernorm_fwd_grid(n_rows, n_cols, x_2d.dtype)
 
@@ -629,9 +622,7 @@ def layernorm_bwd_impl(dy, x_2d, w, b, mean, rstd):
     else:
         BLOCK_SIZE_N = align(x_2d, n_cols, VEC_ALIGN_BYTES)
 
-    num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")[
-        "num_vectorcore"
-    ]
+    num_programs = get_num_cores("vector")
     grid = (num_programs,)
 
     dx = torch.empty_like(dy_2d)
