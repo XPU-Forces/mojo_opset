@@ -1274,6 +1274,8 @@ def swa_paged_decode_impl(
     gqa_interleave: bool = False,
     softmax_scale: Optional[float] = None,
 ) -> torch.Tensor:
+    if q.ndim == 4:
+        raise NotImplementedError("swa_paged_decode_impl does not support MTP input on npu.")
     batch_size, num_q_heads, head_dim = q.shape
     num_total_blocks, num_kv_heads, page_size, head_dim_cache = key_cache.shape
 

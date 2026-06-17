@@ -2892,6 +2892,8 @@ def swa_paged_decode_impl(
     softmax_scale: Optional[float] = None,
     o: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    if q.ndim == 4:
+        raise NotImplementedError("swa_paged_decode_impl does not support MTP input on ilu.")
     batch_size, num_q_heads, head_dim = q.shape
     num_total_blocks, num_kv_heads, block_size, head_dim_cache = key_cache.shape
 
