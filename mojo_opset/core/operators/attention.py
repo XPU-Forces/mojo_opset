@@ -684,7 +684,6 @@ class MojoPagedDecodeSWA(MojoOperator):
 
         assert_paged_decode_contract(block_table, total_seq_lens)
         bsz, n_q_heads, head_dim = query.shape
-
         _, n_kv_heads, page_size, _ = key_cache.shape
         if softmax_scale is None:
             softmax_scale = 1.0 / (head_dim**0.5)
@@ -710,20 +709,20 @@ class MojoPagedDecodeSWA(MojoOperator):
                     k_i_T = k_i_T.repeat_interleave(
                         n_q_heads // n_kv_heads, dim=0
                     )  # -> [n_q_heads, head_dim, kv_seq_len]
-            s_i = torch.bmm(q_i, k_i_T).float() * softmax_scale  # -> [n_q_heads, seq_len, kv_seq_len]
+            s_i = torch.bmm(q_i, k_i_T).float() * softmax_scale  # -> [n_q_heads, 1, kv_seq_len]
 
             if self.is_causal:
                 s_mask = _generate_window_mask(
-                    q_i.shape[1],
+                    1,
                     kv_seq_len,
                     self.local_window_size,
                     self.global_window_size,
                 ).to(s_i.device)
                 s_i = torch.where(s_mask, s_i, float("-inf"))
-            m_i = torch.max(s_i, dim=-1, keepdim=True).values  # -> [n_q_heads, seq_len, 1]
-            s_i = s_i - m_i  # -> [n_q_heads, seq_len, kv_seq_len]
+            m_i = torch.max(s_i, dim=-1, keepdim=True).values  # -> [n_q_heads, 1, 1]
+            s_i = s_i - m_i  # -> [n_q_heads, 1, kv_seq_len]
             p_i = torch.exp(s_i)
-            l_i = torch.sum(p_i, dim=-1, keepdim=True)  # -> [n_q_heads, seq_len, 1]
+            l_i = torch.sum(p_i, dim=-1, keepdim=True)  # -> [n_q_heads, 1, 1]
             p_i = p_i.to(query.dtype)
 
             v_i = value_cache[block_table[i, :kv_blocks]]
@@ -735,8 +734,8 @@ class MojoPagedDecodeSWA(MojoOperator):
                     v_i = v_i.repeat((n_q_heads // n_kv_heads, 1, 1))
                 else:
                     v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, kv_seq_len, head_dim]
-            o_i = torch.bmm(p_i, v_i).float()  # -> [n_q_heads, seq_len, head_dim]
-            o_i = o_i / l_i  # -> [n_q_heads, seq_len, head_dim]
+            o_i = torch.bmm(p_i, v_i).float()  # -> [n_q_heads, 1, head_dim]
+            o_i = o_i / l_i  # -> [n_q_heads, 1, head_dim]
             o_i = o_i.squeeze(1)  # -> [n_q_heads, head_dim]
             o[i] = o_i.to(o.dtype)
         return o
