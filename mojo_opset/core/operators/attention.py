@@ -671,7 +671,7 @@ class MojoPagedDecodeSWA(MojoOperator):
 
     def forward(
         self,
-        query: torch.Tensor,  # [bsz, n_q_heads, head_dim] or [bsz, seq_len, n_q_heads, head_dim]
+        query: torch.Tensor,  # [bsz, n_q_heads, head_dim]
         key_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
         value_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
         total_seq_lens: torch.Tensor,  # [bsz]
@@ -683,10 +683,7 @@ class MojoPagedDecodeSWA(MojoOperator):
         # Note: for decode kernel, is_causal = False should never happen
 
         assert_paged_decode_contract(block_table, total_seq_lens)
-        if query.ndim == 4:
-            bsz, seq_len, n_q_heads, head_dim = query.shape
-        else:
-            bsz, n_q_heads, head_dim = query.shape
+        bsz, n_q_heads, head_dim = query.shape
 
         _, n_kv_heads, page_size, _ = key_cache.shape
         if softmax_scale is None:
@@ -694,11 +691,7 @@ class MojoPagedDecodeSWA(MojoOperator):
 
         o = torch.zeros_like(query)
         for i in range(bsz):
-            if query.ndim == 4:
-                q_i = query[i]  # -> [seq_len, n_q_heads, head_dim]
-                q_i = q_i.permute(1, 0, 2)  # -> [n_q_heads, seq_len, head_dim]
-            else:
-                q_i = query[i].unsqueeze(1) # -> [n_q_heads, 1, head_dim]
+            q_i = query[i].unsqueeze(1) # -> [n_q_heads, 1, head_dim]
 
             kv_seq_len = total_seq_lens[i].item()
             if kv_seq_len <= 0:
@@ -744,12 +737,8 @@ class MojoPagedDecodeSWA(MojoOperator):
                     v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, kv_seq_len, head_dim]
             o_i = torch.bmm(p_i, v_i).float()  # -> [n_q_heads, seq_len, head_dim]
             o_i = o_i / l_i  # -> [n_q_heads, seq_len, head_dim]
-            if query.ndim == 4:
-                o_i = o_i.permute(1, 0, 2)  # -> [seq_len, n_q_heads, head_dim]
-                o[i] = o_i.to(o.dtype)
-            else:
-                o_i = o_i.squeeze(1)  # -> [n_q_heads, head_dim]
-                o[i] = o_i.to(o.dtype)
+            o_i = o_i.squeeze(1)  # -> [n_q_heads, head_dim]
+            o[i] = o_i.to(o.dtype)
         return o
 
     def extra_repr(self) -> str:

@@ -24,6 +24,7 @@ from mojo_opset.experimental import MojoPagedDecodeGQAWithKVDequant
 from mojo_opset.experimental import MojoPagedDecodeSWAWithKVDequant
 from mojo_opset.experimental import MojoPagedPrefillGQAWithKVDequant
 from mojo_opset.experimental import MojoPagedPrefillSWAWithKVDequant
+from mojo_opset.experimental import MojoPagedDecodeNstepSWA
 
 
 class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
@@ -429,4 +430,34 @@ class TTXSWA(MojoSWA):
             softmax_scale,
             self.gqa_interleave,
         )
+        return o
+
+
+class TTXPagedDecodeNstepSWA(MojoPagedDecodeNstepSWA):
+    supported_platforms_list = ["mlu"]
+
+    def forward(
+        self,
+        q: torch.Tensor,  # [bsz, seq_len, n_q_heads, head_dim]
+        k_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
+        v_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
+        total_seq_lens: torch.Tensor,  # [bsz]
+        block_table: torch.Tensor,  # [bsz, max_num_blocks]
+        softmax_scale: Optional[float] = None,
+        *,
+        max_total_seq_len: Optional[int] = None,
+    ) -> torch.Tensor:
+        assert_paged_decode_contract(block_table, total_seq_lens)
+        o = swa_paged_decode(
+            q,
+            k_cache,
+            v_cache,
+            total_seq_lens,
+            block_table,
+            self.local_window_size,
+            self.global_window_size,
+            self.gqa_interleave,
+            softmax_scale,
+        )
+
         return o
