@@ -4,7 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
-from mojo_opset.backends.ttx.kernels.npu.utils import VEC_ALIGN_BYTES
+from mojo_opset.backends.ttx.kernels.npu.utils import VEC_ALIGN_BYTES, get_num_cores
 from mojo_opset.backends.ttx.kernels.utils import align, ceil_div
 
 from .utils import libentry
@@ -56,9 +56,7 @@ def rms_norm_fwd_heuristics(args):
 
 
 def _num_vectorcores():
-    return triton.runtime.driver.active.utils.get_device_properties("npu")[
-        "num_vectorcore"
-    ]
+    return get_num_cores("vector")
 
 
 @triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
@@ -536,12 +534,12 @@ def fused_add_rmsnorm_infer_impl(
 
     BLOCK_SIZE_M = rms_norm_fwd_heuristics({"n_rows": n_rows, "n_cols": n_cols})
     num_row_tasks = ceil_div(n_rows, BLOCK_SIZE_M)
-    grid = (min(_num_vectorcores(), num_row_tasks),)
+    grid = (max(1, min(_num_vectorcores(), num_row_tasks)),)
 
     Y = torch.empty_like(hidden_states_2d)
     use_single_pass = n_cols <= BLOCK_SIZE_N
     drop_cols_mask = n_cols % BLOCK_SIZE_N == 0
-    drop_rows_mask = drop_cols_mask and n_rows % BLOCK_SIZE_M == 0
+    drop_rows_mask = n_rows % BLOCK_SIZE_M == 0
 
     if use_single_pass:
         S = Y if add_mode == "post" else torch.empty_like(hidden_states_2d)
