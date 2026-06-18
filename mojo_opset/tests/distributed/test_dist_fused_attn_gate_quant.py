@@ -21,15 +21,15 @@ import torch.multiprocessing as mp
 
 from mojo_opset.experimental import MojoDistFusedConcatAttnGateQuant
 from mojo_opset.tests.utils import bypass_not_implemented
-from mojo_opset.utils.platform import get_dist_backend, get_platform
+from mojo_opset.utils.platform import get_dist_backend, get_platform, get_torch_device
 
 torch.manual_seed(42)
 
 dtypes = [torch.float16, torch.bfloat16]
 
 _PLATFORM = get_platform()
-COMM_BACKEND = get_dist_backend()
-DEVICE = _PLATFORM if _PLATFORM in ("npu", "mlu") else "cpu"
+DEVICE = get_torch_device()
+COMM_BACKEND = "nccl" if DEVICE == "cuda" else get_dist_backend()
 
 if _PLATFORM == "npu":
     _NPU_COUNT = torch.npu.device_count()
@@ -70,14 +70,33 @@ def _init_pg(rank, world_size, master_port):
     os.environ.pop("ASCEND_RT_VISIBLE_DEVICES", None)
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = str(master_port)
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["LOCAL_RANK"] = str(rank)
     if _PLATFORM == "npu":
         torch.npu.set_device(_TEST_NPU_IDS[rank])
-    dist.init_process_group(
-        backend=COMM_BACKEND,
-        init_method="env://",
-        rank=rank,
-        world_size=world_size,
-    )
+        dist.init_process_group(
+            backend=COMM_BACKEND,
+            init_method="env://",
+            rank=rank,
+            world_size=world_size,
+        )
+    elif DEVICE == "cuda":
+        torch.cuda.set_device(rank)
+        dist.init_process_group(
+            backend=COMM_BACKEND,
+            init_method="env://",
+            rank=rank,
+            world_size=world_size,
+            device_id=torch.device("cuda", rank),
+        )
+    else:
+        dist.init_process_group(
+            backend=COMM_BACKEND,
+            init_method="env://",
+            rank=rank,
+            world_size=world_size,
+        )
 
 
 def _destroy_pg():
@@ -104,6 +123,11 @@ def _skip_if_no_specific_backend():
         )
 
 
+def _skip_if_ixformer_unsupported_gate_shape(num_heads_total):
+    if _PLATFORM == "ilu" and num_heads_total < 8:
+        pytest.skip("Ixformer mixed_type_linear requires at least 8 gate outputs.")
+
+
 def _build_inputs(T, N_full, N_swa, head_dim, hidden_size, dtype):
     hidden_states = torch.randn(T, hidden_size, dtype=dtype)
     full_attn = torch.randn(T, N_full, head_dim, dtype=dtype)
@@ -113,13 +137,15 @@ def _build_inputs(T, N_full, N_swa, head_dim, hidden_size, dtype):
 
 
 def _load_op_params(op, inv_smooth, gate_weight_full, gate_weight_swa, gate_bias_full, gate_bias_swa):
-    op.inv_smooth_scale.data.copy_(inv_smooth)
-    op.attn_gate.full_gate_weight.data.copy_(gate_weight_full)
-    op.attn_gate.swa_gate_weight.data.copy_(gate_weight_swa)
+    state_dict = op.state_dict()
+    state_dict["inv_smooth_scale"] = inv_smooth
+    state_dict["attn_gate.full_gate_weight"] = gate_weight_full
+    state_dict["attn_gate.swa_gate_weight"] = gate_weight_swa
     if gate_bias_full is not None:
-        op.attn_gate.full_gate_bias.data.copy_(gate_bias_full)
+        state_dict["attn_gate.full_gate_bias"] = gate_bias_full
     if gate_bias_swa is not None:
-        op.attn_gate.swa_gate_bias.data.copy_(gate_bias_swa)
+        state_dict["attn_gate.swa_gate_bias"] = gate_bias_swa
+    op.load_state_dict(state_dict)
 
 
 # ===========================================================================
@@ -142,9 +168,13 @@ def _load_op_params(op, inv_smooth, gate_weight_full, gate_weight_swa, gate_bias
 @bypass_not_implemented
 def test_dist_fused_attn_gate_quant_no_dist(T, N_full, N_swa, head_dim, hidden_size, dtype):
     _skip_if_no_specific_backend()
+    _skip_if_ixformer_unsupported_gate_shape(N_full + N_swa)
     hidden_states, full_attn, swa_attn, inv_smooth = _build_inputs(
         T, N_full, N_swa, head_dim, hidden_size, dtype
     )
+    hidden_states = _to_dev(hidden_states)
+    full_attn = _to_dev(full_attn)
+    swa_attn = _to_dev(swa_attn)
     gw_full = torch.randn(N_full, hidden_size, dtype=dtype)
     gw_swa = torch.randn(N_swa, hidden_size, dtype=dtype)
 
@@ -155,7 +185,7 @@ def test_dist_fused_attn_gate_quant_no_dist(T, N_full, N_swa, head_dim, hidden_s
         head_dim=head_dim,
         bias=False,
         tp_group=None,
-    )
+    ).to(DEVICE)
     _load_op_params(op, inv_smooth, gw_full, gw_swa, None, None)
 
     op_ref = MojoDistFusedConcatAttnGateQuant._registry.get("torch")(
@@ -165,7 +195,7 @@ def test_dist_fused_attn_gate_quant_no_dist(T, N_full, N_swa, head_dim, hidden_s
         head_dim=head_dim,
         bias=False,
         tp_group=None,
-    )
+    ).to(DEVICE)
     _load_op_params(op_ref, inv_smooth, gw_full, gw_swa, None, None)
 
     op.forward_diff_with(
@@ -190,12 +220,16 @@ def test_dist_fused_attn_gate_quant_no_dist_non_contiguous(
 ):
     """M13 callers feed strided slices for full / SWA attention output."""
     _skip_if_no_specific_backend()
+    _skip_if_ixformer_unsupported_gate_shape(N_full + N_swa)
     hidden_states, _, _, inv_smooth = _build_inputs(T, N_full, N_swa, head_dim, hidden_size, dtype)
+    hidden_states = _to_dev(hidden_states)
     big_full = torch.randn(T, N_full * 2, head_dim, dtype=dtype)
     big_swa = torch.randn(T, N_swa * 2, head_dim, dtype=dtype)
     full_attn = big_full[:, ::2, :]
     swa_attn = big_swa[:, ::2, :]
     assert not full_attn.is_contiguous() and not swa_attn.is_contiguous()
+    full_attn = _to_dev(full_attn)
+    swa_attn = _to_dev(swa_attn)
 
     gw_full = torch.randn(N_full, hidden_size, dtype=dtype)
     gw_swa = torch.randn(N_swa, hidden_size, dtype=dtype)
@@ -203,13 +237,13 @@ def test_dist_fused_attn_gate_quant_no_dist_non_contiguous(
     op = MojoDistFusedConcatAttnGateQuant(
         hidden_size=hidden_size, num_heads_full=N_full, num_heads_swa=N_swa,
         head_dim=head_dim, bias=False, tp_group=None,
-    )
+    ).to(DEVICE)
     _load_op_params(op, inv_smooth, gw_full, gw_swa, None, None)
 
     op_ref = MojoDistFusedConcatAttnGateQuant._registry.get("torch")(
         hidden_size=hidden_size, num_heads_full=N_full, num_heads_swa=N_swa,
         head_dim=head_dim, bias=False, tp_group=None,
-    )
+    ).to(DEVICE)
     _load_op_params(op_ref, inv_smooth, gw_full, gw_swa, None, None)
 
     op.forward_diff_with(
@@ -290,7 +324,7 @@ def test_dist_fused_attn_gate_quant_comm(master_port, shape, dtype):
     T, N_full, N_swa, head_dim, hidden_size = shape
     if N_full % WORLD_SIZE != 0 or N_swa % WORLD_SIZE != 0:
         pytest.skip(f"head counts not divisible by world_size={WORLD_SIZE}")
-
+    _skip_if_ixformer_unsupported_gate_shape((N_full + N_swa) // WORLD_SIZE)
     full_attn = torch.randn(T, N_full, head_dim, dtype=dtype)
     swa_attn = torch.randn(T, N_swa, head_dim, dtype=dtype)
     hidden_states = torch.randn(T, hidden_size, dtype=dtype)

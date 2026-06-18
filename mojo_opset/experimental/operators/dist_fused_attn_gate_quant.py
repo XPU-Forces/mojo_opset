@@ -24,12 +24,12 @@ class MojoDistFusedConcatAttnGateQuant(MojoOperator):
         gated  = sigmoid(hidden_states @ cat([full_gate_w, swa_gate_w]).T)
         gated *= cat([full_attn, swa_attn], dim=channel)        # bf16
         smoothed = gated.float() * inv_smooth_scale             # smooth-quant pre-scale
-        local_amax = smoothed.abs().amax(dim=-1)                # [T] per-token, per-rank
+        local_amax = smoothed.abs().amax(dim=-1, keepdim=True)  # [T, 1] per-token, per-rank
         # AllGather local_amax across tp_group, then per-token max-reduce
-        gathered      = all_gather(local_amax, group=tp_group)  # [tp, T]
-        unified_amax  = gathered.amax(dim=0)                    # [T]
+        gathered      = all_gather(local_amax, group=tp_group)  # [tp, T, 1]
+        unified_amax  = gathered.amax(dim=0)                    # [T, 1]
         unified_scale = (unified_amax / 127).clamp(min=1e-12)
-        quant = round(smoothed / unified_scale[..., None]).clamp(-128, 127).to(int8)
+        quant = round(smoothed / unified_scale).clamp(-128, 127).to(int8)
         return quant, unified_scale
 
     Token padding
@@ -115,7 +115,7 @@ class MojoDistFusedConcatAttnGateQuant(MojoOperator):
         Returns:
             Tuple of:
               * ``quant``: int8 ``[T_padded, (N_full + N_swa) * D]``.
-              * ``unified_scale``: float32 ``[T_padded]``, bit-identical on
+              * ``unified_scale``: float32 ``[T_padded, 1]``, bit-identical on
                 every rank in ``tp_group``.
 
             ``T_padded == T`` when ``tp_group`` is None or ``T %% tp_size == 0``;
@@ -137,7 +137,7 @@ class MojoDistFusedConcatAttnGateQuant(MojoOperator):
                     gated = torch.nn.functional.pad(gated, (0, 0, 0, pad))
 
         smoothed = gated.float() * self.inv_smooth_scale
-        local_amax = smoothed.abs().amax(dim=-1)
+        local_amax = smoothed.abs().amax(dim=-1, keepdim=True)
 
         if (
             self.tp_group is not None
@@ -162,8 +162,9 @@ class MojoDistFusedConcatAttnGateQuant(MojoOperator):
             unified_amax = local_amax
 
         unified_scale = (unified_amax / self.q_max).clamp(min=1e-12)
+        unified_scale = torch.where(unified_scale < 1e-6, 1.0, unified_scale)
         quant = torch.clamp(
-            torch.round(smoothed / unified_scale.unsqueeze(-1)),
+            torch.round(smoothed / unified_scale),
             self.q_min,
             self.q_max,
         ).to(self.quant_dtype)
