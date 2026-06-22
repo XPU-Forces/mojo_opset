@@ -1,0 +1,3700 @@
+import math
+import json
+import os
+import logging
+import time
+from contextlib import contextmanager, nullcontext
+from typing import Optional, Tuple
+
+import torch
+import torch_npu
+import custom_ops
+import ctypes
+_custom_transformer_lib = os.path.join(
+    os.environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/cann-9.0.0-beta.2"),
+    "opp/vendors/custom_transformer/op_api/lib/libcust_opapi.so",
+)
+if os.path.exists(_custom_transformer_lib):
+    ctypes.CDLL(_custom_transformer_lib)
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.distributed as dist
+
+from mojo_opset import MojoGemm
+from mojo_opset import MojoGroupedMatmul
+from mojo_opset import MojoFunctionalDequantSwiGLUQuant
+from mojo_opset import MojoFormatCast
+from mojo_opset import MojoHcPost
+from mojo_opset import MojoHcPre
+from mojo_opset import MojoInplacePartialRotaryMul
+from mojo_opset import MojoMoEDistributeCombineV2
+from mojo_opset import MojoMoEDistributeDispatchV2
+from mojo_opset import MojoMoEFinalizeRouting
+from mojo_opset import MojoMoEInitRoutingV2
+from mojo_opset import MojoMoEReRouting
+from mojo_opset import MojoQuantMatmul
+from mojo_opset import MojoQuantGemm
+from mojo_opset import MojoQuantLightningIndexer
+from mojo_opset import MojoQuantLightningIndexerMetadata
+from mojo_opset import MojoRMSNorm
+from mojo_opset import MojoDynamicQuant
+from mojo_opset import MojoMoEDispatch
+from mojo_opset import MojoMoEGatingTopK
+from mojo_opset import MojoQuantExperts
+from mojo_opset import MojoMoECombine
+from mojo_opset import MojoCompressor
+from mojo_opset import MojoScatterNdUpdateAsc
+from mojo_opset import MojoSparseAttnSharedkv
+from mojo_opset import MojoSparseAttnSharedkvMetadata
+from mojo_opset.distributed.parallel.context_parallel import (
+    apply_cp_zigzag_to_prefill_inputs,
+    deepseek_v4_cp_get_window,
+    deepseek_v4_cp_run_indexer,
+    deepseek_v4_cp_run_prefill,
+    deepseek_v4_cp_run_sfa_compressor,
+    gather_cp_prefill_hidden_states,
+)
+from mojo_opset.distributed.parallel.expert_parallel import (
+    build_deepseek_v4_moe_mc2_kwargs,
+    deepseek_v4_moe_infer_ep_decode,
+    deepseek_v4_moe_infer_ep_prefill,
+    gather_deepseek_v4_moe_smooth_scale_1,
+)
+from mojo_opset.distributed.parallel.mesh import LLMParallelConfig
+from mojo_opset.distributed.parallel.mesh import init_llm_parallel_groups
+from mojo_opset.distributed.parallel.tensor_parallel import (
+    deepseek_v4_lmhead_tp_forward,
+    get_deepseek_v4_lmhead_tp_partition,
+)
+
+
+_INPLACE_PARTIAL_ROTARY_MUL = MojoInplacePartialRotaryMul()
+_DYNAMIC_QUANT_PER_TOKEN = MojoDynamicQuant()
+_DSV4_LAYER_PROFILE = os.getenv("DSV4_LAYER_PROFILE", "0") == "1"
+_DSV4_LAYER_PROFILE_STATS = {}
+_MOE_SHARED_EXPERT_STREAMS = {}
+_ATTN_MLA_STREAMS = {}
+_ATTN_COMPRESSOR_STREAMS = {}
+_ATTN_INDEXER_STREAMS = {}
+_NPU_FRACTAL_NZ_FORMAT = 29
+
+def _create_contiguous_subgroup(
+    subgroup_size: int,
+    global_rank: int,
+    world_size: int,
+    *,
+    pg_options=None,
+):
+    if subgroup_size <= 1 or world_size <= 1:
+        return None
+    if world_size % subgroup_size != 0:
+        raise ValueError(f"world_size={world_size} must be divisible by subgroup_size={subgroup_size}")
+    my_group = None
+    for start in range(0, world_size, subgroup_size):
+        ranks = list(range(start, start + subgroup_size))
+        group = dist.new_group(ranks=ranks, pg_options=pg_options)
+        if global_rank in ranks:
+            my_group = group
+    return my_group
+
+
+def _get_global_moe_shared_expert_stream():
+    device_idx = torch.npu.current_device()
+    stream = _MOE_SHARED_EXPERT_STREAMS.get(device_idx)
+    if stream is None:
+        stream = torch.npu.Stream()
+        _MOE_SHARED_EXPERT_STREAMS[device_idx] = stream
+    return stream
+
+
+def _get_global_attn_mla_stream():
+    device_idx = torch.npu.current_device()
+    stream = _ATTN_MLA_STREAMS.get(device_idx)
+    if stream is None:
+        stream = torch.npu.Stream()
+        _ATTN_MLA_STREAMS[device_idx] = stream
+    return stream
+
+
+def _get_global_attn_compressor_stream():
+    device_idx = torch.npu.current_device()
+    stream = _ATTN_COMPRESSOR_STREAMS.get(device_idx)
+    if stream is None:
+        stream = torch.npu.Stream()
+        _ATTN_COMPRESSOR_STREAMS[device_idx] = stream
+    return stream
+
+
+def _profile_rank0() -> bool:
+    return (not dist.is_initialized()) or dist.get_rank() == 0
+
+
+
+
+def _profile_sync():
+    if _DSV4_LAYER_PROFILE:
+        torch_npu.npu.synchronize()
+
+
+def _profile_record(layer_idx: int, name: str, elapsed_ms: float):
+    if not _DSV4_LAYER_PROFILE or not _profile_rank0():
+        return
+    layer_stats = _DSV4_LAYER_PROFILE_STATS.setdefault(int(layer_idx), {})
+    layer_stats.setdefault(name, []).append(float(elapsed_ms))
+
+
+class _ProfileTimer:
+    def __init__(self, layer_idx: int, name: str):
+        self.layer_idx = layer_idx
+        self.name = name
+        self.start = 0.0
+
+    def __enter__(self):
+        if _DSV4_LAYER_PROFILE:
+            _profile_sync()
+            self.start = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if _DSV4_LAYER_PROFILE:
+            _profile_sync()
+            _profile_record(self.layer_idx, self.name, (time.perf_counter() - self.start) * 1000.0)
+        return False
+
+
+def _profile_timer(layer_idx: int, name: str):
+    if not _DSV4_LAYER_PROFILE:
+        return nullcontext()
+    return _ProfileTimer(layer_idx, name)
+
+
+def reset_dsv4_layer_profile():
+    _DSV4_LAYER_PROFILE_STATS.clear()
+
+
+def get_dsv4_layer_profile():
+    return {
+        str(layer_idx): {
+            name: {
+                "count": len(values),
+                "total_ms": sum(values),
+                "avg_ms": sum(values) / len(values) if values else 0.0,
+                "values_ms": values,
+            }
+            for name, values in stats.items()
+        }
+        for layer_idx, stats in sorted(_DSV4_LAYER_PROFILE_STATS.items())
+    }
+
+
+def _get_global_attn_indexer_stream():
+    device_idx = torch.npu.current_device()
+    stream = _ATTN_INDEXER_STREAMS.get(device_idx)
+    if stream is None:
+        stream = torch.npu.Stream()
+        _ATTN_INDEXER_STREAMS[device_idx] = stream
+    return stream
+
+
+@contextmanager
+def _npugraph_limit_core_num(enable: bool, aic_num: int, aiv_num: int):
+    if enable and hasattr(torch.npu, "npugraph_ex"):
+        with torch.npu.npugraph_ex.scope.limit_core_num(aic_num, aiv_num):
+            yield
+    else:
+        yield
+
+
+def _get_had_pow2(n: int, norm: bool = True, device: Optional[torch.device] = None) -> torch.Tensor:
+    if not ((n & (n - 1) == 0) and (n > 0)):
+        raise ValueError(f"n must be a positive power of 2, got {n}")
+    had = torch.ones(1, 1, dtype=torch.bfloat16, device=device)
+    while had.shape[0] != n:
+        had = torch.cat((torch.cat([had, had], 1), torch.cat([had, -had], 1)), 0)
+        if norm:
+            had /= math.sqrt(2)
+    return had
+
+
+def _rotate_activation(x: torch.Tensor, matrix: torch.Tensor) -> torch.Tensor:
+    init_shape = x.shape
+    x = x.to(torch.bfloat16).reshape(-1, matrix.shape[0])
+    return x.matmul(matrix.to(device=x.device, dtype=torch.bfloat16)).reshape(init_shape).to(torch.bfloat16)
+
+
+def _apply_partial_rotary(x, cos, sin, partial_slice):
+    if isinstance(partial_slice, list):
+        rope_dim = partial_slice[1] - partial_slice[0]
+    else:
+        rope_dim = partial_slice
+    orig_shape = x.shape
+    if x.dim() == 4:
+        b, s, h, d = x.shape
+        x_4d = x.reshape(b * s, h, 1, d)
+    elif x.dim() == 3:
+        b, s, d = x.shape
+        x_4d = x.reshape(b * s, 1, 1, d)
+    else:
+        x_4d = x.unsqueeze(-3).unsqueeze(-3)
+    if cos.dim() == 3:
+        cos = cos.reshape(-1, 1, 1, rope_dim)
+    elif cos.dim() == 2:
+        cos = cos.unsqueeze(-2).unsqueeze(-2)
+    if sin.dim() == 3:
+        sin = sin.reshape(-1, 1, 1, rope_dim)
+    elif sin.dim() == 2:
+        sin = sin.unsqueeze(-2).unsqueeze(-2)
+    _INPLACE_PARTIAL_ROTARY_MUL(
+        x_4d, cos, sin,
+        rotary_mode="interleave",
+        partial_slice=partial_slice,
+    )
+    if x_4d.shape != orig_shape:
+        if len(orig_shape) == 4:
+            b, s, h, d = orig_shape
+            x_4d = x_4d.reshape(b, s, h, d)
+        elif len(orig_shape) == 3:
+            b, s, d = orig_shape
+            x_4d = x_4d.reshape(b, s, d)
+        return x_4d
+    return x
+
+
+class DeepseekV4Config:
+
+    def __init__(self, **kwargs):
+        self.vocab_size = kwargs.get("vocab_size", 129280)
+        self.hidden_size = kwargs.get("hidden_size", 4096)
+        self.intermediate_size = kwargs.get("intermediate_size", 18432)
+        self.num_hidden_layers = kwargs.get("num_hidden_layers", 43)
+        self.num_attention_heads = kwargs.get("num_attention_heads", 64)
+        self.num_key_value_heads = kwargs.get("num_key_value_heads", 1)
+
+        self.moe_intermediate_size = kwargs.get("moe_intermediate_size", 2048)
+        self.n_shared_experts = kwargs.get("n_shared_experts", 1)
+        self.n_routed_experts = kwargs.get("n_routed_experts", 256)
+        self.num_experts_per_tok = kwargs.get("num_experts_per_tok", 6)
+        self.routed_scaling_factor = kwargs.get("routed_scaling_factor", 1.5)
+        self.n_group = kwargs.get("n_group", 8)
+        self.topk_group = kwargs.get("topk_group", 4)
+        self.first_k_dense_replace = kwargs.get("first_k_dense_replace", 0)
+        self.norm_topk_prob = kwargs.get("norm_topk_prob", True)
+        self.scoring_func = kwargs.get("scoring_func", "sqrtsoftplus")
+        self.topk_method = kwargs.get("topk_method", "noaux_tc")
+
+        self.head_dim = kwargs.get("head_dim", 512)
+        self.q_lora_rank = kwargs.get("q_lora_rank", 1024)
+        self.qk_rope_head_dim = kwargs.get("qk_rope_head_dim", 64)
+        self.qk_nope_head_dim = self.head_dim - self.qk_rope_head_dim
+        self.v_head_dim = self.head_dim
+
+        self.o_lora_rank = kwargs.get("o_lora_rank", 1024)
+        self.o_groups = kwargs.get("o_groups", 8)
+
+        self.sliding_window = kwargs.get("sliding_window", 128)
+        self.compress_ratios = kwargs.get("compress_ratios", [0, 0] + [4, 128] * 20 + [4, 0])
+        self.next_n = kwargs.get("next_n", 0)
+        self.pa_max_length = kwargs.get("pa_max_length", 2048)
+
+        self.hc_mult = kwargs.get("hc_mult", 4)
+        self.hc_sinkhorn_iters = kwargs.get("hc_sinkhorn_iters", 20)
+        self.hc_eps = kwargs.get("hc_eps", 1e-6)
+
+        self.index_n_heads = kwargs.get("index_n_heads", 64)
+        self.index_head_dim = kwargs.get("index_head_dim", 128)
+        self.index_topk = kwargs.get("index_topk", 512)
+
+        self.num_hash_layers = kwargs.get("num_hash_layers", 3)
+
+        self.attention_bias = kwargs.get("attention_bias", False)
+        self.attention_dropout = kwargs.get("attention_dropout", 0.0)
+
+        self.rms_norm_eps = kwargs.get("rms_norm_eps", 1e-6)
+        self.hidden_act = kwargs.get("hidden_act", "silu")
+
+        self.rope_theta = kwargs.get("rope_theta", 10000.0)
+        self.compress_rope_theta = kwargs.get("compress_rope_theta", 160000.0)
+        self.max_position_embeddings = kwargs.get("max_position_embeddings", 1048576)
+        self.rope_scaling = kwargs.get("rope_scaling", {
+            "beta_fast": 32,
+            "beta_slow": 1,
+            "factor": 16,
+            "original_max_position_embeddings": 65536,
+            "type": "yarn",
+        })
+
+        self.swiglu_limit = kwargs.get("swiglu_limit", 10.0)
+
+    @classmethod
+    def from_json(cls, json_path: str) -> "DeepseekV4Config":
+        with open(json_path) as f:
+            data = json.load(f)
+        return cls(**data)
+
+    @classmethod
+    def _from_hf_config(cls, hf_config) -> "DeepseekV4Config":
+        kwargs = {}
+        for attr in [
+            "vocab_size", "hidden_size", "intermediate_size", "num_hidden_layers",
+            "num_attention_heads", "num_key_value_heads", "moe_intermediate_size",
+            "n_shared_experts", "n_routed_experts", "num_experts_per_tok",
+            "routed_scaling_factor", "n_group", "topk_group",
+            "first_k_dense_replace", "norm_topk_prob", "scoring_func", "topk_method",
+            "head_dim", "q_lora_rank", "qk_rope_head_dim", "o_lora_rank", "o_groups",
+            "sliding_window", "compress_ratios", "next_n", "pa_max_length",
+            "hc_mult", "hc_sinkhorn_iters", "hc_eps", "index_n_heads", "index_head_dim", "index_topk",
+            "num_hash_layers", "attention_bias", "attention_dropout",
+            "rms_norm_eps", "hidden_act", "rope_theta", "compress_rope_theta",
+            "max_position_embeddings", "swiglu_limit",
+        ]:
+            if hasattr(hf_config, attr):
+                kwargs[attr] = getattr(hf_config, attr)
+        if hasattr(hf_config, "rope_scaling") and hf_config.rope_scaling is not None:
+            kwargs["rope_scaling"] = dict(hf_config.rope_scaling)
+        return cls(**kwargs)
+
+
+class PagedDummyCache:
+
+    def __init__(self, config: DeepseekV4Config, batch_size: int, device: str,
+                 block_size: int = 128, max_seq_len: int = 4096,
+                 pa_max_length: Optional[int] = None, next_n: Optional[int] = None):
+        self.num_layers = config.num_hidden_layers
+        self.device = device
+        self.block_size = block_size
+        self.max_seq_len = max_seq_len
+        self.batch_size = batch_size
+        self.head_dim = config.head_dim
+        self.config = config
+        self.sliding_window = config.sliding_window
+        self.index_head_dim = config.index_head_dim
+        self.next_n = config.next_n if next_n is None else next_n
+        self.pa_max_length = config.pa_max_length if pa_max_length is None else pa_max_length
+        self.win_cache_size = self.sliding_window + self.next_n
+        self._win_block_table = self._calc_ring_block_table(self.win_cache_size, self.batch_size)
+        self._full_block_table = self._calc_full_block_table(self.max_seq_len, self.batch_size)
+
+        self._decode_q_lens = torch.ones((self.batch_size,), dtype=torch.int32, device=self.device)
+        self._decode_cu_q_lens = torch.arange(self.batch_size + 1, dtype=torch.int32, device=self.device)
+        self._decode_position_offsets = torch.zeros((1, 1), dtype=torch.long, device=self.device)
+        self._batch_indices_long = torch.arange(self.batch_size, dtype=torch.long, device=self.device)
+        self.seq_lens = torch.zeros(
+            (self.num_layers, self.batch_size), dtype=torch.int32, device=self.device,
+        )
+        self.scatter_nd_update = MojoScatterNdUpdateAsc()
+        self.li_dynamic_quant = MojoDynamicQuant()
+
+        self.cache_data = {}
+        self._state_block_table_offsets = {}
+        self._state_block_pos_ids = {}
+
+        def calc_state_cache_size(ratio: int) -> int:
+            overlap = 1 if ratio == 4 else 0
+            num_ratio_group = (1 if self.next_n == 0 else 2) + overlap
+            return num_ratio_group * ratio
+
+        for layer_idx in range(self.num_layers):
+            ratio = config.compress_ratios[layer_idx] if layer_idx < len(config.compress_ratios) else 0
+            cache_dict = {
+                "win_kv": None,
+                "sfa_cmp_kv": None,
+                "sfa_kv_state": None,
+                "li_cmp_kv": None,
+                "li_kv_state": None,
+                "li_key_dequant_scale": None,
+                "c4a_cmp_kv_block_table": None,
+                "c128a_cmp_kv_block_table": None,
+            }
+            win_block_num = self._get_block_num(self.win_cache_size)
+            cache_dict["win_kv"] = self._create_cache(win_block_num, self.head_dim, torch.bfloat16)
+
+            if ratio == 4:
+                cmp_block_num = self._get_block_num(self.pa_max_length // ratio)
+                state_block_num = self._get_block_num(calc_state_cache_size(ratio))
+                cache_dict["sfa_cmp_kv"] = self._create_cache(cmp_block_num, self.head_dim, torch.bfloat16)
+                cache_dict["sfa_kv_state"] = self._create_state_cache(state_block_num, ratio, self.head_dim)
+                cache_dict["li_cmp_kv"] = self._create_cache(cmp_block_num, self.index_head_dim, torch.int8)
+                cache_dict["li_kv_state"] = self._create_state_cache(state_block_num, ratio, self.index_head_dim)
+                cache_dict["li_key_dequant_scale"] = self._create_cache(cmp_block_num, 1, torch.float16)
+                cmp_block_num_per_batch = (cmp_block_num - 1) // self.batch_size
+                cache_dict["c4a_cmp_kv_block_table"] = (
+                    torch.arange(0, self.batch_size * cmp_block_num_per_batch, dtype=torch.int32, device=self.device)
+                    .view(self.batch_size, -1) + 1
+                )
+            elif ratio == 128:
+                cmp_block_num = self._get_block_num(self.pa_max_length // ratio)
+                state_block_num = self._get_block_num(calc_state_cache_size(ratio))
+                cache_dict["sfa_cmp_kv"] = self._create_cache(cmp_block_num, self.head_dim, torch.bfloat16)
+                cache_dict["sfa_kv_state"] = self._create_state_cache(state_block_num, ratio, self.head_dim)
+                cmp_block_num_per_batch = (cmp_block_num - 1) // self.batch_size
+                cache_dict["c128a_cmp_kv_block_table"] = (
+                    torch.arange(0, self.batch_size * cmp_block_num_per_batch, dtype=torch.int32, device=self.device)
+                    .view(self.batch_size, -1) + 1
+                )
+
+            self.cache_data[layer_idx] = cache_dict
+
+        for ratio in sorted(set(r if r > 1 else 0 for r in config.compress_ratios)):
+            if ratio <= 1:
+                continue
+            state_cache_size = calc_state_cache_size(ratio)
+            self._state_block_table_offsets[ratio], self._state_block_pos_ids[ratio] = (
+                self._calc_state_block_table_templates(state_cache_size, self.batch_size)
+            )
+
+    def _get_block_num(self, cache_size):
+        return math.ceil(cache_size / self.block_size) * self.batch_size + 1
+
+    def _create_cache(self, block_num, dim, dtype):
+        return torch.zeros(
+            (block_num, self.block_size, 1, dim),
+            dtype=dtype, device=self.device,
+        )
+
+    def _calc_full_block_table(self, cache_size: int, batch_size: int) -> torch.Tensor:
+        block_num_per_batch = math.ceil(cache_size / self.block_size)
+        return (
+            torch.arange(0, batch_size * block_num_per_batch, dtype=torch.int32, device=self.device)
+            .view(batch_size, -1)
+            + 1
+        )
+
+    def _calc_ring_block_table(self, cache_size: int, batch_size: int) -> torch.Tensor:
+        block_num_per_batch = math.ceil(cache_size / self.block_size)
+        block_table_len = math.ceil(self.pa_max_length / self.block_size)
+        block_table_offset = (
+            torch.arange(0, batch_size * block_num_per_batch, dtype=torch.int32, device=self.device)
+            .view(batch_size, -1)
+            + 1
+        )
+        repeat_num = math.ceil(block_table_len / block_num_per_batch)
+        return block_table_offset.repeat(1, repeat_num)[:, :block_table_len]
+
+    def _calc_state_block_table(
+        self,
+        cache_size: int,
+        start_pos: torch.Tensor,
+        seq_used_q: torch.Tensor,
+        is_prefill: bool,
+    ) -> torch.Tensor:
+        batch_size = start_pos.shape[0]
+        block_num_per_batch = math.ceil(cache_size / self.block_size)
+        block_table_len = math.ceil(self.pa_max_length / self.block_size)
+        block_table_offset = (
+            torch.arange(0, batch_size * block_num_per_batch, dtype=torch.int32, device=self.device)
+            .view(batch_size, -1)
+            + 1
+        )
+        repeat_num = math.ceil(block_table_len / block_num_per_batch)
+        block_table_offset = block_table_offset.repeat(1, repeat_num)[:, :block_table_len]
+        block_pos_ids = torch.arange(block_table_len, dtype=torch.int32, device=self.device).repeat(batch_size, 1)
+        actual_seq_len = start_pos + seq_used_q
+        actual_block_start = (start_pos // self.block_size).view(batch_size, 1)
+        actual_block_end = ((actual_seq_len - 1) // self.block_size).view(batch_size, 1)
+        if is_prefill:
+            return torch.where(block_pos_ids == actual_block_end, block_table_offset, torch.zeros_like(block_table_offset))
+        block_table = torch.where(block_pos_ids >= actual_block_start, block_table_offset, torch.zeros_like(block_table_offset))
+        return torch.where(block_pos_ids <= actual_block_end, block_table, torch.zeros_like(block_table))
+
+    def _calc_state_block_table_templates(self, cache_size: int, batch_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        block_num_per_batch = math.ceil(cache_size / self.block_size)
+        block_table_len = math.ceil(self.pa_max_length / self.block_size)
+        block_table_offset = (
+            torch.arange(0, batch_size * block_num_per_batch, dtype=torch.int32, device=self.device)
+            .view(batch_size, -1)
+            + 1
+        )
+        repeat_num = math.ceil(block_table_len / block_num_per_batch)
+        block_table_offset = block_table_offset.repeat(1, repeat_num)[:, :block_table_len]
+        block_pos_ids = torch.arange(block_table_len, dtype=torch.int32, device=self.device).view(1, -1)
+        return block_table_offset, block_pos_ids
+
+    def get_cmp_state_block_table(
+        self,
+        layer_idx: int,
+        start_pos: torch.Tensor,
+        seq_used_q: torch.Tensor,
+        is_prefill: bool,
+    ) -> torch.Tensor:
+        ratio = self.config.compress_ratios[layer_idx]
+        overlap = 1 if ratio == 4 else 0
+        num_ratio_group = (1 if self.next_n == 0 else 2) + overlap
+        state_cache_size = num_ratio_group * ratio
+        return self._calc_state_block_table(state_cache_size, start_pos, seq_used_q, is_prefill)
+
+    def get_cmp_state_block_table_decode(self, layer_idx: int, start_pos: torch.Tensor) -> torch.Tensor:
+        ratio = self.config.compress_ratios[layer_idx]
+        block_table_offset = self._state_block_table_offsets.get(ratio)
+        block_pos_ids = self._state_block_pos_ids.get(ratio)
+        if block_table_offset is None or block_pos_ids is None:
+            return self.get_cmp_state_block_table(
+                layer_idx,
+                start_pos,
+                self._decode_q_lens[:start_pos.shape[0]],
+                False,
+            )
+        current_block = (start_pos.to(dtype=torch.int32) // self.block_size).view(-1, 1)
+        return torch.where(
+            block_pos_ids == current_block,
+            block_table_offset[:start_pos.shape[0]],
+            torch.zeros_like(block_table_offset[:start_pos.shape[0]]),
+        )
+
+    def get_cmp_state_block_table_decode_window(
+        self,
+        layer_idx: int,
+        start_pos: torch.Tensor,
+        seq_len: int,
+    ) -> torch.Tensor:
+        ratio = self.config.compress_ratios[layer_idx]
+        block_table_offset = self._state_block_table_offsets.get(ratio)
+        block_pos_ids = self._state_block_pos_ids.get(ratio)
+        if block_table_offset is None or block_pos_ids is None:
+            seq_used_q = torch.full((start_pos.shape[0],), seq_len, dtype=torch.int32, device=start_pos.device)
+            return self.get_cmp_state_block_table(layer_idx, start_pos, seq_used_q, False)
+
+        batch_size = start_pos.shape[0]
+        start_pos = start_pos.to(dtype=torch.int32)
+        actual_block_start = (start_pos // self.block_size).view(batch_size, 1)
+        actual_block_end = ((start_pos + seq_len - 1) // self.block_size).view(batch_size, 1)
+        block_pos_ids = block_pos_ids[:batch_size]
+        block_table_offset = block_table_offset[:batch_size]
+        block_table = torch.where(
+            block_pos_ids >= actual_block_start,
+            block_table_offset,
+            torch.zeros_like(block_table_offset),
+        )
+        return torch.where(block_pos_ids <= actual_block_end, block_table, torch.zeros_like(block_table))
+
+    def get_compressed_position_ids(
+        self,
+        start_pos: torch.Tensor,
+        seq_used_q: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        ratio: int,
+        pad_value: int = 1,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        start_pos = start_pos.to(dtype=torch.int32)
+        seq_used_q = seq_used_q.to(dtype=torch.int32)
+        cmp_start = start_pos // ratio
+        cmp_end = (start_pos + seq_used_q) // ratio
+        compressed_len = cmp_end - cmp_start
+        offsets = F.pad(torch.cumsum(compressed_len, dim=0, dtype=torch.int32), (1, 0))[:-1]
+        expanded_starts = torch.repeat_interleave(cmp_start, compressed_len)
+        expanded_offsets = torch.repeat_interleave(offsets, compressed_len)
+        flat_range = torch.arange(compressed_len.sum(), dtype=torch.int32, device=start_pos.device)
+        compressed_ids = flat_range - expanded_offsets + expanded_starts
+        bsz = start_pos.shape[0]
+        max_len = min(cu_seqlens_q[-1], cu_seqlens_q[-1] // ratio + bsz)
+        position_ids_cmp = torch.full((max_len,), pad_value, dtype=torch.int32, device=start_pos.device)
+        valid_len = min(compressed_ids.numel(), max_len)
+        if valid_len > 0:
+            position_ids_cmp[:valid_len] = compressed_ids[:valid_len]
+        return compressed_len, position_ids_cmp
+
+    def get_compressed_position_ids_decode(
+        self,
+        start_pos: torch.Tensor,
+        ratio: int,
+        pad_value: int = 1,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        start_pos = start_pos.to(dtype=torch.int32)
+        cmp_start = start_pos // ratio
+        cmp_end = (start_pos + 1) // ratio
+        compressed_len = cmp_end - cmp_start
+        position_ids_cmp = torch.full(
+            (start_pos.shape[0],), pad_value, dtype=torch.int32, device=start_pos.device
+        )
+        valid_mask = compressed_len > 0
+        packed_idx = (torch.cumsum(compressed_len, dim=0, dtype=torch.int32) - 1).to(torch.long)
+        position_ids_cmp[packed_idx[valid_mask]] = cmp_start[valid_mask]
+        return compressed_len, position_ids_cmp
+
+    def get_compressed_position_ids_decode_window(
+        self,
+        start_pos: torch.Tensor,
+        seq_len: int,
+        ratio: int,
+        pad_value: int = 1,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        start_pos = start_pos.to(dtype=torch.int32)
+        batch_size = start_pos.shape[0]
+        total_q_len = batch_size * seq_len
+        max_len = min(total_q_len, total_q_len // ratio + batch_size)
+        if max_len <= 0:
+            return (
+                torch.zeros((batch_size,), dtype=torch.int32, device=start_pos.device),
+                torch.empty((0,), dtype=torch.int32, device=start_pos.device),
+            )
+
+        cmp_start = start_pos // ratio
+        cmp_end = (start_pos + seq_len) // ratio
+        compressed_len = cmp_end - cmp_start
+        offsets = F.pad(torch.cumsum(compressed_len, dim=0, dtype=torch.int32), (1, 0))[:-1]
+        out_idx = torch.arange(max_len, dtype=torch.int32, device=start_pos.device).view(1, max_len)
+        valid_by_row = (out_idx >= offsets.view(batch_size, 1)) & (
+            out_idx < (offsets + compressed_len).view(batch_size, 1)
+        )
+        any_valid = valid_by_row.any(dim=0)
+        row_idx = valid_by_row.to(dtype=torch.int32).argmax(dim=0).to(torch.long)
+        rel_idx = out_idx.view(max_len) - offsets[row_idx]
+        compressed_ids = cmp_start[row_idx] + rel_idx
+        pad_ids = torch.full((max_len,), pad_value, dtype=torch.int32, device=start_pos.device)
+        return compressed_len, torch.where(any_valid, compressed_ids.to(dtype=torch.int32), pad_ids)
+
+    def get_cmp_slot_mapping(
+        self,
+        layer_idx: int,
+        start_pos: torch.Tensor,
+        seq_used_q: torch.Tensor,
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        compressed_len: Optional[torch.Tensor] = None,
+        position_ids_cmp: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
+        ratio = self.config.compress_ratios[layer_idx]
+        block_table = self.cache_data[layer_idx].get(f"c{ratio}a_cmp_kv_block_table")
+        if block_table is None:
+            return None
+        if compressed_len is None or position_ids_cmp is None:
+            if cu_seqlens_q is None:
+                cu_seqlens_q = torch.cat([
+                    torch.zeros(1, dtype=torch.int32, device=start_pos.device),
+                    seq_used_q.cumsum(0, dtype=torch.int32),
+                ])
+            compressed_len, position_ids_cmp = self.get_compressed_position_ids(
+                start_pos, seq_used_q, cu_seqlens_q, ratio
+            )
+
+        row_indices = torch.repeat_interleave(
+            torch.arange(start_pos.shape[0], dtype=torch.int32, device=start_pos.device),
+            compressed_len,
+        )
+        total_len = position_ids_cmp.shape[0]
+        slot_mapping = torch.full((total_len,), -1, dtype=torch.int32, device=start_pos.device)
+        if row_indices.numel() == 0:
+            return slot_mapping
+
+        valid_len = min(row_indices.numel(), total_len)
+        row_indices = row_indices[:valid_len].to(torch.long)
+        indices = position_ids_cmp[:valid_len]
+        block_idx = (indices // self.block_size).to(torch.long)
+        offset = indices % self.block_size
+        slot_mapping[:valid_len] = block_table[row_indices, block_idx] * self.block_size + offset
+        return slot_mapping
+
+    def get_cmp_slot_mapping_decode(
+        self,
+        layer_idx: int,
+        start_pos: torch.Tensor,
+        compressed_len: Optional[torch.Tensor] = None,
+        position_ids_cmp: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
+        ratio = self.config.compress_ratios[layer_idx]
+        block_table = self.cache_data[layer_idx].get(f"c{ratio}a_cmp_kv_block_table")
+        if block_table is None:
+            return None
+        if compressed_len is None or position_ids_cmp is None:
+            compressed_len, position_ids_cmp = self.get_compressed_position_ids_decode(start_pos, ratio)
+
+        slot_mapping = torch.full_like(position_ids_cmp, -1)
+        valid_mask = compressed_len > 0
+        packed_idx = (torch.cumsum(compressed_len, dim=0, dtype=torch.int32) - 1).to(torch.long)
+        row_idx = self._batch_indices_long[:start_pos.shape[0]]
+        indices = start_pos.to(dtype=torch.int32) // ratio
+        block_idx = (indices // self.block_size).to(torch.long)
+        offset = indices % self.block_size
+        slots = block_table[:start_pos.shape[0]][row_idx, block_idx] * self.block_size + offset
+        slot_mapping[packed_idx[valid_mask]] = slots[valid_mask].to(dtype=torch.int32)
+        return slot_mapping
+
+    def get_cmp_slot_mapping_decode_window(
+        self,
+        layer_idx: int,
+        start_pos: torch.Tensor,
+        seq_len: int,
+        compressed_len: Optional[torch.Tensor] = None,
+        position_ids_cmp: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
+        ratio = self.config.compress_ratios[layer_idx]
+        block_table = self.cache_data[layer_idx].get(f"c{ratio}a_cmp_kv_block_table")
+        if block_table is None:
+            return None
+        if compressed_len is None or position_ids_cmp is None:
+            compressed_len, position_ids_cmp = self.get_compressed_position_ids_decode_window(start_pos, seq_len, ratio)
+
+        total_len = position_ids_cmp.shape[0]
+        if total_len == 0:
+            return torch.empty((0,), dtype=torch.int32, device=start_pos.device)
+
+        batch_size = start_pos.shape[0]
+        offsets = F.pad(torch.cumsum(compressed_len, dim=0, dtype=torch.int32), (1, 0))[:-1]
+        out_idx = torch.arange(total_len, dtype=torch.int32, device=start_pos.device).view(1, total_len)
+        valid_by_row = (out_idx >= offsets.view(batch_size, 1)) & (
+            out_idx < (offsets + compressed_len).view(batch_size, 1)
+        )
+        any_valid = valid_by_row.any(dim=0)
+        row_idx = valid_by_row.to(dtype=torch.int32).argmax(dim=0).to(torch.long)
+        indices = position_ids_cmp.to(dtype=torch.int32)
+        block_idx = (indices // self.block_size).to(torch.long)
+        offset = indices % self.block_size
+        slots = block_table[:batch_size][row_idx, block_idx] * self.block_size + offset
+        invalid_slots = torch.full((total_len,), -1, dtype=torch.int32, device=start_pos.device)
+        return torch.where(any_valid, slots.to(dtype=torch.int32), invalid_slots)
+
+    def get_compressed_rope_position_ids(
+        self,
+        start_pos: torch.Tensor,
+        seq_used_q: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        ratio: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        compressed_len, position_ids_cmp = self.get_compressed_position_ids(
+            start_pos, seq_used_q, cu_seqlens_q, ratio, pad_value=1
+        )
+        return compressed_len, (position_ids_cmp * ratio).to(dtype=torch.long).unsqueeze(0)
+
+    def get_win_slot_mapping(
+        self,
+        start_pos: torch.Tensor,
+        seq_used_q: torch.Tensor,
+        pad_to_window: bool = False,
+    ) -> torch.Tensor:
+        start_pos = start_pos.to(device=self.device, dtype=torch.int32)
+        seq_used_q = seq_used_q.to(device=self.device, dtype=torch.int32)
+        batch_size = start_pos.shape[0]
+        block_table = self._get_win_block_table(batch_size)
+        if pad_to_window:
+            seq_len = self.sliding_window
+            base_pos = torch.clamp(start_pos + seq_used_q - self.sliding_window, min=0)
+            valid_mask = torch.ones((batch_size, seq_len), dtype=torch.bool, device=self.device)
+        else:
+            seq_len = int(seq_used_q.max().item()) if batch_size > 0 else 0
+            if seq_len == 0:
+                return torch.empty((0,), dtype=torch.int32, device=self.device)
+            base_pos = start_pos
+            valid_mask = torch.arange(seq_len, dtype=torch.int32, device=self.device).unsqueeze(0) < seq_used_q.unsqueeze(1)
+
+        offsets_in_seq = torch.arange(seq_len, dtype=torch.int32, device=self.device).unsqueeze(0)
+        positions = base_pos.unsqueeze(1) + offsets_in_seq
+        block_idx = (positions // self.block_size).to(torch.long)
+        block_offset = positions % self.block_size
+        row_idx = torch.arange(batch_size, device=self.device, dtype=torch.long).unsqueeze(1).expand_as(block_idx)
+        slots = block_table[row_idx, block_idx] * self.block_size + block_offset
+        return slots[valid_mask].to(dtype=torch.int32)
+
+    def get_win_slot_mapping_decode(self, start_pos: torch.Tensor) -> torch.Tensor:
+        start_pos = start_pos.to(device=self.device, dtype=torch.int32)
+        batch_size = start_pos.shape[0]
+        block_table = self._get_win_block_table(batch_size)
+        block_idx = (start_pos // self.block_size).to(torch.long)
+        offset = start_pos % self.block_size
+        row_idx = self._batch_indices_long[:batch_size]
+        return (block_table[row_idx, block_idx] * self.block_size + offset).to(dtype=torch.int32)
+
+    def get_win_slot_mapping_decode_window(self, start_pos: torch.Tensor, seq_len: int) -> torch.Tensor:
+        start_pos = start_pos.to(device=self.device, dtype=torch.int32)
+        batch_size = start_pos.shape[0]
+        if seq_len <= 0 or batch_size == 0:
+            return torch.empty((0,), dtype=torch.int32, device=self.device)
+
+        block_table = self._get_win_block_table(batch_size)
+        offsets_in_seq = torch.arange(seq_len, dtype=torch.int32, device=self.device).unsqueeze(0)
+        positions = start_pos.unsqueeze(1) + offsets_in_seq
+        block_idx = (positions // self.block_size).to(torch.long)
+        block_offset = positions % self.block_size
+        row_idx = self._batch_indices_long[:batch_size].unsqueeze(1).expand_as(block_idx)
+        return (block_table[row_idx, block_idx] * self.block_size + block_offset).reshape(-1).to(dtype=torch.int32)
+
+    def get_full_kv_gather_indices(
+        self,
+        start_pos: torch.Tensor,
+        seq_used_q: torch.Tensor,
+    ) -> torch.Tensor:
+        total_len = start_pos.to(torch.int32) + seq_used_q.to(torch.int32)
+        gather_start = torch.clamp(total_len - self.sliding_window, min=0)
+        token_indices = torch.arange(self.sliding_window, dtype=torch.int32, device=self.device)
+        return gather_start.unsqueeze(1) + token_indices.unsqueeze(0)
+
+    def init_full_buffer_c1a(self, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
+        return self._create_cache(self._get_block_num(self.max_seq_len), self.head_dim, dtype)
+
+    def get_full_slot_mapping(
+        self,
+        start_pos: torch.Tensor,
+        seq_used_q: torch.Tensor,
+    ) -> torch.Tensor:
+        start_pos = start_pos.to(device=self.device, dtype=torch.int32)
+        seq_used_q = seq_used_q.to(device=self.device, dtype=torch.int32)
+        batch_size = start_pos.shape[0]
+        seq_len = int(seq_used_q.max().item()) if batch_size > 0 else 0
+        if seq_len == 0:
+            return torch.empty((0,), dtype=torch.int32, device=self.device)
+        block_table = self._get_full_block_table(batch_size)
+        offsets_in_seq = torch.arange(seq_len, dtype=torch.int32, device=self.device).unsqueeze(0)
+        valid_mask = offsets_in_seq < seq_used_q.unsqueeze(1)
+        positions = start_pos.unsqueeze(1) + offsets_in_seq
+        block_idx = (positions // self.block_size).to(torch.long)
+        block_offset = positions % self.block_size
+        row_idx = torch.arange(batch_size, device=self.device, dtype=torch.long).unsqueeze(1).expand_as(block_idx)
+        slots = block_table[row_idx, block_idx] * self.block_size + block_offset
+        return slots[valid_mask].to(dtype=torch.int32)
+
+    def build_full_kv_for_prefill(
+        self,
+        kv: torch.Tensor,
+        context_lens: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        actual_q_lens: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch_size = kv.shape[0]
+        q_lens = (cu_q_lens[1:] - cu_q_lens[:-1]).to(device=kv.device, dtype=torch.int32)
+        if actual_q_lens is not None:
+            q_lens = actual_q_lens.to(device=kv.device, dtype=torch.int32)
+        full_kv = self.init_full_buffer_c1a(dtype=kv.dtype)
+        slot_mapping = self.get_full_slot_mapping(context_lens, q_lens)
+        if slot_mapping.numel() > 0:
+            token_offsets = torch.arange(kv.shape[1], dtype=torch.int32, device=kv.device).unsqueeze(0)
+            valid_mask = token_offsets < q_lens.unsqueeze(1)
+            kv_flat = kv[valid_mask].reshape(-1, self.head_dim)
+            self.scatter_nd_update(
+                full_kv.view(-1, self.head_dim),
+                slot_mapping.reshape(-1, 1),
+                kv_flat,
+            )
+        return full_kv, self._get_full_block_table(batch_size)
+
+    def _create_state_cache(self, state_block_num, compress_ratio, cache_dim):
+        overlap_num = 2 if compress_ratio == 4 else 1
+        return torch.zeros(
+            (state_block_num, self.block_size, 2, overlap_num, cache_dim),
+            dtype=torch.float32, device=self.device,
+        )
+
+    def _allocate_blocks(self, num_blocks: int) -> torch.Tensor:
+        raise RuntimeError("PagedDummyCache no longer keeps persistent full original KV blocks.")
+
+    def update(self, kv: torch.Tensor, layer_idx: int, cu_q_lens: Optional[torch.Tensor] = None,
+               actual_q_lens: Optional[torch.Tensor] = None) -> None:
+        batch_size = kv.shape[0]
+        new_seq_len = kv.shape[1]
+
+        if cu_q_lens is None:
+            cu_q_lens = torch.arange(
+                0, (batch_size + 1) * new_seq_len, step=new_seq_len,
+                device=kv.device, dtype=torch.int32,
+            )
+
+        q_lens = (cu_q_lens[1:] - cu_q_lens[:-1]).to(device=kv.device, dtype=torch.int32)
+        if actual_q_lens is not None:
+            q_lens = actual_q_lens.to(device=kv.device, dtype=torch.int32)
+        self.seq_lens[layer_idx] = (self.seq_lens[layer_idx] + q_lens).to(self.seq_lens.dtype)
+
+    def update_win_kv(
+        self,
+        kv: torch.Tensor,
+        layer_idx: int,
+        slot_mapping: Optional[torch.Tensor] = None,
+        gather_indices: Optional[torch.Tensor] = None,
+        start_pos: Optional[torch.Tensor] = None,
+    ) -> None:
+        win_cache = self.cache_data[layer_idx]["win_kv"]
+        if win_cache is None:
+            return
+        if slot_mapping is None:
+            raise ValueError("update_win_kv requires Golden-equivalent slot_mapping.")
+        batch_size, seq_len, _ = kv.shape
+        if gather_indices is not None:
+            if start_pos is None:
+                start_pos = torch.zeros(batch_size, dtype=torch.int32, device=kv.device)
+            local_idx = gather_indices.to(kv.device, dtype=torch.int32) - start_pos.to(kv.device, dtype=torch.int32).unsqueeze(1)
+            local_idx = torch.where(
+                (local_idx >= 0) & (local_idx < seq_len),
+                local_idx,
+                torch.zeros_like(local_idx),
+            ).to(torch.long)
+            row_idx = torch.arange(batch_size, device=kv.device, dtype=torch.long).unsqueeze(1).expand_as(local_idx)
+            kv_flat = kv[row_idx, local_idx].reshape(-1, self.head_dim)
+        else:
+            kv_flat = kv.reshape(-1, self.head_dim)
+        win_flat = win_cache.view(-1, self.head_dim)
+        self.scatter_nd_update(win_flat, slot_mapping.reshape(-1, 1), kv_flat)
+
+    def update_sfa_cmp_kv(self, kv: torch.Tensor, layer_idx: int, slot_mapping: Optional[torch.Tensor] = None) -> None:
+        sfa_cmp_cache = self.cache_data[layer_idx]["sfa_cmp_kv"]
+        if sfa_cmp_cache is None:
+            return
+        if kv.shape[1] == 0:
+            return
+        batch_size, seq_len, _ = kv.shape
+        kv_flat = kv.reshape(-1, self.head_dim)
+        cmp_flat = sfa_cmp_cache.view(-1, self.head_dim)
+        if slot_mapping is not None:
+            self.scatter_nd_update(cmp_flat, slot_mapping.reshape(-1, 1), kv_flat)
+        else:
+            ratio = self.config.compress_ratios[layer_idx]
+            cmp_context_len = int(self.seq_lens[layer_idx][0].item()) // ratio
+            for t in range(seq_len):
+                pos = cmp_context_len + t
+                block_idx = pos // self.block_size + 1
+                offset = pos % self.block_size
+                if block_idx < sfa_cmp_cache.shape[0]:
+                    sfa_cmp_cache[block_idx, offset, 0, :] = kv_flat[t]
+
+    def update_li_cmp_kv(self, kv: torch.Tensor, layer_idx: int, slot_mapping: Optional[torch.Tensor] = None) -> None:
+        li_cmp_cache = self.cache_data[layer_idx]["li_cmp_kv"]
+        scale_cache = self.cache_data[layer_idx]["li_key_dequant_scale"]
+        if li_cmp_cache is None:
+            return
+        if kv.shape[1] == 0:
+            return
+        batch_size, seq_len, _ = kv.shape
+        kv_flat = kv.reshape(-1, self.index_head_dim).contiguous()
+        kv_quant, k_scale = self.li_dynamic_quant(kv_flat)
+        k_scale = k_scale.squeeze(-1).to(torch.float16)
+        cmp_flat = li_cmp_cache.view(-1, self.index_head_dim)
+        scale_flat = scale_cache.view(-1, scale_cache.shape[-1])
+        if slot_mapping is not None:
+            self.scatter_nd_update(
+                scale_flat,
+                slot_mapping.reshape(-1, 1),
+                k_scale.view(-1, scale_cache.shape[-1]),
+            )
+            self.scatter_nd_update(
+                cmp_flat,
+                slot_mapping.reshape(-1, 1),
+                kv_quant.view(-1, li_cmp_cache.shape[-1]),
+            )
+        else:
+            ratio = self.config.compress_ratios[layer_idx]
+            cmp_context_len = int(self.seq_lens[layer_idx][0].item()) // ratio
+            for t in range(seq_len):
+                pos = cmp_context_len + t
+                block_idx = pos // self.block_size + 1
+                offset = pos % self.block_size
+                if block_idx < li_cmp_cache.shape[0]:
+                    li_cmp_cache[block_idx, offset, 0, :] = kv_quant[t]
+                    scale_cache[block_idx, offset, 0, 0] = k_scale[t]
+
+    def get_kv_for_decode(self, layer_idx: int) -> Tuple[None, None]:
+        return None, None
+
+    def get_kv_slot_mapping(
+        self,
+        layer_idx: int,
+        start_pos: torch.Tensor,
+        seq_used_q: torch.Tensor,
+        seq_len: int,
+    ) -> Optional[torch.Tensor]:
+        return None
+
+    def get_all_kv_slot_mapping(
+        self,
+        start_pos: torch.Tensor,
+        seq_used_q: torch.Tensor,
+        seq_len: int,
+    ) -> Optional[torch.Tensor]:
+        return None
+
+    def get_all_kv_slot_mapping_decode(self, start_pos: torch.Tensor) -> Optional[torch.Tensor]:
+        return None
+
+    def get_win_kv_for_decode(self, layer_idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        win_kv = self.cache_data[layer_idx]["win_kv"]
+        block_table = self._get_win_block_table(self.batch_size)
+        return win_kv, block_table
+
+    def get_full_block_table(self, batch_size: Optional[int] = None) -> torch.Tensor:
+        return self._get_full_block_table(self.batch_size if batch_size is None else batch_size)
+
+    def _get_full_block_table(self, batch_size: int) -> torch.Tensor:
+        if batch_size == self.batch_size:
+            return self._full_block_table
+        return self._calc_full_block_table(self.max_seq_len, batch_size)
+
+    def _get_win_block_table(self, batch_size: int) -> torch.Tensor:
+        if batch_size == self.batch_size:
+            return self._win_block_table
+        return self._calc_ring_block_table(self.win_cache_size, batch_size)
+
+    def get_win_kv(self, layer_idx: int):
+        return self.cache_data[layer_idx]["win_kv"]
+
+    def get_sfa_cmp_kv(self, layer_idx: int):
+        return self.cache_data[layer_idx]["sfa_cmp_kv"]
+
+    def get_sfa_kv_state(self, layer_idx: int):
+        return self.cache_data[layer_idx]["sfa_kv_state"]
+
+    def get_li_cmp_kv(self, layer_idx: int):
+        return self.cache_data[layer_idx]["li_cmp_kv"]
+
+    def get_li_kv_state(self, layer_idx: int):
+        return self.cache_data[layer_idx]["li_kv_state"]
+
+    def get_li_key_dequant_scale(self, layer_idx: int):
+        return self.cache_data[layer_idx]["li_key_dequant_scale"]
+
+    def get_c4a_cmp_kv_block_table(self, layer_idx: int):
+        return self.cache_data[layer_idx]["c4a_cmp_kv_block_table"]
+
+    def get_cmp_kv_block_table(self, layer_idx: int):
+        ratio = self.config.compress_ratios[layer_idx]
+        return self.cache_data[layer_idx].get(f"c{ratio}a_cmp_kv_block_table")
+
+    def get_cmp_kv_for_decode(self, layer_idx: int):
+        sfa_cmp = self.cache_data[layer_idx]["sfa_cmp_kv"]
+        if sfa_cmp is not None:
+            return sfa_cmp, None
+        return None, None
+
+    def update_cmp(self, kv: torch.Tensor, layer_idx: int) -> None:
+        self.update_sfa_cmp_kv(kv, layer_idx)
+
+    def get_seq_length(self, layer_idx: int = 0) -> torch.Tensor:
+        return self.seq_lens[layer_idx].clone()
+
+
+def _yarn_get_mscale(scale=1.0, mscale=1.0):
+    if scale <= 1.0:
+        return 1.0
+    return 0.1 * mscale * math.log(scale) + 1.0
+
+
+class DeepseekV4RotaryEmbedding(nn.Module):
+
+    def __init__(self, config: DeepseekV4Config, device: Optional[str] = None, base: Optional[float] = None):
+        super().__init__()
+        dim = config.qk_rope_head_dim
+        base = config.rope_theta if base is None else base
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.int64).to(device=device, dtype=torch.float) / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+        rope_scaling = config.rope_scaling
+        if rope_scaling is not None and rope_scaling.get("type") == "yarn":
+            scale = rope_scaling.get("factor", 1.0)
+            self.attention_scaling = _yarn_get_mscale(scale, 1.0)
+        else:
+            self.attention_scaling = 1.0
+
+    @torch.no_grad()
+    def forward(self, x: torch.Tensor, position_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        position_ids_expanded = position_ids[:, None, :].float()
+        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):
+            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            emb = freqs.repeat_interleave(2, dim=-1)
+            cos = emb.cos() * self.attention_scaling
+            sin = emb.sin() * self.attention_scaling
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
+
+class DeepseekV4Compressor(nn.Module):
+
+    def __init__(self, config: DeepseekV4Config, compress_ratio: int, head_dim: Optional[int] = None,
+                 is_indexer: bool = False):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.head_dim = head_dim if head_dim is not None else config.head_dim
+        self.rope_head_dim = config.qk_rope_head_dim
+        self.nope_head_dim = self.head_dim - self.rope_head_dim
+        self.compress_ratio = compress_ratio
+        self.overlap = compress_ratio == 4
+        self.coff = 1 + self.overlap
+        self.is_indexer = is_indexer
+        if self.is_indexer:
+            self.register_buffer("hadamard_matrix", _get_had_pow2(self.head_dim), persistent=False)
+
+        self.wkv = MojoGemm(in_features=self.hidden_size, out_features=self.coff * self.head_dim, bias=False, dtype=torch.bfloat16)
+        self.wgate = MojoGemm(in_features=self.hidden_size, out_features=self.coff * self.head_dim, bias=False, dtype=torch.bfloat16)
+        self.norm = MojoRMSNorm(norm_size=self.head_dim, eps=config.rms_norm_eps)
+        self.ape = nn.Parameter(torch.empty(compress_ratio, self.coff * self.head_dim, dtype=torch.float32))
+        self.compressor_op = MojoCompressor()
+
+    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+                state_cache: Optional[torch.Tensor] = None,
+                state_block_table: Optional[torch.Tensor] = None,
+                cu_seqlens: Optional[torch.Tensor] = None,
+                seq_used_q: Optional[torch.Tensor] = None,
+                start_pos: Optional[torch.Tensor] = None,
+                apply_indexer_rotate: bool = True) -> torch.Tensor:
+        batch_size, seq_len, _ = x.shape
+        if state_cache is None or state_block_table is None:
+            raise ValueError("DeepseekV4Compressor requires state_cache and state_block_table.")
+        if cu_seqlens is None:
+            cu_seqlens = torch.arange(
+                0, (batch_size + 1) * seq_len, step=seq_len,
+                dtype=torch.int32, device=x.device,
+            )
+        if seq_used_q is None:
+            seq_used_q = torch.full((batch_size,), seq_len, dtype=torch.int32, device=x.device)
+        if start_pos is None:
+            start_pos = torch.zeros(batch_size, dtype=torch.int32, device=x.device)
+
+        x_flat = x.to(torch.bfloat16).reshape(-1, self.hidden_size).contiguous()
+        cmp_flat = self.compressor_op(
+            x=x_flat,
+            wkv=self.wkv.weight,
+            wgate=self.wgate.weight,
+            state_cache=state_cache.flatten(-3),
+            ape=self.ape,
+            norm_weight=self.norm.weight,
+            rope_cos=cos.reshape(-1, self.rope_head_dim),
+            rope_sin=sin.reshape(-1, self.rope_head_dim),
+            rope_head_dim=self.rope_head_dim,
+            cmp_ratio=self.compress_ratio,
+            state_block_table=state_block_table,
+            cu_seqlens=cu_seqlens,
+            seqused=seq_used_q,
+            start_pos=start_pos,
+            coff=self.coff,
+            norm_eps=self.norm.variance_epsilon,
+            rotary_mode=2,
+            cache_mode=1,
+        )
+        output_len = cos.reshape(-1, self.rope_head_dim).shape[0]
+        cmp_flat = cmp_flat[:output_len]
+        if self.is_indexer and apply_indexer_rotate and cmp_flat.numel() > 0:
+            cmp_flat = _rotate_activation(cmp_flat, self.hadamard_matrix)
+        cmp_out = cmp_flat.view(1, output_len, self.head_dim)
+        return cmp_out
+
+
+class DeepseekV4Indexer(nn.Module):
+
+    def __init__(self, config: DeepseekV4Config, compress_ratio: int = 4):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.n_heads = config.index_n_heads
+        self.head_dim = config.index_head_dim
+        self.rope_head_dim = config.qk_rope_head_dim
+        self.partial_slice = [self.head_dim - self.rope_head_dim, self.head_dim]
+        self.index_topk = config.index_topk
+        self.q_lora_rank = config.q_lora_rank
+        self.compress_ratio = compress_ratio
+        self.softmax_scale = self.head_dim ** -0.5
+
+        self.wq_b = MojoQuantGemm(
+            in_features=self.q_lora_rank,
+            out_features=self.n_heads * self.head_dim,
+        )
+        self.weights_proj = MojoGemm(in_features=self.hidden_size, out_features=self.n_heads, bias=False)
+        self.compressor = DeepseekV4Compressor(config, compress_ratio, head_dim=self.head_dim, is_indexer=True)
+        self.compress_rotary_emb = DeepseekV4RotaryEmbedding(config, base=config.compress_rope_theta)
+        self.quant_lightning_indexer_metadata = MojoQuantLightningIndexerMetadata()
+        self.quant_lightning_indexer = MojoQuantLightningIndexer()
+        self.query_dynamic_quant = MojoDynamicQuant()
+        self.scatter_nd_update = MojoScatterNdUpdateAsc()
+        self.register_buffer("hadamard_matrix", _get_had_pow2(self.head_dim), persistent=False)
+
+    def prepare_quant_proj_weights(self):
+        if self.wq_b.weight_scale.dtype != torch.float32:
+            self.wq_b.weight_scale.data = self.wq_b.weight_scale.data.float()
+
+    def project_query(self, qr, cos, sin, batch_size: int, seq_len: int, layer_idx=0):
+        qr_flat = qr.reshape(-1, self.q_lora_rank).to(torch.bfloat16)
+        qr_quant, qr_scale = _dynamic_quant_per_token(qr_flat)
+        return self.project_query_quantized(qr_quant, qr_scale, cos, sin, batch_size, seq_len, layer_idx)
+
+    def project_query_quantized(self, qr_quant, qr_scale, cos, sin, batch_size: int, seq_len: int, layer_idx=0):
+        with _profile_timer(layer_idx, "indexer_q_proj_rope"):
+            q = self.wq_b(qr_quant, qr_scale)
+            q = q.view(batch_size, seq_len, self.n_heads, self.head_dim)
+            q = _apply_partial_rotary(q, cos, sin, self.partial_slice)
+            q = _rotate_activation(q, self.hadamard_matrix)
+        return q
+
+    def forward(self, x, qr, cos, sin, past_key_values=None, layer_idx=0,
+                cu_seqlens_q=None, seq_lens=None, start_pos: Optional[torch.Tensor] = None,
+                state_block_table: Optional[torch.Tensor] = None,
+                seq_used_q: Optional[torch.Tensor] = None,
+                attn_inputs: Optional[dict] = None,
+                precomputed_query: Optional[torch.Tensor] = None,
+                precomputed_query_event=None,
+                precomputed_query_quant: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+                precomputed_query_quant_event=None):
+        batch_size, seq_len, _ = x.shape
+
+        with _profile_timer(layer_idx, "indexer_weights_proj"):
+            weights = self.weights_proj(x.to(torch.bfloat16).reshape(-1, self.hidden_size))
+            weights = weights.view(batch_size, seq_len, self.n_heads) * (self.softmax_scale * self.n_heads ** -0.5)
+
+        li_state_cache = attn_inputs["li_state_cache"]
+        start_pos = attn_inputs["start_pos"]
+        cu_seqlens_q = attn_inputs["cu_q_lens"]
+        seq_used_q = attn_inputs["seq_used_q"]
+        state_block_table = attn_inputs["li_state_block_table"]
+        cmp_rope_position_ids = attn_inputs["cmp_rope_position_ids"]
+        cmp_cos, cmp_sin = self.compress_rotary_emb(x, cmp_rope_position_ids)
+
+        with _profile_timer(layer_idx, "indexer_compressor"):
+            li_kv = self.compressor(
+                x, cmp_cos, cmp_sin,
+                state_cache=li_state_cache,
+                state_block_table=state_block_table,
+                cu_seqlens=cu_seqlens_q,
+                seq_used_q=seq_used_q,
+                start_pos=start_pos,
+            )
+
+        li_cmp_slot_mapping = attn_inputs["li_cmp_slot_mapping"]
+        li_cmp_kv_cache = attn_inputs["li_cmp_kv"]
+        li_scale_cache = attn_inputs["li_key_dequant_scale"]
+        kv_flat = li_kv.reshape(-1, self.head_dim).contiguous()
+        kv_quant, k_scale = _dynamic_quant_per_token(kv_flat)
+        k_scale = k_scale.to(torch.float16)
+        self.scatter_nd_update(
+            li_scale_cache.view(-1, li_scale_cache.shape[-1]),
+            li_cmp_slot_mapping.reshape(-1, 1),
+            k_scale.view(-1, li_scale_cache.shape[-1]),
+        )
+        self.scatter_nd_update(
+            li_cmp_kv_cache.view(-1, self.head_dim),
+            li_cmp_slot_mapping.reshape(-1, 1),
+            kv_quant.view(-1, self.head_dim),
+        )
+
+        li_cmp_kv = attn_inputs["li_cmp_kv"]
+        li_key_dequant_scale = attn_inputs["li_key_dequant_scale"]
+        c4a_block_table = attn_inputs["c4a_cmp_kv_block_table"]
+
+        if precomputed_query_quant is None:
+            if precomputed_query is None:
+                q = self.project_query(qr, cos, sin, batch_size, seq_len, layer_idx)
+            else:
+                if precomputed_query_event is not None:
+                    current_stream = torch.npu.current_stream()
+                    current_stream.wait_event(precomputed_query_event)
+                q = precomputed_query
+                q.record_stream(torch.npu.current_stream())
+
+            q_flat = q.flatten(0, 1)
+            with _profile_timer(layer_idx, "indexer_q_quant"):
+                q_quant, q_scale = _dynamic_quant_per_token(q_flat)
+                q_scale = q_scale.to(torch.float16)
+        else:
+            if precomputed_query_quant_event is not None:
+                torch.npu.current_stream().wait_event(precomputed_query_quant_event)
+            q_quant, q_scale = precomputed_query_quant
+            q_quant.record_stream(torch.npu.current_stream())
+            q_scale.record_stream(torch.npu.current_stream())
+
+        actual_seq_q = cu_seqlens_q[1:]
+        actual_seq_k = seq_lens if seq_lens is not None else torch.tensor([seq_len], dtype=torch.int32, device=x.device)
+
+        with _profile_timer(layer_idx, "indexer_metadata"):
+            li_metadata = attn_inputs.get("li_metadata")
+            if li_metadata is None:
+                li_metadata = self.quant_lightning_indexer_metadata(
+                    q_quant.view(batch_size, seq_len, self.n_heads, self.head_dim),
+                    li_cmp_kv,
+                    weights,
+                    q_scale.view(batch_size, seq_len, self.n_heads),
+                    li_key_dequant_scale.squeeze(-2),
+                    0,
+                    0,
+                    actual_seq_lengths_query=actual_seq_q,
+                    actual_seq_lengths_key=actual_seq_k,
+                    block_table=c4a_block_table,
+                    layout_key='PA_BSND',
+                    sparse_count=self.index_topk,
+                    sparse_mode=3,
+                    layout_query="TND",
+                    cmp_ratio=self.compress_ratio,
+                )
+
+        with _profile_timer(layer_idx, "indexer_li_kernel"):
+            topk_idxs, _ = self.quant_lightning_indexer(
+                query=q_quant,
+                key=li_cmp_kv,
+                weights=weights.flatten(0, 1).to(torch.float16),
+                query_dequant_scale=q_scale,
+                key_dequant_scale=li_key_dequant_scale.squeeze(-2),
+                actual_seq_lengths_query=actual_seq_q,
+                actual_seq_lengths_key=actual_seq_k,
+                block_table=c4a_block_table, layout_key='PA_BSND',
+                sparse_count=self.index_topk, sparse_mode=3,
+                layout_query="TND", cmp_ratio=self.compress_ratio,
+                key_quant_mode=0, query_quant_mode=0,
+                metadata=li_metadata,
+            )
+        topk_view = topk_idxs.view(q_quant.shape[0], -1, self.index_topk)
+        return topk_view
+
+
+def _dynamic_quant_per_token(x: torch.Tensor):
+    quant, scale = _DYNAMIC_QUANT_PER_TOKEN(x)
+    return quant, scale.squeeze(-1)
+
+
+def _apply_hc_head(x: torch.Tensor, hc_head_fn: torch.Tensor, hc_head_base: torch.Tensor,
+                   hc_head_scale: torch.Tensor, norm_eps: float, hc_eps: float) -> torch.Tensor:
+    shape, dtype = x.size(), x.dtype
+    x = x.flatten(2).float()
+    rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + norm_eps)
+    mixes = F.linear(x, hc_head_fn) * rsqrt
+    pre = torch.sigmoid(mixes * hc_head_scale + hc_head_base) + hc_eps
+    y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)
+    return y.to(dtype)
+
+
+class DeepseekV4Attention(nn.Module):
+
+    def __init__(self, config: DeepseekV4Config, layer_idx: int):
+        super().__init__()
+        self.config = config
+        self.logical_layer_idx = layer_idx
+        self.is_mtp = layer_idx == config.num_hidden_layers
+        self.layer_idx = 0 if self.is_mtp else layer_idx
+        self.num_heads = config.num_attention_heads
+        self.q_lora_rank = config.q_lora_rank
+        self.qk_rope_head_dim = config.qk_rope_head_dim
+        self.head_dim = config.head_dim
+        self.o_lora_rank = config.o_lora_rank
+        self.o_groups = config.o_groups
+        self.sliding_window = config.sliding_window
+        self.partial_slice = [self.head_dim - self.qk_rope_head_dim, self.head_dim]
+        self.scaling = self.head_dim ** (-0.5)
+        self.rotary_emb = DeepseekV4RotaryEmbedding(config)
+        self.cp_size = 1
+        self.global_rank = 0
+        self.hccl_comm_dict = {}
+
+        raw_ratio = config.compress_ratios[layer_idx] if layer_idx < len(config.compress_ratios) else 0
+        self.compress_ratio = raw_ratio if raw_ratio > 1 else 1
+        self._is_c1a = raw_ratio == 0
+
+        self.wq_a = MojoGemm(in_features=config.hidden_size, out_features=config.q_lora_rank, bias=False)
+        self.q_norm = MojoRMSNorm(norm_size=config.q_lora_rank, eps=config.rms_norm_eps)
+        self.q_a_quant = MojoDynamicQuant(input_size=config.q_lora_rank)
+        nn.init.ones_(self.q_a_quant.inv_smooth_scale)
+        self.wq_b = MojoQuantGemm(in_features=config.q_lora_rank, out_features=self.num_heads * self.head_dim)
+        self.q_b_norm = MojoRMSNorm(eps=config.rms_norm_eps, norm_size=self.head_dim)
+
+        self.wkv = MojoGemm(in_features=config.hidden_size, out_features=self.head_dim, bias=False, dtype=torch.bfloat16)
+        self.kv_norm = MojoRMSNorm(eps=config.rms_norm_eps, norm_size=self.head_dim)
+
+        self.wo_a = MojoGemm(in_features=self.num_heads * self.head_dim // self.o_groups, out_features=self.o_groups * self.o_lora_rank, bias=False)
+        self.wo_b = MojoQuantGemm(in_features=self.o_groups * self.o_lora_rank, out_features=config.hidden_size)
+
+        self.attn_sink = nn.Parameter(torch.empty(self.num_heads, dtype=torch.float32))
+
+        if raw_ratio > 1:
+            self.sfa_compressor = DeepseekV4Compressor(config, raw_ratio, head_dim=self.head_dim)
+            self.compress_rotary_emb = DeepseekV4RotaryEmbedding(config, base=config.compress_rope_theta)
+            self.indexer = DeepseekV4Indexer(config, raw_ratio) if raw_ratio == 4 else None
+        else:
+            self.sfa_compressor = None
+            self.compress_rotary_emb = None
+            self.indexer = None
+        self.sparse_attn_metadata = MojoSparseAttnSharedkvMetadata()
+        self.sparse_attn = MojoSparseAttnSharedkv()
+        self.scatter_nd_update = MojoScatterNdUpdateAsc()
+        self.enable_attn_mla_multi_stream = os.getenv("MOJO_ATTN_MLA_MULTI_STREAM", "0") == "1"
+        self.enable_attn_compressor_multi_stream = os.getenv("MOJO_ATTN_COMPRESSOR_MULTI_STREAM", "0") == "1"
+        self.enable_attn_indexer_multi_stream = (
+            os.getenv("MOJO_ATTN_INDEXER_MULTI_STREAM", os.getenv("MOJO_ATTN_MLA_MULTI_STREAM", "0")) == "1"
+        )
+        self.enable_attn_limit_core = os.getenv("MOJO_ATTN_LIMIT_CORE", "0") == "1"
+        self.attn_total_aic_num = int(os.getenv("MOJO_ATTN_TOTAL_AIC_NUM", "24"))
+        self.attn_aiv_to_aic_ratio = int(os.getenv("MOJO_ATTN_AIV_TO_AIC_RATIO", "2"))
+        self.attn_compressor_aic_num = int(os.getenv("MOJO_ATTN_COMPRESSOR_AIC_NUM", "16"))
+        self.attn_indexer_aic_num = int(
+            os.getenv(
+                "MOJO_ATTN_INDEXER_AIC_NUM",
+                str(max(self.attn_total_aic_num - self.attn_compressor_aic_num, 1)),
+            )
+        )
+        self.attn_qb_aic_num = int(
+            os.getenv(
+                "MOJO_ATTN_QB_AIC_NUM",
+                str(max(self.attn_total_aic_num - self.attn_compressor_aic_num, 1)),
+            )
+        )
+        if self.enable_attn_mla_multi_stream:
+            self.mla_stream = _get_global_attn_mla_stream()
+            self.mla_input_ready_event = torch.npu.Event()
+            self.mla_wkv_done_event = torch.npu.Event()
+            self.mla_kv_done_event = torch.npu.Event()
+        else:
+            self.mla_stream = None
+            self.mla_input_ready_event = None
+            self.mla_wkv_done_event = None
+            self.mla_kv_done_event = None
+        if self.enable_attn_compressor_multi_stream:
+            self.compressor_stream = _get_global_attn_compressor_stream()
+            self.compressor_input_ready_event = torch.npu.Event()
+            self.compressor_done_event = torch.npu.Event()
+        else:
+            self.compressor_stream = None
+            self.compressor_input_ready_event = None
+            self.compressor_done_event = None
+        if self.enable_attn_indexer_multi_stream:
+            self.indexer_stream = _get_global_attn_indexer_stream()
+            self.indexer_input_ready_event = torch.npu.Event()
+            self.indexer_query_done_event = torch.npu.Event()
+            self.indexer_query_quant_done_event = torch.npu.Event()
+        else:
+            self.indexer_stream = None
+            self.indexer_input_ready_event = None
+            self.indexer_query_done_event = None
+            self.indexer_query_quant_done_event = None
+
+    def prepare_wo_a_weight(self) -> torch.Tensor:
+        weight = self.wo_a.weight
+        if weight.dim() == 2:
+            weight = (
+                weight.view(self.o_groups, self.o_lora_rank, -1)
+                .transpose(1, 2)
+                .contiguous()
+            )
+            self.wo_a.weight = nn.Parameter(weight, requires_grad=False)
+        return self.wo_a.weight
+
+    @staticmethod
+    def _maybe_cast_weight_to_nz(weight: torch.Tensor) -> torch.Tensor:
+        if weight.device.type == "npu":
+            return torch_npu.npu_format_cast(weight, _NPU_FRACTAL_NZ_FORMAT)
+        return weight
+
+    @staticmethod
+    def _prepare_quant_weight_tn(module: MojoQuantGemm, use_nz: bool = True) -> torch.Tensor:
+        weight = module.weight.t().contiguous() if module.trans_weight else module.weight.contiguous()
+        if use_nz:
+            weight = DeepseekV4Attention._maybe_cast_weight_to_nz(weight)
+        return weight
+
+    @staticmethod
+    def _process_quant_weight_inplace(module: MojoQuantGemm, use_nz: bool = True) -> torch.Tensor:
+        weight = DeepseekV4Attention._prepare_quant_weight_tn(module, use_nz=use_nz)
+        module.weight = weight
+        module.trans_weight = False
+        module.weight_shape = tuple(weight.shape)
+        return module.weight
+
+    def prepare_quant_proj_weights(self):
+        # Golden casts wq_b scales to fp32 after loading to hit the intended
+        # W8A8 path on A3. Keep wo_b scale dtype unchanged for now.
+        if self.wq_b.weight_scale.dtype != torch.float32:
+            self.wq_b.weight_scale.data = self.wq_b.weight_scale.data.float()
+
+        self._process_quant_weight_inplace(self.wq_b, use_nz=True)
+        self._process_quant_weight_inplace(self.wo_b, use_nz=True)
+
+    @staticmethod
+    def _run_quant_gemm(
+        module: MojoQuantGemm,
+        input: torch.Tensor,
+        input_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        pertoken_scale = input_scale.flatten()
+        if pertoken_scale.dtype != torch.float32:
+            pertoken_scale = pertoken_scale.float()
+
+        kernel_output_dtype = module.output_dtype
+        if module.weight_scale.dtype == torch.bfloat16 and module.output_dtype not in (torch.bfloat16, torch.int32):
+            kernel_output_dtype = torch.bfloat16
+
+        out = torch_npu.npu_quant_matmul(
+            input,
+            module.weight,
+            module.weight_scale.flatten(),
+            pertoken_scale=pertoken_scale,
+            output_dtype=kernel_output_dtype,
+        )
+        if out.dtype != module.output_dtype:
+            out = out.to(module.output_dtype)
+        return out
+
+    def _get_wo_a_weight_for_tbmm(self) -> torch.Tensor:
+        if self.wo_a.weight.dim() != 3:
+            return self.prepare_wo_a_weight()
+        return self.wo_a.weight
+
+    def _use_mla_multi_stream(self, is_prefill: bool) -> bool:
+        return self.enable_attn_mla_multi_stream and not is_prefill
+
+    def _use_compressor_multi_stream(self, is_prefill: bool) -> bool:
+        return self.enable_attn_compressor_multi_stream and not is_prefill and self.sfa_compressor is not None
+
+    def _use_indexer_multi_stream(self, is_prefill: bool) -> bool:
+        return self.enable_attn_indexer_multi_stream and not is_prefill and self.indexer is not None
+
+    def _use_attn_limit_core(self, is_prefill: bool) -> bool:
+        return self.enable_attn_limit_core and not is_prefill and self.enable_attn_indexer_multi_stream
+
+    def _ensure_mla_multi_stream(self):
+        if self.mla_stream is None:
+            self.mla_stream = _get_global_attn_mla_stream()
+        if self.mla_input_ready_event is None:
+            self.mla_input_ready_event = torch.npu.Event()
+        if self.mla_wkv_done_event is None:
+            self.mla_wkv_done_event = torch.npu.Event()
+        if self.mla_kv_done_event is None:
+            self.mla_kv_done_event = torch.npu.Event()
+        return self.mla_stream, self.mla_input_ready_event, self.mla_wkv_done_event, self.mla_kv_done_event
+
+    def _ensure_compressor_multi_stream(self):
+        if self.compressor_stream is None:
+            self.compressor_stream = _get_global_attn_compressor_stream()
+        if self.compressor_input_ready_event is None:
+            self.compressor_input_ready_event = torch.npu.Event()
+        if self.compressor_done_event is None:
+            self.compressor_done_event = torch.npu.Event()
+        return self.compressor_stream, self.compressor_input_ready_event, self.compressor_done_event
+
+    def _ensure_indexer_multi_stream(self):
+        if self.indexer_stream is None:
+            self.indexer_stream = _get_global_attn_indexer_stream()
+        if self.indexer_input_ready_event is None:
+            self.indexer_input_ready_event = torch.npu.Event()
+        if self.indexer_query_done_event is None:
+            self.indexer_query_done_event = torch.npu.Event()
+        if self.indexer_query_quant_done_event is None:
+            self.indexer_query_quant_done_event = torch.npu.Event()
+        return (
+            self.indexer_stream,
+            self.indexer_input_ready_event,
+            self.indexer_query_done_event,
+            self.indexer_query_quant_done_event,
+        )
+
+    def _launch_kv_mla_prolog(
+        self,
+        h_flat: torch.Tensor,
+        batch_size: int,
+        seq_length: int,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ):
+        mla_stream, ready_event, wkv_done_event, kv_done_event = self._ensure_mla_multi_stream()
+        main_stream = torch.npu.current_stream()
+        ready_event.record(main_stream)
+        with torch.npu.stream(mla_stream):
+            mla_stream.wait_event(ready_event)
+            h_flat.record_stream(mla_stream)
+            cos.record_stream(mla_stream)
+            sin.record_stream(mla_stream)
+            kv = self.wkv(h_flat)
+            wkv_done_event.record(mla_stream)
+            kv = self.kv_norm(kv)
+            kv = kv.view(batch_size, seq_length, self.head_dim)
+            kv = _apply_partial_rotary(
+                kv.view(batch_size, seq_length, 1, self.head_dim), cos, sin, self.partial_slice
+            ).view(batch_size, seq_length, self.head_dim)
+            kv.record_stream(mla_stream)
+            kv_done_event.record(mla_stream)
+        return kv, wkv_done_event, kv_done_event
+
+    def _launch_indexer_query_proj(
+        self,
+        qa_quant: torch.Tensor,
+        qa_scale: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        batch_size: int,
+        seq_length: int,
+        is_prefill: bool,
+    ):
+        indexer_stream, ready_event, done_event, _ = self._ensure_indexer_multi_stream()
+        main_stream = torch.npu.current_stream()
+        ready_event.record(main_stream)
+        with torch.npu.stream(indexer_stream):
+            indexer_stream.wait_event(ready_event)
+            qa_quant.record_stream(indexer_stream)
+            qa_scale.record_stream(indexer_stream)
+            cos.record_stream(indexer_stream)
+            sin.record_stream(indexer_stream)
+            with _npugraph_limit_core_num(
+                self._use_attn_limit_core(is_prefill),
+                self.attn_indexer_aic_num,
+                self.attn_indexer_aic_num * self.attn_aiv_to_aic_ratio,
+            ):
+                q = self.indexer.project_query_quantized(
+                    qa_quant, qa_scale, cos, sin, batch_size, seq_length, self.layer_idx
+                )
+            q.record_stream(indexer_stream)
+            done_event.record(indexer_stream)
+        return q, done_event
+
+    def _launch_indexer_query_quant(
+        self,
+        q: torch.Tensor,
+        q_ready_event,
+        compressor_done_event,
+        is_prefill: bool,
+    ):
+        indexer_stream, _, _, done_event = self._ensure_indexer_multi_stream()
+        with torch.npu.stream(indexer_stream):
+            if q_ready_event is not None:
+                indexer_stream.wait_event(q_ready_event)
+            if compressor_done_event is not None:
+                indexer_stream.wait_event(compressor_done_event)
+            q.record_stream(indexer_stream)
+            with _npugraph_limit_core_num(
+                self._use_attn_limit_core(is_prefill),
+                self.attn_indexer_aic_num,
+                self.attn_indexer_aic_num * self.attn_aiv_to_aic_ratio,
+            ):
+                q_flat = q.flatten(0, 1)
+                q_quant, q_scale = _dynamic_quant_per_token(q_flat)
+                q_scale = q_scale.to(torch.float16)
+            q_quant.record_stream(indexer_stream)
+            q_scale.record_stream(indexer_stream)
+            done_event.record(indexer_stream)
+        return (q_quant, q_scale), done_event
+
+    def _run_sfa_compressor(
+        self,
+        hidden_states: torch.Tensor,
+        cmp_cos: torch.Tensor,
+        cmp_sin: torch.Tensor,
+        sfa_state_cache: torch.Tensor,
+        state_block_table: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        seq_used_q: torch.Tensor,
+        start_pos: torch.Tensor,
+        cmp_cache: torch.Tensor,
+        cmp_slot_mapping: torch.Tensor,
+    ) -> None:
+        cmp_kv = self.sfa_compressor(
+            hidden_states, cmp_cos, cmp_sin,
+            state_cache=sfa_state_cache,
+            state_block_table=state_block_table,
+            cu_seqlens=cu_seqlens_q,
+            seq_used_q=seq_used_q,
+            start_pos=start_pos,
+        )
+        self.scatter_nd_update(
+            cmp_cache.view(-1, self.head_dim),
+            cmp_slot_mapping.reshape(-1, 1),
+            cmp_kv.reshape(-1, self.head_dim),
+        )
+
+    def _launch_sfa_compressor(
+        self,
+        hidden_states: torch.Tensor,
+        cmp_cos: torch.Tensor,
+        cmp_sin: torch.Tensor,
+        sfa_state_cache: torch.Tensor,
+        state_block_table: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        seq_used_q: torch.Tensor,
+        start_pos: torch.Tensor,
+        cmp_cache: torch.Tensor,
+        cmp_slot_mapping: torch.Tensor,
+    ):
+        compressor_stream, ready_event, done_event = self._ensure_compressor_multi_stream()
+        main_stream = torch.npu.current_stream()
+        ready_event.record(main_stream)
+        with torch.npu.stream(compressor_stream):
+            compressor_stream.wait_event(ready_event)
+            for tensor in (
+                hidden_states,
+                cmp_cos,
+                cmp_sin,
+                sfa_state_cache,
+                state_block_table,
+                cu_seqlens_q,
+                seq_used_q,
+                start_pos,
+                cmp_cache,
+                cmp_slot_mapping,
+            ):
+                if tensor is not None:
+                    tensor.record_stream(compressor_stream)
+            with _npugraph_limit_core_num(
+                self._use_attn_limit_core(False),
+                self.attn_compressor_aic_num,
+                self.attn_compressor_aic_num * self.attn_aiv_to_aic_ratio,
+            ):
+                with _profile_timer(self.layer_idx, "compressor"):
+                    self._run_sfa_compressor(
+                        hidden_states,
+                        cmp_cos,
+                        cmp_sin,
+                        sfa_state_cache,
+                        state_block_table,
+                        cu_seqlens_q,
+                        seq_used_q,
+                        start_pos,
+                        cmp_cache,
+                        cmp_slot_mapping,
+                    )
+            done_event.record(compressor_stream)
+        return done_event
+
+    @staticmethod
+    def _wait_mla_event(event):
+        if event is None:
+            return
+        torch.npu.current_stream().wait_event(event)
+
+    def _resolve_attn_inputs(self, attn_inputs, attn_metadata, past_key_values):
+        if attn_metadata is None:
+            if attn_inputs is None:
+                raise ValueError("DeepseekV4Attention requires attn_inputs or attn_metadata.")
+            return attn_inputs
+
+        layer_inputs = dict(attn_inputs) if attn_inputs is not None else {}
+        block_table = attn_metadata.get("block_table", {})
+        slot_mapping = attn_metadata.get("slot_mapping", {})
+        kernel_metadata = attn_metadata.get("kernel_metadata", {})
+        position_ids_c = attn_metadata.get("position_ids_c", {})
+        prefill_kv = attn_metadata.get("prefill_kv") or {}
+
+        def prefer_metadata(value, fallback_key):
+            return value if value is not None else layer_inputs.get(fallback_key)
+
+        layer_inputs.update({
+            "q_lens": attn_metadata["seq_used_q"],
+            "cu_q_lens": attn_metadata["cu_seq_lens_q"],
+            "start_pos": attn_metadata["start_pos"],
+            "seq_used_q": attn_metadata["seq_used_q"],
+            "sas_metadata": prefer_metadata(kernel_metadata.get(f"c{self.compress_ratio}a_metadata"), "sas_metadata"),
+            "cp_metadata": attn_metadata.get("cp_metadata"),
+            "prev": attn_metadata.get("prev"),
+            "next": attn_metadata.get("next"),
+        })
+
+        if past_key_values is not None:
+            win_kv_cache, fallback_win_block_table = past_key_values.get_win_kv_for_decode(self.layer_idx)
+            win_block_table = prefer_metadata(block_table.get("win_kv"), "win_block_table")
+            if win_block_table is None:
+                win_block_table = fallback_win_block_table
+            prefill_win_block_table = prefer_metadata(prefill_kv.get("win_block_table"), "win_block_table")
+            if prefill_win_block_table is None:
+                prefill_win_block_table = win_block_table
+            win_slot_mapping = prefer_metadata(
+                prefill_kv.get("win_slot_mapping")
+                if attn_metadata.get("is_prefill", False)
+                else slot_mapping.get("win_kv"),
+                "win_slot_mapping",
+            )
+            if win_slot_mapping is None:
+                q_lens = attn_metadata["seq_used_q"]
+                start_pos = attn_metadata["start_pos"]
+                if attn_metadata.get("is_prefill", False):
+                    win_slot_mapping = past_key_values.get_win_slot_mapping(start_pos, q_lens)
+                else:
+                    win_slot_mapping = past_key_values.get_win_slot_mapping_decode(start_pos)
+            layer_inputs.update({
+                "win_kv_cache": win_kv_cache,
+                "win_block_table": prefill_win_block_table,
+                "win_slot_mapping": win_slot_mapping,
+                "full_kv_cache": prefer_metadata(prefill_kv.get("full_kv_cache"), "full_kv_cache"),
+                "full_block_table": prefer_metadata(prefill_kv.get("full_block_table"), "full_block_table"),
+                "full_slot_mapping": prefer_metadata(prefill_kv.get("full_slot_mapping"), "full_slot_mapping"),
+                "full_kv_gather_indices": prefer_metadata(prefill_kv.get("full_kv_gather_indices"), "full_kv_gather_indices"),
+                "full_valid_mask": prefer_metadata(prefill_kv.get("full_valid_mask"), "full_valid_mask"),
+                "win_local_indices": prefer_metadata(prefill_kv.get("win_local_indices"), "win_local_indices"),
+            })
+
+        if self.compress_ratio <= 1:
+            return layer_inputs
+
+        ratio_key = str(self.compress_ratio)
+        cmp_block_key = f"c{self.compress_ratio}a_cmp_kv"
+        cmp_state_key = f"c{self.compress_ratio}a_cmp_state"
+        cmp_position_ids = position_ids_c.get(ratio_key)
+        if cmp_position_ids is not None:
+            layer_inputs["cmp_rope_position_ids"] = cmp_position_ids.to(dtype=torch.long).unsqueeze(0)
+
+        if past_key_values is not None:
+            layer_inputs.update({
+                "sfa_state_cache": past_key_values.get_sfa_kv_state(self.layer_idx),
+                "cmp_kv_cache": past_key_values.get_sfa_cmp_kv(self.layer_idx),
+            })
+        layer_inputs.update({
+            "state_block_table": prefer_metadata(block_table.get(cmp_state_key), "state_block_table"),
+            "cmp_slot_mapping": prefer_metadata(slot_mapping.get(cmp_block_key), "cmp_slot_mapping"),
+            "cmp_block_tables": prefer_metadata(block_table.get(cmp_block_key), "cmp_block_tables"),
+        })
+        if layer_inputs.get("cmp_slot_mapping") is None and past_key_values is not None:
+            layer_inputs["cmp_slot_mapping"] = past_key_values.get_cmp_slot_mapping(
+                self.layer_idx,
+                attn_metadata["start_pos"],
+                attn_metadata["seq_used_q"],
+                cu_seqlens_q=attn_metadata["cu_seq_lens_q"],
+            )
+        if layer_inputs.get("cmp_block_tables") is None and past_key_values is not None:
+            layer_inputs["cmp_block_tables"] = past_key_values.get_cmp_kv_block_table(self.layer_idx)
+        if layer_inputs.get("state_block_table") is None and past_key_values is not None:
+            layer_inputs["state_block_table"] = past_key_values.get_cmp_state_block_table(
+                self.layer_idx,
+                attn_metadata["start_pos"],
+                attn_metadata["seq_used_q"],
+                attn_metadata.get("is_prefill", False),
+            )
+
+        if self.compress_ratio == 4 and past_key_values is not None:
+            layer_inputs.update({
+                "li_cmp_kv": past_key_values.get_li_cmp_kv(self.layer_idx),
+                "li_key_dequant_scale": past_key_values.get_li_key_dequant_scale(self.layer_idx),
+                "li_state_cache": past_key_values.get_li_kv_state(self.layer_idx),
+                "li_state_block_table": prefer_metadata(block_table.get(cmp_state_key), "li_state_block_table"),
+                "li_cmp_slot_mapping": prefer_metadata(slot_mapping.get(cmp_block_key), "li_cmp_slot_mapping"),
+                "li_metadata": prefer_metadata(kernel_metadata.get("lightning_indexer_quant"), "li_metadata"),
+                "c4a_cmp_kv_block_table": prefer_metadata(block_table.get("c4a_cmp_kv"), "c4a_cmp_kv_block_table"),
+            })
+            if layer_inputs.get("li_cmp_slot_mapping") is None:
+                layer_inputs["li_cmp_slot_mapping"] = layer_inputs.get("cmp_slot_mapping")
+            if layer_inputs.get("c4a_cmp_kv_block_table") is None:
+                layer_inputs["c4a_cmp_kv_block_table"] = past_key_values.get_c4a_cmp_kv_block_table(self.layer_idx)
+
+        return layer_inputs
+
+    def _is_cp_prefill(self, attn_inputs: Optional[dict], is_prefill: bool) -> bool:
+        if not is_prefill or attn_inputs is None:
+            return False
+        return self.cp_size > 1 and attn_inputs.get("cp_metadata") is not None
+
+    def _get_rotary_by_position_ids(self, x: torch.Tensor, position_ids: torch.Tensor, *, use_compress: bool):
+        rotary = self.compress_rotary_emb if use_compress and self.compress_rotary_emb is not None else self.rotary_emb
+        return rotary(x, position_ids.to(device=x.device, dtype=torch.long))
+
+    def _get_cp_window(self, hidden_states: torch.Tensor, attn_inputs: dict):
+        return deepseek_v4_cp_get_window(
+            self,
+            hidden_states,
+            attn_inputs,
+            apply_partial_rotary=_apply_partial_rotary,
+        )
+
+    def _run_cp_sfa_compressor(self, x_segments: dict, past_key_values: PagedDummyCache, attn_inputs: dict):
+        return deepseek_v4_cp_run_sfa_compressor(self, x_segments, past_key_values, attn_inputs)
+
+    def _run_cp_indexer(self, hidden_states, qa, position_embeddings, x_segments, past_key_values, attn_inputs):
+        return deepseek_v4_cp_run_indexer(
+            self,
+            hidden_states,
+            qa,
+            position_embeddings,
+            x_segments,
+            past_key_values,
+            attn_inputs,
+            rotate_activation=_rotate_activation,
+            dynamic_quant_per_token=_dynamic_quant_per_token,
+            apply_partial_rotary=_apply_partial_rotary,
+        )
+
+    def _run_cp_prefill(self, hidden_states, qa, q, past_key_values, attn_inputs, position_embeddings):
+        return deepseek_v4_cp_run_prefill(
+            self,
+            hidden_states,
+            qa,
+            q,
+            past_key_values,
+            attn_inputs,
+            position_embeddings,
+            apply_partial_rotary=_apply_partial_rotary,
+            rotate_activation=_rotate_activation,
+            dynamic_quant_per_token=_dynamic_quant_per_token,
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[PagedDummyCache] = None,
+        use_cache: bool = True,
+        is_prefill: bool = True,
+        context_lens: Optional[torch.Tensor] = None,
+        attn_inputs: Optional[dict] = None,
+        attn_metadata: Optional[dict] = None,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, None]:
+        batch_size, seq_length = hidden_states.shape[:2]
+        position_ids = kwargs.get("position_ids")
+
+        attn_inputs = self._resolve_attn_inputs(attn_inputs, attn_metadata, past_key_values)
+        q_lens = attn_inputs["q_lens"]
+        cu_seqlens_q = attn_inputs["cu_q_lens"]
+
+        if context_lens is not None:
+            _context_lens = context_lens.to(device=hidden_states.device)
+        else:
+            _context_lens = (
+                past_key_values.get_seq_length(self.layer_idx)
+                if past_key_values is not None
+                else torch.zeros(batch_size, dtype=torch.long, device=hidden_states.device)
+            )
+
+        cmp_sparse_indices = None
+        compressor_done_event = None
+        sfa_compressor_args = None
+        if self.sfa_compressor is not None and not self._is_cp_prefill(attn_inputs, is_prefill):
+            start_pos = attn_inputs["start_pos"]
+            seq_used_q = attn_inputs["seq_used_q"]
+            cmp_rope_position_ids = attn_inputs["cmp_rope_position_ids"]
+            state_block_table = attn_inputs["state_block_table"]
+            cmp_slot_mapping = attn_inputs["cmp_slot_mapping"]
+            sfa_state_cache = attn_inputs["sfa_state_cache"]
+            cmp_cache = attn_inputs["cmp_kv_cache"]
+            cmp_cos, cmp_sin = self.compress_rotary_emb(hidden_states, cmp_rope_position_ids)
+            sfa_compressor_args = (
+                hidden_states,
+                cmp_cos,
+                cmp_sin,
+                sfa_state_cache,
+                state_block_table,
+                cu_seqlens_q,
+                seq_used_q,
+                start_pos,
+                cmp_cache,
+                cmp_slot_mapping,
+            )
+
+        with _profile_timer(self.layer_idx, "attention_setup"):
+            h_flat = hidden_states.reshape(-1, hidden_states.shape[-1]).to(torch.bfloat16)
+            cos, sin = position_embeddings
+    
+            qa = self.wq_a(h_flat)
+            use_mla_multi_stream = self._use_mla_multi_stream(is_prefill)
+            if use_mla_multi_stream:
+                kv, wkv_done_event, kv_done_event = self._launch_kv_mla_prolog(
+                    h_flat, batch_size, seq_length, cos, sin
+                )
+            else:
+                wkv_done_event = None
+                kv_done_event = None
+    
+            qa = qa.view(batch_size, seq_length, -1)
+            qa = self.q_norm(qa)
+            qa_flat = qa.reshape(-1, qa.shape[-1]).to(torch.bfloat16)
+            qa_quant, qa_scale = self.q_a_quant(qa_flat)
+            self._wait_mla_event(wkv_done_event)
+            q = self._run_quant_gemm(
+                self.wq_b,
+                qa_quant,
+                qa_scale,
+            )
+            if self._use_compressor_multi_stream(is_prefill) and sfa_compressor_args is not None:
+                compressor_done_event = self._launch_sfa_compressor(*sfa_compressor_args)
+            q = q.view(batch_size, seq_length, self.num_heads, self.head_dim)
+            precomputed_indexer_query = None
+            precomputed_indexer_query_event = None
+            if self._use_indexer_multi_stream(is_prefill):
+                precomputed_indexer_query, precomputed_indexer_query_event = self._launch_indexer_query_proj(
+                    qa_quant, qa_scale, cos, sin, batch_size, seq_length, is_prefill
+                )
+            with _npugraph_limit_core_num(
+                self._use_attn_limit_core(is_prefill),
+                self.attn_qb_aic_num,
+                self.attn_qb_aic_num * self.attn_aiv_to_aic_ratio,
+            ):
+                q = self.q_b_norm(q)
+    
+                if not use_mla_multi_stream:
+                    kv = self.wkv(h_flat)
+                    kv = self.kv_norm(kv)
+                    kv = kv.view(batch_size, seq_length, self.head_dim)
+    
+                q = _apply_partial_rotary(q, cos, sin, self.partial_slice)
+            if use_mla_multi_stream:
+                self._wait_mla_event(kv_done_event)
+                kv.record_stream(torch.npu.current_stream())
+            else:
+                kv = _apply_partial_rotary(
+                    kv.view(batch_size, seq_length, 1, self.head_dim), cos, sin, self.partial_slice
+                ).view(batch_size, seq_length, self.head_dim)
+    
+        win_kv_updated = False
+        if not is_prefill:
+            with _profile_timer(self.layer_idx, "cache_update"):
+                self.scatter_nd_update(
+                    attn_inputs["win_kv_cache"].view(-1, self.head_dim),
+                    attn_inputs["win_slot_mapping"].reshape(-1, 1),
+                    kv.reshape(-1, self.head_dim),
+                )
+            win_kv_updated = True
+
+        if past_key_values is None:
+            raise ValueError("Paged Attention requires a PagedDummyCache instance.")
+
+        if self._is_cp_prefill(attn_inputs, is_prefill):
+            o = self._run_cp_prefill(hidden_states, qa, q, past_key_values, attn_inputs, position_embeddings)
+            with _profile_timer(self.layer_idx, "attention_post"):
+                o = self._attn_post(o, position_embeddings, attn_inputs=attn_inputs, q_lens=q_lens)
+            return o, None
+
+        if self.sfa_compressor is not None:
+            if compressor_done_event is None:
+                with _profile_timer(self.layer_idx, "compressor"):
+                    self._run_sfa_compressor(*sfa_compressor_args)
+
+            if self.indexer is not None:
+                if is_prefill:
+                    indexer_seq_lens = torch.full(
+                        (batch_size,), seq_length, dtype=torch.int32, device=hidden_states.device
+                    )
+                else:
+                    indexer_seq_lens = _context_lens.to(dtype=torch.int32) + q_lens
+                precomputed_indexer_query_quant = None
+                precomputed_indexer_query_quant_event = None
+                if precomputed_indexer_query is not None:
+                    precomputed_indexer_query_quant, precomputed_indexer_query_quant_event = (
+                        self._launch_indexer_query_quant(
+                            precomputed_indexer_query,
+                            precomputed_indexer_query_event,
+                            compressor_done_event,
+                            is_prefill,
+                        )
+                    )
+                with _profile_timer(self.layer_idx, "indexer"):
+                    cmp_sparse_indices = self.indexer.forward(
+                        hidden_states, qa, cos, sin,
+                        past_key_values=past_key_values, layer_idx=self.layer_idx,
+                        cu_seqlens_q=cu_seqlens_q,
+                        seq_lens=indexer_seq_lens,
+                        start_pos=start_pos,
+                        state_block_table=state_block_table,
+                        seq_used_q=q_lens,
+                        attn_inputs=attn_inputs,
+                        precomputed_query=precomputed_indexer_query,
+                        precomputed_query_event=precomputed_indexer_query_event,
+                        precomputed_query_quant=precomputed_indexer_query_quant,
+                        precomputed_query_quant_event=precomputed_indexer_query_quant_event,
+                    )
+
+        if self._is_c1a:
+            o = self._c1a_attention(
+                q, kv, past_key_values, _context_lens, is_prefill, q_lens, attn_inputs,
+                win_kv_updated=win_kv_updated,
+            )
+        else:
+            o = self._sparse_attention(
+                q,
+                kv,
+                past_key_values,
+                _context_lens,
+                cmp_sparse_indices,
+                is_prefill,
+                q_lens,
+                attn_inputs,
+                compressor_done_event=compressor_done_event,
+                win_kv_updated=win_kv_updated,
+            )
+
+        with _profile_timer(self.layer_idx, "attention_post"):
+            o = self._attn_post(o, position_embeddings, attn_inputs=attn_inputs, q_lens=q_lens)
+        return o, None
+
+    def _update_prefill_full_and_window_kv(self, kv: torch.Tensor, attn_inputs: dict) -> Tuple[torch.Tensor, torch.Tensor]:
+        full_kv_cache = attn_inputs.get("full_kv_cache")
+        full_block_table = attn_inputs.get("full_block_table")
+        full_slot_mapping = attn_inputs.get("full_slot_mapping")
+        win_kv_cache = attn_inputs.get("win_kv_cache")
+        win_slot_mapping = attn_inputs.get("win_slot_mapping")
+        full_valid_mask = attn_inputs.get("full_valid_mask")
+        win_local_indices = attn_inputs.get("win_local_indices")
+
+        required = {
+            "full_kv_cache": full_kv_cache,
+            "full_block_table": full_block_table,
+            "full_slot_mapping": full_slot_mapping,
+            "win_kv_cache": win_kv_cache,
+            "win_slot_mapping": win_slot_mapping,
+            "full_valid_mask": full_valid_mask,
+            "win_local_indices": win_local_indices,
+        }
+        missing = [name for name, value in required.items() if value is None]
+        if missing:
+            raise ValueError(
+                "Prefill KV plan is incomplete; missing fields: {}".format(", ".join(missing))
+            )
+
+        kv_flat = kv[full_valid_mask].reshape(-1, self.head_dim)
+        if kv_flat.numel() > 0:
+            self.scatter_nd_update(
+                full_kv_cache.view(-1, self.head_dim),
+                full_slot_mapping.reshape(-1, 1),
+                kv_flat,
+            )
+
+        row_idx = torch.arange(kv.shape[0], device=kv.device, dtype=torch.long).unsqueeze(1).expand_as(win_local_indices)
+        win_kv = kv[row_idx, win_local_indices].reshape(-1, self.head_dim)
+        self.scatter_nd_update(
+            win_kv_cache.view(-1, self.head_dim),
+            win_slot_mapping.reshape(-1, 1),
+            win_kv,
+        )
+        return full_kv_cache, full_block_table
+
+    def _prepare_prefill_ori_kv(
+        self,
+        kv: torch.Tensor,
+        attn_inputs: dict,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self._update_prefill_full_and_window_kv(kv, attn_inputs)
+
+    def _run_attn(self, q, kv_cache, block_tables, seq_lens, batch_size, seq_length,
+                  compress_ratio, cu_q_lens=None, cmp_kv_cache=None, cmp_block_tables=None,
+                  cmp_sparse_indices=None, q_lens=None, sas_metadata=None):
+        has_cmp_kv = compress_ratio > 1
+        if sas_metadata is None:
+            metadata_kwargs = {
+                "cu_seqlens_q": cu_q_lens,
+                "seqused_kv": seq_lens,
+                "batch_size": batch_size,
+                "cmp_ratio": compress_ratio,
+                "ori_mask_mode": 4,
+                "cmp_mask_mode": 3,
+                "ori_win_left": self.sliding_window - 1,
+                "ori_win_right": 0,
+                "layout_q": "TND",
+                "layout_kv": "PA_ND",
+                "num_heads_q": self.num_heads,
+                "num_heads_kv": 1,
+                "head_dim": self.head_dim,
+                "has_ori_kv": True,
+                "has_cmp_kv": has_cmp_kv,
+            }
+            if has_cmp_kv and compress_ratio == 4:
+                metadata_kwargs["cmp_topk"] = self.config.index_topk
+            with _profile_timer(self.layer_idx, "attention_metadata"):
+                metadata = self.sparse_attn_metadata(**metadata_kwargs)
+        else:
+            metadata = sas_metadata
+
+        with _profile_timer(self.layer_idx, "attn_core"):
+            o = self.sparse_attn(
+                q=q, ori_kv=kv_cache,
+                cmp_kv=cmp_kv_cache if has_cmp_kv else None,
+                cmp_sparse_indices=cmp_sparse_indices if has_cmp_kv else None,
+                cu_seqlens_q=cu_q_lens, seqused_kv=seq_lens,
+                cmp_block_table=cmp_block_tables if has_cmp_kv and cmp_block_tables is not None else None,
+                ori_block_table=block_tables, cmp_ratio=compress_ratio,
+                ori_mask_mode=4, cmp_mask_mode=3,
+                ori_win_left=self.sliding_window - 1, ori_win_right=0,
+                layout_q="TND", layout_kv="PA_ND",
+                sinks=self.attn_sink, metadata=metadata,
+                softmax_scale=self.scaling,
+            )
+        if isinstance(o, tuple):
+            o = o[0]
+        return o.view(batch_size, seq_length, self.num_heads, self.head_dim)
+
+    def _c1a_attention(self, q, kv, past_key_values, context_lens, is_prefill: bool,
+                       q_lens: torch.Tensor, attn_inputs=None, win_kv_updated: bool = False):
+        batch_size, seq_length = q.shape[:2]
+        q_padded = q.contiguous().view(-1, self.num_heads, self.head_dim)
+        q_lens = attn_inputs["q_lens"]
+        cu_q_lens_padded = attn_inputs["cu_q_lens"]
+        current_seq_lens = context_lens.to(torch.int32) + q_lens
+        if is_prefill:
+            attn_seq_lens = torch.full((batch_size,), seq_length, dtype=torch.int32, device=q.device)
+        else:
+            attn_seq_lens = current_seq_lens
+        if is_prefill:
+            with _profile_timer(self.layer_idx, "cache_update"):
+                kv_cache, block_tables = self._prepare_prefill_ori_kv(
+                    kv, attn_inputs
+                )
+        elif not win_kv_updated:
+            kv_flat = kv.reshape(-1, self.head_dim)
+            self.scatter_nd_update(
+                attn_inputs["win_kv_cache"].view(-1, self.head_dim),
+                attn_inputs["win_slot_mapping"].reshape(-1, 1),
+                kv_flat,
+            )
+            kv_cache = attn_inputs["win_kv_cache"]
+            block_tables = attn_inputs["win_block_table"]
+        else:
+            kv_cache = attn_inputs["win_kv_cache"]
+            block_tables = attn_inputs["win_block_table"]
+        sas_metadata = attn_inputs.get("sas_metadata")
+        out = self._run_attn(q_padded, kv_cache, block_tables, attn_seq_lens, batch_size, seq_length, 1, cu_q_lens_padded, sas_metadata=sas_metadata)
+        if is_prefill:
+            with _profile_timer(self.layer_idx, "cache_update"):
+                past_key_values.update(kv, self.layer_idx, cu_q_lens_padded, actual_q_lens=q_lens)
+        return out
+
+    def _sparse_attention(self, q, kv, past_key_values, context_lens, cmp_sparse_indices=None,
+                          is_prefill: bool = True, q_lens: Optional[torch.Tensor] = None,
+                          attn_inputs=None, compressor_done_event=None, win_kv_updated: bool = False):
+        batch_size, seq_length = q.shape[:2]
+        q_padded = q.contiguous().view(-1, self.num_heads, self.head_dim)
+        q_lens = attn_inputs["q_lens"]
+        cu_q_lens_padded = attn_inputs["cu_q_lens"]
+        current_seq_lens = context_lens.to(torch.int32) + q_lens
+        if is_prefill:
+            attn_seq_lens = torch.full((batch_size,), seq_length, dtype=torch.int32, device=q.device)
+        else:
+            attn_seq_lens = current_seq_lens
+        if is_prefill:
+            with _profile_timer(self.layer_idx, "cache_update"):
+                kv_cache, block_tables = self._prepare_prefill_ori_kv(
+                    kv, attn_inputs
+                )
+        elif not win_kv_updated:
+            kv_flat = kv.reshape(-1, self.head_dim)
+            self.scatter_nd_update(
+                attn_inputs["win_kv_cache"].view(-1, self.head_dim),
+                attn_inputs["win_slot_mapping"].reshape(-1, 1),
+                kv_flat,
+            )
+            kv_cache = attn_inputs["win_kv_cache"]
+            block_tables = attn_inputs["win_block_table"]
+        else:
+            kv_cache = attn_inputs["win_kv_cache"]
+            block_tables = attn_inputs["win_block_table"]
+        cmp_kv_cache = attn_inputs["cmp_kv_cache"]
+        cmp_block_tables = attn_inputs["cmp_block_tables"]
+        sas_metadata = attn_inputs.get("sas_metadata")
+        self._wait_mla_event(compressor_done_event)
+        out = self._run_attn(q_padded, kv_cache, block_tables, attn_seq_lens, batch_size, seq_length,
+                             self.compress_ratio, cu_q_lens_padded, cmp_kv_cache, cmp_block_tables,
+                             cmp_sparse_indices, sas_metadata=sas_metadata)
+        if is_prefill:
+            with _profile_timer(self.layer_idx, "cache_update"):
+                past_key_values.update(kv, self.layer_idx, cu_q_lens_padded, actual_q_lens=q_lens)
+        return out
+
+    def _attn_post(self, o, position_embeddings, attn_inputs: Optional[dict] = None, q_lens: Optional[torch.Tensor] = None):
+        batch_size, seq_length = o.shape[:2]
+        cos = position_embeddings[0]
+        sin = -position_embeddings[1]
+
+        torch.ops.custom.inplace_partial_rotary_mul(
+            o.flatten(0, 1).unsqueeze(2),
+            cos.reshape(-1, 1, 1, self.qk_rope_head_dim),
+            sin.reshape(-1, 1, 1, self.qk_rope_head_dim),
+            rotary_mode="interleave",
+            partial_slice=self.partial_slice,
+        )
+        o = o.reshape(batch_size * seq_length, self.o_groups, -1).to(torch.bfloat16)
+        wo_a_out = torch_npu.npu_transpose_batchmatmul(
+            o,
+            self._get_wo_a_weight_for_tbmm(),
+            perm_x1=(1, 0, 2),
+            perm_y=(1, 0, 2),
+        )
+        wo_a_out = wo_a_out.reshape(batch_size * seq_length, -1).to(torch.bfloat16)
+        wo_a_quant, wo_a_scale = _dynamic_quant_per_token(wo_a_out)
+        wo_b_out = self._run_quant_gemm(
+            self.wo_b,
+            wo_a_quant,
+            wo_a_scale,
+        )
+        post = wo_b_out.view(batch_size, seq_length, -1)
+        return post
+
+
+class DeepseekV4SharedExpert(nn.Module):
+
+    def __init__(self, config: DeepseekV4Config, layer_idx: int):
+        super().__init__()
+        self.layer_idx = layer_idx
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.moe_intermediate_size * config.n_shared_experts
+        self.swiglu_limit = config.swiglu_limit
+
+        self.gate_proj = MojoQuantGemm(in_features=self.hidden_size, out_features=self.intermediate_size)
+        self.up_proj = MojoQuantGemm(in_features=self.hidden_size, out_features=self.intermediate_size)
+        self.down_proj = MojoQuantGemm(in_features=self.intermediate_size, out_features=self.hidden_size)
+        self.gate_quant = MojoDynamicQuant(input_size=self.hidden_size)
+        self.up_quant = MojoDynamicQuant(input_size=self.hidden_size)
+        self.intermediate_quant = MojoDynamicQuant(input_size=self.intermediate_size)
+        self.quant_matmul = MojoQuantMatmul()
+        self.dequant_swiglu_quant = MojoFunctionalDequantSwiGLUQuant()
+        nn.init.ones_(self.gate_quant.inv_smooth_scale)
+        nn.init.ones_(self.up_quant.inv_smooth_scale)
+        nn.init.ones_(self.intermediate_quant.inv_smooth_scale)
+        self.register_buffer("_gate_up_weight_cache", None, persistent=False)
+        self.register_buffer("_gate_up_weight_scale_cache", None, persistent=False)
+
+    def prepare_quant_proj_weights(self):
+        DeepseekV4Attention._process_quant_weight_inplace(self.gate_proj, use_nz=False)
+        DeepseekV4Attention._process_quant_weight_inplace(self.up_proj, use_nz=False)
+        DeepseekV4Attention._process_quant_weight_inplace(self.down_proj, use_nz=True)
+        self._gate_up_weight_cache = DeepseekV4Attention._maybe_cast_weight_to_nz(
+            torch.cat((self.gate_proj.weight, self.up_proj.weight), dim=1).contiguous()
+        )
+        self._gate_up_weight_scale_cache = torch.cat(
+            (self.gate_proj.weight_scale, self.up_proj.weight_scale), dim=0
+        ).contiguous().view(-1).float()
+
+    def _get_gate_up_weight(self):
+        if (
+            self._gate_up_weight_cache is None
+            or self._gate_up_weight_cache.device != self.gate_proj.weight.device
+            or self._gate_up_weight_cache.dtype != self.gate_proj.weight.dtype
+        ):
+            self.prepare_quant_proj_weights()
+        return self._gate_up_weight_cache, self._gate_up_weight_scale_cache
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        orig_shape = x.shape
+        x_flat = x.reshape(-1, self.hidden_size).to(torch.bfloat16)
+        gate_up_weight, gate_up_weight_scale = self._get_gate_up_weight()
+        with _profile_timer(self.layer_idx, "shared_expert_gate_up") if hasattr(self, "layer_idx") else nullcontext():
+            x_quant, activation_scale = self.gate_quant(x_flat)
+            merged_x = self.quant_matmul(
+                x_quant,
+                gate_up_weight,
+                gate_up_weight_scale,
+                pertoken_scale=None,
+                bias=None,
+                output_dtype=torch.int32,
+            )
+
+        swiglu_limit_args = {}
+        if self.swiglu_limit is not None and self.swiglu_limit > 0:
+            swiglu_limit_args.update(
+                {
+                    "swiglu_mode": 1,
+                    "clamp_limit": self.swiglu_limit,
+                    "glu_alpha": 1,
+                    "glu_bias": 0,
+                }
+            )
+        with _profile_timer(self.layer_idx, "shared_expert_swiglu") if hasattr(self, "layer_idx") else nullcontext():
+            intermediate_quant, intermediate_scale = torch_npu.npu_dequant_swiglu_clamp_quant(
+                merged_x,
+                weight_scale=gate_up_weight_scale,
+                quant_scale=self.intermediate_quant.inv_smooth_scale.to(dtype=torch.float32),
+                quant_mode=1,
+                activate_left=True,
+                activation_scale=activation_scale.view(-1),
+                **swiglu_limit_args,
+            )
+            intermediate_scale = intermediate_scale.unsqueeze(-1)
+        with _profile_timer(self.layer_idx, "shared_expert_down") if hasattr(self, "layer_idx") else nullcontext():
+            return DeepseekV4Attention._run_quant_gemm(
+                self.down_proj,
+                intermediate_quant,
+                intermediate_scale,
+            ).view(*orig_shape)
+
+
+class DeepseekV4MoE(nn.Module):
+
+    def __init__(self, config: DeepseekV4Config, layer_idx: int, ep_size: int = 1, ep_rank: int = 0):
+        super().__init__()
+        self.config = config
+        self.layer_idx = layer_idx
+        self.hidden_size = config.hidden_size
+        self.n_routed_experts = config.n_routed_experts
+        self.n_shared_experts = int(config.n_shared_experts or 0)
+        self.norm_topk_prob = config.norm_topk_prob
+        self.routed_scaling_factor = config.routed_scaling_factor
+        self.top_k = config.num_experts_per_tok
+        self.scoring_func = config.scoring_func
+        self.topk_method = config.topk_method
+        self.is_hash = layer_idx < config.num_hash_layers
+
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
+        self.experts_per_rank = self.n_routed_experts // self.ep_size
+        self.ep_start = self.ep_rank * self.experts_per_rank
+        self.ep_end = self.ep_start + self.experts_per_rank
+        self.ep_group = None
+        self.hccl_comm_dict = {}
+        self.dispatch_kwargs = None
+        self.combine_kwargs = None
+        self.gmm_quant_mode = "w8a8int8"
+        self.dispatch_quant_mode = {
+            "w16a16": 0,
+            "w8a8int8": 2,
+        }
+
+        self.dispatch = MojoMoEDispatch(num_experts=config.n_routed_experts)
+        self.experts = MojoQuantExperts(
+            num_experts=self.experts_per_rank,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            weight_dtype=torch.int8,
+        )
+        self.combine = MojoMoECombine(multiply_by_gates=True)
+        self.dynamic_quant = MojoDynamicQuant()
+        self.grouped_matmul = MojoGroupedMatmul()
+        self.dequant_swiglu_quant = MojoFunctionalDequantSwiGLUQuant()
+        self.format_cast = MojoFormatCast()
+        self.moe_init_routing_v2 = MojoMoEInitRoutingV2()
+        self.moe_re_routing = MojoMoEReRouting()
+        self.moe_finalize_routing = MojoMoEFinalizeRouting()
+        self.moe_distribute_dispatch_v2 = MojoMoEDistributeDispatchV2()
+        self.moe_distribute_combine_v2 = MojoMoEDistributeCombineV2()
+        nn.init.ones_(self.experts.up_proj_quantize.inv_smooth_scale)
+        nn.init.ones_(self.experts.down_proj_quantize.inv_smooth_scale)
+
+        self.register_buffer(
+            "smooth_scale_1",
+            torch.ones(self.experts_per_rank, config.hidden_size, dtype=torch.float32),
+        )
+        self.register_buffer(
+            "smooth_scale_2",
+            torch.ones(self.experts_per_rank, config.moe_intermediate_size, dtype=torch.float32),
+        )
+
+        self.shared_experts = DeepseekV4SharedExpert(config, layer_idx)
+        self.moe_gating_top_k = MojoMoEGatingTopK()
+
+        self.gate = nn.Parameter(torch.empty(config.n_routed_experts, config.hidden_size, dtype=torch.float32))
+
+        if self.is_hash:
+            self.e_score_correction_bias = None
+            self.tid2eid = nn.Parameter(
+                torch.randint(high=config.n_routed_experts, size=(config.vocab_size, self.top_k), dtype=torch.int32),
+                requires_grad=False,
+            )
+        else:
+            self.e_score_correction_bias = nn.Parameter(torch.empty(config.n_routed_experts, dtype=torch.float32))
+            self.tid2eid = None
+
+        self.enable_moe_multi_stream = os.getenv("MOJO_MOE_MULTI_STREAM", "0") == "1"
+        if self.enable_moe_multi_stream:
+            self.shared_expert_stream = _get_global_moe_shared_expert_stream()
+            self.shared_expert_ready_event = torch.npu.Event()
+            self.shared_expert_done_event = torch.npu.Event()
+        else:
+            self.shared_expert_stream = None
+            self.shared_expert_ready_event = None
+            self.shared_expert_done_event = None
+
+    def _use_moe_multi_stream(self) -> bool:
+        return self.enable_moe_multi_stream and self.ep_size > 1 and self.ep_group is not None
+
+    def _ensure_moe_multi_stream(self, shared_expert_stream=None):
+        if shared_expert_stream is not None:
+            self.shared_expert_stream = shared_expert_stream
+        if self.shared_expert_stream is None:
+            self.shared_expert_stream = _get_global_moe_shared_expert_stream()
+        if self.shared_expert_ready_event is None:
+            self.shared_expert_ready_event = torch.npu.Event()
+        if self.shared_expert_done_event is None:
+            self.shared_expert_done_event = torch.npu.Event()
+        return self.shared_expert_stream, self.shared_expert_ready_event, self.shared_expert_done_event
+
+    def _launch_shared_expert(
+        self,
+        hidden_states_flat: torch.Tensor,
+        shared_expert_stream=None,
+    ) -> Tuple[torch.Tensor, torch.npu.Event]:
+        shared_stream, ready_event, done_event = self._ensure_moe_multi_stream(shared_expert_stream)
+        main_stream = torch.npu.current_stream()
+        ready_event.record(main_stream)
+        with torch.npu.stream(shared_stream):
+            shared_stream.wait_event(ready_event)
+            hidden_states_flat.record_stream(shared_stream)
+            shared_out_flat = self.shared_experts(hidden_states_flat).to(torch.bfloat16)
+            shared_out_flat.record_stream(shared_stream)
+            done_event.record(shared_stream)
+        return shared_out_flat, done_event
+
+    @staticmethod
+    def _wait_shared_expert(shared_expert_out: Optional[torch.Tensor], shared_expert_event=None):
+        if shared_expert_event is None or shared_expert_out is None:
+            return
+        current_stream = torch.npu.current_stream()
+        current_stream.wait_event(shared_expert_event)
+        shared_expert_out.record_stream(current_stream)
+
+    def _gate_topk(self, logits, input_ids=None):
+        if self.scoring_func == "sigmoid":
+            scores = logits.sigmoid()
+        elif self.scoring_func == "softmax":
+            scores = logits.softmax(dim=-1, dtype=torch.float32)
+        elif self.scoring_func == "sqrtsoftplus":
+            scores = F.softplus(logits).sqrt()
+        else:
+            raise NotImplementedError(f"Unsupported scoring_func: {self.scoring_func}")
+
+        if self.topk_method == "noaux_tc":
+            scoring_func_mapping = {"softmax": 0, "sigmoid": 1, "sqrtsoftplus": 2}
+            topk_weight, topk_idx, _ = self.moe_gating_top_k(
+                logits, k=self.top_k, bias=self.e_score_correction_bias,
+                input_ids=input_ids if self.is_hash else None,
+                tid2eid=self.tid2eid, k_group=1, group_count=1,
+                group_select_mode=1, renorm=0,
+                norm_type=scoring_func_mapping[self.scoring_func],
+                routed_scaling_factor=self.routed_scaling_factor,
+                eps=float(1e-20), out_flag=False,
+            )
+            return topk_idx.to(torch.int32), topk_weight
+        elif self.topk_method == "greedy":
+            topk_weight, topk_idx = torch.topk(scores, k=self.top_k, dim=-1, sorted=False)
+        else:
+            raise NotImplementedError(f"Unsupported topk_method: {self.topk_method}")
+
+        if self.top_k > 1 and self.norm_topk_prob:
+            denominator = topk_weight.sum(dim=-1, keepdim=True)
+            topk_weight = topk_weight / denominator
+        topk_weight = topk_weight * self.routed_scaling_factor
+        return topk_idx.to(torch.int32), topk_weight
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: Optional[torch.Tensor] = None,
+        is_prefill: bool = True,
+        cur_topk_list: Optional[torch.Tensor] = None,
+        shared_expert_stream=None,
+    ) -> torch.Tensor:
+        orig_shape = hidden_states.shape
+        hidden_states_flat = hidden_states.view(-1, self.hidden_size).to(torch.bfloat16)
+        if input_ids is not None:
+            input_ids = input_ids.reshape(-1).contiguous()
+
+        if self.n_shared_experts > 0 and self._use_moe_multi_stream():
+            shared_out_flat, shared_expert_event = self._launch_shared_expert(
+                hidden_states_flat,
+                shared_expert_stream=shared_expert_stream,
+            )
+        else:
+            if self.n_shared_experts > 0:
+                shared_out_flat = self.shared_experts(hidden_states_flat).to(torch.bfloat16)
+                shared_expert_event = None
+            else:
+                shared_out_flat = None
+                shared_expert_event = None
+
+        logits = F.linear(hidden_states_flat.float(), self.gate)
+        topk_idx, topk_weight = self._gate_topk(logits, input_ids)
+        if cur_topk_list is not None:
+            topk_idx = cur_topk_list.to(device=topk_idx.device, dtype=torch.int32)
+
+        if self.ep_size > 1 and self.ep_group is not None:
+            n_tokens = hidden_states_flat.shape[0]
+            # For small token counts (e.g., MTP model with 1-2 tokens),
+            # use decode path which handles small batches better with EP
+            if is_prefill and n_tokens > self.ep_size:
+                routed_out = self._moe_infer_ep(
+                    hidden_states_flat, topk_idx, topk_weight,
+                    shared_expert_out=shared_out_flat,
+                    shared_expert_event=shared_expert_event,
+                )
+                return routed_out.view(*orig_shape)
+            else:
+                routed_out = self._moe_infer_ep_decode(
+                    hidden_states_flat, topk_idx, topk_weight,
+                    shared_expert_out=shared_out_flat,
+                    shared_expert_event=shared_expert_event,
+                )
+                return routed_out.view(*orig_shape)
+
+        sorted_hidden, tokens_per_expert, sorted_gates, token_indices = self.dispatch(
+            hidden_states_flat, topk_weight, topk_idx
+        )
+        expert_outputs = self.experts(sorted_hidden, tokens_per_expert)
+        output_buffer = torch.zeros_like(hidden_states_flat, memory_format=torch.contiguous_format)
+        routed_out = self.combine(output_buffer, expert_outputs, sorted_gates, token_indices)
+        if shared_out_flat is not None:
+            routed_out = routed_out + shared_out_flat
+        return routed_out.view(*orig_shape)
+
+    def set_mc2_kwargs(self):
+        self.dispatch_kwargs, self.combine_kwargs = build_deepseek_v4_moe_mc2_kwargs(self)
+
+    def forward_expert_gmm(self, x, expert_tokens, pertoken_scale=None, group_list_type=1):
+        experts_mod = self.experts
+        hidden_size = x.size(-1)
+
+        if pertoken_scale is not None and pertoken_scale.dim() > 1:
+            pertoken_scale = pertoken_scale.reshape(-1)
+            x = x.view(-1, hidden_size)
+
+        if pertoken_scale is None:
+            x, pertoken_scale = self.dynamic_quant(x)
+            # pertoken_scale = pertoken_scale.squeeze(-1)
+
+        fc1_out = self.grouped_matmul(
+            [x], [experts_mod.up_proj_weight],
+            group_list=expert_tokens,
+            split_item=3,
+            output_dtype=torch.int32,
+            group_type=0,
+            group_list_type=group_list_type,
+            tuning_config=[0],
+        )[0]
+
+        intermediate_h, pertoken_scale = torch_npu.npu_dequant_swiglu_quant(
+            fc1_out,
+            weight_scale=experts_mod.up_proj_weight_scale,
+            quant_scale=self.smooth_scale_2,
+            group_index=expert_tokens,
+            activate_left=True,
+            quant_mode=1,
+            activation_scale=pertoken_scale,
+        )
+
+        fc2_out = self.grouped_matmul(
+            [intermediate_h], [experts_mod.down_proj_weight],
+            scale=[experts_mod.down_proj_weight_scale],
+            per_token_scale=[pertoken_scale],
+            group_list=expert_tokens,
+            split_item=3,
+            output_dtype=torch.bfloat16,
+            group_type=0,
+            group_list_type=group_list_type,
+            tuning_config=[0],
+        )[0]
+
+        return fc2_out
+
+    def process_expert_weights(self):
+        if self.ep_size <= 1:
+            return
+        experts_mod = self.experts
+        experts_mod.up_proj_weight.data = experts_mod.up_proj_weight.data.transpose(1, 2).contiguous()
+        experts_mod.down_proj_weight.data = experts_mod.down_proj_weight.data.transpose(1, 2).contiguous()
+        torch_npu.npu.config.allow_internal_format = True
+        experts_mod.up_proj_weight.data = self.format_cast(experts_mod.up_proj_weight.data.contiguous(), 29)
+        experts_mod.down_proj_weight.data = self.format_cast(experts_mod.down_proj_weight.data.contiguous(), 29)
+        experts_mod.up_proj_weight_scale.data = experts_mod.up_proj_weight_scale.data.to(torch.float)
+        self.smooth_scale_1.data = self.smooth_scale_1.data.to(torch.float)
+        self.smooth_scale_2.data = self.smooth_scale_2.data.to(torch.float)
+
+    def _moe_infer_ep(
+        self,
+        hidden_states_flat,
+        topk_idx,
+        topk_weight,
+        shared_expert_out=None,
+        shared_expert_event=None,
+    ):
+        return deepseek_v4_moe_infer_ep_prefill(
+            self,
+            hidden_states_flat,
+            topk_idx,
+            topk_weight,
+            shared_expert_out=shared_expert_out,
+            shared_expert_event=shared_expert_event,
+        )
+
+    def _moe_infer_ep_decode(
+        self,
+        hidden_states_flat,
+        topk_idx,
+        topk_weight,
+        shared_expert_out=None,
+        shared_expert_event=None,
+    ):
+        return deepseek_v4_moe_infer_ep_decode(
+            self,
+            hidden_states_flat,
+            topk_idx,
+            topk_weight,
+            shared_expert_out=shared_expert_out,
+            shared_expert_event=shared_expert_event,
+        )
+
+
+class DeepseekV4DecoderLayer(nn.Module):
+
+    def __init__(self, config: DeepseekV4Config, layer_idx: int, ep_size: int = 1, ep_rank: int = 0):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.layer_idx = layer_idx
+        self.hc_mult = config.hc_mult
+        self.hc_sinkhorn_iters = config.hc_sinkhorn_iters
+        self.hc_eps = config.hc_eps
+        self.norm_eps = config.rms_norm_eps
+
+        self.self_attn = DeepseekV4Attention(config=config, layer_idx=layer_idx)
+        self.mlp = DeepseekV4MoE(config, layer_idx, ep_size=ep_size, ep_rank=ep_rank)
+
+        hc_dim = self.hc_mult * config.hidden_size
+        mix_hc = (2 + self.hc_mult) * self.hc_mult
+        origin_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.float32)
+        self.hc_attn_fn = nn.Parameter(torch.empty(mix_hc, hc_dim))
+        self.hc_ffn_fn = nn.Parameter(torch.empty(mix_hc, hc_dim))
+        self.hc_attn_base = nn.Parameter(torch.empty(mix_hc))
+        self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc))
+        self.hc_attn_scale = nn.Parameter(torch.empty(3))
+        self.hc_ffn_scale = nn.Parameter(torch.empty(3))
+        torch.set_default_dtype(origin_dtype)
+
+        self.attn_norm = MojoRMSNorm(config.hidden_size, config.rms_norm_eps, dtype=torch.bfloat16)
+        self.ffn_norm = MojoRMSNorm(config.hidden_size, config.rms_norm_eps, dtype=torch.bfloat16)
+        self.hc_pre = MojoHcPre()
+        self.hc_post = MojoHcPost()
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[PagedDummyCache] = None,
+        use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        input_ids: Optional[torch.Tensor] = None,
+        is_prefill: bool = True,
+        attn_inputs: Optional[dict] = None,
+        attn_metadata: Optional[dict] = None,
+        cur_topk_list: Optional[torch.Tensor] = None,
+        shared_expert_stream=None,
+        **kwargs,
+    ) -> torch.Tensor:
+        if _DSV4_LAYER_PROFILE:
+            _profile_sync()
+            layer_start = time.perf_counter()
+        residual = hidden_states
+        hidden_states, post, comb = self.hc_pre(
+            hidden_states,
+            self.hc_attn_fn,
+            self.hc_attn_scale,
+            self.hc_attn_base,
+            hc_mult=self.hc_mult,
+            hc_sinkhorn_iters=self.hc_sinkhorn_iters,
+            norm_eps=self.norm_eps,
+            hc_eps=self.hc_eps,
+        )
+        hidden_states = self.attn_norm(hidden_states)
+        with _profile_timer(self.layer_idx, "attention_total"):
+            hidden_states, _ = self.self_attn(
+                hidden_states=hidden_states, attention_mask=attention_mask,
+                past_key_values=past_key_values, use_cache=use_cache,
+                position_embeddings=position_embeddings,
+                position_ids=position_ids,
+                is_prefill=is_prefill, attn_inputs=attn_inputs,
+                attn_metadata=attn_metadata,
+            )
+        hidden_states = self.hc_post(hidden_states, residual, post, comb)
+
+        residual = hidden_states
+        hidden_states, post, comb = self.hc_pre(
+            hidden_states,
+            self.hc_ffn_fn,
+            self.hc_ffn_scale,
+            self.hc_ffn_base,
+            hc_mult=self.hc_mult,
+            hc_sinkhorn_iters=self.hc_sinkhorn_iters,
+            norm_eps=self.norm_eps,
+            hc_eps=self.hc_eps,
+        )
+        hidden_states = self.ffn_norm(hidden_states)
+        with _profile_timer(self.layer_idx, "moe"):
+            hidden_states = self.mlp(
+                hidden_states,
+                input_ids=input_ids,
+                is_prefill=is_prefill,
+                cur_topk_list=cur_topk_list,
+                shared_expert_stream=shared_expert_stream,
+            )
+        hidden_states = self.hc_post(hidden_states, residual, post, comb)
+
+        if _DSV4_LAYER_PROFILE:
+            _profile_sync()
+            _profile_record(self.layer_idx, "layer_total", (time.perf_counter() - layer_start) * 1000.0)
+        return hidden_states
+
+
+class DeepseekV4Model(nn.Module):
+
+    def __init__(self, config: DeepseekV4Config, ep_size: int = 1, ep_rank: int = 0, parallel_config=None):
+        super().__init__()
+        self.config = config
+        self.vocab_size = config.vocab_size
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
+        self.parallel_config = dict(parallel_config or {})
+        self.attn_tp_size = int(self.parallel_config.get("attn_tp_size", 1))
+        self.o_proj_tp_size = int(self.parallel_config.get("o_proj_tp_size", self.attn_tp_size))
+        self.hccl_comm_dict = {}
+        self.shared_expert_stream = (
+            _get_global_moe_shared_expert_stream()
+            if os.getenv("MOJO_MOE_MULTI_STREAM", "0") == "1"
+            else None
+        )
+
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.layers = nn.ModuleList([
+            DeepseekV4DecoderLayer(config, layer_idx, ep_size=ep_size, ep_rank=ep_rank) for layer_idx in range(config.num_hidden_layers)
+        ])
+        self.norm = MojoRMSNorm(eps=config.rms_norm_eps, norm_size=config.hidden_size)
+        self.rotary_emb = DeepseekV4RotaryEmbedding(config=config)
+        self.compress_rotary_emb = DeepseekV4RotaryEmbedding(config=config, base=config.compress_rope_theta)
+
+        self.hc_mult = config.hc_mult
+        self.hc_eps = config.hc_eps
+        self.norm_eps = config.rms_norm_eps
+        hc_dim = config.hc_mult * config.hidden_size
+        origin_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.float32)
+        self.hc_head_fn = nn.Parameter(torch.empty(config.hc_mult, hc_dim))
+        self.hc_head_base = nn.Parameter(torch.empty(config.hc_mult))
+        self.hc_head_scale = nn.Parameter(torch.empty(1))
+        torch.set_default_dtype(origin_dtype)
+
+    def _hc_head(self, x: torch.Tensor) -> torch.Tensor:
+        return _apply_hc_head(x, self.hc_head_fn, self.hc_head_base, self.hc_head_scale, self.norm_eps, self.hc_eps)
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[PagedDummyCache] = None,
+        use_cache: Optional[bool] = None,
+        is_prefill: bool = True,
+        context_lens: Optional[torch.Tensor] = None,
+        attn_inputs: Optional[dict] = None,
+        attn_metadata: Optional[dict] = None,
+        q_lens: Optional[torch.Tensor] = None,
+        cur_topk_list: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, PagedDummyCache]:
+        device = input_ids.device
+        batch_size, seq_len = input_ids.shape
+
+        if past_key_values is None:
+            past_key_values = PagedDummyCache(
+                self.config,
+                batch_size=batch_size,
+                device=str(device),
+                block_size=128,
+                max_seq_len=max(seq_len * 4, 4096),
+                pa_max_length=self.config.pa_max_length,
+                next_n=self.config.next_n,
+            )
+
+        if position_ids is not None:
+            if q_lens is None:
+                if attention_mask is not None and is_prefill:
+                    q_lens = attention_mask.to(device=device, dtype=torch.int32).sum(dim=-1)
+                else:
+                    q_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device=device)
+        elif attention_mask is not None and is_prefill:
+            q_lens = attention_mask.to(device=device, dtype=torch.int32).sum(dim=-1)
+            position_ids = (attention_mask.to(device=device, dtype=torch.long).cumsum(dim=-1) - 1).clamp(min=0)
+            position_ids = position_ids.masked_fill(~attention_mask.to(dtype=torch.bool), 1)
+        else:
+            if q_lens is None:
+                q_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device=device)
+            past_lens = past_key_values.get_seq_length(0).to(device=device, dtype=torch.long)
+            offsets = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0)
+            position_ids = past_lens.unsqueeze(1) + offsets
+
+        hidden_states = self.embed_tokens(input_ids)
+        if is_prefill and attn_metadata is not None and attn_metadata.get("cp_metadata") is not None:
+            hidden_states, input_ids, position_ids = apply_cp_zigzag_to_prefill_inputs(
+                hidden_states,
+                input_ids,
+                position_ids,
+                attn_metadata["cp_metadata"],
+            )
+        cos, sin = self.rotary_emb(hidden_states, position_ids)
+        position_embeddings = (cos, sin)
+        cmp_cos, cmp_sin = self.compress_rotary_emb(hidden_states, position_ids)
+        compress_position_embeddings = (cmp_cos, cmp_sin)
+
+        hidden_states = hidden_states.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)
+
+        for layer_idx, decoder_layer in enumerate(self.layers):
+            layer_position_embeddings = (
+                compress_position_embeddings
+                if self.config.compress_ratios[layer_idx] > 1
+                else position_embeddings
+            )
+            hidden_states = decoder_layer(
+                hidden_states, attention_mask=attention_mask,
+                position_embeddings=layer_position_embeddings, position_ids=position_ids,
+                past_key_values=past_key_values, use_cache=use_cache,
+                input_ids=input_ids, is_prefill=is_prefill,
+                context_lens=context_lens,
+                attn_inputs=attn_inputs.get(layer_idx) if attn_inputs is not None else None,
+                attn_metadata=attn_metadata,
+                q_lens=q_lens,
+                cur_topk_list=cur_topk_list,
+                shared_expert_stream=(
+                    attn_metadata.get("shared_expert_stream", self.shared_expert_stream)
+                    if attn_metadata is not None
+                    else self.shared_expert_stream
+                ),
+            )
+
+        hidden_states = self._hc_head(hidden_states)
+        hidden_states = self.norm(hidden_states)
+        return hidden_states, past_key_values
+
+
+class MojoDynamicQuantLinear(nn.Module):
+    """Replicated W8A8 linear with the same call style as golden ReplicatedLinear."""
+
+    def __init__(self, in_features: int, out_features: int, output_dtype: torch.dtype = torch.bfloat16):
+        super().__init__()
+        self.quant = MojoDynamicQuant()
+        self.gemm = MojoQuantGemm(
+            in_features=in_features,
+            out_features=out_features,
+            output_dtype=output_dtype,
+            trans_weight=True,
+        )
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        origin_shape = input.shape[:-1]
+        input_i8, input_scale = self.quant(input)
+        output = self.gemm(
+            input_i8.reshape(-1, input_i8.shape[-1]),
+            input_scale.reshape(-1, input_scale.shape[-1]),
+        )
+        return output.view(*origin_shape, output.shape[-1])
+
+
+class DeepseekV4MTPLayer(nn.Module):
+    """MTP layer for speculative decoding with enorm/hnorm/e_proj/h_proj projection."""
+
+    def __init__(self, config: DeepseekV4Config, ep_size: int = 1, ep_rank: int = 0):
+        super().__init__()
+        self.config = config
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
+        self.mtp_start_layer_idx = config.num_hidden_layers
+        num_mtp_layers = getattr(config, "num_nextn_predict_layers", 1)
+        self.hidden_size = config.hidden_size
+
+        self.enorm = MojoRMSNorm(config.hidden_size, config.rms_norm_eps, dtype=torch.bfloat16)
+        self.hnorm = MojoRMSNorm(config.hidden_size, config.rms_norm_eps, dtype=torch.bfloat16)
+        self.e_proj = MojoDynamicQuantLinear(config.hidden_size, config.hidden_size)
+        self.h_proj = MojoDynamicQuantLinear(config.hidden_size, config.hidden_size)
+
+        self.layers = nn.ModuleDict({
+            str(i):  # Use layer_idx=0 for MTP cache compatibility
+            DeepseekV4DecoderLayer(config, self.mtp_start_layer_idx + i, ep_size=ep_size, ep_rank=ep_rank)
+            for i in range(num_mtp_layers)
+        })
+        self.norm = MojoRMSNorm(eps=config.rms_norm_eps, norm_size=config.hidden_size)
+        self.rotary_emb = DeepseekV4RotaryEmbedding(config=config)
+        self.compress_rotary_emb = DeepseekV4RotaryEmbedding(config=config, base=config.compress_rope_theta)
+
+        self.hc_mult = config.hc_mult
+        self.hc_eps = config.hc_eps
+        self.norm_eps = config.rms_norm_eps
+        hc_dim = config.hc_mult * config.hidden_size
+        origin_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.float32)
+        self.hc_head_fn = nn.Parameter(torch.empty(config.hc_mult, hc_dim))
+        self.hc_head_base = nn.Parameter(torch.empty(config.hc_mult))
+        self.hc_head_scale = nn.Parameter(torch.empty(1))
+        torch.set_default_dtype(origin_dtype)
+
+    def _hc_head(self, x):
+        return _apply_hc_head(x, self.hc_head_fn, self.hc_head_base, self.hc_head_scale, self.norm_eps, self.hc_eps)
+
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, past_key_values=None,
+                use_cache=None, is_prefill=True, context_lens=None, attn_inputs=None,
+                attn_metadata=None, q_lens=None, input_ids=None, mtp_layer_idx=0, **kwargs):
+        # hidden_states = prev_hidden_states [B, S, H] from main model
+        # input_ids [B, S] for computing embeddings via embed_tokens
+        #
+        # Following note:: RoPE is computed on the RAW embedding (before enorm/hnorm),
+        # then passed to decoder layer via position_embeddings.
+        # Flow: embed_tokens -> cos_sin on raw embed -> enorm/hnorm/e_proj/h_proj -> MHC -> decoder_layer
+
+        # Compute position_embeddings using RAW embedding (before norm+proj), matching note:
+        position_embeddings = None
+        if input_ids is not None and hasattr(self, 'embed_tokens') and self.embed_tokens is not None:
+            embed_states = self.embed_tokens(input_ids)  # [B, S, H] raw embedding
+            if is_prefill and attn_metadata is not None and attn_metadata.get("cp_metadata") is not None:
+                split_list = attn_metadata["cp_metadata"]["split_list"]
+                zigzag_idx = attn_metadata["cp_metadata"]["zigzag_idx"]
+                embed_segments = embed_states.split(split_list, dim=1)
+                input_segments = input_ids.split(split_list, dim=1)
+                embed_states = torch.cat([embed_segments[idx] for idx in zigzag_idx], dim=1)
+                input_ids = torch.cat([input_segments[idx] for idx in zigzag_idx], dim=1)
+                if position_ids is not None:
+                    pos_segments = position_ids.split(split_list, dim=1)
+                    position_ids = torch.cat([pos_segments[idx] for idx in zigzag_idx], dim=1)
+
+            # Compute RoPE on raw embedding, BEFORE enorm/hnorm (matching note:)
+            if position_ids is not None and hasattr(self, 'rotary_emb'):
+                cos, sin = self.rotary_emb(embed_states, position_ids)
+                position_embeddings = (cos, sin)
+
+            normed_embed = self.enorm(embed_states)
+            normed_hidden = self.hnorm(hidden_states)
+
+            hidden_states = self.e_proj(normed_embed) + self.h_proj(normed_hidden)
+
+        if hidden_states.dim() == 3 and hidden_states.shape[2] != self.hc_mult * self.config.hidden_size:
+            hidden_states = hidden_states.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)
+
+        layer_key = str(mtp_layer_idx)
+        decoder_layer = self.layers[layer_key]
+
+        if attn_inputs is not None and mtp_layer_idx in attn_inputs:
+            layer_attn_inputs = attn_inputs[mtp_layer_idx]
+        elif attn_inputs is not None and self.mtp_start_layer_idx in attn_inputs:
+            layer_attn_inputs = attn_inputs[self.mtp_start_layer_idx]
+        else:
+            layer_attn_inputs = attn_inputs
+
+        hidden_states = decoder_layer(
+            hidden_states, attention_mask=attention_mask, position_embeddings=position_embeddings,
+            position_ids=position_ids, past_key_values=past_key_values, use_cache=use_cache,
+            input_ids=input_ids, is_prefill=is_prefill, context_lens=context_lens,
+            attn_inputs=layer_attn_inputs,
+            attn_metadata=attn_metadata,
+        )
+        hidden_states = self._hc_head(hidden_states)
+        hidden_states = self.norm(hidden_states)
+        return hidden_states, past_key_values
+
+
+class DeepseekV4ForMTP(nn.Module):
+    """MTP model for speculative decoding. Shares embed_tokens, lm_head, rotary_emb with main model."""
+
+    def __init__(self, config, ep_size=1, ep_rank=0):
+        super().__init__()
+        if not isinstance(config, DeepseekV4Config):
+            config = DeepseekV4Config._from_hf_config(config)
+        self.config = config
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
+        self.model = DeepseekV4MTPLayer(config, ep_size=ep_size, ep_rank=ep_rank)
+        self.lm_head = None
+        self.hccl_comm_dict = {}
+        self.cp_size = 1
+        self.global_rank = 0
+        self.attn_tp_size = 1
+        self.attn_dp_size = 1
+        self.prefill_dp_size = 1
+        self.lmhead_tp_size = 1
+        self.local_vocab_size = config.vocab_size
+
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, past_key_values=None,
+                use_cache=None, is_prefill=True, attn_inputs=None, context_lens=None,
+                attn_metadata=None, q_lens=None, input_ids=None, mtp_layer_idx=0,
+                return_hidden=False, **kwargs):
+        hidden_states, past_key_values = self.model(
+            hidden_states, attention_mask=attention_mask, position_ids=position_ids,
+            past_key_values=past_key_values, use_cache=use_cache, is_prefill=is_prefill,
+            attn_inputs=attn_inputs, context_lens=context_lens, attn_metadata=attn_metadata, q_lens=q_lens,
+            input_ids=input_ids, mtp_layer_idx=mtp_layer_idx,
+        )
+        if self.lm_head is not None:
+            mtp_hidden = hidden_states  # hidden states before lm_head, for next MTP step
+            if is_prefill:
+                if attn_metadata is not None and attn_metadata.get("cp_metadata") is not None:
+                    hidden_states = self._gather_cp_prefill_hidden_states(hidden_states, attn_metadata)
+                    mtp_hidden = hidden_states
+                if q_lens is not None:
+                    gather_q_lens = q_lens
+                elif attention_mask is not None:
+                    gather_q_lens = attention_mask.to(dtype=torch.int32).sum(dim=-1)
+                else:
+                    gather_q_lens = None
+                if gather_q_lens is not None:
+                    gather_index = (gather_q_lens - 1).unsqueeze(1).unsqueeze(2).repeat(1, 1, hidden_states.shape[-1])
+                    hidden_states = torch.gather(hidden_states, 1, gather_index)
+            logits = deepseek_v4_lmhead_tp_forward(
+                lm_head=self.lm_head,
+                hidden_states=hidden_states,
+                local_vocab_size=self.local_vocab_size,
+                vocab_size=self.config.vocab_size,
+                attn_dp_size=self.attn_dp_size,
+                lmhead_tp_size=self.lmhead_tp_size,
+                lmhead_tp_group=self.hccl_comm_dict.get("lmhead_tp_group"),
+            )
+            if return_hidden:
+                return logits, past_key_values, mtp_hidden
+            return logits, past_key_values
+        if return_hidden:
+            return hidden_states, past_key_values, hidden_states
+        return hidden_states, past_key_values
+
+    def init_parallel_comm_group(self):
+        if not dist.is_initialized():
+            return
+        world_size = dist.get_world_size()
+        global_rank = dist.get_rank()
+        self.global_rank = global_rank
+        parallel_layout_config = LLMParallelConfig(
+            ep_size=self.ep_size,
+            cp_size=self.cp_size,
+            attn_tp_size=self.attn_tp_size,
+            lmhead_tp_size=self.lmhead_tp_size,
+        )
+        parallel_layout_config.validate(world_size)
+        self.attn_dp_size = parallel_layout_config.attn_dp_size(world_size)
+        self.prefill_dp_size = parallel_layout_config.prefill_dp_size(world_size)
+        self.hccl_comm_dict = init_llm_parallel_groups(
+            parallel_layout_config,
+            moe_intermediate_size=self.config.moe_intermediate_size,
+            hidden_size=self.config.hidden_size,
+            world_size=world_size,
+            global_rank=global_rank,
+        )
+
+    def set_ep_group(self, bind_moe: bool = True):
+        moe_ep_group = self.hccl_comm_dict.get("moe_ep_group")
+        self.moe_ep_group = moe_ep_group
+        self.model.hccl_comm_dict = self.hccl_comm_dict
+        for layer_key, layer in self.model.layers.items():
+            if bind_moe:
+                layer.mlp.ep_group = moe_ep_group
+                layer.mlp.hccl_comm_dict = self.hccl_comm_dict
+            layer.self_attn.hccl_comm_dict = self.hccl_comm_dict
+            layer.self_attn.cp_size = self.cp_size
+            layer.self_attn.global_rank = self.global_rank
+            if layer.self_attn.sfa_compressor is not None:
+                layer.self_attn.sfa_compressor.cp_size = self.cp_size
+                layer.self_attn.sfa_compressor.global_rank = self.global_rank
+                layer.self_attn.sfa_compressor.hccl_comm_dict = self.hccl_comm_dict
+            if layer.self_attn.indexer is not None:
+                layer.self_attn.indexer.cp_size = self.cp_size
+                layer.self_attn.indexer.global_rank = self.global_rank
+                layer.self_attn.indexer.hccl_comm_dict = self.hccl_comm_dict
+
+    def _gather_cp_prefill_hidden_states(self, hidden_states: torch.Tensor, attn_metadata: dict) -> torch.Tensor:
+        return gather_cp_prefill_hidden_states(
+            hidden_states,
+            attn_metadata,
+            cp_size=self.cp_size,
+            cp_group=self.hccl_comm_dict.get("cp_group"),
+        )
+
+    @staticmethod
+    def load_weights(model, weight_dir, main_model=None):
+        DeepseekV4ForCausalLM._init_default_weights(model)
+        if main_model is not None:
+            model.lm_head = main_model.lm_head
+            model.local_vocab_size = main_model.local_vocab_size
+            model.lmhead_tp_size = main_model.lmhead_tp_size
+            model.attn_dp_size = main_model.attn_dp_size
+            model.model.rotary_emb = main_model.model.rotary_emb
+            model.model.compress_rotary_emb = main_model.model.compress_rotary_emb
+
+        name_mapping = DeepseekV4ForCausalLM._build_name_mapping(model, is_mtp=True)
+        expert_key_prefixes = ["mtp.0"]
+        expert_weights = DeepseekV4ForCausalLM._load_mapped_weights_from_dir(
+            model, weight_dir, name_mapping, expert_key_prefixes, is_mtp=True,
+        )
+
+        DeepseekV4ForMTP._load_mtp_expert_weights(model, expert_weights)
+
+        mtp_layers = list(model.model.layers.values())
+        DeepseekV4ForCausalLM._process_expert_weights(model, mtp_layers)
+        DeepseekV4ForCausalLM._prepare_quant_weights(model, mtp_layers)
+
+    @staticmethod
+    def _load_mtp_expert_weights(model, expert_weights):
+        ep_size = model.ep_size
+        ep_rank = model.ep_rank
+        experts_per_rank = model.config.n_routed_experts // ep_size
+        ep_start = ep_rank * experts_per_rank
+        intermediate_size = model.config.moe_intermediate_size
+        hidden_size = model.config.hidden_size
+        pfx = "mtp.0"
+        for layer_key, layer in model.model.layers.items():
+            experts_mod = layer.mlp.experts
+            up_proj_w = torch.zeros(experts_per_rank, intermediate_size * 2, hidden_size, dtype=torch.int8)
+            up_proj_s = torch.zeros(experts_per_rank, intermediate_size * 2, dtype=torch.bfloat16)
+            down_proj_w = torch.zeros(experts_per_rank, hidden_size, intermediate_size, dtype=torch.int8)
+            down_proj_s = torch.zeros(experts_per_rank, hidden_size, dtype=torch.bfloat16)
+            for local_eid in range(experts_per_rank):
+                global_eid = ep_start + local_eid
+                for src, dst_off, dst_len in [
+                    (f"{pfx}.ffn.experts.{global_eid}.w1", 0, intermediate_size),
+                    (f"{pfx}.ffn.experts.{global_eid}.w3", intermediate_size, intermediate_size),
+                ]:
+                    w_key = f"{src}.weight"
+                    s_key = f"{src}.scale"
+                    if w_key in expert_weights:
+                        up_proj_w[local_eid, dst_off:dst_off+dst_len, :] = expert_weights[w_key]
+                    if s_key in expert_weights:
+                        up_proj_s[local_eid, dst_off:dst_off+dst_len] = expert_weights[s_key].squeeze(-1).to(torch.bfloat16)
+                w2_key = f"{pfx}.ffn.experts.{global_eid}.w2.weight"
+                s2_key = f"{pfx}.ffn.experts.{global_eid}.w2.scale"
+                if w2_key in expert_weights:
+                    down_proj_w[local_eid] = expert_weights[w2_key]
+                if s2_key in expert_weights:
+                    down_proj_s[local_eid] = expert_weights[s2_key].squeeze(-1).to(torch.bfloat16)
+            experts_mod.up_proj_weight.copy_(up_proj_w)
+            experts_mod.up_proj_weight_scale.data.copy_(up_proj_s)
+            experts_mod.down_proj_weight.copy_(down_proj_w)
+            experts_mod.down_proj_weight_scale.data.copy_(down_proj_s)
+
+
+class DeepseekV4ForCausalLM(nn.Module):
+
+    def __init__(self, config, num_layers=None, ep_size=1, ep_rank=0, global_rank=0, parallel_config=None):
+        super().__init__()
+        if not isinstance(config, DeepseekV4Config):
+            config = DeepseekV4Config._from_hf_config(config)
+        if num_layers is not None and num_layers < config.num_hidden_layers:
+            config = DeepseekV4Config(**{k: getattr(config, k) for k in [
+                "vocab_size", "hidden_size", "intermediate_size", "num_hidden_layers",
+                "num_attention_heads", "num_key_value_heads", "moe_intermediate_size",
+                "n_shared_experts", "n_routed_experts", "num_experts_per_tok",
+                "routed_scaling_factor", "n_group", "topk_group",
+                "first_k_dense_replace", "norm_topk_prob", "scoring_func", "topk_method",
+                "head_dim", "q_lora_rank", "qk_rope_head_dim", "o_lora_rank", "o_groups",
+                "sliding_window", "hc_mult", "hc_sinkhorn_iters",
+                "hc_eps", "index_n_heads", "index_head_dim", "index_topk",
+                "num_hash_layers", "attention_bias", "attention_dropout",
+                "rms_norm_eps", "hidden_act", "rope_theta", "compress_rope_theta",
+                "max_position_embeddings", "swiglu_limit", "rope_scaling",
+            ]})
+            config.num_hidden_layers = num_layers
+            config.compress_ratios = config.compress_ratios[:num_layers]
+        self.config = config
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
+        self.global_rank = global_rank
+        self.parallel_config = dict(parallel_config or {})
+        self.cp_size = int(self.parallel_config.get("cp_size", 1))
+        self.attn_tp_size = int(self.parallel_config.get("attn_tp_size", 1))
+        self.attn_dp_size = int(self.parallel_config.get("attn_dp_size", 1))
+        self.prefill_dp_size = int(self.parallel_config.get("prefill_dp_size", 1))
+        self.moe_tp_size = int(self.parallel_config.get("moe_tp_size", 1))
+        self.lmhead_tp_size = int(self.parallel_config.get("lmhead_tp_size", 1))
+        self.use_parallelize_module_tp = bool(int(self.parallel_config.get("use_parallelize_module_tp", 0)))
+        self.o_proj_tp_size = int(self.parallel_config.get("o_proj_tp_size", self.attn_tp_size))
+        self.experts_per_rank = config.n_routed_experts // max(self.ep_size, 1)
+        self.top_k = config.num_experts_per_tok
+        self.perfect_eplb = os.getenv("MOJO_PERFECT_EPLB", "0").strip().lower() in {"1", "true", "yes", "on"}
+        self.lmhead_tp_rank, self.lmhead_vocab_start, self.lmhead_vocab_end, self.local_vocab_size = (
+            get_deepseek_v4_lmhead_tp_partition(
+                config.vocab_size,
+                global_rank=global_rank,
+                lmhead_tp_size=self.lmhead_tp_size,
+                use_parallelize_module_tp=self.use_parallelize_module_tp,
+            )
+        )
+        self.model = DeepseekV4Model(config, ep_size=ep_size, ep_rank=ep_rank, parallel_config=self.parallel_config)
+        self.lm_head = MojoGemm(
+            in_features=config.hidden_size,
+            out_features=self.local_vocab_size,
+            bias=False,
+        )
+        self.hccl_comm_dict = {}
+
+    def gen_cur_topk_idx(
+        self,
+        is_prefill: bool,
+        batch_size: int,
+        seq_len: int,
+        device: torch.device,
+    ) -> Optional[torch.Tensor]:
+        if not self.perfect_eplb:
+            return None
+        global_rank = dist.get_rank() if dist.is_initialized() else self.global_rank
+        if is_prefill:
+            if self.ep_size != 1:
+                tokens_per_rank = batch_size * seq_len // max(self.attn_tp_size, 1)
+            else:
+                tokens_per_rank = batch_size * seq_len * max(self.attn_dp_size, 1)
+            step = tokens_per_rank * self.top_k
+            topk_list = (
+                torch.arange(step, dtype=torch.int32, device=device) + int(global_rank)
+            ) % self.config.n_routed_experts
+        elif self.moe_tp_size > 1:
+            tokens_per_rank = batch_size * self.top_k * seq_len
+            offsets = torch.arange(self.ep_size, dtype=torch.int32, device=device) * self.experts_per_rank
+            token_offsets = torch.arange(tokens_per_rank, dtype=torch.int32, device=device)
+            topk_list = (offsets[:, None] + token_offsets[None, :]).reshape(-1)
+            tokens_per_rank = batch_size * seq_len
+        else:
+            expanded_tokens = batch_size * self.top_k * seq_len
+            step_gap = self.config.n_routed_experts // max(self.ep_size, 1)
+            expanded_offset = expanded_tokens * global_rank + global_rank
+            idx = torch.arange(expanded_tokens, dtype=torch.int64, device=device) + int(expanded_offset)
+            col = idx % max(self.ep_size, 1)
+            row = (idx // max(self.ep_size, 1)) % step_gap
+            topk_list = (row + col * step_gap).to(torch.int32)
+            tokens_per_rank = batch_size * seq_len
+        return topk_list.view(tokens_per_rank, -1)
+
+    def _gather_cp_prefill_hidden_states(self, hidden_states: torch.Tensor, attn_metadata: dict) -> torch.Tensor:
+        return gather_cp_prefill_hidden_states(
+            hidden_states,
+            attn_metadata,
+            cp_size=self.cp_size,
+            cp_group=self.hccl_comm_dict.get("cp_group"),
+        )
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[PagedDummyCache] = None,
+        use_cache: Optional[bool] = None,
+        is_prefill: bool = True,
+        attn_inputs: Optional[dict] = None,
+        attn_metadata: Optional[dict] = None,
+        context_lens: Optional[torch.Tensor] = None,
+        q_lens: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, PagedDummyCache, torch.Tensor]:
+        cur_topk_list = self.gen_cur_topk_idx(is_prefill, input_ids.shape[0], input_ids.shape[1], input_ids.device)
+        hidden_states, past_key_values = self.model(
+            input_ids, attention_mask=attention_mask, position_ids=position_ids,
+            past_key_values=past_key_values, use_cache=use_cache,
+            is_prefill=is_prefill, attn_inputs=attn_inputs,
+            attn_metadata=attn_metadata, context_lens=context_lens, q_lens=q_lens,
+            cur_topk_list=cur_topk_list,
+        )
+        mtp_hidden = hidden_states
+        if is_prefill:
+            if attn_metadata is not None and attn_metadata.get("cp_metadata") is not None:
+                hidden_states = self._gather_cp_prefill_hidden_states(hidden_states, attn_metadata)
+            if q_lens is not None:
+                gather_q_lens = q_lens
+            elif attention_mask is not None:
+                gather_q_lens = attention_mask.to(dtype=torch.int32).sum(dim=-1)
+            else:
+                gather_q_lens = None
+            if gather_q_lens is not None:
+                gather_index = (gather_q_lens - 1).unsqueeze(1).unsqueeze(2).repeat(1, 1, hidden_states.shape[-1])
+                hidden_states = torch.gather(hidden_states, 1, gather_index)
+        logits = deepseek_v4_lmhead_tp_forward(
+            lm_head=self.lm_head,
+            hidden_states=hidden_states,
+            local_vocab_size=self.local_vocab_size,
+            vocab_size=self.config.vocab_size,
+            attn_dp_size=self.attn_dp_size,
+            lmhead_tp_size=self.lmhead_tp_size,
+            lmhead_tp_group=self.hccl_comm_dict.get("lmhead_tp_group"),
+        ).float()
+        return logits, past_key_values, mtp_hidden
+
+    def init_parallel_comm_group(self):
+        if not dist.is_initialized():
+            logging.warning("dist not initialized, skip init_parallel_comm_group")
+            return
+        world_size = dist.get_world_size()
+        global_rank = dist.get_rank()
+        self.global_rank = global_rank
+        parallel_layout_config = LLMParallelConfig(
+            ep_size=self.ep_size,
+            cp_size=self.cp_size,
+            attn_tp_size=self.attn_tp_size,
+            lmhead_tp_size=self.lmhead_tp_size,
+            o_proj_tp_size=self.o_proj_tp_size,
+        )
+        parallel_layout_config.validate(world_size)
+        self.attn_dp_size = parallel_layout_config.attn_dp_size(world_size)
+        self.prefill_dp_size = parallel_layout_config.prefill_dp_size(world_size)
+        self.hccl_comm_dict = init_llm_parallel_groups(
+            parallel_layout_config,
+            moe_intermediate_size=self.config.moe_intermediate_size,
+            hidden_size=self.config.hidden_size,
+            world_size=world_size,
+            global_rank=global_rank,
+        )
+        logging.info(
+            "Created LLM parallel groups via distributed.parallel: "
+            f"world_size={world_size}, ep_size={self.ep_size}, rank={global_rank}"
+        )
+
+    def set_ep_group(self, bind_moe: bool = True):
+        moe_ep_group = self.hccl_comm_dict.get("moe_ep_group")
+        self.moe_ep_group = moe_ep_group
+        self.model.hccl_comm_dict = self.hccl_comm_dict
+        for layer in self.model.layers:
+            if bind_moe:
+                layer.mlp.ep_group = moe_ep_group
+                layer.mlp.hccl_comm_dict = self.hccl_comm_dict
+            layer.self_attn.hccl_comm_dict = self.hccl_comm_dict
+            layer.self_attn.cp_size = self.cp_size
+            layer.self_attn.global_rank = self.global_rank
+            if layer.self_attn.sfa_compressor is not None:
+                layer.self_attn.sfa_compressor.cp_size = self.cp_size
+                layer.self_attn.sfa_compressor.global_rank = self.global_rank
+                layer.self_attn.sfa_compressor.hccl_comm_dict = self.hccl_comm_dict
+            if layer.self_attn.indexer is not None:
+                layer.self_attn.indexer.cp_size = self.cp_size
+                layer.self_attn.indexer.global_rank = self.global_rank
+                layer.self_attn.indexer.hccl_comm_dict = self.hccl_comm_dict
+
+    @staticmethod
+    def _align_weight(weight, target):
+        if weight.shape != target.shape:
+            if weight.dim() == 2 and target.dim() == 1 and weight.shape[1] == 1:
+                weight = weight.squeeze(-1)
+            elif weight.dim() == 1 and target.dim() == 2 and target.shape[1] == 1:
+                weight = weight.unsqueeze(-1)
+        if weight.dtype != target.dtype:
+            if target.dtype == torch.bfloat16 and weight.dtype == torch.float32:
+                weight = weight.to(torch.bfloat16)
+            elif target.dtype == torch.float32 and weight.dtype == torch.bfloat16:
+                weight = weight.to(torch.float32)
+            elif target.dtype == torch.int32 and weight.dtype == torch.int64:
+                weight = weight.to(torch.int32)
+        return weight
+
+    @staticmethod
+    def _align_quant_gemm_weight(weight, target, module):
+        if isinstance(module, MojoQuantGemm) and weight.dim() == 2 and target.dim() == 2:
+            if weight.shape != target.shape and weight.t().shape == target.shape:
+                weight = weight.t().contiguous()
+        return DeepseekV4ForCausalLM._align_weight(weight, target)
+
+    @staticmethod
+    def _init_default_weights(model):
+        for _, module in model.named_modules():
+            cls_name = type(module).__name__
+            if "RMSNorm" in cls_name:
+                if hasattr(module, 'weight') and module.weight is not None:
+                    module.weight.data.fill_(1.0)
+            elif "DynamicQuant" in cls_name:
+                if hasattr(module, 'inv_smooth_scale') and module.inv_smooth_scale is not None:
+                    module.inv_smooth_scale.data.fill_(1.0)
+
+    @staticmethod
+    def _load_mapped_weights_from_dir(model, weight_dir, name_mapping, expert_key_prefixes, *, is_mtp=False):
+        from safetensors.torch import load_file
+
+        index_path = os.path.join(weight_dir, "model.safetensors.index.json")
+        with open(index_path) as f:
+            index = json.load(f)
+        weight_map = index["weight_map"]
+
+        needed_checkpoint_keys = set(name_mapping.keys())
+
+        ep_size = model.ep_size
+        ep_rank = model.ep_rank
+        experts_per_rank = model.config.n_routed_experts // ep_size
+        ep_start = ep_rank * experts_per_rank
+
+        for pfx in expert_key_prefixes:
+            for local_eid in range(experts_per_rank):
+                global_eid = ep_start + local_eid
+                for w in ["w1.weight", "w1.scale", "w2.weight", "w2.scale", "w3.weight", "w3.scale"]:
+                    needed_checkpoint_keys.add(f"{pfx}.ffn.experts.{global_eid}.{w}")
+
+        file_to_keys = {}
+        for ck_key in needed_checkpoint_keys:
+            if ck_key in weight_map:
+                sf = weight_map[ck_key]
+                file_to_keys.setdefault(sf, []).append(ck_key)
+
+        params_dict = dict(model.named_parameters())
+        buffers_dict = dict(model.named_buffers())
+        modules_dict = dict(model.named_modules())
+
+        expert_weights = {}
+        for sf_file in sorted(file_to_keys.keys()):
+            fp = os.path.join(weight_dir, sf_file)
+            data = load_file(fp)
+            for ck_key in file_to_keys[sf_file]:
+                if ck_key not in data:
+                    continue
+                weight = data[ck_key]
+                if (
+                    not is_mtp
+                    and ck_key == "head.weight"
+                    and model.lmhead_tp_size > 1
+                    and not getattr(model, "use_parallelize_module_tp", False)
+                ):
+                    weight = weight[model.lmhead_vocab_start:model.lmhead_vocab_end]
+                if "experts." in ck_key and "shared_experts" not in ck_key:
+                    expert_weights[ck_key] = weight
+                    continue
+                model_name = name_mapping.get(ck_key)
+                if model_name is None:
+                    continue
+                if model_name in params_dict:
+                    param = params_dict[model_name]
+                    module_name = model_name.rsplit(".", 1)[0]
+                    module = modules_dict.get(module_name)
+                    weight = DeepseekV4ForCausalLM._align_quant_gemm_weight(weight, param, module)
+                    if param.shape == weight.shape:
+                        param.data.copy_(weight)
+                elif model_name in buffers_dict:
+                    buf = buffers_dict[model_name]
+                    module_name = model_name.rsplit(".", 1)[0]
+                    module = modules_dict.get(module_name)
+                    weight = DeepseekV4ForCausalLM._align_quant_gemm_weight(weight, buf, module)
+                    if buf.shape == weight.shape:
+                        buf.data.copy_(weight)
+            del data
+
+        return expert_weights
+
+    @staticmethod
+    def _prepare_quant_weights(model, layer_iter):
+        for layer in layer_iter:
+            self_attn = layer.self_attn
+            self_attn.prepare_wo_a_weight()
+            self_attn.prepare_quant_proj_weights()
+            if self_attn.indexer is not None:
+                self_attn.indexer.prepare_quant_proj_weights()
+            layer.mlp.shared_experts.prepare_quant_proj_weights()
+
+    @staticmethod
+    def _process_expert_weights(model, layer_iter):
+        for layer in layer_iter:
+            mlp = layer.mlp
+            if hasattr(mlp, 'process_expert_weights'):
+                mlp.process_expert_weights()
+
+    @staticmethod
+    def load_weights(model, weight_dir: str):
+        DeepseekV4ForCausalLM._init_default_weights(model)
+
+        name_mapping = DeepseekV4ForCausalLM._build_name_mapping(model)
+
+        max_layer_idx = model.config.num_hidden_layers - 1
+        name_mapping = {
+            k: v for k, v in name_mapping.items()
+            if not k.startswith("layers.") or int(k.split(".")[1]) <= max_layer_idx
+        }
+
+        expert_key_prefixes = [f"layers.{layer_idx}" for layer_idx in range(model.config.num_hidden_layers)]
+        expert_weights = DeepseekV4ForCausalLM._load_mapped_weights_from_dir(
+            model, weight_dir, name_mapping, expert_key_prefixes,
+        )
+
+        DeepseekV4ForCausalLM._load_expert_weights(model, expert_weights)
+
+        DeepseekV4ForCausalLM._process_expert_weights(
+            model, [model.model.layers[layer_idx] for layer_idx in range(model.config.num_hidden_layers)],
+        )
+        DeepseekV4ForCausalLM._prepare_quant_weights(
+            model, [model.model.layers[layer_idx] for layer_idx in range(model.config.num_hidden_layers)],
+        )
+
+        gather_deepseek_v4_moe_smooth_scale_1(
+            model,
+            [model.model.layers[layer_idx] for layer_idx in range(model.config.num_hidden_layers)],
+        )
+
+    @staticmethod
+    def _add_layer_name_mapping(
+        mapping,
+        pfx,
+        mpfx,
+        *,
+        include_compressor=False,
+        include_indexer=False,
+        include_tid2eid=False,
+    ):
+        mapping[f"{pfx}.hc_attn_fn"] = f"{mpfx}.hc_attn_fn"
+        mapping[f"{pfx}.hc_attn_base"] = f"{mpfx}.hc_attn_base"
+        mapping[f"{pfx}.hc_attn_scale"] = f"{mpfx}.hc_attn_scale"
+        mapping[f"{pfx}.hc_ffn_fn"] = f"{mpfx}.hc_ffn_fn"
+        mapping[f"{pfx}.hc_ffn_base"] = f"{mpfx}.hc_ffn_base"
+        mapping[f"{pfx}.hc_ffn_scale"] = f"{mpfx}.hc_ffn_scale"
+        mapping[f"{pfx}.attn_norm.weight"] = f"{mpfx}.attn_norm.weight"
+        mapping[f"{pfx}.ffn_norm.weight"] = f"{mpfx}.ffn_norm.weight"
+
+        mapping[f"{pfx}.attn.wq_a.weight"] = f"{mpfx}.self_attn.wq_a.weight"
+        mapping[f"{pfx}.attn.q_norm.weight"] = f"{mpfx}.self_attn.q_norm.weight"
+        mapping[f"{pfx}.attn.wq_b.weight"] = f"{mpfx}.self_attn.wq_b.weight"
+        mapping[f"{pfx}.attn.wq_b.scale"] = f"{mpfx}.self_attn.wq_b.weight_scale"
+        mapping[f"{pfx}.attn.wkv.weight"] = f"{mpfx}.self_attn.wkv.weight"
+        mapping[f"{pfx}.attn.kv_norm.weight"] = f"{mpfx}.self_attn.kv_norm.weight"
+        mapping[f"{pfx}.attn.wo_a.weight"] = f"{mpfx}.self_attn.wo_a.weight"
+        mapping[f"{pfx}.attn.wo_b.weight"] = f"{mpfx}.self_attn.wo_b.weight"
+        mapping[f"{pfx}.attn.wo_b.scale"] = f"{mpfx}.self_attn.wo_b.weight_scale"
+        mapping[f"{pfx}.attn.attn_sink"] = f"{mpfx}.self_attn.attn_sink"
+
+        if include_compressor:
+            mapping[f"{pfx}.attn.compressor.wkv.weight"] = f"{mpfx}.self_attn.sfa_compressor.wkv.weight"
+            mapping[f"{pfx}.attn.compressor.wgate.weight"] = f"{mpfx}.self_attn.sfa_compressor.wgate.weight"
+            mapping[f"{pfx}.attn.compressor.ape"] = f"{mpfx}.self_attn.sfa_compressor.ape"
+            mapping[f"{pfx}.attn.compressor.norm.weight"] = f"{mpfx}.self_attn.sfa_compressor.norm.weight"
+
+        if include_indexer:
+            mapping[f"{pfx}.attn.indexer.wq_b.weight"] = f"{mpfx}.self_attn.indexer.wq_b.weight"
+            mapping[f"{pfx}.attn.indexer.wq_b.scale"] = f"{mpfx}.self_attn.indexer.wq_b.weight_scale"
+            mapping[f"{pfx}.attn.indexer.weights_proj.weight"] = f"{mpfx}.self_attn.indexer.weights_proj.weight"
+            mapping[f"{pfx}.attn.indexer.compressor.wkv.weight"] = f"{mpfx}.self_attn.indexer.compressor.wkv.weight"
+            mapping[f"{pfx}.attn.indexer.compressor.wgate.weight"] = f"{mpfx}.self_attn.indexer.compressor.wgate.weight"
+            mapping[f"{pfx}.attn.indexer.compressor.ape"] = f"{mpfx}.self_attn.indexer.compressor.ape"
+            mapping[f"{pfx}.attn.indexer.compressor.norm.weight"] = f"{mpfx}.self_attn.indexer.compressor.norm.weight"
+
+        mapping[f"{pfx}.ffn.gate.weight"] = f"{mpfx}.mlp.gate"
+        mapping[f"{pfx}.ffn.gate.bias"] = f"{mpfx}.mlp.e_score_correction_bias"
+        if include_tid2eid:
+            mapping[f"{pfx}.ffn.gate.tid2eid"] = f"{mpfx}.mlp.tid2eid"
+
+        mapping[f"{pfx}.ffn.shared_experts.w1.weight"] = f"{mpfx}.mlp.shared_experts.gate_proj.weight"
+        mapping[f"{pfx}.ffn.shared_experts.w1.scale"] = f"{mpfx}.mlp.shared_experts.gate_proj.weight_scale"
+        mapping[f"{pfx}.ffn.shared_experts.w3.weight"] = f"{mpfx}.mlp.shared_experts.up_proj.weight"
+        mapping[f"{pfx}.ffn.shared_experts.w3.scale"] = f"{mpfx}.mlp.shared_experts.up_proj.weight_scale"
+        mapping[f"{pfx}.ffn.shared_experts.w2.weight"] = f"{mpfx}.mlp.shared_experts.down_proj.weight"
+        mapping[f"{pfx}.ffn.shared_experts.w2.scale"] = f"{mpfx}.mlp.shared_experts.down_proj.weight_scale"
+
+    @staticmethod
+    def _build_name_mapping(model, *, is_mtp=False):
+        mapping = {}
+        if is_mtp:
+            pfx = "mtp.0"
+            mpfx = "model.layers.0"  # MTP uses layer_idx=0 in its own cache
+            mapping[f"{pfx}.enorm.weight"] = "model.enorm.weight"
+            mapping[f"{pfx}.hnorm.weight"] = "model.hnorm.weight"
+            mapping[f"{pfx}.e_proj.weight"] = "model.e_proj.gemm.weight"
+            mapping[f"{pfx}.e_proj.scale"] = "model.e_proj.gemm.weight_scale"
+            mapping[f"{pfx}.h_proj.weight"] = "model.h_proj.gemm.weight"
+            mapping[f"{pfx}.h_proj.scale"] = "model.h_proj.gemm.weight_scale"
+            mapping[f"{pfx}.norm.weight"] = "model.norm.weight"
+            mapping[f"{pfx}.hc_head_fn"] = "model.hc_head_fn"
+            mapping[f"{pfx}.hc_head_base"] = "model.hc_head_base"
+            mapping[f"{pfx}.hc_head_scale"] = "model.hc_head_scale"
+            DeepseekV4ForCausalLM._add_layer_name_mapping(mapping, pfx, mpfx)
+            return mapping
+
+        mapping["embed.weight"] = "model.embed_tokens.weight"
+        mapping["head.weight"] = "lm_head.weight"
+        mapping["norm.weight"] = "model.norm.weight"
+        mapping["hc_head_fn"] = "model.hc_head_fn"
+        mapping["hc_head_base"] = "model.hc_head_base"
+        mapping["hc_head_scale"] = "model.hc_head_scale"
+
+        for layer_idx in range(model.config.num_hidden_layers):
+            pfx = f"layers.{layer_idx}"
+            mpfx = f"model.layers.{layer_idx}"
+
+            DeepseekV4ForCausalLM._add_layer_name_mapping(
+                mapping,
+                pfx,
+                mpfx,
+                include_compressor=True,
+                include_indexer=True,
+                include_tid2eid=True,
+            )
+
+        return mapping
+
+    @staticmethod
+    def _load_expert_weights(model, expert_weights):
+        ep_size = model.ep_size
+        ep_rank = model.ep_rank
+        experts_per_rank = model.config.n_routed_experts // ep_size
+        ep_start = ep_rank * experts_per_rank
+        intermediate_size = model.config.moe_intermediate_size
+        hidden_size = model.config.hidden_size
+
+        for layer_idx in range(model.config.num_hidden_layers):
+            experts_mod = model.model.layers[layer_idx].mlp.experts
+
+            up_proj_w = torch.empty(experts_per_rank, intermediate_size * 2, hidden_size, dtype=torch.int8)
+            up_proj_s = torch.empty(experts_per_rank, intermediate_size * 2, dtype=torch.bfloat16)
+            down_proj_w = torch.empty(experts_per_rank, hidden_size, intermediate_size, dtype=torch.int8)
+            down_proj_s = torch.empty(experts_per_rank, hidden_size, dtype=torch.bfloat16)
+
+            for local_eid in range(experts_per_rank):
+                global_eid = ep_start + local_eid
+                w1_key = f"layers.{layer_idx}.ffn.experts.{global_eid}.w1.weight"
+                w3_key = f"layers.{layer_idx}.ffn.experts.{global_eid}.w3.weight"
+                w2_key = f"layers.{layer_idx}.ffn.experts.{global_eid}.w2.weight"
+                s1_key = f"layers.{layer_idx}.ffn.experts.{global_eid}.w1.scale"
+                s3_key = f"layers.{layer_idx}.ffn.experts.{global_eid}.w3.scale"
+                s2_key = f"layers.{layer_idx}.ffn.experts.{global_eid}.w2.scale"
+
+                if w1_key in expert_weights:
+                    up_proj_w[local_eid, :intermediate_size, :] = expert_weights[w1_key]
+                if w3_key in expert_weights:
+                    up_proj_w[local_eid, intermediate_size:, :] = expert_weights[w3_key]
+                if w2_key in expert_weights:
+                    down_proj_w[local_eid] = expert_weights[w2_key]
+                if s1_key in expert_weights:
+                    up_proj_s[local_eid, :intermediate_size] = expert_weights[s1_key].squeeze(-1).to(torch.bfloat16)
+                if s3_key in expert_weights:
+                    up_proj_s[local_eid, intermediate_size:] = expert_weights[s3_key].squeeze(-1).to(torch.bfloat16)
+                if s2_key in expert_weights:
+                    down_proj_s[local_eid] = expert_weights[s2_key].squeeze(-1).to(torch.bfloat16)
+
+            experts_mod.up_proj_weight.copy_(up_proj_w)
+            experts_mod.up_proj_weight_scale.data.copy_(up_proj_s)
+            experts_mod.down_proj_weight.copy_(down_proj_w)
+            experts_mod.down_proj_weight_scale.data.copy_(down_proj_s)

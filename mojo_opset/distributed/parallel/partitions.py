@@ -11,6 +11,8 @@ from torch.distributed.tensor.placement_types import Shard
 
 from mojo_opset.core.operators.attention import MojoPagedDecodeGQA
 from mojo_opset.core.operators.attention import MojoPagedPrefillGQA
+from mojo_opset.core.operators.gemm import MojoGemm
+from mojo_opset.core.operators.gemm import MojoQuantGemm
 from mojo_opset.core.operators.mlp import MojoSwiGLUMLP
 from mojo_opset.distributed.parallel.tensor_parallel import MojoColwiseParallel
 from mojo_opset.distributed.parallel.tensor_parallel import MojoQKVColwiseParallel
@@ -49,6 +51,84 @@ MojoRowwiseParallel.register_dist_info(
 MojoColwiseParallel.register_dist_info(
     torch.nn.Linear,
     partial(__torch_nn_linear_partition, sharding_dim=0),
+    desired_input_layouts=[Replicate()],
+    desired_output_layouts=[Shard(-1)],
+)
+
+
+def __mojo_gemm_partition(
+    src_data_rank, module_name, module: MojoGemm, device_mesh: DeviceMesh, sharding_dim=-1
+):
+    module.register_parameter(
+        "weight",
+        nn.Parameter(shard_tensor(device_mesh, [Shard(sharding_dim)], src_data_rank, module.weight)),
+    )
+    if module.bias is not None and sharding_dim == 0:
+        module.register_parameter(
+            "bias",
+            nn.Parameter(shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.bias)),
+        )
+
+    module.out_features, module.in_features = module.weight.shape
+    module.register_state_dict_post_hook(partial(stat_dict_rename_hook, ("weight", "bias"), device_mesh))
+
+
+MojoRowwiseParallel.register_dist_info(
+    MojoGemm,
+    __mojo_gemm_partition,
+    desired_input_layouts=[Shard(-1)],
+    desired_output_layouts=[Partial()],
+)
+
+MojoColwiseParallel.register_dist_info(
+    MojoGemm,
+    partial(__mojo_gemm_partition, sharding_dim=0),
+    desired_input_layouts=[Replicate()],
+    desired_output_layouts=[Shard(-1)],
+)
+
+
+def __mojo_quant_gemm_partition(
+    src_data_rank,
+    module_name,
+    module: MojoQuantGemm,
+    device_mesh: DeviceMesh,
+    *,
+    shard_output: bool,
+):
+    if module.trans_weight:
+        weight_shard_dim = 0 if shard_output else 1
+    else:
+        weight_shard_dim = 1 if shard_output else 0
+
+    module.register_buffer(
+        "weight",
+        shard_tensor(device_mesh, [Shard(weight_shard_dim)], src_data_rank, module.weight),
+    )
+    if shard_output:
+        module.register_buffer(
+            "weight_scale",
+            shard_tensor(device_mesh, [Shard(0)], src_data_rank, module.weight_scale),
+        )
+
+    if module.trans_weight:
+        module.out_features, module.in_features = module.weight.shape
+    else:
+        module.in_features, module.out_features = module.weight.shape
+    module.weight_shape = tuple(module.weight.shape)
+    module.register_state_dict_post_hook(partial(stat_dict_rename_hook, ("weight", "weight_scale"), device_mesh))
+
+
+MojoRowwiseParallel.register_dist_info(
+    MojoQuantGemm,
+    partial(__mojo_quant_gemm_partition, shard_output=False),
+    desired_input_layouts=[Shard(-1)],
+    desired_output_layouts=[Partial()],
+)
+
+MojoColwiseParallel.register_dist_info(
+    MojoQuantGemm,
+    partial(__mojo_quant_gemm_partition, shard_output=True),
     desired_input_layouts=[Replicate()],
     desired_output_layouts=[Shard(-1)],
 )

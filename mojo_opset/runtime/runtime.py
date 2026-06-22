@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Optional
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
+from mojo_opset.distributed.parallel.context_parallel import build_deepseek_v4_cp_metadata
 from mojo_opset.runtime.config import MojoConfig
 from mojo_opset.runtime.generation import MojoSession
 from mojo_opset.utils.logging import get_logger
@@ -279,3 +282,918 @@ class PagedAttentionGenerationModel(nn.Module):
 
         logits = self.model(*model_inputs, lm_head_indices=lm_head_indices)
         return logits, session
+
+
+class DeepseekSparseAttentionRuntimeState(MojoSession):
+    """DeepSeek-V4 runtime state that pre-computes decode metadata outside graph."""
+
+    def __init__(self, paged_cache, config, cp_size=1, global_rank=0, hccl_comm_dict=None):
+        self.paged_cache = paged_cache
+        self.config = config
+        self.cp_size = cp_size
+        self.global_rank = global_rank
+        self.hccl_comm_dict = hccl_comm_dict or {}
+        self._compress_ratios = tuple(getattr(config, "compress_ratios", ()))
+        self._unique_metadata_ratios = tuple(sorted(set(
+            self._compress_ratios[l] if l < len(self._compress_ratios) else 0
+            for l in range(self.paged_cache.num_layers)
+        )))
+        self._first_layer_by_ratio = {}
+        for layer_idx in range(self.paged_cache.num_layers):
+            ratio = self._compress_ratios[layer_idx] if layer_idx < len(self._compress_ratios) else 0
+            self._first_layer_by_ratio.setdefault(ratio, layer_idx)
+        self._decode_query_static_cache = {}
+
+    @property
+    def kv_cache(self):
+        return self.paged_cache
+
+    def _get_first_layer_for_ratio(self, ratio):
+        return self._first_layer_by_ratio.get(ratio)
+
+    def _metadata_compress_ratios(self):
+        return self._compress_ratios
+
+    def _get_decode_query_static(self, *, device, batch_size: int, seq_len: int):
+        cache_key = (str(device), batch_size, seq_len)
+        cached = self._decode_query_static_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        cached = {
+            "q_lens": torch.full((batch_size,), seq_len, dtype=torch.int32, device=device),
+            "cu_q_lens": torch.arange(
+                0, (batch_size + 1) * seq_len, step=seq_len,
+                dtype=torch.int32, device=device,
+            ),
+            "position_offsets": torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0),
+        }
+        self._decode_query_static_cache[cache_key] = cached
+        return cached
+
+    def _get_cp_rank(self, cp_group) -> int:
+        if cp_group is None or not dist.is_initialized():
+            return 0
+        return dist.get_rank(group=cp_group)
+
+    def _build_golden_style_attn_metadata(
+        self,
+        *,
+        position_ids,
+        context_lens,
+        q_lens,
+        cu_q_lens,
+        current_seq_lens,
+        start_pos,
+        seq_used_q,
+        shared_metadata,
+        win_slot_mapping,
+        full_kv_cache,
+        is_prefill,
+        batch_size,
+        decode_fast_path=False,
+        decode_seq_len=None,
+    ):
+        pkv = self.paged_cache
+        position_ids_c = {}
+        block_table = {}
+        slot_mapping = {}
+        kernel_metadata = {}
+
+        win_kv_cache, win_block_table = pkv.get_win_kv_for_decode(0)
+        block_table["win_kv"] = win_block_table
+        slot_mapping["win_kv"] = win_slot_mapping
+
+        if is_prefill:
+            block_table["full_kv"] = pkv.get_full_block_table(batch_size)
+            slot_mapping["full_kv"] = pkv.get_full_slot_mapping(context_lens, q_lens)
+            slot_mapping["full_kv_gather_indices"] = pkv.get_full_kv_gather_indices(context_lens, q_lens)
+
+        for ratio, metadata in shared_metadata.items():
+            attn_ratio = ratio if ratio > 1 else 1
+            kernel_metadata[f"c{attn_ratio}a_metadata"] = metadata.get("sas_metadata")
+            if ratio <= 1:
+                continue
+
+            position_ids_cmp = metadata.get("position_ids_cmp")
+            if position_ids_cmp is not None:
+                position_ids_c[str(ratio)] = position_ids_cmp * ratio
+
+            layer_idx = self._get_first_layer_for_ratio(ratio)
+            if layer_idx is None:
+                continue
+
+            cmp_block_table_key = f"c{ratio}a_cmp_kv"
+            block_table[cmp_block_table_key] = pkv.get_cmp_kv_block_table(layer_idx)
+            if decode_fast_path and decode_seq_len == 1:
+                slot_mapping[cmp_block_table_key] = pkv.get_cmp_slot_mapping_decode(
+                    layer_idx,
+                    start_pos,
+                    compressed_len=metadata.get("compressed_len"),
+                    position_ids_cmp=position_ids_cmp,
+                )
+                block_table[f"c{ratio}a_cmp_state"] = pkv.get_cmp_state_block_table_decode(
+                    layer_idx, start_pos
+                )
+            elif decode_fast_path and decode_seq_len is not None and decode_seq_len > 1:
+                slot_mapping[cmp_block_table_key] = pkv.get_cmp_slot_mapping_decode_window(
+                    layer_idx,
+                    start_pos,
+                    decode_seq_len,
+                    compressed_len=metadata.get("compressed_len"),
+                    position_ids_cmp=position_ids_cmp,
+                )
+                block_table[f"c{ratio}a_cmp_state"] = pkv.get_cmp_state_block_table_decode_window(
+                    layer_idx, start_pos, decode_seq_len
+                )
+            else:
+                slot_mapping[cmp_block_table_key] = pkv.get_cmp_slot_mapping(
+                    layer_idx,
+                    start_pos,
+                    seq_used_q,
+                    cu_seqlens_q=cu_q_lens,
+                    compressed_len=metadata.get("compressed_len"),
+                    position_ids_cmp=position_ids_cmp,
+                )
+                block_table[f"c{ratio}a_cmp_state"] = pkv.get_cmp_state_block_table(
+                    layer_idx, start_pos, seq_used_q, is_prefill
+                )
+
+            if ratio == 4:
+                block_table["c4a_cmp_kv"] = pkv.get_c4a_cmp_kv_block_table(layer_idx)
+                kernel_metadata["lightning_indexer_quant"] = metadata.get("li_metadata")
+
+        return {
+            "batch_size_per_rank": batch_size,
+            "position_ids": position_ids.to(dtype=torch.int32),
+            "kv_len": current_seq_lens.to(dtype=torch.int32),
+            "actual_seq_q": cu_q_lens[1:],
+            "actual_seq_k": current_seq_lens.to(dtype=torch.int32),
+            "cu_seq_lens_q": cu_q_lens,
+            "seq_used_q": seq_used_q,
+            "start_pos": start_pos,
+            "position_ids_c": position_ids_c,
+            "block_table": block_table,
+            "slot_mapping": slot_mapping,
+            "kernel_metadata": kernel_metadata,
+            "is_prefill": is_prefill,
+            "win_kv_cache": win_kv_cache,
+            "full_kv_cache": full_kv_cache,
+            "prefill_kv": self._build_prefill_kv_plan(
+                context_lens=context_lens,
+                q_lens=q_lens,
+                seq_len=position_ids.shape[-1],
+                batch_size=batch_size,
+                full_kv_cache=full_kv_cache,
+                win_kv_cache=win_kv_cache,
+                block_table=block_table,
+                slot_mapping=slot_mapping,
+                is_prefill=is_prefill,
+            ),
+        }
+
+    def _build_prefill_kv_plan(
+        self,
+        *,
+        context_lens,
+        q_lens,
+        seq_len,
+        batch_size,
+        full_kv_cache,
+        win_kv_cache,
+        block_table,
+        slot_mapping,
+        is_prefill,
+    ):
+        if not is_prefill:
+            return None
+
+        device = q_lens.device
+        q_lens = q_lens.to(dtype=torch.int32, device=device)
+        if seq_len > 0:
+            token_offsets = torch.arange(seq_len, dtype=torch.int32, device=device).unsqueeze(0)
+            full_valid_mask = token_offsets < q_lens.unsqueeze(1)
+        else:
+            full_valid_mask = torch.empty((batch_size, 0), dtype=torch.bool, device=device)
+
+        full_kv_gather_indices = slot_mapping.get("full_kv_gather_indices")
+        if full_kv_gather_indices is None:
+            full_kv_gather_indices = self.paged_cache.get_full_kv_gather_indices(context_lens, q_lens)
+            slot_mapping["full_kv_gather_indices"] = full_kv_gather_indices
+
+        win_local_indices = full_kv_gather_indices.to(device=device, dtype=torch.int32) - \
+            context_lens.to(device=device, dtype=torch.int32).unsqueeze(1)
+        win_local_indices = torch.where(
+            (win_local_indices >= 0) & (win_local_indices < q_lens.unsqueeze(1)),
+            win_local_indices,
+            torch.zeros_like(win_local_indices),
+        ).to(dtype=torch.long)
+
+        return {
+            "full_kv_cache": full_kv_cache,
+            "win_kv_cache": win_kv_cache,
+            "full_block_table": block_table.get("full_kv"),
+            "win_block_table": block_table.get("win_kv"),
+            "full_slot_mapping": slot_mapping.get("full_kv"),
+            "win_slot_mapping": slot_mapping.get("win_kv"),
+            "full_kv_gather_indices": full_kv_gather_indices,
+            "full_valid_mask": full_valid_mask,
+            "win_local_indices": win_local_indices,
+        }
+
+    def _get_slot_mapping_from_block_table(self, seq_lens, position_ids, block_table):
+        seq_lens = seq_lens.to(dtype=torch.int32, device=position_ids.device)
+        batch_size = seq_lens.shape[0]
+        if batch_size == 0:
+            return torch.empty((0,), dtype=torch.int32, device=position_ids.device)
+        max_len = position_ids.shape[-1]
+        valid_mask = torch.arange(max_len, dtype=torch.int32, device=position_ids.device).unsqueeze(0) < seq_lens.unsqueeze(1)
+        block_idx = (position_ids // self.paged_cache.block_size).to(torch.long)
+        offset = (position_ids % self.paged_cache.block_size).to(torch.int32)
+        row_idx = torch.arange(batch_size, dtype=torch.long, device=position_ids.device).unsqueeze(1).expand_as(block_idx)
+        slots = block_table[row_idx, block_idx] * self.paged_cache.block_size + offset
+        return slots[valid_mask].to(dtype=torch.int32)
+
+    def _get_padded_slot_mapping_from_block_table(self, seq_lens, position_ids, block_table):
+        seq_lens = seq_lens.to(dtype=torch.int32, device=position_ids.device)
+        batch_size = seq_lens.shape[0]
+        if batch_size == 0:
+            return torch.empty((0,), dtype=torch.int32, device=position_ids.device)
+        flat_position_ids = position_ids.reshape(-1).to(dtype=torch.int32)
+        row_indices = torch.repeat_interleave(
+            torch.arange(batch_size, dtype=torch.int32, device=position_ids.device),
+            seq_lens,
+        )
+        pad_length = flat_position_ids.shape[0] - row_indices.shape[0]
+        if pad_length > 0:
+            valid_position_ids = flat_position_ids[:-pad_length]
+        else:
+            valid_position_ids = flat_position_ids
+        block_idx = (valid_position_ids // self.paged_cache.block_size).to(torch.long)
+        offset = (valid_position_ids % self.paged_cache.block_size).to(torch.int32)
+        row_indices = row_indices.to(torch.long)
+        slot_mapping = block_table[row_indices, block_idx] * self.paged_cache.block_size + offset
+        if pad_length > 0:
+            pad_tensor = torch.full(
+                (pad_length,),
+                -1,
+                dtype=torch.int32,
+                device=position_ids.device,
+            )
+            slot_mapping = torch.cat([slot_mapping.to(torch.int32), pad_tensor], dim=0)
+        return slot_mapping.to(dtype=torch.int32)
+
+    @staticmethod
+    def _get_zigzag_idx(origin_idx, cp_segment_num):
+        midpoint = cp_segment_num // 2 - 1
+        if origin_idx <= midpoint:
+            return origin_idx, "prev"
+        return midpoint + 1 - (origin_idx - midpoint), "next"
+
+    def _get_cp_cmp_param(
+        self,
+        segment_idx,
+        attn_metadata,
+        split_list_hidden,
+        split_position_ids,
+        split_kv_len,
+        ratio,
+    ):
+        batch_size = split_kv_len.shape[0]
+        cur_kv_len = split_kv_len[:, segment_idx]
+        cur_segment_len = split_list_hidden[segment_idx]
+        cur_position_ids = split_position_ids[segment_idx]
+        if segment_idx == 0 or cur_segment_len == 0:
+            comp_len = torch.zeros([batch_size], dtype=torch.int32, device=cur_position_ids.device)
+        else:
+            overlap_len = ratio if ratio == 4 else 0
+            comp_len = cur_position_ids[:, 0].to(dtype=torch.int32) % ratio + overlap_len
+        seq_used_q = cur_kv_len.to(dtype=torch.int32) + comp_len
+        seq_used_q = torch.where(cur_kv_len > 0, seq_used_q, torch.zeros_like(seq_used_q))
+        cu_seq_lens = torch.cat([
+            torch.zeros(1, dtype=torch.int32, device=cur_position_ids.device),
+            (torch.full_like(cur_kv_len, cur_segment_len, dtype=torch.int32) + comp_len),
+        ])
+        if segment_idx == 0:
+            start_pos = torch.zeros([batch_size], dtype=torch.int32, device=cur_position_ids.device)
+        else:
+            start_pos = torch.full(
+                [batch_size],
+                sum(split_list_hidden[:segment_idx]),
+                dtype=torch.int32,
+                device=cur_position_ids.device,
+            ) - comp_len
+        compressed_len, position_ids_cmp = self.paged_cache.get_compressed_position_ids(
+            start_pos, seq_used_q, cu_seq_lens, ratio
+        )
+        slot_mapping_cmp = self._get_padded_slot_mapping_from_block_table(
+            compressed_len,
+            position_ids_cmp.unsqueeze(0),
+            attn_metadata["block_table"][f"c{ratio}a_cmp_kv"],
+        )
+        if ratio == 4 and segment_idx > 0 and compressed_len.numel() > 0:
+            offsets = torch.nn.functional.pad(
+                torch.cumsum(compressed_len, dim=0, dtype=torch.int32), (1, 0)
+            )[:-1]
+            slot_mapping_cmp[offsets.to(torch.long)] = -1
+        return {
+            "compressed_len": compressed_len.to(dtype=torch.int32),
+            "cu_seq_lens": cu_seq_lens.to(dtype=torch.int32),
+            "seq_used_q": seq_used_q.to(dtype=torch.int32),
+            "start_pos": start_pos.to(dtype=torch.int32),
+            "position_ids_cmp_for_rope": (position_ids_cmp * ratio).to(dtype=torch.long).unsqueeze(0),
+            "slot_mapping_cmp": slot_mapping_cmp.to(dtype=torch.int32),
+            "comp_lens": comp_len.to(dtype=torch.int32),
+        }
+
+    def _build_cp_metadata(self, input_ids, attn_metadata):
+        cp_group = self.hccl_comm_dict.get("cp_group")
+        cp_rank = self._get_cp_rank(cp_group) if cp_group is not None else 0
+        return build_deepseek_v4_cp_metadata(
+            input_ids=input_ids,
+            attn_metadata=attn_metadata,
+            config=self.config,
+            cp_size=self.cp_size,
+            cp_group=cp_group,
+            cp_rank=cp_rank,
+            paged_cache=self.paged_cache,
+            metadata_compress_ratios=self._metadata_compress_ratios,
+            compute_sas_metadata=self._compute_sas_metadata,
+            compute_li_metadata=self._compute_li_metadata,
+            get_slot_mapping_from_block_table=self._get_slot_mapping_from_block_table,
+            get_padded_slot_mapping_from_block_table=self._get_padded_slot_mapping_from_block_table,
+        )
+
+    @classmethod
+    def from_model(
+        cls,
+        model,
+        batch_size,
+        block_size=128,
+        device=None,
+        dtype=None,
+        max_seq_len=None,
+        pa_max_length=None,
+        next_n=None,
+    ):
+        from mojo_opset.modeling.deepseekv4.mojo_deepseek_v4 import PagedDummyCache
+
+        if device is None:
+            device = model.lm_head.weight.device
+        config = model.config
+        if max_seq_len is None:
+            max_seq_len = config.max_position_embeddings
+        if pa_max_length is None:
+            pa_max_length = config.pa_max_length
+        if next_n is None:
+            next_n = config.next_n
+
+        cache_data = PagedDummyCache(
+            config,
+            batch_size=batch_size,
+            device=str(device),
+            block_size=block_size,
+            max_seq_len=max_seq_len,
+            pa_max_length=pa_max_length,
+            next_n=next_n,
+        )
+        return cls(
+            cache_data,
+            config,
+            cp_size=getattr(model, "cp_size", 1),
+            global_rank=getattr(model, "global_rank", 0),
+            hccl_comm_dict=getattr(model, "hccl_comm_dict", {}),
+        )
+
+    def prepare_prefill_inputs(self, input_ids, attention_mask=None, q_lens=None):
+        pkv = self.paged_cache
+        batch_size, seq_len = input_ids.shape
+        device = input_ids.device
+
+        if q_lens is None:
+            if attention_mask is not None:
+                q_lens = attention_mask.to(device=device, dtype=torch.int32).sum(dim=-1).to(dtype=torch.int32)
+            else:
+                q_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device=device)
+
+        context_lens = pkv.get_seq_length(0).to(device=device, dtype=torch.long)
+        if attention_mask is not None:
+            position_ids = (attention_mask.to(device=device, dtype=torch.long).cumsum(dim=-1) - 1).clamp(min=0)
+            position_ids = position_ids.masked_fill(~attention_mask.to(device=device, dtype=torch.bool), 1)
+        else:
+            past_len = int(context_lens.max().item()) if context_lens.numel() > 0 else 0
+            position_ids = torch.arange(past_len, past_len + seq_len, device=device, dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
+
+        cu_q_lens = torch.arange(
+            0, (batch_size + 1) * seq_len, step=seq_len,
+            dtype=torch.int32, device=device,
+        )
+
+        start_pos = context_lens.to(dtype=torch.int32)
+        seq_used_q = q_lens
+        # Golden keeps kv_len as the real request length even when CP pads the
+        # prefill sequence to segment alignment. Treating padding as valid KV
+        # pollutes the tail window handed to decode.
+        current_seq_lens = q_lens.to(dtype=torch.int32)
+
+        compress_ratios = self._metadata_compress_ratios()
+        unique_ratios = sorted(set(
+            compress_ratios[l] if l < len(compress_ratios) else 0
+            for l in range(pkv.num_layers)
+        ))
+        shared_metadata = {}
+        for ratio in unique_ratios:
+            attn_ratio = ratio if ratio > 1 else 1
+            sas_meta = self._compute_sas_metadata(cu_q_lens, current_seq_lens, batch_size, attn_ratio)
+            shared_metadata[ratio] = {"sas_metadata": sas_meta}
+            if ratio > 1:
+                compressed_len, position_ids_cmp = pkv.get_compressed_position_ids(
+                    start_pos, seq_used_q, cu_q_lens, ratio,
+                )
+                cmp_rope_position_ids = (position_ids_cmp * ratio).to(dtype=torch.long).unsqueeze(0)
+                shared_metadata[ratio].update({
+                    "compressed_len": compressed_len,
+                    "position_ids_cmp": position_ids_cmp,
+                    "cmp_rope_position_ids": cmp_rope_position_ids,
+                })
+
+        full_kv_cache = pkv.init_full_buffer_c1a()
+        win_slot_mapping = pkv.get_win_slot_mapping(context_lens, q_lens, pad_to_window=True)
+        prefill_kv = self._build_prefill_kv_plan(
+            context_lens=context_lens,
+            q_lens=q_lens,
+            seq_len=seq_len,
+            batch_size=batch_size,
+            full_kv_cache=full_kv_cache,
+            win_kv_cache=pkv.get_win_kv_for_decode(0)[0],
+            block_table={
+                "full_kv": pkv.get_full_block_table(batch_size),
+                "win_kv": pkv.get_win_kv_for_decode(0)[1],
+            },
+            slot_mapping={
+                "full_kv": pkv.get_full_slot_mapping(context_lens, q_lens),
+                "win_kv": win_slot_mapping,
+                "full_kv_gather_indices": pkv.get_full_kv_gather_indices(context_lens, q_lens),
+            },
+            is_prefill=True,
+        )
+        for metadata in shared_metadata.values():
+            metadata["prefill_kv"] = prefill_kv
+        attn_metadata = self._build_golden_style_attn_metadata(
+            position_ids=position_ids,
+            context_lens=context_lens,
+            q_lens=q_lens,
+            cu_q_lens=cu_q_lens,
+            current_seq_lens=current_seq_lens,
+            start_pos=start_pos,
+            seq_used_q=seq_used_q,
+            shared_metadata=shared_metadata,
+            win_slot_mapping=win_slot_mapping,
+            full_kv_cache=full_kv_cache,
+            is_prefill=True,
+            batch_size=batch_size,
+            decode_fast_path=False,
+        )
+        attn_metadata = self._build_cp_metadata(input_ids, attn_metadata)
+
+        attn_inputs = None
+        if os.getenv("MOJO_BUILD_LEGACY_ATTN_INPUTS", "0") == "1":
+            attn_inputs = {}
+            for layer_idx in range(pkv.num_layers):
+                ratio = compress_ratios[layer_idx] if layer_idx < len(compress_ratios) else 0
+                attn_inputs[layer_idx] = self._prepare_layer_prefill_inputs(
+                    layer_idx, ratio, context_lens, q_lens, cu_q_lens,
+                    start_pos, seq_used_q, batch_size, seq_len, device,
+                    full_kv_cache,
+                    shared_metadata.get(ratio, {}),
+                )
+
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+            "context_lens": context_lens,
+            "cu_q_lens": cu_q_lens,
+            "q_lens": q_lens,
+            "attn_inputs": attn_inputs,
+            "attn_metadata": attn_metadata,
+        }
+
+    def _prepare_layer_prefill_inputs(
+        self, layer_idx, ratio, context_lens, q_lens, cu_q_lens,
+        start_pos, seq_used_q, batch_size, seq_len, device,
+        full_kv_cache, shared_metadata=None,
+    ):
+        pkv = self.paged_cache
+        prefill_kv = shared_metadata.get("prefill_kv") if shared_metadata else None
+        layer_inputs = {
+            "q_lens": q_lens,
+            "cu_q_lens": cu_q_lens,
+            "start_pos": start_pos,
+            "seq_used_q": seq_used_q,
+            "sas_metadata": shared_metadata.get("sas_metadata") if shared_metadata else None,
+            "full_kv_cache": full_kv_cache,
+            "full_block_table": prefill_kv.get("full_block_table") if prefill_kv else pkv.get_full_block_table(batch_size),
+            "full_slot_mapping": prefill_kv.get("full_slot_mapping") if prefill_kv else pkv.get_full_slot_mapping(context_lens, q_lens),
+            "full_kv_gather_indices": prefill_kv.get("full_kv_gather_indices") if prefill_kv else pkv.get_full_kv_gather_indices(context_lens, q_lens),
+            "win_kv_cache": prefill_kv.get("win_kv_cache") if prefill_kv else None,
+            "win_block_table": prefill_kv.get("win_block_table") if prefill_kv else None,
+            "win_slot_mapping": prefill_kv.get("win_slot_mapping") if prefill_kv else None,
+            "full_valid_mask": prefill_kv.get("full_valid_mask") if prefill_kv else None,
+            "win_local_indices": prefill_kv.get("win_local_indices") if prefill_kv else None,
+        }
+        if ratio <= 1:
+            return layer_inputs
+
+        compressed_len = shared_metadata.get("compressed_len") if shared_metadata else None
+        position_ids_cmp = shared_metadata.get("position_ids_cmp") if shared_metadata else None
+        cmp_rope_position_ids = shared_metadata.get("cmp_rope_position_ids") if shared_metadata else None
+        if compressed_len is None or position_ids_cmp is None:
+            compressed_len, position_ids_cmp = pkv.get_compressed_position_ids(
+                start_pos, seq_used_q, cu_q_lens, ratio,
+            )
+            cmp_rope_position_ids = (position_ids_cmp * ratio).to(dtype=torch.long).unsqueeze(0)
+
+        cmp_slot_mapping = pkv.get_cmp_slot_mapping(
+            layer_idx, start_pos, seq_used_q,
+            cu_seqlens_q=cu_q_lens,
+            compressed_len=compressed_len,
+            position_ids_cmp=position_ids_cmp,
+        )
+
+        layer_inputs.update({
+            "sfa_state_cache": pkv.get_sfa_kv_state(layer_idx),
+            "state_block_table": pkv.get_cmp_state_block_table(layer_idx, start_pos, seq_used_q, True),
+            "cmp_slot_mapping": cmp_slot_mapping,
+            "cmp_kv_cache": pkv.get_sfa_cmp_kv(layer_idx),
+            "cmp_block_tables": pkv.get_cmp_kv_block_table(layer_idx),
+            "compressed_len": compressed_len,
+            "cmp_rope_position_ids": cmp_rope_position_ids,
+        })
+        if ratio != 4:
+            return layer_inputs
+
+        c4a_cmp_kv_block_table = pkv.get_c4a_cmp_kv_block_table(layer_idx)
+        li_metadata = shared_metadata.get("li_metadata") if shared_metadata else None
+        if li_metadata is None:
+            indexer_seq_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device=device)
+            li_metadata = self._compute_li_metadata(cu_q_lens[1:], indexer_seq_lens, c4a_cmp_kv_block_table)
+
+        layer_inputs.update({
+            "li_cmp_kv": pkv.get_li_cmp_kv(layer_idx),
+            "li_key_dequant_scale": pkv.get_li_key_dequant_scale(layer_idx),
+            "c4a_cmp_kv_block_table": c4a_cmp_kv_block_table,
+            "li_state_cache": pkv.get_li_kv_state(layer_idx),
+            "li_state_block_table": pkv.get_cmp_state_block_table(layer_idx, start_pos, seq_used_q, True),
+            "li_cmp_slot_mapping": pkv.get_cmp_slot_mapping(
+                layer_idx, start_pos, seq_used_q,
+                cu_seqlens_q=cu_q_lens,
+                compressed_len=compressed_len,
+                position_ids_cmp=position_ids_cmp,
+            ),
+            "li_metadata": li_metadata,
+        })
+        return layer_inputs
+
+    def _prepare_decode_query_state(self, input_ids, *, expected_seq_len=None):
+        pkv = self.paged_cache
+        batch_size, seq_len = input_ids.shape
+        device = input_ids.device
+        if expected_seq_len is not None:
+            if seq_len != expected_seq_len:
+                raise ValueError(f"MTP verify expects seq_len={expected_seq_len}, got {seq_len}")
+
+        context_lens_i32 = pkv.get_seq_length(0).to(device=device, dtype=torch.int32)
+        context_lens = context_lens_i32.to(dtype=torch.long)
+        static_query = self._get_decode_query_static(device=device, batch_size=batch_size, seq_len=seq_len)
+        q_lens = static_query["q_lens"]
+        cu_q_lens = static_query["cu_q_lens"]
+        position_offsets = static_query["position_offsets"]
+        position_ids = context_lens.unsqueeze(1) + position_offsets
+        current_seq_lens = context_lens_i32 + seq_len
+        start_pos = context_lens_i32
+        seq_used_q = q_lens
+        if seq_len == 1:
+            win_slot_mapping = pkv.get_win_slot_mapping_decode(start_pos)
+        else:
+            win_slot_mapping = pkv.get_win_slot_mapping_decode_window(start_pos, seq_len)
+        return {
+            "batch_size": batch_size,
+            "seq_len": seq_len,
+            "device": device,
+            "position_ids": position_ids,
+            "context_lens": context_lens,
+            "current_seq_lens": current_seq_lens,
+            "cu_q_lens": cu_q_lens,
+            "q_lens": q_lens,
+            "start_pos": start_pos,
+            "seq_used_q": seq_used_q,
+            "win_slot_mapping": win_slot_mapping,
+        }
+
+    def _build_decode_shared_metadata(
+        self,
+        *,
+        batch_size,
+        cu_q_lens,
+        current_seq_lens,
+        start_pos,
+        seq_used_q,
+        seq_len,
+        allow_decode_fast_path=False,
+    ):
+        pkv = self.paged_cache
+        shared_metadata = {}
+        for ratio in self._unique_metadata_ratios:
+            attn_ratio = ratio if ratio > 1 else 1
+            sas_meta = self._compute_sas_metadata(cu_q_lens, current_seq_lens, batch_size, attn_ratio)
+            shared_metadata[ratio] = {"sas_metadata": sas_meta}
+            if ratio == 4:
+                c4a_block_table = pkv.get_c4a_cmp_kv_block_table(0)
+                li_meta = self._compute_li_metadata(cu_q_lens[1:], current_seq_lens, c4a_block_table)
+                shared_metadata[ratio]["li_metadata"] = li_meta
+
+        for ratio in self._unique_metadata_ratios:
+            if ratio > 1:
+                if allow_decode_fast_path and seq_len == 1:
+                    compressed_len, position_ids_cmp = pkv.get_compressed_position_ids_decode(start_pos, ratio)
+                elif allow_decode_fast_path and seq_len > 1:
+                    compressed_len, position_ids_cmp = pkv.get_compressed_position_ids_decode_window(
+                        start_pos, seq_len, ratio,
+                    )
+                else:
+                    compressed_len, position_ids_cmp = pkv.get_compressed_position_ids(
+                        start_pos, seq_used_q, cu_q_lens, ratio,
+                    )
+                cmp_rope_position_ids = (position_ids_cmp * ratio).to(dtype=torch.long).unsqueeze(0)
+                shared_metadata[ratio].update({
+                    "compressed_len": compressed_len,
+                    "position_ids_cmp": position_ids_cmp,
+                    "cmp_rope_position_ids": cmp_rope_position_ids,
+                })
+        return shared_metadata
+
+    def prepare_decode_inputs(self, input_ids, *, expected_seq_len=None, allow_decode_fast_path=False):
+        pkv = self.paged_cache
+        state = self._prepare_decode_query_state(input_ids, expected_seq_len=expected_seq_len)
+        shared_metadata = self._build_decode_shared_metadata(
+            batch_size=state["batch_size"],
+            cu_q_lens=state["cu_q_lens"],
+            current_seq_lens=state["current_seq_lens"],
+            start_pos=state["start_pos"],
+            seq_used_q=state["seq_used_q"],
+            seq_len=state["seq_len"],
+            allow_decode_fast_path=allow_decode_fast_path,
+        )
+
+        attn_metadata = self._build_golden_style_attn_metadata(
+            position_ids=state["position_ids"],
+            context_lens=state["context_lens"],
+            q_lens=state["q_lens"],
+            cu_q_lens=state["cu_q_lens"],
+            current_seq_lens=state["current_seq_lens"],
+            start_pos=state["start_pos"],
+            seq_used_q=state["seq_used_q"],
+            shared_metadata=shared_metadata,
+            win_slot_mapping=state["win_slot_mapping"],
+            full_kv_cache=None,
+            is_prefill=False,
+            batch_size=state["batch_size"],
+            decode_fast_path=allow_decode_fast_path,
+            decode_seq_len=state["seq_len"],
+        )
+
+        attn_inputs = None
+        if os.getenv("MOJO_BUILD_LEGACY_ATTN_INPUTS", "0") == "1":
+            attn_inputs = {}
+            compress_ratios = self._metadata_compress_ratios()
+            for layer_idx in range(pkv.num_layers):
+                ratio = compress_ratios[layer_idx] if layer_idx < len(compress_ratios) else 0
+                attn_inputs[layer_idx] = self._prepare_layer_decode_inputs(
+                    layer_idx, ratio, state["context_lens"], state["q_lens"], state["cu_q_lens"],
+                    state["start_pos"], state["seq_used_q"], state["batch_size"], state["seq_len"], state["device"],
+                    shared_metadata.get(ratio, {}), state["win_slot_mapping"],
+                )
+
+        return {
+            "position_ids": state["position_ids"],
+            "context_lens": state["context_lens"],
+            "current_seq_lens": state["current_seq_lens"],
+            "cu_q_lens": state["cu_q_lens"],
+            "q_lens": state["q_lens"],
+            "start_pos": state["start_pos"],
+            "seq_used_q": state["seq_used_q"],
+            "attn_inputs": attn_inputs,
+            "attn_metadata": attn_metadata,
+        }
+
+    def post_decode_step(self, seq_len=1):
+        self.paged_cache.seq_lens += seq_len
+
+    def _prepare_layer_decode_inputs(
+        self, layer_idx, ratio, context_lens, q_lens, cu_q_lens,
+        start_pos, seq_used_q, batch_size, seq_len, device,
+        shared_metadata=None, win_slot_mapping=None,
+    ):
+        pkv = self.paged_cache
+        win_kv_cache, win_block_table = pkv.get_win_kv_for_decode(layer_idx)
+
+        layer_inputs = {
+            "win_kv_cache": win_kv_cache,
+            "win_block_table": win_block_table,
+            "win_slot_mapping": win_slot_mapping,
+            "q_lens": q_lens,
+            "cu_q_lens": cu_q_lens,
+            "start_pos": start_pos,
+            "seq_used_q": seq_used_q,
+            "sas_metadata": shared_metadata.get("sas_metadata") if shared_metadata else None,
+        }
+        if ratio <= 1:
+            return layer_inputs
+
+        compressed_len = shared_metadata.get("compressed_len") if shared_metadata else None
+        position_ids_cmp = shared_metadata.get("position_ids_cmp") if shared_metadata else None
+        cmp_rope_position_ids = shared_metadata.get("cmp_rope_position_ids") if shared_metadata else None
+        if compressed_len is None or position_ids_cmp is None:
+            compressed_len, position_ids_cmp = pkv.get_compressed_position_ids(
+                start_pos, seq_used_q, cu_q_lens, ratio,
+            )
+            cmp_rope_position_ids = (position_ids_cmp * ratio).to(dtype=torch.long).unsqueeze(0)
+
+        cmp_slot_mapping = pkv.get_cmp_slot_mapping(
+            layer_idx, start_pos, seq_used_q,
+            cu_seqlens_q=cu_q_lens,
+            compressed_len=compressed_len,
+            position_ids_cmp=position_ids_cmp,
+        )
+
+        layer_inputs.update({
+            "sfa_state_cache": pkv.get_sfa_kv_state(layer_idx),
+            "state_block_table": pkv.get_cmp_state_block_table(layer_idx, start_pos, seq_used_q, False),
+            "cmp_slot_mapping": cmp_slot_mapping,
+            "cmp_kv_cache": pkv.get_sfa_cmp_kv(layer_idx),
+            "cmp_block_tables": pkv.get_cmp_kv_block_table(layer_idx),
+            "compressed_len": compressed_len,
+            "cmp_rope_position_ids": cmp_rope_position_ids,
+        })
+        if ratio != 4:
+            return layer_inputs
+
+        c4a_cmp_kv_block_table = pkv.get_c4a_cmp_kv_block_table(layer_idx)
+        li_metadata = shared_metadata.get("li_metadata") if shared_metadata else None
+        if li_metadata is None:
+            li_metadata = self._compute_li_metadata(cu_q_lens[1:], context_lens + seq_len, c4a_cmp_kv_block_table)
+
+        layer_inputs.update({
+            "li_cmp_kv": pkv.get_li_cmp_kv(layer_idx),
+            "li_key_dequant_scale": pkv.get_li_key_dequant_scale(layer_idx),
+            "c4a_cmp_kv_block_table": c4a_cmp_kv_block_table,
+            "li_state_cache": pkv.get_li_kv_state(layer_idx),
+            "li_state_block_table": pkv.get_cmp_state_block_table(layer_idx, start_pos, seq_used_q, True),
+            "li_cmp_slot_mapping": pkv.get_cmp_slot_mapping(
+                layer_idx, start_pos, seq_used_q,
+                cu_seqlens_q=cu_q_lens,
+                compressed_len=compressed_len,
+                position_ids_cmp=position_ids_cmp,
+            ),
+            "li_metadata": li_metadata,
+        })
+        return layer_inputs
+
+    def _compute_li_metadata(self, actual_seq_q, actual_seq_k, block_table):
+        config = self.config
+        batch_size = actual_seq_q.shape[0]
+        max_seqlen_q = int(actual_seq_q.max().item())
+        max_seqlen_k = int(actual_seq_k.max().item())
+        try:
+            return torch.ops.custom.npu_quant_lightning_indexer_metadata(
+                actual_seq_lengths_query=actual_seq_q,
+                actual_seq_lengths_key=actual_seq_k,
+                num_heads_q=config.index_n_heads,
+                num_heads_k=1,
+                head_dim=config.index_head_dim,
+                query_quant_mode=0,
+                key_quant_mode=0,
+                batch_size=batch_size,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=config.index_topk,
+                sparse_mode=3,
+                pre_tokens=9223372036854775807,
+                next_tokens=9223372036854775807,
+                cmp_ratio=4,
+                device=f"npu:{torch.npu.current_device()}",
+            )
+        except Exception:
+            return None
+
+    def _compute_sas_metadata(self, cu_q_lens, seq_lens, batch_size, compress_ratio):
+        has_cmp_kv = compress_ratio > 1
+        metadata_kwargs = {
+            "cu_seqlens_q": cu_q_lens,
+            "seqused_kv": seq_lens,
+            "batch_size": batch_size,
+            "cmp_ratio": compress_ratio,
+            "ori_mask_mode": 4,
+            "cmp_mask_mode": 3,
+            "ori_win_left": self.config.sliding_window - 1,
+            "ori_win_right": 0,
+            "layout_q": "TND",
+            "layout_kv": "PA_ND",
+            "num_heads_q": self.config.num_attention_heads,
+            "num_heads_kv": 1,
+            "head_dim": self.config.head_dim,
+            "has_ori_kv": True,
+            "has_cmp_kv": has_cmp_kv,
+        }
+        if has_cmp_kv and compress_ratio == 4:
+            metadata_kwargs["cmp_topk"] = self.config.index_topk
+        try:
+            from mojo_opset import MojoSparseAttnSharedkvMetadata
+            return MojoSparseAttnSharedkvMetadata()(**metadata_kwargs)
+        except Exception:
+            return None
+
+
+class DeepseekMTPRuntimeState(DeepseekSparseAttentionRuntimeState):
+    """Runtime state for DeepSeek-V4 MTP model.
+
+    Uses a PagedDummyCache with only 1 layer (the MTP layer).
+    Shares the same config as the main model but operates on a single layer.
+    """
+
+    def __init__(self, paged_cache, config, mtp_layer_idx, cp_size=1, global_rank=0, hccl_comm_dict=None):
+        super().__init__(
+            paged_cache,
+            config,
+            cp_size=cp_size,
+            global_rank=global_rank,
+            hccl_comm_dict=hccl_comm_dict,
+        )
+        self.mtp_layer_idx = mtp_layer_idx
+
+    def _metadata_compress_ratios(self):
+        return self.paged_cache.config.compress_ratios
+
+    @classmethod
+    def from_model(
+        cls,
+        mtp_model,
+        batch_size,
+        block_size=128,
+        device=None,
+        max_seq_len=None,
+        pa_max_length=None,
+        next_n=None,
+    ):
+        from mojo_opset.modeling.deepseekv4.mojo_deepseek_v4 import PagedDummyCache, DeepseekV4Config
+
+        if device is None:
+            device = mtp_model.lm_head.weight.device if mtp_model.lm_head is not None else torch.npu.current_device()
+        config = mtp_model.config
+        if max_seq_len is None:
+            max_seq_len = config.max_position_embeddings
+        if pa_max_length is None:
+            pa_max_length = config.pa_max_length
+        if next_n is None:
+            next_n = config.next_n
+
+        # Create a config for the MTP cache with only 1 layer
+        mtp_config_kwargs = {k: getattr(config, k) for k in [
+            "vocab_size", "hidden_size", "intermediate_size",
+            "num_attention_heads", "num_key_value_heads", "moe_intermediate_size",
+            "n_shared_experts", "n_routed_experts", "num_experts_per_tok",
+            "routed_scaling_factor", "n_group", "topk_group",
+            "first_k_dense_replace", "norm_topk_prob", "scoring_func", "topk_method",
+            "head_dim", "q_lora_rank", "qk_rope_head_dim", "o_lora_rank", "o_groups",
+            "sliding_window", "hc_mult", "hc_sinkhorn_iters",
+            "hc_eps", "index_n_heads", "index_head_dim", "index_topk",
+            "num_hash_layers", "attention_bias", "attention_dropout",
+            "rms_norm_eps", "hidden_act", "rope_theta", "compress_rope_theta",
+            "max_position_embeddings", "swiglu_limit", "rope_scaling",
+            "pa_max_length", "next_n",
+        ] if hasattr(config, k)}
+        mtp_config_kwargs["num_hidden_layers"] = 1
+        # MTP layer uses the compress_ratio of the last main layer
+        mtp_config_kwargs["compress_ratios"] = [config.compress_ratios[-1]] if config.compress_ratios else [0]
+        mtp_cache_config = DeepseekV4Config(**mtp_config_kwargs)
+
+        mtp_layer_idx = config.num_hidden_layers
+        cache_data = PagedDummyCache(
+            mtp_cache_config,
+            batch_size=batch_size,
+            device=str(device),
+            block_size=block_size,
+            max_seq_len=max_seq_len,
+            pa_max_length=pa_max_length,
+            next_n=next_n,
+        )
+        return cls(
+            cache_data,
+            config,
+            mtp_layer_idx,
+            cp_size=getattr(mtp_model, "cp_size", 1),
+            global_rank=getattr(mtp_model, "global_rank", 0),
+            hccl_comm_dict=getattr(mtp_model, "hccl_comm_dict", {}),
+        )

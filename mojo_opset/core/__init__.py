@@ -37,6 +37,9 @@ from .operators.attention import MojoPagedPrefillQuantGQA
 from .operators.attention import MojoPagedDecodeQuantSWA
 from .operators.attention import MojoPagedPrefillQuantSWA
 
+""" compressor """
+from .operators.compressor import MojoCompressor
+
 """ kvcache """
 from .operators.kv_cache import MojoStoreMLAKVCache
 from .operators.kv_cache import MojoStorePagedKVCache
@@ -67,6 +70,15 @@ from .operators.quantize import MojoDequantSwiGLUQuant
 from .operators.quantize import MojoDynamicQuant
 from .operators.quantize import MojoMoEDynamicQuant
 from .operators.quantize import MojoStaticQuant
+from .operators.npu_ops import MojoFormatCast
+from .operators.npu_ops import MojoFunctionalDequantSwiGLUQuant
+from .operators.npu_ops import MojoGroupedMatmul
+from .operators.npu_ops import MojoMoEDistributeCombineV2
+from .operators.npu_ops import MojoMoEDistributeDispatchV2
+from .operators.npu_ops import MojoMoEFinalizeRouting
+from .operators.npu_ops import MojoMoEInitRoutingV2
+from .operators.npu_ops import MojoMoEReRouting
+from .operators.npu_ops import MojoQuantMatmul
 
 """ moe """
 from .operators.moe import MojoExperts
@@ -75,6 +87,7 @@ from .operators.moe import MojoMoE
 from .operators.moe import MojoMoECombine
 from .operators.moe import MojoMoEDispatch
 from .operators.moe import MojoMoEGating
+from .operators.moe_gating_top_k import MojoMoEGatingTopK
 from .operators.moe import MojoMoEInitRoutingDynamicQuant
 from .operators.moe import MojoQuantExperts
 from .operators.moe import MojoQuantMoE
@@ -92,6 +105,7 @@ from .operators.normalization import MojoResidualAddRMSNorm
 from .operators.normalization import MojoResidualAddRMSNormQuant
 from .operators.normalization import MojoRMSNorm
 from .operators.normalization import MojoRMSNormQuant
+from .operators.rms_norm_dynamic_quant import MojoRMSNormDynamicQuant
 
 """ position_embedding """
 from .operators.position_embedding import MojoRelativeEmbedding
@@ -103,6 +117,7 @@ from .operators.position_embedding import MojoNormRoPEStoreKV
 from .operators.position_embedding import MojoRoPEStoreKV
 from .operators.position_embedding import MojoRotaryEmbedding
 from .operators.position_embedding import MojoVisionRotaryEmbedding2D
+from .operators.inplace_partial_rotary_mul import MojoInplacePartialRotaryMul
 
 """ sampling """
 from .operators.sampling import MojoApplyPenaltiesTempurate
@@ -120,6 +135,23 @@ from .operators.mlp import MojoSwiGLUMLP
 
 """ indexer """
 from .operators.indexer import MojoLightningIndexer
+from .operators.indexer import MojoQuantLightningIndexer
+from .operators.indexer import MojoIndexerCompressEpilog
+from .operators.indexer import MojoKvCompressEpilog
+from .operators.indexer import MojoSparseAttnSharedkv
+from .operators.indexer import MojoSparseAttnSharedkvMetadata
+from .operators.indexer import MojoKvQuantSparseAttnSharedkv
+from .operators.indexer import MojoKvQuantSparseAttnSharedkvMetadata
+from .operators.indexer import MojoQuantLightningIndexerMetadata
+
+""" hc_post """
+from .operators.hc_post import MojoHcPost
+
+""" hc_pre """
+from .operators.hc_pre import MojoHcPre
+
+""" scatter_nd_update_asc """
+from .operators.scatter_nd_update_asc import MojoScatterNdUpdateAsc
 
 """ functions """
 from .functions.activation import MojoSiluFunction
@@ -159,6 +191,8 @@ __all__ = [
     "MojoPagedPrefillQuantGQA",
     "MojoPagedDecodeQuantGQA",
     "MojoPagedPrefillQuantSWA",
+
+    "MojoCompressor",
     "MojoPagedDecodeQuantSWA",
 
     "MojoStorePagedKVCache",
@@ -178,6 +212,15 @@ __all__ = [
     "MojoDynamicQuant",
     "MojoMoEDynamicQuant",
     "MojoDequantSwiGLUQuant",
+    "MojoQuantMatmul",
+    "MojoFunctionalDequantSwiGLUQuant",
+    "MojoGroupedMatmul",
+    "MojoFormatCast",
+    "MojoMoEInitRoutingV2",
+    "MojoMoEReRouting",
+    "MojoMoEFinalizeRouting",
+    "MojoMoEDistributeDispatchV2",
+    "MojoMoEDistributeCombineV2",
 
     "MojoEmbedding",
     "MojoParallelEmbedding",
@@ -187,6 +230,7 @@ __all__ = [
 
     "MojoMoE",
     "MojoMoEGating",
+    "MojoMoEGatingTopK",
     "MojoMoEDispatch",
     "MojoMoEInitRoutingDynamicQuant",
     "MojoFusedSwiGLUMoEScaleDynamicQuantize",
@@ -202,6 +246,7 @@ __all__ = [
     "MojoChannelRMSNorm",
     "MojoRMSNormQuant",
     "MojoLayerNormQuant",
+    "MojoRMSNormDynamicQuant",
     "MojoResidualAddRMSNorm",
     "MojoResidualAddLayerNorm",
     "MojoResidualAddRMSNormQuant",
@@ -212,6 +257,7 @@ __all__ = [
     "MojoApplyRoPE",
     "MojoApplyVisionRoPE2D",
     "MojoRoPEStoreKV",
+    "MojoInplacePartialRotaryMul",
     "MojoNormRoPE",
     "MojoNormRoPEStoreKV",
     "MojoGridRoPE",
@@ -235,6 +281,18 @@ __all__ = [
     "MojoCausalConv1dFunction",
 
     "MojoLightningIndexer",
+    "MojoQuantLightningIndexer",
+    "MojoIndexerCompressEpilog",
+    "MojoKvCompressEpilog",
+    "MojoSparseAttnSharedkv",
+    "MojoSparseAttnSharedkvMetadata",
+    "MojoKvQuantSparseAttnSharedkv",
+    "MojoKvQuantSparseAttnSharedkvMetadata",
+    "MojoQuantLightningIndexerMetadata",
+
+    "MojoHcPost",
+    "MojoHcPre",
+    "MojoScatterNdUpdateAsc",
 
     "MojoFusedLinearCrossEntropyLoss",
 

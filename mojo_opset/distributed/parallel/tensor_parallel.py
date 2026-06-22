@@ -12,6 +12,70 @@ from torch.distributed.tensor.placement_types import Shard
 
 from mojo_opset.distributed.parallel.mojo_parallel import MojoDistributedModule
 from mojo_opset.distributed.parallel.mojo_parallel import MojoRegisterableParallelStyle
+from mojo_opset.distributed.parallel.data_parallel import gather_lmhead_logits_for_attn_dp
+from mojo_opset.distributed.parallel.data_parallel import prepare_lmhead_input_for_attn_dp
+
+
+# DeepSeek V4 LMHead-TP helpers.
+#
+# These helpers keep model files free from LMHead-TP communication details while
+# the generic MojoTensorParallel styles below remain reusable for regular modules.
+def split_even_range(total_size: int, num_partitions: int, partition_rank: int) -> tuple[int, int]:
+    base = total_size // num_partitions
+    rem = total_size % num_partitions
+    start = base * partition_rank + min(partition_rank, rem)
+    end = start + base + (1 if partition_rank < rem else 0)
+    return start, end
+
+
+def get_deepseek_v4_lmhead_tp_partition(
+    vocab_size: int,
+    *,
+    global_rank: int = 0,
+    lmhead_tp_size: int = 1,
+    use_parallelize_module_tp: bool = False,
+) -> tuple[int, int, int, int]:
+    """Return rank-local LMHead vocab partition information for DeepSeek V4."""
+
+    init_tp_size = 1 if use_parallelize_module_tp and lmhead_tp_size > 1 else lmhead_tp_size
+    tp_rank = global_rank % init_tp_size if init_tp_size > 1 else 0
+    vocab_start, vocab_end = split_even_range(vocab_size, init_tp_size, tp_rank)
+    return tp_rank, vocab_start, vocab_end, vocab_end - vocab_start
+
+
+def deepseek_v4_lmhead_tp_forward(
+    *,
+    lm_head,
+    hidden_states,
+    local_vocab_size: int,
+    vocab_size: int,
+    attn_dp_size: int,
+    lmhead_tp_size: int,
+    lmhead_tp_group=None,
+):
+    """Run DeepSeek V4 LMHead with LMHead-TP and Attention-DP aware communication."""
+
+    local_bs, q_len, hidden_size = hidden_states.shape
+    hidden_states_for_lm = hidden_states.view(local_bs * q_len, 1, hidden_size).to(torch.bfloat16)
+    hidden_states_for_lm = prepare_lmhead_input_for_attn_dp(
+        hidden_states_for_lm,
+        attn_dp_size=attn_dp_size,
+        lmhead_tp_size=lmhead_tp_size,
+        lmhead_tp_group=lmhead_tp_group,
+    )
+
+    logits_flat = lm_head(hidden_states_for_lm.view(-1, hidden_size))
+    logits = logits_flat.view(*hidden_states_for_lm.shape[:-1], local_vocab_size)
+    logits = gather_lmhead_logits_for_attn_dp(
+        logits,
+        local_batch=local_bs,
+        q_len=q_len,
+        vocab_size=vocab_size,
+        attn_dp_size=attn_dp_size,
+        lmhead_tp_size=lmhead_tp_size,
+        lmhead_tp_group=lmhead_tp_group,
+    )
+    return logits.reshape(local_bs, q_len, -1)
 
 
 class MojoTensorParallel(MojoRegisterableParallelStyle):

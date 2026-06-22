@@ -11,12 +11,16 @@ from .generation import MojoSampler
 from .generation import MojoSession
 from .generation import PerfHook
 from .generation import PerfMojoGenerator
+from .runtime import DeepseekSparseAttentionRuntimeState
+from .runtime import DeepseekMTPRuntimeState
 from .parallel import dp_allreduce
 from .parallel import dp_scatter
 from .parallel import merge_group_and_share_ffn
 
 __all__ = [
     "BaseModel",
+    "DeepseekSparseAttentionRuntimeState",
+    "DeepseekMTPRuntimeState",
     "DumpHook",
     "GeneratorHook",
     "MojoConfig",
