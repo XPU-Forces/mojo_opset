@@ -300,8 +300,8 @@ class TorchNpuPagedPrefillSWA(MojoPagedPrefillSWA, default_priority=0):
         softmax_scale: Optional[float] = None,
         cu_total_seq_lens: Optional[torch.Tensor] = None,  # [bsz + 1]
         *,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
 
         _, num_q_heads, head_dim = query.shape
@@ -325,18 +325,18 @@ class TorchNpuPagedPrefillSWA(MojoPagedPrefillSWA, default_priority=0):
                 block_table,
                 softmax_scale=softmax_scale,
                 cu_total_seq_lens=cu_total_seq_lens,
-                max_q_lens=max_q_lens,
-                max_total_seq_lens=max_total_seq_lens,
+                max_q_len=max_q_len,
+                max_total_seq_len=max_total_seq_len,
             )
 
         if softmax_scale is None:
             softmax_scale = head_dim**-0.5
 
-        max_seq_len = max_q_lens if max_q_lens is not None else q_seq_lens.max().item()
-        max_total_seq_lens = max_total_seq_lens if max_total_seq_lens else total_seq_lens.max().item()
+        max_seq_len = max_q_len if max_q_len is not None else q_seq_lens.max().item()
+        max_total_seq_lens = max_total_seq_len if max_total_seq_len else total_seq_lens.max().item()
 
         block_table_max_kv_len = block_table.shape[1] * block_size
-        mask_kv_len = max(max_total_seq_lens, block_table_max_kv_len)
+        mask_kv_len = max(max_total_seq_len, block_table_max_kv_len)
 
         # convert query from tnd to bnsd
         query_bnsd = tnd_to_bnsd(query, cu_q_lens, max_seq_len)
