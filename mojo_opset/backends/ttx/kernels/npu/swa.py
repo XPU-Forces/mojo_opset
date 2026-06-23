@@ -767,96 +767,7 @@ def _swa_paged_prefill_kernel(
                 LOCAL_WINDOW,
             )
 
-            for kv_block_id in range(num_global_window_blocks):
-                kv_block_start = kv_block_id * BLOCK_N
-                kv_block_end = min(kv_block_start + BLOCK_N, kv_seq_len)
-                kv_block_len = kv_block_end - kv_block_start
-                logical_page_id = kv_block_start // PAGE_SIZE
-                kv_block_start_in_page = kv_block_start % PAGE_SIZE
-                physical_page_id = tl.load(
-                    block_table_ptr + b_id * stride_block_table_b + logical_page_id * stride_block_table_p
-                )
-                kv_mask = gen_mask_n_right_bound(
-                    aux_mask_ptr_10,
-                    aux_mask_size,
-                    stride_mask_m,
-                    stride_mask_n,
-                    BLOCK_M,
-                    BLOCK_N,
-                    kv_block_start,
-                    kv_seq_len,
-                )
-                if IS_CAUSAL:
-                    # actually, it must be true for global window blocks
-                    mask_gw = gen_mask_n_right_bound(
-                        aux_mask_ptr_10,
-                        aux_mask_size,
-                        stride_mask_m,
-                        stride_mask_n,
-                        BLOCK_M,
-                        BLOCK_N,
-                        kv_block_start,
-                        GLOBAL_WINDOW,
-                    )
-                    if LOCAL_WINDOW is not None:
-                        mask_sw = gen_mask_triu(
-                            aux_mask_ptr_triu,
-                            aux_mask_size,
-                            stride_mask_m,
-                            stride_mask_n,
-                            BLOCK_M,
-                            BLOCK_N,
-                            q_block_start + kv_computed_len,
-                            kv_block_start + LOCAL_WINDOW,
-                        )
-                        mask_gw = mask_gw | mask_sw
-                    mask_causal = gen_mask_tril(
-                        aux_mask_ptr_tril,
-                        aux_mask_size,
-                        stride_mask_m,
-                        stride_mask_n,
-                        BLOCK_M,
-                        BLOCK_N,
-                        q_block_start + kv_computed_len,
-                        kv_block_start,
-                    )
-                    mask_causal = mask_gw & mask_causal
-                    mask = mask_causal & q_mask & kv_mask
-                else:
-                    mask = q_mask & kv_mask
-                cur_k_block_ptr = tl.make_block_ptr(
-                    base=k_ptr + physical_page_id * stride_kp + kv_head_id * stride_kh + kv_block_start_in_page * stride_kt,
-                    shape=(kv_block_len, HEAD_DIM),
-                    strides=(stride_kt, stride_kd),
-                    offsets=(0, 0),
-                    block_shape=(BLOCK_N, BLOCK_D),
-                    order=(1, 0),
-                )
-                cur_v_block_ptr = tl.make_block_ptr(
-                    base=v_ptr + physical_page_id * stride_vp + kv_head_id * stride_vh + kv_block_start_in_page * stride_vt,
-                    shape=(kv_block_len, HEAD_DIM),
-                    strides=(stride_vt, stride_vd),
-                    offsets=(0, 0),
-                    block_shape=(BLOCK_N, BLOCK_D),
-                    order=(1, 0),
-                )
-                acc, l_i, m_i = _sdpa_acc_fwd_MxN(
-                    acc,
-                    l_i,
-                    m_i,
-                    cur_q_block,
-                    cur_k_block_ptr,
-                    cur_v_block_ptr,
-                    mask,
-                    scale,
-                    HEAD_DIM,
-                    BLOCK_M,
-                    BLOCK_N,
-                    BLOCK_D,
-                    v_ptr.dtype.element_ty == tl.float8e5,
-                )
-
-            for kv_block_id in range(non_global_window_start_block, num_total_blocks):
+            for kv_block_id in range(num_total_blocks):
                 kv_block_start = kv_block_id * BLOCK_N
                 kv_block_end = min(kv_block_start + BLOCK_N, kv_seq_len)
                 kv_block_len = kv_block_end - kv_block_start
@@ -886,6 +797,7 @@ def _swa_paged_prefill_kernel(
                         q_block_start + kv_computed_len,
                         kv_block_start,
                     )
+                    mask_vis = mask_causal
                     if LOCAL_WINDOW is not None:
                         mask_sw = gen_mask_triu(
                             aux_mask_ptr_triu,
@@ -897,8 +809,23 @@ def _swa_paged_prefill_kernel(
                             q_block_start + kv_computed_len,
                             kv_block_start + LOCAL_WINDOW,
                         )
-                        mask_causal = mask_causal & mask_sw
-                    mask = mask_causal & q_mask & kv_mask
+                        mask_vis = mask_vis & mask_sw
+                    if GLOBAL_WINDOW is not None and kv_block_start < GLOBAL_WINDOW:
+                        mask_gw = gen_mask_n_right_bound(
+                            aux_mask_ptr_10,
+                            aux_mask_size,
+                            stride_mask_m,
+                            stride_mask_n,
+                            BLOCK_M,
+                            BLOCK_N,
+                            kv_block_start,
+                            GLOBAL_WINDOW,
+                        )
+                        if LOCAL_WINDOW is not None:
+                            mask_vis = (mask_gw | mask_sw) & mask_causal
+                        else:
+                            mask_vis = mask_gw & mask_causal
+                    mask = mask_vis & q_mask & kv_mask
                 else:
                     mask = q_mask & kv_mask
 
@@ -918,21 +845,24 @@ def _swa_paged_prefill_kernel(
                     block_shape=(BLOCK_N, BLOCK_D),
                     order=(1, 0),
                 )
-                acc, l_i, m_i = _sdpa_acc_fwd_MxN(
-                    acc,
-                    l_i,
-                    m_i,
-                    cur_q_block,
-                    cur_k_block_ptr,
-                    cur_v_block_ptr,
-                    mask,
-                    scale,
-                    HEAD_DIM,
-                    BLOCK_M,
-                    BLOCK_N,
-                    BLOCK_D,
-                    v_ptr.dtype.element_ty == tl.float8e5,
-                )
+                if mask is not False:
+                    k = tl.load(cur_k_block_ptr, boundary_check=(0, 1), padding_option="zero")
+                    k_T = tl.trans(k)
+                    qk = tl.dot(cur_q_block, k_T)
+                    qk = qk * scale
+                    if mask is not None and mask is not True:
+                        qk = tl.where(mask, qk, -1e6)
+                    m_ij = tl.maximum(m_i, tl.max(qk, 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL)
+                    qk = qk - m_ij[:, None]
+                    p = tl.math.exp(qk)
+                    p_cast = p.to(k_T.dtype)
+                    v = tl.load(cur_v_block_ptr, boundary_check=(0, 1), padding_option="zero")
+                    l_ij = tl.sum(p, 1)
+                    alpha = tl.math.exp(m_i - m_ij)
+                    l_i = l_i * alpha + l_ij
+                    acc = acc * alpha[:, None]
+                    acc = tl.dot(p_cast, v, acc)
+                    m_i = m_ij
 
             # cur_o_block_ptr = tl.advance(o_block_ptr, (q_block_start.to(tl.int32), 0))
             cur_o_block_ptr = tl.make_block_ptr(
@@ -970,16 +900,19 @@ def swa_paged_prefill_impl(
 
     o = torch.zeros_like(q, memory_format=torch.contiguous_format)
     if q.dtype == torch.float32:
-        BLOCK_M = 64
+        BLOCK_M = min(64, triton.next_power_of_2(tot_q_toks))
         BLOCK_N = min(64, triton.next_power_of_2(page_size))
     else:
-        BLOCK_M = 128
+        BLOCK_M = min(128, triton.next_power_of_2(tot_q_toks))
         BLOCK_N = min(128, triton.next_power_of_2(page_size))
 
     BLOCK_D = head_dim
     cube_num = get_num_cores("cube")
 
-    grid = (cube_num,)
+    num_q_chunks = triton.cdiv(tot_q_toks, BLOCK_M)
+    num_tasks = num_q_chunks * num_q_heads
+    grid = (min(cube_num, num_tasks),)
+
 
     _swa_paged_prefill_kernel[grid](
         o,
