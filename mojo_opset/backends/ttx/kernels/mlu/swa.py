@@ -824,9 +824,9 @@ def _swa_paged_decode_kernel(
             seq_offsets = tl.arange(0, BLOCK_SIZE_Q_HEADS * Q_SEQLEN) // BLOCK_SIZE_Q_HEADS
             base = kv_block_start + tl.arange(0, BLOCK_SIZE_N)
             if LOCAL_WINDOW is not None:
-                sw_mask = base[None, :] + LOCAL_WINDOW >= kv_seq_len - (Q_SEQLEN - seq_offsets[:, None])
+                sw_mask = base[None, :] + LOCAL_WINDOW >= kv_seq_len - Q_SEQLEN + seq_offsets[:, None] 
                 gw_mask = gw_mask | sw_mask
-            casul_mask = base[None, :] - seq_offsets[:, None]  <= kv_seq_len - Q_SEQLEN
+            casul_mask = base[None, :]  <= kv_seq_len - Q_SEQLEN + seq_offsets[:, None]
             mask = gw_mask & kv_mask[None, :] & casul_mask
 
             acc, l_i, m_i = _decode_acc_fwd_MxN(
@@ -874,9 +874,9 @@ def _swa_paged_decode_kernel(
             kv_mask = tl.arange(0, BLOCK_SIZE_N) < kv_block_len
             seq_offsets = tl.arange(0, BLOCK_SIZE_Q_HEADS * Q_SEQLEN) // BLOCK_SIZE_Q_HEADS
             base = kv_block_start + tl.arange(0, BLOCK_SIZE_N)
-            casul_mask = base[None, :] - seq_offsets[:, None] <= kv_seq_len - Q_SEQLEN
+            casul_mask = base[None, :]  <= kv_seq_len - Q_SEQLEN + seq_offsets[:, None]
             if LOCAL_WINDOW is not None:
-                sw_mask = base[None, :] + LOCAL_WINDOW >= kv_seq_len - (Q_SEQLEN - seq_offsets[:, None])
+                sw_mask = base[None, :] + LOCAL_WINDOW >= kv_seq_len - Q_SEQLEN + seq_offsets[:, None]
                 mask = sw_mask & kv_mask[None, :] & casul_mask
             else:
                 mask = kv_mask[None, :] & casul_mask 
