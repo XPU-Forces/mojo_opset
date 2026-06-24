@@ -101,7 +101,14 @@ def get_impl_by_platform():
 
             for _, module_name, _ in pkgutil.iter_modules([api_dir_path]):
                 full_module_name = f"{api_package_name}.{module_name}"
-                module = importlib.import_module(full_module_name)
+                try:
+                    module = importlib.import_module(full_module_name)
+                except ImportError as e:
+                    logger.warning(
+                        f"Skip backend module '{full_module_name}' due to import error: {e}. "
+                        f"Other operators in this backend are unaffected."
+                    )
+                    continue
 
                 for name, op in inspect.getmembers(module, inspect.isclass):
                     if (
@@ -113,7 +120,7 @@ def get_impl_by_platform():
                         logger.debug(f"Found supported operator '{name}' in {full_module_name}")
                         import_op_map[name] = op
 
-    except (ImportError, IndexError):
+    except IndexError:
         import traceback
 
         logger.error(f"Failed to discover operators: {traceback.format_exc()}")
