@@ -5,6 +5,74 @@ from ...core.operator import MojoOperator
 
 
 class MojoFusedAttnOutputGate(MojoOperator):
+    """Fused gated attention output for a single attention path.
+
+    Accepts a raw attention output (3D [T, N, D] or 2D [T, N*D]), reshapes
+    internally, and applies a per-head sigmoid gate driven by ``hidden_states``.
+
+    Computation (head mode, fp32 internal):
+        gate = sigmoid(hidden_states @ gate_weight.T)
+        output = (attn_output.view(T, N, D) * gate.unsqueeze(-1)).view(T, N * D)
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        head_dim: int,
+        bias: bool = False,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        assert num_heads > 0
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+
+        self.gate_weight = nn.Parameter(
+            torch.empty(num_heads, hidden_size, **self.tensor_factory_kwargs)
+        )
+        if bias:
+            self.gate_bias = nn.Parameter(
+                torch.empty(num_heads, **self.tensor_factory_kwargs)
+            )
+        else:
+            self.register_parameter("gate_bias", None)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attn_output: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            hidden_states: [T, hidden_size] — gate input (pre-attn residual).
+            attn_output:   [T, N, D] or [T, N * D] — attention output.
+
+        Returns:
+            [T, N * D], same dtype as hidden_states.
+        """
+        T = hidden_states.shape[0]
+        attn_output = attn_output.view(T, self.num_heads, self.head_dim)
+
+        gate = torch.matmul(hidden_states.float(), self.gate_weight.t().float())
+        if self.gate_bias is not None:
+            gate = gate + self.gate_bias.float()
+        gate = torch.sigmoid(gate)
+
+        gated = attn_output.float() * gate.unsqueeze(-1)
+        return gated.view(T, self.num_heads * self.head_dim).to(hidden_states.dtype)
+
+    def extra_repr(self) -> str:
+        return (
+            f"hidden_size={self.hidden_size}, "
+            f"num_heads={self.num_heads}, "
+            f"head_dim={self.head_dim}, "
+            f"bias={self.gate_bias is not None}"
+        )
+
+
+class MojoFusedConcatAttnOutputGate(MojoOperator):
     """Fused gated attention output for dual-path (full + SWA) attention.
 
     Holds two separate weight parameters (one per attention path) for

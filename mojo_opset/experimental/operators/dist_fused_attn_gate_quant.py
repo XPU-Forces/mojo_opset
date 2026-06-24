@@ -4,13 +4,13 @@ import torch
 import torch.distributed as dist
 
 from ...core.operator import MojoOperator
-from .attention_gate import MojoFusedAttnOutputGate
+from .attention_gate import MojoFusedConcatAttnOutputGate
 
-__all__ = ["MojoDistFusedAttnGateQuant"]
+__all__ = ["MojoDistFusedConcatAttnGateQuant"]
 
 
-class MojoDistFusedAttnGateQuant(MojoOperator):
-    """Distributed variant of :class:`MojoFusedAttnGateQuant`.
+class MojoDistFusedConcatAttnGateQuant(MojoOperator):
+    """Distributed variant of :class:`MojoFusedConcatAttnGateQuant`.
 
     Same gate + smooth-quant pipeline as the base op, but the per-token amax
     used to derive the int8 scale is reduced across the channel slices held
@@ -42,7 +42,7 @@ class MojoDistFusedAttnGateQuant(MojoOperator):
     Construction
     ------------
     The caller can pass an externally-owned ``attn_gate`` (a built
-    :class:`MojoFusedAttnOutputGate`) so this op shares the gate sub-module
+    :class:`MojoFusedConcatAttnOutputGate`) so this op shares the gate sub-module
     with the parent module instead of allocating duplicates. Sub-Module
     sharing is safe under PyTorch's lazy-init: ``Module._apply`` only
     replaces entries in ``_parameters`` / ``_buffers``, not in ``_modules``.
@@ -64,7 +64,7 @@ class MojoDistFusedAttnGateQuant(MojoOperator):
         bias: bool = False,
         quant_dtype: torch.dtype = torch.int8,
         tp_group: Optional[dist.ProcessGroup] = None,
-        attn_gate: Optional[MojoFusedAttnOutputGate] = None,
+        attn_gate: Optional[MojoFusedConcatAttnOutputGate] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -85,7 +85,7 @@ class MojoDistFusedAttnGateQuant(MojoOperator):
         if attn_gate is not None:
             object.__setattr__(self, "attn_gate", attn_gate)
         else:
-            AttnGateCls = MojoFusedAttnOutputGate._registry.get(self._backend)
+            AttnGateCls = MojoFusedConcatAttnOutputGate._registry.get("torch")
             self.attn_gate = AttnGateCls(
                 hidden_size=hidden_size,
                 num_heads_full=num_heads_full,

@@ -2,9 +2,48 @@ import torch
 from torch import nn
 
 from ixformer import functions as ixf_f
-from mojo_opset.experimental import MojoFusedAttnOutputGate
+from mojo_opset.experimental import MojoFusedAttnOutputGate, MojoFusedConcatAttnOutputGate
+
 
 class IxformerFusedAttnOutputGate(MojoFusedAttnOutputGate):
+    supported_platforms_list = ["ilu"]
+
+    @staticmethod
+    def _cast_weight_and_bias_hook(module, incompatible_keys):
+        module._cached_weight = module.gate_weight.data.float()
+        if module.gate_bias is not None:
+            module._cached_bias = module.gate_bias.data.float()
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        head_dim: int,
+        bias: bool = False,
+        **kwargs,
+    ):
+        super().__init__(hidden_size, num_heads, head_dim, bias, **kwargs)
+
+        self.register_buffer("_cached_weight", None, persistent=False)
+        self.register_buffer("_cached_bias", None, persistent=False)
+
+        self.register_load_state_dict_post_hook(self._cast_weight_and_bias_hook)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attn_output: torch.Tensor,
+    ) -> torch.Tensor:
+        gate = ixf_f.mixed_type_linear(hidden_states, self._cached_weight)
+
+        attn_output = attn_output.view(-1, self.num_heads, self.head_dim)
+
+        gated = ixf_f.fused_sigmoid_mul(attn_output, gate, self._cached_bias)
+
+        return gated.view(-1, self.num_heads * self.head_dim)
+
+
+class IxformerFusedConcatAttnOutputGate(MojoFusedConcatAttnOutputGate):
     supported_platforms_list = ["ilu"]
 
     @staticmethod
@@ -27,9 +66,9 @@ class IxformerFusedAttnOutputGate(MojoFusedAttnOutputGate):
         self.register_load_state_dict_post_hook(self._cat_weight_and_bias_hook)
 
     def forward(
-        self, 
-        hidden_states: torch.Tensor, 
-        full_attn_output: torch.Tensor, 
+        self,
+        hidden_states: torch.Tensor,
+        full_attn_output: torch.Tensor,
         swa_attn_output: torch.Tensor
     ) -> torch.Tensor:
         gate = ixf_f.mixed_type_linear(hidden_states, self._cached_weight)
@@ -40,4 +79,3 @@ class IxformerFusedAttnOutputGate(MojoFusedAttnOutputGate):
         gated = ixf_f.fused_concat_sigmoid_mul(full_attn_output, swa_attn_output, gate, self._cached_bias)
 
         return gated.view(-1, self.num_heads_total * self.head_dim)
-

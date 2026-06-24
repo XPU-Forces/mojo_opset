@@ -39,8 +39,8 @@ def _quant_gemm(
     ``(K, N)`` and is transposed via ``.mT`` to align with the int8-GEMM
     contract.
     """
-    w = weight if trans_weight else weight.mT
-    out = torch.mul(input_i8.int().unsqueeze(-2), w.int()).float().sum(dim=-1)
+    w = weight if trans_weight else weight.mT  # [N, K]
+    out = input_i8.float() @ w.float().T       # [M, N]
     out = out * input_scale.float().unsqueeze(-1) * weight_scale.float()
     return out.to(output_dtype)
 

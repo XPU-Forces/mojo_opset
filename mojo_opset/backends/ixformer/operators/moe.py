@@ -184,6 +184,7 @@ class IxformerMoE(MojoMoE):
         num_tokens, dim = hidden_states.shape
 
         need_gpu_size = self.disable_sync or enable_cuda_graph
+        graph_safe_ep = self.ep_size > 1 and need_gpu_size
 
         if self.ep_size > 1:
             # _ep variant filters tokens to the local expert range [ep_start, ep_end);
@@ -198,6 +199,7 @@ class IxformerMoE(MojoMoE):
                 self.ep_start,
                 self.ep_end,
                 gdr_buffer_ptr=None if need_gpu_size else self.gdr_buffer_ptr,
+                graph_safe=graph_safe_ep,
             )
         else:
             (src_to_dst,
@@ -210,7 +212,9 @@ class IxformerMoE(MojoMoE):
             )
             expand_tokens = num_tokens * self.top_k
 
-        if sorted_token_ids.shape[0] == 0:
+        dispatch_tokens = num_tokens * self.top_k if graph_safe_ep else expand_tokens
+
+        if not graph_safe_ep and sorted_token_ids.shape[0] == 0:
             combined = torch.zeros(
                 num_tokens, self.hidden_size,
                 dtype=hidden_states.dtype, device=hidden_states.device,
@@ -221,9 +225,10 @@ class IxformerMoE(MojoMoE):
             sorted_hidden_states = ixf_f.moe_expand_input(
                 hidden_states=hidden_states,
                 dst_to_src=sorted_token_ids,
-                dst_tokens=expand_tokens,
+                dst_tokens=dispatch_tokens,
                 topk=self.top_k,
                 src_to_dst=src_to_dst,
+                check_valid=graph_safe_ep,
             ).view(-1, dim)
 
             # gemv variant takes GPU-side sizes so kernel shapes don't depend on CPU values during graph capture.
@@ -431,26 +436,14 @@ class IxformerQuantMoE(MojoQuantMoE):
         # all_gather the (tiny) routing tensors afterwards. dispatch then sees the
         # full hidden_states + full routing.
         if self.dp_input and self.ep_size > 1:
-            comm_stream = torch.cuda.Stream()
-            curr_stream = torch.cuda.current_stream()
-            full_start = torch.cuda.Event()
-            full_stop = torch.cuda.Event()
-            index_start = torch.cuda.Event()
-            index_stop = torch.cuda.Event()
-            gates_start = torch.cuda.Event()
-            gates_stop = torch.cuda.Event()
             local_tokens = hidden_states.shape[0]
             full = torch.empty(
                 local_tokens * self.ep_size, hidden_states.shape[1],
                 dtype=hidden_states.dtype, device=hidden_states.device,
             )
-            full_start.record(curr_stream)
-            comm_stream.wait_event(full_start)
-            with torch.cuda.stream(comm_stream):
-                ixfd.all_gather_into_tensor(
-                    full, hidden_states.contiguous(), group=self.ep_group, async_op=True,
-                )
-            full_stop.record(comm_stream)
+            h_hdl = dist.all_gather_into_tensor(
+                full, hidden_states.contiguous(), group=self.ep_group, async_op=True,
+            )
 
             # gating on local hidden_states — runs on compute stream while AG(h) flies.
             local_gate_logits = ixf_f.triple_gemm_bf16_bf16_fp32(
@@ -467,32 +460,26 @@ class IxformerQuantMoE(MojoQuantMoE):
                 local_tokens * self.ep_size, *local_top_k_indices.shape[1:],
                 dtype=local_top_k_indices.dtype, device=local_top_k_indices.device,
             )
-            index_start.record(curr_stream)
-            comm_stream.wait_event(index_start)
-            with torch.cuda.stream(comm_stream):
-                ixfd.all_gather_into_tensor(
-                    full_top_k_indices, local_top_k_indices.contiguous(),
-                    group=self.ep_group, async_op=True,
-                )
-            index_stop.record(comm_stream)
+            idx_hdl = dist.all_gather_into_tensor(
+                full_top_k_indices, local_top_k_indices.contiguous(),
+                group=self.ep_group, async_op=True,
+            )
             full_top_k_gates = torch.empty(
                 local_tokens * self.ep_size, *local_top_k_gates.shape[1:],
                 dtype=local_top_k_gates.dtype, device=local_top_k_gates.device,
             )
-            gates_start.record(curr_stream)
-            comm_stream.wait_event(gates_start)
-            with torch.cuda.stream(comm_stream):
-                ixfd.all_gather_into_tensor(
-                    full_top_k_gates, local_top_k_gates.contiguous(),
-                    group=self.ep_group, async_op=True,
-                )
-            gates_stop.record(comm_stream)
+            gates_hdl = dist.all_gather_into_tensor(
+                full_top_k_gates, local_top_k_gates.contiguous(),
+                group=self.ep_group, async_op=True,
+            )
+
+            h_hdl.wait()
+            idx_hdl.wait()
+            gates_hdl.wait()
 
             hidden_states = full
             top_k_indices = full_top_k_indices
             top_k_gates = full_top_k_gates
-            curr_stream.wait_event(full_stop)
-            curr_stream.wait_event(index_stop)
         else:
             # triple_gemm uses 3 bf16 components of the fp32 gate weight to emulate fp32 matmul precision on bf16 HW.
             gate_logits = ixf_f.triple_gemm_bf16_bf16_fp32(
@@ -506,13 +493,11 @@ class IxformerQuantMoE(MojoQuantMoE):
         num_tokens, dim = hidden_states.shape
 
         need_gpu_size = self.disable_sync or enable_cuda_graph
+        graph_safe_ep = self.ep_size > 1 and need_gpu_size
 
         if self.ep_size > 1:
             # _ep variant filters tokens to the local expert range [ep_start, ep_end);
             # expand_tokens is the actual local token count after filtering.
-            if need_gpu_size:
-                raise NotImplementedError(f"IxformerQuantMoE: EP QuantMoE does not support cuda graph capture or disable_sync=True (set IXFORMER_DISABLE_SYNC=0).")
-
             (src_to_dst,
              sorted_token_ids,
              expert_sizes_gpu,
@@ -523,6 +508,7 @@ class IxformerQuantMoE(MojoQuantMoE):
                 self.ep_start,
                 self.ep_end,
                 gdr_buffer_ptr=None if need_gpu_size else self.gdr_buffer_ptr,
+                graph_safe=graph_safe_ep,
             )
         else:
             (src_to_dst,
@@ -534,10 +520,10 @@ class IxformerQuantMoE(MojoQuantMoE):
                 gdr_buffer_ptr=None if need_gpu_size else self.gdr_buffer_ptr,
             )
             expand_tokens = num_tokens * self.top_k
-        
+
+        dispatch_tokens = num_tokens * self.top_k if graph_safe_ep else expand_tokens
+
         if sorted_token_ids.shape[0] == 0:
-            if self.dp_input and self.ep_size > 1:
-                curr_stream.wait_event(gates_stop)
             combined = torch.zeros(
                 num_tokens, self.hidden_size,
                 dtype=hidden_states.dtype, device=hidden_states.device,
@@ -550,11 +536,12 @@ class IxformerQuantMoE(MojoQuantMoE):
             i8_hs, quant_scale = ixf_f.moe_expand_input_dynamic_scaled_int8(
                 hidden_states=hidden_states,
                 dst_to_src=sorted_token_ids,
-                dst_tokens=expand_tokens,
+                dst_tokens=dispatch_tokens,
                 topk=self.top_k,
                 src_to_dst=src_to_dst,
                 topk_ids=top_k_indices,
                 smooth_scales=self.experts.up_proj_quantize.inv_smooth_scale,
+                check_valid=graph_safe_ep,
             )
             i8_hs = i8_hs.view(-1, dim)
 
@@ -610,6 +597,7 @@ class IxformerQuantMoE(MojoQuantMoE):
                 dst_to_src=sorted_token_ids,
                 topk_ids=top_k_indices,
                 act_type="swiglu",
+                check_valid=graph_safe_ep,
             )
 
             group_gemm_output2 = torch.empty(
@@ -666,9 +654,6 @@ class IxformerQuantMoE(MojoQuantMoE):
 
             # src_to_dst == -1 marks padding slots that must not be summed.
             reduce_mask = src_to_dst == -1
-
-            if self.dp_input and self.ep_size > 1:
-                curr_stream.wait_event(gates_stop)
 
             combined = ixf_f.moe_output_reduce_sum(
                 input=expert_outputs,

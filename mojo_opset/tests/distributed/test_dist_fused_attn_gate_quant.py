@@ -1,8 +1,8 @@
-"""Distributed correctness tests for MojoDistFusedAttnGateQuant.
+"""Distributed correctness tests for MojoDistFusedConcatAttnGateQuant.
 
 Mirrors mojo_opset/tests/accuracy/operators/test_compute_with_comm.py: each
 worker constructs the op (current backend) and a torch-backend reference, and
-``forward_diff_with`` compares the two. When MojoDistFusedAttnGateQuant has no
+``forward_diff_with`` compares the two. When MojoDistFusedConcatAttnGateQuant has no
 device-specific backend registered, all cases skip via ``bypass_not_implemented``
 (both operands resolve to the same auto-generated Torch class).
 
@@ -19,7 +19,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from mojo_opset.experimental import MojoDistFusedAttnGateQuant
+from mojo_opset.experimental import MojoDistFusedConcatAttnGateQuant
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_dist_backend, get_platform
 
@@ -94,12 +94,12 @@ def master_port():
 
 
 def _skip_if_no_specific_backend():
-    """Skip when MojoDistFusedAttnGateQuant only has the auto-generated torch fallback."""
-    default_cls = MojoDistFusedAttnGateQuant._registry.get(None)
-    torch_cls = MojoDistFusedAttnGateQuant._registry.get("torch")
+    """Skip when MojoDistFusedConcatAttnGateQuant only has the auto-generated torch fallback."""
+    default_cls = MojoDistFusedConcatAttnGateQuant._registry.get(None)
+    torch_cls = MojoDistFusedConcatAttnGateQuant._registry.get("torch")
     if default_cls is torch_cls:
         raise NotImplementedError(
-            "No device-specific backend for MojoDistFusedAttnGateQuant; "
+            "No device-specific backend for MojoDistFusedConcatAttnGateQuant; "
             "both operands resolve to the same implementation."
         )
 
@@ -148,7 +148,7 @@ def test_dist_fused_attn_gate_quant_no_dist(T, N_full, N_swa, head_dim, hidden_s
     gw_full = torch.randn(N_full, hidden_size, dtype=dtype)
     gw_swa = torch.randn(N_swa, hidden_size, dtype=dtype)
 
-    op = MojoDistFusedAttnGateQuant(
+    op = MojoDistFusedConcatAttnGateQuant(
         hidden_size=hidden_size,
         num_heads_full=N_full,
         num_heads_swa=N_swa,
@@ -158,7 +158,7 @@ def test_dist_fused_attn_gate_quant_no_dist(T, N_full, N_swa, head_dim, hidden_s
     )
     _load_op_params(op, inv_smooth, gw_full, gw_swa, None, None)
 
-    op_ref = MojoDistFusedAttnGateQuant._registry.get("torch")(
+    op_ref = MojoDistFusedConcatAttnGateQuant._registry.get("torch")(
         hidden_size=hidden_size,
         num_heads_full=N_full,
         num_heads_swa=N_swa,
@@ -200,13 +200,13 @@ def test_dist_fused_attn_gate_quant_no_dist_non_contiguous(
     gw_full = torch.randn(N_full, hidden_size, dtype=dtype)
     gw_swa = torch.randn(N_swa, hidden_size, dtype=dtype)
 
-    op = MojoDistFusedAttnGateQuant(
+    op = MojoDistFusedConcatAttnGateQuant(
         hidden_size=hidden_size, num_heads_full=N_full, num_heads_swa=N_swa,
         head_dim=head_dim, bias=False, tp_group=None,
     )
     _load_op_params(op, inv_smooth, gw_full, gw_swa, None, None)
 
-    op_ref = MojoDistFusedAttnGateQuant._registry.get("torch")(
+    op_ref = MojoDistFusedConcatAttnGateQuant._registry.get("torch")(
         hidden_size=hidden_size, num_heads_full=N_full, num_heads_swa=N_swa,
         head_dim=head_dim, bias=False, tp_group=None,
     )
@@ -252,7 +252,7 @@ def _worker_dist_gate_quant(
         gw_full_local = _to_dev(gw_full[rank * n_full_local : (rank + 1) * n_full_local].contiguous())
         gw_swa_local = _to_dev(gw_swa[rank * n_swa_local : (rank + 1) * n_swa_local].contiguous())
 
-        op = MojoDistFusedAttnGateQuant(
+        op = MojoDistFusedConcatAttnGateQuant(
             hidden_size=hidden_size,
             num_heads_full=n_full_local,
             num_heads_swa=n_swa_local,
@@ -263,7 +263,7 @@ def _worker_dist_gate_quant(
         op = op.to(DEVICE) if DEVICE != "cpu" else op
         _load_op_params(op, inv_smooth_local, gw_full_local, gw_swa_local, None, None)
 
-        op_ref = MojoDistFusedAttnGateQuant._registry.get("torch")(
+        op_ref = MojoDistFusedConcatAttnGateQuant._registry.get("torch")(
             hidden_size=hidden_size,
             num_heads_full=n_full_local,
             num_heads_swa=n_swa_local,
