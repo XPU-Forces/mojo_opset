@@ -1151,6 +1151,117 @@ class MojoPagedDecodeSWAWithKVDequant(MojoOperator):
         return f"{self.is_causal=}, {self.gqa_layout=}, {self.global_window_size=}, {self.local_window_size=}, {self.query_dtype=}, {self.context_dtype=}, {self.compute_dtype=}".replace("self.", "")
 
 
+class MojoPagedDecodeNstepSWA(MojoOperator):
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+        global_window_size: Optional[int] = None,
+        local_window_size: Optional[int] = None,
+    ):
+        """
+        Paged decode SWA operator that consumes a multi-step (n-step) query of shape
+        [bsz, seq_len, n_q_heads, head_dim].
+
+        Parameter descriptions:
+        - gqa_layout (str): GQA head grouping layout, values {"ABAB","AABB"}, default "AABB".
+        - is_causal (bool): Whether to enable causal masking, default True.
+        - global_window_size (Optional[int]): Global attention window length; None means no global window,
+            default None. Only effective when is_causal=True.
+        - local_window_size (Optional[int]): Local attention window length; None means no local window,
+            default None. Only effective when is_causal=True.
+        """
+        super().__init__()
+
+        if gqa_layout not in ["ABAB", "AABB"]:
+            raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
+
+        self.is_causal = is_causal
+        self.gqa_layout = gqa_layout
+        self.gqa_interleave = gqa_layout == "ABAB"
+        self.global_window_size = global_window_size
+        self.local_window_size = local_window_size
+
+    def forward(
+        self,
+        query: torch.Tensor,  # [bsz, seq_len, n_q_heads, head_dim]
+        key_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
+        value_cache: torch.Tensor,  # [n_pages, n_kv_heads, page_size, head_dim]
+        total_seq_lens: torch.Tensor,  # [bsz]
+        block_table: torch.Tensor,  # [bsz, max_num_blocks]
+        softmax_scale: Optional[float] = None,
+        *,
+        max_total_seq_len: Optional[int] = None,
+    ) -> torch.Tensor:
+        # Note: for decode kernel, is_causal = False should never happen
+
+        assert_paged_decode_contract(block_table, total_seq_lens)
+        assert query.ndim == 4, (
+            f"MojoPagedDecodeNstepSWA expects 4D query [bsz, seq_len, n_q_heads, head_dim], got ndim={query.ndim}"
+        )
+        bsz, seq_len, n_q_heads, head_dim = query.shape
+
+        _, n_kv_heads, page_size, _ = key_cache.shape
+        if softmax_scale is None:
+            softmax_scale = 1.0 / (head_dim**0.5)
+
+        o = torch.zeros_like(query)
+        for i in range(bsz):
+            q_i = query[i]  # -> [seq_len, n_q_heads, head_dim]
+            q_i = q_i.permute(1, 0, 2)  # -> [n_q_heads, seq_len, head_dim]
+
+            kv_seq_len = total_seq_lens[i].item()
+            if kv_seq_len <= 0:
+                # skip padded tokens
+                continue
+            if block_table[i, 0].item() < 0:
+                raise ValueError("Paged decode requires a valid block table for rows with kv lens > 0.")
+            kv_blocks = (kv_seq_len + page_size - 1) // page_size
+            k_i = key_cache[block_table[i, :kv_blocks]]  # [kv_blocks, n_kv_heads, page_size, head_dim]
+            k_i = k_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
+            k_i_T = k_i.permute(0, 2, 1)  # -> [n_kv_heads, head_dim, kv_seq_len]
+            if n_q_heads != n_kv_heads:
+                if self.gqa_interleave:
+                    k_i_T = k_i_T.repeat((n_q_heads // n_kv_heads, 1, 1))
+                else:
+                    k_i_T = k_i_T.repeat_interleave(
+                        n_q_heads // n_kv_heads, dim=0
+                    )  # -> [n_q_heads, head_dim, kv_seq_len]
+            s_i = torch.bmm(q_i, k_i_T).float() * softmax_scale  # -> [n_q_heads, seq_len, kv_seq_len]
+
+            if self.is_causal:
+                s_mask = _generate_window_mask(
+                    seq_len,
+                    kv_seq_len,
+                    self.local_window_size,
+                    self.global_window_size,
+                ).to(s_i.device)
+                s_i = torch.where(s_mask, s_i, float("-inf"))
+            m_i = torch.max(s_i, dim=-1, keepdim=True).values  # -> [n_q_heads, seq_len, 1]
+            s_i = s_i - m_i  # -> [n_q_heads, seq_len, kv_seq_len]
+            p_i = torch.exp(s_i)
+            l_i = torch.sum(p_i, dim=-1, keepdim=True)  # -> [n_q_heads, seq_len, 1]
+            p_i = p_i.to(query.dtype)
+
+            v_i = value_cache[block_table[i, :kv_blocks]]
+            v_i = v_i.permute(1, 0, 2, 3).reshape(n_kv_heads, kv_blocks * page_size, head_dim)[
+                :, :kv_seq_len
+            ]  # -> [n_kv_heads, kv_seq_len, head_dim]
+            if n_q_heads != n_kv_heads:
+                if self.gqa_interleave:
+                    v_i = v_i.repeat((n_q_heads // n_kv_heads, 1, 1))
+                else:
+                    v_i = v_i.repeat_interleave(n_q_heads // n_kv_heads, dim=0)  # -> [n_q_heads, kv_seq_len, head_dim]
+            o_i = torch.bmm(p_i, v_i).float()  # -> [n_q_heads, seq_len, head_dim]
+            o_i = o_i / l_i  # -> [n_q_heads, seq_len, head_dim]
+            o_i = o_i.permute(1, 0, 2)  # -> [seq_len, n_q_heads, head_dim]
+            o[i] = o_i.to(o.dtype)
+        return o
+
+    def extra_repr(self) -> str:
+        return f"is_causal={self.is_causal}, gqa_layout={self.gqa_layout}, global_window_size={self.global_window_size}, local_window_size={self.local_window_size}"
+
+
 # ---------------------------------------------------------------------------
 # NSA (Native Sparse Attention) helpers - module-level to avoid triggering
 # MojoOperator.__init_subclass__ registration.
@@ -1742,5 +1853,6 @@ __all__ = [
     "MojoPagedDecodeGQAWithKVDequant",
     "MojoPagedPrefillSWAWithKVDequant",
     "MojoPagedDecodeSWAWithKVDequant",
+    "MojoPagedDecodeNstepSWA",
     "MojoPagedPrefillSageGQA",
 ]

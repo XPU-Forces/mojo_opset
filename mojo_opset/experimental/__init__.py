@@ -12,6 +12,7 @@ from .operators.attention import MojoPagedDecodeMLA
 from .operators.attention import MojoPagedDecodeNSA
 from .operators.attention import MojoPagedDecodeGQAWithKVDequant
 from .operators.attention import MojoPagedDecodeSWAWithKVDequant
+from .operators.attention import MojoPagedDecodeNstepSWA
 from .operators.attention import MojoPagedPrefillGQAWithKVDequant
 from .operators.attention import MojoPagedPrefillMLA
 from .operators.attention import MojoPagedPrefillNSA
@@ -50,6 +51,7 @@ __all__ = [
     "MojoPagedDecodeGQAWithKVDequant",
     "MojoPagedPrefillSWAWithKVDequant",
     "MojoPagedDecodeSWAWithKVDequant",
+    "MojoPagedDecodeNstepSWA",
     "MojoFusedAttnOutputGate",
     "MojoPagedPrefillSageGQA",
     "MojoStorePagedMLAKVCache",
