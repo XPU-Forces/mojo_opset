@@ -22,6 +22,7 @@ def _build_store_paged_kv_case(
     q_lens_val,
     *,
     device,
+    dtype=torch.bfloat16,
 ):
     context_kv_lens = torch.tensor(context_kv_lens_val, dtype=torch.int32, device=device)
     q_lens = torch.tensor(q_lens_val, dtype=torch.int32, device=device)
@@ -36,8 +37,8 @@ def _build_store_paged_kv_case(
     )
 
     total_tokens = int(q_lens.sum().item()) if not is_decode else batch_size
-    key_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=torch.bfloat16, device=device)
-    value_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=torch.bfloat16, device=device)
+    key_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=dtype, device=device)
+    value_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=dtype, device=device)
 
     max_kv_len = torch.clamp(context_kv_lens + q_lens, min=0).max().item()
     max_blocks_per_seq = (max_kv_len + block_size - 1) // block_size + 2
@@ -48,8 +49,8 @@ def _build_store_paged_kv_case(
     total_phys_blocks = total_blocks_needed + 10
 
     cache_shape = (total_phys_blocks, kv_heads, block_size, head_dim)
-    k_cache = torch.zeros(cache_shape, dtype=torch.bfloat16, device=device)
-    v_cache = torch.zeros(cache_shape, dtype=torch.bfloat16, device=device)
+    k_cache = torch.zeros(cache_shape, dtype=dtype, device=device)
+    v_cache = torch.zeros(cache_shape, dtype=dtype, device=device)
 
     block_table = torch.full((batch_size, max_blocks_per_seq), -1, dtype=torch.int32, device=device)
     next_block = 0
@@ -526,6 +527,61 @@ def test_store_paged_single_cache_without_chunk_metadata(
         case["context_kv_lens"],
     )
 
+    assert_close(cache, cache_ref)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "batch_size, kv_heads, head_dim, block_size, context_kv_lens_val, q_lens_val",
+    [
+        (1, 2, 128, 128, [127], [1]),
+        (2, 4, 128, 32, [5, 33], [7, 19]),
+        (3, 8, 128, 128, [17, -1, 63], [1, 1, 1]),
+        (4, 16, 128, 128, [0, 3, 127, 255], [9, 17, 33, 65]),
+    ],
+)
+@bypass_not_implemented
+def test_store_paged_single_cache_dtypes(
+    dtype,
+    batch_size,
+    kv_heads,
+    head_dim,
+    block_size,
+    context_kv_lens_val,
+    q_lens_val,
+):
+    case = _build_store_paged_kv_case(
+        batch_size,
+        kv_heads,
+        head_dim,
+        block_size,
+        context_kv_lens_val,
+        q_lens_val,
+        device=get_torch_device(),
+        dtype=dtype,
+    )
+
+    store_single_ref = MojoStorePagedSingleCache._registry.get("torch")()
+    store_single = MojoStorePagedSingleCache()
+    if type(store_single_ref) is type(store_single):
+        raise NotImplementedError("both operands resolve to the same implementation, skipping comparison.")
+
+    cache_ref = store_single_ref(
+        case["key_states"],
+        case["k_cache"].clone(),
+        case["block_table"],
+        case["cu_q_lens"],
+        case["context_kv_lens"],
+    )
+    cache = store_single(
+        case["key_states"],
+        case["k_cache"].clone(),
+        case["block_table"],
+        case["cu_q_lens"],
+        case["context_kv_lens"],
+    )
+
+    assert cache.dtype == dtype
     assert_close(cache, cache_ref)
 
 
