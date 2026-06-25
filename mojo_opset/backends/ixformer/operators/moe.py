@@ -59,6 +59,49 @@ def _repack_int4_tn_to_nn(packed_tn: torch.Tensor, N: int, K: int) -> torch.Tens
     return packed.reshape(E, K, N // 2).contiguous().to(device)
 
 
+def _repack_int4_nn_to_tn(packed_nn: torch.Tensor, N: int, K: int) -> torch.Tensor:
+    """Inverse of :func:`_repack_int4_tn_to_nn`.
+
+    Takes NN-packed int4 (E, K, N//2) used by the ixformer kernel and
+    returns TN-packed int4 (E, N//2, K) matching the checkpoint layout.
+    Used by the state_dict post-hook dual to keep state_dict round-trip
+    safe.
+    """
+    device = packed_nn.device
+    packed_nn = packed_nn.cuda()
+    E = packed_nn.shape[0]
+
+    # Unpack the i / i+16 pair packing.
+    packed = packed_nn.view(E, K, N // 32, 16)
+    out = torch.empty(E, K, N // 32, 32, dtype=torch.int8, device=packed.device)
+    for i in range(16):
+        byte = packed[:, :, :, i].to(torch.uint8)
+        lo_nib = (byte & 0x0F).to(torch.int8)
+        hi_nib = ((byte >> 4) & 0x0F).to(torch.int8)
+        lo_nib = torch.where(lo_nib >= 8, lo_nib - 16, lo_nib)
+        hi_nib = torch.where(hi_nib >= 8, hi_nib - 16, hi_nib)
+        out[:, :, :, i] = lo_nib
+        out[:, :, :, i + 16] = hi_nib
+    out = out.view(E, K, N)
+
+    # Inverse permute (the original permutation [0, 1, 5, 3, 4, 2, 6] is
+    # self-inverse, so applying it again undoes the swizzle).
+    out = out.view(E, K // 32, 2, 16, N // 32, 2, 16)
+    out = out.permute(0, 1, 5, 3, 4, 2, 6).contiguous().view(E, K, N)
+
+    # Transpose K <-> N back to checkpoint orientation.
+    unpacked = out.transpose(-2, -1).contiguous()  # (E, N, K)
+
+    # Pack pairs along N (low nibble = even index, high nibble = odd index).
+    low = unpacked[:, 0::2, :]
+    high = unpacked[:, 1::2, :]
+    low_u8 = (low & 0x0F).to(torch.uint8)
+    high_u8 = ((high & 0x0F) << 4).to(torch.uint8)
+    packed_tn = (high_u8 | low_u8).to(torch.int8)
+
+    return packed_tn.contiguous().to(device)
+
+
 def _swizzle_weights_post_hook(module, incompatible_keys):
     """load_state_dict post-hook: convert int4/int8 weights from TN (checkpoint) to NN (ixformer) format."""
     device = module.up_proj_weight.device
@@ -89,6 +132,45 @@ def _swizzle_weights_post_hook(module, incompatible_keys):
         down_scale_nn = module.down_proj_weight_scale.data.contiguous()
         module.register_buffer("down_proj_weight", down_nn.to(device))
         module.down_proj_weight_scale = torch.nn.Parameter(down_scale_nn.to(device=device, dtype=torch.float32))
+
+
+def _unswizzle_weights_state_dict_post_hook(module, state_dict, prefix, local_metadata):
+    """Dual of :func:`_swizzle_weights_post_hook`.
+
+    Reverses the runtime NN/swizzled layout back to checkpoint TN layout so
+    state_dict() output can be re-loaded via load_state_dict() and have the
+    forward post-hook re-swizzle to runtime form. Covers up/down proj weights
+    and weight scales for both int4 and int8 paths. ``inv_smooth_scale``
+    dtype cast (bf16) is idempotent on round-trip and needs no inverse.
+    """
+    up_key = prefix + "up_proj_weight"
+    up_scale_key = prefix + "up_proj_weight_scale"
+    down_key = prefix + "down_proj_weight"
+    down_scale_key = prefix + "down_proj_weight_scale"
+
+    if module.up_weight_dtype == "int4":
+        N_up = module.intermediate_size * 2
+        K_up = module.hidden_size
+        if up_key in state_dict:
+            state_dict[up_key] = _repack_int4_nn_to_tn(state_dict[up_key], N_up, K_up)
+        if up_scale_key in state_dict:
+            state_dict[up_scale_key] = state_dict[up_scale_key].permute(0, 2, 1).contiguous()
+    elif module.up_weight_dtype == torch.int8:
+        if up_key in state_dict:
+            state_dict[up_key] = state_dict[up_key].transpose(1, 2).contiguous()
+        # int8 up_proj_weight_scale: forward only .contiguous() + dtype cast,
+        # both idempotent, no shape inverse needed.
+
+    if module.down_weight_dtype == "int4":
+        N_down = module.hidden_size
+        K_down = module.intermediate_size
+        if down_key in state_dict:
+            state_dict[down_key] = _repack_int4_nn_to_tn(state_dict[down_key], N_down, K_down)
+        if down_scale_key in state_dict:
+            state_dict[down_scale_key] = state_dict[down_scale_key].permute(0, 2, 1).contiguous()
+    elif module.down_weight_dtype == torch.int8:
+        if down_key in state_dict:
+            state_dict[down_key] = state_dict[down_key].transpose(1, 2).contiguous()
 
 
 def _attach_gating_bf16_buffers(gating_module):
@@ -394,6 +476,7 @@ class IxformerQuantMoE(MojoQuantMoE):
         setattr(self.experts.down_proj_weight_scale, "force_dtype", torch.float32)
         # Convert checkpoint weights from TN layout to NN + tensor-core swizzle expected by the kernel.
         self.experts.register_load_state_dict_post_hook(_swizzle_weights_post_hook)
+        self.experts.register_state_dict_post_hook(_unswizzle_weights_state_dict_post_hook)
         self.output_dtype = torch.bfloat16
 
         self.gdr_device_buffer = torch.zeros([self.num_experts + 1], dtype=torch.int, device="cuda")

@@ -20,6 +20,24 @@ def _cast_weight_scale_to_fp32(module, incompatible_keys):
     )
 
 
+def _restore_weight_layout_state_dict_post_hook(module, state_dict, prefix, local_metadata):
+    """Dual of ``_cast_weight_scale_to_fp32``.
+
+    The runtime weight is post-transpose ``[in, out]`` (when ``trans_weight``
+    is True). ``state_dict()`` would normally emit that runtime layout, which
+    cannot be re-loaded via ``load_state_dict()`` because the freshly-built
+    module's Parameter is still ``[out, in]`` and the load post-hook would
+    transpose a second time. Restore the pre-transpose ``[out, in]`` layout
+    here so the load post-hook reproduces the runtime state correctly. The
+    ``weight_scale`` fp32 cast in the load hook is dtype-idempotent (fp32 ->
+    fp32 round-trips losslessly), no inverse needed.
+    """
+    if module.trans_weight:
+        key = prefix + "weight"
+        if key in state_dict:
+            state_dict[key] = state_dict[key].transpose(0, 1).contiguous()
+
+
 def _destroy_symm_workspace(module):
     if getattr(module, "_workspace", None) is None:
         return
@@ -47,6 +65,7 @@ class IxformerAllGatherQuantGemm(MojoAllGatherQuantGemm):
                 "IxformerAllGatherQuantGemm does not support float32 output dtype"
             )
         self.register_load_state_dict_post_hook(_cast_weight_scale_to_fp32)
+        self.register_state_dict_post_hook(_restore_weight_layout_state_dict_post_hook)
 
         self._workspace = None
         if dist.is_available() and dist.is_initialized():
@@ -155,6 +174,7 @@ class IxformerQuantGemmReduceScatter(MojoQuantGemmReduceScatter):
                 "IxformerQuantGemmReduceScatter does not support float32 output dtype"
             )
         self.register_load_state_dict_post_hook(_cast_weight_scale_to_fp32)
+        self.register_state_dict_post_hook(_restore_weight_layout_state_dict_post_hook)
         self._workspace = None
 
         if dist.is_available() and dist.is_initialized():
