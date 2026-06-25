@@ -17,6 +17,7 @@ from mojo_opset.experimental import MojoDecodeMLA
 from mojo_opset.experimental import MojoDecodeNSA
 from mojo_opset.experimental import MojoPagedDecodeMLA
 from mojo_opset.experimental import MojoPagedDecodeNSA
+from mojo_opset.experimental import MojoPagedDecodeNstepSWA
 from mojo_opset.experimental import MojoPagedDecodeSWAWithKVDequant
 from mojo_opset.experimental import MojoPagedPrefillGQAWithKVDequant
 from mojo_opset.experimental import MojoPagedPrefillMLA
@@ -37,14 +38,20 @@ def generate_paged_decode_data(
     max_seq_len: int,
     block_size: int,
     dtype: torch.dtype,
+    seq_len: int = -1,
 ):
-    query = torch.randn(batch_size, num_q_heads, head_dim, dtype=dtype)
-
-    if max_seq_len > 0:
-        total_seq_lens = torch.randint(0, max_seq_len, (batch_size,), dtype=torch.int32)
-        total_seq_lens = torch.clamp(total_seq_lens, min=1)
+    if (seq_len != -1):
+        query = torch.randn(batch_size, seq_len, num_q_heads, head_dim, dtype=dtype)
     else:
-        total_seq_lens = torch.randperm(batch_size, dtype=torch.int32)
+        query = torch.randn(batch_size, num_q_heads, head_dim, dtype=dtype)
+
+    min_seq_len = seq_len if seq_len != -1 else 1
+    if max_seq_len > 0:
+      total_seq_lens = torch.randint(0, max_seq_len, (batch_size,), dtype=torch.int32)
+      total_seq_lens = torch.clamp(total_seq_lens, min=min_seq_len)
+    else:
+      total_seq_lens = torch.randperm(batch_size, dtype=torch.int32)
+      total_seq_lens = torch.where(total_seq_lens == 0, 0, total_seq_lens + min_seq_len - 1)
 
     max_total_seq_len = total_seq_lens.max().item()
     max_num_blocks_per_seq = (max_total_seq_len + block_size - 1) // block_size
@@ -1597,21 +1604,21 @@ def test_paged_prefill_swa_with_graph(
 
 
 test_configs_swa_decode = [
-    (4, 16, 4, 128, 1024, 512, torch.bfloat16, "M_BF16"),
-    (8, 16, 4, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
-    (8, 8, 1, 128, 4096, 128, torch.bfloat16, "M_BF16_LONG"),
-    # (2, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
-    (2, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
-    # (2, 8, 2, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP1"),
-    (2, 24, 8, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP2"),
+    (4, -1, 16, 4, 128, 1024, 512, torch.bfloat16, "M_BF16"),
+    (8, -1, 16, 8, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
+    (8, -1, 8, 1, 128, 4096, 128, torch.bfloat16, "M_BF16_LONG"),
+    (2, -1, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
+    (2, -1, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
+    (2, -1, 8, 2, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP1"),
+    (2, -1, 24, 8, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP2"),
 ]
-
 @pytest.mark.parametrize(
     "query, k_cache, v_cache, total_seq_lens, block_tables, max_total_seq_len",
     [
         pytest.param(
             *generate_paged_decode_data(
                 batch_size=B,
+                seq_len=S,
                 num_q_heads=Q_H,
                 num_kv_heads=KV_H,
                 head_dim=D,
@@ -1621,7 +1628,7 @@ test_configs_swa_decode = [
             ),
             id=ID,
         )
-        for B, Q_H, KV_H, D, S_LEN, BLK_S, dtype, ID in test_configs_swa_decode
+        for B, S, Q_H, KV_H, D, S_LEN, BLK_S, dtype, ID in test_configs_swa_decode
     ],
 )
 @pytest.mark.parametrize("gqa_layout, global_window, local_window", [
@@ -1651,6 +1658,85 @@ def test_paged_decode_swa(
         local_window_size=local_window,
     )
     paged_decode_swa_ref = MojoPagedDecodeSWA._registry.get("torch")(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+        global_window_size=global_window,
+        local_window_size=local_window,
+    )
+
+    atol = 2e-2 if query.dtype != torch.float32 else 1e-5
+    rtol = 2e-2 if query.dtype != torch.float32 else 1e-6
+
+    paged_decode_swa.forward_diff_with(
+        paged_decode_swa_ref,
+        query,
+        k_cache,
+        v_cache,
+        total_seq_lens,
+        block_tables,
+        softmax_scale=softmax_scale,
+        max_total_seq_len=max_total_seq_len,
+        atol=atol,
+        rtol=rtol,
+    )
+
+test_configs_swa_nstep_decode = [
+    (4, 1, 16, 4, 128, 1024, 512, torch.bfloat16, "M_BF16"),
+    (8, 1, 16, 8, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
+    (4, 2, 16, 4, 128, 1024, 512, torch.bfloat16, "M_BF16"),
+    (8, 2, 16, 8, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
+    (8, 3, 8, 1, 128, 4096, 128, torch.bfloat16, "M_BF16_LONG"),
+    (2, 3, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
+    (2, 1, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
+    (2, 4, 8, 2, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP1"),
+    (2, 4, 24, 8, 128, 2048, 1024, torch.bfloat16, "M_BF16_GROUP2"),
+]
+@pytest.mark.parametrize(
+    "query, k_cache, v_cache, total_seq_lens, block_tables, max_total_seq_len",
+    [
+        pytest.param(
+            *generate_paged_decode_data(
+                batch_size=B,
+                seq_len=S,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_seq_len=S_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            id=ID,
+        )
+        for B, S, Q_H, KV_H, D, S_LEN, BLK_S, dtype, ID in test_configs_swa_nstep_decode
+    ],
+)
+@pytest.mark.parametrize("gqa_layout, global_window, local_window", [
+    ("ABAB", 4, 255),
+    ("AABB", 4, 1023),
+])
+@auto_switch_platform()
+@bypass_not_implemented
+def test_paged_decode_nstep_swa(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    total_seq_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_total_seq_len: int,
+    gqa_layout: str,
+    global_window: int,
+    local_window: int,
+):
+    head_dim = query.shape[-1]
+    softmax_scale = 1.0 / math.sqrt(head_dim)
+
+    paged_decode_swa = MojoPagedDecodeNstepSWA(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+        global_window_size=global_window,
+        local_window_size=local_window,
+    )
+    paged_decode_swa_ref = MojoPagedDecodeNstepSWA._registry.get("torch")(
         is_causal=True,
         gqa_layout=gqa_layout,
         global_window_size=global_window,
