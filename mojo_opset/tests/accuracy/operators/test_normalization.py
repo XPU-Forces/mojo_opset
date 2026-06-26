@@ -16,6 +16,8 @@ from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoRMSNormQuant
 from mojo_opset.experimental import MojoChannelRMSNorm
 from mojo_opset.experimental import MojoGroupLayerNorm
+from mojo_opset.experimental import MojoRMSNormInplace
+from mojo_opset.experimental import MojoGroupRMSNormInplace
 
 torch.manual_seed(43)
 
@@ -59,6 +61,51 @@ def test_rmsnorm(shape, dtype, eps):
     else:
         atol, rtol = 3e-2, 6e-3
     rmsnorm.forward_diff_with(rmsnorm_ref, x, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (32, 1024),
+        (64, 8192),
+        (57, 7338),
+        (2, 256),
+        (7762, 18688),
+    ],
+)
+@pytest.mark.parametrize("dtype", dtypes)
+@pytest.mark.parametrize("eps", [1e-5])
+@pytest.mark.parametrize("inplace", [True])
+@bypass_not_implemented
+def test_rmsnorm_inplace(shape, dtype, eps, inplace):
+    x = torch.randn(size=shape, dtype=dtype)
+    x_ref = x.clone()
+    weight = torch.randn(size=(shape[-1],), dtype=dtype)
+    rmsnorm = MojoRMSNormInplace(eps=eps, norm_size=shape[-1], inplace=inplace, device=x.device, dtype=x.dtype)
+
+    rmsnorm_ref = (
+        MojoRMSNormInplace._registry.get("torch")(
+            eps=eps,
+            norm_size=weight.size(0),
+            inplace=inplace,
+        )
+        .to(x.device)
+        .to(weight.dtype)
+    )
+
+    with torch.no_grad():
+        rmsnorm.weight.copy_(weight.to(torch.float32))
+        rmsnorm_ref.weight.copy_(weight.to(torch.float32))
+
+    rmsnorm(x)
+    rmsnorm_ref(x_ref)
+
+    if x.dtype == torch.float32:
+        atol, rtol = 1e-5, 1e-6
+    else:
+        atol, rtol = 2e-1, 2e-2
+
+    torch.testing.assert_close(x, x_ref, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize(
@@ -129,7 +176,7 @@ def test_grouprmsnorm(bsz, group_dims, hidden_size, dtype, eps):
 
     rmsnorm_ref = (
         MojoGroupRMSNorm._registry.get("torch")(
-            num_groups = len(group_dims), 
+            num_groups = len(group_dims),
             eps=eps,
             norm_size=hidden_size,
         )
@@ -147,6 +194,60 @@ def test_grouprmsnorm(bsz, group_dims, hidden_size, dtype, eps):
         atol, rtol = 3e-2, 6e-3
 
     rmsnorm.forward_diff_with(rmsnorm_ref, x_groups, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize(
+    "bsz,group_dims,hidden_size",
+    [
+        (1024, (16, 4), 96),
+        (798, (16, 4, 8, 2), 128),
+        (8000, (48, 8, 16, 4), 128),
+        (17, (3, 5), 128),
+        (33, (2, 7, 1), 128),
+        (65, (4, 4, 4, 4), 128),
+        (129, (1, 3, 5, 7), 128),
+        (257, (6, 2), 192),
+        (513, (8, 8, 8), 256),
+        (1025, (12, 6, 3, 1), 128),
+        (2049, (5, 9, 7, 3), 64),
+    ],
+)
+@pytest.mark.parametrize("dtype", dtypes)
+@pytest.mark.parametrize("eps", [1e-5])
+@pytest.mark.parametrize("inplace", [True])
+@bypass_not_implemented
+def test_grouprmsnorm_inplace(bsz, group_dims, hidden_size, dtype, eps, inplace):
+    x = torch.randn(size=(bsz, sum(group_dims), hidden_size), dtype=dtype)
+    x_ref = x.clone()
+    x_groups = torch.split(x, group_dims, dim=1)
+    weight = torch.randn(size=(len(group_dims), hidden_size), dtype=dtype)
+    rmsnorm = MojoGroupRMSNormInplace(num_groups = len(group_dims), eps=eps, norm_size=hidden_size, inplace=inplace, device=x.device, dtype=x.dtype)
+
+    rmsnorm_ref = (
+        MojoGroupRMSNormInplace._registry.get("torch")(
+            num_groups = len(group_dims),
+            eps=eps,
+            norm_size=hidden_size,
+            inplace=inplace,
+        )
+        .to(x.device)
+        .to(weight.dtype)
+    )
+
+    with torch.no_grad():
+        rmsnorm.weight.copy_(weight.to(torch.float32))
+        rmsnorm_ref.weight.copy_(weight.to(torch.float32))
+
+    rmsnorm(x)
+    rmsnorm_ref(x_ref)
+
+    if x.dtype == torch.float32:
+        atol, rtol = 1e-5, 1e-6
+    else:
+        atol, rtol = 3e-2, 6e-3
+
+    torch.testing.assert_close(x, x_ref, atol=atol, rtol=rtol)
+
 
 @pytest.mark.parametrize(
     "bsz,group_dims,hidden_size",
