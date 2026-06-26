@@ -1,0 +1,14 @@
+{
+    "mojo_paged_prefill_gqa": [
+        {
+            "arg_type": "llm",
+            "num_q_heads.num_kv_heads.head_dim": [
+                [8, 1, 128]
+            ], 
+            "batch_size.q_len.cache_len": [
+                [1, 10240, 0]
+            ],
+            "block_size": 512
+        }
+    ]
+}

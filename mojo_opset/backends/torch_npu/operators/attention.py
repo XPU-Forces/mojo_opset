@@ -62,12 +62,29 @@ class TorchNpuPrefillGQA(MojoPrefillGQA, default_priority=0):
 
 
 class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
+    _ATTN_MASK_SIZE = 2048
+
     def __init__(
         self,
         is_causal: bool = True,
         gqa_layout: str = "ABAB",
     ):
         super().__init__(is_causal=is_causal, gqa_layout=gqa_layout)
+        self._attn_mask: Optional[torch.Tensor] = None
+        self._attn_mask_device: Optional[torch.device] = None
+
+    def _get_attn_mask(self, device: torch.device) -> torch.Tensor:
+        if self._attn_mask is None or self._attn_mask_device != device:
+            self._attn_mask = torch.triu(
+                torch.ones(
+                    (self._ATTN_MASK_SIZE, self._ATTN_MASK_SIZE),
+                    dtype=torch.bool,
+                    device=device,
+                ),
+                diagonal=1,
+            )
+            self._attn_mask_device = device
+        return self._attn_mask
 
     def forward(
         self,
@@ -85,20 +102,18 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
         assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
         _, num_q_heads, head_dim = query.shape
         _, num_kv_heads, block_size, _ = key_cache.shape
-        total_seq_lens = (
-            cu_q_lens[1:] - cu_q_lens[:-1]
-            if cu_total_seq_lens is None
-            else cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
-        )
-        
+
         if head_dim % 128 != 0:
-            raise NotImplementedError(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
-        if cu_total_seq_lens is not None:
-            raise NotImplementedError("NPU kernel npu_fused_infer_attention_score currently does not support TND layout with sparse_mode=3 (Page Attention), raising RuntimeError: call aclnnFusedInferAttentionScoreV3 failed.")
+            raise NotImplementedError(
+                f"NPU kernel requires head_dim % 128 == 0, got {head_dim}"
+            )
 
-
-        if block_size % 128 != 0 or block_size > 512:
-            # high performance attention kernel only supports block_size % 128 == 0 and block_size <= 512
+        if (
+            mask is not None
+            or not self.is_causal
+            or block_size % 128 != 0
+            or block_size > 512
+        ):
             return super().forward(
                 query=query,
                 key_cache=key_cache,
@@ -115,21 +130,29 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
         if softmax_scale is None:
             softmax_scale = head_dim**-0.5
 
-        compress_mask = torch.triu(torch.ones((2048, 2048), dtype=torch.bool, device=query.device), diagonal=1)
-        out, _ = torch_npu.npu_fused_infer_attention_score(
-            query=query,
-            key=key_cache,
-            value=value_cache,
-            atten_mask=compress_mask,
-            block_table=block_tables,
-            input_layout="TND",
-            block_size=block_size,
-            actual_seq_lengths=cu_q_lens[1:],
-            actual_seq_lengths_kv=total_seq_lens,
+        actual_seq_qlen = cu_q_lens[1:] - cu_q_lens[:-1]
+        if cu_total_seq_lens is not None:
+            actual_seq_kvlen = cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
+        else:
+            actual_seq_kvlen = actual_seq_qlen
+
+        out, _ = torch_npu.npu_fused_infer_attention_score_v2(
+            query,
+            key_cache,
+            value_cache,
+            atten_mask=self._get_attn_mask(query.device),
+            actual_seq_qlen=actual_seq_qlen,
+            actual_seq_kvlen=actual_seq_kvlen,
+            num_query_heads=num_q_heads,
             num_key_value_heads=num_kv_heads,
-            num_heads=num_q_heads,
-            scale=softmax_scale,
+            block_size=block_size,
+            block_table=block_tables,
+            softmax_scale=softmax_scale,
+            input_layout="TND",
             sparse_mode=3,
+            query_dtype=query.dtype,
+            key_dtype=key_cache.dtype,
+            value_dtype=value_cache.dtype,
         )
         return out
 
