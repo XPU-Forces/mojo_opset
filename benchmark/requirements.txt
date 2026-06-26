@@ -1,0 +1,9 @@
+# Dependencies for the mojo_opset benchmark harness.
+#
+# The harness reuses xpu-perf's micro_perf framework (BasicOp / ProviderRegistry /
+# OpTensorInfo). Since `benchmark/` lives outside the installed `mojo_opset` package,
+# the dependency is declared here rather than in pyproject.toml.
+#
+# Install from the sibling xpu-perf checkout (editable):
+#   pip install -e ../../xpu-perf
+xpu-perf

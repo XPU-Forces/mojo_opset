@@ -1,0 +1,12 @@
+{
+    "mojo_quant_gemm": [
+        {
+            "arg_type": "llm",
+            "num_tokens.in_features.out_features": [
+                [4096, 4096, 4096],
+                [8192, 8192, 8192]
+            ],
+            "sp_size": 1
+        }
+    ]
+}

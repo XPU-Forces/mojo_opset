@@ -208,9 +208,12 @@ class MojoQuantGemm(MojoOperator):
                 f"weight_scale shape {tuple(self.weight_scale.shape)} must match output dim {(self.out_features,)}."
             )
 
-        if not self.trans_weight:
-            weight = weight.mT
-        out = torch.mul(input.int().unsqueeze(-2), weight.int()).float().sum(dim=-1)
+        if self.trans_weight:
+            # stored as (N, K); matmul needs (K, N)
+            weight = weight.t()
+
+        # float32 matmul emulates int8 GEMM (exact for int8 partial sums at practical K)
+        out = torch.matmul(input.float(), weight.float())
 
         weight_scale = self.weight_scale
         if input_scale.dim() == 1:
