@@ -657,10 +657,6 @@ def paged_attention_prefill_impl(
     return o
 
 
-# ---------------------------------------------------------------------------
-# Flash Decode helpers (mirrors AscendC CheckFlashDecode / SplitS2 logic)
-# ---------------------------------------------------------------------------
-
 def _should_use_flash_decode(
     batch_size: int,
     num_kv_heads: int,
@@ -668,8 +664,7 @@ def _should_use_flash_decode(
     max_kv_len: int,
     cube_num: int,
 ) -> bool:
-    """Mirrors AscendC FusedInferAttentionScoreTilingImpl::CheckFlashDecode.
-
+    """
     FD is triggered when B*N_KV tasks are too few to saturate all cube cores
     and the KV sequence is long enough to benefit from S2 splitting.
     """
@@ -692,25 +687,23 @@ def _compute_kv_split_parts(
     max_kv_len: int,
     cube_num: int,
 ) -> int:
-    """Mirrors AscendC FusedInferAttentionScoreTilingImpl::SplitS2.
-
+    """
     Start with aicNum/loopTimes and reduce until each split covers at least
     KV_SPLIT_LIMIT tokens (experience value matching sInnerFactor_=128 path).
     """
-    KV_SPLIT_LIMIT = 256  # matches kvSplitLimit when sInnerFactor_<=256
+    KV_SPLIT_LIMIT = 256
     loop_times = batch_size * num_kv_heads
-    kv_split_parts = max(cube_num // loop_times, 1)
-    while kv_split_parts > 1 and (max_kv_len // kv_split_parts) < KV_SPLIT_LIMIT:
-        kv_split_parts -= 1
-    return kv_split_parts
+    max_by_cores = cube_num // loop_times
+    max_by_len = max_kv_len // KV_SPLIT_LIMIT
+    return max(1, min(max_by_cores, max_by_len))
 
 
 # ---------------------------------------------------------------------------
 # Flash Decode Phase-1 kernel: Cube cores compute partial attention per split
 #
-# Core assignment (mirrors AscendC SplitS2 + gsMerge):
+# Core assignment:
 #   Each program handles one (batch, kv_head, s2_split) triple and processes
-#   all GROUP_SIZE Q-heads simultaneously (equivalent to AscendC's gsMerge).
+#   all GROUP_SIZE Q-heads simultaneously.
 #   Tasks are: total = B * N_KV * KV_SPLIT_PARTS, cycled across cube_num cores.
 #
 # Workspace written per program:
@@ -764,16 +757,20 @@ def paged_decode_fd_kernel(
 
     for fd_task_id in range(pid, total_fd_tasks, n_progs):
         split_idx = fd_task_id % KV_SPLIT_PARTS
-        kv_task   = fd_task_id // KV_SPLIT_PARTS
-        b_id      = kv_task // NUM_KV_HEADS
+        kv_task = fd_task_id // KV_SPLIT_PARTS
+        b_id = kv_task // NUM_KV_HEADS
         kv_head_id = kv_task % NUM_KV_HEADS
 
         kv_seq_len = tl.load(seqlens_ptr + b_id)
 
-        # Partition the KV sequence evenly across splits
-        chunk_size = tl.cdiv(kv_seq_len, KV_SPLIT_PARTS)
-        kv_start   = split_idx * chunk_size
-        kv_end     = tl.minimum(kv_start + chunk_size, kv_seq_len)
+        # Partition the KV sequence evenly across splits, aligning chunk_size to
+        # PAGE_SIZE so that each split starts at a page boundary.  This avoids KV
+        # blocks that cross page boundaries, which would produce incorrect loads
+        # because each page maps to a different physical block via block_tables.
+        raw_chunk = tl.cdiv(kv_seq_len, KV_SPLIT_PARTS)
+        chunk_size = tl.cdiv(raw_chunk, PAGE_SIZE) * PAGE_SIZE
+        kv_start = split_idx * chunk_size
+        kv_end = tl.minimum(kv_start + chunk_size, kv_seq_len)
 
         # Workspace slot for this (b, kv_head, split)
         ws_task_idx = (b_id * NUM_KV_HEADS + kv_head_id) * KV_SPLIT_PARTS + split_idx
@@ -795,7 +792,7 @@ def paged_decode_fd_kernel(
         )
         q = tl.load(q_ptrs, mask=offs_d[None, :] < HEAD_DIM, other=0.0)
 
-        m_i = tl.full((GROUP_SIZE,), float("-inf"), dtype=tl.float32)
+        m_i = tl.zeros((GROUP_SIZE,), dtype=tl.float32) - float("inf")
         l_i = tl.zeros((GROUP_SIZE,), dtype=tl.float32)
         acc = tl.zeros((GROUP_SIZE, BLOCK_SIZE_D), dtype=tl.float32)
 
@@ -804,10 +801,10 @@ def paged_decode_fd_kernel(
 
         for kv_block_id in range(num_kv_blocks):
             kv_block_start = kv_start + kv_block_id * BLOCK_SIZE_N
-            kv_block_end   = tl.minimum(kv_block_start + BLOCK_SIZE_N, kv_end)
-            kv_block_len   = kv_block_end - kv_block_start
+            kv_block_end = tl.minimum(kv_block_start + BLOCK_SIZE_N, kv_end)
+            kv_block_len = kv_block_end - kv_block_start
 
-            logical_page_id       = kv_block_start // PAGE_SIZE
+            logical_page_id = kv_block_start // PAGE_SIZE
             kv_block_start_in_page = kv_block_start % PAGE_SIZE
             physical_page_id = tl.load(
                 block_tables_ptr
@@ -845,7 +842,7 @@ def paged_decode_fd_kernel(
             mask = tl.arange(0, BLOCK_SIZE_N) < kv_block_len
 
             k_T = tl.load(K_T_block_ptr, boundary_check=(0, 1), padding_option="zero")
-            v   = tl.load(V_block_ptr,   boundary_check=(0, 1), padding_option="zero")
+            v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
             qk = tl.dot(q, k_T)  # [G, BLOCK_N]
             qk = qk * softmax_scale
@@ -855,9 +852,9 @@ def paged_decode_fd_kernel(
                 m_i, tl.max(qk, 1, propagate_nan=True),
                 propagate_nan=tl.PropagateNan.ALL,
             )
-            qk    = qk - m_ij[:, None]
-            p     = tl.math.exp(qk)
-            l_ij  = tl.sum(p, 1)
+            qk = qk - m_ij[:, None]
+            p = tl.math.exp(qk)
+            l_ij = tl.sum(p, 1)
             alpha = tl.math.exp(m_i - m_ij)
 
             l_i = l_i * alpha + l_ij
@@ -868,8 +865,8 @@ def paged_decode_fd_kernel(
         # The reduce kernel will re-weight each split's contribution using lse_i.
         # Empty splits (kv_start >= kv_seq_len) have l_i=0; guard against div-0.
         l_i_safe = tl.where(l_i > 0, l_i, 1.0)
-        acc      = acc / l_i_safe[:, None]
-        lse_i    = tl.where(l_i > 0, m_i + tl.math.log(l_i), float("-inf"))
+        acc = acc / l_i_safe[:, None]
+        lse_i = tl.where(l_i > 0, m_i + tl.math.log(l_i), float("-inf"))
 
         # Write lse to workspace
         lse_ptrs = (
@@ -892,7 +889,6 @@ def paged_decode_fd_kernel(
 # ---------------------------------------------------------------------------
 # Flash Decode Phase-2 kernel: Vector cores merge partial results
 #
-# Mirrors AscendC FiaBlockVecFlashDecode::FlashDecode + ComputeScaleValue.
 # Each program handles one (batch, kv_head) pair and merges KV_SPLIT_PARTS
 # partial outputs into the final attention output.
 #
@@ -927,12 +923,12 @@ def paged_decode_fd_reduce_kernel(
 ):
     GROUP_SIZE: tl.constexpr = NUM_Q_HEADS // NUM_KV_HEADS
 
-    pid    = tl.program_id(0)
+    pid = tl.program_id(0)
     n_progs = tl.num_programs(0)
     total_reduce_tasks = BATCH_SIZE * NUM_KV_HEADS
 
     for reduce_task_id in range(pid, total_reduce_tasks, n_progs):
-        b_id       = reduce_task_id // NUM_KV_HEADS
+        b_id = reduce_task_id // NUM_KV_HEADS
         kv_head_id = reduce_task_id % NUM_KV_HEADS
 
         g_offsets = tl.arange(0, GROUP_SIZE)
@@ -944,7 +940,7 @@ def paged_decode_fd_reduce_kernel(
         offs_d = tl.arange(0, BLOCK_SIZE_D)
 
         # Pass 1: find per-G-head max lse across all splits (numerical stability)
-        lse_max = tl.full((GROUP_SIZE,), float("-inf"), dtype=tl.float32)
+        lse_max = tl.zeros((GROUP_SIZE,), dtype=tl.float32) - float("inf")
         for split_idx in tl.static_range(KV_SPLIT_PARTS):
             ws_task_idx = (b_id * NUM_KV_HEADS + kv_head_id) * KV_SPLIT_PARTS + split_idx
             lse_ptrs = (
@@ -955,7 +951,7 @@ def paged_decode_fd_reduce_kernel(
             lse_max = tl.maximum(lse_max, tl.load(lse_ptrs))
 
         # Pass 2: weighted accumulation of partial outputs
-        out     = tl.zeros((GROUP_SIZE, BLOCK_SIZE_D), dtype=tl.float32)
+        out = tl.zeros((GROUP_SIZE, BLOCK_SIZE_D), dtype=tl.float32)
         exp_sum = tl.zeros((GROUP_SIZE,), dtype=tl.float32)
 
         for split_idx in tl.static_range(KV_SPLIT_PARTS):
@@ -967,7 +963,7 @@ def paged_decode_fd_reduce_kernel(
                 + g_offsets * stride_lse_g
             )
             lse = tl.load(lse_ptrs)
-            w   = tl.math.exp(lse - lse_max)  # [G,]; 0 for empty splits (lse=-inf)
+            w = tl.math.exp(lse - lse_max)  # [G,]; 0 for empty splits (lse=-inf)
             exp_sum += w
 
             acc_ptrs = (
@@ -1065,7 +1061,7 @@ def paged_decode_kernel(
             kv_block_start_in_seq = kv_block_id * BLOCK_SIZE_N
             kv_block_end_in_seq = min(kv_block_start_in_seq + BLOCK_SIZE_N, kv_seq_len)
             kv_block_len = kv_block_end_in_seq - kv_block_start_in_seq
-            
+
             logical_page_id = kv_block_start_in_seq // PAGE_SIZE
             kv_block_start_in_page = kv_block_start_in_seq % PAGE_SIZE
             physical_page_id = tl.load(block_tables_ptr + b_id * stride_bt_batch + logical_page_id * stride_bt_block)
@@ -1145,12 +1141,12 @@ def paged_attention_decode_impl(
 
     o = torch.empty_like(q)
 
-    cube_num    = get_num_cores("cube")
-    vector_num  = get_num_cores("vector")
+    cube_num = get_num_cores("cube")
+    vector_num = get_num_cores("vector")
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     BLOCK_SIZE_N = min(128, triton.next_power_of_2(page_size))
-    group_size   = num_q_heads // num_kv_heads
-    max_kv_len   = int(seqlens.max().item())
+    group_size  = num_q_heads // num_kv_heads
+    max_kv_len  = int(seqlens.max().item())
 
     if _should_use_flash_decode(batch_size, num_kv_heads, group_size, max_kv_len, cube_num):
         kv_split_parts = _compute_kv_split_parts(
