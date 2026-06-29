@@ -127,7 +127,7 @@ class TorchNpuResidualAddRMSNormQuant(MojoResidualAddRMSNormQuant, default_prior
             self.variance_epsilon,
         )
         quantized, scale = _dynamic_quant(normed, self.quant_dtype, smooth_scale)
-        return quantized, residual_before_norm, scale
+        return quantized, residual_before_norm if self.norm_pos == "pre" else normed, scale
 
 
 class TorchNpuResidualAddLayerNormQuant(MojoResidualAddLayerNormQuant, default_priority=0):
