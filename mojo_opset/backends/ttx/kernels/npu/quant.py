@@ -119,7 +119,7 @@ def scale_dynamic_quant_kernel(
             
             current_max = tl.max(tl.abs(scaled_vals), axis=1)
 
-            max_abs_accumulator = tl.maximum(max_abs_accumulator, current_max)
+            max_abs_accumulator = tl.maximum(max_abs_accumulator, current_max,propagate_nan=tl.PropagateNan.ALL)
 
         final_max_abs = max_abs_accumulator
         current_quant_scale = final_max_abs / 127.0

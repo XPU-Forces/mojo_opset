@@ -282,10 +282,10 @@ def _compare_and_swap(x, ids, flip, i: core.constexpr, n_dims: core.constexpr):
     left = core.reshape(left, x.shape)
     right = core.reshape(right, x.shape)
 
-    left_idx = core.broadcast_to(tl.max(y_idx * (1 - mask), 1)[:, None, :], shape).to(
+    left_idx = core.broadcast_to(tl.max(y_idx * (1 - mask), 1,propagate_nan=tl.PropagateNan.ALL)[:, None, :], shape).to(
         ids.dtype
     )
-    right_idx = core.broadcast_to(tl.max(y_idx * mask, 1)[:, None, :], shape).to(
+    right_idx = core.broadcast_to(tl.max(y_idx * mask, 1,propagate_nan=tl.PropagateNan.ALL)[:, None, :], shape).to(
         ids.dtype
     )
     left_idx = core.reshape(left_idx, ids.shape)
@@ -633,14 +633,14 @@ def _top_p_sample_kernel(
 
     logits = tl.load(row_logits_ptr + offsets * stride_logits_k)
 
-    logits_max = tl.max(logits, 0)
+    logits_max = tl.max(logits, 0,propagate_nan=tl.PropagateNan.ALL)
     numerator = tl.exp(logits - logits_max)
     probs = numerator / tl.sum(numerator, 0)
     cum_probs = tl.cumsum(probs, 0)
     to_remove = (cum_probs - probs) > top_p
     to_remove = tl.where(offsets < min_tokens_to_keep, False, to_remove)
     filtered_logits = tl.where(to_remove, filter_value, logits)
-    f_logits_max = tl.max(filtered_logits, 0)
+    f_logits_max = tl.max(filtered_logits, 0,propagate_nan=tl.PropagateNan.ALL)
     f_numerator = tl.exp(filtered_logits - f_logits_max)
     f_probs = f_numerator / tl.sum(f_numerator, 0)
 
@@ -787,14 +787,14 @@ def _top_p_filter_kernel(
 
     logits = tl.load(row_logits_ptr + offsets * stride_logits_k)
 
-    logits_max = tl.max(logits, 0)
+    logits_max = tl.max(logits, 0, propagate_nan=tl.PropagateNan.ALL)
     numerator = tl.exp(logits - logits_max)
     probs = numerator / tl.sum(numerator, 0)
     cum_probs = tl.cumsum(probs, 0)
     to_remove = (cum_probs - probs) > top_p
     to_remove = tl.where(offsets < min_tokens_to_keep, False, to_remove)
     filtered_logits = tl.where(to_remove, filter_value, logits)
-    f_logits_max = tl.max(filtered_logits, 0)
+    f_logits_max = tl.max(filtered_logits, 0, propagate_nan=tl.PropagateNan.ALL)
     f_numerator = tl.exp(filtered_logits - f_logits_max)
     f_probs = f_numerator / tl.sum(f_numerator, 0)
 

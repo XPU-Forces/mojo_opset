@@ -94,7 +94,7 @@ def _cross_entropy_kernel(
 
         if HAS_SOFTCAPPING:
             X_block = softcap * tl.math.tanh(X_block / softcap)
-        block_max = tl.max(X_block)
+        block_max = tl.max(X_block,propagate_nan=tl.PropagateNan.ALL)
         if label_smoothing > 0:
             X_block2 = tl.load(
                 X_ptr + X_offsets,
@@ -107,7 +107,7 @@ def _cross_entropy_kernel(
                 scaled_x_sum += tl.sum(-eps * X_block2 * weight_block).to(tl.float32)
             else:
                 scaled_x_sum += tl.sum(-eps * X_block2).to(tl.float32)
-        m_new = tl.maximum(m, block_max)
+        m_new = tl.maximum(m, block_max,propagate_nan=tl.PropagateNan.ALL)
         d = d * tl.exp(m - m_new) + tl.sum(tl.exp(X_block - m_new))
         m = m_new
 
@@ -312,7 +312,7 @@ def _cross_entropy_prime_kernel(
                 other=float("-inf"),
             ).cast(tl.float32)
 
-            block_max = tl.max(X_block, axis=0)  # Use axis=0 for clarity, it's a 1D reduction
+            block_max = tl.max(X_block, axis=0,propagate_nan=tl.PropagateNan.ALL)  # Use axis=0 for clarity, it's a 1D reduction
             if label_smoothing > 0:
                 X_block2 = tl.load(
                     current_X_ptr + X_offsets,
@@ -320,7 +320,7 @@ def _cross_entropy_prime_kernel(
                     other=0.0,
                 ).cast(tl.float32)
                 scaled_x_sum += tl.sum(-eps * X_block2, axis=0).to(tl.float32)
-            m_new = tl.maximum(m, block_max)
+            m_new = tl.maximum(m, block_max,propagate_nan=tl.PropagateNan.ALL)
             d = d * tl.exp(m - m_new) + tl.sum(tl.exp(X_block - m_new), axis=0)
             m = m_new
 
