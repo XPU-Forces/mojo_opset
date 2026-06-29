@@ -39,6 +39,32 @@ def get_aux_mask():
     return AUX_MASK_SIZE, AUX_MASK
 
 
+def get_mask_causal_with_window(
+        BLOCK_M: int,
+        BLOCK_N: int,
+        local_window_size: Optional[int] = None,
+        global_window_size: Optional[int] = None,
+        device: str = "npu",
+):
+    if local_window_size is None:
+        local_window_size = 0
+    if global_window_size is None:
+        global_window_size = 0
+
+    M = global_window_size + local_window_size + 4 * max(BLOCK_M, BLOCK_N)
+    N = global_window_size + local_window_size + 5 * max(BLOCK_M, BLOCK_N)
+
+    causal = torch.ones(M, N, dtype=torch.bool).tril()
+
+    sink_band = torch.zeros(M, N, dtype=torch.bool)
+    sink_band[:, :global_window_size] = True
+
+    local_band = torch.ones(M, N, dtype=torch.bool).triu(diagonal=-local_window_size)
+
+    mask = causal & (sink_band | local_band)
+    return mask.to(device=device)
+
+
 import triton
 import triton.language as tl
 
@@ -181,6 +207,23 @@ def gen_mask_triu(mask_ptr_triu, mask_size, mask_stride_m, mask_stride_n, M_BLOC
         mask_ptr_triu
         + tl.arange(0, M_BLOCK)[:, None] * mask_stride_m
         + (len_offset + tl.arange(0, N_BLOCK))[None, :] * mask_stride_n
+    )
+    return mask
+
+
+@triton.jit
+def gen_mask_causal_with_window(mask_ptr_causal, mask_size_m, mask_size_n, M_BLOCK, N_BLOCK, m_start, n_start,
+                                global_window_size):
+    m_pos = min(m_start, mask_size_m - M_BLOCK)
+    condition_1 = min(1, max(0, m_start - mask_size_m + M_BLOCK))  # m_start > bottom -> 1 else 0
+    condition_2 = min(1, max(0, n_start - global_window_size))  # n_start > global_window_size -> 1 else 0
+    condition = condition_1 * condition_2
+    n_pos = (1 - condition) * n_start + condition * max(global_window_size + 1,
+                                                        n_start - (m_start - mask_size_m + M_BLOCK))
+    mask = tl.load(
+        mask_ptr_causal
+        + (m_pos + tl.arange(0, M_BLOCK)[:, None]) * mask_size_n
+        + (n_pos + tl.arange(0, N_BLOCK))[None, :]
     )
     return mask
 
@@ -659,10 +702,9 @@ def _swa_paged_prefill_kernel(
     stride_vd,
     stride_block_table_b,
     stride_block_table_p,
-    aux_mask_ptr,
-    aux_mask_size,
-    stride_mask_m,
-    stride_mask_n,
+    causal_mask_ptr,
+    causal_mask_m_size: tl.constexpr,
+    causal_mask_n_size: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     GLOBAL_WINDOW: tl.constexpr,
     LOCAL_WINDOW: tl.constexpr,
@@ -674,24 +716,12 @@ def _swa_paged_prefill_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
-    skip_window_mask: tl.constexpr,
 ):
     tl.static_assert(HEAD_DIM <= BLOCK_D, "BLOCK_SIZE_D should not be less than HEAD_DIM")
     tl.static_assert(PAGE_SIZE % BLOCK_N == 0, "BLOCK_N must be a divisor of PAGE_SIZE")
 
     pid = tl.program_id(0)
     n_programs = tl.num_programs(0)
-
-    # Hint(chenyifan):
-    #   the prepared aux_mask is [[empty, triu, full, tril, empty],
-    #                             [full, empty, empty, full, empty]]
-    #   every mask [BLOCK_M, BLOCK_N] can be sliced from the aux_mask and further combined
-    aux_mask_ptr_01 = aux_mask_ptr + aux_mask_size * 1 * stride_mask_m + aux_mask_size * 3 * stride_mask_n
-    aux_mask_ptr_10 = aux_mask_ptr + aux_mask_size * 1 * stride_mask_m + aux_mask_size * 1 * stride_mask_n
-    aux_mask_ptr_triu = aux_mask_ptr + aux_mask_size * 1 * stride_mask_n
-    aux_mask_ptr_tril = aux_mask_ptr + aux_mask_size * 3 * stride_mask_n
-    aux_mask_ptr_01t = aux_mask_ptr + aux_mask_size * 1 * stride_mask_m
-    aux_mask_ptr_10t = aux_mask_ptr + aux_mask_size * 1 * stride_mask_m + aux_mask_size * 2 * stride_mask_n
 
     cu_q_chunks = 0
     for b_id in range(bsz):
@@ -730,16 +760,7 @@ def _swa_paged_prefill_kernel(
             #     block_shape=(BLOCK_M, BLOCK_D),
             #     order=(1, 0),
             # )
-            q_mask = gen_mask_m_right_bound(
-                aux_mask_ptr_10t,
-                aux_mask_size,
-                stride_mask_m,
-                stride_mask_n,
-                BLOCK_M,
-                BLOCK_N,
-                q_block_id * BLOCK_M,
-                q_seq_len,
-            )
+
             q_block_start = q_block_id * BLOCK_M
             q_block_end = min(q_block_start + BLOCK_M, q_seq_len)
             q_block_len = q_block_end - q_block_start
@@ -777,54 +798,21 @@ def _swa_paged_prefill_kernel(
                 physical_page_id = tl.load(
                     block_table_ptr + b_id * stride_block_table_b + logical_page_id * stride_block_table_p
                 )
-                kv_mask = gen_mask_n_right_bound(
-                    aux_mask_ptr_10,
-                    aux_mask_size,
-                    stride_mask_m,
-                    stride_mask_n,
-                    BLOCK_M,
-                    BLOCK_N,
-                    kv_block_start,
-                    kv_seq_len,
-                )
+
                 if IS_CAUSAL:
-                    # actually, it must be true for global window blocks
-                    mask_gw = gen_mask_n_right_bound(
-                        aux_mask_ptr_10,
-                        aux_mask_size,
-                        stride_mask_m,
-                        stride_mask_n,
-                        BLOCK_M,
-                        BLOCK_N,
-                        kv_block_start,
-                        GLOBAL_WINDOW,
-                    )
-                    if LOCAL_WINDOW is not None:
-                        mask_sw = gen_mask_triu(
-                            aux_mask_ptr_triu,
-                            aux_mask_size,
-                            stride_mask_m,
-                            stride_mask_n,
-                            BLOCK_M,
-                            BLOCK_N,
-                            q_block_start + kv_computed_len,
-                            kv_block_start + LOCAL_WINDOW,
-                        )
-                        mask_gw = mask_gw | mask_sw
-                    mask_causal = gen_mask_tril(
-                        aux_mask_ptr_tril,
-                        aux_mask_size,
-                        stride_mask_m,
-                        stride_mask_n,
+                    mask = gen_mask_causal_with_window(
+                        causal_mask_ptr,
+                        causal_mask_m_size,
+                        causal_mask_n_size,
                         BLOCK_M,
                         BLOCK_N,
                         q_block_start + kv_computed_len,
                         kv_block_start,
+                        GLOBAL_WINDOW,
                     )
-                    mask_causal = mask_gw & mask_causal
-                    mask = mask_causal & q_mask & kv_mask
                 else:
-                    mask = q_mask & kv_mask
+                    mask = tl.full((BLOCK_M, BLOCK_N), 1,  dtype=tl.int1)
+
                 cur_k_block_ptr = tl.make_block_ptr(
                     base=k_ptr + physical_page_id * stride_kp + kv_head_id * stride_kh + kv_block_start_in_page * stride_kt,
                     shape=(kv_block_len, HEAD_DIM),
@@ -866,42 +854,20 @@ def _swa_paged_prefill_kernel(
                 physical_page_id = tl.load(
                     block_table_ptr + b_id * stride_block_table_b + logical_page_id * stride_block_table_p
                 )
-                kv_mask = gen_mask_n_right_bound(
-                    aux_mask_ptr_10,
-                    aux_mask_size,
-                    stride_mask_m,
-                    stride_mask_n,
-                    BLOCK_M,
-                    BLOCK_N,
-                    kv_block_start,
-                    kv_seq_len,
-                )
+
                 if IS_CAUSAL:
-                    mask_causal = gen_mask_tril(
-                        aux_mask_ptr_tril,
-                        aux_mask_size,
-                        stride_mask_m,
-                        stride_mask_n,
+                    mask = gen_mask_causal_with_window(
+                        causal_mask_ptr,
+                        causal_mask_m_size,
+                        causal_mask_n_size,
                         BLOCK_M,
                         BLOCK_N,
                         q_block_start + kv_computed_len,
                         kv_block_start,
+                        GLOBAL_WINDOW,
                     )
-                    if LOCAL_WINDOW is not None:
-                        mask_sw = gen_mask_triu(
-                            aux_mask_ptr_triu,
-                            aux_mask_size,
-                            stride_mask_m,
-                            stride_mask_n,
-                            BLOCK_M,
-                            BLOCK_N,
-                            q_block_start + kv_computed_len,
-                            kv_block_start + LOCAL_WINDOW,
-                        )
-                        mask_causal = mask_causal & mask_sw
-                    mask = mask_causal & q_mask & kv_mask
                 else:
-                    mask = q_mask & kv_mask
+                    mask = tl.full((BLOCK_M, BLOCK_N), 1,  dtype=tl.int1)
 
                 cur_k_block_ptr = tl.make_block_ptr(
                     base=k_ptr + physical_page_id * stride_kp + kv_head_id * stride_kh + kv_block_start_in_page * stride_kt,
@@ -975,10 +941,9 @@ def _swa_paged_prefill_small_kernel(
     stride_vd,
     stride_block_table_b,
     stride_block_table_p,
-    aux_mask_ptr,
-    aux_mask_size,
-    stride_mask_m,
-    stride_mask_n,
+    causal_mask_ptr,
+    causal_mask_m_size: tl.constexpr,
+    causal_mask_n_size: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     GLOBAL_WINDOW: tl.constexpr,
     LOCAL_WINDOW: tl.constexpr,
@@ -990,7 +955,6 @@ def _swa_paged_prefill_small_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
-    skip_window_mask: tl.constexpr,
 ):
     tl.static_assert(HEAD_DIM <= BLOCK_D, "BLOCK_SIZE_D should not be less than HEAD_DIM")
     tl.static_assert(PAGE_SIZE % BLOCK_N == 0, "BLOCK_N must be a divisor of PAGE_SIZE")
@@ -998,16 +962,6 @@ def _swa_paged_prefill_small_kernel(
     pid = tl.program_id(0)
     n_programs = tl.num_programs(0)
 
-    # Hint(chenyifan):
-    #   the prepared aux_mask is [[empty, triu, full, tril, empty],
-    #                             [full, empty, empty, full, empty]]
-    #   every mask [BLOCK_M, BLOCK_N] can be sliced from the aux_mask and further combined
-    aux_mask_ptr_01 = aux_mask_ptr + aux_mask_size * 1 * stride_mask_m + aux_mask_size * 3 * stride_mask_n
-    aux_mask_ptr_10 = aux_mask_ptr + aux_mask_size * 1 * stride_mask_m + aux_mask_size * 1 * stride_mask_n
-    aux_mask_ptr_triu = aux_mask_ptr + aux_mask_size * 1 * stride_mask_n
-    aux_mask_ptr_tril = aux_mask_ptr + aux_mask_size * 3 * stride_mask_n
-    aux_mask_ptr_01t = aux_mask_ptr + aux_mask_size * 1 * stride_mask_m
-    aux_mask_ptr_10t = aux_mask_ptr + aux_mask_size * 1 * stride_mask_m + aux_mask_size * 2 * stride_mask_n
 
     cu_q_chunks = 0
     for b_id in range(bsz):
@@ -1046,16 +1000,6 @@ def _swa_paged_prefill_small_kernel(
             #     block_shape=(BLOCK_M, BLOCK_D),
             #     order=(1, 0),
             # )
-            q_mask = gen_mask_m_right_bound(
-                aux_mask_ptr_10t,
-                aux_mask_size,
-                stride_mask_m,
-                stride_mask_n,
-                BLOCK_M,
-                BLOCK_N,
-                q_block_id * BLOCK_M,
-                q_seq_len,
-            )
             q_block_start = q_block_id * BLOCK_M
             q_block_end = min(q_block_start + BLOCK_M, q_seq_len)
             q_block_len = q_block_end - q_block_start
@@ -1093,59 +1037,21 @@ def _swa_paged_prefill_small_kernel(
                 physical_page_id = tl.load(
                     block_table_ptr + b_id * stride_block_table_b + logical_page_id * stride_block_table_p
                 )
-                kv_mask = gen_mask_n_right_bound(
-                    aux_mask_ptr_10,
-                    aux_mask_size,
-                    stride_mask_m,
-                    stride_mask_n,
-                    BLOCK_M,
-                    BLOCK_N,
-                    kv_block_start,
-                    kv_seq_len,
-                )
+
                 if IS_CAUSAL:
-                    mask_causal = gen_mask_tril(
-                        aux_mask_ptr_tril,
-                        aux_mask_size,
-                        stride_mask_m,
-                        stride_mask_n,
+                    mask = gen_mask_causal_with_window(
+                        causal_mask_ptr,
+                        causal_mask_m_size,
+                        causal_mask_n_size,
                         BLOCK_M,
                         BLOCK_N,
                         q_block_start + kv_computed_len,
                         kv_block_start,
+                        GLOBAL_WINDOW,
                     )
-                    mask_vis = mask_causal
-                    if not skip_window_mask:
-                        if LOCAL_WINDOW is not None:
-                            mask_sw = gen_mask_triu(
-                                aux_mask_ptr_triu,
-                                aux_mask_size,
-                                stride_mask_m,
-                                stride_mask_n,
-                                BLOCK_M,
-                                BLOCK_N,
-                                q_block_start + kv_computed_len,
-                                kv_block_start + LOCAL_WINDOW,
-                            )
-                            mask_vis = mask_vis & mask_sw
-                        if GLOBAL_WINDOW is not None and kv_block_start < GLOBAL_WINDOW:
-                            mask_gw = gen_mask_n_right_bound(
-                                aux_mask_ptr_10,
-                                aux_mask_size,
-                                stride_mask_m,
-                                stride_mask_n,
-                                BLOCK_M,
-                                BLOCK_N,
-                                kv_block_start,
-                                GLOBAL_WINDOW,
-                            )
-                            if LOCAL_WINDOW is not None:
-                                mask_vis = (mask_gw | mask_sw) & mask_causal
-                            else:
-                                mask_vis = mask_gw & mask_causal
-                    mask = mask_vis & q_mask & kv_mask
                 else:
-                    mask = q_mask & kv_mask
+                    mask = tl.full((BLOCK_M, BLOCK_N), 1,  dtype=tl.int1)
+
                 cur_k_block_ptr = tl.make_block_ptr(
                     base=k_ptr + physical_page_id * stride_kp + kv_head_id * stride_kh + kv_block_start_in_page * stride_kt,
                     shape=(kv_block_len, HEAD_DIM),
@@ -1209,7 +1115,7 @@ def swa_paged_prefill_impl(
     softmax_scale: Optional[float] = None,
     gqa_interleave: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    mask_size, mask = get_aux_mask()
+
     bsz = cu_q_lens.shape[0] - 1
     tot_q_toks, num_q_heads, head_dim = q.shape
     _, num_kv_heads, page_size, _ = k_cache.shape
@@ -1235,7 +1141,17 @@ def swa_paged_prefill_impl(
     max_kv_len = kvlens.max()
     if max_kv_len < global_window_size + local_window_size + BLOCK_N * 4:
         use_swa_paged_prefill_kernel = _swa_paged_prefill_small_kernel
-    skip_window_mask = max_kv_len < global_window_size + local_window_size
+
+    if global_window_size is None:
+        global_window_size = 0
+
+    causal_mask = get_mask_causal_with_window(
+        BLOCK_M,
+        BLOCK_N,
+        local_window_size,
+        global_window_size
+    )
+    causal_mask_m_size, causal_mask_n_size = causal_mask.shape
 
     use_swa_paged_prefill_kernel[grid](
         o,
@@ -1263,10 +1179,9 @@ def swa_paged_prefill_impl(
         v_cache.stride(3),
         block_table.stride(0),
         block_table.stride(1),
-        mask,
-        mask_size,
-        mask.stride(0),
-        mask.stride(1),
+        causal_mask,
+        causal_mask_m_size,
+        causal_mask_n_size,
         is_causal,
         global_window_size,
         local_window_size,
@@ -1278,7 +1193,6 @@ def swa_paged_prefill_impl(
         BLOCK_N,
         BLOCK_D,
         page_size,
-        skip_window_mask,
     )
     return o
 
