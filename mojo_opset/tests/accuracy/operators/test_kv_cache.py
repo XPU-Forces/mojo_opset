@@ -276,6 +276,7 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, context_kv_l
         ),
     ],
 )
+@auto_switch_platform()
 @bypass_not_implemented
 def test_store_paged_kv_c8(batch_size, kv_heads, head_dim, block_size, context_kv_lens_val, q_lens_val):
     case = _build_store_paged_kv_case(
@@ -287,7 +288,7 @@ def test_store_paged_kv_c8(batch_size, kv_heads, head_dim, block_size, context_k
         q_lens_val,
         device=get_torch_device(),
     )
-    cache_scale = torch.randn((2, kv_heads, head_dim), dtype=torch.float, device="mlu")
+    cache_scale = torch.randn((2, kv_heads, head_dim), dtype=torch.float, device=get_torch_device())
     key_scale = cache_scale[0]
     value_scale = cache_scale[1]
 
@@ -659,27 +660,28 @@ def gen_args(
     # Preprocess arguments
     assert cache_mem_len >= max_context_len, "cache_mem_len should greater then or equal to max_context_len."
     assert head_size % group_size == 0, "head_size should be a multiply of groupwise."
+    device = get_torch_device()
     total_heads = head_num_q + head_num_kv * 2
     max_seq_offset = cache_mem_len - max_context_len
     max_block_num = int(math.ceil(max_context_len / block_size))
     total_blocks = int(math.ceil(cache_mem_len / block_size)) * batch_size // 4 * 4
     block_tables = random.sample(range(0, total_blocks), batch_size * max_block_num)
-    block_tables = torch.tensor(block_tables, dtype=torch.int32, device="mlu").view(batch_size, max_block_num)
+    block_tables = torch.tensor(block_tables, dtype=torch.int32, device=device).view(batch_size, max_block_num)
     # Generates key and cache from context
-    context_lens = torch.randint(size=[batch_size], low=1, high=max_context_len + 1, dtype=torch.int32, device="mlu")
+    context_lens = torch.randint(size=[batch_size], low=1, high=max_context_len + 1, dtype=torch.int32, device=device)
     if use_seq_offset:
-        context_paddings = torch.randint(size=[batch_size], low=0, high=max_seq_offset, dtype=torch.int32, device="mlu")
+        context_paddings = torch.randint(size=[batch_size], low=0, high=max_seq_offset, dtype=torch.int32, device=device)
     else:
         context_paddings = torch.zeros_like(context_lens)
     cu_context_lens = torch.cumsum(context_lens + context_paddings, dim=-1)
     total_seqlen = cu_context_lens[-1]
-    context_seq_offset = torch.zeros([batch_size], dtype=torch.int32, device="mlu")
+    context_seq_offset = torch.zeros([batch_size], dtype=torch.int32, device=device)
     context_seq_offset[1:] = cu_context_lens[:-1]
     if context_strided:
-        context = torch.randn([total_heads, total_seqlen, max(pad_head_size, head_size)], dtype=dtype, device="mlu")
+        context = torch.randn([total_heads, total_seqlen, max(pad_head_size, head_size)], dtype=dtype, device=device)
         context = context.transpose(0, 1)
     else:
-        context = torch.randn([total_seqlen, total_heads, max(pad_head_size, head_size)], dtype=dtype, device="mlu")
+        context = torch.randn([total_seqlen, total_heads, max(pad_head_size, head_size)], dtype=dtype, device=device)
     key = context[..., head_num_q : head_num_q + head_num_kv, :head_size]
     value = None
     dim = 2 if has_value else 1
@@ -689,7 +691,7 @@ def gen_args(
             low=-128,
             high=127,
             dtype=torch.int32,
-            device="mlu",
+            device=device,
         )
         .view(torch.int8)
         .view(dim, total_blocks, head_num_kv, block_size, head_size)
@@ -697,9 +699,9 @@ def gen_args(
 
     # Generates key_cache_scale and value_cache_scale
     if quant_mode == 0:  # quant_mode == 0 is per channel
-        cache_scale = torch.randn((dim, head_num_kv, head_size), dtype=torch.float, device="mlu")
+        cache_scale = torch.randn((dim, head_num_kv, head_size), dtype=torch.float, device=device)
     else:  # quant_mode != 1 (== 1 for extend) is per head
-        cache_scale = torch.randn((dim, total_blocks, head_num_kv, block_size), dtype=torch.float, device="mlu")
+        cache_scale = torch.randn((dim, total_blocks, head_num_kv, block_size), dtype=torch.float, device=device)
     key_cache = cache[0]
     value_cache = None
     key_cache_scale = cache_scale[0]
@@ -729,6 +731,7 @@ def gen_args(
 @pytest.mark.parametrize("has_value", [True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("context_strided", [False, True])
+@auto_switch_platform()
 @bypass_not_implemented
 def test_dequant_from_paged_cache(
     batch_size,
