@@ -8,6 +8,7 @@ from mojo_opset import MojoRotaryEmbedding
 from mojo_opset import MojoVisionRotaryEmbedding2D
 from mojo_opset.experimental import MojoGridRoPE
 from mojo_opset.experimental import MojoRelativeEmbedding
+from mojo_opset.experimental import MojoMRoPEInplace
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_torch_device
 
@@ -27,19 +28,19 @@ VISION_VIT_CONFIG = {
 }
 
 
-def compute_cos_sin_cache(head_dim, rotary_dim, max_position, base=10000.0):
+def compute_cos_sin_cache(head_dim, rotary_dim, max_position, device, base=10000.0):
     inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim // 2, 2, dtype=torch.float32) / rotary_dim))
     t = torch.arange(max_position, dtype=inv_freq.dtype)
     freqs = torch.einsum("i,j->ij", t, inv_freq)
     freqs = freqs.repeat_interleave(2, dim=-1)
-    return freqs.cos(), freqs.sin()
+    return freqs.cos().to(device), freqs.sin().to(device)
 
 
 def prepare_mrope_test_inputs(num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=torch.float32):
     rotary_dim = sum(mrope_section) * 2
 
     positions = torch.randint(0, 1000, (3, num_tokens), device=device, dtype=torch.long)
-    cos_cache, sin_cache = compute_cos_sin_cache(head_dim, rotary_dim, 4000, base=10000.0)
+    cos_cache, sin_cache = compute_cos_sin_cache(head_dim, rotary_dim, 4000, device, base=10000.0)
 
     half_rotary_dim = rotary_dim // 2
     cos_3d = torch.zeros(3, num_tokens, half_rotary_dim, device=device, dtype=torch.float32)
@@ -290,6 +291,50 @@ def test_mrope_qwen_models(
     mrope.forward_diff_with(mrope_ref, query, key, cos_table, sin_table, mrope_section_out, is_interleaved, head_dim=head_dim)
 
 
+@pytest.mark.parametrize("num_tokens", [1, 32, 128])
+@pytest.mark.parametrize("n_qh, n_kh, mrope_section, is_interleaved, model_name", [
+    (28, 4, [16, 24, 24], False, "Qwen2-VL-7B"),
+    (40, 8, [16, 24, 24], False, "Qwen2.5-VL-32B"),
+    (16, 8, [24, 20, 20], True, "Qwen3-VL-2B"),
+    (32, 8, [24, 20, 20], True, "Qwen3-VL-8B"),
+])
+@pytest.mark.parametrize("head_dim", [128])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("inplace", [True])
+@bypass_not_implemented
+def test_mrope_qwen_models_inplace(
+    num_tokens,
+    n_qh,
+    n_kh,
+    head_dim,
+    mrope_section,
+    is_interleaved,
+    model_name,
+    dtype,
+    inplace,
+):
+    device = get_torch_device()
+    query, key, cos_table, sin_table, mrope_section_out = prepare_mrope_test_inputs(
+        num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=dtype
+    )
+    query_ref = query.clone()
+    key_ref = key.clone()
+
+    mrope = MojoMRoPEInplace(inplace=inplace)
+    mrope_ref = MojoMRoPEInplace._registry.get("torch")(inplace=inplace)
+
+    mrope(query, key, cos_table, sin_table, mrope_section_out, is_interleaved, head_dim=head_dim)
+    mrope_ref(query_ref, key_ref, cos_table, sin_table, mrope_section_out, is_interleaved, head_dim=head_dim)
+
+    if dtype == torch.float32:
+        atol, rtol = 1e-5, 1e-6
+    else:
+        atol, rtol = 3e-2, 6e-3
+
+    torch.testing.assert_close(query, query_ref, atol=atol, rtol=rtol)
+    torch.testing.assert_close(key, key_ref, atol=atol, rtol=rtol)
+
+
 @pytest.mark.parametrize("num_tokens", [16, 64])
 @pytest.mark.parametrize("n_qh, n_kh", [
     (32, 4),
@@ -321,6 +366,53 @@ def test_mrope_partial_rotation(
     mrope = MojoMRoPE()
     mrope_ref = MojoMRoPE._registry.get("torch")()
     mrope.forward_diff_with(mrope_ref, query, key, cos_table, sin_table, mrope_section_out, is_interleaved, head_dim=head_dim)
+
+
+@pytest.mark.parametrize("num_tokens", [16, 64])
+@pytest.mark.parametrize("n_qh, n_kh", [
+    (32, 4),
+    (64, 8),
+])
+@pytest.mark.parametrize("head_dim, mrope_section, description", [
+    (128, [8, 12, 12], "partial_rotation_50pct"),
+    (128, [12, 18, 18], "partial_rotation_75pct"),
+    (96, [8, 12, 12], "small_head_full_rotation"),
+])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("is_interleaved", [False])
+@pytest.mark.parametrize("inplace", [True])
+@bypass_not_implemented
+def test_mrope_partial_rotation_inplace(
+    num_tokens,
+    n_qh,
+    n_kh,
+    head_dim,
+    mrope_section,
+    description,
+    dtype,
+    is_interleaved,
+    inplace,
+):
+    device = get_torch_device()
+    query, key, cos_table, sin_table, mrope_section_out = prepare_mrope_test_inputs(
+        num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=dtype
+    )
+    query_ref = query.clone()
+    key_ref = key.clone()
+
+    mrope = MojoMRoPEInplace(inplace=inplace)
+    mrope_ref = MojoMRoPEInplace._registry.get("torch")(inplace=inplace)
+
+    mrope(query, key, cos_table, sin_table, mrope_section_out, is_interleaved, head_dim=head_dim)
+    mrope_ref(query_ref, key_ref, cos_table, sin_table, mrope_section_out, is_interleaved, head_dim=head_dim)
+
+    if dtype == torch.float32:
+        atol, rtol = 1e-5, 1e-6
+    else:
+        atol, rtol = 3e-2, 6e-3
+
+    torch.testing.assert_close(query, query_ref, atol=atol, rtol=rtol)
+    torch.testing.assert_close(key, key_ref, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize("num_buckets", [32, 64])

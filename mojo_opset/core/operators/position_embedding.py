@@ -184,7 +184,7 @@ class MojoMRoPE(MojoOperator):
     Reference: https://qwenlm.github.io/blog/qwen2-vl/
     """
 
-    supported_platforms_list = ["npu"]
+    supported_platforms_list = ["npu", "mlu", "meta_device", "ilu"]
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
