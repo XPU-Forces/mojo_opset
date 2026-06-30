@@ -2,6 +2,7 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
+from torch import nn
 
 from mojo_opset.core.operator import MojoOperator
 from mojo_opset.core.operators.moe import _count_expert_tokens
@@ -87,6 +88,39 @@ def _sort_moe_routes(
     sorted_gates = flat_gates.index_select(0, sort_indices).reshape(token_num, top_k, 1)
     sorted_token_indices = flat_token_indices.index_select(0, sort_indices).reshape(token_num, top_k, 1)
     return sorted_hidden, sorted_gates, sorted_token_indices, sorted_experts.reshape(token_num, top_k)
+
+
+class MojoMixLinear(MojoOperator):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        if in_features <= 0:
+            raise ValueError(f"in_features must be positive, got {in_features}.")
+        if out_features <= 0:
+            raise ValueError(f"out_features must be positive, got {out_features}.")
+
+        self.in_features = in_features
+        self.out_features = out_features
+
+        weight_factory_kwargs = dict(self.tensor_factory_kwargs)
+        weight_factory_kwargs["dtype"] = torch.float32
+        self.weight = nn.Parameter(torch.empty(out_features, in_features, **weight_factory_kwargs))
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if input.dim() < 2:
+            raise ValueError(f"input must have rank >= 2, got shape {tuple(input.shape)}.")
+        if input.shape[-1] != self.in_features:
+            raise ValueError(
+                f"input last dim must be in_features={self.in_features}, got {input.shape[-1]}."
+            )
+        return torch.matmul(input.float(), self.weight.t().float())
+
+    def extra_repr(self) -> str:
+        return f"in_features={self.in_features}, out_features={self.out_features}"
 
 
 class MojoMoEInitRoutingDynamicQuant(MojoOperator):
@@ -193,6 +227,7 @@ class MojoFusedSwiGLUMoEScaleDynamicQuantize(MojoOperator):
 
 
 __all__ = [
+    "MojoMixLinear",
     "MojoMoEInitRoutingDynamicQuant",
     "MojoFusedSwiGLUMoEScaleDynamicQuantize",
 ]
