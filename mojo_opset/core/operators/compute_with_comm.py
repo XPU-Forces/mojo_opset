@@ -39,6 +39,11 @@ def _quant_gemm(
     ``(K, N)`` and is transposed via ``.mT`` to align with the int8-GEMM
     contract.
     """
+    input_scale = input_scale.reshape(-1)
+    if input_scale.numel() != input_i8.shape[0]:
+        raise ValueError(
+            f"input_scale must contain one scale per input row, got {input_scale.numel()} and {input_i8.shape[0]}"
+        )
     w = weight if trans_weight else weight.mT  # [N, K]
     out = input_i8.float() @ w.float().T       # [M, N]
     out = out * input_scale.float().unsqueeze(-1) * weight_scale.float()

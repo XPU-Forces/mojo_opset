@@ -33,6 +33,8 @@ from .operators.moe import MojoFusedSwiGLUMoEScaleDynamicQuantize
 from .operators.moe import MojoMoEInitRoutingDynamicQuant
 from .operators.normalization import MojoChannelRMSNorm
 from .operators.normalization import MojoGroupLayerNorm
+from .operators.normalization import MojoRMSNormInplace
+from .operators.normalization import MojoGroupRMSNormInplace
 from .operators.position_embedding import MojoGridRoPE
 from .operators.position_embedding import MojoRelativeEmbedding
 from .operators.fused_norm_rope_quant_store import MojoFusedNormRoPEQuantStore
@@ -68,6 +70,8 @@ __all__ = [
     "MojoFusedSwiGLUMoEScaleDynamicQuantize",
     "MojoGroupLayerNorm",
     "MojoChannelRMSNorm",
+    "MojoRMSNormInplace",
+    "MojoGroupRMSNormInplace",
     "MojoRelativeEmbedding",
     "MojoGridRoPE",
     "MojoStoreLowrank",

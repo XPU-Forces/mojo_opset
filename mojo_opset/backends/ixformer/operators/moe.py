@@ -9,6 +9,70 @@ from mojo_opset.core import MojoQuantMoE
 from ixformer import functions as ixf_f
 import ixformer.distributed as ixfd
 
+
+def _m13_debug_layer_enabled(layer_idx) -> bool:
+    if os.environ.get("M13_DUMP_MOE_DEBUG", "0") != "1":
+        return False
+    if os.environ.get("DEBUG_DUMP_HIDDEN", "0") != "1":
+        return False
+    if layer_idx is None:
+        return False
+    layers = os.environ.get("M13_DUMP_ATTN_LAYERS", "")
+    if layers:
+        enabled = {int(item) for item in layers.replace(",", " ").split() if item.strip()}
+        if int(layer_idx) not in enabled:
+            return False
+    return True
+
+
+def _m13_debug_rank() -> int:
+    if dist.is_available() and dist.is_initialized():
+        return int(dist.get_rank())
+    return int(os.environ.get("GLOBAL_RANK", os.environ.get("RANK", "0")))
+
+
+def _m13_dump_tensor(kind: str, tensor: torch.Tensor, layer_idx) -> None:
+    if not _m13_debug_layer_enabled(layer_idx):
+        return
+    if not torch.is_tensor(tensor) or tensor.dim() == 0:
+        return
+    root = os.environ.get("HIDDEN_DUMP_DIR", "/tmp/xpu_gpt_hidden_dump")
+    rank = _m13_debug_rank()
+    layer_dump_dir = os.path.join(root, kind, f"layer_{int(layer_idx)}")
+    os.makedirs(layer_dump_dir, exist_ok=True)
+    prefix = f"hidden_rank_{rank}_"
+    counter = 0
+    for name in os.listdir(layer_dump_dir):
+        if not name.startswith(prefix) or not name.endswith(".pt"):
+            continue
+        try:
+            counter = max(counter, int(name[len(prefix) : -3]) + 1)
+        except ValueError:
+            continue
+    torch.save(tensor.detach().cpu().reshape(-1, tensor.shape[-1]), os.path.join(layer_dump_dir, f"{prefix}{counter}.pt"))
+
+
+def _m13_dump_meta(kind: str, payload: dict, layer_idx) -> None:
+    if not _m13_debug_layer_enabled(layer_idx):
+        return
+    root = os.environ.get("HIDDEN_DUMP_DIR", "/tmp/xpu_gpt_hidden_dump")
+    rank = _m13_debug_rank()
+    meta_dir = os.path.join(root, "meta")
+    os.makedirs(meta_dir, exist_ok=True)
+    prefix = f"{kind}_rank_{rank}_"
+    counter = 0
+    for name in os.listdir(meta_dir):
+        if not name.startswith(prefix) or not name.endswith(".pt"):
+            continue
+        try:
+            counter = max(counter, int(name[len(prefix) : -3]) + 1)
+        except ValueError:
+            continue
+    payload = dict(payload)
+    payload["rank"] = rank
+    payload["layer_idx"] = int(layer_idx)
+    torch.save(payload, os.path.join(meta_dir, f"{prefix}{counter}.pt"))
+
 def decompose_fp32_to_3bf16(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
     x0 = x.bfloat16()
@@ -59,49 +123,6 @@ def _repack_int4_tn_to_nn(packed_tn: torch.Tensor, N: int, K: int) -> torch.Tens
     return packed.reshape(E, K, N // 2).contiguous().to(device)
 
 
-def _repack_int4_nn_to_tn(packed_nn: torch.Tensor, N: int, K: int) -> torch.Tensor:
-    """Inverse of :func:`_repack_int4_tn_to_nn`.
-
-    Takes NN-packed int4 (E, K, N//2) used by the ixformer kernel and
-    returns TN-packed int4 (E, N//2, K) matching the checkpoint layout.
-    Used by the state_dict post-hook dual to keep state_dict round-trip
-    safe.
-    """
-    device = packed_nn.device
-    packed_nn = packed_nn.cuda()
-    E = packed_nn.shape[0]
-
-    # Unpack the i / i+16 pair packing.
-    packed = packed_nn.view(E, K, N // 32, 16)
-    out = torch.empty(E, K, N // 32, 32, dtype=torch.int8, device=packed.device)
-    for i in range(16):
-        byte = packed[:, :, :, i].to(torch.uint8)
-        lo_nib = (byte & 0x0F).to(torch.int8)
-        hi_nib = ((byte >> 4) & 0x0F).to(torch.int8)
-        lo_nib = torch.where(lo_nib >= 8, lo_nib - 16, lo_nib)
-        hi_nib = torch.where(hi_nib >= 8, hi_nib - 16, hi_nib)
-        out[:, :, :, i] = lo_nib
-        out[:, :, :, i + 16] = hi_nib
-    out = out.view(E, K, N)
-
-    # Inverse permute (the original permutation [0, 1, 5, 3, 4, 2, 6] is
-    # self-inverse, so applying it again undoes the swizzle).
-    out = out.view(E, K // 32, 2, 16, N // 32, 2, 16)
-    out = out.permute(0, 1, 5, 3, 4, 2, 6).contiguous().view(E, K, N)
-
-    # Transpose K <-> N back to checkpoint orientation.
-    unpacked = out.transpose(-2, -1).contiguous()  # (E, N, K)
-
-    # Pack pairs along N (low nibble = even index, high nibble = odd index).
-    low = unpacked[:, 0::2, :]
-    high = unpacked[:, 1::2, :]
-    low_u8 = (low & 0x0F).to(torch.uint8)
-    high_u8 = ((high & 0x0F) << 4).to(torch.uint8)
-    packed_tn = (high_u8 | low_u8).to(torch.int8)
-
-    return packed_tn.contiguous().to(device)
-
-
 def _swizzle_weights_post_hook(module, incompatible_keys):
     """load_state_dict post-hook: convert int4/int8 weights from TN (checkpoint) to NN (ixformer) format."""
     device = module.up_proj_weight.device
@@ -132,45 +153,6 @@ def _swizzle_weights_post_hook(module, incompatible_keys):
         down_scale_nn = module.down_proj_weight_scale.data.contiguous()
         module.register_buffer("down_proj_weight", down_nn.to(device))
         module.down_proj_weight_scale = torch.nn.Parameter(down_scale_nn.to(device=device, dtype=torch.float32))
-
-
-def _unswizzle_weights_state_dict_post_hook(module, state_dict, prefix, local_metadata):
-    """Dual of :func:`_swizzle_weights_post_hook`.
-
-    Reverses the runtime NN/swizzled layout back to checkpoint TN layout so
-    state_dict() output can be re-loaded via load_state_dict() and have the
-    forward post-hook re-swizzle to runtime form. Covers up/down proj weights
-    and weight scales for both int4 and int8 paths. ``inv_smooth_scale``
-    dtype cast (bf16) is idempotent on round-trip and needs no inverse.
-    """
-    up_key = prefix + "up_proj_weight"
-    up_scale_key = prefix + "up_proj_weight_scale"
-    down_key = prefix + "down_proj_weight"
-    down_scale_key = prefix + "down_proj_weight_scale"
-
-    if module.up_weight_dtype == "int4":
-        N_up = module.intermediate_size * 2
-        K_up = module.hidden_size
-        if up_key in state_dict:
-            state_dict[up_key] = _repack_int4_nn_to_tn(state_dict[up_key], N_up, K_up)
-        if up_scale_key in state_dict:
-            state_dict[up_scale_key] = state_dict[up_scale_key].permute(0, 2, 1).contiguous()
-    elif module.up_weight_dtype == torch.int8:
-        if up_key in state_dict:
-            state_dict[up_key] = state_dict[up_key].transpose(1, 2).contiguous()
-        # int8 up_proj_weight_scale: forward only .contiguous() + dtype cast,
-        # both idempotent, no shape inverse needed.
-
-    if module.down_weight_dtype == "int4":
-        N_down = module.hidden_size
-        K_down = module.intermediate_size
-        if down_key in state_dict:
-            state_dict[down_key] = _repack_int4_nn_to_tn(state_dict[down_key], N_down, K_down)
-        if down_scale_key in state_dict:
-            state_dict[down_scale_key] = state_dict[down_scale_key].permute(0, 2, 1).contiguous()
-    elif module.down_weight_dtype == torch.int8:
-        if down_key in state_dict:
-            state_dict[down_key] = state_dict[down_key].transpose(1, 2).contiguous()
 
 
 def _attach_gating_bf16_buffers(gating_module):
@@ -476,7 +458,6 @@ class IxformerQuantMoE(MojoQuantMoE):
         setattr(self.experts.down_proj_weight_scale, "force_dtype", torch.float32)
         # Convert checkpoint weights from TN layout to NN + tensor-core swizzle expected by the kernel.
         self.experts.register_load_state_dict_post_hook(_swizzle_weights_post_hook)
-        self.experts.register_state_dict_post_hook(_unswizzle_weights_state_dict_post_hook)
         self.output_dtype = torch.bfloat16
 
         self.gdr_device_buffer = torch.zeros([self.num_experts + 1], dtype=torch.int, device="cuda")
@@ -501,6 +482,44 @@ class IxformerQuantMoE(MojoQuantMoE):
             ixf_f.delete_gdr_buffer(self.gdr_buffer_ptr2)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        debug_layer_idx = getattr(self, "_m13_debug_layer_idx", None)
+        if _m13_debug_layer_enabled(debug_layer_idx):
+            _m13_dump_meta(
+                "moe_ixformer_runtime",
+                {
+                    "backend": getattr(self, "_backend", None),
+                    "moe_cls": type(self).__module__ + "." + type(self).__name__,
+                    "gating_cls": type(self.gating).__module__ + "." + type(self.gating).__name__,
+                    "experts_cls": type(self.experts).__module__ + "." + type(self.experts).__name__,
+                    "ep_size": int(self.ep_size),
+                    "ep_rank": int(self.ep_rank),
+                    "ep_start": int(self.ep_start),
+                    "ep_end": int(self.ep_end),
+                    "dp_input": bool(self.dp_input),
+                    "top_k": int(self.top_k),
+                    "hidden_size": int(self.hidden_size),
+                    "intermediate_size": int(self.intermediate_size),
+                    "up_weight_dtype": str(self.up_weight_dtype),
+                    "down_weight_dtype": str(self.down_weight_dtype),
+                    "up_quant_group_size": int(self.up_quant_group_size),
+                    "down_quant_group_size": int(self.down_quant_group_size),
+                    "up_proj_weight_shape": tuple(self.experts.up_proj_weight.shape),
+                    "down_proj_weight_shape": tuple(self.experts.down_proj_weight.shape),
+                    "up_proj_weight_scale_shape": tuple(self.experts.up_proj_weight_scale.shape),
+                    "down_proj_weight_scale_shape": tuple(self.experts.down_proj_weight_scale.shape),
+                    "up_inv_smooth_dtype": str(self.experts.up_proj_quantize.inv_smooth_scale.dtype),
+                    "down_inv_smooth_dtype": str(self.experts.down_proj_quantize.inv_smooth_scale.dtype),
+                },
+                debug_layer_idx,
+            )
+            _m13_dump_tensor("moe_input", hidden_states, debug_layer_idx)
+            _m13_dump_tensor("moe_gate_weight", self.gating.gate_weight, debug_layer_idx)
+            _m13_dump_tensor("moe_up_inv_smooth", self.experts.up_proj_quantize.inv_smooth_scale, debug_layer_idx)
+            _m13_dump_tensor("moe_down_inv_smooth", self.experts.down_proj_quantize.inv_smooth_scale, debug_layer_idx)
+            _m13_dump_tensor("moe_up_weight_scale", self.experts.up_proj_weight_scale, debug_layer_idx)
+            _m13_dump_tensor("moe_down_weight_scale", self.experts.down_proj_weight_scale, debug_layer_idx)
+            _m13_dump_tensor("moe_up_weight_head", self.experts.up_proj_weight[:2, :64, :64], debug_layer_idx)
+            _m13_dump_tensor("moe_down_weight_head", self.experts.down_proj_weight[:2, :64, :64], debug_layer_idx)
 
         if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
             enable_cuda_graph = True
@@ -535,9 +554,12 @@ class IxformerQuantMoE(MojoQuantMoE):
                 self.gating.gate_weight_bf16_tn_1,
                 self.gating.gate_weight_bf16_tn_0,
             )
+            _m13_dump_tensor("moe_local_gate_logits", local_gate_logits, debug_layer_idx)
             local_top_k_gates, local_top_k_indices = ixf_f.moe_topk_softmax(
                 local_gate_logits, self.gating.top_k, renormalize=True,
             )
+            _m13_dump_tensor("moe_local_topk_gates", local_top_k_gates, debug_layer_idx)
+            _m13_dump_tensor("moe_local_topk_indices", local_top_k_indices, debug_layer_idx)
 
             full_top_k_indices = torch.empty(
                 local_tokens * self.ep_size, *local_top_k_indices.shape[1:],
@@ -563,6 +585,9 @@ class IxformerQuantMoE(MojoQuantMoE):
             hidden_states = full
             top_k_indices = full_top_k_indices
             top_k_gates = full_top_k_gates
+            _m13_dump_tensor("moe_full_hidden", hidden_states, debug_layer_idx)
+            _m13_dump_tensor("moe_topk_indices", top_k_indices, debug_layer_idx)
+            _m13_dump_tensor("moe_topk_gates", top_k_gates, debug_layer_idx)
         else:
             # triple_gemm uses 3 bf16 components of the fp32 gate weight to emulate fp32 matmul precision on bf16 HW.
             gate_logits = ixf_f.triple_gemm_bf16_bf16_fp32(
@@ -571,7 +596,10 @@ class IxformerQuantMoE(MojoQuantMoE):
                 self.gating.gate_weight_bf16_tn_1,
                 self.gating.gate_weight_bf16_tn_0,
             )
+            _m13_dump_tensor("moe_gate_logits", gate_logits, debug_layer_idx)
             top_k_gates, top_k_indices = ixf_f.moe_topk_softmax(gate_logits, self.gating.top_k, renormalize=True)
+            _m13_dump_tensor("moe_topk_indices", top_k_indices, debug_layer_idx)
+            _m13_dump_tensor("moe_topk_gates", top_k_gates, debug_layer_idx)
 
         num_tokens, dim = hidden_states.shape
 
@@ -605,6 +633,10 @@ class IxformerQuantMoE(MojoQuantMoE):
             expand_tokens = num_tokens * self.top_k
 
         dispatch_tokens = num_tokens * self.top_k if graph_safe_ep else expand_tokens
+        _m13_dump_tensor("moe_src_to_dst", src_to_dst, debug_layer_idx)
+        _m13_dump_tensor("moe_sorted_token_ids", sorted_token_ids, debug_layer_idx)
+        _m13_dump_tensor("moe_expert_sizes_cpu", expert_sizes_cpu, debug_layer_idx)
+        _m13_dump_tensor("moe_expert_sizes_gpu", expert_sizes_gpu, debug_layer_idx)
 
         if sorted_token_ids.shape[0] == 0:
             combined = torch.zeros(
@@ -627,6 +659,8 @@ class IxformerQuantMoE(MojoQuantMoE):
                 check_valid=graph_safe_ep,
             )
             i8_hs = i8_hs.view(-1, dim)
+            _m13_dump_tensor("moe_i8_hs", i8_hs, debug_layer_idx)
+            _m13_dump_tensor("moe_quant_scale", quant_scale, debug_layer_idx)
 
             # gemv variant takes GPU-side sizes so kernel shapes don't depend on CPU values during graph capture.
             if self.up_weight_dtype == torch.int8:
@@ -672,6 +706,7 @@ class IxformerQuantMoE(MojoQuantMoE):
                 )
             else:
                 raise NotImplementedError(f"IxformerQuantMoE: up_weight_dtype must be 'torch.int8' or 'int4', got {self.up_weight_dtype}.")
+            _m13_dump_tensor("moe_group_gemm1", group_gemm_output1, debug_layer_idx)
 
             # Fuses swiglu activation, smooth-quant scaling, and dynamic-int8 quant ahead of the down projection.
             act_i8, act_scale = ixf_f.activation_dynamic_scaled_int8(
@@ -682,6 +717,8 @@ class IxformerQuantMoE(MojoQuantMoE):
                 act_type="swiglu",
                 check_valid=graph_safe_ep,
             )
+            _m13_dump_tensor("moe_act_i8", act_i8, debug_layer_idx)
+            _m13_dump_tensor("moe_act_scale", act_scale, debug_layer_idx)
 
             group_gemm_output2 = torch.empty(
                 num_tokens * self.top_k, self.hidden_size,
@@ -732,6 +769,7 @@ class IxformerQuantMoE(MojoQuantMoE):
 
             else:
                 raise NotImplementedError(f"IxformerQuantMoE: down_weight_dtype must be 'torch.int8' or 'int4', got {self.down_weight_dtype}.")
+            _m13_dump_tensor("moe_group_gemm2", group_gemm_output2, debug_layer_idx)
 
             expert_outputs = group_gemm_output2.view(-1, self.top_k, self.hidden_size)
 
@@ -743,6 +781,7 @@ class IxformerQuantMoE(MojoQuantMoE):
                 topk_weight=top_k_gates,
                 mask=reduce_mask,
             )
+            _m13_dump_tensor("moe_combined_pre_ep", combined, debug_layer_idx)
 
         # Sum partial expert outputs across EP ranks; reduce_scatter slices the result back to the rank's DP shard.
         if self.ep_size > 1:
@@ -755,5 +794,6 @@ class IxformerQuantMoE(MojoQuantMoE):
                 combined = local_combined
             else:
                 ixfd.all_reduce(combined, group=self.ep_group, async_op=True)
+        _m13_dump_tensor("moe_combined_post_ep", combined, debug_layer_idx)
 
         return combined

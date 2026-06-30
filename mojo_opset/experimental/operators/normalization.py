@@ -92,7 +92,100 @@ class MojoChannelRMSNorm(MojoOperator):
         )
 
 
+class MojoRMSNormInplace(MojoOperator):
+    def __init__(
+        self,
+        norm_size: int,
+        eps: float = 1e-5,
+        inplace: bool = False,
+        **kwargs,
+    ):
+        """
+        Initialize RMSNorm patch parameters.
+
+        Args:
+            norm_size (int): Size of 1-D affine scale vector.
+            eps (float, default=1e-5): Epsilon added for numerical stability; must be > 0.
+            inplace (bool, default=False): Whether to perform RMSNorm in-place on the input tensor.
+            **kwargs: The keyword arguments of torch.empty, such as device, dtype and so on to create the weight and bias.
+        """
+        super().__init__(**kwargs)
+        self.norm_size = norm_size
+        self.weight = torch.nn.Parameter(torch.empty(norm_size, **self.tensor_factory_kwargs))
+        self.variance_epsilon = eps
+        self.inplace = inplace
+
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
+        """
+        Apply RMSNorm over the last dimension of the input.
+
+        Args:
+            hidden_state (torch.Tensor): Input tensor whose last dimension is the hidden size
+                (e.g., shape (B, T, D) or (..., D)). The normalization is performed across D.
+
+        Returns:
+            torch.Tensor: Tensor of the same shape and dtype as `hidden_state`, normalized
+            over the last dimension.
+        """
+        normalized = F.rms_norm(
+            hidden_state,
+            [hidden_state.shape[-1]],
+            weight=self.weight,
+            eps=self.variance_epsilon,
+        )
+        if self.inplace:
+            hidden_state.copy_(normalized)
+            return hidden_state
+        else:
+            return normalized
+
+    def extra_repr(self) -> str:
+        return f"{self.norm_size=}, {self.variance_epsilon=}".replace("self.", "")
+
+
+class MojoGroupRMSNormInplace(MojoOperator):
+    def __init__(self, num_groups, norm_size, eps, elementwise_affine=True, inplace=False, **kwargs):
+        super().__init__(**kwargs)
+        self.num_groups = num_groups
+        self.norm_size = norm_size
+        self.elementwise_affine = elementwise_affine
+        if elementwise_affine:
+            self.weight = torch.nn.Parameter(torch.empty((num_groups, norm_size), **self.tensor_factory_kwargs))
+        else:
+            self.weight = None
+        self.variance_epsilon = eps
+        self.inplace = inplace
+
+    def forward(self, input_groups):
+        # Note: input_groups is a list of tensors, each tensor has compatible shapes for norm
+
+        output_groups = []
+        for group_id in range(self.num_groups):
+            # Compute normalized result (new tensor)
+            normalized = F.rms_norm(
+                input_groups[group_id],
+                (self.norm_size,),
+                weight=self.weight[group_id],
+                eps=self.variance_epsilon,
+            )
+            # Copy the normalized values back into the original tensor (in-place)
+            if self.inplace:
+                input_groups[group_id].copy_(normalized)
+            else:
+                output_groups.append(normalized)
+
+        if self.inplace:
+            return input_groups
+        else:
+            return output_groups
+
+    def extra_repr(self) -> str:
+        return f"{self.num_groups=}, {self.norm_size=}, {self.variance_epsilon=}, {self.elementwise_affine=}".replace("self.", "")
+
+
 __all__ = [
     "MojoGroupLayerNorm",
     "MojoChannelRMSNorm",
+    "MojoRMSNormInplace",
+    "MojoGroupRMSNormInplace",
 ]
