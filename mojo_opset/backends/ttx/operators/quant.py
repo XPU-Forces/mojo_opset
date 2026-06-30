@@ -16,7 +16,7 @@ class TTXStaticQuant(MojoStaticQuant):
 
 
 class TTXDequant(MojoDequant):
-    supported_platforms_list = ["ilu"]
+    supported_platforms_list = ["npu", "ilu"]
 
     def forward(
         self,

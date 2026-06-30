@@ -22,6 +22,8 @@ from .layernorm import layernorm_fwd_impl
 from .layernorm import layernorm_infer_impl
 from .lightning_indexer import lightning_indexer_impl
 from .quant import dynamic_quant_impl
+from .quant import static_quant_impl
+from .quant import dequant_impl
 from .rmsnorm import rmsnorm_bwd_impl
 from .rmsnorm import rmsnorm_fwd_impl
 from .rmsnorm import rmsnorm_infer_impl
@@ -108,6 +110,8 @@ __all__ = [
     "sdpa_bwd_impl",
     "lightning_indexer_impl",
     "dynamic_quant_impl",
+    "static_quant_impl",
+    "dequant_impl",
     "diffusion_attention_fwd_impl",
     "diffusion_attention_bwd_impl",
     "m_grouped_matmul_impl",
