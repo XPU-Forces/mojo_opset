@@ -26,6 +26,7 @@ from .normalization import MojoGroupLayerNorm
 from .position_embedding import MojoGridRoPE
 from .position_embedding import MojoRelativeEmbedding
 from .fused_norm_rope_quant_store import MojoFusedNormRoPEQuantStore
+from .fused_norm_rope_sage_quant_store import MojoFusedNormRoPESageQuantStore
 from .store_lowrank import MojoStoreLowrank
 
 __all__ = [
@@ -58,4 +59,5 @@ __all__ = [
     "MojoStoreLowrank",
     "MojoQuantBatchGemmReduceSum",
     "MojoFusedNormRoPEQuantStore",
+    "MojoFusedNormRoPESageQuantStore",
 ]

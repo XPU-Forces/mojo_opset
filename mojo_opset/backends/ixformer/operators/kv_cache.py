@@ -4,6 +4,7 @@ import torch
 from ixformer import functions as ixf_f
 
 from mojo_opset.core import MojoStorePagedKVCache
+from mojo_opset.core import MojoStorePagedSingleCache
 from mojo_opset.core.operators.kv_cache import assert_paged_kv_store_contract
 
 class IxformerStorePagedKVCache(MojoStorePagedKVCache):
@@ -78,3 +79,61 @@ class IxformerStorePagedKVCache(MojoStorePagedKVCache):
             context_kv_lens,
         )
         return key_cache, value_cache
+
+
+class IxformerStorePagedSingleCache(MojoStorePagedSingleCache):
+    supported_platforms_list = ["ilu"]
+
+    def forward(
+        self,
+        states: torch.Tensor,
+        cache: torch.Tensor,
+        block_table: Optional[torch.Tensor] = None,
+        cu_q_lens: Optional[torch.Tensor] = None,
+        context_kv_lens: Optional[torch.Tensor] = None,
+        *,
+        chunk_metadata: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Store new tokens of a single attribute (key OR value) into one ixformer
+        block-based paged cache.
+
+        Args:
+            states (torch.Tensor): New tokens with shape (token_num, kv_head_num, head_dim).
+            cache (torch.Tensor): Paged cache with shape
+                (num_blocks, kv_head_num, block_size, head_dim), updated in-place.
+            block_table (torch.Tensor | None): Logical-to-physical block mapping with
+                shape (batch_size, max_blocks_per_sequence).
+            cu_q_lens (torch.Tensor | None): Cumulative query lengths for prefill with
+                shape (batch_size + 1,). None indicates decode mode.
+            context_kv_lens (torch.Tensor | None): Existing KV lengths before storing the
+                current tokens, shape (batch_size,). Padding entries use -1.
+            chunk_metadata (torch.Tensor | None): Optional precomputed store plan with shape
+                (num_chunks, 4) and per-row (src_token_start, dst_block_id, dst_block_offset, chunk_len).
+
+        Returns:
+            torch.Tensor: Updated cache.
+        """
+        if states.dim() != 3:
+            raise ValueError("states must be (token_num, kv_head_num, head_dim).")
+        if cache.dim() != 4:
+            raise ValueError("cache must be (num_blocks, kv_head_num, block_size, head_dim).")
+        if cache.dtype != states.dtype:
+            raise ValueError("IxformerStorePagedSingleCache requires states and cache to have the same dtype.")
+
+        if chunk_metadata is not None:
+            raise NotImplementedError("IxformerStorePagedSingleCache does not support the chunk_metadata path.")
+        if block_table is None or context_kv_lens is None:
+            raise ValueError("block_table and context_kv_lens are required when chunk_metadata is not provided.")
+
+        ixf_f.paged_store_kv_cache_with_block_table(
+            states,
+            states,
+            cache,
+            cache,
+            block_table,
+            cu_q_lens,
+            context_kv_lens,
+            store_mode=1,
+        )
+        return cache

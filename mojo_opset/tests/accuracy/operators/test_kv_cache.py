@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from mojo_opset import MojoStorePagedKVCache
+from mojo_opset import MojoStorePagedSingleCache
 from mojo_opset.experimental import MojoStorePagedMLAKVCache
 from mojo_opset.tests.utils import assert_close
 from mojo_opset.tests.utils import auto_switch_platform
@@ -21,6 +22,7 @@ def _build_store_paged_kv_case(
     q_lens_val,
     *,
     device,
+    dtype=torch.bfloat16,
 ):
     context_kv_lens = torch.tensor(context_kv_lens_val, dtype=torch.int32, device=device)
     q_lens = torch.tensor(q_lens_val, dtype=torch.int32, device=device)
@@ -35,8 +37,8 @@ def _build_store_paged_kv_case(
     )
 
     total_tokens = int(q_lens.sum().item()) if not is_decode else batch_size
-    key_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=torch.bfloat16, device=device)
-    value_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=torch.bfloat16, device=device)
+    key_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=dtype, device=device)
+    value_states = torch.randn((total_tokens, kv_heads, head_dim), dtype=dtype, device=device)
 
     max_kv_len = torch.clamp(context_kv_lens + q_lens, min=0).max().item()
     max_blocks_per_seq = (max_kv_len + block_size - 1) // block_size + 2
@@ -47,8 +49,8 @@ def _build_store_paged_kv_case(
     total_phys_blocks = total_blocks_needed + 10
 
     cache_shape = (total_phys_blocks, kv_heads, block_size, head_dim)
-    k_cache = torch.zeros(cache_shape, dtype=torch.bfloat16, device=device)
-    v_cache = torch.zeros(cache_shape, dtype=torch.bfloat16, device=device)
+    k_cache = torch.zeros(cache_shape, dtype=dtype, device=device)
+    v_cache = torch.zeros(cache_shape, dtype=dtype, device=device)
 
     block_table = torch.full((batch_size, max_blocks_per_seq), -1, dtype=torch.int32, device=device)
     next_block = 0
@@ -418,6 +420,207 @@ def test_store_paged_kv_chunk_metadata_perf_and_accuracy():
         f"chunk-metadata kernel should outperform legacy sequence-chunk kernel on bucket-padded sparse batches. "
         f"new={new_latency_ms:.3f} ms, legacy={legacy_latency_ms:.3f} ms"
     )
+
+
+# ===========================================================================
+# MojoStorePagedSingleCache
+# ===========================================================================
+
+@pytest.mark.parametrize(
+    "batch_size, kv_heads, head_dim, block_size, context_kv_lens_val, q_lens_val",
+    [
+        (2, 2, 128, 128, [0, 0], [130, 33]),
+        (2, 2, 128, 128, [32, 35], [1, 1]),
+        (2, 2, 128, 128, [15, 40], [788, 126]),
+        (2, 2, 128, 512, [255, 511], [300, 257]),
+        (2, 2, 128, 2048, [1023, 2047], [900, 1025]),
+        (1, 1, 128, 128, [0], [5]),
+        (1, 1, 128, 128, [5], [1]),
+        (1, 1, 128, 2048, [2046], [2]),
+        (3, 2, 128, 128, [32, -1, 35], [1, 1, 1]),
+        (3, 2, 128, 128, [0, -1, 5], [4, 0, 2]),
+        (3, 2, 128, 512, [510, -1, 700], [4, 1, 300]),
+        (8, 2, 128, 128, [224, 542, 34, 41, 54, 57, 65, 0], [432, 84, 977, 93, 23, 89, 31, 555]),
+        (8, 2, 128, 128, [772, 974, 3232, 43, 77, 7633, 888, 1], [1, 1, 1, 1, 1, 1, 1, 1]),
+    ],
+)
+@bypass_not_implemented
+def test_store_paged_single_cache(batch_size, kv_heads, head_dim, block_size, context_kv_lens_val, q_lens_val):
+    case = _build_store_paged_kv_case(
+        batch_size,
+        kv_heads,
+        head_dim,
+        block_size,
+        context_kv_lens_val,
+        q_lens_val,
+        device=get_torch_device(),
+    )
+
+    store_single_ref = MojoStorePagedSingleCache._registry.get("torch")()
+    store_single = MojoStorePagedSingleCache()
+    if type(store_single_ref) is type(store_single):
+        raise NotImplementedError("both operands resolve to the same implementation, skipping comparison.")
+
+    cache_ref = store_single_ref(
+        case["key_states"],
+        case["k_cache"].clone(),
+        chunk_metadata=case["chunk_metadata"],
+    )
+    cache = store_single(
+        case["key_states"],
+        case["k_cache"].clone(),
+        chunk_metadata=case["chunk_metadata"],
+    )
+
+    assert_close(cache, cache_ref)
+
+
+@pytest.mark.parametrize(
+    "batch_size, kv_heads, head_dim, block_size, context_kv_lens_val, q_lens_val",
+    [
+        (1, 2, 128, 16, [0], [3]),
+        (1, 2, 128, 128, [127], [1]),
+        (2, 4, 128, 32, [5, 33], [7, 19]),
+        (2, 4, 128, 256, [255, 511], [1, 1]),
+        (3, 8, 128, 128, [17, -1, 63], [1, 1, 1]),
+        (4, 16, 128, 128, [0, 3, 127, 255], [9, 17, 33, 65]),
+        (4, 16, 128, 512, [511, 1025, 7, 63], [1, 1, 1, 1]),
+        (6, 24, 128, 128, [31, 511, 1023, 7, 95, 1535], [129, 257, 513, 5, 17, 65]),
+    ],
+)
+@bypass_not_implemented
+def test_store_paged_single_cache_without_chunk_metadata(
+    batch_size,
+    kv_heads,
+    head_dim,
+    block_size,
+    context_kv_lens_val,
+    q_lens_val,
+):
+    case = _build_store_paged_kv_case(
+        batch_size,
+        kv_heads,
+        head_dim,
+        block_size,
+        context_kv_lens_val,
+        q_lens_val,
+        device=get_torch_device(),
+    )
+
+    store_single_ref = MojoStorePagedSingleCache._registry.get("torch")()
+    store_single = MojoStorePagedSingleCache()
+    if type(store_single_ref) is type(store_single):
+        raise NotImplementedError("both operands resolve to the same implementation, skipping comparison.")
+
+    cache_ref = store_single_ref(
+        case["key_states"],
+        case["k_cache"].clone(),
+        case["block_table"],
+        case["cu_q_lens"],
+        case["context_kv_lens"],
+    )
+    cache = store_single(
+        case["key_states"],
+        case["k_cache"].clone(),
+        case["block_table"],
+        case["cu_q_lens"],
+        case["context_kv_lens"],
+    )
+
+    assert_close(cache, cache_ref)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "batch_size, kv_heads, head_dim, block_size, context_kv_lens_val, q_lens_val",
+    [
+        (1, 2, 128, 128, [127], [1]),
+        (2, 4, 128, 32, [5, 33], [7, 19]),
+        (3, 8, 128, 128, [17, -1, 63], [1, 1, 1]),
+        (4, 16, 128, 128, [0, 3, 127, 255], [9, 17, 33, 65]),
+    ],
+)
+@bypass_not_implemented
+def test_store_paged_single_cache_dtypes(
+    dtype,
+    batch_size,
+    kv_heads,
+    head_dim,
+    block_size,
+    context_kv_lens_val,
+    q_lens_val,
+):
+    case = _build_store_paged_kv_case(
+        batch_size,
+        kv_heads,
+        head_dim,
+        block_size,
+        context_kv_lens_val,
+        q_lens_val,
+        device=get_torch_device(),
+        dtype=dtype,
+    )
+
+    store_single_ref = MojoStorePagedSingleCache._registry.get("torch")()
+    store_single = MojoStorePagedSingleCache()
+    if type(store_single_ref) is type(store_single):
+        raise NotImplementedError("both operands resolve to the same implementation, skipping comparison.")
+
+    cache_ref = store_single_ref(
+        case["key_states"],
+        case["k_cache"].clone(),
+        case["block_table"],
+        case["cu_q_lens"],
+        case["context_kv_lens"],
+    )
+    cache = store_single(
+        case["key_states"],
+        case["k_cache"].clone(),
+        case["block_table"],
+        case["cu_q_lens"],
+        case["context_kv_lens"],
+    )
+
+    assert cache.dtype == dtype
+    assert_close(cache, cache_ref)
+
+
+@bypass_not_implemented
+def test_store_paged_single_cache_matches_full_kv_store():
+    batch_size = 4
+    kv_heads = 2
+    head_dim = 128
+    block_size = 128
+    context_kv_lens_val = [224, 0, 34, 41]
+    q_lens_val = [432, 84, 977, 93]
+
+    case = _build_store_paged_kv_case(
+        batch_size,
+        kv_heads,
+        head_dim,
+        block_size,
+        context_kv_lens_val,
+        q_lens_val,
+        device=get_torch_device(),
+    )
+
+    store_kv_ref = MojoStorePagedKVCache._registry.get("torch")()
+    store_single_ref = MojoStorePagedSingleCache._registry.get("torch")()
+
+    k_cache_ref, _ = store_kv_ref(
+        case["key_states"],
+        case["value_states"],
+        case["k_cache"].clone(),
+        case["v_cache"].clone(),
+        chunk_metadata=case["chunk_metadata"],
+    )
+    cache_single = store_single_ref(
+        case["key_states"],
+        case["k_cache"].clone(),
+        chunk_metadata=case["chunk_metadata"],
+    )
+
+    assert_close(cache_single, k_cache_ref)
 
 
 # ===========================================================================

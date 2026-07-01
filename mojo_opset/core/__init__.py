@@ -26,6 +26,7 @@ from .operators.attention import MojoSWA
 
 """ kvcache """
 from .operators.kv_cache import MojoStorePagedKVCache
+from .operators.kv_cache import MojoStorePagedSingleCache
 
 """ gemm """
 from .operators.gemm import MojoGemm
@@ -125,6 +126,7 @@ __all__ = [
     "MojoSWA",
 
     "MojoStorePagedKVCache",
+    "MojoStorePagedSingleCache",
 
     "MojoGemm",
     "MojoQuantGemm",

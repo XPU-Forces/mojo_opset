@@ -2,7 +2,11 @@ import torch
 import torch.distributed as dist
 
 from ixformer import functions as ixf_f
-from ixformer.distributed import symmetric_memory as symm
+# from ixformer.distributed import symmetric_memory as symm
+try:
+    from ixformer.distributed import symmetric_memory as symm
+except ImportError:
+    symm = None 
 
 from mojo_opset.core.operators.compute_with_comm import (
     MojoAllGatherQuantGemm,
