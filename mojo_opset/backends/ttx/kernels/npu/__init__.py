@@ -49,6 +49,7 @@ from .swa import swa_paged_decode_impl
 from .swa import swa_paged_prefill_impl
 from .swiglu import swiglu_bwd_impl
 from .swiglu import swiglu_fwd_impl
+from .int8_gemm import int8_gemm_dequant_impl, prepare_b_impl
 
 # triton-dist based comm kernels (requires triton_dist + shmem packages)
 allgather_gemm_impl = None
@@ -131,4 +132,6 @@ __all__ = [
     "allgather_gemm_impl",
     "gemm_allreduce_impl",
     "gemm_reduce_scatter_impl",
+    "int8_gemm_dequant_impl", 
+    "prepare_b_impl",
 ]

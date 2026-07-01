@@ -110,7 +110,7 @@ def _pad_to(x, mult):
     return ((x + mult - 1) // mult) * mult
 
 
-def prepare_b(b: torch.Tensor) -> torch.Tensor:
+def prepare_b_impl(b: torch.Tensor) -> torch.Tensor:
     """Transpose B to (N, K) row-major and pad to block boundaries.
 
     For inference: weight B is fixed, call once and reuse.
