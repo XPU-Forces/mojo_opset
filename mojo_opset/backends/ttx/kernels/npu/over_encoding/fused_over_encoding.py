@@ -97,13 +97,13 @@ def over_encoding_decode_kernel(
                 # WARNING(liuyuan): tl.cat required the same shapes of lhs and rhs in triton-npu. WTF?
                 # history_id = tl.cat(history_id, __input_ids, can_reorder=True)
                 __tmp = tl.zeros((MTP_STEP + MAX_N_GRAM,), dtype=tl.int64)
-                __tmp = tl.insert_slice(__tmp, history_id, (0,), (MAX_N_GRAM,), (1,))
-                __tmp = tl.insert_slice(__tmp, __input_ids, (MAX_N_GRAM,), (MTP_STEP,), (1,))
+                __tmp = tl.extra.cann.extension.insert_slice(__tmp, history_id, (0,), (MAX_N_GRAM,), (1,))
+                __tmp = tl.extra.cann.extension.insert_slice(__tmp, __input_ids, (MAX_N_GRAM,), (MTP_STEP,), (1,))
                 history_id = __tmp
 
                 for i in tl.static_range(1, MAX_N_GRAM):
                     __cal_mask = n_grams >= (i + 1)
-                    __history_ids = tl.extract_slice(
+                    __history_ids = tl.extra.cann.extension.extract_slice(
                         history_id, (MAX_N_GRAM - i,), (MTP_STEP,), (1,)
                     )
                     __history_ids = (

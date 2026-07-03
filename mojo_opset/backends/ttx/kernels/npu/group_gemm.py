@@ -151,7 +151,7 @@ def _m_grouped_matmul_bNmajor_kernel(
     # group_size_m = tl.load(group_size_ptr + tl.arange(0, num_groups)).to(tl.int32)
     # should use tl.static_range on NV
     for group_idx in range(num_groups):
-        # m = tl.extract_slice(group_size_m, [group_idx], [1], [1])
+        # m = tl.extra.cann.extension.extract_slice(group_size_m, [group_idx], [1], [1])
         m = tl.load(group_size_ptr + group_idx).to(tl.int32)
         group_end = group_start + m
         num_block_m = tl.cdiv(m, BLOCK_M)
@@ -268,7 +268,7 @@ def _k_grouped_matmul_kernel(
     blocks_per_group = num_block_m * num_block_n
     # group_size_k = tl.load(group_size_ptr + tl.arange(0, num_groups)).to(tl.int32)
     for group_idx in range(num_groups):
-        # k = tl.extract_slice(group_size_k, [group_idx], [1], [1])
+        # k = tl.extra.cann.extension.extract_slice(group_size_k, [group_idx], [1], [1])
         tokens = tl.load(group_size_ptr + group_idx).to(tl.int32)
         group_end = group_start + tokens
         cur_count = last_count + blocks_per_group
