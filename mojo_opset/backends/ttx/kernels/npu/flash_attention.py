@@ -122,7 +122,7 @@ def _sdpa_infer_single_block(
     # Load (transposed) K block
     k_T = tl.load(K_T_block_ptr, boundary_check=(0, 1), padding_option="zero")
     qk = tl.dot(q, k_T)
-    # tl.compile_hint(qk, "tile_cube_loop")
+    # tl.extra.cann.extension.compile_hint(qk, "tile_cube_loop")
 
     qk = qk * qk_scale
     if mask is not None:
@@ -147,7 +147,7 @@ def _sdpa_infer_single_block(
     # -- Update output accumulator --
     acc_ptr = acc_ptr * alpha[:, None]
     acc_ptr = tl.dot(p_cast, v, acc_ptr)
-    # tl.compile_hint(acc_ptr, "tile_cube_loop")
+    # tl.extra.cann.extension.compile_hint(acc_ptr, "tile_cube_loop")
 
     # Update current block max
     m_i = m_ij

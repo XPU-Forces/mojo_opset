@@ -298,7 +298,7 @@ def _sdpa_acc_fwd_MxN(
     k = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
     k_T = tl.trans(k)
     qk = tl.dot(q, k_T)
-    # tl.compile_hint(qk, "tile_cube_loop")
+    # tl.extra.cann.extension.compile_hint(qk, "tile_cube_loop")
 
     qk = qk * qk_scale
     if mask is not None and mask is not True:
@@ -323,7 +323,7 @@ def _sdpa_acc_fwd_MxN(
     # -- Update output accumulator --
     acc_ptr = acc_ptr * alpha[:, None]
     acc_ptr = tl.dot(p_cast, v, acc_ptr)
-    # tl.compile_hint(acc_ptr, "tile_cube_loop")
+    # tl.extra.cann.extension.compile_hint(acc_ptr, "tile_cube_loop")
 
     # Update current block max
     m_i = m_ij
@@ -1933,7 +1933,7 @@ def _sdpa_single_block_bwd_dkdv(
     # qkT = tl.dot(k, q_T)  # [BLOCK_N, BLOCK_M]
     k_T = tl.trans(k)
     qk = tl.dot(q, k_T)
-    # tl.compile_hint(qk, "tile_cube_loop")
+    # tl.extra.cann.extension.compile_hint(qk, "tile_cube_loop")
     qk = qk * qk_scale
 
     # -- Compute p ----
@@ -1991,7 +1991,7 @@ def _sdpa_single_block_bwd_dq(
     k = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
     k_T = tl.trans(k)
     qk = tl.dot(q, k_T)  # [BLOCK_M, BLOCK_N]
-    # tl.compile_hint(qk, "tile_cube_loop")
+    # tl.extra.cann.extension.compile_hint(qk, "tile_cube_loop")
     qk = qk * qk_scale
 
     # -- Compute p ----

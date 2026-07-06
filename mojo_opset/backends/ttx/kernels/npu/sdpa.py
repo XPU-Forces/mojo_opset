@@ -82,7 +82,7 @@ def _sdpa_infer_inner(
         # -- Update output accumulator --
         acc_ptr = acc_ptr * alpha[:, None]
         acc_ptr = tl.dot(p_cast, v, acc_ptr)
-        tl.compile_hint(acc_ptr, "tile_cube_loop", 2)
+        tl.extra.cann.extension.compile_hint(acc_ptr, "tile_cube_loop", 2)
 
         m_i = m_ij  # Update current block max
         # Advance V and K block pointers to next BLOCK_N range
