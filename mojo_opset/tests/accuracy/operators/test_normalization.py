@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from mojo_opset.utils.platform import get_platform
 from mojo_opset.tests.utils import bypass_not_implemented
-
+from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset import MojoLayerNorm
 from mojo_opset import MojoLayerNormQuant
 from mojo_opset import MojoGroupRMSNorm
@@ -120,12 +120,13 @@ def test_layernorm(shape, dtype, eps):
 )
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("eps", [1e-5])
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_grouprmsnorm(bsz, group_dims, hidden_size, dtype, eps):
     x = torch.randn(size=(bsz, sum(group_dims), hidden_size), dtype=dtype)
     x_groups = torch.split(x, group_dims, dim=1)
     weight = torch.randn(size=(len(group_dims), hidden_size), dtype=dtype)
-    rmsnorm = MojoGroupRMSNorm(num_groups = len(group_dims), eps=eps, norm_size=hidden_size, device=x.device, dtype=x.dtype)
+    rmsnorm = MojoGroupRMSNorm._registry.get("ttx")(num_groups = len(group_dims), eps=eps, norm_size=hidden_size, device=x.device, dtype=x.dtype)
 
     rmsnorm_ref = (
         MojoGroupRMSNorm._registry.get("torch")(
@@ -145,7 +146,8 @@ def test_grouprmsnorm(bsz, group_dims, hidden_size, dtype, eps):
         atol, rtol = 1e-5, 1e-6
     else:
         atol, rtol = 3e-2, 6e-3
-
+    perf(lambda: rmsnorm(x_groups))
+    perf(lambda: rmsnorm_ref(x_groups))
     rmsnorm.forward_diff_with(rmsnorm_ref, x_groups, atol=atol, rtol=rtol)
 
 @pytest.mark.parametrize(
@@ -204,13 +206,14 @@ def test_grouplayernorm(bsz, group_dims, hidden_size, dtype, eps):
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("eps", [1e-5])
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_residual_add_rms_norm(shape, dtype, norm_pos, eps):
     torch.manual_seed(43)
     x = torch.randn(size=shape, dtype=dtype)
     residual = torch.randn(size=shape, dtype=dtype)
     weight = torch.randn(size=(shape[-1],), dtype=dtype)
-    add_norm = MojoResidualAddRMSNorm(
+    add_norm = MojoResidualAddRMSNorm._registry.get("ttx")(
         norm_size=weight.size(0), eps=eps, norm_pos=norm_pos, device=x.device, dtype=weight.dtype
     )
     add_norm_ref = MojoResidualAddRMSNorm._registry.get("torch")(
@@ -225,7 +228,8 @@ def test_residual_add_rms_norm(shape, dtype, norm_pos, eps):
         atol, rtol = 1e-5, 1e-6
     else:
         atol, rtol = 5e-2, 1e-2
-
+    perf(lambda: add_norm(x, residual))
+    perf(lambda: add_norm_ref(x, residual))
     add_norm.forward_diff_with(
         add_norm_ref,
         x,
@@ -247,6 +251,7 @@ def test_residual_add_rms_norm(shape, dtype, norm_pos, eps):
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("eps", [1e-5])
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_residual_add_layernorm(shape, dtype, norm_pos, eps):
     torch.manual_seed(43)
@@ -254,7 +259,7 @@ def test_residual_add_layernorm(shape, dtype, norm_pos, eps):
     residual = torch.randn(size=shape, dtype=dtype)
     weight = torch.randn(size=(shape[-1],), dtype=dtype)
     bias = torch.randn(size=(shape[-1],), dtype=dtype)
-    add_norm = MojoResidualAddLayerNorm(
+    add_norm = MojoResidualAddLayerNorm._registry.get("ttx")(
         norm_size=weight.size(0),
         eps=eps,
         norm_pos=norm_pos,
@@ -274,7 +279,8 @@ def test_residual_add_layernorm(shape, dtype, norm_pos, eps):
         atol, rtol = 1e-5, 1e-6
     else:
         atol, rtol = 5e-2, 1e-2
-
+    perf(lambda: add_norm(x, residual))
+    perf(lambda: add_norm_ref(x, residual))
     add_norm.forward_diff_with(
         add_norm_ref,
         x,

@@ -26,10 +26,13 @@ dtype_str_map = {
     ],
 )
 @bypass_not_implemented
+@auto_switch_platform(set_perf=True)
 def test_gelu(shape):
     x = torch.rand(*shape, dtype=torch.bfloat16)
-    gelu = MojoGelu()
-    gelu_ref = MojoGelu._registry.get("torch")()
+    gelu = MojoGelu._registry.get("ttx")()
+    gelu_ref = MojoGelu._registry.get("torch_npu")()
+    perf(lambda: gelu(x))
+    perf(lambda: gelu_ref(x))
     gelu.forward_diff_with(gelu_ref, x)
 
 
@@ -42,10 +45,13 @@ def test_gelu(shape):
     ],
 )
 @bypass_not_implemented
+@auto_switch_platform(set_perf=True)
 def test_silu(shape):
     x = torch.rand(*shape, dtype=torch.bfloat16)
-    silu = MojoSilu()
+    silu = MojoSilu._registry.get("ttx")()
     silu_ref = MojoSilu._registry.get("torch")()
+    perf(lambda: silu(x))
+    # perf(lambda: silu_ref(x))
     silu.forward_diff_with(silu_ref, x)
 
 
@@ -58,11 +64,14 @@ def test_silu(shape):
     ],
 )
 @bypass_not_implemented
+@auto_switch_platform(set_perf=True)
 def test_swiglu(shape):
     gate_out = torch.rand(*shape, dtype=torch.bfloat16)
     up_out = torch.rand(*shape, dtype=torch.bfloat16)
-    swiglu = MojoSwiGLU()
+    swiglu = MojoSwiGLU._registry.get("ttx")()
     swiglu_ref = MojoSwiGLU._registry.get("torch")()
+    perf(lambda: swiglu(gate_out, up_out))
+    perf(lambda: swiglu_ref(gate_out, up_out))
     swiglu.forward_diff_with(swiglu_ref, gate_out, up_out)
 
 

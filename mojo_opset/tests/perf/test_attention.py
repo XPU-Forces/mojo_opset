@@ -434,8 +434,11 @@ def test_sdpa(
     diffusion_attn = MojoSdpa(
         scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
     )
+    diffusion_attn_ref = MojoSdpa._registry.get("torch")(
+        scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
+    )
     perf(lambda: diffusion_attn(query, key, value, blockwise_diffusion_attn_mask))  # noqa: F821
-
+    perf(lambda: diffusion_attn_ref(query, key, value, blockwise_diffusion_attn_mask))
 
 test_configs_swa_prefill = [
     (2, 16, 4, 128, 1024, 0, 32, torch.bfloat16, "M_BF16"),
@@ -653,15 +656,32 @@ def test_swa_infer(
     global_window: int,
     local_window: int,
 ):
-    swa_infer = MojoSWA(
+    swa = MojoSWA._registry.get("ttx")(
         is_causal=True,
         gqa_layout=gqa_layout,
-        global_window_size=global_window,
         local_window_size=local_window,
+        global_window_size=global_window,
+    )
+
+    swa_infer = MojoSWA._registry.get("torch")(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+        local_window_size=local_window,
+        global_window_size=global_window,
     )
 
     head_dim = query.shape[-1]
     softmax_scale = 1.0 / math.sqrt(head_dim)
+    perf(  # noqa: F821
+        lambda: swa(
+            query,
+            key,
+            value,
+            cu_q_lens,
+            cu_total_seq_lens,
+            softmax_scale=softmax_scale,
+        )
+    )
 
     perf(  # noqa: F821
         lambda: swa_infer(

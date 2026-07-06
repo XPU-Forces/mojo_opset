@@ -4,7 +4,7 @@ import torch
 from mojo_opset.tests.utils import MockFunctionCtx
 from mojo_opset.tests.utils import assert_close
 from mojo_opset.tests.utils import bypass_not_implemented
-
+from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset import MojoCausalConv1dFunction
 
 
@@ -25,6 +25,7 @@ from mojo_opset import MojoCausalConv1dFunction
         ]
     ],
 )
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_conv(
     B: int,
@@ -45,17 +46,22 @@ def test_conv(
     dy = torch.rand(B, T, D).to(dtype)
 
     ctx = MockFunctionCtx()
-    y, _ = MojoCausalConv1dFunction.forward(ctx, x, weight, bias, residual, None, False, activation)
+    y, _ = MojoCausalConv1dFunction._registry.get("ttx").forward(ctx, x, weight, bias, residual, None, False, activation)
 
     ctx_ref = MockFunctionCtx()
-    y_ref, _ = MojoCausalConv1dFunction._registry.get("torch").forward(
+    y_ref, _ = MojoCausalConv1dFunction._registry.get("torch_npu").forward(
         ctx_ref, x, weight, bias, residual, None, False, activation
     )
+    perf(lambda: MojoCausalConv1dFunction._registry.get("ttx").forward(ctx, x, weight, bias, residual, None, False, activation))
+    perf(lambda: MojoCausalConv1dFunction._registry.get("torch_npu").forward(ctx_ref, x, weight, bias, residual, None, False, activation))
+
     assert_close(y, y_ref)
-    dx, dw, db, dr, d_init, _, _, _ = MojoCausalConv1dFunction.backward(ctx, dy)
-    dx_ref, dw_ref, db_ref, dr_ref, d_init_ref, _, _, _ = MojoCausalConv1dFunction._registry.get("torch").backward(
+    dx, dw, db, dr, d_init, _, _, _ = MojoCausalConv1dFunction._registry.get("ttx").backward(ctx, dy)
+    dx_ref, dw_ref, db_ref, dr_ref, d_init_ref, _, _, _ = MojoCausalConv1dFunction._registry.get("torch_npu").backward(
         ctx_ref, dy
     )
+    # perf(lambda: MojoCausalConv1dFunction._registry.get("ttx").forward(ctx, dy))
+    # perf(lambda: MojoCausalConv1dFunction._registry.get("torch_npu").forward(ctx_ref, dy))
     assert_close(dx, dx_ref)
     assert_close(dw, dw_ref)
     if has_bias:

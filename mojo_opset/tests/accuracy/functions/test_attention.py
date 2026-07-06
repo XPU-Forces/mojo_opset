@@ -69,7 +69,7 @@ test_configs_swa = [
     (False, 4, 1023),
 ])
 @bypass_not_implemented
-@auto_switch_platform()
+@auto_switch_platform(set_perf=True)
 def test_swa_function(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -81,7 +81,7 @@ def test_swa_function(
     global_window: int,
     local_window: int,
 ):
-    swa_func = MojoSWAFunction.apply
+    swa_func = MojoSWAFunction._registry.get("ttx").apply
 
     swa_func_ref = MojoSWAFunction._registry.get("torch").apply
 
@@ -104,7 +104,21 @@ def test_swa_function(
         gqa_interleave,
         True,
     )
+    perf(lambda: swa_func(
+        q,
+        k,
+        v,
+        cu_q_lens,
+        cu_total_seq_lens,
+        True,
+        local_window,
+        global_window,
+        softmax_scale,
+        gqa_interleave,
+        True,
+    ))
     o.backward(grad_out)
+    # perf(lambda: o.backward(grad_out))
 
     q_ref = query.clone().detach().requires_grad_(True)
     k_ref = key.clone().detach().requires_grad_(True)
@@ -172,7 +186,7 @@ def test_swa_function_perf():
                         max_kv_computed_len=KV_COMPUTED_LEN,
                         dtype=dtype,
                     )
-                swa_func = MojoSWAFunction.apply
+                swa_func = MojoSWAFunction._registry.get("ttx").apply
 
                 head_dim = query.shape[-1]
                 softmax_scale = 1.0 / math.sqrt(head_dim)

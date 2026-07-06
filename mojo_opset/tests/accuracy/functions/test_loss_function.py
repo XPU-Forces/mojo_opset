@@ -4,7 +4,7 @@ import torch
 from mojo_opset.tests.utils import MockFunctionCtx
 from mojo_opset.tests.utils import assert_close
 from mojo_opset.tests.utils import bypass_not_implemented
-
+from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset import MojoFusedLinearCrossEntropyFunction
 
 
@@ -19,6 +19,7 @@ from mojo_opset import MojoFusedLinearCrossEntropyFunction
     ],
 )
 @pytest.mark.parametrize("reduction", ["mean", "sum", "none"])
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_fused_ce_forward_backward_diff(
     batch,
@@ -42,7 +43,7 @@ def test_fused_ce_forward_backward_diff(
         ce_weight = torch.rand(weight.shape[0], device=weight.device, dtype=torch.float32) + 0.1
 
     ctx = MockFunctionCtx()
-    output = MojoFusedLinearCrossEntropyFunction.forward(
+    output = MojoFusedLinearCrossEntropyFunction._registry.get("ttx").forward(
         ctx,
         input_tensor,
         weight,
@@ -57,7 +58,21 @@ def test_fused_ce_forward_backward_diff(
         return_z_loss,
         None,
     )
-
+    perf(lambda: MojoFusedLinearCrossEntropyFunction._registry.get("ttx").forward(
+        ctx,
+        input_tensor,
+        weight,
+        target,
+        bias,
+        ce_weight,
+        ignore_index,
+        lse_square_scale,
+        label_smoothing,
+        reduction,
+        None,
+        return_z_loss,
+        None,
+    ))
     ctx_ref = MockFunctionCtx()
     output_ref = MojoFusedLinearCrossEntropyFunction._registry.get("torch").forward(
         ctx_ref,
@@ -74,7 +89,21 @@ def test_fused_ce_forward_backward_diff(
         return_z_loss,
         None,
     )
-
+    perf(lambda: MojoFusedLinearCrossEntropyFunction._registry.get("torch").forward(
+        ctx_ref,
+        input_tensor,
+        weight,
+        target,
+        bias,
+        ce_weight,
+        ignore_index,
+        lse_square_scale,
+        label_smoothing,
+        reduction,
+        None,
+        return_z_loss,
+        None,
+    ))
     assert_close(output, output_ref)
 
     loss, z_loss = output
@@ -88,16 +117,24 @@ def test_fused_ce_forward_backward_diff(
     else:
         grad_output = torch.rand_like(loss) / input_tensor.shape[0]
 
-    grad = MojoFusedLinearCrossEntropyFunction.backward(
+    grad = MojoFusedLinearCrossEntropyFunction._registry.get("ttx").backward(
         ctx,
         grad_output,
         grad_z_loss,
     )
-
+    perf(lambda: MojoFusedLinearCrossEntropyFunction._registry.get("ttx").backward(
+        ctx,
+        grad_output,
+        grad_z_loss,
+    ))
     grad_ref = MojoFusedLinearCrossEntropyFunction._registry.get("torch").backward(
         ctx_ref,
         grad_output,
         grad_z_loss,
     )
-
+    perf(lambda: MojoFusedLinearCrossEntropyFunction._registry.get("torch").backward(
+        ctx_ref,
+        grad_output,
+        grad_z_loss,
+    ))
     assert_close(grad, grad_ref)

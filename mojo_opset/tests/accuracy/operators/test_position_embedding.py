@@ -10,7 +10,7 @@ from mojo_opset.experimental import MojoGridRoPE
 from mojo_opset.experimental import MojoRelativeEmbedding
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_torch_device
-
+from mojo_opset.tests.utils import auto_switch_platform
 torch.random.manual_seed(42)
 
 VISION_VIT_CONFIG = {
@@ -63,6 +63,7 @@ def prepare_mrope_test_inputs(num_tokens, n_qh, n_kh, head_dim, mrope_section, d
     [32, 48, 64, 88, 96, 128],
 )
 @pytest.mark.parametrize("mode", ["padding_prefill", "varlen_prefill", "decode"])
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_rotary_embedding(bs, seqlen, rope_dim, mode):
     """Test MojoRotaryEmbedding (position embedding extraction) independently."""
@@ -76,7 +77,7 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
     rot_pos_emb_ref = MojoRotaryEmbedding._registry.get("torch")(
         rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len
     ).to(device)
-    rot_pos_emb = MojoRotaryEmbedding(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
+    rot_pos_emb = MojoRotaryEmbedding._registry.get("ttx")(rope_theta=10000.0, rope_dim=rope_dim, init_max_length=max_seq_len).to(device)
 
     if mode == "padding_prefill":
         x = torch.randn(bs, seqlen, hidden_size, device=device, dtype=torch.float32)
@@ -93,6 +94,8 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
             atol=1e-5,
             rtol=1e-5,
         )
+        perf(lambda: rot_pos_emb(x))
+        perf(lambda: rot_pos_emb_ref(x))
     elif mode == "decode":
         x = torch.randn(bs, hidden_size, device=device, dtype=torch.float32)
         position_ids = torch.randint(0, max_seq_len, (bs,), dtype=torch.int32, device=device)
@@ -110,6 +113,8 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
             atol=1e-5,
             rtol=1e-5,
         )
+        perf(lambda: rot_pos_emb(x, position_ids=position_ids))
+        perf(lambda: rot_pos_emb_ref(x, position_ids=position_ids))
     else:
         seq_lens = torch.randint((seqlen + 1) // 2, seqlen + 1, (bs,), device=device, dtype=torch.int32)
         cu_seqlens = torch.zeros(bs + 1, device=device, dtype=torch.int32)
@@ -131,6 +136,8 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
             atol=1e-5,
             rtol=1e-5,
         )
+        perf(lambda: rot_pos_emb(x, cu_q_lens=cu_seqlens, total_seq_lens=kv_lens))
+        perf(lambda: rot_pos_emb_ref(x, cu_q_lens=cu_seqlens, total_seq_lens=kv_lens))
 
 
 @pytest.mark.parametrize(
@@ -153,6 +160,7 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
 )
 @pytest.mark.parametrize("mode", ["padding_prefill_pos2d", "padding_prefill_pos3d", "varlen_prefill", "decode"])
 @bypass_not_implemented
+@auto_switch_platform(set_perf=True)
 def test_apply_rope(bs, seqlen, q_heads, k_heads, head_first, head_dim, rope_percentage, mode, dtype):
     """Test MojoApplyRoPE (apply rotary position embedding) with pre-extracted cos/sin."""
     device = get_torch_device()
@@ -211,9 +219,20 @@ def test_apply_rope(bs, seqlen, q_heads, k_heads, head_first, head_dim, rope_per
             q = q.transpose(0, 1)
             k = k.transpose(0, 1)
 
-    rope = MojoApplyRoPE()
-    rope_ref = MojoApplyRoPE._registry.get("torch")()
-
+    rope = MojoApplyRoPE._registry.get("ttx")()
+    rope_ref = MojoApplyRoPE._registry.get("torch_npu")()
+    perf(lambda: rope(
+        q,
+        k,
+        cos,
+        sin,
+        head_first))
+    perf(lambda: rope_ref(
+        q,
+        k,
+        cos,
+        sin,
+        head_first))
     rope.forward_diff_with(
         rope_ref,
         q,
@@ -269,6 +288,7 @@ def test_grid_pos_emb(bs, grid, heads, head_dim, pad, dtype):
 ])
 @pytest.mark.parametrize("head_dim", [128])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_mrope_qwen_models(
     num_tokens,
@@ -285,8 +305,10 @@ def test_mrope_qwen_models(
         num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=dtype
     )
 
-    mrope = MojoMRoPE()
+    mrope = MojoMRoPE._registry.get("ttx")()
     mrope_ref = MojoMRoPE._registry.get("torch")()
+    perf(lambda: mrope(query, key, cos_table, sin_table, mrope_section_out, is_interleaved, head_dim=head_dim))
+    perf(lambda: mrope_ref(query, key, cos_table, sin_table, mrope_section_out, is_interleaved, head_dim=head_dim))
     mrope.forward_diff_with(mrope_ref, query, key, cos_table, sin_table, mrope_section_out, is_interleaved, head_dim=head_dim)
 
 
@@ -302,6 +324,7 @@ def test_mrope_qwen_models(
 ])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("is_interleaved", [False])
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_mrope_partial_rotation(
     num_tokens,
@@ -318,8 +341,10 @@ def test_mrope_partial_rotation(
         num_tokens, n_qh, n_kh, head_dim, mrope_section, device, dtype=dtype
     )
 
-    mrope = MojoMRoPE()
+    mrope = MojoMRoPE._registry.get("ttx")()
     mrope_ref = MojoMRoPE._registry.get("torch")()
+    perf(lambda: mrope(query, key, cos_table, sin_table, mrope_section_out, is_interleaved, head_dim=head_dim))
+    perf(lambda: mrope_ref(query, key, cos_table, sin_table, mrope_section_out, is_interleaved, head_dim=head_dim))
     mrope.forward_diff_with(mrope_ref, query, key, cos_table, sin_table, mrope_section_out, is_interleaved, head_dim=head_dim)
 
 
@@ -334,10 +359,11 @@ def test_mrope_partial_rotation(
         (33, 97),
     ],
 )
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_relative_embedding(num_buckets, num_heads, bidirectional, lq, lk):
-    emb = MojoRelativeEmbedding(num_buckets=num_buckets, num_heads=num_heads, bidirectional=bidirectional)
-    emb_ref = MojoRelativeEmbedding._registry.get("torch")(
+    emb = MojoRelativeEmbedding._registry.get("ttx")(num_buckets=num_buckets, num_heads=num_heads, bidirectional=bidirectional)
+    emb_ref = MojoRelativeEmbedding(
         num_buckets=num_buckets, num_heads=num_heads, bidirectional=bidirectional
     )
 
@@ -345,7 +371,8 @@ def test_relative_embedding(num_buckets, num_heads, bidirectional, lq, lk):
         weight = torch.randn(num_buckets, num_heads, dtype=torch.float32)
         emb.embedding.weight.copy_(weight)
         emb_ref.embedding.weight.copy_(weight)
-
+    perf(lambda: emb(lq, lk))
+    perf(lambda: emb_ref(lq, lk))
     emb.forward_diff_with(emb_ref, lq, lk, atol=1e-5, rtol=1e-6)
 
 
@@ -363,6 +390,7 @@ def test_relative_embedding(num_buckets, num_heads, bidirectional, lq, lk):
         pytest.param(VISION_VIT_CONFIG, id="vision_448_27l_20h_h64"),
     ],
 )
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_vision_rotary_embedding_2d(grid, vision_config):
     device = get_torch_device()
@@ -371,7 +399,7 @@ def test_vision_rotary_embedding_2d(grid, vision_config):
     adapooling_factor = vision_config["adapooling_factor"]
 
     grid_hw = torch.tensor(grid, device=device, dtype=torch.int32)
-    rot_pos_emb = MojoVisionRotaryEmbedding2D(
+    rot_pos_emb = MojoVisionRotaryEmbedding2D._registry.get("ttx")(
         rope_theta=rope_theta,
         rope_dim=head_dim,
         adapooling_factor=adapooling_factor,
@@ -381,6 +409,8 @@ def test_vision_rotary_embedding_2d(grid, vision_config):
         rope_dim=head_dim,
         adapooling_factor=adapooling_factor,
     ).to(device)
+    perf(lambda: rot_pos_emb(grid_hw))
+    perf(lambda: rot_pos_emb_ref(grid_hw))
 
     rot_pos_emb.forward_diff_with(
         rot_pos_emb_ref,
@@ -405,6 +435,7 @@ def test_vision_rotary_embedding_2d(grid, vision_config):
     ],
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_apply_vision_rope_2d(grid, vision_config, dtype):
     device = get_torch_device()
@@ -425,8 +456,11 @@ def test_apply_vision_rope_2d(grid, vision_config, dtype):
     ).to(device)
     cos, sin = rot_pos_emb_ref(grid_hw)
 
-    rope = MojoApplyVisionRoPE2D()
-    rope_ref = MojoApplyVisionRoPE2D._registry.get("torch")()
+    rope = MojoApplyVisionRoPE2D._registry.get("ttx")()
+    rope_ref = MojoApplyVisionRoPE2D._registry.get("torch_npu")()
+
+    perf(lambda: rope(q, k, cos, sin))
+    perf(lambda: rope_ref(q, k, cos, sin))
 
     rope.forward_diff_with(
         rope_ref,

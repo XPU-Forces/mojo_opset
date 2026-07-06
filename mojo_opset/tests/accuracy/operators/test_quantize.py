@@ -8,7 +8,7 @@ from mojo_opset import MojoMoEDynamicQuant
 from mojo_opset import MojoStaticQuant
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_platform
-
+from mojo_opset.tests.utils import auto_switch_platform
 torch.manual_seed(42)
 
 dtypes = [torch.float16, torch.bfloat16]
@@ -98,6 +98,7 @@ def has_ixformer_quant_kernel(name: str) -> bool:
 @pytest.mark.parametrize("shape", static_quant_shapes)
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("quant_dtype", [torch.int8])
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_static_quant(shape, dtype, quant_dtype):
     if quant_dtype == torch.int8 and not has_ixformer_quant_kernel("static_quant"):
@@ -107,19 +108,22 @@ def test_static_quant(shape, dtype, quant_dtype):
     q_max = 127
     scale = make_scale(x, q_max)
 
-    quant = load_params(MojoStaticQuant(input_size=shape[-1], quant_dtype=quant_dtype), scale=scale)
+    quant = load_params(MojoStaticQuant._registry.get("ttx")(input_size=shape[-1], quant_dtype=quant_dtype), scale=scale)
     quant_ref = load_params(
         MojoStaticQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=quant_dtype),
         scale=scale.clone(),
     )
 
     atol = 1 if quant_dtype == torch.int8 else 0
+    perf(lambda: quant(x))
+    perf(lambda: quant_ref(x))
     quant.forward_diff_with(quant_ref, x, atol=atol, rtol=0)
 
 
 @pytest.mark.parametrize("shape,scale_shape", static_quant_grouped_cases)
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("quant_dtype", [torch.int8])
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_static_quant_grouped(shape, scale_shape, dtype, quant_dtype):
     if quant_dtype == torch.int8 and not has_ixformer_quant_kernel("static_quant"):
@@ -129,18 +133,20 @@ def test_static_quant_grouped(shape, scale_shape, dtype, quant_dtype):
     q_max = 127
     scale = make_grouped_scale(x, q_max, scale_shape)
 
-    quant = load_params(MojoStaticQuant(input_size=scale_shape, quant_dtype=quant_dtype), scale=scale)
+    quant = load_params(MojoStaticQuant._registry.get("ttx")(input_size=scale_shape, quant_dtype=quant_dtype), scale=scale)
     quant_ref = load_params(
         MojoStaticQuant._registry.get("torch")(input_size=scale_shape, quant_dtype=quant_dtype),
         scale=scale.clone(),
     )
-
+    perf(lambda: quant(x))
+    perf(lambda: quant_ref(x))
     atol = 1 if quant_dtype == torch.int8 else 0
     quant.forward_diff_with(quant_ref, x, atol=atol, rtol=0)
 
 
 @pytest.mark.parametrize("shape", dequant_shapes)
 @pytest.mark.parametrize("dtype", dtypes)
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_dequant(shape, dtype):
     x = torch.randn(shape, dtype=dtype)
@@ -152,13 +158,16 @@ def test_dequant(shape, dtype):
     )
     quantized, quant_scale = quant_ref(x)
 
-    dequant = MojoDequant(output_dtype=dtype)
+    dequant = MojoDequant._registry.get("ttx")(output_dtype=dtype)
     dequant_ref = MojoDequant._registry.get("torch")(output_dtype=dtype)
+    perf(lambda: dequant(quantized, quant_scale))
+    perf(lambda: dequant_ref(quantized, quant_scale))
     dequant.forward_diff_with(dequant_ref, quantized, quant_scale, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("shape,scale_shape", static_quant_grouped_cases)
 @pytest.mark.parametrize("dtype", dtypes)
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_dequant_grouped(shape, scale_shape, dtype):
     x = torch.randn(shape, dtype=dtype)
@@ -170,13 +179,16 @@ def test_dequant_grouped(shape, scale_shape, dtype):
     )
     quantized, quant_scale = quant_ref(x)
 
-    dequant = MojoDequant(output_dtype=dtype)
+    dequant = MojoDequant._registry.get("ttx")(output_dtype=dtype)
     dequant_ref = MojoDequant._registry.get("torch")(output_dtype=dtype)
+    perf(lambda: dequant(quantized, quant_scale))
+    perf(lambda: dequant_ref(quantized, quant_scale))
     dequant.forward_diff_with(dequant_ref, quantized, quant_scale, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("shape", dynamic_quant_shapes)
 @pytest.mark.parametrize("dtype", dtypes)
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_dynamic_quant(shape, dtype):
     if not has_ixformer_quant_kernel("dynamic_quant"):
@@ -187,18 +199,21 @@ def test_dynamic_quant(shape, dtype):
     inv_smooth_scale = 1.0 / smooth_scale
 
     quant = load_params(
-        MojoDynamicQuant(input_size=shape[-1], quant_dtype=torch.int8),
+        MojoDynamicQuant._registry.get("ttx")(input_size=shape[-1], quant_dtype=torch.int8),
         inv_smooth_scale=inv_smooth_scale,
     )
     quant_ref = load_params(
-        MojoDynamicQuant._registry.get("torch")(input_size=shape[-1], quant_dtype=torch.int8),
+        MojoDynamicQuant._registry.get("torch_npu")(input_size=shape[-1], quant_dtype=torch.int8),
         inv_smooth_scale=inv_smooth_scale,
     )
+    perf(lambda: quant(x))
+    perf(lambda: quant_ref(x))
     quant.forward_diff_with(quant_ref, x, atol=(1, 2e-3), rtol=(0, 2e-3))
 
 
 @pytest.mark.parametrize("tokens, hidden_size, token_count", moe_dynamic_quant_cases)
 @pytest.mark.parametrize("dtype", dtypes)
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_moe_dynamic_quant(tokens, hidden_size, token_count, dtype):
     x = torch.randn(tokens, hidden_size, dtype=dtype)
@@ -208,17 +223,19 @@ def test_moe_dynamic_quant(tokens, hidden_size, token_count, dtype):
     inv_smooth_scale = 1.0 / smooth_scale
 
     quant = load_params(
-        MojoMoEDynamicQuant(expert_num=expert_num, input_size=hidden_size, quant_dtype=torch.int8),
+        MojoMoEDynamicQuant._registry.get("ttx")(expert_num=expert_num, input_size=hidden_size, quant_dtype=torch.int8),
         inv_smooth_scale=inv_smooth_scale,
     )
     quant_ref = load_params(
-        MojoMoEDynamicQuant._registry.get("torch")(
+        MojoMoEDynamicQuant._registry.get("torch_npu")(
             expert_num=expert_num,
             input_size=hidden_size,
             quant_dtype=torch.int8,
         ),
         inv_smooth_scale=inv_smooth_scale,
     )
+    perf(lambda: quant(x, token_count))
+    perf(lambda: quant_ref(x, token_count))
     quant.forward_diff_with(quant_ref, x, token_count, atol=(1, 2e-3), rtol=(0, 2e-3))
 
 

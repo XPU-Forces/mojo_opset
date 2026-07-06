@@ -36,6 +36,8 @@ shapes_key_lr = [
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_store_lowrank(label_cache, key_lr, block_idxs, token_idxs, token_num):
-    store_lowrank = MojoStoreLowrank()
-
+    store_lowrank = MojoStoreLowrank._registry.get("ttx")()
+    store_lowrank_ref = MojoStoreLowrank._registry.get("torch")()
     perf(lambda: store_lowrank(label_cache, key_lr, block_idxs, token_idxs, token_num))
+    perf(lambda: store_lowrank_ref(label_cache, key_lr, block_idxs, token_idxs, token_num))
+

@@ -19,10 +19,11 @@ from mojo_opset.tests.utils import bypass_not_implemented
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_topk_sampling(logits, topk, min_tokens_to_keep):
-    top_k_sampling = MojoTopKSampling(top_k=topk, min_tokens_to_keep=min_tokens_to_keep)
+    top_k_sampling = MojoTopKSampling._registry.get("ttx")(top_k=topk, min_tokens_to_keep=min_tokens_to_keep)
     top_k_sampling_ref = MojoTopKSampling._registry.get("torch")(top_k=topk, min_tokens_to_keep=min_tokens_to_keep)
 
     perf(lambda: top_k_sampling(logits))  # noqa: F821
+    perf(lambda: top_k_sampling_ref(logits))
 
 
 @pytest.mark.parametrize(
@@ -36,9 +37,11 @@ def test_topk_sampling(logits, topk, min_tokens_to_keep):
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_topp_filter(logits, topk, topp, min_tokens_to_keep):
-    top_p_filter = MojoTopPFilter()
+    top_p_filter = MojoTopPFilter._registry.get("ttx")()
+    top_p_filter_ref = MojoTopPFilter._registry.get("torch")()
 
     perf(lambda: top_p_filter(logits, topp, min_tokens_to_keep, topk))  # noqa: F821
+    perf(lambda: top_p_filter_ref(logits, topp, min_tokens_to_keep, topk))
 
 
 @pytest.mark.parametrize(
@@ -56,11 +59,11 @@ def test_topp_filter(logits, topk, topp, min_tokens_to_keep):
 @bypass_not_implemented
 def test_reject_sampling(target_logits, draft_tokens, draft_probs, spec_step):
     torch.manual_seed(42)
-
-    reject_sampling = MojoRejectSampling()
+    reject_sampling = MojoRejectSampling._registry.get("ttx")()
+    ref_reject_sampling = MojoRejectSampling._registry.get("torch")()
 
     perf(lambda: reject_sampling(target_logits, draft_tokens, draft_probs))  # noqa: F821
-
+    perf(lambda: ref_reject_sampling(target_logits, draft_tokens, draft_probs))
 
 @pytest.mark.parametrize(
     "target_logits, draft_tokens, draft_probs, spec_step, top_p, rand_top_k",
@@ -80,6 +83,8 @@ def test_reject_sampling(target_logits, draft_tokens, draft_probs, spec_step):
 def test_magic_reject_sampling(target_logits, draft_tokens, draft_probs, spec_step, top_p, rand_top_k):
     torch.manual_seed(42)
 
-    reject_sampling = MojoJoinProbRejectSampling()
+    reject_sampling = MojoJoinProbRejectSampling._registry.get("ttx")()
+    reject_sampling_ref = MojoJoinProbRejectSampling._registry.get("torch")()
 
     perf(lambda: reject_sampling(target_logits, draft_tokens, draft_probs))  # noqa: F821
+    perf(lambda: reject_sampling_ref(target_logits, draft_tokens, draft_probs))  # noqa: F821

@@ -10,7 +10,7 @@ from mojo_opset.core.operators.over_encoding import dequantize_nf4_rows
 from mojo_opset.core.operators.over_encoding import n_gram_impl_torch
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.tests.utils import get_torch_device
-
+from mojo_opset.tests.utils import auto_switch_platform
 TEST_DEVICE = get_torch_device()
 
 
@@ -518,6 +518,7 @@ class TestRefOverEncodingParametrized:
         )
 
     @bypass_not_implemented
+    @auto_switch_platform(set_perf=True)
     def test_embedding_nf4_dequant_impl(self):
         vocab_size = 257
         embedding_dim = 128
@@ -549,13 +550,22 @@ class TestRefOverEncodingParametrized:
         valid_mask = (input_ids >= 0) & (input_ids < vocab_size)
         expected[valid_mask] = dequant_lut.index_select(0, input_ids[valid_mask])
 
-        output = MojoNF4DequantEmbedding(
+        output = MojoNF4DequantEmbedding._registry.get("ttx")(
             qweight,
             scale,
             mean,
             group_size=group_size,
             output_dtype=torch.float32,
         ).to(TEST_DEVICE)(input_ids)
+        perf(  # noqa: F821
+            lambda: MojoNF4DequantEmbedding._registry.get("ttx")(
+                qweight,
+                scale,
+                mean,
+                group_size=group_size,
+                output_dtype=torch.float32,
+            ).to(TEST_DEVICE)(input_ids)
+        )
         assert_close(output, expected, atol=1e-5, rtol=0)
 
     @bypass_not_implemented

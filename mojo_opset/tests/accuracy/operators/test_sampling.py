@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from mojo_opset.tests.utils import bypass_not_implemented
-
+from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset import MojoApplyPenaltiesTempurate
 from mojo_opset import MojoJoinProbRejectSampling
 from mojo_opset import MojoRejectSampling
@@ -19,12 +19,14 @@ from mojo_opset import MojoTopKSampling
     "shape, topk, min_tokens_to_keep",
     [((20, 151936), 10, 1)],
 )
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_topk_sampling(shape, topk, min_tokens_to_keep):
     logits = torch.randn(shape, dtype=torch.float32)
-    top_k_sampling = MojoTopKSampling(top_k=topk, min_tokens_to_keep=min_tokens_to_keep)
+    top_k_sampling = MojoTopKSampling._registry.get("ttx")(top_k=topk, min_tokens_to_keep=min_tokens_to_keep)
     top_k_sampling_ref = MojoTopKSampling._registry.get("torch")(top_k=topk, min_tokens_to_keep=min_tokens_to_keep)
-
+    perf(lambda: top_k_sampling(logits))
+    perf(lambda: top_k_sampling_ref(logits))
     top_k_sampling.forward_diff_with(top_k_sampling_ref, logits)
 
 
@@ -32,14 +34,16 @@ def test_topk_sampling(shape, topk, min_tokens_to_keep):
     "shape, topk, topp, min_tokens_to_keep",
     [((20, 151936), 1000, 0.75, 1)],
 )
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_topp_sampling(shape, topk, topp, min_tokens_to_keep):
     logits = torch.randn(shape, dtype=torch.float32)
-    top_p_sampling = MojoTopPSampling(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk)
+    top_p_sampling = MojoTopPSampling._registry.get("ttx")(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk)
     top_p_sampling_ref = MojoTopPSampling._registry.get("torch")(
         top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk
     )
-
+    # perf(lambda: top_p_sampling(logits))
+    # perf(lambda: top_p_sampling_ref(logits))
     top_p_sampling.forward_diff_with(top_p_sampling_ref, logits)
 
 
@@ -47,12 +51,14 @@ def test_topp_sampling(shape, topk, topp, min_tokens_to_keep):
     "shape, topk, topp, min_tokens_to_keep",
     [((20, 151936), 1000, 0.75, 1), ((60, 155136), 100, 0.7, 1)],
 )
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_topp_filter(shape, topk, topp, min_tokens_to_keep):
     logits = torch.randn(shape, dtype=torch.float32)
-    top_p_filter = MojoTopPFilter()
+    top_p_filter = MojoTopPFilter._registry.get("ttx")()
     top_p_filter_ref = MojoTopPFilter._registry.get("torch")()
-
+    perf(lambda: top_p_filter(logits, topp, min_tokens_to_keep, topk))
+    perf(lambda: top_p_filter_ref(logits, topp, min_tokens_to_keep, topk))
     top_p_filter.forward_diff_with(
         top_p_filter_ref,
         logits=logits,
@@ -66,6 +72,7 @@ def test_topp_filter(shape, topk, topp, min_tokens_to_keep):
     "batch_size, vocab_size, spec_step",
     [(15, 155136, 3)],
 )
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_reject_sampler(batch_size, vocab_size, spec_step):
     torch.manual_seed(42)
@@ -73,7 +80,7 @@ def test_reject_sampler(batch_size, vocab_size, spec_step):
     draft_tokens = torch.randint(0, vocab_size, (batch_size, spec_step))
     draft_probs = torch.ones((batch_size, spec_step), dtype=torch.float32)
 
-    reject_sampling = MojoRejectSampling()
+    reject_sampling = MojoRejectSampling._registry.get("ttx")()
     ref_reject_sampling = MojoRejectSampling._registry.get("torch")()
 
     batch_size = target_logits.shape[0]
@@ -88,6 +95,8 @@ def test_reject_sampler(batch_size, vocab_size, spec_step):
 
     ttx_mask = range_mask < ttx_accept_len.unsqueeze(-1).expand(-1, spec_step + 1)
     ttx_token_ids = ttx_token_ids * ttx_mask
+    perf(lambda: reject_sampling(target_logits, draft_tokens, draft_probs))
+    perf(lambda: ref_reject_sampling(target_logits, draft_tokens, draft_probs))
 
     torch.testing.assert_close(ref_token_ids.to(torch.float32), ttx_token_ids.to(torch.float32), atol=1e-2, rtol=1e-2)
 
@@ -98,6 +107,7 @@ def test_reject_sampler(batch_size, vocab_size, spec_step):
     "batch_size, vocab_size, spec_step",
     [(15, 155136, 3)],
 )
+@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_join_prob_reject_sampler(batch_size, vocab_size, spec_step):
     torch.manual_seed(42)
@@ -105,7 +115,7 @@ def test_join_prob_reject_sampler(batch_size, vocab_size, spec_step):
     draft_tokens = torch.randint(0, vocab_size, (batch_size, spec_step))
     draft_probs = torch.ones((batch_size, spec_step), dtype=torch.float32)
 
-    reject_join_prob_sampling = MojoJoinProbRejectSampling()
+    reject_join_prob_sampling = MojoJoinProbRejectSampling._registry.get("ttx")()
     ref_join_prob_sampling = MojoJoinProbRejectSampling._registry.get("torch")()
 
     batch_size = target_logits.shape[0]
@@ -120,7 +130,8 @@ def test_join_prob_reject_sampler(batch_size, vocab_size, spec_step):
 
     ttx_mask = range_mask < ttx_accept_len.unsqueeze(-1).expand(-1, spec_step + 1)
     ttx_token_ids = ttx_token_ids * ttx_mask
-
+    # perf(lambda: ref_join_prob_sampling(target_logits, draft_tokens, draft_probs, 42))
+    # perf(lambda: reject_join_prob_sampling(target_logits, draft_tokens, draft_probs, 42))
     torch.testing.assert_close(ref_token_ids.to(torch.float32), ttx_token_ids.to(torch.float32), atol=1e-2, rtol=1e-2)
 
     torch.testing.assert_close(ref_accept_len.to(torch.float32), ttx_accept_len.to(torch.float32), atol=1e-2, rtol=1e-2)

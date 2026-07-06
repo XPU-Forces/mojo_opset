@@ -18,8 +18,10 @@ from mojo_opset.tests.utils import bypass_not_implemented
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_gelu(x):
-    gelu = MojoGelu()
-    perf(lambda: gelu(x))  # noqa: F821
+    gelu = MojoGelu._registry.get("ttx")()
+    gelu_ref = MojoGelu._registry.get("torch_npu")()
+    perf(lambda: gelu(x))
+    perf(lambda: gelu_ref(x))
 
 
 @pytest.mark.parametrize(
@@ -29,8 +31,10 @@ def test_gelu(x):
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_silu(x):
-    silu = MojoSilu()
-    perf(lambda: silu(x))  # noqa: F821
+    silu = MojoSilu._registry.get("ttx")()
+    silu_ref = MojoSilu._registry.get("torch")()
+    perf(lambda: silu(x))
+    # perf(lambda: silu_ref(x))
 
 
 @pytest.mark.parametrize(
@@ -46,4 +50,7 @@ def test_silu(x):
 @bypass_not_implemented
 def test_swiglu(gate_out, up_out):
     swiglu = MojoSwiGLU()
-    perf(lambda: swiglu(gate_out, up_out))  # noqa: F821
+    swiglu = MojoSwiGLU._registry.get("ttx")()
+    swiglu_ref = MojoSwiGLU._registry.get("torch")()
+    perf(lambda: swiglu(gate_out, up_out))
+    perf(lambda: swiglu_ref(gate_out, up_out))

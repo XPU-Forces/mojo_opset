@@ -25,7 +25,12 @@ from mojo_opset.tests.utils import bypass_not_implemented
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_residual_add_rmsnorm(x, residual, weight, norm_pos, eps):
-    add_norm = MojoResidualAddRMSNorm(
+    add_norm = MojoResidualAddRMSNorm._registry.get("ttx")(
+        norm_size=weight.size(0),
+        eps=eps,
+        norm_pos=norm_pos,
+    ).to(x.device)
+    add_norm_ref = MojoResidualAddRMSNorm._registry.get("torch")(
         norm_size=weight.size(0),
         eps=eps,
         norm_pos=norm_pos,
@@ -33,7 +38,7 @@ def test_residual_add_rmsnorm(x, residual, weight, norm_pos, eps):
     add_norm.weight = torch.nn.Parameter(weight)
 
     perf(lambda: add_norm(x, residual))  # noqa: F821
-
+    perf(lambda: add_norm_ref(x, residual))
 
 @pytest.mark.parametrize(
     "x, residual, weight, bias",
@@ -52,16 +57,21 @@ def test_residual_add_rmsnorm(x, residual, weight, norm_pos, eps):
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_residual_add_layernorm(x, residual, weight, bias, norm_pos, eps):
-    add_norm = MojoResidualAddLayerNorm(
+    add_norm = MojoResidualAddLayerNorm._registry.get("ttx")(
         norm_size=weight.size(0),
         eps=eps,
         norm_pos=norm_pos,
-    )
+    ).to(x.device)
+    add_norm_ref = MojoResidualAddLayerNorm._registry.get("torch")(
+        norm_size=weight.size(0),
+        eps=eps,
+        norm_pos=norm_pos,
+    ).to(x.device)
     add_norm.weight = torch.nn.Parameter(weight)
     add_norm.bias = torch.nn.Parameter(bias)
 
     perf(lambda: add_norm(x, residual))  # noqa: F821
-
+    perf(lambda: add_norm_ref(x, residual))  # noqa: F821
 
 @pytest.mark.parametrize(
     "x, weight",
@@ -131,7 +141,14 @@ def test_grouprmsnorm(x, weight, group_dims, eps):
     x_groups = torch.split(x, group_dims, dim=1)
 
     from mojo_opset import MojoGroupRMSNorm
-    rmsnorm = MojoGroupRMSNorm(
+    rmsnorm = MojoGroupRMSNorm._registry.get("ttx")(
+        num_groups=len(group_dims),
+        eps=eps,
+        norm_size=x.shape[-1],
+        device=x.device,
+        dtype=x.dtype,
+    ).to(x.device)
+    rmsnorm_ref = MojoGroupRMSNorm._registry.get("torch")(
         num_groups=len(group_dims),
         eps=eps,
         norm_size=x.shape[-1],
@@ -142,6 +159,7 @@ def test_grouprmsnorm(x, weight, group_dims, eps):
         rmsnorm.weight.copy_(weight.to(torch.float32))
 
     perf(lambda: rmsnorm(x_groups)) # noqa: F821
+    perf(lambda: rmsnorm_ref(x_groups))
 
 @pytest.mark.parametrize(
     "x, weight, bias",
