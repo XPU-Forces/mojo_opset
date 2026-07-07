@@ -1854,7 +1854,10 @@ def swa_fwd_impl(
         BLOCK_D,
         output_f32,
         limit_auto_multi_buffer_buffer="no-limit",
-        hfusion_enable_multiple_consumer_fusion=True
+        hfusion_enable_multiple_consumer_fusion=True,
+        enable_dynamic_cv_flow_opt=True,
+        intra_cache_num=3,
+        inter_cache_num=2,
     )
     if output_f32:
         return o, softmax_lse, o_f32
