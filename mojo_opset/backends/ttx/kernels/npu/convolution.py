@@ -663,18 +663,9 @@ def causal_conv1d_update_kernel_bdt_fwd(
         bi = bti // NUM_T_CHK
         ti = bti % NUM_T_CHK
 
-        w = tl.load(
-            tl.make_block_ptr(
-                weight_ptr,
-                shape=(dim, width),
-                strides=(width, 1),
-                offsets=(di * D_CHK_SIZE, 0),
-                block_shape=(D_CHK_SIZE, width),
-                order=(1, 0),
-            ),
-            boundary_check=(0, 1),
-            padding_option="zero",
-        )
+        w_off_d = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)[:, None]
+        w_off_w = tl.arange(0, width)[None, :]
+        w = tl.load(weight_ptr + w_off_d * width + w_off_w).to(tl.float32)
 
         if ti == 0:
             st_b = tl.load(
@@ -689,69 +680,72 @@ def causal_conv1d_update_kernel_bdt_fwd(
                 boundary_check=(0, 1),
                 padding_option="zero",
             )
-            offset0_x = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)
-            offset1_x = ti * T_CHK_SIZE + tl.arange(0, T_CHK_SIZE)
-            mask_x = (offset0_x < dim)[:, None] & ((offset1_x >= 0) & (offset1_x < seq_len))[None, :]
-            block_off_x = bi * dim * seq_len + offset0_x[:, None] * seq_len + offset1_x[None, :]
-            x_b_tmp = tl.load(x_ptr + block_off_x, mask=mask_x, other=0)
+            x_b_tmp = tl.load(
+                tl.make_block_ptr(
+                    x_ptr + bi * dim * seq_len,
+                    shape=(dim, seq_len),
+                    strides=(seq_len, 1),
+                    offsets=(di * D_CHK_SIZE, 0),
+                    block_shape=(D_CHK_SIZE, T_CHK_SIZE),
+                    order=(1, 0),
+                ),
+                boundary_check=(0, 1),
+                padding_option="zero",
+            )
             x_b = tl.extra.cann.extension.insert_slice(st_b, x_b_tmp, (0, width - 1), (D_CHK_SIZE, T_CHK_SIZE), (1, 1))
         else:
-            offset0 = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)
-            offset1 = ti * T_CHK_SIZE - (width - 1) + tl.arange(0, T_CHK_SIZE + width - 1)
-            mask = (offset0 < dim)[:, None] & ((offset1 >= 0) & (offset1 < seq_len))[None, :]
-            block_off = bi * dim * seq_len + offset0[:, None] * seq_len + offset1[None, :]
-            x_b = tl.load(x_ptr + block_off, mask=mask, other=0)
+            x_b = tl.load(
+                tl.make_block_ptr(
+                    x_ptr + bi * dim * seq_len,
+                    shape=(dim, seq_len),
+                    strides=(seq_len, 1),
+                    offsets=(di * D_CHK_SIZE, ti * T_CHK_SIZE - (width - 1)),
+                    block_shape=(D_CHK_SIZE, T_CHK_SIZE + width - 1),
+                    order=(1, 0),
+                ),
+                boundary_check=(0, 1),
+                padding_option="zero",
+            )
 
-        out_block = tl.zeros((T_CHK_SIZE, D_CHK_SIZE), dtype=x_ptr.dtype.element_ty)
-        x_b = tl.trans(x_b, (1, 0))
-        w = tl.trans(w, (1, 0))
+        out_block = tl.zeros((D_CHK_SIZE, T_CHK_SIZE), dtype=tl.float32)
+        x_b = x_b.to(tl.float32)
 
         new_state_start_off = seq_len - state_len
         t_start_off = ti * T_CHK_SIZE - (width - 1)
         t_end_off = (ti + 1) * T_CHK_SIZE
         if t_end_off >= new_state_start_off:
-            t_off = t_start_off - new_state_start_off
-            if t_off < -(width - 1):
-                # NOTE: In order to avoid use tl.maximum for negative offset,
-                #       we pre-compute a fix head tile size (ST_STORE_HEAD_TILE_SIZE)
-                #       to store the scene of negative address
-                x_new_h = tl.extra.cann.extension.extract_slice(x_b, (-t_off, 0), (ST_STORE_HEAD_TILE_SIZE, D_CHK_SIZE), (1, 1))
-                x_new_h = tl.trans(x_new_h, (1, 0))
-                nst_off_y0 = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)[:, None]
-                nst_off_y1_h = tl.arange(0, ST_STORE_HEAD_TILE_SIZE)[None, :]
-                nst_mask_h = (nst_off_y0 < dim) & (nst_off_y1_h >= 0) & (nst_off_y1_h < state_len)
-                block_ptr_h = bi * dim * state_len + nst_off_y0 * state_len + nst_off_y1_h
-                tl.store(conv_state_update_ptr + block_ptr_h, x_new_h, mask=nst_mask_h)
-            else:
-                x_new_s = tl.extra.cann.extension.extract_slice(x_b, (width - 1, 0), (T_CHK_SIZE, D_CHK_SIZE), (1, 1))
-                x_new_s = tl.trans(x_new_s, (1, 0))
-                nst_off_y0 = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)[:, None]
-                nst_off_y1 = width - 1 + t_off + tl.arange(0, T_CHK_SIZE)[None, :]
-                nst_mask = (nst_off_y0 < dim) & (nst_off_y1 >= 0) & (nst_off_y1 < state_len)
-                block_ptr = bi * dim * state_len + nst_off_y0 * state_len + nst_off_y1
-                tl.store(conv_state_update_ptr + block_ptr, x_new_s, mask=nst_mask)
+            nst_off_y0 = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)[:, None]
+            nst_off_y1 = tl.arange(0, state_len)[None, :]
+            nst_mask = (nst_off_y0 < dim) & (nst_off_y1 < state_len)
+            block_ptr_st = bi * dim * state_len + nst_off_y0 * state_len + nst_off_y1
+
+            if new_state_start_off < 0:
+                cs_src_idx = seq_len + nst_off_y1
+                cs_mask = nst_mask & (cs_src_idx < state_len) & (cs_src_idx >= 0)
+                cs_off = bi * dim * state_len + nst_off_y0 * state_len + cs_src_idx
+                cs_val = tl.load(conv_state_ptr + cs_off, mask=cs_mask, other=0).to(conv_state_update_ptr.dtype.element_ty)
+                tl.store(conv_state_update_ptr + block_ptr_st, cs_val, mask=cs_mask)
+
+            src_col_off = new_state_start_off - t_start_off + nst_off_y1
+            src_valid = (src_col_off >= 0) & (src_col_off < T_CHK_SIZE + width - 1)
+            x_st_off = bi * dim * seq_len + nst_off_y0 * seq_len + (new_state_start_off + nst_off_y1)
+            x_st_mask = nst_mask & src_valid & ((new_state_start_off + nst_off_y1) < seq_len) & ((new_state_start_off + nst_off_y1) >= 0)
+            x_st = tl.load(x_ptr + x_st_off, mask=x_st_mask, other=0).to(conv_state_update_ptr.dtype.element_ty)
+            tl.store(conv_state_update_ptr + block_ptr_st, x_st, mask=x_st_mask)
 
         for owi in tl.range(0, width):
-            new_x = tl.extra.cann.extension.extract_slice(x_b, (owi, 0), (T_CHK_SIZE, D_CHK_SIZE), (1, 1))
-            w_chl_wi = tl.extra.cann.extension.extract_slice(w, (owi, 0), (1, D_CHK_SIZE), (1, 1))
-            x_mul_chl_wi = new_x * w_chl_wi
-            out_block += x_mul_chl_wi
-        out_block = tl.trans(out_block, (1, 0))
+            new_x = tl.extra.cann.extension.extract_slice(x_b, (0, owi), (D_CHK_SIZE, T_CHK_SIZE), (1, 1))
+            w_chl_wi = tl.extra.cann.extension.extract_slice(w, (0, owi), (D_CHK_SIZE, 1), (1, 1))
+            out_block += new_x * w_chl_wi
 
         if SILU_ACTIVATION:
-            out_block = out_block * tl.sigmoid(out_block)
-        tl.store(
-            tl.make_block_ptr(
-                out_ptr,
-                shape=(batch, dim, out_len),
-                strides=(dim * out_len, out_len, 1),
-                offsets=(bi, di * D_CHK_SIZE, ti * T_CHK_SIZE),
-                block_shape=(1, D_CHK_SIZE, T_CHK_SIZE),
-                order=(2, 1, 0),
-            ),
-            out_block[None, :, :],
-            boundary_check=(0, 1, 2),
-        )
+            out_block = out_block / (1.0 + tl.exp(-out_block))
+        out_block = out_block.to(out_ptr.type.element_ty)
+        out_off_d = di * D_CHK_SIZE + tl.arange(0, D_CHK_SIZE)[:, None]
+        out_off_t = ti * T_CHK_SIZE + tl.arange(0, T_CHK_SIZE)[None, :]
+        out_mask = (out_off_d < dim) & (out_off_t < out_len)
+        out_off = bi * dim * out_len + out_off_d * out_len + out_off_t
+        tl.store(out_ptr + out_off, out_block, mask=out_mask)
 
 
 @input_guard(make_contiguous=True, auto_to_device=True)
