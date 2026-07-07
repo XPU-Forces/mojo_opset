@@ -2091,7 +2091,7 @@ def _swa_bwd_dkdv_kernel(
             balance_ratio_ = gw_task // lw_task
             if balance_ratio_ >= 2:
                 gw_kv_chunks = tl.cdiv(GLOBAL_WINDOW, BLOCK_N)
-                lw_kv_chunks = tl.cdiv(num_kv_chunks - gw_kv_chunks, balance_ratio)
+                lw_kv_chunks = tl.cdiv(num_kv_chunks - gw_kv_chunks, balance_ratio_)
                 num_kv_chunks = gw_kv_chunks + lw_kv_chunks
                 balance_ratio = balance_ratio_
 
