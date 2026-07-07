@@ -63,6 +63,7 @@ class TestRefOverEncodingBasic:
         self.OE_EMBED_DIM = self.EMBED_DIM // self.SPLIT_NUM
 
     @bypass_not_implemented
+    @auto_switch_platform(set_perf=True)
     def test_n_gram_encoding(self):
         input_ids = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64)
         oe_history = torch.cat(
@@ -112,6 +113,8 @@ class TestRefOverEncodingBasic:
         oe_ngram_ref = oe_ngram_ref.to(TEST_DEVICE)
 
         oe_ngram.forward_diff_with(oe_ngram_ref, input_ids, oe_history[:1], q_lens, atol=0, rtol=0)
+        perf(lambda: oe_ngram(input_ids, oe_history[:1], q_lens))
+        perf(lambda: oe_ngram_ref(input_ids, oe_history[:1], q_lens))
         oe_history = torch.stack([torch.arange(1, self.N) for _ in range(input_ids.size(0))], dim=0).to(TEST_DEVICE)
         # goldens = torch.Tensor(
         #     [
@@ -123,6 +126,8 @@ class TestRefOverEncodingBasic:
         #     ],
         # ).to(TEST_DEVICE)
         oe_ngram.forward_diff_with(oe_ngram_ref, input_ids.unsqueeze(-1), oe_history, atol=0, rtol=0)
+        perf(lambda: oe_ngram(input_ids.unsqueeze(-1), oe_history))
+        perf(lambda: oe_ngram_ref(input_ids.unsqueeze(-1), oe_history))
         oe_history = torch.cat(
             (
                 torch.ones(
@@ -136,8 +141,11 @@ class TestRefOverEncodingBasic:
             dim=1,
         )
         oe_ngram.forward_diff_with(oe_ngram_ref, input_ids.unsqueeze(-1), oe_history, atol=0, rtol=0)
+        perf(lambda: oe_ngram(input_ids.unsqueeze(-1), oe_history))
+        perf(lambda: oe_ngram_ref(input_ids.unsqueeze(-1), oe_history))
 
     @bypass_not_implemented
+    @auto_switch_platform(set_perf=True)
     def test_n_gram_encoding_additional_shapes(self):
         vocab_size = 257
         oe_vocab_sizes = torch.tensor(
@@ -190,16 +198,21 @@ class TestRefOverEncodingBasic:
             rtol=0,
         )
 
+        input_ids = input_ids.to(TEST_DEVICE)
+        oe_history = oe_history.to(TEST_DEVICE)
+        q_lens = q_lens.to(TEST_DEVICE)
         oe_ngram = oe_ngram.to(TEST_DEVICE)
         oe_ngram_ref = oe_ngram_ref.to(TEST_DEVICE)
         oe_ngram.forward_diff_with(
             oe_ngram_ref,
-            input_ids.to(TEST_DEVICE),
-            oe_history.to(TEST_DEVICE),
-            q_lens.to(TEST_DEVICE),
+            input_ids,
+            oe_history,
+            q_lens,
             atol=0,
             rtol=0,
         )
+        perf(lambda: oe_ngram(input_ids, oe_history, q_lens))
+        perf(lambda: oe_ngram_ref(input_ids, oe_history, q_lens))
 
     @pytest.mark.parametrize(
         "vocab_size, oe_vocab_sizes, n_grams, q_lens, oe_history",
@@ -228,6 +241,7 @@ class TestRefOverEncodingBasic:
         ],
     )
     @bypass_not_implemented
+    @auto_switch_platform(set_perf=True)
     def test_n_gram_encoding_more_varlen_cases(
         self,
         vocab_size,
@@ -267,18 +281,24 @@ class TestRefOverEncodingBasic:
         golden = torch.cat(golden, dim=0)
 
         assert_close(oe_ngram_ref(input_ids, oe_history, q_lens), golden, atol=0, rtol=0)
+        input_ids = input_ids.to(TEST_DEVICE)
+        oe_history = oe_history.to(TEST_DEVICE)
+        q_lens = q_lens.to(TEST_DEVICE)
         oe_ngram = oe_ngram.to(TEST_DEVICE)
         oe_ngram_ref = oe_ngram_ref.to(TEST_DEVICE)
         oe_ngram.forward_diff_with(
             oe_ngram_ref,
-            input_ids.to(TEST_DEVICE),
-            oe_history.to(TEST_DEVICE),
-            q_lens.to(TEST_DEVICE),
+            input_ids,
+            oe_history,
+            q_lens,
             atol=0,
             rtol=0,
         )
+        perf(lambda: oe_ngram(input_ids, oe_history, q_lens))
+        perf(lambda: oe_ngram_ref(input_ids, oe_history, q_lens))
 
     @bypass_not_implemented
+    @auto_switch_platform(set_perf=True)
     def test_over_encoding(self):
         input_ids = torch.Tensor([1, 2, 3, 4, 5, 6]).to(torch.int64).to(TEST_DEVICE)
         q_lens = torch.Tensor([3, 3]).to(torch.int64).to(TEST_DEVICE)
@@ -317,6 +337,8 @@ class TestRefOverEncodingBasic:
         ref = oe_layer(input_ids, oe_history, q_lens)
         ttx_res = ttx_oe_layer(input_ids, oe_history, q_lens)
         assert_close(ttx_res, ref)
+        perf(lambda: ttx_oe_layer(input_ids, oe_history, q_lens))
+        perf(lambda: oe_layer(input_ids, oe_history, q_lens))
 
         # NOTE(liuyuan): Test Decode
         oe_history = torch.zeros(input_ids.size(0), self.N, device=TEST_DEVICE, dtype=torch.int64)
@@ -324,6 +346,8 @@ class TestRefOverEncodingBasic:
         ref = oe_layer(input_ids, oe_history)
         ttx_res = ttx_oe_layer(input_ids, oe_history)
         assert_close(ttx_res, ref)
+        perf(lambda: ttx_oe_layer(input_ids, oe_history))
+        perf(lambda: oe_layer(input_ids, oe_history))
 
         # FIXME(liuyuan): The Triton kernel still suffers from random partial errors caused by Byted-Triton-X. We will re-run this test case once the fix is complete.
         # input_ids = input_ids.reshape(-1, 2)
@@ -408,6 +432,7 @@ class TestRefOverEncodingParametrized:
         ((1536, 192),),
     )
     @bypass_not_implemented
+    @auto_switch_platform(set_perf=True)
     def test_over_encoding_parametrized(
         self,
         input_ids,
@@ -439,6 +464,8 @@ class TestRefOverEncodingParametrized:
             ttx_oe_layer(input_ids, oe_history_inputs, q_lens),
             ref_oe_layer(input_ids, oe_history_inputs, q_lens),
         )
+        perf(lambda: ttx_oe_layer(input_ids, oe_history_inputs, q_lens))
+        perf(lambda: ref_oe_layer(input_ids, oe_history_inputs, q_lens))
 
     @pytest.mark.parametrize(
         "input_ids,q_lens,oe_history_inputs,vocab_size,oe_vocab_sizes,n_grams,embed_dim,oe_embed_dims",
@@ -483,6 +510,7 @@ class TestRefOverEncodingParametrized:
         ids=("prefill-b3-len5-7-9", "decode-b48-s1"),
     )
     @bypass_not_implemented
+    @auto_switch_platform(set_perf=True)
     def test_over_encoding_additional_shapes(
         self,
         input_ids,
@@ -516,6 +544,8 @@ class TestRefOverEncodingParametrized:
             atol=1e-5,
             rtol=1e-5,
         )
+        perf(lambda: ttx_oe_layer(input_ids, oe_history_inputs, q_lens))
+        perf(lambda: ref_oe_layer(input_ids, oe_history_inputs, q_lens))
 
     @bypass_not_implemented
     @auto_switch_platform(set_perf=True)
@@ -569,6 +599,7 @@ class TestRefOverEncodingParametrized:
         assert_close(output, expected, atol=1e-5, rtol=0)
 
     @bypass_not_implemented
+    @auto_switch_platform(set_perf=True)
     @torch.no_grad
     def test_over_encoding_with_quantized_mega_embedding(self):
         torch.manual_seed(0)
@@ -642,12 +673,16 @@ class TestRefOverEncodingParametrized:
             atol=1e-5,
             rtol=1e-5,
         )
+        perf(lambda: ttx_oe_layer(prefill_input_ids, prefill_history, prefill_q_lens))
+        perf(lambda: ref_oe_layer(prefill_input_ids, prefill_history, prefill_q_lens))
         assert_close(
             ref_oe_layer(decode_input_ids, decode_history),
             ttx_oe_layer(decode_input_ids, decode_history),
             atol=1e-5,
             rtol=1e-5,
         )
+        perf(lambda: ttx_oe_layer(decode_input_ids, decode_history))
+        perf(lambda: ref_oe_layer(decode_input_ids, decode_history))
 
     @pytest.mark.parametrize(
         "input_ids,q_lens,oe_history_inputs",

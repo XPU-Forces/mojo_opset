@@ -89,6 +89,7 @@ def test_conv(
     ],
 )
 @bypass_not_implemented
+@auto_switch_platform(set_perf=True)
 def test_conv_varlen(
     N: int,
     T: int,
@@ -134,3 +135,7 @@ def test_conv_varlen(
         assert_close(db, db_ref)
     if has_residual:
         assert_close(dr, dr_ref)
+
+    perf_ctx_fwd = MockFunctionCtx()
+    perf(lambda: MojoCausalConv1dFunction.forward(perf_ctx_fwd, x, weight, bias, residual, None, False, activation, cu_seqlens))
+    perf(lambda: MojoCausalConv1dFunction.backward(ctx, dy))
