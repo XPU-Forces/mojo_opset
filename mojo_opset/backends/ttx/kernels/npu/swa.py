@@ -828,6 +828,7 @@ def _swa_paged_prefill_kernel(
                         LOCAL_WINDOW,
                         q_seq_len,
                         kv_seq_len,
+                        GEN_MASK_BLOCK_SIZE=128,
                     )
                 else:
                     mask = tl.full((BLOCK_M, BLOCK_N), 1,  dtype=tl.int1)
@@ -887,6 +888,7 @@ def _swa_paged_prefill_kernel(
                         LOCAL_WINDOW,
                         q_seq_len,
                         kv_seq_len,
+                        GEN_MASK_BLOCK_SIZE=128,
                     )
                 else:
                     mask = tl.full((BLOCK_M, BLOCK_N), 1,  dtype=tl.int1)
@@ -1073,6 +1075,7 @@ def _swa_paged_prefill_small_kernel(
                         LOCAL_WINDOW,
                         q_seq_len,
                         kv_seq_len,
+                        GEN_MASK_BLOCK_SIZE=128,
                     )
                 else:
                     mask = tl.full((BLOCK_M, BLOCK_N), 1,  dtype=tl.int1)
