@@ -9,6 +9,10 @@ from .utils import get_num_cores
 AUX_MASK_SIZE = 256
 AUX_MASK = None
 
+_GLOBAL_WINDOW_SIZE = None
+_LOCAL_WINDOW_SIZE = None
+_COMPRESSED_MASK = None
+
 
 def get_aux_mask():
     global AUX_MASK
@@ -49,6 +53,16 @@ def get_mask_causal_with_window(
         global_window_size: Optional[int] = None,
         device: str = "npu",
 ):
+    global _GLOBAL_WINDOW_SIZE
+    global _LOCAL_WINDOW_SIZE
+    global _COMPRESSED_MASK
+    if (
+        _GLOBAL_WINDOW_SIZE == global_window_size
+        and _LOCAL_WINDOW_SIZE == local_window_size
+        and _COMPRESSED_MASK is not None
+    ):
+        return _COMPRESSED_MASK
+
     if local_window_size is None:
         local_window_size = 0
     if global_window_size is None:
@@ -70,12 +84,22 @@ def get_mask_causal_with_window(
     N_boundary = N + BLOCK_N
     mask_boundary = torch.zeros(M_boundary, N_boundary, dtype=torch.bool)
     mask_boundary[:M, :N] = mask
-    return mask_boundary.to(device=device)
+    mask_boundary = mask_boundary.to(device=device)
+
+    _GLOBAL_WINDOW_SIZE = global_window_size
+    _LOCAL_WINDOW_SIZE = local_window_size
+    _COMPRESSED_MASK = mask_boundary
+    return _COMPRESSED_MASK
 
 
 @triton.jit
 def gen_mask_causal_with_window(mask_ptr_causal, mask_size_m, mask_size_n, M_BLOCK, N_BLOCK, m_start, n_start,
                                 global_window_size, local_windows_size, q_seq_len, kv_seq_len, GEN_MASK_BLOCK_SIZE=256):
+    if local_windows_size is None:
+        local_windows_size = 0
+    if global_window_size is None:
+        global_window_size = 0
+
     actual_mask_m = mask_size_m - GEN_MASK_BLOCK_SIZE
     is_q_oob = (m_start >= kv_seq_len).to(tl.int32)
     valid_rows = max(0, min(kv_seq_len - m_start, M_BLOCK))
