@@ -1681,6 +1681,7 @@ def test_paged_decode_swa(
     )
 
 test_configs_swa_nstep_decode = [
+    (1, 1, 16, 4, 128, 1024, 512, torch.bfloat16, "M_BF16"),
     (4, 1, 16, 4, 128, 1024, 512, torch.bfloat16, "M_BF16"),
     (8, 1, 16, 8, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (4, 2, 16, 4, 128, 1024, 512, torch.bfloat16, "M_BF16"),
