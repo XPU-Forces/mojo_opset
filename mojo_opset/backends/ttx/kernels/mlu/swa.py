@@ -756,7 +756,7 @@ def _swa_paged_decode_kernel(
     tl.static_assert(GQA_GROUP_SIZE % BLOCK_SIZE_Q_HEADS == 0, "BLOCK_SIZE_Q_HEADS must be a divisor of GQA_GROUP_SIZE")
     GQA_GROUP_STRIDE: tl.constexpr = 1 if GQA_INTERLEAVE else GQA_GROUP_SIZE
     GQA_HEAD_STRIDE: tl.constexpr = NUM_KV_HEADS if GQA_INTERLEAVE else 1
-    NUM_Q_HEAD_BLOCKS_PER_KV_HEAD: tl.constexpr = (GQA_GROUP_SIZE + BLOCK_SIZE_Q_HEADS - 1) // BLOCK_SIZE_Q_HEADS
+    NUM_Q_HEAD_BLOCKS_PER_KV_HEAD: tl.constexpr = GQA_GROUP_SIZE // BLOCK_SIZE_Q_HEADS
 
     pid = tl.program_id(0)
     n_progs = tl.num_programs(0)
