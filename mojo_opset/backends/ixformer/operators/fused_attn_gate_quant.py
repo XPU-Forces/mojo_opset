@@ -48,6 +48,10 @@ class IxformerFusedAttnGateQuant(MojoFusedAttnGateQuant):
         hidden_states: torch.Tensor,
         attn_output: torch.Tensor,
     ) -> torch.Tensor:
+        if self._cached_weight is None:
+            self._cached_weight = self.attn_gate.gate_weight.data.float()
+            if self.attn_gate.gate_bias is not None:
+                self._cached_bias = self.attn_gate.gate_bias.data.float()
         gate = ixf_f.mixed_type_linear(hidden_states, self._cached_weight)
 
         attn_output = attn_output.view(-1, self.num_heads, self.head_dim)
@@ -104,6 +108,14 @@ class IxformerFusedConcatAttnGateQuant(MojoFusedConcatAttnGateQuant):
         full_attn_output: torch.Tensor,
         swa_attn_output: torch.Tensor,
     ) -> torch.Tensor:
+        if self._cached_weight is None:
+            self._cached_weight = torch.cat(
+                [self.attn_gate.full_gate_weight.data, self.attn_gate.swa_gate_weight.data], dim=0
+            ).float()
+            if self.attn_gate.full_gate_bias is not None:
+                self._cached_bias = torch.cat(
+                    [self.attn_gate.full_gate_bias.data, self.attn_gate.swa_gate_bias.data], dim=0
+                ).float()
         gate = ixf_f.mixed_type_linear(hidden_states, self._cached_weight)
 
         full_attn_output = full_attn_output.view(-1, self.num_heads_full, self.head_dim)

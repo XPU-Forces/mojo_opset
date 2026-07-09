@@ -911,6 +911,30 @@ class IxformerPagedPrefillSageGQA(MojoPagedPrefillSageGQA):
 
     supported_platforms_list = ["ilu"]
 
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+        query_dtype: torch.dtype = torch.int8,
+        context_dtype: torch.dtype = torch.int8,
+        compute_dtype: torch.dtype = torch.int8,
+        global_window_size: Optional[int] = None,
+        local_window_size: Optional[int] = None,
+    ):
+        super().__init__(
+            is_causal=is_causal,
+            gqa_layout=gqa_layout,
+            query_dtype=query_dtype,
+            context_dtype=context_dtype,
+            compute_dtype=compute_dtype,
+        )
+        if global_window_size is not None and global_window_size < 0:
+            raise ValueError(f"global_window_size must be >= 0, got {global_window_size}.")
+        if local_window_size is not None and local_window_size < 0:
+            raise ValueError(f"local_window_size must be >= 0, got {local_window_size}.")
+        self.global_window_size = global_window_size
+        self.local_window_size = local_window_size
+
     def forward(
         self,
         query: torch.Tensor,
@@ -1021,6 +1045,11 @@ class IxformerPagedPrefillSageGQA(MojoPagedPrefillSageGQA):
             raise NotImplementedError(
                 "IxformerPagedPrefillSageGQA requires contiguous key_cache and value_cache."
             )
+        window_size = (self.local_window_size, 0) if self.local_window_size is not None else (-1, -1)
+        if window_size == (-1, -1) and self.global_window_size is not None and self.global_window_size > 0:
+            raise ValueError(
+                "global_window_size > 0 requires a valid local_window_size (sliding window)."
+            )
 
         return ix_fa.flash_attn_varlen_int8_func(
             q=query,
@@ -1035,6 +1064,8 @@ class IxformerPagedPrefillSageGQA(MojoPagedPrefillSageGQA):
             max_seqlen_k=max_total_seq_len,
             softmax_scale=softmax_scale,
             causal=self.is_causal,
+            window_size=window_size,
+            global_window_size=self.global_window_size,
             block_table=block_tables,
             output_dtype=torch.bfloat16,
         )

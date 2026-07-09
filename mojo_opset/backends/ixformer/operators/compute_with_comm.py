@@ -66,8 +66,11 @@ class IxformerAllGatherQuantGemm(MojoAllGatherQuantGemm):
             raise ValueError(
                 f"input_scale must contain one scale per input row, got {input_scale.numel()} and {input.shape[0]}"
             )
+        weight_scale = self.weight_scale
+        if weight_scale.dtype != torch.float32:
+            weight_scale = weight_scale.float()
         return ixf_f.w8a8(
-            input, self.weight, input_scale, self.weight_scale,
+            input, self.weight, input_scale, weight_scale,
             format="TN" if self.trans_weight else "NN",
             out_dtype=self.output_dtype,
         )
@@ -101,8 +104,11 @@ class IxformerQuantGemmReduceScatter(MojoQuantGemmReduceScatter):
             raise ValueError(
                 f"input_scale must contain one scale per input row, got {input_scale.numel()} and {input.shape[0]}"
             )
+        weight_scale = self.weight_scale
+        if weight_scale.dtype != torch.float32:
+            weight_scale = weight_scale.float()
         partial = ixf_f.w8a8(
-            input, self.weight, input_scale, self.weight_scale,
+            input, self.weight, input_scale, weight_scale,
             format="TN" if self.trans_weight else "NN",
             out_dtype=self.output_dtype,
         )
