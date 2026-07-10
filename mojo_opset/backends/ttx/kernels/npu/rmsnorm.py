@@ -124,7 +124,13 @@ def _rmsnorm_infer_kernel(
                 mask=row_mask[:, None] & col_mask[None, :],
             )
 
-import triton.backends.ascend.runtime
+def _prune_oversized_tiles(configs, nargs, **kwargs):
+    N = kwargs["BLOCK_SIZE_N"]
+    return [
+        cfg
+        for cfg in configs
+        if cfg.kwargs.get("BLOCK_SIZE_M", 0) * N <= 1048576
+    ]
 
 @libentry()
 @triton.autotune(
@@ -135,6 +141,7 @@ import triton.backends.ascend.runtime
         for EF in [True, False]
     ],
     key=["n_rows", "n_cols", "X_ptr.dtype"],
+    prune_configs_by={"early_config_prune": _prune_oversized_tiles},
 )
 @triton.jit
 def _rmsnorm_infer_kernel_single(
