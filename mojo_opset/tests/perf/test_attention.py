@@ -262,7 +262,7 @@ def generate_paged_prefill_data(
 ):
     torch.manual_seed(43)
     if max_q_len > 0:
-        if id is not None and id == 'M_BF16_128K':
+        if id is not None and id == 'M_BF16_128K_FULL':
             q_lens = torch.tensor([max_q_len] * batch_size, dtype=torch.int32)
         else:
             q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
