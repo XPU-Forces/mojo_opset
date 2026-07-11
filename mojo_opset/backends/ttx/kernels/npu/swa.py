@@ -9,6 +9,12 @@ from .utils import get_num_cores
 AUX_MASK_SIZE = 256
 AUX_MASK = None
 
+_GLOBAL_WINDOW_SIZE = None
+_LOCAL_WINDOW_SIZE = None
+_BLOCK_M = None
+_BLOCK_N = None
+_COMPRESSED_MASK = None
+
 
 def get_aux_mask():
     global AUX_MASK
@@ -49,13 +55,27 @@ def get_mask_causal_with_window(
         global_window_size: Optional[int] = None,
         device: str = "npu",
 ):
+    global _GLOBAL_WINDOW_SIZE
+    global _LOCAL_WINDOW_SIZE
+    global _BLOCK_M
+    global _BLOCK_N
+    global _COMPRESSED_MASK
+    if (
+        _GLOBAL_WINDOW_SIZE == global_window_size
+        and _LOCAL_WINDOW_SIZE == local_window_size
+        and _BLOCK_M == BLOCK_M
+        and _BLOCK_N == BLOCK_N
+        and _COMPRESSED_MASK is not None
+    ):
+        return _COMPRESSED_MASK
+
     if local_window_size is None:
         local_window_size = 0
     if global_window_size is None:
         global_window_size = 0
 
-    M = (global_window_size + local_window_size + 2 * max(BLOCK_M, BLOCK_N) + BLOCK_M - 1) // BLOCK_M * BLOCK_M
-    N = (global_window_size + local_window_size + 3 * max(BLOCK_M, BLOCK_N) + BLOCK_N - 1) // BLOCK_N * BLOCK_N
+    M = (global_window_size + local_window_size + 4 * max(BLOCK_M, BLOCK_N) + BLOCK_M - 1) // BLOCK_M * BLOCK_M
+    N = (global_window_size + local_window_size + 5 * max(BLOCK_M, BLOCK_N) + BLOCK_N - 1) // BLOCK_N * BLOCK_N
 
     causal = torch.ones(M, N, dtype=torch.bool).tril()
 
@@ -66,50 +86,35 @@ def get_mask_causal_with_window(
 
     mask = causal & (sink_band | local_band)
 
-    M_boundary = M + BLOCK_M
-    N_boundary = N + BLOCK_N
+    M_boundary = M + AUX_MASK_SIZE
+    N_boundary = N + AUX_MASK_SIZE
     mask_boundary = torch.zeros(M_boundary, N_boundary, dtype=torch.bool)
     mask_boundary[:M, :N] = mask
-    return mask_boundary.to(device=device)
+    mask_boundary = mask_boundary.to(device=device)
 
-
-def get_paged_mask_causal_with_window(
-        BLOCK_M: int,
-        BLOCK_N: int,
-        local_window_size: Optional[int] = None,
-        global_window_size: Optional[int] = None,
-        device: str = "npu",
-):
-    if local_window_size is None:
-        local_window_size = 0
-    if global_window_size is None:
-        global_window_size = 0
-
-    M = global_window_size + local_window_size + 3 * max(BLOCK_M, BLOCK_N)
-    N = global_window_size + local_window_size + 4 * max(BLOCK_M, BLOCK_N)
-
-    causal = torch.ones(M, N, dtype=torch.bool).tril()
-
-    sink_band = torch.zeros(M, N, dtype=torch.bool)
-    sink_band[:, :global_window_size] = True
-
-    local_band = torch.ones(M, N, dtype=torch.bool).triu(diagonal=-local_window_size)
-
-    mask = causal & (sink_band | local_band)
-    return mask.to(device=device)
+    _GLOBAL_WINDOW_SIZE = global_window_size
+    _LOCAL_WINDOW_SIZE = local_window_size
+    _BLOCK_M = BLOCK_M
+    _BLOCK_N = BLOCK_N
+    _COMPRESSED_MASK = mask_boundary
+    return _COMPRESSED_MASK
 
 
 @triton.jit
 def gen_mask_causal_with_window(mask_ptr_causal, mask_size_m, mask_size_n, M_BLOCK, N_BLOCK, m_start, n_start,
-                                global_window_size, local_windows_size, q_seq_len, kv_seq_len, GEN_MASK_BLOCK_SIZE=256):
-    actual_mask_m = mask_size_m - GEN_MASK_BLOCK_SIZE
+                                global_window_size, local_windows_size, q_seq_len, kv_seq_len, AUX_MASK_SIZE=AUX_MASK_SIZE):
+    if local_windows_size is None:
+        local_windows_size = 0
+    if global_window_size is None:
+        global_window_size = 0
+
+    actual_mask_m = mask_size_m - AUX_MASK_SIZE
     is_q_oob = (m_start >= kv_seq_len).to(tl.int32)
     valid_rows = max(0, min(kv_seq_len - m_start, M_BLOCK))
     is_tail = (valid_rows < M_BLOCK).to(tl.int32)
 
     m_pos_normal = min(m_start, actual_mask_m - M_BLOCK)
-    m_pos_tail = actual_mask_m - valid_rows
-    m_pos = (1 - is_q_oob) * ((1 - is_tail) * m_pos_normal + is_tail * m_pos_tail) + is_q_oob * actual_mask_m
+    m_pos = (1 - is_q_oob) * m_pos_normal + is_q_oob * actual_mask_m
 
     shift = m_start - m_pos
     need_adjust = (shift != 0).to(tl.int32)
@@ -118,23 +123,6 @@ def gen_mask_causal_with_window(mask_ptr_causal, mask_size_m, mask_size_n, M_BLO
     need_adjust = need_adjust * ((1 - is_global_block) + is_global_block * can_compensate)
     n_pos = ((1 - need_adjust) * n_start + need_adjust * max(global_window_size + 1, n_start - shift)) * (1 - is_q_oob)
 
-    mask = tl.load(
-        mask_ptr_causal
-        + (m_pos + tl.arange(0, M_BLOCK)[:, None]) * mask_size_n
-        + (n_pos + tl.arange(0, N_BLOCK))[None, :]
-    )
-    return mask
-
-
-@triton.jit
-def gen_paged_mask_causal_with_window(mask_ptr_causal, mask_size_m, mask_size_n, M_BLOCK, N_BLOCK, m_start, n_start,
-                                global_window_size):
-    m_pos = min(m_start, mask_size_m - M_BLOCK)
-    condition_1 = min(1, max(0, m_start - mask_size_m + M_BLOCK))  # m_start > bottom -> 1 else 0
-    condition_2 = min(1, max(0, n_start - global_window_size))  # n_start > global_window_size -> 1 else 0
-    condition = condition_1 * condition_2
-    n_pos = (1 - condition) * n_start + condition * max(global_window_size + 1,
-                                                        n_start - (m_start - mask_size_m + M_BLOCK))
     mask = tl.load(
         mask_ptr_causal
         + (m_pos + tl.arange(0, M_BLOCK)[:, None]) * mask_size_n
@@ -844,7 +832,7 @@ def _swa_paged_prefill_kernel(
                 )
 
                 if IS_CAUSAL:
-                    mask = gen_paged_mask_causal_with_window(
+                    mask = gen_mask_causal_with_window(
                         causal_mask_ptr,
                         causal_mask_m_size,
                         causal_mask_n_size,
@@ -853,6 +841,9 @@ def _swa_paged_prefill_kernel(
                         q_block_start + kv_computed_len,
                         kv_block_start,
                         GLOBAL_WINDOW,
+                        LOCAL_WINDOW,
+                        q_seq_len,
+                        kv_seq_len,
                     )
                 else:
                     mask = tl.full((BLOCK_M, BLOCK_N), 1,  dtype=tl.int1)
@@ -1009,7 +1000,7 @@ def _swa_paged_prefill_aggregation_kernel(
                 kv_block_start = kv_block_id * BLOCK_N
 
                 if IS_CAUSAL:
-                    mask = gen_paged_mask_causal_with_window(
+                    mask = gen_mask_causal_with_window(
                         causal_mask_ptr,
                         causal_mask_m_size,
                         causal_mask_n_size,
@@ -1018,6 +1009,9 @@ def _swa_paged_prefill_aggregation_kernel(
                         q_block_start + kv_computed_len,
                         kv_block_start,
                         GLOBAL_WINDOW,
+                        LOCAL_WINDOW,
+                        q_seq_len,
+                        kv_seq_len,
                     )
                 else:
                     mask = tl.full((BLOCK_M, BLOCK_N), 1,  dtype=tl.int1)
@@ -1136,7 +1130,7 @@ def swa_paged_prefill_impl(
     if global_window_size is None:
         global_window_size = 0
 
-    causal_mask = get_paged_mask_causal_with_window(
+    causal_mask = get_mask_causal_with_window(
         BLOCK_M,
         BLOCK_N,
         local_window_size,
