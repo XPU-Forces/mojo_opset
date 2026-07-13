@@ -301,9 +301,12 @@ def _sdpa_infer_kernel(
         triton.Config({"multibuffer": True, "BLOCK_R": 128, "BLOCK_C": 128}),
         triton.Config({"multibuffer": True, "BLOCK_R": 64, "BLOCK_C": 128}),
         triton.Config({"multibuffer": True, "BLOCK_R": 128, "BLOCK_C": 64}),
+        triton.Config({"multibuffer": True, "BLOCK_R": 64, "BLOCK_C": 64}),
         triton.Config({"multibuffer": False, "BLOCK_R": 128, "BLOCK_C": 256}),
         triton.Config({"multibuffer": False, "BLOCK_R": 256, "BLOCK_C": 128}),
         triton.Config({"multibuffer": False, "BLOCK_R": 128, "BLOCK_C": 128}),
+        triton.Config({"multibuffer": False, "BLOCK_R": 256, "BLOCK_C": 64}),
+        triton.Config({"multibuffer": False, "BLOCK_R": 64, "BLOCK_C": 256}),
     ],
     key=["N", "S", "H"],
 )
@@ -406,16 +409,22 @@ def kernel_sdpa_fwd(
             block_k = tl.load(ptr_k, mask=mask_kv, other=0.0)
             block_v = tl.load(ptr_v, mask=mask_kv, other=0.0)
 
-            block_s = tl.dot(block_q, tl.trans(block_k)) * scale
-            block_s -= (1.0 - block_mask.to(HIGH_TYPE)) * 1e6
+            # Scale+Mask Fusion: Fuses the scale multiplication and mask addition into a single FMA instruction.
+            block_s = tl.dot(block_q, tl.trans(block_k))
+            block_s = block_s * scale + tl.where(block_mask, 0.0, -1e6)
             block_m_1 = tl.maximum(block_m, tl.max(block_s, axis=1))
             block_s = tl.exp(block_s - block_m_1[:, None])
-            block_l_1 = tl.exp(block_m - block_m_1) * block_l + tl.sum(block_s, axis=1)
-            block_o = tl.exp(block_m - block_m_1)[:, None] * block_o + tl.dot(block_s.to(LOW_TYPE), block_v).to(
-                HIGH_TYPE
-            )
+
+            # CV pipeline optimization: Pre-compute cube operations (PV matmul)
+            # Enable parallel execution of vector computations (for block_p_sum and block_alpha) and cube computations.
+            block_pv = tl.dot(block_s.to(LOW_TYPE), block_v).to(HIGH_TYPE)
+
+            # The following vector calculations run in parallel with the cube calculations above.
+            block_p_sum = tl.sum(block_s, axis=1)
+            block_alpha = tl.exp(block_m - block_m_1)
+            block_o = block_alpha[:, None] * block_o + block_pv
+            block_l = block_alpha * block_l + block_p_sum
             block_m = block_m_1
-            block_l = block_l_1
 
         block_o = block_o / block_l[:, None]
         block_lse = tl.log(block_l) + block_m
@@ -842,7 +851,7 @@ def sdpa_infer_impl(
         SEQ=seq_length,
         HEAD_DIM=head_dim,
         BLOCK_M=128,
-        BLOCK_N=512,
+        BLOCK_N=256,
         enable_ubuf_saving=True,
         enable_hivm_auto_cv_balance=True,
         multibuffer=True,  # 控制开double_buffer

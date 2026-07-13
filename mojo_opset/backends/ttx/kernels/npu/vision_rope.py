@@ -126,15 +126,15 @@ def _compute_vision_rope_separated(
 @triton.jit
 def _vision_rope_apply_kernel(
     q_ptr,
-    q_token_stride,
-    q_head_stride,
+    q_token_stride: tl.constexpr,
+    q_head_stride: tl.constexpr,
     k_ptr,
-    k_token_stride,
-    k_head_stride,
+    k_token_stride: tl.constexpr,
+    k_head_stride: tl.constexpr,
     cos_ptr,
-    cos_token_stride,
+    cos_token_stride: tl.constexpr,
     sin_ptr,
-    sin_token_stride,
+    sin_token_stride: tl.constexpr,
     T,
     num_token_blocks,
     n_qh: tl.constexpr,
@@ -144,6 +144,7 @@ def _vision_rope_apply_kernel(
     TOKEN_BLOCK_SIZE: tl.constexpr,
     ALIGNED: tl.constexpr,
     CAST_TO_FP32: tl.constexpr,
+    TOKEN_ALIGNED: tl.constexpr,
 ):
     """Apply vision 2D RoPE to q and k in a single kernel.
 
@@ -152,141 +153,229 @@ def _vision_rope_apply_kernel(
     pid = tl.program_id(axis=0)
     grid_size = tl.num_programs(axis=0)
 
+    half_dim_offsets = tl.arange(0, HALF_D)
+    head_q_offsets = tl.arange(0, n_qh)
+    head_k_offsets = tl.arange(0, n_kh)
+
     for block_id in range(pid, num_token_blocks, grid_size):
         token_start = block_id * TOKEN_BLOCK_SIZE
         token_offsets = token_start + tl.arange(0, TOKEN_BLOCK_SIZE)
-        token_mask = token_offsets < T
-
-        half_dim_offsets = tl.arange(0, HALF_D)
-        half_dim_mask = half_dim_offsets < HALF_D
 
         cos_token_ptr = cos_ptr + token_offsets[:, None] * cos_token_stride
         sin_token_ptr = sin_ptr + token_offsets[:, None] * sin_token_stride
 
-        head_q_offsets = tl.arange(0, n_qh)
-        head_k_offsets = tl.arange(0, n_kh)
-
         if ALIGNED:
-            # The current vision RoPE table duplicates the first half into the
-            # second half, so we only load half of cos/sin and reuse it.
-            cos_half = tl.load(
-                cos_token_ptr + half_dim_offsets[None, :],
-                mask=token_mask[:, None] & half_dim_mask[None, :],
-                other=0.0,
-            )
-            sin_half = tl.load(
-                sin_token_ptr + half_dim_offsets[None, :],
-                mask=token_mask[:, None] & half_dim_mask[None, :],
-                other=0.0,
-            )
+            if TOKEN_ALIGNED:
+                # cos/sin: 2D block_ptr [TOKEN_BLOCK_SIZE, HALF_D]
+                cos_block_ptr = tl.make_block_ptr(
+                    base=cos_ptr,
+                    shape=(T, HALF_D),
+                    strides=(cos_token_stride, 1),
+                    offsets=(token_start, 0),
+                    block_shape=(TOKEN_BLOCK_SIZE, HALF_D),
+                    order=(1, 0),
+                )
+                sin_block_ptr = tl.make_block_ptr(
+                    base=sin_ptr,
+                    shape=(T, HALF_D),
+                    strides=(sin_token_stride, 1),
+                    offsets=(token_start, 0),
+                    block_shape=(TOKEN_BLOCK_SIZE, HALF_D),
+                    order=(1, 0),
+                )
+                cos_half = tl.load(cos_block_ptr)
+                sin_half = tl.load(sin_block_ptr)
 
-            cos_half_tile = tl.reshape(cos_half, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
-            sin_half_tile = tl.reshape(sin_half, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
+                cos_half_tile = tl.reshape(cos_half, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
+                sin_half_tile = tl.reshape(sin_half, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
 
-            dim_offsets = tl.arange(0, D)
-            dim_mask = dim_offsets < D
+                # Q: 3D block_ptr [TOKEN_BLOCK_SIZE, n_qh, D]
+                q_block_ptr = tl.make_block_ptr(
+                    base=q_ptr,
+                    shape=(T, n_qh, D),
+                    strides=(q_token_stride, q_head_stride, 1),
+                    offsets=(token_start, 0, 0),
+                    block_shape=(TOKEN_BLOCK_SIZE, n_qh, D),
+                    order=(2, 1, 0),
+                )
+                q_tile = tl.load(q_block_ptr)
+                q_load_dtype = q_tile.dtype
+                if CAST_TO_FP32:
+                    q_tile = q_tile.to(cos_half.dtype)
+                q_tile = _compute_vision_rope(q_tile, sin_half_tile, cos_half_tile, n_qh, HALF_D, TOKEN_BLOCK_SIZE)
+                tl.store(q_block_ptr, q_tile.to(q_load_dtype))
 
-            # Q: 3D load [TOKEN_BLOCK_SIZE, n_qh, D], rotate, store
-            q_offsets = (
-                token_offsets[:, None, None] * q_token_stride
-                + head_q_offsets[None, :, None] * q_head_stride
-                + dim_offsets[None, None, :]
-            )
-            q_mask = token_mask[:, None, None] & (head_q_offsets[None, :, None] < n_qh) & dim_mask[None, None, :]
-            q_tile = tl.load(q_ptr + q_offsets, mask=q_mask, other=0.0)
-            if CAST_TO_FP32:
-                q_tile = q_tile.to(cos_half.dtype)
-            q_tile = _compute_vision_rope(q_tile, sin_half_tile, cos_half_tile, n_qh, HALF_D, TOKEN_BLOCK_SIZE)
-            tl.store(q_ptr + q_offsets, q_tile, mask=q_mask)
+                # K: 3D block_ptr [TOKEN_BLOCK_SIZE, n_kh, D]
+                k_block_ptr = tl.make_block_ptr(
+                    base=k_ptr,
+                    shape=(T, n_kh, D),
+                    strides=(k_token_stride, k_head_stride, 1),
+                    offsets=(token_start, 0, 0),
+                    block_shape=(TOKEN_BLOCK_SIZE, n_kh, D),
+                    order=(2, 1, 0),
+                )
+                k_tile = tl.load(k_block_ptr)
+                k_load_dtype = k_tile.dtype
+                if CAST_TO_FP32:
+                    k_tile = k_tile.to(cos_half.dtype)
+                k_tile = _compute_vision_rope(k_tile, sin_half_tile, cos_half_tile, n_kh, HALF_D, TOKEN_BLOCK_SIZE)
+                tl.store(k_block_ptr, k_tile.to(k_load_dtype))
+            else:
+                token_mask = token_offsets < T
 
-            # K: 3D load [TOKEN_BLOCK_SIZE, n_kh, D], rotate, store
-            k_offsets = (
-                token_offsets[:, None, None] * k_token_stride
-                + head_k_offsets[None, :, None] * k_head_stride
-                + dim_offsets[None, None, :]
-            )
-            k_mask = token_mask[:, None, None] & (head_k_offsets[None, :, None] < n_kh) & dim_mask[None, None, :]
-            k_tile = tl.load(k_ptr + k_offsets, mask=k_mask, other=0.0)
-            if CAST_TO_FP32:
-                k_tile = k_tile.to(cos_half.dtype)
-            k_tile = _compute_vision_rope(k_tile, sin_half_tile, cos_half_tile, n_kh, HALF_D, TOKEN_BLOCK_SIZE)
-            tl.store(k_ptr + k_offsets, k_tile, mask=k_mask)
+                cos_half = tl.load(
+                    cos_token_ptr + half_dim_offsets[None, :],
+                    mask=token_mask[:, None],
+                    other=0.0,
+                )
+                sin_half = tl.load(
+                    sin_token_ptr + half_dim_offsets[None, :],
+                    mask=token_mask[:, None],
+                    other=0.0,
+                )
+
+                cos_half_tile = tl.reshape(cos_half, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
+                sin_half_tile = tl.reshape(sin_half, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
+
+                dim_offsets = tl.arange(0, D)
+
+                q_offsets = (
+                    token_offsets[:, None, None] * q_token_stride
+                    + head_q_offsets[None, :, None] * q_head_stride
+                    + dim_offsets[None, None, :]
+                )
+                q_mask = token_mask[:, None, None]
+                q_tile = tl.load(q_ptr + q_offsets, mask=q_mask, other=0.0)
+                if CAST_TO_FP32:
+                    q_tile = q_tile.to(cos_half.dtype)
+                q_tile = _compute_vision_rope(q_tile, sin_half_tile, cos_half_tile, n_qh, HALF_D, TOKEN_BLOCK_SIZE)
+                tl.store(q_ptr + q_offsets, q_tile, mask=q_mask)
+
+                k_offsets = (
+                    token_offsets[:, None, None] * k_token_stride
+                    + head_k_offsets[None, :, None] * k_head_stride
+                    + dim_offsets[None, None, :]
+                )
+                k_mask = token_mask[:, None, None]
+                k_tile = tl.load(k_ptr + k_offsets, mask=k_mask, other=0.0)
+                if CAST_TO_FP32:
+                    k_tile = k_tile.to(cos_half.dtype)
+                k_tile = _compute_vision_rope(k_tile, sin_half_tile, cos_half_tile, n_kh, HALF_D, TOKEN_BLOCK_SIZE)
+                tl.store(k_ptr + k_offsets, k_tile, mask=k_mask)
         else:
-            # The current vision RoPE table duplicates the first half into the
-            # second half, so we only load half of cos/sin and reuse it.
-            cos_half = tl.load(
-                cos_token_ptr + half_dim_offsets[None, :],
-                mask=token_mask[:, None] & half_dim_mask[None, :],
-                other=0.0,
-            )
-            sin_half = tl.load(
-                sin_token_ptr + half_dim_offsets[None, :],
-                mask=token_mask[:, None] & half_dim_mask[None, :],
-                other=0.0,
-            )
+            if TOKEN_ALIGNED:
+                cos_half = tl.load(cos_token_ptr + half_dim_offsets[None, :])
+                sin_half = tl.load(sin_token_ptr + half_dim_offsets[None, :])
 
-            cos_half_tile = tl.reshape(cos_half, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
-            sin_half_tile = tl.reshape(sin_half, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
+                cos_half_tile = tl.reshape(cos_half, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
+                sin_half_tile = tl.reshape(sin_half, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
 
-            # Q halves
-            q_offsets_half1 = (
-                token_offsets[:, None, None] * q_token_stride
-                + head_q_offsets[None, :, None] * q_head_stride
-                + half_dim_offsets[None, None, :]
-            )
-            q_offsets_half2 = (
-                token_offsets[:, None, None] * q_token_stride
-                + head_q_offsets[None, :, None] * q_head_stride
-                + HALF_D
-                + half_dim_offsets[None, None, :]
-            )
-            q_half_mask = (
-                token_mask[:, None, None] & (head_q_offsets[None, :, None] < n_qh) & half_dim_mask[None, None, :]
-            )
+                q_offsets_half1 = (
+                    token_offsets[:, None, None] * q_token_stride
+                    + head_q_offsets[None, :, None] * q_head_stride
+                    + half_dim_offsets[None, None, :]
+                )
+                q_offsets_half2 = (
+                    token_offsets[:, None, None] * q_token_stride
+                    + head_q_offsets[None, :, None] * q_head_stride
+                    + HALF_D
+                    + half_dim_offsets[None, None, :]
+                )
 
-            q_tile_1 = tl.load(q_ptr + q_offsets_half1, mask=q_half_mask, other=0.0)
-            q_tile_2 = tl.load(q_ptr + q_offsets_half2, mask=q_half_mask, other=0.0)
-            if CAST_TO_FP32:
-                q_tile_1 = q_tile_1.to(tl.float32)
-                q_tile_2 = q_tile_2.to(tl.float32)
-            new_q_1, new_q_2 = _compute_vision_rope_separated(
-                q_tile_1,
-                q_tile_2,
-                sin_half_tile,
-                cos_half_tile,
-            )
-            tl.store(q_ptr + q_offsets_half1, new_q_1, mask=q_half_mask)
-            tl.store(q_ptr + q_offsets_half2, new_q_2, mask=q_half_mask)
+                q_tile_1 = tl.load(q_ptr + q_offsets_half1)
+                q_tile_2 = tl.load(q_ptr + q_offsets_half2)
+                if CAST_TO_FP32:
+                    q_tile_1 = q_tile_1.to(tl.float32)
+                    q_tile_2 = q_tile_2.to(tl.float32)
+                roped_x1 = q_tile_1 * cos_half_tile - q_tile_2 * sin_half_tile
+                roped_x2 = q_tile_2 * cos_half_tile + q_tile_1 * sin_half_tile
+                tl.store(q_ptr + q_offsets_half1, roped_x1)
+                tl.store(q_ptr + q_offsets_half2, roped_x2)
 
-            # K halves
-            k_offsets_half1 = (
-                token_offsets[:, None, None] * k_token_stride
-                + head_k_offsets[None, :, None] * k_head_stride
-                + half_dim_offsets[None, None, :]
-            )
-            k_offsets_half2 = (
-                token_offsets[:, None, None] * k_token_stride
-                + head_k_offsets[None, :, None] * k_head_stride
-                + HALF_D
-                + half_dim_offsets[None, None, :]
-            )
-            k_half_mask = (
-                token_mask[:, None, None] & (head_k_offsets[None, :, None] < n_kh) & half_dim_mask[None, None, :]
-            )
+                k_offsets_half1 = (
+                    token_offsets[:, None, None] * k_token_stride
+                    + head_k_offsets[None, :, None] * k_head_stride
+                    + half_dim_offsets[None, None, :]
+                )
+                k_offsets_half2 = (
+                    token_offsets[:, None, None] * k_token_stride
+                    + head_k_offsets[None, :, None] * k_head_stride
+                    + HALF_D
+                    + half_dim_offsets[None, None, :]
+                )
 
-            k_tile_1 = tl.load(k_ptr + k_offsets_half1, mask=k_half_mask, other=0.0)
-            k_tile_2 = tl.load(k_ptr + k_offsets_half2, mask=k_half_mask, other=0.0)
-            if CAST_TO_FP32:
-                k_tile_1 = k_tile_1.to(tl.float32)
-                k_tile_2 = k_tile_2.to(tl.float32)
-            new_k_1, new_k_2 = _compute_vision_rope_separated(
-                k_tile_1,
-                k_tile_2,
-                sin_half_tile,
-                cos_half_tile,
-            )
-            tl.store(k_ptr + k_offsets_half1, new_k_1, mask=k_half_mask)
-            tl.store(k_ptr + k_offsets_half2, new_k_2, mask=k_half_mask)
+                k_tile_1 = tl.load(k_ptr + k_offsets_half1)
+                k_tile_2 = tl.load(k_ptr + k_offsets_half2)
+                if CAST_TO_FP32:
+                    k_tile_1 = k_tile_1.to(tl.float32)
+                    k_tile_2 = k_tile_2.to(tl.float32)
+                roped_k1 = k_tile_1 * cos_half_tile - k_tile_2 * sin_half_tile
+                roped_k2 = k_tile_2 * cos_half_tile + k_tile_1 * sin_half_tile
+                tl.store(k_ptr + k_offsets_half1, roped_k1)
+                tl.store(k_ptr + k_offsets_half2, roped_k2)
+            else:
+                token_mask = token_offsets < T
+
+                cos_half = tl.load(
+                    cos_token_ptr + half_dim_offsets[None, :],
+                    mask=token_mask[:, None],
+                    other=0.0,
+                )
+                sin_half = tl.load(
+                    sin_token_ptr + half_dim_offsets[None, :],
+                    mask=token_mask[:, None],
+                    other=0.0,
+                )
+
+                cos_half_tile = tl.reshape(cos_half, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
+                sin_half_tile = tl.reshape(sin_half, (TOKEN_BLOCK_SIZE, 1, HALF_D), can_reorder=True)
+
+                q_offsets_half1 = (
+                    token_offsets[:, None, None] * q_token_stride
+                    + head_q_offsets[None, :, None] * q_head_stride
+                    + half_dim_offsets[None, None, :]
+                )
+                q_offsets_half2 = (
+                    token_offsets[:, None, None] * q_token_stride
+                    + head_q_offsets[None, :, None] * q_head_stride
+                    + HALF_D
+                    + half_dim_offsets[None, None, :]
+                )
+                q_half_mask = token_mask[:, None, None]
+
+                q_tile_1 = tl.load(q_ptr + q_offsets_half1, mask=q_half_mask, other=0.0)
+                q_tile_2 = tl.load(q_ptr + q_offsets_half2, mask=q_half_mask, other=0.0)
+                if CAST_TO_FP32:
+                    q_tile_1 = q_tile_1.to(tl.float32)
+                    q_tile_2 = q_tile_2.to(tl.float32)
+                roped_x1 = q_tile_1 * cos_half_tile - q_tile_2 * sin_half_tile
+                roped_x2 = q_tile_2 * cos_half_tile + q_tile_1 * sin_half_tile
+                tl.store(q_ptr + q_offsets_half1, roped_x1, mask=q_half_mask)
+                tl.store(q_ptr + q_offsets_half2, roped_x2, mask=q_half_mask)
+
+                k_offsets_half1 = (
+                    token_offsets[:, None, None] * k_token_stride
+                    + head_k_offsets[None, :, None] * k_head_stride
+                    + half_dim_offsets[None, None, :]
+                )
+                k_offsets_half2 = (
+                    token_offsets[:, None, None] * k_token_stride
+                    + head_k_offsets[None, :, None] * k_head_stride
+                    + HALF_D
+                    + half_dim_offsets[None, None, :]
+                )
+                k_half_mask = token_mask[:, None, None]
+
+                k_tile_1 = tl.load(k_ptr + k_offsets_half1, mask=k_half_mask, other=0.0)
+                k_tile_2 = tl.load(k_ptr + k_offsets_half2, mask=k_half_mask, other=0.0)
+                if CAST_TO_FP32:
+                    k_tile_1 = k_tile_1.to(tl.float32)
+                    k_tile_2 = k_tile_2.to(tl.float32)
+                roped_k1 = k_tile_1 * cos_half_tile - k_tile_2 * sin_half_tile
+                roped_k2 = k_tile_2 * cos_half_tile + k_tile_1 * sin_half_tile
+                tl.store(k_ptr + k_offsets_half1, roped_k1, mask=k_half_mask)
+                tl.store(k_ptr + k_offsets_half2, roped_k2, mask=k_half_mask)
+
 
 
 def _get_token_block_size(n_qh: int, n_kh: int) -> int:
@@ -328,10 +417,12 @@ def vision_rope_apply_impl(
     is_aligned = _is_half_rope_dim_aligned(half_D)
     cast_to_fp32 = q.dtype != torch.float32
 
-    token_block_size = _get_token_block_size(n_qh, n_kh)
+    token_block_size = 2
     num_token_blocks = (T + token_block_size - 1) // token_block_size
+    token_aligned = (T % token_block_size == 0)
 
     num_programs = get_num_cores()
+    num_programs = min(num_programs, num_token_blocks)
 
     cos = cos.contiguous()
     sin = sin.contiguous()
@@ -357,6 +448,8 @@ def vision_rope_apply_impl(
         token_block_size,
         is_aligned,
         cast_to_fp32,
+        token_aligned,
+        enable_vf_fusion=True,
     )
 
     return q, k

@@ -154,23 +154,23 @@ def _store_paged_kv_cache_chunk_kernel(
     value_cache_ptr,
     chunk_meta_ptr,
     num_chunks,
-    stride_cm_row,
-    stride_cm_col,
-    num_kv_heads,
-    stride_k_tok,
-    stride_k_head,
-    stride_k_dim,
-    stride_v_tok,
-    stride_v_head,
-    stride_v_dim,
-    stride_kc_blk,
-    stride_kc_head,
-    stride_kc_tok,
-    stride_kc_dim,
-    stride_vc_blk,
-    stride_vc_head,
-    stride_vc_tok,
-    stride_vc_dim,
+    stride_cm_row: tl.constexpr,
+    stride_cm_col: tl.constexpr,
+    num_kv_heads: tl.constexpr,
+    stride_k_tok: tl.constexpr,
+    stride_k_head: tl.constexpr,
+    stride_k_dim: tl.constexpr,
+    stride_v_tok: tl.constexpr,
+    stride_v_head: tl.constexpr,
+    stride_v_dim: tl.constexpr,
+    stride_kc_blk: tl.constexpr,
+    stride_kc_head: tl.constexpr,
+    stride_kc_tok: tl.constexpr,
+    stride_kc_dim: tl.constexpr,
+    stride_vc_blk: tl.constexpr,
+    stride_vc_head: tl.constexpr,
+    stride_vc_tok: tl.constexpr,
+    stride_vc_dim: tl.constexpr,
     head_dim: tl.constexpr,
     num_subchunks: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
@@ -185,7 +185,7 @@ def _store_paged_kv_cache_chunk_kernel(
         chunk_idx = p_idx // num_kv_heads
 
         chunk_base = chunk_meta_ptr + chunk_idx * stride_cm_row
-        src_token_start = tl.load(chunk_base + 0 * stride_cm_col)
+        src_token_start = tl.load(chunk_base + 0 * stride_cm_col, care_padding=False)
         dst_block_id = tl.load(chunk_base + 1 * stride_cm_col)
         dst_block_offset = tl.load(chunk_base + 2 * stride_cm_col)
         chunk_len = tl.load(chunk_base + 3 * stride_cm_col)
@@ -222,7 +222,7 @@ def _store_paged_kv_cache_chunk_kernel(
                 + offs_d[None, :] * stride_vc_dim
             )
 
-            k_val = tl.load(base_src_k_ptr + h * stride_k_head, mask=mask_sub[:, None])
+            k_val = tl.load(base_src_k_ptr + h * stride_k_head, mask=mask_sub[:, None], care_padding=False)
             v_val = tl.load(base_src_v_ptr + h * stride_v_head, mask=mask_sub[:, None])
             tl.store(base_dst_k_ptr + h * stride_kc_head, k_val, mask=mask_sub[:, None])
             tl.store(base_dst_v_ptr + h * stride_vc_head, v_val, mask=mask_sub[:, None])
