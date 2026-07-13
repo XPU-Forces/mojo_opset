@@ -5,6 +5,8 @@ Once we find the operators of contrib become more and more stable in community, 
 
 from .functions.diffusion_attention import MojoDiffusionAttentionFunction
 from .functions.diffusion_attention import mojo_diffusion_attention
+from .functions.flex_attention import MojoFlexAttentionFunction
+from .functions.flex_attention import mojo_flex_attention
 from .operators.activation import MojoRotateActivation
 from .operators.attention import MojoDecodeMLA
 from .operators.attention import MojoDecodeNSA
@@ -35,6 +37,8 @@ from .operators.store_lowrank import MojoStoreLowrank
 __all__ = [
     "MojoDiffusionAttentionFunction",
     "mojo_diffusion_attention",
+    "MojoFlexAttentionFunction",
+    "mojo_flex_attention",
     "MojoRotateActivation",
     "MojoQuantBatchGemmReduceSum",
     "MojoLightningIndexer",

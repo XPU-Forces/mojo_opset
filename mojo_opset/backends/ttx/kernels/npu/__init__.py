@@ -3,6 +3,8 @@ from .convolution import causal_conv1d_fwd_impl
 from .convolution import causal_conv1d_update_bdt_impl
 from .diffution_attention import diffusion_attention_bwd_impl
 from .diffution_attention import diffusion_attention_fwd_impl
+from .flex_attention import flex_attention_bwd_impl
+from .flex_attention import flex_attention_fwd_impl
 from .flash_attention import paged_attention_decode_impl
 from .flash_attention import paged_attention_prefill_impl
 from .fused_add_layernorm import fused_add_layernorm_infer_impl
@@ -114,6 +116,8 @@ __all__ = [
     "dequant_impl",
     "diffusion_attention_fwd_impl",
     "diffusion_attention_bwd_impl",
+    "flex_attention_fwd_impl",
+    "flex_attention_bwd_impl",
     "m_grouped_matmul_impl",
     "k_grouped_matmul_impl",
     "store_paged_kv_impl",

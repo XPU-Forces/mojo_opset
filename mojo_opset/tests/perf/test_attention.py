@@ -258,11 +258,15 @@ def generate_paged_prefill_data(
     max_kv_computed_len: int,
     block_size: int,
     dtype: torch.dtype,
+    id: Optional[str]
 ):
     torch.manual_seed(43)
     if max_q_len > 0:
-        q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
-        q_lens = torch.clamp(q_lens, min=1)
+        if id is not None and id == 'M_BF16_128K_FULL':
+            q_lens = torch.tensor([max_q_len] * batch_size, dtype=torch.int32)
+        else:
+            q_lens = torch.randint(max_q_len // 2, max_q_len, (batch_size,), dtype=torch.int32)
+            q_lens = torch.clamp(q_lens, min=1)
     else:
         # max_q_len = 0 for testing padding logic, use randperm to generate a list with 0
         q_lens = torch.randperm(batch_size, dtype=torch.int32)
@@ -334,8 +338,9 @@ test_configs_prefill = [
     (2, 8, 1, 128, 1024, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
     (2, 8, 1, 128, 0, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
 
-     (2, 8, 1, 128, 16384, 8192, 128, torch.bfloat16, "M_BF16_WITH_CACHE_16384"),
-     (2, 8, 1, 128, 32768, 10240, 128, torch.bfloat16, "M_BF16_WITH_CACHE_32768"),
+    (2, 8, 1, 128, 16384, 8192, 128, torch.bfloat16, "M_BF16_WITH_CACHE_16384"),
+    (2, 8, 1, 128, 32768, 10240, 128, torch.bfloat16, "M_BF16_WITH_CACHE_32768"),
+    (1, 12, 4, 128, 131072, 0, 128, torch.bfloat16, "M_BF16_128K_FULL")
 ]
 @pytest.mark.parametrize(
     "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens",
@@ -350,6 +355,7 @@ test_configs_prefill = [
                 max_kv_computed_len=KV_COMPUTED_LEN,
                 block_size=BLK_S,
                 dtype=dtype,
+                id=ID,
             ),
             id=ID,
         )
