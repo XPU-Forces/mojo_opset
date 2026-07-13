@@ -24,15 +24,6 @@ COL_BLOCKING_THRESHOLD = 4096
 
 @triton.jit
 def gelu_tanh_approx(x):
-    """GELU activation using tanh approximation"""
-    sqrt_2_over_pi = 0.7978845608028654  # sqrt(2 / π)
-    x_cubed = x * x * x
-    tanh_arg = sqrt_2_over_pi * (x + 0.044715 * x_cubed)
-    return 0.5 * x * (1 + tl.math.tanh(tanh_arg))
-
-
-@triton.jit
-def gelu_tanh_approx(x):
     """GELU activation using exp (iter_2 optimization, kept unchanged)."""
     c = 1.5957691216057308   # 2 * sqrt(2/π)
     k = 0.07135889030264642  # c * 0.044715，预计算常量
