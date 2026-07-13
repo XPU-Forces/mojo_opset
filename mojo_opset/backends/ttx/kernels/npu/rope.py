@@ -120,13 +120,13 @@ def _compute_rope_separated(
 @triton.jit
 def _rot_pos_embed_kernel(
     cos_table_ptr,
-    cos_table_stride,
+    cos_table_stride: tl.constexpr,
     sin_table_ptr,
-    sin_table_stride,
+    sin_table_stride: tl.constexpr,
     cos_out_ptr,
-    cos_out_stride,
+    cos_out_stride: tl.constexpr,
     sin_out_ptr,
-    sin_out_stride,
+    sin_out_stride: tl.constexpr,
     chunk_indices_ptr,
     total_blocks,
     ROPE_DIM: tl.constexpr,
@@ -189,7 +189,8 @@ def _rot_pos_embed_kernel(
         triton.Config({"TOKEN_BLOCK_SIZE": 16}),
         triton.Config({"TOKEN_BLOCK_SIZE": 32}),
     ],
-    key=["n_qh", "n_kh"],
+    key=["n_qh", "n_kh", "half_rope_dim"],
+    restore_value=["q_ptr", "k_ptr"],
 )
 @triton.jit(do_not_specialize=["seq_len"])
 def _rope_inplace_kernel(
@@ -408,7 +409,7 @@ def rot_pos_embed_impl(
     else:
         context_lens = None
 
-    token_block_size = _get_token_block_size(1, 1)
+    token_block_size = 32
     chunk_indices = prepare_chunk_indices(cu_q_lens, token_block_size, context_lens)
     total_blocks = chunk_indices.shape[0]
     rope_dim = cos.shape[-1]
@@ -427,6 +428,7 @@ def rot_pos_embed_impl(
         sin_out, sin_out.stride(0),
         chunk_indices, total_blocks,
         rope_dim, token_block_size,
+        multibuffer=True,
     )
     return cos_out, sin_out
 
@@ -560,8 +562,8 @@ def rope_bwd_impl(
         nope_dim,
         rope_dim,
         half_rope_dim,
-        is_aligned,
-        True,
+        ALIGNED=is_aligned,
+        INVERSE=True,
     )
 
     if head_first:
