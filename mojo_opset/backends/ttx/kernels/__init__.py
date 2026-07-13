@@ -87,6 +87,9 @@ swa_bwd_impl = _get_kernel_impl(ttx_backend_module, "swa_bwd_impl")
 diffusion_attention_fwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_attention_fwd_impl")
 diffusion_attention_bwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_attention_bwd_impl")
 
+flex_attention_fwd_impl = _get_kernel_impl(ttx_backend_module, "flex_attention_fwd_impl")
+flex_attention_bwd_impl = _get_kernel_impl(ttx_backend_module, "flex_attention_bwd_impl")
+
 m_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "m_grouped_matmul_impl")
 m_grouped_matmul_capturable_impl = _get_kernel_impl(ttx_backend_module, "m_grouped_matmul_capturable_impl")
 k_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "k_grouped_matmul_impl")
@@ -1007,6 +1010,8 @@ else:
     swa_bwd = swa_bwd_impl
     diffusion_attention_fwd = diffusion_attention_fwd_impl
     diffusion_attention_bwd = diffusion_attention_bwd_impl
+    flex_attention_fwd = flex_attention_fwd_impl
+    flex_attention_bwd = flex_attention_bwd_impl
     m_grouped_matmul = m_grouped_matmul_impl
     m_grouped_matmul_capturable = m_grouped_matmul_capturable_impl
     k_grouped_matmul = k_grouped_matmul_impl
