@@ -479,7 +479,7 @@ def paged_prefill_page_aggregation_kernel(
 
             # Load (transposed) K block
             k = tl.zeros((PAGE_AGGREGATION_NUM * BLOCK_SIZE_N, BLOCK_SIZE_D), dtype=key_cache_ptr.dtype.element_ty)
-            for page_iter in range(PAGE_AGGREGATION_NUM):
+            for page_iter in tl.extra.cann.extension.parallel(0, PAGE_AGGREGATION_NUM):
                 kv_block_start = (kv_block_id + page_iter) * BLOCK_SIZE_N
                 kv_block_end = min(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
                 kv_block_len = max(kv_block_end - kv_block_start, 0)
@@ -526,7 +526,7 @@ def paged_prefill_page_aggregation_kernel(
             acc = acc * alpha[:, None]
             # Load corresponding V block
             v = tl.zeros((PAGE_AGGREGATION_NUM * BLOCK_SIZE_N, BLOCK_SIZE_D), dtype=value_cache_ptr.dtype.element_ty)
-            for page_iter in range(PAGE_AGGREGATION_NUM):
+            for page_iter in tl.extra.cann.extension.parallel(0, PAGE_AGGREGATION_NUM):
                 kv_block_start = (kv_block_id + page_iter) * BLOCK_SIZE_N
                 kv_block_end = min(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
                 kv_block_len = max(kv_block_end - kv_block_start, 0)
