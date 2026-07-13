@@ -440,8 +440,8 @@ def paged_decode_vector_kernel(
             qk = tl.where(row_mask[:, None] & n_mask[None, :], qk, float("-inf"))
 
             # Online softmax
-            m_j = tl.max(qk, axis=1, propagate_nan=tl.PropagateNan.ALL)
-            m_ij = tl.maximum(m_i, m_j, propagate_nan=tl.PropagateNan.ALL)
+            m_j = tl.max(qk, axis=1)
+            m_ij = tl.maximum(m_i, m_j)
             qk = qk - m_ij[:, None]
             p = tl.exp(qk)
 
@@ -905,7 +905,13 @@ def paged_attention_decode_impl(
         max_seq = seqlens.max().item()
 
         num_kv_blocks = (max_seq + BLOCK_N - 1) // BLOCK_N
+        # Minimum number of BLOCK_N tiles per split: ensures each split has enough
+        # compute to amortize the cost of workspace writes and global sync.
+        # Empirically, fewer than 4 blocks per split makes the reduction overhead
+        # dominate over the attention compute benefit.
         MIN_BLOCKS_PER_SPLIT = 4
+        # Minimum tile size in M dimension (Q heads) for cube core.
+        # Empirically, BLOCK_M < 4 leads to poor cube utilization.
         BLOCK_M = max(4, BLOCK_M)
 
         # Compute natural num_splits: only split when cores are underutilized
