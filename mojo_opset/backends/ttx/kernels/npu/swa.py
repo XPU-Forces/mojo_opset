@@ -1551,9 +1551,9 @@ def swa_paged_decode_impl(
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_M": BM, "BLOCK_N": BN, "multibuffer": MF})
-        for BM in [64, 128]
-        for BN in [64, 128]
-        for MF in [True, False]
+        for BM in [128]
+        for BN in [128]
+        for MF in [False]
     ],
     key=["HEAD_DIM"],
 )
@@ -1839,7 +1839,9 @@ def swa_fwd_impl(
         BLOCK_D,
         output_f32,
         limit_auto_multi_buffer_buffer="no-limit",
-        hfusion_enable_multiple_consumer_fusion=True
+        hfusion_enable_multiple_consumer_fusion=True,
+        intra_cache_num=3,
+        inter_cache_num=2,
     )
     if output_f32:
         return o, softmax_lse, o_f32
@@ -2019,11 +2021,11 @@ def _sdpa_single_block_bwd_dq(
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_M": BM, "BLOCK_N": BN, "multibuffer": MF})
-        for BM in [64, 128, 256]
-        for BN in [64, 128]
-        for MF in [True, False]
+        for BM in [128]
+        for BN in [128]
+        for MF in [False, True]
     ],
-    key=["HEAD_DIM", "LOCAL_WINDOW", "GLOBAL_WINDOW"],
+    key=["HEAD_DIM"],
 )
 @triton.jit
 def _swa_bwd_dkdv_kernel(
@@ -2217,7 +2219,7 @@ def _swa_bwd_dkdv_kernel(
                                                 other=0.0)
                             tl.static_assert(cur_delta.dtype == tl.float32)
                             cur_lse = tl.load(lse_i_ptr + q_offs * stride_lse_t, mask=q_offs < q_seq_len,
-                                              other=-float("inf"))
+                                              other=0.0)
                             tl.static_assert(cur_lse.dtype == tl.float32)
                             dk, dv = _sdpa_single_block_bwd_dkdv(
                                 dk,
@@ -2236,19 +2238,8 @@ def _swa_bwd_dkdv_kernel(
                                 BLOCK_D,
                                 v_ptr.dtype.element_ty == tl.float8e5,
                             )
-                    # tl.extra.cann.extension.compile_hint(dk, "matmul_at_least_once")
-                    # tl.extra.cann.extension.compile_hint(dv, "matmul_at_least_once")
-                    # cur_dk_block_ptr = tl.advance(dk_block_ptr, (kv_block_start.to(tl.int32), 0))
-                    cur_dk_block_ptr = tl.make_block_ptr(
-                        base=dk_ptr + kv_start * stride_dkt + kv_head_id * stride_dkh,
-                        shape=(kv_seq_len, HEAD_DIM),
-                        strides=(stride_dkt, stride_dkd),
-                        offsets=(kv_block_start.to(tl.int32), 0),
-                        block_shape=(BLOCK_N, BLOCK_D),
-                        order=(1, 0),
-                    )
-                    tl.store(cur_dk_block_ptr, dk.to(dk_ptr.type.element_ty), boundary_check=(0, 1))
-                    # cur_dv_block_ptr = tl.advance(dv_block_ptr, (kv_block_start.to(tl.int32), 0))
+                    tl.extra.cann.extension.compile_hint(dv, "matmul_at_least_once")
+                    tl.extra.cann.extension.compile_hint(dk, "matmul_at_least_once")
                     cur_dv_block_ptr = tl.make_block_ptr(
                         base=dv_ptr + kv_start * stride_dvt + kv_head_id * stride_dvh,
                         shape=(kv_seq_len, HEAD_DIM),
@@ -2258,6 +2249,16 @@ def _swa_bwd_dkdv_kernel(
                         order=(1, 0),
                     )
                     tl.store(cur_dv_block_ptr, dv.to(dv_ptr.type.element_ty), boundary_check=(0, 1))
+
+                    cur_dk_block_ptr = tl.make_block_ptr(
+                        base=dk_ptr + kv_start * stride_dkt + kv_head_id * stride_dkh,
+                        shape=(kv_seq_len, HEAD_DIM),
+                        strides=(stride_dkt, stride_dkd),
+                        offsets=(kv_block_start.to(tl.int32), 0),
+                        block_shape=(BLOCK_N, BLOCK_D),
+                        order=(1, 0),
+                    )
+                    tl.store(cur_dk_block_ptr, dk.to(dk_ptr.type.element_ty), boundary_check=(0, 1))
 
 
 @triton.autotune(
@@ -2373,7 +2374,7 @@ def _swa_bwd_dq_kernel(
 
             q_offs = q_block_start + tl.arange(0, BLOCK_M)
             cur_delta = tl.load(delta_i_ptr + q_offs, q_offs < q_seq_len, other=0.0)
-            cur_lse = tl.load(lse_i_ptr + q_offs, q_offs < q_seq_len, other=-float("inf"))
+            cur_lse = tl.load(lse_i_ptr + q_offs, q_offs < q_seq_len, other=0.0)
 
             num_global_window_blocks, non_global_window_start_block, num_total_blocks = _swa_split_blocks(
                 q_block_start + kv_computed_len,
@@ -2568,6 +2569,11 @@ def swa_bwd_impl(
         gqa_interleave,
         head_dim,
         BLOCK_D,
+        limit_auto_multi_buffer_buffer="no-limit",
+        hfusion_enable_multiple_consumer_fusion=True,
+        unit_flag=True,
+        limit_auto_multi_buffer_of_local_buffer="no-l0c",
+        intra_cache_num=1,
     )
     _swa_bwd_dq_kernel[grid](
         dq,
@@ -2611,6 +2617,12 @@ def swa_bwd_impl(
         gqa_interleave,
         head_dim,
         BLOCK_D,
+        limit_auto_multi_buffer_buffer="no-limit",
+        hfusion_enable_multiple_consumer_fusion=True,
+        unit_flag=True,
+        limit_auto_multi_buffer_of_local_buffer="no-l0c",
+        intra_cache_num=3,
+        inter_cache_num=2,
     )
 
     return dq, dk, dv

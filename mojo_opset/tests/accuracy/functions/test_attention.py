@@ -136,7 +136,8 @@ def test_swa_function_perf():
         ((2, 16, 4, 128, 1024, 0, torch.float32), True, 4, 255),
         ((2, 16, 4, 96, 1024, 0, torch.bfloat16), True, 4, 255),
         ((2, 16, 4, 128, 4096, 0, torch.bfloat16), True, 4, 255),
-        ((2, 16, 4, 128, 1024, 0, torch.float32), False, 4, 1023)
+        ((2, 16, 4, 128, 1024, 0, torch.float32), False, 4, 1023),
+        ((1, 12, 4, 128, 131072, 0, torch.bfloat16), False, 4, 1023),
     ]
     import torch_npu
 
