@@ -2095,8 +2095,8 @@ def _swa_bwd_dkdv_kernel(
         num_kv_chunks = tl.cdiv(kv_seq_len, BLOCK_N)
         balance_ratio = 1
         gw_kv_chunks = num_kv_chunks
+        tail_kv_chunk_begin = num_kv_chunks
         if GLOBAL_WINDOW is not None and LOCAL_WINDOW is not None:
-            # if 2*LOCAL_WINDOW < q_seq_len:
             gw_task = tl.cdiv(q_seq_len, BLOCK_M)
             lw_task = tl.cdiv(LOCAL_WINDOW, BLOCK_M) + 1
             balance_ratio_ = gw_task // lw_task
@@ -2104,7 +2104,16 @@ def _swa_bwd_dkdv_kernel(
                 gw_kv_chunks = tl.cdiv(GLOBAL_WINDOW, BLOCK_N)
                 gw_kv_chunks = min(gw_kv_chunks, num_kv_chunks)
                 lw_kv_chunks = tl.cdiv(num_kv_chunks - gw_kv_chunks, balance_ratio_)
-                num_kv_chunks = gw_kv_chunks + lw_kv_chunks
+                _num_kv_chunks = gw_kv_chunks + lw_kv_chunks
+                if _num_kv_chunks * NUM_KV_HEADS > n_programs:
+                    # 重新分配尾块, 不整除时仍然有不均衡问题
+                    tail_heads = NUM_KV_HEADS % n_programs
+                    lw_kv_chunks_with_gw = (n_programs // tail_heads - gw_kv_chunks) % (n_programs // tail_heads)
+                    lw_kv_chunks_only = (lw_kv_chunks - lw_kv_chunks_with_gw) * balance_ratio_
+                    num_kv_chunks = gw_kv_chunks + lw_kv_chunks_with_gw + lw_kv_chunks_only
+                    tail_kv_chunk_begin = gw_kv_chunks + lw_kv_chunks_with_gw
+                else:
+                    num_kv_chunks = _num_kv_chunks
                 balance_ratio = balance_ratio_
 
         prev_kv_tasks = cu_kv_chunks * NUM_KV_HEADS
@@ -2114,17 +2123,18 @@ def _swa_bwd_dkdv_kernel(
             _kv_block_id = kv_task_id // NUM_KV_HEADS
             kv_head_id = kv_task_id % NUM_KV_HEADS
             is_global_task = _kv_block_id < gw_kv_chunks
+            is_tail_task = _kv_block_id >= tail_kv_chunk_begin
             inner_loops = tl.where(is_global_task, 1, balance_ratio)
-            # inner_loops = 1
-            # if _kv_block_id >= gw_kv_chunks:
-            #     inner_loops = balance_ratio
-            for inner_id in range(inner_loops):
-                # kv_block_id = _kv_block_id
-                # if _kv_block_id >= gw_kv_chunks:
-                #     kv_block_id = gw_kv_chunks + (_kv_block_id - gw_kv_chunks) * inner_loops + inner_id
+            inner_loops = tl.where(is_tail_task, 1, inner_loops)
 
+            for inner_id in range(inner_loops):
                 kv_block_id = tl.where(is_global_task, _kv_block_id,
                                        gw_kv_chunks + (_kv_block_id - gw_kv_chunks) * inner_loops + inner_id)
+                kv_block_id = tl.where(is_tail_task,
+                                       gw_kv_chunks
+                                       + (tail_kv_chunk_begin - gw_kv_chunks) * balance_ratio
+                                       + (_kv_block_id - tail_kv_chunk_begin),
+                                       kv_block_id)
                 kv_block_start = kv_block_id * BLOCK_N
                 kv_block_end = min(kv_block_start + BLOCK_N, kv_seq_len)
                 kv_block_len = kv_block_end - kv_block_start
