@@ -663,11 +663,12 @@ def build_problem(mask_mod):
     "mask_func",
     [
         _sparse_mask_mod,
+        _full_mask_mod,
         _stair_mask_mod,
         _video_stair_mask_mod,
         _cross_sample_causal_video_bidir_mask_mod,
     ],
-    ids=["sparse", "stair", "video_stair", "cross_sample_causal_video_bidir"],
+    ids=["sparse", "stair", "full", "video_stair", "cross_sample_causal_video_bidir"],
 )
 @pytest.mark.skipif(get_platform() != "npu", reason="FlexAttention TTX backend requires NPU")
 @bypass_not_implemented
@@ -720,7 +721,7 @@ def test_flex_attention(mask_func):
 # ============================================================================
 # Performance benchmark (torch_npu.profiler based)
 # ============================================================================
-def _perf_benchmark(label, build_mask_fn, fwd_fn, q, k, v, prof_dir_root):
+def _perf_benchmark(label, build_mask_fn, fwd_fn, q, k, v, prof_dir_root, mask_func):
     import torch_npu
 
     q = q.detach().requires_grad_(True)
@@ -728,18 +729,6 @@ def _perf_benchmark(label, build_mask_fn, fwd_fn, q, k, v, prof_dir_root):
     v = v.detach().requires_grad_(True)
 
     return_grid = torch.tensor(520000, dtype=DTYPE, device=torch.device(_device()))
-
-    # warmup: fwd+bwd once, then release
-    mask = build_mask_fn()
-    out = fwd_fn(q, k, v, mask)
-    _sync()
-    out.float().mean().backward(return_grid)
-    _sync()
-    q.grad = k.grad = v.grad = None
-    del out, mask
-    torch.npu.empty_cache()
-    gc.collect()
-    _sync()
 
     # mask build measurement: peak + stable
     torch.npu.empty_cache()
@@ -793,12 +782,26 @@ def _perf_benchmark(label, build_mask_fn, fwd_fn, q, k, v, prof_dir_root):
         on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(prof_dir),
     ) as prof:
         for i in range(12):
+            # 重新构造数据，避免L2 Cache影响
+            problem = build_problem(mask_func)
+            q = problem["q"].detach().clone().requires_grad_(True)
+            k = problem["k"].detach().clone().requires_grad_(True)
+            v = problem["v"].detach().clone().requires_grad_(True)
+
             out = fwd_fn(q, k, v, mask)
             _sync()
+
+            # 插入其他算子，重置L2 Cache, 112M，总访存224MB覆盖112MB L2, 模拟整网调用场景
+            for j in range(5):
+                a = torch.randn(19573419, dtype=torch.float32, device="cpu").to(q.device)
+                b = torch.randn(19573419, dtype=torch.float32, device="cpu").to(q.device)
+                c = a + b       # 冲刷全部L2
+            _sync()
+
             out.float().mean().backward(return_grid)
             _sync()
-            q.grad = k.grad = v.grad = None
             prof.step()
+            del a,b,c
     print(f"======================== prof end ({label}) ====================")
 
     del out, mask
@@ -836,6 +839,7 @@ def _perf_flex_attention(mask_func, problem=None):
         lambda q, k, v, bm: _flex_attention_mojo(q, k, v, None, bm, 0.0, None),
         problem["q"], problem["k"], problem["v"],
         prof_dir_root,
+        mask_func,
     )
 
     # ascendc: torch SDPA + dense_mask
@@ -848,6 +852,7 @@ def _perf_flex_attention(mask_func, problem=None):
         lambda q, k, v, m: _sdpa_with_dense_mask(q, k, v, m, 0.0, None),
         problem["q"], problem["k"], problem["v"],
         prof_dir_root,
+        mask_func,
     )
     return results
 
@@ -856,11 +861,12 @@ def _perf_flex_attention(mask_func, problem=None):
     "mask_func",
     [
         _sparse_mask_mod,
+        _full_mask_mod,
         _stair_mask_mod,
         _video_stair_mask_mod,
         _cross_sample_causal_video_bidir_mask_mod,
     ],
-    ids=["sparse", "stair", "video_stair", "cross_sample_causal_video_bidir"],
+    ids=["sparse", "full", "stair", "video_stair", "cross_sample_causal_video_bidir"],
 )
 @pytest.mark.skipif(get_platform() != "npu", reason="FlexAttention TTX backend requires NPU")
 def test_flex_attention_perf(mask_func):

@@ -102,7 +102,7 @@ def flex_attention_kernel(
         OUT_ptr = OUT + out_offset
         LSE_ptr = LSE + lse_offset
 
-        m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+        m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
         l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
         acc = tl.zeros([BLOCK_M, V_HEAD_DIM], dtype=tl.float32)
 
@@ -112,7 +112,7 @@ def flex_attention_kernel(
 
         q = tl.load(
             Q_ptr + offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk,
-            mask=(offs_m[:, None] < Q_LEN) & (offs_k[None, :] < QK_HEAD_DIM),
+            mask=(offs_m[:, None] < Q_LEN),
             other=0.0
         )
 
@@ -162,12 +162,12 @@ def flex_attention_kernel(
 
             k = tl.load(
                 K_ptr + offs_n_load[:, None] * stride_kn + offs_k[None, :] * stride_kk,
-                mask=(offs_n_load[:, None] < KV_LEN) & (offs_k[None, :] < QK_HEAD_DIM),
+                mask=(offs_n_load[:, None] < KV_LEN),
                 other=0.0
             )
             v = tl.load(
                 V_ptr + offs_n_load[:, None] * stride_vn + offs_v[None, :] * stride_vk,
-                mask=(offs_n_load[:, None] < KV_LEN) & (offs_v[None, :] < V_HEAD_DIM),
+                mask=(offs_n_load[:, None] < KV_LEN),
                 other=0.0
             )
             k = tl.trans(k)
@@ -175,7 +175,7 @@ def flex_attention_kernel(
             qk = tl.dot(q, k, input_precision="ieee")
             qk *= SM_SCALE
 
-            qk = tl.where(mask & (offs_n_load[None, :] < KV_LEN), qk, float("-inf"))
+            qk = tl.where(mask, qk, float("-inf"))
 
             m_ij = tl.maximum(m_i, tl.max(qk, 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL)
             masked_out_rows = (m_ij == float("-inf"))
@@ -202,12 +202,12 @@ def flex_attention_kernel(
                 offs_n_load = kv_start + tl.arange(0, BLOCK_N)
                 k = tl.load(
                     K_ptr + offs_n_load[:, None] * stride_kn + offs_k[None, :] * stride_kk,
-                    mask=(offs_n_load[:, None] < KV_LEN) & (offs_k[None, :] < QK_HEAD_DIM),
+                    mask=(offs_n_load[:, None] < KV_LEN),
                     other=0.0
                 )
                 v = tl.load(
                     V_ptr + offs_n_load[:, None] * stride_vn + offs_v[None, :] * stride_vk,
-                    mask=(offs_n_load[:, None] < KV_LEN) & (offs_v[None, :] < V_HEAD_DIM),
+                    mask=(offs_n_load[:, None] < KV_LEN),
                     other=0.0
                 )
                 k = tl.trans(k)
@@ -215,14 +215,9 @@ def flex_attention_kernel(
                 qk = tl.dot(q, k, input_precision="ieee")
                 qk *= SM_SCALE
 
-                qk = tl.where(offs_n_load[None, :] < KV_LEN, qk, float("-inf"))
-
                 m_ij = tl.maximum(m_i, tl.max(qk, 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL)
-                masked_out_rows = (m_ij == float("-inf"))
-                m_ij_masked = tl.where(masked_out_rows, 0, m_ij)
-
-                alpha = tl.math.exp(m_i - m_ij_masked)
-                p = tl.math.exp(qk - m_ij_masked[:, None])
+                alpha = tl.math.exp(m_i - m_ij)
+                p = tl.math.exp(qk - m_ij[:, None])
 
                 pv = tl.dot(p.to(Q.dtype.element_ty), v, input_precision="ieee")
                 l_i = l_i * alpha + tl.sum(p, 1)
@@ -363,6 +358,7 @@ def bwd_dq_block_mn(
     return dq
 
 
+
 @triton.jit(
     do_not_specialize=[
         "stride_mask_m",
@@ -431,7 +427,6 @@ def flex_attention_backward_dq_kernel(
     num_core = tl.num_programs(0).to(tl.int32)
     sparse_q_multiple = SPARSE_Q_BLOCK_SIZE // BLOCK_M
     KV_BLOCK_SIZE: tl.constexpr = BLOCK_N * NUM_KV_SUB_BLOCKS
-    sparse_kv_multiple = SPARSE_KV_BLOCK_SIZE // KV_BLOCK_SIZE
     MATMUL_PRECISION = Q.dtype.element_ty
 
     for task_id in range(pid, NUM_TASKS, num_core):
@@ -542,7 +537,7 @@ def flex_attention_backward_dq_kernel(
                         Q_LEN=Q_LEN,
                         KV_LEN=KV_LEN,
                     )
-                qk = tl.where(mask & (offs_n[None, :] < KV_LEN), qk, float("-inf"))
+                qk = tl.where(mask, qk, float("-inf"))
 
                 p = tl.math.exp(qk - lse[:, None])
                 dp = tl.dot(do, tl.trans(v), input_precision="ieee")
@@ -574,7 +569,6 @@ def flex_attention_backward_dq_kernel(
 
                     qk = tl.dot(q, tl.trans(k), input_precision="ieee")
                     qk *= SM_SCALE
-                    qk = tl.where(offs_n[None, :] < KV_LEN, qk, float("-inf"))
 
                     p = tl.math.exp(qk - lse[:, None])
                     dp = tl.dot(do, tl.trans(v), input_precision="ieee")
@@ -834,7 +828,6 @@ def bwd_dkdv_block_mn(
     qk = tl.dot(q, tl.trans(k), input_precision="ieee")
     qk *= SM_SCALE
 
-    mask = True
     if not IS_FULL_BLOCKS:
         if USE_PACKED_PARTIAL_MASK:
             partial_block_idx = tl.load(
@@ -868,10 +861,7 @@ def bwd_dkdv_block_mn(
                 Q_LEN=Q_LEN,
                 KV_LEN=KV_LEN,
             )
-        qk = tl.where(mask & (offs_n[None, :] < KV_LEN), qk, float("-inf"))
-    else:
-        qk = tl.where(offs_n[None, :] < KV_LEN, qk, float("-inf"))
-
+        qk = tl.where(mask, qk, float("-inf"))
     p = tl.math.exp(qk - lse[:, None])
 
     dv = tl.dot(tl.trans(p.to(MATMUL_PRECISION)), do, input_precision="ieee")
@@ -1169,7 +1159,6 @@ def flex_attention_bwd_impl(
         limit_auto_multi_buffer_of_local_buffer="no-l0c",
         intra_cache_num=2,
         inter_cache_num=1,
-        # enable_cross_if_fusion=True,
     )
 
     return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype)
