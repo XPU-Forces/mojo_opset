@@ -9,8 +9,8 @@ from transformers import AutoTokenizer
 
 from mojo_opset import MojoGelu
 from mojo_opset import MojoRMSNorm
-from mojo_opset import MojoRelativeEmbedding
 from mojo_opset import MojoSdpa
+from mojo_opset.experimental import MojoRelativeEmbedding
 from mojo_opset.utils.logging import get_logger
 
 logger = get_logger(__name__)

@@ -4,7 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
-from triton.runtime.libentry import libentry
+from .utils import libentry
 
 from mojo_opset.backends.ttx.kernels.npu.utils import VEC_ALIGN_BYTES
 from mojo_opset.backends.ttx.kernels.utils import align
@@ -40,6 +40,49 @@ def rms_norm_fwd_heuristics(args):
         return 1
     else:
         return 4
+
+
+@libentry()
+@triton.jit
+def _rmsnorm_infer_small_cols_kernel(
+    X_ptr,
+    Y_ptr,
+    W_ptr,
+    stride_x_row,
+    stride_y_row,
+    n_rows,
+    n_cols,
+    eps,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    grid_size = tl.num_programs(axis=0)
+
+    num_row_tasks = (n_rows + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+
+    for row_task_id in range(pid, num_row_tasks, grid_size):
+        block_start_row = row_task_id * BLOCK_SIZE_M
+
+        current_row_offsets = block_start_row + tl.arange(0, BLOCK_SIZE_M)
+        col_offsets = tl.arange(0, BLOCK_SIZE_N)
+        row_mask = current_row_offsets < n_rows
+        col_mask = col_offsets < n_cols
+        block_mask = row_mask[:, None] & col_mask[None, :]
+
+        x_ptrs = X_ptr + (current_row_offsets[:, None] * stride_x_row + col_offsets[None, :])
+        y_ptrs = Y_ptr + (current_row_offsets[:, None] * stride_y_row + col_offsets[None, :])
+
+        x = tl.load(x_ptrs, mask=block_mask, other=0.0).to(tl.float32)
+        w = tl.load(W_ptr + col_offsets, mask=col_mask, other=0.0).to(tl.float32)
+
+        ss_acc = tl.sum(x * x, axis=1)
+        mean_square = ss_acc / n_cols
+        rrms = tl.rsqrt(mean_square + eps)
+        rrms = tl.where(row_mask, rrms, 0.0)
+
+        y = x * rrms[:, None] * w[None, :]
+        tl.store(y_ptrs, y.to(Y_ptr.dtype.element_ty), mask=block_mask)
 
 
 @triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
@@ -132,19 +175,47 @@ def rmsnorm_infer_impl(
 
     num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
 
-    grid = (num_programs,)
+    if n_cols <= COL_BLOCKING_THRESHOLD:
+        work_items = n_rows * n_cols
+        # BLOCK_SIZE_M 同时看 hidden dim 和总 work size
+        if work_items <= 4096:
+            BLOCK_SIZE_M = 1
+        elif work_items <= 16384:
+            BLOCK_SIZE_M = 2 if n_cols >= 1024 else 4
+        elif work_items <= 65536:
+            BLOCK_SIZE_M = 4 if n_cols >= 1024 else 8
+        else:
+            heur_m = rms_norm_fwd_heuristics({"n_cols": n_cols})
+            BLOCK_SIZE_M = 1 << (heur_m.bit_length() - 1)
+        num_row_tasks = ceil_div(n_rows, BLOCK_SIZE_M)
+        grid = (min(num_programs, num_row_tasks),)
 
-    _rmsnorm_infer_kernel[grid](
-        x,
-        y,
-        w,
-        X_2d.stride(0),
-        y.stride(0),
-        n_rows=n_rows,
-        n_cols=n_cols,
-        eps=eps,
-        BLOCK_SIZE_N=BLOCK_SIZE_N,
-    )
+        _rmsnorm_infer_small_cols_kernel[grid](
+            x,
+            y,
+            w,
+            X_2d.stride(0),
+            y.stride(0),
+            n_rows=n_rows,
+            n_cols=n_cols,
+            eps=eps,
+            BLOCK_SIZE_N=triton.next_power_of_2(n_cols),
+            BLOCK_SIZE_M=BLOCK_SIZE_M,
+        )
+    else:
+        grid = (num_programs,)
+
+        _rmsnorm_infer_kernel[grid](
+            x,
+            y,
+            w,
+            X_2d.stride(0),
+            y.stride(0),
+            n_rows=n_rows,
+            n_cols=n_cols,
+            eps=eps,
+            BLOCK_SIZE_N=BLOCK_SIZE_N,
+        )
 
     return y.reshape(*shape)
 

@@ -3,6 +3,17 @@ from functools import lru_cache
 import triton
 import triton.language as tl
 
+try:
+    from triton.runtime.libentry import libentry
+except ImportError:
+
+    def libentry():
+        """No-op fallback when triton.runtime.libentry is unavailable."""
+        def _decorator(fn):
+            return fn
+
+        return _decorator
+
 VEC_ALIGN_BYTES = 256
 SRAM_ALIGN_BYTES = 32
 

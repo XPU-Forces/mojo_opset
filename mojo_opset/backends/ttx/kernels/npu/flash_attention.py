@@ -253,8 +253,8 @@ def paged_attention_prefill_impl(
     gqa_interleave: bool,
     softmax_scale: Optional[float] = None,
     aux_mask: Optional[torch.Tensor] = None,
-    max_q_lens: Optional[int] = None,
-    max_total_seq_lens: Optional[int] = None,
+    max_q_len: Optional[int] = None,
+    max_total_seq_len: Optional[int] = None,
 ) -> torch.Tensor:
     _, num_q_heads, head_dim = q.shape
     _, num_kv_heads, page_size, _ = key_cache.shape
@@ -264,7 +264,7 @@ def paged_attention_prefill_impl(
         softmax_scale = 1.0 / math.sqrt(head_dim)
 
     if aux_mask is None:
-        aux_mask = torch.ones(1024, 1024 * 3, dtype=torch.bool).tril(1024).npu()
+        aux_mask = torch.ones(1024, 1024 * 3, device="npu", dtype=torch.bool).tril(1024)
 
     # Note(chenyifan):
     #   In general, this paged attention kernel works in a `split-q` style.

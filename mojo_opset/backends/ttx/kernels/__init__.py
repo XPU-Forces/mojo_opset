@@ -88,7 +88,14 @@ diffusion_attention_fwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_a
 diffusion_attention_bwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_attention_bwd_impl")
 
 m_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "m_grouped_matmul_impl")
+m_grouped_matmul_capturable_impl = _get_kernel_impl(ttx_backend_module, "m_grouped_matmul_capturable_impl")
 k_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "k_grouped_matmul_impl")
+
+moe_gating_impl = _get_kernel_impl(ttx_backend_module, "moe_gating_impl")
+moe_dispatch_impl = _get_kernel_impl(ttx_backend_module, "moe_dispatch_impl")
+moe_experts_impl = _get_kernel_impl(ttx_backend_module, "moe_experts_impl")
+moe_combine_impl = _get_kernel_impl(ttx_backend_module, "moe_combine_impl")
+quant_moe_experts_impl = _get_kernel_impl(ttx_backend_module, "quant_moe_experts_impl")
 quant_batch_gemm_reduce_sum_impl = _get_kernel_impl(ttx_backend_module, "quant_batch_gemm_reduce_sum_impl")
 
 int8_gemm_dequant_impl = _get_kernel_impl(ttx_backend_module, "int8_gemm_dequant_impl")
@@ -114,6 +121,13 @@ embedding_nf4_dequant_impl = _get_kernel_impl(ttx_backend_module, "embedding_nf4
 n_gram_decode_impl = _get_kernel_impl(ttx_backend_module, "n_gram_decode_impl")
 n_gram_prefill_impl = _get_kernel_impl(ttx_backend_module, "n_gram_prefill_impl")
 over_encoding_decode_impl = _get_kernel_impl(ttx_backend_module, "over_encoding_decode_impl")
+
+allgather_gemm_impl = _get_kernel_impl(ttx_backend_module, "allgather_gemm_impl")
+allgather_gemm_peer_mem_size = _get_kernel_impl(ttx_backend_module, "allgather_gemm_peer_mem_size")
+gemm_allreduce_impl = _get_kernel_impl(ttx_backend_module, "gemm_allreduce_impl")
+gemm_allreduce_peer_mem_size = _get_kernel_impl(ttx_backend_module, "gemm_allreduce_peer_mem_size")
+gemm_reduce_scatter_impl = _get_kernel_impl(ttx_backend_module, "gemm_reduce_scatter_impl")
+gemm_reduce_scatter_peer_mem_size = _get_kernel_impl(ttx_backend_module, "gemm_reduce_scatter_peer_mem_size")
 
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
@@ -242,14 +256,13 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         block_tables: torch.Tensor,
         gqa_interleave: bool,
         softmax_scale: Optional[float] = None,
-        aux_mask: Optional[torch.Tensor] = None,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         return paged_attention_prefill_impl(
-            q, key_cache, value_cache, cu_q_lens, seqlens_kv, block_tables, gqa_interleave, softmax_scale, aux_mask,
-            max_q_lens=max_q_lens,
-            max_total_seq_lens=max_total_seq_lens,
+            q, key_cache, value_cache, cu_q_lens, seqlens_kv, block_tables, gqa_interleave, softmax_scale,
+            max_q_len=max_q_len,
+            max_total_seq_len=max_total_seq_len,
         )
 
     @paged_attention_prefill.register_fake
@@ -262,9 +275,8 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         block_tables: torch.Tensor,
         gqa_interleave: bool,
         softmax_scale: Optional[float] = None,
-        aux_mask: Optional[torch.Tensor] = None,
-        max_q_lens: Optional[int] = None,
-        max_total_seq_lens: Optional[int] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         return torch.empty_like(q)
 
@@ -775,6 +787,50 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     ) -> torch.Tensor:
         return torch.empty_like(C)
 
+    @torch.library.custom_op("ttx::m_grouped_matmul_capturable", mutates_args={})
+    def m_grouped_matmul_capturable(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        size_per_group: torch.Tensor,
+        num_groups: int,
+        M: int,
+        N: int,
+        K: int,
+        strideBN: int,
+        strideBK: int,
+        trans_b: bool = False,
+    ) -> torch.Tensor:
+        return m_grouped_matmul_capturable_impl(
+            A,
+            B,
+            C,
+            size_per_group,
+            num_groups,
+            M,
+            N,
+            K,
+            strideBN,
+            strideBK,
+            trans_b,
+        )
+
+    @m_grouped_matmul_capturable.register_fake
+    def m_grouped_matmul_capturable_fake(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        size_per_group: torch.Tensor,
+        num_groups: int,
+        M: int,
+        N: int,
+        K: int,
+        strideBN: int,
+        strideBK: int,
+        trans_b: bool = False,
+    ) -> torch.Tensor:
+        return torch.empty_like(C)
+
     @torch.library.custom_op("ttx::k_grouped_matmul", mutates_args={})
     def k_grouped_matmul(
         A: torch.Tensor,
@@ -904,6 +960,9 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     n_gram_decode = n_gram_decode_impl
     n_gram_prefill = n_gram_prefill_impl
     over_encoding_decode = over_encoding_decode_impl
+    allgather_gemm = allgather_gemm_impl
+    gemm_allreduce = gemm_allreduce_impl
+    gemm_reduce_scatter = gemm_reduce_scatter_impl
 
 else:
     causal_conv1d_fwd = causal_conv1d_fwd_impl
@@ -949,7 +1008,13 @@ else:
     diffusion_attention_fwd = diffusion_attention_fwd_impl
     diffusion_attention_bwd = diffusion_attention_bwd_impl
     m_grouped_matmul = m_grouped_matmul_impl
+    m_grouped_matmul_capturable = m_grouped_matmul_capturable_impl
     k_grouped_matmul = k_grouped_matmul_impl
+    moe_gating = moe_gating_impl
+    moe_dispatch = moe_dispatch_impl
+    moe_experts = moe_experts_impl
+    moe_combine = moe_combine_impl
+    quant_moe_experts = quant_moe_experts_impl
     int8_gemm_dequant = int8_gemm_dequant_impl
     prepare_b = prepare_b_impl
     store_paged_kv = store_paged_kv_impl
@@ -969,3 +1034,6 @@ else:
     n_gram_decode = n_gram_decode_impl
     n_gram_prefill = n_gram_prefill_impl
     over_encoding_decode = over_encoding_decode_impl
+    allgather_gemm = allgather_gemm_impl
+    gemm_allreduce = gemm_allreduce_impl
+    gemm_reduce_scatter = gemm_reduce_scatter_impl

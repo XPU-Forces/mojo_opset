@@ -49,6 +49,23 @@ from .swa import swa_paged_decode_impl
 from .swa import swa_paged_prefill_impl
 from .swiglu import swiglu_bwd_impl
 from .swiglu import swiglu_fwd_impl
+from .int8_gemm import int8_gemm_dequant_impl, prepare_b_impl
+
+# triton-dist based comm kernels (requires triton_dist + shmem packages)
+allgather_gemm_impl = None
+allgather_gemm_peer_mem_size = None
+gemm_allreduce_impl = None
+gemm_allreduce_peer_mem_size = None
+gemm_reduce_scatter_impl = None
+gemm_reduce_scatter_peer_mem_size = None
+try:
+    import triton_dist  # noqa: F401 — gate on the actual optional dependency
+    from .allgather_gemm import allgather_gemm_impl, allgather_gemm_peer_mem_size
+    from .gemm_allreduce import gemm_allreduce_impl, gemm_allreduce_peer_mem_size
+    from .gemm_reduce_scatter import gemm_reduce_scatter_impl, gemm_reduce_scatter_peer_mem_size
+except ImportError:
+    import logging
+    logging.getLogger(__name__).debug("triton_dist not available, comm kernels disabled")
 
 # Over-Encoding (OE)
 from .over_encoding.embedding import embedding_nf4_dequant_impl
@@ -112,4 +129,9 @@ __all__ = [
     "n_gram_decode_impl",
     "n_gram_prefill_impl",
     "over_encoding_decode_impl",
+    "allgather_gemm_impl",
+    "gemm_allreduce_impl",
+    "gemm_reduce_scatter_impl",
+    "int8_gemm_dequant_impl", 
+    "prepare_b_impl",
 ]

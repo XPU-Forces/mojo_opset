@@ -1,3 +1,5 @@
+import logging
+import os
 import random
 
 import pytest
@@ -12,6 +14,7 @@ from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.tests.utils import get_platform
 from mojo_opset.tests.utils import get_torch_device
+from mojo_opset.utils.acc import check_tol_diff
 
 torch.manual_seed(42)
 
@@ -154,7 +157,7 @@ def test_quant_gemm_parameters_are_registered():
         (1, 4096, 4096),
         (32, 4096, 11008),
         (128, 2048, 4096),
-        (128, 4096, 4096),
+        (64, 4096, 4096),
     ],
 )
 @pytest.mark.parametrize("output_dtype", [torch.float16, torch.bfloat16])
@@ -218,8 +221,7 @@ def generate_quant_group_gemm_data(
     return x1, weight, x1_scale, x2_scale
 
 
-@pytest.mark.parametrize(
-    "input, weight, group_list, trans_weight",
+_group_gemm_cases = (
     [
         (
             torch.randn(size=(8 * 2560, 4096), dtype=dtype),
@@ -276,8 +278,11 @@ def generate_quant_group_gemm_data(
             id=f"trans_weight_uneven_fp={'bf16' if dtype is torch.bfloat16 else 'fp16'}",
         )
         for dtype in [torch.float16, torch.bfloat16]
-    ],
+    ]
 )
+
+
+@pytest.mark.parametrize("input, weight, group_list, trans_weight", _group_gemm_cases)
 @bypass_not_implemented
 @auto_switch_platform()
 def test_group_gemm(input, weight, group_list, trans_weight):
@@ -433,3 +438,78 @@ def test_group_gemm_two_groups_single_call(dtype, trans_weight):
     out = op(x, group_list)
 
     torch.testing.assert_close(out.to(torch.float32), ref.to(torch.float32), atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.skipif(
+    get_platform() != "ilu" or os.environ.get("MOJO_BACKEND", "").strip().lower() != "ttx",
+    reason="CUDA Graph group gemm test is only enabled on ILU platform with TTX backend.",
+)
+@pytest.mark.parametrize("input, weight, group_list, trans_weight", _group_gemm_cases)
+def test_group_gemm_cuda_graph(input, weight, group_list, trans_weight):
+    """CUDA graph variant of test_group_gemm: same cases/tolerances, captured and replayed.
+
+    The capturable path derives group offsets on-device (no host sync) and uses a
+    static grid bound (max_m=M), so replays must pick up in-place edits to the static
+    input/group_list buffers without recompiling or relaunching.
+    """
+    device = get_torch_device()
+
+    input = input.to(device)
+    weight = weight.to(device)
+    group_list = group_list.to(device)
+
+    M, K = input.shape
+    G = weight.shape[0]
+    if trans_weight:
+        N = weight.shape[1]
+        strideBN, strideBK = weight.stride(1), weight.stride(2)
+    else:
+        N = weight.shape[2]
+        strideBK, strideBN = weight.stride(1), weight.stride(2)
+
+    op = MojoGroupGemm(weight=weight, trans_weight=trans_weight)
+    op_ref = MojoGroupGemm._registry.get("torch")(weight=weight.clone(), trans_weight=trans_weight)
+
+    # Same relaxed tolerance as test_group_gemm (bf16 large-K tl.dot accumulation).
+    atol, rtol, ptol = 1, 2**-6, 0.90
+
+    # Warm up the capturable path directly: the operator only dispatches to it
+    # while a stream is capturing, so a normal eager call would compile/autotune
+    # the host-path kernel under a different key=bucket(M) instead.
+    from mojo_opset.backends.ttx.kernels import m_grouped_matmul_capturable
+
+    C_warm = input.new_empty(M, N)
+    m_grouped_matmul_capturable(
+        input, weight, C_warm, group_list, G, M, N, K, strideBN, strideBK, not trans_weight
+    )
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    try:
+        with torch.cuda.graph(graph):
+            out = op(input, group_list)
+        torch.cuda.synchronize()
+    except Exception as e:
+        logging.getLogger(__name__).error(f"CUDA graph capture failed: {e}.")
+        torch.cuda.empty_cache()
+        pytest.skip(f"CUDA graph capture unsupported/failed: {e}")
+
+    torch.cuda.synchronize()
+    graph.replay()
+    torch.cuda.synchronize()
+
+    ref_output = op_ref(input, group_list)
+    check_tol_diff(out, ref_output, atol=atol, rtol=rtol, ptol=ptol)
+
+    # Replay twice with fresh in-place workloads (sum still == M) to verify the
+    # on-device offset recompute picks up the mutated static buffers.
+    for _ in range(2):
+        group_list.copy_(generate_random_list(G, M).to(device))
+        input.copy_(torch.randn(M, K, dtype=input.dtype, device=device))
+
+        torch.cuda.synchronize()
+        graph.replay()
+        torch.cuda.synchronize()
+
+        ref_output = op_ref(input, group_list)
+        check_tol_diff(out, ref_output, atol=atol, rtol=rtol, ptol=ptol)

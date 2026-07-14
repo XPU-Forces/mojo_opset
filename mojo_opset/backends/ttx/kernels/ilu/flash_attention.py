@@ -15,26 +15,20 @@ from .utils import LOG2E, libentry, smart_triton_autotune
 
 
 @triton.jit
-def causal_mask_fn(mask_ptr, mask_size, mask_stride_m, mask_stride_n, q_start, kv_start, Q_BLOCK, KV_BLOCK):
-    offset_causal = min(max(kv_start - q_start, -mask_size), mask_size)
-    offsets_mask_causal = (
-        (tl.arange(0, Q_BLOCK)[:, None]) * mask_stride_m
-        + (mask_size + offset_causal + tl.arange(0, KV_BLOCK)[None, :]) * mask_stride_n
-    )
-    mask_causal = tl.load(mask_ptr + offsets_mask_causal).to(tl.int1)
-    return mask_causal
+def inline_causal_mask(q_blk_start, kv_blk_start, kv_cache_len, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
+    offs_m = q_blk_start + tl.arange(0, BLOCK_M)
+    offs_n = kv_blk_start + tl.arange(0, BLOCK_N)
+    return (offs_m[:, None] + kv_cache_len) >= offs_n[None, :]
 
 
 @smart_triton_autotune(
     configs=[
-        triton.Config({"BLOCK_M": 32}, num_warps=4, num_stages=1),
-        triton.Config({"BLOCK_M": 64}, num_warps=4, num_stages=1),
-        triton.Config({"BLOCK_M": 64}, num_warps=4, num_stages=2),
-        triton.Config({"BLOCK_M": 64}, num_warps=4, num_stages=3),
-        triton.Config({"BLOCK_M": 64}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_M": 128}, num_warps=4, num_stages=2),
-        triton.Config({"BLOCK_M": 128}, num_warps=4, num_stages=3),
+        triton.Config({"BLOCK_M": 256}, num_warps=8, num_stages=1),
+        triton.Config({"BLOCK_M": 256}, num_warps=16, num_stages=1),
         triton.Config({"BLOCK_M": 128}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 128}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 64}, num_warps=8, num_stages=3),
+        triton.Config({"BLOCK_M": 64}, num_warps=4, num_stages=3),
     ],
     selected_idx=0,
     key=["NUM_Q_HEADS", "HEAD_DIM", "PAGE_SIZE"],
@@ -45,7 +39,6 @@ def _paged_prefill_fav2_kernel(
     K_cache,
     V_cache,
     Out,
-    aux_mask_ptr,
     cu_q_lens_ptr,
     seqlens_kv_ptr,
     block_tables_ptr,
@@ -54,9 +47,7 @@ def _paged_prefill_fav2_kernel(
     stride_vb, stride_vh, stride_vn, stride_vd,
     stride_ot, stride_oh, stride_od,
     stride_bt_batch, stride_bt_block,
-    stride_mask_m, stride_mask_n,
     sm_scale,
-    AUX_MASK_SIZE: tl.constexpr,
     NUM_Q_HEADS: tl.constexpr,
     NUM_KV_HEADS: tl.constexpr,
     GQA_INTERLEAVE: tl.constexpr,
@@ -66,9 +57,10 @@ def _paged_prefill_fav2_kernel(
     PAGE_SIZE: tl.constexpr,
     BLOCK_N: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
-    USE_AUX_MASK: tl.constexpr,
 ):
     tl.static_assert(HEAD_DIM <= BLOCK_D, "BLOCK_D must be >= HEAD_DIM")
+    # full-page loop loads BLOCK_N at a time without boundary_check; requires PAGE_SIZE be an integer multiple of BLOCK_N
+    tl.static_assert(PAGE_SIZE % BLOCK_N == 0, "PAGE_SIZE must be a multiple of BLOCK_N")
 
     local_q_block_id = tl.program_id(0)
     q_head_id = tl.program_id(1)
@@ -117,7 +109,7 @@ def _paged_prefill_fav2_kernel(
 
     qk_scale = sm_scale * LOG2E
 
-    for page_idx in tl.range(0, num_full_pages):
+    for page_idx in tl.range(0, num_full_pages, num_stages=2):
         physical_block = tl.load(
             block_tables_ptr + b_id * stride_bt_batch + page_idx * stride_bt_block
         )
@@ -139,7 +131,7 @@ def _paged_prefill_fav2_kernel(
             order=(1, 0),
         )
 
-        for kv_inner_idx in tl.range(0, PAGE_SIZE // BLOCK_N):
+        for kv_inner_idx in tl.range(0, tl.cdiv(PAGE_SIZE, BLOCK_N)):
             kv_blk_start = page_idx * PAGE_SIZE + kv_inner_idx * BLOCK_N
 
             if HEAD_DIM == BLOCK_D:
@@ -153,23 +145,8 @@ def _paged_prefill_fav2_kernel(
             qk = qk * qk_scale
 
             if IS_CAUSAL:
-                if USE_AUX_MASK:
-                    mask = causal_mask_fn(
-                        aux_mask_ptr,
-                        AUX_MASK_SIZE,
-                        stride_mask_m,
-                        stride_mask_n,
-                        kv_cache_len + q_blk_start,
-                        kv_blk_start,
-                        BLOCK_M,
-                        BLOCK_N,
-                    )
-                    qk = tl.where(mask, qk, float("-inf"))
-                else:
-                    offs_m = q_blk_start + tl.arange(0, BLOCK_M)
-                    offs_n = kv_blk_start + tl.arange(0, BLOCK_N)
-                    causal_mask = (offs_m[:, None] + kv_cache_len) >= offs_n[None, :]
-                    qk = tl.where(causal_mask, qk, float("-inf"))
+                causal_mask = inline_causal_mask(q_blk_start, kv_blk_start, kv_cache_len, BLOCK_M, BLOCK_N)
+                qk = tl.where(causal_mask, qk, float("-inf"))
 
             m_ij = tl.maximum(m_i, tl.max(qk, 1))
             alpha = tl.math.exp2(m_i - m_ij)
@@ -185,9 +162,9 @@ def _paged_prefill_fav2_kernel(
             V_blk_ptr = tl.advance(V_blk_ptr, (BLOCK_N, 0))
 
     for page_idx in tl.range(num_full_pages, num_kv_pages):
-        kv_page_start = page_idx * PAGE_SIZE
-        kv_blk_end = tl.minimum(kv_page_start + PAGE_SIZE, kv_seq_len)
-        kv_blk_len = kv_blk_end - kv_page_start
+        kv_blk_start = page_idx * PAGE_SIZE
+        kv_blk_end_actual = tl.minimum(kv_blk_start + PAGE_SIZE, kv_seq_len)
+        kv_blk_len = kv_blk_end_actual - kv_blk_start
 
         physical_block = tl.load(
             block_tables_ptr + b_id * stride_bt_batch + page_idx * stride_bt_block
@@ -212,7 +189,7 @@ def _paged_prefill_fav2_kernel(
 
         num_inner_blocks = tl.cdiv(kv_blk_len, BLOCK_N)
         for kv_inner_idx in tl.range(0, num_inner_blocks):
-            kv_blk_start = kv_page_start + kv_inner_idx * BLOCK_N
+            kv_inner_blk_start = kv_blk_start + kv_inner_idx * BLOCK_N
 
             k_T = tl.load(K_T_blk_ptr, boundary_check=(0, 1), padding_option="zero")
             v = tl.load(V_blk_ptr, boundary_check=(0, 1), padding_option="zero")
@@ -221,23 +198,8 @@ def _paged_prefill_fav2_kernel(
             qk = qk * qk_scale
 
             if IS_CAUSAL:
-                if USE_AUX_MASK:
-                    mask = causal_mask_fn(
-                        aux_mask_ptr,
-                        AUX_MASK_SIZE,
-                        stride_mask_m,
-                        stride_mask_n,
-                        kv_cache_len + q_blk_start,
-                        kv_blk_start,
-                        BLOCK_M,
-                        BLOCK_N,
-                    )
-                    qk = tl.where(mask, qk, float("-inf"))
-                else:
-                    offs_m = q_blk_start + tl.arange(0, BLOCK_M)
-                    offs_n = kv_blk_start + tl.arange(0, BLOCK_N)
-                    causal_mask = (offs_m[:, None] + kv_cache_len) >= offs_n[None, :]
-                    qk = tl.where(causal_mask, qk, float("-inf"))
+                causal_mask = inline_causal_mask(q_blk_start, kv_inner_blk_start, kv_cache_len, BLOCK_M, BLOCK_N)
+                qk = tl.where(causal_mask, qk, float("-inf"))
 
             m_ij = tl.maximum(m_i, tl.max(qk, 1))
             alpha = tl.math.exp2(m_i - m_ij)
@@ -662,9 +624,8 @@ def paged_attention_prefill_impl(
     block_tables: torch.Tensor,
     gqa_interleave: bool,
     softmax_scale: Optional[float] = None,
-    aux_mask: Optional[torch.Tensor] = None,
-    max_q_lens: Optional[int] = None,
-    max_total_seq_lens: Optional[int] = None,
+    max_q_len: Optional[int] = None,
+    max_total_seq_len: Optional[int] = None,
     out: Optional[torch.Tensor] = None,
     block_tables_i32: Optional[torch.Tensor] = None,
     max_q_blocks: Optional[int] = None,
@@ -680,8 +641,6 @@ def paged_attention_prefill_impl(
     else:
         seqlens_kv = seqlens_kv.to(torch.int32)
 
-    use_aux_mask = aux_mask is not None
-
     if out is None:
         out = torch.empty_like(q)
     if block_tables_i32 is None:
@@ -689,25 +648,14 @@ def paged_attention_prefill_impl(
 
     BLOCK_D = triton.next_power_of_2(head_dim)
 
-    if use_aux_mask:
-        mask_ptr = aux_mask
-        mask_stride_m = aux_mask.stride(0)
-        mask_stride_n = aux_mask.stride(1)
-        mask_size = aux_mask.shape[0]
-    else:
-        mask_ptr = q
-        mask_stride_m = 0
-        mask_stride_n = 0
-        mask_size = 0
-
     if max_q_blocks is not None:
         _max_q_blocks = max_q_blocks
         def grid(META):
             return (_max_q_blocks, num_q_heads, batch_size)
-    elif max_q_lens is not None:
+    elif max_q_len is not None:
         def grid(META):
             bm = META["BLOCK_M"]
-            _mqb = (max_q_lens + bm - 1) // bm
+            _mqb = (max_q_len + bm - 1) // bm
             return (_mqb, num_q_heads, batch_size)
     else:
         def grid(META):
@@ -721,7 +669,6 @@ def paged_attention_prefill_impl(
         key_cache,
         value_cache,
         out,
-        mask_ptr,
         cu_q_lens,
         seqlens_kv,
         block_tables_i32,
@@ -730,9 +677,7 @@ def paged_attention_prefill_impl(
         value_cache.stride(0), value_cache.stride(1), value_cache.stride(2), value_cache.stride(3),
         out.stride(0), out.stride(1), out.stride(2),
         block_tables_i32.stride(0), block_tables_i32.stride(1),
-        mask_stride_m, mask_stride_n,
         float(sm_scale),
-        AUX_MASK_SIZE=mask_size,
         NUM_Q_HEADS=num_q_heads,
         NUM_KV_HEADS=num_kv_heads,
         GQA_INTERLEAVE=gqa_interleave,
@@ -741,7 +686,6 @@ def paged_attention_prefill_impl(
         PAGE_SIZE=block_size,
         BLOCK_N=min(block_size, 128),
         IS_CAUSAL=True,
-        USE_AUX_MASK=use_aux_mask,
     )
 
     return out
@@ -909,7 +853,7 @@ def _paged_decode_gather_and_causal(
     return o
 
 
-@triton.autotune(
+@smart_triton_autotune(
     configs=[
         triton.Config({"BLOCK_N": 64}, num_warps=4, num_stages=2),
         triton.Config({"BLOCK_N": 64}, num_warps=4, num_stages=3),
@@ -918,6 +862,7 @@ def _paged_decode_gather_and_causal(
         triton.Config({"BLOCK_N": 128}, num_warps=4, num_stages=3),
         triton.Config({"BLOCK_N": 128}, num_warps=8, num_stages=2),
     ],
+    selected_idx=0,
     key=["HQ", "D", "PAGE_SIZE", "COMPUTE_INT8"],
 )
 @libentry()

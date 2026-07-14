@@ -55,7 +55,27 @@ def m_grouped_matmul_autotune_config():
                     {"BLOCK_M": BM, "BLOCK_N": BN, "BLOCK_K": BK},
                     num_warps=nw, num_stages=ns,
                 ))
+    for BN in [128, 256]:
+        for BK in [64, 128]:
+            for nw in [4, 8]:
+                for ns in [2, 3]:
+                    configs.append(triton.Config(
+                        {"BLOCK_M": 16, "BLOCK_N": BN, "BLOCK_K": BK},
+                        num_warps=nw, num_stages=ns,
+                    ))
     return configs
+
+
+def _bucket_max_m(m: int) -> int:
+    if m <= 16:
+        return 16
+    if m <= 64:
+        return 64
+    if m <= 256:
+        return 256
+    if m <= 1024:
+        return 1024
+    return 1 << (m - 1).bit_length()
 
 
 @smart_triton_autotune(configs=m_grouped_matmul_autotune_config(), selected_idx=0, key=["N", "K", "MAX_M"])
@@ -136,11 +156,19 @@ def m_grouped_matmul_impl(
     max_m: Optional[int] = None,
 ) -> torch.Tensor:
     if group_offsets is None:
-        cum = size_per_group.cumsum(0, dtype=torch.int32)
-        group_offsets = torch.zeros(num_groups + 1, dtype=torch.int32, device=A.device)
-        group_offsets[1:] = cum
-    if max_m is None:
-        max_m = size_per_group.max().item()
+        sizes = size_per_group.tolist()
+        offs = [0] * (num_groups + 1)
+        acc = 0
+        for i in range(num_groups):
+            acc += sizes[i]
+            offs[i + 1] = acc
+        group_offsets = torch.tensor(
+            offs, dtype=torch.int32, pin_memory=A.is_cuda
+        ).to(A.device, non_blocking=A.is_cuda)
+        if max_m is None:
+            max_m = max(sizes) if num_groups else 0
+    elif max_m is None:
+        max_m = int(size_per_group.max()) if size_per_group.numel() > 0 else 0
 
     def grid(META):
         return (
@@ -156,7 +184,55 @@ def m_grouped_matmul_impl(
         group_offsets,
         N,
         K,
-        max_m,
+        _bucket_max_m(max_m),
+        B.stride(0),
+        strideBK,
+        strideBN,
+        trans_b,
+    )
+    return C
+
+
+def m_grouped_matmul_capturable_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    size_per_group: torch.Tensor,
+    num_groups: int,
+    M: int,
+    N: int,
+    K: int,
+    strideBN: int,
+    strideBK: int,
+    trans_b: bool = False,
+    max_m: Optional[int] = None,
+) -> torch.Tensor:
+    # CUDA-graph-capturable variant: derive offsets on-device (no host sync) and
+    # use a static grid bound so the launch shape is fixed across graph replays.
+    cum = size_per_group.cumsum(0, dtype=torch.int32)
+    group_offsets = torch.zeros(num_groups + 1, dtype=torch.int32, device=A.device)
+    group_offsets[1:] = cum
+    # Any single group has at most M rows, so M is a safe static upper bound that
+    # stays constant during capture; surplus m-tiles early-return via the per-group
+    # size check inside the kernel.
+    if max_m is None:
+        max_m = M
+
+    def grid(META):
+        return (
+            triton.cdiv(N, META["BLOCK_N"]),
+            triton.cdiv(max_m, META["BLOCK_M"]),
+            num_groups,
+        )
+
+    _m_grouped_matmul_kernel[grid](
+        A,
+        B,
+        C,
+        group_offsets,
+        N,
+        K,
+        _bucket_max_m(max_m),
         B.stride(0),
         strideBK,
         strideBN,

@@ -4,8 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from mojo_opset import MojoChannelRMSNorm
 from mojo_opset import MojoSilu
+from mojo_opset.experimental import MojoChannelRMSNorm
 from mojo_opset.utils.logging import get_logger
 
 logger = get_logger(__name__)

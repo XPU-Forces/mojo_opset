@@ -43,10 +43,10 @@ def _layernorm_fwd_kernel(
     rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
     rows_mask = task_mask & (rows_off < n_rows)
 
-    sum_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
-
-    for col_offset in range(0, N_COLS, BLOCK_SIZE_N):
-        cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+    if N_COLS <= BLOCK_SIZE_N:
+        # Single-tile path: the whole row fits in one tile, so load X once,
+        # keep it in registers and reuse it for stats + output (1 read + 1 write).
+        cols_off = tl.arange(0, BLOCK_SIZE_N)
         cols_mask = cols_off < N_COLS
         block_mask = rows_mask[:, None] & cols_mask[None, :]
 
@@ -54,45 +54,17 @@ def _layernorm_fwd_kernel(
             X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0
         ).to(tl.float32)
 
-        sum_acc += tl.sum(x_chunk, axis=1)
+        mean = tl.sum(x_chunk, axis=1) / N_COLS
+        x_centered = tl.where(cols_mask[None, :], x_chunk - mean[:, None], 0.0)
+        var = tl.sum(x_centered * x_centered, axis=1) / N_COLS
+        rstd = tl.rsqrt(var + eps)
 
-    mean = sum_acc / N_COLS
-
-    tl.store(Mean_ptr + rows_off, mean, mask=rows_mask)
-
-    var_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
-
-    for col_offset in range(0, N_COLS, BLOCK_SIZE_N):
-        cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
-        cols_mask = cols_off < N_COLS
-        block_mask = rows_mask[:, None] & cols_mask[None, :]
-
-        x_chunk = tl.load(
-            X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0
-        ).to(tl.float32)
-
-        x_centered = x_chunk - mean[:, None]
-
-        var_acc += tl.sum(x_centered * x_centered, axis=1)
-
-    var = var_acc / N_COLS
-    rstd = tl.rsqrt(var + eps)
-
-    tl.store(RSTD_ptr + rows_off, rstd, mask=rows_mask)
-
-    for col_offset in range(0, N_COLS, BLOCK_SIZE_N):
-        cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
-        cols_mask = cols_off < N_COLS
-        block_mask = rows_mask[:, None] & cols_mask[None, :]
-
-        x_chunk = tl.load(
-            X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0
-        ).to(tl.float32)
+        tl.store(Mean_ptr + rows_off, mean, mask=rows_mask)
+        tl.store(RSTD_ptr + rows_off, rstd, mask=rows_mask)
 
         w_chunk = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
         b_chunk = tl.load(B_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
 
-        x_centered = x_chunk - mean[:, None]
         y_chunk = x_centered * rstd[:, None] * w_chunk[None, :] + b_chunk[None, :]
 
         tl.store(
@@ -100,6 +72,54 @@ def _layernorm_fwd_kernel(
             y_chunk,
             mask=block_mask,
         )
+    else:
+        # Multi-tile path: cannot keep the whole row in registers, so use a
+        # two-pass scheme. Pass 1 accumulates sum(x) and sum(x^2) together to
+        # derive both mean and variance in a single read; pass 2 normalizes.
+        sum_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+        sumsq_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+
+        for col_offset in range(0, N_COLS, BLOCK_SIZE_N):
+            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+            cols_mask = cols_off < N_COLS
+            block_mask = rows_mask[:, None] & cols_mask[None, :]
+
+            x_chunk = tl.load(
+                X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0
+            ).to(tl.float32)
+
+            sum_acc += tl.sum(x_chunk, axis=1)
+            sumsq_acc += tl.sum(x_chunk * x_chunk, axis=1)
+
+        mean = sum_acc / N_COLS
+        # E[x^2] - mean^2 can dip slightly below 0 from fp roundoff when the true
+        # variance is near zero; clamp to keep rsqrt finite (avoid NaN/inf).
+        var = tl.maximum(sumsq_acc / N_COLS - mean * mean, 0.0)
+        rstd = tl.rsqrt(var + eps)
+
+        tl.store(Mean_ptr + rows_off, mean, mask=rows_mask)
+        tl.store(RSTD_ptr + rows_off, rstd, mask=rows_mask)
+
+        for col_offset in range(0, N_COLS, BLOCK_SIZE_N):
+            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+            cols_mask = cols_off < N_COLS
+            block_mask = rows_mask[:, None] & cols_mask[None, :]
+
+            x_chunk = tl.load(
+                X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0
+            ).to(tl.float32)
+
+            w_chunk = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
+            b_chunk = tl.load(B_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
+
+            x_centered = x_chunk - mean[:, None]
+            y_chunk = x_centered * rstd[:, None] * w_chunk[None, :] + b_chunk[None, :]
+
+            tl.store(
+                Y_ptr + rows_off[:, None] * stride_y_row + cols_off[None, :],
+                y_chunk,
+                mask=block_mask,
+            )
 
 
 @triton.heuristics({"BLOCK_SIZE_M": lambda args: ceil_div(4096, args.get("n_cols", args.get("N_COLS")))})
@@ -321,8 +341,8 @@ def layernorm_fwd_impl(x, w, b, eps):
         x_2d.stride(0),
         y.stride(0),
         n_rows,
-        n_cols,
         eps,
+        N_COLS=n_cols,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
     )
 
