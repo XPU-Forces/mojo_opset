@@ -389,7 +389,7 @@ def test_paged_prefill_gqa(
     # trigger NPU thermal throttling (frequency down-shifting). Insert a short
     # sleep before each execution on NPU to let the device cool down and avoid
     # frequency throttling skewing the benchmark results.
-    need_sleep = "M_BF16_128K_FULL" in request.node.callspec.id and get_platform() == "npu"
+    need_sleep = hasattr(request.node, "callspec") and "M_BF16_128K_FULL" in request.node.callspec.id and get_platform() == "npu"
 
     def fn():
         if need_sleep:
