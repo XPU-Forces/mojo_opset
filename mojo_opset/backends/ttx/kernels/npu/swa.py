@@ -2105,10 +2105,16 @@ def _swa_bwd_dkdv_kernel(
                 gw_kv_chunks = min(gw_kv_chunks, num_kv_chunks)
                 lw_kv_chunks = tl.cdiv(num_kv_chunks - gw_kv_chunks, balance_ratio_)
                 _num_kv_chunks = gw_kv_chunks + lw_kv_chunks
-                if _num_kv_chunks * NUM_KV_HEADS > n_programs:
-                    # 重新分配尾块, 不整除时仍然有不均衡问题
-                    tail_heads = NUM_KV_HEADS % n_programs
-                    lw_kv_chunks_with_gw = (n_programs // tail_heads - gw_kv_chunks) % (n_programs // tail_heads)
+                tail_heads = NUM_KV_HEADS % n_programs
+                if _num_kv_chunks * NUM_KV_HEADS > n_programs and tail_heads != 0:
+                    # 重新分配尾块
+                    wave_size = n_programs // tail_heads
+                    lw_kv_chunks_with_gw = (wave_size - gw_kv_chunks % wave_size) % wave_size
+                    lw_kv_chunks_with_gw = tl.where(
+                        lw_kv_chunks_with_gw < lw_kv_chunks,
+                        lw_kv_chunks_with_gw,
+                        lw_kv_chunks
+                    )
                     lw_kv_chunks_only = (lw_kv_chunks - lw_kv_chunks_with_gw) * balance_ratio_
                     num_kv_chunks = gw_kv_chunks + lw_kv_chunks_with_gw + lw_kv_chunks_only
                     tail_kv_chunk_begin = gw_kv_chunks + lw_kv_chunks_with_gw
