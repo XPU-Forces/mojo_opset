@@ -53,7 +53,6 @@ def _build_lpt_task_schedule(
             cost = max(1, triton.cdiv(kv_cache_len + q_block_end, block_size_n))
             for q_head_id in range(num_q_heads):
                 kv_head_id = q_head_id // (num_q_heads // 4)
-                # weighted_tasks.append((cost, seq_no, b_id, q_block_id, q_head_id))
                 weighted_tasks.append((b_id, kv_head_id, q_block_id, cost, q_head_id, seq_no))
                 seq_no += 1
 
@@ -70,14 +69,11 @@ def _build_lpt_task_schedule(
     task_q_head = []
     core_task_offsets = [0]
     for tasks in per_core_tasks:
-        # tasks.sort()
         for b_id, q_head_id, q_block_id in tasks:
-            # task_b.append(b_id * 1024 * 12 + q_block_id * 12 + q_head_id)
             task_b.append(b_id)
             task_q_block.append(q_block_id)
             task_q_head.append(q_head_id)
         core_task_offsets.append(len(task_b))
-    # print(max(task_b), max(task_q_block), max(task_q_head))
 
     device = cu_q_lens.device
     return (

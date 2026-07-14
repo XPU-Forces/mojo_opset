@@ -1,4 +1,5 @@
 import math
+import time
 
 from typing import Optional
 
@@ -13,6 +14,7 @@ from mojo_opset import MojoPagedDecodeSWA
 from mojo_opset import MojoSWA
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.utils.platform import get_platform
 
 
 def generate_paged_decode_data(
@@ -373,6 +375,7 @@ def test_paged_prefill_gqa(
     block_tables: torch.Tensor,
     gqa_layout: str,
     cu_total_seq_lens: Optional[torch.Tensor],
+    request,
 ):
     paged_attn_prefill = MojoPagedPrefillGQA(
         is_causal=True,
@@ -382,8 +385,16 @@ def test_paged_prefill_gqa(
     head_dim = query.shape[-1]
     softmax_scale = 1.0 / math.sqrt(head_dim)
 
-    perf(  # noqa: F821
-        lambda: paged_attn_prefill(
+    # The 128K full prefill case runs long, high-density computation that can
+    # trigger NPU thermal throttling (frequency down-shifting). Insert a short
+    # sleep before each execution on NPU to let the device cool down and avoid
+    # frequency throttling skewing the benchmark results.
+    need_sleep = "M_BF16_128K_FULL" in request.node.callspec.id and get_platform() == "npu"
+
+    def fn():
+        if need_sleep:
+            time.sleep(0.5)
+        return paged_attn_prefill(
             query,
             k_cache,
             v_cache,
@@ -392,7 +403,8 @@ def test_paged_prefill_gqa(
             softmax_scale=softmax_scale,
             cu_total_seq_lens=cu_total_seq_lens,
         )
-    )
+
+    perf(fn)  # noqa: F821
 
 
 def generate_test_data(
