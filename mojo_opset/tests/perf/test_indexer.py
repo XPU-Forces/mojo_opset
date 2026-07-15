@@ -29,7 +29,4 @@ TEST_DTYPES = [torch.bfloat16, torch.float16, torch.float32]
 @bypass_not_implemented
 def test_lightning_index(query, query_scale, key, key_scale):
     indexer = MojoLightningIndexer()
-    indexer_ref = indexer._registry.get("torch")()
-
-    perf(lambda: indexer_ref(query, query_scale, key, key_scale))
     perf(lambda: indexer(query, query_scale, key, key_scale))

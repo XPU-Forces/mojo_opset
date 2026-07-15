@@ -216,7 +216,7 @@ def _sdpa_acc_fwd_MxN(
     if mask is not None and mask is not True:
         qk = tl.where(mask, qk, -1e6)  # 32B # bool
 
-    m_ij = tl.maximum(m_i, tl.max(qk, 1))  # Scaled max
+    m_ij = tl.maximum(m_i, tl.max(qk, 1,propagate_nan=tl.PropagateNan.ALL),propagate_nan=tl.PropagateNan.ALL)  # Scaled max
     qk = qk - m_ij[:, None]  # Stabilize
 
     # Softmax weights p = exp(qk)
@@ -630,6 +630,7 @@ def swa_infer_impl(
         BLOCK_M,
         BLOCK_N,
         BLOCK_D,
+        enable_ubuf_saving=True,
     )
     return o
 
@@ -1023,6 +1024,7 @@ def swa_paged_prefill_impl(
         BLOCK_N,
         BLOCK_D,
         page_size,
+        enable_ubuf_saving=True
     )
     return o
 
@@ -1055,7 +1057,7 @@ def _sdpa_acc_fwd_1xN(
     if mask is not None and mask is not True:
         qk = tl.where(mask, qk, float("-inf"))  # 32B # bool
 
-    m_ij = tl.maximum(m_i, tl.max(qk, 0))  # Scaled max
+    m_ij = tl.maximum(m_i, tl.max(qk, 0,propagate_nan=tl.PropagateNan.ALL),propagate_nan=tl.PropagateNan.ALL)  # Scaled max
     qk = qk - m_ij  # Stabilize
 
     # Softmax weights p = exp(qk)

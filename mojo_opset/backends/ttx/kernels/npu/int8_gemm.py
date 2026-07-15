@@ -85,8 +85,6 @@ def _int8_gemm_dequant_kernel(
         for k in range(0, K // BLOCK_K):
             a = tl.load(a_ptrs)
             bt = tl.load(bt_ptrs)
-            tl.multibuffer(a, 2)
-            tl.multibuffer(bt, 2)
             acc = tl.dot(a, tl.trans(bt), acc=acc)
             a_ptrs += BLOCK_K * stride_ak
             bt_ptrs += BLOCK_K * stride_btk
