@@ -31,7 +31,7 @@ jobs:
     name: Run npu tests
     runs-on: NPU
     container:
-      image: hub.byted.org/aicompiler/npu.ci.debian12:cann8.2.rc1_py3.11_th27
+      image: hub.byted.org/aicompiler/npu.ci.debian12:1.0.0.26
       volumes:
       - /etc/localtime:/etc/localtime
       - /usr/local/Ascend/driver:/usr/local/Ascend/driver

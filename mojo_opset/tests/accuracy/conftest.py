@@ -1,5 +1,7 @@
 import logging
 import os
+import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -8,6 +10,43 @@ from mojo_opset.core.backend_registry import MojoBackendRegistry
 from mojo_opset.utils.platform import get_platform, get_torch_device
 from mojo_opset.tests.utils import BackendNotImplementedForTest
 from mojo_opset.tests.utils import resolve_backend_for_accuracy_test
+
+
+def _candidate_ext_roots():
+    env_root = os.environ.get("MOJO_OPSET_EXT_PATH")
+    if env_root:
+        yield Path(env_root)
+
+    repo_root = Path(__file__).resolve().parents[3]
+    yield repo_root.parent / "mojo_opset_gitlab"
+
+
+def _load_xops_backend_for_accuracy():
+    if get_platform() != "mlu":
+        return
+
+    if os.environ.get("MOJO_OPSET_ACCURACY_LOAD_XOPS", "1") != "1":
+        return
+
+    for ext_root in _candidate_ext_roots():
+        if (ext_root / "mojo_opset_ext_autoload.py").is_file():
+            ext_root_str = str(ext_root)
+            if ext_root_str not in sys.path:
+                sys.path.insert(0, ext_root_str)
+            break
+
+    try:
+        import mojo_opset_ext_autoload
+    except ModuleNotFoundError as exc:
+        if exc.name != "mojo_opset_ext_autoload":
+            raise
+        logging.warning("mojo_opset_ext_autoload is not available, xops backend will not be loaded.")
+        return
+
+    mojo_opset_ext_autoload._autoload()
+
+
+_load_xops_backend_for_accuracy()
 
 
 @pytest.fixture(scope="session", autouse=True)

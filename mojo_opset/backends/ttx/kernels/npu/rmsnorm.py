@@ -221,7 +221,35 @@ def rmsnorm_infer_impl(
 
     num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
 
-    grid = (num_programs,)
+    if n_cols <= COL_BLOCKING_THRESHOLD:
+        work_items = n_rows * n_cols
+        # BLOCK_SIZE_M 同时看 hidden dim 和总 work size
+        if work_items <= 4096:
+            BLOCK_SIZE_M = 1
+        elif work_items <= 16384:
+            BLOCK_SIZE_M = 2 if n_cols >= 1024 else 4
+        elif work_items <= 65536:
+            BLOCK_SIZE_M = 4 if n_cols >= 1024 else 8
+        else:
+            heur_m = rms_norm_fwd_heuristics({"n_cols": n_cols})
+            BLOCK_SIZE_M = 1 << (heur_m.bit_length() - 1)
+        num_row_tasks = ceil_div(n_rows, BLOCK_SIZE_M)
+        grid = (min(num_programs, num_row_tasks),)
+
+        _rmsnorm_infer_small_cols_kernel[grid](
+            x,
+            y,
+            w,
+            X_2d.stride(0),
+            y.stride(0),
+            n_rows=n_rows,
+            n_cols=n_cols,
+            eps=eps,
+            BLOCK_SIZE_N=triton.next_power_of_2(n_cols),
+            BLOCK_SIZE_M=BLOCK_SIZE_M,
+        )
+    else:
+        grid = (num_programs,)
 
     if BLOCK_SIZE_N < n_cols:
         _rmsnorm_infer_kernel[grid](
@@ -373,7 +401,7 @@ def _rmsnorm_bwd_kernel(
 
         if casting_mode_int == _CASTING_MODE_LLAMA:
             m_block = (dY_block * W_row_offset[None, :]).to(tl.float32)
-            dW_acc += tl.sum(dY_block * normed_X_block.to(X_dtype), axis=0)
+            dW_acc += tl.sum(dY_block * normed_X_block.to(tl.float32), axis=0)
         elif casting_mode_int == _CASTING_MODE_GEMMA:
             dY_block_f32 = dY_block.to(tl.float32)
             W_row_offset = W_row_offset.to(tl.float32)

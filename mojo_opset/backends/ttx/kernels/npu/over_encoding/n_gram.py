@@ -164,6 +164,7 @@ def n_gram_decode_kernel(
 
     block_offsets = tl.arange(0, BLOCK_SIZE_N)
     block_mask = block_offsets < n_grams_size
+    block_mask_1 = block_offsets[None,:] < n_grams_size
 
     oe_vocab_sizes = tl.load(
         oe_vocab_sizes + block_offsets, mask=block_mask, other=1
@@ -185,7 +186,6 @@ def n_gram_decode_kernel(
             if MTP_STEP > 1:
                 input_indices = tl.arange(0, MTP_STEP)
                 __input_ids = tl.load(input_ids + bid * MTP_STEP + input_indices).to(tl.int64)
-                tl.device_print("__input_ids:", __input_ids)
 
                 n_gram_ids = tl.view(__input_ids, (MTP_STEP, 1))
                 n_gram_ids = tl.broadcast_to(n_gram_ids, (MTP_STEP, BLOCK_SIZE_N))
@@ -193,7 +193,7 @@ def n_gram_decode_kernel(
                 oe_carry = tl.full((MTP_STEP, BLOCK_SIZE_N,), vocab_size, dtype=tl.int64)
 
                 history_ptr = oe_history + oe_history_stride_0 * bid
-                n_gram_offsets = tl.flip(tl.arange(0, MAX_N_GRAM))
+                n_gram_offsets = tl.extra.cann.extension.flip(tl.arange(0, MAX_N_GRAM))
 
                 history_id = tl.load(
                     history_ptr + (oe_history_dim_1 - n_gram_offsets - 1) * oe_history_stride_1
@@ -226,7 +226,7 @@ def n_gram_decode_kernel(
                     output_ids + bid * output_stride_0 + tl.arange(0, MTP_STEP)[:, None] * output_stride_1 + block_offsets[None, :] * output_stride_2,
                     # output_ids + bid * output_stride_0 + output_offsets,
                     n_gram_ids.to(output_ids.dtype.element_ty),
-                    mask=tl.view(block_mask, (1, BLOCK_SIZE_N)),
+                    mask=block_mask_1
                 )
 
             else:
