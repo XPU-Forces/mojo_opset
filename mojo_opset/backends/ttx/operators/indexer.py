@@ -1,10 +1,30 @@
+import os
+
 from typing import Optional
 
 import torch
 
 from mojo_opset.backends.ttx.kernels import lightning_indexer_impl
+from mojo_opset.backends.ttx.kernels import lightning_indexer_v2_impl
 from mojo_opset.experimental import MojoLightningIndexer
 from mojo_opset.experimental.operators.indexer import MojoIndexer
+from mojo_opset.utils.platform import get_platform
+
+
+def _lightning_indexer_tle_enabled() -> bool:
+    return os.getenv("MOJO_TTX_LIGHTNING_INDEXER_TLE", "1").lower() not in ("0", "false", "off", "no")
+
+
+def _can_use_lightning_indexer_tle(
+    query: torch.Tensor,
+    query_scale: torch.Tensor,
+    key: torch.Tensor,
+    key_scale: torch.Tensor,
+) -> bool:
+    if not _lightning_indexer_tle_enabled() or get_platform() != "npu":
+        return False
+    tensors = (query, query_scale, key, key_scale)
+    return all(t is not None and t.device.type == "npu" for t in tensors)
 
 
 class TTXLightningIndexer(MojoLightningIndexer):
@@ -47,6 +67,13 @@ class TTXLightningIndexer(MojoLightningIndexer):
         query = query.contiguous()
         query_scale = query_scale.contiguous()
         key = key.contiguous()
+        key_scale = key_scale.contiguous()
+
+        if _can_use_lightning_indexer_tle(query, query_scale, key, key_scale):
+            try:
+                return lightning_indexer_v2_impl(query, query_scale, key, key_scale)
+            except NotImplementedError:
+                pass
 
         return lightning_indexer_impl(query, query_scale, key, key_scale)
 
