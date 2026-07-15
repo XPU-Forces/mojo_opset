@@ -6,6 +6,7 @@ from .diffution_attention import diffusion_attention_fwd_impl
 from .flash_attention import paged_attention_decode_impl
 from .flash_attention import paged_attention_prefill_impl
 from .fused_add_layernorm import fused_add_layernorm_infer_impl
+from .fused_add_layernorm_tle import fused_add_layernorm_infer_impl as fused_add_layernorm_tle_infer_impl
 from .fused_add_rmsnorm import fused_add_rmsnorm_infer_impl
 from .fused_linear_cross_entropy import fused_linear_cross_entropy_1d_bwd_impl
 from .fused_linear_cross_entropy import fused_linear_cross_entropy_1d_fwd_impl
@@ -93,6 +94,7 @@ __all__ = [
     "layernorm_fwd_impl",
     "fused_add_rmsnorm_infer_impl",
     "fused_add_layernorm_infer_impl",
+    "fused_add_layernorm_tle_infer_impl",
     "rot_pos_embed_impl",
     "rope_bwd_impl",
     "rope_fwd_impl",
