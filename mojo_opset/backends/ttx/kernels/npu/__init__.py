@@ -50,6 +50,7 @@ from .swa import swa_paged_prefill_impl
 from .swiglu import swiglu_bwd_impl
 from .swiglu import swiglu_fwd_impl
 from .int8_gemm import int8_gemm_dequant_impl, prepare_b_impl
+from .hc_pre import hc_pre_impl
 
 # triton-dist based comm kernels (requires triton_dist + shmem packages)
 allgather_gemm_impl = None
@@ -134,4 +135,5 @@ __all__ = [
     "gemm_reduce_scatter_impl",
     "int8_gemm_dequant_impl", 
     "prepare_b_impl",
+    "hc_pre_impl",
 ]
