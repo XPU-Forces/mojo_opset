@@ -1017,7 +1017,7 @@ def _swa_paged_prefill_aggregation_kernel(
                     mask = tl.full((BLOCK_M, BLOCK_N), 1,  dtype=tl.int1)
 
                 k = tl.zeros((PAGE_AGGREGATION_NUM * BLOCK_N, BLOCK_D), dtype=k_ptr.dtype.element_ty)
-                for page_iter in range(PAGE_AGGREGATION_NUM):
+                for page_iter in tl.extra.cann.extension.parallel(0, PAGE_AGGREGATION_NUM):
                     kv_block_start = (kv_block_id + page_iter) * BLOCK_N
                     kv_block_end = min(kv_block_start + BLOCK_N, kv_seq_len)
                     kv_block_len = max(kv_block_end - kv_block_start, 0)
@@ -1054,7 +1054,7 @@ def _swa_paged_prefill_aggregation_kernel(
                 l_i = l_i * alpha + l_ij
                 acc = acc * alpha[:, None]
                 v = tl.zeros((PAGE_AGGREGATION_NUM * BLOCK_N, BLOCK_D), dtype=v_ptr.dtype.element_ty)
-                for page_iter in range(PAGE_AGGREGATION_NUM):
+                for page_iter in tl.extra.cann.extension.parallel(0, PAGE_AGGREGATION_NUM):
                     kv_block_start = (kv_block_id + page_iter) * BLOCK_N
                     kv_block_end = min(kv_block_start + BLOCK_N, kv_seq_len)
                     kv_block_len = max(kv_block_end - kv_block_start, 0)
