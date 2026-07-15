@@ -5,12 +5,23 @@ import triton.language as tl
 from triton.language.math import rsqrt
 from .utils import libentry
 
+from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 from mojo_opset.backends.ttx.kernels.npu.utils import VEC_ALIGN_BYTES
 from mojo_opset.backends.ttx.kernels.utils import align
 from mojo_opset.backends.ttx.kernels.utils import ceil_div
 from mojo_opset.backends.ttx.kernels.utils import torch_to_triton_dtype
 
 COL_BLOCKING_THRESHOLD = 2048
+SINGLE_PASS_THRESHOLD = 2048
+TWO_PASS_BLOCK_SIZE_N = 4096
+
+
+def layer_norm_fwd_two_pass_pass1_heuristics(args):
+    n_cols = args["n_cols"]
+    if n_cols <= 8192:
+        return 8192
+    else:
+        return TWO_PASS_BLOCK_SIZE_N
 
 TOKEN_BLOCK_SIZE_TABLE = {
     2048: 4,
@@ -32,10 +43,95 @@ def layer_norm_fwd_heuristics(args):
                 return block_size
         return 1
     else:
+        return 8
+
+
+def layer_norm_fwd_single_pass_row_pack_heuristics(args):
+    n_cols = args["n_cols"]
+    block_size_n = triton.next_power_of_2(n_cols)
+    if block_size_n <= 1024:
         return 4
+    elif block_size_n <= 4096:
+        return 2
+    else:
+        return 1
 
 
-@triton.heuristics({"BLOCK_SIZE_M": layer_norm_fwd_heuristics})
+def layer_norm_fwd_two_pass_heuristics(args):
+    hidden_dim = args["n_cols"]
+    if hidden_dim <= COL_BLOCKING_THRESHOLD:
+        if hidden_dim in TOKEN_BLOCK_SIZE_TABLE:
+            return TOKEN_BLOCK_SIZE_TABLE[hidden_dim]
+
+        for dim_thresh, block_size in sorted(TOKEN_BLOCK_SIZE_TABLE.items()):
+            if hidden_dim <= dim_thresh:
+                return block_size
+        return 1
+    else:
+        return 2
+
+
+@triton.heuristics({"ROW_PACK": layer_norm_fwd_single_pass_row_pack_heuristics})
+@libentry()
+@triton.jit
+def _layernorm_fwd_single_pass_kernel(
+    X_ptr,
+    Y_ptr,
+    W_ptr,
+    B_ptr,
+    Mean_ptr,
+    RSTD_ptr,
+    stride_x_row,
+    stride_y_row,
+    n_rows,
+    n_cols,
+    eps,
+    BLOCK_SIZE_N: tl.constexpr,
+    ROW_PACK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+
+    cols_off = tl.arange(0, BLOCK_SIZE_N)
+    cols_mask = cols_off < n_cols
+
+    w = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
+    b = tl.load(B_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
+
+    num_row_blocks = (n_rows + ROW_PACK - 1) // ROW_PACK
+
+    for block_id in range(pid, num_row_blocks, num_programs):
+        rows_off = block_id * ROW_PACK + tl.arange(0, ROW_PACK)
+        rows_mask = rows_off < n_rows
+        block_mask = rows_mask[:, None] & cols_mask[None, :]
+
+        x = tl.load(
+            X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :],
+            mask=block_mask, other=0.0,
+        ).to(tl.float32)
+
+        mean = tl.sum(x, axis=1) / n_cols
+
+        x_centered = x - mean[:, None]
+        var = tl.sum(x_centered * x_centered, axis=1) / n_cols
+        rstd = rsqrt(var + eps)
+
+        tl.store(Mean_ptr + rows_off, mean, mask=rows_mask)
+        tl.store(RSTD_ptr + rows_off, rstd, mask=rows_mask)
+
+        y = x_centered * rstd[:, None] * w[None, :] + b[None, :]
+
+        tl.store(
+            Y_ptr + rows_off[:, None] * stride_y_row + cols_off[None, :],
+            y.to(Y_ptr.dtype.element_ty),
+            mask=block_mask,
+        )
+
+
+@triton.heuristics({
+    "BLOCK_SIZE_M": layer_norm_fwd_two_pass_heuristics,
+    "BLOCK_SIZE_N_PASS1": layer_norm_fwd_two_pass_pass1_heuristics,
+})
 @libentry()
 @triton.jit
 def _layernorm_fwd_kernel(
@@ -51,6 +147,7 @@ def _layernorm_fwd_kernel(
     n_cols,
     eps,
     BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_N_PASS1: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -63,10 +160,12 @@ def _layernorm_fwd_kernel(
         rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
         rows_mask = rows_off < n_rows
 
+        # Pass 1: compute mean and variance simultaneously via E[x²]-E[x]²
         sum_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+        sq_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
 
-        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
-            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+        for col_offset in tl.range(0, n_cols, BLOCK_SIZE_N_PASS1):
+            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N_PASS1)
             cols_mask = cols_off < n_cols
             block_mask = rows_mask[:, None] & cols_mask[None, :]
 
@@ -75,35 +174,17 @@ def _layernorm_fwd_kernel(
             ).to(tl.float32)
 
             sum_acc += tl.sum(x_chunk, axis=1)
+            sq_acc += tl.sum(x_chunk * x_chunk, axis=1)
 
         mean = sum_acc / n_cols
-
-        tl.store(Mean_ptr + rows_off, mean, mask=rows_mask)
-
-        var_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
-
-        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
-            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
-            cols_mask = cols_off < n_cols
-            block_mask = rows_mask[:, None] & cols_mask[None, :]
-
-            x_chunk = tl.load(
-                X_ptr + rows_off[:, None] * stride_x_row + cols_off[None, :], mask=block_mask, other=0.0
-            ).to(tl.float32)
-
-            w_chunk = tl.load(W_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
-            b_chunk = tl.load(B_ptr + cols_off, mask=cols_mask, other=0.0).to(tl.float32)
-
-            x_centered = x_chunk - mean[:, None]
-
-            var_acc += tl.sum(x_centered * x_centered, axis=1)
-
-        var = var_acc / n_cols
+        var = sq_acc / n_cols - mean * mean
         rstd = rsqrt(var + eps)
 
+        tl.store(Mean_ptr + rows_off, mean, mask=rows_mask)
         tl.store(RSTD_ptr + rows_off, rstd, mask=rows_mask)
 
-        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
+        # Pass 2: normalize and write output (reads X once more)
+        for col_offset in tl.range(0, n_cols, BLOCK_SIZE_N):
             cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
             cols_mask = cols_off < n_cols
             block_mask = rows_mask[:, None] & cols_mask[None, :]
@@ -292,32 +373,45 @@ def layernorm_infer_impl(
     x_2d = hidden_states.reshape(-1, dim)
     n_rows, n_cols = x_2d.shape
 
-    if n_cols > COL_BLOCKING_THRESHOLD:
-        BLOCK_SIZE_N = 2048
-    else:
-        BLOCK_SIZE_N = align(hidden_states, n_cols, VEC_ALIGN_BYTES)
-
-    num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
+    num_programs = get_num_cores()
     grid = (num_programs,)
 
     y = torch.empty_like(x_2d)
     mean = torch.empty(n_rows, dtype=hidden_states.dtype, device=hidden_states.device)
     rstd = torch.empty(n_rows, dtype=hidden_states.dtype, device=hidden_states.device)
 
-    _layernorm_fwd_kernel[grid](
-        x_2d,
-        y,
-        weight,
-        bias,
-        mean,
-        rstd,
-        x_2d.stride(0),
-        y.stride(0),
-        n_rows,
-        n_cols,
-        eps,
-        BLOCK_SIZE_N=BLOCK_SIZE_N,
-    )
+    if n_cols <= SINGLE_PASS_THRESHOLD:
+        BLOCK_SIZE_N = triton.next_power_of_2(n_cols)
+        _layernorm_fwd_single_pass_kernel[grid](
+            x_2d,
+            y,
+            weight,
+            bias,
+            mean,
+            rstd,
+            x_2d.stride(0),
+            y.stride(0),
+            n_rows,
+            n_cols,
+            eps,
+            BLOCK_SIZE_N=BLOCK_SIZE_N,
+        )
+    else:
+        BLOCK_SIZE_N = TWO_PASS_BLOCK_SIZE_N
+        _layernorm_fwd_kernel[grid](
+            x_2d,
+            y,
+            weight,
+            bias,
+            mean,
+            rstd,
+            x_2d.stride(0),
+            y.stride(0),
+            n_rows,
+            n_cols,
+            eps,
+            BLOCK_SIZE_N=BLOCK_SIZE_N,
+        )
 
     return y.reshape(*shape)
 
@@ -328,32 +422,45 @@ def layernorm_fwd_impl(x, w, b, eps):
     x_2d = x.reshape(-1, dim)
     n_rows, n_cols = x_2d.shape
 
-    if n_cols > COL_BLOCKING_THRESHOLD:
-        BLOCK_SIZE_N = 2048
-    else:
-        BLOCK_SIZE_N = align(x, n_cols, VEC_ALIGN_BYTES)
-
-    num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
+    num_programs = get_num_cores()
     grid = (num_programs,)
 
     y = torch.empty_like(x_2d)
     mean = torch.empty(n_rows, dtype=x.dtype, device=x.device)
     rstd = torch.empty(n_rows, dtype=x.dtype, device=x.device)
 
-    _layernorm_fwd_kernel[grid](
-        x_2d,
-        y,
-        w,
-        b,
-        mean,
-        rstd,
-        x_2d.stride(0),
-        y.stride(0),
-        n_rows,
-        n_cols,
-        eps,
-        BLOCK_SIZE_N=BLOCK_SIZE_N,
-    )
+    if n_cols <= SINGLE_PASS_THRESHOLD:
+        BLOCK_SIZE_N = triton.next_power_of_2(n_cols)
+        _layernorm_fwd_single_pass_kernel[grid](
+            x_2d,
+            y,
+            w,
+            b,
+            mean,
+            rstd,
+            x_2d.stride(0),
+            y.stride(0),
+            n_rows,
+            n_cols,
+            eps,
+            BLOCK_SIZE_N=BLOCK_SIZE_N,
+        )
+    else:
+        BLOCK_SIZE_N = TWO_PASS_BLOCK_SIZE_N
+        _layernorm_fwd_kernel[grid](
+            x_2d,
+            y,
+            w,
+            b,
+            mean,
+            rstd,
+            x_2d.stride(0),
+            y.stride(0),
+            n_rows,
+            n_cols,
+            eps,
+            BLOCK_SIZE_N=BLOCK_SIZE_N,
+        )
 
     return y.reshape(*shape), x_2d, mean, rstd
 
@@ -365,11 +472,11 @@ def layernorm_bwd_impl(dy, x_2d, w, b, mean, rstd):
     n_rows, n_cols = dy_2d.shape
 
     if n_cols > COL_BLOCKING_THRESHOLD:
-        BLOCK_SIZE_N = 2048
+        BLOCK_SIZE_N = 4096
     else:
         BLOCK_SIZE_N = align(x_2d, n_cols, VEC_ALIGN_BYTES)
 
-    num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
+    num_programs = get_num_cores()
     grid = (num_programs,)
 
     dx = torch.empty_like(dy_2d)

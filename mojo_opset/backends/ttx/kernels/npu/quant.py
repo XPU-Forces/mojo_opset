@@ -230,7 +230,6 @@ def dynamic_quant_impl(
         total_tokens=total_tokens,
         dims=dims,
         align_dims=align_dims,
-        BLOCK_SIZE_N=256,
     )
 
     return output_tensor, quant_scale_tensor.unsqueeze(-1)
@@ -238,14 +237,15 @@ def dynamic_quant_impl(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_SIZE_M": 8, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 16, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 32, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 64, "multibuffer": True}),
-        triton.Config({"BLOCK_SIZE_M": 8, "multibuffer": False}),
-        triton.Config({"BLOCK_SIZE_M": 16, "multibuffer": False}),
-        triton.Config({"BLOCK_SIZE_M": 32, "multibuffer": False}),
-        triton.Config({"BLOCK_SIZE_M": 64, "multibuffer": False}),
+        triton.Config({"BLOCK_SIZE_M": bm, "BLOCK_SIZE_N": bn, "multibuffer": mb})
+        for bm in [8, 16, 32, 64]
+        for bn in [256, 512, 1024, 2048]
+        for mb in [True, False]
+    ] + [
+        triton.Config({"BLOCK_SIZE_M": bm, "BLOCK_SIZE_N": bn, "multibuffer": mb})
+        for bm in [2, 4, 8]
+        for bn in [4096, 8192]
+        for mb in [True, False]
     ],
     key=["dims"],
 )
@@ -302,11 +302,15 @@ def scale_dynamic_quant_kernel(
 
             input_ptr = input + input_offset
             block_mask = element_mask[:, None] & dims_mask[None, :]
-            input_vals = tl.load(input_ptr, mask=block_mask, other=0.0).to(tl.float32)
 
+            # Load instruction reordering: first load `scale` (no dependencies, can be issued early), then load `input`.
             if scale is not None:
                 scale_ptr = scale + dims_off
                 scale_vals = tl.load(scale_ptr, mask=dims_mask, other=1.0).to(tl.float32)
+
+            input_vals = tl.load(input_ptr, mask=block_mask, other=0.0).to(tl.float32)
+
+            if scale is not None:
                 scaled_vals = input_vals * scale_vals
             else:
                 scaled_vals = input_vals
@@ -334,12 +338,15 @@ def scale_dynamic_quant_kernel(
 
             block_mask = element_mask[:, None] & dims_mask[None, :]
 
+            # Load instruction reordering: first load `scale` (no dependencies, can be issued early), then load `input`.
+            if scale is not None:
+                scale_ptr = scale + dims_off
+                scale_vals = tl.load(scale_ptr, mask=dims_mask, other=1.0).to(tl.float32)
+
             input_vals = tl.load(input_ptr, mask=block_mask, other=0.0).to(tl.float32)
 
             # Apply scaling and quantization
             if scale is not None:
-                scale_ptr = scale + dims_off
-                scale_vals = tl.load(scale_ptr, mask=dims_mask, other=1.0).to(tl.float32)
                 scaled_vals = input_vals * scale_vals
             else:
                 scaled_vals = input_vals

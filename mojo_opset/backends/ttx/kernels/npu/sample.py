@@ -410,11 +410,10 @@ def _topk_stage1_kernel(
     CHUNK_SIZE: tl.constexpr,
     ROW_STRIDE: tl.constexpr,
     DESCENDING: tl.constexpr,
+    NUM_CORES: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    grid_size = tl.num_programs(0)
-
-    for task_id in range(pid, TOTAL_TASKS, grid_size):
+    for task_id in range(pid, TOTAL_TASKS, NUM_CORES):
         cur_batch = task_id // CHUNK_NUM
         cur_chunk_idx = task_id % CHUNK_NUM
         chunk_offset = cur_chunk_idx * CHUNK_SIZE
@@ -427,16 +426,15 @@ def _topk_stage1_kernel(
         mask_x = off_col < VOCAB_SIZE
         pad_value = filter_value if DESCENDING else -filter_value
         x = tl.load(x_ptr + safe_off_x, mask=mask_x, other=pad_value)
-        x = tl.where(mask_x, x, pad_value)
-        x_index = tl.where(mask_x, off_col, 0).to(tl.int32)
-        sort_keys = _pack_sort_keys(x, x_index)
-        sorted_keys, _ = argsort(sort_keys, tl.zeros_like(sort_keys), 0, descending=DESCENDING)
-        sorted_x = _unpack_sort_values(sorted_keys)
-        sorted_index = _unpack_sort_indices(sorted_keys)
+        x_index = off_col.to(tl.int32)
+        sort_vals = _float_to_sortable_i32(x)
+        sorted_vals, sorted_ids = argsort(sort_vals, x_index, 0, descending=DESCENDING)
+        sorted_x = _sortable_i32_to_float(sorted_vals)
+        sorted_index = sorted_ids
 
         cols = tl.arange(0, CHUNK_SIZE)
         tl.store(batch_y_ptr + cols, sorted_x)
-        tl.store(batch_y_index_ptr + cols, sorted_index.to(tl.int32))
+        tl.store(batch_y_index_ptr + cols, sorted_index)
 
 
 @libentry()
@@ -455,33 +453,35 @@ def _topk_merge_kernel(
     GROUP_CHUNKS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     DESCENDING: tl.constexpr,
+    MERGE_TOTAL_TASKS: tl.constexpr,
+    NUM_CORES: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    cur_batch = pid // NEXT_GROUPS
-    cur_group = pid % NEXT_GROUPS
 
-    group_start = cur_group * GROUP_CHUNKS * k
-    off_col = tl.arange(0, BLOCK_SIZE)
-    valid = (off_col < GROUP_CHUNKS * k) & ((group_start + off_col) < INPUT_ELEMS)
+    for task_id in range(pid, MERGE_TOTAL_TASKS, NUM_CORES):
+        cur_batch = task_id // NEXT_GROUPS
+        cur_group = task_id % NEXT_GROUPS
 
-    in_row_start = cur_batch * INPUT_ROW_STRIDE
-    safe_off_x = tl.where(valid, in_row_start + group_start + off_col, in_row_start)
+        group_start = cur_group * GROUP_CHUNKS * k
+        off_col = tl.arange(0, BLOCK_SIZE)
+        valid = (off_col < GROUP_CHUNKS * k) & ((group_start + off_col) < INPUT_ELEMS)
 
-    pad_value = filter_value if DESCENDING else -filter_value
-    chunk_x = tl.load(x_ptr + safe_off_x, mask=valid, other=pad_value)
-    chunk_x = tl.where(valid, chunk_x, pad_value)
-    chunk_index = tl.load(x_index_ptr + safe_off_x, mask=valid, other=0).to(tl.int32)
-    chunk_index = tl.where(valid, chunk_index, 0)
+        in_row_start = cur_batch * INPUT_ROW_STRIDE
+        safe_off_x = tl.where(valid, in_row_start + group_start + off_col, in_row_start)
 
-    sort_keys = _pack_sort_keys(chunk_x, chunk_index)
-    sorted_keys, _ = argsort(sort_keys, tl.zeros_like(sort_keys), 0, descending=DESCENDING)
-    sorted_logits = _unpack_sort_values(sorted_keys)
-    sorted_index = _unpack_sort_indices(sorted_keys)
+        pad_value = filter_value if DESCENDING else -filter_value
+        chunk_x = tl.load(x_ptr + safe_off_x, mask=valid, other=pad_value)
+        chunk_index = tl.load(x_index_ptr + safe_off_x, mask=valid, other=0).to(tl.int32)
 
-    out_row_start = cur_batch * OUTPUT_ROW_STRIDE + cur_group * BLOCK_SIZE
-    tl.store(y_ptr + out_row_start + off_col, sorted_logits)
-    tl.store(y_index_ptr + out_row_start + off_col, sorted_index.to(tl.int32))
-    
+        sort_vals = _float_to_sortable_i32(chunk_x)
+        sorted_vals, sorted_ids = argsort(sort_vals, chunk_index, 0, descending=DESCENDING)
+        sorted_logits = _sortable_i32_to_float(sorted_vals)
+        sorted_index = sorted_ids
+
+        out_row_start = cur_batch * OUTPUT_ROW_STRIDE + cur_group * BLOCK_SIZE
+        tl.store(y_ptr + out_row_start + off_col, sorted_logits)
+        tl.store(y_index_ptr + out_row_start + off_col, sorted_index)
+
 
 def top_k_sampling_impl(
     logits: torch.FloatTensor,
@@ -502,8 +502,8 @@ def top_k_sampling_impl(
     top_k = max(top_k, min_tokens_to_keep)
     
     descending = 1 if largest else 0
-    
-    chunk_size = 128
+
+    chunk_size = 32
     if chunk_size < top_k:
         chunk_size = triton.next_power_of_2(top_k)
     chunk_num = triton.cdiv(vocab_size, chunk_size)
@@ -516,9 +516,9 @@ def top_k_sampling_impl(
 
     stage1_sorted = torch.full((batch_size, stage1_sorted_row_stride), pad_val, device=device, dtype=logits.dtype).contiguous()
     stage1_sorted_index = torch.zeros((batch_size, stage1_sorted_row_stride), device=device, dtype=torch.int32).contiguous()
-    
+    num_vectorcore = triton.runtime.driver.active.utils.get_device_properties(device)["num_vectorcore"]
     stage1_total_tasks = batch_size * chunk_num
-    _topk_stage1_kernel[(min(stage1_total_tasks, 65535),)](
+    _topk_stage1_kernel[(num_vectorcore,)](
         stage1_sorted,
         stage1_sorted_index,
         logits_2d,
@@ -530,6 +530,7 @@ def top_k_sampling_impl(
         chunk_size,
         stage1_sorted_row_stride,
         descending,
+        num_vectorcore,
     )
 
     stage1_out, stage1_out_index = _compact_sorted_blocks(
@@ -546,7 +547,7 @@ def top_k_sampling_impl(
     current_groups = chunk_num
     current_row_stride = row_stride
 
-    max_merge_candidates = 128
+    max_merge_candidates = 32
     merge_group_chunks = max(1, max_merge_candidates // top_k)
     while merge_group_chunks > 1 and (merge_group_chunks * top_k) > max_merge_candidates:
         merge_group_chunks //= 2
@@ -563,7 +564,7 @@ def top_k_sampling_impl(
         next_sorted_vals = torch.full((batch_size, next_sorted_row_stride), pad_val, device=device, dtype=logits.dtype).contiguous()
         next_sorted_idx = torch.zeros((batch_size, next_sorted_row_stride), device=device, dtype=torch.int32).contiguous()
         merge_total_tasks = batch_size * next_groups
-        _topk_merge_kernel[(merge_total_tasks,)](
+        _topk_merge_kernel[(num_vectorcore,)](
             next_sorted_vals,
             next_sorted_idx,
             candidate_vals,
@@ -577,6 +578,8 @@ def top_k_sampling_impl(
             group_chunks,
             block_size,
             descending,
+            merge_total_tasks,
+            num_vectorcore,
         )
 
         next_vals, next_idx = _compact_sorted_blocks(

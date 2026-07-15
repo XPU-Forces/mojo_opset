@@ -185,7 +185,7 @@ def _store_paged_kv_cache_chunk_kernel(
         chunk_idx = p_idx // num_kv_heads
 
         chunk_base = chunk_meta_ptr + chunk_idx * stride_cm_row
-        src_token_start = tl.load(chunk_base + 0 * stride_cm_col)
+        src_token_start = tl.load(chunk_base + 0 * stride_cm_col, care_padding=False)
         dst_block_id = tl.load(chunk_base + 1 * stride_cm_col)
         dst_block_offset = tl.load(chunk_base + 2 * stride_cm_col)
         chunk_len = tl.load(chunk_base + 3 * stride_cm_col)
@@ -222,7 +222,7 @@ def _store_paged_kv_cache_chunk_kernel(
                 + offs_d[None, :] * stride_vc_dim
             )
 
-            k_val = tl.load(base_src_k_ptr + h * stride_k_head, mask=mask_sub[:, None])
+            k_val = tl.load(base_src_k_ptr + h * stride_k_head, mask=mask_sub[:, None], care_padding=False)
             v_val = tl.load(base_src_v_ptr + h * stride_v_head, mask=mask_sub[:, None])
             tl.store(base_dst_k_ptr + h * stride_kc_head, k_val, mask=mask_sub[:, None])
             tl.store(base_dst_v_ptr + h * stride_vc_head, v_val, mask=mask_sub[:, None])
