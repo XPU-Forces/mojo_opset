@@ -7,6 +7,7 @@ from .flex_attention import flex_attention_bwd_impl
 from .flex_attention import flex_attention_fwd_impl
 from .flash_attention import paged_attention_decode_impl
 from .flash_attention import paged_attention_prefill_impl
+from .flash_attention import paged_attention_prefill_prepare
 from .fused_add_layernorm import fused_add_layernorm_infer_impl
 from .fused_add_rmsnorm import fused_add_rmsnorm_infer_impl
 from .group_rmsnorm import group_rmsnorm_impl
@@ -84,6 +85,7 @@ __all__ = [
     "causal_conv1d_bwd_impl",
     "paged_attention_decode_impl",
     "paged_attention_prefill_impl",
+    "paged_attention_prefill_prepare",
     "fused_linear_cross_entropy_bwd_impl",
     "fused_linear_cross_entropy_fwd_impl",
     "fused_linear_cross_entropy_1d_bwd_impl",

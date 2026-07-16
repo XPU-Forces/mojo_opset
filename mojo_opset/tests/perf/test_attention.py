@@ -389,23 +389,45 @@ def test_paged_prefill_gqa(
     # trigger NPU thermal throttling (frequency down-shifting). Insert a short
     # sleep before each execution on NPU to let the device cool down and avoid
     # frequency throttling skewing the benchmark results.
-    need_sleep = hasattr(request.node, "callspec") and "M_BF16_128K_FULL" in request.node.callspec.id and get_platform() == "npu"
 
-    def fn():
-        if need_sleep:
-            time.sleep(0.5)
-        return paged_attn_prefill(
-            query,
-            k_cache,
-            v_cache,
+    if get_platform() == "npu":
+        need_sleep = hasattr(request.node, "callspec") and "M_BF16_128K_FULL" in request.node.callspec.id
+        num_q_heads = query.shape[1]
+        num_kv_heads = k_cache.shape[1]
+        page_size = k_cache.shape[2]
+        paged_attn_prefill.prepare_metadata(
             cu_q_lens,
-            block_tables,
-            softmax_scale=softmax_scale,
-            cu_total_seq_lens=cu_total_seq_lens,
+            cu_total_seq_lens,
+            num_q_heads,
+            num_kv_heads,
+            page_size,
         )
+        def fn():
+            if need_sleep:
+                time.sleep(0.5)
+            return paged_attn_prefill(
+                query,
+                k_cache,
+                v_cache,
+                cu_q_lens,
+                block_tables,
+                softmax_scale=softmax_scale,
+                cu_total_seq_lens=cu_total_seq_lens,
+            )
 
-    perf(fn)  # noqa: F821
-
+        perf(fn)  # noqa: F821
+    else:
+        perf( # noqa: F821
+            lambda : paged_attn_prefill(
+                query,
+                k_cache,
+                v_cache,
+                cu_q_lens,
+                block_tables,
+                softmax_scale=softmax_scale,
+                cu_total_seq_lens=cu_total_seq_lens,
+            )
+        )
 
 def generate_test_data(
     bsz: int,

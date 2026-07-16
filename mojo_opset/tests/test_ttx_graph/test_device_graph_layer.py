@@ -60,6 +60,21 @@ class DummyLayer(nn.Module):
         self.rms_norm_2 = MojoRMSNorm(norm_size=hidden_size)
         self.self_attention = SimpleAttention(hidden_size, num_heads)
         self.ffn = MojoSwiGLUMLP(input_size=hidden_size, output_size=hidden_size, hidden_size=intermediate_size)
+        self.metadata = None
+    def prepare_attn(self, x):
+        if get_platform() == "npu":
+            batch_size, seq_len, _ = x.shape
+            block_size = seq_len
+            cu_q_lens = torch.arange(0, (batch_size + 1) * seq_len, step=seq_len, dtype=torch.int32, device=x.device)
+            total_seq_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device=x.device)
+            cu_total_seq_lens = torch.nn.functional.pad(total_seq_lens.cumsum(0, dtype=torch.int32), (1, 0))
+            self.self_attention.attn.prepare_metadata(
+                cu_q_lens,
+                cu_total_seq_lens,
+                self.self_attention.num_heads,
+                self.self_attention.num_heads,
+                block_size,
+            )
 
     def forward(self, hidden_states, session=None):
 
@@ -110,7 +125,7 @@ def test_device_graph_m8_dense_layer():
     session = DummySession()
 
     runner = DeviceGraphRunner(model, device=device)
-
+    model.prepare_attn(hidden_states)
     with torch.inference_mode():
         runner.capture(hidden_states, session=session)
         graph_test_output, _ = runner.replay(test_hidden_states, session=session)

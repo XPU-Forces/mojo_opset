@@ -563,6 +563,30 @@ def paged_prefill_page_aggregation_kernel(
         tl.store(O_block_ptr, accumulator.to(o_ptr.type.element_ty), boundary_check=(0, 1))
 
 
+def paged_attention_prefill_prepare(
+    cu_q_lens,
+    seqlens_kv,
+    num_q_heads,
+    num_kv_heads,
+    gqa_interleave,
+    page_size,
+):
+    cube_num = get_num_cores("cube")
+    CHUNK_SIZE = 128
+    BLOCK_SIZE_N = min(128, triton.next_power_of_2(page_size))
+
+    task_b, task_q_block, task_q_head, core_task_offsets = _build_lpt_task_schedule(
+        cu_q_lens,
+        seqlens_kv,
+        num_q_heads,
+        num_kv_heads,
+        CHUNK_SIZE,
+        BLOCK_SIZE_N,
+        cube_num,
+        gqa_interleave,
+    )
+    return task_b, task_q_block, task_q_head, core_task_offsets
+
 def paged_attention_prefill_impl(
     q: torch.Tensor,
     key_cache: torch.Tensor,
@@ -571,11 +595,21 @@ def paged_attention_prefill_impl(
     seqlens_kv: Optional[torch.Tensor],
     block_tables: torch.Tensor,
     gqa_interleave: bool,
+    task_b: Optional[torch.Tensor],
+    task_q_block: Optional[torch.Tensor],
+    task_q_head: Optional[torch.Tensor],
+    core_task_offsets: Optional[torch.Tensor],
     softmax_scale: Optional[float] = None,
     aux_mask: Optional[torch.Tensor] = None,
     max_q_len: Optional[int] = None,
     max_total_seq_len: Optional[int] = None,
+
 ) -> torch.Tensor:
+    assert task_b is not None
+    assert task_q_block is not None
+    assert task_q_head is not None
+    assert core_task_offsets is not None
+
     _, num_q_heads, head_dim = q.shape
     _, num_kv_heads, page_size, _ = key_cache.shape
     batch_size = cu_q_lens.shape[0] - 1
@@ -600,16 +634,6 @@ def paged_attention_prefill_impl(
     BLOCK_SIZE_N = min(128, triton.next_power_of_2(page_size))
     cube_num = get_num_cores("cube")
     grid = (cube_num,)
-    task_b, task_q_block, task_q_head, core_task_offsets = _build_lpt_task_schedule(
-        cu_q_lens,
-        seqlens_kv,
-        num_q_heads,
-        num_kv_heads,
-        CHUNK_SIZE,
-        BLOCK_SIZE_N,
-        cube_num,
-        gqa_interleave,
-    )
 
     if not (page_size < 128 and 128 % page_size == 0):
         paged_prefill_kernel[grid](
@@ -657,6 +681,8 @@ def paged_attention_prefill_impl(
             hfusion_enable_multiple_consumer_fusion=True,
             intra_cache_num=3,
             inter_cache_num=2,
+            enable_buffer_insert_optimization=True,
+            enable_ub_refine_opt=True,
         )
     else:
         PAGE_AGGREGATION_NUM = 128 // page_size
@@ -705,6 +731,8 @@ def paged_attention_prefill_impl(
             PAGE_AGGREGATION_NUM=PAGE_AGGREGATION_NUM,
             enable_dynamic_cv_pipeline=True,
             enable_cube_block_merge=True,
+            enable_buffer_insert_optimization=True,
+            enable_ub_refine_opt=True,
         )
 
     return o

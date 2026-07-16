@@ -2,7 +2,7 @@ from typing import Optional
 
 import torch
 
-from mojo_opset.backends.ttx.kernels import paged_attention_prefill
+from mojo_opset.backends.ttx.kernels import paged_attention_prefill, paged_attention_prefill_prepare
 from mojo_opset.backends.ttx.kernels import paged_attention_prefill_with_kv_dequant
 from mojo_opset.backends.ttx.kernels import paged_attention_decode
 from mojo_opset.backends.ttx.kernels import paged_attention_decode_with_kv_dequant
@@ -25,10 +25,51 @@ from mojo_opset.experimental import MojoPagedDecodeSWAWithKVDequant
 from mojo_opset.experimental import MojoPagedPrefillGQAWithKVDequant
 from mojo_opset.experimental import MojoPagedPrefillSWAWithKVDequant
 from mojo_opset.experimental import MojoPagedDecodeNstepSWA
+from mojo_opset.utils.platform import get_platform
 
 
 class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
     supported_platforms_list = ["npu", "ilu", "mlu"]
+
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+    ):
+        super().__init__(is_causal, gqa_layout)
+        self.meta_task_b = None
+        self.meta_task_q_block = None
+        self.meta_task_q_head = None
+        self.meta_core_task_offsets = None
+
+    def prepare_metadata(
+        self,
+        cu_q_lens: torch.Tensor,
+        cu_total_seq_lens: torch.Tensor,
+        num_q_heads: int,
+        num_kv_heads: int,
+        page_size: int,
+    ):
+        assert get_platform() == "npu"
+        total_seq_lens = (
+            cu_q_lens[1:] - cu_q_lens[:-1]
+            if cu_total_seq_lens is None
+            else cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
+        )
+
+        (
+            self.meta_task_b,
+            self.meta_task_q_block,
+            self.meta_task_q_head,
+            self.meta_core_task_offsets
+        )= paged_attention_prefill_prepare(
+            cu_q_lens,
+            total_seq_lens,
+            num_q_heads,
+            num_kv_heads,
+            self.gqa_layout == "ABAB",
+            page_size,
+        )
 
     def forward(
         self,
@@ -55,18 +96,36 @@ class TTXPagedPrefillGQA(MojoPagedPrefillGQA):
             else cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
         )
         # max_q_len / max_total_seq_len / kwargs: core·Ixformer API compatibility.
-        output = paged_attention_prefill(
-            q=query,
-            key_cache=key_cache,
-            value_cache=value_cache,
-            cu_q_lens=cu_q_lens,
-            seqlens_kv=total_seq_lens,
-            block_tables=block_tables,
-            gqa_interleave=self.gqa_layout == "ABAB",
-            softmax_scale=softmax_scale,
-            max_q_len=max_q_len,
-            max_total_seq_len=max_total_seq_len,
-        )
+        if get_platform() == "npu":
+            output = paged_attention_prefill(
+                q=query,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                cu_q_lens=cu_q_lens,
+                seqlens_kv=total_seq_lens,
+                block_tables=block_tables,
+                gqa_interleave=self.gqa_layout == "ABAB",
+                task_b=self.meta_task_b,
+                task_q_block=self.meta_task_q_block,
+                task_q_head=self.meta_task_q_head,
+                core_task_offsets=self.meta_core_task_offsets,
+                softmax_scale=softmax_scale,
+                max_q_len=max_q_len,
+                max_total_seq_len=max_total_seq_len,
+            )
+        else:
+            output = paged_attention_prefill(
+                q=query,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                cu_q_lens=cu_q_lens,
+                seqlens_kv=total_seq_lens,
+                block_tables=block_tables,
+                gqa_interleave=self.gqa_layout == "ABAB",
+                softmax_scale=softmax_scale,
+                max_q_len=max_q_len,
+                max_total_seq_len=max_total_seq_len,
+            )
 
         return output
 

@@ -28,6 +28,7 @@ from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.tests.utils import requires_platform_backend
 from mojo_opset.utils.acc import check_tol_diff
+from mojo_opset.utils.platform import get_platform
 
 
 def generate_paged_decode_data(
@@ -481,6 +482,17 @@ def test_paged_prefill_gqa(
         is_causal=True,
         gqa_layout=gqa_layout
     )
+    if get_platform() == "npu":
+        num_q_heads = query.shape[1]
+        num_kv_heads = k_cache.shape[1]
+        page_size = k_cache.shape[2]
+        paged_prefill_attn.prepare_metadata(
+            cu_q_lens,
+            cu_total_seq_lens,
+            num_q_heads,
+            num_kv_heads,
+            page_size,
+        )
 
     paged_prefill_attn_ref = MojoPagedPrefillGQA._registry.get("torch")(
         is_causal=True,
