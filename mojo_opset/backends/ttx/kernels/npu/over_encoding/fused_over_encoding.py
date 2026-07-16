@@ -88,7 +88,7 @@ def over_encoding_decode_kernel(
                 oe_carry = tl.full((MTP_STEP, BLOCK_SIZE_N,), ori_vocab_size, dtype=tl.int64)
 
                 history_ptr = oe_history + oe_history_stride_0 * bid
-                n_gram_offsets = tl.flip(tl.arange(0, MAX_N_GRAM))
+                n_gram_offsets = tl.extra.cann.extension.flip(tl.arange(0, MAX_N_GRAM))
 
                 history_id = tl.load(
                     history_ptr + (oe_history_dim_1 - n_gram_offsets - 1) * oe_history_stride_1
@@ -120,7 +120,7 @@ def over_encoding_decode_kernel(
                 for ele_idx in (tl.static_range if BLOCK_BATCH_SIZE < 4 else tl.range)(
                     0, MTP_STEP * n_grams_size
                 ):
-                    __id = tl.get_element(n_gram_ids, (ele_idx,))
+                    __id = tl.extra.cann.extension.get_element(n_gram_ids, (ele_idx,))
                     __embedding_nf4_dequant__(
                         ele_idx + bid * MTP_STEP * MAX_N_GRAM,
                         __id,
@@ -169,7 +169,7 @@ def over_encoding_decode_kernel(
                 for ele_idx in (tl.static_range if BLOCK_BATCH_SIZE < 4 else tl.range)(
                     0, MTP_STEP * n_grams_size
                 ):
-                    __id = tl.get_element(n_gram_ids, (ele_idx,))
+                    __id = tl.extra.cann.extension.get_element(n_gram_ids, (ele_idx,))
                     __embedding_nf4_dequant__(
                         ele_idx + bid * MTP_STEP * n_grams_size,
                         __id,

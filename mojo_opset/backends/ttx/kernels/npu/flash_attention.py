@@ -19,9 +19,11 @@ def _build_lpt_task_schedule(
         cu_q_lens: torch.Tensor,
         seqlens_kv: Optional[torch.Tensor],
         num_q_heads: int,
+        num_kv_heads: int,
         block_size_m: int,
         block_size_n: int,
         cube_num: int,
+        gqa_interleave: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build a shape-aware static schedule for the 1D Triton grid.
 
@@ -52,8 +54,10 @@ def _build_lpt_task_schedule(
             q_block_end = min((q_block_id + 1) * block_size_m, q_seq_len)
             cost = max(1, triton.cdiv(kv_cache_len + q_block_end, block_size_n))
             for q_head_id in range(num_q_heads):
-                kv_head_id = q_head_id // (num_q_heads // 4)
-                # weighted_tasks.append((cost, seq_no, b_id, q_block_id, q_head_id))
+                if gqa_interleave:
+                    kv_head_id = q_head_id % num_kv_heads
+                else:
+                    kv_head_id = q_head_id // (num_q_heads // num_kv_heads)
                 weighted_tasks.append((b_id, kv_head_id, q_block_id, cost, q_head_id, seq_no))
                 seq_no += 1
 
@@ -70,14 +74,11 @@ def _build_lpt_task_schedule(
     task_q_head = []
     core_task_offsets = [0]
     for tasks in per_core_tasks:
-        # tasks.sort()
         for b_id, q_head_id, q_block_id in tasks:
-            # task_b.append(b_id * 1024 * 12 + q_block_id * 12 + q_head_id)
             task_b.append(b_id)
             task_q_block.append(q_block_id)
             task_q_head.append(q_head_id)
         core_task_offsets.append(len(task_b))
-    # print(max(task_b), max(task_q_block), max(task_q_head))
 
     device = cu_q_lens.device
     return (
@@ -479,7 +480,7 @@ def paged_prefill_page_aggregation_kernel(
 
             # Load (transposed) K block
             k = tl.zeros((PAGE_AGGREGATION_NUM * BLOCK_SIZE_N, BLOCK_SIZE_D), dtype=key_cache_ptr.dtype.element_ty)
-            for page_iter in range(PAGE_AGGREGATION_NUM):
+            for page_iter in tl.extra.cann.extension.parallel(0, PAGE_AGGREGATION_NUM):
                 kv_block_start = (kv_block_id + page_iter) * BLOCK_SIZE_N
                 kv_block_end = min(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
                 kv_block_len = max(kv_block_end - kv_block_start, 0)
@@ -526,7 +527,7 @@ def paged_prefill_page_aggregation_kernel(
             acc = acc * alpha[:, None]
             # Load corresponding V block
             v = tl.zeros((PAGE_AGGREGATION_NUM * BLOCK_SIZE_N, BLOCK_SIZE_D), dtype=value_cache_ptr.dtype.element_ty)
-            for page_iter in range(PAGE_AGGREGATION_NUM):
+            for page_iter in tl.extra.cann.extension.parallel(0, PAGE_AGGREGATION_NUM):
                 kv_block_start = (kv_block_id + page_iter) * BLOCK_SIZE_N
                 kv_block_end = min(kv_block_start + BLOCK_SIZE_N, kv_seq_len)
                 kv_block_len = max(kv_block_end - kv_block_start, 0)
@@ -603,9 +604,11 @@ def paged_attention_prefill_impl(
         cu_q_lens,
         seqlens_kv,
         num_q_heads,
+        num_kv_heads,
         CHUNK_SIZE,
         BLOCK_SIZE_N,
         cube_num,
+        gqa_interleave,
     )
 
     if not (page_size < 128 and 128 % page_size == 0):

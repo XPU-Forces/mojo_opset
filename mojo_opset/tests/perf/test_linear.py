@@ -19,7 +19,7 @@ def generate_random_list(length, total_sum):
 
     diff = total_sum - sum(lst)
     lst[-1] += diff
-    return torch.Tensor(lst).to(torch.int64)
+    return torch.Tensor(lst).to(torch.int32)
 
 
 @pytest.mark.parametrize(

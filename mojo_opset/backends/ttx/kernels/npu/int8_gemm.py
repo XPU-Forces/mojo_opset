@@ -85,8 +85,6 @@ def _int8_gemm_dequant_kernel(
         for k in range(0, K // BLOCK_K):
             a = tl.load(a_ptrs)
             bt = tl.load(bt_ptrs)
-            tl.multibuffer(a, 2)
-            tl.multibuffer(bt, 2)
             acc = tl.dot(a, tl.trans(bt), acc=acc)
             a_ptrs += BLOCK_K * stride_ak
             bt_ptrs += BLOCK_K * stride_btk
@@ -110,7 +108,7 @@ def _pad_to(x, mult):
     return ((x + mult - 1) // mult) * mult
 
 
-def prepare_b(b: torch.Tensor) -> torch.Tensor:
+def prepare_b_impl(b: torch.Tensor) -> torch.Tensor:
     """Transpose B to (N, K) row-major and pad to block boundaries.
 
     For inference: weight B is fixed, call once and reuse.

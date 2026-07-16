@@ -739,7 +739,7 @@ def causal_conv1d_update_kernel_bdt_fwd(
         out_block = tl.trans(out_block, (1, 0))
 
         if SILU_ACTIVATION:
-            out_block = out_block * tl.sigmoid(out_block)
+            out_block = (out_block * tl.sigmoid(out_block)).to(x_ptr.dtype.element_ty)
         tl.store(
             tl.make_block_ptr(
                 out_ptr,

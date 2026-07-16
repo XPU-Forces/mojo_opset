@@ -290,7 +290,13 @@ def embedding_nf4_dequant_impl(
     else:
         codebook = codebook.to(device=LUT_qweight.device, dtype=torch.float16)
 
-    output = torch.empty(
+    # `torch.zeros` (not `torch.empty`) so that rows corresponding to out-of-vocab
+    # tokens — for which the kernel's `token_mask` is False and `tl.store` is
+    # masked out — deterministically read back as zero. Using `torch.empty` here
+    # leaves those rows holding whatever bytes the allocator hands us; on some
+    # runners those bytes happen to be close to zero (test passes), on others
+    # they aren't (test fails with large mismatches at exactly one row).
+    output = torch.zeros(
         (input_flat.numel(), embedding_dim),
         dtype=output_dtype,
         device=input.device,

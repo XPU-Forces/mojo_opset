@@ -718,6 +718,7 @@ def swa_infer_impl(
         BLOCK_M,
         BLOCK_N,
         BLOCK_D,
+        enable_ubuf_saving=True,
     )
     return o
 
@@ -1017,7 +1018,7 @@ def _swa_paged_prefill_aggregation_kernel(
                     mask = tl.full((BLOCK_M, BLOCK_N), 1,  dtype=tl.int1)
 
                 k = tl.zeros((PAGE_AGGREGATION_NUM * BLOCK_N, BLOCK_D), dtype=k_ptr.dtype.element_ty)
-                for page_iter in range(PAGE_AGGREGATION_NUM):
+                for page_iter in tl.extra.cann.extension.parallel(0, PAGE_AGGREGATION_NUM):
                     kv_block_start = (kv_block_id + page_iter) * BLOCK_N
                     kv_block_end = min(kv_block_start + BLOCK_N, kv_seq_len)
                     kv_block_len = max(kv_block_end - kv_block_start, 0)
@@ -1054,7 +1055,7 @@ def _swa_paged_prefill_aggregation_kernel(
                 l_i = l_i * alpha + l_ij
                 acc = acc * alpha[:, None]
                 v = tl.zeros((PAGE_AGGREGATION_NUM * BLOCK_N, BLOCK_D), dtype=v_ptr.dtype.element_ty)
-                for page_iter in range(PAGE_AGGREGATION_NUM):
+                for page_iter in tl.extra.cann.extension.parallel(0, PAGE_AGGREGATION_NUM):
                     kv_block_start = (kv_block_id + page_iter) * BLOCK_N
                     kv_block_end = min(kv_block_start + BLOCK_N, kv_seq_len)
                     kv_block_len = max(kv_block_end - kv_block_start, 0)
@@ -1262,7 +1263,7 @@ def _sdpa_acc_fwd_1xN(
     if mask is not None and mask is not True:
         qk = tl.where(mask, qk, float("-inf"))  # 32B # bool
 
-    m_ij = tl.maximum(m_i, tl.max(qk, 0))  # Scaled max
+    m_ij = tl.maximum(m_i, tl.max(qk, 0,propagate_nan=tl.PropagateNan.ALL),propagate_nan=tl.PropagateNan.ALL)  # Scaled max
     qk = qk - m_ij  # Stabilize
 
     # Softmax weights p = exp(qk)
