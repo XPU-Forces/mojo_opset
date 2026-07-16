@@ -47,6 +47,7 @@ class TTXLightningIndexer(MojoLightningIndexer):
         query = query.contiguous()
         query_scale = query_scale.contiguous()
         key = key.contiguous()
+        key_scale = key_scale.contiguous()
 
         return lightning_indexer_impl(query, query_scale, key, key_scale)
 
