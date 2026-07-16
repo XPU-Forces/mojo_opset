@@ -1842,6 +1842,8 @@ def swa_fwd_impl(
         hfusion_enable_multiple_consumer_fusion=True,
         intra_cache_num=3,
         inter_cache_num=2,
+        enable_buffer_insert_optimization=True,
+        enable_ub_refine_opt = True,
     )
     if output_f32:
         return o, softmax_lse, o_f32
