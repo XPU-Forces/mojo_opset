@@ -37,7 +37,6 @@ silu_bwd_impl = _get_kernel_impl(ttx_backend_module, "silu_bwd_impl")
 dynamic_quant_impl = _get_kernel_impl(ttx_backend_module, "dynamic_quant_impl")
 static_quant_impl = _get_kernel_impl(ttx_backend_module, "static_quant_impl")
 lightning_indexer_impl = _get_kernel_impl(ttx_backend_module, "lightning_indexer_impl")
-lightning_indexer_v2_impl = _get_kernel_impl(ttx_backend_module, "lightning_indexer_v2_impl")
 dequant_impl = _get_kernel_impl(ttx_backend_module, "dequant_impl")
 
 rot_pos_embed_impl = _get_kernel_impl(ttx_backend_module, "rot_pos_embed_impl")
