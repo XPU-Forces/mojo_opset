@@ -62,7 +62,7 @@ def generate_quant_group_gemm_reduce_sum_perf_data(b: int, m: int, k: int, n: in
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_quant_batch_gemm_reduce_sum_perf(x1, weight, x1_scale, x2_scale):
-    op = MojoQuantBatchGemmReduceSum(trans_weight=False, weight=weight)
+    op = MojoQuantBatchGemmReduceSum._registry.get("torch")(trans_weight=False, weight=weight)
 
     def run():
         op(x1, x1_scale, x2_scale)
