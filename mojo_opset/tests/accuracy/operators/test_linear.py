@@ -11,6 +11,9 @@ from mojo_opset.tests.utils import get_torch_device
 from mojo_opset import MojoGroupGemm
 from mojo_opset.experimental import MojoQuantBatchGemmReduceSum
 
+_SKIP_NPU_QUANT_GROUP_GEMM = get_platform() == "npu"
+
+
 def generate_random_list(length, total_sum):
     avg = total_sum // length
     lst = [0] * length
@@ -161,18 +164,10 @@ def test_group_gemm(input, weight, group_list, trans_weight):
         ),
     ],
 )
+@pytest.mark.skipif(_SKIP_NPU_QUANT_GROUP_GEMM, reason="Skipped on NPU due to CANN 8.2 issue")
 @auto_switch_platform()
 @bypass_not_implemented
-def test_quant_batch_gemm_reduce_sum(
-    x1,
-    weight,
-    x1_scale,
-    x2_scale,
-    trans_weight,
-    atol,
-    rtol,
-    enable_npu_internal_format,
-):
+def test_quant_batch_gemm_reduce_sum(x1, weight, x1_scale, x2_scale, trans_weight, atol, rtol):
     quant_gemm = MojoQuantBatchGemmReduceSum(
         trans_weight=trans_weight,
         weight=weight,

@@ -366,7 +366,7 @@ def mojo_perf(
         profile_map = {provider: profiling for provider in provider_names}
     else:
         unknown_profiles = set(profiling) - provider_names
-        if unknown_profiles and not infer_providers:
+        if unknown_profiles:
             raise ValueError(f"profiling contains unregistered providers: {sorted(unknown_profiles)}")
         invalid_profiles = {
             provider: value

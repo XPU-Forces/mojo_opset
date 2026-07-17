@@ -341,18 +341,10 @@ def test_group_gemm(input, weight, group_list, trans_weight):
         ),
     ],
 )
+@pytest.mark.skipif(get_platform() == "npu", reason="Skipped on NPU due to CANN 8.2 issue")
 @auto_switch_platform()
 @bypass_not_implemented
-def test_quant_batch_gemm_reduce_sum(
-    x1,
-    weight,
-    x1_scale,
-    x2_scale,
-    trans_weight,
-    atol,
-    rtol,
-    enable_npu_internal_format,
-):
+def test_quant_batch_gemm_reduce_sum(x1, weight, x1_scale, x2_scale, trans_weight, atol, rtol):
     quant_gemm = MojoQuantBatchGemmReduceSum(
         trans_weight=trans_weight,
         weight=weight,
