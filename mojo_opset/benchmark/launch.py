@@ -5,11 +5,11 @@ reporting machinery. Provider capability checks are applied before dispatch;
 each provider receives only the descriptor cases it supports.
 
 Examples:
-    # run all smoke cases on all NPUs
-    python -m mojo_opset.benchmark.launch --backend NPU
+    # run all smoke cases on all devices (backend is inferred)
+    python -m mojo_opset.benchmark.launch
 
     # restrict provider and devices
-    python -m mojo_opset.benchmark.launch --backend NPU --device 0,1 \
+    python -m mojo_opset.benchmark.launch --device 0,1 \
         --providers torch_npu --preset full
 """
 
@@ -31,6 +31,8 @@ from mojo_opset.benchmark import build_test_cases
 
 from .runner_common import build_provider_map
 from .runner_common import case_provider_support
+from .runner_common import detect_xpu_backend
+from .runner_common import parse_requested_providers
 from .runner_common import select_plugin_paths
 
 FILE_DIR = pathlib.Path(__file__).parent.absolute()
@@ -44,7 +46,13 @@ def parse_args():
     backend_name_list, backend_mod_list = get_submodules("xpu_perf.micro_perf.backends")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 
-    parser.add_argument("--backend", type=str, default="NPU", choices=backend_name_list)
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default=None,
+        choices=backend_name_list,
+        help="xpu-perf backend; default is inferred from the current Mojo platform",
+    )
     parser.add_argument("--op_defs", type=existing_dir_path, default=None)
     parser.add_argument("--vendor_ops", type=existing_dir_path, default=None, action="append")
     parser.add_argument(
@@ -68,8 +76,8 @@ def parse_args():
     parser.add_argument(
         "--providers",
         type=str,
-        default="base,torch_npu,ttx",
-        help="comma-separated provider order; unsupported cases are skipped with a reason",
+        default=None,
+        help="comma-separated providers; default selects base and all available target providers",
     )
     parser.add_argument(
         "--timing",
@@ -83,6 +91,7 @@ def parse_args():
     default_op_defs, default_vendor_ops = select_plugin_paths()
     args.op_defs = args.op_defs or default_op_defs
     args.vendor_ops = args.vendor_ops or [default_vendor_ops]
+    args.backend = args.backend or detect_xpu_backend(backend_name_list)
     args.script_dir = FILE_DIR
     args.backend_name_list = backend_name_list
     args.backend_mod_list = backend_mod_list
@@ -110,17 +119,31 @@ def prepare_provider_matrix(server, test_cases, requested_providers):
     for op_name, cases in test_cases.items():
         provider_map = build_provider_map(server.backend_instance, op_name, requested_providers)
         if not provider_map:
+            if requested_providers is None:
+                logger.info(f"skip {op_name}: no provider is available in this environment")
+                continue
             raise RuntimeError(f"op {op_name!r} has no registered requested providers")
-        available_by_op[op_name] = provider_map
+
         inactive = [
             provider
             for provider in provider_map
             if not any(case_provider_support(op_name, provider, case)[0] for case in cases)
         ]
-        if inactive:
+        if inactive and requested_providers is not None:
             raise RuntimeError(
                 f"op {op_name!r} has no selected cases supported by providers {inactive}"
             )
+        if inactive:
+            provider_map = {
+                provider: op_cls
+                for provider, op_cls in provider_map.items()
+                if provider not in inactive
+            }
+        if not provider_map:
+            logger.info(f"skip {op_name}: no provider supports the selected cases")
+            continue
+
+        available_by_op[op_name] = provider_map
 
         selected = []
         for case in cases:
@@ -143,6 +166,9 @@ def prepare_provider_matrix(server, test_cases, requested_providers):
                 f"op {op_name!r} has no cases supported by the requested providers"
             )
         selected_cases[op_name] = selected
+    if not selected_cases:
+        raise RuntimeError("no benchmark target has a runnable provider in this environment")
+
     return selected_cases, available_by_op
 
 
@@ -155,7 +181,13 @@ def run_provider_matrix(server, test_cases, available_by_op, requested_providers
     }
     original_mapping = server.backend_instance.op_mapping
     try:
-        for provider in requested_providers:
+        if requested_providers is None:
+            provider_order = list(dict.fromkeys(
+                provider for provider_map in available_by_op.values() for provider in provider_map
+            ))
+        else:
+            provider_order = requested_providers
+        for provider in provider_order:
             provider_cases = {}
             provider_indices = {}
             provider_mapping = {}
@@ -225,7 +257,7 @@ def run_bench(args):
     if not raw_test_cases:
         logger.error("No valid test cases found. Exiting.")
         raise SystemExit(1)
-    requested_providers = [name.strip() for name in args.providers.split(",") if name.strip()]
+    requested_providers = parse_requested_providers(args.providers)
 
     with XpuPerfServer(args) as server_instance:
         test_cases, available_by_op = prepare_provider_matrix(

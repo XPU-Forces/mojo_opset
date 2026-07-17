@@ -10,17 +10,53 @@ from xpu_perf.micro_perf.core.op import ProviderRegistry
 
 from mojo_opset.benchmark import build_test_cases
 from mojo_opset.benchmark.api import get_perf_spec
+from mojo_opset.utils.platform import get_platform
 
 HERE = pathlib.Path(__file__).parent.absolute()
 DESCRIPTOR_OP_DEFS = HERE / "plugins" / "op_defs"
-DESCRIPTOR_VENDOR_OPS = HERE / "plugins" / "vendor_ops" / "NPU" / "ops"
+DESCRIPTOR_VENDOR_OPS = HERE / "plugins" / "vendor_ops"
 DEFAULT_PRESET = "smoke"
 
 BASE_PROVIDER = ProviderRegistry.BASE_PROVIDER  # "base"
+PLATFORM_XPU_BACKEND = {
+    "npu": "NPU",
+    "ilu": "ILU",
+    "mlu": "MLU",
+}
 
 
 def select_plugin_paths() -> tuple[pathlib.Path, pathlib.Path]:
     return DESCRIPTOR_OP_DEFS, DESCRIPTOR_VENDOR_OPS
+
+
+def detect_xpu_backend(available_backends=None) -> str:
+    """Map the current Mojo platform to an available xpu-perf backend."""
+
+    platform = get_platform()
+    backend = PLATFORM_XPU_BACKEND.get(platform)
+    if backend is None:
+        raise RuntimeError(
+            f"cannot infer an xpu-perf backend from Mojo platform {platform!r}; "
+            "run in an accelerator environment or pass --backend explicitly"
+        )
+
+    if available_backends is not None and backend not in available_backends:
+        raise RuntimeError(
+            f"Mojo detected platform {platform!r}, which requires xpu-perf backend "
+            f"{backend!r}, but the available backends are {list(available_backends)}"
+        )
+    return backend
+
+
+def parse_requested_providers(value: str | None) -> list[str] | None:
+    """Keep ``None`` distinct from an explicitly supplied provider list."""
+
+    if value is None:
+        return None
+    providers = [name.strip() for name in value.split(",") if name.strip()]
+    if len(providers) != len(set(providers)):
+        raise ValueError(f"provider names must be unique: {providers}")
+    return providers
 
 
 def resolve_test_cases(
@@ -61,14 +97,34 @@ def case_provider_support(
     return False, reason
 
 
-def build_provider_map(backend, op_name: str, requested: list[str]) -> dict:
-    """Map only requested providers, pulling ``base`` from BASE_IMPL_MAPPING."""
+def build_provider_map(
+    backend,
+    op_name: str,
+    requested: list[str] | None,
+) -> dict:
+    """Resolve providers available for one target in this environment.
 
+    Omitting ``--providers`` selects ``base`` followed by the vendor
+    providers resolved by the descriptor. Passing ``--providers`` is a
+    strict filter and may explicitly exclude ``base``.
+    """
+
+    vendor_available = backend.op_mapping.get(op_name, {})
     available = {}
     if op_name in ProviderRegistry.BASE_IMPL_MAPPING:
         available[BASE_PROVIDER] = ProviderRegistry.BASE_IMPL_MAPPING[op_name]
-    available.update(backend.op_mapping.get(op_name, {}))
 
-    if requested:
-        return {name: available[name] for name in requested if name in available}
-    return available
+    if requested is None:
+        spec = get_perf_spec(op_name)
+        available.update(
+            {
+                name: vendor_available[name]
+                for name in spec.providers
+                if name in vendor_available
+            }
+        )
+        return available
+
+    available.update(vendor_available)
+
+    return {name: available[name] for name in requested if name in available}

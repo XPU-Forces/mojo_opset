@@ -70,7 +70,6 @@ CASES = (
     name="mojo_quant_gemm",
     target=MojoQuantGemm,
     cases=CASES,
-    providers=("torch_npu",),
 )
 def quant_gemm_workload(case: Mapping[str, Any]) -> PerfWorkload:
     """Return construction metadata; xpu-perf creates the actual tensors."""

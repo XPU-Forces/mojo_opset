@@ -64,7 +64,6 @@ def _residual_workload(case: Mapping[str, Any], *, with_bias: bool) -> PerfWorkl
     name="mojo_residual_add_rmsnorm",
     target=MojoResidualAddRMSNorm,
     cases=RESIDUAL_CASES,
-    providers=("torch_npu", "ttx"),
 )
 def residual_add_rmsnorm_workload(case: Mapping[str, Any]) -> PerfWorkload:
     return _residual_workload(case, with_bias=False)
@@ -74,7 +73,6 @@ def residual_add_rmsnorm_workload(case: Mapping[str, Any]) -> PerfWorkload:
     name="mojo_residual_add_layernorm",
     target=MojoResidualAddLayerNorm,
     cases=RESIDUAL_CASES,
-    providers=("ttx",),
 )
 def residual_add_layernorm_workload(case: Mapping[str, Any]) -> PerfWorkload:
     return _residual_workload(case, with_bias=True)
@@ -94,7 +92,7 @@ RMSNORM_CASES = tuple(
 )
 
 
-@mojo_perf(name="mojo_rmsnorm", target=MojoRMSNorm, cases=RMSNORM_CASES, providers=("torch_npu", "ttx"))
+@mojo_perf(name="mojo_rmsnorm", target=MojoRMSNorm, cases=RMSNORM_CASES)
 def rmsnorm_workload(case: Mapping[str, Any]) -> PerfWorkload:
     shape = (int(case["batch"]), int(case["tokens"]), int(case["hidden"]))
     hidden = shape[-1]
@@ -124,7 +122,7 @@ LAYERNORM_CASES = tuple(
 )
 
 
-@mojo_perf(name="mojo_layernorm", target=MojoLayerNorm, cases=LAYERNORM_CASES, providers=("ttx",))
+@mojo_perf(name="mojo_layernorm", target=MojoLayerNorm, cases=LAYERNORM_CASES)
 def layernorm_workload(case: Mapping[str, Any]) -> PerfWorkload:
     shape = (int(case["rows"]), int(case["hidden"]))
     hidden = shape[-1]

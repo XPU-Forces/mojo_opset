@@ -143,11 +143,11 @@ def _over_encoding_workload(case: Mapping[str, Any], *, with_embedding: bool) ->
     )
 
 
-@mojo_perf(name="mojo_over_encoding", target=MojoOverEncoding, cases=CASES, providers=("ttx",))
+@mojo_perf(name="mojo_over_encoding", target=MojoOverEncoding, cases=CASES)
 def over_encoding_workload(case: Mapping[str, Any]) -> PerfWorkload:
     return _over_encoding_workload(case, with_embedding=True)
 
 
-@mojo_perf(name="mojo_over_encoding_ngram", target=MojoOverEncodingNGram, cases=CASES, providers=("ttx",))
+@mojo_perf(name="mojo_over_encoding_ngram", target=MojoOverEncodingNGram, cases=CASES)
 def over_encoding_ngram_workload(case: Mapping[str, Any]) -> PerfWorkload:
     return _over_encoding_workload(case, with_embedding=False)

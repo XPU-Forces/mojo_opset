@@ -42,7 +42,6 @@ CASES = tuple(
     name="mojo_causal_conv1d_update_state",
     target=MojoCausalConv1dUpdateState,
     cases=CASES,
-    providers=("ttx",),
 )
 def causal_conv_workload(case: Mapping[str, Any]) -> PerfWorkload:
     batch = int(case["batch"])

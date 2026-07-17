@@ -40,7 +40,7 @@ GROUP_GEMM_CASES = (
 )
 
 
-@mojo_perf(name="mojo_group_gemm", target=MojoGroupGemm, cases=GROUP_GEMM_CASES, providers=("torch_npu", "ttx"))
+@mojo_perf(name="mojo_group_gemm", target=MojoGroupGemm, cases=GROUP_GEMM_CASES)
 def group_gemm_workload(case: Mapping[str, Any]) -> PerfWorkload:
     groups = int(case["groups"])
     tokens_per_group = int(case["tokens_per_group"])
@@ -97,7 +97,6 @@ QUANT_REDUCE_CASES = tuple(
     name="mojo_quant_batch_gemm_reduce_sum",
     target=MojoQuantBatchGemmReduceSum,
     cases=QUANT_REDUCE_CASES,
-    providers=("torch_npu",),
 )
 def quant_batch_gemm_reduce_sum_workload(case: Mapping[str, Any]) -> PerfWorkload:
     batch = int(case["batch"])

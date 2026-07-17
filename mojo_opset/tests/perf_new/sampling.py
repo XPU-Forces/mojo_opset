@@ -30,7 +30,7 @@ TOPK_CASES = tuple(
 )
 
 
-@mojo_perf(name="mojo_topk_sampling", target=MojoTopKSampling, cases=TOPK_CASES, providers=("ttx",))
+@mojo_perf(name="mojo_topk_sampling", target=MojoTopKSampling, cases=TOPK_CASES)
 def topk_sampling_workload(case: Mapping[str, Any]) -> PerfWorkload:
     shape = (int(case["batch"]), int(case["vocab"]))
     return PerfWorkload(
@@ -57,7 +57,7 @@ TOPP_CASES = tuple(
 )
 
 
-@mojo_perf(name="mojo_topp_filter", target=MojoTopPFilter, cases=TOPP_CASES, providers=("ttx",))
+@mojo_perf(name="mojo_topp_filter", target=MojoTopPFilter, cases=TOPP_CASES)
 def topp_filter_workload(case: Mapping[str, Any]) -> PerfWorkload:
     shape = (int(case["batch"]), int(case["vocab"]))
     return PerfWorkload(
@@ -97,7 +97,7 @@ def _reject_workload(case: Mapping[str, Any], *, joined: bool) -> PerfWorkload:
     )
 
 
-@mojo_perf(name="mojo_reject_sampling", target=MojoRejectSampling, cases=REJECT_CASES, providers=("ttx",))
+@mojo_perf(name="mojo_reject_sampling", target=MojoRejectSampling, cases=REJECT_CASES)
 def reject_sampling_workload(case: Mapping[str, Any]) -> PerfWorkload:
     return _reject_workload(case, joined=False)
 
@@ -106,7 +106,6 @@ def reject_sampling_workload(case: Mapping[str, Any]) -> PerfWorkload:
     name="mojo_join_prob_reject_sampling",
     target=MojoJoinProbRejectSampling,
     cases=REJECT_CASES,
-    providers=("ttx",),
 )
 def join_prob_reject_sampling_workload(case: Mapping[str, Any]) -> PerfWorkload:
     return _reject_workload(case, joined=True)

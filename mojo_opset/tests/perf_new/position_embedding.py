@@ -37,7 +37,7 @@ CASES = (
 )
 
 
-@mojo_perf(name="mojo_apply_rope", target=MojoApplyRoPE, cases=CASES, providers=("torch_npu", "ttx"))
+@mojo_perf(name="mojo_apply_rope", target=MojoApplyRoPE, cases=CASES)
 def apply_rope_workload(case: Mapping[str, Any]) -> PerfWorkload:
     batch = int(case["batch"])
     seq_len = int(case["seq_len"])
