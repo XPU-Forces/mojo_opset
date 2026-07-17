@@ -60,7 +60,7 @@ class DummyLayer(nn.Module):
         self.rms_norm_2 = MojoRMSNorm(norm_size=hidden_size)
         self.self_attention = SimpleAttention(hidden_size, num_heads)
         self.ffn = MojoSwiGLUMLP(input_size=hidden_size, output_size=hidden_size, hidden_size=intermediate_size)
-        self.metadata = None
+
     def prepare_attn(self, x):
         if get_platform() == "npu":
             batch_size, seq_len, _ = x.shape

@@ -4,6 +4,7 @@ import torch
 
 from mojo_opset.modeling.qwen3 import torch_qwen3_dense
 from mojo_opset.modeling.qwen3 import mojo_qwen3_dense
+from mojo_opset.modeling.qwen3.mojo_qwen3_dense import Qwen3AttentionBackend
 from mojo_opset.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -21,7 +22,15 @@ def run_single_pass(config, device: str, dtype: torch.dtype, model_data: tuple, 
         device=device,
         block_size=128,
     )
-
+    Qwen3AttentionBackend.init_attention_info(
+        num_heads=config.num_attention_heads,
+        num_key_value_heads=config.num_key_value_heads,
+        block_size=128,
+    )
+    Qwen3AttentionBackend.prepare_prefill_attn(
+        hidden_states_prefill,
+        past_key_values,
+    )
     position_embeddings_prefill = rotary_emb(hidden_states_prefill, position_ids_prefill)
     with torch.no_grad():
         output_prefill = decoder_layer(
