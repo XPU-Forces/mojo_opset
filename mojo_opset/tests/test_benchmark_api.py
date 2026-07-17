@@ -7,6 +7,7 @@ from mojo_opset import MojoGelu
 from mojo_opset.benchmark import PerfWorkload
 from mojo_opset.benchmark import mojo_perf
 from mojo_opset.benchmark import perf_case
+from mojo_opset.benchmark import profile
 from mojo_opset.benchmark import tensor
 from mojo_opset.benchmark.api import get_perf_spec
 from mojo_opset.benchmark.runner_common import build_provider_map
@@ -71,6 +72,17 @@ def test_mojo_perf_rejects_bare_provider_string():
             target=_DummyTarget,
             cases=(),
             providers="ttx",
+        )
+
+
+@pytest.mark.parametrize("provider", ("typo", "ixformer"))
+def test_mojo_perf_inferred_rejects_unknown_profile_provider(provider):
+    with pytest.raises(ValueError, match="profiling contains unregistered providers"):
+        mojo_perf(
+            name="test_unknown_profile_provider",
+            target=_DummyTarget,
+            cases=(),
+            profiling={provider: profile()},
         )
 
 

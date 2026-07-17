@@ -62,14 +62,6 @@ def generate_quant_group_gemm_reduce_sum_perf_data(b: int, m: int, k: int, n: in
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_quant_batch_gemm_reduce_sum_perf(x1, weight, x1_scale, x2_scale):
-    if weight.device.type == "npu":
-        import torch_npu
-
-        torch.npu.config.allow_internal_format = True
-        weight = torch_npu.npu_format_cast(weight.contiguous(), 29)
-        if torch_npu.get_npu_format(weight) != 29:
-            raise RuntimeError("QuantBatchGemmReduceSum perf test requires FRACTAL_NZ weight")
-
     op = MojoQuantBatchGemmReduceSum(trans_weight=False, weight=weight)
 
     def run():

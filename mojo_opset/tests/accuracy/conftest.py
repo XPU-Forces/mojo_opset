@@ -87,23 +87,6 @@ def setup_session_device(request):
         pass
 
 
-@pytest.fixture
-def enable_npu_internal_format():
-    """Temporarily allow private NPU formats for operators that require them."""
-    if get_platform() != "npu":
-        yield
-        return
-
-    import torch_npu
-
-    previous_option = torch_npu._C._npu_getOption("ALLOW_INTERNAL_FORMAT")
-    torch.npu.config.allow_internal_format = True
-    try:
-        yield
-    finally:
-        torch.npu.config.allow_internal_format = previous_option == b"enable"
-
-
 @pytest.fixture(autouse=True)
 def enable_strict_backend_resolution_for_accuracy(monkeypatch):
     if not os.environ.get("MOJO_BACKEND"):

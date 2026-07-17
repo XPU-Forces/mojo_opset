@@ -260,6 +260,9 @@ class GeneratedMojoPerfAdapter(BasicOp):
     def _bind_state(self, tensor_mapping: Mapping[str, torch.Tensor]) -> None:
         for target_attr, tensor_name in self.workload.state.items():
             tensor = tensor_mapping[tensor_name]
+            # Use the direct registry intentionally: get_parameter() raises for a
+            # parameter registered as None, while _parameters preserves that state
+            # without exception-based control flow.
             if target_attr in self._target._parameters:
                 previous = self._target._parameters[target_attr]
                 requires_grad = previous.requires_grad if previous is not None else False
