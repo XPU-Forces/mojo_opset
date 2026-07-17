@@ -128,6 +128,7 @@ gemm_allreduce_impl = _get_kernel_impl(ttx_backend_module, "gemm_allreduce_impl"
 gemm_allreduce_peer_mem_size = _get_kernel_impl(ttx_backend_module, "gemm_allreduce_peer_mem_size")
 gemm_reduce_scatter_impl = _get_kernel_impl(ttx_backend_module, "gemm_reduce_scatter_impl")
 gemm_reduce_scatter_peer_mem_size = _get_kernel_impl(ttx_backend_module, "gemm_reduce_scatter_peer_mem_size")
+hc_post_impl = _get_kernel_impl(ttx_backend_module, "hc_post_impl")
 
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
@@ -945,6 +946,28 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(key_cache), torch.empty_like(value_cache)
 
+    # =====================================
+    # Register HC Post
+    # =====================================
+
+    @torch.library.custom_op("ttx::hc_post", mutates_args={})
+    def hc_post(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> torch.Tensor:
+        return hc_post_impl(x, residual, post, comb)
+
+    @hc_post.register_fake
+    def hc_post_fake(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.empty(residual.shape, dtype=x.dtype, device=x.device)
+
     # TODO(zhangjihang): Support compile mode
     sdpa_infer = sdpa_infer_impl
     paged_attention_decode_with_kv_dequant = paged_attention_decode_with_kv_dequant_impl
@@ -1037,3 +1060,4 @@ else:
     allgather_gemm = allgather_gemm_impl
     gemm_allreduce = gemm_allreduce_impl
     gemm_reduce_scatter = gemm_reduce_scatter_impl
+    hc_post = hc_post_impl
