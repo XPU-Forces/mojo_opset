@@ -47,6 +47,16 @@ def _resolve_call_arg(value: Any, tensor_mapping: Mapping[str, torch.Tensor]) ->
     return value
 
 
+class _BenchmarkFunctionContext:
+    """Minimal autograd context used to isolate direct Function.backward timing."""
+
+    def __init__(self):
+        self.saved_tensors: tuple[torch.Tensor | None, ...] = ()
+
+    def save_for_backward(self, *tensors: torch.Tensor | None) -> None:
+        self.saved_tensors = tensors
+
+
 class KernelSelectionError(ValueError):
     """A requested profiler kernel selector did not match any event."""
 
@@ -168,7 +178,14 @@ class GeneratedMojoPerfAdapter(BasicOp):
         self.io_bytes = self.read_bytes + self.write_bytes
         self.calc_flops = self.workload.flops
 
+        self._is_function_backward = False
         if issubclass(self.perf_spec.target, MojoOperator):
+            if self.perf_spec.phase != "forward":
+                raise ValueError("Mojo Operators only support phase='forward'")
+            if self.workload.forward_args is not None:
+                raise ValueError(
+                    "PerfWorkload.forward_args are only valid for Mojo Function backward"
+                )
             if self.workload.target_factory is None:
                 self._target: Callable[..., Any] = self.backend_target_cls(
                     **dict(self.workload.op_kwargs)
@@ -189,10 +206,22 @@ class GeneratedMojoPerfAdapter(BasicOp):
                 raise ValueError("PerfWorkload.target_factory is only valid for Mojo Operators")
             if self.workload.kwargs:
                 raise ValueError(
-                    "Mojo Function.apply accepts positional arguments only; "
+                    "Mojo Functions accept positional arguments only; "
                     "place tensor references and literals in PerfWorkload.args"
                 )
-            self._target = self.backend_target_cls.apply
+            if self.perf_spec.phase == "backward":
+                if self.workload.forward_args is None:
+                    raise ValueError(
+                        "Mojo Function backward requires PerfWorkload.forward_args"
+                    )
+                self._target = None
+                self._is_function_backward = True
+            else:
+                if self.workload.forward_args is not None:
+                    raise ValueError(
+                        "PerfWorkload.forward_args are only valid for Mojo Function backward"
+                    )
+                self._target = self.backend_target_cls.apply
             self._is_operator = False
         else:
             raise TypeError(
@@ -255,6 +284,18 @@ class GeneratedMojoPerfAdapter(BasicOp):
         mappings = self._create_tensors_func(instance_num)
         if self._is_operator and self.workload.state:
             self._bind_state(mappings[0])
+        if self._is_function_backward:
+            self._function_contexts = {}
+            with torch.no_grad():
+                for tensor_mapping in mappings:
+                    ctx = _BenchmarkFunctionContext()
+                    forward_args = [
+                        _resolve_call_arg(value, tensor_mapping)
+                        for value in self.workload.forward_args
+                    ]
+                    self.backend_target_cls.forward(ctx, *forward_args)
+                    self._function_contexts[id(tensor_mapping)] = ctx
+            self.backend.device_synchronize()
         return mappings
 
     def _bind_state(self, tensor_mapping: Mapping[str, torch.Tensor]) -> None:
@@ -275,15 +316,25 @@ class GeneratedMojoPerfAdapter(BasicOp):
                 setattr(self._target, target_attr, tensor)
 
     def vendor_impl_run(self, tensor_mapping: Mapping[str, torch.Tensor]):
+        target = self._target
+        if self._is_function_backward:
+            try:
+                ctx = self._function_contexts[id(tensor_mapping)]
+            except KeyError as err:
+                raise RuntimeError(
+                    "Function backward tensors were not prepared by create_tensors"
+                ) from err
+            target = partial(self.backend_target_cls.backward, ctx)
+
         if self.workload.run is not None:
-            return self.workload.run(self._target, tensor_mapping)
+            return self.workload.run(target, tensor_mapping)
 
         args = [_resolve_call_arg(value, tensor_mapping) for value in self.workload.args]
         kwargs = {
             name: _resolve_call_arg(value, tensor_mapping)
             for name, value in self.workload.kwargs.items()
         }
-        return self._target(*args, **kwargs)
+        return target(*args, **kwargs)
 
     def _resolve_profile_spec(self) -> ProfileSpec:
         configured = self.perf_spec.profiles[self.xpu_provider]
@@ -363,7 +414,7 @@ def register_vendor_specs(provider: str) -> int:
         name = _class_name("XpuPerfVendor", spec.name, provider)
         generated = type(
             name,
-            (),
+            (GeneratedMojoPerfAdapter,),
             {
                 "__module__": __name__,
                 "__qualname__": name,
