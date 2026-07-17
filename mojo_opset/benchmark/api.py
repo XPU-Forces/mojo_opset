@@ -296,18 +296,34 @@ def mojo_perf(
     cases: Sequence[PerfCase],
     target: type,
     providers: (
-        Mapping[str, str | PerfProviderSpec] | Iterable[str | PerfProviderSpec]
-    ) = (),
+        Mapping[str, str | PerfProviderSpec] | Iterable[str | PerfProviderSpec] | None
+    ) = None,
     base_backend: str = "torch",
     profiling: ProfileSpec | Mapping[str, ProfileSpec] | None = None,
     engine: str = "ComputeEngine",
 ):
-    """Register the complete perf description of a Mojo Operator or Function."""
+    """Register the complete perf description of a Mojo Operator or Function.
 
-    if not isinstance(target, type) or not callable(getattr(target, "get_backend_impl", None)):
+    By default, vendor providers are inferred from the target's backends
+    registered for the current platform. Passing ``providers`` explicitly
+    replaces inference with an allowlist and optional capability declarations.
+    """
+
+    if (
+        not isinstance(target, type)
+        or not callable(getattr(target, "get_backend_impl", None))
+        or not callable(getattr(target, "get_registered_backends", None))
+    ):
         raise TypeError("mojo_perf target must be a Mojo Operator or Function class")
 
-    if isinstance(providers, Mapping):
+    infer_providers = providers is None
+    if infer_providers:
+        raw_provider_map = {
+            backend: backend
+            for backend in target.get_registered_backends()
+            if backend != base_backend
+        }
+    elif isinstance(providers, Mapping):
         raw_provider_map = dict(providers)
     else:
         if isinstance(providers, (str, PerfProviderSpec)):
@@ -350,7 +366,7 @@ def mojo_perf(
         profile_map = {provider: profiling for provider in provider_names}
     else:
         unknown_profiles = set(profiling) - provider_names
-        if unknown_profiles:
+        if unknown_profiles and not infer_providers:
             raise ValueError(f"profiling contains unregistered providers: {sorted(unknown_profiles)}")
         invalid_profiles = {
             provider: value

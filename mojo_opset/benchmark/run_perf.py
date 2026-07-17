@@ -1,10 +1,9 @@
 """Lightweight single-process perf runner for mojo_opset benchmark op_defs.
 
-Reuses xpu-perf's micro_perf machinery (the real ``BackendNPU.perf`` timing loop,
+Reuses xpu-perf's micro_perf backend timing loop,
 ``BasicOp.summary`` metrics, and ``export_reports`` report format) but runs every
 case in-process -- no server, engine, or subprocess spawning. Each case is run for
-every provider (``base`` torch reference + registered vendors such as
-``torch_npu``) and a side-by-side comparison table is printed.
+every selected provider, and a side-by-side comparison table is printed.
 
 Examples:
     # default: run descriptor cases tagged "smoke" on device 0
@@ -21,21 +20,31 @@ import json
 
 import prettytable
 
-from xpu_perf.micro_perf.backends.NPU.backend_npu import BackendNPU
 from xpu_perf.micro_perf.core.common_utils import export_reports
+from xpu_perf.micro_perf.core.common_utils import get_submodules
 
 from .runner_common import (
     BASE_PROVIDER,
     DEFAULT_PRESET,
     build_provider_map,
     case_provider_support,
+    detect_xpu_backend,
+    parse_requested_providers,
     resolve_test_cases,
     select_plugin_paths,
 )
 
 
 def parse_args():
+    backend_names, backend_modules = get_submodules("xpu_perf.micro_perf.backends")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default=None,
+        choices=backend_names,
+        help="xpu-perf backend; default is inferred from the current Mojo platform",
+    )
     parser.add_argument(
         "--preset",
         type=str,
@@ -52,8 +61,8 @@ def parse_args():
     parser.add_argument(
         "--providers",
         type=str,
-        default="base,torch_npu,ttx",
-        help="comma-separated provider order; unavailable providers are skipped per target",
+        default=None,
+        help="comma-separated providers; default selects base and all available target providers",
     )
     parser.add_argument(
         "--timing",
@@ -67,7 +76,11 @@ def parse_args():
         default=None,
         help="if set, also export micro_perf-style jsonl/csv reports here",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.backend = args.backend or detect_xpu_backend(backend_names)
+    args.backend_names = backend_names
+    args.backend_modules = backend_modules
+    return args
 
 
 def run_case(backend, op_name, op_provider, op_cls, case):
@@ -163,11 +176,13 @@ def build_info_dict(backend, device_id):
 
 def main():
     args = parse_args()
-    requested_providers = [p.strip() for p in args.providers.split(",") if p.strip()]
+    requested_providers = parse_requested_providers(args.providers)
     requested_ops = [name.strip() for name in args.ops.split(",") if name.strip()] if args.ops else None
 
     op_defs, vendor_ops = select_plugin_paths()
-    backend = BackendNPU(backend="NPU", op_defs=op_defs, vendor_ops=[vendor_ops])
+    backend_module = args.backend_modules[args.backend]
+    backend_class = getattr(backend_module, "Backend" + args.backend)
+    backend = backend_class(backend=args.backend, op_defs=op_defs, vendor_ops=[vendor_ops])
     backend.set_device(args.device)
     backend.load_all_ops()
 
@@ -179,7 +194,19 @@ def main():
     bench_results = {}
     for op_name, cases in test_cases.items():
         provider_map = build_provider_map(backend, op_name, requested_providers)
+        if requested_providers is None:
+            provider_map = {
+                provider: op_cls
+                for provider, op_cls in provider_map.items()
+                if any(case_provider_support(op_name, provider, case)[0] for case in cases)
+            }
         if not provider_map:
+            if requested_providers is None:
+                print(
+                    f"SKIP {op_name}: no provider is available for "
+                    f"the selected cases on xpu-perf backend {args.backend}"
+                )
+                continue
             raise RuntimeError(f"op {op_name!r} has no registered requested providers")
 
         print("#" * 100)
@@ -216,12 +243,15 @@ def main():
         if not executed_cases:
             raise RuntimeError(f"op {op_name!r} has no cases supported by the requested providers")
         inactive = [provider for provider, count in provider_run_counts.items() if count == 0]
-        if inactive:
+        if inactive and requested_providers is not None:
             raise RuntimeError(
                 f"op {op_name!r} has no selected cases supported by providers {inactive}"
             )
         report_cases[op_name] = executed_cases
         bench_results[op_name] = op_results
+
+    if not bench_results:
+        raise RuntimeError("no benchmark target has a runnable provider in this environment")
 
     if args.report_dir:
         info_dict = build_info_dict(backend, args.device)

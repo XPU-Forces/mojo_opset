@@ -22,7 +22,7 @@ GELU_CASES = (
 )
 
 
-@mojo_perf(name="mojo_gelu", target=MojoGelu, cases=GELU_CASES, providers=("torch_npu", "ttx"))
+@mojo_perf(name="mojo_gelu", target=MojoGelu, cases=GELU_CASES)
 def gelu_workload(case: Mapping[str, Any]) -> PerfWorkload:
     shape = (int(case["rows"]), int(case["cols"]))
     value_dtype = case["dtype"]
@@ -38,7 +38,7 @@ SILU_CASES = (
 )
 
 
-@mojo_perf(name="mojo_silu", target=MojoSilu, cases=SILU_CASES, providers=("torch_npu", "ttx"))
+@mojo_perf(name="mojo_silu", target=MojoSilu, cases=SILU_CASES)
 def silu_workload(case: Mapping[str, Any]) -> PerfWorkload:
     shape = (int(case["rows"]), int(case["cols"]))
     value_dtype = case["dtype"]
@@ -59,7 +59,6 @@ SILU_FUNCTION_CASES = (
     name="mojo_silu_function",
     target=MojoSiluFunction,
     cases=SILU_FUNCTION_CASES,
-    providers=("ttx",),
 )
 def silu_function_workload(case: Mapping[str, Any]) -> PerfWorkload:
     shape = (int(case["rows"]), int(case["cols"]))
@@ -75,7 +74,7 @@ SWIGLU_CASES = (
 )
 
 
-@mojo_perf(name="mojo_swiglu", target=MojoSwiGLU, cases=SWIGLU_CASES, providers=("torch_npu", "ttx"))
+@mojo_perf(name="mojo_swiglu", target=MojoSwiGLU, cases=SWIGLU_CASES)
 def swiglu_workload(case: Mapping[str, Any]) -> PerfWorkload:
     shape = (int(case["rows"]), int(case["cols"]))
     value_dtype = case["dtype"]

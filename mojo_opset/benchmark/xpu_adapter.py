@@ -344,12 +344,19 @@ def register_base_specs() -> None:
         globals()[name] = registered
 
 
-def register_vendor_specs(provider: str) -> None:
-    """Register descriptors supporting *provider* during vendor_ops loading."""
+def register_vendor_specs(provider: str) -> int:
+    """Register descriptors supported by *provider* on the current platform."""
 
+    registered_count = 0
     for spec in iter_perf_specs():
         if provider not in spec.providers:
             continue
+        backend = spec.providers[provider].backend
+        try:
+            spec.target.get_backend_impl(backend, strict=True)
+        except KeyError:
+            continue
+
         name = _class_name("XpuPerfVendor", spec.name, provider)
         generated = type(
             name,
@@ -358,9 +365,26 @@ def register_vendor_specs(provider: str) -> None:
                 "__module__": __name__,
                 "__qualname__": name,
                 "perf_op_name": spec.name,
-                "mojo_backend": spec.providers[provider].backend,
+                "mojo_backend": backend,
                 "xpu_provider": provider,
             },
         )
         registered = ProviderRegistry.register_vendor_impl(spec.name, provider)(generated)
         globals()[name] = registered
+        registered_count += 1
+    return registered_count
+
+
+def register_available_vendor_specs() -> tuple[str, ...]:
+    """Register descriptor providers whose Mojo backends exist in this process."""
+
+    provider_names = list(dict.fromkeys(
+        provider
+        for spec in iter_perf_specs()
+        for provider in spec.providers
+    ))
+    registered_providers = []
+    for provider in provider_names:
+        if register_vendor_specs(provider):
+            registered_providers.append(provider)
+    return tuple(registered_providers)

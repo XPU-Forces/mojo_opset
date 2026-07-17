@@ -29,7 +29,7 @@ CASES = tuple(
 )
 
 
-@mojo_perf(name="mojo_store_lowrank", target=MojoStoreLowrank, cases=CASES, providers=("ttx",))
+@mojo_perf(name="mojo_store_lowrank", target=MojoStoreLowrank, cases=CASES)
 def store_lowrank_workload(case: Mapping[str, Any]) -> PerfWorkload:
     blocks = int(case["blocks"])
     heads = int(case["heads"])

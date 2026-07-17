@@ -35,7 +35,7 @@ CASES = tuple(
 )
 
 
-@mojo_perf(name="mojo_lightning_indexer", target=MojoLightningIndexer, cases=CASES, providers=("ttx",))
+@mojo_perf(name="mojo_lightning_indexer", target=MojoLightningIndexer, cases=CASES)
 def lightning_indexer_workload(case: Mapping[str, Any]) -> PerfWorkload:
     batch = int(case["batch"])
     m = int(case["m"])

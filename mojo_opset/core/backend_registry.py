@@ -117,6 +117,10 @@ class MojoBackendRegistry:
 
         return self._registry[backend_name]
 
+    def registered_backends(self) -> tuple[str, ...]:
+        """Return backend names registered for the current platform in priority order."""
+        return tuple(self._registry)
+
     def sort(self):
         def _prio_key(item):
             name = item[0]

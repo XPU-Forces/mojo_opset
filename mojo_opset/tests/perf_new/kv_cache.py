@@ -70,7 +70,7 @@ def _metadata_shape(
     return tuple(metadata.shape)
 
 
-@mojo_perf(name="mojo_store_paged_kv_cache", target=MojoStorePagedKVCache, cases=CASES, providers=("ttx",))
+@mojo_perf(name="mojo_store_paged_kv_cache", target=MojoStorePagedKVCache, cases=CASES)
 def store_paged_kv_workload(case: Mapping[str, Any]) -> PerfWorkload:
     batch = int(case["batch"])
     kv_heads = int(case["kv_heads"])
