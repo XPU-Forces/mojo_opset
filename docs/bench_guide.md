@@ -1,7 +1,7 @@
 # mojo_opset 性能测试
 
 `mojo_opset.benchmark` 使用 xpu-perf 执行性能测试。开发者为每个 Operator 或 Function 维护一个
-`mojo_opset/tests/perf_new/<target>.py` 描述文件，定义测试参数和调用方式即可。
+`mojo_opset/tests/perf_new/operators/<target>.py` 或 `functions/<target>.py` 描述文件，定义测试参数和调用方式即可。
 
 ## 基本机制
 
@@ -111,33 +111,72 @@ def quant_gemm_workload(case):
 | `inputs` / `outputs` | tensor 的 shape、dtype 和可选 creator |
 | `op_kwargs` | 构造 Operator 的参数 |
 | `state` | 将生成的 weight、cache 等绑定到 Operator 属性 |
-| `args` / `kwargs` | 调用 target 的参数；简单情况可省略 `args` 自动推导 |
+| `args` / `kwargs` | 计时调用的参数；简单情况可省略 `args` 自动推导 |
+| `forward_args` | Function backward 在计时外准备 ctx 的 forward 参数 |
 | `flops` | 用于报告计算吞吐 |
 
 
 ## 编写 Function spec
 
-Function 使用相同写法，框架会调用后端 Function 的 `apply(...)`：
+Function forward 继续通过后端 Function 的 `apply(...)` 执行，名称显式带 `_forward`：
 
 ```python
 from mojo_opset import MojoSiluFunction
 
 
-@mojo_perf(
-    name="mojo_silu_function",
-    target=MojoSiluFunction,
-    cases=(perf_case("1024x1024", tags=("smoke",), m=1024, n=1024),),
+CASES = (
+    perf_case("1024x1024", tags=("smoke",), rows=1024, cols=1024),
 )
-def silu_workload(case):
-    shape = (case["m"], case["n"])
+
+
+@mojo_perf(
+    name="mojo_silu_function_forward",
+    target=MojoSiluFunction,
+    cases=CASES,
+)
+def silu_forward_workload(case):
+    shape = (case["rows"], case["cols"])
     return PerfWorkload(
-        inputs={"input": tensor(shape, torch.float16, creator=torch.randn)},
-        outputs={"output": tensor(shape, torch.float16)},
+        inputs={"x": tensor(shape, torch.float16, creator=torch.randn)},
+        outputs={"y": tensor(shape, torch.float16)},
     )
 ```
 
-Function 参数顺序与 `inputs` 不一致，或包含标量时，显式填写 `args`。字符串表示 tensor 名；字面字符串
-使用 `literal("value")`。
+需要测试 backward 时，再增加一个 `phase="backward"` descriptor：
+
+```python
+@mojo_perf(
+    name="mojo_silu_function_backward",
+    target=MojoSiluFunction,
+    cases=CASES,
+    phase="backward",
+)
+def silu_backward_workload(case):
+    shape = (case["rows"], case["cols"])
+    return PerfWorkload(
+        inputs={
+            "x": tensor(shape, torch.float16, creator=torch.randn),
+            "dy": tensor(shape, torch.float16, creator=torch.randn),
+        },
+        outputs={"dx": tensor(shape, torch.float16)},
+        forward_args=("x",),
+    )
+```
+
+框架为每份输入在计时外调用对应 provider 的 `forward(ctx, ...)`，同步设备后只重复测量
+`backward(ctx, ...)`。`args` 会自动推导为没有出现在 `forward_args` 中的输入，上例为
+`("dy",)`。开发者不需要创建 ctx 或编写 prepare。
+
+Function 参数包含标量时直接写入参数元组；字符串表示 tensor 名，字面字符串使用
+`literal("value")`。Function 不支持关键字调用。
+
+运行同一 Function 的前反向：
+
+```bash
+python -m mojo_opset.benchmark.run_perf \
+  --ops mojo_silu_function_forward,mojo_silu_function_backward \
+  --providers base,ttx
+```
 
 ## Provider 限制
 

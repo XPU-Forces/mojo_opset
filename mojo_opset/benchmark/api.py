@@ -27,6 +27,7 @@ ProviderSupport = Callable[[Mapping[str, Any]], bool]
 TimingMode = Literal["profiler", "event"]
 KernelMatch = Literal["exact", "contains", "regex"]
 LatencyReduction = Literal["span", "sum"]
+FunctionPhase = Literal["forward", "backward"]
 
 
 def _serialize_case_value(value: Any) -> Any:
@@ -122,15 +123,17 @@ class PerfWorkload:
     values are passed literally. When ``args`` is omitted, input tensors are
     passed positionally in declaration order, excluding tensors bound through
     ``state`` or referenced by ``kwargs``. Use ``literal("value")`` for a
-    literal string. A custom ``run`` receives one callable for either target
-    kind: an Operator instance, or a Function implementation's ``apply``
-    method.
+    literal string. For Function backward, ``forward_args`` are used once
+    outside timing to prepare the context; inferred ``args`` exclude those
+    tensors. A custom ``run`` receives the measured callable: an Operator
+    instance, Function ``apply``, or context-bound Function ``backward``.
     """
 
     inputs: Mapping[str, TensorSpec]
     outputs: Mapping[str, TensorSpec]
     op_kwargs: Mapping[str, Any] = field(default_factory=dict)
     state: Mapping[str, str] = field(default_factory=dict)
+    forward_args: tuple[Any, ...] | None = None
     args: tuple[Any, ...] | None = None
     kwargs: Mapping[str, Any] = field(default_factory=dict)
     flops: int = 0
@@ -142,12 +145,20 @@ class PerfWorkload:
     write_bytes: int | float | None = None
 
     def __post_init__(self):
+        if self.forward_args is not None:
+            object.__setattr__(self, "forward_args", tuple(self.forward_args))
+
         if self.args is None:
             if self.run is None:
                 keyword_tensors = {
                     value for value in self.kwargs.values() if isinstance(value, str)
                 }
-                omitted = set(self.state.values()) | keyword_tensors
+                forward_tensors = {
+                    value
+                    for value in (self.forward_args or ())
+                    if isinstance(value, str)
+                }
+                omitted = set(self.state.values()) | keyword_tensors | forward_tensors
                 inferred_args = tuple(name for name in self.inputs if name not in omitted)
             else:
                 inferred_args = ()
@@ -159,6 +170,9 @@ class PerfWorkload:
         references = {
             value for value in (*self.args, *self.kwargs.values()) if isinstance(value, str)
         }
+        references.update(
+            value for value in (self.forward_args or ()) if isinstance(value, str)
+        )
         references.update(self.state.values())
         missing = references - input_names
         if missing:
@@ -272,6 +286,7 @@ class PerfTargetSpec:
     providers: Mapping[str, PerfProviderSpec]
     profiles: Mapping[str, ProfileSpec]
     engine: str
+    phase: FunctionPhase
 
     def resolve_case_params(self, task: Mapping[str, Any]) -> Mapping[str, Any]:
         case_id = task.get("__case_id__")
@@ -301,12 +316,15 @@ def mojo_perf(
     base_backend: str = "torch",
     profiling: ProfileSpec | Mapping[str, ProfileSpec] | None = None,
     engine: str = "ComputeEngine",
+    phase: FunctionPhase = "forward",
 ):
     """Register the complete perf description of a Mojo Operator or Function.
 
     By default, vendor providers are inferred from the target's backends
     registered for the current platform. Passing ``providers`` explicitly
     replaces inference with an allowlist and optional capability declarations.
+    Function descriptors may set ``phase="backward"`` for direct backward
+    timing; Operator descriptors only support the default forward phase.
     """
 
     if (
@@ -315,6 +333,13 @@ def mojo_perf(
         or not callable(getattr(target, "get_registered_backends", None))
     ):
         raise TypeError("mojo_perf target must be a Mojo Operator or Function class")
+    if phase not in ("forward", "backward"):
+        raise ValueError("mojo_perf phase must be 'forward' or 'backward'")
+    if phase == "backward":
+        from mojo_opset.core.function import MojoFunction
+
+        if not issubclass(target, MojoFunction):
+            raise TypeError("mojo_perf phase='backward' is only valid for Mojo Functions")
 
     infer_providers = providers is None
     if infer_providers:
@@ -395,6 +420,7 @@ def mojo_perf(
             providers=provider_map,
             profiles=profile_map,
             engine=engine,
+            phase=phase,
         )
         previous = _SPECS.get(name)
         if previous is not None and previous.build is not builder:
@@ -414,7 +440,9 @@ def discover_perf_specs(package_name: str = "mojo_opset.tests.perf_new") -> None
 
     package = importlib.import_module(package_name)
     module_names = sorted(
-        module.name for module in pkgutil.iter_modules(package.__path__, prefix=f"{package.__name__}.")
+        module.name for module in pkgutil.walk_packages(
+            package.__path__, prefix=f"{package.__name__}."
+        )
     )
     for module_name in module_names:
         importlib.import_module(module_name)

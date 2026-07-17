@@ -1,5 +1,6 @@
 """Declarative performance benchmark API for Mojo Operators and Functions."""
 
+from .api import FunctionPhase
 from .api import LiteralArg
 from .api import PerfCase
 from .api import PerfProviderSpec
@@ -16,6 +17,7 @@ from .api import profile
 from .api import tensor
 
 __all__ = [
+    "FunctionPhase",
     "LiteralArg",
     "PerfCase",
     "PerfProviderSpec",

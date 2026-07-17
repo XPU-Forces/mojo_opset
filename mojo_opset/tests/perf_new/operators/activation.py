@@ -7,7 +7,6 @@ import torch
 
 from mojo_opset import MojoGelu
 from mojo_opset import MojoSilu
-from mojo_opset import MojoSiluFunction
 from mojo_opset import MojoSwiGLU
 from mojo_opset.benchmark import PerfWorkload
 from mojo_opset.benchmark import mojo_perf
@@ -45,26 +44,6 @@ def silu_workload(case: Mapping[str, Any]) -> PerfWorkload:
     return PerfWorkload(
         inputs={"x": tensor(shape, value_dtype, creator=torch.rand)},
         outputs={"output": tensor(shape, value_dtype)},
-        flops=4 * shape[0] * shape[1],
-    )
-
-
-SILU_FUNCTION_CASES = (
-    perf_case("smoke_1024x1024", tags=("smoke",), rows=1024, cols=1024),
-    perf_case("full_4096x4096", tags=("full",), rows=4096, cols=4096),
-)
-
-
-@mojo_perf(
-    name="mojo_silu_function",
-    target=MojoSiluFunction,
-    cases=SILU_FUNCTION_CASES,
-)
-def silu_function_workload(case: Mapping[str, Any]) -> PerfWorkload:
-    shape = (int(case["rows"]), int(case["cols"]))
-    return PerfWorkload(
-        inputs={"input": tensor(shape, torch.float16, creator=torch.randn)},
-        outputs={"output": tensor(shape, torch.float16)},
         flops=4 * shape[0] * shape[1],
     )
 
