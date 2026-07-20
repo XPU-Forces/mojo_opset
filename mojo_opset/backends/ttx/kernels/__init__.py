@@ -56,6 +56,7 @@ swiglu_bwd_impl = _get_kernel_impl(ttx_backend_module, "swiglu_bwd_impl")
 rmsnorm_fwd_impl = _get_kernel_impl(ttx_backend_module, "rmsnorm_fwd_impl")
 rmsnorm_bwd_impl = _get_kernel_impl(ttx_backend_module, "rmsnorm_bwd_impl")
 rmsnorm_infer_impl = _get_kernel_impl(ttx_backend_module, "rmsnorm_infer_impl")
+rms_norm_dynamic_quant_impl = _get_kernel_impl(ttx_backend_module, "rms_norm_dynamic_quant_impl")
 layernorm_infer_impl = _get_kernel_impl(ttx_backend_module, "layernorm_infer_impl")
 layernorm_bwd_impl = _get_kernel_impl(ttx_backend_module, "layernorm_bwd_impl")
 layernorm_fwd_impl = _get_kernel_impl(ttx_backend_module, "layernorm_fwd_impl")
@@ -956,6 +957,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     swa_fwd = swa_fwd_impl
     swa_bwd = swa_bwd_impl
     group_rmsnorm = group_rmsnorm_impl
+    rms_norm_dynamic_quant = rms_norm_dynamic_quant_impl
     embedding_nf4_dequant = embedding_nf4_dequant_impl
     n_gram_decode = n_gram_decode_impl
     n_gram_prefill = n_gram_prefill_impl
@@ -986,6 +988,7 @@ else:
     rmsnorm_fwd = rmsnorm_fwd_impl
     rmsnorm_bwd = rmsnorm_bwd_impl
     rmsnorm_infer = rmsnorm_infer_impl
+    rms_norm_dynamic_quant = rms_norm_dynamic_quant_impl
     layernorm_fwd = layernorm_fwd_impl
     layernorm_bwd = layernorm_bwd_impl
     layernorm_infer = layernorm_infer_impl
