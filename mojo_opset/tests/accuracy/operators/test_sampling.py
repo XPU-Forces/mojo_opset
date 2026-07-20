@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from mojo_opset.tests.utils import bypass_not_implemented
-
+from mojo_opset.utils.platform import get_torch_device
 from mojo_opset import MojoApplyPenaltiesTempurate
 from mojo_opset import MojoJoinProbRejectSampling
 from mojo_opset import MojoRejectSampling
@@ -34,7 +34,8 @@ def test_topk_sampling(shape, topk, min_tokens_to_keep):
 )
 @bypass_not_implemented
 def test_topp_sampling(shape, topk, topp, min_tokens_to_keep):
-    logits = torch.randn(shape, dtype=torch.float32)
+    device = get_torch_device()
+    logits = torch.randn(shape, dtype=torch.float32).to(device)
     top_p_sampling = MojoTopPSampling(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk)
     top_p_sampling_ref = MojoTopPSampling._registry.get("torch")(
         top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk
@@ -68,9 +69,11 @@ def test_topp_sampling(shape, topk, topp, min_tokens_to_keep):
 )
 @bypass_not_implemented
 def test_topp_filter(shape, topk, topp, min_tokens_to_keep):
-    logits = torch.randn(shape, dtype=torch.float32)
+    device = get_torch_device()
+    logits = torch.randn(shape, dtype=torch.float32).to(device)
     top_p_filter = MojoTopPFilter()
     top_p_filter_ref = MojoTopPFilter._registry.get("torch")()
+
     ref_probs, ref_idx = top_p_filter_ref(logits.clone(), topp, min_tokens_to_keep, topk)
     npu_probs, npu_idx = top_p_filter(logits.clone(), topp, min_tokens_to_keep, topk)
 
