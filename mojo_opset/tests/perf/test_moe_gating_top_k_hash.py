@@ -14,7 +14,10 @@ DSV4_SCORING = 2
     "experts, routed_scaling_factor",
     [(256, 1.5), (384, 2.5)],
 )
-@pytest.mark.parametrize("num_tokens", [1, 8, 16, 32, 64, 128])
+@pytest.mark.parametrize(
+    "num_tokens",
+    [1, 16, 64, 128, 256, 512, 1024, 4096, 8192],
+)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
