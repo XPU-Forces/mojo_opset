@@ -92,9 +92,7 @@ m_grouped_matmul_capturable_impl = _get_kernel_impl(ttx_backend_module, "m_group
 k_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "k_grouped_matmul_impl")
 
 moe_gating_impl = _get_kernel_impl(ttx_backend_module, "moe_gating_impl")
-moe_gating_top_k_hash_infer_impl = _get_kernel_impl(
-    ttx_backend_module, "moe_gating_top_k_hash_infer_impl"
-)
+moe_gating_top_k_hash_infer_impl = _get_kernel_impl(ttx_backend_module, "moe_gating_top_k_hash_infer_impl")
 moe_dispatch_impl = _get_kernel_impl(ttx_backend_module, "moe_dispatch_impl")
 moe_experts_impl = _get_kernel_impl(ttx_backend_module, "moe_experts_impl")
 moe_combine_impl = _get_kernel_impl(ttx_backend_module, "moe_combine_impl")

@@ -72,9 +72,12 @@ def _moe_gating_top_k_hash_kernel(
 
         if norm_type == NORM_SOFTMAX:
             logits_for_max = tl.where(expert_mask, logits, float("-inf"))
-            row_max = tl.max(logits_for_max, axis=0)
-            exp_logits = tl.exp(logits - row_max)
-            exp_logits = tl.where(expert_mask, exp_logits, 0.0)
+            row_max = tl.max(
+                logits_for_max,
+                axis=0,
+                propagate_nan=tl.PropagateNan.ALL,
+            )
+            exp_logits = tl.exp(tl.where(expert_mask, logits - row_max, float("-inf")))
             sum_exp = tl.sum(exp_logits, axis=0)
             scores = exp_logits / sum_exp
         elif norm_type == NORM_SIGMOID:
@@ -140,12 +143,12 @@ def _moe_gating_dsa_k_kernel(
     k_offsets = tl.arange(0, BLOCK_K)
     k_mask = k_offsets < k
 
+    x_ub = tle.dsa.alloc(
+        [BLOCK_E],
+        dtype=x_ptr.dtype.element_ty,
+        mem_addr_space=tle.dsa.ascend.UB,
+    )
     for row in range(pid, row_count, tl.num_programs(0)):
-        x_ub = tle.dsa.alloc(
-            [BLOCK_E],
-            dtype=x_ptr.dtype.element_ty,
-            mem_addr_space=tle.dsa.ascend.UB,
-        )
         tle.dsa.copy(x_ptr + row * expert_count + row_offsets, x_ub, [expert_count])
 
         token_id = tl.load(input_ids_ptr + row).to(tl.int64)

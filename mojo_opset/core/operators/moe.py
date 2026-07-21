@@ -358,7 +358,7 @@ class MojoMoEGatingTopKHash(MojoOperator):
         elif self.norm_type == 1:
             scores = torch.sigmoid(logits)
         elif self.norm_type == 2:
-            scores = torch.sqrt(torch.log1p(torch.exp(logits)))
+            scores = torch.sqrt(F.softplus(logits))
         else:
             raise ValueError(f"norm_type must be 0, 1, or 2, got {self.norm_type}")
 
