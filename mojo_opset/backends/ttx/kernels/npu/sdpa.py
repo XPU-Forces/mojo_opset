@@ -167,10 +167,17 @@ def get_autotune_config():
     return configs
 
 
-# @triton.autotune(
-#     configs=get_autotune_config(),
-#     key=["BSZ", "Q_HEAD_NUM", "SEQ", "HEAD_DIM"],  # 加入 shape 相关的关键参数
-# )
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 512}),
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 256}),
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 512}),
+    ],
+    key=["BSZ", "Q_HEAD_NUM", "SEQ", "HEAD_DIM"],
+)
 @triton.jit
 def _sdpa_infer_kernel(
     Q,
@@ -841,8 +848,6 @@ def sdpa_infer_impl(
         KV_HEAD_NUM=kv_head_num,
         SEQ=seq_length,
         HEAD_DIM=head_dim,
-        BLOCK_M=128,
-        BLOCK_N=512,
         enable_ubuf_saving=True,
         enable_hivm_auto_cv_balance=True,
         multibuffer=True,  # 控制开double_buffer
