@@ -26,7 +26,10 @@ def get_num_cores(op_type="vector"):
         if op_type == "vector"
         else triton.runtime.driver.active.utils.get_device_properties("npu")["num_aicore"]
     )
-
+    
+def is_910() -> bool:
+    target=triton.runtime.driver.active.get_current_target()
+    return "Ascend910" in target.arch
 
 # npu triton only
 exp = tl.exp
