@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from mojo_opset.tests.utils import bypass_not_implemented
-
+from mojo_opset.utils.platform import get_torch_device
 from mojo_opset import MojoApplyPenaltiesTempurate
 from mojo_opset import MojoJoinProbRejectSampling
 from mojo_opset import MojoRejectSampling
@@ -34,14 +34,34 @@ def test_topk_sampling(shape, topk, min_tokens_to_keep):
 )
 @bypass_not_implemented
 def test_topp_sampling(shape, topk, topp, min_tokens_to_keep):
-    logits = torch.randn(shape, dtype=torch.float32)
+    device = get_torch_device()
+    logits = torch.randn(shape, dtype=torch.float32).to(device)
     top_p_sampling = MojoTopPSampling(top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk)
     top_p_sampling_ref = MojoTopPSampling._registry.get("torch")(
         top_p=topp, min_tokens_to_keep=min_tokens_to_keep, rand_top_k=topk
     )
-
-    top_p_sampling.forward_diff_with(top_p_sampling_ref, logits)
-
+    # 两个实现采用不同采样策略（torch.multinomial 逆CDF vs 类Gumbel-max），
+    # 单次采样的 token 不可逐个比对。改为对同一 logits 大量重复采样，
+    # 比较返回概率 out_probs 的统计均值和标准差：
+    # - 均值收敛到 sum(p_i^2)，反映采样分布的一阶特征；
+    # - 标准差反映分布的离散程度。
+    # 两者均应收敛到同一理论值（采样噪声 ~ O(1/sqrt(N))）。
+    num_samples = 200
+    ref_probs_list = []
+    npu_probs_list = []
+    for _ in range(num_samples):
+        ref_p, _ = top_p_sampling_ref(logits.clone())
+        npu_p, _ = top_p_sampling(logits.clone())
+        ref_probs_list.append(ref_p.float())
+        npu_probs_list.append(npu_p.float())
+    ref_all = torch.cat(ref_probs_list, dim=1)
+    npu_all = torch.cat(npu_probs_list, dim=1)
+    ref_mean = ref_all.mean(dim=1, keepdim=True)
+    npu_mean = npu_all.mean(dim=1, keepdim=True)
+    ref_std = ref_all.std(dim=1, keepdim=True)
+    npu_std = npu_all.std(dim=1, keepdim=True)
+    torch.testing.assert_close(npu_mean, ref_mean, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(npu_std, ref_std, atol=1e-2, rtol=1e-2)
 
 @pytest.mark.parametrize(
     "shape, topk, topp, min_tokens_to_keep",
@@ -49,18 +69,24 @@ def test_topp_sampling(shape, topk, topp, min_tokens_to_keep):
 )
 @bypass_not_implemented
 def test_topp_filter(shape, topk, topp, min_tokens_to_keep):
-    logits = torch.randn(shape, dtype=torch.float32)
+    device = get_torch_device()
+    logits = torch.randn(shape, dtype=torch.float32).to(device)
     top_p_filter = MojoTopPFilter()
     top_p_filter_ref = MojoTopPFilter._registry.get("torch")()
 
-    top_p_filter.forward_diff_with(
-        top_p_filter_ref,
-        logits=logits,
-        top_p=topp,
-        min_tokens_to_keep=min_tokens_to_keep,
-        rand_top_k=topk,
+    ref_probs, ref_idx = top_p_filter_ref(logits.clone(), topp, min_tokens_to_keep, topk)
+    npu_probs, npu_idx = top_p_filter(logits.clone(), topp, min_tokens_to_keep, topk)
+
+    torch.testing.assert_close(
+        npu_probs.float(), ref_probs.float(), atol=1e-2, rtol=1e-2
     )
 
+    ref_idx_sorted, _ = ref_idx.sort(dim=-1)
+    npu_idx_sorted, _ = npu_idx.sort(dim=-1)
+    assert torch.equal(ref_idx_sorted, npu_idx_sorted), (
+        f"Selected token indices do not match! "
+        f"Expected: {ref_idx_sorted}, Got: {npu_idx_sorted}"
+    )
 
 @pytest.mark.parametrize(
     "batch_size, vocab_size, spec_step",
@@ -101,17 +127,17 @@ def test_reject_sampler(batch_size, vocab_size, spec_step):
 @bypass_not_implemented
 def test_join_prob_reject_sampler(batch_size, vocab_size, spec_step):
     torch.manual_seed(42)
-    target_logits = torch.randn((batch_size, 1 + spec_step, vocab_size), dtype=torch.float32)
+    target_probs = torch.softmax(torch.randn((batch_size, 1 + spec_step, vocab_size), dtype=torch.float32), dim=-1)
     draft_tokens = torch.randint(0, vocab_size, (batch_size, spec_step))
     draft_probs = torch.ones((batch_size, spec_step), dtype=torch.float32)
 
     reject_join_prob_sampling = MojoJoinProbRejectSampling()
     ref_join_prob_sampling = MojoJoinProbRejectSampling._registry.get("torch")()
 
-    batch_size = target_logits.shape[0]
+    batch_size = target_probs.shape[0]
 
-    ref_token_ids, ref_accept_len = ref_join_prob_sampling(target_logits, draft_tokens, draft_probs, 42)
-    ttx_token_ids, ttx_accept_len = reject_join_prob_sampling(target_logits, draft_tokens, draft_probs, 42)
+    ref_token_ids, ref_accept_len = ref_join_prob_sampling(target_probs, draft_tokens, draft_probs, 42)
+    ttx_token_ids, ttx_accept_len = reject_join_prob_sampling(target_probs, draft_tokens, draft_probs, 42)
 
     range_mask = torch.arange(spec_step + 1).expand(batch_size, -1).to(ref_accept_len.device)
 

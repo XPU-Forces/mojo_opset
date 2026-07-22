@@ -11,7 +11,13 @@ from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 from mojo_opset.backends.ttx.kernels.utils import input_guard
 from mojo_opset.backends.ttx.kernels.utils import prepare_chunk_indices
 
-
+@triton.autotune(
+    configs=[
+        triton.Config({"BD": BD})
+        for BD in [128, 256, 4096]
+    ],
+    key=["T", "D"],
+)
 @triton.heuristics(
     {
         "HAS_WEIGHT": lambda args: args["weight"] is not None,
@@ -44,8 +50,8 @@ def causal_conv1d_fwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     NUM_CHKS: tl.int32,
-    NUM_BLKS_D: tl.int32,
 ):
+    NUM_BLKS_D = tl.cdiv(D, BD)
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
 
@@ -406,9 +412,6 @@ def causal_conv1d_fwd_impl(
 
     BT = min(32, triton.next_power_of_2(triton.cdiv(max(16, B * T), NUM_CORES)))
 
-    BD = 256
-    assert D % BD == 0, "D must be divisible by BD."
-    NUM_BLKS_D = triton.cdiv(D, BD)
 
     if cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -436,10 +439,8 @@ def causal_conv1d_fwd_impl(
         D=D,
         W=W,
         BT=BT,
-        BD=BD,
         ACTIVATION=activation,
         NUM_CHKS=NUM_CHKS,
-        NUM_BLKS_D=NUM_BLKS_D,
     )
 
     final_state = None

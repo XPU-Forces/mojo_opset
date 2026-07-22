@@ -4,6 +4,7 @@ import torch
 from mojo_opset import MojoQuantGemm
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.utils.platform import get_torch_device
 
 
 def _make_gemm_dequant_perf_data(m, k, n, trans_weight):
@@ -45,12 +46,13 @@ def _make_gemm_dequant_perf_data(m, k, n, trans_weight):
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
 def test_quant_gemm_perf(x_i8, w_i8, x_scale, w_scale, output_dtype, trans_weight):
+    device = get_torch_device()
     op = MojoQuantGemm(
         in_features=x_i8.shape[1],
         out_features=w_scale.numel(),
         output_dtype=output_dtype,
         trans_weight=trans_weight,
-    )
+    ).to(device)
     op.load_state_dict(
         {
             "weight": w_i8,

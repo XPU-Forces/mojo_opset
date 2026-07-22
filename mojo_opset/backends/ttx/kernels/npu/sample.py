@@ -952,9 +952,8 @@ def _join_prob_reject_sampler_kernel(
     target_probs = tl.load(batch_target_probs_ptr + spec_offset * vocab_size + draft_token_ids)
 
     ratio = target_probs / draft_probs
-
+    ratio = tl.clamp(ratio, 0, 1)
     cum_probs = tl.cumprod(ratio, axis=0)
-    cum_probs = tl.clamp(cum_probs, 0, 1)
     cum_rands = tl.cumprod(uniform_rand, axis=0)
 
     tl.store(batch_cum_probs_ptr + spec_offset, cum_probs)
