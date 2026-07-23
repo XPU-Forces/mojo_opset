@@ -1157,7 +1157,7 @@ def flex_attention_bwd_impl(
         USE_PACKED_PARTIAL_MASK=bm["use_packed_partial_mask"],
         limit_auto_multi_buffer_buffer="no-limit",
         hfusion_enable_multiple_consumer_fusion=True,
-        unit_flag=True,
+        #unit_flag=True,
         limit_auto_multi_buffer_of_local_buffer="no-l0c",
         intra_cache_num=2,
         inter_cache_num=1,
