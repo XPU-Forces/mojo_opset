@@ -21,6 +21,7 @@ from .layernorm import layernorm_fwd_impl
 from .layernorm import layernorm_infer_impl
 from .lightning_indexer import lightning_indexer_impl
 from .quant import dynamic_quant_impl
+from .rms_norm_dynamic_quant import rms_norm_dynamic_quant_impl
 from .rmsnorm import rmsnorm_bwd_impl
 from .rmsnorm import rmsnorm_fwd_impl
 from .rmsnorm import rmsnorm_infer_impl
@@ -85,6 +86,7 @@ __all__ = [
     "fused_linear_cross_entropy_1d_fwd_impl",
     "gelu_bwd_impl",
     "gelu_fwd_impl",
+    "rms_norm_dynamic_quant_impl",
     "rmsnorm_bwd_impl",
     "rmsnorm_fwd_impl",
     "rmsnorm_infer_impl",

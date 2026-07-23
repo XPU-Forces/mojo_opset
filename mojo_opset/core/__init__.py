@@ -74,6 +74,7 @@ from .operators.normalization import MojoResidualAddLayerNormQuant
 from .operators.normalization import MojoResidualAddRMSNorm
 from .operators.normalization import MojoResidualAddRMSNormQuant
 from .operators.normalization import MojoRMSNorm
+from .operators.normalization import MojoRMSNormDynamicQuant
 from .operators.normalization import MojoRMSNormQuant
 
 """ position_embedding """
@@ -158,6 +159,7 @@ __all__ = [
 
     "MojoLayerNorm",
     "MojoRMSNorm",
+    "MojoRMSNormDynamicQuant",
     "MojoGroupRMSNorm",
     "MojoRMSNormQuant",
     "MojoLayerNormQuant",
