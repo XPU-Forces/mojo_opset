@@ -61,8 +61,13 @@ def _make_quant_weights(
     down_quant_group_size: int,
     down_weight_dtype: Union[torch.dtype, str],
 ):
-    up_weight_fp = torch.randn(num_experts, intermediate_size * 2, hidden_size, dtype=torch.float32) * 0.01
-    down_weight_fp = torch.randn(num_experts, hidden_size, intermediate_size, dtype=torch.float32) * 0.01
+    # Keep int4 packing off NPU because its bitwise ops may fall back to TBE.
+    up_weight_fp = (
+        torch.randn(num_experts, intermediate_size * 2, hidden_size, dtype=torch.float32, device="cpu") * 0.01
+    )
+    down_weight_fp = (
+        torch.randn(num_experts, hidden_size, intermediate_size, dtype=torch.float32, device="cpu") * 0.01
+    )
     up_weight, up_weight_scale = _quantize_weight_per_group(up_weight_fp, up_quant_group_size, up_weight_dtype)
     down_weight, down_weight_scale = _quantize_weight_per_group(down_weight_fp, down_quant_group_size, down_weight_dtype)
     return up_weight, up_weight_scale.bfloat16(), down_weight, down_weight_scale.bfloat16()
