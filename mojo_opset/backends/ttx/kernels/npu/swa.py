@@ -1555,7 +1555,7 @@ def swa_paged_decode_impl(
         triton.Config({"BLOCK_M": BM, "BLOCK_N": BN, "multibuffer": MF})
         for BM in [128]
         for BN in [128]
-        for MF in [False]
+        for MF in [True]
     ],
     key=["HEAD_DIM"],
 )
@@ -1840,12 +1840,15 @@ def swa_fwd_impl(
         head_dim,
         BLOCK_D,
         output_f32,
-        limit_auto_multi_buffer_buffer="no-limit",
+        limit_auto_multi_buffer_buffer="only-cube",
         hfusion_enable_multiple_consumer_fusion=True,
         intra_cache_num=3,
         inter_cache_num=2,
         enable_buffer_insert_optimization=True,
         enable_ub_refine_opt = True,
+        enable_dynamic_cv_pipeline=False,
+        enable_preload=True,
+        enable_vf_operand_substitution=True,
     )
     if output_f32:
         return o, softmax_lse, o_f32
@@ -1933,6 +1936,8 @@ def _sdpa_single_block_bwd_dkdv(
 
     # Load (transposed) K block
     q = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero")
+    tl.extra.cann.extension.compile_hint(q, "cv_pipeline_lazy_load", True)
+
     # q_T = tl.trans(q)
     # qkT = tl.dot(k, q_T)  # [BLOCK_N, BLOCK_M]
     k_T = tl.trans(k)
@@ -1952,6 +1957,8 @@ def _sdpa_single_block_bwd_dkdv(
     # -- Compute dV ----
     # dv = pT @ do
     do = tl.load(DO_block_ptr, boundary_check=(0, 1), padding_option="zero")
+    tl.extra.cann.extension.compile_hint(do, "cv_pipeline_lazy_load", True)
+
     dv = tl.dot(tl.trans(p_cast), do, dv_ptr)
 
     # -- Compute dS ----
@@ -1993,6 +2000,7 @@ def _sdpa_single_block_bwd_dq(
 
     # Load (transposed) K block
     k = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
+    tl.extra.cann.extension.compile_hint(k, "cv_pipeline_lazy_load", True)
     k_T = tl.trans(k)
     qk = tl.dot(q, k_T)  # [BLOCK_M, BLOCK_N]
     # tl.extra.cann.extension.compile_hint(qk, "tile_cube_loop")
@@ -2595,6 +2603,8 @@ def swa_bwd_impl(
         unit_flag=unit_flag,
         limit_auto_multi_buffer_of_local_buffer="no-l0c",
         intra_cache_num=1,
+        enable_dynamic_cv_pipeline=False,
+        enable_preload=True,
     )
     _swa_bwd_dq_kernel[grid](
         dq,
@@ -2644,6 +2654,8 @@ def swa_bwd_impl(
         limit_auto_multi_buffer_of_local_buffer="no-l0c",
         intra_cache_num=3,
         inter_cache_num=2,
+        enable_dynamic_cv_pipeline=False,
+        enable_preload=True,
     )
 
     return dq, dk, dv
