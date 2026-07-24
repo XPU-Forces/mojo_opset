@@ -1,3 +1,5 @@
+from . import _dispatch  # noqa: F401  populates sys.modules with per-SoC dispatched kernels
+
 from .convolution import causal_conv1d_bwd_impl
 from .convolution import causal_conv1d_fwd_impl
 from .convolution import causal_conv1d_update_bdt_impl
