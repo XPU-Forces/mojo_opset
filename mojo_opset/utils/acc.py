@@ -28,6 +28,12 @@ def check_tol_diff(
     """
     if isinstance(norm, tuple) or isinstance(norm, list):
         for idx, (norm_i, ref_i) in enumerate(zip(norm, ref)):
+            if norm_i is None and ref_i is None:
+                continue
+            if norm_i is None or ref_i is None:
+                raise AssertionError(
+                    f"Mismatched None at output[{idx}]: norm={type(norm_i)}, ref={type(ref_i)}"
+                )
             check_tol_diff(
                 norm_i,
                 ref_i,

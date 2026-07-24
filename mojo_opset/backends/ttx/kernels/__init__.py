@@ -92,6 +92,7 @@ m_grouped_matmul_capturable_impl = _get_kernel_impl(ttx_backend_module, "m_group
 k_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "k_grouped_matmul_impl")
 
 moe_gating_impl = _get_kernel_impl(ttx_backend_module, "moe_gating_impl")
+moe_gating_top_k_hash_infer_impl = _get_kernel_impl(ttx_backend_module, "moe_gating_top_k_hash_infer_impl")
 moe_dispatch_impl = _get_kernel_impl(ttx_backend_module, "moe_dispatch_impl")
 moe_experts_impl = _get_kernel_impl(ttx_backend_module, "moe_experts_impl")
 moe_combine_impl = _get_kernel_impl(ttx_backend_module, "moe_combine_impl")
@@ -956,6 +957,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     swa_fwd = swa_fwd_impl
     swa_bwd = swa_bwd_impl
     group_rmsnorm = group_rmsnorm_impl
+    moe_gating_top_k_hash_infer = moe_gating_top_k_hash_infer_impl
     embedding_nf4_dequant = embedding_nf4_dequant_impl
     n_gram_decode = n_gram_decode_impl
     n_gram_prefill = n_gram_prefill_impl
@@ -1011,6 +1013,7 @@ else:
     m_grouped_matmul_capturable = m_grouped_matmul_capturable_impl
     k_grouped_matmul = k_grouped_matmul_impl
     moe_gating = moe_gating_impl
+    moe_gating_top_k_hash_infer = moe_gating_top_k_hash_infer_impl
     moe_dispatch = moe_dispatch_impl
     moe_experts = moe_experts_impl
     moe_combine = moe_combine_impl

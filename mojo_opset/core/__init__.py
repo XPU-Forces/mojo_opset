@@ -62,6 +62,7 @@ from .operators.moe import MojoMoE
 from .operators.moe import MojoMoECombine
 from .operators.moe import MojoMoEDispatch
 from .operators.moe import MojoMoEGating
+from .operators.moe import MojoMoEGatingTopKHash
 from .operators.moe import MojoQuantExperts
 from .operators.moe import MojoQuantMoE
 
@@ -150,6 +151,7 @@ __all__ = [
 
     "MojoMoE",
     "MojoMoEGating",
+    "MojoMoEGatingTopKHash",
     "MojoMoEDispatch",
     "MojoExperts",
     "MojoMoECombine",

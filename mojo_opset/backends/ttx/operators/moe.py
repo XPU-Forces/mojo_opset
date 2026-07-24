@@ -5,12 +5,14 @@ from mojo_opset.backends.ttx.kernels import moe_combine
 from mojo_opset.backends.ttx.kernels import moe_dispatch
 from mojo_opset.backends.ttx.kernels import moe_experts
 from mojo_opset.backends.ttx.kernels import moe_gating
+from mojo_opset.backends.ttx.kernels import moe_gating_top_k_hash_infer
 from mojo_opset.backends.ttx.kernels import quant_moe_experts
 from mojo_opset.core import MojoExperts
 from mojo_opset.core import MojoMoE
 from mojo_opset.core import MojoMoECombine
 from mojo_opset.core import MojoMoEDispatch
 from mojo_opset.core import MojoMoEGating
+from mojo_opset.core import MojoMoEGatingTopKHash
 from mojo_opset.core import MojoQuantExperts
 from mojo_opset.core import MojoQuantMoE
 
@@ -32,6 +34,27 @@ class TTXMoEGating(MojoMoEGating):
         """
         assert self.gate_weight.dtype == torch.float32
         return moe_gating(hidden_states, self.gate_weight, self.top_k)
+
+
+class TTXMoEGatingTopKHash(MojoMoEGatingTopKHash):
+    supported_platforms_list = ["npu"]
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        input_ids: torch.Tensor = None,
+        tid2eid: torch.Tensor = None,
+    ):
+        return moe_gating_top_k_hash_infer(
+            x,
+            self.k,
+            input_ids=input_ids,
+            tid2eid=tid2eid,
+            routed_scaling_factor=self.routed_scaling_factor,
+            eps=self.eps,
+            norm_type=self.norm_type,
+            out_flag=self.out_flag,
+        )
 
 
 class TTXMoEDispatch(MojoMoEDispatch):
