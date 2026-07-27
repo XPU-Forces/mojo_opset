@@ -29,6 +29,179 @@ from ..utils import libentry
 
 
 @libentry()
+@triton.heuristics({"BLOCK_D": lambda args: triton.next_power_of_2(int(args["embedding_dim"]))})
+@triton.jit
+def _embedding_nf4_dequant_row_kernel(
+    out_ptr,           # [N, D] - typed as output_dtype
+    input_ptr,         # [N]    - integer token indices
+    qweight_ptr,       # [V, D/2] int8, packed NF4 (two 4-bit values per byte)
+    scale_ptr,         # [V, D/GROUP_SIZE] float32
+    mean_ptr,          # [V, D/GROUP_SIZE] float32
+    codebook_ptr,      # [16] float16 - NF4 codebook
+    N,
+    embedding_dim,
+    qweight_stride_0,
+    qweight_stride_1,
+    scale_stride_0,
+    scale_stride_1,
+    mean_stride_0,
+    mean_stride_1,
+    out_stride_0,
+    out_stride_1,
+    vocab_start_id,
+    vocab_size,
+    GROUP_SIZE: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    pid_n = tl.program_id(0).to(tl.int64)
+
+    token_id_raw = tl.load(input_ptr + pid_n, mask=pid_n < N, other=-1).to(tl.int64)
+    local_id = token_id_raw - tl.cast(vocab_start_id, tl.int64)
+    valid = (pid_n < N) & (local_id >= tl.cast(0, tl.int64)) & (local_id < tl.cast(vocab_size, tl.int64))
+    safe_id = tl.where(valid, local_id, tl.cast(0, tl.int64))
+
+    half_offs = tl.arange(0, BLOCK_D // 2)
+    half_mask = valid & (half_offs < (embedding_dim // 2))
+
+    packed = tl.load(
+        qweight_ptr + safe_id * qweight_stride_0 + half_offs * qweight_stride_1,
+        mask=half_mask,
+        other=0,
+    ).to(tl.int32)
+
+    low_nf4 = packed & 0x0F
+    high_nf4 = (packed >> 4) & 0x0F
+
+    low_out_idx = half_offs * 2
+    high_out_idx = low_out_idx + 1
+    low_mask = valid & (low_out_idx < embedding_dim)
+    high_mask = valid & (high_out_idx < embedding_dim)
+    low_store_mask = (pid_n < N) & (low_out_idx < embedding_dim)
+    high_store_mask = (pid_n < N) & (high_out_idx < embedding_dim)
+
+    low_val = tl.load(codebook_ptr + low_nf4, mask=low_mask, other=0.0).to(tl.float32)
+    high_val = tl.load(codebook_ptr + high_nf4, mask=high_mask, other=0.0).to(tl.float32)
+
+    low_group = low_out_idx // GROUP_SIZE
+    high_group = high_out_idx // GROUP_SIZE
+
+    low_scale = tl.load(
+        scale_ptr + safe_id * scale_stride_0 + low_group * scale_stride_1,
+        mask=low_mask,
+        other=0.0,
+    ).to(tl.float32)
+    low_mean = tl.load(
+        mean_ptr + safe_id * mean_stride_0 + low_group * mean_stride_1,
+        mask=low_mask,
+        other=0.0,
+    ).to(tl.float32)
+    high_scale = tl.load(
+        scale_ptr + safe_id * scale_stride_0 + high_group * scale_stride_1,
+        mask=high_mask,
+        other=0.0,
+    ).to(tl.float32)
+    high_mean = tl.load(
+        mean_ptr + safe_id * mean_stride_0 + high_group * mean_stride_1,
+        mask=high_mask,
+        other=0.0,
+    ).to(tl.float32)
+
+    low_out = tl.where(valid, low_val * low_scale + low_mean, 0.0)
+    high_out = tl.where(valid, high_val * high_scale + high_mean, 0.0)
+
+    base = pid_n * out_stride_0
+    tl.store(out_ptr + base + low_out_idx * out_stride_1, low_out, mask=low_store_mask)
+    tl.store(out_ptr + base + high_out_idx * out_stride_1, high_out, mask=high_store_mask)
+
+
+@libentry()
+@triton.heuristics({"BLOCK_D": lambda args: triton.next_power_of_2(int(args["embedding_dim"]))})
+@triton.jit
+def _embedding_nf4_dequant_tiled_kernel(
+    out_ptr,
+    input_ptr,
+    qweight_ptr,
+    scale_ptr,
+    mean_ptr,
+    codebook_ptr,
+    N,
+    embedding_dim,
+    qweight_stride_0,
+    qweight_stride_1,
+    scale_stride_0,
+    scale_stride_1,
+    mean_stride_0,
+    mean_stride_1,
+    out_stride_0,
+    out_stride_1,
+    vocab_start_id,
+    vocab_size,
+    GROUP_SIZE: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_TOKENS: tl.constexpr,
+):
+    base_n = tl.program_id(0).to(tl.int64) * BLOCK_TOKENS
+    half_offs = tl.arange(0, BLOCK_D // 2)
+    low_out_idx = half_offs * 2
+    high_out_idx = low_out_idx + 1
+
+    for k in tl.static_range(0, BLOCK_TOKENS):
+        pid_n = base_n + k
+        token_id_raw = tl.load(input_ptr + pid_n, mask=pid_n < N, other=-1).to(tl.int64)
+        local_id = token_id_raw - tl.cast(vocab_start_id, tl.int64)
+        valid = (pid_n < N) & (local_id >= tl.cast(0, tl.int64)) & (local_id < tl.cast(vocab_size, tl.int64))
+        safe_id = tl.where(valid, local_id, tl.cast(0, tl.int64))
+        half_mask = valid & (half_offs < (embedding_dim // 2))
+
+        packed = tl.load(
+            qweight_ptr + safe_id * qweight_stride_0 + half_offs * qweight_stride_1,
+            mask=half_mask,
+            other=0,
+        ).to(tl.int32)
+
+        low_nf4 = packed & 0x0F
+        high_nf4 = (packed >> 4) & 0x0F
+        low_mask = valid & (low_out_idx < embedding_dim)
+        high_mask = valid & (high_out_idx < embedding_dim)
+        low_store_mask = (pid_n < N) & (low_out_idx < embedding_dim)
+        high_store_mask = (pid_n < N) & (high_out_idx < embedding_dim)
+
+        low_val = tl.load(codebook_ptr + low_nf4, mask=low_mask, other=0.0).to(tl.float32)
+        high_val = tl.load(codebook_ptr + high_nf4, mask=high_mask, other=0.0).to(tl.float32)
+
+        low_group = low_out_idx // GROUP_SIZE
+        high_group = high_out_idx // GROUP_SIZE
+
+        low_scale = tl.load(
+            scale_ptr + safe_id * scale_stride_0 + low_group * scale_stride_1,
+            mask=low_mask,
+            other=0.0,
+        ).to(tl.float32)
+        low_mean = tl.load(
+            mean_ptr + safe_id * mean_stride_0 + low_group * mean_stride_1,
+            mask=low_mask,
+            other=0.0,
+        ).to(tl.float32)
+        high_scale = tl.load(
+            scale_ptr + safe_id * scale_stride_0 + high_group * scale_stride_1,
+            mask=high_mask,
+            other=0.0,
+        ).to(tl.float32)
+        high_mean = tl.load(
+            mean_ptr + safe_id * mean_stride_0 + high_group * mean_stride_1,
+            mask=high_mask,
+            other=0.0,
+        ).to(tl.float32)
+
+        low_out = tl.where(valid, low_val * low_scale + low_mean, 0.0)
+        high_out = tl.where(valid, high_val * high_scale + high_mean, 0.0)
+
+        base = pid_n * out_stride_0
+        tl.store(out_ptr + base + low_out_idx * out_stride_1, low_out, mask=low_store_mask)
+        tl.store(out_ptr + base + high_out_idx * out_stride_1, high_out, mask=high_store_mask)
+
+
+@libentry()
 @triton.heuristics(
     {
         "BLOCK_D": lambda args: triton.next_power_of_2(
@@ -37,7 +210,7 @@ from ..utils import libentry
     }
 )
 @triton.jit
-def _embedding_nf4_dequant_kernel(
+def _embedding_nf4_dequant_split_kernel(
     out_ptr,           # [N, D] – typed as output_dtype
     input_ptr,         # [N]    – integer token indices
     qweight_ptr,       # [V, D/2] int8, packed NF4 (two 4-bit values per byte)
@@ -95,6 +268,8 @@ def _embedding_nf4_dequant_kernel(
 
     low_mask  = valid & (low_out_idx  < embedding_dim)
     high_mask = valid & (high_out_idx < embedding_dim)
+    low_store_mask = low_out_idx < embedding_dim
+    high_store_mask = high_out_idx < embedding_dim
 
     # NF4 codebook lookup → float32
     low_val  = tl.load(codebook_ptr + low_nf4,  mask=low_mask,  other=0.0).to(tl.float32)
@@ -123,12 +298,12 @@ def _embedding_nf4_dequant_kernel(
     ).to(tl.float32)
 
     # Dequantize: val * scale + mean  (float32, auto-cast to out_ptr dtype on store)
-    low_out  = low_val  * low_scale  + low_mean
-    high_out = high_val * high_scale + high_mean
+    low_out  = tl.where(valid, low_val  * low_scale  + low_mean, 0.0)
+    high_out = tl.where(valid, high_val * high_scale + high_mean, 0.0)
 
     base = pid_n * out_stride_0
-    tl.store(out_ptr + base + low_out_idx  * out_stride_1, low_out,  mask=low_mask)
-    tl.store(out_ptr + base + high_out_idx * out_stride_1, high_out, mask=high_mask)
+    tl.store(out_ptr + base + low_out_idx  * out_stride_1, low_out,  mask=low_store_mask)
+    tl.store(out_ptr + base + high_out_idx * out_stride_1, high_out, mask=high_store_mask)
 
 
 def embedding_nf4_dequant_impl(
@@ -214,15 +389,10 @@ def embedding_nf4_dequant_impl(
     LUT_scale   = LUT_scale.contiguous()
     LUT_mean    = LUT_mean.contiguous()
 
-    # Output initialised to zeros so that out-of-range token IDs produce zeros.
-    output = torch.zeros(N, embedding_dim, dtype=output_dtype, device=input.device)
+    # Kernels explicitly write zero rows for out-of-range token IDs.
+    output = torch.empty(N, embedding_dim, dtype=output_dtype, device=input.device)
 
-    block_d = triton.next_power_of_2(min(embedding_dim, 256))
-    grid    = (N, triton.cdiv(embedding_dim, block_d))
-
-    _embedding_nf4_dequant_kernel[grid](
-        output, input_flat,
-        LUT_qweight, LUT_scale, LUT_mean, codebook,
+    kernel_kwargs = dict(
         N=N,
         embedding_dim=embedding_dim,
         qweight_stride_0=LUT_qweight.stride(0),
@@ -237,4 +407,38 @@ def embedding_nf4_dequant_impl(
         vocab_size=vocab_size,
         GROUP_SIZE=group_size,
     )
+
+    if embedding_dim <= 256 and N >= 1024:
+        _embedding_nf4_dequant_tiled_kernel[(triton.cdiv(N, 4),)](
+            output,
+            input_flat,
+            LUT_qweight,
+            LUT_scale,
+            LUT_mean,
+            codebook,
+            **kernel_kwargs,
+            BLOCK_TOKENS=4,
+        )
+    elif embedding_dim <= 4096:
+        _embedding_nf4_dequant_row_kernel[(N,)](
+            output,
+            input_flat,
+            LUT_qweight,
+            LUT_scale,
+            LUT_mean,
+            codebook,
+            **kernel_kwargs,
+        )
+    else:
+        block_d = triton.next_power_of_2(min(embedding_dim, 256))
+        grid = (N, triton.cdiv(embedding_dim, block_d))
+        _embedding_nf4_dequant_split_kernel[grid](
+            output,
+            input_flat,
+            LUT_qweight,
+            LUT_scale,
+            LUT_mean,
+            codebook,
+            **kernel_kwargs,
+        )
     return output.view(*input.shape, embedding_dim)
