@@ -143,8 +143,6 @@ def lightning_indexer_kernel(
         )
         k_scale = tl.load(key_scale_ptrs, mask=mask, other=0.0)
 
-        k = k * k_scale[:, None]
-
         query_ptrs = (
             query_ptr
             + batch_idx * query_stride_b
@@ -154,7 +152,8 @@ def lightning_indexer_kernel(
         )
         q = tl.load(query_ptrs)
 
-        relu_qk = tl.maximum(tl.dot(q.to(k.dtype), tl.trans(k)), 0.0)
+        mul_qk = tl.dot(q.to(k.dtype), tl.trans(k))
+        relu_qk = tl.maximum(mul_qk * k_scale[None, :], 0.0)
 
         query_scale_ptrs = (
             query_scale_ptr
