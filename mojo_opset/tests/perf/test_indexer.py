@@ -1,3 +1,5 @@
+import os
+
 import pytest
 import torch
 
@@ -12,6 +14,11 @@ TEST_SHAPES = [
 TEST_DTYPES = [torch.bfloat16, torch.float16, torch.float32]
 
 
+def _set_lightning_indexer_tle_branch(lightning_indexer_tle):
+    os.environ["MOJO_TTX_LIGHTNING_INDEXER_TLE"] = lightning_indexer_tle
+
+
+@pytest.mark.parametrize("lightning_indexer_tle", ["1", "0"], ids=["tle", "fallback"])
 @pytest.mark.parametrize(
     "query, query_scale, key, key_scale",
     [
@@ -27,6 +34,7 @@ TEST_DTYPES = [torch.bfloat16, torch.float16, torch.float32]
 )
 @auto_switch_platform(set_perf=True)
 @bypass_not_implemented
-def test_lightning_index(query, query_scale, key, key_scale):
+def test_lightning_index(query, query_scale, key, key_scale, lightning_indexer_tle):
+    _set_lightning_indexer_tle_branch(lightning_indexer_tle)
     indexer = MojoLightningIndexer()
     perf(lambda: indexer(query, query_scale, key, key_scale))
