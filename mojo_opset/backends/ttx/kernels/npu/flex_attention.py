@@ -116,6 +116,7 @@ def flex_attention_kernel(
             mask=(offs_m[:, None] < Q_LEN),
             other=0.0
         )
+        tl.extra.cann.extension.compile_hint(q, "cv_pipeline_lazy_load", True)
 
         SPARSE_Q_MULTIPLE = SPARSE_Q_BLOCK_SIZE // BLOCK_M
         SPARSE_KV_MULTIPLE = SPARSE_KV_BLOCK_SIZE // BLOCK_N
@@ -166,11 +167,13 @@ def flex_attention_kernel(
                 mask=(offs_n_load[:, None] < KV_LEN),
                 other=0.0
             )
+            tl.extra.cann.extension.compile_hint(k, "cv_pipeline_lazy_load", True)
             v = tl.load(
                 V_ptr + offs_n_load[:, None] * stride_vn + offs_v[None, :] * stride_vk,
                 mask=(offs_n_load[:, None] < KV_LEN),
                 other=0.0
             )
+            tl.extra.cann.extension.compile_hint(v, "cv_pipeline_lazy_load", True)
             k = tl.trans(k)
 
             qk = tl.dot(q, k, input_precision="ieee")
@@ -206,11 +209,13 @@ def flex_attention_kernel(
                     mask=(offs_n_load[:, None] < KV_LEN),
                     other=0.0
                 )
+                tl.extra.cann.extension.compile_hint(k, "cv_pipeline_lazy_load", True)
                 v = tl.load(
                     V_ptr + offs_n_load[:, None] * stride_vn + offs_v[None, :] * stride_vk,
                     mask=(offs_n_load[:, None] < KV_LEN),
                     other=0.0
                 )
+                tl.extra.cann.extension.compile_hint(v, "cv_pipeline_lazy_load", True)
                 k = tl.trans(k)
 
                 qk = tl.dot(q, k, input_precision="ieee")
@@ -465,11 +470,13 @@ def flex_attention_backward_dq_kernel(
             mask=(offs_m[:, None] < Q_LEN),
             other=0.0,
         )
+        tl.extra.cann.extension.compile_hint(q, "cv_pipeline_lazy_load", True)
         do = tl.load(
             DO_ptr + offs_m[:, None] * stride_dom + offs_v[None, :] * stride_dok,
             mask=(offs_m[:, None] < Q_LEN),
             other=0.0,
         )
+        tl.extra.cann.extension.compile_hint(do, "cv_pipeline_lazy_load", True)
 
         lse = tl.load(LSE_ptr + offs_m * stride_lse_m, mask=offs_m < Q_LEN, other=float("-inf"))
         delta = tl.load(DELTA_ptr + offs_m * stride_delta_m, mask=offs_m < Q_LEN, other=0.0)
@@ -498,11 +505,13 @@ def flex_attention_backward_dq_kernel(
                     mask=(offs_n[:, None] < KV_LEN),
                     other=0.0,
                 )
+                tl.extra.cann.extension.compile_hint(k, "cv_pipeline_lazy_load", True)
                 v = tl.load(
                     V_ptr + offs_n[:, None] * stride_vn + offs_v[None, :] * stride_vk,
                     mask=(offs_n[:, None] < KV_LEN),
                     other=0.0,
                 )
+                tl.extra.cann.extension.compile_hint(v, "cv_pipeline_lazy_load", True)
 
                 qk = tl.dot(q, tl.trans(k), input_precision="ieee")
                 qk *= SM_SCALE
@@ -562,11 +571,13 @@ def flex_attention_backward_dq_kernel(
                         mask=(offs_n[:, None] < KV_LEN),
                         other=0.0,
                     )
+                    tl.extra.cann.extension.compile_hint(k, "cv_pipeline_lazy_load", True)
                     v = tl.load(
                         V_ptr + offs_n[:, None] * stride_vn + offs_v[None, :] * stride_vk,
                         mask=(offs_n[:, None] < KV_LEN),
                         other=0.0,
                     )
+                    tl.extra.cann.extension.compile_hint(v, "cv_pipeline_lazy_load", True)
 
                     qk = tl.dot(q, tl.trans(k), input_precision="ieee")
                     qk *= SM_SCALE
@@ -697,11 +708,13 @@ def flex_attention_backward_dkdv_kernel(
                 mask=(offs_n[:, None] < KV_LEN) & (offs_k[None, :] < QK_HEAD_DIM),
                 other=0.0,
             )
+            tl.extra.cann.extension.compile_hint(k, "cv_pipeline_lazy_load", True)
             v = tl.load(
                 V_ptr + offs_n[:, None] * stride_vn + offs_v[None, :] * stride_vk,
                 mask=(offs_n[:, None] < KV_LEN) & (offs_v[None, :] < V_HEAD_DIM),
                 other=0.0,
             )
+            tl.extra.cann.extension.compile_hint(v, "cv_pipeline_lazy_load", True)
 
             for off_g in range(0, GQA_SHARED_HEADS):
                 off_hq = off_hkv * GQA_SHARED_HEADS + off_g
@@ -818,11 +831,13 @@ def bwd_dkdv_block_mn(
         mask=(offs_m[:, None] < Q_LEN) & (offs_k[None, :] < QK_HEAD_DIM),
         other=0.0,
     )
+    tl.extra.cann.extension.compile_hint(q, "cv_pipeline_lazy_load", True)
     do = tl.load(
         DO + offs_m[:, None] * stride_dom + offs_v[None, :] * stride_dok,
         mask=(offs_m[:, None] < Q_LEN) & (offs_v[None, :] < V_HEAD_DIM),
         other=0.0,
     )
+    tl.extra.cann.extension.compile_hint(do, "cv_pipeline_lazy_load", True)
     lse = tl.load(LSE + offs_m, mask=offs_m < Q_LEN, other=float("-inf"))
     lse = tl.where(lse == float("-inf"), 0.0, lse)
 
@@ -1038,6 +1053,8 @@ def flex_attention_fwd_impl(
         enable_cross_if_fusion=True,
         enable_buffer_insert_optimization=True,
         enable_ub_refine_opt = True,
+        enable_preload=True,
+        enable_dynamic_cv_pipeline=False,
     )
 
     return output, lse
@@ -1115,6 +1132,8 @@ def flex_attention_bwd_impl(
         limit_auto_multi_buffer_of_local_buffer="no-l0c",
         intra_cache_num=3,
         inter_cache_num=2,
+        enable_preload=True,
+        enable_dynamic_cv_pipeline=False,
     )
 
     BLOCK_M_DKDV = TILE_BLOCK_SIZE
@@ -1162,6 +1181,8 @@ def flex_attention_bwd_impl(
         limit_auto_multi_buffer_of_local_buffer="no-l0c",
         intra_cache_num=2,
         inter_cache_num=1,
+        enable_preload=True,
+        enable_dynamic_cv_pipeline=False,
     )
 
     return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype)
