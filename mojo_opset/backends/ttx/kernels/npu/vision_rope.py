@@ -96,16 +96,16 @@ def _compute_vision_rope(
     so both cos/sin halves are numerically identical and we only need one half.
     """
     # Split x into halves: [TOKEN_BLOCK_SIZE, head_num, half_rope_dim]
-    x1 = tl.extract_slice(x, [0, 0, 0], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
-    x2 = tl.extract_slice(x, [0, 0, half_rope_dim], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
+    x1 = tl.extra.cann.extension.extract_slice(x, [0, 0, 0], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
+    x2 = tl.extra.cann.extension.extract_slice(x, [0, 0, half_rope_dim], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
 
     # out_half1 = x1*c - x2*s  (broadcasts c/s across heads)
     # out_half2 = x2*c + x1*s
     roped_x1 = x1 * cos_half_tile - x2 * sin_half_tile
     roped_x2 = x2 * cos_half_tile + x1 * sin_half_tile
 
-    x = tl.insert_slice(x, roped_x1, [0, 0, 0], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
-    x = tl.insert_slice(x, roped_x2, [0, 0, half_rope_dim], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
+    x = tl.extra.cann.extension.insert_slice(x, roped_x1, [0, 0, 0], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
+    x = tl.extra.cann.extension.insert_slice(x, roped_x2, [0, 0, half_rope_dim], [TOKEN_BLOCK_SIZE, head_num, half_rope_dim], [1, 1, 1])
 
     return x
 

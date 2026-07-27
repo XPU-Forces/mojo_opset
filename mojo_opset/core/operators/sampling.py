@@ -286,7 +286,7 @@ class MojoJoinProbRejectSampling(MojoOperator):
         # reject sampling
         target_token_probs = torch.gather(target_probs[:, :spec_step, :], -1, draft_tokens.unsqueeze(-1)).squeeze(-1)
 
-        ratios = torch.minimum(torch.ones_like(target_token_probs), target_token_probs / draft_probs)
+        ratios = torch.clamp(target_token_probs / draft_probs, 0, 1)
         pi = torch.cumprod(ratios, dim=1)
         if random_seed is not None:
             torch.manual_seed(random_seed)

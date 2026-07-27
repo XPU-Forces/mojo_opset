@@ -518,9 +518,9 @@ class TestRefOverEncodingParametrized:
         )
 
     @bypass_not_implemented
-    def test_embedding_nf4_dequant_impl(self):
+    @pytest.mark.parametrize("embedding_dim", [128, 1024, 4096])
+    def test_embedding_nf4_dequant_impl(self, embedding_dim):
         vocab_size = 257
-        embedding_dim = 128
         group_size = 64
         qweight, scale, mean = build_nf4_embedding_lut(
             vocab_size=vocab_size,

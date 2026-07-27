@@ -68,7 +68,7 @@ def micro_kernel_fwd(
     block_s = tl.dot(block_q, block_k.T) * scale
     if block_mask is not None:
         block_s += block_mask
-    block_m_1 = tl.maximum(block_m, tl.max(block_s, axis=1))
+    block_m_1 = tl.maximum(block_m, tl.max(block_s, axis=1,propagate_nan=tl.PropagateNan.ALL),propagate_nan=tl.PropagateNan.ALL)
     block_s = tl.exp(block_s - block_m_1[:, None])
     block_l_1 = tl.exp(block_m - block_m_1) * block_l + tl.sum(block_s, axis=1)
 

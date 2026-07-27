@@ -58,7 +58,7 @@ def _sdpa_infer_single_block(
     if mask is not None:
         qk = tl.where(mask, qk, float("-inf"))  # 32B # bool
 
-    m_ij = tl.maximum(m_i, tl.max(qk, 1))  # Scaled max
+    m_ij = tl.maximum(m_i, tl.max(qk, 1, propagate_nan=tl.PropagateNan.ALL), propagate_nan=tl.PropagateNan.ALL)  # Scaled max
     qk = qk - m_ij[:, None]  # Stabilize
 
     # Softmax weights p = exp(qk)
@@ -440,8 +440,8 @@ def paged_decode_vector_kernel(
             qk = tl.where(row_mask[:, None] & n_mask[None, :], qk, float("-inf"))
 
             # Online softmax
-            m_j = tl.max(qk, axis=1)
-            m_ij = tl.maximum(m_i, m_j)
+            m_j = tl.max(qk, axis=1, propagate_nan=tl.PropagateNan.ALL)
+            m_ij = tl.maximum(m_i, m_j, propagate_nan=tl.PropagateNan.ALL)
             qk = qk - m_ij[:, None]
             p = tl.exp(qk)
 

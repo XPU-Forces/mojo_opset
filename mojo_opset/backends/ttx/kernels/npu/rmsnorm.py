@@ -343,7 +343,7 @@ def _rmsnorm_bwd_kernel(
 
         if casting_mode_int == _CASTING_MODE_LLAMA:
             m_block = (dY_block * W_row_offset[None, :]).to(tl.float32)
-            dW_acc += tl.sum(dY_block * normed_X_block.to(X_dtype), axis=0)
+            dW_acc += tl.sum(dY_block * normed_X_block.to(tl.float32), axis=0)
         elif casting_mode_int == _CASTING_MODE_GEMMA:
             dY_block_f32 = dY_block.to(tl.float32)
             W_row_offset = W_row_offset.to(tl.float32)
@@ -442,7 +442,7 @@ def _rmsnorm_bwd_large_cols_kernel(
 
             if casting_mode_int == _CASTING_MODE_LLAMA:
                 m_chunk = (dY_chunk * W_chunk_offset[None, :]).to(tl.float32)
-                dW_chunk_sum = tl.sum(dY_chunk * normed_X_chunk.to(X_dtype), axis=0)
+                dW_chunk_sum = tl.sum(dY_chunk * normed_X_chunk.to(tl.float32), axis=0)
             elif casting_mode_int == _CASTING_MODE_GEMMA:
                 dY_chunk_f32 = dY_chunk.to(tl.float32)
                 W_chunk_offset = W_chunk_offset.to(tl.float32)
