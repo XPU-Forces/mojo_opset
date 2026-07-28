@@ -1,7 +1,7 @@
 import torch
 from typing import Optional, Tuple
 
-from .utils import get_num_cores
+from ..utils import get_num_cores
 
 AUX_MASK_SIZE = 256
 AUX_MASK = None

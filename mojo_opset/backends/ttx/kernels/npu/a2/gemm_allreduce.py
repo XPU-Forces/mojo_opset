@@ -9,11 +9,11 @@ from triton_dist.language.extra.ascend.algorithm import (
 )
 from triton.language.extra.cann.extension import sub_vec_id
 
-from .utils import get_num_cores
+from ..utils import get_num_cores
 
 
 @triton.jit
-def kernel_gemm_reduce_scatter(
+def kernel_gemm_allreduce(
     a_ptr,
     b_ptr,
     c_ptr,
@@ -43,8 +43,7 @@ def kernel_gemm_reduce_scatter(
     ncore = tl.num_programs(axis=0)
     pid = tl.program_id(axis=0)
     loop_num_per_comm = ncore * pvalue
-    m_per_rank = M // rank_size
-    num_loops_m = tl.cdiv(m_per_rank, BLOCK_SIZE_M) * rank_size
+    num_loops_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_loops_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_loops = num_loops_m * num_loops_n
     num_loops_comm = tl.cdiv(total_loops, loop_num_per_comm)
@@ -52,30 +51,21 @@ def kernel_gemm_reduce_scatter(
     for global_id in range(0, num_loops_comm):
         buffer_id = global_id % buffer_num
         actual_loop_num_per_comm = loop_num_per_comm
-        output_block_offset_in_rank = global_id * loop_num_per_comm // rank_size
+        output_block_id_offset = global_id * loop_num_per_comm
         if global_id == num_loops_comm - 1:
             actual_loop_num_per_comm = total_loops - global_id * loop_num_per_comm
         num_k_blocks = tl.cdiv(K, BLOCK_SIZE_K)
-        num_blocks_per_rank = actual_loop_num_per_comm // rank_size
         for block_id in range(pid, actual_loop_num_per_comm, ncore):
-            block_id_in_rank = (
-                output_block_offset_in_rank + block_id % num_blocks_per_rank
-            )
             block_id_m, block_id_n = gemm_swizzle2d_Nz(
-                block_id_in_rank,
-                m_per_rank,
+                output_block_id_offset + block_id,
+                M,
                 N,
                 BLOCK_SIZE_M,
                 BLOCK_SIZE_N,
             )
-            rank_idx = block_id // num_blocks_per_rank
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-            matmul_offs_am = (
-                m_per_rank * rank_idx
-                + block_id_m * BLOCK_SIZE_M
-                + tl.arange(0, BLOCK_SIZE_M)
-            )
-            matmul_msk_am = matmul_offs_am[:, None] < (m_per_rank * (rank_idx + 1))
+            matmul_offs_am = block_id_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            matmul_msk_am = matmul_offs_am[:, None] < M
             offs_bn = block_id_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
             msk_n = offs_bn[None, :] < N
             for block_id_k in range(0, num_k_blocks):
@@ -105,19 +95,17 @@ def kernel_gemm_reduce_scatter(
             )
             tl.store(peer_mem_ptrs, c)
         libshmem_device.barrier_all()
-        comm_problem_size_m_per_rank = tl.cdiv(
-            actual_loop_num_per_comm * BLOCK_SIZE_M, rank_size
+        comm_problem_size_m = actual_loop_num_per_comm * BLOCK_SIZE_M
+        comm_block_num = tl.cdiv(comm_problem_size_m, COMM_BLOCK_SIZE_M) * tl.cdiv(
+            BLOCK_SIZE_N, COMM_BLOCK_SIZE_N
         )
-        comm_block_num_per_rank = tl.cdiv(
-            comm_problem_size_m_per_rank, COMM_BLOCK_SIZE_M
-        ) * tl.cdiv(BLOCK_SIZE_N, COMM_BLOCK_SIZE_N)
         if subblock_idx == 0:
-            for idx in range(pid, comm_block_num_per_rank * rank_size, ncore):
+            for idx in range(pid, comm_block_num * rank_size, ncore):
                 block_id_m, block_id_n, target_rank, comm_row_shape, comm_col_shape = (
                     dist_swizzle2d_Nz(
                         idx,
                         rank_size,
-                        comm_problem_size_m_per_rank,
+                        comm_problem_size_m,
                         BLOCK_SIZE_N,
                         COMM_BLOCK_SIZE_M,
                         COMM_BLOCK_SIZE_N,
@@ -127,7 +115,6 @@ def kernel_gemm_reduce_scatter(
                 comm_offs_m = (
                     tl.arange(0, COMM_BLOCK_SIZE_M)
                     + block_id_m * COMM_BLOCK_SIZE_M
-                    + rank * comm_problem_size_m_per_rank
                     + buffer_id * loop_num_per_comm * BLOCK_SIZE_M
                 )
                 comm_offs_n = (
@@ -137,9 +124,8 @@ def kernel_gemm_reduce_scatter(
                     comm_offs_m[:, None] * BLOCK_SIZE_N + comm_offs_n[None, :]
                 )
                 block_id = block_id_m * COMM_BLOCK_SIZE_M // BLOCK_SIZE_M
-                block_id_in_rank = output_block_offset_in_rank + block_id
                 block_id_gemm_m, block_id_gemm_n = gemm_swizzle2d_Nz(
-                    block_id_in_rank, m_per_rank, N, BLOCK_SIZE_M, BLOCK_SIZE_N
+                    output_block_id_offset + block_id, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N
                 )
                 m_offset_in_block = (block_id_m * COMM_BLOCK_SIZE_M) % BLOCK_SIZE_M
                 n_offset_in_block = (block_id_n * COMM_BLOCK_SIZE_N) % BLOCK_SIZE_N
@@ -154,12 +140,12 @@ def kernel_gemm_reduce_scatter(
                     + tl.arange(0, COMM_BLOCK_SIZE_N)
                 )
                 c_offs = stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-                c_mask = (offs_cm[:, None] < m_per_rank) & (offs_cn[None, :] < N)
+                c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
                 c_temp = tl.load(remote_ptrs)
                 tl.atomic_add(c_ptr + c_offs, c_temp, mask=c_mask)
 
 
-def gemm_reduce_scatter_impl(
+def gemm_allreduce_impl(
     input: torch.Tensor,
     weight: torch.Tensor,
     output: torch.Tensor,
@@ -177,7 +163,7 @@ def gemm_reduce_scatter_impl(
     M, K = input.shape
     _, N = weight.shape
     ncore = get_num_cores("cube")
-    kernel_gemm_reduce_scatter[ncore, 1, 1](
+    kernel_gemm_allreduce[ncore, 1, 1](
         input, weight, output, peer_mem,
         rank, world_size, buffer_num,
         M, N, K,
@@ -189,8 +175,8 @@ def gemm_reduce_scatter_impl(
     )
 
 
-def gemm_reduce_scatter_peer_mem_size() -> int:
-    """Return the flat peer_mem element count required for gemm_reduce_scatter kernel."""
+def gemm_allreduce_peer_mem_size() -> int:
+    """Return the flat peer_mem element count required for gemm_allreduce kernel."""
     BLOCK_SIZE_M, BLOCK_SIZE_N = 128, 256
     ncore = get_num_cores("cube")
     pvalue, buffer_num = 4, 2
