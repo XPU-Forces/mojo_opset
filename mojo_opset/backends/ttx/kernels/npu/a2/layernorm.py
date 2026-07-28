@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from triton.language.math import rsqrt
-from .utils import get_num_cores, libentry
+from ..utils import get_num_cores, libentry
 
 from mojo_opset.backends.ttx.kernels.npu.utils import VEC_ALIGN_BYTES
 from mojo_opset.backends.ttx.kernels.utils import align, ceil_div, torch_to_triton_dtype

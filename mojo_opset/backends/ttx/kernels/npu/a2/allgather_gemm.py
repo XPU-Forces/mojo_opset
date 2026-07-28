@@ -9,7 +9,7 @@ from triton_dist.language.extra.ascend.algorithm import (
 )
 from triton.language.extra.cann.extension import sub_vec_id
 
-from .utils import get_num_cores
+from ..utils import get_num_cores
 
 
 @triton.jit

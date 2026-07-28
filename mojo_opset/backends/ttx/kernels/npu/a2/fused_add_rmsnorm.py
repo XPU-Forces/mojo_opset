@@ -7,7 +7,7 @@ import triton.language as tl
 from mojo_opset.backends.ttx.kernels.npu.utils import VEC_ALIGN_BYTES, get_num_cores
 from mojo_opset.backends.ttx.kernels.utils import align, ceil_div
 
-from .utils import libentry
+from ..utils import libentry
 
 COL_BLOCKING_THRESHOLD = 2048
 

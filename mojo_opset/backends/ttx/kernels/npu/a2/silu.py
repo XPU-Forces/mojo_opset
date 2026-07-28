@@ -1,56 +1,45 @@
 import torch
 import triton
 import triton.language as tl
-try:
-    import triton.language.extra.cann.libdevice as libdevice
-except ModuleNotFoundError:
-    libdevice = tl
-
-from .utils import get_num_cores, libentry
+from ..utils import get_num_cores, libentry
 
 """
-This file contains the implementation of GELU (Gaussian Error Linear Unit) for NPU.
+This file contains the implementation of SiLU (Sigmoid Linear Unit) for NPU.
 
-GELU formula: gelu(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+SiLU formula: silu(x) = x * sigmoid(x) = x / (1 + exp(-x))
 
-Based on Liger Kernel implementation:
-https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/geglu.py
+Based on SwiGLU implementation pattern and Liger Kernel style.
 
 Modifications for NPU architecture by triton-x team, 2025.
 """
 
 
-MAX_BLOCK_SIZE_N = 1024
-
-
-GELU_TANH_BLOCK_SIZE_M_CONFIGS = [
-    triton.Config({"BLOCK_SIZE_M": 1}),
-    triton.Config({"BLOCK_SIZE_M": 2}),
-    triton.Config({"BLOCK_SIZE_M": 4}),
-    triton.Config({"BLOCK_SIZE_M": 8}),
-]
-
-GELU_TANH_MAX_BLOCK_SIZE_M = max(
-    config.kwargs["BLOCK_SIZE_M"] for config in GELU_TANH_BLOCK_SIZE_M_CONFIGS
-)
+MAX_BLOCK_SIZE_N = 2048
 
 
 @triton.jit
-def gelu_tanh_approx(x):
-    """GELU activation using tanh approximation."""
-    sqrt_2_over_pi = 0.7978845608028654  # sqrt(2 / pi)
-    x_cubed = x * x * x
-    tanh_arg = sqrt_2_over_pi * (x + 0.044715 * x_cubed)
-    return 0.5 * x * (1 + libdevice.tanh(tanh_arg))
+def silu_activation(x):
+    """SiLU activation function: x * sigmoid(x)"""
+    return x * tl.sigmoid(x)
 
 
 @triton.autotune(
-    configs=GELU_TANH_BLOCK_SIZE_M_CONFIGS,
+    configs=[
+        triton.Config({"BLOCK_SIZE_M": 1}),
+        triton.Config({"BLOCK_SIZE_M": 2}),
+        triton.Config({"BLOCK_SIZE_M": 4}),
+        triton.Config({"BLOCK_SIZE_M": 8}),
+        triton.Config({"BLOCK_SIZE_M": 12}),
+        triton.Config({"BLOCK_SIZE_M": 16}),
+        triton.Config({"BLOCK_SIZE_M": 20}),
+        triton.Config({"BLOCK_SIZE_M": 24}),
+        triton.Config({"BLOCK_SIZE_M": 32}),
+    ],
     key=["n_rows", "n_cols"],
 )
 @libentry()
 @triton.jit
-def _gelu_fwd_kernel(
+def _silu_fwd_kernel(
     x,
     y,
     stride_row,
@@ -80,7 +69,7 @@ def _gelu_fwd_kernel(
             x_chunk = tl.load(x_ptrs, mask=block_mask, other=0.0)
 
             x_f32 = x_chunk.to(tl.float32)
-            y_f32 = gelu_tanh_approx(x_f32)
+            y_f32 = silu_activation(x_f32)
 
             y_chunk = y_f32.to(x_chunk.dtype)
 
@@ -88,12 +77,18 @@ def _gelu_fwd_kernel(
 
 
 @triton.autotune(
-    configs=GELU_TANH_BLOCK_SIZE_M_CONFIGS,
+    configs=[
+        triton.Config({"BLOCK_SIZE_M": 1}),
+        triton.Config({"BLOCK_SIZE_M": 2}),
+        triton.Config({"BLOCK_SIZE_M": 4}),
+        triton.Config({"BLOCK_SIZE_M": 8}),
+        triton.Config({"BLOCK_SIZE_M": 16}),
+    ],
     key=["n_rows", "n_cols"],
 )
 @libentry()
 @triton.jit
-def _gelu_fwd_nomask_kernel(
+def _silu_fwd_nomask_kernel(
     x,
     y,
     stride_row,
@@ -119,19 +114,25 @@ def _gelu_fwd_nomask_kernel(
 
             x_chunk = tl.load(x_ptrs)
             x_f32 = x_chunk.to(tl.float32)
-            y_f32 = gelu_tanh_approx(x_f32)
+            y_f32 = silu_activation(x_f32)
             y_chunk = y_f32.to(x_chunk.dtype)
 
             tl.store(y_ptrs, y_chunk)
 
 
 @triton.autotune(
-    configs=GELU_TANH_BLOCK_SIZE_M_CONFIGS,
+    configs=[
+        triton.Config({"BLOCK_SIZE_M": 1}),
+        triton.Config({"BLOCK_SIZE_M": 2}),
+        triton.Config({"BLOCK_SIZE_M": 4}),
+        triton.Config({"BLOCK_SIZE_M": 8}),
+        triton.Config({"BLOCK_SIZE_M": 16}),
+    ],
     key=["n_rows", "n_cols"],
 )
 @libentry()
 @triton.jit
-def _gelu_fwd_nomask_single_kernel(
+def _silu_fwd_nomask_single_kernel(
     x,
     y,
     stride_row,
@@ -155,20 +156,30 @@ def _gelu_fwd_nomask_single_kernel(
 
         x_chunk = tl.load(x_ptrs)
         x_f32 = x_chunk.to(tl.float32)
-        y_f32 = gelu_tanh_approx(x_f32)
+        y_f32 = silu_activation(x_f32)
         y_chunk = y_f32.to(x_chunk.dtype)
 
         tl.store(y_ptrs, y_chunk)
 
 
 @triton.autotune(
-    configs=GELU_TANH_BLOCK_SIZE_M_CONFIGS,
+    configs=[
+        triton.Config({"BLOCK_SIZE_M": 1}),
+        triton.Config({"BLOCK_SIZE_M": 2}),
+        triton.Config({"BLOCK_SIZE_M": 4}),
+        triton.Config({"BLOCK_SIZE_M": 8}),
+        triton.Config({"BLOCK_SIZE_M": 12}),
+        triton.Config({"BLOCK_SIZE_M": 16}),
+        triton.Config({"BLOCK_SIZE_M": 20}),
+        triton.Config({"BLOCK_SIZE_M": 24}),
+        triton.Config({"BLOCK_SIZE_M": 32}),
+    ],
     key=["n_rows", "n_cols"],
     restore_value=["dy", "dx"],
 )
 @libentry()
 @triton.jit
-def _gelu_bwd_kernel(
+def _silu_bwd_kernel(
     dy,
     x,
     dx,
@@ -201,22 +212,11 @@ def _gelu_bwd_kernel(
             x_chunk = tl.load(x_ptrs, mask=block_mask, other=0.0)
 
             x_f32 = x_chunk.to(tl.float32)
-            sqrt_2_over_pi = 0.7978845608028654
-            x_cubed = x_f32 * x_f32 * x_f32
-            tanh_arg = sqrt_2_over_pi * (x_f32 + 0.044715 * x_cubed)
-            tanh_result = libdevice.tanh(tanh_arg)
+            sigmoid_x = tl.sigmoid(x_f32)
 
-            term1 = 0.5 * (1 + tanh_result)
-            tanh_sq = tanh_result * tanh_result
-            term2 = (
-                0.5
-                * x_f32
-                * (1 - tanh_sq)
-                * (sqrt_2_over_pi * (1 + 3 * 0.044715 * x_f32 * x_f32))
-            )
-            dgelu_dx = term1 + term2
+            dsilu_dx = sigmoid_x * (1 + x_f32 * (1 - sigmoid_x))
 
-            dx_chunk = dy_chunk * dgelu_dx.to(dy_chunk.dtype)
+            dx_chunk = dy_chunk * dsilu_dx.to(dy_chunk.dtype)
 
             tl.store(dx_ptrs, dx_chunk, mask=block_mask)
 
@@ -234,23 +234,28 @@ def _rowwise_autotune_grid(n_rows):
     return lambda META: _rowwise_grid(n_rows, META["BLOCK_SIZE_M"])
 
 
+SILU_NOMASK_MAX_BLOCK_SIZE_M = 16
+
+
 def _can_use_nomask_kernel(n_rows, n_cols, block_size_n):
-    return n_cols % block_size_n == 0 and n_rows % GELU_TANH_MAX_BLOCK_SIZE_M == 0
+    return n_cols % block_size_n == 0 and n_rows % SILU_NOMASK_MAX_BLOCK_SIZE_M == 0
 
 
 def _can_use_nomask_single_kernel(n_rows, n_cols, block_size_n):
-    return n_cols == block_size_n and n_rows % GELU_TANH_MAX_BLOCK_SIZE_M == 0
+    return n_cols == block_size_n and n_rows % SILU_NOMASK_MAX_BLOCK_SIZE_M == 0
 
 
-def gelu_fwd_impl(x: torch.Tensor) -> torch.Tensor:
+def silu_fwd_impl(
+    x: torch.Tensor,
+) -> torch.Tensor:
     """
-    Forward pass for GELU.
+    Forward pass for SiLU.
 
     Args:
         x: Input tensor
 
     Returns:
-        y: Output tensor y = gelu(x)
+        y: Output tensor y = silu(x) = x * sigmoid(x)
     """
     ori_shape = x.shape
     n_cols = ori_shape[-1]
@@ -264,7 +269,7 @@ def gelu_fwd_impl(x: torch.Tensor) -> torch.Tensor:
     grid = _rowwise_autotune_grid(n_rows)
 
     if _can_use_nomask_single_kernel(n_rows, n_cols, block_size_n):
-        _gelu_fwd_nomask_single_kernel[grid](
+        _silu_fwd_nomask_single_kernel[grid](
             x_2d,
             y,
             x_2d.stride(0),
@@ -273,7 +278,7 @@ def gelu_fwd_impl(x: torch.Tensor) -> torch.Tensor:
             BLOCK_SIZE_N=block_size_n,
         )
     elif _can_use_nomask_kernel(n_rows, n_cols, block_size_n):
-        _gelu_fwd_nomask_kernel[grid](
+        _silu_fwd_nomask_kernel[grid](
             x_2d,
             y,
             x_2d.stride(0),
@@ -282,7 +287,7 @@ def gelu_fwd_impl(x: torch.Tensor) -> torch.Tensor:
             BLOCK_SIZE_N=block_size_n,
         )
     else:
-        _gelu_fwd_kernel[grid](
+        _silu_fwd_kernel[grid](
             x_2d,
             y,
             x_2d.stride(0),
@@ -294,12 +299,12 @@ def gelu_fwd_impl(x: torch.Tensor) -> torch.Tensor:
     return y.reshape(*ori_shape)
 
 
-def gelu_bwd_impl(
+def silu_bwd_impl(
     dy: torch.Tensor,
     x: torch.Tensor,
 ) -> torch.Tensor:
     """
-    Backward pass for GELU.
+    Backward pass for SiLU.
 
     Args:
         dy: Gradient w.r.t. output
@@ -320,7 +325,7 @@ def gelu_bwd_impl(
     block_size_n = _rowwise_block_size_n(n_cols)
     grid = _rowwise_autotune_grid(n_rows)
 
-    _gelu_bwd_kernel[grid](
+    _silu_bwd_kernel[grid](
         dy_2d,
         x_2d,
         dx,

@@ -2,7 +2,7 @@ import math
 import torch
 import triton
 import triton.language as tl
-from mojo_opset.backends.ttx.kernels.npu.over_encoding.embedding import __embedding_nf4_dequant__
+from .embedding import __embedding_nf4_dequant__
 from mojo_opset.core.operators.over_encoding import get_nf4_codebook
 
 __910B_UB_MAX_SIZE__ = 192 * 2**10

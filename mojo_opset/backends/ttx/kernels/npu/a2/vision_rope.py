@@ -6,7 +6,7 @@ import triton.language as tl
 
 from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 
-from .utils import SRAM_ALIGN_BYTES
+from ..utils import SRAM_ALIGN_BYTES
 
 
 def _is_half_rope_dim_aligned(half_rope_dim: int, dtype_size: int = 2) -> bool:
