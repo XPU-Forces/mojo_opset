@@ -248,8 +248,23 @@ def _swa_acc_fwd_nomask_mxn(
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    k = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option="zero")
-    qk = tl.dot(q, tl.trans(k))
+    # When BLOCK_D == HEAD_DIM (head_dim a power of two — the common case):
+    #   • K block_ptr is transposed (BLOCK_D, BLOCK_N) by the caller, so
+    #     tl.dot(q, k) = Q @ K^T directly — no TransOp, no smeLayoutTrans
+    #     warp-shuffle.
+    #   • boundary_check is dropped on both K and V (the nomask region
+    #     guarantees full in-bounds tiles + PAGE_SIZE % BLOCK_N == 0 keeps
+    #     each tile within one page), letting MMALoad / MatmulLoad activate.
+    # When BLOCK_D != HEAD_DIM (non-power-of-two head_dim):
+    #   • K is (BLOCK_N, BLOCK_D); we keep boundary_check + tl.trans(k)
+    #     because the D-dim may be padded (BLOCK_D > HEAD_DIM).
+    KT_NOTRANS: tl.constexpr = BLOCK_D == HEAD_DIM
+    if KT_NOTRANS:
+        k = tl.load(k_block_ptr)
+        qk = tl.dot(q, k)
+    else:
+        k = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option="zero")
+        qk = tl.dot(q, tl.trans(k))
     qk = qk * qk_scale
 
     m_ij = tl.maximum(m_i, tl.max(qk, 1))
@@ -257,7 +272,10 @@ def _swa_acc_fwd_nomask_mxn(
     p = tl.math.exp(qk)
     p_cast = p.to(k.dtype)
 
-    v = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero")
+    if KT_NOTRANS:
+        v = tl.load(v_block_ptr)
+    else:
+        v = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option="zero")
     l_ij = tl.sum(p, 1)
     alpha = tl.math.exp(m_i - m_ij)
     l_i = l_i * alpha + l_ij
@@ -480,14 +498,26 @@ def _swa_infer_kernel(
 
                 for kv_block_id in range(full_local_start_block, full_local_end_block + 1):
                     kv_block_start = kv_block_id * BLOCK_N
-                    k_block_ptr = tl.make_block_ptr(
-                        base=k_ptr + kv_start * stride_kt + kv_head_id * stride_kh,
-                        shape=(kv_seq_len, HEAD_DIM),
-                        strides=(stride_kt, stride_kd),
-                        offsets=(kv_block_start.to(tl.int32), 0),
-                        block_shape=(BLOCK_N, BLOCK_D),
-                        order=(1, 0),
-                    )
+                    # When BLOCK_D == HEAD_DIM, construct K block_ptr transposed (BLOCK_D, BLOCK_N)
+                    # so _swa_acc_fwd_nomask_mxn uses tl.dot(q, k) without tl.trans.
+                    if BLOCK_D == HEAD_DIM:
+                        k_block_ptr = tl.make_block_ptr(
+                            base=k_ptr + kv_start * stride_kt + kv_head_id * stride_kh,
+                            shape=(HEAD_DIM, kv_seq_len),
+                            strides=(stride_kd, stride_kt),
+                            offsets=(0, kv_block_start.to(tl.int32)),
+                            block_shape=(BLOCK_D, BLOCK_N),
+                            order=(0, 1),
+                        )
+                    else:
+                        k_block_ptr = tl.make_block_ptr(
+                            base=k_ptr + kv_start * stride_kt + kv_head_id * stride_kh,
+                            shape=(kv_seq_len, HEAD_DIM),
+                            strides=(stride_kt, stride_kd),
+                            offsets=(kv_block_start.to(tl.int32), 0),
+                            block_shape=(BLOCK_N, BLOCK_D),
+                            order=(1, 0),
+                        )
                     v_block_ptr = tl.make_block_ptr(
                         base=v_ptr + kv_start * stride_vt + kv_head_id * stride_vh,
                         shape=(kv_seq_len, HEAD_DIM),
@@ -659,8 +689,8 @@ def _swa_paged_prefill_kernel(
     tl.static_assert(PAGE_SIZE % BLOCK_N == 0, "BLOCK_N must divide PAGE_SIZE for paged KV tiling")
     pid = tl.program_id(0)
     n_programs = tl.num_programs(0)
-    has_global_window = GLOBAL_WINDOW is not None
-    has_local_window = LOCAL_WINDOW is not None
+    has_global_window: tl.constexpr = GLOBAL_WINDOW is not None
+    has_local_window: tl.constexpr = LOCAL_WINDOW is not None
 
     cu_q_chunks = 0
     q_offsets = tl.arange(0, BLOCK_M)
@@ -867,17 +897,34 @@ def _swa_paged_prefill_kernel(
                     physical_page_id = tl.load(
                         block_table_ptr + b_id * stride_block_table_b + logical_page_id * stride_block_table_p
                     )
-                    k_block_ptr = tl.make_block_ptr(
-                        base=k_cache_ptr
-                        + physical_page_id * stride_kp
-                        + kv_head_id * stride_kh
-                        + kv_block_start_in_page * stride_kt,
-                        shape=(kv_block_len, HEAD_DIM),
-                        strides=(stride_kt, stride_kd),
-                        offsets=(0, 0),
-                        block_shape=(BLOCK_N, BLOCK_D),
-                        order=(1, 0),
-                    )
+
+                    # When BLOCK_D == HEAD_DIM, construct K block_ptr transposed (BLOCK_D, BLOCK_N) so
+                    # _swa_acc_fwd_nomask_mxn uses tl.dot(q, k) without tl.trans. When BLOCK_D != HEAD_DIM,
+                    # keep the original (BLOCK_N, BLOCK_D) layout with boundary_check fallback handled inside the helper.
+                    if BLOCK_D == HEAD_DIM:
+                        k_block_ptr = tl.make_block_ptr(
+                            base=k_cache_ptr
+                            + physical_page_id * stride_kp
+                            + kv_head_id * stride_kh
+                            + kv_block_start_in_page * stride_kt,
+                            shape=(HEAD_DIM, kv_block_len),
+                            strides=(stride_kd, stride_kt),
+                            offsets=(0, 0),
+                            block_shape=(BLOCK_D, BLOCK_N),
+                            order=(0, 1),
+                        )
+                    else:
+                        k_block_ptr = tl.make_block_ptr(
+                            base=k_cache_ptr
+                            + physical_page_id * stride_kp
+                            + kv_head_id * stride_kh
+                            + kv_block_start_in_page * stride_kt,
+                            shape=(kv_block_len, HEAD_DIM),
+                            strides=(stride_kt, stride_kd),
+                            offsets=(0, 0),
+                            block_shape=(BLOCK_N, BLOCK_D),
+                            order=(1, 0),
+                        )
                     v_block_ptr = tl.make_block_ptr(
                         base=v_cache_ptr
                         + physical_page_id * stride_vp
