@@ -108,7 +108,7 @@ class MojoIndexer(MojoOperator):
 
         self.wq_b = nn.Linear(q_lora_rank, n_heads * head_dim, bias=False)
         self.wk = nn.Linear(self.dim, self.head_dim, bias=False)
-        self.k_norm = MojoLayerNorm(self.head_dim)
+        self.k_norm = MojoLayerNorm._registry.get(self._backend)(self.head_dim)
         self.weights_proj = nn.Linear(self.dim, self.n_heads, bias=False)
 
         self.register_buffer(
@@ -122,10 +122,10 @@ class MojoIndexer(MojoOperator):
             persistent=False,
         )
 
-        self.rope = MojoApplyRoPE()
-        self.activation = MojoRotateActivation()
-        self.quant = MojoDynamicQuant()
-        self.lightning_indexer = MojoLightningIndexer()
+        self.rope = MojoApplyRoPE._registry.get(self._backend)()
+        self.activation = MojoRotateActivation._registry.get(self._backend)()
+        self.quant = MojoDynamicQuant._registry.get(self._backend)()
+        self.lightning_indexer = MojoLightningIndexer._registry.get(self._backend)()
 
     def forward(
         self,
