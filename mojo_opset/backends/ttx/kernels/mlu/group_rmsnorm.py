@@ -11,7 +11,20 @@ def check_supported_dtype(dtype: torch.dtype) -> None:
         torch.float32,
     ), f"dtype must be one of [torch.float16, torch.bfloat16, torch.float32], got {dtype}"
 
-@triton.jit
+
+def cfggen():
+    block_m = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+    num_stages = [4]
+    configs = [
+        triton.Config({"BLOCK_M": m}, num_stages=s)
+        for m in block_m
+        for s in num_stages
+    ]
+    return configs
+
+
+@triton.autotune(configs=cfggen(), key=["T", "H", "N"])
+@triton.jit(do_not_specialize=["eps"])
 def _rmsnorm_fwd_impl(
     x_ptr,  # x base ptr, shape [T, H, N]
     w_ptr,  # weight ptr, shape [N]
@@ -19,74 +32,52 @@ def _rmsnorm_fwd_impl(
     T,  # token 数
     H,  # num_head
     N,  # norm_size
-    stride_xt,  # x stride for token dim
-    stride_xh,  # x stride for head dim
-    stride_xn,  # x stride for norm dim，要求=1
-    stride_yt,  # y stride for token dim
-    stride_yh,  # y stride for head dim
-    stride_yn,  # y stride for norm dim，要求=1
     eps,
     BLOCK_N: tl.constexpr,
+    BLOCK_M: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
+    USE_DOT: tl.constexpr,
 ):
     pid = tl.program_id(0)
     num_pid = tl.num_programs(0)
     M = T * H
+    ones = tl.full((1, BLOCK_N), 1.0, dtype=tl.float32)
 
-    row = pid
-    while row < M:
-        token_id = row // H
-        head_id = row % H
+    for row_start in range(pid * BLOCK_M, M, num_pid * BLOCK_M):
+        offs_m = row_start + tl.arange(0, BLOCK_M)
+        mask_m = offs_m < M
 
-        # x[token_id, head_id, :]
-        #   = x_ptr + token_id * stride_xt + head_id * stride_xh + n * stride_xn
-        #
-        x_row_base = token_id * stride_xt + head_id * stride_xh
-        y_row_base = token_id * stride_yt + head_id * stride_yh
+        offs_n = tl.arange(0, BLOCK_N)
+        mask_n = offs_n < N
 
-        acc = 0.0
-        start_n = 0
-        while start_n < N:
-            offs_n = start_n + tl.arange(0, BLOCK_N)
-            mask = offs_n < N
-            x = tl.load(
-                x_ptr + x_row_base + offs_n * stride_xn,
-                mask=mask,
-                other=0.0,
-            )
-            x = x.to(tl.float32)
-            acc += tl.sum(x * x, axis=0)
-            start_n += BLOCK_N
+        addr_x = x_ptr + offs_m[:, None] * N + offs_n[None, :]
+        mask_2d = mask_m[:, None] & mask_n[None, :]
+        x_f32 = tl.load(addr_x, mask=mask_2d, other=0.0).to(tl.float32)
+
+        if USE_DOT:
+            sq = x_f32 * x_f32
+            acc = tl.reshape(tl.dot(ones, tl.trans(sq), allow_tf32=False), (BLOCK_M,))
+        else:
+            acc = tl.sum(x_f32 * x_f32, axis=1)
         mean_sq = acc / N
         rstd = tl.rsqrt(mean_sq + eps)
 
-        start_n = 0
-        while start_n < N:
-            offs_n = start_n + tl.arange(0, BLOCK_N)
-            mask = offs_n < N
-            x = tl.load(
-                x_ptr + x_row_base + offs_n * stride_xn,
-                mask=mask,
-                other=0.0,
-            )
-            x_fp32 = x.to(tl.float32)
-            if HAS_WEIGHT:
-                w = tl.load(
-                    w_ptr + offs_n,
-                    mask=mask,
-                    other=1.0,
-                )
-                w_fp32 = w.to(tl.float32)
-                y_fp32 = x_fp32 * rstd * w_fp32
+        if HAS_WEIGHT:
+            w = tl.load(w_ptr + offs_n, mask=mask_n, other=1.0)
+            w_f32 = w.to(tl.float32)
+            if USE_DOT:
+                y_f32 = tl.dot(tl.reshape(rstd, (BLOCK_M, 1)), ones, allow_tf32=False) * x_f32 * w_f32[None, :]
             else:
-                y_fp32 = x_fp32 * rstd
-            tl.store(
-                y_ptr + y_row_base + offs_n * stride_yn,
-                y_fp32,
-                mask=mask,
-            )
-            start_n += BLOCK_N
-        row += num_pid
+                y_f32 = x_f32 * rstd[:, None] * w_f32[None, :]
+        else:
+            if USE_DOT:
+                y_f32 = tl.dot(tl.reshape(rstd, (BLOCK_M, 1)), ones, allow_tf32=False) * x_f32
+            else:
+                y_f32 = x_f32 * rstd[:, None]
+
+        addr_y = y_ptr + offs_m[:, None] * N + offs_n[None, :]
+        tl.store(addr_y, y_f32, mask=mask_2d)
+
 
 def rmsnorm_fwd_triton(
     x,
@@ -98,6 +89,7 @@ def rmsnorm_fwd_triton(
     assert x.ndim == 3, f"x must be 3D [token, num_head, norm_size], got {x.shape}"
     T, H, N = x.shape
     assert x.stride(2) == 1, f"x last dim must be contiguous, got stride={x.stride()}"
+    assert N <= 8192, f"x last size must be <= 8192, got norm_size={x.size(-1)}"
     if weight is not None:
         assert weight.dtype == x.dtype
         assert weight.shape == (N,)
@@ -105,21 +97,23 @@ def rmsnorm_fwd_triton(
         has_weight = True
     else:
         has_weight = False
-    if output_like_input_stride:
-        y = torch.empty_strided(
-            size=x.shape,
-            stride=x.stride(),
-            dtype=x.dtype,
-            device=x.device,
-        )
-    else:
-        y = torch.empty_like(x, memory_format=torch.contiguous_format)
-    assert y.stride(2) == 1, f"y last dim must be contiguous, got stride={y.stride()}"
+    
+    orig_stride = x.stride()
+    orig_is_contiguous = x.is_contiguous()
+    if not x.is_contiguous():
+        x = x.contiguous()
+    y = torch.empty_like(x, memory_format=torch.contiguous_format)
 
-    block_n = min(triton.next_power_of_2(N), 1024)
-    grid_size = get_mlu_total_cores()
-    total_rows = T * H
-    grid = (min(grid_size, total_rows),)
+    block_n = min(triton.next_power_of_2(N), 8192)
+
+    grid = lambda meta: (
+        min(get_mlu_total_cores(), triton.cdiv(T * H, meta['BLOCK_M'])),
+    )
+    if N > 1024:
+        use_dot = False
+    else:
+        use_dot = True
+
     _rmsnorm_fwd_impl[grid](
         x,
         weight,
@@ -127,17 +121,23 @@ def rmsnorm_fwd_triton(
         T,
         H,
         N,
-        x.stride(0),
-        x.stride(1),
-        x.stride(2),
-        y.stride(0),
-        y.stride(1),
-        y.stride(2),
         eps,
         BLOCK_N=block_n,
         HAS_WEIGHT=has_weight,
+        USE_DOT=use_dot,
     )
-    return y
+
+    if output_like_input_stride and not orig_is_contiguous:
+        y_strided = torch.empty_strided(
+            size=y.shape,
+            stride=orig_stride,
+            dtype=y.dtype,
+            device=y.device,
+        )
+        y_strided.copy_(y)
+        return y_strided
+    else:
+        return y
 
 def group_rmsnorm_impl(
     input_groups,
