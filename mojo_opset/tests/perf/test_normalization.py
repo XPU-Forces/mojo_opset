@@ -5,8 +5,10 @@ from mojo_opset import MojoLayerNorm
 from mojo_opset import MojoResidualAddLayerNorm
 from mojo_opset import MojoResidualAddRMSNorm
 from mojo_opset import MojoRMSNorm
+from mojo_opset import MojoRMSNormDynamicQuant
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.utils.platform import get_torch_device
 
 
 @pytest.mark.parametrize(
@@ -113,3 +115,23 @@ def test_layernorm(x, weight, bias, eps):
         layernorm.bias.copy_(bias.to(torch.float32))
 
     perf(lambda: layernorm(x))  # noqa: F821
+
+
+
+@pytest.mark.parametrize("batch_shape", [(64, 1), (64, 1024)])
+@pytest.mark.parametrize("d", [512, 1024, 1536, 2048, 4096])
+@pytest.mark.parametrize("has_beta", [False, True])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@auto_switch_platform(set_perf=True)
+@bypass_not_implemented
+def test_rms_norm_dynamic_quant(batch_shape, d, has_beta, dtype):
+    """Benchmark RMSNorm + dynamic quant across decode/prefill shapes."""
+    device = get_torch_device()
+    bs, n = batch_shape
+    x = (torch.rand(bs, n, d, dtype=dtype, device=device) * 9.0 + 1.0).contiguous()
+    gamma = torch.rand(d, dtype=torch.float32, device=device).contiguous()
+    smooth_scale = torch.rand(d, dtype=torch.float32, device=device).contiguous()
+    beta = torch.randn(d, dtype=torch.float32, device=device).contiguous() if has_beta else None
+
+    op = MojoRMSNormDynamicQuant(norm_size=d, eps=1e-6).to(device)
+    perf(lambda: op(x, gamma, smooth_scale=smooth_scale, beta=beta))  # noqa: F821

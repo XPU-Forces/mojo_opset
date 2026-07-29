@@ -305,6 +305,108 @@ class MojoLayerNormQuant(MojoOperator):
         )
 
 
+class MojoRMSNormDynamicQuant(MojoOperator):
+    """Fused RMSNorm + dynamic per-token quantization with explicit gamma.
+
+    Equivalent to the following sequence::
+
+        normed = rms_norm(hidden_state, weight=gamma)
+        if beta is not None:
+            normed = normed + beta
+        if smooth_scale is not None:
+            normed = normed * smooth_scale
+        scale  = amax(|normed|, dim=-1) / 127.0
+        output = round(normed * (127.0 / amax(|normed|, dim=-1)))
+
+    Returns ``(quant_output, scale)`` where quant_output is int8 and scale is float32.
+    """
+
+    def __init__(
+        self,
+        norm_size: int,
+        eps: float = 1e-6,
+        quant_dtype: torch.dtype = torch.int8,
+        symmetric: bool = True,
+        **kwargs,
+    ):
+        """
+        Args:
+            norm_size (int): Hidden dimension for RMSNorm.
+            eps (float): Epsilon for RMSNorm stability.
+            quant_dtype (torch.dtype): Target quantization dtype.
+            symmetric (bool): Symmetric quantization flag.
+            **kwargs: Tensor factory kwargs (device, dtype).
+        """
+        super().__init__(**kwargs)
+        self.norm_size = norm_size
+        self.variance_epsilon = eps
+        self.quant_dtype = quant_dtype
+        self.symmetric = symmetric
+
+        if quant_dtype == torch.int8:
+            self.q_max = 127
+            self.q_min = -128 if symmetric else 0
+        elif quant_dtype == torch.float8_e4m3fn:
+            self.q_max = torch.finfo(torch.float8_e4m3fn).max
+            self.q_min = -torch.finfo(torch.float8_e4m3fn).max
+        else:
+            raise NotImplementedError(
+                f"Unsupported quant_dtype: {quant_dtype}, "
+                f"expected torch.int8 or torch.float8_e4m3fn"
+            )
+
+    def forward(
+        self,
+        hidden_state: torch.Tensor,
+        gamma: torch.Tensor,
+        *,
+        smooth_scale: Optional[torch.Tensor] = None,
+        beta: Optional[torch.Tensor] = None,
+    ):
+        """
+        Args:
+            hidden_state (torch.Tensor): ``(*, D)`` input.
+            gamma (torch.Tensor): ``(D,)`` RMSNorm weight / scale.
+            smooth_scale (Optional[torch.Tensor]): ``(D,)`` per-channel smooth scale.
+            beta (Optional[torch.Tensor]): ``(D,)`` per-channel bias.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]:
+                - ``quant_output`` in ``quant_dtype``, same shape as input.
+                - ``scale`` of shape ``x.shape[:-1]`` (per-token).
+        """
+        d = hidden_state.shape[-1]
+        if gamma.dim() != 1 or gamma.numel() != d:
+            raise ValueError(f"gamma must be 1D with {d} elements.")
+        if smooth_scale is not None and (
+            smooth_scale.dim() != 1 or smooth_scale.numel() != d
+        ):
+            raise ValueError(f"smooth_scale must be 1D with {d} elements.")
+        if beta is not None and (beta.dim() != 1 or beta.numel() != d):
+            raise ValueError(f"beta must be 1D with {d} elements.")
+
+        # RMSNorm over the last dimension
+        normed = F.rms_norm(
+            hidden_state.float(),
+            [hidden_state.shape[-1]],
+            weight=gamma,
+            eps=self.variance_epsilon,
+        )
+        if beta is not None:
+            normed = normed + beta.float()
+        normed_fp = _apply_optional_smooth_scale(normed, smooth_scale)
+        scale = normed_fp.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / self.q_max
+        output = torch.clamp(torch.round(normed_fp / scale), self.q_min, self.q_max)
+        return output.to(self.quant_dtype), scale.squeeze(-1)
+
+    def extra_repr(self) -> str:
+        return (
+            f"norm_size={self.norm_size}, variance_epsilon={self.variance_epsilon}, "
+            f"quant_dtype={self.quant_dtype}, symmetric={self.symmetric}"
+        )
+
+
+
 class MojoResidualAddRMSNorm(MojoOperator):
     def __init__(
         self,
