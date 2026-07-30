@@ -75,11 +75,11 @@ class MojoLightningIndexer(MojoOperator):
 
             for i in range(q_seq_len):
                 q_slice = query[batch_id, i].to(torch.float32)  # [H, K]
-                dot_product = torch.matmul(q_slice, key_batch.transpose(0, 1)) * key_scale_batch  # [H, N]
+                dot_product = torch.matmul(q_slice, key_batch.transpose(0, 1))  # [H, N]
                 relu_out = torch.maximum(dot_product, torch.tensor(0.0))
                 q_scale_slice = query_scale[batch_id, i].unsqueeze(-1)  # [H, 1]
                 scaled_out = relu_out * q_scale_slice
-                index_score[batch_id, i] = torch.sum(scaled_out, dim=0)
+                index_score[batch_id, i] = torch.sum(scaled_out, dim=0) * key_scale_batch
 
         return index_score
 
