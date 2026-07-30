@@ -271,7 +271,7 @@ def _compact_sorted_blocks(
 @triton.jit
 def _compare_and_swap(x, ids, flip, i: core.constexpr, n_dims: core.constexpr):
     n_outer: core.constexpr = x.numel >> n_dims
-    shape: core.constexpr = [n_outer * 2**i, 2, 2 ** (n_dims - i - 1)]
+    shape: core.constexpr = [n_outer * 2 ** i, 2, 2 ** (n_dims - i - 1)]
 
     y = core.reshape(x, shape)
     y_idx = core.reshape(ids, shape)
@@ -398,213 +398,106 @@ def _unpack_sort_indices(keys):
 
 @libentry()
 @triton.jit
-def _topk_stage1_kernel(
-    y_ptr,
-    y_index_ptr,
-    x_ptr,
-    filter_value: tl.constexpr,
-    k: tl.constexpr,
-    TOTAL_TASKS,
-    VOCAB_SIZE: tl.constexpr,
-    CHUNK_NUM: tl.constexpr,
-    CHUNK_SIZE: tl.constexpr,
-    ROW_STRIDE: tl.constexpr,
-    DESCENDING: tl.constexpr,
+def _top_k_sample_kernel(
+        sorted_logits_ptr,
+        sorted_indices_ptr,
+        rand_data_ptr,
+        output_ptr,
+        probs_out_ptr,
+        stride_logits_b,
+        stride_logits_k,
+        stride_indices_b,
+        stride_indices_k,
+        stride_rand_b,
+        stride_out0_b,
+        stride_out0_k,
+        stride_probs_b,
+        stride_probs_k,
+        TOP_K: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    grid_size = tl.num_programs(0)
 
-    for task_id in range(pid, TOTAL_TASKS, grid_size):
-        cur_batch = task_id // CHUNK_NUM
-        cur_chunk_idx = task_id % CHUNK_NUM
-        chunk_offset = cur_chunk_idx * CHUNK_SIZE
-        off_col = chunk_offset + tl.arange(0, CHUNK_SIZE)
-        row_start = cur_batch * VOCAB_SIZE
-        safe_off_x = tl.where(off_col < VOCAB_SIZE, row_start + off_col, row_start)
-        batch_y_ptr = y_ptr + cur_batch * ROW_STRIDE + cur_chunk_idx * k
-        batch_y_index_ptr = y_index_ptr + cur_batch * ROW_STRIDE + cur_chunk_idx * k
+    row_logits_ptr = sorted_logits_ptr + pid * stride_logits_b
+    offsets = tl.arange(0, TOP_K)
 
-        mask_x = off_col < VOCAB_SIZE
-        pad_value = filter_value if DESCENDING else -filter_value
-        x = tl.load(x_ptr + safe_off_x, mask=mask_x, other=pad_value)
-        x = tl.where(mask_x, x, pad_value)
-        x_index = tl.where(mask_x, off_col, 0x7FFFFFFF).to(tl.int32)
+    logits = tl.load(row_logits_ptr + offsets * stride_logits_k)
 
-        # Iterative max extraction: loop k times to extract top-k elements
-        for k_idx in range(k):
-            if DESCENDING:
-                select_val = tl.max(x, axis=0)
-                is_max = (x == select_val)
-                select_orig_idx = tl.min(tl.where(is_max, x_index, 0x7FFFFFFF), axis=0)
-            else:
-                select_val = tl.min(x, axis=0)
-                is_min = (x == select_val)
-                select_orig_idx = tl.min(tl.where(is_min, x_index, 0x7FFFFFFF), axis=0)
+    logits_max = tl.max(logits, 0)
+    numerator = tl.exp(logits - logits_max)
+    probs = numerator / tl.sum(numerator, 0)
 
-            tl.store(batch_y_ptr + k_idx, select_val)
-            tl.store(batch_y_index_ptr + k_idx, select_orig_idx)
+    row_indices_ptr = sorted_indices_ptr + pid * stride_indices_b
+    out_token_ptr = output_ptr + pid * stride_out0_b
+    out_prob_ptr = out_token_ptr + 1
 
-            # Mask out selected element for next iteration
-            x = tl.where(x_index == select_orig_idx, pad_value, x)
+    threshold = tl.load(rand_data_ptr + pid * stride_rand_b)
+    cum_probs = tl.cumsum(probs, 0)
+    is_candidate = cum_probs >= threshold
+    candidate_indices = tl.where(is_candidate, offsets, TOP_K)
+    sampled_index_in_topk = tl.min(candidate_indices, 0)
+    sampled_index_in_topk = tl.where(sampled_index_in_topk == TOP_K, 0, sampled_index_in_topk)
 
+    is_selected_mask = offsets == sampled_index_in_topk
+    selected_prob_val = tl.sum(tl.where(is_selected_mask, probs, 0.0), 0)
+    all_topk_indices = tl.load(row_indices_ptr + offsets * stride_indices_k)
+    selected_token_val = tl.sum(tl.where(is_selected_mask, all_topk_indices, 0), 0)
 
-@libentry()
-@triton.jit
-def _topk_merge_kernel(
-    y_ptr,
-    y_index_ptr,
-    x_ptr,
-    x_index_ptr,
-    filter_value: tl.constexpr,
-    k: tl.constexpr,
-    INPUT_ELEMS: tl.constexpr,
-    INPUT_ROW_STRIDE: tl.constexpr,
-    OUTPUT_ROW_STRIDE: tl.constexpr,
-    TOTAL_TASKS,
-    NEXT_GROUPS: tl.constexpr,
-    GROUP_CHUNKS: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    DESCENDING: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    grid_size = tl.num_programs(0)
+    tl.store(out_token_ptr, selected_token_val.to(tl.int32))
+    tl.store(out_prob_ptr, selected_prob_val)
 
-    for task_id in range(pid, TOTAL_TASKS, grid_size):
-        cur_batch = task_id // NEXT_GROUPS
-        cur_group = task_id % NEXT_GROUPS
-
-        group_start = cur_group * GROUP_CHUNKS * k
-        off_col = tl.arange(0, BLOCK_SIZE)
-        valid = (off_col < GROUP_CHUNKS * k) & ((group_start + off_col) < INPUT_ELEMS)
-
-        in_row_start = cur_batch * INPUT_ROW_STRIDE
-        safe_off_x = tl.where(valid, in_row_start + group_start + off_col, in_row_start)
-
-        pad_value = filter_value if DESCENDING else -filter_value
-        chunk_x = tl.load(x_ptr + safe_off_x, mask=valid, other=pad_value)
-        chunk_x = tl.where(valid, chunk_x, pad_value)
-        chunk_index = tl.load(x_index_ptr + safe_off_x, mask=valid, other=0x7FFFFFFF).to(tl.int32)
-        chunk_index = tl.where(valid, chunk_index, 0x7FFFFFFF)
-
-        out_row_start = cur_batch * OUTPUT_ROW_STRIDE + cur_group * k
-
-        # Iterative max extraction: loop k times to extract top-k elements
-        for k_idx in range(k):
-            if DESCENDING:
-                select_val = tl.max(chunk_x, axis=0)
-                is_max = (chunk_x == select_val)
-                select_orig_idx = tl.min(tl.where(is_max, chunk_index, 0x7FFFFFFF), axis=0)
-            else:
-                select_val = tl.min(chunk_x, axis=0)
-                is_min = (chunk_x == select_val)
-                select_orig_idx = tl.min(tl.where(is_min, chunk_index, 0x7FFFFFFF), axis=0)
-
-            tl.store(y_ptr + out_row_start + k_idx, select_val)
-            tl.store(y_index_ptr + out_row_start + k_idx, select_orig_idx)
-
-            # Mask out selected element for next iteration
-            chunk_x = tl.where(chunk_index == select_orig_idx, pad_value, chunk_x)
+    row_probs_ptr = probs_out_ptr + pid * stride_probs_b
+    tl.store(row_probs_ptr + offsets * stride_probs_k, probs)
 
 
 def top_k_sampling_impl(
-    logits: torch.FloatTensor,
-    top_k: int = 50,
-    filter_value: float = -float("Inf"),
-    min_tokens_to_keep: int = 1,
-    largest = True
+        logits: torch.FloatTensor,
+        top_k: int = 50,
+        filter_value: float = -float("Inf"),
+        min_tokens_to_keep: int = 1,
+        largest=True
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    device = logits.device 
-    logits = logits.to(torch.float32)    
-    
+    device = logits.device
+    logits = logits.to(torch.float32)
+
     vocab_size = logits.size(-1)
     batch_size = logits.numel() // vocab_size
-    
+
     logits_2d = logits.reshape(batch_size, vocab_size).contiguous()
-    
+
     top_k = min(top_k, vocab_size)
     top_k = max(top_k, min_tokens_to_keep)
-    
-    descending = 1 if largest else 0
-    
-    chunk_size = 128
-    if chunk_size < top_k:
-        chunk_size = triton.next_power_of_2(top_k)
-    chunk_num = triton.cdiv(vocab_size, chunk_size)
 
-    stage1_row_stride = chunk_num * top_k
+    sorted_logits, sorted_topk_indices = torch.topk(logits_2d, top_k, largest=largest)
 
-    pad_val = filter_value if descending else -filter_value
+    rand_data = torch.empty(batch_size, dtype=torch.float32, device=device)
+    output_data = torch.empty((batch_size, 2), dtype=torch.float32, device=device)
+    probs_data = torch.empty((batch_size, top_k), dtype=torch.float32, device=device)
 
-    stage1_out = torch.empty((batch_size, stage1_row_stride), device=device, dtype=logits.dtype)
-    stage1_out_index = torch.empty((batch_size, stage1_row_stride), device=device, dtype=torch.int32)
-
-    stage1_total_tasks = batch_size * chunk_num
-    _topk_stage1_kernel[(min(stage1_total_tasks, 65535),)](
-        stage1_out,
-        stage1_out_index,
-        logits_2d,
-        filter_value,
-        top_k,
-        stage1_total_tasks,
-        vocab_size,
-        chunk_num,
-        chunk_size,
-        stage1_row_stride,
-        descending,
+    grid = (batch_size,)
+    _top_k_sample_kernel[grid](
+        sorted_logits,
+        sorted_topk_indices,
+        rand_data,
+        output_data,
+        probs_data,
+        sorted_logits.stride(0),
+        sorted_logits.stride(1),
+        sorted_topk_indices.stride(0),
+        sorted_topk_indices.stride(1),
+        rand_data.stride(0),
+        output_data.stride(0),
+        output_data.stride(1),
+        probs_data.stride(0),
+        probs_data.stride(1),
+        TOP_K=top_k,
     )
 
-    candidate_vals = stage1_out
-    candidate_idx = stage1_out_index
-    current_groups = chunk_num
-    current_row_stride = stage1_row_stride
+    select_index = torch.multinomial(probs_data, num_samples=1)
 
-    max_merge_candidates = 128
-    merge_group_chunks = max(1, max_merge_candidates // top_k)
-    while merge_group_chunks > 1 and (merge_group_chunks * top_k) > max_merge_candidates:
-        merge_group_chunks //= 2
-    if merge_group_chunks < 2:
-        merge_group_chunks = 2
+    next_tokens = torch.gather(sorted_topk_indices, dim=-1, index=select_index)
+    next_probs = torch.gather(probs_data, dim=-1, index=select_index)
 
-    while current_groups > 1:
-        group_chunks = min(merge_group_chunks, current_groups)
-        next_groups = triton.cdiv(current_groups, group_chunks)
-        next_row_stride = next_groups * top_k
-        block_size = triton.next_power_of_2(group_chunks * top_k)
-
-        next_vals = torch.empty((batch_size, next_row_stride), device=device, dtype=logits.dtype)
-        next_idx = torch.empty((batch_size, next_row_stride), device=device, dtype=torch.int32)
-        merge_total_tasks = batch_size * next_groups
-        _topk_merge_kernel[(min(merge_total_tasks, 65535),)](
-            next_vals,
-            next_idx,
-            candidate_vals,
-            candidate_idx,
-            filter_value,
-            top_k,
-            current_groups * top_k,
-            current_row_stride,
-            next_row_stride,
-            merge_total_tasks,
-            next_groups,
-            group_chunks,
-            block_size,
-            descending,
-        )
-
-        candidate_vals = next_vals
-        candidate_idx = next_idx
-        current_groups = next_groups
-        current_row_stride = next_row_stride
-
-    final_candidate_vals = candidate_vals[:, :top_k].contiguous()
-    final_candidate_idx = candidate_idx[:, :top_k].contiguous()
-
-    final_probs_dist = torch.nn.functional.softmax(final_candidate_vals, dim=-1)
-    select_index = torch.multinomial(final_probs_dist, num_samples=1)
-    stage2_out_prob = torch.gather(final_probs_dist, dim=-1, index=select_index)
-    stage2_out_token = torch.gather(final_candidate_idx, dim=-1, index=select_index)
-
-    return stage2_out_prob, stage2_out_token
+    return next_probs, next_tokens
 
 
 @triton.jit
