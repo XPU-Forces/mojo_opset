@@ -141,7 +141,7 @@ def lightning_indexer_kernel(
             + n_idx * BLOCK_SIZE_N * key_scale_stride_n
             + offs_n * key_scale_stride_n
         )
-        k_scale = tl.load(key_scale_ptrs, mask=mask, other=0.0)
+        k_scale = tl.load(key_scale_ptrs, mask=mask, other=0.0).to(tl.float32)
 
         query_ptrs = (
             query_ptr
@@ -161,7 +161,7 @@ def lightning_indexer_kernel(
             + m_idx * query_scale_stride_m
             + offs_h * query_scale_stride_h
         )
-        q_scale = tl.load(query_scale_ptrs)
+        q_scale = tl.load(query_scale_ptrs).to(tl.float32)
 
         o = tl.sum(relu_qk * q_scale[:, None], axis=0)
 
