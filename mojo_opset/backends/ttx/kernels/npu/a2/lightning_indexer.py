@@ -153,7 +153,7 @@ def lightning_indexer_kernel(
         q = tl.load(query_ptrs)
 
         mul_qk = tl.dot(q.to(k.dtype), tl.trans(k))
-        relu_qk = tl.maximum(mul_qk * k_scale[None, :], 0.0)
+        relu_qk = tl.maximum(mul_qk, 0.0)
 
         query_scale_ptrs = (
             query_scale_ptr
@@ -163,7 +163,7 @@ def lightning_indexer_kernel(
         )
         q_scale = tl.load(query_scale_ptrs).to(tl.float32)
 
-        o = tl.sum(relu_qk * q_scale[:, None], axis=0)
+        o = tl.sum(relu_qk * q_scale[:, None], axis=0)  * k_scale
 
         output_ptrs = (
             output_ptr

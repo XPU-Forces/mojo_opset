@@ -71,16 +71,15 @@ class MojoLightningIndexer(MojoOperator):
 
         for batch_id in range(batch_size):
             key_batch = key[batch_id].to(torch.float32)  # [N, K]
-            key_scale_batch = key_scale[batch_id].unsqueeze(-1)  # [N, 1]
-            key_scaled = key_batch * key_scale_batch  # [N, K]
+            key_scale_batch = key_scale[batch_id]  # [N]
 
             for i in range(q_seq_len):
                 q_slice = query[batch_id, i].to(torch.float32)  # [H, K]
-                dot_product = torch.matmul(q_slice, key_scaled.transpose(0, 1))  # [H, N]
+                dot_product = torch.matmul(q_slice, key_batch.transpose(0, 1))  # [H, N]
                 relu_out = torch.maximum(dot_product, torch.tensor(0.0))
                 q_scale_slice = query_scale[batch_id, i].unsqueeze(-1)  # [H, 1]
                 scaled_out = relu_out * q_scale_slice
-                index_score[batch_id, i] = torch.sum(scaled_out, dim=0)
+                index_score[batch_id, i] = torch.sum(scaled_out, dim=0) * key_scale_batch
 
         return index_score
 
@@ -108,7 +107,7 @@ class MojoIndexer(MojoOperator):
 
         self.wq_b = nn.Linear(q_lora_rank, n_heads * head_dim, bias=False)
         self.wk = nn.Linear(self.dim, self.head_dim, bias=False)
-        self.k_norm = MojoLayerNorm(self.head_dim)
+        self.k_norm = MojoLayerNorm._registry.get(self._backend)(self.head_dim)
         self.weights_proj = nn.Linear(self.dim, self.n_heads, bias=False)
 
         self.register_buffer(
@@ -122,10 +121,10 @@ class MojoIndexer(MojoOperator):
             persistent=False,
         )
 
-        self.rope = MojoApplyRoPE()
-        self.activation = MojoRotateActivation()
-        self.quant = MojoDynamicQuant()
-        self.lightning_indexer = MojoLightningIndexer()
+        self.rope = MojoApplyRoPE._registry.get(self._backend)()
+        self.activation = MojoRotateActivation._registry.get(self._backend)()
+        self.quant = MojoDynamicQuant._registry.get(self._backend)()
+        self.lightning_indexer = MojoLightningIndexer._registry.get(self._backend)()
 
     def forward(
         self,
