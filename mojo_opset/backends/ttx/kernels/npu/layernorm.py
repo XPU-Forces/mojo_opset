@@ -521,17 +521,13 @@ def _launch_layernorm_fwd_kernel(
     block_size_n,
     store_stats: bool,
 ):
-    block_size_m = layer_norm_fwd_two_pass_heuristics(
-        {"n_cols": n_cols}
-    )
-    drop_cols_mask = n_cols % block_size_n == 0
-    drop_rows_mask = n_rows % block_size_m == 0
-    block_size_n_pass1 = 8192 if n_cols <= 8192 else TWO_PASS_BLOCK_SIZE_N
     use_single_pass = n_cols <= SINGLE_PASS_THRESHOLD
     num_programs = get_num_cores()
     grid = (num_programs,)
 
     if use_single_pass:
+        block_size_n = triton.next_power_of_2(n_cols)
+        drop_cols_mask = n_cols % block_size_n == 0
         _layernorm_fwd_single_pass_kernel[grid](
             x_2d,
             y,
@@ -545,11 +541,23 @@ def _launch_layernorm_fwd_kernel(
             n_cols,
             eps,
             DROP_COLS_MASK=drop_cols_mask,
-            DROP_ROWS_MASK=drop_rows_mask,
+            DROP_ROWS_MASK=False,
             STORE_STATS=store_stats,
             BLOCK_SIZE_N=block_size_n,
         )
         return
+
+    if n_cols > 8192:
+        block_size_m = 2
+        block_size_n = 4096
+        block_size_n_pass1 = 8192
+    else:
+        block_size_m = 2
+        block_size_n = 2048
+        block_size_n_pass1 = 8192
+
+    drop_cols_mask = n_cols % block_size_n == 0
+    drop_rows_mask = n_rows % block_size_m == 0
 
     _layernorm_fwd_kernel[grid](
         x_2d,
