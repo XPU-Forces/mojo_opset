@@ -61,6 +61,7 @@ layernorm_bwd_impl = _get_kernel_impl(ttx_backend_module, "layernorm_bwd_impl")
 layernorm_fwd_impl = _get_kernel_impl(ttx_backend_module, "layernorm_fwd_impl")
 fused_add_rmsnorm_infer_impl = _get_kernel_impl(ttx_backend_module, "fused_add_rmsnorm_infer_impl")
 fused_add_layernorm_infer_impl = _get_kernel_impl(ttx_backend_module, "fused_add_layernorm_infer_impl")
+fused_add_layernorm_tle_infer_impl = _get_kernel_impl(ttx_backend_module, "fused_add_layernorm_tle_infer_impl")
 
 paged_attention_prefill_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_prefill_impl")
 paged_attention_prefill_with_kv_dequant_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_prefill_with_kv_dequant_impl")
