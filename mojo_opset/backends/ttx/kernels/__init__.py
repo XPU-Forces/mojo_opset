@@ -129,6 +129,8 @@ gemm_allreduce_peer_mem_size = _get_kernel_impl(ttx_backend_module, "gemm_allred
 gemm_reduce_scatter_impl = _get_kernel_impl(ttx_backend_module, "gemm_reduce_scatter_impl")
 gemm_reduce_scatter_peer_mem_size = _get_kernel_impl(ttx_backend_module, "gemm_reduce_scatter_peer_mem_size")
 
+hc_pre_impl = _get_kernel_impl(ttx_backend_module, "hc_pre_impl")
+
 if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     assert torch.version.__version__ >= "2.7.0", "Work with torch.compile request your torch version >= 2.7.0"
 
@@ -963,6 +965,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
     allgather_gemm = allgather_gemm_impl
     gemm_allreduce = gemm_allreduce_impl
     gemm_reduce_scatter = gemm_reduce_scatter_impl
+    hc_pre = hc_pre_impl
 
 else:
     causal_conv1d_fwd = causal_conv1d_fwd_impl
@@ -1037,3 +1040,4 @@ else:
     allgather_gemm = allgather_gemm_impl
     gemm_allreduce = gemm_allreduce_impl
     gemm_reduce_scatter = gemm_reduce_scatter_impl
+    hc_pre = hc_pre_impl

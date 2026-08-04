@@ -97,6 +97,9 @@ from .operators.convolution import MojoCausalConv1dUpdateState
 """ mlp"""
 from .operators.mlp import MojoSwiGLUMLP
 
+""" hc_pre """
+from .operators.hc_pre import MojoHcPre
+
 """ functions """
 from .functions.activation import MojoSiluFunction
 from .functions.attention import MojoSWAFunction
@@ -192,5 +195,7 @@ __all__ = [
     "MojoFusedLinearCrossEntropyLoss",
 
     "MojoSWAFunction",
+
+    "MojoHcPre",
 ]
 # fmt: on
