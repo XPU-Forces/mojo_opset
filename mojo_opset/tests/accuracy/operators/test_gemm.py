@@ -152,15 +152,19 @@ def test_quant_gemm_parameters_are_registered():
 
 
 @pytest.mark.parametrize(
-    "m, k, n",
+    "m, k, n, output_dtype",
     [
-        (1, 4096, 4096),
-        (32, 4096, 11008),
-        (128, 2048, 4096),
-        (64, 4096, 4096),
-    ],
+        (m, k, n, output_dtype)
+        for m, k, n in [
+            (1, 4096, 4096),
+            (32, 4096, 11008),
+            (128, 2048, 4096),
+            (64, 4096, 4096),
+        ]
+        for output_dtype in [torch.float16, torch.bfloat16]
+    ]
+    + [(65, 257, 129, output_dtype) for output_dtype in [torch.float16, torch.bfloat16, torch.float32]],
 )
-@pytest.mark.parametrize("output_dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("trans_weight", [False, True])
 @bypass_not_implemented
 @auto_switch_platform()

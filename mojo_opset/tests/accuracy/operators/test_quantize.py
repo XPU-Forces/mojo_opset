@@ -61,6 +61,7 @@ moe_dynamic_quant_cases = [
     (18, 512, [6, 6, 4, 2]),
     (21, 1024, [2, 5, 1, 7, 6]),
     (32, 2048, [8, 7, 5, 6, 4, 2]),
+    (9, 129, [3, 0, 6]),
 ]
 
 dequant_swiglu_quant_cases = [
@@ -195,6 +196,28 @@ def test_dynamic_quant(shape, dtype):
         inv_smooth_scale=inv_smooth_scale,
     )
     quant.forward_diff_with(quant_ref, x, atol=(1, 2e-3), rtol=(0, 2e-3))
+
+
+@pytest.mark.parametrize("dtype", dtypes)
+@bypass_not_implemented
+def test_dynamic_quant_tiny_values_use_unit_scale(dtype):
+    hidden_size = 129
+    x = torch.full((9, hidden_size), 1e-7, dtype=dtype)
+    inv_smooth_scale = torch.ones(hidden_size, dtype=torch.float32)
+    quant = load_params(
+        MojoDynamicQuant(input_size=hidden_size, quant_dtype=torch.int8),
+        inv_smooth_scale=inv_smooth_scale,
+    )
+
+    output, scale = quant(x)
+
+    torch.testing.assert_close(output, torch.zeros_like(output), atol=0, rtol=0)
+    torch.testing.assert_close(
+        scale,
+        torch.ones_like(scale),
+        atol=0,
+        rtol=0,
+    )
 
 
 @pytest.mark.parametrize("tokens, hidden_size, token_count", moe_dynamic_quant_cases)

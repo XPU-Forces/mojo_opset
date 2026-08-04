@@ -227,6 +227,36 @@ def test_apply_rope(bs, seqlen, q_heads, k_heads, head_first, head_dim, rope_per
     )
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@bypass_not_implemented
+def test_apply_rope_generic_shape(dtype):
+    device = get_torch_device()
+    num_tokens = 13
+    q_heads = 3
+    k_heads = 2
+    head_dim = 64
+    rope_dim = 32
+
+    query = torch.randn(num_tokens, q_heads, head_dim, device=device, dtype=dtype)
+    key = torch.randn(num_tokens, k_heads, head_dim, device=device, dtype=dtype)
+    angles = torch.randn(num_tokens, rope_dim // 2, device=device, dtype=torch.float32)
+    cos = torch.cat((angles.cos(), angles.cos()), dim=-1)
+    sin = torch.cat((angles.sin(), angles.sin()), dim=-1)
+
+    rope = MojoApplyRoPE()
+    rope_ref = MojoApplyRoPE._registry.get("torch")()
+    rope.forward_diff_with(
+        rope_ref,
+        query,
+        key,
+        cos,
+        sin,
+        False,
+        atol=5e-2,
+        rtol=5e-2,
+    )
+
+
 @pytest.mark.parametrize(
     "bs, grid, heads, head_dim, pad",
     [
