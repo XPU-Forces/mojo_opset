@@ -921,6 +921,34 @@ def test_sdpa(
     diffusion_attn_ref.forward_diff_with(diffusion_attn, query, key, value, blockwise_diffusion_attn_mask)
 
 
+@pytest.mark.parametrize(
+    "bsz, q_head_num, kv_head_num, q_seq_length, kv_seq_length, head_dim",
+    [(1, 4, 2, 512, 512, 64)],
+)
+@bypass_not_implemented
+def test_sdpa_without_mask(
+    bsz,
+    q_head_num,
+    kv_head_num,
+    q_seq_length,
+    kv_seq_length,
+    head_dim,
+):
+    query = torch.randn(bsz, q_head_num, q_seq_length, head_dim, dtype=torch.bfloat16) * 0.25
+    key = torch.randn(bsz, kv_head_num, kv_seq_length, head_dim, dtype=torch.bfloat16) * 0.25
+    value = torch.randn_like(key) * 0.25
+    scale = 1.0 / math.sqrt(head_dim)
+
+    sdpa = MojoSdpa(scale=scale, enable_gqa=True)
+    sdpa_ref = MojoSdpa._registry.get("torch")(scale=scale, enable_gqa=True)
+    sdpa.forward_diff_with(
+        sdpa_ref,
+        query,
+        key,
+        value,
+    )
+
+
 # ===========================================================================
 # MojoDecodeGQA (non-paged)
 # ===========================================================================
