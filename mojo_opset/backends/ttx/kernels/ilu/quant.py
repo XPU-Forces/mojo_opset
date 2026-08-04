@@ -177,7 +177,8 @@ def _dynamic_quant_row_kernel(
     abs_max = tl.max(tl.abs(x_scaled), axis=0)
 
     qscale = abs_max / 127.0
-    inv_qscale = tl.where(qscale > 0.0, 1.0 / qscale, 0.0)
+    qscale = tl.where(qscale < 1e-6, 1.0, qscale)
+    inv_qscale = 1.0 / qscale
 
     q = x_scaled * inv_qscale
     # Round-half-away-from-zero, matching the NPU reference kernel.
@@ -220,7 +221,8 @@ def _dynamic_quant_row_kernel_blocked(
         abs_max = tl.maximum(abs_max, cur)
 
     qscale = abs_max / 127.0
-    inv_qscale = tl.where(qscale > 0.0, 1.0 / qscale, 0.0)
+    qscale = tl.where(qscale < 1e-6, 1.0, qscale)
+    inv_qscale = 1.0 / qscale
     tl.store(qscale_ptr + pid, qscale)
 
     for col_off in range(0, n_cols, BLOCK_SIZE_N):
