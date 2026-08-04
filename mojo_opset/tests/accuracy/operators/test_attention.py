@@ -897,8 +897,11 @@ def generate_diffusion_attn_test_data(
 
 
 @pytest.mark.parametrize(
-    "bsz, q_head_num, kv_head_num, head_dim, seq_length, block_size",
-    [(1, 5, 1, 128, 2048, 32,)],
+    "bsz, q_head_num, kv_head_num, head_dim, seq_length, block_size, mask_kind",
+    [
+        (1, 5, 1, 128, 2048, 32, "diffusion"),
+        (1, 4, 2, 64, 512, None, "none"),
+    ],
 )
 @bypass_not_implemented
 def test_sdpa(
@@ -908,46 +911,30 @@ def test_sdpa(
     head_dim,
     seq_length,
     block_size,
+    mask_kind,
 ):
-    query, key, value, blockwise_diffusion_attn_mask, enable_gqa = generate_diffusion_attn_test_data(
-        bsz, q_head_num, kv_head_num, head_dim, seq_length, block_size
-    )
-    diffusion_attn_ref = MojoSdpa._registry.get("torch")(
-        scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
-    )
-    diffusion_attn = MojoSdpa(
-        scale=1.0 / math.sqrt(query.shape[-1]), enable_gqa=enable_gqa
-    )
-    diffusion_attn_ref.forward_diff_with(diffusion_attn, query, key, value, blockwise_diffusion_attn_mask)
+    if mask_kind == "diffusion":
+        query, key, value, mask, enable_gqa = generate_diffusion_attn_test_data(
+            bsz, q_head_num, kv_head_num, head_dim, seq_length, block_size
+        )
+        atol = rtol = 1e-2
+    else:
+        query = torch.randn(bsz, q_head_num, seq_length, head_dim, dtype=torch.bfloat16) * 0.25
+        key = torch.randn(bsz, kv_head_num, seq_length, head_dim, dtype=torch.bfloat16) * 0.25
+        value = torch.randn_like(key) * 0.25
+        mask = None
+        enable_gqa = q_head_num != kv_head_num
+        atol, rtol = 6e-2, 8e-2
 
-
-@pytest.mark.parametrize(
-    "bsz, q_head_num, kv_head_num, q_seq_length, kv_seq_length, head_dim",
-    [(1, 4, 2, 512, 512, 64)],
-)
-@bypass_not_implemented
-def test_sdpa_without_mask(
-    bsz,
-    q_head_num,
-    kv_head_num,
-    q_seq_length,
-    kv_seq_length,
-    head_dim,
-):
-    query = torch.randn(bsz, q_head_num, q_seq_length, head_dim, dtype=torch.bfloat16) * 0.25
-    key = torch.randn(bsz, kv_head_num, kv_seq_length, head_dim, dtype=torch.bfloat16) * 0.25
-    value = torch.randn_like(key) * 0.25
     scale = 1.0 / math.sqrt(head_dim)
-
-    sdpa = MojoSdpa(scale=scale, enable_gqa=True)
-    sdpa_ref = MojoSdpa._registry.get("torch")(scale=scale, enable_gqa=True)
+    sdpa = MojoSdpa(scale=scale, enable_gqa=enable_gqa)
+    sdpa_ref = MojoSdpa._registry.get("torch")(scale=scale, enable_gqa=enable_gqa)
+    inputs = (query, key, value) if mask is None else (query, key, value, mask)
     sdpa.forward_diff_with(
         sdpa_ref,
-        query,
-        key,
-        value,
-        atol=6e-2,
-        rtol=8e-2,
+        *inputs,
+        atol=atol,
+        rtol=rtol,
     )
 
 

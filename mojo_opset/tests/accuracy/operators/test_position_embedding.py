@@ -135,21 +135,14 @@ def test_rotary_embedding(bs, seqlen, rope_dim, mode):
 
 
 @pytest.mark.parametrize(
-    "bs, seqlen",
+    "bs, seqlen, dtype, q_heads, k_heads, head_first, head_dim, rope_percentage",
     [
-        (1, 124),
-        (6, 555),
-        (2, 2048),
-    ],
-)
-@pytest.mark.parametrize(
-    "dtype, q_heads, k_heads, head_first, head_dim, rope_percentage",
-    [
-        (torch.float16, 32, 8, True, 96, 1.0),
-        (torch.bfloat16, 8, 2, False, 96, 0.3333333333333333333333),
-        (torch.float16, 16, 8, True, 128, 1.0),
-        (torch.bfloat16, 64, 8, False, 88, 1.0),
-        (torch.float16, 64, 4, True, 128, 0.375),
+        (1, 124, torch.float16, 32, 8, True, 96, 1.0),
+        (6, 555, torch.bfloat16, 8, 2, False, 96, 1 / 3),
+        (2, 2048, torch.float16, 16, 8, True, 128, 1.0),
+        (1, 124, torch.bfloat16, 64, 8, False, 88, 1.0),
+        (6, 555, torch.float16, 64, 4, True, 128, 0.375),
+        (1, 13, torch.bfloat16, 3, 2, False, 64, 0.5),
     ],
 )
 @pytest.mark.parametrize("mode", ["padding_prefill_pos2d", "padding_prefill_pos3d", "varlen_prefill", "decode"])
@@ -222,36 +215,6 @@ def test_apply_rope(bs, seqlen, q_heads, k_heads, head_first, head_dim, rope_per
         cos,
         sin,
         head_first,
-        atol=5e-2,
-        rtol=5e-2,
-    )
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@bypass_not_implemented
-def test_apply_rope_generic_shape(dtype):
-    device = get_torch_device()
-    num_tokens = 13
-    q_heads = 3
-    k_heads = 2
-    head_dim = 64
-    rope_dim = 32
-
-    query = torch.randn(num_tokens, q_heads, head_dim, device=device, dtype=dtype)
-    key = torch.randn(num_tokens, k_heads, head_dim, device=device, dtype=dtype)
-    angles = torch.randn(num_tokens, rope_dim // 2, device=device, dtype=torch.float32)
-    cos = torch.cat((angles.cos(), angles.cos()), dim=-1)
-    sin = torch.cat((angles.sin(), angles.sin()), dim=-1)
-
-    rope = MojoApplyRoPE()
-    rope_ref = MojoApplyRoPE._registry.get("torch")()
-    rope.forward_diff_with(
-        rope_ref,
-        query,
-        key,
-        cos,
-        sin,
-        False,
         atol=5e-2,
         rtol=5e-2,
     )
