@@ -58,9 +58,16 @@ class MojoOperator(ABC, torch.nn.Module):
         return cls._registry
 
     @classmethod
-    def get_backend_impl(cls, backend_name: Optional[str] = None):
+    def get_backend_impl(
+        cls, backend_name: Optional[str] = None, *, strict: bool = False
+    ):
         """Return the registered implementation class for the requested backend."""
-        return cls.get_registry().get(backend_name)
+        return cls.get_registry().get(backend_name, strict=strict)
+
+    @classmethod
+    def get_registered_backends(cls) -> tuple[str, ...]:
+        """Return backend names available for this target on the current platform."""
+        return cls.get_registry().registered_backends()
 
     def __init__(self, **kwargs):
         torch.nn.Module.__init__(self)
