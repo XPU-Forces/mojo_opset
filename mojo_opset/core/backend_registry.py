@@ -90,7 +90,9 @@ class MojoBackendRegistry:
         else:
             logger.warning(f"Operator {cls.__name__} is not supported on {curr_platform} platform.")
 
-    def get(self, backend_name: str = None) -> Union[MojoOperator, MojoFunction]:
+    def get(
+        self, backend_name: str = None, *, strict: bool = False
+    ) -> Union[MojoOperator, MojoFunction]:
         # Since the selection of `backend_name` is not deterministic, the import order
         # may lead to missing registrations. To avoid this, we first ensure that all
         # backends are fully registered before accessing or executing the registry
@@ -98,6 +100,12 @@ class MojoBackendRegistry:
         backend_name = _normalize_backend_name(backend_name)
 
         if (backend_name is None) or (backend_name not in self._registry.keys()):  # get first class
+            if strict and backend_name is not None:
+                raise KeyError(
+                    f"{self._operator_name} backend {backend_name!r} is not registered; "
+                    f"available: {list(self._registry)}"
+                )
+
             assert len(self._registry) > 0, f"{self._operator_name} does not implement any backend."
             fallback = list(self._registry.values())[0]
             logger.debug(
@@ -108,6 +116,10 @@ class MojoBackendRegistry:
             return fallback
 
         return self._registry[backend_name]
+
+    def registered_backends(self) -> tuple[str, ...]:
+        """Return backend names registered for the current platform in priority order."""
+        return tuple(self._registry)
 
     def sort(self):
         def _prio_key(item):

@@ -18,6 +18,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+benchmark = [
+    "prettytable",
+    "xpu-perf"
+]
 npu = [
     "byted-triton-x >= 3.2.1"
 ]
