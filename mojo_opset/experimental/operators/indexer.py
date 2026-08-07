@@ -69,17 +69,24 @@ class MojoLightningIndexer(MojoOperator):
             device=query.device,
         )
 
-        for batch_id in range(batch_size):
-            key_batch = key[batch_id].to(torch.float32)  # [N, K]
-            key_scale_batch = key_scale[batch_id]  # [N]
+        # Chunked over M with a single reused workspace for the [Mc, H, N] fp32
+        # matmul result. Everything runs under no_grad: inputs may carry grad
+        # (e.g. scales computed from trainable projections), and an autograd
+        # graph over B*M chunks would pin every intermediate (OOM at 32x4096).
+        chunk = max(1, min(q_seq_len, 2**28 // max(1, head_num * k_seq_len)))
+        with torch.no_grad():
+            dot_buf = torch.empty((chunk, head_num, k_seq_len), dtype=torch.float32, device=query.device)
+            for batch_id in range(batch_size):
+                key_batch = key[batch_id].to(torch.float32)  # [N, K]
+                key_scale_batch = key_scale[batch_id]  # [N]
+                q_batch = query[batch_id].to(torch.float32)  # [M, H, K]
 
-            for i in range(q_seq_len):
-                q_slice = query[batch_id, i].to(torch.float32)  # [H, K]
-                dot_product = torch.matmul(q_slice, key_batch.transpose(0, 1))  # [H, N]
-                relu_out = torch.maximum(dot_product, torch.tensor(0.0))
-                q_scale_slice = query_scale[batch_id, i].unsqueeze(-1)  # [H, 1]
-                scaled_out = relu_out * q_scale_slice
-                index_score[batch_id, i] = torch.sum(scaled_out, dim=0) * key_scale_batch
+                for m0 in range(0, q_seq_len, chunk):
+                    m1 = min(m0 + chunk, q_seq_len)
+                    dot_product = torch.matmul(q_batch[m0:m1], key_batch.transpose(0, 1), out=dot_buf[: m1 - m0])  # [Mc, H, N]
+                    dot_product.relu_()
+                    dot_product.mul_(query_scale[batch_id, m0:m1].unsqueeze(-1))  # [Mc, H, 1]
+                    index_score[batch_id, m0:m1] = dot_product.sum(dim=1).mul_(key_scale_batch)
 
         return index_score
 
