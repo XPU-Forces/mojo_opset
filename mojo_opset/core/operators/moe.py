@@ -323,6 +323,65 @@ class MojoMoEGating(MojoOperator):
         return f"{hidden_size=}, {num_experts=}, {self.top_k=}".replace("self.", "")
 
 
+class MojoMoEGatingTopKHash(MojoOperator):
+    """Hash-based expert selection used by DeepSeek-V4 routing."""
+
+    def __init__(
+        self,
+        k: int,
+        *,
+        routed_scaling_factor: float = 1.0,
+        eps: float = 1e-20,
+        norm_type: int = 1,
+        out_flag: bool = False,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.k = k
+        self.routed_scaling_factor = routed_scaling_factor
+        self.eps = eps
+        self.norm_type = norm_type
+        self.out_flag = out_flag
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        input_ids: torch.Tensor = None,
+        tid2eid: torch.Tensor = None,
+    ):
+        if x.ndim != 2:
+            raise ValueError(f"x must be 2D, got shape {tuple(x.shape)}")
+
+        logits = x.float()
+        if self.norm_type == 0:
+            scores = torch.softmax(logits, dim=-1)
+        elif self.norm_type == 1:
+            scores = torch.sigmoid(logits)
+        elif self.norm_type == 2:
+            scores = torch.sqrt(F.softplus(logits))
+        else:
+            raise ValueError(f"norm_type must be 0, 1, or 2, got {self.norm_type}")
+
+        if input_ids is not None and tid2eid is not None:
+            expert_idx = tid2eid[input_ids].to(torch.int32)
+        else:
+            _, expert_idx = torch.topk(scores, self.k, dim=-1)
+            expert_idx = expert_idx.to(torch.int32)
+
+        selected = torch.gather(scores, 1, expert_idx.long())
+        if self.norm_type != 0:
+            selected = selected / (selected.sum(dim=-1, keepdim=True) + self.eps)
+
+        y = (selected * self.routed_scaling_factor).to(x.dtype)
+        return y, expert_idx, scores if self.out_flag else None
+
+    def extra_repr(self) -> str:
+        return (
+            f"{self.k=}, {self.routed_scaling_factor=}, {self.eps=}, "
+            f"{self.norm_type=}, {self.out_flag=}"
+        ).replace("self.", "")
+
+
 def _count_expert_tokens(top_k_indices: torch.Tensor, num_experts: int) -> torch.Tensor:
     flat_indices = top_k_indices.reshape(-1).to(dtype=torch.int64, device=top_k_indices.device)
     return torch.bincount(flat_indices, minlength=num_experts).to(dtype=torch.int32, device=top_k_indices.device)
