@@ -42,8 +42,18 @@ def _inputs(case: Mapping[str, Any]):
     hidden = int(case["hidden"])
     vocab = int(case["vocab"])
     return {
-        "input": tensor((batch, hidden), torch.bfloat16, creator=torch.randn),
-        "weight": tensor((vocab, hidden), torch.bfloat16, creator=torch.randn),
+        "input": tensor(
+            (batch, hidden),
+            torch.bfloat16,
+            creator=torch.randn,
+            requires_grad=True,
+        ),
+        "weight": tensor(
+            (vocab, hidden),
+            torch.bfloat16,
+            creator=torch.randn,
+            requires_grad=True,
+        ),
         "target": tensor(
             (batch,),
             torch.int64,

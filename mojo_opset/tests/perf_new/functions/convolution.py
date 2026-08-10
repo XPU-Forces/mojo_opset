@@ -50,13 +50,33 @@ def _workload(case: Mapping[str, Any], *, backward: bool) -> PerfWorkload:
     weight_shape = (hidden, width)
 
     inputs = {
-        "x": tensor(shape, torch.float16, creator=torch.rand),
-        "weight": tensor(weight_shape, torch.float16, creator=torch.rand),
+        "x": tensor(
+            shape,
+            torch.float16,
+            creator=torch.rand,
+            requires_grad=True,
+        ),
+        "weight": tensor(
+            weight_shape,
+            torch.float16,
+            creator=torch.rand,
+            requires_grad=True,
+        ),
     }
     if has_bias:
-        inputs["bias"] = tensor((hidden,), torch.float16, creator=torch.rand)
+        inputs["bias"] = tensor(
+            (hidden,),
+            torch.float16,
+            creator=torch.rand,
+            requires_grad=True,
+        )
     if has_residual:
-        inputs["residual"] = tensor(shape, torch.float16, creator=torch.rand)
+        inputs["residual"] = tensor(
+            shape,
+            torch.float16,
+            creator=torch.rand,
+            requires_grad=True,
+        )
 
     forward_args = (
         "x",

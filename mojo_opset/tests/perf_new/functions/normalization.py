@@ -28,8 +28,18 @@ def rmsnorm_forward_workload(case: Mapping[str, Any]) -> PerfWorkload:
     hidden = shape[-1]
     return PerfWorkload(
         inputs={
-            "x": tensor(shape, torch.bfloat16, creator=torch.randn),
-            "weight": tensor((hidden,), torch.float32, creator=torch.randn),
+            "x": tensor(
+                shape,
+                torch.bfloat16,
+                creator=torch.randn,
+                requires_grad=True,
+            ),
+            "weight": tensor(
+                (hidden,),
+                torch.float32,
+                creator=torch.randn,
+                requires_grad=True,
+            ),
         },
         outputs={"y": tensor(shape, torch.bfloat16)},
         args=("x", "weight", 1e-6),
@@ -48,8 +58,18 @@ def rmsnorm_backward_workload(case: Mapping[str, Any]) -> PerfWorkload:
     hidden = shape[-1]
     return PerfWorkload(
         inputs={
-            "x": tensor(shape, torch.bfloat16, creator=torch.randn),
-            "weight": tensor((hidden,), torch.float32, creator=torch.randn),
+            "x": tensor(
+                shape,
+                torch.bfloat16,
+                creator=torch.randn,
+                requires_grad=True,
+            ),
+            "weight": tensor(
+                (hidden,),
+                torch.float32,
+                creator=torch.randn,
+                requires_grad=True,
+            ),
             "dy": tensor(shape, torch.bfloat16, creator=torch.randn),
         },
         outputs={
