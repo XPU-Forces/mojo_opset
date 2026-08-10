@@ -50,8 +50,9 @@ def _resolve_call_arg(value: Any, tensor_mapping: Mapping[str, torch.Tensor]) ->
 class _BenchmarkFunctionContext:
     """Minimal autograd context used to isolate direct Function.backward timing."""
 
-    def __init__(self):
+    def __init__(self, needs_input_grad: tuple[bool, ...]):
         self.saved_tensors: tuple[torch.Tensor | None, ...] = ()
+        self.needs_input_grad = needs_input_grad
 
     def save_for_backward(self, *tensors: torch.Tensor | None) -> None:
         self.saved_tensors = tensors
@@ -179,12 +180,20 @@ class GeneratedMojoPerfAdapter(BasicOp):
         self.calc_flops = self.workload.flops
 
         self._is_function_backward = False
+        grad_input_names = {
+            name for name, spec in self.workload.inputs.items() if spec.requires_grad
+        }
         if issubclass(self.perf_spec.target, MojoOperator):
             if self.perf_spec.phase != "forward":
                 raise ValueError("Mojo Operators only support phase='forward'")
             if self.workload.forward_args is not None:
                 raise ValueError(
                     "PerfWorkload.forward_args are only valid for Mojo Function backward"
+                )
+            if grad_input_names:
+                raise ValueError(
+                    "Mojo Operator benchmarks are inference-only; input tensors cannot "
+                    f"require gradients: {sorted(grad_input_names)}"
                 )
             if self.workload.target_factory is None:
                 self._target: Callable[..., Any] = self.backend_target_cls(
@@ -196,6 +205,8 @@ class GeneratedMojoPerfAdapter(BasicOp):
                     raise TypeError("PerfWorkload.target_factory must return a callable target")
                 if isinstance(self._target, torch.nn.Module):
                     self._target = self._target.to(device)
+            if isinstance(self._target, torch.nn.Module):
+                self._target.eval()
             self._is_operator = True
         elif issubclass(self.perf_spec.target, MojoFunction):
             if self.workload.op_kwargs:
@@ -214,12 +225,34 @@ class GeneratedMojoPerfAdapter(BasicOp):
                     raise ValueError(
                         "Mojo Function backward requires PerfWorkload.forward_args"
                     )
+                forward_tensor_names = {
+                    value
+                    for value in self.workload.forward_args
+                    if isinstance(value, str)
+                }
+                unrelated_grad_inputs = grad_input_names - forward_tensor_names
+                if unrelated_grad_inputs:
+                    raise ValueError(
+                        "requires_grad inputs for Mojo Function backward must be "
+                        "referenced by forward_args: "
+                        f"{sorted(unrelated_grad_inputs)}"
+                    )
+                if not grad_input_names:
+                    raise ValueError(
+                        "Mojo Function backward requires at least one forward input "
+                        "with requires_grad=True"
+                    )
                 self._target = None
                 self._is_function_backward = True
             else:
                 if self.workload.forward_args is not None:
                     raise ValueError(
                         "PerfWorkload.forward_args are only valid for Mojo Function backward"
+                    )
+                if not grad_input_names:
+                    raise ValueError(
+                        "Mojo Function forward benchmarks must exercise the training path; "
+                        "at least one input must set requires_grad=True"
                     )
                 self._target = self.backend_target_cls.apply
             self._is_operator = False
@@ -280,19 +313,34 @@ class GeneratedMojoPerfAdapter(BasicOp):
             mappings.append({name: value.clone() for name, value in first.items()})
         return mappings
 
+    def _apply_input_requires_grad(self, mappings) -> None:
+        for tensor_mapping in mappings:
+            for name, spec in self.workload.inputs.items():
+                tensor = tensor_mapping[name]
+                # Detach makes every xpu-perf clone an independent leaf. The
+                # descriptor, rather than a custom creator, owns grad metadata.
+                tensor_mapping[name] = tensor.detach().requires_grad_(
+                    spec.requires_grad
+                )
+
     def create_tensors(self, instance_num: int):
         mappings = self._create_tensors_func(instance_num)
+        self._apply_input_requires_grad(mappings)
         if self._is_operator and self.workload.state:
             self._bind_state(mappings[0])
         if self._is_function_backward:
             self._function_contexts = {}
             with torch.no_grad():
                 for tensor_mapping in mappings:
-                    ctx = _BenchmarkFunctionContext()
                     forward_args = [
                         _resolve_call_arg(value, tensor_mapping)
                         for value in self.workload.forward_args
                     ]
+                    needs_input_grad = tuple(
+                        isinstance(value, torch.Tensor) and value.requires_grad
+                        for value in forward_args
+                    )
+                    ctx = _BenchmarkFunctionContext(needs_input_grad)
                     self.backend_target_cls.forward(ctx, *forward_args)
                     self._function_contexts[id(tensor_mapping)] = ctx
             self.backend.device_synchronize()
@@ -326,15 +374,23 @@ class GeneratedMojoPerfAdapter(BasicOp):
                 ) from err
             target = partial(self.backend_target_cls.backward, ctx)
 
-        if self.workload.run is not None:
-            return self.workload.run(target, tensor_mapping)
+        if self._is_operator:
+            execution_context = torch.inference_mode()
+        elif self._is_function_backward:
+            execution_context = torch.no_grad()
+        else:
+            execution_context = torch.enable_grad()
 
-        args = [_resolve_call_arg(value, tensor_mapping) for value in self.workload.args]
-        kwargs = {
-            name: _resolve_call_arg(value, tensor_mapping)
-            for name, value in self.workload.kwargs.items()
-        }
-        return target(*args, **kwargs)
+        with execution_context:
+            if self.workload.run is not None:
+                return self.workload.run(target, tensor_mapping)
+
+            args = [_resolve_call_arg(value, tensor_mapping) for value in self.workload.args]
+            kwargs = {
+                name: _resolve_call_arg(value, tensor_mapping)
+                for name, value in self.workload.kwargs.items()
+            }
+            return target(*args, **kwargs)
 
     def _resolve_profile_spec(self) -> ProfileSpec:
         configured = self.perf_spec.profiles[self.xpu_provider]

@@ -108,7 +108,7 @@ def quant_gemm_workload(case):
 
 | 字段 | 作用 |
 |---|---|
-| `inputs` / `outputs` | tensor 的 shape、dtype 和可选 creator |
+| `inputs` / `outputs` | tensor 的 shape、dtype、可选 creator；Function 的可微输入设置 `requires_grad=True` |
 | `op_kwargs` | 构造 Operator 的参数 |
 | `state` | 将生成的 weight、cache 等绑定到 Operator 属性 |
 | `args` / `kwargs` | 计时调用的参数；简单情况可省略 `args` 自动推导 |
@@ -118,7 +118,9 @@ def quant_gemm_workload(case):
 
 ## 编写 Function spec
 
-Function forward 继续通过后端 Function 的 `apply(...)` 执行，名称显式带 `_forward`：
+Operator 固定以 `eval()` 和 `inference_mode()` 推理模式运行，不接受需要梯度的输入。Function 固定测试训练路径：
+forward 通过后端 Function 的 `apply(...)` 执行，并由输入的 `requires_grad` 建立真实 autograd
+ctx；名称显式带 `_forward`：
 
 ```python
 from mojo_opset import MojoSiluFunction
@@ -137,7 +139,14 @@ CASES = (
 def silu_forward_workload(case):
     shape = (case["rows"], case["cols"])
     return PerfWorkload(
-        inputs={"x": tensor(shape, torch.float16, creator=torch.randn)},
+        inputs={
+            "x": tensor(
+                shape,
+                torch.float16,
+                creator=torch.randn,
+                requires_grad=True,
+            )
+        },
         outputs={"y": tensor(shape, torch.float16)},
     )
 ```
@@ -155,7 +164,12 @@ def silu_backward_workload(case):
     shape = (case["rows"], case["cols"])
     return PerfWorkload(
         inputs={
-            "x": tensor(shape, torch.float16, creator=torch.randn),
+            "x": tensor(
+                shape,
+                torch.float16,
+                creator=torch.randn,
+                requires_grad=True,
+            ),
             "dy": tensor(shape, torch.float16, creator=torch.randn),
         },
         outputs={"dx": tensor(shape, torch.float16)},
@@ -164,8 +178,13 @@ def silu_backward_workload(case):
 ```
 
 框架为每份输入在计时外调用对应 provider 的 `forward(ctx, ...)`，同步设备后只重复测量
-`backward(ctx, ...)`。`args` 会自动推导为没有出现在 `forward_args` 中的输入，上例为
+`backward(ctx, ...)`。内部 ctx 的 `needs_input_grad` 由 `forward_args` 中 tensor 的
+`requires_grad` 自动生成，因此 Function 可按真实训练条件保存中间量。`args` 会自动推导为没有
+出现在 `forward_args` 中的输入，上例为
 `("dy",)`。开发者不需要创建 ctx 或编写 prepare。
+
+Function forward 始终在 `enable_grad()` 下运行；直接测量的 backward 在 `no_grad()` 下运行，
+与默认的一阶反向语义一致。
 
 Function 参数包含标量时直接写入参数元组；字符串表示 tensor 名，字面字符串使用
 `literal("value")`。Function 不支持关键字调用。

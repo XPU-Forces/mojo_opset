@@ -69,6 +69,16 @@ def test_perf_case_serializes_torch_dtype():
     assert case.to_task("test_op")["dtype"] == "bfloat16"
 
 
+def test_tensor_spec_validates_requires_grad():
+    spec = tensor((2, 4), torch.float32, requires_grad=True)
+
+    assert spec.requires_grad is True
+    with pytest.raises(ValueError, match="floating-point or complex"):
+        tensor((2, 4), torch.int32, requires_grad=True)
+    with pytest.raises(TypeError, match="must be a bool"):
+        tensor((2, 4), torch.float32, requires_grad=1)
+
+
 def test_get_backend_impl_strict_rejects_fallback():
     with pytest.raises(KeyError, match="backend 'missing' is not registered"):
         MojoGelu.get_backend_impl("missing", strict=True)
@@ -235,7 +245,12 @@ def _register_backward_test_spec(name, *, run=None):
     def workload(_case):
         return PerfWorkload(
             inputs={
-                "x": tensor((2, 4), torch.float32, creator=torch.randn),
+                "x": tensor(
+                    (2, 4),
+                    torch.float32,
+                    creator=torch.randn,
+                    requires_grad=True,
+                ),
                 "dy": tensor((2, 4), torch.float32, creator=torch.randn),
             },
             outputs={"dx": tensor((2, 4), torch.float32)},
@@ -290,6 +305,116 @@ def test_function_phase_validates_forward_args(phase, forward_args, match):
         _make_test_adapter(name)(case.to_task(name), _FakeBenchmarkBackend())
 
 
+def test_operator_benchmark_forces_eval_mode():
+    name = "_test_operator_eval_mode"
+    case = perf_case("tiny")
+    observed = []
+
+    def run(target, tensors):
+        observed.append((target.training, torch.is_inference_mode_enabled()))
+        return target(tensors["x"])
+
+    @mojo_perf(
+        name=name,
+        target=MojoGelu,
+        cases=(case,),
+        profiling=profile(timing="event"),
+    )
+    def workload(_case):
+        return PerfWorkload(
+            inputs={"x": tensor((2, 4), torch.float32)},
+            outputs={"y": tensor((2, 4), torch.float32)},
+            run=run,
+        )
+
+    adapter = _make_test_adapter(name)(case.to_task(name), _FakeBenchmarkBackend())
+    mapping = adapter.create_tensors(1)[0]
+
+    adapter.core_run(mapping)
+
+    assert adapter._target.training is False
+    assert observed == [(False, True)]
+
+
+def test_operator_benchmark_rejects_requires_grad_inputs():
+    name = "_test_operator_requires_grad"
+    case = perf_case("tiny")
+
+    @mojo_perf(
+        name=name,
+        target=MojoGelu,
+        cases=(case,),
+        profiling=profile(timing="event"),
+    )
+    def workload(_case):
+        return PerfWorkload(
+            inputs={"x": tensor((2, 4), torch.float32, requires_grad=True)},
+            outputs={"y": tensor((2, 4), torch.float32)},
+        )
+
+    with pytest.raises(ValueError, match="inference-only"):
+        _make_test_adapter(name)(case.to_task(name), _FakeBenchmarkBackend())
+
+
+def test_function_forward_requires_training_input():
+    name = "_test_function_forward_requires_grad"
+    case = perf_case("tiny")
+
+    @mojo_perf(
+        name=name,
+        target=MojoSiluFunction,
+        cases=(case,),
+        profiling=profile(timing="event"),
+    )
+    def workload(_case):
+        return PerfWorkload(
+            inputs={"x": tensor((2, 4), torch.float32)},
+            outputs={"y": tensor((2, 4), torch.float32)},
+        )
+
+    with pytest.raises(ValueError, match="training path"):
+        _make_test_adapter(name)(case.to_task(name), _FakeBenchmarkBackend())
+
+
+def test_function_forward_uses_apply_training_context(monkeypatch):
+    name = "_test_function_forward_training_context"
+    case = perf_case("tiny")
+
+    @mojo_perf(
+        name=name,
+        target=MojoSiluFunction,
+        cases=(case,),
+        profiling=profile(timing="event"),
+    )
+    def workload(_case):
+        return PerfWorkload(
+            inputs={
+                "x": tensor((2, 4), torch.float32, requires_grad=True),
+            },
+            outputs={"y": tensor((2, 4), torch.float32)},
+        )
+
+    backend_impl = MojoSiluFunction.get_backend_impl("torch", strict=True)
+    original_forward = backend_impl.forward
+    observed = []
+
+    def spy_forward(ctx, x):
+        observed.append(ctx.needs_input_grad)
+        return original_forward(ctx, x)
+
+    monkeypatch.setattr(backend_impl, "forward", staticmethod(spy_forward))
+    adapter = _make_test_adapter(name)(case.to_task(name), _FakeBenchmarkBackend())
+    mapping = adapter.create_tensors(1)[0]
+
+    with torch.no_grad():
+        result = adapter.core_run(mapping)
+
+    assert mapping["x"].is_leaf
+    assert mapping["x"].requires_grad
+    assert observed == [(True,)]
+    assert result.requires_grad
+
+
 def test_function_backward_prepares_distinct_contexts_outside_timing(monkeypatch):
     name = "_test_function_backward_lifecycle"
     case = _register_backward_test_spec(name)
@@ -297,13 +422,20 @@ def test_function_backward_prepares_distinct_contexts_outside_timing(monkeypatch
     original_forward = backend_impl.forward
     original_backward = backend_impl.backward
     calls = []
+    observed_needs_input_grad = []
+    backward_grad_enabled = []
 
     def spy_forward(ctx, x):
         calls.append(("forward", id(ctx)))
+        observed_needs_input_grad.append(ctx.needs_input_grad)
+        if ctx.needs_input_grad[0]:
+            ctx.training_intermediate = x.square()
         return original_forward(ctx, x)
 
     def spy_backward(ctx, dy):
         calls.append(("backward", id(ctx)))
+        backward_grad_enabled.append(torch.is_grad_enabled())
+        assert hasattr(ctx, "training_intermediate")
         return original_backward(ctx, dy)
 
     monkeypatch.setattr(backend_impl, "forward", staticmethod(spy_forward))
@@ -316,6 +448,8 @@ def test_function_backward_prepares_distinct_contexts_outside_timing(monkeypatch
     assert [kind for kind, _ in calls] == ["forward", "forward"]
     assert len({ctx_id for _, ctx_id in calls}) == 2
     assert backend.synchronize_calls == 1
+    assert observed_needs_input_grad == [(True,), (True,)]
+    assert all(mapping["x"].requires_grad for mapping in mappings)
 
     adapter.core_run(mappings[0])
     adapter.core_run(mappings[1])
@@ -330,6 +464,7 @@ def test_function_backward_prepares_distinct_contexts_outside_timing(monkeypatch
     ]
     assert calls[0][1] == calls[2][1] == calls[4][1]
     assert calls[1][1] == calls[3][1]
+    assert backward_grad_enabled == [False, False, False]
 
 
 def test_function_backward_custom_run_receives_bound_target():

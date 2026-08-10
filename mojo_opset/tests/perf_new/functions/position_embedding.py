@@ -56,8 +56,18 @@ def apply_rope_forward_workload(case: Mapping[str, Any]) -> PerfWorkload:
     q_shape, k_shape, rope_shape = _shapes(case)
     return PerfWorkload(
         inputs={
-            "q": tensor(q_shape, torch.bfloat16, creator=torch.randn),
-            "k": tensor(k_shape, torch.bfloat16, creator=torch.randn),
+            "q": tensor(
+                q_shape,
+                torch.bfloat16,
+                creator=torch.randn,
+                requires_grad=True,
+            ),
+            "k": tensor(
+                k_shape,
+                torch.bfloat16,
+                creator=torch.randn,
+                requires_grad=True,
+            ),
             "cos": tensor(rope_shape, torch.float32, creator=torch.randn),
             "sin": tensor(rope_shape, torch.float32, creator=torch.randn),
         },
@@ -79,8 +89,18 @@ def apply_rope_backward_workload(case: Mapping[str, Any]) -> PerfWorkload:
     q_shape, k_shape, rope_shape = _shapes(case)
     return PerfWorkload(
         inputs={
-            "q": tensor(q_shape, torch.bfloat16, creator=torch.randn),
-            "k": tensor(k_shape, torch.bfloat16, creator=torch.randn),
+            "q": tensor(
+                q_shape,
+                torch.bfloat16,
+                creator=torch.randn,
+                requires_grad=True,
+            ),
+            "k": tensor(
+                k_shape,
+                torch.bfloat16,
+                creator=torch.randn,
+                requires_grad=True,
+            ),
             "cos": tensor(rope_shape, torch.float32, creator=torch.randn),
             "sin": tensor(rope_shape, torch.float32, creator=torch.randn),
             "dq_out": tensor(q_shape, torch.bfloat16, creator=torch.randn),
