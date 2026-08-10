@@ -83,6 +83,7 @@ class TensorSpec:
     dtype: torch.dtype
     creator: TensorCreator | None = None
     device: str | None = None
+    requires_grad: bool = False
 
     def __post_init__(self):
         object.__setattr__(self, "shape", tuple(int(dim) for dim in self.shape))
@@ -90,6 +91,14 @@ class TensorSpec:
             raise ValueError(f"tensor shape must be non-negative, got {self.shape}")
         if self.creator is not None and not callable(self.creator):
             raise TypeError("TensorSpec.creator must be callable")
+        if not isinstance(self.requires_grad, bool):
+            raise TypeError("TensorSpec.requires_grad must be a bool")
+        if self.requires_grad and not (
+            self.dtype.is_floating_point or self.dtype.is_complex
+        ):
+            raise ValueError(
+                "TensorSpec.requires_grad is only valid for floating-point or complex tensors"
+            )
 
 
 def tensor(
@@ -98,8 +107,15 @@ def tensor(
     *,
     creator: TensorCreator | None = None,
     device: str | None = None,
+    requires_grad: bool = False,
 ) -> TensorSpec:
-    return TensorSpec(shape=tuple(shape), dtype=dtype, creator=creator, device=device)
+    return TensorSpec(
+        shape=tuple(shape),
+        dtype=dtype,
+        creator=creator,
+        device=device,
+        requires_grad=requires_grad,
+    )
 
 
 @dataclass(frozen=True)

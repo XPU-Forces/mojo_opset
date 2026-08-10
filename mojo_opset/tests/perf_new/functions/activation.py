@@ -26,7 +26,14 @@ CASES = (
 def silu_forward_workload(case: Mapping[str, Any]) -> PerfWorkload:
     shape = (int(case["rows"]), int(case["cols"]))
     return PerfWorkload(
-        inputs={"x": tensor(shape, torch.float16, creator=torch.randn)},
+        inputs={
+            "x": tensor(
+                shape,
+                torch.float16,
+                creator=torch.randn,
+                requires_grad=True,
+            )
+        },
         outputs={"y": tensor(shape, torch.float16)},
         flops=4 * shape[0] * shape[1],
     )
@@ -42,7 +49,12 @@ def silu_backward_workload(case: Mapping[str, Any]) -> PerfWorkload:
     shape = (int(case["rows"]), int(case["cols"]))
     return PerfWorkload(
         inputs={
-            "x": tensor(shape, torch.float16, creator=torch.randn),
+            "x": tensor(
+                shape,
+                torch.float16,
+                creator=torch.randn,
+                requires_grad=True,
+            ),
             "dy": tensor(shape, torch.float16, creator=torch.randn),
         },
         outputs={"dx": tensor(shape, torch.float16)},

@@ -67,9 +67,24 @@ def _workload(case: Mapping[str, Any], *, backward: bool) -> PerfWorkload:
     kv_shape = (total_tokens, kv_heads, head_dim)
     cu_shape = (batch + 1,)
     inputs = {
-        "q": tensor(q_shape, torch.bfloat16, creator=torch.randn),
-        "k": tensor(kv_shape, torch.bfloat16, creator=torch.randn),
-        "v": tensor(kv_shape, torch.bfloat16, creator=torch.randn),
+        "q": tensor(
+            q_shape,
+            torch.bfloat16,
+            creator=torch.randn,
+            requires_grad=True,
+        ),
+        "k": tensor(
+            kv_shape,
+            torch.bfloat16,
+            creator=torch.randn,
+            requires_grad=True,
+        ),
+        "v": tensor(
+            kv_shape,
+            torch.bfloat16,
+            creator=torch.randn,
+            requires_grad=True,
+        ),
         "cu_q_lens": tensor(
             cu_shape,
             torch.int32,
