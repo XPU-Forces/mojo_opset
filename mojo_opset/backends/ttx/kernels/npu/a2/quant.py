@@ -3,6 +3,7 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
+import triton.language.extra.cann.libdevice as libdevice
 
 from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 
@@ -150,7 +151,8 @@ def scale_dynamic_quant_kernel(
             else:
                 scaled_vals = input_vals
             quant_vals = scaled_vals / current_quant_scale[:, None]
-            quant_vals = tl.where(quant_vals < 0, quant_vals - 0.5, quant_vals + 0.5)
+            # Round-half-to-even (banker's rounding) to match torch.round.
+            quant_vals = libdevice.rint(quant_vals)
             quant_vals_int8 = tl.cast(quant_vals, dtype=tl.int8)
 
             tl.store(output_ptr, quant_vals_int8, mask=block_mask)
