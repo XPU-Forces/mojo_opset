@@ -36,7 +36,7 @@ def _repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8, num_stages=2),
     ],
     selected_idx=0,
-    key=["SEQ", "HEAD_DIM"],
+    key=["SEQ", "HEAD_DIM", "HAS_MASK"],
 )
 @libentry()
 @triton.jit
@@ -57,6 +57,7 @@ def _sdpa_fav2_fwd_kernel(
     KV_HEAD_NUM: tl.constexpr,
     SEQ: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    HAS_MASK: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
@@ -104,14 +105,18 @@ def _sdpa_fav2_fwd_kernel(
         qk = tl.dot(q_block, k_T_block)
         qk = qk * sm_scale
 
-        attn_mask_ptrs = (
-            mask_ptr
-            + (q_start + offs_m[:, None]) * stride_m0
-            + kv_offs[None, :] * stride_m1
-        )
         mask_valid = ((q_start + offs_m[:, None]) < SEQ) & (kv_offs[None, :] < SEQ)
-        attn_mask_raw = tl.load(attn_mask_ptrs, mask=mask_valid, other=0)
-        attn_mask = attn_mask_raw != 0
+        if HAS_MASK:
+            attn_mask_ptrs = (
+                mask_ptr
+                + (q_start + offs_m[:, None]) * stride_m0
+                + kv_offs[None, :] * stride_m1
+            )
+            attn_mask_raw = tl.load(attn_mask_ptrs, mask=mask_valid, other=0)
+            attn_mask = attn_mask_raw != 0
+        else:
+            # No explicit mask still needs to exclude padded sequence positions.
+            attn_mask = mask_valid
         qk = tl.where(attn_mask, qk, float("-inf"))
 
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
@@ -160,8 +165,9 @@ def sdpa_infer_impl(
     assert q.shape[-1] == k.shape[-1] and k.shape[-1] == v.shape[-1]
     assert q.shape[-2] == k.shape[-2] and k.shape[-2] == v.shape[-2]
     seq_length = q.shape[-2]
-    assert mask is not None
-    assert mask.shape == (seq_length, seq_length) and mask.dtype == torch.bool
+    has_mask = mask is not None
+    if has_mask:
+        assert mask.shape == (seq_length, seq_length) and mask.dtype == torch.bool
 
     if not enable_gqa:
         assert q.shape[1] == k.shape[1] == v.shape[1]
@@ -177,7 +183,12 @@ def sdpa_infer_impl(
     q_c = q.contiguous()
     k_c = k.contiguous()
     v_c = v.contiguous()
-    mask_c = mask.to(torch.int8).contiguous()
+    if has_mask:
+        mask_c = mask.to(torch.int8).contiguous()
+    else:
+        # The pointer is unused by the HAS_MASK=False specialization.
+        mask_c = q_c
+
     out = torch.empty_like(q_c)
 
     def grid(META):
@@ -200,6 +211,7 @@ def sdpa_infer_impl(
         KV_HEAD_NUM=kv_head_num,
         SEQ=seq_length,
         HEAD_DIM=head_dim,
+        HAS_MASK=has_mask,
     )
     return out.to(q.dtype)
 
