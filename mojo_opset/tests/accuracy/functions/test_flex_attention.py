@@ -7,6 +7,7 @@ from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_platform
 from mojo_opset.utils.platform import get_torch_device
 from mojo_opset.backends.ttx.kernels.npu.utils import is_910
+import torch_npu._inductor
 from mojo_opset.backends.ttx.kernels.npu.flex_attention import _build_packed_block_mask_streaming
 from mojo_opset.backends.ttx.kernels.npu.flex_attention import create_block_mask_patched
 from mojo_opset.backends.ttx.kernels.npu.flex_attention import triton_create_mask
@@ -132,12 +133,6 @@ def _flex_attention_mojo(q, k, v, mask, block_mask, dropout_rate=0.0, input_form
     if USE_MOJO_FLEX_ATTENTION:
         output = mojo_flex_attention(q, k, v, block_mask=block_mask)
     else:
-        try:
-            import torch_npu  
-            import torch_npu._inductor  # noqa: F401
-        except ImportError as e:
-            print(f"import torch_npu._inductor {e}")
-            pass
         flex_compiled = torch.compile(flex_attention, backend="inductor")
         output = flex_compiled(q, k, v, block_mask=block_mask,
                                enable_gqa=True, return_lse=False)                            
