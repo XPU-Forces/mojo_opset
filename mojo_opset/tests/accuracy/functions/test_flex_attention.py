@@ -6,11 +6,11 @@ from mojo_opset.experimental import mojo_flex_attention
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_platform
 from mojo_opset.utils.platform import get_torch_device
-from mojo_opset.backends.ttx.kernels.npu.flex_attention import _build_packed_block_mask_streaming
-from mojo_opset.backends.ttx.kernels.npu.flex_attention import create_block_mask_patched
-from mojo_opset.backends.ttx.kernels.npu.flex_attention import triton_create_mask
-from mojo_opset.backends.ttx.kernels.npu.flex_attention import MASK_BLOCK_SIZE
 try:
+    from mojo_opset.backends.ttx.kernels.npu.flex_attention import _build_packed_block_mask_streaming
+    from mojo_opset.backends.ttx.kernels.npu.flex_attention import create_block_mask_patched
+    from mojo_opset.backends.ttx.kernels.npu.flex_attention import triton_create_mask
+    from mojo_opset.backends.ttx.kernels.npu.flex_attention import MASK_BLOCK_SIZE
     import torch_npu._inductor
     from torch.nn.attention.flex_attention import flex_attention
     from torch.nn.attention.flex_attention import create_block_mask

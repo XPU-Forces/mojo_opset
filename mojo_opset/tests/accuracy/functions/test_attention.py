@@ -326,7 +326,7 @@ def test_swa_function(
 ):   
     q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
     max_q_len = q_lens.max().item()
-    if max_q_len >= 16384 and get_platform() != "npu":
+    if max_q_len > 8192 and get_platform() != "npu":
         pytest.skip("large shape only on NPU, to avoid OOM on other platform")
     swa_func = MojoSWAFunction.apply
     
@@ -378,19 +378,17 @@ def test_swa_function(
         assert_close(v.grad, v_ref.grad)
     else:
         print(f"max_q_len {max_q_len}, use chunked_swa_torch")
-        q_ref_cpu = query.detach()
-        k_ref_cpu = key.detach()
-        v_ref_cpu = value.detach()
-        do_ref_cpu = grad_out.detach()
-        cu_q_lens_cpu = cu_q_lens
-        cu_total_seq_lens_cpu = cu_total_seq_lens
+        q_ref = query.detach()
+        k_ref = key.detach()
+        v_ref = value.detach()
+        do_ref = grad_out.detach()
 
         o_ref_cpu, softmax_lse_ref, o_f32_ref = _chunked_swa_torch_forward(
-            q_ref_cpu,
-            k_ref_cpu,
-            v_ref_cpu,
-            cu_q_lens_cpu,
-            cu_total_seq_lens_cpu,
+            q_ref,
+            k_ref,
+            v_ref,
+            cu_q_lens,
+            cu_total_seq_lens,
             True,
             local_window,
             global_window,
@@ -399,14 +397,14 @@ def test_swa_function(
             True,
         )
         dq_ref, dk_ref, dv_ref = _chunked_swa_torch_backward(
-            do_ref_cpu,
-            q_ref_cpu,
-            k_ref_cpu,
-            v_ref_cpu,
+            do_ref,
+            q_ref,
+            k_ref,
+            v_ref,
             o_f32_ref,
             softmax_lse_ref,
-            cu_q_lens_cpu,
-            cu_total_seq_lens_cpu,
+            cu_q_lens,
+            cu_total_seq_lens,
             True,
             local_window,
             global_window,
@@ -414,7 +412,7 @@ def test_swa_function(
             gqa_interleave,
         )
 
-        assert_close(o, o_ref_cpu.npu())
-        assert_close(q.grad, dq_ref.npu())
-        assert_close(k.grad, dk_ref.npu())
-        assert_close(v.grad, dv_ref.npu())
+        assert_close(o, o_ref_cpu)
+        assert_close(q.grad, dq_ref)
+        assert_close(k.grad, dk_ref)
+        assert_close(v.grad, dv_ref)
