@@ -65,7 +65,7 @@ def _int8_gemm_dequant_kernel(
     tl.store(c_ptrs, c, mask=mask_m[:, None] & mask_n[None, :])
 
 
-def prepare_b_impl(b: torch.Tensor) -> torch.Tensor:
+def prepare_b_impl(b: torch.Tensor, transposed: bool = False) -> torch.Tensor:
     """Transpose B to (N, K) row-major layout.
 
     For inference: weight B is fixed, call once and reuse.

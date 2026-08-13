@@ -205,18 +205,27 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, context_kv_l
         chunk_metadata=case["chunk_metadata"],
     )
     ## torch_npu does not support chunk_metadata
-    from  mojo_opset.backends.torch_npu.operators.kv_cache import TorchNpuStorePagedKVCache
-    if isinstance(store_paged_kv,TorchNpuStorePagedKVCache):
-        k_cache, v_cache = store_paged_kv(
-            case["key_states"],
-            case["value_states"],
-            case["k_cache"].clone(),
-            case["v_cache"].clone(),
-            case["block_table"],
-            case["cu_q_lens"],
-            case["context_kv_lens"],
-            chunk_metadata=None,
-        )
+    if get_platform =="npu":
+        from mojo_opset.backends.torch_npu.operators.kv_cache import TorchNpuStorePagedKVCache
+        if  isinstance(store_paged_kv,TorchNpuStorePagedKVCache):
+            k_cache, v_cache = store_paged_kv(
+                case["key_states"],
+                case["value_states"],
+                case["k_cache"].clone(),
+                case["v_cache"].clone(),
+                case["block_table"],
+                case["cu_q_lens"],
+                case["context_kv_lens"],
+                chunk_metadata=None,
+            )
+        else:
+            k_cache, v_cache = store_paged_kv(
+                        case["key_states"],
+                        case["value_states"],
+                        case["k_cache"].clone(),
+                        case["v_cache"].clone(),
+                        chunk_metadata=case["chunk_metadata"],
+                    )
     else:
         k_cache, v_cache = store_paged_kv(
             case["key_states"],
@@ -463,13 +472,36 @@ def test_store_paged_kv_bucket_padded_varlen():
         v_cache_ref,
         chunk_metadata=chunk_metadata,
     )
-    k_cache, v_cache = store_paged_kv(
-        key_states,
-        value_states,
-        k_cache,
-        v_cache,
-        chunk_metadata=chunk_metadata,
-    )
+    ## torch_npu does not support chunk_metadata
+    if get_platform =="npu":
+        from mojo_opset.backends.torch_npu.operators.kv_cache import TorchNpuStorePagedKVCache
+        if  isinstance(store_paged_kv,TorchNpuStorePagedKVCache):
+            k_cache, v_cache = store_paged_kv(
+                key_states,
+                value_states,
+                k_cache,
+                v_cache,
+                block_table,
+                cu_q_lens,
+                context_kv_lens,
+                chunk_metadata=None,
+            )
+        else:
+            k_cache, v_cache = store_paged_kv(
+                    key_states,
+                    value_states,
+                    k_cache,
+                    v_cache,
+                    chunk_metadata=chunk_metadata,
+                )
+    else:
+        k_cache, v_cache = store_paged_kv(
+                key_states,
+                value_states,
+                k_cache,
+                v_cache,
+                chunk_metadata=chunk_metadata,
+            )
 
     for batch_id in range(real_batch_size):
         write_pos = context_kv_lens[batch_id].item()

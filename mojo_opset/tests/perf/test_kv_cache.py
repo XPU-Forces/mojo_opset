@@ -6,6 +6,7 @@ from mojo_opset.core.operators.kv_cache import build_paged_kv_chunk_metadata
 from mojo_opset.utils.platform import get_torch_device
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.utils.platform import get_platform
 
 
 @pytest.mark.parametrize(
@@ -140,22 +141,32 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, context_kv_l
 
     k_cache = k_cache_ref.clone()
     v_cache = v_cache_ref.clone()
-
+     
     store_paged_kv = MojoStorePagedKVCache()
-    from  mojo_opset.backends.torch_npu.operators.kv_cache import TorchNpuStorePagedKVCache
-    if isinstance(store_paged_kv,TorchNpuStorePagedKVCache):
-        perf(  
-        lambda: store_paged_kv(
-            key_states,
-            value_states,
-            k_cache,
-            v_cache,
-            block_table,
-            cu_q_lens,
-            context_kv_lens,
-            chunk_metadata=None,
-        )
-    )
+    if get_platform =="npu":
+        from  mojo_opset.backends.torch_npu.operators.kv_cache import TorchNpuStorePagedKVCache
+        if isinstance(store_paged_kv,TorchNpuStorePagedKVCache):
+            perf(  
+            lambda: store_paged_kv(
+                key_states,
+                value_states,
+                k_cache,
+                v_cache,
+                block_table,
+                cu_q_lens,
+                context_kv_lens,
+                chunk_metadata=None,)
+           )
+        else:
+            perf(  
+                    lambda: store_paged_kv(
+                        key_states,
+                        value_states,
+                        k_cache,
+                        v_cache,
+                        chunk_metadata=chunk_metadata,
+                    )
+            )
     else:
         perf(  
         lambda: store_paged_kv(
