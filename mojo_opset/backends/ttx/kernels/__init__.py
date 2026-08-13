@@ -409,8 +409,9 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         cos: torch.Tensor,
         sin: torch.Tensor,
         head_first: bool = True,
+        keep_cos_sin_dtype: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return rope_fwd_impl(q, k, cos, sin, head_first)
+        return rope_fwd_impl(q, k, cos, sin, head_first, keep_cos_sin_dtype)
 
     @rope_fwd.register_fake
     def rope_fwd_fake(
@@ -419,6 +420,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         cos: torch.Tensor,
         sin: torch.Tensor,
         head_first: bool = True,
+        keep_cos_sin_dtype: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(q), torch.empty_like(k)
 

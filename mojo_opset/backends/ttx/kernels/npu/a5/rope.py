@@ -484,14 +484,19 @@ def rope_fwd_impl(
     cos: torch.Tensor,
     sin: torch.Tensor,
     head_first: bool = True,
+    keep_cos_sin_dtype: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Apply RoPE to q/k with pre-extracted cos/sin (forward pass).
 
     Supports 4D [B,S,N,D]/[B,N,S,D] and 3D [T,N,D]/[N,T,D] inputs.
     Uses a non-inplace kernel with empty_like output allocation to avoid clone overhead.
+
+    When keep_cos_sin_dtype is True, cos/sin are NOT cast to q.dtype, preserving
+    float32 precision for callers (e.g. indexer) that pass float32 cos/sin.
     """
-    cos = cos.to(q.dtype)
-    sin = sin.to(q.dtype)
+    if not keep_cos_sin_dtype:
+        cos = cos.to(q.dtype)
+        sin = sin.to(q.dtype)
     return _run_rope_kernel(q, k, cos, sin, head_first, inverse=False)
 
 
