@@ -9,6 +9,7 @@ from mojo_opset import MojoSWAFunction
 from mojo_opset.tests.utils import assert_close
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.utils.platform import get_platform
 
 def _generate_window_mask_chunk(
     q_start: int,
@@ -323,6 +324,10 @@ def test_swa_function(
     global_window: int,
     local_window: int,
 ):   
+    q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
+    max_q_len = q_lens.max().item()
+    if max_q_len >= 16384 and get_platform() != "npu":
+        pytest.skip("large shape only on NPU, to avoid OOM on other platform")
     swa_func = MojoSWAFunction.apply
     
     swa_func_ref = MojoSWAFunction._registry.get("torch").apply
@@ -347,8 +352,6 @@ def test_swa_function(
         True,
     )
     o.backward(grad_out)
-    q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
-    max_q_len = q_lens.max().item()
     if max_q_len <= 8192:
         print(f"max_q_len {max_q_len}, use swa_func_ref")
         q_ref = query.clone().detach().requires_grad_(True)
