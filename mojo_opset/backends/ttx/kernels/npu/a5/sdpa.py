@@ -40,18 +40,20 @@ def _sdpa_infer_inner(
     offs_m: tl.constexpr,
     offs_n: tl.constexpr,  # Current stage flag, m and n offset indices
     SEQ: tl.constexpr,
+    HAS_MASK: tl.constexpr,
     fp8_v: tl.constexpr,
 ):
     # Iterate over all k, v blocks in the current stage and accumulate the output
     for start_n in range(0, SEQ, BLOCK_N):  # Process BLOCK_N columns at a time
         start_n = tl.multiple_of(start_n, BLOCK_N)  # Align column start position
-        mask_ptr = (
-            mask_base_ptr
-            + start_m * BLOCK_M * SEQ
-            + start_n
-            + tl.arange(0, BLOCK_M)[:, None] * SEQ
-            + tl.arange(0, BLOCK_N)[None, :]
-        )
+        if HAS_MASK:
+            mask_ptr = (
+                mask_base_ptr
+                + start_m * BLOCK_M * SEQ
+                + start_n
+                + tl.arange(0, BLOCK_M)[:, None] * SEQ
+                + tl.arange(0, BLOCK_N)[None, :]
+            )
         # -- Compute qk ----
         k = tl.load(K_block_ptr)
         # Modify K
@@ -60,11 +62,11 @@ def _sdpa_infer_inner(
 
         # NOTE(zhangjihang): tl.where will introduce ub overflow
         qk = qk * qk_scale
-        mask = tl.load(mask_ptr)
-
-        # qk += (1 - mask.to(tl.float32)) * (-1e6)
-        # qk = tl.where(mask, qk, float("-inf"))
-        qk = tl.where(mask, qk, -1e6)
+        if HAS_MASK:
+            mask = tl.load(mask_ptr)
+            # qk += (1 - mask.to(tl.float32)) * (-1e6)
+            # qk = tl.where(mask, qk, float("-inf"))
+            qk = tl.where(mask, qk, -1e6)
         m_ij = tl.maximum(m_i, tl.max(qk, 1, propagate_nan=tl.PropagateNan.ALL), propagate_nan=tl.PropagateNan.ALL)
         #m_ij = tl.maximum(m_i, tl.max(qk, 1))  # Scaled max
         qk = qk - m_ij[:, None]  # Stabilize
@@ -176,7 +178,7 @@ def get_autotune_config():
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 256}),
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 512}),
     ],
-    key=["BSZ", "Q_HEAD_NUM", "SEQ", "HEAD_DIM"],
+    key=["BSZ", "Q_HEAD_NUM", "SEQ", "HEAD_DIM","HAS_MASK"],
 )
 @triton.jit
 def _sdpa_infer_kernel(
@@ -208,6 +210,7 @@ def _sdpa_infer_kernel(
     KV_HEAD_NUM: tl.constexpr,
     SEQ: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    HAS_MASK: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
@@ -290,6 +293,7 @@ def _sdpa_infer_kernel(
             offs_m,
             offs_n,
             SEQ,
+            HAS_MASK,
             V.dtype.element_ty == tl.float8e5,
         )
 
@@ -802,8 +806,10 @@ def sdpa_infer_impl(
     assert head_dim in {64, 128}
     assert q.shape[-2] == k.shape[-2] and k.shape[-2] == v.shape[-2]
     seq_length = q.shape[-2]
-    assert len(mask.shape) == 2 and mask.shape[0] == seq_length and mask.shape[1] == seq_length
-    assert mask.dtype == torch.bool
+    has_mask = mask is not None
+    if has_mask:
+        assert len(mask.shape) == 2 and mask.shape[0] == seq_length and mask.shape[1] == seq_length
+        assert mask.dtype == torch.bool
 
     if not enable_gqa:
         assert q.shape[1] == k.shape[1] and q.shape[1] == v.shape[1]
@@ -818,6 +824,8 @@ def sdpa_infer_impl(
     cube_num, vector_num = get_device_properties()
     num_cores = cube_num
     M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
+    # The pointer is unused by the HAS_MASK=False specialization.
+    mask_arg = mask if has_mask else q
 
     # mask = 1 - mask.to(torch.int8)
     # mask = (1.0 - mask.to(torch.float32)) * (-1e6)
@@ -825,7 +833,7 @@ def sdpa_infer_impl(
         q,
         k,
         v,
-        mask,
+        mask_arg,
         M,
         o,
         scale,
@@ -850,6 +858,7 @@ def sdpa_infer_impl(
         KV_HEAD_NUM=kv_head_num,
         SEQ=seq_length,
         HEAD_DIM=head_dim,
+        HAS_MASK=has_mask,
         enable_ubuf_saving=True,
         enable_hivm_auto_cv_balance=True,
         multibuffer=True,  # 控制开double_buffer
