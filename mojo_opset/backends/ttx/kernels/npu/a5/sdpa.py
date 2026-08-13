@@ -951,7 +951,9 @@ def sdpa_fwd_impl(
 
 @triton.autotune(
     configs=[
-        triton.Config({"multibuffer": False, "BLOCK_R": 128, "BLOCK_C": 128}),
+        triton.Config({"multibuffer": False, "BLOCK_R": r, "BLOCK_C": c})
+        for r in [64, 128]
+        for c in [64, 128]
     ],
     key=["N", "S", "H"],
     reset_to_zero=["dq", "dk", "dv"],
@@ -995,6 +997,7 @@ def kernel_sdpa_bwd_qkv(
     pid = tl.program_id(axis=0)
     n_programs = tl.num_programs(axis=0)
     num_r = tl.cdiv(S, BLOCK_R)
+    num_c = tl.cdiv(S, BLOCK_C)
     group_size = N // num_group
     group_num = N // group_size
     idx_h = tl.arange(0, H)
@@ -1003,7 +1006,7 @@ def kernel_sdpa_bwd_qkv(
         idx_b = idx_br // num_r // N
         idx_r = idx_br // N % num_r
         idx_n = idx_br % N
-        tasks = num_r
+        tasks = num_c
         ptr_dq = (
                 dq
                 + idx_b * STRIDE_Q_B
@@ -1273,7 +1276,6 @@ def sdpa_bwd_impl(
             limit_auto_multi_buffer_of_local_buffer="no-l0c",
             intra_cache_num=2,
             inter_cache_num=2,
-            enable_vf_operand_substitution=True,
         )
         dk = torch.sum(core_dk, 0)
         dv = torch.sum(core_dv, 0)
