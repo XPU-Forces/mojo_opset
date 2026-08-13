@@ -448,6 +448,7 @@ def rope_fwd_impl(
     head_first: bool = True,
     cu_seqlens: Optional[torch.Tensor] = None,
     kv_lens: Optional[torch.Tensor] = None,
+    keep_cos_sin_dtype: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
 
     is_varlen = cu_seqlens is not None
