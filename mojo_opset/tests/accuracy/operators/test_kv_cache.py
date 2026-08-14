@@ -480,6 +480,14 @@ def test_store_paged_kv_bucket_padded_varlen():
                     v_cache,
                     chunk_metadata=chunk_metadata,
             )
+    else:
+        k_cache, v_cache = store_paged_kv(
+                    key_states,
+                    value_states,
+                    k_cache,
+                    v_cache,
+                    chunk_metadata=chunk_metadata,
+            )
 
     for batch_id in range(real_batch_size):
         write_pos = context_kv_lens[batch_id].item()
