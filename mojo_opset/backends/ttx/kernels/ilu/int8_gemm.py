@@ -66,16 +66,19 @@ def _int8_gemm_dequant_kernel(
 
 
 def prepare_b_impl(b: torch.Tensor, transposed: bool = False) -> torch.Tensor:
-    """Transpose B to (N, K) row-major layout.
+    """Prepare B to (N, K) row-major layout.
 
     For inference: weight B is fixed, call once and reuse.
 
     Args:
-        b: (K, N) int8
+        b: (K, N) int8 when transposed=False, (N, K) int8 when transposed=True
+        transposed: if True, b is already (N, K) and only needs contiguous().
 
     Returns:
         bt: (N, K) int8, contiguous
     """
+    if transposed:
+        return b.contiguous()
     return b.T.contiguous()
 
 

@@ -519,7 +519,7 @@ def test_paged_prefill_gqa(
         max_total_seq_len=max_total_seq_len,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
-        # ptol=0.0,                                             # Annotate this line for strict comparison.
+        ptol=0.0,                                             # Annotate this line for strict comparison.
     )
 
 
