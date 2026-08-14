@@ -205,7 +205,7 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, context_kv_l
         chunk_metadata=case["chunk_metadata"],
     )
     ## torch_npu does not support chunk_metadata
-    if get_platform =="npu":
+    if get_platform() == "npu":
         from mojo_opset.backends.torch_npu.operators.kv_cache import TorchNpuStorePagedKVCache
         if  isinstance(store_paged_kv,TorchNpuStorePagedKVCache):
             k_cache, v_cache = store_paged_kv(
@@ -473,7 +473,7 @@ def test_store_paged_kv_bucket_padded_varlen():
         chunk_metadata=chunk_metadata,
     )
     ## torch_npu does not support chunk_metadata
-    if get_platform =="npu":
+    if get_platform() == "npu":
         from mojo_opset.backends.torch_npu.operators.kv_cache import TorchNpuStorePagedKVCache
         if  isinstance(store_paged_kv,TorchNpuStorePagedKVCache):
             k_cache, v_cache = store_paged_kv(
@@ -548,14 +548,26 @@ def test_store_paged_kv_chunk_metadata_perf_and_accuracy():
     store_paged_kv_ref = MojoStorePagedKVCache._registry.get("torch")()
     if type(store_paged_kv_ref) is type(store_paged_kv):
         raise NotImplementedError("both operands resolve to the same implementation, skipping comparison.")
-
-    k_cache_new, v_cache_new = store_paged_kv(
-        case["key_states"],
-        case["value_states"],
-        case["k_cache"].clone(),
-        case["v_cache"].clone(),
-        chunk_metadata=case["chunk_metadata"],
-    )
+    if get_platform() == "npu":
+        from mojo_opset.backends.torch_npu.operators.kv_cache import TorchNpuStorePagedKVCache
+        if  isinstance(store_paged_kv,TorchNpuStorePagedKVCache):
+            pytest.skip("torch_npu kv_cache skip")
+        else:
+            k_cache_new, v_cache_new = store_paged_kv(
+            case["key_states"],
+            case["value_states"],
+            case["k_cache"].clone(),
+            case["v_cache"].clone(),
+            chunk_metadata=case["chunk_metadata"],
+        )
+    else:       
+        k_cache_new, v_cache_new = store_paged_kv(
+            case["key_states"],
+            case["value_states"],
+            case["k_cache"].clone(),
+            case["v_cache"].clone(),
+            chunk_metadata=case["chunk_metadata"],
+        )
     k_cache_legacy, v_cache_legacy = store_paged_kv_impl_legacy(
         case["key_states"],
         case["value_states"],

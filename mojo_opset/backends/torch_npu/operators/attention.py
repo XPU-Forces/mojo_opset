@@ -94,26 +94,26 @@ class TorchNpuPagedPrefillGQA(MojoPagedPrefillGQA, default_priority=0):
             else cu_total_seq_lens[1:] - cu_total_seq_lens[:-1]
         )
         
-        # if head_dim % 128 != 0:
-        #     raise NotImplementedError(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
-        # if cu_total_seq_lens is not None:
-        #     raise NotImplementedError("NPU kernel npu_fused_infer_attention_score currently does not support TND layout with sparse_mode=3 (Page Attention), raising RuntimeError: call aclnnFusedInferAttentionScoreV3 failed.")
+        if head_dim % 128 != 0:
+            raise NotImplementedError(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
+        if cu_total_seq_lens is not None:
+            raise NotImplementedError("NPU kernel npu_fused_infer_attention_score currently does not support TND layout with sparse_mode=3 (Page Attention), raising RuntimeError: call aclnnFusedInferAttentionScoreV3 failed.")
 
 
-        # if block_size % 128 != 0 or block_size > 512:
-        #     # high performance attention kernel only supports block_size % 128 == 0 and block_size <= 512
-        #     return super().forward(
-        #         query=query,
-        #         key_cache=key_cache,
-        #         value_cache=value_cache,
-        #         cu_q_lens=cu_q_lens,
-        #         block_tables=block_tables,
-        #         softmax_scale=softmax_scale,
-        #         cu_total_seq_lens=cu_total_seq_lens,
-        #         mask=mask,
-        #         max_q_len=max_q_len,
-        #         max_total_seq_len=max_total_seq_len,
-        #     )
+        if block_size % 128 != 0 or block_size > 512:
+            # high performance attention kernel only supports block_size % 128 == 0 and block_size <= 512
+            return super().forward(
+                query=query,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                cu_q_lens=cu_q_lens,
+                block_tables=block_tables,
+                softmax_scale=softmax_scale,
+                cu_total_seq_lens=cu_total_seq_lens,
+                mask=mask,
+                max_q_len=max_q_len,
+                max_total_seq_len=max_total_seq_len,
+            )
 
         if softmax_scale is None:
             softmax_scale = head_dim**-0.5
@@ -162,20 +162,20 @@ class TorchNpuPagedDecodeGQA(MojoPagedDecodeGQA, default_priority=0):
         batch_size, num_q_heads, head_dim = query.shape
         _, head_nums, block_size, _ = k_cache.shape
         assert_paged_decode_contract(block_tables, total_seq_lens)
-        # if head_dim % 128 != 0:
-        #     raise NotImplementedError(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
+        if head_dim % 128 != 0:
+            raise NotImplementedError(f"NPU kernel npu_fused_infer_attention_score currently produces incorrect results for head_dim={head_dim} (not a multiple of 128)")
 
-        # if block_size % 128 != 0 or block_size > 512:
-        #     return super().forward(
-        #         query,
-        #         k_cache,
-        #         v_cache,
-        #         total_seq_lens,
-        #         block_tables,
-        #         softmax_scale=softmax_scale,
-        #         mask=mask,
-        #         max_total_seq_len=max_total_seq_len,
-        #     )
+        if block_size % 128 != 0 or block_size > 512:
+            return super().forward(
+                query,
+                k_cache,
+                v_cache,
+                total_seq_lens,
+                block_tables,
+                softmax_scale=softmax_scale,
+                mask=mask,
+                max_total_seq_len=max_total_seq_len,
+            )
 
         if softmax_scale is None:
             softmax_scale = 1.0 / (head_dim**0.5)

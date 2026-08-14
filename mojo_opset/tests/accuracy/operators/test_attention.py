@@ -555,6 +555,9 @@ def test_paged_prefill_gqa_bucket_padded_varlen(gqa_layout: str):
         gqa_layout=gqa_layout,
     )
     if get_platform() == "npu":
+        from mojo_opset.backends.torch_npu.operators.attention import TorchNpuPagedPrefillGQA
+        if  isinstance(paged_prefill_attn,TorchNpuPagedPrefillGQA) and gqa_layout=="ABAB":
+            pytest.skip("torch_npu does not support gqa_layout ABAB")
         num_q_heads = query.shape[1]
         num_kv_heads = key_cache.shape[1]
         page_size = key_cache.shape[2]
@@ -1445,6 +1448,11 @@ def test_paged_prefill_swa(
         local_window_size=local_window,
         global_window_size=global_window,
     )
+    if get_platform() == "npu":
+        from mojo_opset.backends.torch_npu.operators.attention import TorchNpuPagedPrefillSWA
+        if  isinstance(paged_prefill_swa,TorchNpuPagedPrefillSWA) and gqa_layout=="ABAB":
+            pytest.skip("torch_npu does not support gqa_layout ABAB")
+            
 
     head_dim = query.shape[-1]
     softmax_scale = 1.0 / math.sqrt(head_dim)
@@ -1720,6 +1728,10 @@ def test_paged_decode_swa(
         global_window_size=global_window,
         local_window_size=local_window,
     )
+    if get_platform() == "npu":
+        from mojo_opset.backends.torch_npu.operators.attention import TorchNpuPagedDecodeSWA
+        if  isinstance(paged_decode_swa,TorchNpuPagedDecodeSWA) and gqa_layout=="ABAB":
+            pytest.skip("torch_npu does not support gqa_layout ABAB")
 
     atol = 2e-2 if query.dtype != torch.float32 else 1e-5
     rtol = 2e-2 if query.dtype != torch.float32 else 1e-6

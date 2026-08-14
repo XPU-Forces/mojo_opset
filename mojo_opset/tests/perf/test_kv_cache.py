@@ -143,7 +143,7 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, context_kv_l
     v_cache = v_cache_ref.clone()
      
     store_paged_kv = MojoStorePagedKVCache()
-    if get_platform =="npu":
+    if get_platform() =="npu":
         from  mojo_opset.backends.torch_npu.operators.kv_cache import TorchNpuStorePagedKVCache
         if isinstance(store_paged_kv,TorchNpuStorePagedKVCache):
             perf(  
