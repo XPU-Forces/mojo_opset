@@ -395,7 +395,11 @@ def test_store_paged_kv_without_chunk_metadata(
     store_paged_kv = MojoStorePagedKVCache()
     if type(store_paged_kv_ref) is type(store_paged_kv):
         raise NotImplementedError("both operands resolve to the same implementation, skipping comparison.")
-
+    if get_platform() == "npu":
+        from mojo_opset.backends.torch_npu.operators.kv_cache import TorchNpuStorePagedKVCache
+        if  isinstance(store_paged_kv,TorchNpuStorePagedKVCache):
+            pytest.skip("skip on torch_npu due to CI coredump")
+            
     k_cache_ref, v_cache_ref = store_paged_kv_ref(
         case["key_states"],
         case["value_states"],
