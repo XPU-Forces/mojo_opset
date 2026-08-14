@@ -1,14 +1,18 @@
+from typing import Optional
+
 import torch
 
 from mojo_opset.backends.ttx.kernels import fused_add_layernorm_infer
 from mojo_opset.backends.ttx.kernels import fused_add_rmsnorm_infer
 from mojo_opset.backends.ttx.kernels import layernorm_infer
 from mojo_opset.backends.ttx.kernels import rmsnorm_infer
+from mojo_opset.backends.ttx.kernels import rms_norm_dynamic_quant
 from mojo_opset.backends.ttx.kernels import group_rmsnorm
 from mojo_opset.core import MojoLayerNorm
 from mojo_opset.core import MojoResidualAddLayerNorm
 from mojo_opset.core import MojoResidualAddRMSNorm
 from mojo_opset.core import MojoRMSNorm
+from mojo_opset.core import MojoRMSNormDynamicQuant
 from mojo_opset.core import MojoGroupRMSNorm
 
 class TTXGroupRMSNorm(MojoGroupRMSNorm):
@@ -45,6 +49,26 @@ class TTXResidualAddRMSNorm(MojoResidualAddRMSNorm):
         )
 
         return output, res
+
+
+class TTXRMSNormDynamicQuant(MojoRMSNormDynamicQuant):
+    supported_platforms_list = ["npu",]
+
+    def forward(
+        self,
+        hidden_state: torch.Tensor,
+        gamma: torch.Tensor,
+        *,
+        smooth_scale: Optional[torch.Tensor] = None,
+        beta: Optional[torch.Tensor] = None,
+    ):
+        return rms_norm_dynamic_quant(
+            hidden_state,
+            gamma,
+            smooth_scale=smooth_scale,
+            beta=beta,
+            epsilon=self.variance_epsilon,
+        )
 
 
 class TTXResidualAddLayerNorm(MojoResidualAddLayerNorm):

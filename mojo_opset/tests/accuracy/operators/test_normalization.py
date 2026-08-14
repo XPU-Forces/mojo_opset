@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 
 from mojo_opset.utils.platform import get_platform
+from mojo_opset.utils.platform import get_torch_device
 from mojo_opset.tests.utils import bypass_not_implemented
 
 from mojo_opset import MojoLayerNorm
@@ -13,6 +14,7 @@ from mojo_opset import MojoResidualAddLayerNormQuant
 from mojo_opset import MojoResidualAddRMSNorm
 from mojo_opset import MojoResidualAddRMSNormQuant
 from mojo_opset import MojoRMSNorm
+from mojo_opset import MojoRMSNormDynamicQuant
 from mojo_opset import MojoRMSNormQuant
 from mojo_opset.experimental import MojoChannelRMSNorm
 from mojo_opset.experimental import MojoGroupLayerNorm
@@ -642,3 +644,62 @@ def test_normquant_unsupported_dtype_raises():
         MojoResidualAddRMSNormQuant._registry.get("torch")(norm_size=64, quant_dtype=torch.float32)
     with pytest.raises(NotImplementedError, match="Unsupported quant_dtype"):
         MojoResidualAddLayerNormQuant._registry.get("torch")(norm_size=64, quant_dtype=torch.float32)
+
+
+# ===========================================================================
+# RMSNormDynamicQuant tests
+# ===========================================================================
+
+_RMS_NORM_DQ_SHAPES = [
+    (1, 4096),
+    (2, 256),
+    (4, 512),
+    (8, 2048),
+    (16, 1536),
+    (32, 1024),
+    (64, 8192),
+]
+
+_RMS_NORM_DQ_OPTIONS = [
+    # (has_smooth, has_beta)
+    (False, False),
+    (True, False),
+    (False, True),
+    (True, True),
+]
+
+
+@pytest.mark.parametrize("shape", _RMS_NORM_DQ_SHAPES)
+@pytest.mark.parametrize("has_smooth,has_beta", _RMS_NORM_DQ_OPTIONS)
+@pytest.mark.parametrize("dtype", dtypes)
+@bypass_not_implemented
+def test_rms_norm_dynamic_quant(shape, has_smooth, has_beta, dtype):
+    device = get_torch_device()
+    x = torch.randn(size=shape, dtype=dtype, device=device)
+    gamma = torch.randn(size=(shape[-1],), dtype=torch.float32, device=device)
+    smooth_scale = torch.rand(size=(shape[-1],), dtype=torch.float32, device=device) if has_smooth else None
+    beta = torch.randn(size=(shape[-1],), dtype=torch.float32, device=device) if has_beta else None
+
+    op = MojoRMSNormDynamicQuant(norm_size=shape[-1], device=device, dtype=dtype)
+    op_ref = MojoRMSNormDynamicQuant._registry.get("torch")(
+        norm_size=shape[-1], device=device, dtype=dtype
+    )
+
+    op.forward_diff_with(
+        op_ref, x, gamma,
+        smooth_scale=smooth_scale, beta=beta,
+        atol=(1, 1e-3), rtol=(0, 1e-3),
+    )
+
+
+@bypass_not_implemented
+def test_rms_norm_dynamic_quant_input_validation():
+    op = MojoRMSNormDynamicQuant._registry.get("torch")(norm_size=128)
+    x, gamma = torch.randn(4, 128), torch.randn(128)
+
+    with pytest.raises(ValueError, match="gamma must be 1D"):
+        op(x, torch.randn(64))
+    with pytest.raises(ValueError, match="smooth_scale must be 1D"):
+        op(x, gamma, smooth_scale=torch.randn(64))
+    with pytest.raises(ValueError, match="beta must be 1D"):
+        op(x, gamma, beta=torch.randn(64))
