@@ -120,16 +120,19 @@ class TorchNpuStorePagedKVCache(MojoStorePagedKVCache):
 
         key_cache_nz = _nhsd_to_nz(key_cache, last_dim_k)
         value_cache_nz = _nhsd_to_nz(value_cache, last_dim_k)
-        key_cache_npu = key_cache_nz.npu()
-        value_cache_npu = value_cache_nz.npu()
+        # npu_scatter_pa_kv_cache requires real ACL_NZ format (29), not just a
+        # permuted contiguous tensor. Without this, older CANN segfaults.
+        key_cache_npu = torch_npu.npu_format_cast(key_cache_nz.npu(), 29)
+        value_cache_npu = torch_npu.npu_format_cast(value_cache_nz.npu(), 29)
 
         torch_npu.npu_scatter_pa_kv_cache(
             key_npu, value_npu, key_cache_npu, value_cache_npu, slot_mapping_npu,
         )
         torch.npu.synchronize()
 
-        key_cache_out = _nz_to_nhsd(key_cache_npu, kv_heads, head_dim, last_dim_k)
-        value_cache_out = _nz_to_nhsd(value_cache_npu, kv_heads, head_dim, last_dim_k)
+        # Convert back from NZ to ND format before permute/reshape.
+        key_cache_out = _nz_to_nhsd(torch_npu.npu_format_cast(key_cache_npu, 2), kv_heads, head_dim, last_dim_k)
+        value_cache_out = _nz_to_nhsd(torch_npu.npu_format_cast(value_cache_npu, 2), kv_heads, head_dim, last_dim_k)
         return key_cache_out, value_cache_out
 
     def _forward_normal(self, key_npu, value_npu, key_cache, value_cache, slot_mapping_npu, kv_heads, head_dim):
