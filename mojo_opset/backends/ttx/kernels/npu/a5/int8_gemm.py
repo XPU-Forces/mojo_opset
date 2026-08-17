@@ -246,6 +246,7 @@ def int8_gemm_dequant_impl(
         b_transposed.stride(0), b_transposed.stride(1),
         c.stride(0), c.stride(1),
         HAS_BIAS=has_bias,
+        limit_auto_multi_buffer_buffer="only-cube",
     )
 
     return c[:M_orig, :N_orig]
