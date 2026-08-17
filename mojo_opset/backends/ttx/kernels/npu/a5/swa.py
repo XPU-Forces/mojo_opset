@@ -576,7 +576,7 @@ def swa_infer_impl(
         BLOCK_D,
         enable_ubuf_saving=True,
         limit_auto_multi_buffer_of_local_buffer="no-l0c",
-        limit_auto_multi_buffer_buffer="no-limit",
+        limit_auto_multi_buffer_buffer="only-cube",
         hfusion_enable_multiple_consumer_fusion=True,
         intra_cache_num=3,
         inter_cache_num=2,
