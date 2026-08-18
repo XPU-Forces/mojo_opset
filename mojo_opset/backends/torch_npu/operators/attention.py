@@ -347,7 +347,7 @@ class TorchNpuPagedPrefillSWA(MojoPagedPrefillSWA):
         max_total_seq_lens = max_total_seq_len if max_total_seq_len else total_seq_lens.max().item()
 
         block_table_max_kv_len = block_table.shape[1] * block_size
-        mask_kv_len = max(max_total_seq_len, block_table_max_kv_len)
+        mask_kv_len = max(max_total_seq_len, block_table_max_kv_len) if max_total_seq_len else block_table_max_kv_len
 
         # convert query from tnd to bnsd
         query_bnsd = tnd_to_bnsd(query, cu_q_lens, max_seq_len)
