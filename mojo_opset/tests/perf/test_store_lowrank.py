@@ -40,7 +40,7 @@ def test_store_lowrank(shape_label_cache, shape_key_lr, kv_len):
     label_cache = torch.zeros(size=shape_label_cache, dtype=torch.bfloat16,device=device)
     key_lr = torch.randn(size=(slot_mapping.shape[0], *shape_key_lr), dtype=torch.bfloat16,device=device)
     block_idxs = (slot_mapping // 512).to(torch.int32)
-    token_idxs = (slot_mapping % 512).to(torch.int32)   
+    token_idxs = (slot_mapping % 512).to(torch.int32)
     token_num = slot_mapping.shape[0]
 
     store_lowrank = MojoStoreLowrank()

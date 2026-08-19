@@ -446,6 +446,7 @@ def rope_fwd_impl(
     cos: torch.Tensor,
     sin: torch.Tensor,
     head_first: bool = True,
+    keep_cos_sin_dtype: bool = False,
     cu_seqlens: Optional[torch.Tensor] = None,
     kv_lens: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:

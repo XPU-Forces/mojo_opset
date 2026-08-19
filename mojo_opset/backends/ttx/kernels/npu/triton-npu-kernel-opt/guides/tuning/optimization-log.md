@@ -58,7 +58,7 @@ Chronological record of optimization experiments on the ttx (Triton NPU) backend
 
 ### 2026-03-26 | Kernel: INT8 GEMM | SoC: Ascend 910B2C
 
-**Technique:** tl.compile_hint("dot_pad_only_k")
+**Technique:** tl.extra.cann.extension.compile_hint("dot_pad_only_k")
 **Result:** REJECTED — aicore timeout with BLOCK_K=512. Only safe with BK≤256.
 **Action:** Added to Known Pitfalls
 

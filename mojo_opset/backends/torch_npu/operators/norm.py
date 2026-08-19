@@ -10,6 +10,7 @@ from mojo_opset.core import MojoResidualAddLayerNormQuant
 from mojo_opset.core import MojoResidualAddRMSNormQuant
 from mojo_opset.core import MojoResidualAddRMSNorm
 from mojo_opset.core import MojoRMSNorm
+from mojo_opset.core import MojoGroupRMSNorm
 from mojo_opset.core import MojoRMSNormQuant
 
 
@@ -50,6 +51,21 @@ class TorchNpuRMSNorm(MojoRMSNorm, default_priority=0):
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         return torch_npu.npu_rms_norm(hidden_state, self.weight, epsilon=self.variance_epsilon)[0]
+
+
+class TorchNpuGroupRMSNorm(MojoGroupRMSNorm):
+    supported_platforms_list = ["npu"]
+
+    def forward(self, input_groups):
+        output_groups = []
+        for group_id in range(self.num_groups):
+            out = torch_npu.npu_rms_norm(
+                input_groups[group_id],
+                self.weight[group_id],
+                epsilon=self.variance_epsilon,
+            )[0]
+            output_groups.append(out)
+        return output_groups
 
 
 class TorchNpuResidualAddRMSNorm(MojoResidualAddRMSNorm, default_priority=0):
