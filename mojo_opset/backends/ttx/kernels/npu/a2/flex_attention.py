@@ -1138,13 +1138,80 @@ def flex_attention_backward_dq_kernel(
         kv_indices = KV_IDX + sparse_kv_idx_offset
         kv_num_blocks = tl.load(KV_NUM_BLKS + sparse_kv_num_blks_offset)
 
-        for blk_idx_in_list in range(0, kv_num_blocks):
+        # 将 (blk_idx, kv_sub) 双层循环展平为单层 n_tile 循环,
+        # 与 forward kernel 结构一致, 避免 bisheng 编译器在数据依赖外层循环
+        # 内嵌 constexpr 内层循环 (NUM_KV_SUB_BLOCKS > 1) 时的后端选择失败。
+        block_n_end = kv_num_blocks * NUM_KV_SUB_BLOCKS
+        for n_tile in range(0, block_n_end):
+            blk_idx_in_list = n_tile // NUM_KV_SUB_BLOCKS
             kv_block = tl.load(kv_indices + blk_idx_in_list)
-            kv_start_full = kv_block * SPARSE_KV_BLOCK_SIZE
+            kv_sub = n_tile % NUM_KV_SUB_BLOCKS
+            kv_start = kv_block * SPARSE_KV_BLOCK_SIZE + kv_sub * BLOCK_N
+            offs_n = kv_start + tl.arange(0, BLOCK_N)
 
-            for kv_sub in range(NUM_KV_SUB_BLOCKS):
-                start_n = kv_start_full + kv_sub * BLOCK_N
-                offs_n = start_n + tl.arange(0, BLOCK_N)
+            k = tl.load(
+                K_ptr + offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk,
+                mask=(offs_n[:, None] < KV_LEN),
+                other=0.0,
+            )
+            v = tl.load(
+                V_ptr + offs_n[:, None] * stride_vn + offs_v[None, :] * stride_vk,
+                mask=(offs_n[:, None] < KV_LEN),
+                other=0.0,
+            )
+
+            qk = tl.dot(q, tl.trans(k), input_precision="ieee")
+            qk *= SM_SCALE
+
+            if USE_PACKED_PARTIAL_MASK:
+                partial_block_idx = tl.load(
+                    PARTIAL_BLOCK_TABLE
+                    + q_sparse_idx * stride_partial_table_m
+                    + kv_block * stride_partial_table_n
+                )
+                safe_partial_block_idx = tl.maximum(partial_block_idx, 0, propagate_nan=True)
+                offs_m_in_block = offs_m - q_sparse_base
+                offs_n_in_block = kv_sub * BLOCK_N + tl.arange(0, BLOCK_N)
+                mask = load_packed_partial_mask(
+                    PARTIAL_MASK_PACKED,
+                    stride_partial_p,
+                    stride_partial_m,
+                    stride_partial_n,
+                    safe_partial_block_idx,
+                    offs_m_in_block,
+                    offs_n_in_block,
+                    SPARSE_Q_BLOCK_SIZE=SPARSE_Q_BLOCK_SIZE,
+                    SPARSE_KV_BLOCK_SIZE=SPARSE_KV_BLOCK_SIZE,
+                )
+                mask = mask & (partial_block_idx >= 0)
+            else:
+                mask = load_dense_mask(
+                    DENSE_MASK,
+                    stride_mask_m,
+                    stride_mask_n,
+                    offs_m,
+                    offs_n,
+                    Q_LEN=Q_LEN,
+                    KV_LEN=KV_LEN,
+                )
+            qk = tl.where(mask, qk, float("-inf"))
+
+            p = tl.math.exp(qk - lse[:, None])
+            dp = tl.dot(do, tl.trans(v), input_precision="ieee")
+            ds = p * (dp - delta[:, None])
+            ds *= SM_SCALE
+            dq += tl.dot(ds.to(MATMUL_PRECISION), k, input_precision="ieee")
+
+        if HAS_FULL_BLOCKS:
+            kv_indices_f = FULL_KV_IDX + sparse_kv_idx_offset
+            kv_num_blocks_f = tl.load(FULL_KV_NUM_BLKS + sparse_kv_num_blks_offset)
+            block_n_end_f = kv_num_blocks_f * NUM_KV_SUB_BLOCKS
+            for n_tile in range(0, block_n_end_f):
+                blk_idx_in_list = n_tile // NUM_KV_SUB_BLOCKS
+                kv_block = tl.load(kv_indices_f + blk_idx_in_list)
+                kv_sub = n_tile % NUM_KV_SUB_BLOCKS
+                kv_start = kv_block * SPARSE_KV_BLOCK_SIZE + kv_sub * BLOCK_N
+                offs_n = kv_start + tl.arange(0, BLOCK_N)
 
                 k = tl.load(
                     K_ptr + offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk,
@@ -1160,75 +1227,11 @@ def flex_attention_backward_dq_kernel(
                 qk = tl.dot(q, tl.trans(k), input_precision="ieee")
                 qk *= SM_SCALE
 
-                if USE_PACKED_PARTIAL_MASK:
-                    partial_block_idx = tl.load(
-                        PARTIAL_BLOCK_TABLE
-                        + q_sparse_idx * stride_partial_table_m
-                        + kv_block * stride_partial_table_n
-                    )
-                    safe_partial_block_idx = tl.maximum(partial_block_idx, 0, propagate_nan=True)
-                    offs_m_in_block = offs_m - q_sparse_base
-                    offs_n_in_block = kv_sub * BLOCK_N + tl.arange(0, BLOCK_N)
-                    mask = load_packed_partial_mask(
-                        PARTIAL_MASK_PACKED,
-                        stride_partial_p,
-                        stride_partial_m,
-                        stride_partial_n,
-                        safe_partial_block_idx,
-                        offs_m_in_block,
-                        offs_n_in_block,
-                        SPARSE_Q_BLOCK_SIZE=SPARSE_Q_BLOCK_SIZE,
-                        SPARSE_KV_BLOCK_SIZE=SPARSE_KV_BLOCK_SIZE,
-                    )
-                    mask = mask & (partial_block_idx >= 0)
-                else:
-                    mask = load_dense_mask(
-                        DENSE_MASK,
-                        stride_mask_m,
-                        stride_mask_n,
-                        offs_m,
-                        offs_n,
-                        Q_LEN=Q_LEN,
-                        KV_LEN=KV_LEN,
-                    )
-                qk = tl.where(mask, qk, float("-inf"))
-
                 p = tl.math.exp(qk - lse[:, None])
                 dp = tl.dot(do, tl.trans(v), input_precision="ieee")
                 ds = p * (dp - delta[:, None])
                 ds *= SM_SCALE
                 dq += tl.dot(ds.to(MATMUL_PRECISION), k, input_precision="ieee")
-
-        if HAS_FULL_BLOCKS:
-            kv_indices_f = FULL_KV_IDX + sparse_kv_idx_offset
-            kv_num_blocks_f = tl.load(FULL_KV_NUM_BLKS + sparse_kv_num_blks_offset)
-            for blk_idx_in_list in range(0, kv_num_blocks_f):
-                kv_block = tl.load(kv_indices_f + blk_idx_in_list)
-                kv_start_full = kv_block * SPARSE_KV_BLOCK_SIZE
-
-                for kv_sub in range(NUM_KV_SUB_BLOCKS):
-                    start_n = kv_start_full + kv_sub * BLOCK_N
-                    offs_n = start_n + tl.arange(0, BLOCK_N)
-
-                    k = tl.load(
-                        K_ptr + offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk,
-                        mask=(offs_n[:, None] < KV_LEN),
-                        other=0.0,
-                    )
-                    v = tl.load(
-                        V_ptr + offs_n[:, None] * stride_vn + offs_v[None, :] * stride_vk,
-                        mask=(offs_n[:, None] < KV_LEN),
-                        other=0.0,
-                    )
-
-                    qk = tl.dot(q, tl.trans(k), input_precision="ieee")
-                    qk *= SM_SCALE
-
-                    p = tl.math.exp(qk - lse[:, None])
-                    dp = tl.dot(do, tl.trans(v), input_precision="ieee")
-                    ds = p * (dp - delta[:, None])
-                    ds *= SM_SCALE
-                    dq += tl.dot(ds.to(MATMUL_PRECISION), k, input_precision="ieee")
 
         tl.store(
             DQ_ptr + offs_m[:, None] * stride_dqm + offs_k[None, :] * stride_dqk,
@@ -1931,8 +1934,11 @@ def flex_attention_fwd_impl(
         sm_scale = 1.0 / (D ** 0.5)
 
     BLOCK_M = TILE_BLOCK_SIZE
-    BLOCK_N = TILE_BLOCK_SIZE
     SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE = _get_mask_block_sizes(block_mask)
+    # KV tile 加宽至 256 以提升 KV 侧吞吐 (减少 KV loop 迭代次数);
+    # 当 SPARSE_KV_BLOCK_SIZE 不是 256 的整数倍时 (如 128/384),
+    # 回退到 TILE_BLOCK_SIZE(128) 保证 SPARSE_KV_MULTIPLE >= 1。
+    BLOCK_N = 256 if SPARSE_KV_BLOCK_SIZE % 256 == 0 else TILE_BLOCK_SIZE
 
     num_q_blocks = (M + SPARSE_Q_BLOCK_SIZE - 1) // SPARSE_Q_BLOCK_SIZE
     num_kv_blocks = triton.cdiv(N, SPARSE_KV_BLOCK_SIZE)
@@ -2502,7 +2508,9 @@ def flex_attention_bwd_impl(
     #   - 不均衡时走 task-list kernel (heavy-light 装箱, direct-only)
     # ========================================================================
     BLOCK_M_DKDV = TILE_BLOCK_SIZE
-    BLOCK_N_DKDV = TILE_BLOCK_SIZE
+    # 当 SPARSE_KV_BLOCK_SIZE 是 256 的整数倍时, 使用 BLOCK_N=256 减少 KV tile
+    # 迭代次数, 提升 matmul 计算密度; 否则回退到 TILE_BLOCK_SIZE(128)。
+    BLOCK_N_DKDV = 256 if SPARSE_KV_BLOCK_SIZE % 256 == 0 else TILE_BLOCK_SIZE
     NUM_KV_SUB_BLOCKS_VAL = SPARSE_KV_BLOCK_SIZE // BLOCK_N_DKDV
     total_base = num_kv_blocks * Z * Hkv
     num_core = _get_num_aicore()
@@ -2550,8 +2558,8 @@ def flex_attention_bwd_impl(
             limit_auto_multi_buffer_buffer="no-limit",
             hfusion_enable_multiple_consumer_fusion=True,
             limit_auto_multi_buffer_of_local_buffer="no-l0c",
-            intra_cache_num=2,
-            inter_cache_num=1,
+            tile_mix_vector_loop=4,
+            tile_mix_cube_loop=4,
         )
 
     else:
@@ -2596,8 +2604,8 @@ def flex_attention_bwd_impl(
             limit_auto_multi_buffer_buffer="no-limit",
             hfusion_enable_multiple_consumer_fusion=True,
             limit_auto_multi_buffer_of_local_buffer="no-l0c",
-            intra_cache_num=2,
-            inter_cache_num=1,
+            tile_mix_vector_loop=4,
+            tile_mix_cube_loop=4,
         )
 
     return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype)
