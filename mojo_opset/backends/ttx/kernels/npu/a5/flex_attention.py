@@ -12,6 +12,13 @@ from ..utils import is_910
 
 TILE_BLOCK_SIZE = 128
 
+_FWD_LB_RR = 0
+_FWD_LB_HEAD_SNAKE = 1
+_FWD_LB_WAVE_SNAKE = 2
+_FWD_LB_THRESHOLD = 0.02
+_FWD_LB_PARTIAL_WEIGHT = 120
+_FWD_LB_FULL_WEIGHT = 100
+
 
 def _get_num_aicore():
     try:
@@ -23,6 +30,148 @@ def _get_num_aicore():
 def _persistent_launch_config(num_tasks):
     num_tasks = max(int(num_tasks), 1)
     return (min(_get_num_aicore(), num_tasks),), num_tasks
+
+
+def _fwd_lb_strategy_name(strategy_id):
+    if strategy_id == _FWD_LB_HEAD_SNAKE:
+        return "head_snake"
+    if strategy_id == _FWD_LB_WAVE_SNAKE:
+        return "wave_snake"
+    return "rr"
+
+
+def _first_q_block_counts(tensor, num_q_blocks):
+    if tensor is None or num_q_blocks <= 0:
+        return [0] * max(int(num_q_blocks), 0)
+    values = tensor.detach().reshape(-1)
+    if values.numel() == 0:
+        return [0] * int(num_q_blocks)
+    values = values[:num_q_blocks].to("cpu", dtype=torch.int64).tolist()
+    if len(values) < num_q_blocks:
+        values.extend([0] * (num_q_blocks - len(values)))
+    return [int(v) for v in values]
+
+
+def _fwd_lb_q_tile_costs(bm, num_q_blocks):
+    partial_counts = _first_q_block_counts(bm["kv_num_blks"], num_q_blocks)
+    full_counts = _first_q_block_counts(bm["full_kv_num_blks"], num_q_blocks)
+    costs = [
+        max(
+            1,
+            partial * _FWD_LB_PARTIAL_WEIGHT + full * _FWD_LB_FULL_WEIGHT,
+        )
+        for partial, full in zip(partial_counts, full_counts)
+    ]
+    return costs
+
+
+def _fwd_lb_task_q_tile(strategy_id, tile_id, q_tiles, q_heads, total_tasks, num_programs):
+    if strategy_id == _FWD_LB_WAVE_SNAKE:
+        wave_id = tile_id // num_programs
+        lane = tile_id - wave_id * num_programs
+        wave_end = min((wave_id + 1) * num_programs, total_tasks)
+        if wave_id % 2 == 1:
+            tile_id = wave_end - 1 - lane
+
+    linear_q = tile_id % q_tiles
+    off_zh = tile_id // q_tiles
+    off_hq = off_zh % q_heads
+    if strategy_id == _FWD_LB_HEAD_SNAKE and off_hq % 2 == 1:
+        return q_tiles - 1 - linear_q
+    return linear_q
+
+
+def _fwd_lb_loads(strategy_id, costs, batch_size, q_heads, num_programs):
+    q_tiles = len(costs)
+    if q_tiles == 0 or num_programs <= 0:
+        return [1]
+    total_tasks = q_tiles * batch_size * q_heads
+    loads = [0] * num_programs
+    for program_id in range(num_programs):
+        task_id = program_id
+        while task_id < total_tasks:
+            q_tile = _fwd_lb_task_q_tile(
+                strategy_id,
+                task_id,
+                q_tiles,
+                q_heads,
+                total_tasks,
+                num_programs,
+            )
+            loads[program_id] += costs[q_tile]
+            task_id += num_programs
+    return loads
+
+
+def _tensor_cache_version(tensor):
+    try:
+        return tensor._version
+    except RuntimeError:
+        return None
+
+
+def _choose_fwd_lb_strategy(block_mask, bm, batch_size, q_heads, num_q_blocks, num_programs):
+    forced_strategy_id = getattr(block_mask, "fwd_lb_force_strategy_id", None)
+    if forced_strategy_id is not None:
+        return int(forced_strategy_id)
+
+    total_tasks = int(batch_size) * int(q_heads) * int(num_q_blocks)
+    if total_tasks <= num_programs or num_q_blocks <= 1:
+        return _FWD_LB_RR
+
+    kv_num_blks = bm["kv_num_blks"]
+    full_kv_num_blks = bm["full_kv_num_blks"]
+    cache_key = (
+        int(batch_size),
+        int(q_heads),
+        int(num_q_blocks),
+        int(num_programs),
+        _FWD_LB_PARTIAL_WEIGHT,
+        _FWD_LB_FULL_WEIGHT,
+        _FWD_LB_THRESHOLD,
+        id(kv_num_blks),
+        _tensor_cache_version(kv_num_blks),
+        id(full_kv_num_blks),
+        _tensor_cache_version(full_kv_num_blks),
+    )
+    cache = getattr(block_mask, "_fwd_lb_strategy_cache", None)
+    if cache is not None:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+    costs = _fwd_lb_q_tile_costs(bm, num_q_blocks)
+    if not costs or max(costs) == min(costs):
+        return _FWD_LB_RR
+
+    candidates = [_FWD_LB_RR]
+    if q_heads > 1:
+        candidates.append(_FWD_LB_HEAD_SNAKE)
+    candidates.append(_FWD_LB_WAVE_SNAKE)
+
+    max_loads = {
+        strategy_id: max(
+            _fwd_lb_loads(
+                strategy_id,
+                costs,
+                batch_size,
+                q_heads,
+                num_programs,
+            )
+        )
+        for strategy_id in candidates
+    }
+    best_id = min(candidates, key=lambda sid: max_loads[sid])
+    rr_max = max_loads[_FWD_LB_RR]
+    best_max = max_loads[best_id]
+    relative_gain = (rr_max - best_max) / rr_max if rr_max else 0.0
+    if relative_gain < _FWD_LB_THRESHOLD:
+        best_id = _FWD_LB_RR
+    if cache is None:
+        cache = {}
+        setattr(block_mask, "_fwd_lb_strategy_cache", cache)
+    cache[cache_key] = best_id
+    return best_id
 
 
 @triton.jit(
@@ -77,14 +226,34 @@ def flex_attention_kernel(
     GQA_SHARED_HEADS,
     HAS_FULL_BLOCKS: tl.constexpr = True,
     USE_PACKED_PARTIAL_MASK: tl.constexpr = False,
+    LB_STRATEGY_ID: tl.constexpr = 0,
 ):
     pid = tl.program_id(0).to(tl.int32)
     num_core = tl.num_programs(0).to(tl.int32)
 
     for task_id in range(pid, NUM_TASKS, num_core):
-        q_start = task_id % NUM_Q_BLOCKS
-        off_z = (task_id // NUM_Q_BLOCKS) // Q_HEAD
-        off_hq = (task_id // NUM_Q_BLOCKS) % Q_HEAD
+        if LB_STRATEGY_ID == 2:
+            wave_id = task_id // num_core
+            wave_lane = task_id - wave_id * num_core
+            wave_end = tl.minimum((wave_id + 1) * num_core, NUM_TASKS)
+            mapped_task_id = tl.where(
+                (wave_id % 2) == 0,
+                task_id,
+                wave_end - 1 - wave_lane,
+            )
+        else:
+            mapped_task_id = task_id
+        linear_q_start = mapped_task_id % NUM_Q_BLOCKS
+        off_z = (mapped_task_id // NUM_Q_BLOCKS) // Q_HEAD
+        off_hq = (mapped_task_id // NUM_Q_BLOCKS) % Q_HEAD
+        if LB_STRATEGY_ID == 1:
+            q_start = tl.where(
+                (off_hq % 2) == 0,
+                linear_q_start,
+                NUM_Q_BLOCKS - 1 - linear_q_start,
+            )
+        else:
+            q_start = linear_q_start
         off_hkv = off_hq // GQA_SHARED_HEADS
 
         off_z = off_z.to(tl.int64)
@@ -1516,6 +1685,16 @@ def flex_attention_fwd_impl(
 
     num_tasks = num_q_blocks * Z * Hq
     grid, num_tasks = _persistent_launch_config(num_tasks)
+    lb_strategy_id = _choose_fwd_lb_strategy(
+        block_mask,
+        bm,
+        batch_size=Z,
+        q_heads=Hq,
+        num_q_blocks=num_q_blocks,
+        num_programs=grid[0],
+    )
+    block_mask.fwd_lb_strategy_id = lb_strategy_id
+    block_mask.fwd_lb_strategy = _fwd_lb_strategy_name(lb_strategy_id)
 
     flex_attention_kernel[grid](
         q, k, v,
@@ -1546,6 +1725,7 @@ def flex_attention_fwd_impl(
         GQA_SHARED_HEADS=GQA_SHARED_HEADS,
         HAS_FULL_BLOCKS=True,
         USE_PACKED_PARTIAL_MASK=bm["use_packed_partial_mask"],
+        LB_STRATEGY_ID=lb_strategy_id,
         limit_auto_multi_buffer_buffer="no-limit",
         hfusion_enable_multiple_consumer_fusion=True,
         intra_cache_num=3,
