@@ -78,6 +78,8 @@ class TorchNpuStorePagedKVCache(MojoStorePagedKVCache):
         context_kv_lens: torch.Tensor,
         chunk_metadata: Optional[torch.Tensor] = None,   #torch_npu does not support chunk_metadata yet
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if chunk_metadata is not None:
+            raise NotImplementedError(f"torch_npu kv_cache does not support chunk_metadata yet")
         total_tokens = key_states.shape[0]
         kv_heads = key_states.shape[1]
         head_dim = key_states.shape[2]
