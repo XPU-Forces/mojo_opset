@@ -1,0 +1,456 @@
+import torch
+import triton
+import triton.language as tl
+from ..utils import get_num_cores, libentry
+
+"""
+This file contains the implementation of SiLU (Sigmoid Linear Unit) for NPU.
+
+SiLU formula: silu(x) = x * sigmoid(x) = x / (1 + exp(-x))
+
+Based on SwiGLU implementation pattern and Liger Kernel style.
+
+Modifications for NPU architecture by triton-x team, 2025.
+"""
+
+
+MAX_BLOCK_SIZE_N = 2048
+
+
+@triton.jit
+def silu_activation(x):
+    """SiLU activation function: x / (1 + exp(-x))
+
+    Uses tl.fdiv + tl.exp instead of x * tl.sigmoid(x) for better NPU performance.
+    Reference: docs_for_triton_agent/19-fused-swiglu-migration.md fast_silu pattern.
+    """
+    return tl.fdiv(x, 1.0 + tl.exp(-x))
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_SIZE": 1024}),
+        triton.Config({"BLOCK_SIZE": 2048}),
+        triton.Config({"BLOCK_SIZE": 4096}),
+        triton.Config({"BLOCK_SIZE": 8192}),
+        triton.Config({"BLOCK_SIZE": 16384}),
+    ],
+    key=["n_elements"],
+)
+@libentry()
+@triton.jit
+def _silu_fwd_flatten_kernel(
+        x,
+        y,
+        n_elements,
+        BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    grid_size = tl.num_programs(axis=0)
+
+    num_blocks = (n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE
+    blocks_per_core = (num_blocks + grid_size - 1) // grid_size
+    block_start = pid * blocks_per_core
+    block_end = min(block_start + blocks_per_core, num_blocks)
+
+    for block_id in range(block_start, block_end):
+        offsets = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        x_chunk = tl.load(x + offsets, mask=mask, other=0.0)
+        x_fp32 = x_chunk.to(tl.float32)
+        y_fp32 = silu_activation(x_fp32)
+        y_chunk = y_fp32.to(x_chunk.dtype)
+        tl.store(y + offsets, y_chunk, mask=mask)
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_SIZE": 1024}),
+        triton.Config({"BLOCK_SIZE": 2048}),
+        triton.Config({"BLOCK_SIZE": 4096}),
+        triton.Config({"BLOCK_SIZE": 8192}),
+        triton.Config({"BLOCK_SIZE": 16384}),
+    ],
+    key=["n_elements"],
+)
+@libentry()
+@triton.jit
+def _silu_bwd_flatten_kernel(
+        dy,
+        x,
+        dx,
+        n_elements,
+        BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    grid_size = tl.num_programs(axis=0)
+
+    num_blocks = (n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE
+    blocks_per_core = (num_blocks + grid_size - 1) // grid_size
+    block_start = pid * blocks_per_core
+    block_end = min(block_start + blocks_per_core, num_blocks)
+
+    for block_id in range(block_start, block_end):
+        offsets = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        dy_chunk = tl.load(dy + offsets, mask=mask, other=0.0)
+        x_chunk = tl.load(x + offsets, mask=mask, other=0.0)
+        x_fp32 = x_chunk.to(tl.float32)
+
+        sigmoid_x = tl.sigmoid(x_fp32)
+        sigmoid_neg_x = tl.sigmoid(-x_fp32)
+        dsilu_dx = sigmoid_x + x_fp32 * sigmoid_x * sigmoid_neg_x
+
+        dx_chunk = dy_chunk * dsilu_dx.to(dy_chunk.dtype)
+        tl.store(dx + offsets, dx_chunk, mask=mask)
+
+
+def _flatten_grid(n_elements):
+    num_cores = get_num_cores("vector")
+    return lambda META: (max(1, min(num_cores, triton.cdiv(n_elements, META["BLOCK_SIZE"]))),)
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_SIZE_M": 1}),
+        triton.Config({"BLOCK_SIZE_M": 2}),
+        triton.Config({"BLOCK_SIZE_M": 4}),
+        triton.Config({"BLOCK_SIZE_M": 8}),
+        triton.Config({"BLOCK_SIZE_M": 12}),
+        triton.Config({"BLOCK_SIZE_M": 16}),
+        triton.Config({"BLOCK_SIZE_M": 20}),
+        triton.Config({"BLOCK_SIZE_M": 24}),
+        triton.Config({"BLOCK_SIZE_M": 32}),
+    ],
+    key=["n_rows", "n_cols"],
+)
+@libentry()
+@triton.jit
+def _silu_fwd_kernel(
+    x,
+    y,
+    stride_row,
+    n_rows,
+    n_cols,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    grid_size = tl.num_programs(axis=0)
+
+    num_row_tasks = (n_rows + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+
+    for row_task_id in range(pid, num_row_tasks, grid_size):
+        block_start_row = row_task_id * BLOCK_SIZE_M
+        rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
+        rows_mask = rows_off < n_rows
+
+        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
+            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+            cols_mask = cols_off < n_cols
+            block_mask = rows_mask[:, None] & cols_mask[None, :]
+
+            x_ptrs = x + rows_off[:, None] * stride_row + cols_off[None, :]
+            y_ptrs = y + rows_off[:, None] * stride_row + cols_off[None, :]
+
+            x_chunk = tl.load(x_ptrs, mask=block_mask, other=0.0)
+
+            x_f32 = x_chunk.to(tl.float32)
+            y_f32 = silu_activation(x_f32)
+
+            y_chunk = y_f32.to(x_chunk.dtype)
+
+            tl.store(y_ptrs, y_chunk, mask=block_mask)
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_SIZE_M": 1}),
+        triton.Config({"BLOCK_SIZE_M": 2}),
+        triton.Config({"BLOCK_SIZE_M": 4}),
+        triton.Config({"BLOCK_SIZE_M": 8}),
+        triton.Config({"BLOCK_SIZE_M": 16}),
+    ],
+    key=["n_rows", "n_cols"],
+)
+@libentry()
+@triton.jit
+def _silu_fwd_nomask_kernel(
+    x,
+    y,
+    stride_row,
+    n_rows,
+    n_cols,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    grid_size = tl.num_programs(axis=0)
+
+    num_row_tasks = (n_rows + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+
+    for row_task_id in range(pid, num_row_tasks, grid_size):
+        block_start_row = row_task_id * BLOCK_SIZE_M
+        rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
+
+        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
+            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+
+            x_ptrs = x + rows_off[:, None] * stride_row + cols_off[None, :]
+            y_ptrs = y + rows_off[:, None] * stride_row + cols_off[None, :]
+
+            x_chunk = tl.load(x_ptrs)
+            x_f32 = x_chunk.to(tl.float32)
+            y_f32 = silu_activation(x_f32)
+            y_chunk = y_f32.to(x_chunk.dtype)
+
+            tl.store(y_ptrs, y_chunk)
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_SIZE_M": 1}),
+        triton.Config({"BLOCK_SIZE_M": 2}),
+        triton.Config({"BLOCK_SIZE_M": 4}),
+        triton.Config({"BLOCK_SIZE_M": 8}),
+        triton.Config({"BLOCK_SIZE_M": 16}),
+    ],
+    key=["n_rows", "n_cols"],
+)
+@libentry()
+@triton.jit
+def _silu_fwd_nomask_single_kernel(
+    x,
+    y,
+    stride_row,
+    n_rows,
+    n_cols,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    grid_size = tl.num_programs(axis=0)
+
+    num_row_tasks = (n_rows + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+    cols_off = tl.arange(0, BLOCK_SIZE_N)
+
+    for row_task_id in range(pid, num_row_tasks, grid_size):
+        block_start_row = row_task_id * BLOCK_SIZE_M
+        rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
+
+        x_ptrs = x + rows_off[:, None] * stride_row + cols_off[None, :]
+        y_ptrs = y + rows_off[:, None] * stride_row + cols_off[None, :]
+
+        x_chunk = tl.load(x_ptrs)
+        x_f32 = x_chunk.to(tl.float32)
+        y_f32 = silu_activation(x_f32)
+        y_chunk = y_f32.to(x_chunk.dtype)
+
+        tl.store(y_ptrs, y_chunk)
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_SIZE_M": 1}),
+        triton.Config({"BLOCK_SIZE_M": 2}),
+        triton.Config({"BLOCK_SIZE_M": 4}),
+        triton.Config({"BLOCK_SIZE_M": 8}),
+        triton.Config({"BLOCK_SIZE_M": 12}),
+        triton.Config({"BLOCK_SIZE_M": 16}),
+        triton.Config({"BLOCK_SIZE_M": 20}),
+        triton.Config({"BLOCK_SIZE_M": 24}),
+        triton.Config({"BLOCK_SIZE_M": 32}),
+    ],
+    key=["n_rows", "n_cols"],
+    restore_value=["dy", "dx"],
+)
+@libentry()
+@triton.jit
+def _silu_bwd_kernel(
+    dy,
+    x,
+    dx,
+    stride_row,
+    n_rows,
+    n_cols,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    grid_size = tl.num_programs(axis=0)
+
+    num_row_tasks = (n_rows + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+
+    for row_task_id in range(pid, num_row_tasks, grid_size):
+        block_start_row = row_task_id * BLOCK_SIZE_M
+        rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
+        rows_mask = rows_off < n_rows
+
+        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
+            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+            cols_mask = cols_off < n_cols
+            block_mask = rows_mask[:, None] & cols_mask[None, :]
+
+            dy_ptrs = dy + rows_off[:, None] * stride_row + cols_off[None, :]
+            x_ptrs = x + rows_off[:, None] * stride_row + cols_off[None, :]
+            dx_ptrs = dx + rows_off[:, None] * stride_row + cols_off[None, :]
+
+            dy_chunk = tl.load(dy_ptrs, mask=block_mask, other=0.0)
+            x_chunk = tl.load(x_ptrs, mask=block_mask, other=0.0)
+
+            x_f32 = x_chunk.to(tl.float32)
+            sigmoid_x = tl.sigmoid(x_f32)
+
+            dsilu_dx = sigmoid_x * (1 + x_f32 * (1 - sigmoid_x))
+
+            dx_chunk = dy_chunk * dsilu_dx.to(dy_chunk.dtype)
+
+            tl.store(dx_ptrs, dx_chunk, mask=block_mask)
+
+
+def _rowwise_block_size_n(n_cols):
+    return min(triton.next_power_of_2(n_cols), MAX_BLOCK_SIZE_N)
+
+
+def _rowwise_grid(n_rows, block_size_m):
+    num_row_tasks = (n_rows + block_size_m - 1) // block_size_m
+    return (max(1, min(get_num_cores("vector"), num_row_tasks)),)
+
+
+def _rowwise_autotune_grid(n_rows):
+    return lambda META: _rowwise_grid(n_rows, META["BLOCK_SIZE_M"])
+
+
+SILU_NOMASK_MAX_BLOCK_SIZE_M = 16
+
+
+def _can_use_nomask_kernel(n_rows, n_cols, block_size_n):
+    return n_cols % block_size_n == 0 and n_rows % SILU_NOMASK_MAX_BLOCK_SIZE_M == 0
+
+
+def _can_use_nomask_single_kernel(n_rows, n_cols, block_size_n):
+    return n_cols == block_size_n and n_rows % SILU_NOMASK_MAX_BLOCK_SIZE_M == 0
+
+
+def silu_fwd_impl(
+    x: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Forward pass for SiLU.
+
+    Args:
+        x: Input tensor
+
+    Returns:
+        y: Output tensor y = silu(x) = x * sigmoid(x)
+    """
+    ori_shape = x.shape
+    n_cols = ori_shape[-1]
+
+    x_2d = x.reshape(-1, n_cols)
+    n_rows = x_2d.shape[0]
+    block_size_n = _rowwise_block_size_n(n_cols)
+
+    if n_rows < get_num_cores("vector") or triton.next_power_of_2(n_cols) < 10 * MAX_BLOCK_SIZE_N:
+        n_elements = x.numel()
+
+        x_flat = x.reshape(-1)
+        y_flat = torch.empty_like(x_flat)
+
+        grid = _flatten_grid(n_elements)
+
+        _silu_fwd_flatten_kernel[grid](
+            x_flat,
+            y_flat,
+            n_elements,
+        )
+
+        return y_flat.reshape(*ori_shape)
+    y = torch.empty_like(x_2d)
+
+    grid = _rowwise_autotune_grid(n_rows)
+
+    if _can_use_nomask_single_kernel(n_rows, n_cols, block_size_n):
+        _silu_fwd_nomask_single_kernel[grid](
+            x_2d,
+            y,
+            x_2d.stride(0),
+            n_rows,
+            n_cols,
+            BLOCK_SIZE_N=block_size_n,
+        )
+    elif _can_use_nomask_kernel(n_rows, n_cols, block_size_n):
+        _silu_fwd_nomask_kernel[grid](
+            x_2d,
+            y,
+            x_2d.stride(0),
+            n_rows,
+            n_cols,
+            BLOCK_SIZE_N=block_size_n,
+        )
+    else:
+        _silu_fwd_kernel[grid](
+            x_2d,
+            y,
+            x_2d.stride(0),
+            n_rows,
+            n_cols,
+            BLOCK_SIZE_N=block_size_n,
+        )
+
+    return y.reshape(*ori_shape)
+
+
+def silu_bwd_impl(
+    dy: torch.Tensor,
+    x: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Backward pass for SiLU.
+
+    Args:
+        dy: Gradient w.r.t. output
+        x: Input tensor (from forward pass)
+
+    Returns:
+        dx: Gradient w.r.t. input
+    """
+    ori_shape = dy.shape
+    n_cols = ori_shape[-1]
+
+    dy_2d = dy.reshape(-1, n_cols)
+    n_rows = dy_2d.shape[0]
+    block_size_n = _rowwise_block_size_n(n_cols)
+
+    if n_rows < get_num_cores("vector") or triton.next_power_of_2(n_cols) < 10 * MAX_BLOCK_SIZE_N:
+        n_elements = dy.numel()
+
+        dy_flat = dy.reshape(-1)
+        x_flat = x.reshape(-1)
+        dx_flat = torch.empty_like(x_flat)
+
+        grid = _flatten_grid(n_elements)
+
+        _silu_bwd_flatten_kernel[grid](
+            dy_flat,
+            x_flat,
+            dx_flat,
+            n_elements,
+        )
+
+        return dx_flat.reshape(*ori_shape)
+    else:
+        x_2d = x.reshape(-1, n_cols)
+        dx = torch.empty_like(x_2d)
+
+        grid = _rowwise_autotune_grid(n_rows)
+        _silu_bwd_kernel[grid](
+            dy_2d,
+            x_2d,
+            dx,
+            dy_2d.stride(0),
+            n_rows,
+            n_cols,
+            BLOCK_SIZE_N=block_size_n,
+        )
+
+        return dx.reshape(*ori_shape)

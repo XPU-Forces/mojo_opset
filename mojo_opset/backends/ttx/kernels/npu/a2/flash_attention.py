@@ -1,6 +1,7 @@
 import math
+import heapq
 
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import torch
 import triton
@@ -9,6 +10,81 @@ import triton.language as tl
 from mojo_opset.backends.ttx.kernels.npu.utils import get_num_cores
 from mojo_opset.backends.ttx.kernels.utils import prepare_chunk_indices
 
+def _tensor_to_cpu_list(tensor: torch.Tensor) -> List[int]:
+    return [int(x) for x in tensor.detach().cpu().tolist()]
+
+def _build_lpt_task_schedule(
+        cu_q_lens: torch.Tensor,
+        seqlens_kv: Optional[torch.Tensor],
+        num_q_heads: int,
+        num_kv_heads: int,
+        block_size_m: int,
+        block_size_n: int,
+        cube_num: int,
+        gqa_interleave: bool,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build a shape-aware static schedule for the 1D Triton grid.
+
+    Each task still computes one (batch, q block, q head). The estimated cost is
+    the number of KV blocks scanned by that task. LPT keeps the kernel free of
+    global atomics while avoiding the worst tail imbalance of round-robin.
+    """
+    cu_q_lens_host = _tensor_to_cpu_list(cu_q_lens)
+    seqlens_kv_host = None if seqlens_kv is None else _tensor_to_cpu_list(seqlens_kv)
+    batch_size = len(cu_q_lens_host) - 1
+
+    weighted_tasks = []
+    seq_no = 0
+    for b_id in range(batch_size):
+        q_seq_len = cu_q_lens_host[b_id + 1] - cu_q_lens_host[b_id]
+        if q_seq_len <= 0:
+            continue
+
+        kv_seq_len = q_seq_len if seqlens_kv_host is None else seqlens_kv_host[b_id]
+        kv_cache_len = kv_seq_len - q_seq_len
+        if kv_cache_len < 0:
+            raise ValueError(
+                f"seqlens_kv[{b_id}] ({kv_seq_len}) must be >= q_seq_len ({q_seq_len})"
+            )
+
+        q_chunks = triton.cdiv(q_seq_len, block_size_m)
+        for q_block_id in range(q_chunks):
+            q_block_end = min((q_block_id + 1) * block_size_m, q_seq_len)
+            cost = max(1, triton.cdiv(kv_cache_len + q_block_end, block_size_n))
+            for q_head_id in range(num_q_heads):
+                if gqa_interleave:
+                    kv_head_id = q_head_id % num_kv_heads
+                else:
+                    kv_head_id = q_head_id // (num_q_heads // num_kv_heads)
+                weighted_tasks.append((b_id, kv_head_id, q_block_id, cost, q_head_id, seq_no))
+                seq_no += 1
+
+    heap = [(0, core_id) for core_id in range(cube_num)]
+    per_core_tasks: List[List[Tuple[int, int, int]]] = [[] for _ in range(cube_num)]
+
+    for b_id, kv_head_id, q_block_id, cost, q_head_id, seq_no in sorted(weighted_tasks, reverse=True):
+        core_cost, core_id = heapq.heappop(heap)
+        per_core_tasks[core_id].append((b_id, q_head_id, q_block_id))
+        heapq.heappush(heap, (core_cost + cost, core_id))
+
+    task_b = []
+    task_q_block = []
+    task_q_head = []
+    core_task_offsets = [0]
+    for tasks in per_core_tasks:
+        for b_id, q_head_id, q_block_id in tasks:
+            task_b.append(b_id)
+            task_q_block.append(q_block_id)
+            task_q_head.append(q_head_id)
+        core_task_offsets.append(len(task_b))
+
+    device = cu_q_lens.device
+    return (
+        torch.tensor(task_b, device=device, dtype=torch.int32),
+        torch.tensor(task_q_block, device=device, dtype=torch.int32),
+        torch.tensor(task_q_head, device=device, dtype=torch.int32),
+        torch.tensor(core_task_offsets, device=device, dtype=torch.int32),
+    )
 
 @triton.jit
 def causal_mask_fn(mask_ptr, mask_size, mask_stride_m, mask_stride_n, q_start, kv_start, Q_BLOCK, KV_BLOCK):
@@ -242,6 +318,29 @@ def paged_prefill_kernel(
             # tl.store(m_ptrs, m_i)
             tl.store(O_block_ptr, accumulator.to(o_ptr.type.element_ty), boundary_check=(0, 1))
 
+def paged_attention_prefill_prepare(
+    cu_q_lens,
+    seqlens_kv,
+    num_q_heads,
+    num_kv_heads,
+    gqa_interleave,
+    page_size,
+):
+    cube_num = get_num_cores("cube")
+    CHUNK_SIZE = 128
+    BLOCK_SIZE_N = min(128, triton.next_power_of_2(page_size))
+
+    task_b, task_q_block, task_q_head, core_task_offsets = _build_lpt_task_schedule(
+        cu_q_lens,
+        seqlens_kv,
+        num_q_heads,
+        num_kv_heads,
+        CHUNK_SIZE,
+        BLOCK_SIZE_N,
+        cube_num,
+        gqa_interleave,
+    )
+    return task_b, task_q_block, task_q_head, core_task_offsets
 
 def paged_attention_prefill_impl(
     q: torch.Tensor,
@@ -251,6 +350,10 @@ def paged_attention_prefill_impl(
     seqlens_kv: Optional[torch.Tensor],
     block_tables: torch.Tensor,
     gqa_interleave: bool,
+    task_b: Optional[torch.Tensor],
+    task_q_block: Optional[torch.Tensor],
+    task_q_head: Optional[torch.Tensor],
+    core_task_offsets: Optional[torch.Tensor],
     softmax_scale: Optional[float] = None,
     aux_mask: Optional[torch.Tensor] = None,
     max_q_len: Optional[int] = None,

@@ -108,19 +108,24 @@ def _pad_to(x, mult):
     return ((x + mult - 1) // mult) * mult
 
 
-def prepare_b_impl(b: torch.Tensor) -> torch.Tensor:
-    """Transpose B to (N, K) row-major and pad to block boundaries.
+def prepare_b_impl(b: torch.Tensor, transposed: bool = False) -> torch.Tensor:
+    """Prepare B to (N, K) row-major and pad to block boundaries.
 
     For inference: weight B is fixed, call once and reuse.
 
     Args:
-        b: (K, N) int8
+        b: (K, N) int8 when transposed=False, (N, K) int8 when transposed=True
+        transposed: if True, b is already (N, K) and only padding is applied.
 
     Returns:
         bt: (N_padded, K_padded) int8, contiguous
     """
-    K_orig, N_orig = b.shape
-    bt = b.T.contiguous()
+    if transposed:
+        N_orig, K_orig = b.shape
+        bt = b.contiguous()
+    else:
+        K_orig, N_orig = b.shape
+        bt = b.T.contiguous()
 
     pN = _pad_to(N_orig, _PAD_N)
     pK = _pad_to(K_orig, _PAD_K)

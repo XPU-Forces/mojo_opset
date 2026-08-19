@@ -161,6 +161,7 @@ class MojoIndexer(MojoOperator):
             cos,
             sin,
             head_first=False,
+            keep_cos_sin_dtype=True,
         )
         k = k.squeeze(2)
 

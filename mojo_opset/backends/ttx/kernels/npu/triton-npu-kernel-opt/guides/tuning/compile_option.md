@@ -48,7 +48,7 @@ See also:
 
 | Option / Hint | Caution |
 |---|---|
-| `tl.compile_hint(..., "dot_pad_only_k")` | Unsafe with large `BLOCK_K` in tested GEMM cases; can trigger `aicore timeout` |
+| `tl.extra.cann.extension.compile_hint(..., "dot_pad_only_k")` | Unsafe with large `BLOCK_K` in tested GEMM cases; can trigger `aicore timeout` |
 | aggressive block/workspace overrides | Can hide the real scheduling issue instead of fixing it |
 | undocumented or broad compiler toggles | Do not include them in the delivered path without measured evidence |
 

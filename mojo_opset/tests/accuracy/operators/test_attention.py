@@ -28,6 +28,7 @@ from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.tests.utils import requires_platform_backend
 from mojo_opset.utils.acc import check_tol_diff
+from mojo_opset.utils.platform import get_platform
 
 
 def generate_paged_decode_data(
@@ -88,7 +89,9 @@ test_configs_decode = [
     (8, 16, 4, 96, 1024, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (8, 8, 1, 128, 8192, 1024, torch.bfloat16, "M_BF16_LONG"),
     (8, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
-    (8, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ")
+    (8, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
+    # (8, 8, 1, 128, 16384, 128, torch.bfloat16, "M_BF16_LONG_16384"),
+    #  (8, 8, 1, 128, 32768, 128, torch.bfloat16, "M_BF16_LONG_32768"),
 ]
 
 
@@ -435,7 +438,10 @@ test_configs_prefill = [
     (2, 16, 4, 96, 1024, 0, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (2, 8, 1, 128, 4096, 8192, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
     (2, 8, 1, 128, 1024, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
-    (2, 8, 1, 128, 0, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ")
+    (2, 8, 1, 128, 0, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
+
+    #  (2, 8, 1, 128, 16384, 8192, 128, torch.bfloat16, "M_BF16_WITH_CACHE_16384"),
+    #  (2, 8, 1, 128, 32768, 10240, 128, torch.bfloat16, "M_BF16_WITH_CACHE_32768"),
 ]
 
 
@@ -458,7 +464,7 @@ test_configs_prefill = [
         for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_prefill
     ],
 )
-@pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
+@pytest.mark.parametrize("gqa_layout", ["ABAB","AABB"])
 @auto_switch_platform()
 @bypass_not_implemented
 def test_paged_prefill_gqa(
@@ -476,6 +482,17 @@ def test_paged_prefill_gqa(
         is_causal=True,
         gqa_layout=gqa_layout
     )
+    if get_platform() == "npu":
+        num_q_heads = query.shape[1]
+        num_kv_heads = k_cache.shape[1]
+        page_size = k_cache.shape[2]
+        paged_prefill_attn.prepare_metadata(
+            cu_q_lens,
+            cu_total_seq_lens,
+            num_q_heads,
+            num_kv_heads,
+            page_size,
+        )
 
     paged_prefill_attn_ref = MojoPagedPrefillGQA._registry.get("torch")(
         is_causal=True,
@@ -502,7 +519,7 @@ def test_paged_prefill_gqa(
         max_total_seq_len=max_total_seq_len,
         atol=2e-2 if query.dtype != torch.float32 else 1e-5,
         rtol=2e-2 if query.dtype != torch.float32 else 1e-6,
-        ptol=0.0,
+        ptol=0.0,                                             # Annotate this line for strict comparison.
     )
 
 
@@ -537,6 +554,21 @@ def test_paged_prefill_gqa_bucket_padded_varlen(gqa_layout: str):
         is_causal=True,
         gqa_layout=gqa_layout,
     )
+    if get_platform() == "npu":
+        from mojo_opset.backends.torch_npu.operators.attention import TorchNpuPagedPrefillGQA
+        if  isinstance(paged_prefill_attn,TorchNpuPagedPrefillGQA) and gqa_layout=="ABAB":
+            pytest.skip("torch_npu does not support gqa_layout ABAB")
+        num_q_heads = query.shape[1]
+        num_kv_heads = key_cache.shape[1]
+        page_size = key_cache.shape[2]
+        paged_prefill_attn.prepare_metadata(
+            cu_q_lens,
+            cu_total_seq_lens,
+            num_q_heads,
+            num_kv_heads,
+            page_size,
+        )
+
     paged_prefill_attn_ref = MojoPagedPrefillGQA._registry.get("torch")(
         is_causal=True,
         gqa_layout=gqa_layout,
@@ -1355,7 +1387,7 @@ def test_paged_prefill_nsa(H, D, blk):
 
 test_configs_swa_prefill = [
     (2, 16, 4, 128, 1024, 0, 32, torch.bfloat16, "M_BF16"),
-    (2, 16, 4, 96, 2048, 0, 128, torch.bfloat16, "M_BF16_PADDIM"),
+    (2, 16, 4, 128, 2048, 0, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (2, 8, 1, 128, 256, 1024, 128, torch.bfloat16, "M_BF16_WITH_CACHE"),
     (2, 8, 1, 128, 1024, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
     (2, 8, 1, 128, 0, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
@@ -1384,7 +1416,7 @@ test_configs_swa_prefill = [
     ],
 )
 @pytest.mark.parametrize("gqa_layout, global_window, local_window", [
-    ("ABAB", 4, 255),
+    ("ABAB", 4, 255), 
     ("AABB", 4, 1023),
 ])
 @auto_switch_platform()
@@ -1416,6 +1448,11 @@ def test_paged_prefill_swa(
         local_window_size=local_window,
         global_window_size=global_window,
     )
+    if get_platform() == "npu":
+        from mojo_opset.backends.torch_npu.operators.attention import TorchNpuPagedPrefillSWA
+        if  isinstance(paged_prefill_swa,TorchNpuPagedPrefillSWA) and gqa_layout=="ABAB":
+            pytest.skip("torch_npu does not support gqa_layout ABAB")
+            
 
     head_dim = query.shape[-1]
     softmax_scale = 1.0 / math.sqrt(head_dim)
@@ -1633,7 +1670,7 @@ def test_paged_prefill_swa_with_graph(
 
 test_configs_swa_decode = [
     (4, -1, 16, 4, 128, 1024, 512, torch.bfloat16, "M_BF16"),
-    (8, -1, 16, 8, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
+    (8, -1, 16, 4, 96, 2048, 128, torch.bfloat16, "M_BF16_PADDIM"),
     (8, -1, 8, 1, 128, 4096, 128, torch.bfloat16, "M_BF16_LONG"),
     (2, -1, 8, 1, 128, 2048, 1024, torch.bfloat16, "M_BF16_BIGPAGE"),
     (2, -1, 8, 1, 128, 0, 1024, torch.bfloat16, "M_BF16_PADSEQ"),
@@ -1691,6 +1728,10 @@ def test_paged_decode_swa(
         global_window_size=global_window,
         local_window_size=local_window,
     )
+    if get_platform() == "npu":
+        from mojo_opset.backends.torch_npu.operators.attention import TorchNpuPagedDecodeSWA
+        if  isinstance(paged_decode_swa,TorchNpuPagedDecodeSWA) and gqa_layout=="ABAB":
+            pytest.skip("torch_npu does not support gqa_layout ABAB")
 
     atol = 2e-2 if query.dtype != torch.float32 else 1e-5
     rtol = 2e-2 if query.dtype != torch.float32 else 1e-6

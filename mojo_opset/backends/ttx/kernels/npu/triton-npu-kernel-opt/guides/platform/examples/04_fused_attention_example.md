@@ -108,13 +108,13 @@ def _attn_fwd_inner(acc_ptr, l_i, m_i, q,  # Accumulator, local l, local m, quer
                 # Calculate start/end rows for current slice
                 offset = i * (BLOCK_M // 4)
                 # Extract slice data
-                acc_i = tl.extract_slice(acc, (offset, 0), (BLOCK_M // 4, HEAD_DIM), (1, 1))
-                alpha_i = tl.extract_slice(alpha, [offset], [BLOCK_M // 4], [1])
-                pv_i = tl.extract_slice(pv, (offset, 0), (BLOCK_M // 4, HEAD_DIM), (1, 1))
+                acc_i = tl.extra.cann.extension.extract_slice(acc, (offset, 0), (BLOCK_M // 4, HEAD_DIM), (1, 1))
+                alpha_i = tl.extra.cann.extension.extract_slice(alpha, [offset], [BLOCK_M // 4], [1])
+                pv_i = tl.extra.cann.extension.extract_slice(pv, (offset, 0), (BLOCK_M // 4, HEAD_DIM), (1, 1))
                 # Incrementally update slice: acc = acc * alpha + pv
                 acc_i = acc_i * alpha_i[:, None] + pv_i
                 # Write updated slice back to accumulator
-                acc = tl.insert_slice(acc, acc_i, (offset, 0), (BLOCK_M // 4, HEAD_DIM), (1, 1))
+                acc = tl.extra.cann.extension.insert_slice(acc, acc_i, (offset, 0), (BLOCK_M // 4, HEAD_DIM), (1, 1))
             # 3. updated accumulator
             tl.store(acc_ptr + block2d_acc, acc)
 

@@ -23,15 +23,20 @@ class TTXQuantGemm(MojoQuantGemm):
 
     supported_platforms_list = ["npu", "ilu"]
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._bt_cache = None
+        self._bt_cache_key = None
+
     def forward(self, input: torch.Tensor, input_scale: torch.Tensor) -> torch.Tensor:
-        weight = self.weight
-        if self.trans_weight:
-            weight = weight.t().contiguous()
-
         M, K = input.shape
-        K_w, N = weight.shape
+        N = self.out_features
 
-        bt = prepare_b(weight)
+        key = (self.weight.data_ptr(), self.trans_weight)
+        if self._bt_cache_key != key:
+            self._bt_cache = prepare_b(self.weight, transposed=self.trans_weight)
+            self._bt_cache_key = key
+        bt = self._bt_cache
 
         if not input.is_contiguous():
             input = input.contiguous()

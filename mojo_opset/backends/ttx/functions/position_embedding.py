@@ -15,6 +15,7 @@ class TTXApplyRoPEFunction(MojoApplyRoPEFunction):
         cos: torch.Tensor,
         sin: torch.Tensor,
         head_first: bool = True,
+        need_cast: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         q_rope, k_rope = rope_fwd(q, k, cos, sin, head_first)
 

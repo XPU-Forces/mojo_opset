@@ -379,10 +379,10 @@ class Qwen3Attention(nn.Module):
         self.gamma = nn.Parameter(torch.ones(self.head_dim))
 
         self.q_norm = (
-            Qwen3RMSNorm(eps=config.rms_norm_eps, gamma=self.gamma) if hasattr(config, "q_norm") else nn.Identity()
+            Qwen3RMSNorm(eps=config.rms_norm_eps, weight=self.gamma) if hasattr(config, "q_norm") else nn.Identity()
         )
         self.k_norm = (
-            Qwen3RMSNorm(eps=config.rms_norm_eps, gamma=self.gamma) if hasattr(config, "k_norm") else nn.Identity()
+            Qwen3RMSNorm(eps=config.rms_norm_eps, weight=self.gamma) if hasattr(config, "k_norm") else nn.Identity()
         )
 
     def forward(self, hidden_states, position_embeddings, attention_mask, past_key_values, use_cache, **kwargs):
@@ -416,7 +416,7 @@ class Qwen3Attention(nn.Module):
             context_lens=context_lens,
         )
 
-        attn_output = query_states.reshape(bsz, q_len, self.hidden_size).contiguous()
+        attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, self.hidden_size).contiguous()
         return self.o_proj(attn_output), None
 
 

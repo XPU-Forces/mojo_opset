@@ -72,8 +72,9 @@ class TTXApplyRoPE(MojoApplyRoPE):
         cos: torch.Tensor,
         sin: torch.Tensor,
         head_first: bool = True,
+        keep_cos_sin_dtype: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return rope_fwd(q, k, cos, sin, head_first)
+        return rope_fwd(q, k, cos, sin, head_first, keep_cos_sin_dtype)
 
 
 class TTXMRoPE(MojoMRoPE):

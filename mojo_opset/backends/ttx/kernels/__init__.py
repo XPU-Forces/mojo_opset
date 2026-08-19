@@ -63,6 +63,7 @@ fused_add_rmsnorm_infer_impl = _get_kernel_impl(ttx_backend_module, "fused_add_r
 fused_add_layernorm_infer_impl = _get_kernel_impl(ttx_backend_module, "fused_add_layernorm_infer_impl")
 
 paged_attention_prefill_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_prefill_impl")
+paged_attention_prefill_prepare = _get_kernel_impl(ttx_backend_module, "paged_attention_prefill_prepare")
 paged_attention_prefill_with_kv_dequant_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_prefill_with_kv_dequant_impl")
 paged_attention_decode_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_decode_impl")
 paged_attention_decode_with_kv_dequant_impl = _get_kernel_impl(ttx_backend_module, "paged_attention_decode_with_kv_dequant_impl")
@@ -86,6 +87,9 @@ swa_bwd_impl = _get_kernel_impl(ttx_backend_module, "swa_bwd_impl")
 
 diffusion_attention_fwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_attention_fwd_impl")
 diffusion_attention_bwd_impl = _get_kernel_impl(ttx_backend_module, "diffusion_attention_bwd_impl")
+
+flex_attention_fwd_impl = _get_kernel_impl(ttx_backend_module, "flex_attention_fwd_impl")
+flex_attention_bwd_impl = _get_kernel_impl(ttx_backend_module, "flex_attention_bwd_impl")
 
 m_grouped_matmul_impl = _get_kernel_impl(ttx_backend_module, "m_grouped_matmul_impl")
 m_grouped_matmul_capturable_impl = _get_kernel_impl(ttx_backend_module, "m_grouped_matmul_capturable_impl")
@@ -255,15 +259,33 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         seqlens_kv: torch.Tensor,
         block_tables: torch.Tensor,
         gqa_interleave: bool,
+        task_b: Optional[torch.Tensor] = None,
+        task_q_block: Optional[torch.Tensor] = None,
+        task_q_head: Optional[torch.Tensor] = None,
+        core_task_offsets: Optional[torch.Tensor] = None,
         softmax_scale: Optional[float] = None,
         max_q_len: Optional[int] = None,
         max_total_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
-        return paged_attention_prefill_impl(
-            q, key_cache, value_cache, cu_q_lens, seqlens_kv, block_tables, gqa_interleave, softmax_scale,
-            max_q_len=max_q_len,
-            max_total_seq_len=max_total_seq_len,
-        )
+        if get_platform() == "npu":
+            return paged_attention_prefill_impl(
+                q, key_cache, value_cache, cu_q_lens, seqlens_kv, block_tables, gqa_interleave,
+                task_b=task_b,
+                task_q_block=task_q_block,
+                task_q_head=task_q_head,
+                core_task_offsets=core_task_offsets,
+                softmax_scale=softmax_scale,
+                max_q_len=max_q_len,
+                max_total_seq_len=max_total_seq_len,
+
+            )
+        else:
+            return paged_attention_prefill_impl(
+                q, key_cache, value_cache, cu_q_lens, seqlens_kv, block_tables, gqa_interleave,
+                softmax_scale=softmax_scale,
+                max_q_len=max_q_len,
+                max_total_seq_len=max_total_seq_len,
+            )
 
     @paged_attention_prefill.register_fake
     def paged_attention_prefill_fake(
@@ -274,6 +296,10 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         seqlens_kv: torch.Tensor,
         block_tables: torch.Tensor,
         gqa_interleave: bool,
+        task_b: Optional[torch.Tensor] = None,
+        task_q_block: Optional[torch.Tensor] = None,
+        task_q_head: Optional[torch.Tensor] = None,
+        core_task_offsets: Optional[torch.Tensor] = None,
         softmax_scale: Optional[float] = None,
         max_q_len: Optional[int] = None,
         max_total_seq_len: Optional[int] = None,
@@ -313,6 +339,10 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         seqlens_kv: torch.Tensor,
         block_tables: torch.Tensor,
         gqa_interleave: bool,
+        task_b: Optional[torch.Tensor] = None,
+        task_q_block: Optional[torch.Tensor] = None,
+        task_q_head: Optional[torch.Tensor] = None,
+        core_task_offsets: Optional[torch.Tensor] = None,
         softmax_scale: Optional[float] = None,
         max_seqlen_q: Optional[int] = None,
         max_seqlen_k: Optional[int] = None,
@@ -383,8 +413,9 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         cos: torch.Tensor,
         sin: torch.Tensor,
         head_first: bool = True,
+        keep_cos_sin_dtype: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return rope_fwd_impl(q, k, cos, sin, head_first)
+        return rope_fwd_impl(q, k, cos, sin, head_first, keep_cos_sin_dtype)
 
     @rope_fwd.register_fake
     def rope_fwd_fake(
@@ -393,6 +424,7 @@ if os.getenv("MOJO_RUN_MODE", "EAGER") == "COMPILE":
         cos: torch.Tensor,
         sin: torch.Tensor,
         head_first: bool = True,
+        keep_cos_sin_dtype: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return torch.empty_like(q), torch.empty_like(k)
 
@@ -1007,6 +1039,8 @@ else:
     swa_bwd = swa_bwd_impl
     diffusion_attention_fwd = diffusion_attention_fwd_impl
     diffusion_attention_bwd = diffusion_attention_bwd_impl
+    flex_attention_fwd = flex_attention_fwd_impl
+    flex_attention_bwd = flex_attention_bwd_impl
     m_grouped_matmul = m_grouped_matmul_impl
     m_grouped_matmul_capturable = m_grouped_matmul_capturable_impl
     k_grouped_matmul = k_grouped_matmul_impl

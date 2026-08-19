@@ -332,6 +332,16 @@ class MojoPagedPrefillGQA(MojoOperator):
         self.is_causal = is_causal
         self.gqa_layout = gqa_layout
 
+    def prepare_metadata(
+        self,
+        cu_q_lens: torch.Tensor,
+        cu_total_seq_lens: torch.Tensor,
+        num_q_heads: int,
+        num_kv_heads: int,
+        page_size: int,
+    ):
+        pass
+
     def forward(
         self,
         query: torch.Tensor,

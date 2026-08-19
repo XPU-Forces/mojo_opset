@@ -166,6 +166,18 @@ def _build_store_paged_kv_case(
             [2047, 2048, 3232, 43, 77, 7633, 888, 1],
             [1, 1, 1, 1, 1, 1, 1, 1],
         ),
+
+        #  add pref case
+        (2, 2, 128, 128, [0, 0], [130, 33]),
+        (2, 2, 128, 128, [32, 35], [1, 1]),
+        (2, 2, 128, 128, [15, 40], [788, 126]),
+        (2, 2, 128, 256, [15, 40], [788, 126]),
+        (1, 1, 128, 128, [0], [5]),
+        (1, 1, 128, 128, [5], [1]),
+        (3, 2, 128, 128, [32,-1, 35], [1, 1, 1]),
+        (3, 2, 128, 128, [0, -1, 5], [4, 0 ,2]),
+        (8, 2, 128, 128, [224, 542, 34, 41, 54, 57, 65, 0], [432, 84, 977, 93, 23, 89, 31, 555]),
+        (8, 2, 128, 128, [772, 974, 3232, 43, 77, 7633, 888, 1], [1, 1, 1, 1, 1, 1, 1, 1]),
     ],
 )
 @bypass_not_implemented
@@ -192,13 +204,27 @@ def test_store_paged_kv(batch_size, kv_heads, head_dim, block_size, context_kv_l
         case["v_cache"].clone(),
         chunk_metadata=case["chunk_metadata"],
     )
-    k_cache, v_cache = store_paged_kv(
-        case["key_states"],
-        case["value_states"],
-        case["k_cache"].clone(),
-        case["v_cache"].clone(),
-        chunk_metadata=case["chunk_metadata"],
-    )
+    ## torch_npu does not support chunk_metadata
+    if get_platform() == "npu":
+        from mojo_opset.backends.torch_npu.operators.kv_cache import TorchNpuStorePagedKVCache
+        if  isinstance(store_paged_kv,TorchNpuStorePagedKVCache):
+            pytest.skip("skip on torch_npu due to CI coredump")
+        else:
+            k_cache, v_cache = store_paged_kv(
+                        case["key_states"],
+                        case["value_states"],
+                        case["k_cache"].clone(),
+                        case["v_cache"].clone(),
+                        chunk_metadata=case["chunk_metadata"],
+                    )
+    else:
+        k_cache, v_cache = store_paged_kv(
+            case["key_states"],
+            case["value_states"],
+            case["k_cache"].clone(),
+            case["v_cache"].clone(),
+            chunk_metadata=case["chunk_metadata"],
+        )
 
     assert_close(k_cache, k_cache_ref)
     assert_close(v_cache, v_cache_ref)
@@ -360,7 +386,11 @@ def test_store_paged_kv_without_chunk_metadata(
     store_paged_kv = MojoStorePagedKVCache()
     if type(store_paged_kv_ref) is type(store_paged_kv):
         raise NotImplementedError("both operands resolve to the same implementation, skipping comparison.")
-
+    if get_platform() == "npu":
+        from mojo_opset.backends.torch_npu.operators.kv_cache import TorchNpuStorePagedKVCache
+        if  isinstance(store_paged_kv,TorchNpuStorePagedKVCache):
+            pytest.skip("skip on torch_npu due to CI coredump")
+            
     k_cache_ref, v_cache_ref = store_paged_kv_ref(
         case["key_states"],
         case["value_states"],
@@ -437,13 +467,27 @@ def test_store_paged_kv_bucket_padded_varlen():
         v_cache_ref,
         chunk_metadata=chunk_metadata,
     )
-    k_cache, v_cache = store_paged_kv(
-        key_states,
-        value_states,
-        k_cache,
-        v_cache,
-        chunk_metadata=chunk_metadata,
-    )
+    ## torch_npu does not support chunk_metadata
+    if get_platform() == "npu":
+        from mojo_opset.backends.torch_npu.operators.kv_cache import TorchNpuStorePagedKVCache
+        if  isinstance(store_paged_kv,TorchNpuStorePagedKVCache):
+            pytest.skip("skip on torch_npu due to CI coredump")
+        else:
+            k_cache, v_cache = store_paged_kv(
+                    key_states,
+                    value_states,
+                    k_cache,
+                    v_cache,
+                    chunk_metadata=chunk_metadata,
+            )
+    else:
+        k_cache, v_cache = store_paged_kv(
+                    key_states,
+                    value_states,
+                    k_cache,
+                    v_cache,
+                    chunk_metadata=chunk_metadata,
+            )
 
     for batch_id in range(real_batch_size):
         write_pos = context_kv_lens[batch_id].item()
@@ -490,14 +534,26 @@ def test_store_paged_kv_chunk_metadata_perf_and_accuracy():
     store_paged_kv_ref = MojoStorePagedKVCache._registry.get("torch")()
     if type(store_paged_kv_ref) is type(store_paged_kv):
         raise NotImplementedError("both operands resolve to the same implementation, skipping comparison.")
-
-    k_cache_new, v_cache_new = store_paged_kv(
-        case["key_states"],
-        case["value_states"],
-        case["k_cache"].clone(),
-        case["v_cache"].clone(),
-        chunk_metadata=case["chunk_metadata"],
-    )
+    if get_platform() == "npu":
+        from mojo_opset.backends.torch_npu.operators.kv_cache import TorchNpuStorePagedKVCache
+        if  isinstance(store_paged_kv,TorchNpuStorePagedKVCache):
+            pytest.skip("torch_npu kv_cache skip")
+        else:
+            k_cache_new, v_cache_new = store_paged_kv(
+            case["key_states"],
+            case["value_states"],
+            case["k_cache"].clone(),
+            case["v_cache"].clone(),
+            chunk_metadata=case["chunk_metadata"],
+        )
+    else:       
+        k_cache_new, v_cache_new = store_paged_kv(
+            case["key_states"],
+            case["value_states"],
+            case["k_cache"].clone(),
+            case["v_cache"].clone(),
+            chunk_metadata=case["chunk_metadata"],
+        )
     k_cache_legacy, v_cache_legacy = store_paged_kv_impl_legacy(
         case["key_states"],
         case["value_states"],

@@ -12,7 +12,55 @@ from mojo_opset import MojoApplyRoPE
 from mojo_opset import MojoSilu
 from mojo_opset import MojoStorePagedKVCache
 from mojo_opset.core.operators.kv_cache import build_paged_kv_chunk_metadata
+from mojo_opset.utils.platform import get_platform
 
+
+class AttentionBackend:
+    def __init__(self):
+        self.attn_prefill = MojoPagedPrefillGQA()
+        self.attn_decode = MojoPagedDecodeGQA()
+        self.num_heads = None
+        self.num_key_value_heads = None
+        self.block_size = None
+
+    def init_attention_info(self, num_heads, num_key_value_heads, block_size):
+        self.num_heads = num_heads
+        self.num_key_value_heads = num_key_value_heads
+        self.block_size = block_size
+    """
+     prepare_prefill_attn is used for load balancing before attention. 
+     Some computations are performed on the CPU.
+     If there is an input graph, the operation will fail.
+     We advice do prepare_prefill_attn before layer, not in the model
+    """
+    def prepare_prefill_attn(self, x, past_key_values):
+        if get_platform() == "npu":
+            bsz, q_len = x.shape[:2]
+            device = x.device
+            if q_len > 1: # prefill
+                q_lens = torch.full((bsz,), q_len, dtype=torch.int32, device=device)
+                cu_q_lens = torch.cat(
+                    [torch.tensor([0], device=device, dtype=torch.int32), q_lens.cumsum(0, dtype=torch.int32)]
+                )
+                context_lens = (
+                    past_key_values.get_seq_length(0)
+                    if past_key_values is not None
+                    else torch.zeros(bsz, dtype=torch.long, device=x.device)
+                )
+                current_seq_lens = context_lens + q_len
+                cu_total_seq_lens = torch.cat(
+                    [torch.tensor([0], device=device, dtype=torch.int32), current_seq_lens.cumsum(0, dtype=torch.int32)]
+                )
+
+                self.attn_prefill.prepare_metadata(
+                    cu_q_lens,
+                    cu_total_seq_lens,
+                    self.num_heads,
+                    self.num_key_value_heads,
+                    self.block_size,
+                )
+
+Qwen3AttentionBackend = AttentionBackend()
 
 class Qwen3Config:
     def __init__(self):
@@ -210,8 +258,10 @@ class Qwen3Attention(nn.Module):
             eps=config.rms_norm_eps,
         )
         self.rope = MojoApplyRoPE()
-        self.attn_prefill = MojoPagedPrefillGQA()
-        self.attn_decode = MojoPagedDecodeGQA()
+        global Qwen3AttentionBackend
+        self.attn_prefill = Qwen3AttentionBackend.attn_prefill
+        self.attn_decode = Qwen3AttentionBackend.attn_decode
+
 
     def forward(self, hidden_states, position_embeddings, attention_mask, past_key_values, use_cache, **kwargs):
         bsz, q_len, _ = hidden_states.size()
@@ -270,6 +320,9 @@ class Qwen3Attention(nn.Module):
             q = query_states.permute(0, 2, 1, 3).reshape(total_tokens, num_q_heads, head_dim)
 
             current_seq_lens = context_lens + q_len
+            cu_current_seq_lens = torch.cat(
+                [torch.tensor([0], device=device, dtype=torch.int32), current_seq_lens.cumsum(0, dtype=torch.int32)]
+            )
 
             k_cache = past_key_values.k_cache
             v_cache = past_key_values.v_cache
@@ -284,7 +337,7 @@ class Qwen3Attention(nn.Module):
                 cu_q_lens,
                 block_tables,
                 self.scaling,
-                cu_total_seq_lens=current_seq_lens,
+                cu_total_seq_lens=cu_current_seq_lens,
             )
             attn_output = attn_output_tnd.reshape(bsz, q_len, num_q_heads, head_dim)
             attn_output = attn_output.transpose(1, 2)
@@ -368,6 +421,11 @@ class Qwen3Model(nn.Module):
         cos, sin = self.rotary(hidden_states, position_ids)  # position_ids increment
         position_embeddings = (cos, sin)
 
+        #prepare_prefill_attn is used for load balancing before attention. 
+        # Some computations are performed on the CPU.
+        # If there is an input graph, the operation will fail
+        #Qwen3AttentionBackend.prepare_prefill_attn(hidden_states,past_key_values)
+                     
         for layer in self.layers:
             hidden_states = layer(
                 hidden_states=hidden_states,
