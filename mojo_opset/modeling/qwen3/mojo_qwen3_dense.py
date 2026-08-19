@@ -27,7 +27,12 @@ class AttentionBackend:
         self.num_heads = num_heads
         self.num_key_value_heads = num_key_value_heads
         self.block_size = block_size
-
+    """
+     prepare_prefill_attn is used for load balancing before attention. 
+     Some computations are performed on the CPU.
+     If there is an input graph, the operation will fail.
+     We advice do prepare_prefill_attn before layer, not in the model
+    """
     def prepare_prefill_attn(self, x, past_key_values):
         if get_platform() == "npu":
             bsz, q_len = x.shape[:2]
@@ -416,6 +421,11 @@ class Qwen3Model(nn.Module):
         cos, sin = self.rotary(hidden_states, position_ids)  # position_ids increment
         position_embeddings = (cos, sin)
 
+        #prepare_prefill_attn is used for load balancing before attention. 
+        # Some computations are performed on the CPU.
+        # If there is an input graph, the operation will fail
+        #Qwen3AttentionBackend.prepare_prefill_attn(hidden_states,past_key_values)
+                     
         for layer in self.layers:
             hidden_states = layer(
                 hidden_states=hidden_states,
