@@ -1,16 +1,49 @@
+from dataclasses import dataclass
+from math import gcd
 from typing import Optional
 from typing import Tuple
 
+import heapq
 import torch
-import time
 import triton
 import triton.language as tl
+
+try:
+    import numpy as _np
+    _HAS_NUMPY = True
+except ImportError:
+    _HAS_NUMPY = False
 
 from ..utils import get_num_cores
 from ..utils import is_910
 
 
 TILE_BLOCK_SIZE = 128
+
+# Q 侧加权 task list 调度的最小相对改善阈值: round-robin baseline 与 LPT 装箱
+# 之间的改善率低于此值时, 认为不值得引入 task list 开销, 直接使用 round-robin。
+_Q_TASKLIST_MIN_RELATIVE_IMPROVEMENT = 0.05
+
+# DKDV 侧负载均衡阈值
+_DKDV_MAX_FULL_ROUNDS_FOR_TAIL_SPLIT = 2
+_DKDV_TAIL_RATIO_THRESHOLD = 0.5
+# max_weight/mean_weight 超过此比例时启用 task list 调度。
+# 设为 1.3 而非 1.5: 当权重变异超过 30% 时, round-robin 的核间不均衡
+# 可达 10%+ (如 cross_sample mask: text/image 混合, max/mean=1.49,
+# round-robin 不均衡 1.13x), LPT 装箱可将不均衡降至 ~1.01x。
+_DKDV_WEIGHT_IMBALANCE_THRESHOLD = 1.3
+
+# DKDV 装箱 heavy-light 分解阈值: weight > target * 此比例的 item 视为重 item,
+# 预分配到空核后再用容量感知 fill-ratio heap 装箱轻 item, 避免 min-heap 后期
+# 将重 item 堆叠到半满核上 (典型场景: SWA global-window 首块 w=512 vs target=725)
+_DKDV_HEAVY_RATIO_THRESHOLD = 0.3
+
+# fill-ratio heap 的整数化精度 (key = light_weight / light_capacity * SCALE)
+_FILL_RATIO_SCALE = 100000
+
+# 张量维度常量
+_WORK_ITEM_COLUMNS = 2
+_INVALID_BLOCK_INDEX = -1
 
 
 def _get_num_aicore():
@@ -21,8 +54,616 @@ def _get_num_aicore():
 
 
 def _persistent_launch_config(num_tasks):
+    """计算 persistent kernel 的 launch grid 和实际任务数。
+
+    Args:
+        num_tasks: 原始任务总数。
+
+    Returns:
+        (grid, num_tasks): grid 为单元素 tuple (active_cores,),
+            num_tasks 为钳位后的有效任务数 (至少为 1)。
+    """
     num_tasks = max(int(num_tasks), 1)
     return (min(_get_num_aicore(), num_tasks),), num_tasks
+
+
+def _get_mask_block_sizes(block_mask):
+    """从 BlockMask 提取稀疏分块大小 (Q, KV)。
+
+    BlockMask.BLOCK_SIZE 记录了掩码构建时使用的分块粒度, kernel 必须以该粒度
+    解释 kv_block / q_block 索引, 否则会导致 KV 位置计算错误。
+
+    Args:
+        block_mask: 由 create_block_mask_patched / BlockMask.from_kv_blocks 构建的掩码对象。
+
+    Returns:
+        (sparse_q_block_size, sparse_kv_block_size): 掩码的 Q / KV 分块大小。
+        当 block_mask 缺少 BLOCK_SIZE 属性时, 回退为 (TILE_BLOCK_SIZE, TILE_BLOCK_SIZE)。
+
+    Raises:
+        ValueError: 当分块大小不是 TILE_BLOCK_SIZE 的正整数倍时。
+    """
+    raw_bs = getattr(block_mask, "BLOCK_SIZE", None)
+    if raw_bs is None:
+        sparse_q_block_size = sparse_kv_block_size = TILE_BLOCK_SIZE
+    elif isinstance(raw_bs, int):
+        sparse_q_block_size = sparse_kv_block_size = raw_bs
+    else:
+        sparse_q_block_size, sparse_kv_block_size = raw_bs
+
+    if (
+        not isinstance(sparse_q_block_size, int)
+        or not isinstance(sparse_kv_block_size, int)
+        or sparse_q_block_size < TILE_BLOCK_SIZE
+        or sparse_kv_block_size < TILE_BLOCK_SIZE
+        or sparse_q_block_size % TILE_BLOCK_SIZE != 0
+        or sparse_kv_block_size % TILE_BLOCK_SIZE != 0
+    ):
+        raise ValueError(
+            "FlexAttention NPU kernels require Q and KV BlockMask block sizes "
+            f"to be integer multiples of {TILE_BLOCK_SIZE} and at least "
+            f"{TILE_BLOCK_SIZE}; received (Q, KV)=({sparse_q_block_size}, "
+            f"{sparse_kv_block_size}). Block sizes such as 32, 64, or "
+            "non-divisible values are unsupported by the current 128-tile kernels."
+        )
+
+    return sparse_q_block_size, sparse_kv_block_size
+
+
+# ===========================================================================
+# Q 侧负载均衡: LPT (Longest Processing Time first) 加权 task list 调度
+#
+# 设计动机:
+#   原始 round-robin 调度按 task_id 顺序分配任务到各核, 当不同 Q block 的
+#   KV-block 数量差异较大时 (如 SWA mask 首块 global window 导致 w 远超均值),
+#   round-robin 会导致核间负载严重不均衡。LPT 贪心装箱将重任务优先分配到
+#   空核或最轻核, 使各核负载逼近理论下界。
+#
+# 判定流程 (两级 early exit):
+#   Level 1 — _may_need_q_task_schedule: 纯几何快速判定, 无需同步 device 权重
+#   Level 2 — _build_q_task_schedule: 同步权重 + round-robin baseline 估算 +
+#             完整 LPT 装箱 + 改善率二次校验
+# ===========================================================================
+
+def _may_need_q_task_schedule(
+    Z: int, Hq: int, num_q_blocks: int,
+    sparse_q_multiple: int, num_core: int,
+) -> bool:
+    """纯几何快速判定 Q-task 加权调度是否可能改善负载均衡。
+
+    仅使用 host 侧已知的 launch 几何参数, 不需要同步 device 权重。
+    返回 False 时可证明 round-robin 已足够均衡, 调用方跳过权重同步。
+
+    Args:
+        Z: 批次数。
+        Hq: Q head 数。
+        num_q_blocks: Q block 总数。
+        sparse_q_multiple: 稀疏分块换算因子。
+        num_core: 核数。
+
+    Returns:
+        True 表示可能需要加权调度 (需进一步同步权重判定);
+        False 表示 round-robin 已足够, 可安全跳过。
+    """
+    # Step 1: 任务数不超过核数时, 每核最多一个任务, 无需均衡
+    total_tasks = Z * Hq * num_q_blocks
+    active_cores = min(max(int(num_core), 1), max(total_tasks, 1))
+    if total_tasks <= num_core:
+        return False
+
+    # Step 2: 仅有一个稀疏 block 时, 所有任务等重, 无需均衡
+    num_sparse_q_blocks = (num_q_blocks + sparse_q_multiple - 1) // sparse_q_multiple
+    if num_sparse_q_blocks <= 1:
+        return False
+
+    # Step 3: 当 block 数与核数互素且 copy 数整除核数时,
+    # round-robin 天然均衡, 无需加权
+    task_copies = Z * Hq
+    return not (
+        gcd(num_q_blocks, active_cores) == 1
+        and task_copies % active_cores == 0
+    )
+
+
+def _build_q_task_schedule(
+    q_sparse_weights,
+    Z: int,
+    Hq: int,
+    Hkv: int,
+    num_q_blocks: int,
+    sparse_q_multiple: int,
+    num_core: int,
+) -> Tuple[Optional[list], bool]:
+    """为 forward/dQ 构建无拆分、无归约的加权 Q-task 排列。
+
+    通过三级判定逐步决定是否需要加权调度:
+      Level 1 — round-robin baseline 快速估算 (O(num_q_blocks), 无需装箱)
+      Level 2 — 完整贪心装箱 + 改善率二次校验
+    任一级别不满足阈值即 early exit, 返回 (None, False)。
+
+    Args:
+        q_sparse_weights: 每个 sparse Q block 的有效 KV-block 数 (partial + full 等权)。
+        Z / Hq / Hkv: 批次数 / Q head 数 / KV head 数。
+        num_q_blocks: Q block 总数。
+        sparse_q_multiple: 稀疏分块换算因子。
+        num_core: 核数。
+
+    Returns:
+        (task_ids, use_task_list): use_task_list=False 时 task_ids 为 None,
+            表示 round-robin 已足够; use_task_list=True 时 task_ids 为加权排列列表。
+
+    Raises:
+        ValueError: 当权重列表长度不足以覆盖所有 Q blocks 时。
+    """
+    # Step 1: 展开权重并校验
+    total_tasks = Z * Hq * num_q_blocks
+    active_cores = min(max(int(num_core), 1), max(total_tasks, 1))
+    num_sparse_q_blocks = (num_q_blocks + sparse_q_multiple - 1) // sparse_q_multiple
+    weight_values = list(q_sparse_weights)
+    if len(weight_values) < num_sparse_q_blocks:
+        raise ValueError(
+            "FlexAttention Q-task weights do not cover all Q blocks: "
+            f"expected {num_sparse_q_blocks}, got {len(weight_values)}"
+        )
+
+    block_weights = [
+        max(float(weight_values[q_block // sparse_q_multiple]), 1.0)
+        for q_block in range(num_q_blocks)
+    ]
+    gqa_shared_heads = Hq // Hkv if Hq >= Hkv else 1
+
+    # Step 2: round-robin baseline 快速计算 (Level 1 判定)
+    task_copies = Z * Hq
+    baseline_max = _compute_round_robin_baseline_max(
+        block_weights, num_q_blocks, active_cores, task_copies,
+    )
+    total_weight = sum(block_weights) * task_copies
+    theoretical_max = total_weight / active_cores
+    quick_improvement = (baseline_max - theoretical_max) / max(baseline_max, 1.0)
+    if quick_improvement < _Q_TASKLIST_MIN_RELATIVE_IMPROVEMENT:
+        return None, False
+
+    # Step 3: 完整贪心装箱 (Level 2 判定)
+    per_core_tasks, capacities, core_loads = _greedy_pack_q_tasks(
+        block_weights, total_tasks, active_cores, num_q_blocks,
+        Z, Hq, Hkv, gqa_shared_heads,
+    )
+    balanced_max = max(core_loads)
+    relative_improvement = (baseline_max - balanced_max) / max(baseline_max, 1.0)
+    if relative_improvement < _Q_TASKLIST_MIN_RELATIVE_IMPROVEMENT:
+        return None, False
+
+    # Step 4: 轮转展平 — 按 round-robin 交替取出各核任务, 保证 persistent 调度连续性
+    task_ids = _flatten_per_core_tasks(per_core_tasks, capacities)
+    return task_ids, True
+
+
+def _compute_round_robin_baseline_max(
+    block_weights: list, num_q_blocks: int,
+    active_cores: int, task_copies: int,
+) -> float:
+    """计算 round-robin 调度下最重核的负载。
+
+    利用 residue_sums 预聚合 + offset 计数, 将 O(total_tasks) 降为
+    O(num_q_blocks + distinct_offsets * active_cores)。
+
+    Args:
+        block_weights: 每个 Q block 的权重列表。
+        num_q_blocks: Q block 总数。
+        active_cores: 实际使用的核数。
+        task_copies: Z * Hq, 每个 q_block 的任务副本数。
+
+    Returns:
+        round-robin 调度下最重核的负载值。
+    """
+    residue_sums = [0.0] * active_cores
+    for q_block in range(num_q_blocks):
+        residue_sums[q_block % active_cores] += block_weights[q_block]
+
+    offset_counts = {}
+    for copy_id in range(task_copies):
+        offset = (copy_id * num_q_blocks) % active_cores
+        offset_counts[offset] = offset_counts.get(offset, 0) + 1
+
+    baseline_loads = [0.0] * active_cores
+    for offset, count in offset_counts.items():
+        for core_id in range(active_cores):
+            baseline_loads[core_id] += count * residue_sums[(core_id - offset) % active_cores]
+
+    return max(baseline_loads)
+
+
+def _greedy_pack_q_tasks(
+    block_weights: list, total_tasks: int, active_cores: int,
+    num_q_blocks: int, Z: int, Hq: int, Hkv: int, gqa_shared_heads: int,
+) -> Tuple[list, list, list]:
+    """使用 LPT (Longest Processing Time first) 贪心装箱, 将 Q tasks 均衡分配到各核。
+
+    将所有任务按权重全局降序排列后, 依次放入当前最轻的核 (min-heap)。
+    相比按 head 分组的嵌套遍历, 全局 LPT 保证重任务优先占据空核,
+    轻任务精确填缝, 使各核负载逼近理论下界 ceil(total_weight / num_core)。
+
+    Args:
+        block_weights: 每个 Q block 的权重列表。
+        total_tasks: Z * Hq * num_q_blocks, 任务总数。
+        active_cores: 实际使用的核数。
+        num_q_blocks: Q block 总数。
+        Z / Hq / Hkv: 批次 / Q head / KV head 数。
+        gqa_shared_heads: Hq // Hkv, GQA 共享头数 (保留用于兼容签名, LPT 不依赖分组)。
+
+    Returns:
+        (per_core_tasks, capacities, core_loads):
+            per_core_tasks[core_id] 为该核的任务 ID 列表;
+            capacities[core_id] 为该核的容量上限;
+            core_loads[core_id] 为该核的实际负载。
+    """
+    # Step 1: 计算每核容量上限 (前 extra_tasks 个核多分一个任务)
+    tasks_per_core, extra_tasks = divmod(total_tasks, active_cores)
+    capacities = [
+        tasks_per_core + (1 if core_id < extra_tasks else 0)
+        for core_id in range(active_cores)
+    ]
+    remaining_capacities = capacities.copy()
+    core_loads = [0.0] * active_cores
+    per_core_tasks = [[] for _ in range(active_cores)]
+    core_heap = [(0.0, core_id) for core_id in range(active_cores)]
+    heapq.heapify(core_heap)
+
+    # Step 2: 枚举所有 (off_z, off_hq, q_block) 任务并按权重全局降序排列。
+    #
+    # LPT 策略的核心: 重任务先放置, 优先占据空核或最轻核;
+    # 轻任务后放置, 精确填入剩余缝隙。全局排序消除了嵌套遍历中
+    # 同一 q_block 的 head 副本被穿插放置导致的重任务堆叠问题。
+    all_tasks = []
+    for off_z in range(Z):
+        for off_hq in range(Hq):
+            for q_block in range(num_q_blocks):
+                weight = block_weights[q_block]
+                all_tasks.append((weight, off_z, off_hq, q_block))
+    all_tasks.sort(key=lambda t: t[0], reverse=True)
+
+    # Step 3: 依次将排序后的任务放入当前最轻的核 (min-heap 贪心)。
+    for weight, off_z, off_hq, q_block in all_tasks:
+        _, core_id = heapq.heappop(core_heap)
+        task_id = (off_z * Hq + off_hq) * num_q_blocks + q_block
+        per_core_tasks[core_id].append(task_id)
+        remaining_capacities[core_id] -= 1
+        core_loads[core_id] += weight
+        if remaining_capacities[core_id] > 0:
+            heapq.heappush(core_heap, (core_loads[core_id], core_id))
+
+    return per_core_tasks, capacities, core_loads
+
+
+def _flatten_per_core_tasks(per_core_tasks: list, capacities: list) -> list:
+    """将各核任务列表按 round-robin 轮转展平为一维序列。
+
+    persistent kernel 按展平后的顺序依次执行任务,
+    轮转展平确保相邻任务来自不同核, 减少尾部空闲。
+
+    Args:
+        per_core_tasks: 各核的任务 ID 列表。
+        capacities: 各核容量上限 (决定轮转轮数)。
+
+    Returns:
+        展平后的任务 ID 一维列表。
+    """
+    task_ids = []
+    for task_round in range(max(capacities)):
+        for core_id, core_tasks in enumerate(per_core_tasks):
+            if task_round < len(core_tasks):
+                task_ids.append(core_tasks[task_round])
+    return task_ids
+
+
+# ===========================================================================
+# 统一负载均衡计划: Q 侧 + DKDV 侧打包为单一计划, 由 _get_or_build_load_balance_plan
+# 构建并缓存到 BlockMask 上, 供 forward / bwd kernel 共享复用。
+# ===========================================================================
+
+@dataclass
+class _FlexAttentionLoadBalancePlan:
+    """FlexAttention 的统一负载均衡计划 (Q 侧 + DKDV 侧)。
+
+    封装 Q 侧和 DKDV 侧两套独立的任务调度方案, 由 _get_or_build_load_balance_plan
+    构建并缓存到 BlockMask 上, 供 forward / bwd kernel 复用。
+
+    Attributes:
+        q_task_ids: Q 侧任务 ID 排列张量, shape [num_q_tasks]。
+            use_q_task_list=False 时退化为 bm["kv_num_blks"] (原始 round-robin 序列)。
+        use_q_task_list: Q 侧是否启用加权 task list 调度。
+        dkdv_work_items: DKDV work items, shape [num_work, 2],
+            每行 = (hkv, kv_block)。
+        dkdv_task_offsets: CSR 偏移, shape [num_core+1], 每核 work-item 起始索引。
+        use_dkdv_task_list: DKDV 侧是否启用 task list 调度 (仅控制分支选择, task list 始终构建)。
+    """
+    q_task_ids: torch.Tensor
+    use_q_task_list: bool
+    dkdv_work_items: torch.Tensor
+    dkdv_task_offsets: torch.Tensor
+    use_dkdv_task_list: bool
+
+
+@dataclass
+class _DkdvSidePlan:
+    """DKDV 侧负载均衡计划的中间结果。
+
+    Attributes:
+        work_items: [num_work, 2] int32 work items 张量, 每行 = (hkv, kv_block)。
+        task_offsets: [num_core+1] int32 CSR 偏移张量。
+        use_task_list: 是否启用 task list 调度。
+    """
+    work_items: torch.Tensor
+    task_offsets: torch.Tensor
+    use_task_list: bool
+
+
+def _build_q_side_plan(
+    bm: dict, Z: int, Hq: int, Hkv: int,
+    num_q_blocks: int, sparse_q_multiple: int,
+    num_core: int, device,
+) -> Tuple[torch.Tensor, bool]:
+    """构建 Q 侧负载均衡计划 (非缓存, 由上层统一缓存)。
+
+    仅在 _may_need_q_task_schedule 返回 True 时同步权重并构建加权排列;
+    否则直接使用原始 round-robin 序列 (bm["kv_num_blks"])。
+
+    Args:
+        bm: BlockMask 属性字典。
+        Z / Hq / Hkv: 批次 / Q head / KV head 数。
+        num_q_blocks: Q block 总数。
+        sparse_q_multiple: 稀疏分块换算因子。
+        num_core: 核数。
+        device: 计算设备。
+
+    Returns:
+        (q_task_ids, use_q_task_list)。
+    """
+    if not _may_need_q_task_schedule(Z, Hq, num_q_blocks, sparse_q_multiple, num_core):
+        return bm["kv_num_blks"], False
+
+    q_weight_values = (bm["kv_num_blks"] + bm["full_kv_num_blks"]).reshape(-1).tolist()
+    q_task_ids, use_q_task_list = _build_q_task_schedule(
+        q_weight_values, Z, Hq, Hkv, num_q_blocks, sparse_q_multiple, num_core,
+    )
+    if use_q_task_list:
+        q_task_ids = torch.tensor(q_task_ids, dtype=torch.int32, device=device)
+    else:
+        q_task_ids = bm["kv_num_blks"]
+    return q_task_ids, use_q_task_list
+
+
+def _build_dkdv_side_plan(
+    bm: dict, Z: int, Hkv: int,
+    num_kv_blocks: int, sparse_kv_multiple: int,
+    num_core: int, device, build_dkdv: bool,
+) -> "_DkdvSidePlan":
+    """构建 DKDV 侧负载均衡计划 (非缓存, 由上层统一缓存)。
+
+    采用两级判定:
+    - Level 1: Z != 1 或不需要 dkdv 时直接返回 SIMPLE 模式, 跳过权重同步。
+    - Level 2: 同步权重并检测尾部不均或权重不均衡, 确定 SIMPLE / TASKLIST 模式。
+    - Level 3: 完整装箱 (仅 TASKLIST 模式触发)。
+
+    权重不均衡检测不依赖 tail_cores 是否为 0, 因为极端 outlier
+    (如 SWA mask 中 global window 集中在首个 kv_block) 在任意
+    full_rounds 下都会导致 round-robin 分配不均。
+
+    Args:
+        bm: BlockMask 属性字典。
+        Z: 批次数 (Z > 1 时不构建 DKDV 计划)。
+        Hkv: KV head 数。
+        num_kv_blocks: KV block 总数。
+        sparse_kv_multiple: 稀疏分块换算因子。
+        num_core: 核数。
+        device: 计算设备。
+        build_dkdv: 是否构建 DKDV 侧计划。
+
+    Returns:
+        _DkdvSidePlan 封装的 DKDV 侧计划。
+    """
+    # Step 1: 默认 SIMPLE 模式 — Z > 1 或不需要 dkdv 时直接返回
+    if not build_dkdv or Z != 1:
+        return _DkdvSidePlan(
+            work_items=torch.empty((0, _WORK_ITEM_COLUMNS), dtype=torch.int32, device=device),
+            task_offsets=torch.zeros((num_core + 1,), dtype=torch.int32, device=device),
+            use_task_list=False,
+        )
+
+    # Step 2: Level 2 — 同步权重并做完整判定
+    total_base = num_kv_blocks * Hkv
+    full_rounds = total_base // num_core
+    tail_cores = total_base % num_core
+
+    dkdv_weight_values = (bm["q_num_blks"] + bm["full_q_num_blks"]).reshape(-1).tolist()
+    total_w = Hkv * sum(dkdv_weight_values)
+    mean_w = total_w / max(total_base, 1)
+    max_w = max(dkdv_weight_values, default=0)
+
+    has_significant_tail = (
+        total_w > 0 and tail_cores > 0
+        and full_rounds <= _DKDV_MAX_FULL_ROUNDS_FOR_TAIL_SPLIT
+        and tail_cores / num_core < _DKDV_TAIL_RATIO_THRESHOLD
+    )
+    has_weight_imbalance = (
+        mean_w > 0 and max_w / mean_w > _DKDV_WEIGHT_IMBALANCE_THRESHOLD
+    )
+    use_task_list = has_significant_tail or has_weight_imbalance
+
+    if not use_task_list:
+        return _DkdvSidePlan(
+            work_items=torch.empty((0, _WORK_ITEM_COLUMNS), dtype=torch.int32, device=device),
+            task_offsets=torch.zeros((num_core + 1,), dtype=torch.int32, device=device),
+            use_task_list=False,
+        )
+
+    # Step 3: Level 3 — 完整装箱
+    target = total_w / num_core
+    work_items, task_offsets = _build_dkdv_task_schedule(
+        dkdv_weight_values, Hkv, num_kv_blocks, sparse_kv_multiple,
+        target, num_core, device,
+    )
+    return _DkdvSidePlan(
+        work_items=work_items,
+        task_offsets=task_offsets,
+        use_task_list=True,
+    )
+
+
+def _build_load_balance_plan(
+    bm: dict,
+    Z: int,
+    Hq: int,
+    Hkv: int,
+    num_q_blocks: int,
+    num_kv_blocks: int,
+    sparse_q_multiple: int,
+    sparse_kv_multiple: int,
+    num_core: int,
+    device,
+    build_dkdv: bool,
+) -> "_FlexAttentionLoadBalancePlan":
+    """构建统一负载均衡计划 (Q 侧 + DKDV 侧)。
+
+    Q 侧通过 _build_q_side_plan 构建加权排列 (含 early exit)。
+    DKDV 侧先做纯算术快速判断, 能确定 SIMPLE 模式时跳过权重同步与
+    task list 构建; 仅在可能不均衡时才同步权重并做完整判定。
+
+    Args:
+        bm: BlockMask 属性字典 (_prepare_block_mask_attrs 的输出)。
+        Z / Hq / Hkv: 批次 / Q head 数 / KV head 数。
+        num_q_blocks / num_kv_blocks: Q block / KV block 总数。
+        sparse_q_multiple / sparse_kv_multiple: 稀疏分块换算因子。
+        num_core: 核数。
+        device: 计算设备。
+        build_dkdv: 是否构建 DKDV 侧计划。
+
+    Returns:
+        _FlexAttentionLoadBalancePlan 封装的完整计划。
+    """
+    # Step 1: Q 侧 — 仅在几何形状可能不均衡时同步权重并构建加权排列
+    q_task_ids, use_q_task_list = _build_q_side_plan(
+        bm, Z, Hq, Hkv, num_q_blocks, sparse_q_multiple, num_core, device,
+    )
+
+    # Step 2: DKDV 侧 — 纯算术快速判断, 能确定 SIMPLE 则跳过所有计算
+    dkdv_result = _build_dkdv_side_plan(
+        bm, Z, Hkv, num_kv_blocks, sparse_kv_multiple, num_core, device, build_dkdv,
+    )
+
+    return _FlexAttentionLoadBalancePlan(
+        q_task_ids=q_task_ids,
+        use_q_task_list=use_q_task_list,
+        dkdv_work_items=dkdv_result.work_items,
+        dkdv_task_offsets=dkdv_result.task_offsets,
+        use_dkdv_task_list=dkdv_result.use_task_list,
+    )
+
+
+def _make_load_balance_plan_cache_key(
+    block_mask,
+    Z: int,
+    Hq: int,
+    Hkv: int,
+    num_q_blocks: int,
+    num_kv_blocks: int,
+    sparse_q_multiple: int,
+    sparse_kv_multiple: int,
+    num_core: int,
+    device,
+    build_dkdv: bool,
+) -> tuple:
+    """构建统一负载均衡计划的缓存键。
+
+    缓存键由 BlockMask 核心张量的身份标识 + 几何参数组成, 确保同一 BlockMask
+    在相同形状参数下的计划只需构建一次。使用 BlockMask 原始属性 (而非
+    _prepare_block_mask_attrs 处理后的 bm dict), 避免每次调用因 .to(int32)
+    .contiguous() 产生新张量导致缓存未命中。
+
+    Args:
+        block_mask: BlockMask 对象, 提供稀疏分块索引表张量。
+        Z / Hq / Hkv: 批次 / Q head / KV head 数。
+        num_q_blocks / num_kv_blocks: Q block / KV block 总数。
+        sparse_q_multiple / sparse_kv_multiple: 稀疏分块换算因子。
+        num_core: 核数。
+        device: 计算设备。
+        build_dkdv: 是否构建 DKDV 侧计划 (影响计划内容)。
+
+    Returns:
+        可哈希的缓存键元组, 包含所有影响计划构建结果的参数。
+    """
+
+    def _tensor_cache_id(tensor: Optional[torch.Tensor]) -> tuple:
+        if tensor is None:
+            return None
+        return (
+            tensor.data_ptr(),
+            getattr(tensor, "_version", 0),
+            tuple(tensor.shape),
+            tensor.dtype,
+            tensor.device,
+        )
+
+    return (
+        _tensor_cache_id(block_mask.kv_num_blocks),
+        _tensor_cache_id(getattr(block_mask, "full_kv_num_blocks", None)),
+        _tensor_cache_id(block_mask.q_num_blocks),
+        _tensor_cache_id(getattr(block_mask, "full_q_num_blocks", None)),
+        Z, Hq, Hkv,
+        num_q_blocks, num_kv_blocks,
+        sparse_q_multiple, sparse_kv_multiple,
+        num_core, device, build_dkdv,
+    )
+
+
+def _get_or_build_load_balance_plan(
+    block_mask,
+    bm: dict,
+    Z: int,
+    Hq: int,
+    Hkv: int,
+    num_q_blocks: int,
+    num_kv_blocks: int,
+    sparse_q_multiple: int,
+    sparse_kv_multiple: int,
+    device,
+    build_dkdv: bool,
+) -> "_FlexAttentionLoadBalancePlan":
+    """获取或构建统一负载均衡计划 (带缓存)。
+
+    同一 BlockMask 在相同形状参数下的后续调用直接复用缓存, 避免重复装箱。
+    缓存键由 BlockMask 核心张量的身份标识 + 几何参数组成。
+    forward 首次调用时预构建 DKDV 计划, backward 直接复用。
+
+    Args:
+        block_mask: BlockMask 对象, 计划缓存到其 _load_balance_plan 属性上。
+        bm: BlockMask 属性字典 (_prepare_block_mask_attrs 的输出)。
+        Z / Hq / Hkv: 批次 / Q head / KV head 数。
+        num_q_blocks / num_kv_blocks: Q / KV block 总数。
+        sparse_q_multiple / sparse_kv_multiple: 稀疏分块换算因子。
+        device: 计算设备。
+        build_dkdv: 是否构建 DKDV 侧计划。
+
+    Returns:
+        _FlexAttentionLoadBalancePlan 封装的完整计划。
+    """
+    # Step 1: 计算缓存键并检查是否命中
+    num_core = _get_num_aicore()
+    cache_key = _make_load_balance_plan_cache_key(
+        block_mask, Z, Hq, Hkv, num_q_blocks, num_kv_blocks,
+        sparse_q_multiple, sparse_kv_multiple, num_core, device, build_dkdv,
+    )
+    if getattr(block_mask, "_load_balance_plan_cache_key", None) == cache_key:
+        return block_mask._load_balance_plan
+
+    # Step 2: 缓存未命中, 构建新计划并写入缓存
+    plan = _build_load_balance_plan(
+        bm, Z, Hq, Hkv, num_q_blocks, num_kv_blocks,
+        sparse_q_multiple, sparse_kv_multiple, num_core, device, build_dkdv,
+    )
+    block_mask._load_balance_plan_cache_key = cache_key
+    block_mask._load_balance_plan = plan
+    return plan
 
 
 @triton.jit(
@@ -45,6 +686,7 @@ def flex_attention_kernel(
     KV_IDX,
     FULL_KV_NUM_BLKS,
     FULL_KV_IDX,
+    Q_TASK_IDS,
     DENSE_MASK,
     stride_mask_m,
     stride_mask_n,
@@ -77,11 +719,16 @@ def flex_attention_kernel(
     GQA_SHARED_HEADS,
     HAS_FULL_BLOCKS: tl.constexpr = True,
     USE_PACKED_PARTIAL_MASK: tl.constexpr = False,
+    USE_Q_TASK_LIST: tl.constexpr = False,
 ):
     pid = tl.program_id(0).to(tl.int32)
     num_core = tl.num_programs(0).to(tl.int32)
 
-    for task_id in range(pid, NUM_TASKS, num_core):
+    for task_slot in range(pid, NUM_TASKS, num_core):
+        task_id = task_slot
+        if USE_Q_TASK_LIST:
+            task_id = tl.load(Q_TASK_IDS + task_slot).to(tl.int32)
+
         q_start = task_id % NUM_Q_BLOCKS
         off_z = (task_id // NUM_Q_BLOCKS) // Q_HEAD
         off_hq = (task_id // NUM_Q_BLOCKS) % Q_HEAD
@@ -386,6 +1033,7 @@ def flex_attention_backward_dq_kernel(
     KV_IDX,
     FULL_KV_NUM_BLKS,
     FULL_KV_IDX,
+    Q_TASK_IDS,
     DENSE_MASK,
     stride_mask_m,
     stride_mask_n,
@@ -423,6 +1071,7 @@ def flex_attention_backward_dq_kernel(
     GQA_SHARED_HEADS: tl.constexpr,
     HAS_FULL_BLOCKS: tl.constexpr = True,
     USE_PACKED_PARTIAL_MASK: tl.constexpr = False,
+    USE_Q_TASK_LIST: tl.constexpr = False,
 ):
     pid = tl.program_id(0).to(tl.int32)
     num_core = tl.num_programs(0).to(tl.int32)
@@ -430,7 +1079,11 @@ def flex_attention_backward_dq_kernel(
     KV_BLOCK_SIZE: tl.constexpr = BLOCK_N * NUM_KV_SUB_BLOCKS
     MATMUL_PRECISION = Q.dtype.element_ty
 
-    for task_id in range(pid, NUM_TASKS, num_core):
+    for task_slot in range(pid, NUM_TASKS, num_core):
+        task_id = task_slot
+        if USE_Q_TASK_LIST:
+            task_id = tl.load(Q_TASK_IDS + task_slot).to(tl.int32)
+
         q_start = task_id % NUM_Q_BLOCKS
         off_z = (task_id // NUM_Q_BLOCKS) // Q_HEAD
         off_hq = (task_id // NUM_Q_BLOCKS) % Q_HEAD
@@ -485,13 +1138,80 @@ def flex_attention_backward_dq_kernel(
         kv_indices = KV_IDX + sparse_kv_idx_offset
         kv_num_blocks = tl.load(KV_NUM_BLKS + sparse_kv_num_blks_offset)
 
-        for blk_idx_in_list in range(0, kv_num_blocks):
+        # 将 (blk_idx, kv_sub) 双层循环展平为单层 n_tile 循环,
+        # 与 forward kernel 结构一致, 避免 bisheng 编译器在数据依赖外层循环
+        # 内嵌 constexpr 内层循环 (NUM_KV_SUB_BLOCKS > 1) 时的后端选择失败。
+        block_n_end = kv_num_blocks * NUM_KV_SUB_BLOCKS
+        for n_tile in range(0, block_n_end):
+            blk_idx_in_list = n_tile // NUM_KV_SUB_BLOCKS
             kv_block = tl.load(kv_indices + blk_idx_in_list)
-            kv_start_full = kv_block * SPARSE_KV_BLOCK_SIZE
+            kv_sub = n_tile % NUM_KV_SUB_BLOCKS
+            kv_start = kv_block * SPARSE_KV_BLOCK_SIZE + kv_sub * BLOCK_N
+            offs_n = kv_start + tl.arange(0, BLOCK_N)
 
-            for kv_sub in range(NUM_KV_SUB_BLOCKS):
-                start_n = kv_start_full + kv_sub * BLOCK_N
-                offs_n = start_n + tl.arange(0, BLOCK_N)
+            k = tl.load(
+                K_ptr + offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk,
+                mask=(offs_n[:, None] < KV_LEN),
+                other=0.0,
+            )
+            v = tl.load(
+                V_ptr + offs_n[:, None] * stride_vn + offs_v[None, :] * stride_vk,
+                mask=(offs_n[:, None] < KV_LEN),
+                other=0.0,
+            )
+
+            qk = tl.dot(q, tl.trans(k), input_precision="ieee")
+            qk *= SM_SCALE
+
+            if USE_PACKED_PARTIAL_MASK:
+                partial_block_idx = tl.load(
+                    PARTIAL_BLOCK_TABLE
+                    + q_sparse_idx * stride_partial_table_m
+                    + kv_block * stride_partial_table_n
+                )
+                safe_partial_block_idx = tl.maximum(partial_block_idx, 0, propagate_nan=True)
+                offs_m_in_block = offs_m - q_sparse_base
+                offs_n_in_block = kv_sub * BLOCK_N + tl.arange(0, BLOCK_N)
+                mask = load_packed_partial_mask(
+                    PARTIAL_MASK_PACKED,
+                    stride_partial_p,
+                    stride_partial_m,
+                    stride_partial_n,
+                    safe_partial_block_idx,
+                    offs_m_in_block,
+                    offs_n_in_block,
+                    SPARSE_Q_BLOCK_SIZE=SPARSE_Q_BLOCK_SIZE,
+                    SPARSE_KV_BLOCK_SIZE=SPARSE_KV_BLOCK_SIZE,
+                )
+                mask = mask & (partial_block_idx >= 0)
+            else:
+                mask = load_dense_mask(
+                    DENSE_MASK,
+                    stride_mask_m,
+                    stride_mask_n,
+                    offs_m,
+                    offs_n,
+                    Q_LEN=Q_LEN,
+                    KV_LEN=KV_LEN,
+                )
+            qk = tl.where(mask, qk, float("-inf"))
+
+            p = tl.math.exp(qk - lse[:, None])
+            dp = tl.dot(do, tl.trans(v), input_precision="ieee")
+            ds = p * (dp - delta[:, None])
+            ds *= SM_SCALE
+            dq += tl.dot(ds.to(MATMUL_PRECISION), k, input_precision="ieee")
+
+        if HAS_FULL_BLOCKS:
+            kv_indices_f = FULL_KV_IDX + sparse_kv_idx_offset
+            kv_num_blocks_f = tl.load(FULL_KV_NUM_BLKS + sparse_kv_num_blks_offset)
+            block_n_end_f = kv_num_blocks_f * NUM_KV_SUB_BLOCKS
+            for n_tile in range(0, block_n_end_f):
+                blk_idx_in_list = n_tile // NUM_KV_SUB_BLOCKS
+                kv_block = tl.load(kv_indices_f + blk_idx_in_list)
+                kv_sub = n_tile % NUM_KV_SUB_BLOCKS
+                kv_start = kv_block * SPARSE_KV_BLOCK_SIZE + kv_sub * BLOCK_N
+                offs_n = kv_start + tl.arange(0, BLOCK_N)
 
                 k = tl.load(
                     K_ptr + offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk,
@@ -507,75 +1227,11 @@ def flex_attention_backward_dq_kernel(
                 qk = tl.dot(q, tl.trans(k), input_precision="ieee")
                 qk *= SM_SCALE
 
-                if USE_PACKED_PARTIAL_MASK:
-                    partial_block_idx = tl.load(
-                        PARTIAL_BLOCK_TABLE
-                        + q_sparse_idx * stride_partial_table_m
-                        + kv_block * stride_partial_table_n
-                    )
-                    safe_partial_block_idx = tl.maximum(partial_block_idx, 0, propagate_nan=True)
-                    offs_m_in_block = offs_m - q_sparse_base
-                    offs_n_in_block = kv_sub * BLOCK_N + tl.arange(0, BLOCK_N)
-                    mask = load_packed_partial_mask(
-                        PARTIAL_MASK_PACKED,
-                        stride_partial_p,
-                        stride_partial_m,
-                        stride_partial_n,
-                        safe_partial_block_idx,
-                        offs_m_in_block,
-                        offs_n_in_block,
-                        SPARSE_Q_BLOCK_SIZE=SPARSE_Q_BLOCK_SIZE,
-                        SPARSE_KV_BLOCK_SIZE=SPARSE_KV_BLOCK_SIZE,
-                    )
-                    mask = mask & (partial_block_idx >= 0)
-                else:
-                    mask = load_dense_mask(
-                        DENSE_MASK,
-                        stride_mask_m,
-                        stride_mask_n,
-                        offs_m,
-                        offs_n,
-                        Q_LEN=Q_LEN,
-                        KV_LEN=KV_LEN,
-                    )
-                qk = tl.where(mask, qk, float("-inf"))
-
                 p = tl.math.exp(qk - lse[:, None])
                 dp = tl.dot(do, tl.trans(v), input_precision="ieee")
                 ds = p * (dp - delta[:, None])
                 ds *= SM_SCALE
                 dq += tl.dot(ds.to(MATMUL_PRECISION), k, input_precision="ieee")
-
-        if HAS_FULL_BLOCKS:
-            kv_indices_f = FULL_KV_IDX + sparse_kv_idx_offset
-            kv_num_blocks_f = tl.load(FULL_KV_NUM_BLKS + sparse_kv_num_blks_offset)
-            for blk_idx_in_list in range(0, kv_num_blocks_f):
-                kv_block = tl.load(kv_indices_f + blk_idx_in_list)
-                kv_start_full = kv_block * SPARSE_KV_BLOCK_SIZE
-
-                for kv_sub in range(NUM_KV_SUB_BLOCKS):
-                    start_n = kv_start_full + kv_sub * BLOCK_N
-                    offs_n = start_n + tl.arange(0, BLOCK_N)
-
-                    k = tl.load(
-                        K_ptr + offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk,
-                        mask=(offs_n[:, None] < KV_LEN),
-                        other=0.0,
-                    )
-                    v = tl.load(
-                        V_ptr + offs_n[:, None] * stride_vn + offs_v[None, :] * stride_vk,
-                        mask=(offs_n[:, None] < KV_LEN),
-                        other=0.0,
-                    )
-
-                    qk = tl.dot(q, tl.trans(k), input_precision="ieee")
-                    qk *= SM_SCALE
-
-                    p = tl.math.exp(qk - lse[:, None])
-                    dp = tl.dot(do, tl.trans(v), input_precision="ieee")
-                    ds = p * (dp - delta[:, None])
-                    ds *= SM_SCALE
-                    dq += tl.dot(ds.to(MATMUL_PRECISION), k, input_precision="ieee")
 
         tl.store(
             DQ_ptr + offs_m[:, None] * stride_dqm + offs_k[None, :] * stride_dqk,
@@ -961,22 +1617,20 @@ def _bwd_dkdv_qblock_range(
 # Task-list dkdv kernel: 基于 host 侧装箱结果的自适应负载均衡 kernel。
 #
 # 设计动机:
-#   原始 qsplit kernel 仅处理"尾部不满核"场景, 且对所有尾部 task 统一拆分,
-#   无法应对"某 KV 分块 Q-block 数远超均值"的长尾场景。本 kernel 由 host 侧
-#   装箱算法生成 task list (merge 轻任务 + split 重任务), kernel 仅按 list 执行。
+#   原始 SIMPLE kernel 以 (z, hkv, kv_block) 为粒度 round-robin 调度, 当 KV 分块
+#   间 Q-block 数差异大时核间负载严重不均衡。本 kernel 由 host 侧装箱算法
+#   (heavy-light 分解 + fill-ratio heap) 生成 task list, kernel 仅按 list 执行。
 #
-# 数据结构 (host 侧构建, 详见 _build_task_list):
-#   work_items[j]  = (hkv, kv_block, sub_id, K, is_split)   # 5 元组, int32
-#   task_offsets[m] = meta-task m 的 work-item 起始索引      # CSR 偏移, len = NUM_META+1
+# 数据结构 (host 侧构建, 详见 _build_dkdv_task_schedule):
+#   work_items[j]  = (hkv, kv_block)                    # 2 元组, int32
+#   task_offsets[c] = 核 c 的 work-item 起始索引         # CSR 偏移, len = num_core+1
 #
-#   - meta-task: 分配给一个核的工作包, 含 1 个或多个 work-item, 重量 ≈ target
-#   - work-item direct (is_split=0): 处理 base task 全部 Q-blocks, atomic_add 写 DK/DV
-#   - work-item split  (is_split=1): 处理 base task 的 1/K 切片, atomic_add 写 DK_PARTIAL[sub_id]
+#   - 所有 work-item 均为 direct: 处理 base task 全部 Q-blocks, atomic_add 写 DK/DV
+#   - 无 split/reduce: 跨核均衡由 host 侧 heavy-light 装箱保证
 #
 # 写入语义:
-#   - direct: 不同 (hkv, kv_block) 写不同地址, 无竞争
-#   - split : 同一 (hkv, kv_block) 的不同 sub_id 写 DK_PARTIAL 不同 sub_id 维, 无竞争
-#   - 被 split 的 kv_block 不会被 direct 路径写入 (host 侧保证互斥)
+#   - 不同 (hkv, kv_block) 写不同地址, 无竞争
+#   - 同一 kv_block 的不同 hkv 写不同 head 维, 无竞争
 # ===========================================================================
 @triton.jit(
     do_not_specialize=[
@@ -984,7 +1638,7 @@ def _bwd_dkdv_qblock_range(
         "stride_partial_p", "stride_partial_m",
         "stride_partial_table_m",
         "stride_lse_z", "stride_lse_h", "stride_q_idx_m",
-        "Q_LEN", "KV_LEN", "NUM_META",
+        "Q_LEN", "KV_LEN",
         "stride_qz", "stride_qh",
         "stride_kz", "stride_kh",
         "stride_vz", "stride_vh",
@@ -992,7 +1646,6 @@ def _bwd_dkdv_qblock_range(
         "stride_delta_z", "stride_delta_h",
         "stride_dkz", "stride_dkh",
         "stride_dvz", "stride_dvh",
-        "stride_dkp_k", "stride_dvp_k",
     ]
 )
 def flex_attention_backward_dkdv_kernel_tasklist(
@@ -1002,9 +1655,7 @@ def flex_attention_backward_dkdv_kernel_tasklist(
     PARTIAL_MASK_PACKED, PARTIAL_MASK_OFFSETS, PARTIAL_BLOCK_TABLE,
     stride_partial_p, stride_partial_m, stride_partial_n,
     stride_partial_offset_m, stride_partial_table_m, stride_partial_table_n,
-    DK, DV,                                  # direct 路径写入目标 (merge bin 内 atomic_add)
-    DK_PARTIAL, DV_PARTIAL,                  # split 路径写入目标 (核间隔离)
-    stride_dkp_k, stride_dvp_k,              # partial 第 0 维 (sub_id) stride
+    DK, DV,                                  # direct 路径写入目标 (atomic_add)
     stride_dkz, stride_dkh, stride_dkn, stride_dkk,
     stride_dvz, stride_dvh, stride_dvn, stride_dvk,
     stride_qz, stride_qh, stride_qm, stride_qk,
@@ -1014,15 +1665,14 @@ def flex_attention_backward_dkdv_kernel_tasklist(
     stride_lse_z, stride_lse_h, stride_lse_m,
     stride_delta_z, stride_delta_h, stride_delta_m,
     stride_q_idx_m,
-    WORK_ITEMS,                               # [num_work, 5]: (hkv, kv_block, sub_id, K, is_split)
-    TASK_OFFSETS,                             # [NUM_META+1]: CSR 偏移
+    WORK_ITEMS,                               # [num_work, 2]: (hkv, kv_block)
+    TASK_OFFSETS,                             # [num_core+1]: CSR 偏移
     SM_SCALE: tl.constexpr,
     QK_HEAD_DIM: tl.constexpr,
     V_HEAD_DIM: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     NUM_KV_SUB_BLOCKS: tl.constexpr,
-    NUM_META,                                 # meta-task 数 (= len(task_offsets)-1)
     KV_HEAD,                                  # = Hkv (Z=1)
     SPARSE_Q_BLOCK_SIZE: tl.constexpr,
     SPARSE_KV_BLOCK_SIZE: tl.constexpr,
@@ -1032,8 +1682,13 @@ def flex_attention_backward_dkdv_kernel_tasklist(
     HAS_FULL_BLOCKS: tl.constexpr = True,
     USE_PACKED_PARTIAL_MASK: tl.constexpr = False,
 ):
+    """Task-list dkdv kernel (direct-only, 无 split/reduce)。
+
+    每个 pid 处理 TASK_OFFSETS[pid] 到 TASK_OFFSETS[pid+1] 范围内的 work-item,
+    遍历 partial + full Q-block 累加 dk/dv 梯度。保留两段 partial/full 循环结构,
+    通过 IS_FULL_BLOCKS 编译期常量控制 mask 加载行为。
+    """
     pid = tl.program_id(0).to(tl.int32)
-    num_core = tl.num_programs(0).to(tl.int32)
 
     MATMUL_PRECISION = Q.dtype.element_ty
     KV_BLOCK_SIZE: tl.constexpr = BLOCK_N * NUM_KV_SUB_BLOCKS
@@ -1046,114 +1701,114 @@ def flex_attention_backward_dkdv_kernel_tasklist(
     sparse_kv_multiple = SPARSE_KV_BLOCK_SIZE // KV_BLOCK_SIZE
 
     # ================================================================
-    # meta-task 主循环 (persistent): 每个 pid 顺序领取多个 meta-task
-    # 通常 NUM_META = num_core, 每核恰好 1 个 meta-task, 无 round-robin 尾部
+    # 每个 pid 恰好处理 1 个核的 work-item (核数 = len(TASK_OFFSETS)-1, 无 round-robin)
     # ================================================================
-    for meta_id in range(pid, NUM_META, num_core):
-        work_start = tl.load(TASK_OFFSETS + meta_id)
-        work_end = tl.load(TASK_OFFSETS + meta_id + 1)
+    work_start = tl.load(TASK_OFFSETS + pid)
+    work_end = tl.load(TASK_OFFSETS + pid + 1)
 
-        # ============================================================
-        # work-item 内层循环: 一个 meta-task 内顺序处理多个 work-item
-        #   - direct (is_split=0): merge bin 内多 base task, 各自 atomic_add DK/DV
-        #   - split  (is_split=1): 单 base task 的 1/K 切片, atomic_add DK_PARTIAL
-        # 同一 meta-task 内可混合 direct/split (处理不同 kv_block, 无写冲突)
-        # ============================================================
-        for widx in range(work_start, work_end):
-            # ---- 从 work-item 中读取任务参数 ----
-            off_hkv  = tl.load(WORK_ITEMS + widx * 5 + 0).to(tl.int64)
-            kv_block = tl.load(WORK_ITEMS + widx * 5 + 1)
-            sub_id   = tl.load(WORK_ITEMS + widx * 5 + 2)
-            K_split  = tl.load(WORK_ITEMS + widx * 5 + 3)
-            is_split = tl.load(WORK_ITEMS + widx * 5 + 4)
+    for widx in range(work_start, work_end):
+        # ---- 从 work-item 中读取任务参数 (2 元组: hkv, kv_block) ----
+        off_hkv = tl.load(WORK_ITEMS + widx * 2 + 0).to(tl.int64)
+        kv_block = tl.load(WORK_ITEMS + widx * 2 + 1)
 
-            off_z = tl.zeros_like(off_hkv)              # Z=1
+        off_z = tl.zeros_like(off_hkv)              # Z=1
 
-            # ---- 指针基址 (按 hkv 切片) ----
-            k_offset  = off_z * stride_kz  + off_hkv * stride_kh
-            v_offset  = off_z * stride_vz  + off_hkv * stride_vh
-            dk_offset = off_z * stride_dkz + off_hkv * stride_dkh
-            dv_offset = off_z * stride_dvz + off_hkv * stride_dvh
-            K_ptr = K + k_offset
-            V_ptr = V + v_offset
+        # ---- 指针基址 (按 hkv 切片) ----
+        k_offset  = off_z * stride_kz  + off_hkv * stride_kh
+        v_offset  = off_z * stride_vz  + off_hkv * stride_vh
+        dk_offset = off_z * stride_dkz + off_hkv * stride_dkh
+        dv_offset = off_z * stride_dvz + off_hkv * stride_dvh
+        K_ptr = K + k_offset
+        V_ptr = V + v_offset
 
-            # ---- 输出指针分流: direct -> DK/DV; split -> DK_PARTIAL[sub_id] ----
-            if is_split == 0:
-                DK_OUT_ptr = DK + dk_offset
-                DV_OUT_ptr = DV + dv_offset
-            else:
-                DK_OUT_ptr = DK_PARTIAL + sub_id * stride_dkp_k + dk_offset
-                DV_OUT_ptr = DV_PARTIAL + sub_id * stride_dvp_k + dv_offset
+        # ---- 输出指针: direct 路径, 写 DK/DV ----
+        DK_OUT_ptr = DK + dk_offset
+        DV_OUT_ptr = DV + dv_offset
 
-            start_n_full = kv_block * KV_BLOCK_SIZE
-            kv_sparse_idx = kv_block // sparse_kv_multiple
-            sparse_q_idx_offset = kv_sparse_idx * stride_q_idx_m
+        start_n_full = kv_block * KV_BLOCK_SIZE
+        kv_sparse_idx = kv_block // sparse_kv_multiple
+        sparse_q_idx_offset = kv_sparse_idx * stride_q_idx_m
 
-            # ---- 计算 Q-block 迭代范围 [q_start, q_end) ----
-            #   direct: 全部 [0, block_m_end)
-            #   split : 第 sub_id/K 切片 (与 qsplit kernel 切片公式一致)
-            q_indices = Q_IDX + sparse_q_idx_offset
-            q_num_blocks = tl.load(Q_NUM_BLKS + kv_sparse_idx)
-            block_m_end_p = tl.minimum(
-                q_num_blocks * sparse_q_multiple,
+        # ---- 计算 partial Q-block 迭代范围 [0, block_m_end_p) ----
+        q_indices = Q_IDX + sparse_q_idx_offset
+        q_num_blocks = tl.load(Q_NUM_BLKS + kv_sparse_idx)
+        block_m_end_p = tl.minimum(
+            q_num_blocks * sparse_q_multiple,
+            tl.maximum(tl.cdiv(Q_LEN, BLOCK_M), 1, propagate_nan=True),
+            propagate_nan=tl.PropagateNan.ALL,
+        )
+        q_start_p = 0
+        q_end_p = block_m_end_p
+
+        # ---- 计算 full Q-block 迭代范围 (仅当 HAS_FULL_BLOCKS) ----
+        q_start_f = 0
+        q_end_f = 0
+        q_indices_f = q_indices  # dummy; 仅 HAS_FULL_BLOCKS 时使用
+        if HAS_FULL_BLOCKS:
+            q_indices_f = FULL_Q_IDX + sparse_q_idx_offset
+            q_num_blocks_f = tl.load(FULL_Q_NUM_BLKS + kv_sparse_idx)
+            block_m_end_f = tl.minimum(
+                q_num_blocks_f * sparse_q_multiple,
                 tl.maximum(tl.cdiv(Q_LEN, BLOCK_M), 1, propagate_nan=True),
                 propagate_nan=tl.PropagateNan.ALL,
             )
-            if is_split == 0:
-                q_start_p = 0
-                q_end_p = block_m_end_p
-            else:
-                q_start_p = sub_id * block_m_end_p // K_split
-                q_end_p = (sub_id + 1) * block_m_end_p // K_split
-
-            # Full Q-blocks (仅当 HAS_FULL_BLOCKS 时加载, 否则范围为空)
             q_start_f = 0
-            q_end_f = 0
-            q_indices_f = q_indices  # dummy; 仅 HAS_FULL_BLOCKS 时使用
-            if HAS_FULL_BLOCKS:
-                q_indices_f = FULL_Q_IDX + sparse_q_idx_offset
-                q_num_blocks_f = tl.load(FULL_Q_NUM_BLKS + kv_sparse_idx)
-                block_m_end_f = tl.minimum(
-                    q_num_blocks_f * sparse_q_multiple,
-                    tl.maximum(tl.cdiv(Q_LEN, BLOCK_M), 1, propagate_nan=True),
-                    propagate_nan=tl.PropagateNan.ALL,
+            q_end_f = block_m_end_f
+
+        # ========================================================
+        # KV sub-block 循环: 加载 k/v tile, 遍历 GQA heads
+        # 复用 _bwd_dkdv_qblock_range 处理 partial + full Q-block 切片
+        # ========================================================
+        for kv_sub in range(NUM_KV_SUB_BLOCKS):
+            start_n = start_n_full + kv_sub * BLOCK_N
+            offs_n = start_n + tl.arange(0, BLOCK_N)
+            n_mask = offs_n < KV_LEN
+
+            k = tl.load(
+                K_ptr + offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk,
+                mask=n_mask[:, None] & (offs_k[None, :] < QK_HEAD_DIM),
+                other=0.0,
+            )
+            v = tl.load(
+                V_ptr + offs_n[:, None] * stride_vn + offs_v[None, :] * stride_vk,
+                mask=n_mask[:, None] & (offs_v[None, :] < V_HEAD_DIM),
+                other=0.0,
+            )
+
+            for off_g in range(0, GQA_SHARED_HEADS):
+                off_hq = (off_hkv * GQA_SHARED_HEADS + off_g).to(tl.int64)
+
+                Q_h = Q + off_z * stride_qz + off_hq * stride_qh
+                DO_h = DO + off_z * stride_doz + off_hq * stride_doh
+                LSE_h = LSE + off_z * stride_lse_z + off_hq * stride_lse_h
+                DELTA_h = DELTA + off_z * stride_delta_z + off_hq * stride_delta_h
+
+                # ---- partial Q-blocks 切片 ----
+                _bwd_dkdv_qblock_range(
+                    Q_h, DO_h, DK_OUT_ptr, DELTA_h, LSE_h, DV_OUT_ptr,
+                    DENSE_MASK, stride_mask_m, stride_mask_n,
+                    PARTIAL_MASK_PACKED, stride_partial_p, stride_partial_m, stride_partial_n,
+                    PARTIAL_BLOCK_TABLE, stride_partial_table_m, stride_partial_table_n,
+                    k, v, Q_LEN, KV_LEN,
+                    off_z, off_hq, off_hkv, offs_n, offs_k, offs_v,
+                    q_indices, q_start_p, q_end_p,
+                    kv_sparse_idx, kv_sub,
+                    stride_qm, stride_qk, stride_dom, stride_dok,
+                    stride_dvn, stride_dvk, stride_dkn, stride_dkk,
+                    MATMUL_PRECISION,
+                    SM_SCALE=SM_SCALE,
+                    SPARSE_Q_BLOCK_SIZE=SPARSE_Q_BLOCK_SIZE,
+                    SPARSE_KV_BLOCK_SIZE=SPARSE_KV_BLOCK_SIZE,
+                    QK_HEAD_DIM=QK_HEAD_DIM,
+                    V_HEAD_DIM=V_HEAD_DIM,
+                    BLOCK_M=BLOCK_M,
+                    BLOCK_N=BLOCK_N,
+                    IS_FULL_BLOCKS=False,
+                    USE_PACKED_PARTIAL_MASK=USE_PACKED_PARTIAL_MASK,
                 )
-                if is_split == 0:
-                    q_start_f = 0
-                    q_end_f = block_m_end_f
-                else:
-                    q_start_f = sub_id * block_m_end_f // K_split
-                    q_end_f = (sub_id + 1) * block_m_end_f // K_split
 
-            # ========================================================
-            # KV sub-block 循环: 加载 k/v tile, 遍历 GQA heads
-            # 复用 _bwd_dkdv_qblock_range 处理 [q_start, q_end) 切片
-            # ========================================================
-            for kv_sub in range(NUM_KV_SUB_BLOCKS):
-                start_n = start_n_full + kv_sub * BLOCK_N
-                offs_n = start_n + tl.arange(0, BLOCK_N)
-                n_mask = offs_n < KV_LEN
-
-                k = tl.load(
-                    K_ptr + offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk,
-                    mask=n_mask[:, None] & (offs_k[None, :] < QK_HEAD_DIM),
-                    other=0.0,
-                )
-                v = tl.load(
-                    V_ptr + offs_n[:, None] * stride_vn + offs_v[None, :] * stride_vk,
-                    mask=n_mask[:, None] & (offs_v[None, :] < V_HEAD_DIM),
-                    other=0.0,
-                )
-
-                for off_g in range(0, GQA_SHARED_HEADS):
-                    off_hq = (off_hkv * GQA_SHARED_HEADS + off_g).to(tl.int64)
-
-                    Q_h = Q + off_z * stride_qz + off_hq * stride_qh
-                    DO_h = DO + off_z * stride_doz + off_hq * stride_doh
-                    LSE_h = LSE + off_z * stride_lse_z + off_hq * stride_lse_h
-                    DELTA_h = DELTA + off_z * stride_delta_z + off_hq * stride_delta_h
-
-                    # ---- partial Q-blocks 切片 ----
+                # ---- full Q-blocks 切片 ----
+                if HAS_FULL_BLOCKS:
                     _bwd_dkdv_qblock_range(
                         Q_h, DO_h, DK_OUT_ptr, DELTA_h, LSE_h, DV_OUT_ptr,
                         DENSE_MASK, stride_mask_m, stride_mask_n,
@@ -1161,7 +1816,7 @@ def flex_attention_backward_dkdv_kernel_tasklist(
                         PARTIAL_BLOCK_TABLE, stride_partial_table_m, stride_partial_table_n,
                         k, v, Q_LEN, KV_LEN,
                         off_z, off_hq, off_hkv, offs_n, offs_k, offs_v,
-                        q_indices, q_start_p, q_end_p,
+                        q_indices_f, q_start_f, q_end_f,
                         kv_sparse_idx, kv_sub,
                         stride_qm, stride_qk, stride_dom, stride_dok,
                         stride_dvn, stride_dvk, stride_dkn, stride_dkk,
@@ -1173,239 +1828,9 @@ def flex_attention_backward_dkdv_kernel_tasklist(
                         V_HEAD_DIM=V_HEAD_DIM,
                         BLOCK_M=BLOCK_M,
                         BLOCK_N=BLOCK_N,
-                        IS_FULL_BLOCKS=False,
+                        IS_FULL_BLOCKS=True,
                         USE_PACKED_PARTIAL_MASK=USE_PACKED_PARTIAL_MASK,
                     )
-
-                    # ---- full Q-blocks 切片 ----
-                    if HAS_FULL_BLOCKS:
-                        _bwd_dkdv_qblock_range(
-                            Q_h, DO_h, DK_OUT_ptr, DELTA_h, LSE_h, DV_OUT_ptr,
-                            DENSE_MASK, stride_mask_m, stride_mask_n,
-                            PARTIAL_MASK_PACKED, stride_partial_p, stride_partial_m, stride_partial_n,
-                            PARTIAL_BLOCK_TABLE, stride_partial_table_m, stride_partial_table_n,
-                            k, v, Q_LEN, KV_LEN,
-                            off_z, off_hq, off_hkv, offs_n, offs_k, offs_v,
-                            q_indices_f, q_start_f, q_end_f,
-                            kv_sparse_idx, kv_sub,
-                            stride_qm, stride_qk, stride_dom, stride_dok,
-                            stride_dvn, stride_dvk, stride_dkn, stride_dkk,
-                            MATMUL_PRECISION,
-                            SM_SCALE=SM_SCALE,
-                            SPARSE_Q_BLOCK_SIZE=SPARSE_Q_BLOCK_SIZE,
-                            SPARSE_KV_BLOCK_SIZE=SPARSE_KV_BLOCK_SIZE,
-                            QK_HEAD_DIM=QK_HEAD_DIM,
-                            V_HEAD_DIM=V_HEAD_DIM,
-                            BLOCK_M=BLOCK_M,
-                            BLOCK_N=BLOCK_N,
-                            IS_FULL_BLOCKS=True,
-                            USE_PACKED_PARTIAL_MASK=USE_PACKED_PARTIAL_MASK,
-                        )
-
-
-# ===========================================================================
-# Reduce kernel (tasklist 版): 对 split base task 求和合并 partial 梯度
-#
-# 改造要点 (vs 原 reduce_dkdv_kernel):
-#   1. 移除 SPLIT_START 线性假设, 改用显式 SPLIT_BASES 列表
-#   2. 每个 program 处理一个 (split_base, n_tile) 二维切片
-#   3. 沿 sub_id 维累加 K 份 partial, 写入 DK/DV 原地址
-#
-# Grid: (num_split_base * num_n_tiles_per_kv,)
-#   - num_split_base = len(split_bases)
-#   - num_n_tiles_per_kv = SPARSE_KV_BLOCK_SIZE // BLOCK_N (autotune)
-#
-# 写入语义: tl.store 覆盖写 DK/DV。被 split 的 kv_block 仅由 split 路径写 partial,
-#           direct 路径不写这些 kv_block (host 侧保证互斥), 故覆盖安全。
-# ===========================================================================
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_N": 32}),
-        triton.Config({"BLOCK_N": 64}),
-        triton.Config({"BLOCK_N": 128}),
-    ],
-    key=["SPARSE_KV_BLOCK_SIZE"],
-    restore_value=["DK", "DV"],
-)
-@triton.jit(
-    do_not_specialize=[
-        "NUM_SPLIT_BASE", "KV_LEN",
-        "stride_dkp_k", "stride_dvp_k",
-        "stride_dkz", "stride_dkh",
-        "stride_dvz", "stride_dvh",
-    ]
-)
-def reduce_dkdv_kernel_tasklist(
-    DK, DV,                                  # 输出: 原梯度地址 (direct 已写入, reduce 累加 split 部分)
-    DK_PARTIAL, DV_PARTIAL,                  # 输入: split 路径的 partial buffer
-    SPLIT_BASES,                             # [num_split_base, 3]: (hkv, kv_block, K)
-    stride_dkp_k, stride_dvp_k,              # partial 第 0 维 (sub_id) stride
-    stride_dkz, stride_dkh, stride_dkn, stride_dkk,
-    stride_dvz, stride_dvh, stride_dvn, stride_dvk,
-    NUM_SPLIT_BASE,
-    KV_LEN,
-    KV_HEAD,                                 # = Hkv (Z=1)
-    SPARSE_KV_BLOCK_SIZE: tl.constexpr,
-    QK_HEAD_DIM: tl.constexpr,
-    V_HEAD_DIM: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-):
-    pid = tl.program_id(0).to(tl.int32)
-
-    # ================================================================
-    # 任务分解: pid -> (split_base_id, n_tile_in_kv)
-    # ================================================================
-    num_n_tiles_per_kv: tl.constexpr = SPARSE_KV_BLOCK_SIZE // BLOCK_N
-    split_base_id = pid // num_n_tiles_per_kv
-    n_tile_in_kv  = pid %  num_n_tiles_per_kv
-
-    # ---- 从 SPLIT_BASES 读取当前 split base task 信息 ----
-    off_hkv  = tl.load(SPLIT_BASES + split_base_id * 3 + 0).to(tl.int64)
-    kv_block = tl.load(SPLIT_BASES + split_base_id * 3 + 1)
-    K_split  = tl.load(SPLIT_BASES + split_base_id * 3 + 2)
-
-    off_z = tl.zeros_like(off_hkv)                              # Z=1
-
-    # ---- 定位 N 轴切片 (kv_block 内的 n_tile) ----
-    start_n = kv_block * SPARSE_KV_BLOCK_SIZE + n_tile_in_kv * BLOCK_N
-    offs_n = start_n + tl.arange(0, BLOCK_N)
-    n_mask = offs_n < KV_LEN
-
-    offs_k = tl.arange(0, QK_HEAD_DIM)
-    offs_v = tl.arange(0, V_HEAD_DIM)
-
-    dk_offset = off_z * stride_dkz + off_hkv * stride_dkh
-    dv_offset = off_z * stride_dvz + off_hkv * stride_dvh
-
-    # ================================================================
-    # 累加 K 份 partial: DK = sum_{s=0}^{K-1} DK_PARTIAL[s, hkv, kv_block, ...]
-    # 固定迭代顺序 s=0,1,...,K-1, 保证累加顺序确定
-    # ================================================================
-    dk_sum = tl.zeros([BLOCK_N, QK_HEAD_DIM], dtype=tl.float32)
-    for s in range(K_split):
-        dk_sum += tl.load(
-            DK_PARTIAL + s * stride_dkp_k + dk_offset
-            + offs_n[:, None] * stride_dkn + offs_k[None, :] * stride_dkk,
-            mask=n_mask[:, None] & (offs_k[None, :] < QK_HEAD_DIM),
-            other=0.0,
-        )
-    tl.store(
-        DK + dk_offset
-        + offs_n[:, None] * stride_dkn + offs_k[None, :] * stride_dkk,
-        dk_sum,
-        mask=n_mask[:, None] & (offs_k[None, :] < QK_HEAD_DIM),
-    )
-
-    # ---- DV 累加 ----
-    dv_sum = tl.zeros([BLOCK_N, V_HEAD_DIM], dtype=tl.float32)
-    for s in range(K_split):
-        dv_sum += tl.load(
-            DV_PARTIAL + s * stride_dvp_k + dv_offset
-            + offs_n[:, None] * stride_dvn + offs_v[None, :] * stride_dvk,
-            mask=n_mask[:, None] & (offs_v[None, :] < V_HEAD_DIM),
-            other=0.0,
-        )
-    tl.store(
-        DV + dv_offset
-        + offs_n[:, None] * stride_dvn + offs_v[None, :] * stride_dvk,
-        dv_sum,
-        mask=n_mask[:, None] & (offs_v[None, :] < V_HEAD_DIM),
-    )
-
-
-# ===========================================================================
-# Legacy Reduce kernel (仅被 legacy qsplit 分支使用, 保留供回退)
-# 仅对 split KV block 求和 — DK = sum(DK_PARTIAL[0..K-1])
-# Direct KV block 已在 qsplit kernel 中直接写入 DK/DV。
-#
-# 固定迭代顺序 s=0,1,...,K-1，保证结果确定。
-# AutoTune 选择最优 BLOCK_N，grid 数 = num_split_base × (SPARSE_KV_BLOCK_SIZE // BLOCK_N)，
-# 由 grid lambda 根据 autotuned BLOCK_N 动态计算，使总 tile 数自动适配硬件核数。
-# ===========================================================================
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_N": 32}),
-        triton.Config({"BLOCK_N": 64}),
-        triton.Config({"BLOCK_N": 128}),
-    ],
-    key=["K", "SPARSE_KV_BLOCK_SIZE"],
-    restore_value=["DK", "DV"],
-)
-@triton.jit(
-    do_not_specialize=[
-        "NUM_SPLIT_BASE", "KV_LEN", "SPLIT_START",
-        "NUM_KV_BLOCKS",
-        "stride_dkp_k", "stride_dvp_k",
-        "stride_dkz", "stride_dkh",
-        "stride_dvz", "stride_dvh",
-    ]
-)
-def reduce_dkdv_kernel(
-    DK, DV,
-    DK_PARTIAL, DV_PARTIAL,
-    stride_dkp_k, stride_dvp_k,
-    stride_dkz, stride_dkh, stride_dkn, stride_dkk,
-    stride_dvz, stride_dvh, stride_dvn, stride_dvk,
-    NUM_SPLIT_BASE, KV_LEN, SPLIT_START, NUM_KV_BLOCKS,
-    KV_HEAD,
-    K: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    SPARSE_KV_BLOCK_SIZE: tl.constexpr,
-    QK_HEAD_DIM: tl.constexpr,
-    V_HEAD_DIM: tl.constexpr,
-):
-    pid = tl.program_id(0).to(tl.int32)
-
-    # 每个 program 处理一个 N-tile; NUM_N_TILES_PER_KV 由 constexpr 推导
-    num_n_tiles_per_kv = SPARSE_KV_BLOCK_SIZE // BLOCK_N
-    split_base_id = pid // num_n_tiles_per_kv
-    n_tile_in_kv = pid % num_n_tiles_per_kv
-
-    base_task = SPLIT_START + split_base_id
-    kv_block = base_task % NUM_KV_BLOCKS
-    zhkv = base_task // NUM_KV_BLOCKS
-    off_z = (zhkv // KV_HEAD).to(tl.int64)
-    off_hkv = (zhkv % KV_HEAD).to(tl.int64)
-
-    start_n = kv_block * SPARSE_KV_BLOCK_SIZE + n_tile_in_kv * BLOCK_N
-    offs_n = start_n + tl.arange(0, BLOCK_N)
-    n_mask = offs_n < KV_LEN
-
-    offs_k = tl.arange(0, QK_HEAD_DIM)
-    offs_v = tl.arange(0, V_HEAD_DIM)
-
-    dk_offset = off_z * stride_dkz + off_hkv * stride_dkh
-    dv_offset = off_z * stride_dvz + off_hkv * stride_dvh
-
-    # Sum K partials for DK (fixed order -> deterministic)
-    dk_sum = tl.zeros([BLOCK_N, QK_HEAD_DIM], dtype=tl.float32)
-    for s in range(K):
-        dk_sum += tl.load(
-            DK_PARTIAL + s * stride_dkp_k + dk_offset
-            + offs_n[:, None] * stride_dkn + offs_k[None, :] * stride_dkk,
-            mask=n_mask[:, None] & (offs_k[None, :] < QK_HEAD_DIM),
-            other=0.0,
-        )
-    tl.store(
-        DK + dk_offset + offs_n[:, None] * stride_dkn + offs_k[None, :] * stride_dkk,
-        dk_sum,
-        mask=n_mask[:, None] & (offs_k[None, :] < QK_HEAD_DIM),
-    )
-
-    # Sum K partials for DV
-    dv_sum = tl.zeros([BLOCK_N, V_HEAD_DIM], dtype=tl.float32)
-    for s in range(K):
-        dv_sum += tl.load(
-            DV_PARTIAL + s * stride_dvp_k + dv_offset
-            + offs_n[:, None] * stride_dvn + offs_v[None, :] * stride_dvk,
-            mask=n_mask[:, None] & (offs_v[None, :] < V_HEAD_DIM),
-            other=0.0,
-        )
-    tl.store(
-        DV + dv_offset + offs_n[:, None] * stride_dvn + offs_v[None, :] * stride_dvk,
-        dv_sum,
-        mask=n_mask[:, None] & (offs_v[None, :] < V_HEAD_DIM),
-    )
 
 
 def _prepare_block_mask_attrs(block_mask, q, num_q_blocks, sparse_q_block_size, sparse_kv_block_size):
@@ -1491,6 +1916,16 @@ def flex_attention_fwd_impl(
     block_mask,
     sm_scale: Optional[float] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """FlexAttention 前向传播的 host 侧编排入口。
+
+    Args:
+        q / k / v: 注意力输入张量。
+        block_mask: 稀疏注意力掩码 (BlockMask)。
+        sm_scale: softmax 缩放因子; None 时自动取 1/sqrt(D)。
+
+    Returns:
+        (output, lse): 注意力输出及 logsumexp。
+    """
     Z, Hq, M, D = q.shape
     _, Hkv, N, Dv = k.shape
 
@@ -1500,10 +1935,10 @@ def flex_attention_fwd_impl(
 
     BLOCK_M = TILE_BLOCK_SIZE
     BLOCK_N = TILE_BLOCK_SIZE
-    SPARSE_Q_BLOCK_SIZE = BLOCK_M
-    SPARSE_KV_BLOCK_SIZE = BLOCK_N
+    SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE = _get_mask_block_sizes(block_mask)
 
     num_q_blocks = (M + SPARSE_Q_BLOCK_SIZE - 1) // SPARSE_Q_BLOCK_SIZE
+    num_kv_blocks = triton.cdiv(N, SPARSE_KV_BLOCK_SIZE)
 
     output = torch.empty_like(q)
     lse = torch.empty((Z, Hq, M), dtype=torch.float32, device=q.device)
@@ -1514,12 +1949,22 @@ def flex_attention_fwd_impl(
 
     bm = _prepare_block_mask_attrs(block_mask, q, num_q_blocks, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE)
 
+    # 构建统一负载均衡计划 (Q 侧 + DKDV 侧, 带缓存复用)
+    # forward 预构建 DKDV 计划, backward 直接复用, 避免重复装箱
+    build_dkdv = q.requires_grad or k.requires_grad or v.requires_grad
+    load_balance_plan = _get_or_build_load_balance_plan(
+        block_mask, bm, Z, Hq, Hkv, num_q_blocks, num_kv_blocks,
+        SPARSE_Q_BLOCK_SIZE // BLOCK_M, 1,
+        q.device, build_dkdv,
+    )
+
     num_tasks = num_q_blocks * Z * Hq
     grid, num_tasks = _persistent_launch_config(num_tasks)
 
     flex_attention_kernel[grid](
         q, k, v,
         bm["kv_num_blks"], bm["kv_idx"], bm["full_kv_num_blks"], bm["full_kv_idx"],
+        load_balance_plan.q_task_ids,
         bm["dense_mask"], bm["dense_mask"].stride(2), bm["dense_mask"].stride(3),
         bm["packed_partial_mask"], bm["partial_mask_offsets"],
         bm["packed_partial_mask"].stride(0), bm["packed_partial_mask"].stride(1), bm["packed_partial_mask"].stride(2),
@@ -1546,6 +1991,7 @@ def flex_attention_fwd_impl(
         GQA_SHARED_HEADS=GQA_SHARED_HEADS,
         HAS_FULL_BLOCKS=True,
         USE_PACKED_PARTIAL_MASK=bm["use_packed_partial_mask"],
+        USE_Q_TASK_LIST=load_balance_plan.use_q_task_list,
         limit_auto_multi_buffer_buffer="no-limit",
         hfusion_enable_multiple_consumer_fusion=True,
         intra_cache_num=3,
@@ -1559,248 +2005,384 @@ def flex_attention_fwd_impl(
 
 
 # ============================================================================
-# Host 侧负载均衡: 任务列表构建 (Step 1)
+# Host 侧负载均衡: DKDV 任务列表构建 (direct-only, heavy-light 装箱)
 #
 # 输入: 每个 kv_sparse_idx 的有效 Q-block 数 (partial + full 等权)
-# 输出: work_items / task_offsets / split_bases / max_sub
+# 输出: work_items [num_work, 2] / task_offsets [num_core+1]
 #
-# 算法 (两阶段, 统一装箱):
-#   阶段 A: 枚举所有 base task (hkv, kv_block)
-#           - w <= target: 作为 direct work-item (整块, K=1)
-#           - w >  target: 拆成 K=ceil(w/target) 个 split work-item (各 1/K 重量)
-#   阶段 B: 所有 work-item 降序 first-fit 装入 num_core 个 bin
-#           - 每 bin = 1 meta-task, 重量 ≈ target
-#           - 同一 bin 可混合 direct/split (处理不同 kv_block, 无写冲突)
-#
-# 互斥保证: 一个 kv_block 要么整体 direct (w<=target), 要么整体 split (w>target),
-#           两者不混存, 故 split 的 kv_block 的 DK/DV 地址仅由 reduce 写入, 覆盖安全。
-# ============================================================================
-# 装箱策略: hkv 分块连续装箱 (唯一策略)
-#
-# 每个 core 连续处理完一个 hkv 的所有 work-item 再切下一个 hkv,
-# 缓存命中最高 (同 hkv 内 K/V 驻留 cache)。组内按重量降序,
-# 每个 work-item 放入当前最轻的 bin, 保证负载均衡。
+# 算法 (两阶段):
+#   阶段 A: 构建模板 — 枚举 hkv=0 的所有 kv_block, weight > 0 的作为 direct item
+#           (重量仅依赖 kv_block, 与 hkv 无关, 按 hkv 复制模板)
+#   阶段 B: heavy-light 分解 — 重 item round-robin 预分配, 轻 item fill-ratio heap
+#           - hkv 外层循环保证 L2 cache 友好
+#           - 所有 work-item 直接 atomic_add 写 DK/DV, 无 split/reduce
 # ============================================================================
 
-def _first_fit_into_bins(ordered_items, num_core, target, TOL):
-    """通用 first-fit 装箱: 按 ordered_items 顺序依次放入第一个容得下的 bin。
+@dataclass
+class _DkdvTemplate:
+    """DKDV 装箱模板 (hkv=0 的任务列表, 按 hkv 复制)。
 
-    装不下时放入当前最轻的 bin (保证 bin 数 = num_core, 不溢出)。
-    不同策略只需改变 ordered_items 的顺序即可复用本函数。
+    重量仅依赖 kv_block, 与 hkv 无关, 因此只需构建一次模板再复制。
+
+    Attributes:
+        items: 模板 item 列表, 每个元素为 2 元组:
+            (kv_block, weight)
+            - kv_block: KV block 索引。
+            - weight: 该 item 的权重 (有效 Q-block 数)。
     """
-    bins = [[] for _ in range(num_core)]
-    bin_w = [0.0] * num_core
-    for wi in ordered_items:
-        w = wi[5]
-        placed = False
-        for b in range(num_core):
-            if bin_w[b] + w <= target * TOL:
-                bins[b].append(wi)
-                bin_w[b] += w
-                placed = True
-                break
-        if not placed:
-            lightest = bin_w.index(min(bin_w))
-            bins[lightest].append(wi)
-            bin_w[lightest] += w
-    return bins
+    items: list
+
+    @property
+    def num_items(self) -> int:
+        """模板 item 总数。"""
+        return len(self.items)
 
 
-def _bin_pack_hkv_continuous(work_items_list, num_core, target, TOL):
-    """hkv 分块连续装箱。
+def _build_dkdv_template(
+    w_sparse_list: list,
+    num_kv_blocks: int,
+    sparse_kv_multiple: int,
+    target: float,
+) -> "_DkdvTemplate":
+    """构建 hkv=0 的 DKDV 装箱模板。
 
-    每个 core 连续处理完一个 hkv 的所有 work-item 再切下一个 hkv,
-    缓存命中最高 (同 hkv 内 K/V 驻留 cache)。组内按重量降序,
-    每个 work-item 放入当前最轻的 bin, 保证负载均衡。
+    遍历所有 kv_block, 将 weight > 0 的块作为 direct item 加入模板。
+    拆分策略已移除: 所有 item 均为 direct (整块处理), 由装箱算法的
+    heavy-light 分解 + fill-ratio heap 实现跨核均衡, 无需 split + reduce。
 
     Args:
-        work_items_list: [(hkv, kv_block, sub_id, K, is_split, w), ...]
-        num_core: bin 数 (= 核数)
-        target: 单核目标重量
-        TOL: 装箱容忍 (bin_w + wi <= target*TOL)
+        w_sparse_list: 每个 sparse kv block 的有效 Q-block 数。
+        num_kv_blocks: KV block 总数。
+        sparse_kv_multiple: kv_block → sparse_idx 的换算因子。
+        target: 单核目标重量 (保留参数, 供未来扩展使用)。
 
     Returns:
-        bins: List[List[work_item]], 每个 core 的串行执行序列
+        _DkdvTemplate 封装的模板数据, items 为 (kv_block, weight) 2 元组列表。
     """
-    bins = [[] for _ in range(num_core)]
-    bin_w = [0.0] * num_core
-
-    # 按 hkv 分组, 组内按重量降序
-    groups = {}
-    for wi in work_items_list:
-        groups.setdefault(wi[0], []).append(wi)
-
-    for hkv in sorted(groups.keys()):
-        group = sorted(groups[hkv], key=lambda t: t[5], reverse=True)
-        # 组内: 每个 work-item 放入当前最轻的 bin, 让同 hkv 任务尽量集中
-        for wi in group:
-            w = wi[5]
-            lightest = bin_w.index(min(bin_w))
-            bins[lightest].append(wi)
-            bin_w[lightest] += w
-    return bins
-
-
-def _build_task_list(
-    w_sparse: torch.Tensor,   # [num_kv_sparse], 每个 kv_sparse_idx 的有效 Q-block 数
-    Hkv: int,
-    num_kv_blocks: int,
-    sparse_kv_multiple: int,  # kv_block -> kv_sparse_idx 的换算因子
-    target: float,            # 单核目标重量
-    num_core: int,            # 核数
-    device,
-):
-    """构建 task list (merge + split 统一装箱)。
-
-    装箱策略固定为 hkv 分块连续装箱 (_bin_pack_hkv_continuous)。
-
-    Returns:
-        work_items_t:   [num_work, 5] int32, (hkv, kv_block, sub_id, K, is_split)
-        task_offsets_t: [num_meta+1] int32, CSR 偏移
-        split_bases_t:  [num_split_base, 3] int32, (hkv, kv_block, K)
-        max_sub:        int, partial buffer 第 0 维大小
-    """
-    # ================================================================
-    # 阶段 A: 生成所有 work-item
-    #
-    # 性能优化要点:
-    #   1. 原实现在 Hkv * num_kv_blocks 内层循环中逐次调用
-    #      w_sparse[...].item(), 每次触发一次 NPU->CPU 同步 (约 11 us/次),
-    #      是该函数 >95% 耗时的根源。改为一次性 .tolist() 将整张小张量
-    #      同步到 Python 列表, 把 Hkv*num_kv_blocks 次同步降为 1 次。
-    #
-    #   2. 每个 kv_block 的重量 w 仅依赖 kv_block // sparse_kv_multiple,
-    #      与 hkv 完全无关。先构建 hkv=0 的模板 (template), 再按 hkv
-    #      批量复制, 避免在 Hkv 重循环中重复执行分支判断与 ceil 除法。
-    #      复制后 work_items_list / split_bases_list 的元素顺序与原实现
-    #      严格一致 (hkv 外层升序, kv_block 内层升序)。
-    # ================================================================
-    w_sparse_list = w_sparse.tolist()
-    target_int = int(target)
-
-    # 预计算每个 kv_block 的重量 (与 hkv 无关, 只算一次)
-    w_per_kv_block = [
-        w_sparse_list[kv_block // sparse_kv_multiple]
-        for kv_block in range(num_kv_blocks)
-    ]
-
-    # 构建 hkv=0 的模板: (kv_block, sub_id, K, is_split, w)
-    template_items = []
-    template_split_bases = []
-    max_sub = 1
+    items = []
 
     for kv_block in range(num_kv_blocks):
-        w = w_per_kv_block[kv_block]
+        w = w_sparse_list[kv_block // sparse_kv_multiple]
         if w == 0:
             continue
-        if w <= target:
-            # direct: 整块, K=1
-            template_items.append((kv_block, 0, 1, 0, float(w)))
+        items.append((kv_block, float(w)))
+
+    return _DkdvTemplate(items=items)
+
+
+def _make_empty_dkdv_tensors(
+    device, num_core: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """构建空的 DKDV 调度张量 (用于无任务场景)。
+
+    Args:
+        device: 张量分配设备。
+        num_core: 核数, 用于 task_offsets 长度。
+
+    Returns:
+        (work_items, task_offsets)。
+    """
+    return (
+        torch.empty((0, _WORK_ITEM_COLUMNS), dtype=torch.int32, device=device),
+        torch.zeros((num_core + 1,), dtype=torch.int32, device=device),
+    )
+
+
+@dataclass(frozen=True)
+class _DkdvPackingPlan:
+    """DKDV 装箱计划 (heavy-light 分解结果)。
+
+    将模板 item 按重量分为重 item 和轻 item 两组, 分别采用不同装箱策略:
+    - 重 item: round-robin 预分配到空核, 避免堆叠到半满核。
+    - 轻 item: 容量感知 fill-ratio heap 装箱, 重核少收、轻核多收。
+
+    Attributes:
+        heavy_order: 重 item 的模板索引列表 (重量降序)。
+        light_order: 轻 item 的模板索引列表 (重量降序)。
+        target: 单核目标重量 (total_w / num_core), 用于计算 heavy 阈值和 light 容量。
+    """
+
+    heavy_order: list
+    light_order: list
+    target: float
+
+
+def _classify_dkdv_items(
+    template: "_DkdvTemplate",
+    target: float,
+) -> _DkdvPackingPlan:
+    """将模板 item 按重量分为重 item 和轻 item。
+
+    重 item 定义为 weight > target * _DKDV_HEAVY_RATIO_THRESHOLD。这些 item 在
+    min-heap 装箱中容易导致后期堆叠到半满核上, 因此需要预分配。
+
+    Args:
+        template: DKDV 装箱模板, items[tid][1] 为重量。
+        target: 单核目标重量。
+
+    Returns:
+        _DkdvPackingPlan 封装的 heavy/light 分组与 target。
+    """
+    heavy_threshold = target * _DKDV_HEAVY_RATIO_THRESHOLD
+    heavy_order = []
+    light_order = []
+
+    for tid in range(template.num_items):
+        weight = template.items[tid][1]
+        if weight > heavy_threshold:
+            heavy_order.append(tid)
         else:
-            # split: 拆 K 份
-            K = (w + target_int - 1) // target_int   # ceil(w/target)
-            template_split_bases.append((kv_block, K))
-            if K > max_sub:
-                max_sub = K
-            per_sub_w = w / K
-            for sub in range(K):
-                template_items.append((kv_block, sub, K, 1, per_sub_w))
+            light_order.append(tid)
 
-    # 按 hkv 复制模板, 生成完整 work_items_list / split_bases_list
-    work_items_list = []   # [(hkv, kv_block, sub_id, K, is_split, w), ...]
-    split_bases_list = []  # [(hkv, kv_block, K), ...]
-    for hkv in range(Hkv):
-        for kv_block, sub_id, K_val, is_split, w in template_items:
-            work_items_list.append((hkv, kv_block, sub_id, K_val, is_split, w))
-        for kv_block, K_val in template_split_bases:
-            split_bases_list.append((hkv, kv_block, K_val))
+    # 两组均按重量降序, 保证重中重优先、轻中重优先
+    get_weight = template.items.__getitem__
+    heavy_order.sort(key=lambda tid: get_weight(tid)[1], reverse=True)
+    light_order.sort(key=lambda tid: get_weight(tid)[1], reverse=True)
 
-    # ================================================================
-    # 阶段 B: hkv 分块连续装箱, 装入 num_core 个 bin
-    # ================================================================
-    TOL = 1.0   # 装箱容忍: bin_w + wi <= target*TOL
-    bins = _bin_pack_hkv_continuous(work_items_list, num_core, target, TOL)
-
-    # ================================================================
-    # 组装 CSR: work_items_final[j] = (hkv, kv_block, sub_id, K, is_split)
-    #           task_offsets[m] = meta-task m 的 work-item 起始索引
-    # ================================================================
-    work_items_final = []
-    task_offsets = [0]
-    for b in range(num_core):
-        for wi in bins[b]:
-            work_items_final.append((wi[0], wi[1], wi[2], wi[3], wi[4]))
-        task_offsets.append(len(work_items_final))
-
-    # ---- 转 tensor ----
-    if work_items_final:
-        work_items_t = torch.tensor(work_items_final, dtype=torch.int32, device=device)
-    else:
-        work_items_t = torch.zeros((0, 5), dtype=torch.int32, device=device)
-
-    task_offsets_t = torch.tensor(task_offsets, dtype=torch.int32, device=device)
-
-    if split_bases_list:
-        split_bases_t = torch.tensor(split_bases_list, dtype=torch.int32, device=device)
-    else:
-        split_bases_t = torch.zeros((0, 3), dtype=torch.int32, device=device)
-
-    return work_items_t, task_offsets_t, split_bases_t, max_sub
+    return _DkdvPackingPlan(
+        heavy_order=heavy_order,
+        light_order=light_order,
+        target=target,
+    )
 
 
-def _compute_and_cache_task_list(
-    block_mask,
-    w_sparse: torch.Tensor,
+def _build_dkdv_task_schedule(
+    w_sparse,
     Hkv: int,
     num_kv_blocks: int,
     sparse_kv_multiple: int,
     target: float,
     num_core: int,
     device,
-    sparse_kv_block_size: int,
-):
-    """构建 bwd task list 并缓存到 block_mask 上 (延迟缓存)。
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """构建 DKDV task list (direct-only 统一装箱)。
 
-    task list 仅依赖 block_mask 的 q_num_blocks/full_q_num_blocks 以及 Hkv、
-    SPARSE_KV_BLOCK_SIZE, 与具体 q/k/v 数据无关。首次 bwd 调用时计算并缓存,
-    同一 mask 的后续 bwd 调用直接复用, 避免重复装箱。
+    装箱策略固定为 hkv 分块连续装箱。采用模板复制优化: 先构建 hkv=0 的模板
+    (重量仅依赖 kv_block, 与 hkv 无关), 再按 hkv 直接复制模板。
 
-    调用前提: bwd 侧 use_tasklist 判定已保证 sparse_kv_block_size == TILE_BLOCK_SIZE,
-    故本函数无条件缓存。
+    所有 item 均为 direct (整块处理), 由 heavy-light 分解 + fill-ratio heap
+    实现跨核均衡, 无需 split + reduce 两步流程。
 
     Args:
-        block_mask: BlockMask 对象, 计算结果缓存到其 task_list_* 属性上。
-        w_sparse: [num_kv_sparse] 每个 kv_sparse_idx 的有效 Q-block 数。
+        w_sparse: 每个 kv_sparse_idx 的有效 Q-block 数 (partial + full 等权)。
         Hkv: KV head 数。
         num_kv_blocks: KV block 总数。
-        sparse_kv_multiple: kv_block -> kv_sparse_idx 的换算因子。
-        target: 单核目标重量。
-        num_core: 核数。
+        sparse_kv_multiple: kv_block → sparse_kv_idx 的换算因子。
+        target: 单核目标重量 (total_w / num_core)。
+        num_core: 核数 (= bin 数)。
         device: 张量分配设备。
-        sparse_kv_block_size: 当前执行的 SPARSE_KV_BLOCK_SIZE (校验/缓存用)。
 
     Returns:
-        work_items_t:   [num_work, 5] int32, (hkv, kv_block, sub_id, K, is_split)
-        task_offsets_t: [num_meta+1] int32, CSR 偏移
-        split_bases_t:  [num_split_base, 3] int32, (hkv, kv_block, K)
-        max_sub:        int, partial buffer 第 0 维大小
+        (work_items, task_offsets):
+        work_items: [num_work, 2] int32, (hkv, kv_block)。
+        task_offsets: [num_core+1] int32, CSR 偏移。
     """
-    start_time = time.perf_counter()
-    work_items_t, task_offsets_t, split_bases_t, max_sub = _build_task_list(
-        w_sparse.reshape(-1), Hkv, num_kv_blocks, sparse_kv_multiple,
-        target, num_core, device,
+    # Step 1: 构建 hkv=0 模板
+    w_sparse_list = (
+        w_sparse.reshape(-1).tolist()
+        if isinstance(w_sparse, torch.Tensor)
+        else list(w_sparse)
     )
-    end_time = time.perf_counter()
+    template = _build_dkdv_template(w_sparse_list, num_kv_blocks, sparse_kv_multiple, target)
 
-    # 缓存到 block_mask (进入 tasklist 分支时 SPARSE_KV_BLOCK_SIZE == TILE_BLOCK_SIZE 已保证)
-    block_mask.task_list_work_items = work_items_t
-    block_mask.task_list_offsets = task_offsets_t
-    block_mask.task_list_split_bases = split_bases_t
-    block_mask.task_list_max_sub = max_sub
-    block_mask.task_list_sparse_kv_block_size = sparse_kv_block_size
-    block_mask.task_list_num_kv_heads = Hkv
+    if template.num_items == 0:
+        return _make_empty_dkdv_tensors(device, num_core)
 
-    return work_items_t, task_offsets_t, split_bases_t, max_sub
+    # Step 2: heavy-light 分解 + 容量感知装箱
+    # 重 item 预分配到空核, 轻 item 用 fill-ratio heap 按剩余容量比例装箱,
+    # 避免 min-heap 后期将重 item 堆叠到半满核上
+    plan = _classify_dkdv_items(template, target)
+
+    if _HAS_NUMPY:
+        return _pack_dkdv_tasks_numpy(
+            template, plan, Hkv, num_core, device,
+        )
+
+    return _pack_dkdv_tasks_python(
+        template, plan, Hkv, num_core, device,
+    )
+
+
+def _pack_dkdv_tasks_python(
+    template: "_DkdvTemplate",
+    plan: "_DkdvPackingPlan",
+    Hkv: int,
+    num_core: int,
+    device,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """纯 Python 路径的 DKDV 装箱 (fallback, 无 numpy 时使用)。
+
+    采用 heavy-light 分解 + 容量感知 fill-ratio heap 策略:
+    1. 重 item round-robin 预分配到各核, 每核均匀承担重负载。
+    2. 轻 item 用 fill-ratio = light_weight / light_capacity 作为 heap key,
+       重核 (light_capacity 小) 的 fill_ratio 增长快, 自然少收轻 item。
+    3. hkv 外层循环保证每核 item 列表 hkv 有序, 利于 L2 cache 共享。
+
+    Args:
+        template: DKDV 装箱模板。
+        plan: heavy-light 分解的装箱计划。
+        Hkv: KV head 数。
+        num_core: 核数。
+        device: 张量分配设备。
+
+    Returns:
+        (work_items, task_offsets)。
+    """
+    # 解包模板属性到局部变量, 避免热循环中重复属性查找
+    items = template.items
+    heavy_order = plan.heavy_order
+    light_order = plan.light_order
+    target = plan.target
+
+    # Step 1: 重 item round-robin 预分配 — 每个 (hkv, tid) 固定到一个核
+    heavy_assignment = {}
+    core_heavy_weight = [0.0] * num_core
+    heavy_core = 0
+    for tid in heavy_order:
+        weight = items[tid][1]
+        for hkv in range(Hkv):
+            heavy_assignment[(hkv, tid)] = heavy_core
+            core_heavy_weight[heavy_core] += weight
+            heavy_core = (heavy_core + 1) % num_core
+
+    # Step 2: 计算每核轻 item 容量 = target - 重 item 已占重量
+    light_capacity = [max(1.0, target - core_heavy_weight[c]) for c in range(num_core)]
+
+    # Step 3: hkv-major 装箱 — 重 item 按预分配插入, 轻 item 用 fill-ratio heap
+    bins = [[] for _ in range(num_core)]
+    bin_counts = [0] * num_core
+    light_weight = [0.0] * num_core
+    bin_heap = [(0, core_id) for core_id in range(num_core)]
+    heapq.heapify(bin_heap)
+
+    for hkv in range(Hkv):
+        # Step 3a: 插入本轮重 item (保持 hkv 顺序)
+        for tid in heavy_order:
+            core_id = heavy_assignment[(hkv, tid)]
+            kv_block, _weight = items[tid]
+            bins[core_id].append((hkv, kv_block))
+            bin_counts[core_id] += 1
+
+        # Step 3b: 装箱轻 item (fill-ratio heap 选择 fill 比例最低的核)
+        for tid in light_order:
+            _, core_id = heapq.heappop(bin_heap)
+            kv_block, weight = items[tid]
+            bins[core_id].append((hkv, kv_block))
+            bin_counts[core_id] += 1
+            light_weight[core_id] += weight
+            new_key = int(light_weight[core_id] * _FILL_RATIO_SCALE / light_capacity[core_id])
+            heapq.heappush(bin_heap, (new_key, core_id))
+
+    # Step 4: 汇总 work_items 和 task_offsets
+    work_items_final = [item for core_items in bins for item in core_items]
+    task_offsets = [0]
+    for count in bin_counts:
+        task_offsets.append(task_offsets[-1] + count)
+
+    work_items_t = torch.tensor(work_items_final, dtype=torch.int32, device=device)
+    task_offsets_t = torch.tensor(task_offsets, dtype=torch.int32, device=device)
+
+    return work_items_t, task_offsets_t
+
+
+def _pack_dkdv_tasks_numpy(
+    template: "_DkdvTemplate",
+    plan: "_DkdvPackingPlan",
+    Hkv: int,
+    num_core: int,
+    device,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """numpy 加速路径的 DKDV 装箱 (有 numpy 时使用)。
+
+    采用 heavy-light 分解 + 容量感知 fill-ratio heap 策略 (与 python 路径逻辑一致):
+    1. 重 item round-robin 预分配到各核。
+    2. 轻 item 用 fill-ratio heap 按剩余容量比例装箱。
+    用 flat Python lists 替代 list-of-tuples 避免 tuple 创建开销,
+    最终用 np.array + torch.from_numpy 加速 H2D 传输。
+
+    Args:
+        template: DKDV 装箱模板。
+        plan: heavy-light 分解的装箱计划。
+        Hkv: KV head 数。
+        num_core: 核数。
+        device: 张量分配设备。
+
+    Returns:
+        (work_items, task_offsets)。
+    """
+    total_items = Hkv * template.num_items
+
+    # 解包模板属性到局部变量, 避免热循环中重复属性查找
+    items = template.items
+    heavy_order = plan.heavy_order
+    light_order = plan.light_order
+    target = plan.target
+
+    # Step 1: 重 item round-robin 预分配
+    heavy_assignment = {}
+    core_heavy_weight = [0.0] * num_core
+    heavy_core = 0
+    for tid in heavy_order:
+        weight = items[tid][1]
+        for hkv in range(Hkv):
+            heavy_assignment[(hkv, tid)] = heavy_core
+            core_heavy_weight[heavy_core] += weight
+            heavy_core = (heavy_core + 1) % num_core
+
+    # Step 2: 计算每核轻 item 容量
+    light_capacity = [max(1.0, target - core_heavy_weight[c]) for c in range(num_core)]
+
+    # Step 3: flat lists 装箱 — 避免 tuple 创建开销
+    flat_core = [0] * total_items
+    flat_hkv = [0] * total_items
+    flat_kv = [0] * total_items
+
+    light_weight = [0.0] * num_core
+    bin_heap = [(0, core_id) for core_id in range(num_core)]
+    heapq.heapify(bin_heap)
+    idx = 0
+
+    for hkv in range(Hkv):
+        # Step 3a: 插入本轮重 item (保持 hkv 顺序)
+        for tid in heavy_order:
+            core_id = heavy_assignment[(hkv, tid)]
+            kv_block, _weight = items[tid]
+            flat_core[idx] = core_id
+            flat_hkv[idx] = hkv
+            flat_kv[idx] = kv_block
+            idx += 1
+
+        # Step 3b: 装箱轻 item (fill-ratio heap)
+        for tid in light_order:
+            _, core_id = heapq.heappop(bin_heap)
+            kv_block, weight = items[tid]
+            flat_core[idx] = core_id
+            flat_hkv[idx] = hkv
+            flat_kv[idx] = kv_block
+            light_weight[core_id] += weight
+            new_key = int(light_weight[core_id] * _FILL_RATIO_SCALE / light_capacity[core_id])
+            heapq.heappush(bin_heap, (new_key, core_id))
+            idx += 1
+
+    # Step 4: 按 core 稳定排序得到 CSR 序, 再 column_stack 构建 [N, 2] 数组
+    core_arr = _np.array(flat_core, dtype=_np.int32)
+    sort_idx = _np.argsort(core_arr, kind='stable')
+
+    work_items_np = _np.column_stack([
+        _np.array(flat_hkv, dtype=_np.int32)[sort_idx],
+        _np.array(flat_kv, dtype=_np.int32)[sort_idx],
+    ])
+
+    # Step 5: CSR offsets
+    bin_counts = _np.bincount(core_arr, minlength=num_core)
+    task_offsets_np = _np.zeros(num_core + 1, dtype=_np.int32)
+    _np.cumsum(bin_counts, out=task_offsets_np[1:])
+
+    # Step 6: numpy → torch → device
+    work_items_t = torch.from_numpy(work_items_np).to(device)
+    task_offsets_t = torch.from_numpy(task_offsets_np).to(device)
+
+    return work_items_t, task_offsets_t
 
 
 def flex_attention_bwd_impl(
@@ -1813,6 +2395,29 @@ def flex_attention_bwd_impl(
     block_mask,
     sm_scale: Optional[float] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Flex Attention 反向传播的 host 侧编排入口。
+
+    分两阶段计算梯度:
+      1. DQ kernel   — 以 Q-block 为中心遍历 KV-block, 计算 dq。
+      2. DKDV kernel — 以 KV-block 为中心遍历 Q-block, 计算 dk/dv。
+        根据负载均衡判定, DKDV 选择两条路径之一:
+        - SIMPLE kernel   : 负载均衡时走零开销的 round-robin 调度。
+        - task-list kernel: 负载不均衡时走装箱 (heavy-light 分解 + fill-ratio heap) 调度。
+
+    Args:
+        grad_output: 前向输出的梯度, shape [Z, Hq, M, Dv]。
+        q / k / v:   注意力输入张量。
+        output:      前向注意力输出, 用于计算 delta = sum(output * grad_output)。
+        lse:         前向 logsumexp, shape [Z, Hq, M]。
+        block_mask:  稀疏注意力掩码 (BlockMask)。
+        sm_scale:    softmax 缩放因子; None 时自动取 1/sqrt(D)。
+
+    Returns:
+        (dq, dk, dv): 梯度张量, dtype 与 q / k / v 对齐。
+    """
+    # ========================================================================
+    # Phase 0: 预处理 — 形状解析、delta 计算、BlockMask 属性提取
+    # ========================================================================
     Z, Hq, M, D = q.shape
     _, Hkv, N, Dv = k.shape
     GQA_SHARED_HEADS = Hq // Hkv if Hq >= Hkv else 1
@@ -1822,9 +2427,9 @@ def flex_attention_bwd_impl(
     grad_output = grad_output.contiguous()
     delta = (output * grad_output).sum(dim=-1).to(torch.float32).contiguous()
 
-    SPARSE_Q_BLOCK_SIZE = TILE_BLOCK_SIZE
-    SPARSE_KV_BLOCK_SIZE = TILE_BLOCK_SIZE
+    SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE = _get_mask_block_sizes(block_mask)
     num_q_blocks = triton.cdiv(M, SPARSE_Q_BLOCK_SIZE)
+    num_kv_blocks = triton.cdiv(N, SPARSE_KV_BLOCK_SIZE)
 
     bm = _prepare_block_mask_attrs(block_mask, q, num_q_blocks, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE)
 
@@ -1832,6 +2437,19 @@ def flex_attention_bwd_impl(
     dk = torch.zeros(k.shape, dtype=torch.float32, device=k.device)
     dv = torch.zeros(v.shape, dtype=torch.float32, device=v.device)
 
+    # ========================================================================
+    # 构建统一负载均衡计划 (Q 侧 + DKDV 侧, 带缓存复用)
+    # forward 已预构建时直接复用, 否则首次构建并缓存
+    # ========================================================================
+    load_balance_plan = _get_or_build_load_balance_plan(
+        block_mask, bm, Z, Hq, Hkv, num_q_blocks, num_kv_blocks,
+        SPARSE_Q_BLOCK_SIZE // TILE_BLOCK_SIZE, 1,
+        q.device, True,
+    )
+
+    # ========================================================================
+    # Phase 1: DQ kernel — 以 Q-block 为中心, 直接写入 dq
+    # ========================================================================
     BLOCK_M_DQ = TILE_BLOCK_SIZE
     BLOCK_N_DQ = TILE_BLOCK_SIZE
     NUM_KV_SUB_BLOCKS_VAL = SPARSE_KV_BLOCK_SIZE // BLOCK_N_DQ
@@ -1839,6 +2457,7 @@ def flex_attention_bwd_impl(
     flex_attention_backward_dq_kernel[grid_dq](
         q, k, v, grad_output, lse, delta,
         bm["kv_num_blks"], bm["kv_idx"], bm["full_kv_num_blks"], bm["full_kv_idx"],
+        load_balance_plan.q_task_ids,
         bm["dense_mask"], bm["dense_mask"].stride(2), bm["dense_mask"].stride(3),
         bm["packed_partial_mask"], bm["partial_mask_offsets"], bm["partial_block_table"],
         bm["packed_partial_mask"].stride(0), bm["packed_partial_mask"].stride(1), bm["packed_partial_mask"].stride(2),
@@ -1869,6 +2488,7 @@ def flex_attention_bwd_impl(
         GQA_SHARED_HEADS=GQA_SHARED_HEADS,
         HAS_FULL_BLOCKS=True,
         USE_PACKED_PARTIAL_MASK=bm["use_packed_partial_mask"],
+        USE_Q_TASK_LIST=load_balance_plan.use_q_task_list,
         limit_auto_multi_buffer_buffer="no-limit",
         hfusion_enable_multiple_consumer_fusion=True,
         enable_select_analysis=False,
@@ -1877,68 +2497,20 @@ def flex_attention_bwd_impl(
         inter_cache_num=2,
     )
 
+    # ========================================================================
+    # Phase 2: DKDV kernel — 以 KV-block 为中心, atomic_add 写入 dk/dv
+    #
+    # 负载均衡分支判定已由 _build_dkdv_side_plan 完成 (封装在 load_balance_plan 中):
+    #   - 均衡时走 SIMPLE kernel (零开销 round-robin)
+    #   - 不均衡时走 task-list kernel (heavy-light 装箱, direct-only)
+    # ========================================================================
     BLOCK_M_DKDV = TILE_BLOCK_SIZE
     BLOCK_N_DKDV = TILE_BLOCK_SIZE
     NUM_KV_SUB_BLOCKS_VAL = SPARSE_KV_BLOCK_SIZE // BLOCK_N_DKDV
-    num_kv_blocks = triton.cdiv(N, SPARSE_KV_BLOCK_SIZE)
-
-    # ========================================================================
-    # DKDV 反向: 负载均衡分支判定 (Step 0)
-    #
-    # 重量定义: 每个 kv_sparse_idx 的有效 Q-block 数 (partial + full 等权)
-    #   w_sparse[kv_sparse_idx] = q_num_blks + full_q_num_blks
-    #   base task = (hkv, kv_block), 重量 = w_sparse[kv_block // sparse_kv_multiple]
-    #
-    # 仅在以下两种场景才进入 task-list 路径 (否则走零开销的 SIMPLE kernel):
-    #
-    # 场景一 — 尾块浪费显著 (total_base 不能整除核数):
-    #   满轮数 full_rounds = total_base // num_core <= MAX_FULL_ROUNDS, 且
-    #   尾轮核占比 tail_ratio = (total_base % num_core) / num_core < TAIL_RATIO_THRESHOLD
-    #   (轮数少 + 尾轮空闲核多 → 尾块浪费占总工作比例大, 值得装箱均衡)
-    #
-    # 场景二 — 重量长尾 (total_base 能整除核数, 无尾块问题):
-    #   max_w / mean_w > IMB_THRESHOLD, 各 KV 分块 Q-block 数差异大
-    #   (任务数虽均衡但实际计算量不均衡, 需 split 重任务)
-    # ========================================================================
     total_base = num_kv_blocks * Z * Hkv
     num_core = _get_num_aicore()
-    KV_BLOCK_SIZE_DKDV = BLOCK_N_DKDV * NUM_KV_SUB_BLOCKS_VAL
-    sparse_kv_multiple = SPARSE_KV_BLOCK_SIZE // KV_BLOCK_SIZE_DKDV
 
-    # ---- 重量统计 ----
-    w_sparse = (bm["q_num_blks"] + bm["full_q_num_blks"]).to(torch.int32)
-    total_w = Hkv * w_sparse.sum().item()
-    mean_w = total_w / max(total_base, 1)
-    max_w = w_sparse.max().item()
-    target = total_w / num_core                       # 单核目标重量
-
-    # ---- 分支判定阈值 ----
-    IMB_THRESHOLD = 1.5                               # 重量长尾判定阈值
-    TAIL_RATIO_THRESHOLD = 0.5                        # 尾轮核占比阈值
-    MAX_FULL_ROUNDS = 2                               # 尾块判定的最大满轮数
-
-    full_rounds = total_base // num_core
-    tail_cores = total_base % num_core
-    tail_ratio = tail_cores / num_core
-
-    # 场景一: 尾块浪费显著 (不能整除 + 满轮数少 + 尾轮核占比低)
-    has_significant_tail = (
-        tail_cores > 0
-        and full_rounds <= MAX_FULL_ROUNDS
-        and tail_ratio < TAIL_RATIO_THRESHOLD
-    )
-    # 场景二: 重量长尾 (能整除, 无尾块问题, 但 KV 分块间计算量差异大)
-    has_weight_imbalance = (
-        tail_cores == 0
-        and mean_w > 0
-        and max_w / mean_w > IMB_THRESHOLD
-    )
-    use_tasklist = has_significant_tail or has_weight_imbalance
-    # tasklist 路径的装箱参数仅在 SPARSE_KV_BLOCK_SIZE == TILE_BLOCK_SIZE 时有效,
-    # 不满足时直接走 SIMPLE kernel 分支 (零额外开销)
-    use_tasklist = use_tasklist and (SPARSE_KV_BLOCK_SIZE == TILE_BLOCK_SIZE)
-
-    if not use_tasklist:
+    if not load_balance_plan.use_dkdv_task_list:
         # ================================================================
         # 均衡路径: 原始 SIMPLE kernel (零额外开销, 性能最优)
         # 每个 (z, hkv, kv_block) 一个 task, round-robin 调度
@@ -1980,7 +2552,6 @@ def flex_attention_bwd_impl(
             USE_PACKED_PARTIAL_MASK=bm["use_packed_partial_mask"],
             limit_auto_multi_buffer_buffer="no-limit",
             hfusion_enable_multiple_consumer_fusion=True,
-            #unit_flag=True,
             limit_auto_multi_buffer_of_local_buffer="no-l0c",
             intra_cache_num=2,
             inter_cache_num=1,
@@ -1988,59 +2559,9 @@ def flex_attention_bwd_impl(
 
     else:
         # ================================================================
-        # 不均衡路径: task-list kernel (merge 轻任务 + split 重任务 + reduce)
-        #
-        # Step 1: host 侧构建任务列表 (统一装箱, bin 数 = num_core)
-        # Step 2: launch task-list kernel (CSR 双层循环, 每核 1 meta-task)
-        # Step 3: launch reduce kernel (仅对 split base task 合并 partial)
+        # 不均衡路径: task-list kernel (heavy-light 装箱, direct-only)
         # ================================================================
-
-        # ---- Step 1: 获取任务列表 (延迟缓存: 首次计算并缓存, 后续复用) ----
-        #
-        # task list 仅依赖 block_mask 的 q_num_blocks/full_q_num_blocks 以及 Hkv、
-        # SPARSE_KV_BLOCK_SIZE, 与具体 q/k/v 数据无关。因此首次 bwd 调用时计算,
-        # 缓存到 block_mask 上, 同一 mask 的后续 bwd 调用直接复用, 避免重复装箱。
-        #
-        # 合法性拦截 (全部满足才复用缓存, 否则重新计算并刷新缓存):
-        #   1. block_mask 上存在 task_list 缓存 (首次调用后写入)
-        #   2. 缓存时的 SPARSE_KV_BLOCK_SIZE == 当前执行的 SPARSE_KV_BLOCK_SIZE
-        #   3. 缓存时的 Hkv == 当前 Hkv
-        #   (SPARSE_KV_BLOCK_SIZE == TILE_BLOCK_SIZE 已在 use_tasklist 判定时保证)
-        cached_sparse_kv_bs = getattr(block_mask, "task_list_sparse_kv_block_size", None)
-        cached_hkv = getattr(block_mask, "task_list_num_kv_heads", None)
-        has_valid_cache = (
-            cached_sparse_kv_bs is not None
-            and cached_sparse_kv_bs == SPARSE_KV_BLOCK_SIZE
-            and cached_hkv == Hkv
-        )
-
-        if has_valid_cache:
-            work_items_t = block_mask.task_list_work_items
-            task_offsets_t = block_mask.task_list_offsets
-            split_bases_t = block_mask.task_list_split_bases
-            max_sub = block_mask.task_list_max_sub
-        else:
-            # 首次调用或参数不匹配: 构建任务列表并缓存到 block_mask
-            work_items_t, task_offsets_t, split_bases_t, max_sub = _compute_and_cache_task_list(
-                block_mask, w_sparse, Hkv, num_kv_blocks, sparse_kv_multiple,
-                target, num_core, k.device, SPARSE_KV_BLOCK_SIZE,
-            )
-
-        num_meta = num_core                             # meta-task 数 = 核数
-        num_split_base = split_bases_t.shape[0]
-
-        # ---- 分配 partial buffer (仅 split 路径需要) ----
-        # partial: [max_sub, Z, Hkv, N, D], 各 sub_id 写入互不重叠
-        # Z=1 (用户确认), 但保留 Z 维以兼容 dk/dv 的 stride
-        dk_partial = torch.zeros(
-            (max_sub, Z, Hkv, N, D), dtype=torch.float32, device=k.device,
-        )
-        dv_partial = torch.zeros(
-            (max_sub, Z, Hkv, N, Dv), dtype=torch.float32, device=v.device,
-        )
-
-        # ---- Step 2: launch task-list kernel ----
-        grid_tasklist, _ = _persistent_launch_config(num_meta)
+        grid_tasklist = (num_core,)
         flex_attention_backward_dkdv_kernel_tasklist[grid_tasklist](
             q, k, v, grad_output, lse, delta,
             bm["q_num_blks"], bm["q_idx"], bm["full_q_num_blks"], bm["full_q_idx"],
@@ -2049,9 +2570,7 @@ def flex_attention_bwd_impl(
             bm["packed_partial_mask"].stride(0), bm["packed_partial_mask"].stride(1), bm["packed_partial_mask"].stride(2),
             bm["partial_mask_offsets"].stride(2),
             bm["partial_block_table"].stride(0), bm["partial_block_table"].stride(1),
-            dk, dv,                                      # direct 路径写入目标
-            dk_partial, dv_partial,                      # split 路径写入目标
-            dk_partial.stride(0), dv_partial.stride(0),  # partial sub_id 维 stride
+            dk, dv,
             dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
             dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),
@@ -2061,14 +2580,14 @@ def flex_attention_bwd_impl(
             lse.stride(0), lse.stride(1), lse.stride(2),
             delta.stride(0), delta.stride(1), delta.stride(2),
             bm["q_idx"].stride(2),
-            work_items_t, task_offsets_t,                # 任务列表
+            load_balance_plan.dkdv_work_items,
+            load_balance_plan.dkdv_task_offsets,
             SM_SCALE=sm_scale,
             QK_HEAD_DIM=D,
             V_HEAD_DIM=Dv,
             BLOCK_M=BLOCK_M_DKDV,
             BLOCK_N=BLOCK_N_DKDV,
             NUM_KV_SUB_BLOCKS=NUM_KV_SUB_BLOCKS_VAL,
-            NUM_META=num_meta,
             KV_HEAD=Hkv,
             SPARSE_Q_BLOCK_SIZE=SPARSE_Q_BLOCK_SIZE,
             SPARSE_KV_BLOCK_SIZE=SPARSE_KV_BLOCK_SIZE,
@@ -2083,25 +2602,6 @@ def flex_attention_bwd_impl(
             intra_cache_num=2,
             inter_cache_num=1,
         )
-
-        # ---- Step 3: launch reduce kernel (仅当存在 split base) ----
-        if num_split_base > 0:
-            grid_reduce = lambda meta: (
-                num_split_base * (SPARSE_KV_BLOCK_SIZE // meta["BLOCK_N"]),
-            )
-            reduce_dkdv_kernel_tasklist[grid_reduce](
-                dk, dv,
-                dk_partial, dv_partial,
-                split_bases_t,
-                dk_partial.stride(0), dv_partial.stride(0),
-                dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
-                dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
-                num_split_base, N,
-                KV_HEAD=Hkv,
-                SPARSE_KV_BLOCK_SIZE=SPARSE_KV_BLOCK_SIZE,
-                QK_HEAD_DIM=D,
-                V_HEAD_DIM=Dv,
-            )
 
     return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype)
 
