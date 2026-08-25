@@ -1997,6 +1997,9 @@ def _swa_bwd_dkdv_kernel(
                         lw_kv_chunks
                     )
                     lw_kv_chunks_only = (lw_kv_chunks - lw_kv_chunks_with_gw) * balance_ratio_
+                    # 限制尾块数量不超过实际 KV 块数，防止 kv_block_id 越界导致
+                    max_lw_only = num_kv_chunks - gw_kv_chunks - lw_kv_chunks_with_gw * balance_ratio_
+                    lw_kv_chunks_only = max(min(lw_kv_chunks_only, max_lw_only), 0)
                     num_kv_chunks = gw_kv_chunks + lw_kv_chunks_with_gw + lw_kv_chunks_only
                     tail_kv_chunk_begin = gw_kv_chunks + lw_kv_chunks_with_gw
                 else:
