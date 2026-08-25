@@ -182,8 +182,10 @@ def _chunked_swa_torch_backward(
         else:
             v_i_expanded = v_i_perm
 
-        dk_i = torch.zeros((kv_seq_len, n_kv_heads, head_dim), dtype=k.dtype, device=k.device)
-        dv_i = torch.zeros((kv_seq_len, n_kv_heads, head_dim), dtype=v.dtype, device=v.device)
+        # 使用 fp32 累加 dk/dv，避免长序列下 bf16 累加的舍入误差累积
+        # （全局 token 被所有 query 关注，bf16 累加次数过多导致精度损失）
+        dk_i = torch.zeros((kv_seq_len, n_kv_heads, head_dim), dtype=torch.float32, device=k.device)
+        dv_i = torch.zeros((kv_seq_len, n_kv_heads, head_dim), dtype=torch.float32, device=v.device)
 
         for qc_start in range(0, q_seq_len, q_chunk_size):
             qc_end = min(qc_start + q_chunk_size, q_seq_len)
@@ -235,11 +237,12 @@ def _chunked_swa_torch_backward(
                 p_reduced = p_chunk
                 do_reduced = do_chunk
 
-            dk_i += torch.bmm(ds_reduced.mT, q_reduced).permute(1, 0, 2)
-            dv_i += torch.bmm(p_reduced.mT, do_reduced).permute(1, 0, 2)
+            dk_i += torch.bmm(ds_reduced.mT, q_reduced).float().permute(1, 0, 2)
+            dv_i += torch.bmm(p_reduced.mT, do_reduced).float().permute(1, 0, 2)
 
-        dk[kv_batch_start:kv_batch_end] = dk_i
-        dv[kv_batch_start:kv_batch_end] = dv_i
+        dk[kv_batch_start:kv_batch_end] = dk_i.to(k.dtype)
+        dv[kv_batch_start:kv_batch_end] = dv_i.to(v.dtype)
+
 
     return dq, dk, dv
 
