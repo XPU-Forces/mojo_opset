@@ -1,3 +1,4 @@
+import os
 import torch
 from typing import Optional, Tuple
 
@@ -1885,8 +1886,8 @@ def _sdpa_single_block_bwd_dq(
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_M": BM, "BLOCK_N": BN, "multibuffer": MF})
-        for BM in ([128] if not is_910() else [64, 128])
-        for BN in ([128] if not is_910() else [64, 128])
+        for BM in [64, 128]
+        for BN in [64, 128]
         for MF in [False, True]
     ],
     key=["HEAD_DIM"],
@@ -2370,6 +2371,458 @@ def _swa_bwd_dq_kernel(
             tl.store(cur_dq_block_ptr, dq.to(dq_ptr.type.element_ty), boundary_check=(0, 1))
 
 
+@triton.jit
+def _swa_bwd_dkdv_local_kernel(
+    dk_ptr,
+    dv_ptr,
+    do_ptr,
+    delta_ptr,
+    lse_ptr,
+    q_ptr,
+    k_ptr,
+    v_ptr,
+    bsz,
+    cu_q_lens_ptr,
+    cu_total_seq_lens_ptr,
+    scale,
+    stride_dkt,
+    stride_dkh,
+    stride_dkd,
+    stride_dvt,
+    stride_dvh,
+    stride_dvd,
+    stride_dot,
+    stride_doh,
+    stride_dod,
+    stride_delta_h,
+    stride_delta_t,
+    stride_lse_h,
+    stride_lse_t,
+    stride_qt,
+    stride_qh,
+    stride_qd,
+    stride_kt,
+    stride_kh,
+    stride_kd,
+    stride_vt,
+    stride_vh,
+    stride_vd,
+    causal_mask_ptr,
+    causal_mask_m_size: tl.constexpr,
+    causal_mask_n_size: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
+    GLOBAL_WINDOW: tl.constexpr,
+    LOCAL_WINDOW: tl.constexpr,
+    NUM_Q_HEADS: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
+    GQA_INTERLEAVE: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    tl.static_assert(HEAD_DIM <= BLOCK_D, "BLOCK_SIZE_D should not be less than HEAD_DIM")
+    pid = tl.program_id(0)
+    n_programs = tl.num_programs(0)
+
+    GW_KV_CHUNKS: tl.constexpr = (GLOBAL_WINDOW + BLOCK_N - 1) // BLOCK_N
+
+    cu_kv_chunks = 0
+    for b_id in range(bsz):
+        kv_start = tl.load(cu_total_seq_lens_ptr + b_id).to(tl.int32)
+        kv_end = tl.load(cu_total_seq_lens_ptr + b_id + 1).to(tl.int32)
+        q_start = tl.load(cu_q_lens_ptr + b_id).to(tl.int32)
+        q_end = tl.load(cu_q_lens_ptr + b_id + 1).to(tl.int32)
+
+        q_seq_len = q_end - q_start
+        kv_seq_len = kv_end - kv_start
+        kv_computed_len = kv_seq_len - q_seq_len
+
+        num_kv_chunks = tl.cdiv(kv_seq_len, BLOCK_N)
+        num_local_chunks = num_kv_chunks - GW_KV_CHUNKS
+
+        prev_kv_tasks = cu_kv_chunks * NUM_KV_HEADS
+        cu_kv_chunks += num_local_chunks
+        new_kv_tasks = num_local_chunks * NUM_KV_HEADS
+
+        for kv_task_id in range((prev_kv_tasks + pid) % n_programs, new_kv_tasks, n_programs):
+            local_block_id = kv_task_id // NUM_KV_HEADS
+            kv_head_id = kv_task_id % NUM_KV_HEADS
+            kv_block_id = GW_KV_CHUNKS + local_block_id
+
+            kv_block_start = kv_block_id * BLOCK_N
+            kv_block_end = min(kv_block_start + BLOCK_N, kv_seq_len)
+            kv_block_len = kv_block_end - kv_block_start
+
+            if kv_block_len > 0:
+                cur_k_block_ptr = tl.make_block_ptr(
+                    base=k_ptr + kv_start * stride_kt + kv_head_id * stride_kh,
+                    shape=(kv_seq_len, HEAD_DIM),
+                    strides=(stride_kt, stride_kd),
+                    offsets=(kv_block_start.to(tl.int32), 0),
+                    block_shape=(BLOCK_N, BLOCK_D),
+                    order=(1, 0),
+                )
+                cur_k_block = tl.load(cur_k_block_ptr, boundary_check=(0, 1), padding_option="zero")
+
+                cur_v_block_ptr = tl.make_block_ptr(
+                    base=v_ptr + kv_start * stride_vt + kv_head_id * stride_vh,
+                    shape=(kv_seq_len, HEAD_DIM),
+                    strides=(stride_vt, stride_vd),
+                    offsets=(kv_block_start.to(tl.int32), 0),
+                    block_shape=(BLOCK_N, BLOCK_D),
+                    order=(1, 0),
+                )
+                cur_v_block = tl.load(cur_v_block_ptr, boundary_check=(0, 1), padding_option="zero")
+
+                start_block, end_block = _swa_transposed_range_blocks(
+                    kv_block_start,
+                    kv_block_len,
+                    kv_computed_len,
+                    q_seq_len,
+                    BLOCK_M,
+                    IS_CAUSAL,
+                    GLOBAL_WINDOW,
+                    LOCAL_WINDOW,
+                )
+
+                dk = tl.zeros((BLOCK_N, HEAD_DIM), dtype=tl.float32)
+                dv = tl.zeros((BLOCK_N, HEAD_DIM), dtype=tl.float32)
+
+                for q_head_rpt in range(NUM_Q_HEADS // NUM_KV_HEADS):
+                    if GQA_INTERLEAVE:
+                        q_head_id = NUM_KV_HEADS * q_head_rpt + kv_head_id
+                    else:
+                        q_head_id = q_head_rpt + kv_head_id * (NUM_Q_HEADS // NUM_KV_HEADS)
+
+                    lse_i_ptr = lse_ptr + q_head_id * stride_lse_h + q_start * stride_lse_t
+                    delta_i_ptr = delta_ptr + q_head_id * stride_delta_h + q_start * stride_delta_t
+
+                    for q_block_id in range(start_block, end_block):
+                        q_block_start = q_block_id * BLOCK_M
+                        q_mask = (q_block_start + tl.arange(0, BLOCK_M)[:, None]) < q_seq_len
+                        kv_mask = (kv_block_start + tl.arange(0, BLOCK_N)[None, :]) < kv_seq_len
+
+                        if IS_CAUSAL:
+                            q_pos = q_block_start + kv_computed_len
+                            mask = gen_mask_causal_with_window(
+                                causal_mask_ptr,
+                                causal_mask_m_size,
+                                causal_mask_n_size,
+                                BLOCK_M,
+                                BLOCK_N,
+                                q_pos,
+                                kv_block_start,
+                                GLOBAL_WINDOW,
+                                LOCAL_WINDOW,
+                                q_seq_len,
+                                kv_seq_len,
+                            )
+                        else:
+                            mask = q_mask & kv_mask
+
+                        cur_q_block_ptr = tl.make_block_ptr(
+                            base=q_ptr + q_start * stride_qt + q_head_id * stride_qh,
+                            shape=(q_seq_len, HEAD_DIM),
+                            strides=(stride_qt, stride_qd),
+                            offsets=(q_block_start.to(tl.int32), 0),
+                            block_shape=(BLOCK_M, BLOCK_D),
+                            order=(1, 0),
+                        )
+                        cur_do_block_ptr = tl.make_block_ptr(
+                            base=do_ptr + q_start * stride_dot + q_head_id * stride_doh,
+                            shape=(q_seq_len, HEAD_DIM),
+                            strides=(stride_dot, stride_dod),
+                            offsets=(q_block_start.to(tl.int32), 0),
+                            block_shape=(BLOCK_M, BLOCK_D),
+                            order=(1, 0),
+                        )
+                        q_offs = q_block_start + tl.arange(0, BLOCK_M)
+
+                        cur_delta = tl.load(delta_i_ptr + q_offs * stride_delta_t, mask=q_offs < q_seq_len, other=0.0)
+                        tl.static_assert(cur_delta.dtype == tl.float32)
+                        cur_lse = tl.load(lse_i_ptr + q_offs * stride_lse_t, mask=q_offs < q_seq_len, other=0.0)
+                        tl.static_assert(cur_lse.dtype == tl.float32)
+
+                        dk, dv = _sdpa_single_block_bwd_dkdv(
+                            dk,
+                            dv,
+                            cur_delta,
+                            cur_lse,
+                            cur_q_block_ptr,
+                            cur_do_block_ptr,
+                            cur_k_block,
+                            cur_v_block,
+                            mask,
+                            scale,
+                            HEAD_DIM,
+                            BLOCK_M,
+                            BLOCK_N,
+                            BLOCK_D,
+                            v_ptr.dtype.element_ty == tl.float8e5,
+                        )
+
+                tl.extra.cann.extension.compile_hint(dv, "matmul_at_least_once")
+                tl.extra.cann.extension.compile_hint(dk, "matmul_at_least_once")
+
+                cur_dv_block_ptr = tl.make_block_ptr(
+                    base=dv_ptr + kv_start * stride_dvt + kv_head_id * stride_dvh,
+                    shape=(kv_seq_len, HEAD_DIM),
+                    strides=(stride_dvt, stride_dvd),
+                    offsets=(kv_block_start.to(tl.int32), 0),
+                    block_shape=(BLOCK_N, BLOCK_D),
+                    order=(1, 0),
+                )
+                tl.store(cur_dv_block_ptr, dv.to(dv_ptr.type.element_ty), boundary_check=(0, 1))
+
+                cur_dk_block_ptr = tl.make_block_ptr(
+                    base=dk_ptr + kv_start * stride_dkt + kv_head_id * stride_dkh,
+                    shape=(kv_seq_len, HEAD_DIM),
+                    strides=(stride_dkt, stride_dkd),
+                    offsets=(kv_block_start.to(tl.int32), 0),
+                    block_shape=(BLOCK_N, BLOCK_D),
+                    order=(1, 0),
+                )
+                tl.store(cur_dk_block_ptr, dk.to(dk_ptr.type.element_ty), boundary_check=(0, 1))
+
+
+@triton.jit
+def _swa_bwd_dkdv_global_kernel(
+    dk_partial_ptr,
+    dv_partial_ptr,
+    do_ptr,
+    delta_ptr,
+    lse_ptr,
+    q_ptr,
+    k_ptr,
+    v_ptr,
+    bsz,
+    cu_q_lens_ptr,
+    cu_total_seq_lens_ptr,
+    scale,
+    stride_dot,
+    stride_doh,
+    stride_dod,
+    stride_delta_h,
+    stride_delta_t,
+    stride_lse_h,
+    stride_lse_t,
+    stride_qt,
+    stride_qh,
+    stride_qd,
+    stride_kt,
+    stride_kh,
+    stride_kd,
+    stride_vt,
+    stride_vh,
+    stride_vd,
+    stride_partial_b,
+    stride_partial_p,
+    stride_partial_h,
+    stride_partial_t,
+    stride_partial_d,
+    causal_mask_ptr,
+    causal_mask_m_size: tl.constexpr,
+    causal_mask_n_size: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
+    GLOBAL_WINDOW: tl.constexpr,
+    LOCAL_WINDOW: tl.constexpr,
+    NUM_Q_HEADS: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
+    GQA_INTERLEAVE: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    GW_KV_CHUNKS: tl.constexpr,
+):
+    tl.static_assert(HEAD_DIM <= BLOCK_D, "BLOCK_SIZE_D should not be less than HEAD_DIM")
+    pid = tl.program_id(0)
+    n_programs = tl.num_programs(0)
+
+    GROUP_SIZE: tl.constexpr = NUM_Q_HEADS // NUM_KV_HEADS
+
+    for b_id in range(bsz):
+        q_start = tl.load(cu_q_lens_ptr + b_id).to(tl.int32)
+        q_end = tl.load(cu_q_lens_ptr + b_id + 1).to(tl.int32)
+        kv_start = tl.load(cu_total_seq_lens_ptr + b_id).to(tl.int32)
+        kv_end = tl.load(cu_total_seq_lens_ptr + b_id + 1).to(tl.int32)
+
+        q_seq_len = q_end - q_start
+        kv_seq_len = kv_end - kv_start
+        kv_computed_len = kv_seq_len - q_seq_len
+
+        num_q_chunks = tl.cdiv(q_seq_len, BLOCK_M)
+
+        for gw_kv_block_id in range(GW_KV_CHUNKS):
+            kv_block_start = gw_kv_block_id * BLOCK_N
+            kv_block_end = min(kv_block_start + BLOCK_N, kv_seq_len)
+            kv_block_len = kv_block_end - kv_block_start
+
+            if kv_block_len > 0:
+                for kv_head_id in range(NUM_KV_HEADS):
+                    dk_acc = tl.zeros((BLOCK_N, HEAD_DIM), dtype=tl.float32)
+                    dv_acc = tl.zeros((BLOCK_N, HEAD_DIM), dtype=tl.float32)
+
+                    cur_k_block_ptr = tl.make_block_ptr(
+                        base=k_ptr + kv_start * stride_kt + kv_head_id * stride_kh,
+                        shape=(kv_seq_len, HEAD_DIM),
+                        strides=(stride_kt, stride_kd),
+                        offsets=(kv_block_start.to(tl.int32), 0),
+                        block_shape=(BLOCK_N, BLOCK_D),
+                        order=(1, 0),
+                    )
+                    cur_k_block = tl.load(cur_k_block_ptr, boundary_check=(0, 1), padding_option="zero")
+
+                    cur_v_block_ptr = tl.make_block_ptr(
+                        base=v_ptr + kv_start * stride_vt + kv_head_id * stride_vh,
+                        shape=(kv_seq_len, HEAD_DIM),
+                        strides=(stride_vt, stride_vd),
+                        offsets=(kv_block_start.to(tl.int32), 0),
+                        block_shape=(BLOCK_N, BLOCK_D),
+                        order=(1, 0),
+                    )
+                    cur_v_block = tl.load(cur_v_block_ptr, boundary_check=(0, 1), padding_option="zero")
+
+                    for q_chunk_id in range(pid, num_q_chunks, n_programs):
+                        q_block_start = q_chunk_id * BLOCK_M
+
+                        for q_head_rpt in range(GROUP_SIZE):
+                            if GQA_INTERLEAVE:
+                                q_head_id = NUM_KV_HEADS * q_head_rpt + kv_head_id
+                            else:
+                                q_head_id = q_head_rpt + kv_head_id * GROUP_SIZE
+
+                            if IS_CAUSAL:
+                                q_pos = q_block_start + kv_computed_len
+                                mask = gen_mask_causal_with_window(
+                                    causal_mask_ptr,
+                                    causal_mask_m_size,
+                                    causal_mask_n_size,
+                                    BLOCK_M,
+                                    BLOCK_N,
+                                    q_pos,
+                                    kv_block_start,
+                                    GLOBAL_WINDOW,
+                                    LOCAL_WINDOW,
+                                    q_seq_len,
+                                    kv_seq_len,
+                                )
+                            else:
+                                q_mask = (q_block_start + tl.arange(0, BLOCK_M)[:, None]) < q_seq_len
+                                kv_mask = (kv_block_start + tl.arange(0, BLOCK_N)[None, :]) < kv_seq_len
+                                mask = q_mask & kv_mask
+
+                            cur_q_block_ptr = tl.make_block_ptr(
+                                base=q_ptr + q_start * stride_qt + q_head_id * stride_qh,
+                                shape=(q_seq_len, HEAD_DIM),
+                                strides=(stride_qt, stride_qd),
+                                offsets=(q_block_start.to(tl.int32), 0),
+                                block_shape=(BLOCK_M, BLOCK_D),
+                                order=(1, 0),
+                            )
+                            cur_do_block_ptr = tl.make_block_ptr(
+                                base=do_ptr + q_start * stride_dot + q_head_id * stride_doh,
+                                shape=(q_seq_len, HEAD_DIM),
+                                strides=(stride_dot, stride_dod),
+                                offsets=(q_block_start.to(tl.int32), 0),
+                                block_shape=(BLOCK_M, BLOCK_D),
+                                order=(1, 0),
+                            )
+
+                            lse_i_ptr = lse_ptr + q_head_id * stride_lse_h + q_start * stride_lse_t
+                            delta_i_ptr = delta_ptr + q_head_id * stride_delta_h + q_start * stride_delta_t
+                            q_offs = q_block_start + tl.arange(0, BLOCK_M)
+
+                            cur_lse = tl.load(lse_i_ptr + q_offs * stride_lse_t, mask=q_offs < q_seq_len, other=0.0)
+                            cur_delta = tl.load(delta_i_ptr + q_offs * stride_delta_t, mask=q_offs < q_seq_len, other=0.0)
+
+                            dk_acc, dv_acc = _sdpa_single_block_bwd_dkdv(
+                                dk_acc,
+                                dv_acc,
+                                cur_delta,
+                                cur_lse,
+                                cur_q_block_ptr,
+                                cur_do_block_ptr,
+                                cur_k_block,
+                                cur_v_block,
+                                mask,
+                                scale,
+                                HEAD_DIM,
+                                BLOCK_M,
+                                BLOCK_N,
+                                BLOCK_D,
+                                v_ptr.dtype.element_ty == tl.float8e5,
+                            )
+
+                    partial_dk_ptr = tl.make_block_ptr(
+                        base=dk_partial_ptr + b_id * stride_partial_b + pid * stride_partial_p + kv_head_id * stride_partial_h,
+                        shape=(GW_KV_CHUNKS * BLOCK_N, HEAD_DIM),
+                        strides=(stride_partial_t, stride_partial_d),
+                        offsets=(kv_block_start.to(tl.int32), 0),
+                        block_shape=(BLOCK_N, BLOCK_D),
+                        order=(1, 0),
+                    )
+                    tl.store(partial_dk_ptr, dk_acc, boundary_check=(0, 1))
+
+                    partial_dv_ptr = tl.make_block_ptr(
+                        base=dv_partial_ptr + b_id * stride_partial_b + pid * stride_partial_p + kv_head_id * stride_partial_h,
+                        shape=(GW_KV_CHUNKS * BLOCK_N, HEAD_DIM),
+                        strides=(stride_partial_t, stride_partial_d),
+                        offsets=(kv_block_start.to(tl.int32), 0),
+                        block_shape=(BLOCK_N, BLOCK_D),
+                        order=(1, 0),
+                    )
+                    tl.store(partial_dv_ptr, dv_acc, boundary_check=(0, 1))
+
+
+@triton.jit
+def _swa_bwd_dkdv_reduce_kernel(
+    dk_ptr,
+    dv_ptr,
+    dk_partial_ptr,
+    dv_partial_ptr,
+    cu_total_seq_lens_ptr,
+    stride_dkt,
+    stride_dkh,
+    stride_dkd,
+    stride_dvt,
+    stride_dvh,
+    stride_dvd,
+    stride_partial_b,
+    stride_partial_p,
+    stride_partial_h,
+    stride_partial_t,
+    stride_partial_d,
+    NUM_KV_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    GW_PADDED: tl.constexpr,
+    NUM_CORES: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    gw_token_id = pid % GW_PADDED
+    kv_head_id = (pid // GW_PADDED) % NUM_KV_HEADS
+    b_id = pid // (GW_PADDED * NUM_KV_HEADS)
+
+    kv_start = tl.load(cu_total_seq_lens_ptr + b_id).to(tl.int32)
+
+    offs_d = tl.arange(0, HEAD_DIM)
+
+    dk_sum = tl.zeros((HEAD_DIM,), dtype=tl.float32)
+    dv_sum = tl.zeros((HEAD_DIM,), dtype=tl.float32)
+
+    for core_id in range(NUM_CORES):
+        partial_off = b_id * stride_partial_b + core_id * stride_partial_p + kv_head_id * stride_partial_h + gw_token_id * stride_partial_t
+        dk_sum += tl.load(dk_partial_ptr + partial_off + offs_d * stride_partial_d)
+        dv_sum += tl.load(dv_partial_ptr + partial_off + offs_d * stride_partial_d)
+
+    dk_out_off = (kv_start + gw_token_id) * stride_dkt + kv_head_id * stride_dkh
+    tl.store(dk_ptr + dk_out_off + offs_d * stride_dkd, dk_sum.to(dk_ptr.type.element_ty))
+
+    dv_out_off = (kv_start + gw_token_id) * stride_dvt + kv_head_id * stride_dvh
+    tl.store(dv_ptr + dv_out_off + offs_d * stride_dvd, dv_sum.to(dv_ptr.type.element_ty))
+
+
 def swa_bwd_impl(
     do: torch.Tensor,
     q: torch.Tensor,
@@ -2433,58 +2886,209 @@ def swa_bwd_impl(
     grid = (cube_num,)
     unit_flag = not is_910()
 
-    _swa_bwd_dkdv_kernel[grid](
-        dk,
-        dv,
-        do,
-        delta,
-        softmax_lse,
-        q,
-        k,
-        v,
-        bsz,
-        cu_q_lens,
-        cu_total_seq_lens,
-        softmax_scale,
-        dk.stride(0),
-        dk.stride(1),
-        dk.stride(2),
-        dv.stride(0),
-        dv.stride(1),
-        dv.stride(2),
-        do.stride(0),
-        do.stride(1),
-        do.stride(2),
-        delta.stride(0),
-        delta.stride(1),
-        softmax_lse.stride(0),
-        softmax_lse.stride(1),
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        k.stride(0),
-        k.stride(1),
-        k.stride(2),
-        v.stride(0),
-        v.stride(1),
-        v.stride(2),
-        causal_mask,
-        causal_mask_m_size,
-        causal_mask_n_size,
-        is_causal,
-        global_window_size,
-        local_window_size,
-        num_q_heads,
-        num_kv_heads,
-        gqa_interleave,
-        head_dim,
-        BLOCK_D,
-        limit_auto_multi_buffer_buffer="no-limit",
-        hfusion_enable_multiple_consumer_fusion=True,
-        unit_flag=unit_flag,
-        limit_auto_multi_buffer_of_local_buffer="no-l0c",
-        intra_cache_num=1,
+    BLOCK_M = 128 if not is_910() else 64
+    BLOCK_N = 128 if not is_910() else 64
+    gw_kv_chunks = (global_window_size + BLOCK_N - 1) // BLOCK_N if global_window_size > 0 else 0
+    local_kv_chunks = (local_window_size + BLOCK_N - 1) // BLOCK_N
+    total_dkdv_tasks = bsz * num_kv_heads * (gw_kv_chunks + local_kv_chunks)
+    use_q_split = (
+        global_window_size > 0
+        and total_dkdv_tasks < cube_num
+        and tot_q_toks >= 2048
+        and global_window_size <= 512
     )
+    if os.environ.get("FORCE_NO_QSPLIT") == "1":
+        use_q_split = False
+
+    if use_q_split:
+        gw_padded = gw_kv_chunks * BLOCK_N
+        dk_partial = torch.zeros(bsz, cube_num, num_kv_heads, gw_padded, head_dim, dtype=torch.float32, device=q.device)
+        dv_partial = torch.zeros(bsz, cube_num, num_kv_heads, gw_padded, head_dim, dtype=torch.float32, device=q.device)
+
+        _swa_bwd_dkdv_local_kernel[grid](
+            dk,
+            dv,
+            do,
+            delta,
+            softmax_lse,
+            q,
+            k,
+            v,
+            bsz,
+            cu_q_lens,
+            cu_total_seq_lens,
+            softmax_scale,
+            dk.stride(0),
+            dk.stride(1),
+            dk.stride(2),
+            dv.stride(0),
+            dv.stride(1),
+            dv.stride(2),
+            do.stride(0),
+            do.stride(1),
+            do.stride(2),
+            delta.stride(0),
+            delta.stride(1),
+            softmax_lse.stride(0),
+            softmax_lse.stride(1),
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            causal_mask,
+            causal_mask_m_size,
+            causal_mask_n_size,
+            is_causal,
+            global_window_size,
+            local_window_size,
+            num_q_heads,
+            num_kv_heads,
+            gqa_interleave,
+            head_dim,
+            BLOCK_D,
+            BLOCK_M,
+            BLOCK_N,
+            limit_auto_multi_buffer_buffer="no-limit",
+            hfusion_enable_multiple_consumer_fusion=True,
+            unit_flag=unit_flag,
+            limit_auto_multi_buffer_of_local_buffer="no-l0c",
+            intra_cache_num=1,
+        )
+        _swa_bwd_dkdv_global_kernel[grid](
+            dk_partial,
+            dv_partial,
+            do,
+            delta,
+            softmax_lse,
+            q,
+            k,
+            v,
+            bsz,
+            cu_q_lens,
+            cu_total_seq_lens,
+            softmax_scale,
+            do.stride(0),
+            do.stride(1),
+            do.stride(2),
+            delta.stride(0),
+            delta.stride(1),
+            softmax_lse.stride(0),
+            softmax_lse.stride(1),
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            dk_partial.stride(0),
+            dk_partial.stride(1),
+            dk_partial.stride(2),
+            dk_partial.stride(3),
+            dk_partial.stride(4),
+            causal_mask,
+            causal_mask_m_size,
+            causal_mask_n_size,
+            is_causal,
+            global_window_size,
+            local_window_size,
+            num_q_heads,
+            num_kv_heads,
+            gqa_interleave,
+            head_dim,
+            BLOCK_D,
+            BLOCK_M,
+            BLOCK_N,
+            gw_kv_chunks,
+            limit_auto_multi_buffer_buffer="no-limit",
+            hfusion_enable_multiple_consumer_fusion=True,
+            unit_flag=unit_flag,
+            limit_auto_multi_buffer_of_local_buffer="no-l0c",
+            intra_cache_num=1,
+        )
+        reduce_grid = (bsz * num_kv_heads * gw_padded,)
+        _swa_bwd_dkdv_reduce_kernel[reduce_grid](
+            dk,
+            dv,
+            dk_partial,
+            dv_partial,
+            cu_total_seq_lens,
+            dk.stride(0),
+            dk.stride(1),
+            dk.stride(2),
+            dv.stride(0),
+            dv.stride(1),
+            dv.stride(2),
+            dk_partial.stride(0),
+            dk_partial.stride(1),
+            dk_partial.stride(2),
+            dk_partial.stride(3),
+            dk_partial.stride(4),
+            num_kv_heads,
+            head_dim,
+            gw_padded,
+            cube_num,
+        )
+    else:
+        _swa_bwd_dkdv_kernel[grid](
+            dk,
+            dv,
+            do,
+            delta,
+            softmax_lse,
+            q,
+            k,
+            v,
+            bsz,
+            cu_q_lens,
+            cu_total_seq_lens,
+            softmax_scale,
+            dk.stride(0),
+            dk.stride(1),
+            dk.stride(2),
+            dv.stride(0),
+            dv.stride(1),
+            dv.stride(2),
+            do.stride(0),
+            do.stride(1),
+            do.stride(2),
+            delta.stride(0),
+            delta.stride(1),
+            softmax_lse.stride(0),
+            softmax_lse.stride(1),
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            causal_mask,
+            causal_mask_m_size,
+            causal_mask_n_size,
+            is_causal,
+            global_window_size,
+            local_window_size,
+            num_q_heads,
+            num_kv_heads,
+            gqa_interleave,
+            head_dim,
+            BLOCK_D,
+            limit_auto_multi_buffer_buffer="no-limit",
+            hfusion_enable_multiple_consumer_fusion=True,
+            unit_flag=unit_flag,
+            limit_auto_multi_buffer_of_local_buffer="no-l0c",
+            intra_cache_num=1,
+        )
     _swa_bwd_dq_kernel[grid](
         dq,
         do,
