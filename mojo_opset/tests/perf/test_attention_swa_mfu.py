@@ -11,6 +11,87 @@ from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_torch_device
 
+
+def compute_attention_area(
+    seq_len: int,
+    global_window: int,
+    local_window: int,
+    causal: bool = True,
+) -> int:
+    r"""
+    计算滑动窗口注意力 (SWA) 的有效计算面积（非掩码 q-k 对数量）。
+
+    掩码模式：
+      - 全局窗口 (global_window, gw)：前 gw 个 key 对所有 query 可见
+      - 局部窗口 (local_window, lw)：每个 query i 可看到距离不超过 lw 的 key
+
+    Causal 模式下，query i 的可见 key 集合为：
+        { k : 0 <= k <= i } ∩ ( { k : k < gw } ∪ { k : k >= i - lw } )
+
+    当 i <= gw + lw - 1 时，全局与局部窗口重叠，整行 [0, i] 可见，计数 = i + 1；
+    当 i >= gw + lw     时，两窗口间出现间隙，计数 = gw + lw + 1。
+
+    有效面积公式（causal）：
+        boundary = gw + lw
+        若 seq_len <= boundary:  area = seq_len * (seq_len + 1) / 2
+        若 seq_len >  boundary:  area = boundary*(boundary+1)/2
+                                        + (seq_len - boundary) * (gw + lw + 1)
+
+    边界情况：
+        gw=0, lw=0 → area = seq_len  （仅对角线）
+        gw=0       → 纯局部窗口因果注意力
+        lw=0       → 仅全局 token + 自身
+        gw+lw >= seq_len → 等价于 full causal attention
+
+    Args:
+        seq_len:       序列长度（query / key token 数）
+        global_window: 全局窗口大小（前 gw 个 key 全局可见）
+        local_window:  局部窗口大小（向后覆盖 lw 个 key + 自身）
+        causal:        是否因果掩码
+
+    Returns:
+        有效 (query, key) 对的数量
+
+    Examples:
+        >>> compute_attention_area(1024, 4, 1023)
+        523264
+        >>> compute_attention_area(1024, 4, 4095)   # gw+lw > seq_len → full causal
+        524800
+        >>> compute_attention_area(1024, 0, 0)       # 仅对角线
+        1024
+        >>> compute_attention_area(10, 2, 3)         # 手工验证
+        45
+    """
+    gw = max(0, min(global_window, seq_len))
+    lw = max(0, min(local_window, seq_len))
+
+    if seq_len == 0:
+        return 0
+
+    if causal:
+        boundary = gw + lw
+        if seq_len <= boundary:
+            return seq_len * (seq_len + 1) // 2
+        else:
+            full_area = boundary * (boundary + 1) // 2
+            sparse_rows = seq_len - boundary
+            sparse_area = sparse_rows * (gw + lw + 1)
+            return full_area + sparse_area
+    else:
+        global_area = seq_len * gw
+        if seq_len <= lw + 1:
+            local_area = seq_len * seq_len
+        else:
+            local_area = seq_len * (2 * lw + 1) - lw * (lw + 1)
+        overlap = 0
+        if gw > 0:
+            for k in range(gw):
+                lo = max(0, k - lw)
+                hi = min(seq_len - 1, k + lw)
+                overlap += hi - lo + 1
+        return global_area + local_area - overlap
+
+
 def generate_sdpa_data(
     batch_size: int,
     num_q_heads: int,
@@ -95,6 +176,29 @@ def test_swa_function_perf(
     ):
     import torch_npu
 
+    # warm up for autotune
+    for _ in range(3):        
+        swa_func = MojoSWAFunction.apply
+        head_dim = query.shape[-1]
+        softmax_scale = 1.0 / math.sqrt(head_dim)
+        q = query.clone().detach().requires_grad_(True)
+        k = key.clone().detach().requires_grad_(True)
+        v = value.clone().detach().requires_grad_(True)
+        o = swa_func(
+            q,
+            k,
+            v,
+            cu_q_lens,
+            cu_total_seq_lens,
+            True,
+            local_window,
+            global_window,
+            softmax_scale,
+            gqa_interleave,
+            True,
+        )
+        o.backward(grad_out) 
+
     experimental_config = torch_npu.profiler._ExperimentalConfig(
         aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
         profiler_level=torch_npu.profiler.ProfilerLevel.Level2,
@@ -156,7 +260,14 @@ def test_swa_function_perf(
                 reader = csv.DictReader(f)
                 for row in reader:
                     kernel_name = row["OP Type"]
-                    for target in ["_swa_fwd_kernel", "_swa_bwd_dkdv_kernel", "_swa_bwd_dq_kernel"]:
+                    for target in [
+                        "_swa_fwd_kernel",
+                        "_swa_bwd_dkdv_kernel",
+                        "_swa_bwd_dkdv_local_kernel",
+                        "_swa_bwd_dkdv_global_kernel",
+                        "_swa_bwd_dkdv_reduce_kernel",
+                        "_swa_bwd_dq_kernel",
+                    ]:
                         if target in kernel_name:
                             kernel_times[target] = float(row["Avg Time(us)"])
                             break
@@ -164,19 +275,19 @@ def test_swa_function_perf(
             kernel_num_matmuls = {
                 "_swa_fwd_kernel": 2,
                 "_swa_bwd_dkdv_kernel": 4,
+                "_swa_bwd_dkdv_local_kernel": 4,
+                "_swa_bwd_dkdv_global_kernel": 4,
+                "_swa_bwd_dkdv_reduce_kernel": 0,
                 "_swa_bwd_dq_kernel": 3,
             }
 
             B = cu_q_lens.shape[0] - 1
             seq_len, head_num, head_dim = q.shape
             tot_kv_toks, KV_H, _ = k.shape
-            base_flops = (
-                B
-                * head_num
-                * (seq_len**2 / 2 - (seq_len - global_window - local_window)**2 / 2)
-                * head_dim
-                * 2
+            effective_area = compute_attention_area(
+                seq_len, global_window, local_window, causal=True
             )
+            base_flops = B * head_num * effective_area * head_dim * 2
 
             print(f"\n{'='*60}")
             print(f"[SWA Perf] B={B}, Q_H={head_num}, KV_H={KV_H}, D={head_dim}, seq_len={seq_len}")
@@ -184,8 +295,34 @@ def test_swa_function_perf(
             print(f"[SWA Perf] Peak={peak_tflops} TFLOPs")
             print(f"{'='*60}")
 
-            total_mfu = 0.0
-            for kernel_name in ["_swa_fwd_kernel", "_swa_bwd_dkdv_kernel", "_swa_bwd_dq_kernel"]:
+            use_q_split = "_swa_bwd_dkdv_local_kernel" in kernel_times
+
+            if use_q_split:
+                dkdv_kernels = [
+                    "_swa_bwd_dkdv_local_kernel",
+                    "_swa_bwd_dkdv_global_kernel",
+                    "_swa_bwd_dkdv_reduce_kernel",
+                ]
+                dkdv_total_us = sum(kernel_times.get(k, 0.0) for k in dkdv_kernels)
+                dkdv_flops = base_flops * 4
+                dkdv_mfu = dkdv_flops / (dkdv_total_us / 1e6) / (peak_tflops * 1e12) if dkdv_total_us > 0 else 0.0
+                print(f"[SWA Perf] dkdv path: Q-split (3 kernels)")
+                for kn in dkdv_kernels:
+                    us = kernel_times.get(kn, 0.0)
+                    print(f"[SWA Perf]   {kn}: Avg Time={us:.2f} us")
+                print(
+                    f"[SWA Perf] _swa_bwd_dkdv (combined): "
+                    f"Avg Time={dkdv_total_us:.2f} us, "
+                    f"num_matmuls=4, "
+                    f"FLOPs={dkdv_flops / 1e12:.4f} T, "
+                    f"MFU={dkdv_mfu:.4f} ({dkdv_mfu*100:.2f}%)"
+                )
+            else:
+                dkdv_kernels = ["_swa_bwd_dkdv_kernel"]
+
+            for kernel_name in ["_swa_fwd_kernel"] + dkdv_kernels + ["_swa_bwd_dq_kernel"]:
+                if kernel_name in ("_swa_bwd_dkdv_local_kernel", "_swa_bwd_dkdv_global_kernel", "_swa_bwd_dkdv_reduce_kernel"):
+                    continue
                 if kernel_name not in kernel_times:
                     print(f"[SWA Perf] {kernel_name}: not found in op_statistic.csv")
                     continue
@@ -195,7 +332,6 @@ def test_swa_function_perf(
                 effective_flops = base_flops * num_matmuls
                 total_flops_t = effective_flops / 1e12
                 mfu = total_flops_t / duration_s / peak_tflops
-
                 print(
                     f"[SWA Perf] {kernel_name}: "
                     f"Avg Time={avg_time_us:.2f} us, "
