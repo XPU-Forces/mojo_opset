@@ -106,3 +106,26 @@ def test_rotate_activation(batch_size, seq_len, num_head, head_dim, dtype):
     res = MojoRotateActivation()
     res_ref = MojoRotateActivation._registry.get("torch")()
     res.forward_diff_with(res_ref, x, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("shape", [([3072, 3072]), ([4096, 2048]), ([257, 480])])
+@bypass_not_implemented
+def test_swiglu_keeps_silu_intermediate_in_fp32(shape):
+    """SwiGLU must round exactly once, on the output store.
+    This pins the reference-platform contract. byted-seed-kernels' ``seed_swiglu``
+    is ``(silu(x1.float()) * x2.float()).to(x1.dtype)`` for ``implementation="torch"``
+    and ``bumi.kernel.swiglu``'s ``y = silu(x1) * x2`` (silu() promotes to fp32,
+    output allocated ``dtype=x1.dtype``) for ``implementation="bumi"``. Both keep
+    the SiLU intermediate in fp32.
+    The NPU kernel used to compute ``silu_a.to(a.dtype) * b``, i.e. it rounded the
+    intermediate first. Measured on 910B2C at the P6D audio-MLP width (3072, 3072)
+    with bf16 inputs, that cost 2592593/9437184 forward elements, max|delta|
+    6.25e-2. With the fp32 intermediate the forward is bitwise equal to the fp32
+    reference, so this test asserts bitwise equality rather than a tolerance.
+    """
+    gate = torch.randn(*shape, dtype=torch.bfloat16)
+    up = torch.randn(*shape, dtype=torch.bfloat16)
+    swiglu = MojoSwiGLU()
+    actual = swiglu(gate, up)
+    expected = (torch.nn.functional.silu(gate.float()) * up.float()).to(gate.dtype)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)

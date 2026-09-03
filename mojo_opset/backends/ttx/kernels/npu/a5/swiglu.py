@@ -81,7 +81,7 @@ def _swiglu_fwd_kernel(
             a_f32 = a_chunk.to(tl.float32)
             silu_a = silu(a_f32)
 
-            c_chunk = silu_a.to(a_chunk.dtype) * b_chunk
+            c_chunk = silu_a * b_chunk.to(tl.float32)
 
             tl.store(c_ptrs, c_chunk, mask=block_mask)
 
@@ -144,7 +144,10 @@ def _swiglu_bwd_kernel(
             sigmoid_a = tl.sigmoid(a_f32)
             silu_a = a_f32 * sigmoid_a
 
-            db_chunk = dc_chunk * silu_a.to(dc_chunk.dtype)
+            dc_f32 = dc_chunk.to(tl.float32)
+            db_chunk = dc_f32 * silu_a
+            da_factor = sigmoid_a * (1 + a_f32 * (1 - sigmoid_a))
+            da_chunk = dc_f32 * b_chunk.to(tl.float32) * da_factor
 
             da_factor = silu_a * (1 - sigmoid_a) + sigmoid_a
             da_chunk = dc_chunk * b_chunk * da_factor.to(dc_chunk.dtype)
