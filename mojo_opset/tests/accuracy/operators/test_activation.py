@@ -106,3 +106,14 @@ def test_rotate_activation(batch_size, seq_len, num_head, head_dim, dtype):
     res = MojoRotateActivation()
     res_ref = MojoRotateActivation._registry.get("torch")()
     res.forward_diff_with(res_ref, x, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("shape", [([3072, 3072]), ([4096, 2048]), ([257, 480])])
+@bypass_not_implemented
+def test_swiglu_keeps_silu_intermediate_in_fp32(shape):
+    gate = torch.randn(*shape, dtype=torch.bfloat16)
+    up = torch.randn(*shape, dtype=torch.bfloat16)
+    swiglu = MojoSwiGLU()
+    actual = swiglu(gate, up)
+    expected = (torch.nn.functional.silu(gate.float()) * up.float()).to(gate.dtype)
+    torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
