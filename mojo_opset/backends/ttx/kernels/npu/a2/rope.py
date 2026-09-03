@@ -178,7 +178,7 @@ def _rot_pos_embed_kernel(
         )
 
 
-@triton.jit(do_not_specialize=["seq_len"])
+@triton.jit(do_not_specialize=["seq_len", "num_seq_blocks", "bs"])
 def _rope_inplace_kernel(
     q_ptr,
     q_batch_stride,
