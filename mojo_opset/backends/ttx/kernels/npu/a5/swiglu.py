@@ -149,9 +149,6 @@ def _swiglu_bwd_kernel(
             da_factor = sigmoid_a * (1 + a_f32 * (1 - sigmoid_a))
             da_chunk = dc_f32 * b_chunk.to(tl.float32) * da_factor
 
-            da_factor = silu_a * (1 - sigmoid_a) + sigmoid_a
-            da_chunk = dc_chunk * b_chunk * da_factor.to(dc_chunk.dtype)
-
             tl.store(da_ptrs, da_chunk, mask=block_mask)
             tl.store(db_ptrs, db_chunk, mask=block_mask)
 
