@@ -42,10 +42,10 @@ def silu(x):
         triton.Config({"BLOCK_SIZE_M": 24}),
         triton.Config({"BLOCK_SIZE_M": 32}),
     ],
-    key=["n_rows", "n_cols"],
+    key=["n_cols"],
 )
 @libentry()
-@triton.jit
+@triton.jit(do_not_specialize=["n_rows"])
 def _swiglu_fwd_kernel(
     a,
     b,
@@ -98,11 +98,11 @@ def _swiglu_fwd_kernel(
         triton.Config({"BLOCK_SIZE_M": 24}),
         triton.Config({"BLOCK_SIZE_M": 32}),
     ],
-    key=["n_rows", "n_cols"],
+    key=["n_cols"],
     restore_value=["dc", "da", "db"],
 )
 @libentry()
-@triton.jit
+@triton.jit(do_not_specialize=["n_rows"])
 def _swiglu_bwd_kernel(
     dc,
     a,
