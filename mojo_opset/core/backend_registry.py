@@ -11,7 +11,7 @@ from .operator import MojoOperator
 logger = get_logger(__name__)
 
 PLATFORM_BACKEND_PRIORITY = {
-    "npu": ["ttx", "torch_npu", "torch", "xops"],
+    "npu": ["ttx", "torch_npu", "torch", "xops", "uc"],
     "ilu": ["ixformer", "ttx", "torch"],
     "mlu": ["ttx", "torch"],
     "meta_device": ["torch"],
