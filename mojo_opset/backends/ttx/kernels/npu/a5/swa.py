@@ -1412,7 +1412,9 @@ def swa_paged_decode_impl(
     ],
     key=["HEAD_DIM"],
 )
-@triton.jit
+# Packed batches change bsz and the token-derived LSE leading stride at runtime.
+# Keep the fixed contiguous Q/K/V/O strides specialized for alignment lowering.
+@triton.jit(do_not_specialize=["bsz", "stride_lse_h"])
 def _swa_fwd_kernel(
     o_ptr,
     o_f32_ptr,
@@ -1712,7 +1714,8 @@ def swa_fwd_impl(
     ],
     key=["HEAD_DIM"],
 )
-@triton.jit
+# Both values are the packed token count for the [head, token] delta buffer.
+@triton.jit(do_not_specialize=["num_tokens", "d_stride_h"])
 def _swa_bwd_preprocess(
     d_ptr: torch.Tensor,
     o_ptr: torch.Tensor,
@@ -1876,7 +1879,8 @@ def _sdpa_single_block_bwd_dq(
     ],
     key=["HEAD_DIM"],
 )
-@triton.jit
+# The packed batch size and [head, token] leading strides vary with the batch.
+@triton.jit(do_not_specialize=["bsz", "stride_delta_h", "stride_lse_h"])
 def _swa_bwd_dkdv_kernel(
     dk_ptr,
     dv_ptr,
@@ -2158,7 +2162,8 @@ def _swa_bwd_dkdv_kernel(
     ],
     key=["HEAD_DIM"],
 )
-@triton.jit
+# The packed batch size and [head, token] leading strides vary with the batch.
+@triton.jit(do_not_specialize=["bsz", "stride_delta_h", "stride_lse_h"])
 def _swa_bwd_dq_kernel(
     dq_ptr,
     do_ptr,

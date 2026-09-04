@@ -64,13 +64,11 @@ def test_npu_swa_training_configs_are_pinned():
             assert _single_triton_config(functions[kernel]) == expected
 
 
-def test_only_a2_swa_uses_runtime_sequence_shape():
-    a2_functions = _functions("a2")
-    a5_functions = _functions("a5")
-
-    for kernel, expected in _RUNTIME_SHAPE_ARGUMENTS.items():
-        assert _do_not_specialize(a2_functions[kernel]) == expected
-        assert _do_not_specialize(a5_functions[kernel]) == []
+def test_npu_swa_uses_runtime_sequence_shape():
+    for arch in ("a2", "a5"):
+        functions = _functions(arch)
+        for kernel, expected in _RUNTIME_SHAPE_ARGUMENTS.items():
+            assert _do_not_specialize(functions[kernel]) == expected
 
 
 def test_npu_swa_mask_cache_is_bounded_per_device():
