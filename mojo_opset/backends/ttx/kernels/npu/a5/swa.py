@@ -1,6 +1,8 @@
-import torch
-from typing import Optional, Tuple
+import functools
+from typing import Optional
+from typing import Tuple
 
+import torch
 import triton
 import triton.language as tl
 
@@ -9,13 +11,6 @@ from ..utils import is_910
 
 AUX_MASK_SIZE = 256
 AUX_MASK = None
-
-_GLOBAL_WINDOW_SIZE = None
-_LOCAL_WINDOW_SIZE = None
-_BLOCK_M = None
-_BLOCK_N = None
-_COMPRESSED_MASK = None
-
 
 def get_aux_mask():
     global AUX_MASK
@@ -49,27 +44,14 @@ def get_aux_mask():
     return AUX_MASK_SIZE, AUX_MASK
 
 
-def get_mask_causal_with_window(
+@functools.lru_cache(maxsize=32)
+def _get_mask_causal_with_window_cached(
         BLOCK_M: int,
         BLOCK_N: int,
         local_window_size: Optional[int] = None,
         global_window_size: Optional[int] = None,
-        device: str = "npu",
+        device: str = "npu:0",
 ):
-    global _GLOBAL_WINDOW_SIZE
-    global _LOCAL_WINDOW_SIZE
-    global _BLOCK_M
-    global _BLOCK_N
-    global _COMPRESSED_MASK
-    if (
-        _GLOBAL_WINDOW_SIZE == global_window_size
-        and _LOCAL_WINDOW_SIZE == local_window_size
-        and _BLOCK_M == BLOCK_M
-        and _BLOCK_N == BLOCK_N
-        and _COMPRESSED_MASK is not None
-    ):
-        return _COMPRESSED_MASK
-
     if local_window_size is None:
         local_window_size = 0
     if global_window_size is None:
@@ -93,12 +75,26 @@ def get_mask_causal_with_window(
     mask_boundary[:M, :N] = mask
     mask_boundary = mask_boundary.to(device=device)
 
-    _GLOBAL_WINDOW_SIZE = global_window_size
-    _LOCAL_WINDOW_SIZE = local_window_size
-    _BLOCK_M = BLOCK_M
-    _BLOCK_N = BLOCK_N
-    _COMPRESSED_MASK = mask_boundary
-    return _COMPRESSED_MASK
+    return mask_boundary
+
+
+def get_mask_causal_with_window(
+        BLOCK_M: int,
+        BLOCK_N: int,
+        local_window_size: Optional[int] = None,
+        global_window_size: Optional[int] = None,
+        device: str = "npu",
+):
+    target = torch.device(device)
+    if target.type == "npu" and target.index is None:
+        target = torch.device("npu", torch.npu.current_device())
+    return _get_mask_causal_with_window_cached(
+        BLOCK_M,
+        BLOCK_N,
+        local_window_size,
+        global_window_size,
+        str(target),
+    )
 
 
 @triton.jit
@@ -1412,14 +1408,13 @@ def swa_paged_decode_impl(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_M": BM, "BLOCK_N": BN, "multibuffer": MF})
-        for BM in [128]
-        for BN in [128]
-        for MF in [False]
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "multibuffer": True}),
     ],
     key=["HEAD_DIM"],
 )
-@triton.jit
+# Packed batches change bsz and the token-derived LSE leading stride at runtime.
+# Keep the fixed contiguous Q/K/V/O strides specialized for alignment lowering.
+@triton.jit(do_not_specialize=["bsz", "stride_lse_h"])
 def _swa_fwd_kernel(
     o_ptr,
     o_f32_ptr,
@@ -1715,16 +1710,12 @@ def swa_fwd_impl(
 
 @triton.autotune(
     configs=[
-        triton.Config(kwargs={"BLOCK_SIZE": 32}),
         triton.Config(kwargs={"BLOCK_SIZE": 64}),
-        triton.Config(kwargs={"BLOCK_SIZE": 128}),
-        triton.Config(kwargs={"BLOCK_SIZE": 256}),
-        triton.Config(kwargs={"BLOCK_SIZE": 512}),
-        triton.Config(kwargs={"BLOCK_SIZE": 1024}),
     ],
     key=["HEAD_DIM"],
 )
-@triton.jit
+# Both values are the packed token count for the [head, token] delta buffer.
+@triton.jit(do_not_specialize=["num_tokens", "d_stride_h"])
 def _swa_bwd_preprocess(
     d_ptr: torch.Tensor,
     o_ptr: torch.Tensor,
@@ -1884,14 +1875,12 @@ def _sdpa_single_block_bwd_dq(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_M": BM, "BLOCK_N": BN, "multibuffer": MF})
-        for BM in ([128] if not is_910() else [64, 128])
-        for BN in ([128] if not is_910() else [64, 128])
-        for MF in [False, True]
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 64, "multibuffer": True}),
     ],
     key=["HEAD_DIM"],
 )
-@triton.jit
+# The packed batch size and [head, token] leading strides vary with the batch.
+@triton.jit(do_not_specialize=["bsz", "stride_delta_h", "stride_lse_h"])
 def _swa_bwd_dkdv_kernel(
     dk_ptr,
     dv_ptr,
@@ -2169,14 +2158,12 @@ def _swa_bwd_dkdv_kernel(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_M": BM, "BLOCK_N": BN, "multibuffer": MF})
-        for BM in [64, 128]
-        for BN in [64, 128]
-        for MF in [True, False]
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "multibuffer": True}),
     ],
     key=["HEAD_DIM"],
 )
-@triton.jit
+# The packed batch size and [head, token] leading strides vary with the batch.
+@triton.jit(do_not_specialize=["bsz", "stride_delta_h", "stride_lse_h"])
 def _swa_bwd_dq_kernel(
     dq_ptr,
     do_ptr,
