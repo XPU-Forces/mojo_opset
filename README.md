@@ -294,7 +294,7 @@ export MOJO_OPSET_VERBOSITY="DEBUG"
 - Add more mojo ops.
 - Support more backend implementations and support more Hardware accelerators.
   - Ascend NPU's official implementation using Ascend C language.
-  - Support Cambircon MLU using triton language.
+  - Support Cambricon MLU using triton language.
 - Performance optimization.
   - A tuner for various backend implementations, ensure users can always get the best performance.
   - A compilation mechanism for replacement the original torch ops with mojo ops.
