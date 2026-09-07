@@ -1408,7 +1408,7 @@ def swa_paged_decode_impl(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "multibuffer": True}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "multibuffer": False}),
     ],
     key=["HEAD_DIM"],
 )
