@@ -1408,7 +1408,7 @@ def swa_paged_decode_impl(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "multibuffer": True}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "multibuffer": False}),
     ],
     key=["HEAD_DIM"],
 )
@@ -1875,7 +1875,7 @@ def _sdpa_single_block_bwd_dq(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_M": 256, "BLOCK_N": 64, "multibuffer": True}),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "multibuffer": True}),
     ],
     key=["HEAD_DIM"],
 )
