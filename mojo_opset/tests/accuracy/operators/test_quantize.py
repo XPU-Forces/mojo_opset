@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from mojo_opset import MojoDequant
+from mojo_opset import MojoDequantSwiGLUClampQuant
 from mojo_opset import MojoDequantSwiGLUQuant
 from mojo_opset import MojoDynamicQuant
 from mojo_opset import MojoMoEDynamicQuant
@@ -263,3 +264,85 @@ def test_dequant_swiglu_quant(tokens, hidden_size, token_count):
         atol=(0, 1e-4),
         rtol=(0, 1e-4),
     )
+
+
+def test_dequant_swiglu_clamp_quant_torch_reference():
+    input = torch.tensor(
+        [[1, 2, 3, 4], [2, -3, 4, -5], [-1, 4, -2, 3]],
+        dtype=torch.int32,
+        device="cpu",
+    )
+    group_list = torch.tensor([1, 2], dtype=torch.int32, device="cpu")
+    weight_scale = torch.tensor([[0.5, 1.0, 0.25, 0.5], [1.0, 0.5, 0.5, 0.25]], device="cpu")
+    quant_scale = torch.tensor([[1.0, 0.5], [0.75, 1.25]], device="cpu")
+    activation_scale = torch.tensor([[0.5], [1.0], [2.0]], device="cpu")
+
+    op = MojoDequantSwiGLUClampQuant._registry.get("torch")(
+        expert_num=2, hidden_size=2, clamp_limit=2.0, device="cpu"
+    )
+    op.load_state_dict({"weight_scale": weight_scale, "quant_scale": quant_scale}, strict=True)
+    output, scale = op(input, activation_scale, group_list)
+
+    expanded_weight_scale = weight_scale.repeat_interleave(group_list, dim=0)
+    hidden = input.float() * expanded_weight_scale * activation_scale
+    gate, up = hidden.chunk(2, dim=-1)
+    hidden = torch.nn.functional.silu(gate.clamp(max=2.0)) * up.clamp(min=-2.0, max=2.0)
+    hidden *= quant_scale.repeat_interleave(group_list, dim=0)
+    expected_scale = hidden.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / 127
+    expected = torch.clamp(torch.round(hidden / expected_scale), -128, 127).to(torch.int8)
+
+    assert torch.equal(output, expected)
+    assert torch.equal(scale, expected_scale)
+
+
+@pytest.mark.parametrize("backend", ["torch", "torch_npu"])
+@pytest.mark.parametrize("hidden_size, counts, limit", [(64, [1, 2], 2), (128, [0, 1, 0, 2, 0], 4)])
+def test_dequant_swiglu_clamp_quant_boundaries(backend, hidden_size, counts, limit):
+    if backend == "torch_npu":
+        if get_platform() != "npu":
+            pytest.skip("Requires an NPU")
+        import torch_npu
+
+        if not hasattr(torch_npu, "npu_dequant_swiglu_clamp_quant"):
+            pytest.skip("torch_npu.npu_dequant_swiglu_clamp_quant is unavailable; fused path not validated")
+
+    # Include an unclamped negative gate, the boundary, and values beyond it.
+    gate = torch.tensor([-limit - 1, limit, limit + 1, limit + 2], dtype=torch.int32, device="cpu")
+    up = torch.tensor([limit + 1, -limit - 1, limit, -limit], dtype=torch.int32, device="cpu")
+    input = torch.cat((gate.repeat(hidden_size // 4), up.repeat(hidden_size // 4))).repeat(3, 1)
+    input[1].zero_()
+    # A literal post-clamp oracle avoids duplicating the implementation's clamps.
+    gate_ref = torch.tensor([-limit - 1, limit, limit, limit], dtype=torch.float32, device="cpu")
+    up_ref = torch.tensor([limit, -limit, limit, -limit], dtype=torch.float32, device="cpu")
+    hidden = (torch.nn.functional.silu(gate_ref) * up_ref).repeat(hidden_size // 4).repeat(3, 1)
+    hidden[1].zero_()
+    expected_scale = hidden.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / 127
+    expected = torch.round(hidden / expected_scale).to(torch.int8)
+
+    device = "npu" if backend == "torch_npu" else "cpu"
+    op = MojoDequantSwiGLUClampQuant._registry.get(backend)(
+        expert_num=len(counts), hidden_size=hidden_size, clamp_limit=limit, device=device
+    )
+    assert op._backend == backend
+    op.load_state_dict(
+        {
+            "weight_scale": torch.ones(len(counts), hidden_size * 2, device="cpu"),
+            "quant_scale": torch.ones(len(counts), hidden_size, device="cpu"),
+        },
+        strict=True,
+    )
+    activation_scale = torch.ones(3, 1, dtype=torch.float32, device=device)
+    token_count = torch.tensor(counts, dtype=torch.int64, device=device)
+    output, scale = op(input.to(device), activation_scale, token_count)
+    output, scale = output.cpu(), scale.cpu()
+
+    assert output.shape == (3, hidden_size)
+    assert output.dtype == torch.int8
+    assert scale.shape == (3, 1)
+    assert scale.dtype == torch.float32
+    assert torch.isfinite(scale).all() and (scale > 0).all()
+    assert torch.equal(output, expected)
+    if backend == "torch":
+        assert torch.equal(scale, expected_scale)
+    else:
+        torch.testing.assert_close(scale, expected_scale, atol=0, rtol=1e-4)

@@ -25,11 +25,14 @@ from .operators.attention import MojoSdpa
 from .operators.attention import MojoSWA
 
 """ kvcache """
+from .operators.kv_cache import MojoScatterNdUpdate
 from .operators.kv_cache import MojoStorePagedKVCache
 
 """ gemm """
+from .operators.gemm import MojoBatchGemm
 from .operators.gemm import MojoGemm
 from .operators.gemm import MojoQuantGemm
+from .operators.gemm import MojoQuantGroupGemm
 from .operators.gemm import MojoGroupGemm
 
 """ compute + comm """
@@ -51,6 +54,7 @@ from .operators.over_encoding import MojoNF4DequantEmbedding
 
 """ quantize """
 from .operators.quantize import MojoDequant
+from .operators.quantize import MojoDequantSwiGLUClampQuant
 from .operators.quantize import MojoDequantSwiGLUQuant
 from .operators.quantize import MojoDynamicQuant
 from .operators.quantize import MojoMoEDynamicQuant
@@ -62,6 +66,7 @@ from .operators.moe import MojoMoE
 from .operators.moe import MojoMoECombine
 from .operators.moe import MojoMoEDispatch
 from .operators.moe import MojoMoEGating
+from .operators.moe import MojoMoEGatingTopK
 from .operators.moe import MojoQuantExperts
 from .operators.moe import MojoQuantMoE
 
@@ -79,6 +84,7 @@ from .operators.normalization import MojoRMSNormQuant
 """ position_embedding """
 from .operators.position_embedding import MojoApplyRoPE
 from .operators.position_embedding import MojoApplyVisionRoPE2D
+from .operators.position_embedding import MojoInplacePartialRotaryMul
 from .operators.position_embedding import MojoMRoPE
 from .operators.position_embedding import MojoRotaryEmbedding
 from .operators.position_embedding import MojoVisionRotaryEmbedding2D
@@ -96,6 +102,10 @@ from .operators.convolution import MojoCausalConv1dUpdateState
 
 """ mlp"""
 from .operators.mlp import MojoSwiGLUMLP
+
+""" hyper connections """
+from .operators.hyper_connection import MojoHcPost
+from .operators.hyper_connection import MojoHcPre
 
 """ functions """
 from .functions.activation import MojoSiluFunction
@@ -124,10 +134,13 @@ __all__ = [
     "MojoPagedDecodeSWA",
     "MojoSWA",
 
+    "MojoScatterNdUpdate",
     "MojoStorePagedKVCache",
 
+    "MojoBatchGemm",
     "MojoGemm",
     "MojoQuantGemm",
+    "MojoQuantGroupGemm",
     "MojoGroupGemm",
     "MojoGemmAll2All",
     "MojoAllGatherGemm",
@@ -138,6 +151,7 @@ __all__ = [
 
     "MojoStaticQuant",
     "MojoDequant",
+    "MojoDequantSwiGLUClampQuant",
     "MojoDynamicQuant",
     "MojoMoEDynamicQuant",
     "MojoDequantSwiGLUQuant",
@@ -150,6 +164,7 @@ __all__ = [
 
     "MojoMoE",
     "MojoMoEGating",
+    "MojoMoEGatingTopK",
     "MojoMoEDispatch",
     "MojoExperts",
     "MojoMoECombine",
@@ -168,6 +183,7 @@ __all__ = [
 
     "MojoRotaryEmbedding",
     "MojoApplyRoPE",
+    "MojoInplacePartialRotaryMul",
     "MojoApplyVisionRoPE2D",
     "MojoVisionRotaryEmbedding2D",
     "MojoMRoPE",
@@ -182,6 +198,9 @@ __all__ = [
     "MojoCausalConv1dUpdateState",
 
     "MojoSwiGLUMLP",
+
+    "MojoHcPost",
+    "MojoHcPre",
 
     "MojoSiluFunction",
     "MojoRMSNormFunction",

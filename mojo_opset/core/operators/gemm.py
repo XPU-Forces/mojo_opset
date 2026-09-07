@@ -56,6 +56,26 @@ class MojoGemm(MojoOperator):
         return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"
 
 
+class MojoBatchGemm(MojoOperator):
+    """Batched GEMM: ``input[M, B, K] x weight[B, K, N] -> output[M, B, N]``.
+
+    B, K and N are num_groups, in_features and out_features; M is the runtime
+    token count. The axis order is fixed, not the dimension sizes.
+    **kwargs supplies tensor factory options such as device and dtype.
+    """
+
+    def __init__(self, num_groups: int, in_features: int, out_features: int, **kwargs):
+        super().__init__(**kwargs)
+        self.num_groups = num_groups
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = nn.Parameter(torch.empty(num_groups, in_features, out_features, **self.tensor_factory_kwargs))
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        output = torch.bmm(input.transpose(0, 1), self.weight)
+        return output.transpose(0, 1).contiguous()
+
+
 class MojoGroupGemm(MojoOperator):
     def __init__(
         self,
@@ -230,3 +250,60 @@ class MojoQuantGemm(MojoOperator):
             f"quant_dtype={self.quant_dtype}, weight_dtype={self.weight_dtype}"
         )
 
+
+class MojoQuantGroupGemm(MojoOperator):
+    """Grouped W8A8 GEMM over ``input[T, K]`` and ``weight[E, K, N]``.
+
+    group_list[E] contains per-group token counts, not cumulative boundaries;
+    counts sum to T and may include empty groups. Output[T, N] concatenates
+    results in group order. E, K and N are constructor dimensions.
+    Scales are omitted for INT32 output. Dequantized output uses per-token
+    input_scale[T] or [T, 1] and per-channel weight_scale[E, N].
+    **kwargs supplies tensor factory options; weights remain INT8 and scales
+    are initialized in FP32 independently of the requested factory dtype.
+    """
+
+    def __init__(
+        self,
+        num_groups: int,
+        in_features: int,
+        out_features: int,
+        output_dtype: torch.dtype = torch.bfloat16,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.num_groups = num_groups
+        self.in_features = in_features
+        self.out_features = out_features
+        self.output_dtype = output_dtype
+        weight_factory_kwargs = {**self.tensor_factory_kwargs, "dtype": torch.int8}
+        weight_scale_factory_kwargs = {**self.tensor_factory_kwargs, "dtype": torch.float32}
+        self.register_buffer(
+            "weight",
+            torch.empty(num_groups, in_features, out_features, **weight_factory_kwargs),
+        )
+        if output_dtype == torch.int32:
+            self.register_buffer("weight_scale", None)
+        else:
+            self.register_buffer(
+                "weight_scale",
+                torch.empty(num_groups, out_features, **weight_scale_factory_kwargs),
+            )
+
+    def forward(
+        self,
+        input: torch.Tensor,
+        group_list: torch.Tensor,
+        input_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        boundaries = group_list.cumsum(0).cpu().tolist()
+        outputs = []
+        start = 0
+        for expert_idx, end in enumerate(boundaries):
+            output = input[start:end].float() @ self.weight[expert_idx].float()
+            if self.output_dtype != torch.int32:
+                output *= self.weight_scale[expert_idx].float().unsqueeze(0)
+                output *= input_scale[start:end].float().reshape(-1, 1)
+            outputs.append(output.to(self.output_dtype))
+            start = end
+        return torch.cat(outputs, dim=0)

@@ -1,5 +1,6 @@
+from typing import List
 from typing import Optional
-from typing import Tuple, List
+from typing import Tuple
 
 import torch
 
@@ -174,6 +175,34 @@ class MojoApplyRoPE(MojoOperator):
             cos = cos.unsqueeze(-2)
             sin = sin.unsqueeze(-2)
         return self._apply_rope(q, k, cos, sin)
+
+
+class MojoInplacePartialRotaryMul(MojoOperator):
+    """Apply interleaved RoPE to ``input[..., start:end]`` in place.
+
+    Corresponding AscendC custom operator:
+    ``torch.ops.custom.inplace_partial_rotary_mul``
+    (``aclnnInplacePartialRotaryMul``).
+    """
+
+    def __init__(self, partial_slice: List[int], rotary_mode: str = "interleave", **kwargs):
+        super().__init__(**kwargs)
+        assert rotary_mode == "interleave"
+        self.partial_slice = tuple(partial_slice)
+        self.rotary_mode = rotary_mode
+
+    def forward(
+        self,
+        input: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
+        """Rotate the selected query/key channels using broadcastable cos/sin."""
+        start, end = self.partial_slice
+        rotary_states = input[..., start:end]
+        rotated_pairs = torch.stack((-rotary_states[..., 1::2], rotary_states[..., ::2]), dim=-1)
+        input[..., start:end] = cos * rotary_states + rotated_pairs.reshape_as(rotary_states) * sin
+        return input
 
 
 class MojoMRoPE(MojoOperator):

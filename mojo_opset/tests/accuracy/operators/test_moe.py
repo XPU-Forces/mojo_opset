@@ -9,9 +9,53 @@ from mojo_opset import MojoMoE
 from mojo_opset import MojoMoECombine
 from mojo_opset import MojoMoEDispatch
 from mojo_opset import MojoMoEGating
+from mojo_opset import MojoMoEGatingTopK
 from mojo_opset import MojoExperts
 from mojo_opset.utils.platform import get_torch_device
 from mojo_opset.tests.utils import bypass_not_implemented
+
+
+@pytest.mark.parametrize("norm_type", [0, 1, 2])
+def test_moe_gating_topk_uses_bias_only_for_selection(norm_type):
+    logits = torch.tensor([[2.0, 0.0, 1.0], [0.0, 3.0, 1.0]], device="cpu")
+    bias = torch.tensor([0.0, 4.0, 0.0], device="cpu")
+    expected_indices = torch.tensor([[1, 0], [1, 2]], dtype=torch.int32, device="cpu")
+    if norm_type == 0:
+        normalized = torch.softmax(logits.float(), dim=-1)
+    elif norm_type == 1:
+        normalized = torch.sigmoid(logits.float())
+    else:
+        normalized = torch.sqrt(torch.nn.functional.softplus(logits.float()))
+    expected_weights = torch.gather(normalized, 1, expected_indices.long())
+    if norm_type != 0:
+        expected_weights = expected_weights / (expected_weights.sum(dim=-1, keepdim=True) + 0.03)
+    expected_weights *= 0.5
+
+    op = MojoMoEGatingTopK._registry.get("torch")(
+        num_experts=3,
+        top_k=2,
+        norm_type=norm_type,
+        routed_scaling_factor=0.5,
+        eps=0.03,
+        device="cpu",
+    )
+    op.load_state_dict({"bias": bias}, strict=True)
+    weights, indices, full_distribution = op(gate_logits=logits)
+
+    assert torch.equal(indices, expected_indices)
+    torch.testing.assert_close(weights, expected_weights)
+    torch.testing.assert_close(full_distribution, normalized)
+
+
+def test_moe_gating_topk_without_bias():
+    op = MojoMoEGatingTopK._registry.get("torch")(num_experts=3, top_k=2, bias=False, device="cpu")
+    gate_logits = torch.tensor([[2.0, 0.0, 1.0]], device="cpu")
+    gates, indices, scores = op(gate_logits=gate_logits)
+
+    assert not op.state_dict()
+    assert torch.equal(indices, torch.tensor([[0, 2]], dtype=torch.int32, device="cpu"))
+    torch.testing.assert_close(gates, torch.softmax(gate_logits, dim=-1)[:, [0, 2]])
+    torch.testing.assert_close(scores, torch.softmax(gate_logits, dim=-1))
 
 
 @pytest.mark.parametrize(

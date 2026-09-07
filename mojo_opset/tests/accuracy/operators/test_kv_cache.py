@@ -4,6 +4,7 @@ import math
 import random
 
 from mojo_opset import MojoStorePagedKVCache
+from mojo_opset import MojoScatterNdUpdate
 from mojo_opset.experimental import MojoStorePagedMLAKVCache
 from mojo_opset.experimental import MojoStorePagedKVCacheC8
 from mojo_opset.experimental import MojoDequantFromPagedKVCache
@@ -14,6 +15,21 @@ from mojo_opset.tests.utils import host_perf
 from mojo_opset.utils.platform import get_platform
 from mojo_opset.utils.platform import get_torch_device
 from mojo_opset.core.operators.kv_cache import build_paged_kv_chunk_metadata
+
+
+def test_scatter_nd_update_is_in_place_and_skips_negative_indices():
+    var = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    original = var.clone()
+    indices = torch.tensor([[2], [-1], [0]], dtype=torch.int32)
+    updates = torch.tensor([[20.0, 21.0, 22.0], [90.0, 91.0, 92.0], [1.0, 2.0, 3.0]])
+
+    actual = MojoScatterNdUpdate._registry.get("torch")()(var, indices, updates)
+
+    assert actual.data_ptr() == var.data_ptr()
+    assert torch.equal(actual[0], updates[2])
+    assert torch.equal(actual[2], updates[0])
+    assert torch.equal(actual[1], original[1])
+    assert torch.equal(actual[3], original[3])
 
 
 def _assert_int8_cache_close(result, ref, mismatch_ratio=1e-5):

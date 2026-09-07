@@ -1,4 +1,5 @@
-from typing import Optional, Tuple, Union
+from typing import Tuple
+from typing import Union
 
 import torch
 import torch.distributed as dist
@@ -321,6 +322,70 @@ class MojoMoEGating(MojoOperator):
         hidden_size = self.gate_weight.size(0)
         num_experts = self.gate_weight.size(1)
         return f"{hidden_size=}, {num_experts=}, {self.top_k=}".replace("self.", "")
+
+
+class MojoMoEGatingTopK(MojoOperator):
+    """Reference MoE top-k gating.
+
+    Input ``gate_logits`` is ``[num_tokens, num_experts]``. Outputs are top-k weights
+    ``[num_tokens, top_k]``, expert indices ``[num_tokens, top_k]`` and
+    router scores ``[num_tokens, num_experts]``.
+
+    Corresponding AscendC custom operator:
+    ``torch.ops.custom.npu_moe_gating_top_k``
+    (``aclnnMoeGatingTopKHash``).
+    """
+
+    def __init__(
+        self,
+        num_experts: int,
+        top_k: int,
+        norm_type: int = 0,
+        routed_scaling_factor: float = 1.0,
+        eps: float = 1e-20,
+        bias: bool = True,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        if norm_type not in (0, 1, 2):
+            raise NotImplementedError(f"MojoMoEGatingTopK does not support norm_type={norm_type}.")
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.norm_type = norm_type
+        self.routed_scaling_factor = routed_scaling_factor
+        self.eps = eps
+        if bias:
+            bias_factory_kwargs = {**self.tensor_factory_kwargs, "dtype": torch.float32}
+            self.bias = nn.Parameter(torch.empty(num_experts, **bias_factory_kwargs))
+        else:
+            self.register_parameter("bias", None)
+
+    def forward(
+        self,
+        gate_logits: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        gate_logits_fp32 = gate_logits.float()
+        if self.norm_type == 0:
+            router_scores = torch.softmax(gate_logits_fp32, dim=-1)
+        elif self.norm_type == 1:
+            router_scores = torch.sigmoid(gate_logits_fp32)
+        else:
+            router_scores = torch.sqrt(F.softplus(gate_logits_fp32))
+
+        selection_scores = router_scores
+        if self.bias is not None:
+            selection_scores = selection_scores + self.bias.float()
+
+        _, top_k_indices = torch.topk(selection_scores, self.top_k, dim=-1, largest=True, sorted=True)
+        top_k_indices = top_k_indices.to(dtype=torch.int32)
+
+        top_k_gates = torch.gather(router_scores, dim=1, index=top_k_indices.to(dtype=torch.int64))
+        if self.norm_type != 0:
+            top_k_gates = top_k_gates / (top_k_gates.sum(dim=-1, keepdim=True) + self.eps)
+
+        top_k_gates = (top_k_gates * self.routed_scaling_factor).to(dtype=gate_logits.dtype)
+
+        return top_k_gates, top_k_indices, router_scores
 
 
 def _count_expert_tokens(top_k_indices: torch.Tensor, num_experts: int) -> torch.Tensor:

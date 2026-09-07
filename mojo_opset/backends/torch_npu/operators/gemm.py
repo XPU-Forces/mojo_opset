@@ -1,8 +1,10 @@
 import torch
 import torch_npu
 
-from mojo_opset.core import MojoQuantGemm
+from mojo_opset.core import MojoBatchGemm
 from mojo_opset.core import MojoGroupGemm
+from mojo_opset.core import MojoQuantGemm
+from mojo_opset.core import MojoQuantGroupGemm
 from mojo_opset.experimental import MojoQuantBatchGemmReduceSum
 from mojo_opset.utils.logging import get_logger
 
@@ -38,6 +40,45 @@ class TorchNpuQuantGemm(MojoQuantGemm):
         if out.dtype != self.output_dtype:
             out = out.to(self.output_dtype)
         return out
+
+
+class TorchNpuBatchGemm(MojoBatchGemm):
+    """Transpose-BMM backend; CANN A2 BF16/FP16 requires K and N aligned to 128."""
+
+    supported_platforms_list = ["npu"]
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        # [M, B, K] -> [B, M, K] for GEMM, then restore output[M, B, N].
+        return torch_npu.npu_transpose_batchmatmul(
+            input.contiguous(),
+            self.weight.contiguous(),
+            perm_x1=(1, 0, 2),
+            perm_x2=(0, 1, 2),
+            perm_y=(1, 0, 2),
+        )
+
+
+class TorchNpuQuantGroupGemm(MojoQuantGroupGemm):
+    supported_platforms_list = ["npu"]
+
+    def forward(
+        self,
+        input: torch.Tensor,
+        group_list: torch.Tensor,
+        input_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # Group along the token axis using counts and return one concatenated tensor.
+        return torch_npu.npu_grouped_matmul(
+            [input],
+            [self.weight],
+            scale=None if self.weight_scale is None else [self.weight_scale],
+            per_token_scale=None if input_scale is None else [input_scale.reshape(-1)],
+            group_list=group_list,
+            split_item=3,
+            output_dtype=self.output_dtype,
+            group_type=0,
+            group_list_type=1,
+        )[0]
 
 
 class TorchNpuGroupGemm(MojoGroupGemm):

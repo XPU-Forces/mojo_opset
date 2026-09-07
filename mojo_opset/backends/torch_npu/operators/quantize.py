@@ -1,6 +1,7 @@
 import torch
 import torch_npu
 
+from mojo_opset.core import MojoDequantSwiGLUClampQuant
 from mojo_opset.core import MojoDequantSwiGLUQuant
 from mojo_opset.core import MojoDynamicQuant
 from mojo_opset.core import MojoMoEDynamicQuant
@@ -62,5 +63,31 @@ class TorchNpuDequantSwiGLUQuant(MojoDequantSwiGLUQuant):
             group_index=token_count,
             activate_left=self.activate_left,
             quant_mode=self.quant_mode,
+        )
+        return output, scale.unsqueeze(-1)
+
+
+class TorchNpuDequantSwiGLUClampQuant(MojoDequantSwiGLUClampQuant):
+    supported_platforms_list = ["npu"]
+
+    def forward(
+        self,
+        input: torch.Tensor,
+        activation_scale: torch.Tensor,
+        token_count: torch.Tensor,
+    ):
+        # Match the core contract: left-gated clamped SiLU, dynamic INT8, no extra alpha/bias.
+        output, scale = torch_npu.npu_dequant_swiglu_clamp_quant(
+            input,
+            weight_scale=self.weight_scale,
+            quant_scale=self.quant_scale,
+            activation_scale=activation_scale.reshape(-1),
+            group_index=token_count,
+            activate_left=True,
+            quant_mode=1,
+            swiglu_mode=1,
+            clamp_limit=self.clamp_limit,
+            glu_alpha=1.0,
+            glu_bias=0.0,
         )
         return output, scale.unsqueeze(-1)

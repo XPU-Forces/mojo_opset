@@ -101,6 +101,23 @@ def build_paged_kv_chunk_metadata(
     return chunk_metadata[valid_rows]
 
 
+class MojoScatterNdUpdate(MojoOperator):
+    def forward(
+        self,
+        cache: torch.Tensor,
+        indices: torch.Tensor,
+        updates: torch.Tensor,
+    ) -> torch.Tensor:
+        """Update ``cache[B, S]`` in place from ``indices[U, 1]`` and ``updates[U, S]``.
+
+        Negative indices are padding and do not update ``cache``.
+        """
+        idx = indices.to(dtype=torch.int64).view(-1)
+        valid = idx >= 0
+        cache[idx[valid]] = updates[valid]
+        return cache
+
+
 class MojoStorePagedKVCache(MojoOperator):
     def __init__(
         self,

@@ -3,6 +3,7 @@ import torch
 
 from mojo_opset import MojoApplyRoPE
 from mojo_opset import MojoApplyVisionRoPE2D
+from mojo_opset import MojoInplacePartialRotaryMul
 from mojo_opset import MojoMRoPE
 from mojo_opset import MojoRotaryEmbedding
 from mojo_opset import MojoVisionRotaryEmbedding2D
@@ -13,6 +14,24 @@ from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_torch_device
 
 torch.random.manual_seed(42)
+
+
+def test_inplace_partial_rotary_mul_updates_only_requested_slice():
+    input = torch.tensor([[10.0, 1.0, 2.0, 3.0, 4.0, 20.0]], device="cpu")
+    original = input.clone()
+    cos = torch.tensor([[2.0, 3.0, 4.0, 5.0]], device="cpu")
+    sin = torch.tensor([[0.5, 1.0, 1.5, 2.0]], device="cpu")
+    rope = original[:, 1:5]
+    rotated = torch.stack((-rope[:, 1::2], rope[:, ::2]), dim=-1).reshape_as(rope)
+    expected_slice = cos * rope + sin * rotated
+
+    op = MojoInplacePartialRotaryMul._registry.get("torch")(partial_slice=[1, 5])
+    actual = op(input=input, cos=cos, sin=sin)
+
+    assert actual.data_ptr() == input.data_ptr()
+    assert torch.equal(actual[:, :1], original[:, :1])
+    assert torch.equal(actual[:, 5:], original[:, 5:])
+    assert torch.equal(actual[:, 1:5], expected_slice)
 
 VISION_VIT_CONFIG = {
     "img_size": 448,

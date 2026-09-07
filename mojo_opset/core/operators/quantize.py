@@ -358,3 +358,45 @@ class MojoDequantSwiGLUQuant(MojoOperator):
             f"expert_num={self.expert_num}, hidden_size={self.hidden_size}, quant_dtype={self.quant_dtype}, "
             f"activate_left={self.activate_left}, quant_mode={self.quant_mode}"
         )
+
+
+class MojoDequantSwiGLUClampQuant(MojoOperator):
+    """Grouped dequantization, clamped ``[gate, up]`` SwiGLU and dynamic INT8 quantization.
+
+    The left gate is upper-clamped, then passed through standard SiLU; the
+    right up branch is clamped to [-clamp_limit, clamp_limit]. No extra GLU
+    alpha or bias is applied. token_count[E] gives counts, not cumulative
+    boundaries. Weight scales are [E, 2H] and quantization scales are [E, H].
+    **kwargs supplies tensor factory options; both scale parameters are
+    initialized in FP32 independently of the requested factory dtype.
+    """
+
+    def __init__(self, expert_num: int, hidden_size: int, clamp_limit: float, **kwargs):
+        super().__init__(**kwargs)
+        self.expert_num = expert_num
+        self.hidden_size = hidden_size
+        self.clamp_limit = clamp_limit
+        scale_kwargs = {**self.tensor_factory_kwargs, "dtype": torch.float32}
+        self.weight_scale = torch.nn.Parameter(torch.empty(expert_num, hidden_size * 2, **scale_kwargs))
+        self.quant_scale = torch.nn.Parameter(torch.empty(expert_num, hidden_size, **scale_kwargs))
+
+    def forward(
+        self,
+        input: torch.Tensor,
+        activation_scale: torch.Tensor,
+        token_count: torch.Tensor,
+    ):
+        """Quantize input[T, 2H] with activation_scale[T] or [T, 1].
+
+        Returns INT8 output[T, H] and FP32 per-token scale[T, 1].
+        """
+        weight_scale = self.weight_scale.float().repeat_interleave(token_count, dim=0)
+        hidden = input.float() * weight_scale * activation_scale.float().reshape(-1, 1)
+        gate, up = hidden.chunk(2, dim=-1)
+        gate = gate.clamp(max=self.clamp_limit)
+        up = up.clamp(min=-self.clamp_limit, max=self.clamp_limit)
+        hidden = F.silu(gate) * up
+        hidden *= self.quant_scale.float().repeat_interleave(token_count, dim=0)
+        scale = hidden.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / 127
+        output = torch.clamp(torch.round(hidden / scale), -128, 127).to(torch.int8)
+        return output, scale

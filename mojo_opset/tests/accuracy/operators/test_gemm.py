@@ -6,9 +6,11 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from mojo_opset import MojoBatchGemm
 from mojo_opset import MojoGemm
 from mojo_opset import MojoGroupGemm
 from mojo_opset import MojoQuantGemm
+from mojo_opset import MojoQuantGroupGemm
 from mojo_opset.experimental import MojoQuantBatchGemmReduceSum
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
@@ -52,6 +54,145 @@ def test_gemm(m, k, n, dtype, bias):
     torch_out = F.linear(input, gemm.weight, gemm.bias)
     mojo_out = gemm(input)
     torch.testing.assert_close(mojo_out, torch_out)
+
+
+# ===========================================================================
+# MojoBatchGemm
+# ===========================================================================
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("m, batch, k, n", [(5, 3, 7, 4), (1, 1, 3, 5), (2, 4, 8, 3)])
+def test_batch_gemm_torch_reference(dtype, m, batch, k, n):
+    input = torch.randn(m, batch, k, dtype=dtype, device="cpu")
+    weight = torch.randn(batch, k, n, dtype=dtype, device="cpu")
+    op = MojoBatchGemm._registry.get("torch")(
+        num_groups=batch, in_features=k, out_features=n, dtype=dtype, device="cpu"
+    )
+    op.load_state_dict({"weight": weight}, strict=True)
+
+    actual = op(input)
+    expected = torch.stack([input[:, batch_idx] @ weight[batch_idx] for batch_idx in range(batch)], dim=1)
+
+    assert actual.shape == (m, batch, n)
+    assert actual.dtype == dtype
+    assert actual.is_contiguous()
+    assert torch.equal(op.state_dict()["weight"], weight)
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.skipif(get_platform() != "npu", reason="Requires an NPU")
+# CANN A2 BF16 transpose-BMM requires 128-aligned K/N; CPU cases also cover unaligned sizes.
+@pytest.mark.parametrize("m, batch, k, n", [(1, 8, 4096, 1024), (5, 2, 128, 128), (3, 4, 256, 128)])
+def test_batch_gemm_npu_matches_torch_reference(m, batch, k, n):
+    import torch_npu
+
+    if not hasattr(torch_npu, "npu_transpose_batchmatmul"):
+        pytest.skip("torch_npu.npu_transpose_batchmatmul is unavailable")
+    input_cpu = torch.randn(m, batch, k, dtype=torch.bfloat16, device="cpu")
+    weight_cpu = torch.randn(batch, k, n, dtype=torch.bfloat16, device="cpu")
+    reference = MojoBatchGemm._registry.get("torch")(
+        num_groups=batch, in_features=k, out_features=n, dtype=torch.bfloat16, device="cpu"
+    )
+    reference.load_state_dict({"weight": weight_cpu}, strict=True)
+    expected = reference(input_cpu)
+
+    op = MojoBatchGemm._registry.get("torch_npu")(
+        num_groups=batch, in_features=k, out_features=n, dtype=torch.bfloat16, device="npu"
+    )
+    assert op._backend == "torch_npu"
+    op.load_state_dict(reference.state_dict(), strict=True)
+    actual = op(input_cpu.to("npu")).cpu()
+
+    assert actual.shape == (m, batch, n)
+    assert actual.dtype == torch.bfloat16
+    torch.testing.assert_close(actual.float(), expected.float(), atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("output_dtype", [torch.float32, torch.int32, torch.bfloat16])
+def test_quant_group_gemm_torch_reference(output_dtype):
+    input = torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int8, device="cpu")
+    weight = torch.tensor(
+        [[[1, 0], [0, 1]], [[2, 1], [1, 2]]],
+        dtype=torch.int8,
+        device="cpu",
+    )
+    group_list = torch.tensor([1, 2], dtype=torch.int32, device="cpu")
+    weight_scale = torch.tensor([[0.5, 1.0], [1.0, 0.25]], device="cpu")
+    input_scale = torch.tensor([[1.0], [0.5], [2.0]], device="cpu")
+
+    op = MojoQuantGroupGemm._registry.get("torch")(
+        num_groups=2, in_features=2, out_features=2, output_dtype=output_dtype, device="cpu"
+    )
+    state = {"weight": weight}
+    if output_dtype != torch.int32:
+        state["weight_scale"] = weight_scale
+    op.load_state_dict(state, strict=True)
+    assert set(op.state_dict()) == set(state)
+
+    if output_dtype == torch.int32:
+        actual = op(input, group_list)
+        assert actual.dtype == output_dtype
+        expected = torch.cat((input[:1].float() @ weight[0].float(), input[1:].float() @ weight[1].float())).int()
+        assert torch.equal(actual, expected)
+        return
+
+    actual = op(input, group_list, input_scale)
+    assert actual.dtype == output_dtype
+    expected = torch.cat(
+        (
+            (input[:1].float() @ weight[0].float()) * weight_scale[0] * input_scale[:1],
+            (input[1:].float() @ weight[1].float()) * weight_scale[1] * input_scale[1:],
+        )
+    )
+    assert actual.dtype == output_dtype
+    assert torch.equal(actual, expected.to(output_dtype))
+
+
+@pytest.mark.parametrize("backend", ["torch", "torch_npu"])
+@pytest.mark.parametrize("output_dtype", [torch.int32, torch.bfloat16])
+@pytest.mark.parametrize("counts, k, n", [([1, 2], 32, 64), ([0, 3, 0, 2, 0], 64, 128), ([3], 128, 32)])
+def test_quant_group_gemm_shapes_and_empty_groups(backend, output_dtype, counts, k, n):
+    if backend == "torch_npu":
+        if get_platform() != "npu":
+            pytest.skip("Requires an NPU")
+        import torch_npu
+
+        if not hasattr(torch_npu, "npu_grouped_matmul"):
+            pytest.skip("torch_npu.npu_grouped_matmul is unavailable")
+
+    tokens, groups = sum(counts), len(counts)
+    input = torch.randint(-4, 5, (tokens, k), dtype=torch.int8, device="cpu")
+    weight = torch.randint(-4, 5, (groups, k, n), dtype=torch.int8, device="cpu")
+    group_list = torch.tensor(counts, dtype=torch.int64, device="cpu")
+    # Binary-exact scales isolate layout/count errors from scale rounding.
+    weight_scale = (torch.arange(groups * n, device="cpu").reshape(groups, n) % 4 + 1).float() / 16
+    input_scale = (torch.arange(tokens, device="cpu") % 4 + 1).float().reshape(-1, 1) / 8
+    token_weights = weight.repeat_interleave(group_list, dim=0).float()
+    expected = torch.bmm(input.float().unsqueeze(1), token_weights).squeeze(1)
+    state = {"weight": weight}
+    if output_dtype != torch.int32:
+        state["weight_scale"] = weight_scale
+        expected *= weight_scale.repeat_interleave(group_list, dim=0) * input_scale
+    expected = expected.to(output_dtype)
+
+    device = "npu" if backend == "torch_npu" else "cpu"
+    op = MojoQuantGroupGemm._registry.get(backend)(
+        num_groups=groups, in_features=k, out_features=n, output_dtype=output_dtype, device=device
+    )
+    assert op._backend == backend
+    op.load_state_dict(state, strict=True)
+    if backend == "torch_npu":
+        # NPU weight preparation belongs to the caller, as in the modeling path.
+        op.weight = torch_npu.npu_format_cast(op.weight, 29)
+        if op.weight_scale is not None:
+            op.weight_scale = op.weight_scale.to(torch.bfloat16)
+    scale = None if output_dtype == torch.int32 else input_scale.to(device)
+    actual = op(input.to(device), group_list.to(device), scale).cpu()
+
+    assert actual.shape == (tokens, n)
+    assert actual.dtype == output_dtype
+    assert torch.equal(actual, expected)
 
 
 # ===========================================================================
