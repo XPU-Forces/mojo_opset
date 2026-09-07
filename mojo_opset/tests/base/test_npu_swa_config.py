@@ -8,9 +8,16 @@ _SWA_FWD_CONFIGS = {
     "a5": {"BLOCK_M": 128, "BLOCK_N": 128, "multibuffer": False},
 }
 _TRAINING_CONFIGS = {
-    "_swa_bwd_preprocess": {"BLOCK_SIZE": 64},
-    "_swa_bwd_dkdv_kernel": {"BLOCK_M": 256, "BLOCK_N": 64, "multibuffer": True},
-    "_swa_bwd_dq_kernel": {"BLOCK_M": 128, "BLOCK_N": 128, "multibuffer": True},
+    "a2": {
+        "_swa_bwd_preprocess": {"BLOCK_SIZE": 64},
+        "_swa_bwd_dkdv_kernel": {"BLOCK_M": 256, "BLOCK_N": 64, "multibuffer": True},
+        "_swa_bwd_dq_kernel": {"BLOCK_M": 128, "BLOCK_N": 128, "multibuffer": True},
+    },
+    "a5": {
+        "_swa_bwd_preprocess": {"BLOCK_SIZE": 64},
+        "_swa_bwd_dkdv_kernel": {"BLOCK_M": 128, "BLOCK_N": 128, "multibuffer": True},
+        "_swa_bwd_dq_kernel": {"BLOCK_M": 128, "BLOCK_N": 128, "multibuffer": True},
+    },
 }
 _RUNTIME_SHAPE_ARGUMENTS = {
     "_swa_fwd_kernel": ["bsz", "stride_lse_h"],
@@ -64,7 +71,7 @@ def test_npu_swa_training_configs_are_pinned():
     for arch in ("a2", "a5"):
         functions = _functions(arch)
         assert _single_triton_config(functions["_swa_fwd_kernel"]) == _SWA_FWD_CONFIGS[arch]
-        for kernel, expected in _TRAINING_CONFIGS.items():
+        for kernel, expected in _TRAINING_CONFIGS[arch].items():
             assert _single_triton_config(functions[kernel]) == expected
 
 
