@@ -1325,7 +1325,6 @@ def sdpa_bwd_impl(
             hfusion_enable_multiple_consumer_fusion=True,
             unit_flag=True,
             limit_auto_multi_buffer_of_local_buffer="no-l0c",
-            intra_cache_num=1,
         )
 
         kernel_sdpa_bwd_kv[(num_cores,)](
