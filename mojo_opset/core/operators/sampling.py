@@ -71,6 +71,28 @@ class MojoTopKSampling(MojoOperator):
         return next_probs, next_tokens
 
 
+class MojoTopKSoftmax(MojoOperator):
+    def __init__(
+        self,
+        top_k: int = 50,
+        filter_value: float = -float("Inf"),
+        min_tokens_to_keep: int = 1,
+    ):
+        super().__init__()
+        self.top_k = top_k
+        self.filter_value = filter_value
+        self.min_tokens_to_keep = min_tokens_to_keep
+
+    def forward(self, logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Torch reference: topk + softmax, returns (probs, indices) shape (batch, K)."""
+        logits = logits.to(torch.float32)
+        top_k = min(self.top_k, logits.size(-1))
+        top_k = max(top_k, self.min_tokens_to_keep)
+        topk_vals, topk_indices = torch.topk(logits, top_k)
+        topk_probs = torch.nn.functional.softmax(topk_vals, dim=-1)
+        return topk_probs, topk_indices
+
+
 class MojoTopPSampling(MojoOperator):
     def __init__(
         self,
