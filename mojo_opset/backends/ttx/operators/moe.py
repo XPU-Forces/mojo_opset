@@ -1,4 +1,5 @@
 import torch
+from typing import Optional
 from typing import Tuple
 
 from mojo_opset.backends.ttx.kernels import moe_combine
@@ -21,15 +22,19 @@ class TTXMoEGating(MojoMoEGating):
     def forward(
         self,
         hidden_states: torch.Tensor,  # (num_tokens, hidden_size)
+        forced_expert_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Returns (top_k_indices, top_k_gates).
 
         Args:
             hidden_states: (num_tokens, hidden_size), fp16/bf16/fp32.
+            forced_expert_ids: Optional (num_tokens, top_k) expert ids.
         Returns:
             top_k_indices: (num_tokens, top_k), int32.
             top_k_gates:   (num_tokens, top_k), fp32.
         """
+        if forced_expert_ids is not None:
+            return super().forward(hidden_states, forced_expert_ids=forced_expert_ids)
         assert self.gate_weight.dtype == torch.float32
         return moe_gating(hidden_states, self.gate_weight, self.top_k)
 
