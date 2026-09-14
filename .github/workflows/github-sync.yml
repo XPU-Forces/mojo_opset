@@ -1,0 +1,20 @@
+# Review this public entry separately before installing it on GitHub's default branch.
+# The Python implementation runs from the reviewed Codebase clone, never the PR tree.
+name: Sync ready PR to Codebase
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, synchronize, edited]
+    branches: [master]
+permissions: {}
+jobs:
+  sync:
+    if: github.repository == 'XPU-Forces/mojo_opset' && !github.event.pull_request.draft && vars.MOJO_PR_SYNC_ENABLED == 'true'
+    runs-on: [self-hosted, mojo-sync-ingress]
+    timeout-minutes: 30
+    steps:
+      - name: Apply ready PR changes
+        shell: bash
+        run: >-
+          sudo -n -i -u mojo-opset /usr/bin/python3 -E -s
+          /home/mojo-opset/mojo_opset/.codebase/github_sync/github_pull.py
+          < "$GITHUB_EVENT_PATH"
