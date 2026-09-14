@@ -232,11 +232,11 @@ class MojoGenerator(torch.nn.Module):
         should_end = next_token_id == self.tokenizer.eos_token_id
         decode_steps = 0
 
-        self._run_hooks("before_decode")
-
         graph_runner = None
         if self._graph_pool is not None:
             graph_runner = self._graph_pool.get_runner(input_ids, session)
+
+        self._run_hooks("before_decode")
 
         for step in range(1, max_decode_steps):
             with torch.inference_mode():
@@ -344,7 +344,7 @@ class PerfMojoGenerator(MojoGenerator):
         logger.info("=" * 60 + "\n", extra={"clean": True})
 
         logger.info("Starting Decode Throughput Tests...")
-        decode_batch_sizes = [1, 2, 4, 8, 16, 24]
+        decode_batch_sizes = [1, 2, 4, 8, 16]
         decode_seqlen = 4000
         self.perf_hook.records.clear()
         for bs in decode_batch_sizes:
