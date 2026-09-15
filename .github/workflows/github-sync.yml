@@ -15,6 +15,6 @@ jobs:
       - name: Apply ready PR changes
         shell: bash
         run: >-
-          sudo -n -i -u mojo-opset /usr/bin/python3 -E -s
+          sudo -n -u mojo-opset /usr/bin/python3 -E -s
           /home/mojo-opset/mojo_opset/.codebase/github_sync/github_pull.py
           < "$GITHUB_EVENT_PATH"
