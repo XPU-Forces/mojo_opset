@@ -5,7 +5,7 @@
 `MojoDebugger` 是一个轻量级、非侵入式的 LLM 模型调试工具，专为 `mojo_opset` 构建的模型设计。它提供两项核心能力：
 
 - **Dump** — 将指定层、指定算子的输入/输出张量保存到磁盘，供离线分析。
-- **Compare** — 将加速后端（如 TTX）的算子输出与 `torch` 参考实现进行逐元素对比，实时打印绝对误差、相对误差和余弦相似度。
+- **Compare** — 将加速后端（如 TTX）的算子输出与 `torch` 参考实现进行对比，并通过可插拔的 `analysis_func` hook 输出精度看护指标。
 
 两项功能均支持**运行时动态切换规则**——无需重建模型，即可在不同 forward 之间更换要观测的算子。
 
@@ -30,7 +30,8 @@ dbg.set_compare("*:mlp.act_fn")
    model(input_ids)            ← 每个 MojoOperator.forward() 执行时：
         │                        1. Hook 读取当前活跃规则（API / 环境变量）
         │                        2. 匹配命中 → 执行 dump 和/或 compare
-        │                        3. Compare: 惰性构建 torch 影子实例 → 运行参考 forward → 输出差异
+        │                        3. Compare: 惰性构建 torch 影子实例 → 运行参考 forward
+        │                        4. analysis_func hook 消费 backend/ref 输出并输出指标
         │
 dbg.detach()                   ← 移除 hook，释放影子实例
 ```
@@ -63,6 +64,19 @@ Hook 在每次 forward 时重新读取活跃规则，因此支持在迭代之间
 - 不匹配任何算子的规则会产生警告，并列出可用目标。
 - Dump 文件按 `rank{LOCAL_RANK}/` 子目录组织，适配分布式训练。
 - 步数计数器（`max_steps`）限制每个算子的 dump/compare 次数，防止磁盘和日志爆炸。
+
+**5. Analysis Hook**
+
+Compare 的指标计算被设计成 hook：`MojoDebugger` 只负责捕获 backend 输出、构建 torch ref 输出和组织上下文，默认 `default_precision_analysis_hook` 负责按算子语义输出精度看护指标。用户可以通过 `analysis_func` 替换默认分析逻辑，或用 `add_analysis_hook()` 追加自定义分析。
+
+默认 hook 按算子名推断语义类型：
+
+| 语义类型 | 典型算子 | 默认指标 |
+|---|---|---|
+| A 概率/路由 | gate、router、softmax | KL / JS / Top-K match |
+| B 方向向量 | RMSNorm、LayerNorm、query/key norm | Angular Error / CosSim / RelNormErr |
+| C 内积敏感 | q_proj、k_proj、v_proj、qkv_proj、KV cache | IPD mean / P95 / max |
+| D 一般数值信号 | Linear/FFN/Attention 输出 | SNR / RelL2 / MaxAbsErr / CosSim |
 
 ---
 
@@ -225,20 +239,44 @@ print(output.shape, output.dtype, output.mean(), output.std())
 
 ### Compare 输出
 
-Compare 在日志中逐算子打印精度指标：
+Compare 在日志中逐算子打印默认 analysis hook 的精度指标：
 
 ```
-[MojoDebug] layer5.input_layernorm step=0 | max_abs_diff=1.526e-05 max_rel_diff=3.814e-04 cos_sim=0.999998
-[MojoDebug] layer5.mlp.act_fn step=0      | max_abs_diff=7.629e-06 max_rel_diff=1.907e-04 cos_sim=1.000000
+[MojoDebug] layer5.input_layernorm step=0 | sem=B guard=safe angular_err_deg_mean=0.01 max_abs_diff=1e-05 max_rel_diff=0.0003 cos_mean=1 angular_err_deg_p95=0.02 rel_norm_err_mean=1e-06
+[MojoDebug] layer5.self_attn.q_proj step=0 | sem=C guard=safe ipd_p95=0.02 max_abs_diff=8e-06 max_rel_diff=0.0002 ipd_mean=0.01 ipd_max=0.03 cos_mean=1 snr_db=90
 ```
 
 | 指标 | 说明 |
 |---|---|
 | `max_abs_diff` | 后端输出与 torch 参考之间的最大绝对误差 |
 | `max_rel_diff` | 最大相对误差（分母 clamp 到 1e-12 以避免除零） |
-| `cos_sim` | 展平后的输出向量之间的余弦相似度 |
+| `sem` | 默认推断的算子语义类型：A/B/C/D |
+| `guard` | 根据默认阈值给出的 `safe` / `warn` / `red` 粗粒度状态 |
+| `ipd_*` | 内积失真指标，主要用于 Q/K/V/KV cache 等内积敏感张量 |
+| `angular_err_*` | 方向角误差，主要用于 RMSNorm/LayerNorm 输出 |
+| `snr_db` / `rel_l2` | 一般数值信号保真度 |
+| `kl_*` / `js_*` / `topk_match` | 概率分布和路由一致性指标 |
 
 > **注意**：Compare 仅报告数值差异，不做 pass/fail 判定。开发者可根据自身精度要求自行判断。
+
+### 自定义 Analysis Hook
+
+```python
+from mojo_opset.utils.debugger import DebugAnalysisContext, MojoDebugger
+
+def my_analysis(ctx: DebugAnalysisContext):
+    # ctx.output 是 backend 输出，ctx.ref_output 是 torch reference 输出
+    print(ctx.tag, ctx.step, ctx.output.shape)
+
+dbg = MojoDebugger(analysis_func=my_analysis)
+dbg.attach(model)
+dbg.set_compare("0:input_layernorm")
+model(input_ids)
+
+# 也可以在默认指标后追加额外分析
+dbg.set_analysis_func(None)      # 恢复默认精度指标 hook
+dbg.add_analysis_hook(my_analysis)
+```
 
 ### Compare 模式：observe vs replace
 
@@ -282,12 +320,15 @@ model(input_ids)
 
 | 方法 | 说明 |
 |---|---|
-| `__init__(dump_dir=None, max_steps=None, compare_mode=None)` | 创建调试器。`dump_dir` 依次取：参数 → `MOJO_DEBUG_DUMP_DIR` → `./mojo_debug_dump`。`compare_mode` 默认 `"observe"`。 |
+| `__init__(dump_dir=None, max_steps=None, compare_mode=None, analysis_func=None)` | 创建调试器。`analysis_func` 为空时使用默认精度指标 hook。 |
 | `attach(model)` | 遍历模型，传播 `layer_idx`，在所有 `MojoOperator` 上注册 hook。 |
 | `detach()` | 移除 hook，释放影子实例，清理调试属性。 |
 | `set_compare(rules)` | 设置 compare 规则，如 `"5:input_layernorm;*:mlp.act_fn"`。传入空字符串清除。 |
 | `set_dump(rules)` | 设置 dump 规则。传入空字符串清除。 |
 | `set_compare_mode(mode)` | 切换 compare 模式：`"observe"` 或 `"replace"`。 |
+| `set_analysis_func(func)` | 替换 compare analysis hook；传入 `None` 恢复默认 hook。 |
+| `add_analysis_hook(func)` | 在现有 hook 后追加一个 analysis hook。 |
+| `clear_analysis_hooks()` | 清空 analysis hook；compare 仍执行，但不输出分析指标。 |
 | `clear_rules()` | 清除所有通过 API 设置的规则。 |
 | `set_dump_dir(path)` | 运行时更改 dump 目录。 |
 | `set_max_steps(n)` | 设置每个算子的最大 dump/compare 步数。 |
@@ -303,6 +344,8 @@ model(input_ids)
 | `MOJO_DEBUG_DUMP_DIR` | Dump 输出目录 | `./mojo_debug_dump` |
 | `MOJO_DEBUG_MAX_STEPS` | 每个算子的最大 dump/compare 步数 | 无限制 |
 | `MOJO_DEBUG_COMPARE_MODE` | Compare 模式：`observe` 或 `replace` | `observe` |
+| `MOJO_DEBUG_IPD_PROBES` | 默认 IPD 随机探针数量 | `64` |
+| `MOJO_DEBUG_IPD_SEED` | 默认 IPD 随机探针种子 | `20260423` |
 
 ---
 
