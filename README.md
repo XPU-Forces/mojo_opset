@@ -1,4 +1,4 @@
-# 🧱 Mojo Opset
+# Mojo Opset
 
 ## Overview
 
