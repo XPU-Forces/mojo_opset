@@ -6,7 +6,7 @@ Mojo Opset is a domain specialized opset for LLMs and multimodal models that pro
 
 ## Backend Implementations
 
-### Torch native
+### Torch
 
 Mojo Opset provides a baseline implementation built on PyTorch native ops. This implementation serves as the golden reference for different backends and also functions as the fallback backend while other backends are being developed.
 
