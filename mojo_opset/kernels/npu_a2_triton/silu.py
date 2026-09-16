@@ -1,0 +1,361 @@
+import torch
+import triton
+import triton.language as tl
+from mojo_opset.kernels._npu_triton_utils import get_num_cores, libentry
+
+"""
+This file contains the implementation of SiLU (Sigmoid Linear Unit) for NPU.
+
+SiLU formula: silu(x) = x * sigmoid(x) = x / (1 + exp(-x))
+
+Based on SwiGLU implementation pattern and Liger Kernel style.
+
+Modifications for NPU architecture by triton-x team, 2025.
+"""
+
+
+MAX_BLOCK_SIZE_N = 2048
+
+
+@triton.jit
+def silu_activation(x):
+    """SiLU activation function: x * sigmoid(x)"""
+    return x * tl.sigmoid(x)
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_SIZE_M": 1}),
+        triton.Config({"BLOCK_SIZE_M": 2}),
+        triton.Config({"BLOCK_SIZE_M": 4}),
+        triton.Config({"BLOCK_SIZE_M": 8}),
+        triton.Config({"BLOCK_SIZE_M": 12}),
+        triton.Config({"BLOCK_SIZE_M": 16}),
+        triton.Config({"BLOCK_SIZE_M": 20}),
+        triton.Config({"BLOCK_SIZE_M": 24}),
+        triton.Config({"BLOCK_SIZE_M": 32}),
+    ],
+    key=["n_rows", "n_cols"],
+)
+@libentry()
+@triton.jit
+def _silu_fwd_kernel(
+    x,
+    y,
+    stride_row,
+    n_rows,
+    n_cols,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    grid_size = tl.num_programs(axis=0)
+
+    num_row_tasks = (n_rows + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+
+    for row_task_id in range(pid, num_row_tasks, grid_size):
+        block_start_row = row_task_id * BLOCK_SIZE_M
+        rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
+        rows_mask = rows_off < n_rows
+
+        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
+            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+            cols_mask = cols_off < n_cols
+            block_mask = rows_mask[:, None] & cols_mask[None, :]
+
+            x_ptrs = x + rows_off[:, None] * stride_row + cols_off[None, :]
+            y_ptrs = y + rows_off[:, None] * stride_row + cols_off[None, :]
+
+            x_chunk = tl.load(x_ptrs, mask=block_mask, other=0.0)
+
+            x_f32 = x_chunk.to(tl.float32)
+            y_f32 = silu_activation(x_f32)
+
+            y_chunk = y_f32.to(x_chunk.dtype)
+
+            tl.store(y_ptrs, y_chunk, mask=block_mask)
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_SIZE_M": 1}),
+        triton.Config({"BLOCK_SIZE_M": 2}),
+        triton.Config({"BLOCK_SIZE_M": 4}),
+        triton.Config({"BLOCK_SIZE_M": 8}),
+        triton.Config({"BLOCK_SIZE_M": 16}),
+    ],
+    key=["n_rows", "n_cols"],
+)
+@libentry()
+@triton.jit
+def _silu_fwd_nomask_kernel(
+    x,
+    y,
+    stride_row,
+    n_rows,
+    n_cols,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    grid_size = tl.num_programs(axis=0)
+
+    num_row_tasks = (n_rows + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+
+    for row_task_id in range(pid, num_row_tasks, grid_size):
+        block_start_row = row_task_id * BLOCK_SIZE_M
+        rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
+
+        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
+            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+
+            x_ptrs = x + rows_off[:, None] * stride_row + cols_off[None, :]
+            y_ptrs = y + rows_off[:, None] * stride_row + cols_off[None, :]
+
+            x_chunk = tl.load(x_ptrs)
+            x_f32 = x_chunk.to(tl.float32)
+            y_f32 = silu_activation(x_f32)
+            y_chunk = y_f32.to(x_chunk.dtype)
+
+            tl.store(y_ptrs, y_chunk)
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_SIZE_M": 1}),
+        triton.Config({"BLOCK_SIZE_M": 2}),
+        triton.Config({"BLOCK_SIZE_M": 4}),
+        triton.Config({"BLOCK_SIZE_M": 8}),
+        triton.Config({"BLOCK_SIZE_M": 16}),
+    ],
+    key=["n_rows", "n_cols"],
+)
+@libentry()
+@triton.jit
+def _silu_fwd_nomask_single_kernel(
+    x,
+    y,
+    stride_row,
+    n_rows,
+    n_cols,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    grid_size = tl.num_programs(axis=0)
+
+    num_row_tasks = (n_rows + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+    cols_off = tl.arange(0, BLOCK_SIZE_N)
+
+    for row_task_id in range(pid, num_row_tasks, grid_size):
+        block_start_row = row_task_id * BLOCK_SIZE_M
+        rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
+
+        x_ptrs = x + rows_off[:, None] * stride_row + cols_off[None, :]
+        y_ptrs = y + rows_off[:, None] * stride_row + cols_off[None, :]
+
+        x_chunk = tl.load(x_ptrs)
+        x_f32 = x_chunk.to(tl.float32)
+        y_f32 = silu_activation(x_f32)
+        y_chunk = y_f32.to(x_chunk.dtype)
+
+        tl.store(y_ptrs, y_chunk)
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_SIZE_M": 1}),
+        triton.Config({"BLOCK_SIZE_M": 2}),
+        triton.Config({"BLOCK_SIZE_M": 4}),
+        triton.Config({"BLOCK_SIZE_M": 8}),
+        triton.Config({"BLOCK_SIZE_M": 12}),
+        triton.Config({"BLOCK_SIZE_M": 16}),
+        triton.Config({"BLOCK_SIZE_M": 20}),
+        triton.Config({"BLOCK_SIZE_M": 24}),
+        triton.Config({"BLOCK_SIZE_M": 32}),
+    ],
+    key=["n_rows", "n_cols"],
+    restore_value=["dy", "dx"],
+)
+@libentry()
+@triton.jit
+def _silu_bwd_kernel(
+    dy,
+    x,
+    dx,
+    stride_row,
+    n_rows,
+    n_cols,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    grid_size = tl.num_programs(axis=0)
+
+    num_row_tasks = (n_rows + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+
+    for row_task_id in range(pid, num_row_tasks, grid_size):
+        block_start_row = row_task_id * BLOCK_SIZE_M
+        rows_off = block_start_row + tl.arange(0, BLOCK_SIZE_M)
+        rows_mask = rows_off < n_rows
+
+        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
+            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+            cols_mask = cols_off < n_cols
+            block_mask = rows_mask[:, None] & cols_mask[None, :]
+
+            dy_ptrs = dy + rows_off[:, None] * stride_row + cols_off[None, :]
+            x_ptrs = x + rows_off[:, None] * stride_row + cols_off[None, :]
+            dx_ptrs = dx + rows_off[:, None] * stride_row + cols_off[None, :]
+
+            dy_chunk = tl.load(dy_ptrs, mask=block_mask, other=0.0)
+            x_chunk = tl.load(x_ptrs, mask=block_mask, other=0.0)
+
+            x_f32 = x_chunk.to(tl.float32)
+            sigmoid_x = tl.sigmoid(x_f32)
+
+            dsilu_dx = sigmoid_x * (1 + x_f32 * (1 - sigmoid_x))
+
+            # Preserve FP32 accumulation when this leaf is composed with a
+            # convolution backward; round only when storing into dx.
+            dx_chunk = dy_chunk.to(tl.float32) * dsilu_dx
+
+            tl.store(dx_ptrs, dx_chunk, mask=block_mask)
+
+
+def _rowwise_block_size_n(n_cols):
+    return min(triton.next_power_of_2(n_cols), MAX_BLOCK_SIZE_N)
+
+
+def _rowwise_grid(n_rows, block_size_m):
+    num_row_tasks = (n_rows + block_size_m - 1) // block_size_m
+    return (max(1, min(get_num_cores("vector"), num_row_tasks)),)
+
+
+def _rowwise_autotune_grid(n_rows):
+    return lambda META: _rowwise_grid(n_rows, META["BLOCK_SIZE_M"])
+
+
+SILU_NOMASK_MAX_BLOCK_SIZE_M = 16
+
+
+def _can_use_nomask_kernel(n_rows, n_cols, block_size_n):
+    return n_cols % block_size_n == 0 and n_rows % SILU_NOMASK_MAX_BLOCK_SIZE_M == 0
+
+
+def _can_use_nomask_single_kernel(n_rows, n_cols, block_size_n):
+    return n_cols == block_size_n and n_rows % SILU_NOMASK_MAX_BLOCK_SIZE_M == 0
+
+
+def silu_fwd_impl(
+    x: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Forward pass for SiLU.
+
+    Args:
+        x: Input tensor
+
+    Returns:
+        y: Output tensor y = silu(x) = x * sigmoid(x)
+    """
+    ori_shape = x.shape
+    n_cols = ori_shape[-1]
+
+    x_2d = x.reshape(-1, n_cols)
+    n_rows = x_2d.shape[0]
+
+    y = torch.empty_like(x_2d)
+
+    block_size_n = _rowwise_block_size_n(n_cols)
+    grid = _rowwise_autotune_grid(n_rows)
+
+    if _can_use_nomask_single_kernel(n_rows, n_cols, block_size_n):
+        _silu_fwd_nomask_single_kernel[grid](
+            x_2d,
+            y,
+            x_2d.stride(0),
+            n_rows,
+            n_cols,
+            BLOCK_SIZE_N=block_size_n,
+        )
+    elif _can_use_nomask_kernel(n_rows, n_cols, block_size_n):
+        _silu_fwd_nomask_kernel[grid](
+            x_2d,
+            y,
+            x_2d.stride(0),
+            n_rows,
+            n_cols,
+            BLOCK_SIZE_N=block_size_n,
+        )
+    else:
+        _silu_fwd_kernel[grid](
+            x_2d,
+            y,
+            x_2d.stride(0),
+            n_rows,
+            n_cols,
+            BLOCK_SIZE_N=block_size_n,
+        )
+
+    return y.reshape(*ori_shape)
+
+
+def silu_bwd_impl(
+    dy: torch.Tensor,
+    x: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Backward pass for SiLU.
+
+    Args:
+        dy: Gradient w.r.t. output
+        x: Input tensor (from forward pass)
+
+    Returns:
+        dx: Gradient w.r.t. input
+    """
+    ori_shape = dy.shape
+    n_cols = ori_shape[-1]
+
+    dy_2d = dy.reshape(-1, n_cols)
+    x_2d = x.reshape(-1, n_cols)
+    n_rows = dy_2d.shape[0]
+
+    dx = torch.empty_like(x_2d)
+
+    block_size_n = _rowwise_block_size_n(n_cols)
+    grid = _rowwise_autotune_grid(n_rows)
+
+    _silu_bwd_kernel[grid](
+        dy_2d,
+        x_2d,
+        dx,
+        dy_2d.stride(0),
+        n_rows,
+        n_cols,
+        BLOCK_SIZE_N=block_size_n,
+    )
+
+    return dx.reshape(*ori_shape)
+
+
+@torch.library.custom_op("mojo_npu_triton_a2::silu_fwd", mutates_args=())
+def silu_fwd(x: torch.Tensor) -> torch.Tensor:
+    return silu_fwd_impl(x.contiguous())
+
+
+@silu_fwd.register_fake
+def _silu_fwd_fake(x: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(x, memory_format=torch.contiguous_format)
+
+
+@torch.library.custom_op("mojo_npu_triton_a2::silu_bwd", mutates_args=())
+def silu_bwd(grad_output: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    return silu_bwd_impl(grad_output.contiguous(), x.contiguous())
+
+
+@silu_bwd.register_fake
+def _silu_bwd_fake(grad_output: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    del grad_output
+    return torch.empty_like(x, memory_format=torch.contiguous_format)

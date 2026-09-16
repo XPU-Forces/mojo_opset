@@ -39,6 +39,7 @@ pip-log.txt
 pip-delete-this-directory.txt
 
 # Unit test / coverage reports
+/artifacts/
 /benchmark_reports/
 /profiling/
 htmlcov/
@@ -186,3 +187,5 @@ kernel_meta*
 *.pt
 
 npu_profiling*
+/native/mojo_opset_lib/**/_build_info.json
+/native/mojo_opset_lib/**/*_LICENSE.txt

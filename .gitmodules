@@ -1,0 +1,3 @@
+[submodule "native/third_party/catlass"]
+	path = native/third_party/catlass
+	url = https://gitee.com/ascend/catlass.git

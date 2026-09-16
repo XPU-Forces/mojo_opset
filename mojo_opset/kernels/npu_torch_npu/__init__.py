@@ -1,0 +1,28 @@
+"""torch_npu kernel provider."""
+
+OPS = {
+    "rms_norm_quant": "fused_quantization",
+    "layer_norm_quant": "fused_quantization",
+    "residual_add_rms_norm_quant": "fused_quantization",
+    "residual_add_layer_norm_quant": "fused_quantization",
+    "moe_dynamic_quant": "fused_quantization",
+    "dequant_swiglu_quant": "fused_quantization",
+    "apply_rope_infer": "position_embedding",
+    "apply_vision_rope2d_infer": "position_embedding",
+    "paged_decode_gqa_infer": "paged_attention",
+    "paged_prefill_gqa_infer": "paged_attention",
+    "paged_prefill_swa_infer": "paged_attention",
+    "paged_decode_swa_infer": "paged_attention",
+    "prefill_gqa_infer": "paged_attention",
+    "store_paged_kv_cache": "kv_cache",
+    "group_gemm": "gemm",
+    "quant_gemm": "gemm",
+    "quant_batch_gemm_reduce_sum": "gemm",
+    "dynamic_quant": "quantization",
+    "silu": "activation",
+    "gelu": "activation",
+    "swiglu": "activation",
+    "rms_norm_infer": "normalization",
+    "group_rms_norm_infer": "normalization",
+    "residual_add_rms_norm_infer": "normalization",
+}

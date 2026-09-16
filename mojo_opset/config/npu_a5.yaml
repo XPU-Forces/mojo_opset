@@ -1,0 +1,61 @@
+npu.a5:
+  rms_norm_quant: torch_npu
+  layer_norm_quant: torch_npu
+  residual_add_rms_norm_quant: torch_npu
+  residual_add_layer_norm_quant: torch_npu
+  moe_dynamic_quant: triton
+  dequant_swiglu_quant: torch_npu
+  rotate_activation: torch_reference
+  flex_attention: triton
+  rotary_embedding: triton
+  vision_rotary_embedding2d: triton
+  mrope: triton
+  sdpa_infer: triton
+  diffusion_attention: triton
+  n_gram_prefill: triton
+  n_gram_decode: triton
+  embedding_nf4_dequant: triton
+  over_encoding_decode: triton
+  lightning_indexer: triton
+  store_lowrank: triton
+  paged_decode_gqa_infer: triton
+  paged_prefill_gqa_infer: triton
+  paged_prefill_swa_infer: triton
+  paged_decode_swa_infer: triton
+  prefill_gqa_infer: torch_npu
+  store_paged_kv_cache: triton
+  apply_rope_infer: triton
+  apply_vision_rope2d_infer: triton
+  # Retained selection: original NPU tests skipped this path; the wrapper raises NotImplementedError.
+  quant_batch_gemm_reduce_sum: torch_npu
+  top_k_sampling: triton
+  top_p_sampling: triton
+  top_p_filter: triton
+  reject_sampling: triton
+  join_prob_reject_sampling: triton
+  apply_penalties_temperature: triton
+  group_gemm: triton
+  quant_gemm: triton
+  static_quant: triton
+  dequant: triton
+  dynamic_quant: triton
+  linear_cross_entropy: triton
+  causal_conv1d_update_state_infer: triton
+  layer_norm_infer: triton
+  rms_norm_infer: triton
+  group_rms_norm_infer: triton
+  residual_add_layer_norm_infer: triton
+  residual_add_rms_norm_infer: triton
+  causal_conv1d: triton
+  silu: triton
+  gelu: triton
+  swiglu: triton
+  rms_norm: triton
+  apply_rope: triton
+  flash_attention: triton
+  flash_attention_infer: triton
+  swa: triton
+  swa_infer: triton
+
+npu.a5.950pr:
+  native_swa_infer: native  # Temporary standalone SWA interface; native supports 950PR only.

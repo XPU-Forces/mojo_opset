@@ -1,0 +1,4 @@
+prune native
+prune mojo_opset/_C
+prune tests
+global-exclude *.so *.pyd *.dll *.dylib __pycache__ *.py[cod]
