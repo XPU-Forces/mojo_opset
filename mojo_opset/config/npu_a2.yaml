@@ -7,6 +7,7 @@ npu.a2:
   dequant_swiglu_quant: torch_npu
   rotate_activation: torch_reference
   flex_attention: triton
+  flex_attention_v2: triton
   rotary_embedding: triton
   vision_rotary_embedding2d: triton
   mrope: triton
@@ -41,6 +42,8 @@ npu.a2:
   dynamic_quant: triton
   varlen_fa_infer: native  # Temporary standalone Varlen FA interface.
   linear_cross_entropy: triton
+  linear_cross_entropy_v2: triton
+  linear_cross_entropy_v2_and_zloss: triton
   causal_conv1d_update_state_infer: triton
   layer_norm_infer: triton
   rms_norm_infer: triton

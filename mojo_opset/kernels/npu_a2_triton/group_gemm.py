@@ -330,6 +330,8 @@ def k_grouped_matmul_impl(
 @torch.library.custom_op("mojo_npu_triton_a2::group_gemm_fwd", mutates_args=())
 def group_gemm_fwd(input: torch.Tensor, weight: torch.Tensor, group_list: torch.Tensor,
                    trans_weight: bool) -> torch.Tensor:
+    # Both raw kernels address input as A[row * K + col].
+    input = input.contiguous()
     m, k = input.shape
     n = weight.shape[1] if trans_weight else weight.shape[2]
     stride_bn, stride_bk = ((weight.stride(1), weight.stride(2)) if trans_weight

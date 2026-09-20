@@ -39,6 +39,10 @@ pip-log.txt
 pip-delete-this-directory.txt
 
 # Unit test / coverage reports
+/.ci-work/
+/.ci-run-dir
+/test-results/
+/tests/performance/results/
 /artifacts/
 /benchmark_reports/
 /profiling/

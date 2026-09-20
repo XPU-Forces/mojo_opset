@@ -1,7 +1,10 @@
 import pytest
 import torch
 
+from mojo_opset import Target
+from mojo_opset import functions
 from mojo_opset import modules
+from mojo_opset.functions._dispatch import resolve_implementation
 from tests._checks import assert_accuracy
 from tests._checks import assert_close
 from tests._checks import assert_mojo_close
@@ -14,11 +17,15 @@ ACTIVATION_SHAPES = [(7, 513), (128, 128), (256, 128), (999, 9999), (1024, 10240
 SWIGLU_SHAPES = ACTIVATION_SHAPES + [(3072, 3072), (4096, 2048), (257, 480)]
 
 
-@pytest.mark.api("modules.GELU", "modules.SiLU", "modules.SwiGLU")
 @pytest.mark.parametrize(
     "name,limit,shape",
     [
-        (name, limit, shape)
+        pytest.param(
+            name,
+            limit,
+            shape,
+            marks=pytest.mark.api("modules." + name, ops=[{"GELU": "gelu", "SiLU": "silu", "SwiGLU": "swiglu"}[name]]),
+        )
         for name, limit in [("GELU", 0), ("SiLU", 0), ("SwiGLU", 0), ("SwiGLU", 0.5)]
         for shape in (SWIGLU_SHAPES if name == "SwiGLU" else ACTIVATION_SHAPES)
     ],
@@ -48,11 +55,15 @@ def test_activation(accuracy_backend, name, dtype, limit, shape):
         assert_accuracy(run, inputs, implementation=accuracy_backend[0])
 
 
-@pytest.mark.api("modules.GELU", "modules.SiLU", "modules.SwiGLU")
 @pytest.mark.parametrize(
     "name,limit,shape",
     [
-        (name, limit, shape)
+        pytest.param(
+            name,
+            limit,
+            shape,
+            marks=pytest.mark.api("modules." + name, ops=[{"GELU": "gelu", "SiLU": "silu", "SwiGLU": "swiglu"}[name]]),
+        )
         for name, limit in [("GELU", 0), ("SiLU", 0), ("SwiGLU", 0), ("SwiGLU", 0.5)]
         for shape in (SWIGLU_SHAPES if name == "SwiGLU" else ACTIVATION_SHAPES)
     ],
@@ -70,20 +81,19 @@ def test_activation_bitwise(accuracy_backend, name, limit, dtype, shape):
     assert_repeatable(module, inputs, parameters=tuple(module.parameters()))
 
 
-@pytest.mark.api("modules.GELU")
+@pytest.mark.api("modules.GELU", ops=["gelu"])
 @pytest.mark.parametrize("shape", ACTIVATION_SHAPES)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.accuracy
 def test_gelu_exact(accuracy_backend, shape, dtype):
-    implementation, _, device = accuracy_backend
+    implementation, target, device = accuracy_backend
+    selected = implementation or resolve_implementation("gelu", Target.parse(target))
+    if selected == "triton":
+        pytest.skip("Triton GELU supports approximate='tanh' only")
     x = torch.randn(shape, device=device, dtype=dtype, requires_grad=True)
     reference_x = x.detach().clone().requires_grad_()
-    try:
-        actual = modules.GELU(approximate="none", implementation=implementation)(x)
-    except NotImplementedError as error:
-        assert "Triton GELU supports approximate='tanh' only" in str(error)
-        return
-    expected = torch.nn.functional.gelu(reference_x.float(), approximate="none").to(dtype)
+    actual = modules.GELU(approximate="none", implementation=implementation)(x)
+    expected = functions.gelu(reference_x, approximate="none", implementation="torch_reference")
     upstream = torch.rand_like(x)
     (actual_grad,) = torch.autograd.grad(actual, x, upstream)
     (expected_grad,) = torch.autograd.grad(expected, reference_x, upstream)
@@ -98,15 +108,15 @@ def test_gelu_exact(accuracy_backend, shape, dtype):
     )
 
 
-@pytest.mark.api("modules.GELU")
+@pytest.mark.api("modules.GELU", ops=["gelu"])
 @pytest.mark.parametrize("shape", ACTIVATION_SHAPES)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.bitwise
 def test_gelu_exact_bitwise(accuracy_backend, shape, dtype):
-    implementation, _, device = accuracy_backend
+    implementation, target, device = accuracy_backend
+    selected = implementation or resolve_implementation("gelu", Target.parse(target))
+    if selected == "triton":
+        pytest.skip("Triton GELU supports approximate='tanh' only")
     x = torch.randn(shape, device=device, dtype=dtype, requires_grad=True)
     function = modules.GELU(approximate="none", implementation=implementation)
-    try:
-        assert_repeatable(function, (x,))
-    except NotImplementedError as error:
-        assert "Triton GELU supports approximate='tanh' only" in str(error)
+    assert_repeatable(function, (x,))

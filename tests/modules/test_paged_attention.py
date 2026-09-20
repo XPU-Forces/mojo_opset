@@ -74,7 +74,7 @@ PAGED_CASES = (
 PREFILL_CASES = [(2, 16, 4, 128, 64), (1, 8, 1, 64, 128)]
 
 
-def paged_bucket_case(layout, device, impl, module=False):
+def paged_bucket_case(layout, device, impl):
     """Original varlen bucket: 4 real tokens in an 8-token, 6-batch allocation."""
     if impl not in (None, "triton", "torch_reference"):
         pytest.skip("Original 16-token page bucket case has no optimized torch_npu implementation")
@@ -86,20 +86,12 @@ def paged_bucket_case(layout, device, impl, module=False):
     value_cache[:4, :, 0] = torch.randn(4, 2, 128, dtype=query.dtype, device=device)
     block_tables = torch.full((6, 1), -1, dtype=torch.int32, device=device)
     block_tables[:4, 0] = torch.arange(4, dtype=torch.int32, device=device)
-    inputs = query, key_cache, value_cache, cu_q_lens, block_tables
-    options = dict(
-        cu_total_seq_lens=cu_q_lens.clone(),
-        softmax_scale=128**-0.5,
-        max_q_len=1,
-        max_total_seq_len=1,
-    )
-    if module:
-        op = M.PagedPrefillGQAInfer(gqa_layout=layout, implementation=impl)
-        op.prepare_metadata(cu_q_lens, options["cu_total_seq_lens"], 4, 2, 16)
-    else:
-        op = partial(F.paged_prefill_gqa_infer, gqa_layout=layout, implementation=impl)
+    inputs = (query, key_cache, value_cache, cu_q_lens, block_tables)
+    options = dict(cu_total_seq_lens=cu_q_lens.clone(), softmax_scale=128 ** (-0.5), max_q_len=1, max_total_seq_len=1)
+    op = M.PagedPrefillGQAInfer(gqa_layout=layout, implementation=impl)
+    op.prepare_metadata(cu_q_lens, options["cu_total_seq_lens"], 4, 2, 16)
     reference = partial(F.paged_prefill_gqa_infer, gqa_layout=layout, implementation="torch_reference", **options)
-    return partial(op, **options), reference, inputs
+    return (partial(op, **options), reference, inputs)
 
 
 def generate_paged_decode_data(
@@ -213,9 +205,9 @@ def move_tensors(values, device):
     return tuple(value.to(device) if isinstance(value, torch.Tensor) else value for value in values)
 
 
-def paged_case(spec, device, impl, module=False):
+def paged_case(spec, device, impl):
     name, module_name, case, layout, global_window, local_window = spec
-    prefill, swa = "prefill" in name, "swa" in name
+    prefill, swa = ("prefill" in name, "swa" in name)
     dims = case[:-1]
     if prefill:
         batch, qheads, kheads, dim, qmax, prefix, page, dtype = dims
@@ -241,20 +233,14 @@ def paged_case(spec, device, impl, module=False):
         data = move_tensors(generate_paged_decode_data(batch, qheads, kheads, dim, kmax, page, dtype), device)
         inputs = data[:5]
         kwargs = dict(max_total_seq_len=data[5])
-    op = (
-        getattr(M, module_name)(**config, implementation=impl)
-        if module
-        else partial(getattr(F, name), **config, implementation=impl)
-    )
-    if module and name == "paged_prefill_gqa_infer":
+    op = getattr(M, module_name)(**config, implementation=impl)
+    if name == "paged_prefill_gqa_infer":
         op.prepare_metadata(inputs[3], kwargs["cu_total_seq_lens"], qheads, kheads, page)
     reference = partial(getattr(F, name), **config, implementation="torch_reference", **kwargs)
-    return partial(op, **kwargs), reference, inputs, dtype
+    return (partial(op, **kwargs), reference, inputs, dtype)
 
 
-def prefill_case(case, layout, device, impl, module=False):
-    if impl not in (None, "torch_npu", "torch_reference"):
-        pytest.skip("Non-paged prefill GQA has a torch_npu provider only")
+def prefill_case(case, layout, device, impl):
     batch, qheads, kheads, dim, length = case
     if impl != "torch_reference" and dim % 128:
         pytest.skip("Original torch_npu fused attention requires head_dim divisible by 128")
@@ -264,43 +250,37 @@ def prefill_case(case, layout, device, impl, module=False):
         torch.randn(batch, kheads, length, dim, device=device, dtype=torch.bfloat16),
         torch.arange(batch + 1, device=device, dtype=torch.int32) * length,
     )
-    op = (
-        M.PrefillGQAInfer(gqa_layout=layout, implementation=impl)
-        if module
-        else partial(F.prefill_gqa_infer, gqa_layout=layout, implementation=impl)
-    )
+    op = M.PrefillGQAInfer(gqa_layout=layout, implementation=impl)
     reference = partial(F.prefill_gqa_infer, gqa_layout=layout, implementation="torch_reference")
-    return op, reference, inputs
+    return (op, reference, inputs)
 
 
-@pytest.mark.api(
-    "modules.PagedPrefillGQAInfer",
-    "modules.PagedDecodeGQAInfer",
-    "modules.PagedPrefillSWAInfer",
-    "modules.PagedDecodeSWAInfer",
-)
 @pytest.mark.accuracy
-@pytest.mark.parametrize("spec", PAGED_CASES, ids=[f"{x[0]}-{x[2][-1]}-{x[3]}" for x in PAGED_CASES])
+@pytest.mark.parametrize(
+    "spec",
+    [pytest.param(spec, marks=pytest.mark.api("modules." + spec[1], ops=[spec[0]])) for spec in PAGED_CASES],
+    ids=[f"{x[0]}-{x[2][-1]}-{x[3]}" for x in PAGED_CASES],
+)
 def test_paged(accuracy_backend, spec):
     impl, _, device = accuracy_backend
-    call, ref, inputs, dtype = paged_case(spec, device, impl, True)
+    call, ref, inputs, dtype = paged_case(spec, device, impl)
     assert_close(call(*inputs), ref(*inputs), dtype, rtol=2e-2, atol=2e-2)
 
 
-@pytest.mark.api("modules.PagedPrefillGQAInfer")
+@pytest.mark.api("modules.PagedPrefillGQAInfer", ops=["paged_prefill_gqa_infer"])
 @pytest.mark.accuracy
 @pytest.mark.parametrize("layout", ["ABAB", "AABB"])
 def test_paged_bucket(accuracy_backend, layout):
     impl, _, device = accuracy_backend
-    call, ref, inputs = paged_bucket_case(layout, device, impl, module=True)
+    call, ref, inputs = paged_bucket_case(layout, device, impl)
     assert_close(call(*inputs)[:4].float(), ref(*inputs)[:4].float(), rtol=2e-2, atol=2e-2)
 
 
-@pytest.mark.api("modules.PrefillGQAInfer")
+@pytest.mark.api("modules.PrefillGQAInfer", ops=["prefill_gqa_infer"])
 @pytest.mark.accuracy
 @pytest.mark.parametrize("case", PREFILL_CASES)
 @pytest.mark.parametrize("layout", ["ABAB", "AABB"])
 def test_prefill(accuracy_backend, case, layout):
     impl, _, device = accuracy_backend
-    call, ref, inputs = prefill_case(case, layout, device, impl, True)
+    call, ref, inputs = prefill_case(case, layout, device, impl)
     assert_close(call(*inputs), ref(*inputs), torch.bfloat16, rtol=2e-2, atol=2e-2)

@@ -12,6 +12,7 @@ from .attention import varlen_fa_infer
 from .convolution import causal_conv1d
 from .convolution import causal_conv1d_update_state_infer
 from .flex_attention import flex_attention
+from .flex_attention_v2 import flex_attention_v2
 from .fused_quantization import dequant_swiglu_quant
 from .fused_quantization import layer_norm_quant
 from .fused_quantization import moe_dynamic_quant
@@ -26,6 +27,8 @@ from .indexer import indexer
 from .indexer import lightning_indexer
 from .kv_cache import store_paged_kv_cache
 from .linear_cross_entropy import linear_cross_entropy
+from .linear_cross_entropy_v2 import linear_cross_entropy_v2
+from .linear_cross_entropy_v2 import linear_cross_entropy_v2_and_zloss
 from .mrope import mrope
 from .normalization import group_rms_norm_infer
 from .normalization import layer_norm_infer
@@ -77,6 +80,7 @@ __all__ = [
     "flash_attention",
     "flash_attention_infer",
     "flex_attention",
+    "flex_attention_v2",
     "gelu",
     "group_gemm",
     "group_rms_norm_infer",
@@ -86,6 +90,8 @@ __all__ = [
     "layer_norm_quant",
     "lightning_indexer",
     "linear_cross_entropy",
+    "linear_cross_entropy_v2",
+    "linear_cross_entropy_v2_and_zloss",
     "moe_dynamic_quant",
     "mrope",
     "n_gram_decode",

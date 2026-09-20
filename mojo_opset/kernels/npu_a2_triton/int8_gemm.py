@@ -13,6 +13,7 @@ import triton
 import triton.language as tl
 
 from mojo_opset.kernels._npu_triton_utils import get_num_cores
+from mojo_opset.kernels._weight_cache import PreparedWeightCache
 
 # Padding alignment — must be divisible by every BLOCK size in the autotune configs.
 # BLOCK_M ∈ {64, 128}  → pad M to 128
@@ -38,7 +39,7 @@ def _get_autotune_configs():
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 512}),
         # Small M tiles
         triton.Config({**_vmix, "BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 256}),
-        triton.Config({**_vmix, "BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256}),
+        # Exclude 64x64x256 vmix2: incorrect results on Endor CANN 8.5.1.
     ]
 
 
@@ -216,11 +217,14 @@ def int8_gemm_dequant_impl(
 
     return c[:M_orig, :N_orig]
 
+_prepare_quant_weight = PreparedWeightCache(prepare_b_impl)
+
+
 @torch.library.custom_op("mojo_npu_triton_a2::quant_gemm_fwd", mutates_args=())
 def quant_gemm_fwd(input: torch.Tensor, weight: torch.Tensor, input_scale: torch.Tensor,
                    weight_scale: torch.Tensor, output_dtype: torch.dtype,
                    trans_weight: bool) -> torch.Tensor:
-    packed_weight = prepare_b_impl(weight, transposed=trans_weight)
+    packed_weight = _prepare_quant_weight(weight, transposed=trans_weight)
     n = weight.shape[0] if trans_weight else weight.shape[1]
     return int8_gemm_dequant_impl(input.contiguous(), packed_weight, input_scale.flatten().float(),
                                   weight_scale.flatten().float(), None, input.shape[0], n, output_dtype)

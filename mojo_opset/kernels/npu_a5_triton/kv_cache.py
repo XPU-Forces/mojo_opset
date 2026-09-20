@@ -357,7 +357,7 @@ def _store_paged_kv_fake(key_states, value_states, key_cache, value_cache, chunk
 
 def store_paged_kv_cache_fwd(key_states, value_states, key_cache, value_cache, block_table,
                             cu_q_lens, context_kv_lens, chunk_metadata):
-    from mojo_opset.utils.kv_cache import build_paged_kv_chunk_metadata
+    from mojo_opset.utils.kv_cache_metadata import build_paged_kv_chunk_metadata
     if chunk_metadata is None:
         chunk_metadata = build_paged_kv_chunk_metadata(block_table, cu_q_lens, context_kv_lens,
                                                       key_cache.shape[2])

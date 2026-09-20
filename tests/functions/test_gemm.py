@@ -4,7 +4,6 @@ import pytest
 import torch
 
 from mojo_opset import functions as F
-from mojo_opset import modules as M
 from tests._checks import assert_close
 
 
@@ -18,17 +17,13 @@ def make_quant_batch(case, device):
     )
 
 
-def batch_case(case, device, impl, module=False):
+def batch_case(case, device, impl):
     x, w, s1, s2 = make_quant_batch(case, device)
-    call = (
-        M.QuantBatchGemmReduceSum(w, case[4], implementation=impl)
-        if module
-        else lambda a, b, c: F.quant_batch_gemm_reduce_sum(a, w, b, c, trans_weight=case[4], implementation=impl)
-    )
+    call = lambda a, b, c: F.quant_batch_gemm_reduce_sum(a, w, b, c, trans_weight=case[4], implementation=impl)
     ref = lambda a, b, c: F.quant_batch_gemm_reduce_sum(
         a, w, b, c, trans_weight=case[4], implementation="torch_reference"
     )
-    return call, ref, (x, s1, s2)
+    return (call, ref, (x, s1, s2))
 
 
 def check_group(actual, expected, case, dtype):
@@ -53,21 +48,13 @@ def make_group(case, dtype, device):
     return x, weight, values.to(device)
 
 
-def group_case(case, dtype, device, impl, module=False):
+def group_case(case, dtype, device, impl):
     if impl == "torch_npu" and dtype == torch.float32:
         pytest.skip("Original torch_npu grouped matmul does not support float32")
     x, weight, counts = make_group(case, dtype, device)
-    call = (
-        M.GroupGemm(weight, case[4], implementation=impl)
-        if module
-        else partial(F.group_gemm, weight=weight, trans_weight=case[4], implementation=impl)
-    )
+    call = partial(F.group_gemm, weight=weight, trans_weight=case[4], implementation=impl)
     ref = partial(F.group_gemm, weight=weight, trans_weight=case[4], implementation="torch_reference")
-    return (
-        (lambda a, b: call(a, b)) if module else (lambda a, b: call(a, group_list=b)),
-        lambda a, b: ref(a, group_list=b),
-        (x, counts),
-    )
+    return (lambda a, b: call(a, group_list=b), lambda a, b: ref(a, group_list=b), (x, counts))
 
 
 def _make_int8_gemm_data(m, k, n, trans_weight):
@@ -93,24 +80,18 @@ def move_tensors(values, device):
     return tuple(value.to(device) if isinstance(value, torch.Tensor) else value for value in values)
 
 
-def quant_case(case, dtype, transposed, device, impl, module=False):
+def quant_case(case, dtype, transposed, device, impl):
     x, w, xs, ws = move_tensors(_make_int8_gemm_data(*case, transposed), device)
-    if module:
-        call = M.QuantGemm(case[1], case[2], dtype, transposed, implementation=impl, device=device)
-        call.load_state_dict({"weight": w, "weight_scale": ws})
-    else:
-        call = lambda a, scale: F.quant_gemm(
-            a, w, scale, ws, output_dtype=dtype, trans_weight=transposed, implementation=impl
-        )
+    call = lambda a, scale: F.quant_gemm(
+        a, w, scale, ws, output_dtype=dtype, trans_weight=transposed, implementation=impl
+    )
     ref = lambda a, scale: F.quant_gemm(
         a, w, scale, ws, output_dtype=dtype, trans_weight=transposed, implementation="torch_reference"
     )
-    return call, ref, (x, xs)
+    return (call, ref, (x, xs))
 
 
 def skip_batch(impl, device):
-    if impl not in (None, "torch_npu", "torch_reference"):
-        pytest.skip("quantized batch reduction has no Triton provider")
     if device == "npu" and impl != "torch_reference":
         pytest.skip("Inherited master exclusion: CANN 8.2 quantized batch reduction issue")
 
@@ -153,8 +134,33 @@ QUANT_GEMM_CASES = [(1, 4096, 4096), (32, 4096, 11008), (128, 2048, 4096), (64, 
 @pytest.mark.parametrize("case,dtype", GROUP_GEMM_TYPED_CASES)
 def test_group(accuracy_backend, case, dtype):
     impl, _, device = accuracy_backend
-    call, ref, inputs = group_case(case, dtype, device, impl, False)
+    call, ref, inputs = group_case(case, dtype, device, impl)
     check_group(call(*inputs), ref(*inputs), case, dtype)
+
+
+@pytest.mark.api("functions.group_gemm")
+@pytest.mark.accuracy
+@pytest.mark.parametrize("layout", ["transposed", "row_strided", "column_strided"])
+@pytest.mark.parametrize("transposed", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_group_input_layout(accuracy_backend, layout, transposed, dtype):
+    impl, _, device = accuracy_backend
+    case = (2, 17, 64, 32, transposed, [6, 11])
+    _, rows, k, _, _, _ = case
+    _, weight, counts = make_group(case, dtype, device)
+    if layout == "transposed":
+        x = torch.randn(k, rows, dtype=dtype, device=device).t()
+    elif layout == "row_strided":
+        x = torch.randn(2 * rows, k, dtype=dtype, device=device)[::2]
+    else:
+        x = torch.randn(rows, 2 * k, dtype=dtype, device=device)[:, 1::2]
+    assert not x.is_contiguous()
+    actual = F.group_gemm(x, weight, counts, trans_weight=transposed, implementation=impl)
+    expected = F.group_gemm(
+        x, weight, counts, trans_weight=transposed, implementation="torch_reference"
+    )
+    check_group(actual, expected, case, dtype)
+    assert actual.is_contiguous()
 
 
 @pytest.mark.api("functions.quant_gemm")
@@ -164,7 +170,7 @@ def test_group(accuracy_backend, case, dtype):
 @pytest.mark.parametrize("transposed", [False, True])
 def test_quant(accuracy_backend, case, dtype, transposed):
     impl, _, device = accuracy_backend
-    call, ref, inputs = quant_case(case, dtype, transposed, device, impl, False)
+    call, ref, inputs = quant_case(case, dtype, transposed, device, impl)
     assert_close(call(*inputs), ref(*inputs), dtype, rtol=1e-2, atol=1e-2)
 
 
@@ -174,10 +180,11 @@ def test_quant(accuracy_backend, case, dtype, transposed):
 def test_batch(accuracy_backend, case):
     impl, _, device = accuracy_backend
     skip_batch(impl, device)
-    call, ref, inputs = batch_case(case, device, impl, False)
+    call, ref, inputs = batch_case(case, device, impl)
     assert_close(call(*inputs), ref(*inputs), torch.bfloat16, rtol=1e-2, atol=1e-1)
 
 
+@pytest.mark.reference
 @pytest.mark.accuracy
 @pytest.mark.parametrize("case", QUANT_GEMM_CASES[:3] + [(64, 512, 256)])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])

@@ -6,6 +6,7 @@ import torch
 from mojo_opset import functions as F
 from mojo_opset import modules as M
 from tests._checks import assert_close
+from tests._compile import compile_fullgraph
 
 
 def make_quant_batch(case, device):
@@ -18,17 +19,13 @@ def make_quant_batch(case, device):
     )
 
 
-def batch_case(case, device, impl, module=False):
+def batch_case(case, device, impl):
     x, w, s1, s2 = make_quant_batch(case, device)
-    call = (
-        M.QuantBatchGemmReduceSum(w, case[4], implementation=impl)
-        if module
-        else lambda a, b, c: F.quant_batch_gemm_reduce_sum(a, w, b, c, trans_weight=case[4], implementation=impl)
-    )
+    call = M.QuantBatchGemmReduceSum(w, case[4], implementation=impl)
     ref = lambda a, b, c: F.quant_batch_gemm_reduce_sum(
         a, w, b, c, trans_weight=case[4], implementation="torch_reference"
     )
-    return call, ref, (x, s1, s2)
+    return (call, ref, (x, s1, s2))
 
 
 def check_group(actual, expected, case, dtype):
@@ -53,21 +50,13 @@ def make_group(case, dtype, device):
     return x, weight, values.to(device)
 
 
-def group_case(case, dtype, device, impl, module=False):
+def group_case(case, dtype, device, impl):
     if impl == "torch_npu" and dtype == torch.float32:
         pytest.skip("Original torch_npu grouped matmul does not support float32")
     x, weight, counts = make_group(case, dtype, device)
-    call = (
-        M.GroupGemm(weight, case[4], implementation=impl)
-        if module
-        else partial(F.group_gemm, weight=weight, trans_weight=case[4], implementation=impl)
-    )
+    call = M.GroupGemm(weight, case[4], implementation=impl)
     ref = partial(F.group_gemm, weight=weight, trans_weight=case[4], implementation="torch_reference")
-    return (
-        (lambda a, b: call(a, b)) if module else (lambda a, b: call(a, group_list=b)),
-        lambda a, b: ref(a, group_list=b),
-        (x, counts),
-    )
+    return (lambda a, b: call(a, b), lambda a, b: ref(a, group_list=b), (x, counts))
 
 
 def _make_int8_gemm_data(m, k, n, trans_weight):
@@ -93,24 +82,17 @@ def move_tensors(values, device):
     return tuple(value.to(device) if isinstance(value, torch.Tensor) else value for value in values)
 
 
-def quant_case(case, dtype, transposed, device, impl, module=False):
+def quant_case(case, dtype, transposed, device, impl):
     x, w, xs, ws = move_tensors(_make_int8_gemm_data(*case, transposed), device)
-    if module:
-        call = M.QuantGemm(case[1], case[2], dtype, transposed, implementation=impl, device=device)
-        call.load_state_dict({"weight": w, "weight_scale": ws})
-    else:
-        call = lambda a, scale: F.quant_gemm(
-            a, w, scale, ws, output_dtype=dtype, trans_weight=transposed, implementation=impl
-        )
+    call = M.QuantGemm(case[1], case[2], dtype, transposed, implementation=impl, device=device)
+    call.load_state_dict({"weight": w, "weight_scale": ws})
     ref = lambda a, scale: F.quant_gemm(
         a, w, scale, ws, output_dtype=dtype, trans_weight=transposed, implementation="torch_reference"
     )
-    return call, ref, (x, xs)
+    return (call, ref, (x, xs))
 
 
 def skip_batch(impl, device):
-    if impl not in (None, "torch_npu", "torch_reference"):
-        pytest.skip("quantized batch reduction has no Triton provider")
     if device == "npu" and impl != "torch_reference":
         pytest.skip("Inherited master exclusion: CANN 8.2 quantized batch reduction issue")
 
@@ -148,36 +130,37 @@ QUANT_BATCH_CASES = [
 QUANT_GEMM_CASES = [(1, 4096, 4096), (32, 4096, 11008), (128, 2048, 4096), (64, 4096, 4096)]
 
 
-@pytest.mark.api("modules.GroupGemm")
+@pytest.mark.api("modules.GroupGemm", ops=["group_gemm"])
 @pytest.mark.accuracy
 @pytest.mark.parametrize("case,dtype", GROUP_GEMM_TYPED_CASES)
 def test_group(accuracy_backend, case, dtype):
     impl, _, device = accuracy_backend
-    call, ref, inputs = group_case(case, dtype, device, impl, True)
+    call, ref, inputs = group_case(case, dtype, device, impl)
     check_group(call(*inputs), ref(*inputs), case, dtype)
 
 
-@pytest.mark.api("modules.QuantGemm")
+@pytest.mark.api("modules.QuantGemm", ops=["quant_gemm"])
 @pytest.mark.accuracy
 @pytest.mark.parametrize("case", QUANT_GEMM_CASES)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("transposed", [False, True])
 def test_quant(accuracy_backend, case, dtype, transposed):
     impl, _, device = accuracy_backend
-    call, ref, inputs = quant_case(case, dtype, transposed, device, impl, True)
+    call, ref, inputs = quant_case(case, dtype, transposed, device, impl)
     assert_close(call(*inputs), ref(*inputs), dtype, rtol=1e-2, atol=1e-2)
 
 
-@pytest.mark.api("modules.QuantBatchGemmReduceSum")
+@pytest.mark.api("modules.QuantBatchGemmReduceSum", ops=["quant_batch_gemm_reduce_sum"])
 @pytest.mark.accuracy
 @pytest.mark.parametrize("case", QUANT_BATCH_CASES)
 def test_batch(accuracy_backend, case):
     impl, _, device = accuracy_backend
     skip_batch(impl, device)
-    call, ref, inputs = batch_case(case, device, impl, True)
+    call, ref, inputs = batch_case(case, device, impl)
     assert_close(call(*inputs), ref(*inputs), torch.bfloat16, rtol=1e-2, atol=1e-1)
 
 
+@pytest.mark.api("modules.QuantGemm", ops=["quant_gemm"])
 @pytest.mark.accuracy
 def test_registered_weight(accuracy_backend):
     from mojo_opset.modules import QuantGemm
@@ -187,3 +170,52 @@ def test_registered_weight(accuracy_backend):
     assert set(op.state_dict()) == {"weight", "weight_scale"}
     assert op.weight.dtype == torch.int8 and op.weight_scale.dtype == torch.bfloat16
     assert op.weight.shape == (16, 8) and op.weight_scale.shape == (8,)
+
+
+@pytest.mark.api("modules.QuantGemm", ops=["quant_gemm"])
+@pytest.mark.accuracy
+@pytest.mark.parametrize("transposed", [False, True])
+@pytest.mark.parametrize("compiled", [False, True])
+def test_quant_weight_reuse_and_updates(accuracy_backend, monkeypatch, transposed, compiled):
+    import importlib
+
+    impl, target, device = accuracy_backend
+    if target not in ("npu.a2", "npu.a5") or impl != "triton":
+        pytest.skip("Prepared-weight reuse is specific to A2/A5 Triton")
+    kernel = importlib.import_module(f"mojo_opset.kernels.npu_{target.split('.')[1]}_triton.int8_gemm")
+    prepare = kernel._prepare_quant_weight.prepare
+    preparations = []
+
+    def counted_prepare(weight, transposed=False):
+        preparations.append(1)
+        return prepare(weight, transposed=transposed)
+
+    monkeypatch.setattr(kernel._prepare_quant_weight, "prepare", counted_prepare)
+    # Both orientations require an allocation, including non-block-aligned sizes.
+    x, w, xs, ws = move_tensors(_make_int8_gemm_data(4, 513, 257, transposed), device)
+    module = M.QuantGemm(513, 257, torch.bfloat16, transposed, implementation=impl, device=device)
+    module.load_state_dict({"weight": w, "weight_scale": ws})
+    module(x, xs)  # Resolve dispatch and prepare before tracing.
+    call = compile_fullgraph(module) if compiled else module
+
+    def check(expected_preparations):
+        expected = F.quant_gemm(
+            x, module.weight, xs, module.weight_scale, output_dtype=torch.bfloat16,
+            trans_weight=transposed, implementation="torch_reference",
+        )
+        for _ in range(2):
+            assert_close(call(x, xs), expected, torch.bfloat16, rtol=1e-2, atol=1e-2)
+        assert len(preparations) == expected_preparations
+
+    try:
+        check(1)
+        module.weight.copy_(torch.ones_like(module.weight))
+        check(2)
+        module.load_state_dict({"weight": torch.full_like(w, 2), "weight_scale": ws})
+        check(3)
+        module.weight = torch.full_like(w, -1)
+        check(4)
+        assert set(module.state_dict()) == {"weight", "weight_scale"}
+    finally:
+        if compiled:
+            torch._dynamo.reset()

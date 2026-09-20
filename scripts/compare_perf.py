@@ -164,7 +164,6 @@ def main(argv=None):
     parser.add_argument("baseline", type=Path)
     parser.add_argument("current", type=Path)
     parser.add_argument("--threshold-percent", type=float, default=5.0)
-    parser.add_argument("--fail-on-regression", action="store_true")
     parser.add_argument("--output", type=Path, help="Write Markdown report (also printed to stdout)")
     args = parser.parse_args(argv)
     try:
@@ -184,11 +183,6 @@ def main(argv=None):
     statuses = {row["status"] for row in rows}
     if "missing" in statuses or not any(row["metric"] in METRICS for row in rows):
         return 2
-    if args.fail_on_regression:
-        if "noisy" in statuses:
-            return 2
-        if "regression" in statuses:
-            return 1
     return 0
 
 

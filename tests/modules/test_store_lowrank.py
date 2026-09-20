@@ -21,7 +21,7 @@ def make_store_case(shape, tokens, device):
     )
 
 
-@pytest.mark.api("modules.StoreLowrank")
+@pytest.mark.api("modules.StoreLowrank", ops=["store_lowrank"])
 @pytest.mark.parametrize("shape", STORE_SHAPES)
 @pytest.mark.parametrize("tokens", STORE_LENGTHS)
 @pytest.mark.accuracy

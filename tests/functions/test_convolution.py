@@ -3,9 +3,15 @@ from functools import partial
 import pytest
 import torch
 
+from functorch.compile import make_boxed_func
+from torch._dynamo.backends.common import aot_autograd
+
+from mojo_opset import functions
 from mojo_opset import functions as F
+from mojo_opset import preload
 from tests._checks import assert_accuracy
 from tests._checks import assert_repeatable
+from tests._compile import compile_fullgraph
 
 from .._checks import assert_close
 from .._checks import assert_mojo_close
@@ -106,6 +112,7 @@ def test_update_master(accuracy_backend, b, t, d, w, activation):
     assert_close(state, reference_state, rtol=0, atol=0)
 
 
+@pytest.mark.api("functions.causal_conv1d")
 @pytest.mark.parametrize("state", [False, True])
 @pytest.mark.parametrize("varlen", [False, True])
 @pytest.mark.parametrize("activation", [None, "silu"])
@@ -135,6 +142,7 @@ def test_options(accuracy_backend, state, varlen, activation):
     assert_accuracy(run, (x, w, bias, residual, h), implementation=accuracy_backend[0])
 
 
+@pytest.mark.api("functions.causal_conv1d")
 @pytest.mark.accuracy
 def test_streaming(accuracy_backend):
     implementation, target, device = accuracy_backend
@@ -152,6 +160,7 @@ def test_streaming(accuracy_backend):
     assert_close(grad, expected, rtol=1.3e-6, atol=1e-5)
 
 
+@pytest.mark.api("functions.causal_conv1d")
 @pytest.mark.accuracy
 def test_strides(accuracy_backend):
     device = accuracy_backend[2]
@@ -202,3 +211,84 @@ def test_convolution_bitwise(accuracy_backend, case):
         return F.causal_conv1d(x, weight, bias, residual=residual, implementation=implementation, **options)
 
     assert_repeatable(run, inputs)
+
+
+@pytest.mark.accuracy
+@pytest.mark.api("functions.causal_conv1d")
+def test_compiled_leaves(accuracy_backend):
+    op = "causal_conv1d"
+    implementation, target, device = accuracy_backend
+    if implementation not in (None, "triton") or not target.startswith("npu."):
+        pytest.skip("NPU Triton leaf decomposition contract")
+    preload(op, implementation=implementation, target=target)
+    nodes = {"forward": [], "backward": []}
+
+    def compiler(phase):
+        def capture(graph, inputs):
+            nodes[phase].extend(str(node.target) for node in graph.graph.nodes if node.op == "call_function")
+            return make_boxed_func(graph.forward)
+
+        return capture
+
+    backend = aot_autograd(fw_compiler=compiler("forward"), bw_compiler=compiler("backward"))
+    inputs = tuple(
+        torch.randn(shape, device=device, requires_grad=True) for shape in ((2, 17, 64), (64, 4), (2, 64, 3))
+    )
+
+    def run(x, weight, state):
+        return F.causal_conv1d(
+            x,
+            weight,
+            initial_state=state,
+            output_final_state=True,
+            activation="silu",
+            implementation=implementation,
+        )
+
+    expected_forward = {"causal_conv1d_forward", "causal_conv1d_state"}
+    expected_backward = {
+        "causal_conv1d_forward",
+        "silu_bwd",
+        "causal_conv1d_backward",
+        "causal_conv1d_state_backward",
+    }
+    eager_inputs = tuple(t.detach().clone().requires_grad_() for t in inputs)
+    try:
+        compiled = compile_fullgraph(run, backend=backend)
+        output, expected = compiled(*inputs), run(*eager_inputs)
+        output = (output,) if isinstance(output, torch.Tensor) else output
+        expected = (expected,) if isinstance(expected, torch.Tensor) else expected
+        upstream = tuple(torch.randn_like(t) for t in output)
+        for a, b in zip(output, expected):
+            torch.testing.assert_close(a, b)
+        actual_grads = torch.autograd.grad(output, inputs, upstream)
+        expected_grads = torch.autograd.grad(expected, eager_inputs, upstream)
+        for a, b in zip(actual_grads, expected_grads):
+            torch.testing.assert_close(a, b)
+        for phase, leaves in (("forward", expected_forward), ("backward", expected_backward)):
+            names = {name.split(".")[-2] for name in nodes[phase] if name.startswith("mojo_")}
+            assert leaves <= names, nodes[phase]
+    finally:
+        torch._dynamo.reset()
+
+
+@pytest.mark.accuracy
+@pytest.mark.api("functions.causal_conv1d_update_state_infer")
+def test_update_compile(accuracy_backend):
+    implementation, _, device = accuracy_backend
+    preload("causal_conv1d_update_state_infer", implementation=implementation)
+    x = torch.randn(2, 64, 3, device=device)
+    w = torch.randn(64, 4, device=device)
+    state = torch.randn(2, 64, 5, device=device)
+    eager_state = state.clone()
+
+    def run(x, w, state):
+        return functions.causal_conv1d_update_state_infer(x, state, w, implementation=implementation)
+
+    try:
+        compiled = compile_fullgraph(run)
+        for _ in range(2):
+            torch.testing.assert_close(compiled(x, w, state), run(x, w, eager_state))
+            torch.testing.assert_close(state, eager_state, rtol=0, atol=0)
+    finally:
+        torch._dynamo.reset()

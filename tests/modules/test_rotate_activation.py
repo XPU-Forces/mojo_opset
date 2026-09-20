@@ -27,7 +27,7 @@ def _reference(x):
     return torch.nn.functional.linear(x, matrix) * dim**-0.5
 
 
-@pytest.mark.api("modules.RotateActivation")
+@pytest.mark.api("modules.RotateActivation", ops=["rotate_activation"])
 @pytest.mark.parametrize("shape", ROTATE_SHAPES)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.accuracy

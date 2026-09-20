@@ -39,7 +39,8 @@ def _gelu_fake(x, approximate="tanh"):
 
 @torch.library.custom_op("mojo_npu_torch_npu::gelu_bwd", mutates_args=())
 def gelu_bwd(grad: torch.Tensor, x: torch.Tensor, approximate: str = "tanh") -> torch.Tensor:
-    return torch.ops.aten.gelu_backward(grad.contiguous(), x.contiguous(), approximate=approximate)
+    # Match npu_gelu's autograd path; older NPU ATen backward ignores exact mode.
+    return torch.ops.npu.npu_gelu_backward(grad.contiguous(), x.contiguous(), approximate=approximate)
 
 
 @gelu_bwd.register_fake

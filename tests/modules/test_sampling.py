@@ -89,8 +89,13 @@ def _sampler(name, options, implementation):
     return module(**options, implementation=implementation)
 
 
-@pytest.mark.api("modules.TopKSampling", "modules.TopPSampling", "modules.TopPFilter")
-@pytest.mark.parametrize("name,shape,options", SAMPLING_CASES)
+@pytest.mark.parametrize(
+    "name,shape,options",
+    [
+        pytest.param(name, shape, options, marks=pytest.mark.api("modules." + SAMPLING_MODULES[name], ops=[name]))
+        for name, shape, options in SAMPLING_CASES
+    ],
+)
 @pytest.mark.accuracy
 def test_sampling(accuracy_backend, name, shape, options):
     implementation, _, device = accuracy_backend
@@ -102,8 +107,13 @@ def test_sampling(accuracy_backend, name, shape, options):
     )
 
 
-@pytest.mark.api("modules.RejectSampling", "modules.JoinProbRejectSampling")
-@pytest.mark.parametrize("name", ["reject_sampling", "join_prob_reject_sampling"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param(name, marks=pytest.mark.api("modules." + SAMPLING_MODULES[name], ops=[name]))
+        for name in ["reject_sampling", "join_prob_reject_sampling"]
+    ],
+)
 @pytest.mark.parametrize("case", REJECTION_CASES)
 @pytest.mark.accuracy
 def test_rejection(accuracy_backend, name, case):
@@ -115,7 +125,7 @@ def test_rejection(accuracy_backend, name, case):
         assert_close(a, e, rtol=0, atol=0)
 
 
-@pytest.mark.api("modules.ApplyPenaltiesTemperature")
+@pytest.mark.api("modules.ApplyPenaltiesTemperature", ops=["apply_penalties_temperature"])
 @pytest.mark.parametrize("shape", PENALTY_SHAPES)
 @pytest.mark.accuracy
 def test_penalties(accuracy_backend, shape):

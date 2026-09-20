@@ -10,6 +10,8 @@ def group_gemm_fwd(
 ) -> torch.Tensor:
     if input.dtype == torch.float32:
         raise NotImplementedError("NPU grouped matmul does not support float32")
+    # The M-split vendor kernel rejects a transposed input layout.
+    input = input.contiguous()
     if trans_weight:
         weight = weight.transpose(1, 2).contiguous()
     weights = [w.contiguous() for w in weight]

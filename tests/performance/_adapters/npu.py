@@ -13,6 +13,8 @@ def collect_trace(run, directory):
         activities=[profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.NPU],
         schedule=profiler.schedule(wait=0, warmup=0, active=1, repeat=1),
         on_trace_ready=profiler.tensorboard_trace_handler(str(directory)),
+        # Level0 can omit the launch correlation needed by mixed cube/vector kernels.
+        experimental_config=profiler._ExperimentalConfig(profiler_level=profiler.ProfilerLevel.Level1),
     ) as profile:
         run()
         profile.step()
@@ -23,7 +25,9 @@ def collect_trace(run, directory):
 
 
 def is_kernel(event):
-    return str(event.get("args", {}).get("Task Type", "")).startswith("KERNEL")
+    task_type = str(event.get("args", {}).get("Task Type", ""))
+    # CANN versions use either KERNEL_* or core names for compute tasks.
+    return task_type.startswith("KERNEL") or task_type in {"AI_CORE", "AI_VECTOR_CORE", "MIX_AIC", "MIX_AIV"}
 
 
 def kernel_owners(events, ranges):
@@ -44,6 +48,21 @@ def kernel_owners(events, ranges):
         if any(pid == p and tid == t and start < upper and lower < end for _, p, t, lower, upper in bounds):
             raise ValueError("Ambiguous overlapping NPU sample ranges on the same thread")
         bounds.append((name, pid, tid, start, end))
+
+    # Autograd submits backward kernels on worker threads, not the caller's
+    # record_function thread. Associate only engine scopes enclosed by a unique
+    # sample on the same host process; unrelated threads remain excluded.
+    worker_bounds = []
+    for event in events:
+        if event.get("ph") != "X" or not event.get("name", "").startswith("autograd::engine::evaluate_function:"):
+            continue
+        pid, tid, start = point(event)
+        end = start + Decimal(str(event["dur"]))
+        matches = {name for name, p, _, lower, upper in bounds if pid == p and lower <= start and end <= upper}
+        if len(matches) > 1:
+            raise ValueError("Autograd scope belongs to multiple NPU sample ranges")
+        if matches:
+            worker_bounds.append((matches.pop(), pid, tid, start, end))
 
     targets, kernels, flows = {}, set(), {}
     for index, event in enumerate(events):
@@ -77,10 +96,14 @@ def kernel_owners(events, ranges):
         if index in owners:
             raise ValueError("NPU kernel has multiple flow owners")
         pid, tid, timestamp = point(pair["s"])
-        matches = [name for name, p, t, lower, upper in bounds if pid == p and tid == t and lower <= timestamp < upper]
+        matches = {
+            name
+            for name, p, t, lower, upper in bounds + worker_bounds
+            if pid == p and tid == t and lower <= timestamp < upper
+        }
         if len(matches) > 1:
             raise ValueError("NPU kernel belongs to multiple sample ranges")
-        owners[index] = matches[0] if matches else None  # Warmup/eviction stays outside samples.
+        owners[index] = matches.pop() if matches else None  # Warmup stays outside samples.
     if kernels - owners.keys():
         raise ValueError("NPU device kernel is missing a torch_to_npu flow")
     return owners

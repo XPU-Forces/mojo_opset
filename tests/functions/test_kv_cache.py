@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from mojo_opset import functions as F
-from mojo_opset.utils.kv_cache import build_paged_kv_chunk_metadata
+from mojo_opset.utils.kv_cache_metadata import build_paged_kv_chunk_metadata
 from tests._checks import assert_close
 
 KV_CASES = [

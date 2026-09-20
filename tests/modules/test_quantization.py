@@ -89,8 +89,19 @@ def _make_quant_case(case, backend):
     return actual, reference, inputs
 
 
-@pytest.mark.api("modules.StaticQuant", "modules.DynamicQuant", "modules.Dequant")
-@pytest.mark.parametrize("name", ["StaticQuant", "DynamicQuant", "Dequant"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param(
+            name,
+            marks=pytest.mark.api(
+                "modules." + name,
+                ops=[{"StaticQuant": "static_quant", "DynamicQuant": "dynamic_quant", "Dequant": "dequant"}[name]],
+            ),
+        )
+        for name in ["StaticQuant", "DynamicQuant", "Dequant"]
+    ],
+)
 @pytest.mark.accuracy
 def test_quant(accuracy_backend, name):
     impl, _, device = accuracy_backend
@@ -109,10 +120,17 @@ def test_quant(accuracy_backend, name):
         assert_close(a[1], e[1], rtol=2e-3, atol=2e-3)
 
 
-@pytest.mark.api("modules.StaticQuant", "modules.DynamicQuant", "modules.Dequant")
-@pytest.mark.parametrize("case", QUANT_CASES)
-@pytest.mark.accuracy
-def test_quant_shapes(accuracy_backend, case):
+def _quant_cases(name, *, grouped=False, zeros=False):
+    # CI keeps each test function on one card; separate operators and layouts.
+    cases = []
+    for case in QUANT_CASES:
+        operator, _, scale_shape, _, zero = case.values[0]
+        if operator == name and (len(scale_shape or ()) > 1) == grouped and zero == zeros:
+            cases.append(case)
+    return cases
+
+
+def _check_quant_case(accuracy_backend, case):
     actual, reference, inputs = _make_quant_case(case, accuracy_backend)
     output, expected = actual(*inputs), reference(*inputs)
     if case[0] == "Dequant":
@@ -120,3 +138,45 @@ def test_quant_shapes(accuracy_backend, case):
     else:
         assert_close(output[0], expected[0], rtol=0, atol=0 if case[4] else 1)
         assert_close(output[1], expected[1], rtol=0 if case[4] else 2e-3, atol=0 if case[4] else 2e-3)
+
+
+@pytest.mark.api("modules.StaticQuant", ops=["static_quant"])
+@pytest.mark.parametrize("case", _quant_cases("StaticQuant"))
+@pytest.mark.accuracy
+def test_static_quant_shapes(accuracy_backend, case):
+    _check_quant_case(accuracy_backend, case)
+
+
+@pytest.mark.api("modules.StaticQuant", ops=["static_quant"])
+@pytest.mark.parametrize("case", _quant_cases("StaticQuant", grouped=True))
+@pytest.mark.accuracy
+def test_static_quant_grouped(accuracy_backend, case):
+    _check_quant_case(accuracy_backend, case)
+
+
+@pytest.mark.api("modules.Dequant", ops=["dequant"])
+@pytest.mark.parametrize("case", _quant_cases("Dequant"))
+@pytest.mark.accuracy
+def test_dequant_shapes(accuracy_backend, case):
+    _check_quant_case(accuracy_backend, case)
+
+
+@pytest.mark.api("modules.Dequant", ops=["dequant"])
+@pytest.mark.parametrize("case", _quant_cases("Dequant", grouped=True))
+@pytest.mark.accuracy
+def test_dequant_grouped(accuracy_backend, case):
+    _check_quant_case(accuracy_backend, case)
+
+
+@pytest.mark.api("modules.DynamicQuant", ops=["dynamic_quant"])
+@pytest.mark.parametrize("case", _quant_cases("DynamicQuant"))
+@pytest.mark.accuracy
+def test_dynamic_quant_shapes(accuracy_backend, case):
+    _check_quant_case(accuracy_backend, case)
+
+
+@pytest.mark.api("modules.DynamicQuant", ops=["dynamic_quant"])
+@pytest.mark.parametrize("case", _quant_cases("DynamicQuant", zeros=True))
+@pytest.mark.accuracy
+def test_dynamic_quant_zeros(accuracy_backend, case):
+    _check_quant_case(accuracy_backend, case)

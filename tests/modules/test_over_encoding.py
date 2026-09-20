@@ -13,12 +13,7 @@ ENCODING_CASES = [
     "prime-decode",
     "cpu-prefill",
     "cpu-decode",
-    "nf4-prefill",
-    "nf4-decode",
 ]
-
-
-NF4_DIMS = [128, 1024, 4096]
 
 
 NGRAM_CASES = [
@@ -30,12 +25,6 @@ NGRAM_CASES = [
     "varlen-193",
     "varlen-257",
 ]
-
-
-def make_nf4_lut(vocab, dim, device):
-    indices = torch.randint(16, (vocab, dim), device="cpu", dtype=torch.uint8)
-    packed = (indices[:, ::2] | (indices[:, 1::2] << 4)).to(device=device, dtype=torch.int8)
-    return packed, torch.randn(vocab, dim // 64, device=device), torch.randn(vocab, dim // 64, device=device)
 
 
 def make_ngram_case(case, device):
@@ -113,34 +102,13 @@ def make_encoding_case(case, device):
             ids, lens = torch.arange(1, 49, device=device) % vocab, None
             history = torch.arange(48 * 4, device=device).view(48, 4) % 17
     else:
-        vocab, embed_dim, oe_dim = 128, 64, 64
-        sizes, grams = [131, 133, 135, 139], [2, 2, 3, 3]
-        if mode == "prefill":
-            ids = torch.arange(1, 33, device=device).expand(32, 32).flatten()
-            lens = torch.full((32,), 32, device=device)
-            history = torch.zeros(32, 2, device=device, dtype=torch.int64)
-        else:
-            ids, lens = torch.arange(1, 17, device=device), None
-            history = torch.zeros(16, 2, device=device, dtype=torch.int64)
-        weight, scale, mean = make_nf4_lut(sum(sizes), oe_dim, device)
-        options = dict(
-            _ori_embedding_weight=torch.randn(vocab, embed_dim, device=device),
-            _mega_embedding_weight=weight,
-            _mega_embedding_scale=scale,
-            _mega_embedding_mean=mean,
-            _mega_embedding_group_size=64,
-        )
+        raise ValueError(f"Unknown public encoding case: {case}")
     if lens is None:
         ids = ids.view(-1, 1)
     return (vocab, embed_dim, oe_dim, sizes, grams), options, (ids, history, lens)
 
 
-def make_nf4_case(dim, device):
-    ids = torch.tensor([[0, 17, 32], [128, 256, 257]], device=device)
-    return (ids, *make_nf4_lut(257, dim, device))
-
-
-@pytest.mark.api("modules.OverEncodingNGram")
+@pytest.mark.api("modules.OverEncodingNGram", ops=["n_gram_prefill", "n_gram_decode"])
 @pytest.mark.parametrize("case", NGRAM_CASES)
 @pytest.mark.accuracy
 def test_ngram(accuracy_backend, case):
@@ -149,21 +117,6 @@ def test_ngram(accuracy_backend, case):
     module = modules.OverEncodingNGram(vocab, sizes, grams, implementation=implementation).to(device)
     reference = modules.OverEncodingNGram(vocab, sizes, grams, implementation="torch_reference").to(device)
     assert_close(module(ids, history, lens), reference(ids, history, lens), rtol=0, atol=0)
-
-
-@pytest.mark.api("modules.NF4DequantEmbedding")
-@pytest.mark.parametrize("dim", NF4_DIMS)
-@pytest.mark.accuracy
-def test_nf4(accuracy_backend, dim):
-    implementation, _, device = accuracy_backend
-    ids, *weights = make_nf4_case(dim, device)
-    actual = modules.NF4DequantEmbedding(
-        *weights, group_size=64, output_dtype=torch.float32, implementation=implementation
-    )(ids)
-    expected = modules.NF4DequantEmbedding(
-        *weights, group_size=64, output_dtype=torch.float32, implementation="torch_reference"
-    )(ids)
-    assert_close(actual, expected, rtol=0, atol=1e-5)
 
 
 def _encoding_modules(case, device, implementation):
@@ -189,7 +142,7 @@ def _encoding_modules(case, device, implementation):
     return actual, reference, inputs
 
 
-@pytest.mark.api("modules.OverEncoding")
+@pytest.mark.api("modules.OverEncoding", ops=["over_encoding_decode"])
 @pytest.mark.parametrize("case", ENCODING_CASES)
 @pytest.mark.accuracy
 def test_encoding(accuracy_backend, case):

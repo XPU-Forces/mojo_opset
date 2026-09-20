@@ -414,6 +414,12 @@ def _normalize_for_rope(
     return x, batch_stride, seq_stride, need_transpose_back, batch_size, seq_len, n_head, head_dim
 
 
+def _restore_rope_layout(output, transpose_back, contiguous_output=False):
+    if transpose_back:
+        output = output.transpose(-3, -2).contiguous()
+    return output.contiguous() if contiguous_output else output
+
+
 def _run_rope_kernel(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -462,15 +468,10 @@ def _run_rope_kernel(
         CAST_CACHE_TO_FP32=cast_cache_to_fp32,
     )
 
-    if q_need_tb:
-        q_out = q_out.transpose(-3, -2).contiguous()
-    if k_need_tb:
-        k_out = k_out.transpose(-3, -2).contiguous()
-
-    if contiguous_output:
-        q_out = q_out.contiguous()
-        k_out = k_out.contiguous()
-    return q_out, k_out
+    return (
+        _restore_rope_layout(q_out, q_need_tb, contiguous_output),
+        _restore_rope_layout(k_out, k_need_tb, contiguous_output),
+    )
 
 
 def rot_pos_embed_impl(
@@ -641,8 +642,14 @@ def apply_rope_infer_fwd(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, si
 
 @apply_rope_infer_fwd.register_fake
 def _rope_infer_fake(q, k, cos, sin, head_first, keep_cos_sin_dtype):
-    return (torch.empty_like(q, memory_format=torch.contiguous_format),
-            torch.empty_like(k, memory_format=torch.contiguous_format))
+    # Inference retains a physical BSND/TND layout for transposed head-first
+    # inputs; model the same normalization, allocation and restoration as eager.
+    q, _, _, q_need_tb, *_ = _normalize_for_rope(q, head_first)
+    k, _, _, k_need_tb, *_ = _normalize_for_rope(k, head_first)
+    return (
+        _restore_rope_layout(torch.empty_like(q), q_need_tb),
+        _restore_rope_layout(torch.empty_like(k), k_need_tb),
+    )
 
 
 @torch.library.custom_op("mojo_npu_triton_a5::rotary_embedding_fwd", mutates_args=())

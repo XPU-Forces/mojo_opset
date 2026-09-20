@@ -4,10 +4,12 @@ import pytest
 import torch
 
 from mojo_opset import functions as F
+from mojo_opset import preload
 from tests._checks import assert_accuracy
 from tests._checks import assert_mojo_close
 from tests._checks import assert_repeatable
 from tests._checks import clone_with_grad
+from tests._compile import compile_fullgraph
 
 ROPE_CASES = [
     pytest.param(
@@ -51,6 +53,7 @@ def make_rope_case(device, dtype, batch, tokens, q_heads, k_heads, head_first, d
     return inputs, angles.cos(), angles.sin()
 
 
+@pytest.mark.api("functions.apply_rope")
 @pytest.mark.parametrize("q_transposed,k_transposed", [(False, True), (True, False), (True, True)])
 @pytest.mark.accuracy
 def test_rope_strides(accuracy_backend, q_transposed, k_transposed):
@@ -91,6 +94,7 @@ def test_rope_layout(accuracy_backend, head_first, rotary_dim):
     )
 
 
+@pytest.mark.api("functions.apply_rope")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.accuracy
 def test_rope_cache(accuracy_backend, dtype):
@@ -151,3 +155,49 @@ def test_rope_shapes_bitwise(accuracy_backend, batch, tokens, q_heads, k_heads, 
         partial(F.apply_rope, cos=cos, sin=sin, unsqueeze_dim=0 if head_first else 1, implementation=implementation),
         inputs,
     )
+
+
+@pytest.mark.accuracy
+@pytest.mark.api("functions.apply_rope")
+@pytest.mark.parametrize("op", ["apply_rope"])
+@pytest.mark.parametrize("backend", ["eager", "aot_eager"])
+def test_compiled_layout(accuracy_backend, op, backend):
+    implementation, target, device = accuracy_backend
+    if implementation not in (None, "triton") or not target.startswith("npu."):
+        pytest.skip("NPU Triton contiguous-output contract")
+    implementation = "triton"
+    scaled = op == "swiglu_scaled"
+    op = "swiglu" if scaled else op
+    preload(op, implementation=implementation)
+    x = torch.randn(17, 7, device=device, dtype=torch.bfloat16).T.requires_grad_()
+    inputs = (x,)
+    kwargs = {}
+    if op == "apply_rope":
+        q = torch.randn(1, 4, 7, 16, device=device, dtype=torch.bfloat16, requires_grad=True)
+        k = torch.randn(1, 7, 2, 16, device=device, dtype=torch.bfloat16).transpose(1, 2).requires_grad_()
+        angles = torch.randn(1, 7, 16, device=device)
+        inputs = (q, k)
+        kwargs = {"cos": angles.cos().bfloat16(), "sin": angles.sin().bfloat16(), "unsqueeze_dim": 1}
+
+    def run(*args):
+        output = getattr(F, op)(*args, **kwargs, implementation=implementation)
+        outputs = output if isinstance(output, tuple) else (output,)
+        return outputs, tuple((y.stride(), y.is_contiguous()) for y in outputs)
+
+    try:
+        eager, metadata = run(*inputs)
+        actual, captured_metadata = compile_fullgraph(run, backend=backend)(*inputs)
+        assert captured_metadata == metadata
+        assert all(y.is_contiguous() for y in actual)
+        assert captured_metadata == tuple((y.stride(), y.is_contiguous()) for y in actual)
+        reference = getattr(F, op)(*inputs, **kwargs, implementation="torch_reference")
+        reference = reference if isinstance(reference, tuple) else (reference,)
+        for y, expected in zip(actual, reference):
+            torch.testing.assert_close(y, expected, rtol=2e-2, atol=2e-2)
+        upstream = tuple(torch.randn_like(y) for y in eager)
+        grads = torch.autograd.grad(actual, inputs, upstream)
+        expected_grads = torch.autograd.grad(reference, inputs, upstream)
+        for grad, expected in zip(grads, expected_grads):
+            torch.testing.assert_close(grad, expected, rtol=2e-2, atol=2e-2)
+    finally:
+        torch._dynamo.reset()

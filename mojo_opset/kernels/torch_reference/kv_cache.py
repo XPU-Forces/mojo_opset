@@ -5,8 +5,8 @@ from typing import Tuple
 
 import torch
 
-from mojo_opset.utils.kv_cache import assert_paged_kv_store_contract
-from mojo_opset.utils.kv_cache import build_paged_kv_chunk_metadata
+from mojo_opset.utils.kv_cache_metadata import assert_paged_kv_store_contract
+from mojo_opset.utils.kv_cache_metadata import build_paged_kv_chunk_metadata
 
 
 def store_paged_kv_cache_fwd(

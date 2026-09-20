@@ -1,3 +1,4 @@
+import gc
 import hashlib
 import importlib.metadata
 import json
@@ -5,6 +6,7 @@ import os
 import platform
 import socket
 import subprocess
+import traceback
 
 from datetime import datetime
 from datetime import timezone
@@ -20,7 +22,6 @@ from mojo_opset.utils import target as target_utils
 
 from ._adapters import load_platform
 from .memory import measure_memory
-from .timing import flush_size
 from .timing import measure
 
 
@@ -37,7 +38,7 @@ def _version(name):
 
 
 def pytest_configure(config):
-    if not config.getoption("--mojo-perf"):
+    if config.option.collectonly:
         return
     if getattr(config.option, "numprocesses", 0) or hasattr(config, "workerinput"):
         raise pytest.UsageError("Performance tests require serial execution; disable pytest-xdist")
@@ -46,16 +47,11 @@ def pytest_configure(config):
     timers = config.getoption("--perf-timers").split(",")
     if not timers or len(set(timers)) != len(timers) or set(timers) - {"profiler", "event", "e2e"}:
         raise pytest.UsageError("--perf-timers must contain distinct profiler,event,e2e values")
-    batch = config.getoption("--perf-batch")
-    if batch < 1 or (config.getoption("--perf-cache") == "cold" and batch != 1):
-        raise pytest.UsageError("--perf-batch must be positive; cold requires 1")
-    if batch != 1 and "event" not in timers:
-        raise pytest.UsageError("--perf-batch only applies to event timing")
     if config.getoption("--perf-instances") < 2:
         raise pytest.UsageError("--perf-instances must be >= 2")
-    profile_options = config.getoption("--perf-kernel") or config.getoption("--perf-reduction") != "span"
-    if "profiler" not in timers and profile_options:
-        raise pytest.UsageError("Kernel selectors/reduction require profiler timing")
+    output = Path(config.getoption("--perf-output")).resolve()
+    if output.suffix != ".json":
+        raise pytest.UsageError("--perf-output must be a .json path")
     config._mojo_perf_report = {
         "schema_version": 2,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -65,23 +61,14 @@ def pytest_configure(config):
     }
 
 
-@pytest.fixture(autouse=True)
-def performance_enabled(pytestconfig):
-    if not pytestconfig.getoption("--mojo-perf"):
-        pytest.skip("enable performance tests with --mojo-perf")
-
-
 @pytest.fixture(scope="session")
 def perf_environment(pytestconfig, request):
-    if not pytestconfig.getoption("--mojo-perf"):
-        pytest.skip("enable performance tests with --mojo-perf")
     implementation, target, device_type = request.getfixturevalue("accuracy_backend")
     adapter = load_platform(Target.parse(target).platform)
     index = pytestconfig.getoption("--perf-device")
     adapter.runtime.set_device(index)
     properties = adapter.runtime.get_device_properties(index)
     l2 = adapter.l2_bytes(properties)
-    size = flush_size(pytestconfig.getoption("--perf-cache"), l2, pytestconfig.getoption("--perf-flush-mb"))
     report = pytestconfig._mojo_perf_report
     report["host"] = socket.gethostname()
     report["environment"] = {
@@ -100,62 +87,54 @@ def perf_environment(pytestconfig, request):
     }
     report["measurement"] = {
         "timers": sorted(pytestconfig.getoption("--perf-timers").split(",")),
-        "profiler_timer": "per_call_kernel_v3",
+        "profiler_timer": "per_call_kernel_v4",
         "event_timer": "current_stream_batch_v1",
         "e2e_timer": "synchronized_wall_v2",
         "memory": "allocator_peak_after_timing_v1",
-        "batch": pytestconfig.getoption("--perf-batch"),
-        "instances": (
-            pytestconfig.getoption("--perf-instances") if pytestconfig.getoption("--perf-cache") == "rotate" else 1
-        ),
-        "reduction": pytestconfig.getoption("--perf-reduction"),
-        "selectors": pytestconfig.getoption("--perf-kernel"),
-        "match": pytestconfig.getoption("--perf-kernel-match"),
-        "cache": pytestconfig.getoption("--perf-cache"),
-        "eviction": "uint8_read_write_add_v1",
-        "flush_bytes": size,
+        "batch": 1,
+        "instances": pytestconfig.getoption("--perf-instances"),
+        "reduction": "span",
+        "cache": "rotate",
         "warmup": pytestconfig.getoption("--perf-warmup"),
         "repeats": pytestconfig.getoption("--perf-repeats"),
         "harness_sha256": hashlib.sha256(
             Path(__file__).read_bytes()
             + Path(__file__).with_name("timing.py").read_bytes()
             + Path(__file__).with_name("memory.py").read_bytes()
+            + Path(__file__).with_name("_workload.py").read_bytes()
             + Path(adapter.__file__).read_bytes()
         ).hexdigest(),
     }
     report["config"] = config.get_config() if implementation is None else None
-    return adapter, f"{device_type}:{index}", target, implementation, size
+    return adapter, f"{device_type}:{index}", target, implementation
 
 
 @pytest.fixture
 def benchmark(request, perf_environment, monkeypatch):
-    adapter, device, target, implementation, size = perf_environment
+    adapter, device, target, implementation = perf_environment
     monkeypatch.setattr(target_utils, "_AUTO_TARGET", Target.parse(target))
     torch.manual_seed(42)
     report = request.config._mojo_perf_report
 
-    def run(fn=None, *, factory=None, op, **parameters):
+    def run(*, factory, op, **parameters):
+        declared = {
+            name
+            for marker in request.node.iter_markers("api")
+            for name in marker.kwargs.get("ops", (api.removeprefix("functions.") for api in marker.args))
+        }
+        if op not in declared:
+            raise ValueError(f"{request.node.nodeid}: benchmark op {op!r} is missing from its api mark")
         if any(row["id"] == request.node.nodeid for row in report["cases"]):
             raise ValueError("Call benchmark once per test; parametrize separate workloads")
         selected = implementation or resolve_implementation(op, Target.parse(target))
-        if (fn is None) == (factory is None):
-            raise ValueError("Provide exactly one callable or factory returning a callable")
         count = report["measurement"]["instances"]
-        if count > 1 and factory is None:
-            raise ValueError("rotate requires factory=... to construct independent input/state instances")
-        workload = [factory() for _ in range(count)] if factory is not None else fn
+        workload = [factory() for _ in range(count)]
         metrics = measure(
             workload,
             adapter,
-            device,
             warmup=request.config.getoption("--perf-warmup"),
             repeats=request.config.getoption("--perf-repeats"),
-            flush_bytes=size,
             timers=report["measurement"]["timers"],
-            batch=report["measurement"]["batch"],
-            reduction=report["measurement"]["reduction"],
-            selectors=report["measurement"]["selectors"],
-            match=report["measurement"]["match"],
         )
         row = {
             "id": request.node.nodeid,
@@ -179,8 +158,14 @@ def pytest_runtest_makereport(item, call):
     outcome = yield
     result = outcome.get_result()
     report = getattr(item.config, "_mojo_perf_report", None)
-    if report is not None and result.skipped and "performance" in Path(item.path).parts:
-        report["skipped"].append(item.nodeid)
+    if report is not None and "performance" in Path(item.path).parts:
+        if result.skipped:
+            report["skipped"].append(item.nodeid)
+        elif result.failed and call.excinfo is not None:
+            # The report is already formatted. Drop finished frames' tensor
+            # references so a failed benchmark cannot retain its rotate inputs.
+            traceback.clear_frames(call.excinfo.value.__traceback__)
+            gc.collect()
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -193,3 +178,6 @@ def pytest_sessionfinish(session, exitstatus):
     temporary = output.with_suffix(output.suffix + ".tmp")
     temporary.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     temporary.replace(output)
+    terminal = session.config.pluginmanager.getplugin("terminalreporter")
+    if terminal:
+        terminal.write_line(f"Performance JSON: {output}")

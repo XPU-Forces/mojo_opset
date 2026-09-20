@@ -98,33 +98,12 @@ def kernel_spans(
     return samples
 
 
-def flush_size(cache, detected_l2, requested_mb):
-    if cache not in ("warm", "cold", "rotate"):
-        raise ValueError("cache must be warm, cold or rotate")
-    if requested_mb is not None and requested_mb <= 0:
-        raise ValueError("flush size must be positive")
-    if cache != "cold":
-        return 0
-    if detected_l2 is not None and detected_l2 <= 0:
-        detected_l2 = None
-    if requested_mb is None:
-        if detected_l2 is None:
-            raise ValueError("L2 size is unknown; cold tests require an explicit --perf-flush-mb")
-        return 2 * int(detected_l2)
-    size = requested_mb * 1024 * 1024
-    if detected_l2 is not None and size < 2 * detected_l2:
-        raise ValueError("Cold-cache buffer must be at least twice the detected L2 size")
-    return size
-
-
 def measure(
     fn,
     adapter,
-    device,
     *,
     warmup=10,
     repeats=20,
-    flush_bytes=0,
     timers=("profiler", "e2e"),
     batch=1,
     reduction="span",
@@ -135,8 +114,8 @@ def measure(
         raise ValueError("warmup must be >= 1 and repeats >= 3")
     if not timers or len(set(timers)) != len(timers) or set(timers) - {"profiler", "event", "e2e"}:
         raise ValueError("Choose distinct profiler, event and/or e2e timers")
-    if batch < 1 or (flush_bytes and batch != 1):
-        raise ValueError("batch must be >= 1; cold cache requires batch=1 (flush cannot enter the event interval)")
+    if batch < 1:
+        raise ValueError("batch must be >= 1")
     if reduction not in ("span", "sum") or match not in ("exact", "contains", "regex"):
         raise ValueError("Invalid profiler reduction or selector match mode")
     if "profiler" not in timers and (selectors or reduction != "span"):
@@ -144,11 +123,9 @@ def measure(
     if match == "regex":
         for selector in selectors:
             re.compile(selector)
-    functions = list(fn) if isinstance(fn, (list, tuple)) else [fn]
-    if not functions or not all(callable(function) for function in functions):
-        raise ValueError("Provide a callable or a nonempty sequence of independent callables")
-    if len(functions) > 1 and flush_bytes:
-        raise ValueError("Input rotation and cache flushing are separate policies")
+    functions = list(fn) if isinstance(fn, (list, tuple)) else []
+    if len(functions) < 2 or not all(callable(function) for function in functions):
+        raise ValueError("rotate requires at least two independent callables")
     cursor = 0
 
     def invoke():
@@ -158,28 +135,18 @@ def measure(
         return function()
 
     synchronize = adapter.runtime.synchronize
-    eviction = torch.zeros(flush_bytes, dtype=torch.uint8, device=device) if flush_bytes else None
-
-    def prepare():
-        if eviction is not None:
-            eviction.add_(1)  # Read/write kernel, rather than a potentially cache-bypassing memset.
-        elif len(functions) == 1:
-            functions[0]()  # Restore warm inputs even after profiler initialization.
-        synchronize()
 
     for function in functions:
         function()  # Initialize every rotated instance, including saved backward state.
     for _ in range(warmup):
         invoke()
     synchronize()  # Includes lazy imports, JIT and autotuning, all outside measurement.
-    if eviction is not None:
-        prepare()  # Also compile/warm the eviction operation itself.
 
     metrics = {}
     if "e2e" in timers:
         e2e = []
         for _ in range(repeats):
-            prepare()
+            synchronize()
             start = time.perf_counter_ns()
             result = invoke()
             synchronize()
@@ -196,7 +163,7 @@ def measure(
         end_event.record()
         synchronize()
         for _ in range(repeats):
-            prepare()
+            synchronize()
             start_event.record()
             for _ in range(batch):
                 result = invoke()
@@ -212,7 +179,7 @@ def measure(
             invoke()
         synchronize()
         for index in range(repeats):
-            prepare()  # Cache preparation is outside the measured profiler range.
+            synchronize()
             with torch.autograd.profiler.record_function(f"{SAMPLE_PREFIX}{index}"):
                 result = invoke()
                 synchronize()

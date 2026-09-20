@@ -3,7 +3,7 @@ import torch
 
 from mojo_opset import functions as F
 from mojo_opset import modules as M
-from mojo_opset.utils.kv_cache import build_paged_kv_chunk_metadata
+from mojo_opset.utils.kv_cache_metadata import build_paged_kv_chunk_metadata
 from tests._checks import assert_close
 
 KV_CASES = [
@@ -94,7 +94,7 @@ def _build_store_paged_kv_case(batch_size, kv_heads, head_dim, block_size, conte
     }
 
 
-@pytest.mark.api("modules.StorePagedKVCache")
+@pytest.mark.api("modules.StorePagedKVCache", ops=["store_paged_kv_cache"])
 @pytest.mark.accuracy
 @pytest.mark.parametrize("case", KV_CASES + [(6, 2, 128, 128, [0, 0, 0, 0, 0, 0], [1, 1, 1, 1, 0, 0])])
 @pytest.mark.parametrize("precompute", [False, True])

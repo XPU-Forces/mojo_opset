@@ -5,7 +5,7 @@ from typing import Optional
 import torch
 import torch_npu
 
-from mojo_opset.utils.kv_cache import build_paged_kv_chunk_metadata
+from mojo_opset.utils.kv_cache_metadata import build_paged_kv_chunk_metadata
 
 
 def _nz(cache, last_dim):

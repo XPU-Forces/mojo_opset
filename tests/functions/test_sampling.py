@@ -72,8 +72,13 @@ def make_rejection_case(name, case, device):
     return target, torch.randint(vocab, (batch, steps), device=device), torch.ones(batch, steps, device=device)
 
 
-@pytest.mark.api("functions.top_k_sampling", "functions.top_p_sampling", "functions.top_p_filter")
-@pytest.mark.parametrize("name,shape,options", SAMPLING_CASES)
+@pytest.mark.parametrize(
+    "name,shape,options",
+    [
+        pytest.param(name, shape, options, marks=pytest.mark.api("functions." + name))
+        for name, shape, options in SAMPLING_CASES
+    ],
+)
 @pytest.mark.accuracy
 def test_sampling(accuracy_backend, name, shape, options):
     implementation, _, device = accuracy_backend
@@ -86,8 +91,13 @@ def test_sampling(accuracy_backend, name, shape, options):
     )
 
 
-@pytest.mark.api("functions.reject_sampling", "functions.join_prob_reject_sampling")
-@pytest.mark.parametrize("name", ["reject_sampling", "join_prob_reject_sampling"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param(name, marks=pytest.mark.api("functions." + name))
+        for name in ["reject_sampling", "join_prob_reject_sampling"]
+    ],
+)
 @pytest.mark.parametrize("case", REJECTION_CASES)
 @pytest.mark.accuracy
 def test_rejection(accuracy_backend, name, case):
