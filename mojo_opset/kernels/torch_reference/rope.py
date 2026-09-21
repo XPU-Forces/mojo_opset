@@ -23,7 +23,7 @@ def _apply_one(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, *, inverse
     return torch.cat((x_nope, rotated), dim=-1) if x_nope is not None else rotated
 
 
-def apply_rope_fwd(
+def rope_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     cos: torch.Tensor,
@@ -35,7 +35,7 @@ def apply_rope_fwd(
     return _apply_one(q, cos, sin, inverse=False), _apply_one(k, cos, sin, inverse=False)
 
 
-def apply_rope_bwd(
+def rope_bwd(
     grad_q: torch.Tensor,
     grad_k: torch.Tensor,
     cos: torch.Tensor,

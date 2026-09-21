@@ -2,7 +2,6 @@
 
 from mojo_opset.utils._exports import extend_exports as _extend_exports
 
-from .apply_rope import apply_rope
 from .attention import flash_attention
 from .attention import flash_attention_infer
 from .attention import native_swa_infer
@@ -27,9 +26,8 @@ from .indexer import indexer
 from .indexer import lightning_indexer
 from .kv_cache import store_paged_kv_cache
 from .linear_cross_entropy import linear_cross_entropy
-from .linear_cross_entropy_v2 import linear_cross_entropy_v2
-from .linear_cross_entropy_v2 import linear_cross_entropy_v2_and_zloss
-from .mrope import mrope
+from .linear_cross_entropy import linear_cross_entropy_and_zloss
+from .multimodal_rope_infer import multimodal_rope_infer
 from .normalization import group_rms_norm_infer
 from .normalization import layer_norm_infer
 from .normalization import residual_add_layer_norm_infer
@@ -44,14 +42,15 @@ from .paged_attention import paged_decode_swa_infer
 from .paged_attention import paged_prefill_gqa_infer
 from .paged_attention import paged_prefill_swa_infer
 from .paged_attention import prefill_gqa_infer
-from .position_embedding import apply_rope_infer
-from .position_embedding import apply_vision_rope2d_infer
+from .position_embedding import rope_infer
+from .position_embedding import vision_rope_2d_infer
 from .quantization import dequant
 from .quantization import dynamic_quant
 from .quantization import static_quant
 from .rms_norm import rms_norm
-from .rotary_embedding import rotary_embedding
-from .rotary_embedding import vision_rotary_embedding2d
+from .rope import rope
+from .rope_cos_sin import rope_cos_sin
+from .rope_cos_sin import vision_rope_cos_sin_2d
 from .rotate_activation import rotate_activation
 from .sampling import apply_penalties_temperature
 from .sampling import join_prob_reject_sampling
@@ -67,9 +66,6 @@ from .swiglu import swiglu
 
 __all__ = [
     "apply_penalties_temperature",
-    "apply_rope",
-    "apply_rope_infer",
-    "apply_vision_rope2d_infer",
     "causal_conv1d",
     "causal_conv1d_update_state_infer",
     "dequant",
@@ -90,10 +86,9 @@ __all__ = [
     "layer_norm_quant",
     "lightning_indexer",
     "linear_cross_entropy",
-    "linear_cross_entropy_v2",
-    "linear_cross_entropy_v2_and_zloss",
+    "linear_cross_entropy_and_zloss",
     "moe_dynamic_quant",
-    "mrope",
+    "multimodal_rope_infer",
     "n_gram_decode",
     "n_gram_prefill",
     "native_swa_infer",
@@ -113,7 +108,9 @@ __all__ = [
     "rms_norm",
     "rms_norm_infer",
     "rms_norm_quant",
-    "rotary_embedding",
+    "rope",
+    "rope_cos_sin",
+    "rope_infer",
     "rotate_activation",
     "sdpa_infer",
     "silu",
@@ -127,7 +124,8 @@ __all__ = [
     "top_p_filter",
     "top_p_sampling",
     "varlen_fa_infer",
-    "vision_rotary_embedding2d",
+    "vision_rope_2d_infer",
+    "vision_rope_cos_sin_2d",
 ]
 
 

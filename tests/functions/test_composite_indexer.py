@@ -70,7 +70,7 @@ def _run_composite(module, inputs):
 
 
 @pytest.mark.api(
-    "functions.indexer", ops=["layer_norm_infer", "apply_rope_infer", "dynamic_quant", "lightning_indexer"]
+    "functions.indexer", ops=["layer_norm_infer", "rope_infer", "dynamic_quant", "lightning_indexer"]
 )
 @pytest.mark.parametrize("case", COMPOSITE_CASES)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])

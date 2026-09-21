@@ -7,7 +7,7 @@ import torch
 from ._checks import _require_inference
 from ._dispatch import load_impl
 from .normalization import layer_norm_infer
-from .position_embedding import apply_rope_infer
+from .position_embedding import rope_infer
 from .quantization import dynamic_quant
 from .rotate_activation import rotate_activation
 
@@ -64,7 +64,7 @@ def indexer(
         torch.nn.functional.linear(x, wk), k_norm_weight, k_norm_bias, norm_eps, implementation=implementation
     ).unsqueeze(2)
     cos, sin = (torch.cat((part, part), dim=-1) for part in (freqs_cis.real, freqs_cis.imag))
-    q, k = apply_rope_infer(q, k, cos, sin, head_first=False, keep_cos_sin_dtype=True, implementation=implementation)
+    q, k = rope_infer(q, k, cos, sin, head_first=False, keep_cos_sin_dtype=True, implementation=implementation)
     # RotateActivation had no optimized NPU provider in master; select its Torch formula explicitly.
     q = rotate_activation(q, implementation="torch_reference")
     k = rotate_activation(k.squeeze(2), implementation="torch_reference")

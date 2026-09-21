@@ -8,7 +8,7 @@ from ._checks import _require_inference
 from ._dispatch import load_impl
 
 
-def rotary_embedding(
+def rope_cos_sin(
     x: torch.Tensor,
     inv_freq: torch.Tensor,
     cos: Optional[torch.Tensor] = None,
@@ -20,18 +20,23 @@ def rotary_embedding(
     *,
     implementation: Optional[str] = None,
 ):
-    _require_inference("rotary_embedding", inv_freq, cos, sin)
+    """Return cos/sin tables for the requested positions without rotating x.
+
+    The Triton implementation gathers precomputed tables. The reference can
+    also generate them from inv_freq. x supplies shape and device metadata.
+    """
+    _require_inference("rope_cos_sin", inv_freq, cos, sin)
     if cu_q_lens is not None and position_ids is not None:
         raise ValueError("provide at most one of cu_q_lens and position_ids")
     for indices in (cu_q_lens, total_seq_lens, position_ids):
         if indices is not None and indices.dtype != torch.int32:
             raise ValueError("position indices and sequence lengths must be int32")
-    forward, _ = load_impl("rotary_embedding", implementation)
+    forward, _ = load_impl("rope_cos_sin", implementation)
     # x contributes only shape metadata, not values or a gradient edge.
     return forward(x.detach(), inv_freq, cos, sin, cu_q_lens, total_seq_lens, position_ids, attention_scaling)
 
 
-def vision_rotary_embedding2d(
+def vision_rope_cos_sin_2d(
     inv_freq: torch.Tensor,
     grid_hw: torch.Tensor,
     rope_dim: int,
@@ -39,8 +44,8 @@ def vision_rotary_embedding2d(
     *,
     implementation: Optional[str] = None,
 ):
-    _require_inference("vision_rotary_embedding2d", inv_freq)
+    _require_inference("vision_rope_cos_sin_2d", inv_freq)
     if adapooling_factor < 1 or rope_dim % 4:
         raise ValueError("adapooling_factor must be positive and rope_dim must be divisible by 4")
-    forward, _ = load_impl("vision_rotary_embedding2d", implementation)
+    forward, _ = load_impl("vision_rope_cos_sin_2d", implementation)
     return forward(inv_freq, grid_hw, rope_dim, adapooling_factor)

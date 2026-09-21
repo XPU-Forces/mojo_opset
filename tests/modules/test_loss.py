@@ -13,7 +13,7 @@ def test_linear_ce(accuracy_backend):
     labels = torch.randint(128, (17,), device=device)
 
     def run(x, w, **selection):
-        return modules.LinearCrossEntropyLoss(**selection)(w, x, labels)[0]
+        return modules.LinearCrossEntropyLoss(**selection)(w, x, labels)
 
     assert_accuracy(
         run,

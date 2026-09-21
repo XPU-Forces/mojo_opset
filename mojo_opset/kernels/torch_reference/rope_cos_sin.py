@@ -1,7 +1,7 @@
 import torch
 
 
-def rotary_embedding_fwd(x, inv_freq, cos, sin, cu_q_lens, total_seq_lens, position_ids, attention_scaling):
+def rope_cos_sin_fwd(x, inv_freq, cos, sin, cu_q_lens, total_seq_lens, position_ids, attention_scaling):
     if cu_q_lens is not None:
         if x.ndim != 2:
             raise ValueError("packed prefill x must have shape [tokens, hidden]")
@@ -23,7 +23,7 @@ def rotary_embedding_fwd(x, inv_freq, cos, sin, cu_q_lens, total_seq_lens, posit
     return emb.cos() * attention_scaling, emb.sin() * attention_scaling
 
 
-def vision_rotary_embedding2d_fwd(inv_freq, grid_hw, rope_dim, adapooling_factor):
+def vision_rope_cos_sin_2d_fwd(inv_freq, grid_hw, rope_dim, adapooling_factor):
     device = inv_freq.device if inv_freq.device.type != "cpu" or grid_hw.device.type == "cpu" else grid_hw.device
     if grid_hw.ndim != 2 or grid_hw.shape[-1] != 2 or grid_hw.is_floating_point():
         raise ValueError("grid_hw must be an integer [batch, 2] tensor")

@@ -77,7 +77,7 @@ def make_vision(grid, dtype, device):
     return q, torch.randn_like(q), angles.cos(), angles.sin()
 
 
-@pytest.mark.api("functions.apply_rope_infer")
+@pytest.mark.api("functions.rope_infer")
 @pytest.mark.accuracy
 @pytest.mark.parametrize("shape", ROPE_SHAPES)
 @pytest.mark.parametrize("heads", ROPE_HEADS)
@@ -95,14 +95,14 @@ def test_rope(accuracy_backend, shape, heads, mode):
         and dim // 2 * inputs[0].element_size() % 32
     ):
         pytest.skip("Original torch_npu BNSD rotary half-dimension alignment restriction")
-    op = partial(F.apply_rope_infer, head_first=head_first, implementation=impl)
-    expected = F.apply_rope_infer(*inputs, head_first=head_first, implementation="torch_reference")
+    op = partial(F.rope_infer, head_first=head_first, implementation=impl)
+    expected = F.rope_infer(*inputs, head_first=head_first, implementation="torch_reference")
     actual = op(*inputs)
     for a, e in zip(actual, expected):
         assert_close(a, e, heads[0], rtol=5e-2, atol=5e-2)
 
 
-@pytest.mark.api("functions.apply_rope_infer")
+@pytest.mark.api("functions.rope_infer")
 @pytest.mark.accuracy
 @pytest.mark.parametrize("ndim", [3, 4])
 @pytest.mark.parametrize(
@@ -119,7 +119,7 @@ def test_a5_rope_infer_fake_and_compiled_layout(accuracy_backend, ndim, head_fir
     implementation, target, device = accuracy_backend
     if implementation not in (None, "triton") or not target.startswith("npu.a5"):
         pytest.skip("A5 Triton inference RoPE layout contract")
-    preload("apply_rope_infer", implementation="triton")
+    preload("rope_infer", implementation="triton")
     inputs = []
     for heads, make_contiguous in zip((4, 2), contiguous):
         shape = (2, 7, heads, 64) if ndim == 4 else (7, heads, 64)
@@ -134,13 +134,13 @@ def test_a5_rope_infer_fake_and_compiled_layout(accuracy_backend, ndim, head_fir
     cos, sin = angles.cos(), angles.sin()
     args = (*inputs, cos, sin)
     torch.library.opcheck(
-        torch.ops.mojo_npu_triton_a5.apply_rope_infer_fwd.default,
+        torch.ops.mojo_npu_triton_a5.rope_infer_fwd.default,
         (*args, head_first, False),
         test_utils=("test_schema", "test_faketensor"),
     )
 
     def run(q, k, cos, sin):
-        outputs = F.apply_rope_infer(q, k, cos, sin, head_first=head_first, implementation="triton")
+        outputs = F.rope_infer(q, k, cos, sin, head_first=head_first, implementation="triton")
         return outputs, tuple(output.reshape(-1) for output in outputs), tuple(
             (output.stride(), output.is_contiguous()) for output in outputs
         )
@@ -158,15 +158,15 @@ def test_a5_rope_infer_fake_and_compiled_layout(accuracy_backend, ndim, head_fir
         torch._dynamo.reset()
 
 
-@pytest.mark.api("functions.apply_vision_rope2d_infer")
+@pytest.mark.api("functions.vision_rope_2d_infer")
 @pytest.mark.accuracy
 @pytest.mark.parametrize("grid", VISION_GRIDS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_vision(accuracy_backend, grid, dtype):
     impl, _, device = accuracy_backend
     inputs = make_vision(grid, dtype, device)
-    op = partial(F.apply_vision_rope2d_infer, implementation=impl)
-    expected = F.apply_vision_rope2d_infer(*inputs, implementation="torch_reference")
+    op = partial(F.vision_rope_2d_infer, implementation=impl)
+    expected = F.vision_rope_2d_infer(*inputs, implementation="torch_reference")
     actual = op(*inputs)
     for a, e in zip(actual, expected):
         assert_close(a, e, dtype, rtol=5e-2, atol=5e-2)

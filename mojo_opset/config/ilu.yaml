@@ -1,6 +1,6 @@
 ilu.generic:
-  layer_norm_infer: triton
-  rms_norm_infer: triton
   group_rms_norm_infer: triton
+  layer_norm_infer: triton
   residual_add_layer_norm_infer: triton
   residual_add_rms_norm_infer: triton
+  rms_norm_infer: triton

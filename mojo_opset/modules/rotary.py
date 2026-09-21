@@ -5,7 +5,7 @@ import torch
 from mojo_opset import functions
 
 
-class ApplyRoPEInfer(torch.nn.Module):
+class RoPEInfer(torch.nn.Module):
     def __init__(self, *, head_first=True, keep_cos_sin_dtype=False, implementation=None):
         super().__init__()
         self.head_first = head_first
@@ -13,7 +13,7 @@ class ApplyRoPEInfer(torch.nn.Module):
         self.implementation = implementation
 
     def forward(self, q, k, cos, sin):
-        return functions.apply_rope_infer(
+        return functions.rope_infer(
             q,
             k,
             cos,
@@ -24,10 +24,10 @@ class ApplyRoPEInfer(torch.nn.Module):
         )
 
 
-class ApplyVisionRoPE2DInfer(torch.nn.Module):
+class VisionRoPE2DInfer(torch.nn.Module):
     def __init__(self, *, implementation=None):
         super().__init__()
         self.implementation = implementation
 
     def forward(self, q, k, cos, sin):
-        return functions.apply_vision_rope2d_infer(q, k, cos, sin, implementation=self.implementation)
+        return functions.vision_rope_2d_infer(q, k, cos, sin, implementation=self.implementation)

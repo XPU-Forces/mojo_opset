@@ -103,17 +103,14 @@ def _triton_mrope_kernel(
     first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (tl.arange(0, pad_hd // 2)[None, :] < half_rd)
     first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (tl.arange(0, pad_hd // 2)[None, :] < half_rd)
 
-    safe_q_off1 = tl.where(first_q_mask, first_half_q_offsets, 0)
-    safe_k_off1 = tl.where(first_k_mask, first_half_k_offsets, 0)
+    q_tile_1 = tl.load(q_ptr + first_half_q_offsets, mask=first_q_mask)
+    k_tile_1 = tl.load(k_ptr + first_half_k_offsets, mask=first_k_mask)
 
-    q_tile_1 = tl.load(q_ptr + safe_q_off1, mask=first_q_mask)
-    k_tile_1 = tl.load(k_ptr + safe_k_off1, mask=first_k_mask)
+    second_half_q_offsets = first_half_q_offsets + half_rd
+    second_half_k_offsets = first_half_k_offsets + half_rd
 
-    safe_q_off2 = safe_q_off1 + half_rd
-    safe_k_off2 = safe_k_off1 + half_rd
-
-    q_tile_2 = tl.load(q_ptr + safe_q_off2, mask=first_q_mask)
-    k_tile_2 = tl.load(k_ptr + safe_k_off2, mask=first_k_mask)
+    q_tile_2 = tl.load(q_ptr + second_half_q_offsets, mask=first_q_mask)
+    k_tile_2 = tl.load(k_ptr + second_half_k_offsets, mask=first_k_mask)
 
     cos_row = cos_row.to(q_tile_1.dtype)
     sin_row = sin_row.to(q_tile_1.dtype)
@@ -121,14 +118,14 @@ def _triton_mrope_kernel(
     new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row
     new_q_tile_2 = q_tile_2 * cos_row + q_tile_1 * sin_row
 
-    tl.store(q_ptr + safe_q_off1, new_q_tile_1, mask=first_q_mask)
-    tl.store(q_ptr + safe_q_off2, new_q_tile_2, mask=first_q_mask)
+    tl.store(q_ptr + first_half_q_offsets, new_q_tile_1, mask=first_q_mask)
+    tl.store(q_ptr + second_half_q_offsets, new_q_tile_2, mask=first_q_mask)
 
     new_k_tile_1 = k_tile_1 * cos_row - k_tile_2 * sin_row
     new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
 
-    tl.store(k_ptr + safe_k_off1, new_k_tile_1, mask=first_k_mask)
-    tl.store(k_ptr + safe_k_off2, new_k_tile_2, mask=first_k_mask)
+    tl.store(k_ptr + first_half_k_offsets, new_k_tile_1, mask=first_k_mask)
+    tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=first_k_mask)
 
 
 def mrope_fwd_impl(
@@ -355,12 +352,12 @@ def prepare_mrope_cos_sin(
     return cos_3d, sin_3d
 
 
-@torch.library.custom_op("mojo_npu_triton_a5::mrope_fwd", mutates_args=("q", "k"))
-def mrope_fwd(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, mrope_section: List[int],
+@torch.library.custom_op("mojo_npu_triton_a2::multimodal_rope_infer_fwd", mutates_args=("q", "k"))
+def multimodal_rope_infer_fwd(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, mrope_section: List[int],
                is_interleaved: bool, head_dim: Optional[int]) -> None:
     mrope_fwd_impl(q, k, cos, sin, mrope_section, is_interleaved, head_dim)
 
 
-@mrope_fwd.register_fake
+@multimodal_rope_infer_fwd.register_fake
 def _mrope_fake(q, k, cos, sin, mrope_section, is_interleaved, head_dim):
     return None

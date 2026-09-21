@@ -6,25 +6,23 @@ from mojo_opset import functions
 
 
 class LinearCrossEntropyLoss(torch.nn.Module):
-    """Original mojo loss module, retaining (weight, input, target, bias) order."""
+    """Chunked CE, called with (weight, input, labels).
 
-    def __init__(self, ignore_index=-100, lse_square_scale=0.0, label_smoothing=0.0,
-                 reduction="mean", *, ce_weight=None, softcap=None, return_z_loss=False,
-                 accum_dtype=None, implementation: Optional[str] = None):
+    Returns loss, or (loss, per-token accuracy) when calc_acc=True.
+    """
+
+    def __init__(self, ignore_index=-100, reduction="mean", *, calc_acc=False,
+                 align_precision=True, implementation: Optional[str] = None):
         super().__init__()
         self.ignore_index = ignore_index
-        self.lse_square_scale = lse_square_scale
-        self.label_smoothing = label_smoothing
         self.reduction = reduction
-        self.register_buffer("ce_weight", ce_weight)
-        self.softcap = softcap
-        self.return_z_loss = return_z_loss
-        self.accum_dtype = accum_dtype
+        self.calc_acc = calc_acc
+        self.align_precision = align_precision
         self.implementation = implementation
 
-    def forward(self, lin_weight, _input, target, bias=None):
+    def forward(self, lin_weight, _input, labels):
         return functions.linear_cross_entropy(
-            _input, lin_weight, target, bias, self.ce_weight, self.ignore_index,
-            self.lse_square_scale, self.label_smoothing, self.reduction,
-            self.softcap, self.return_z_loss, self.accum_dtype, implementation=self.implementation,
+            _input, lin_weight, labels, ignore_index=self.ignore_index,
+            reduction=self.reduction, calc_acc=self.calc_acc,
+            align_precision=self.align_precision, implementation=self.implementation,
         )

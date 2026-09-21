@@ -1,7 +1,7 @@
 import torch
 
 
-def mrope_fwd(q, k, cos, sin, mrope_section, is_interleaved, head_dim):
+def multimodal_rope_infer_fwd(q, k, cos, sin, mrope_section, is_interleaved, head_dim):
     rope_dim = sum(mrope_section) * 2
     head_dim = rope_dim if head_dim is None else head_dim
     half = rope_dim // 2

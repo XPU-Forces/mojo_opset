@@ -36,7 +36,7 @@ def make_mrope_case(case, dtype, device):
     return (q, k, cos, sin), dict(mrope_section=section, is_interleaved=interleaved, head_dim=dim)
 
 
-@pytest.mark.api("functions.mrope")
+@pytest.mark.api("functions.multimodal_rope_infer")
 @pytest.mark.parametrize("case", MROPE_CASES)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("inplace", [False, True])
@@ -46,8 +46,8 @@ def test_mrope(accuracy_backend, case, dtype, inplace):
     inputs, options = make_mrope_case(case, dtype, device)
     q, k, cos, sin = inputs
     original_q, original_k = q.clone(), k.clone()
-    function = partial(functions.mrope, inplace=inplace, implementation=implementation)
-    reference = partial(functions.mrope, inplace=inplace, implementation="torch_reference")
+    function = partial(functions.multimodal_rope_infer, inplace=inplace, implementation=implementation)
+    reference = partial(functions.multimodal_rope_infer, inplace=inplace, implementation="torch_reference")
     actual = function(*inputs, **options)
     expected = reference(original_q.clone(), original_k.clone(), cos, sin, **options)
     assert_close(actual, expected, rtol=6e-3 if inplace else 1e-2, atol=3e-2 if inplace else 1e-2)

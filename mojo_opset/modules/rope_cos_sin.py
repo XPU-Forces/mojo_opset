@@ -3,7 +3,9 @@ import torch
 from mojo_opset import functions
 
 
-class RotaryEmbedding(torch.nn.Module):
+class RoPECosSin(torch.nn.Module):
+    """Prepare and select cos/sin tables without rotating input activations."""
+
     def __init__(
         self, rope_theta, rope_dim, attention_scaling=1.0, init_max_length=None, *, implementation=None, device=None
     ):
@@ -24,7 +26,7 @@ class RotaryEmbedding(torch.nn.Module):
         self.cos, self.sin = emb.cos() * self.attention_scaling, emb.sin() * self.attention_scaling
 
     def forward(self, x, cu_q_lens=None, total_seq_lens=None, position_ids=None):
-        return functions.rotary_embedding(
+        return functions.rope_cos_sin(
             x,
             self.inv_freq,
             self.cos,
@@ -37,7 +39,7 @@ class RotaryEmbedding(torch.nn.Module):
         )
 
 
-class VisionRotaryEmbedding2D(torch.nn.Module):
+class VisionRoPECosSin2D(torch.nn.Module):
     def __init__(self, rope_theta=10000.0, rope_dim=64, adapooling_factor=1, *, implementation=None, device=None):
         super().__init__()
         if adapooling_factor < 1 or rope_dim % 4:
@@ -50,6 +52,6 @@ class VisionRotaryEmbedding2D(torch.nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(self, grid_hw):
-        return functions.vision_rotary_embedding2d(
+        return functions.vision_rope_cos_sin_2d(
             self.inv_freq, grid_hw, self.rope_dim, self.adapooling_factor, implementation=self.implementation
         )

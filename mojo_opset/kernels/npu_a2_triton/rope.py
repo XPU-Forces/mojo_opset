@@ -664,15 +664,15 @@ def rope_bwd_impl(
     return _rope_bwd_impl(dq, dk, cos, sin, unsqueeze_dim, True, False)
 
 
-@torch.library.custom_op("mojo_npu_triton_a2::apply_rope_fwd", mutates_args=())
-def apply_rope_fwd(
+@torch.library.custom_op("mojo_npu_triton_a2::rope_fwd", mutates_args=())
+def rope_fwd(
     q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, unsqueeze_dim: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     return rope_train_fwd_impl(q, k, cos, sin, unsqueeze_dim, cache_halves_repeated=False)
 
 
-@apply_rope_fwd.register_fake
-def _apply_rope_fwd_fake(
+@rope_fwd.register_fake
+def _rope_fwd_fake(
     q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, unsqueeze_dim: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     del cos, sin, unsqueeze_dim
@@ -680,47 +680,47 @@ def _apply_rope_fwd_fake(
             torch.empty_like(k, memory_format=torch.contiguous_format))
 
 
-@torch.library.custom_op("mojo_npu_triton_a2::apply_rope_bwd", mutates_args=())
-def apply_rope_bwd(
+@torch.library.custom_op("mojo_npu_triton_a2::rope_bwd", mutates_args=())
+def rope_bwd(
     grad_q: torch.Tensor, grad_k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, unsqueeze_dim: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     return rope_train_bwd_impl(grad_q, grad_k, cos, sin, unsqueeze_dim, cache_halves_repeated=False)
 
 
-@apply_rope_bwd.register_fake
-def _apply_rope_bwd_fake(
+@rope_bwd.register_fake
+def _rope_bwd_fake(
     grad_q: torch.Tensor, grad_k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, unsqueeze_dim: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     del cos, sin, unsqueeze_dim
     return (torch.empty_like(grad_q, memory_format=torch.contiguous_format),
             torch.empty_like(grad_k, memory_format=torch.contiguous_format))
 
-@torch.library.custom_op("mojo_npu_triton_a2::apply_rope_infer_fwd", mutates_args=())
-def apply_rope_infer_fwd(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+@torch.library.custom_op("mojo_npu_triton_a2::rope_infer_fwd", mutates_args=())
+def rope_infer_fwd(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
                          head_first: bool, keep_cos_sin_dtype: bool) -> Tuple[torch.Tensor, torch.Tensor]:
     return rope_fwd_impl(q, k, cos, sin, head_first, keep_cos_sin_dtype)
 
 
-@apply_rope_infer_fwd.register_fake
+@rope_infer_fwd.register_fake
 def _rope_infer_fake(q, k, cos, sin, head_first, keep_cos_sin_dtype):
     return (torch.empty_like(q, memory_format=torch.contiguous_format),
             torch.empty_like(k, memory_format=torch.contiguous_format))
 
 
-@torch.library.custom_op("mojo_npu_triton_a2::rotary_embedding_fwd", mutates_args=())
-def rotary_embedding_fwd(x: torch.Tensor, inv_freq: torch.Tensor, cos: Optional[torch.Tensor],
+@torch.library.custom_op("mojo_npu_triton_a2::rope_cos_sin_fwd", mutates_args=())
+def rope_cos_sin_fwd(x: torch.Tensor, inv_freq: torch.Tensor, cos: Optional[torch.Tensor],
                           sin: Optional[torch.Tensor], cu_q_lens: Optional[torch.Tensor],
                           total_seq_lens: Optional[torch.Tensor], position_ids: Optional[torch.Tensor],
                           attention_scaling: float) -> Tuple[torch.Tensor, torch.Tensor]:
     if cos is None or sin is None:
-        raise ValueError("Triton rotary_embedding requires precomputed cos/sin; set init_max_length")
+        raise ValueError("Triton rope_cos_sin requires precomputed cos/sin; set init_max_length")
     outputs = rot_pos_embed_impl(x, cos, sin, cu_q_lens=cu_q_lens, seqlens_kv=total_seq_lens,
                                   position_ids=position_ids)
     return outputs[0].clone(), outputs[1].clone()
 
 
-@rotary_embedding_fwd.register_fake
-def _rotary_embedding_fake(x, inv_freq, cos, sin, cu_q_lens, total_seq_lens, position_ids, attention_scaling):
+@rope_cos_sin_fwd.register_fake
+def _rope_cos_sin_fake(x, inv_freq, cos, sin, cu_q_lens, total_seq_lens, position_ids, attention_scaling):
     shape = (*position_ids.shape, inv_freq.shape[0] * 2) if position_ids is not None else (
         x.shape[0] if cu_q_lens is not None else x.shape[1], inv_freq.shape[0] * 2)
     return inv_freq.new_empty(shape), inv_freq.new_empty(shape)

@@ -14,7 +14,8 @@ def _launcher():
         return _native.launch_swa
     except (ImportError, AttributeError) as error:
         raise ImportError(
-            "Install byted-mojo-opset-lib-npu-a5-950pr matching your runtime, or build locally: "
+            "Native extension mojo_opset_lib.npu_a5.sku_950pr._native could not be loaded "
+            "or does not export launch_swa. Build and install it for your runtime: "
             "bash native/build.sh npu_a5/sku_950pr swa; then "
             "MOJO_LIB_PROVIDER=npu_a5/sku_950pr python -m pip install --no-build-isolation --no-deps -e ./native"
         ) from error

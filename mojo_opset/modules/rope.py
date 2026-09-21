@@ -5,7 +5,9 @@ import torch
 from mojo_opset import functions
 
 
-class ApplyRoPE(torch.nn.Module):
+class RoPE(torch.nn.Module):
+    """Apply rotary position embedding to Q/K using caller-supplied tables."""
+
     def __init__(
         self,
         *,
@@ -23,7 +25,7 @@ class ApplyRoPE(torch.nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return functions.apply_rope(
+        return functions.rope(
             q,
             k,
             cos,

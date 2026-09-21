@@ -18,7 +18,7 @@ def _rotary_mul_fake(x, cos, sin, rotary_mode):
     return torch.empty_like(x, memory_format=torch.contiguous_format)
 
 
-def apply_rope_infer_fwd(
+def rope_infer_fwd(
     q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, head_first: bool, keep_cos_sin_dtype: bool
 ) -> tuple[torch.Tensor, torch.Tensor]:
     cos, sin = cos.unsqueeze(-3 if head_first else -2), sin.unsqueeze(-3 if head_first else -2)
@@ -39,7 +39,7 @@ def apply_rope_infer_fwd(
     return outputs[0], outputs[1]
 
 
-def apply_vision_rope2d_infer_fwd(
+def vision_rope_2d_infer_fwd(
     q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     cos, sin = cos.unsqueeze(0).unsqueeze(2), sin.unsqueeze(0).unsqueeze(2)

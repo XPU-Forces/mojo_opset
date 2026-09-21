@@ -15,7 +15,6 @@ def test_linear_cross_entropy(benchmark, perf_environment, batch, hidden, vocab,
         x = torch.randn(batch, hidden, dtype=torch.bfloat16, device=device, requires_grad=True)
         weight = torch.randn(vocab, hidden, dtype=torch.bfloat16, device=device, requires_grad=True)
         target = torch.randint(vocab, (batch,), device=device)
-        # Original Mojo CE contract, not the distinct Ext fused CE interface.
         call = lambda: functions.linear_cross_entropy(x, weight, target, implementation=implementation)
         return training(call, (x, weight), phase, grad_factory=torch.rand_like)
 

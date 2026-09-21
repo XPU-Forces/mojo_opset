@@ -38,15 +38,15 @@ def make_rotary_case(case, device):
 
 
 def _rotary(dim, device, implementation, cached=True):
-    table = modules.RotaryEmbedding(
+    table = modules.RoPECosSin(
         10000.0, dim, init_max_length=32768 if cached else None, implementation=implementation, device=device
     )
     return partial(
-        functions.rotary_embedding, inv_freq=table.inv_freq, cos=table.cos, sin=table.sin, implementation=implementation
+        functions.rope_cos_sin, inv_freq=table.inv_freq, cos=table.cos, sin=table.sin, implementation=implementation
     )
 
 
-@pytest.mark.api("functions.rotary_embedding")
+@pytest.mark.api("functions.rope_cos_sin")
 @pytest.mark.parametrize("case", ROTARY_CASES)
 @pytest.mark.accuracy
 def test_rotary(accuracy_backend, case):
@@ -59,15 +59,15 @@ def test_rotary(accuracy_backend, case):
     assert_close(expected, dynamic, rtol=1e-5, atol=1e-5)
 
 
-@pytest.mark.api("functions.vision_rotary_embedding2d")
+@pytest.mark.api("functions.vision_rope_cos_sin_2d")
 @pytest.mark.parametrize("grid", VISION_GRIDS)
 @pytest.mark.accuracy
 def test_vision(accuracy_backend, grid):
     implementation, _, device = accuracy_backend
     grid_hw = torch.tensor(grid, device=device, dtype=torch.int32)
-    table = modules.VisionRotaryEmbedding2D(
+    table = modules.VisionRoPECosSin2D(
         rope_dim=64, adapooling_factor=2, device=device, implementation=implementation
     )
-    actual = functions.vision_rotary_embedding2d(table.inv_freq, grid_hw, 64, 2, implementation=implementation)
-    expected = functions.vision_rotary_embedding2d(table.inv_freq, grid_hw, 64, 2, implementation="torch_reference")
+    actual = functions.vision_rope_cos_sin_2d(table.inv_freq, grid_hw, 64, 2, implementation=implementation)
+    expected = functions.vision_rope_cos_sin_2d(table.inv_freq, grid_hw, 64, 2, implementation="torch_reference")
     assert_close(actual, expected, rtol=1e-5, atol=1e-5)

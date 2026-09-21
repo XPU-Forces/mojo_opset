@@ -7,10 +7,10 @@ from torch.autograd.function import once_differentiable
 from ._dispatch import load_impl
 
 
-class ApplyRoPEFunction(torch.autograd.Function):
+class RoPEFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, cos, sin, unsqueeze_dim, implementation):
-        forward, backward = load_impl("apply_rope", implementation, require_backward=True)
+        forward, backward = load_impl("rope", implementation, require_backward=True)
         ctx.backward_kernel = backward
         ctx.unsqueeze_dim = unsqueeze_dim
         ctx.save_for_backward(cos, sin)
@@ -26,7 +26,7 @@ class ApplyRoPEFunction(torch.autograd.Function):
         return grad_q, grad_k, None, None, None, None
 
 
-def apply_rope(
+def rope(
     q: torch.Tensor,
     k: torch.Tensor,
     cos: torch.Tensor,
@@ -35,6 +35,10 @@ def apply_rope(
     unsqueeze_dim: int = 1,
     implementation: Optional[str] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply partial or full rotary position embedding."""
+    """Rotate Q/K using supplied cos/sin; partial RoPE rotates the suffix.
 
-    return ApplyRoPEFunction.apply(q, k, cos, sin, unsqueeze_dim, implementation)
+    Returns rotated Q/K and supports their gradients. Tables are supplied by
+    the caller, optionally prepared with rope_cos_sin.
+    """
+
+    return RoPEFunction.apply(q, k, cos, sin, unsqueeze_dim, implementation)

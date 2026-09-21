@@ -53,7 +53,7 @@ def _build_position_ids(
 ) -> torch.Tensor:
     """Build adapooling-regrouped 2D position IDs.
 
-    Mirrors MojoVisionRotaryEmbedding2D._build_position_ids.
+    Build height/width positions in adaptive-pooling token order.
     """
     pos_ids = []
     grid_hw_cpu = grid_hw.to(device="cpu", dtype=torch.int64)
@@ -445,7 +445,7 @@ def vision_rope_apply_impl(
 
     return q, k
 
-@torch.library.custom_op("mojo_npu_triton_a5::apply_vision_rope2d_infer", mutates_args=("q", "k"))
+@torch.library.custom_op("mojo_npu_triton_a5::vision_rope_2d_infer", mutates_args=("q", "k"))
 def _vision_rope_leaf(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> None:
     vision_rope_apply_impl(q, k, cos, sin)
 
@@ -455,19 +455,19 @@ def _vision_rope_fake(q, k, cos, sin):
     return None
 
 
-def apply_vision_rope2d_infer_fwd(q, k, cos, sin):
+def vision_rope_2d_infer_fwd(q, k, cos, sin):
     q_out, k_out = q.clone(), k.clone()
     _vision_rope_leaf(q_out, k_out, cos, sin)
     return q_out, k_out
 
 
-@torch.library.custom_op("mojo_npu_triton_a5::vision_rotary_embedding2d_fwd", mutates_args=())
-def vision_rotary_embedding2d_fwd(inv_freq: torch.Tensor, grid_hw: torch.Tensor, rope_dim: int,
+@torch.library.custom_op("mojo_npu_triton_a5::vision_rope_cos_sin_2d_fwd", mutates_args=())
+def vision_rope_cos_sin_2d_fwd(inv_freq: torch.Tensor, grid_hw: torch.Tensor, rope_dim: int,
                                   adapooling_factor: int) -> Tuple[torch.Tensor, torch.Tensor]:
     return vision_rot_pos_embed_impl(inv_freq, grid_hw, rope_dim, adapooling_factor)
 
 
-@vision_rotary_embedding2d_fwd.register_fake
-def _vision_rotary_embedding2d_fake(inv_freq, grid_hw, rope_dim, adapooling_factor):
+@vision_rope_cos_sin_2d_fwd.register_fake
+def _vision_rope_cos_sin_2d_fake(inv_freq, grid_hw, rope_dim, adapooling_factor):
     tokens = torch.library.get_ctx().new_dynamic_size()
     return inv_freq.new_empty((tokens, rope_dim)), inv_freq.new_empty((tokens, rope_dim))

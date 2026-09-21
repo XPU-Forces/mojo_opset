@@ -48,7 +48,7 @@ def make_composite_case(case, dtype, device, implementation):
     return actual, reference, (x, qr, 0, freqs, None)
 
 
-@pytest.mark.api("modules.Indexer", ops=["layer_norm_infer", "apply_rope_infer", "dynamic_quant", "lightning_indexer"])
+@pytest.mark.api("modules.Indexer", ops=["layer_norm_infer", "rope_infer", "dynamic_quant", "lightning_indexer"])
 @pytest.mark.parametrize("case", COMPOSITE_CASES)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.accuracy

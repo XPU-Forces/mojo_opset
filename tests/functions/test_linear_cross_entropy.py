@@ -1,8 +1,9 @@
 import pytest
 import torch
 
-from mojo_opset import functions
+from mojo_opset import functions as F
 from mojo_opset import preload
+from tests._checks import assert_accuracy
 from tests._checks import assert_close
 from tests._checks import assert_repeatable
 from tests._compile import compile_fullgraph
@@ -11,129 +12,150 @@ from tests._compile import compile_fullgraph
 @pytest.mark.api("functions.linear_cross_entropy")
 @pytest.mark.parametrize("reduction", ["mean", "sum", "none"])
 @pytest.mark.accuracy
-def test_master(accuracy_backend, reduction):
-    implementation, _, device = accuracy_backend
-    x = torch.randn(2048, 1024, device=device, dtype=torch.bfloat16, requires_grad=True)
-    weight = torch.randn(4096, 1024, device=device, dtype=torch.bfloat16, requires_grad=True)
-    labels = torch.randint(4096, (2048,), device=device)
-    actual, zloss = functions.linear_cross_entropy(
-        x, weight, labels, reduction=reduction, implementation=implementation
-    )
-    expected, _ = functions.linear_cross_entropy(
-        x, weight, labels, reduction=reduction, implementation="torch_reference"
-    )
-    assert zloss is None
-    assert_close(actual, expected, torch.float32, rtol=6e-3, atol=6e-3)
-    upstream = torch.rand_like(actual)
-    if reduction != "mean":
-        upstream /= x.shape[0]
-    a_grads = torch.autograd.grad(actual, (x, weight), upstream)
-    e_grads = torch.autograd.grad(expected, (x, weight), upstream)
-    for a, e in zip(a_grads, e_grads):
-        # Original master BF16 standard, including its aggregate-error check.
-        assert_close(a, e, a.dtype, rtol=0.05, atol=0.1)
-        assert (a - e).abs().mean() < 0.1 or ((a - e) / (e + 0.01)).abs().mean() < 0.01
-
-
-@pytest.mark.api("functions.linear_cross_entropy")
-@pytest.mark.parametrize("reduction", ["mean", "sum", "none"])
-@pytest.mark.parametrize("option", ["bias", "class_weight", "smoothing", "zloss", "softcap", "accum"])
-@pytest.mark.accuracy
-def test_options(accuracy_backend, reduction, option):
-    implementation, _, device = accuracy_backend
-    x = torch.randn(17, 64, device=device, requires_grad=True)
-    weight = torch.randn(128, 64, device=device, requires_grad=True)
+def test_ce_reduction(accuracy_backend, reduction):
+    device = accuracy_backend[2]
     labels = torch.randint(128, (17,), device=device)
     labels[0] = -100
-    bias = torch.randn(128, device=device, requires_grad=True) if option == "bias" else None
-    options = {
-        "class_weight": dict(ce_weight=torch.rand(128, device=device) + 0.1),
-        "smoothing": dict(label_smoothing=0.1),
-        "zloss": dict(lse_square_scale=0.01, return_z_loss=True),
-        "softcap": dict(softcap=10.0),
-        "accum": dict(accum_dtype=torch.float32),
-    }.get(option, {})
-    loss, diagnostic = functions.linear_cross_entropy(
+
+    def run(x, weight, **selection):
+        return F.linear_cross_entropy(x, weight, labels, reduction=reduction, **selection)
+
+    assert_accuracy(
+        run,
+        tuple(torch.randn(shape, device=device, dtype=torch.bfloat16) for shape in ((17, 64), (128, 64))),
+        implementation=accuracy_backend[0],
+        grad_tolerances={0: (2e-2, 2e-2), 1: (2e-2, 2e-2)},
+    )
+
+
+@pytest.mark.api("functions.linear_cross_entropy_and_zloss")
+@pytest.mark.parametrize("calc_acc", [False, True])
+@pytest.mark.accuracy
+def test_ce_zloss(accuracy_backend, calc_acc):
+    device = accuracy_backend[2]
+    labels = torch.randint(128, (17,), device=device)
+    labels[0] = -100
+
+    def run(x, weight, **selection):
+        return F.linear_cross_entropy_and_zloss(x, weight, labels, 0.01, calc_acc=calc_acc, **selection)
+
+    assert_accuracy(
+        run,
+        tuple(torch.randn(shape, device=device, dtype=torch.bfloat16) for shape in ((17, 64), (128, 64))),
+        implementation=accuracy_backend[0],
+    )
+
+
+@pytest.mark.parametrize(
+    "op",
+    [
+        pytest.param(op, marks=pytest.mark.api("functions." + op))
+        for op in ["linear_cross_entropy", "linear_cross_entropy_and_zloss"]
+    ],
+)
+@pytest.mark.bitwise
+def test_loss_bitwise(accuracy_backend, op):
+    implementation, target, device = accuracy_backend
+    inputs = tuple(
+        torch.randn(shape, device=device, dtype=torch.bfloat16, requires_grad=True) for shape in ((17, 64), (128, 64))
+    )
+    labels = torch.randint(128, (17,), device=device)
+
+    def run(x, weight):
+        kwargs = {"z_loss_weight": 0.01} if op.endswith("_and_zloss") else {}
+        return getattr(F, op)(x, weight, labels, implementation=implementation, **kwargs)
+
+    assert_repeatable(run, inputs)
+
+
+# Preserve the Ext master chunk/vocabulary boundaries as well as the option matrix.
+CE_CASES = (
+    [(17, 16, 64, acc, zloss, ignored, True) for acc in (False, True) for zloss in (0.0, 1e-4) for ignored in (-100, 0)]
+    + [(tokens, 32, 67, False, 1e-4, -100, False) for tokens in (0, 2047, 2048, 2049, 4097)]
+    + [(9, 32, 4103, True, 1e-4, -100, True)]
+)
+
+
+def _ce_inputs(case, device):
+    tokens, hidden, vocab, *_ = case
+    torch.manual_seed(44 if vocab == 4103 else 42 if hidden == 16 else 43)
+    x = torch.randn(tokens, hidden, dtype=torch.bfloat16, device=device)
+    weight = torch.randn(vocab, hidden, dtype=torch.bfloat16, device=device)
+    labels = torch.randint(vocab, (tokens,), dtype=torch.long, device=device)
+    if vocab != 4103:
+        labels[:: 5 if hidden == 16 else 7] = case[5]
+    return x, weight, labels
+
+
+def _ce_call(x, weight, labels, case, implementation):
+    return F.linear_cross_entropy_and_zloss(
         x,
         weight,
         labels,
-        bias,
-        reduction=reduction,
+        case[4],
+        calc_acc=case[3],
+        ignore_index=case[5],
+        align_precision=case[6],
+        reduction="none",
         implementation=implementation,
-        **options,
     )
-    # Independently model the original optimized formula. The preserved old
-    # reference ignores softcap and uses mean-only z-loss, so is not its oracle.
-    logits = x @ weight.T
-    if bias is not None:
-        logits = logits + bias
-    if option == "softcap" and implementation != "torch_reference":
-        logits = 10.0 * (logits / 10.0).tanh()
-    expected = torch.nn.functional.cross_entropy(
-        logits,
-        labels,
-        weight=options.get("ce_weight"),
-        reduction=reduction,
-        label_smoothing=options.get("label_smoothing", 0.0),
-    )
-    if option == "zloss":
-        z = (0.01 * logits.logsumexp(-1).square()).masked_fill(labels == -100, 0)
-        if implementation == "torch_reference" or reduction == "mean":
-            z = z.sum() / (labels != -100).sum()
-        elif reduction == "sum":
-            z = z.sum()
-        expected = expected + z
-        assert_close(diagnostic, z, torch.float32, rtol=6e-3, atol=6e-3)
-    else:
-        assert diagnostic is None
-    assert_close(loss, expected, torch.float32, rtol=6e-3, atol=6e-3)
-    upstream = torch.randn_like(loss)
-    inputs = (x, weight) if bias is None else (x, weight, bias)
-    for actual, reference in zip(
-        torch.autograd.grad(loss, inputs, upstream, retain_graph=True), torch.autograd.grad(expected, inputs, upstream)
-    ):
-        assert_close(actual, reference, torch.float32, rtol=6e-3, atol=6e-3)
-    # A second backward must not mutate and rescale the saved gradient buffers.
-    for a, e in zip(
-        torch.autograd.grad(loss, inputs, upstream * 2, retain_graph=True),
-        torch.autograd.grad(loss, inputs, upstream, retain_graph=True),
-    ):
-        assert_close(a, e * 2, rtol=1.3e-6, atol=1e-5)
 
 
-@pytest.mark.api("functions.linear_cross_entropy")
-@pytest.mark.parametrize("reduction", ["mean", "sum", "none"])
+@pytest.mark.api("functions.linear_cross_entropy_and_zloss")
+@pytest.mark.parametrize("case", CE_CASES)
+@pytest.mark.accuracy
+def test_ce(accuracy_backend, case):
+    impl, _, device = accuracy_backend
+    x, weight, labels = _ce_inputs(case, device)
+    actual_inputs = [t.detach().clone().requires_grad_(True) for t in (x, weight)]
+    reference_inputs = [t.detach().clone().requires_grad_(True) for t in (x, weight)]
+    actual = _ce_call(*actual_inputs, labels, case, impl)
+    expected = _ce_call(*reference_inputs, labels, case, "torch_reference")
+    grad = torch.randn_like(actual[0])
+    actual[0].backward(grad)
+    expected[0].backward(grad)
+    for index, (a, e) in enumerate(zip(actual, expected)):
+        tol = 0.0 if case[3] and index == 1 else 2e-2
+        assert_close(a.float(), e.float(), rtol=tol, atol=tol)
+    assert_close(actual_inputs[0].grad.float(), reference_inputs[0].grad.float(), rtol=2e-2, atol=2e-2)
+    assert_close(
+        actual_inputs[1].grad.float(),
+        reference_inputs[1].grad.float(),
+        rtol=2e-2,
+        atol=5e-2 if case[0] >= 2047 else 2e-2,
+    )
+
+
+@pytest.mark.api("functions.linear_cross_entropy_and_zloss")
+@pytest.mark.parametrize("case", CE_CASES)
 @pytest.mark.bitwise
-def test_linear_ce_bitwise(accuracy_backend, reduction):
-    implementation, _, device = accuracy_backend
-    x = torch.randn(17, 64, device=device, dtype=torch.bfloat16, requires_grad=True)
-    w = torch.randn(128, 64, device=device, dtype=x.dtype, requires_grad=True)
-    labels = torch.randint(128, (17,), device=device)
-
-    def run(x, w):
-        return functions.linear_cross_entropy(x, w, labels, reduction=reduction, implementation=implementation)
-
-    assert_repeatable(run, (x, w))
+def test_ce_bitwise(accuracy_backend, case):
+    impl, _, device = accuracy_backend
+    x, weight, labels = _ce_inputs(case, device)
+    assert_repeatable(lambda a, b: _ce_call(a, b, labels, case, impl), (x.requires_grad_(), weight.requires_grad_()))
 
 
 @pytest.mark.accuracy
-@pytest.mark.api("functions.linear_cross_entropy")
 @pytest.mark.parametrize("reduction", ["mean", "none"])
-def test_compile(accuracy_backend, reduction):
+@pytest.mark.parametrize("op", [
+    pytest.param("linear_cross_entropy", marks=pytest.mark.api("functions.linear_cross_entropy")),
+    pytest.param("linear_cross_entropy_and_zloss", marks=pytest.mark.api("functions.linear_cross_entropy_and_zloss")),
+])
+def test_compile(accuracy_backend, reduction, op):
     implementation, _, device = accuracy_backend
-    preload("linear_cross_entropy", implementation=implementation)
+    preload(op, implementation=implementation)
     x = torch.randn(17, 64, device=device, requires_grad=True)
     w = torch.randn(128, 64, device=device, requires_grad=True)
     labels = torch.randint(128, (17,), device=device)
+    options = {"z_loss_weight": 0.01} if op.endswith("_and_zloss") else {}
 
     def run(x, w):
-        return functions.linear_cross_entropy(x, w, labels, reduction=reduction, implementation=implementation)[0]
+        result = getattr(F, op)(x, w, labels, reduction=reduction, implementation=implementation, **options)
+        return result[0] if options else result
 
     try:
         compiled = compile_fullgraph(run)
         actual, expected = compiled(x, w), run(x, w)
-        if implementation == "triton" and reduction != "none":
-            assert all(t is None for t in expected.grad_fn.saved_tensors[:5])
         torch.testing.assert_close(actual, expected)
         for a, e in zip(torch.autograd.grad(actual.sum(), (x, w)), torch.autograd.grad(expected.sum(), (x, w))):
             torch.testing.assert_close(a, e)

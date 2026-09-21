@@ -74,7 +74,7 @@ def make_vision(grid, dtype, device):
     return q, torch.randn_like(q), angles.cos(), angles.sin()
 
 
-@pytest.mark.api("modules.ApplyRoPEInfer", ops=["apply_rope_infer"])
+@pytest.mark.api("modules.RoPEInfer", ops=["rope_infer"])
 @pytest.mark.accuracy
 @pytest.mark.parametrize("shape", ROPE_SHAPES)
 @pytest.mark.parametrize("heads", ROPE_HEADS)
@@ -92,22 +92,22 @@ def test_rope(accuracy_backend, shape, heads, mode):
         and dim // 2 * inputs[0].element_size() % 32
     ):
         pytest.skip("Original torch_npu BNSD rotary half-dimension alignment restriction")
-    op = M.ApplyRoPEInfer(head_first=head_first, implementation=impl)
-    expected = F.apply_rope_infer(*inputs, head_first=head_first, implementation="torch_reference")
+    op = M.RoPEInfer(head_first=head_first, implementation=impl)
+    expected = F.rope_infer(*inputs, head_first=head_first, implementation="torch_reference")
     actual = op(*inputs)
     for a, e in zip(actual, expected):
         assert_close(a, e, heads[0], rtol=5e-2, atol=5e-2)
 
 
-@pytest.mark.api("modules.ApplyVisionRoPE2DInfer", ops=["apply_vision_rope2d_infer"])
+@pytest.mark.api("modules.VisionRoPE2DInfer", ops=["vision_rope_2d_infer"])
 @pytest.mark.accuracy
 @pytest.mark.parametrize("grid", VISION_GRIDS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_vision(accuracy_backend, grid, dtype):
     impl, _, device = accuracy_backend
     inputs = make_vision(grid, dtype, device)
-    op = M.ApplyVisionRoPE2DInfer(implementation=impl)
-    expected = F.apply_vision_rope2d_infer(*inputs, implementation="torch_reference")
+    op = M.VisionRoPE2DInfer(implementation=impl)
+    expected = F.vision_rope_2d_infer(*inputs, implementation="torch_reference")
     actual = op(*inputs)
     for a, e in zip(actual, expected):
         assert_close(a, e, dtype, rtol=5e-2, atol=5e-2)

@@ -8,7 +8,7 @@ from ._checks import _require_inference
 from ._dispatch import load_impl
 
 
-def mrope(
+def multimodal_rope_infer(
     q: torch.Tensor,
     k: torch.Tensor,
     cos: torch.Tensor,
@@ -20,10 +20,10 @@ def mrope(
     inplace: bool = False,
     implementation: Optional[str] = None,
 ):
-    _require_inference("mrope", q, k, cos, sin)
+    _require_inference("multimodal_rope_infer", q, k, cos, sin)
     q_out = q.contiguous() if inplace else q.clone(memory_format=torch.contiguous_format)
     k_out = k.contiguous() if inplace else k.clone(memory_format=torch.contiguous_format)
-    forward, _ = load_impl("mrope", implementation)
+    forward, _ = load_impl("multimodal_rope_infer", implementation)
     forward(q_out, k_out, cos.contiguous(), sin.contiguous(), list(mrope_section), is_interleaved, head_dim)
     if inplace:
         if q_out is not q:

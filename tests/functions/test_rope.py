@@ -53,7 +53,7 @@ def make_rope_case(device, dtype, batch, tokens, q_heads, k_heads, head_first, d
     return inputs, angles.cos(), angles.sin()
 
 
-@pytest.mark.api("functions.apply_rope")
+@pytest.mark.api("functions.rope")
 @pytest.mark.parametrize("q_transposed,k_transposed", [(False, True), (True, False), (True, True)])
 @pytest.mark.accuracy
 def test_rope_strides(accuracy_backend, q_transposed, k_transposed):
@@ -66,14 +66,14 @@ def test_rope_strides(accuracy_backend, q_transposed, k_transposed):
         return x if transposed else x.contiguous()
 
     def run(q, k, **selection):
-        return F.apply_rope(q, k, cos, sin, unsqueeze_dim=1, **selection)
+        return F.rope(q, k, cos, sin, unsqueeze_dim=1, **selection)
 
     assert_accuracy(
         run, (input_tensor(4, q_transposed), input_tensor(2, k_transposed)), implementation=accuracy_backend[0]
     )
 
 
-@pytest.mark.api("functions.apply_rope")
+@pytest.mark.api("functions.rope")
 @pytest.mark.parametrize("head_first", [False, True])
 @pytest.mark.parametrize("rotary_dim", [48, 88])
 @pytest.mark.accuracy
@@ -85,7 +85,7 @@ def test_rope_layout(accuracy_backend, head_first, rotary_dim):
     shapes = [(2, h, 9, 88) if head_first else (2, 9, h, 88) for h in (4, 2)]
 
     def run(q, k, **selection):
-        return F.apply_rope(q, k, cos, sin, unsqueeze_dim=0 if head_first else 1, **selection)
+        return F.rope(q, k, cos, sin, unsqueeze_dim=0 if head_first else 1, **selection)
 
     assert_accuracy(
         run,
@@ -94,7 +94,7 @@ def test_rope_layout(accuracy_backend, head_first, rotary_dim):
     )
 
 
-@pytest.mark.api("functions.apply_rope")
+@pytest.mark.api("functions.rope")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.accuracy
 def test_rope_cache(accuracy_backend, dtype):
@@ -104,7 +104,7 @@ def test_rope_cache(accuracy_backend, dtype):
     cos, sin = angles.cos().to(dtype), angles.sin().to(dtype)
 
     def run(q, k, **selection):
-        return F.apply_rope(q, k, cos, sin, **selection)
+        return F.rope(q, k, cos, sin, **selection)
 
     assert_accuracy(
         run,
@@ -113,19 +113,19 @@ def test_rope_cache(accuracy_backend, dtype):
     )
 
 
-@pytest.mark.api("functions.apply_rope")
+@pytest.mark.api("functions.rope")
 @pytest.mark.bitwise
 def test_rope_bitwise(accuracy_backend):
     implementation, _, device = accuracy_backend
     q, k = (torch.randn(1, h, 7, 16, device=device, dtype=torch.bfloat16, requires_grad=True) for h in (4, 2))
     angles = torch.randn(1, 7, 16, device=device)
     assert_repeatable(
-        partial(F.apply_rope, unsqueeze_dim=1, implementation=implementation),
+        partial(F.rope, unsqueeze_dim=1, implementation=implementation),
         (q, k, angles.cos().bfloat16(), angles.sin().bfloat16()),
     )
 
 
-@pytest.mark.api("functions.apply_rope")
+@pytest.mark.api("functions.rope")
 @pytest.mark.parametrize("batch,tokens,q_heads,k_heads,head_first,dim,rotary_dim", ROPE_CASES)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.accuracy
@@ -133,8 +133,8 @@ def test_rope(accuracy_backend, batch, tokens, q_heads, k_heads, head_first, dim
     implementation, _, device = accuracy_backend
     inputs, cos, sin = make_rope_case(device, dtype, batch, tokens, q_heads, k_heads, head_first, dim, rotary_dim)
     reference_inputs = clone_with_grad(inputs)
-    actual = F.apply_rope(*inputs, cos, sin, unsqueeze_dim=0 if head_first else 1, implementation=implementation)
-    expected = F.apply_rope(
+    actual = F.rope(*inputs, cos, sin, unsqueeze_dim=0 if head_first else 1, implementation=implementation)
+    expected = F.rope(
         *reference_inputs, cos, sin, unsqueeze_dim=0 if head_first else 1, implementation="torch_reference"
     )
     upstream = tuple(torch.rand_like(output) for output in actual)
@@ -144,7 +144,7 @@ def test_rope(accuracy_backend, batch, tokens, q_heads, k_heads, head_first, dim
         assert_mojo_close(a, b, name=f"output/grad[{index}]")
 
 
-@pytest.mark.api("functions.apply_rope")
+@pytest.mark.api("functions.rope")
 @pytest.mark.parametrize("batch,tokens,q_heads,k_heads,head_first,dim,rotary_dim", ROPE_CASES)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.bitwise
@@ -152,14 +152,14 @@ def test_rope_shapes_bitwise(accuracy_backend, batch, tokens, q_heads, k_heads, 
     implementation, _, device = accuracy_backend
     inputs, cos, sin = make_rope_case(device, dtype, batch, tokens, q_heads, k_heads, head_first, dim, rotary_dim)
     assert_repeatable(
-        partial(F.apply_rope, cos=cos, sin=sin, unsqueeze_dim=0 if head_first else 1, implementation=implementation),
+        partial(F.rope, cos=cos, sin=sin, unsqueeze_dim=0 if head_first else 1, implementation=implementation),
         inputs,
     )
 
 
 @pytest.mark.accuracy
-@pytest.mark.api("functions.apply_rope")
-@pytest.mark.parametrize("op", ["apply_rope"])
+@pytest.mark.api("functions.rope")
+@pytest.mark.parametrize("op", ["rope"])
 @pytest.mark.parametrize("backend", ["eager", "aot_eager"])
 def test_compiled_layout(accuracy_backend, op, backend):
     implementation, target, device = accuracy_backend
@@ -172,7 +172,7 @@ def test_compiled_layout(accuracy_backend, op, backend):
     x = torch.randn(17, 7, device=device, dtype=torch.bfloat16).T.requires_grad_()
     inputs = (x,)
     kwargs = {}
-    if op == "apply_rope":
+    if op == "rope":
         q = torch.randn(1, 4, 7, 16, device=device, dtype=torch.bfloat16, requires_grad=True)
         k = torch.randn(1, 7, 2, 16, device=device, dtype=torch.bfloat16).transpose(1, 2).requires_grad_()
         angles = torch.randn(1, 7, 16, device=device)
