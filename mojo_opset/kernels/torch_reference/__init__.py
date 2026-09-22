@@ -63,6 +63,7 @@ OPS = {
     "swa_infer": "attention",
     "native_swa_infer": "attention",
     "rope": "rope",
+    "sparse_flash_mla_infer": "sparse_flash_mla",
 }
 
 
