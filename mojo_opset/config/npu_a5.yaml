@@ -47,6 +47,7 @@ npu.a5:
   rotate_activation: torch_reference
   sdpa_infer: triton
   silu: triton
+  sparse_flash_mla_infer: cannbotdsl  # DSL sources JIT-compiled by bisheng; A5 (dav-3510) only.
   static_quant: triton
   store_lowrank: triton
   store_paged_kv_cache: triton

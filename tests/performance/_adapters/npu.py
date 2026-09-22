@@ -31,7 +31,13 @@ def is_kernel(event):
 
 
 def kernel_owners(events, ranges):
-    """Follow Torch launch flows; host and device timestamps need not align."""
+    """Follow torch_to_npu launch flows; kernels without a flow (GE custom
+    operators launched outside the torch_npu dispatch layer, e.g. bisheng JIT
+    kernels from cannbotdsl) fall back to device-timestamp attribution against
+    the synchronized sample ranges. Host and device timestamps need not align
+    exactly for the flow path; the fallback relies on every sample ending with
+    a synchronize, so a device kernel start always falls inside its owning
+    sample's host range."""
 
     def point(event):
         if any(key not in event for key in ("pid", "tid", "ts")):
@@ -104,8 +110,19 @@ def kernel_owners(events, ranges):
         if len(matches) > 1:
             raise ValueError("NPU kernel belongs to multiple sample ranges")
         owners[index] = matches.pop() if matches else None  # Warmup stays outside samples.
-    if kernels - owners.keys():
-        raise ValueError("NPU device kernel is missing a torch_to_npu flow")
+    unowned = kernels - owners.keys()
+    if unowned:
+        # GE custom operators (e.g. bisheng JIT kernels from cannbotdsl) launch
+        # outside the torch_npu dispatch layer, so their device kernels carry no
+        # torch_to_npu flow. Attribute them by timestamp against the sample
+        # ranges instead: every sample ends with a synchronize, so a kernel's
+        # device start always falls inside its owning sample's host range.
+        # Pure-aclnn workloads leave `unowned` empty and keep the strict
+        # original behavior unchanged.
+        for index in sorted(unowned):
+            ts = Decimal(str(events[index]["ts"]))
+            matches = [name for name, _, _, lower, upper in bounds if lower <= ts < upper]
+            owners[index] = matches[0] if len(matches) == 1 else None
     return owners
 
 
