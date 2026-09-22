@@ -1,4 +1,4 @@
-"""A5 native wrappers backed by optional mojo_opset_lib SKU packages."""
+"""A5 native wrappers backed by mojo_opset_lib SKU extensions."""
 
 OPS = {}
 

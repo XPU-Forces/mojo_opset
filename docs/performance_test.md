@@ -10,9 +10,9 @@ The suite measures public functions/modules, not every implementation automatica
 Select cases with pytest paths or `-k`; list them with `--collect-only -q`.
 Use an idle device and run revisions serially, without pytest-xdist.
 
-Cases include the original Mojo/Ext performance shapes, including long attention
-sequences and large VWN/GDN states. The full suite is expensive; select files or
-cases for development. Forward, backward, and combined forward/backward are
+Cases cover a range of workload sizes, including long attention sequences.
+The full suite is expensive; select files or cases for development.
+Forward, backward, and combined forward/backward are
 reported separately. Input construction and saved backward graphs are outside
 the timed region; legacy hardware-specific MFU estimates are not reported.
 

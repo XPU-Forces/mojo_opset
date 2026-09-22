@@ -20,7 +20,6 @@ from .gemm import QuantGemm
 from .indexer import Indexer
 from .indexer import LightningIndexer
 from .kv_cache import StorePagedKVCache
-from .loss import LinearCrossEntropyLoss
 from .multimodal_rope_infer import MultimodalRoPEInfer
 from .multimodal_rope_infer import MultimodalRoPEInplaceInfer
 from .normalization import GroupRMSNormInfer
@@ -69,7 +68,6 @@ __all__ = [
     "LayerNormInfer",
     "LayerNormQuant",
     "LightningIndexer",
-    "LinearCrossEntropyLoss",
     "MoEDynamicQuant",
     "MultimodalRoPEInfer",
     "MultimodalRoPEInplaceInfer",

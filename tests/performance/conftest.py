@@ -37,6 +37,12 @@ def _version(name):
         return None
 
 
+def _module_distributions(module):
+    """Record provider builds without hardcoding vendor distribution names."""
+    names = importlib.metadata.packages_distributions().get(module, [module])
+    return {name: version for name in sorted(set(names)) if (version := _version(name)) is not None}
+
+
 def pytest_configure(config):
     if config.option.collectonly:
         return
@@ -83,7 +89,7 @@ def perf_environment(pytestconfig, request):
         "torch_npu": _version("torch-npu"),
         "torch_mlu": _version("torch-mlu"),
         "triton": _version("triton"),
-        "triton_x": _version("byted-triton-x"),
+        "triton_distributions": _module_distributions("triton"),
     }
     report["measurement"] = {
         "timers": sorted(pytestconfig.getoption("--perf-timers").split(",")),

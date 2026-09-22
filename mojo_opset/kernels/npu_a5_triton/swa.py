@@ -1887,6 +1887,10 @@ def _sdpa_single_block_bwd_dq(
 
     # ds = p * (dp - d)
     ds = p * (dp - d[:, None]) * qk_scale
+    if mask is not None and mask is not True:
+        # Padded dot products can contain NaNs; zero probabilities alone
+        # do not suppress them before the dQ reduction.
+        ds = tl.where(mask, ds, 0.0)
     ds_cast = ds.to(q.dtype)
 
     # -- Compute dK ----

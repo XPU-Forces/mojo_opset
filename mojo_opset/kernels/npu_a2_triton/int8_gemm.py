@@ -39,7 +39,7 @@ def _get_autotune_configs():
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 512}),
         # Small M tiles
         triton.Config({**_vmix, "BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 256}),
-        # Exclude 64x64x256 vmix2: incorrect results on Endor CANN 8.5.1.
+        # Exclude 64x64x256 vmix2: incorrect results with CANN 8.5.1.
     ]
 
 

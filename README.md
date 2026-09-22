@@ -13,7 +13,14 @@ kernels/    kernel implementations and Python/custom-op wrappers
 
 ## Quick start
 
-Install in the matching accelerator PyTorch environment:
+Requires Python 3.10 or newer and a matching accelerator PyTorch environment.
+For NPU, install the main package with its compiler and native library dependencies:
+
+```sh
+python -m pip install 'mojo-opset[npu]'
+```
+
+For Python/Triton source development:
 
 ```sh
 python -m pip install -e .
@@ -30,10 +37,14 @@ norm = modules.RMSNorm(1024, implementation="triton").npu()
 y = norm(x)
 ```
 
-Mojo Opset is a pure-Python distribution. Native implementations require
-optional, hardware-specific extensions under `mojo_opset_lib`; users
-still call `mojo_opset.functions` and `mojo_opset.modules`. Python/Triton-only
-development needs no lib package.
+The main package contains Python/Triton code. The `npu` extra installs the 910B
+and 950PR native lib packages; runtime dispatch loads only the matching provider.
+Both lib packages must provide wheels for the installation's Python/CPU platform.
+
+After an editable install, compile and install the required native lib with
+`bash build.sh npu_a2` in the matching toolchain environment. Python/Triton-only
+development does not require compiling native code.
+See the [native build guide](native/README.md) for build and release commands.
 
 ## Operator support
 

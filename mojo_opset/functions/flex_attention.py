@@ -6,7 +6,7 @@ from torch.autograd.function import once_differentiable
 
 from ._dispatch import load_impl
 
-# Fields consumed by the Mojo/Ext launchers and the reference. Keep additions
+# Fields consumed by the kernel launchers and the reference. Keep additions
 # explicit: a new kernel-side tensor must participate in saved-tensor hooks and
 # version checks, rather than being retained invisibly in an arbitrary object.
 _MASK_TENSORS = (

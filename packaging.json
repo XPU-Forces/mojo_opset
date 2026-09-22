@@ -1,0 +1,15 @@
+{
+  "name": "mojo-opset",
+  "version": "1.0.0rc1",
+  "description": "PyTorch operators with optimized implementations",
+  "requires_python": ">=3.10",
+  "urls": {"Homepage": "https://github.com/XPU-Forces/mojo_opset"},
+  "readme": "README.md",
+  "dependencies": ["einops", "pyyaml"],
+  "optional_dependencies": {
+    "dev": ["pytest>=8.3.2"],
+    "npu": ["triton-ascend>=3.2.1"],
+    "mlu": ["triton>=3.2.0"],
+    "ilu": []
+  }
+}

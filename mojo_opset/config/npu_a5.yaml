@@ -18,8 +18,6 @@ npu.a5:
   layer_norm_infer: triton
   layer_norm_quant: torch_npu
   lightning_indexer: triton
-  linear_cross_entropy: triton
-  linear_cross_entropy_and_zloss: triton
   moe_dynamic_quant: triton
   multimodal_rope_infer: triton
   n_gram_decode: triton

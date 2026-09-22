@@ -36,8 +36,6 @@ OPS = {
     "static_quant": "quant",
     "dequant": "quant",
     "dynamic_quant": "quant",
-    "linear_cross_entropy": "linear_cross_entropy",
-    "linear_cross_entropy_and_zloss": "linear_cross_entropy",
     "causal_conv1d_update_state_infer": "convolution",
     "layer_norm_infer": "layernorm",
     "rms_norm_infer": "rmsnorm",

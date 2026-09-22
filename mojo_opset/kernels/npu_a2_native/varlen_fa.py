@@ -14,8 +14,7 @@ def _launcher():
         raise ImportError(
             "Native extension mojo_opset_lib.npu_a2._native could not be loaded "
             "or does not export launch_varlen_fa. Build and install it for your runtime: "
-            "bash native/build.sh npu_a2 varlen_fa; then "
-            "MOJO_LIB_PROVIDER=npu_a2 python -m pip install --no-build-isolation --no-deps -e ./native"
+            "bash build.sh npu_a2"
         ) from error
 
 

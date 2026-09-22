@@ -44,8 +44,6 @@ OPS = {
     "dequant": "quantization",
     "dynamic_quant": "quantization",
     "varlen_fa_infer": "varlen_fa",
-    "linear_cross_entropy": "linear_cross_entropy",
-    "linear_cross_entropy_and_zloss": "linear_cross_entropy",
     "causal_conv1d_update_state_infer": "convolution",
     "layer_norm_infer": "normalization",
     "rms_norm_infer": "normalization",
