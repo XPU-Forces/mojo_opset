@@ -24,6 +24,36 @@ from mojo_opset.utils.platform import get_torch_device
 logger = get_logger(__name__)
 
 
+def write_profile_caseid(prof):
+    """Write the pytest nodeid beside this profiler's existing CSV files."""
+    profiling_path = getattr(getattr(prof, "prof_if", None), "prof_path", None)
+    if not profiling_path or not os.path.isdir(profiling_path):
+        logger.warning(f"NPU profiler result path is unavailable: {profiling_path!r}")
+        return None
+
+    caseid = os.environ.get("PYTEST_CURRENT_TEST", "")
+    if caseid.endswith(" (call)"):
+        caseid = caseid[:-len(" (call)")]
+    if not caseid:
+        logger.warning(f"Missing pytest caseid for NPU profile: {profiling_path}")
+        return profiling_path
+
+    output_dir = os.path.join(profiling_path, "ASCEND_PROFILER_OUTPUT")
+    if not os.path.isdir(output_dir):
+        logger.warning(f"NPU profiler output directory is unavailable: {output_dir}")
+        return profiling_path
+
+    caseid_path = os.path.join(output_dir, "caseid")
+    try:
+        with open(caseid_path, "w", encoding="utf-8") as file:
+            file.write(caseid)
+    except OSError as error:
+        logger.warning(f"Failed to write NPU profile caseid {caseid_path}: {error}")
+    else:
+        logger.info(f"NPU profile: nodeid={caseid!r}, path={profiling_path}")
+    return profiling_path
+
+
 class BackendNotImplementedForTest(NotImplementedError):
     """Raised in tests when the requested backend has no implementation."""
 
@@ -377,6 +407,7 @@ def device_perf_npu(executor, profiling_dir="./npu_profiling", active=5):
             prof.step()
             torch.npu.synchronize()
 
+    write_profile_caseid(prof)
     try:
         kernel_profiling_path = max(
             [

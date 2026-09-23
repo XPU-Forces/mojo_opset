@@ -8,6 +8,7 @@ import math
 from mojo_opset import MojoSWAFunction
 
 from mojo_opset.tests.utils import auto_switch_platform
+from mojo_opset.tests.utils import write_profile_caseid
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.utils.platform import get_torch_device
 
@@ -138,6 +139,7 @@ def test_swa_function_perf(
             torch.npu.synchronize()
             time.sleep(0.5)     # sleep for NPU calm down
 
+    write_profile_caseid(prof)
     peak_tflops = 378.0  # for 950-PR
     if os.path.exists(profiling_dir):
         kernel_profiling_path = max(
