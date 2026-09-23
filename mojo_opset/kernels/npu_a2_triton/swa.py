@@ -2076,7 +2076,19 @@ def _swa_bwd_dkdv_kernel(
                 kv_block_start = kv_block_id * BLOCK_N
                 kv_block_end = min(kv_block_start + BLOCK_N, kv_seq_len)
                 kv_block_len = kv_block_end - kv_block_start
-                if kv_block_len > 0:
+                start_block, end_block = _swa_transposed_range_blocks(
+                    kv_block_start,
+                    kv_block_len,
+                    kv_computed_len,
+                    q_seq_len,
+                    BLOCK_M,
+                    IS_CAUSAL,
+                    GLOBAL_WINDOW,
+                    LOCAL_WINDOW,
+                )
+                # No contributing Q tiles: preserve the zero-initialized KV
+                # gradients instead of storing an empty matmul accumulator.
+                if kv_block_len > 0 and start_block < end_block:
                     # cur_k_block_ptr = tl.advance(k_block_ptr, (kv_block_start.to(tl.int32), 0))
                     cur_k_block_ptr = tl.make_block_ptr(
                         base=k_ptr + kv_start * stride_kt + kv_head_id * stride_kh,
@@ -2097,17 +2109,6 @@ def _swa_bwd_dkdv_kernel(
                         order=(1, 0),
                     )
                     cur_v_block = tl.load(cur_v_block_ptr, boundary_check=(0, 1), padding_option="zero")
-
-                    start_block, end_block = _swa_transposed_range_blocks(
-                        kv_block_start,
-                        kv_block_len,
-                        kv_computed_len,
-                        q_seq_len,
-                        BLOCK_M,
-                        IS_CAUSAL,
-                        GLOBAL_WINDOW,
-                        LOCAL_WINDOW,
-                    )
 
                     dk = tl.zeros((BLOCK_N, HEAD_DIM), dtype=tl.float32)
                     dv = tl.zeros((BLOCK_N, HEAD_DIM), dtype=tl.float32)
