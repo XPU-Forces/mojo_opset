@@ -2553,8 +2553,6 @@ def flex_attention_bwd_impl(
             limit_auto_multi_buffer_buffer="no-limit",
             hfusion_enable_multiple_consumer_fusion=True,
             limit_auto_multi_buffer_of_local_buffer="no-l0c",
-            intra_cache_num=2,
-            inter_cache_num=1,
         )
 
     else:
@@ -2599,8 +2597,6 @@ def flex_attention_bwd_impl(
             limit_auto_multi_buffer_buffer="no-limit",
             hfusion_enable_multiple_consumer_fusion=True,
             limit_auto_multi_buffer_of_local_buffer="no-l0c",
-            intra_cache_num=2,
-            inter_cache_num=1,
         )
 
     return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype)
