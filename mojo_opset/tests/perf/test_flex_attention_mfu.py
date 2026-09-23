@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from mojo_opset.tests.utils import bypass_not_implemented
 from mojo_opset.tests.utils import auto_switch_platform
+from mojo_opset.tests.utils import write_profile_caseid
 from mojo_opset.utils.platform import get_platform
 from mojo_opset.backends.ttx.kernels.npu.utils import is_910
 from mojo_opset.backends.ttx.kernels.npu.flex_attention import _build_packed_block_mask_streaming
@@ -115,6 +116,7 @@ def _perf_benchmark(label, build_mask_fn, fwd_fn, q, k, v, prof_dir_root, mask_f
             _sync()
             prof.step()
     print(f"======================== prof end ({label}) ====================")
+    write_profile_caseid(prof)
     if n_element is not None and os.path.exists(prof_dir):
         kernel_profiling_path = max(
             [
