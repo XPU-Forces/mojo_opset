@@ -396,7 +396,7 @@ def device_perf_npu(executor, profiling_dir="./npu_profiling", active=5):
     local_time = time.localtime(current_time)
     date_str = time.strftime("%Y%m%d%H%M%S", local_time)
 
-    # profiling_dir = os.path.join(profiling_dir, f"{caseid}_{date_str}")
+    profiling_dir = os.path.join(profiling_dir, f"{caseid}_{date_str}")
 
     # warm up
     executor()
