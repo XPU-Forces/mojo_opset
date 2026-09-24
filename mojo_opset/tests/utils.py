@@ -20,9 +20,23 @@ from torch.autograd import DeviceType
 from mojo_opset.utils.logging import get_logger
 from mojo_opset.utils.platform import get_platform
 from mojo_opset.utils.platform import get_torch_device
+import shutil
+import glob
+import re
+import time
+
+
+def pytest_nodeid_to_safe_name(nodeid: str) -> str:
+    """把pytest nodeid转为linux安全文件名"""
+    nodeid0 = nodeid.replace(" (call)", "")
+    safe = re.sub(r"[.:(), \[\]\/\\]", "_", nodeid0)
+    # 把连续下划线合并成一个，避免出现多个___
+    safe = re.sub(r"_+", "_", safe)
+    safe = safe.rstrip("_")
+    print(f"pytest_nodeid_to_safe_name {nodeid} to {safe}")
+    return safe
 
 logger = get_logger(__name__)
-
 
 def write_profile_caseid(prof):
     """Write the pytest nodeid beside this profiler's existing CSV files."""
@@ -375,6 +389,15 @@ def device_perf_npu(executor, profiling_dir="./npu_profiling", active=5):
     if not os.path.exists(profiling_dir):
         os.makedirs(profiling_dir)
 
+    caseid_o = os.environ.get("PYTEST_CURRENT_TEST", "")
+    caseid = pytest_nodeid_to_safe_name(caseid_o)
+
+    current_time = time.time()
+    local_time = time.localtime(current_time)
+    date_str = time.strftime("%Y%m%d%H%M%S", local_time)
+
+    profiling_dir = os.path.join(profiling_dir, f"{caseid}_{date_str}")
+
     # warm up
     executor()
     import torch_npu
@@ -407,7 +430,6 @@ def device_perf_npu(executor, profiling_dir="./npu_profiling", active=5):
             prof.step()
             torch.npu.synchronize()
 
-    write_profile_caseid(prof)
     try:
         kernel_profiling_path = max(
             [
@@ -435,6 +457,13 @@ def device_perf_npu(executor, profiling_dir="./npu_profiling", active=5):
         for row in reader:
             avg_time = float(row["Total Time(us)"])
             total_avg_time_us += avg_time
+
+    kernel_details_file = os.path.join(kernel_profiling_path, "ASCEND_PROFILER_OUTPUT", "kernel_details.csv")
+    dir_part = os.path.dirname(kernel_details_file)
+    # shutil.move(kernel_details_file, os.path.join(dir_part, f"kernel_details_{caseid}.csv"))
+    file_path = os.path.join(dir_part, "caseid")
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(caseid_o.replace(" (call)",""))
 
     return total_avg_time_us / active, kernel_profiling_path
 
