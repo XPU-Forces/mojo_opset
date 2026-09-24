@@ -223,7 +223,9 @@ matching wheel tags alone do not establish binary compatibility.
 
 Root `packaging.json` owns the main version and Python dependency constraints.
 `native/packaging.json` maps provider paths to independent lib versions; package
-name suffixes are derived from those paths.
+name suffixes are derived from those paths. Adjacent `packaging_*.json` overlays
+add or override provider versions in filename order. Main and lib builds use the
+same merged mapping.
 Main packaging automatically adds exact lib dependencies to the corresponding
 platform extra, using the same names and versions as lib packaging. The initial
 `npu` extra pins both libs to `1.0.0rc1`. A main-only release changes only the root

@@ -19,6 +19,7 @@ from mojo_opset import Target
 from mojo_opset import config
 from mojo_opset.functions._dispatch import resolve_implementation
 from mojo_opset.utils import target as target_utils
+from tests._fixtures import check_implementation
 
 from ._adapters import load_platform
 from .memory import measure_memory
@@ -93,7 +94,7 @@ def perf_environment(pytestconfig, request):
     }
     report["measurement"] = {
         "timers": sorted(pytestconfig.getoption("--perf-timers").split(",")),
-        "profiler_timer": "per_call_kernel_v4",
+        "profiler_timer": "per_call_kernel_v5",
         "event_timer": "current_stream_batch_v1",
         "e2e_timer": "synchronized_wall_v2",
         "memory": "allocator_peak_after_timing_v1",
@@ -132,6 +133,7 @@ def benchmark(request, perf_environment, monkeypatch):
             raise ValueError(f"{request.node.nodeid}: benchmark op {op!r} is missing from its api mark")
         if any(row["id"] == request.node.nodeid for row in report["cases"]):
             raise ValueError("Call benchmark once per test; parametrize separate workloads")
+        check_implementation([op], implementation, target)
         selected = implementation or resolve_implementation(op, Target.parse(target))
         count = report["measurement"]["instances"]
         workload = [factory() for _ in range(count)]

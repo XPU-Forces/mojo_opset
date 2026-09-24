@@ -10,6 +10,11 @@ The suite measures public functions/modules, not every implementation automatica
 Select cases with pytest paths or `-k`; list them with `--collect-only -q`.
 Use an idle device and run revisions serially, without pytest-xdist.
 
+Each run uses the configured implementation, or the one selected by
+`--mojo-implementation`. Compare implementations in separate runs. Unsupported
+providers are skipped; missing libraries for a registered provider remain failures.
+Skipped reports cannot be promoted as complete comparison baselines.
+
 Cases cover a range of workload sizes, including long attention sequences.
 The full suite is expensive; select files or cases for development.
 Forward, backward, and combined forward/backward are
@@ -21,7 +26,7 @@ the timed region; legacy hardware-specific MFU estimates are not reported.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--mojo-target` | Detected | Target configuration, e.g. `npu.a2`; does not select a physical card |
-| `--mojo-implementation` | Config | Exact implementation for all selected cases |
+| `--mojo-implementation` | Target config | Exact implementation for all selected cases |
 | `--perf-device` | `0` | Logical device index within the visible devices |
 | `--perf-timers` | `profiler,e2e` | Comma-separated `profiler`, `e2e`, or `event` |
 | `--perf-warmup` | `10` | Warmup calls, at least 1 |

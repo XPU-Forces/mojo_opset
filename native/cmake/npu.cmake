@@ -1,5 +1,8 @@
 if(MOJO_NATIVE_PROVIDER STREQUAL "npu_a2")
     set(_default_soc Ascend910B1)
+elseif(MOJO_NATIVE_PROVIDER STREQUAL "npu_a5")
+    # Architecture-wide ASC kernels select dav-3510, with runtime core counts.
+    set(_default_soc "")
 elseif(MOJO_NATIVE_PROVIDER STREQUAL "npu_a5/sku_950pr")
     set(_default_soc Ascend950PR_9579)
 else()
@@ -27,7 +30,9 @@ if(NOT _query_status EQUAL 0)
     message(FATAL_ERROR "Cannot locate torch_npu with ${Python3_EXECUTABLE}: ${_query_error}")
 endif()
 set(TORCH_NPU_LIB_DIR "${TORCH_NPU_ROOT}/lib")
-include("${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake/ascendc.cmake")
+if(NOT MOJO_NATIVE_PROVIDER STREQUAL "npu_a5")
+    include("${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake/ascendc.cmake")
+endif()
 set(_cann_arch_dir "${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux")
 set(MOJO_ASCEND_INCLUDE_DIRS
     "${ASCEND_CANN_PACKAGE_PATH}/include"

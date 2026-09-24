@@ -64,19 +64,24 @@ def load_metadata(root):
 
 
 def _lib_metadata(root):
-    path = Path(root) / "native/packaging.json"
-    try:
-        versions = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        raise ValueError("Cannot read native/packaging.json") from error
-    if not isinstance(versions, dict) or not versions:
-        raise ValueError("native/packaging.json: expected provider versions")
+    directory = Path(root) / "native"
+    versions = {}
+    for path in [directory / "packaging.json", *sorted(directory.glob("packaging_*.json"))]:
+        label = f"native/{path.name}"
+        try:
+            entries = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise ValueError(f"Cannot read {label}") from error
+        if not isinstance(entries, dict) or not entries:
+            raise ValueError(f"{label}: expected provider versions")
+        for provider, version in entries.items():
+            if (not re.fullmatch(r"[a-z][a-z0-9]*_[a-z0-9_]+(?:/sku_[a-z0-9_]+)?", provider)
+                    or not isinstance(version, str) or not version.strip()):
+                raise ValueError(f"{label}: expected a version for {provider!r}")
+        versions.update(entries)
     providers = {}
     names = set()
     for provider, version in versions.items():
-        if (not re.fullmatch(r"[a-z][a-z0-9]*_[a-z0-9_]+(?:/sku_[a-z0-9_]+)?", provider)
-                or not isinstance(version, str) or not version.strip()):
-            raise ValueError(f"native/packaging.json: expected a version for {provider!r}")
         name = provider.replace("/sku_", "-").replace("_", "-")
         if name in names:
             raise ValueError(f"native/packaging.json: duplicate lib name {name!r}")
