@@ -18,6 +18,7 @@ from .fused_quantization import moe_dynamic_quant
 from .fused_quantization import residual_add_layer_norm_quant
 from .fused_quantization import residual_add_rms_norm_quant
 from .fused_quantization import rms_norm_quant
+from .dynamic_mx_quant_sr import dynamic_mx_quant_sr
 from .gelu import gelu
 from .gemm import group_gemm
 from .gemm import quant_batch_gemm_reduce_sum
@@ -69,6 +70,7 @@ __all__ = [
     "dequant",
     "dequant_swiglu_quant",
     "diffusion_attention",
+    "dynamic_mx_quant_sr",
     "dynamic_quant",
     "embedding_nf4_dequant",
     "flash_attention",
