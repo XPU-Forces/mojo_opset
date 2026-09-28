@@ -85,3 +85,13 @@ def accuracy_backend(pytestconfig):
 
     implementation = pytestconfig.getoption("--mojo-implementation")
     return implementation, target, device
+
+
+@pytest.fixture
+def sparse_flash_mla_backend(accuracy_backend):
+    implementation, target, device = accuracy_backend
+    if implementation == "torch_reference":
+        return implementation, device
+    if not target.startswith("npu.a5") or implementation not in (None, "cannbotdsl"):
+        pytest.skip("Sparse flash MLA inference currently has an A5 cannbotdsl provider only")
+    return implementation, device
