@@ -59,6 +59,7 @@ from .sampling import top_p_sampling
 from .sdpa import diffusion_attention
 from .sdpa import sdpa_infer
 from .silu import silu
+from .sparse_flash_mla import sparse_flash_mla_infer
 from .store_lowrank import store_lowrank
 from .swiglu import swiglu
 
@@ -110,6 +111,7 @@ __all__ = [
     "rotate_activation",
     "sdpa_infer",
     "silu",
+    "sparse_flash_mla_infer",
     "static_quant",
     "store_lowrank",
     "store_paged_kv_cache",
