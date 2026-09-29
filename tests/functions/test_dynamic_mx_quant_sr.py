@@ -52,11 +52,20 @@ def _assert_bitwise(actual, expected):
     assert torch.equal(scale.view(torch.uint8).cpu(), ref_scale.view(torch.uint8).cpu())
 
 
+def _pin_npu_rng(device):
+    # The DSL kernel reserves (seed, block_offset) from the framework
+    # generator. Pin it to (0, 0) so the run replays the golden's default
+    # stream; the reservation advances the offset by 1024 on every call.
+    if str(device) in ("npu", "privateuseone") or (isinstance(device, torch.device) and device.type in ("npu", "privateuseone")):
+        torch.npu.manual_seed(0)
+
+
 def _run_case(backend, shape, axis, src, dst_code=24, algorithm=1, bound=0.0, *, cpu=None):
     implementation, device = backend
     if cpu is None:
         cpu = _random_input(shape, axis, src)
     x = cpu.to(device)
+    _pin_npu_rng(device)
     kwargs = dict(
         axis=axis, dst_type=dst_code, scale_alg=algorithm, max_low_bound=bound
     )
