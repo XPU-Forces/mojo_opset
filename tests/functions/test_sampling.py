@@ -38,8 +38,11 @@ def check_sampling(name, actual_fn, reference_fn, logits):
     # Different sampling algorithms need not draw the same token under one seed.
     # Retain master's 200-draw nucleus statistics and apply the same check to top-k.
     actual_probs, expected_probs = [], []
-    for _ in range(200):
+    for draw in range(200):
+        # Same seed per side: both draw the same token, removing sampling noise.
+        torch.manual_seed(draw)
         expected_p, expected_ids = reference_fn(logits.clone())
+        torch.manual_seed(draw)
         actual_p, actual_ids = actual_fn(logits.clone())
         assert actual_ids.shape == expected_ids.shape
         assert bool(((actual_ids >= 0) & (actual_ids < logits.shape[-1])).all())
