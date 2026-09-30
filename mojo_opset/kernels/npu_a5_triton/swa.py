@@ -61,7 +61,6 @@ def get_aux_mask():
     return AUX_MASK_SIZE, AUX_MASK
 
 
-@functools.lru_cache(maxsize=32)
 def _get_mask_causal_with_window_cached(
         BLOCK_M: int,
         BLOCK_N: int,
