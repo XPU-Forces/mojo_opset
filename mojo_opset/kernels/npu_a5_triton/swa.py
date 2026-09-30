@@ -15,6 +15,20 @@ _private = additions(__package__)
 AUX_MASK_SIZE = 256
 AUX_MASK = None
 
+# Mask 模板压缩：LW > COMPRESS_CAP 时，模板 local 窗口宽度固定为 COMPRESS_CAP，
+# 内存从 O((GW+LW)^2) 降为 O((GW+CAP)^2)。kernel 侧通过 6 类边界对齐映射读取。
+# COMPRESS_CAP >= 2*max_tile 保证斜边界与主对角线不在同一 tile（正确性约束）。
+# 详见 docs/swa_mask_template_compress_design.md
+COMPRESS_CAP = 512
+COMPRESS_TILE = 128
+
+_GLOBAL_WINDOW_SIZE = None
+_LOCAL_WINDOW_SIZE = None
+_BLOCK_M = None
+_BLOCK_N = None
+_COMPRESSED_MASK = None
+
+
 def get_aux_mask():
     global AUX_MASK
     global AUX_MASK_SIZE
@@ -47,7 +61,6 @@ def get_aux_mask():
     return AUX_MASK_SIZE, AUX_MASK
 
 
-@functools.lru_cache(maxsize=32)
 def _get_mask_causal_with_window_cached(
         BLOCK_M: int,
         BLOCK_N: int,
@@ -55,25 +68,58 @@ def _get_mask_causal_with_window_cached(
         global_window_size: Optional[int] = None,
         device: str = "npu:0",
 ):
+    global _GLOBAL_WINDOW_SIZE
+    global _LOCAL_WINDOW_SIZE
+    global _BLOCK_M
+    global _BLOCK_N
+    global _COMPRESSED_MASK
+    if (
+        _GLOBAL_WINDOW_SIZE == global_window_size
+        and _LOCAL_WINDOW_SIZE == local_window_size
+        and _BLOCK_M == BLOCK_M
+        and _BLOCK_N == BLOCK_N
+        and _COMPRESSED_MASK is not None
+    ):
+        return _COMPRESSED_MASK
     has_local_window = local_window_size is not None
     if local_window_size is None:
         local_window_size = 0
     if global_window_size is None:
         global_window_size = 0
 
-    M = (global_window_size + local_window_size + 4 * max(BLOCK_M, BLOCK_N) + BLOCK_M - 1) // BLOCK_M * BLOCK_M
-    N = (global_window_size + local_window_size + 5 * max(BLOCK_M, BLOCK_N) + BLOCK_N - 1) // BLOCK_N * BLOCK_N
+    if local_window_size > COMPRESS_CAP:
+        # 压缩模板：local 窗口宽度固定为 512，模板尺寸仅依赖 GW，与 LW 无关。
+        # 模板布局（S = GW + 1024）：
+        #   n=0      GW     GW+512        GW+1024=S
+        #   +--------+--------+-------------+
+        # m=0| sink  |  dead  |   padding   |
+        #    +--------+        |   (全False) |
+        # GW |  causal下三角  |  local(宽512)|             |
+        # S  +--------+--------+-------------+
+        #    |         AUX padding (256行)   |
+        #    +------------------------------+
+        assert BLOCK_M <= COMPRESS_TILE and BLOCK_N <= COMPRESS_TILE, (
+            f"compressed mask requires BLOCK_M/BLOCK_N <= {COMPRESS_TILE}, got {BLOCK_M}/{BLOCK_N}"
+        )
+        mask_gw = global_window_size
+        mask_lw = COMPRESS_CAP
+        M = mask_gw + mask_lw + 4 * COMPRESS_TILE   # GW + 1024
+        N = mask_gw + mask_lw + 4 * COMPRESS_TILE
+    else:
+        # 未压缩模板：精确反映真实 (GW, LW) mask
+        mask_gw = global_window_size
+        mask_lw = local_window_size
+        M = (global_window_size + local_window_size + 4 * max(BLOCK_M, BLOCK_N) + BLOCK_M - 1) // BLOCK_M * BLOCK_M
+        N = (global_window_size + local_window_size + 5 * max(BLOCK_M, BLOCK_N) + BLOCK_N - 1) // BLOCK_N * BLOCK_N
 
+    # mask[m,n] = (n <= m) & (n < GW | n >= m - LW')，压缩时 LW'=512
     causal = torch.ones(M, N, dtype=torch.bool).tril()
-
     sink_band = torch.zeros(M, N, dtype=torch.bool)
-    sink_band[:, :global_window_size] = True
-
-    local_band = (
-        torch.ones(M, N, dtype=torch.bool).triu(diagonal=-local_window_size)
-        if has_local_window else torch.zeros(M, N, dtype=torch.bool)
+    sink_band[:, :mask_gw] = True
+    local_band = ( 
+        torch.ones(M, N, dtype=torch.bool).triu(diagonal=-mask_lw) 
+        if has_local_window else torch.zeros(M, N, dtype=torch.bool) 
     )
-
     mask = causal & (sink_band | local_band)
 
     M_boundary = M + AUX_MASK_SIZE
@@ -82,7 +128,12 @@ def _get_mask_causal_with_window_cached(
     mask_boundary[:M, :N] = mask
     mask_boundary = mask_boundary.to(device=device)
 
-    return mask_boundary
+    _GLOBAL_WINDOW_SIZE = global_window_size
+    _LOCAL_WINDOW_SIZE = local_window_size
+    _BLOCK_M = BLOCK_M
+    _BLOCK_N = BLOCK_N
+    _COMPRESSED_MASK = mask_boundary
+    return _COMPRESSED_MASK
 
 
 def get_mask_causal_with_window(
@@ -106,7 +157,10 @@ def get_mask_causal_with_window(
 
 @triton.jit
 def gen_mask_causal_with_window(mask_ptr_causal, mask_size_m, mask_size_n, M_BLOCK, N_BLOCK, m_start, n_start,
-                                global_window_size, local_windows_size, q_seq_len, kv_seq_len, AUX_MASK_SIZE=AUX_MASK_SIZE):
+                                global_window_size, local_windows_size, q_seq_len, kv_seq_len,
+                                AUX_MASK_SIZE: tl.constexpr = AUX_MASK_SIZE,
+                                COMPRESS_CAP: tl.constexpr = 512,
+                                COMPRESS_TILE: tl.constexpr = 128):
     if local_windows_size is None:
         local_windows_size = 0
     if global_window_size is None:
@@ -114,18 +168,71 @@ def gen_mask_causal_with_window(mask_ptr_causal, mask_size_m, mask_size_n, M_BLO
 
     actual_mask_m = mask_size_m - AUX_MASK_SIZE
     is_q_oob = (m_start >= kv_seq_len).to(tl.int32)
-    valid_rows = max(0, min(kv_seq_len - m_start, M_BLOCK))
-    is_tail = (valid_rows < M_BLOCK).to(tl.int32)
 
-    m_pos_normal = min(m_start, actual_mask_m - M_BLOCK)
-    m_pos = (1 - is_q_oob) * m_pos_normal + is_q_oob * actual_mask_m
+    if local_windows_size <= COMPRESS_CAP:
+        # 原路径：模板未压缩
+        m_pos_normal = min(m_start, actual_mask_m - M_BLOCK)
+        m_pos = (1 - is_q_oob) * m_pos_normal + is_q_oob * actual_mask_m
 
-    shift = m_start - m_pos
-    need_adjust = (shift != 0).to(tl.int32)
-    is_global_block = (n_start < global_window_size).to(tl.int32)
-    can_compensate = ((m_start - n_start) <= local_windows_size).to(tl.int32)
-    need_adjust = need_adjust * ((1 - is_global_block) + is_global_block * can_compensate)
-    n_pos = ((1 - need_adjust) * n_start + need_adjust * max(global_window_size + 1, n_start - shift)) * (1 - is_q_oob)
+        shift = m_start - m_pos
+        need_adjust = (shift != 0).to(tl.int32)
+        is_global_block = (n_start < global_window_size).to(tl.int32)
+        can_compensate = ((m_start - n_start) <= local_windows_size).to(tl.int32)
+        need_adjust = need_adjust * ((1 - is_global_block) + is_global_block * can_compensate)
+        n_pos = ((1 - need_adjust) * n_start + need_adjust * max(global_window_size + 1, n_start - shift)) * (1 - is_q_oob)
+    else:
+        # LW 压缩分支（LW > 512）：模板按 (GW, 512) 生成，kernel 侧按 tile 相对
+        # 三条边界（竖直 n=GW、斜 n=m-LW、主对角 n=m）的位置分 6 类（A~F）映射读取。
+        # 不变式：mask 图案沿对角线平移不变；tile≤128 且 LW'=512≥2×128，
+        # 斜边界与主对角线不在同一 tile。详见 docs/swa_mask_template_compress_design.md
+
+        lwp = COMPRESS_CAP                              # 模板 local 窗口宽 512
+        RT = global_window_size + lwp + 2 * COMPRESS_TILE  # 全 True 块锚点行
+        lw_shift = local_windows_size - lwp              # LW 压缩差值，行方向补偿
+
+        d  = m_start - n_start                           # 对角偏移 m-n
+        dv = global_window_size - n_start                # 到 GW 竖直边界距离
+        db = d - local_windows_size                      # 到斜边界距离
+
+        # 6 个边界标志（互斥划分 6 类 tile）
+        in_sink    = (dv > N_BLOCK - 1).to(tl.int32)
+        lt_gw      = (dv > 0).to(tl.int32)
+        below      = (d >= N_BLOCK - 1).to(tl.int32)
+        band_right = (db > N_BLOCK - 1).to(tl.int32)
+        band_left  = (db <= -(M_BLOCK - 1)).to(tl.int32)
+        l2b_cond   = (db <= dv - (M_BLOCK - 1)).to(tl.int32)
+
+        # 6 类 one-hot：A=纯sink/直读, B=跨GW, C=local对角块, D=斜边界穿过,
+        #               E=全True, F=全dead
+        cross = lt_gw - in_sink
+        zone = 1 - lt_gw
+        m_clamp = min(m_start, actual_mask_m - M_BLOCK)
+
+        t1 = cross * band_right
+        t2 = cross * l2b_cond
+        cE1 = t2 * below
+        cB = cross - t1 - t2
+        cA = in_sink + t1 + t2 - cE1
+        c_dead = zone * band_right
+        c_z = zone - c_dead
+        cCD = c_z * band_left
+        cE2 = cCD * below
+        cC = cCD - cE2
+        cD = c_z - cCD
+        cE = cE1 + cE2
+
+        # n_pos: A/B 直读, C→GW+512, D→GW+128, E→右下全True, F→padding(全False)
+        g_ab = cA + cB
+        n_pos = (n_start * g_ab + (global_window_size + lwp) * cC
+                 + (global_window_size + COMPRESS_TILE) * cD
+                 + (RT - (N_BLOCK - 1)) * cE)
+
+        # m_pos: A→钳位, B→上移lw_shift, C/D→对角平移(d+n_pos), D额外减lw_shift,
+        #        E→RT, F→padding行
+        g_dnl = cB + cC + cD
+        g_lws = cB + cD
+        m_pos = (m_clamp * cA + (d + n_pos) * g_dnl - lw_shift * g_lws
+                 + RT * cE + actual_mask_m * c_dead)
 
     mask = tl.load(
         mask_ptr_causal
@@ -534,9 +641,16 @@ def swa_infer_impl(
     if global_window_size is None:
         global_window_size = 0
 
+    if q.dtype == torch.float32:
+        BLOCK_M = 64
+        BLOCK_N = 64
+    else:
+        BLOCK_M = 128
+        BLOCK_N = 128
+
     causal_mask = get_mask_causal_with_window(
-        256,
-        256,
+        BLOCK_M,
+        BLOCK_N,
         local_window_size,
         global_window_size,
     )
@@ -551,12 +665,6 @@ def swa_infer_impl(
 
     o = torch.zeros_like(q, memory_format=torch.contiguous_format)
 
-    if q.dtype == torch.float32:
-        BLOCK_M = 64
-        BLOCK_N = 64
-    else:
-        BLOCK_M = 128
-        BLOCK_N = 128
     BLOCK_D = head_dim
 
     cube_num = get_num_cores("cube")
@@ -1653,8 +1761,8 @@ def swa_fwd_impl(
         global_window_size = 0
 
     causal_mask = get_mask_causal_with_window(
-        256,
-        256,
+        128,
+        128,
         local_window_size,
         global_window_size
     )
@@ -2445,7 +2553,12 @@ def swa_dkdv(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     # mask_size, mask = get_aux_mask()
 
-    causal_mask = get_mask_causal_with_window(256, 256, local_window_size, global_window_size)
+    causal_mask = get_mask_causal_with_window(
+        128,
+        128,
+        local_window_size,
+        global_window_size
+    )
     causal_mask_m_size, causal_mask_n_size = causal_mask.shape
 
     bsz = cu_q_lens.shape[0] - 1
@@ -2563,7 +2676,7 @@ def swa_dq(
 ) -> torch.Tensor:
     # mask_size, mask = get_aux_mask()
 
-    causal_mask = get_mask_causal_with_window(256, 256, local_window_size, global_window_size)
+    causal_mask = get_mask_causal_with_window(128, 128, local_window_size, global_window_size)
     causal_mask_m_size, causal_mask_n_size = causal_mask.shape
 
     bsz = cu_q_lens.shape[0] - 1
