@@ -62,10 +62,11 @@ def dynamic_mx_quant_sr(
 ):
     """Stochastic MXFP8 quantization with dynamic per-block E8M0 scales.
 
-    MQA-style MX block quantization: per-32-element absmax scales with
-    stochastic rounding seeded by a fixed Philox (0,0) stream, so repeated
-    calls replay identical randomness.  ``dst_type`` uses Torch integer
-    codes: 23=E5M2, 24=E4M3FN.
+    Per-32-element absmax scales with stochastic rounding. The cannbotdsl
+    implementation reserves Philox state from the input device's default
+    framework generator on each call; restoring its RNG state replays the
+    sequence. The torch_reference implementation uses a fixed (0, 0) state.
+    ``dst_type`` uses Torch integer codes: 23=E5M2, 24=E4M3FN.
 
     Args:
         input: contiguous nonempty FP32/BF16 tensor; the quantization axis

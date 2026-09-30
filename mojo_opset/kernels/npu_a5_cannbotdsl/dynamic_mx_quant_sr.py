@@ -342,46 +342,100 @@ def _nvfp4_counter_coordinates(row_low, row_high, col_low, col_high,
 def _nvfp4_counter_contiguous(row_base, col_base, ids, axis_groups,
                              reciprocal, block_offset, mask):
     """Map one normalized start plus 64 consecutive logical Philox groups."""
-    zero, one = broadcast_u32(0, mask), broadcast_u32(1, mask)
+    zero = broadcast_u32(0, mask)
     row_low_bits, row_high_bits = _split_uint64(row_base)
-    col_low_bits, col_high_bits = _split_uint64(col_base)
+    counter_low = zero
+    counter_high = zero
+    subsequence_low = zero
+    subsequence_high = zero
     row_increment = zero
     col_low = zero
     col_high = zero
-    if axis_groups == 1:
-        row_increment = ids
-    elif axis_groups < 64:
-        numerator = reg.vadds(ids, dtypes.uint32(col_base), mask=mask)
-        _, quotient = reg.vmull(numerator, broadcast_u32(reciprocal, mask),
-                                dtypes.uint32, mask=mask)
-        remainder = reg.vsub(numerator, reg.vmuls(quotient, dtypes.uint32(axis_groups),
-                                                 mask=mask), mask=mask)
-        fix = reg.vselect(one, zero, cond_mask=reg.vges(
-            remainder, dtypes.uint32(axis_groups), mask=mask))
-        row_increment = reg.vadd(quotient, fix, mask=mask)
-        col_low = reg.vsub(remainder, reg.vmuls(fix, dtypes.uint32(axis_groups),
-                                               mask=mask), mask=mask)
+    if axis_groups == 128:
+        # With 128 random groups per row, flattening and the TE rowwise
+        # mapping reduce to fixed bit fields:
+        #   subsequence = (row >> 7) << 11 | (col >> 3) << 7
+        #                 | (row & 15) << 3 | (col & 7)
+        # This preserves the NVFP4 mapping while avoiding the generic u64
+        # compare/subtract and task-grid multiply on every Philox batch.
+        linear_col = reg.vadds(ids, dtypes.uint32(col_base), mask=mask)
+        row_increment = reg.vshr(linear_col, 7, mask=mask)
+        col_low = bitwise_and_scalar(linear_col, 127, mask)
+        row_low, row_high = _pair_add(
+            broadcast_u32(row_low_bits, mask), broadcast_u32(row_high_bits, mask),
+            row_increment, zero, mask)
+        row_task_low = reg.vshl(
+            reg.vshr(row_low, 7, mask=mask), 11, mask=mask)
+        col_task_low = reg.vshl(
+            reg.vshr(col_low, 3, mask=mask), 7, mask=mask)
+        lane = reg.vbitwise_or(
+            reg.vshl(bitwise_and_scalar(row_low, 15, mask), 3, mask=mask),
+            bitwise_and_scalar(col_low, 7, mask), mask=mask)
+        subsequence_low = reg.vbitwise_or(
+            reg.vbitwise_or(row_task_low, col_task_low, mask=mask),
+            lane, mask=mask)
+        subsequence_high = reg.vbitwise_or(
+            reg.vshl(row_high, 4, mask=mask),
+            reg.vshr(row_low, 28, mask=mask), mask=mask)
+        draw = bitwise_and_scalar(reg.vshr(row_low, 4, mask=mask), 7, mask)
+        offset_low, offset_high = _split_uint64(block_offset)
+        counter_low, counter_high = _pair_add(
+            broadcast_u32(offset_low, mask), broadcast_u32(offset_high, mask),
+            draw, zero, mask)
     else:
-        axis_low, axis_high = _split_uint64(axis_groups)
-        col_low, col_high = _pair_add(
-            broadcast_u32(col_low_bits, mask), broadcast_u32(col_high_bits, mask),
-            ids, zero, mask)
-        high_equal = reg.veqs(col_high, axis_high, mask=mask)
-        wrapped = reg.mask_or(
-            reg.vgts(col_high, axis_high, mask=mask),
-            reg.mask_and(high_equal, reg.vges(col_low, axis_low, mask=mask),
-                         exec_mask=mask), exec_mask=mask)
-        row_increment = reg.vselect(one, zero, cond_mask=wrapped)
-        subtract_low = reg.vmuls(row_increment, axis_low, mask=mask)
-        subtract_high = reg.vmuls(row_increment, axis_high, mask=mask)
-        borrow = reg.vselect(one, zero, cond_mask=reg.vlt(col_low, subtract_low, mask=mask))
-        col_low = reg.vsub(col_low, subtract_low, mask=mask)
-        col_high = reg.vsub(reg.vsub(col_high, subtract_high, mask=mask), borrow, mask=mask)
-    row_low, row_high = _pair_add(
-        broadcast_u32(row_low_bits, mask), broadcast_u32(row_high_bits, mask),
-        row_increment, zero, mask)
-    return _nvfp4_counter_coordinates(row_low, row_high, col_low, col_high,
-                                     axis_groups, block_offset, mask)
+        one = broadcast_u32(1, mask)
+        col_low_bits, col_high_bits = _split_uint64(col_base)
+        row_increment = zero
+        col_low = zero
+        col_high = zero
+        if axis_groups == 1:
+            row_increment = ids
+        elif axis_groups < 64:
+            numerator = reg.vadds(ids, dtypes.uint32(col_base), mask=mask)
+            _, quotient = reg.vmull(
+                numerator, broadcast_u32(reciprocal, mask),
+                dtypes.uint32, mask=mask)
+            remainder = reg.vsub(
+                numerator,
+                reg.vmuls(quotient, dtypes.uint32(axis_groups), mask=mask),
+                mask=mask)
+            fix = reg.vselect(one, zero, cond_mask=reg.vges(
+                remainder, dtypes.uint32(axis_groups), mask=mask))
+            row_increment = reg.vadd(quotient, fix, mask=mask)
+            col_low = reg.vsub(
+                remainder,
+                reg.vmuls(fix, dtypes.uint32(axis_groups), mask=mask),
+                mask=mask)
+        else:
+            axis_low, axis_high = _split_uint64(axis_groups)
+            col_low, col_high = _pair_add(
+                broadcast_u32(col_low_bits, mask),
+                broadcast_u32(col_high_bits, mask), ids, zero, mask)
+            high_equal = reg.veqs(col_high, axis_high, mask=mask)
+            wrapped = reg.mask_or(
+                reg.vgts(col_high, axis_high, mask=mask),
+                reg.mask_and(
+                    high_equal, reg.vges(col_low, axis_low, mask=mask),
+                    exec_mask=mask),
+                exec_mask=mask)
+            row_increment = reg.vselect(one, zero, cond_mask=wrapped)
+            subtract_low = reg.vmuls(row_increment, axis_low, mask=mask)
+            subtract_high = reg.vmuls(row_increment, axis_high, mask=mask)
+            borrow = reg.vselect(
+                one, zero,
+                cond_mask=reg.vlt(col_low, subtract_low, mask=mask))
+            col_low = reg.vsub(col_low, subtract_low, mask=mask)
+            col_high = reg.vsub(
+                reg.vsub(col_high, subtract_high, mask=mask),
+                borrow, mask=mask)
+        row_low, row_high = _pair_add(
+            broadcast_u32(row_low_bits, mask),
+            broadcast_u32(row_high_bits, mask), row_increment, zero, mask)
+        counter_low, counter_high, subsequence_low, subsequence_high = (
+            _nvfp4_counter_coordinates(
+                row_low, row_high, col_low, col_high,
+                axis_groups, block_offset, mask))
+    return counter_low, counter_high, subsequence_low, subsequence_high
 
 
 def _nvfp4_counter_rows(row_base, ids, col_group, axis_groups, block_offset, mask):
@@ -517,6 +571,25 @@ def _philox_counter_first(row_base, col_base, axis_groups, reciprocal,
     return _philox_first_round(c0, c1, c2, c3, m0, m1, key0, key1, mask)
 
 
+@jit
+def _philox_counter_first_same_row(
+        base_low, base_high, counter_low, counter_high, lane_start,
+        batch_offset, ids, m0, m1, key0, key1, mask):
+    """One TE rowwise base plus a small offset for one 64-group batch."""
+    position = reg.vadds(
+        ids, dtypes.uint32(lane_start + batch_offset), mask=mask)
+    column_task_delta = reg.vshl(reg.vshr(position, 3, mask=mask), 7, mask=mask)
+    column_lane = bitwise_and_scalar(position, 7, mask)
+    subsequence_delta = reg.vbitwise_or(
+        column_task_delta, column_lane, mask=mask)
+    subsequence_low, subsequence_high = _pair_add(
+        base_low, base_high, subsequence_delta,
+        broadcast_u32(0, mask), mask)
+    return _philox_first_round(
+        counter_low, counter_high, subsequence_low, subsequence_high,
+        m0, m1, key0, key1, mask)
+
+
 def _philox_pair_three(a0, a1, a2, a3, b0, b1, b2, b3, step, m0, m1, seed0, seed1, mask):
     """Three rounds for two independent groups, sharing each round's keys."""
     # This Python loop unfolds three rounds. The enclosing VF loop supplies
@@ -537,6 +610,39 @@ def _philox_pair_three(a0, a1, a2, a3, b0, b1, b2, b3, step, m0, m1, seed0, seed
         b2 = reg.vbitwise_xor(hi_b0, reg.vbitwise_xor(b3, key1, mask=mask), mask=mask)
         b1, b3 = lo_b1, lo_b0
     return a0, a1, a2, a3, b0, b1, b2, b3
+
+
+def _philox_quad_three(
+        a0, a1, a2, a3, b0, b1, b2, b3,
+        c0, c1, c2, c3, d0, d1, d2, d3,
+        step, m0, m1, seed0, seed1, mask):
+    """Advance four independent Philox groups through three full rounds."""
+    for offset in range(3):
+        round_id = dtypes.uint32(step) + offset
+        key0 = broadcast_u32(seed0 + round_id * PHILOX_W0, mask)
+        key1 = broadcast_u32(seed1 + round_id * PHILOX_W1, mask)
+        lo_a0, hi_a0 = reg.vmull(a0, m0, dtypes.uint32, mask=mask)
+        lo_a1, hi_a1 = reg.vmull(a2, m1, dtypes.uint32, mask=mask)
+        lo_b0, hi_b0 = reg.vmull(b0, m0, dtypes.uint32, mask=mask)
+        lo_b1, hi_b1 = reg.vmull(b2, m1, dtypes.uint32, mask=mask)
+        lo_c0, hi_c0 = reg.vmull(c0, m0, dtypes.uint32, mask=mask)
+        lo_c1, hi_c1 = reg.vmull(c2, m1, dtypes.uint32, mask=mask)
+        lo_d0, hi_d0 = reg.vmull(d0, m0, dtypes.uint32, mask=mask)
+        lo_d1, hi_d1 = reg.vmull(d2, m1, dtypes.uint32, mask=mask)
+        a0 = reg.vbitwise_xor(hi_a1, reg.vbitwise_xor(a1, key0, mask=mask), mask=mask)
+        a2 = reg.vbitwise_xor(hi_a0, reg.vbitwise_xor(a3, key1, mask=mask), mask=mask)
+        a1, a3 = lo_a1, lo_a0
+        b0 = reg.vbitwise_xor(hi_b1, reg.vbitwise_xor(b1, key0, mask=mask), mask=mask)
+        b2 = reg.vbitwise_xor(hi_b0, reg.vbitwise_xor(b3, key1, mask=mask), mask=mask)
+        b1, b3 = lo_b1, lo_b0
+        c0 = reg.vbitwise_xor(hi_c1, reg.vbitwise_xor(c1, key0, mask=mask), mask=mask)
+        c2 = reg.vbitwise_xor(hi_c0, reg.vbitwise_xor(c3, key1, mask=mask), mask=mask)
+        c1, c3 = lo_c1, lo_c0
+        d0 = reg.vbitwise_xor(hi_d1, reg.vbitwise_xor(d1, key0, mask=mask), mask=mask)
+        d2 = reg.vbitwise_xor(hi_d0, reg.vbitwise_xor(d3, key1, mask=mask), mask=mask)
+        d1, d3 = lo_d1, lo_d0
+    return (a0, a1, a2, a3, b0, b1, b2, b3,
+            c0, c1, c2, c3, d0, d1, d2, d3)
 
 
 def _store_random_words_aos(scratch, offset, w0, w1, w2, w3, mask):
@@ -670,6 +776,24 @@ def reverse_random_words(self, batches):
 
 
 @jit
+def _finish_philox_quad(
+        self, a0, a1, a2, a3, b0, b1, b2, b3,
+        c0, c1, c2, c3, d0, d1, d2, d3,
+        m0, m1, key0, key1, quad, mask):
+    """Finish full Philox10 and write four 64-group random batches."""
+    for step in range(1, 10, 3):
+        (a0, a1, a2, a3, b0, b1, b2, b3,
+         c0, c1, c2, c3, d0, d1, d2, d3) = _philox_quad_three(
+            a0, a1, a2, a3, b0, b1, b2, b3,
+            c0, c1, c2, c3, d0, d1, d2, d3,
+            step, m0, m1, key0, key1, mask)
+    _store_random_words_aos(self.random_words, quad * 1024, a0, a1, a2, a3, mask)
+    _store_random_words_aos(self.random_words, quad * 1024 + 256, b0, b1, b2, b3, mask)
+    _store_random_words_aos(self.random_words, quad * 1024 + 512, c0, c1, c2, c3, mask)
+    _store_random_words_aos(self.random_words, quad * 1024 + 768, d0, d1, d2, d3, mask)
+
+
+@jit
 def prepare_random_words_aos(self, start, batches, quant_length, seed, block_offset):
     key0, key1 = _split_uint64(seed)
     axis_groups, reciprocal, row_base, col_base = _rng_geometry(start, quant_length)
@@ -679,6 +803,8 @@ def prepare_random_words_aos(self, start, batches, quant_length, seed, block_off
     step_r = dtypes.int64(64) % axis_groups
     pair_q = dtypes.int64(128) // axis_groups
     pair_r = dtypes.int64(128) % axis_groups
+    quad_q = dtypes.int64(256) // axis_groups
+    quad_r = dtypes.int64(256) % axis_groups
     if batches < 4:
         with vf(mode="simd"):
             rl, rh, cl, ch = row_low, row_high, col_low, col_high
@@ -690,6 +816,73 @@ def prepare_random_words_aos(self, start, batches, quant_length, seed, block_off
                 rl, rh, cl, ch = _advance_cursor_words(
                     row_cursor, col_cursor, step_q, step_r, axis_groups)
             # Publish SIMD Philox stores in random_words before SIMT bit reverse reads.
+            reg.vmem_bar("vst_vld")
+    elif batches == 16 and axis_groups >= 256:
+        with vf(mode="simd"):
+            mask = reg.full_mask()
+            ids = reg.varange(0, dtypes.uint32)
+            m0 = broadcast_u32(PHILOX_M0, mask)
+            m1 = broadcast_u32(PHILOX_M1, mask)
+            rl, rh, cl, ch = row_low, row_high, col_low, col_high
+            for quad in range(4):
+                row0, col0 = _cursor_coordinates(rl, rh, cl, ch)
+                row1, col1 = _advance_group(row0, col0, step_q, step_r, axis_groups)
+                row2, col2 = _advance_group(row0, col0, pair_q, pair_r, axis_groups)
+                row3, col3 = _advance_group(row2, col2, step_q, step_r, axis_groups)
+                empty = broadcast_u32(0, mask)
+                a0, a1, a2, a3 = empty, empty, empty, empty
+                b0, b1, b2, b3 = empty, empty, empty, empty
+                c0, c1, c2, c3 = empty, empty, empty, empty
+                d0, d1, d2, d3 = empty, empty, empty, empty
+                if col0 <= axis_groups - 256:
+                    # All four batches remain in one original row. Compute
+                    # their shared TE task base and draw once as u32 pairs.
+                    # Round the starting column down to a task boundary.
+                    # The existing TE vector helper performs one full u64
+                    # row-task vmull and pair_add for this quad, including
+                    # the offset/draw counter carry.
+                    lane_start = col0 % 8
+                    aligned_col = col0 - lane_start
+                    row_low_bits, row_high_bits = _split_uint64(row0)
+                    col_low_bits, col_high_bits = _split_uint64(aligned_col)
+                    counter_low, counter_high, sub_low, sub_high = (
+                        _nvfp4_counter_coordinates(
+                            broadcast_u32(row_low_bits, mask),
+                            broadcast_u32(row_high_bits, mask),
+                            broadcast_u32(col_low_bits, mask),
+                            broadcast_u32(col_high_bits, mask),
+                            axis_groups, block_offset, mask))
+                    a0, a1, a2, a3 = _philox_counter_first_same_row(
+                        sub_low, sub_high, counter_low, counter_high,
+                        lane_start, 0, ids, m0, m1, key0, key1, mask)
+                    b0, b1, b2, b3 = _philox_counter_first_same_row(
+                        sub_low, sub_high, counter_low, counter_high,
+                        lane_start, 64, ids, m0, m1, key0, key1, mask)
+                    c0, c1, c2, c3 = _philox_counter_first_same_row(
+                        sub_low, sub_high, counter_low, counter_high,
+                        lane_start, 128, ids, m0, m1, key0, key1, mask)
+                    d0, d1, d2, d3 = _philox_counter_first_same_row(
+                        sub_low, sub_high, counter_low, counter_high,
+                        lane_start, 192, ids, m0, m1, key0, key1, mask)
+                else:
+                    a0, a1, a2, a3 = _philox_counter_first(
+                        row0, col0, axis_groups, reciprocal, ids,
+                        m0, m1, key0, key1, block_offset, mask)
+                    b0, b1, b2, b3 = _philox_counter_first(
+                        row1, col1, axis_groups, reciprocal, ids,
+                        m0, m1, key0, key1, block_offset, mask)
+                    c0, c1, c2, c3 = _philox_counter_first(
+                        row2, col2, axis_groups, reciprocal, ids,
+                        m0, m1, key0, key1, block_offset, mask)
+                    d0, d1, d2, d3 = _philox_counter_first(
+                        row3, col3, axis_groups, reciprocal, ids,
+                        m0, m1, key0, key1, block_offset, mask)
+                _finish_philox_quad(
+                    self, a0, a1, a2, a3, b0, b1, b2, b3,
+                    c0, c1, c2, c3, d0, d1, d2, d3,
+                    m0, m1, key0, key1, quad, mask)
+                rl, rh, cl, ch = _advance_cursor_words(
+                    row0, col0, quad_q, quad_r, axis_groups)
             reg.vmem_bar("vst_vld")
     else:
         with vf(mode="simd"):
@@ -928,7 +1121,6 @@ def quantize_tile_256(self, x, y, scales, start, count, scale_factor, quant_leng
         full16 = reg.full_mask(elem_bits=16)
         full8 = reg.full_mask(elem_bits=8)
         ids = reg.varange(0, dtypes.uint32)
-        eight = reg.update_mask(8, elem_bits=32)[0]
         scale_index = reg.vshr(ids, 3, mask=full)
         sign_mask8 = reg.vdups(0x80, dtypes.uint8, mask=full8)
         # Gather order maps four 64-byte groups back to interleaved FP8.
@@ -1320,7 +1512,6 @@ def quantize_wide8(self, x, y, scales, row, group, quant_length, width, d_offset
     col_group = dtypes.int64(group) * dtypes.int64(tile_rows) // 16
     axis_groups = dtypes.int64(quant_length) // 16
     key0, key1 = _split_uint64(seed)
-    scale_pairs = reinterpret(scales, dtypes.uint16, shape=(1, self.tile_elements // 32))
     with vf(mode="simd"):
         full = reg.update_mask(lanes, elem_bits=32)[0]
         lane = reg.varange(0, dtypes.uint32)
@@ -2405,7 +2596,6 @@ def dynamic_mx_quant_sr(input, *, axis=-1, round_mode="stochastic", dst_type=24,
     prepared = _prepare_launch(input, dst_dtype, axis, scale_alg, bound_bits)
     prepared.launch()
     return prepared.outputs()
-
 
 def dynamic_mx_quant_sr_fwd(
     input,

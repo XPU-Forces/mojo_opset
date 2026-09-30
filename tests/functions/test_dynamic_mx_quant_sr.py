@@ -96,12 +96,15 @@ def test_dynamic_mx_quant_sr_adaptive_tiles(dynamic_mx_quant_sr_backend, shape, 
 
 
 @pytest.mark.api("functions.dynamic_mx_quant_sr")
+@pytest.mark.parametrize("shape,axis", LAYOUT_CASES + [
+    pytest.param((4, 256), -1, id="tail-bound-aligned"),
+    pytest.param((4, 80), -1, id="tail-bound-padded"),
+])
 @pytest.mark.parametrize("src", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("dst_code", [23, 24])
 @pytest.mark.accuracy
-def test_dynamic_mx_quant_sr_max_low_bound(dynamic_mx_quant_sr_backend, src, dst_code):
-    _run_case(dynamic_mx_quant_sr_backend, (4, 256), -1, src, dst_code, 1, bound=32.0)
-    _run_case(dynamic_mx_quant_sr_backend, (4, 80), -1, src, dst_code, 1, bound=32.0)
+def test_dynamic_mx_quant_sr_max_low_bound(dynamic_mx_quant_sr_backend, shape, axis, src, dst_code):
+    _run_case(dynamic_mx_quant_sr_backend, shape, axis, src, dst_code, 1, bound=32.0)
 
 
 @pytest.mark.api("functions.dynamic_mx_quant_sr")
@@ -150,3 +153,118 @@ def test_dynamic_mx_quant_sr_rejects_invalid_tensors(value, axis, error, match):
 def test_dynamic_mx_quant_sr_rejects_dtype(dtype):
     with pytest.raises(TypeError, match="float32.*bfloat16"):
         F.dynamic_mx_quant_sr(torch.ones((2, 64), dtype=dtype))
+
+
+@pytest.fixture
+def cannbotdsl_rng_device(dynamic_mx_quant_sr_backend):
+    implementation, device = dynamic_mx_quant_sr_backend
+    if implementation == "torch_reference":
+        pytest.skip("device RNG probes require the cannbotdsl implementation")
+    device = torch.device(device)
+    if device.index is None:
+        device = torch.device(device.type, torch.npu.current_device())
+    saved = torch.npu.get_rng_state(device)
+    try:
+        yield device
+    finally:
+        torch.npu.synchronize(device)
+        torch.npu.set_rng_state(saved, device)
+
+
+@pytest.mark.api("functions.dynamic_mx_quant_sr")
+@pytest.mark.parametrize("base", [0, 64, 127, 2**35 - 1, 2**39 - 1, 2**60 - 1])
+@pytest.mark.parametrize("seed,offset", [
+    (0, 0),
+    (0xFEDCBA9876543210, 2**32 - 1),
+    (2**64 - 1, 2**64 - 1 - 1024),
+])
+@pytest.mark.accuracy
+def test_dynamic_mx_quant_sr_rng_2048_counters(cannbotdsl_rng_device, base, seed, offset):
+    import numpy as np
+
+    from mojo_opset.kernels.npu_a5_cannbotdsl._rng_state import _make_rng_state
+    from mojo_opset.kernels.torch_reference.dynamic_mx_quant_sr_golden import _philox_blocks
+    from tests.functions._dynamic_mx_quant_sr_rng import run_counter_words
+
+    groups = [base + lane for lane in range(64)]
+    counters = []
+    for group in groups:
+        row, column = divmod(group, 128)
+        task = (row // 128) * 16 + column // 8
+        subsequence = task * 128 + (row % 16) * 8 + column % 8
+        counter = offset + (row // 16) % 8
+        counters.append((counter & 0xFFFFFFFF, counter >> 32,
+                         subsequence & 0xFFFFFFFF, subsequence >> 32))
+    words = _philox_blocks(groups, quant_length=2048, seed=seed, block_offset=offset)
+    expected = np.concatenate((np.asarray(counters, np.uint32).T, words.T))
+    state = _make_rng_state(seed, offset, device=cannbotdsl_rng_device)
+    output = torch.empty((8, 64), dtype=torch.uint32, device=cannbotdsl_rng_device)
+    run_counter_words(state, output, base, 2048)
+    np.testing.assert_array_equal(output.cpu().numpy(), expected)
+
+
+@pytest.mark.api("functions.dynamic_mx_quant_sr")
+@pytest.mark.parametrize("quant_length,base", [
+    pytest.param(4080, 0, id="below-quad"),
+    pytest.param(4096, 0, id="same-row"),
+    pytest.param(4112, 1, id="unaligned-cross-row"),
+    pytest.param(7168, 0, id="non-power-of-two"),
+    pytest.param(8192, 0, id="two-quads"),
+    pytest.param(16 * (2**32 + 511), 2**32 - 64, id="column-carry32"),
+])
+@pytest.mark.parametrize("seed,offset", [(0, 0), (0xFEDCBA9876543210, 2**32 - 1)])
+@pytest.mark.accuracy
+def test_dynamic_mx_quant_sr_rng_sixteen_batches(cannbotdsl_rng_device, quant_length, base, seed, offset):
+    import numpy as np
+
+    from mojo_opset.kernels.npu_a5_cannbotdsl._rng_state import _make_rng_state
+    from mojo_opset.kernels.torch_reference.dynamic_mx_quant_sr_golden import _philox_blocks
+    from tests.functions._dynamic_mx_quant_sr_rng import run_sixteen_batch_words
+
+    groups = np.arange(16 * 64, dtype=np.uint64) + np.uint64(base)
+    words = _philox_blocks(groups, quant_length=quant_length, seed=seed, block_offset=offset)
+    output = torch.full((1, 16 * 256 + 64), -559038737, dtype=torch.int32, device=cannbotdsl_rng_device)
+    expected = np.full(output.shape, 0xDEADBEEF, dtype=np.uint32)
+    expected[0, :16 * 256] = words.reshape(-1)
+    state = _make_rng_state(seed, offset, device=cannbotdsl_rng_device)
+    run_sixteen_batch_words(state, output, base, quant_length)
+    np.testing.assert_array_equal(output.cpu().numpy().view(np.uint32), expected)
+
+
+@pytest.mark.api("functions.dynamic_mx_quant_sr")
+@pytest.mark.parametrize("shape", [(128, 2048), (512, 4096), (512, 4112)])
+@pytest.mark.parametrize("src", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("dst_code", [23, 24])
+@pytest.mark.parametrize("algorithm", [0, 1])
+@pytest.mark.accuracy
+def test_dynamic_mx_quant_sr_rng_replay(cannbotdsl_rng_device, shape, src, dst_code, algorithm):
+    import numpy as np
+    from ml_dtypes import bfloat16
+
+    from mojo_opset.kernels.torch_reference.dynamic_mx_quant_sr_golden import dynamic_mx_quant_golden
+
+    cpu = _random_input(shape, -1, src)
+    values = cpu.float().numpy().astype(bfloat16 if src == torch.bfloat16 else np.float32)
+    x = cpu.to(cannbotdsl_rng_device)
+    generator = torch.npu.default_generators[cannbotdsl_rng_device.index]
+    seed, offset = 0xFEDCBA9876543210, 2**32 - 4
+    generator.manual_seed(seed)
+    generator.set_offset(offset)
+    saved = torch.npu.get_rng_state(cannbotdsl_rng_device)
+    kwargs = dict(dst_type=dst_code, scale_alg=algorithm, implementation="cannbotdsl")
+    first = None
+    for call in range(2):
+        actual = F.dynamic_mx_quant_sr(x, **kwargs)
+        expected = dynamic_mx_quant_golden(
+            values, "float8_e5m2" if dst_code == 23 else "float8_e4m3fn", algorithm,
+            seed=seed, block_offset=offset + call * 1024,
+        )
+        for tensor, reference in zip(actual, expected):
+            np.testing.assert_array_equal(tensor.view(torch.uint8).cpu().numpy(), reference)
+        assert generator.get_offset() == offset + (call + 1) * 1024
+        if first is None:
+            first = tuple(tensor.clone() for tensor in actual)
+    torch.npu.set_rng_state(saved, cannbotdsl_rng_device)
+    replay = F.dynamic_mx_quant_sr(x, **kwargs)
+    _assert_bitwise(replay, first)
+    assert generator.get_offset() == offset + 1024
