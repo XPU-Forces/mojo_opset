@@ -1,0 +1,19 @@
+# Install on the trusted default branch; enable after the Codebase worker is ready.
+name: Mojo sync ingress
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: [sync-poc/public]
+
+permissions: {}
+
+jobs:
+  enqueue:
+    if: github.repository == 'XPU-Forces/mojo_opset' && vars.MOJO_SYNC_POC_ENABLED == 'true'
+    runs-on: [self-hosted, mojo-sync-ingress]
+    timeout-minutes: 2
+    steps:
+      - name: Queue public PR metadata
+        shell: bash
+        run: sudo -n -u mojo-opset /home/mojo-opset/mojo-sync/ingest.sh < "$GITHUB_EVENT_PATH"
