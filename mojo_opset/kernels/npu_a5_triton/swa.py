@@ -22,12 +22,6 @@ AUX_MASK = None
 COMPRESS_CAP = 512
 COMPRESS_TILE = 128
 
-_GLOBAL_WINDOW_SIZE = None
-_LOCAL_WINDOW_SIZE = None
-_BLOCK_M = None
-_BLOCK_N = None
-_COMPRESSED_MASK = None
-
 
 def get_aux_mask():
     global AUX_MASK
@@ -60,7 +54,7 @@ def get_aux_mask():
         )
     return AUX_MASK_SIZE, AUX_MASK
 
-
+@functools.lru_cache(maxsize=32)
 def _get_mask_causal_with_window_cached(
         BLOCK_M: int,
         BLOCK_N: int,
@@ -68,19 +62,6 @@ def _get_mask_causal_with_window_cached(
         global_window_size: Optional[int] = None,
         device: str = "npu:0",
 ):
-    global _GLOBAL_WINDOW_SIZE
-    global _LOCAL_WINDOW_SIZE
-    global _BLOCK_M
-    global _BLOCK_N
-    global _COMPRESSED_MASK
-    if (
-        _GLOBAL_WINDOW_SIZE == global_window_size
-        and _LOCAL_WINDOW_SIZE == local_window_size
-        and _BLOCK_M == BLOCK_M
-        and _BLOCK_N == BLOCK_N
-        and _COMPRESSED_MASK is not None
-    ):
-        return _COMPRESSED_MASK
     has_local_window = local_window_size is not None
     if local_window_size is None:
         local_window_size = 0
@@ -127,13 +108,7 @@ def _get_mask_causal_with_window_cached(
     mask_boundary = torch.zeros(M_boundary, N_boundary, dtype=torch.bool)
     mask_boundary[:M, :N] = mask
     mask_boundary = mask_boundary.to(device=device)
-
-    _GLOBAL_WINDOW_SIZE = global_window_size
-    _LOCAL_WINDOW_SIZE = local_window_size
-    _BLOCK_M = BLOCK_M
-    _BLOCK_N = BLOCK_N
-    _COMPRESSED_MASK = mask_boundary
-    return _COMPRESSED_MASK
+    return mask_boundary
 
 
 def get_mask_causal_with_window(
