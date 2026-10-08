@@ -255,6 +255,13 @@ def rmsnorm_infer_impl(
 
 @triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
 @libentry()
+@triton.autotune(
+    configs=[
+        triton.Config({"multibuffer": MB})
+        for MB in [True, False]
+    ],
+    key=["n_rows", "n_cols"],
+)
 @triton.jit
 def _rmsnorm_fwd_kernel(
     Y_ptr,
