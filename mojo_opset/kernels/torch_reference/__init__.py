@@ -61,6 +61,7 @@ OPS = {
     "swa_infer": "attention",
     "native_swa_infer": "attention",
     "rope": "rope",
+    "dynamic_mx_quant_sr": "dynamic_mx_quant_sr",
 }
 
 
