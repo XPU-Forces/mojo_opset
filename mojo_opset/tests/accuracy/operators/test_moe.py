@@ -45,9 +45,7 @@ def test_moe(num_experts, top_k, hidden_size, intermediate_size, num_tokens, dty
     moe = moe.to(dtype).to(device)
     moe_ref = moe_ref.to(dtype).to(device)
     moe.load_state_dict(moe_ref.state_dict())
-
-    # FIXME: moe.gating.gate_weight.data should not be casted to float32
-    moe.gating.gate_weight.data = moe.gating.gate_weight.data.float()
+    # Torch MoE gating multiplies the fp32 router weight. .to(dtype) cast it to bf16.
     moe_ref.gating.gate_weight.data = moe_ref.gating.gate_weight.data.float()
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device=device)

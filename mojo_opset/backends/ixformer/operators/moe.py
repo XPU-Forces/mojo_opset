@@ -9,15 +9,50 @@ from mojo_opset.core import MojoQuantMoE
 from ixformer import functions as ixf_f
 import ixformer.distributed as ixfd
 
-def decompose_fp32_to_3bf16(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
-    x0 = x.bfloat16()
-    r1 = x - x0.float()
-    x1 = r1.bfloat16()
-    r2 = r1 - x1.float()
-    x2 = r2.bfloat16()
+def _w4a8_ixmm_swizzle_columns(x: torch.Tensor) -> torch.Tensor:
+    """ixmm's within-32-column interleave on the last dim.
 
-    return x0, x1, x2
+    Forward of ixformer's ``_w4a8_ixmm_unswizzle_columns``, which gathers by the
+    argsort of this map: ``out[..., c] = x[..., col_idx[c]]``.
+    """
+    n = x.shape[-1]
+    j = torch.arange(32, device=x.device)
+    perm = j // 2 + (j & 1) * 16
+    col = torch.arange(n, device=x.device)
+    col_idx = (col // 32) * 32 + perm[col % 32]
+    return x.index_select(-1, col_idx)
+
+
+def _w4a8_ixmm_swap_quadrants(x: torch.Tensor) -> torch.Tensor:
+    """Exchange the 16x16 quadrants inside every 32x32 (k, n) block.
+
+    Its own inverse, so this is also ixformer's ``_w4a8_ixmm_unswap_quadrants``.
+    """
+    *lead, k, n = x.shape
+    blocks = x.reshape(*lead, k // 32, 32, n // 32, 32).clone()
+    top_right = blocks[..., 0:16, :, 16:32].clone()
+    bottom_left = blocks[..., 16:32, :, 0:16].clone()
+    blocks[..., 0:16, :, 16:32] = bottom_left
+    blocks[..., 16:32, :, 0:16] = top_right
+    return blocks.reshape(*lead, k, n)
+
+
+def _pack_w4a8_ixmm_weight(logical: torch.Tensor) -> torch.Tensor:
+    """Logical signed int4 (E, k, n) -> the int8 (E, k, n // 2) buffer that
+    moe_w4a8_group_gemm_ixmm reads.
+
+    Forward of ``ixf_f.unpack_w4a8_ixmm_weight``. ixformer ships the inverse
+    only, for its torch reference, so the pairing is kept explicit here rather
+    than reaching into ixmm for its packer.
+    """
+    swizzled = _w4a8_ixmm_swizzle_columns(
+        _w4a8_ixmm_swap_quadrants(logical.to(torch.int64))
+    )
+    low = (swizzled[..., 0::2] & 0xF).to(torch.uint8)
+    high = (swizzled[..., 1::2] & 0xF).to(torch.uint8)
+    return (low | (high << 4)).view(torch.int8)
+
 
 def _repack_int4_tn_to_nn(packed_tn: torch.Tensor, N: int, K: int) -> torch.Tensor:
     """
@@ -102,6 +137,75 @@ def _repack_int4_nn_to_tn(packed_nn: torch.Tensor, N: int, K: int) -> torch.Tens
     return packed_tn.contiguous().to(device)
 
 
+def _unpack_int4_tn(packed_tn: torch.Tensor, N: int, K: int) -> torch.Tensor:
+    """TN-packed int4 (E, N//2, K) -> logical signed int4 (E, K, N) as int8."""
+    E = packed_tn.shape[0]
+    u8 = packed_tn.to(torch.uint8)
+    low = (u8 & 0x0F).to(torch.int8)
+    high = ((u8 >> 4) & 0x0F).to(torch.int8)
+    low = torch.where(low >= 8, low - 16, low)
+    high = torch.where(high >= 8, high - 16, high)
+    unpacked = torch.empty(E, N, K, dtype=torch.int8, device=packed_tn.device)
+    unpacked[:, 0::2, :] = low
+    unpacked[:, 1::2, :] = high
+    return unpacked.transpose(-2, -1).contiguous()
+
+
+def _pack_int4_tn(logical: torch.Tensor) -> torch.Tensor:
+    """Inverse of :func:`_unpack_int4_tn`: (E, K, N) -> (E, N//2, K)."""
+    unpacked = logical.transpose(-2, -1).contiguous()
+    low = (unpacked[:, 0::2, :] & 0x0F).to(torch.uint8)
+    high = ((unpacked[:, 1::2, :] & 0x0F) << 4).to(torch.uint8)
+    return (high | low).to(torch.int8)
+
+
+def _repack_int4_tn_to_ixmm(packed_tn: torch.Tensor, N: int, K: int) -> torch.Tensor:
+    """Checkpoint TN-packed int4 -> the buffer moe_w4a8_group_gemm_ixmm reads.
+
+    ixmm pre-swizzles into a different layout from the ixinfer one that
+    :func:`_repack_int4_tn_to_nn` builds, so the two packed buffers are not
+    interchangeable. ``unpack_w4a8_ixmm_weight`` is the documented inverse.
+    """
+    device = packed_tn.device
+    logical = _unpack_int4_tn(packed_tn.cuda(), N, K)
+    return _pack_w4a8_ixmm_weight(logical).to(device)
+
+
+def _repack_int4_ixmm_to_tn(packed: torch.Tensor, N: int, K: int) -> torch.Tensor:
+    """Inverse of :func:`_repack_int4_tn_to_ixmm`, for the state_dict dual."""
+    device = packed.device
+    logical = ixf_f.unpack_w4a8_ixmm_weight(packed.cuda()).to(torch.int8)
+    return _pack_int4_tn(logical).to(device)
+
+
+def _ixmm_weight_scale(scale: torch.Tensor, group_size: int) -> torch.Tensor:
+    """Checkpoint weight scale -> the shape the ixmm op validates.
+
+    The grouped checkpoint is (E, n, k // group_size) against an op that wants
+    (E, k // group_size, n). The per-channel one has no k axis to move: the
+    checkpoint drops it, so (E, n) is already what the op takes.
+    """
+    if group_size <= 0:
+        return scale.contiguous()
+    return scale.permute(0, 2, 1).contiguous()
+
+
+def _checkpoint_weight_scale(scale: torch.Tensor, group_size: int) -> torch.Tensor:
+    """Inverse of :func:`_ixmm_weight_scale`; the swap is its own inverse."""
+    return _ixmm_weight_scale(scale, group_size)
+
+
+def _group_layout_from_expert_sizes(tokens_per_expert: torch.Tensor, device) -> torch.Tensor:
+    """Per-expert [start, end) token ranges, the layout the ixmm op indexes with.
+
+    start is the exclusive prefix sum of the expert sizes, which is exact here
+    because the NN format packs expert rows back to back with no padding.
+    """
+    counts = tokens_per_expert.to(device=device, dtype=torch.int64)
+    ends = torch.cumsum(counts, dim=0)
+    return torch.stack((ends - counts, ends), dim=1).to(torch.int32)
+
+
 def _swizzle_weights_post_hook(module, incompatible_keys):
     """load_state_dict post-hook: convert int4/int8 weights from TN (checkpoint) to NN (ixformer) format."""
     device = module.up_proj_weight.device
@@ -110,8 +214,8 @@ def _swizzle_weights_post_hook(module, incompatible_keys):
     if module.up_weight_dtype == "int4":
         N_up = module.intermediate_size * 2
         K_up = module.hidden_size
-        up_nn = _repack_int4_tn_to_nn(module.up_proj_weight.data, N_up, K_up)
-        up_scale_nn = module.up_proj_weight_scale.data.permute(0, 2, 1).contiguous()
+        up_nn = _repack_int4_tn_to_ixmm(module.up_proj_weight.data, N_up, K_up)
+        up_scale_nn = _ixmm_weight_scale(module.up_proj_weight_scale.data, module.up_quant_group_size)
         module.register_buffer("up_proj_weight", up_nn.to(device))
         module.up_proj_weight_scale = torch.nn.Parameter(up_scale_nn.to(device=device, dtype=torch.float32))
     elif module.up_weight_dtype == torch.int8:
@@ -123,8 +227,8 @@ def _swizzle_weights_post_hook(module, incompatible_keys):
     if module.down_weight_dtype == "int4":
         N_down = module.hidden_size
         K_down = module.intermediate_size
-        down_nn = _repack_int4_tn_to_nn(module.down_proj_weight.data, N_down, K_down)
-        down_scale_nn = module.down_proj_weight_scale.data.permute(0, 2, 1).contiguous()
+        down_nn = _repack_int4_tn_to_ixmm(module.down_proj_weight.data, N_down, K_down)
+        down_scale_nn = _ixmm_weight_scale(module.down_proj_weight_scale.data, module.down_quant_group_size)
         module.register_buffer("down_proj_weight", down_nn.to(device))
         module.down_proj_weight_scale = torch.nn.Parameter(down_scale_nn.to(device=device, dtype=torch.float32))
     elif module.down_weight_dtype == torch.int8:
@@ -152,9 +256,11 @@ def _unswizzle_weights_state_dict_post_hook(module, state_dict, prefix, local_me
         N_up = module.intermediate_size * 2
         K_up = module.hidden_size
         if up_key in state_dict:
-            state_dict[up_key] = _repack_int4_nn_to_tn(state_dict[up_key], N_up, K_up)
+            state_dict[up_key] = _repack_int4_ixmm_to_tn(state_dict[up_key], N_up, K_up)
         if up_scale_key in state_dict:
-            state_dict[up_scale_key] = state_dict[up_scale_key].permute(0, 2, 1).contiguous()
+            state_dict[up_scale_key] = _checkpoint_weight_scale(
+                state_dict[up_scale_key], module.up_quant_group_size
+            )
     elif module.up_weight_dtype == torch.int8:
         if up_key in state_dict:
             state_dict[up_key] = state_dict[up_key].transpose(1, 2).contiguous()
@@ -165,33 +271,22 @@ def _unswizzle_weights_state_dict_post_hook(module, state_dict, prefix, local_me
         N_down = module.hidden_size
         K_down = module.intermediate_size
         if down_key in state_dict:
-            state_dict[down_key] = _repack_int4_nn_to_tn(state_dict[down_key], N_down, K_down)
+            state_dict[down_key] = _repack_int4_ixmm_to_tn(state_dict[down_key], N_down, K_down)
         if down_scale_key in state_dict:
-            state_dict[down_scale_key] = state_dict[down_scale_key].permute(0, 2, 1).contiguous()
+            state_dict[down_scale_key] = _checkpoint_weight_scale(
+                state_dict[down_scale_key], module.down_quant_group_size
+            )
     elif module.down_weight_dtype == torch.int8:
         if down_key in state_dict:
             state_dict[down_key] = state_dict[down_key].transpose(1, 2).contiguous()
 
 
-def _attach_gating_bf16_buffers(gating_module):
-    """Attach gate_weight bf16 TN buffers and post-hook to a parameter-holder gating module."""
-    num_experts = gating_module.gate_weight.shape[1]
-    hidden_size = gating_module.gate_weight.shape[0]
-    for name in ("gate_weight_bf16_tn_0", "gate_weight_bf16_tn_1", "gate_weight_bf16_tn_2"):
-        gating_module.register_buffer(
-            name,
-            torch.empty((num_experts, hidden_size), dtype=torch.bfloat16, device=gating_module.gate_weight.device),
-            persistent=False,
-        )
-
-    def _transform_gate_weight_post_hook(module, incompatible_keys):
-        gate_weight = module.gate_weight.data.T.contiguous()
-        gw0, gw1, gw2 = decompose_fp32_to_3bf16(gate_weight)
-        module.register_buffer("gate_weight_bf16_tn_0", gw0)
-        module.register_buffer("gate_weight_bf16_tn_1", gw1)
-        module.register_buffer("gate_weight_bf16_tn_2", gw2)
-
-    gating_module.register_load_state_dict_post_hook(_transform_gate_weight_post_hook)
+def _cast_gate_weight_post_hook(module, incompatible_keys):
+    # fp32 (hidden, num_experts) -> bf16 (num_experts, hidden), the TN layout.
+    module.gate_weight = torch.nn.Parameter(
+        module.gate_weight.detach().to(torch.bfloat16).transpose(0, 1).contiguous(),
+        requires_grad=module.gate_weight.requires_grad,
+    )
 
 
 class IxformerMoE(MojoMoE):
@@ -223,7 +318,7 @@ class IxformerMoE(MojoMoE):
             ep_group=ep_group,
             **kwargs,
         )
-        _attach_gating_bf16_buffers(self.gating)
+        self.gating.register_load_state_dict_post_hook(_cast_gate_weight_post_hook)
 
         # GDR buffer feeds per-expert token counts back to the GPU without a CPU sync.
         self.gdr_device_buffer = torch.zeros([self.num_experts + 1], dtype=torch.int, device="cuda")
@@ -254,12 +349,9 @@ class IxformerMoE(MojoMoE):
             ixfd.all_gather_into_tensor(full, hidden_states.contiguous(), group=self.ep_group, async_op=True)
             hidden_states = full
 
-        # triple_gemm uses 3 bf16 components of the fp32 gate weight to emulate fp32 matmul precision on bf16 HW.
-        gate_logits = ixf_f.triple_gemm_bf16_bf16_fp32(
+        gate_logits = ixf_f.gemm_bf16_bf16_fp32(
             hidden_states,
-            self.gating.gate_weight_bf16_tn_2,
-            self.gating.gate_weight_bf16_tn_1,
-            self.gating.gate_weight_bf16_tn_0,
+            self.gating.gate_weight,
         )
         top_k_gates, top_k_indices = ixf_f.moe_topk_softmax(gate_logits, self.gating.top_k, renormalize=True)
 
@@ -429,7 +521,7 @@ class IxformerQuantMoE(MojoQuantMoE):
         if os.environ.get("IXFORMER_DISABLE_SYNC", "0").strip().lower() == "1" and (self.up_weight_dtype != "int4" or self.down_weight_dtype != "int4"):
             raise NotImplementedError(f"IxformerQuantMoE: up_weight_dtype or down_weight_dtype is not 'int4', is not supported when disable_sync is True.")
 
-        _attach_gating_bf16_buffers(self.gating)
+        self.gating.register_load_state_dict_post_hook(_cast_gate_weight_post_hook)
 
         # Hardware constraints of the ixformer w8a8/w4a8 group-gemm kernels.
         if self.hidden_size % 64 != 0 or self.intermediate_size % 64 != 0:
@@ -445,7 +537,7 @@ class IxformerQuantMoE(MojoQuantMoE):
                 f"IxformerQuantMoE only supports down_weight_dtype='torch.int8' with down_quant_group_size=-1, got {self.down_weight_dtype} and {self.down_quant_group_size}."
             )
         if self.up_weight_dtype == "int4":
-            if self.up_quant_group_size not in [128, 256, 320, 512]:
+            if self.up_quant_group_size not in [-1,128, 256, 320, 512]:
                 raise NotImplementedError(
                     f"IxformerQuantMoE: up_weight_dtype is 'int4' and up_quant_group_size must be 128, 256, 320, or 512, got {self.up_weight_dtype} and {self.up_quant_group_size}."
                 )
@@ -457,8 +549,14 @@ class IxformerQuantMoE(MojoQuantMoE):
                 raise NotImplementedError(
                     f"IxformerQuantMoE: up_weight_dtype is 'int4' and intermediate_size * 2 must be >= 256, hidden_size must be >= 256, got {self.hidden_size} and {self.intermediate_size}."
                 )
+            # ixmm packs two int4 output channels per byte, so n moves in 128s,
+            # and k feeds the 64-wide mainloop.
+            if (self.intermediate_size * 2) % 128 or self.hidden_size % 64:
+                raise NotImplementedError(
+                    f"IxformerQuantMoE: up_weight_dtype is 'int4' and ixmm needs n (intermediate_size * 2) % 128 == 0 and k (hidden_size) % 64 == 0, got intermediate_size={self.intermediate_size} and hidden_size={self.hidden_size}."
+                )
         if self.down_weight_dtype == "int4":
-            if self.down_quant_group_size not in [128, 256, 320, 512]:
+            if self.down_quant_group_size not in [-1, 128, 256, 320, 512]:
                 raise NotImplementedError(
                     f"IxformerQuantMoE: down_weight_dtype is 'int4' and down_quant_group_size must be 128, 256, 320, or 512, got {self.down_weight_dtype} and {self.down_quant_group_size}."
                 )
@@ -469,6 +567,10 @@ class IxformerQuantMoE(MojoQuantMoE):
             if self.intermediate_size < 256 or self.hidden_size < 256:
                 raise NotImplementedError(
                     f"IxformerQuantMoE: down_weight_dtype is 'int4' and intermediate_size must be >= 256, hidden_size must be >= 256, got {self.hidden_size} and {self.intermediate_size}."
+                )
+            if self.hidden_size % 128 or self.intermediate_size % 64:
+                raise NotImplementedError(
+                    f"IxformerQuantMoE: down_weight_dtype is 'int4' and ixmm needs n (hidden_size) % 128 == 0 and k (intermediate_size) % 64 == 0, got hidden_size={self.hidden_size} and intermediate_size={self.intermediate_size}."
                 )
 
         # ixformer quant gemm kernels require fp32 weight scales, overriding the parent's default bf16 storage.
@@ -529,11 +631,9 @@ class IxformerQuantMoE(MojoQuantMoE):
             )
 
             # gating on local hidden_states — runs on compute stream while AG(h) flies.
-            local_gate_logits = ixf_f.triple_gemm_bf16_bf16_fp32(
+            local_gate_logits = ixf_f.gemm_bf16_bf16_fp32(
                 hidden_states,
-                self.gating.gate_weight_bf16_tn_2,
-                self.gating.gate_weight_bf16_tn_1,
-                self.gating.gate_weight_bf16_tn_0,
+                self.gating.gate_weight,
             )
             local_top_k_gates, local_top_k_indices = ixf_f.moe_topk_softmax(
                 local_gate_logits, self.gating.top_k, renormalize=True,
@@ -564,12 +664,9 @@ class IxformerQuantMoE(MojoQuantMoE):
             top_k_indices = full_top_k_indices
             top_k_gates = full_top_k_gates
         else:
-            # triple_gemm uses 3 bf16 components of the fp32 gate weight to emulate fp32 matmul precision on bf16 HW.
-            gate_logits = ixf_f.triple_gemm_bf16_bf16_fp32(
+            gate_logits = ixf_f.gemm_bf16_bf16_fp32(
                 hidden_states,
-                self.gating.gate_weight_bf16_tn_2,
-                self.gating.gate_weight_bf16_tn_1,
-                self.gating.gate_weight_bf16_tn_0,
+                self.gating.gate_weight,
             )
             top_k_gates, top_k_indices = ixf_f.moe_topk_softmax(gate_logits, self.gating.top_k, renormalize=True)
 
@@ -614,6 +711,12 @@ class IxformerQuantMoE(MojoQuantMoE):
         else:
 
             tokens_per_expert = expert_sizes_gpu if need_gpu_size else expert_sizes_cpu
+            # Both w4a8 GEMMs read the same expert ranges, so build them once.
+            group_layout = (
+                _group_layout_from_expert_sizes(tokens_per_expert, hidden_states.device)
+                if "int4" in (self.up_weight_dtype, self.down_weight_dtype)
+                else None
+            )
 
             # Fuses expert-sort, expansion, smooth-quant scaling, and dynamic-int8 quantization into one kernel.
             i8_hs, quant_scale = ixf_f.moe_expand_input_dynamic_scaled_int8(
@@ -656,19 +759,14 @@ class IxformerQuantMoE(MojoQuantMoE):
                     dtype=self.output_dtype,
                     device=i8_hs.device,
                 )
-                ixf_f.moe_w4a8_group_gemm(
-                    input=i8_hs,
+                ixf_f.moe_w4a8_group_gemm_ixmm(
+                    a=i8_hs,
                     weight=self.experts.up_proj_weight,
-                    i_scales=quant_scale,
-                    w_scales=self.experts.up_proj_weight_scale,
-                    output_dtype=self.output_dtype,
-                    tokens_per_experts=tokens_per_expert,
-                    format=0,
-                    version=1,
-                    group_size=self.up_quant_group_size,
-                    gdr_buffer_ptr=self.gdr_buffer_ptr1 if not need_gpu_size else None,
+                    scale_a=quant_scale,
+                    weight_scale=self.experts.up_proj_weight_scale,
+                    group_layout=group_layout,
                     output=group_gemm_output1,
-                    enable_cuda_graph=need_gpu_size,
+                    group_size=self.up_quant_group_size,
                 )
             else:
                 raise NotImplementedError(f"IxformerQuantMoE: up_weight_dtype must be 'torch.int8' or 'int4', got {self.up_weight_dtype}.")
@@ -687,6 +785,10 @@ class IxformerQuantMoE(MojoQuantMoE):
                 num_tokens * self.top_k, self.hidden_size,
                 dtype=self.output_dtype, device=sorted_token_ids.device,
             )
+            # The int8 ops fold dst_to_src into their epilogue and land in token
+            # order; moe_w4a8_group_gemm_ixmm has no such index and stays in
+            # expert-major order, which the reduce below has to account for.
+            expert_major = self.down_weight_dtype == "int4"
 
             if self.down_weight_dtype == torch.int8:
                 if not need_gpu_size:
@@ -714,35 +816,56 @@ class IxformerQuantMoE(MojoQuantMoE):
                         output=group_gemm_output2,
                     )
             elif self.down_weight_dtype == "int4":
-                ixf_f.moe_w4a8_group_gemm(
-                    input=act_i8,
+                # Row 0 is where the reduce below parks slots that carry no
+                # routed row. The GEMM leaves it untouched when nothing routes
+                # to a local expert, so it must not stay allocator garbage:
+                # 0 * NaN would survive the weighted sum.
+                group_gemm_output2[0].zero_()
+                ixf_f.moe_w4a8_group_gemm_ixmm(
+                    a=act_i8,
                     weight=self.experts.down_proj_weight,
-                    i_scales=act_scale,
-                    w_scales=self.experts.down_proj_weight_scale,
-                    output_dtype=self.output_dtype,
-                    tokens_per_experts=tokens_per_expert,
-                    dst_to_src=sorted_token_ids,
-                    format=0,
-                    version=1,
+                    scale_a=act_scale,
+                    weight_scale=self.experts.down_proj_weight_scale,
+                    group_layout=group_layout,
+                    output=group_gemm_output2[: act_i8.shape[0]],
                     group_size=self.down_quant_group_size,
-                    output=group_gemm_output2,
-                    gdr_buffer_ptr=self.gdr_buffer_ptr2 if not need_gpu_size else None,
-                    enable_cuda_graph=need_gpu_size,
                 )
 
             else:
                 raise NotImplementedError(f"IxformerQuantMoE: down_weight_dtype must be 'torch.int8' or 'int4', got {self.down_weight_dtype}.")
 
-            expert_outputs = group_gemm_output2.view(-1, self.top_k, self.hidden_size)
+            if expert_major:
+                # Gather the expert-major rows inside the reduce instead of
+                # scattering them to token order first: the scatter moved the
+                # whole activation twice for nothing.
+                #
+                # The CSR is a plain arange because packed row == slot here, so
+                # slots with no routed row stay in it and are neutralised by a
+                # zero weight. Pointing those at row 0 rather than dropping them
+                # keeps every shape independent of device data, which is what
+                # makes the path graph capturable.
+                slots = src_to_dst.reshape(-1)
+                routed = slots >= 0
+                combined = ixf_f.moe_output_reduce_sum_ep(
+                    input=group_gemm_output2,
+                    token_row_offsets=torch.arange(
+                        0, (num_tokens + 1) * self.top_k, self.top_k,
+                        dtype=torch.int32, device=slots.device,
+                    ),
+                    weights=torch.where(routed, top_k_gates.reshape(-1), 0.0),
+                    packed_to_expert_row=torch.where(routed, slots, 0),
+                )
+            else:
+                expert_outputs = group_gemm_output2.view(-1, self.top_k, self.hidden_size)
 
-            # src_to_dst == -1 marks padding slots that must not be summed.
-            reduce_mask = src_to_dst == -1
+                # src_to_dst == -1 marks padding slots that must not be summed.
+                reduce_mask = src_to_dst == -1
 
-            combined = ixf_f.moe_output_reduce_sum(
-                input=expert_outputs,
-                topk_weight=top_k_gates,
-                mask=reduce_mask,
-            )
+                combined = ixf_f.moe_output_reduce_sum(
+                    input=expert_outputs,
+                    topk_weight=top_k_gates,
+                    mask=reduce_mask,
+                )
 
         # Sum partial expert outputs across EP ranks; reduce_scatter slices the result back to the rank's DP shard.
         if self.ep_size > 1:

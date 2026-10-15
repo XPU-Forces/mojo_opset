@@ -309,6 +309,61 @@ class MojoPrefillGQA(MojoOperator):
         return attn_output
 
 
+def _dequant_fp8_paged_seq(
+    cache: torch.Tensor,
+    scale: torch.Tensor,
+    block_table_row: torch.Tensor,
+    kv_seq_len: int,
+    batch_idx: int,
+) -> torch.Tensor:
+    """Gather one sequence out of an FP8 paged cache and dequantize it to fp32.
+
+    Returns ``[Hkv, kv_seq_len, D]``. ``scale`` is per-tensor (1 element) or
+    per-(batch, kv head) of shape ``(B, Hkv)``.
+    """
+    num_kv_heads, page_size, head_dim = cache.shape[1], cache.shape[2], cache.shape[3]
+    kv_blocks = (kv_seq_len + page_size - 1) // page_size
+    gathered = cache[block_table_row[:kv_blocks]].permute(1, 0, 2, 3)
+    gathered = gathered.reshape(num_kv_heads, kv_blocks * page_size, head_dim)[:, :kv_seq_len]
+    gathered = gathered.float()
+    if scale.numel() == 1:
+        return gathered * scale.float().reshape(())
+    return gathered * scale[batch_idx].float().view(num_kv_heads, 1, 1)
+
+
+def _dequant_fp8_query_seq(
+    query_seq: torch.Tensor,
+    scale: torch.Tensor,
+    num_kv_heads: int,
+    gqa_interleave: bool,
+    batch_idx: int,
+) -> torch.Tensor:
+    """Dequantize one sequence of FP8 query tokens to fp32, shape ``[Hq, T_i, D]``.
+
+    A per-(batch, kv head) scale is spread over each KV head's query group, the
+    way the ixattn kernel reads it.
+    """
+    out = query_seq.float().permute(1, 0, 2)
+    if scale.numel() == 1:
+        return out * scale.float().reshape(())
+    num_q_heads = out.shape[0]
+    row = scale[batch_idx].float()
+    if num_q_heads != num_kv_heads:
+        repeat = num_q_heads // num_kv_heads
+        row = row.repeat(repeat) if gqa_interleave else row.repeat_interleave(repeat)
+    return out * row.view(num_q_heads, 1, 1)
+
+
+def _expand_fp8_kv_heads(x: torch.Tensor, num_q_heads: int, gqa_interleave: bool) -> torch.Tensor:
+    num_kv_heads = x.shape[0]
+    if num_q_heads == num_kv_heads:
+        return x
+    repeat = num_q_heads // num_kv_heads
+    if gqa_interleave:
+        return x.repeat((repeat, 1, 1))
+    return x.repeat_interleave(repeat, dim=0)
+
+
 class MojoPagedPrefillGQA(MojoOperator):
     def __init__(
         self,
@@ -446,6 +501,99 @@ class MojoPagedPrefillGQA(MojoOperator):
 
     def extra_repr(self) -> str:
         return f"{self.is_causal=}, {self.gqa_layout=}".replace("self.", "")
+
+
+class MojoPagedPrefillGQAFp8(MojoOperator):
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+        output_dtype: torch.dtype = torch.bfloat16,
+    ):
+        """Paged prefill GQA over an e4m3 query and KV cache.
+
+        Separate from ``MojoPagedPrefillGQA`` so the fp16/bf16 forward is never
+        swapped. ``output_dtype`` is fp16 or bf16; FP8 attention cannot return fp8.
+        """
+        super().__init__()
+
+        if gqa_layout not in ["ABAB", "AABB"]:
+            raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
+        if output_dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError(f"output_dtype must be fp16 or bf16, got {output_dtype}")
+
+        self.is_causal = is_causal
+        self.gqa_layout = gqa_layout
+        self.output_dtype = output_dtype
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        query_scale: torch.Tensor,
+        key_cache: torch.Tensor,
+        key_scale: torch.Tensor,
+        value_cache: torch.Tensor,
+        value_scale: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        block_tables: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Torch reference for paged prefill GQA over an e4m3 query and KV cache.
+
+        Scales are per-tensor (1 element) or per-(batch, kv head) of shape
+        ``(B, Hkv)``. ``max_q_len`` and ``max_total_seq_len`` are kernel hints
+        and unused here.
+        """
+        assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
+
+        total_q_tokens, num_q_heads, head_dim = query.shape
+        num_kv_heads = key_cache.shape[1]
+        v_head_dim = value_cache.shape[-1]
+        gqa_interleave = self.gqa_layout == "ABAB"
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(head_dim)
+
+        total_seq_lens = (
+            _seq_lens_from_cu(cu_q_lens) if cu_total_seq_lens is None else _seq_lens_from_cu(cu_total_seq_lens)
+        )
+
+        outputs = torch.zeros(
+            total_q_tokens, num_q_heads, v_head_dim, dtype=self.output_dtype, device=query.device
+        )
+
+        for i in range(cu_q_lens.numel() - 1):
+            start_loc = cu_q_lens[i].item()
+            end_loc = cu_q_lens[i + 1].item()
+            q_seq_len = end_loc - start_loc
+            kv_seq_len = total_seq_lens[i].item()
+            if q_seq_len == 0 or kv_seq_len == 0:
+                continue
+
+            q = _dequant_fp8_query_seq(
+                query[start_loc:end_loc], query_scale, num_kv_heads, gqa_interleave, i
+            )
+            k = _dequant_fp8_paged_seq(key_cache, key_scale, block_tables[i], kv_seq_len, i)
+            v = _dequant_fp8_paged_seq(value_cache, value_scale, block_tables[i], kv_seq_len, i)
+            k = _expand_fp8_kv_heads(k, num_q_heads, gqa_interleave)
+            v = _expand_fp8_kv_heads(v, num_q_heads, gqa_interleave)
+
+            attn_scores = torch.matmul(q, k.mT) * softmax_scale
+            if self.is_causal:
+                attn_mask = torch.ones(
+                    q_seq_len, kv_seq_len, device=query.device, dtype=torch.bool
+                ).tril(kv_seq_len - q_seq_len)
+                attn_scores = torch.where(attn_mask, attn_scores, float("-inf"))
+
+            attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32)
+            outputs[start_loc:end_loc] = torch.matmul(attn_probs, v).permute(1, 0, 2).to(self.output_dtype)
+
+        return outputs
+
+    def extra_repr(self) -> str:
+        return f"{self.is_causal=}, {self.gqa_layout=}, {self.output_dtype=}".replace("self.", "")
 
 
 
@@ -634,9 +782,109 @@ class MojoPagedPrefillSWA(MojoOperator):
             o_i = o_i.permute(1, 0, 2)  # -> [q_seq_len, n_q_heads, head_dim]
             o[cu_q_lens[i] : cu_q_lens[i + 1]] = o_i.to(o.dtype)
         return o
-    
+
     def extra_repr(self) -> str:
         return f"is_causal={self.is_causal}, gqa_layout={self.gqa_layout}, global_window_size={self.global_window_size}, local_window_size={self.local_window_size}"
+
+
+class MojoPagedPrefillSWAFp8(MojoOperator):
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+        global_window_size: Optional[int] = None,
+        local_window_size: Optional[int] = None,
+        output_dtype: torch.dtype = torch.bfloat16,
+    ):
+        """Paged prefill SWA over an e4m3 query and KV cache.
+
+        Separate from ``MojoPagedPrefillSWA`` so the fp16/bf16 forward is never
+        swapped. The window is configured here. ``output_dtype`` is fp16 or bf16.
+        """
+        super().__init__()
+
+        if gqa_layout not in ["ABAB", "AABB"]:
+            raise ValueError(f"gqa_layout must be one of ['ABAB', 'AABB'], got {gqa_layout}")
+        if output_dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError(f"output_dtype must be fp16 or bf16, got {output_dtype}")
+
+        self.is_causal = is_causal
+        self.gqa_layout = gqa_layout
+        self.gqa_interleave = gqa_layout == "ABAB"
+        self.global_window_size = global_window_size
+        self.local_window_size = local_window_size
+        self.output_dtype = output_dtype
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        query_scale: torch.Tensor,
+        key_cache: torch.Tensor,
+        key_scale: torch.Tensor,
+        value_cache: torch.Tensor,
+        value_scale: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        block_tables: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Torch reference for paged prefill SWA over an e4m3 query and KV cache.
+
+        The window comes from ``__init__``. ``max_q_len`` and ``max_total_seq_len``
+        are kernel hints and unused here.
+        """
+        assert_paged_prefill_contract(cu_q_lens, block_tables, cu_total_seq_lens)
+
+        total_q_tokens, num_q_heads, head_dim = query.shape
+        num_kv_heads = key_cache.shape[1]
+        v_head_dim = value_cache.shape[-1]
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(head_dim)
+
+        total_seq_lens = (
+            _seq_lens_from_cu(cu_q_lens) if cu_total_seq_lens is None else _seq_lens_from_cu(cu_total_seq_lens)
+        )
+
+        outputs = torch.zeros(
+            total_q_tokens, num_q_heads, v_head_dim, dtype=self.output_dtype, device=query.device
+        )
+
+        for i in range(cu_q_lens.numel() - 1):
+            start_loc = cu_q_lens[i].item()
+            end_loc = cu_q_lens[i + 1].item()
+            q_seq_len = end_loc - start_loc
+            kv_seq_len = total_seq_lens[i].item()
+            if q_seq_len == 0 or kv_seq_len == 0:
+                continue
+
+            q = _dequant_fp8_query_seq(
+                query[start_loc:end_loc], query_scale, num_kv_heads, self.gqa_interleave, i
+            )
+            k = _dequant_fp8_paged_seq(key_cache, key_scale, block_tables[i], kv_seq_len, i)
+            v = _dequant_fp8_paged_seq(value_cache, value_scale, block_tables[i], kv_seq_len, i)
+            k = _expand_fp8_kv_heads(k, num_q_heads, self.gqa_interleave)
+            v = _expand_fp8_kv_heads(v, num_q_heads, self.gqa_interleave)
+
+            attn_scores = torch.matmul(q, k.mT) * softmax_scale
+            if self.is_causal:
+                attn_mask = _generate_window_mask(
+                    q_seq_len, kv_seq_len, self.local_window_size, self.global_window_size
+                ).to(query.device)
+                attn_scores = torch.where(attn_mask, attn_scores, float("-inf"))
+
+            attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32)
+            outputs[start_loc:end_loc] = torch.matmul(attn_probs, v).permute(1, 0, 2).to(self.output_dtype)
+
+        return outputs
+
+    def extra_repr(self) -> str:
+        return (
+            f"is_causal={self.is_causal}, gqa_layout={self.gqa_layout}, "
+            f"global_window_size={self.global_window_size}, local_window_size={self.local_window_size}, "
+            f"output_dtype={self.output_dtype}"
+        )
 
 
 class MojoPagedDecodeSWA(MojoOperator):

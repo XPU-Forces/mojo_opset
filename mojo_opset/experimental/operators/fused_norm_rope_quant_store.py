@@ -8,7 +8,7 @@ from ...core.operators.position_embedding import MojoApplyRoPE
 from ...core.operators.quantize import MojoStaticQuant
 from ...core.operators.kv_cache import MojoStorePagedKVCache
 
-__all__ = ["MojoFusedNormRoPEQuantStore"]
+__all__ = ["MojoFusedNormRoPEQuantStore", "MojoFusedNormRoPEFp8KVStore"]
 
 
 class MojoFusedNormRoPEQuantStore(MojoOperator):
@@ -189,3 +189,21 @@ class MojoFusedNormRoPEQuantStore(MojoOperator):
             f"use_query_norm={self.use_query_norm}, "
             f"use_key_norm={self.use_key_norm}"
         )
+
+
+class MojoFusedNormRoPEFp8KVStore(MojoFusedNormRoPEQuantStore, MojoOperator):
+    """fp8 (e4m3) variant of :class:`MojoFusedNormRoPEQuantStore`.
+
+    Same QK-Norm + RoPE + KV-StaticQuant + PagedKVStore pipeline, against a
+    ``torch.float8_e4m3fn`` paged cache. It is a separate operator rather than a
+    ``quant_dtype`` switch on the int8 one because the backend registry keys
+    implementations off the class name prefix, so a single core operator can
+    carry only one ixformer implementation.
+    """
+
+    def __init__(self, *args, quant_dtype: torch.dtype = torch.float8_e4m3fn, **kwargs):
+        if quant_dtype != torch.float8_e4m3fn:
+            raise ValueError(
+                f"{type(self).__name__} is the fp8 operator, got quant_dtype={quant_dtype}"
+            )
+        super().__init__(*args, quant_dtype=quant_dtype, **kwargs)

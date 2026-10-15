@@ -4,6 +4,7 @@ import torch.nn as nn
 
 from mojo_opset.experimental import MojoFusedAttnOutputGate, MojoFusedConcatAttnOutputGate
 from mojo_opset.tests.utils import auto_switch_platform, bypass_not_implemented
+from mojo_opset.utils.platform import get_platform
 
 torch.manual_seed(42)
 
@@ -41,6 +42,9 @@ SHAPES = [
 @bypass_not_implemented
 def test_fused_attn_output_gate(seq_len, hidden_size, num_heads_full, num_heads_swa, head_dim, dtype, bias):
     """forward_diff_with: op vs torch reference backend."""
+    # The ilu path calls gemm_bf16_bf16_fp32, which accepts bf16 activations only.
+    if dtype == torch.float16 and get_platform() == "ilu":
+        pytest.skip("gemm_bf16_bf16_fp32 accepts bf16 activations only")
     op = MojoFusedConcatAttnOutputGate(
         hidden_size=hidden_size,
         num_heads_full=num_heads_full,
@@ -92,6 +96,9 @@ SHAPES_SINGLE = [
 @bypass_not_implemented
 def test_fused_attn_output_gate_single(seq_len, hidden_size, num_heads, head_dim, dtype, bias):
     """forward_diff_with for the single-path variant."""
+    # The ilu path calls gemm_bf16_bf16_fp32, which accepts bf16 activations only.
+    if dtype == torch.float16 and get_platform() == "ilu":
+        pytest.skip("gemm_bf16_bf16_fp32 accepts bf16 activations only")
     op = MojoFusedAttnOutputGate(
         hidden_size=hidden_size,
         num_heads=num_heads,

@@ -6,6 +6,8 @@ import torch
 
 from mojo_opset.experimental import MojoPagedDecodeGQAWithKVDequant
 from mojo_opset.experimental import MojoPagedDecodeSWAWithKVDequant
+from mojo_opset import MojoPagedPrefillGQAFp8
+from mojo_opset import MojoPagedPrefillSWAFp8
 from mojo_opset.experimental import MojoPagedPrefillGQAWithKVDequant
 from mojo_opset.experimental import MojoPagedPrefillSWAWithKVDequant
 from mojo_opset.experimental import MojoPagedPrefillSageGQA
@@ -810,5 +812,266 @@ def test_paged_prefill_sage_gqa(
         max_total_seq_len=max_total_seq_len,
         atol=atol,
         rtol=rtol,
+        ptol=0.90,
+    )
+
+
+# ===========================================================================
+# MojoPagedPrefillGQAFp8 / MojoPagedPrefillSWAFp8
+# ===========================================================================
+
+# e4m3 saturates at 448; quantization keeps the dynamic range inside that.
+_FP8_E4M3_MAX = 448.0
+
+
+def _to_fp8_e4m3(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    return (x.float() / scale).clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX).to(torch.float8_e4m3fn)
+
+
+def _quantize_fp8_kv_cache(
+    cache: torch.Tensor,  # [n_blocks, n_kv_heads, block_size, head_dim]
+    batch_size: int,
+    per_head: bool,
+):
+    """Quantize a float KV cache to e4m3 with a per-tensor or per-(batch, kv head) scale.
+
+    The kernel reads a per-head scale as ``[batch, num_kv_heads]``, but a paged
+    cache block is not owned by a single batch, so the per-head scales are
+    computed over the whole cache and then broadcast across the batch rows.
+    """
+    cache_f = cache.float()
+    if per_head:
+        amax = cache_f.abs().amax(dim=(0, 2, 3)).clamp(min=1e-6)  # -> [n_kv_heads]
+        scale = amax / _FP8_E4M3_MAX
+        quant = _to_fp8_e4m3(cache_f, scale.view(1, -1, 1, 1))
+        return quant, scale.unsqueeze(0).expand(batch_size, -1).contiguous()
+
+    scale = (cache_f.abs().amax() / _FP8_E4M3_MAX).clamp(min=1e-6).reshape(1)
+    return _to_fp8_e4m3(cache_f, scale), scale
+
+
+def _quantize_fp8_query(
+    query: torch.Tensor,  # [total_q_tokens, num_q_heads, head_dim]
+    cu_q_lens: torch.Tensor,
+    num_kv_heads: int,
+    per_head: bool,
+    gqa_interleave: bool,
+):
+    """Quantize query tokens to e4m3; a per-head scale is shared across each GQA group."""
+    query_f = query.float()
+    if not per_head:
+        scale = (query_f.abs().amax() / _FP8_E4M3_MAX).clamp(min=1e-6).reshape(1)
+        return _to_fp8_e4m3(query_f, scale), scale
+
+    total_q_tokens, num_q_heads, head_dim = query.shape
+    group = num_q_heads // num_kv_heads
+    # Split the head axis so the GQA group of each KV head can be reduced as a whole.
+    group_shape = (
+        (total_q_tokens, group, num_kv_heads, head_dim)
+        if gqa_interleave
+        else (total_q_tokens, num_kv_heads, group, head_dim)
+    )
+    head_axis = 2 if gqa_interleave else 1
+    reduce_dims = tuple(d for d in range(4) if d != head_axis)
+
+    quant = torch.empty_like(query, dtype=torch.float8_e4m3fn)
+    scale = torch.ones(cu_q_lens.numel() - 1, num_kv_heads, device=query.device, dtype=torch.float32)
+    for i in range(cu_q_lens.numel() - 1):
+        start_loc = int(cu_q_lens[i].item())
+        end_loc = int(cu_q_lens[i + 1].item())
+        if end_loc <= start_loc:
+            continue
+        seq = query_f[start_loc:end_loc].view(end_loc - start_loc, *group_shape[1:])
+        seq_scale = (seq.abs().amax(dim=reduce_dims) / _FP8_E4M3_MAX).clamp(min=1e-6)
+        scale[i] = seq_scale
+        broadcast = [1, 1, 1, 1]
+        broadcast[head_axis] = num_kv_heads
+        quant[start_loc:end_loc] = _to_fp8_e4m3(seq, seq_scale.view(broadcast)).view(
+            end_loc - start_loc, num_q_heads, head_dim
+        )
+    return quant, scale
+
+
+test_configs_prefill_fp8 = [
+    (2, 16, 4, 128, 1024, 0, 32, torch.bfloat16, "M_FP8"),
+    (2, 16, 4, 96, 1024, 0, 128, torch.bfloat16, "M_FP8_PADDIM"),
+    (2, 8, 1, 128, 512, 1024, 128, torch.bfloat16, "M_FP8_WITH_CACHE"),
+    (2, 8, 2, 128, 1024, 0, 128, torch.bfloat16, "M_FP8_GROUP"),
+    (3, 12, 3, 64, 257, 513, 16, torch.bfloat16, "M_FP8_VARLEN_BLK16_D64"),
+    (4, 20, 5, 192, 193, 769, 256, torch.bfloat16, "M_FP8_VARLEN_BLK256_D192"),
+    (3, 24, 6, 80, 321, 641, 64, torch.bfloat16, "M_FP8_VARLEN_BLK64_D80"),
+    (1, 16, 4, 128, 128, 0, 16, torch.bfloat16, "M_FP8_SMALL_BLK16"),
+    (2, 24, 6, 128, 255, 129, 32, torch.bfloat16, "M_FP8_H24_VARLEN"),
+    (3, 16, 4, 128, 513, 257, 64, torch.bfloat16, "M_FP8_VARLEN_513"),
+    (4, 24, 6, 128, 769, 511, 128, torch.bfloat16, "M_FP8_H24_BLK128"),
+    (5, 16, 4, 128, 1025, 333, 256, torch.bfloat16, "M_FP8_ODD_KV_333"),
+]
+
+
+@pytest.mark.parametrize(
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_len, max_total_seq_len",
+    [
+        pytest.param(
+            *generate_paged_prefill_quant_data(
+                batch_size=B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_q_len=Q_LEN,
+                max_kv_computed_len=KV_COMPUTED_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            id=ID,
+        )
+        for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_prefill_fp8
+    ],
+)
+@pytest.mark.parametrize("gqa_layout", ["ABAB", "AABB"])
+@pytest.mark.parametrize("per_head_scale", [False, True])
+@auto_switch_platform()
+@bypass_not_implemented
+def test_paged_prefill_gqa_fp8(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cu_q_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    cu_total_seq_lens: Optional[torch.Tensor],
+    max_q_len: int,
+    max_total_seq_len: int,
+    gqa_layout: str,
+    per_head_scale: bool,
+):
+    head_dim = query.shape[-1]
+    if head_dim % 64 != 0:
+        pytest.skip(
+            f"ixattn fp8 FMHA requires head_dim % 64 == 0, got {head_dim}."
+        )
+    batch_size = cu_q_lens.numel() - 1
+    num_kv_heads = k_cache.shape[1]
+    query_q, query_scale = _quantize_fp8_query(
+        query, cu_q_lens, num_kv_heads, per_head_scale, gqa_layout == "ABAB"
+    )
+    k_cache_q, key_scale = _quantize_fp8_kv_cache(k_cache, batch_size, per_head_scale)
+    v_cache_q, value_scale = _quantize_fp8_kv_cache(v_cache, batch_size, per_head_scale)
+
+    op = MojoPagedPrefillGQAFp8(is_causal=True, gqa_layout=gqa_layout)
+    op_ref = MojoPagedPrefillGQAFp8._registry.get("torch")(
+        is_causal=True, gqa_layout=gqa_layout
+    )
+
+    head_dim = query.shape[-1]
+    softmax_scale = 1.0 / math.sqrt(head_dim)
+
+    op.forward_diff_with(
+        op_ref,
+        query_q,
+        query_scale,
+        k_cache_q,
+        key_scale,
+        v_cache_q,
+        value_scale,
+        cu_q_lens,
+        block_tables,
+        softmax_scale=softmax_scale,
+        cu_total_seq_lens=cu_total_seq_lens,
+        max_q_len=max_q_len,
+        max_total_seq_len=max_total_seq_len,
+        atol=5e-2,
+        rtol=5e-2,
+        ptol=0.90,
+    )
+
+
+@pytest.mark.parametrize(
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens, max_q_len, max_total_seq_len",
+    [
+        pytest.param(
+            *generate_paged_prefill_quant_data(
+                batch_size=B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_q_len=Q_LEN,
+                max_kv_computed_len=KV_COMPUTED_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            id=ID,
+        )
+        for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_prefill_fp8
+    ],
+)
+@pytest.mark.parametrize(
+    "gqa_layout, global_window, local_window",
+    [
+        ("ABAB", 4, 255),
+        ("AABB", 4, 1023),
+        ("AABB", 0, 127),
+    ],
+)
+@pytest.mark.parametrize("per_head_scale", [False, True])
+@auto_switch_platform()
+@bypass_not_implemented
+def test_paged_prefill_swa_fp8(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cu_q_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    cu_total_seq_lens: Optional[torch.Tensor],
+    max_q_len: int,
+    max_total_seq_len: int,
+    gqa_layout: str,
+    global_window: int,
+    local_window: int,
+    per_head_scale: bool,
+):
+    head_dim = query.shape[-1]
+    if head_dim % 64 != 0:
+        pytest.skip(
+            f"ixattn fp8 FMHA requires head_dim % 64 == 0, got {head_dim}."
+        )
+    batch_size = cu_q_lens.numel() - 1
+    num_kv_heads = k_cache.shape[1]
+    query_q, query_scale = _quantize_fp8_query(
+        query, cu_q_lens, num_kv_heads, per_head_scale, gqa_layout == "ABAB"
+    )
+    k_cache_q, key_scale = _quantize_fp8_kv_cache(k_cache, batch_size, per_head_scale)
+    v_cache_q, value_scale = _quantize_fp8_kv_cache(v_cache, batch_size, per_head_scale)
+
+    op = MojoPagedPrefillSWAFp8(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+        local_window_size=local_window,
+        global_window_size=global_window,
+    )
+    op_ref = MojoPagedPrefillSWAFp8._registry.get("torch")(
+        is_causal=True,
+        gqa_layout=gqa_layout,
+        local_window_size=local_window,
+        global_window_size=global_window,
+    )
+
+    head_dim = query.shape[-1]
+    softmax_scale = 1.0 / math.sqrt(head_dim)
+
+    op.forward_diff_with(
+        op_ref,
+        query_q,
+        query_scale,
+        k_cache_q,
+        key_scale,
+        v_cache_q,
+        value_scale,
+        cu_q_lens,
+        block_tables,
+        softmax_scale=softmax_scale,
+        cu_total_seq_lens=cu_total_seq_lens,
+        max_q_len=max_q_len,
+        max_total_seq_len=max_total_seq_len,
+        atol=5e-2,
+        rtol=5e-2,
         ptol=0.90,
     )

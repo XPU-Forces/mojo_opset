@@ -12,7 +12,9 @@ from ixformer.contrib import vllm_flash_attn as ix_fa
 from mojo_opset.core import MojoPagedDecodeGQA
 from mojo_opset.core import MojoPagedDecodeSWA
 from mojo_opset.core import MojoPagedPrefillGQA
+from mojo_opset.core import MojoPagedPrefillGQAFp8
 from mojo_opset.core import MojoPagedPrefillSWA
+from mojo_opset.core import MojoPagedPrefillSWAFp8
 from mojo_opset.experimental import MojoPagedPrefillSageGQA
 from mojo_opset.core.operators.attention import assert_paged_decode_contract
 from mojo_opset.core.operators.attention import assert_paged_prefill_contract
@@ -149,7 +151,63 @@ class IxformerPagedPrefillGQA(MojoPagedPrefillGQA):
             causal=self.is_causal,
             softmax_scale=softmax_scale,
             block_table=block_tables,
+            backend="ixinfer",
         )
+
+
+class IxformerPagedPrefillGQAFp8(MojoPagedPrefillGQAFp8):
+    """Ixformer paged prefill GQA over an e4m3 query and KV cache."""
+
+    supported_platforms_list = ["ilu"]
+
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+        output_dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__(is_causal=is_causal, gqa_layout=gqa_layout, output_dtype=output_dtype)
+        if gqa_layout != "AABB":
+            raise NotImplementedError("IxformerPagedPrefillGQAFp8 only supports AABB layout.")
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        query_scale: torch.Tensor,
+        key_cache: torch.Tensor,
+        key_scale: torch.Tensor,
+        value_cache: torch.Tensor,
+        value_scale: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        block_tables: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Calls :func:`ixformer.functions.flash_attn_varlen_fp8_func`."""
+        cu_kv_lens = cu_total_seq_lens if cu_total_seq_lens is not None else cu_q_lens
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(query.shape[-1])
+
+        return ixf_f.flash_attn_varlen_fp8_func(
+            query,
+            key_cache,
+            value_cache,
+            query_scale,
+            key_scale,
+            value_scale,
+            cu_q_lens,
+            cu_kv_lens,
+            max_q_len,
+            max_total_seq_len,
+            softmax_scale=softmax_scale,
+            causal=self.is_causal,
+            block_table=block_tables,
+            output_dtype=self.output_dtype,
+            backend="ixattn",
+        )
+
 
 class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
     """Ixformer implementation for paged prefill SWA (Sliding Window Attention)."""
@@ -163,19 +221,17 @@ class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
         global_window_size: Optional[int] = None,
         local_window_size: Optional[int] = None,
     ):
-        
         super().__init__(
             is_causal=is_causal,
             gqa_layout=gqa_layout,
             global_window_size=global_window_size,
             local_window_size=local_window_size,
         )
-        
+
         if global_window_size is not None and global_window_size < 0:
             raise ValueError(f"global_window_size must be >= 0, got {global_window_size}.")
         if local_window_size is not None and local_window_size < 0:
             raise ValueError(f"local_window_size must be >= 0, got {local_window_size}.")
-        
 
     def forward(
         self,
@@ -288,6 +344,88 @@ class IxformerPagedPrefillSWA(MojoPagedPrefillSWA):
             block_table=block_table,
             window_size=window_size,
             global_window_size=self.global_window_size,
+            backend="ixinfer",
+        )
+
+
+class IxformerPagedPrefillSWAFp8(MojoPagedPrefillSWAFp8):
+    """Ixformer paged prefill SWA over an e4m3 query and KV cache."""
+
+    supported_platforms_list = ["ilu"]
+
+    def __init__(
+        self,
+        is_causal: bool = True,
+        gqa_layout: str = "AABB",
+        global_window_size: Optional[int] = None,
+        local_window_size: Optional[int] = None,
+        output_dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__(
+            is_causal=is_causal,
+            gqa_layout=gqa_layout,
+            global_window_size=global_window_size,
+            local_window_size=local_window_size,
+            output_dtype=output_dtype,
+        )
+        if global_window_size is not None and global_window_size < 0:
+            raise ValueError(f"global_window_size must be >= 0, got {global_window_size}.")
+        if local_window_size is not None and local_window_size < 0:
+            raise ValueError(f"local_window_size must be >= 0, got {local_window_size}.")
+        if gqa_layout != "AABB":
+            raise NotImplementedError("IxformerPagedPrefillSWAFp8 only supports AABB layout.")
+        # The ixattn kernel wants an explicit right bound, so a set local window
+        # becomes (local_window_size, 0) and full attention stays (-1, -1).
+        if local_window_size is not None:
+            self._fp8_window_size = (local_window_size, 0)
+        else:
+            self._fp8_window_size = (-1, -1)
+        if global_window_size is not None and global_window_size > 0:
+            if self._fp8_window_size == (-1, -1):
+                raise ValueError(
+                    "global_window_size > 0 requires a valid local_window_size (sliding window)."
+                )
+            if not is_causal:
+                raise ValueError("global_window_size > 0 requires is_causal=True.")
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        q_scale: torch.Tensor,
+        k_cache: torch.Tensor,
+        k_scale: torch.Tensor,
+        v_cache: torch.Tensor,
+        v_scale: torch.Tensor,
+        cu_q_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+        cu_total_seq_lens: Optional[torch.Tensor] = None,
+        max_q_len: Optional[int] = None,
+        max_total_seq_len: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Calls :func:`ixformer.functions.flash_attn_varlen_fp8_func`."""
+        cu_kv_lens = cu_total_seq_lens if cu_total_seq_lens is not None else cu_q_lens
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(q.shape[-1])
+
+        return ixf_f.flash_attn_varlen_fp8_func(
+            q,
+            k_cache,
+            v_cache,
+            q_scale,
+            k_scale,
+            v_scale,
+            cu_q_lens,
+            cu_kv_lens,
+            max_q_len,
+            max_total_seq_len,
+            softmax_scale=softmax_scale,
+            causal=self.is_causal,
+            window_size=self._fp8_window_size,
+            global_window_size=self.global_window_size,
+            block_table=block_table,
+            output_dtype=self.output_dtype,
+            backend="ixattn",
         )
 
 
@@ -474,6 +612,7 @@ class IxformerPagedPrefillGQAWithKVDequant(MojoPagedPrefillGQAWithKVDequant):
             max_total_seq_len,
             causal=self.is_causal,
             softmax_scale=softmax_scale,
+            backend="ixinfer",
         )
         return output
 
@@ -702,6 +841,7 @@ class IxformerPagedPrefillSWAWithKVDequant(MojoPagedPrefillSWAWithKVDequant):
             softmax_scale=softmax_scale,
             window_size=window_size,
             global_window_size=self.global_window_size,
+            backend="ixinfer",
         )
         return output
 
@@ -901,7 +1041,7 @@ class IxformerPagedDecodeSWA(MojoPagedDecodeSWA):
             max_context_len=max_total_seq_len,
             causal=self.is_causal,
             window_left=self.local_window_size,
-            global_window_size=self.global_window_size
+            global_window_size=self.global_window_size,
         )
 
         return output

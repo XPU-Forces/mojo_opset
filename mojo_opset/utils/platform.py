@@ -101,7 +101,16 @@ def get_impl_by_platform():
 
             for _, module_name, _ in pkgutil.iter_modules([api_dir_path]):
                 full_module_name = f"{api_package_name}.{module_name}"
-                module = importlib.import_module(full_module_name)
+                try:
+                    module = importlib.import_module(full_module_name)
+                except ImportError:
+                    import traceback
+
+                    logger.error(
+                        f"Failed to import {full_module_name}; later operators are still discovered.\n"
+                        f"{traceback.format_exc()}"
+                    )
+                    continue
 
                 for name, op in inspect.getmembers(module, inspect.isclass):
                     if (

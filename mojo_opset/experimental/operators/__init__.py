@@ -25,6 +25,7 @@ from .normalization import MojoChannelRMSNorm
 from .normalization import MojoGroupLayerNorm
 from .position_embedding import MojoGridRoPE
 from .position_embedding import MojoRelativeEmbedding
+from .fused_norm_rope_quant_store import MojoFusedNormRoPEFp8KVStore
 from .fused_norm_rope_quant_store import MojoFusedNormRoPEQuantStore
 from .store_lowrank import MojoStoreLowrank
 
@@ -58,4 +59,5 @@ __all__ = [
     "MojoStoreLowrank",
     "MojoQuantBatchGemmReduceSum",
     "MojoFusedNormRoPEQuantStore",
+    "MojoFusedNormRoPEFp8KVStore",
 ]
