@@ -467,7 +467,7 @@ def test_quant_moe_reference(up_weight_dtype, up_quant_group_size, down_weight_d
 @pytest.mark.parametrize("num_experts, top_k, hidden_size, intermediate_size, num_tokens", quant_moe_backend_cases)
 @pytest.mark.parametrize(
     "up_weight_dtype,up_quant_group_size,down_weight_dtype,down_quant_group_size",
-    [("int4", 512, "int4", 320), (torch.int8, -1, torch.int8, -1)],
+    [("int4", 512, "int4", 320), (torch.int8, -1, torch.int8, -1), ("int4", -1, "int4", -1)],
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @auto_switch_platform()

@@ -10,7 +10,8 @@ class IxformerFusedAttnOutputGate(MojoFusedAttnOutputGate):
 
     @staticmethod
     def _cast_weight_and_bias_hook(module, incompatible_keys):
-        module._cached_weight = module.gate_weight.data.float()
+        # gemm_bf16_bf16_fp32 takes a bf16 weight. TN layout is (num_heads, hidden_size).
+        module._cached_weight = module.gate_weight.data.to(torch.bfloat16).contiguous()
         if module.gate_bias is not None:
             module._cached_bias = module.gate_bias.data.float()
 
@@ -34,7 +35,7 @@ class IxformerFusedAttnOutputGate(MojoFusedAttnOutputGate):
         hidden_states: torch.Tensor,
         attn_output: torch.Tensor,
     ) -> torch.Tensor:
-        gate = ixf_f.mixed_type_linear(hidden_states, self._cached_weight)
+        gate = ixf_f.gemm_bf16_bf16_fp32(hidden_states, self._cached_weight)
 
         attn_output = attn_output.view(-1, self.num_heads, self.head_dim)
 
@@ -48,9 +49,14 @@ class IxformerFusedConcatAttnOutputGate(MojoFusedConcatAttnOutputGate):
 
     @staticmethod
     def _cat_weight_and_bias_hook(module, incompatible_keys):
-        module._cached_weight = torch.cat([module.full_gate_weight.data, module.swa_gate_weight.data], dim=0).float()
+        # gemm_bf16_bf16_fp32 takes a bf16 weight. TN layout is (num_heads_total, hidden_size).
+        module._cached_weight = torch.cat(
+            [module.full_gate_weight.data, module.swa_gate_weight.data], dim=0
+        ).to(torch.bfloat16).contiguous()
         if module.full_gate_bias is not None:
-            module._cached_bias = torch.cat([module.full_gate_bias.data, module.swa_gate_bias.data], dim=0).float()
+            module._cached_bias = torch.cat(
+                [module.full_gate_bias.data, module.swa_gate_bias.data], dim=0
+            ).float()
 
     def __init__(
         self,
@@ -71,7 +77,7 @@ class IxformerFusedConcatAttnOutputGate(MojoFusedConcatAttnOutputGate):
         full_attn_output: torch.Tensor,
         swa_attn_output: torch.Tensor
     ) -> torch.Tensor:
-        gate = ixf_f.mixed_type_linear(hidden_states, self._cached_weight)
+        gate = ixf_f.gemm_bf16_bf16_fp32(hidden_states, self._cached_weight)
 
         full_attn_output = full_attn_output.view(-1, self.num_heads_full, self.head_dim)
         swa_attn_output = swa_attn_output.view(-1, self.num_heads_swa, self.head_dim)

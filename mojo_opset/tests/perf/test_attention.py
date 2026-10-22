@@ -6,13 +6,25 @@ import pytest
 import torch
 
 from mojo_opset import MojoPagedDecodeGQA
+from mojo_opset import MojoPagedDecodeGQAFp8
+from mojo_opset import MojoPagedDecodeSWAFp8
 from mojo_opset import MojoPagedPrefillGQA
+from mojo_opset import MojoPagedPrefillGQAFp8
 from mojo_opset import MojoSdpa
 from mojo_opset import MojoPagedPrefillSWA
+from mojo_opset import MojoPagedPrefillSWAFp8
 from mojo_opset import MojoPagedDecodeSWA
 from mojo_opset import MojoSWA
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
+
+
+def _max_lens(cu_q_lens: torch.Tensor, cu_total_seq_lens: Optional[torch.Tensor]):
+    """Kernel hints the paged FP8 op needs; derived once, outside the timed region."""
+    cu_kv_lens = cu_q_lens if cu_total_seq_lens is None else cu_total_seq_lens
+    max_q_len = int(cu_q_lens.diff().max().item())
+    max_total_seq_len = int(cu_kv_lens.diff().max().item())
+    return max_q_len, max_total_seq_len
 
 
 def generate_paged_decode_data(
@@ -230,6 +242,7 @@ def test_paged_prefill_gqa(
 
     head_dim = query.shape[-1]
     softmax_scale = 1.0 / math.sqrt(head_dim)
+    max_q_len, max_total_seq_len = _max_lens(cu_q_lens, cu_total_seq_lens)
 
     perf(  # noqa: F821
         lambda: paged_attn_prefill(
@@ -240,6 +253,8 @@ def test_paged_prefill_gqa(
             block_tables,
             softmax_scale=softmax_scale,
             cu_total_seq_lens=cu_total_seq_lens,
+            max_q_len=max_q_len,
+            max_total_seq_len=max_total_seq_len,
         )
     )
 
@@ -337,6 +352,7 @@ def test_paged_prefill_swa(
 
     head_dim = query.shape[-1]
     softmax_scale = 1.0 / math.sqrt(head_dim)
+    max_q_len, max_total_seq_len = _max_lens(cu_q_lens, cu_total_seq_lens)
 
     perf(  # noqa: F821
         lambda: swa_prefill(
@@ -347,6 +363,8 @@ def test_paged_prefill_swa(
             block_tables,
             softmax_scale=softmax_scale,
             cu_total_seq_lens=cu_total_seq_lens,
+            max_q_len=max_q_len,
+            max_total_seq_len=max_total_seq_len,
         )
     )
 
@@ -503,5 +521,251 @@ def test_swa_infer(
             cu_q_lens,
             cu_total_seq_lens,
             softmax_scale=softmax_scale,
+        )
+    )
+
+
+# ===========================================================================
+# MojoPagedPrefillGQAFp8 / MojoPagedPrefillSWAFp8
+# ===========================================================================
+
+# e4m3 saturates at 448; quantization keeps the dynamic range inside that.
+_FP8_E4M3_MAX = 448.0
+
+
+def _to_fp8_paged_inputs(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    batch_size: int,
+    per_head_scale: bool,
+):
+    """Cast prefill inputs to e4m3 with per-tensor scales.
+
+    Only the scale *layout* matters for the kernel's cost, so the per-head
+    variant broadcasts the per-tensor scale over ``[batch, num_kv_heads]``
+    instead of recomputing per-head amax.
+    """
+    quantized = []
+    scales = []
+    for tensor in (query, k_cache, v_cache):
+        scale = (tensor.float().abs().amax() / _FP8_E4M3_MAX).clamp(min=1e-6).reshape(1)
+        quantized.append(
+            (tensor.float() / scale).clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX).to(torch.float8_e4m3fn)
+        )
+        if per_head_scale:
+            scale = scale.expand(batch_size, k_cache.shape[1]).contiguous()
+        scales.append(scale)
+    return quantized, scales
+
+
+test_configs_prefill_fp8 = [
+    (2, 16, 4, 128, 1024, 0, 32, torch.bfloat16, "M_FP8"),
+    (2, 16, 4, 64, 1024, 0, 128, torch.bfloat16, "M_FP8_D64"),
+    (2, 8, 1, 128, 4096, 8192, 128, torch.bfloat16, "M_FP8_WITH_CACHE"),
+]
+
+
+@pytest.mark.parametrize(
+    "batch_size, num_q_heads, num_kv_heads, head_dim, max_seq_len, block_size",
+    [
+        (8, 16, 4, 128, 1024, 32),
+        (8, 16, 4, 256, 1024, 16),
+        (8, 8, 1, 128, 8192, 16),
+    ],
+)
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+@auto_switch_platform(set_perf=True)
+@bypass_not_implemented
+def test_paged_decode_gqa_fp8(
+    batch_size, num_q_heads, num_kv_heads, head_dim, max_seq_len, block_size, fp8_dtype
+):
+    from mojo_opset.utils.platform import get_torch_device
+
+    query, key, value, lengths, tables = generate_paged_decode_data(
+        batch_size, num_q_heads, num_kv_heads, head_dim, max_seq_len, block_size, torch.bfloat16
+    )
+    max_length = int(lengths.max().item())
+    device = get_torch_device()
+    query, key, value = (tensor.to(device=device, dtype=fp8_dtype) for tensor in (query, key, value))
+    lengths, tables = lengths.to(device), tables.to(device)
+    query_scale = torch.ones(batch_size, num_q_heads, device=device, dtype=torch.float32)
+    key_scale = torch.ones(key.shape[:-1], device=device, dtype=torch.float32)
+    value_scale = torch.ones(num_kv_heads, head_dim, device=device, dtype=torch.float32)
+    op = MojoPagedDecodeGQAFp8(output_dtype=torch.bfloat16)
+
+    perf(  # noqa: F821
+        lambda: op(
+            query,
+            query_scale,
+            key,
+            key_scale,
+            value,
+            value_scale,
+            lengths,
+            tables,
+            max_total_seq_len=max_length,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "batch_size, num_q_heads, num_kv_heads, head_dim, max_seq_len, block_size",
+    [(8, 16, 4, 128, 1024, 32), (8, 16, 4, 256, 1024, 16), (8, 8, 1, 128, 8192, 16)],
+)
+@pytest.mark.parametrize("global_window, local_window", [(0, 255), (4, 255)])
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+@auto_switch_platform(set_perf=True)
+@bypass_not_implemented
+def test_paged_decode_swa_fp8(
+    batch_size, num_q_heads, num_kv_heads, head_dim, max_seq_len, block_size,
+    global_window, local_window, fp8_dtype,
+):
+    from mojo_opset.utils.platform import get_torch_device
+
+    query, key, value, lengths, tables = generate_paged_decode_data(
+        batch_size, num_q_heads, num_kv_heads, head_dim, max_seq_len, block_size, torch.bfloat16
+    )
+    max_length = int(lengths.max().item())
+    device = get_torch_device()
+    query, key, value = (tensor.to(device=device, dtype=fp8_dtype) for tensor in (query, key, value))
+    lengths, tables = lengths.to(device), tables.to(device)
+    query_scale = torch.ones(batch_size, num_q_heads, device=device, dtype=torch.float32)
+    key_scale = torch.ones(key.shape[:-1], device=device, dtype=torch.float32)
+    value_scale = torch.ones(num_kv_heads, head_dim, device=device, dtype=torch.float32)
+    op = MojoPagedDecodeSWAFp8(global_window_size=global_window, local_window_size=local_window)
+
+    perf(  # noqa: F821
+        lambda: op(
+            query, query_scale, key, key_scale, value, value_scale, lengths, tables,
+            max_total_seq_len=max_length,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens",
+    [
+        pytest.param(
+            *generate_paged_prefill_data(
+                batch_size=B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_q_len=Q_LEN,
+                max_kv_computed_len=KV_COMPUTED_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            id=ID,
+        )
+        for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_prefill_fp8
+    ],
+)
+@pytest.mark.parametrize("per_head_scale", [False, True])
+@auto_switch_platform(set_perf=True)
+@bypass_not_implemented
+def test_paged_prefill_gqa_fp8(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cu_q_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    cu_total_seq_lens: Optional[torch.Tensor],
+    per_head_scale: bool,
+):
+    batch_size = cu_q_lens.numel() - 1
+    (query_q, k_cache_q, v_cache_q), (query_scale, key_scale, value_scale) = _to_fp8_paged_inputs(
+        query, k_cache, v_cache, batch_size, per_head_scale
+    )
+    max_q_len, max_total_seq_len = _max_lens(cu_q_lens, cu_total_seq_lens)
+
+    paged_attn_prefill = MojoPagedPrefillGQAFp8(is_causal=True, gqa_layout="AABB")
+
+    head_dim = query.shape[-1]
+    softmax_scale = 1.0 / math.sqrt(head_dim)
+
+    perf(  # noqa: F821
+        lambda: paged_attn_prefill(
+            query_q,
+            query_scale,
+            k_cache_q,
+            key_scale,
+            v_cache_q,
+            value_scale,
+            cu_q_lens,
+            block_tables,
+            softmax_scale=softmax_scale,
+            cu_total_seq_lens=cu_total_seq_lens,
+            max_q_len=max_q_len,
+            max_total_seq_len=max_total_seq_len,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "query, k_cache, v_cache, cu_q_lens, block_tables, cu_total_seq_lens",
+    [
+        pytest.param(
+            *generate_paged_prefill_data(
+                batch_size=B,
+                num_q_heads=Q_H,
+                num_kv_heads=KV_H,
+                head_dim=D,
+                max_q_len=Q_LEN,
+                max_kv_computed_len=KV_COMPUTED_LEN,
+                block_size=BLK_S,
+                dtype=dtype,
+            ),
+            id=ID,
+        )
+        for B, Q_H, KV_H, D, Q_LEN, KV_COMPUTED_LEN, BLK_S, dtype, ID in test_configs_prefill_fp8
+    ],
+)
+@pytest.mark.parametrize("global_window, local_window", [(4, 1023)])
+@pytest.mark.parametrize("per_head_scale", [False, True])
+@auto_switch_platform(set_perf=True)
+@bypass_not_implemented
+def test_paged_prefill_swa_fp8(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cu_q_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    cu_total_seq_lens: Optional[torch.Tensor],
+    global_window: int,
+    local_window: int,
+    per_head_scale: bool,
+):
+    batch_size = cu_q_lens.numel() - 1
+    (query_q, k_cache_q, v_cache_q), (query_scale, key_scale, value_scale) = _to_fp8_paged_inputs(
+        query, k_cache, v_cache, batch_size, per_head_scale
+    )
+    max_q_len, max_total_seq_len = _max_lens(cu_q_lens, cu_total_seq_lens)
+
+    swa_prefill = MojoPagedPrefillSWAFp8(
+        is_causal=True,
+        gqa_layout="AABB",
+        global_window_size=global_window,
+        local_window_size=local_window,
+    )
+
+    head_dim = query.shape[-1]
+    softmax_scale = 1.0 / math.sqrt(head_dim)
+
+    perf(  # noqa: F821
+        lambda: swa_prefill(
+            query_q,
+            query_scale,
+            k_cache_q,
+            key_scale,
+            v_cache_q,
+            value_scale,
+            cu_q_lens,
+            block_tables,
+            softmax_scale=softmax_scale,
+            cu_total_seq_lens=cu_total_seq_lens,
+            max_q_len=max_q_len,
+            max_total_seq_len=max_total_seq_len,
         )
     )
