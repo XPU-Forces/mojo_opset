@@ -5,6 +5,7 @@ npu.a5:
   dequant: triton
   dequant_swiglu_quant: torch_npu
   diffusion_attention: triton
+  dynamic_mx_quant_sr: cannbotdsl  # DSL sources JIT-compiled by bisheng; A5 (dav-3510) only.
   dynamic_quant: triton
   embedding_nf4_dequant: triton
   flash_attention: triton

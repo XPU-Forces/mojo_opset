@@ -33,7 +33,10 @@ setup(
     ),
     py_modules=[],
     include_package_data=False,
-    package_data={"mojo_opset.config": ["*.yaml"]},
+    package_data={
+        "mojo_opset.config": ["*.yaml"],
+        "mojo_opset.kernels.npu_a5_cannbotdsl": ["csrc/*.cpp"],
+    },
     exclude_package_data={"": ["*.so", "*.pyd", "*.dll", "*.dylib"]},
     cmdclass={"build": PureBuild, "sdist": NoSourceDistribution},
 )

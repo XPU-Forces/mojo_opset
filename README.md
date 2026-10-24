@@ -50,6 +50,19 @@ See the [native build guide](native/README.md) for build and release commands.
 
 See [operator support](docs/operator_support.md) for available implementations.
 
+## Repository layout
+
+- `mojo_opset/functions/` — public stateless operator APIs.
+- `mojo_opset/modules/` — `nn.Module` wrappers.
+- `mojo_opset/kernels/<provider>/` — one module per operator, exported through the package `OPS` map.
+  - `npu_a2_triton/`, `npu_a5_triton/` — Triton kernels.
+  - `npu_a2_native/`, `npu_a5_native/` — native kernels; C++ sources live in `native/`.
+  - `npu_torch_npu/` — `torch_npu`-backed kernels.
+  - `npu_a5_cannbotdsl/` — CANNBot-DSL kernels, JIT-compiled by bisheng (`dav-3510` only); C++ bridge sources live in `csrc/`.
+  - `torch/` — reference implementations; a large reference may be split into `<op>.py` plus a `<op>_golden.py` helper.
+- `mojo_opset/config/` — per-target provider selection.
+- `tests/functions/`, `tests/modules/`, `tests/performance/` — see [Testing](#testing).
+
 ## Targets and configuration
 
 Target identity is `platform.arch[.sku]`, for example `npu.a2`,

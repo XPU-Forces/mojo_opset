@@ -12,6 +12,7 @@ supported shapes, dtypes and options.
 | `dequant` | triton | triton |
 | `dequant_swiglu_quant` | torch_npu | torch_npu |
 | `diffusion_attention` | triton | triton |
+| `dynamic_mx_quant_sr` | — | cannbotdsl |
 | `dynamic_quant` | triton, torch_npu | triton, torch_npu |
 | `embedding_nf4_dequant` | triton | triton |
 | `flash_attention` | triton, torch_npu, native | triton, torch_npu |

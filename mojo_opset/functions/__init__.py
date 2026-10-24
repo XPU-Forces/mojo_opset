@@ -10,6 +10,7 @@ from .attention import swa_infer
 from .attention import varlen_fa_infer
 from .convolution import causal_conv1d
 from .convolution import causal_conv1d_update_state_infer
+from .dynamic_mx_quant_sr import dynamic_mx_quant_sr
 from .flex_attention import flex_attention
 from .flex_attention_v2 import flex_attention_v2
 from .fused_quantization import dequant_swiglu_quant
@@ -69,6 +70,7 @@ __all__ = [
     "dequant",
     "dequant_swiglu_quant",
     "diffusion_attention",
+    "dynamic_mx_quant_sr",
     "dynamic_quant",
     "embedding_nf4_dequant",
     "flash_attention",
