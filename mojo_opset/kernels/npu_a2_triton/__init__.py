@@ -32,6 +32,7 @@ OPS = {
     "join_prob_reject_sampling": "sample",
     "apply_penalties_temperature": "sample",
     "group_gemm": "group_gemm",
+    "hc_collapse": "hc_collapse",
     "quant_gemm": "int8_gemm",
     "static_quant": "quant",
     "dequant": "quant",

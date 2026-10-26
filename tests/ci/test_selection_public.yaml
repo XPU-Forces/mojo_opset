@@ -1131,6 +1131,49 @@ operators:
             - tests/performance/modules/test_normalization.py
           950/performance:
             - tests/performance/modules/test_normalization.py
+  hc_collapse:
+    rules:
+      - paths:
+          - mojo_opset/functions/hc_collapse.py
+          - mojo_opset/kernels/_npu_triton_utils.py
+          - mojo_opset/kernels/torch/hc_collapse.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_hc_collapse.py
+          910b/triton:
+            - tests/functions/test_hc_collapse.py
+          950/performance:
+            - tests/performance/functions/test_hc_collapse.py
+          950/triton:
+            - tests/functions/test_hc_collapse.py
+      - paths:
+          - mojo_opset/kernels/npu_a2_triton/hc_collapse.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_hc_collapse.py
+          910b/triton:
+            - tests/functions/test_hc_collapse.py
+      - paths:
+          - mojo_opset/kernels/npu_a5_triton/hc_collapse.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_hc_collapse.py
+          950/triton:
+            - tests/functions/test_hc_collapse.py
+      - paths:
+          - tests/functions/test_hc_collapse.py
+        jobs:
+          910b/triton:
+            - tests/functions/test_hc_collapse.py
+          950/triton:
+            - tests/functions/test_hc_collapse.py
+      - paths:
+          - tests/performance/functions/test_hc_collapse.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_hc_collapse.py
+          950/performance:
+            - tests/performance/functions/test_hc_collapse.py
   join_prob_reject_sampling:
     rules:
       - paths:
