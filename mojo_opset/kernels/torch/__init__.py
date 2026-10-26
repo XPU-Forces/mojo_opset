@@ -40,6 +40,7 @@ OPS = {
     "apply_penalties_temperature": "sampling",
     "group_gemm": "gemm",
     "quant_gemm": "gemm",
+    "hc_collapse": "hc_collapse",
     "static_quant": "quantization",
     "dequant": "quantization",
     "dynamic_quant": "quantization",
