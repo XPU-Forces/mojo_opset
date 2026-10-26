@@ -94,7 +94,7 @@ def sparse_flash_mla_infer(
         ori_block_table: ``(B, pages_per_batch)`` int32 page ids (PA_BBND only).
         cu_seqlens_q: ``(B+1,)`` int32 cumulative query lens.
         seqused_ori_kv: ``(B,)`` int32 actual ori KV length per batch.
-        sinks: optional per-head sink values; currently zero sinks only.
+        sinks: optional per-head sink values; None means no sink. Provided sinks must be zero.
         win_left / win_right: sliding-window bounds (inclusive left, exclusive
             right offset).
         softmax_scale: scaling factor; defaults to ``1/sqrt(D)``.
@@ -133,9 +133,7 @@ def sparse_flash_mla_infer(
         cmp_mask_mode,
         cmp_ratio,
     )
-    if torch.is_grad_enabled() and any(
-        tensor.requires_grad for tensor in (q, ori_kv, cmp_kv) if tensor is not None
-    ):
+    if torch.is_grad_enabled() and any(tensor.requires_grad for tensor in (q, ori_kv, cmp_kv) if tensor is not None):
         raise RuntimeError("sparse_flash_mla_infer does not support autograd; use torch.no_grad()")
     forward, _ = load_impl("sparse_flash_mla_infer", implementation)
     scale = q.shape[-1] ** -0.5 if softmax_scale is None else float(softmax_scale)

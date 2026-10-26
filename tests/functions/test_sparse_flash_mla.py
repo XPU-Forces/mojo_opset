@@ -114,9 +114,9 @@ def generate_smla_cmp_data(
     if layout == "PA":
         cmp_pages = (t3 + cmp_page - 1) // cmp_page
         cmp_kv = torch.randn(b * cmp_pages, cmp_page, 1, d, dtype=dtype, device=device) * 0.5
-        cmp_block_table = torch.stack(
-            [torch.randperm(b * cmp_pages, device=device)[:cmp_pages] for _ in range(b)]
-        ).to(torch.int32)
+        cmp_block_table = torch.stack([torch.randperm(b * cmp_pages, device=device)[:cmp_pages] for _ in range(b)]).to(
+            torch.int32
+        )
         cu_seqlens_cmp_kv = None
     else:
         cmp_kv = torch.randn(b * t3, 1, d, dtype=dtype, device=device) * 0.5
@@ -124,9 +124,7 @@ def generate_smla_cmp_data(
         cu_seqlens_cmp_kv = torch.tensor([i * t3 for i in range(b + 1)], dtype=torch.int32, device=device)
     cmp_sparse_indices = None
     if layer == "CSA":
-        cmp_sparse_indices = torch.stack(
-            [torch.randperm(t3, device=device)[:k] for _ in range(b * s1)]
-        ).to(torch.int32)
+        cmp_sparse_indices = torch.stack([torch.randperm(t3, device=device)[:k] for _ in range(b * s1)]).to(torch.int32)
     inputs.update(
         cmp_kv=cmp_kv,
         cmp_block_table=cmp_block_table,
@@ -210,7 +208,9 @@ def _run_cmp_case(sparse_flash_mla_backend, dtype, layer, case):
 @pytest.mark.parametrize(
     "case",
     _SMLA_CSA_CASES,
-    ids=[f"b{c[0]}-s1_{c[1]}-s2_{c[2]}-n{c[3]}-w{c[4]}_{c[5]}-r{c[6]}-t3_{c[7]}-k{c[8]}-{c[9]}" for c in _SMLA_CSA_CASES],
+    ids=[
+        f"b{c[0]}-s1_{c[1]}-s2_{c[2]}-n{c[3]}-w{c[4]}_{c[5]}-r{c[6]}-t3_{c[7]}-k{c[8]}-{c[9]}" for c in _SMLA_CSA_CASES
+    ],
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.accuracy
@@ -228,3 +228,100 @@ def test_sparse_flash_mla_csa(sparse_flash_mla_backend, case, dtype):
 @pytest.mark.accuracy
 def test_sparse_flash_mla_hca(sparse_flash_mla_backend, case, dtype):
     _run_cmp_case(sparse_flash_mla_backend, dtype, "HCA", case)
+
+
+@pytest.mark.reference
+@pytest.mark.parametrize("with_sink", [False, True], ids=["none", "zero"])
+def test_sparse_flash_mla_reference_sink_denominator(with_sink):
+    import math
+
+    q = torch.tensor([[[math.log(2.0)]]], dtype=torch.float32)
+    kv = torch.ones((1, 1, 1), dtype=torch.float32)
+    result = F.sparse_flash_mla_infer(
+        q,
+        kv,
+        None,
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.tensor([1], dtype=torch.int32),
+        sinks=torch.zeros(1) if with_sink else None,
+        layout_kv="TND",
+        cu_seqlens_ori_kv=torch.tensor([0, 1], dtype=torch.int32),
+        win_left=0,
+        win_right=0,
+        softmax_scale=1.0,
+        implementation="torch",
+    )
+    torch.testing.assert_close(result, torch.full_like(result, 2.0 / 3.0 if with_sink else 1.0))
+
+
+@pytest.mark.api("functions.sparse_flash_mla_infer")
+@pytest.mark.accuracy
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("layer", ["SWA", "HCA", "CSA"])
+@pytest.mark.parametrize("with_sink", [False, True], ids=["none", "zero"])
+def test_sparse_flash_mla_sink_contract(sparse_flash_mla_backend, monkeypatch, dtype, layer, with_sink):
+    import importlib
+
+    implementation, device = sparse_flash_mla_backend
+    inputs, extra = generate_smla_cmp_data(
+        2,
+        3,
+        64,
+        63,
+        512,
+        dtype,
+        layer,
+        4 if layer != "SWA" else 1,
+        16,
+        k=8 if layer == "CSA" else 0,
+        layout="PA",
+        ori_page=7,
+        cmp_page=7,
+        device=device,
+    )
+    kwargs = dict(win_left=15, win_right=0, cmp_mask_mode=3, **extra)
+    sinks = torch.zeros(63, dtype=torch.float32, device=device) if with_sink else None
+    if implementation == "torch":
+        actual = F.sparse_flash_mla_infer(**inputs, **kwargs, sinks=sinks, implementation="torch")
+        assert torch.isfinite(actual).all()
+        return
+
+    backend = importlib.import_module("mojo_opset.kernels.npu_a5_cannbotdsl.sparse_flash_mla")
+    n64 = importlib.import_module("mojo_opset.kernels.npu_a5_cannbotdsl.sparse_flash_mla_sparse_n64_kernel")
+    calls, flags = [], []
+    for name, route in [("sparse_n64_kernel", "n64"), ("generic_sparse_flash_mla", "generic")]:
+        original = getattr(backend, name)
+
+        def routed(*args, _original=original, _route=route, **kw):
+            calls.append(_route)
+            return _original(*args, **kw)
+
+        monkeypatch.setattr(backend, name, routed)
+
+    poison = torch.tensor([float("nan")], dtype=torch.float32, device=device)
+    getters = [(n64, "_get_compiled_sparse_n64", 19), (backend, "_compile_smla_direct", 6)]
+    for module, name, index in getters:
+        original = getattr(module, name)
+
+        def compiled(*args, _original=original, _index=index, _name=name, **kw):
+            has_sink = bool(args[1]) if _name == "_get_compiled_sparse_n64" else bool(args[-1])
+            flags.append(has_sink)
+            assert has_sink is with_sink
+            fn = _original(*args, **kw)
+
+            def launch(*values):
+                if not with_sink:
+                    values = list(values)
+                    assert values[_index].dtype == torch.float32 and values[_index].numel() == 1
+                    values[_index] = poison
+                return fn(*values)
+
+            return launch
+
+        monkeypatch.setattr(module, name, compiled)
+
+    actual = F.sparse_flash_mla_infer(**inputs, **kwargs, sinks=sinks, implementation=implementation)
+    expected = F.sparse_flash_mla_infer(**inputs, **kwargs, sinks=sinks, implementation="torch")
+    _assert_smla_close(actual, expected, dtype)
+    assert calls == ["n64" if layer == "CSA" else "generic"]
+    assert flags == [with_sink]

@@ -1,16 +1,27 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
-# Licensed under CANN Open Software License Agreement Version 2.0.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
 """SparseFlashMlaMetadata AICPU operator for the A A5 SMLA DSL kernel.
 
 The public ABI follows ops-transformer SparseFlashMlaMetadata.  The scheduling
 algorithm is ported from its arch35 AICPU source.  This target deliberately keeps
 FlashDecode and batch-consistency disabled, matching the supported SMLA kernel.
 """
-import os
+
 import tempfile
+
 from functools import lru_cache
 
-from cannbotdsl.aicpu import GmIn, GmOut, I32, I64, U32, aicpu_kernel
+from cannbotdsl.aicpu import I32
+from cannbotdsl.aicpu import I64
+from cannbotdsl.aicpu import U32
+from cannbotdsl.aicpu import GmIn
+from cannbotdsl.aicpu import GmOut
+from cannbotdsl.aicpu import aicpu_kernel
 
 AIC_CORE_MAX_NUM = 36
 AIV_CORE_MAX_NUM = 72
@@ -41,9 +52,14 @@ LAYOUT_TND = 4
 LAYOUT_NTD = 5
 LAYOUT_PA_BBND = 6
 _LAYOUT_CODES = {
-    "BSND": LAYOUT_BSND, "BNSD": LAYOUT_BNSD, "BSH": LAYOUT_BSH,
-    "NBSD": LAYOUT_NBSD, "TND": LAYOUT_TND, "NTD": LAYOUT_NTD,
-    "PA": LAYOUT_PA_BBND, "PA_BBND": LAYOUT_PA_BBND,
+    "BSND": LAYOUT_BSND,
+    "BNSD": LAYOUT_BNSD,
+    "BSH": LAYOUT_BSH,
+    "NBSD": LAYOUT_NBSD,
+    "TND": LAYOUT_TND,
+    "NTD": LAYOUT_NTD,
+    "PA": LAYOUT_PA_BBND,
+    "PA_BBND": LAYOUT_PA_BBND,
 }
 
 INT64_MAX = 9223372036854775807
@@ -275,7 +291,7 @@ def _block_cost(group_size, tokens):
 
 
 def _calc_row(a, b, row, out):
-    # out = cost, blocks, last_block_cost, s2_loop
+    # Output fields: total cost, block count, final-block cost and S2 loop count.
     ori = 0
     cmp = 0
     if a.has_ori_kv != 0:
@@ -305,14 +321,15 @@ def _calc_row(a, b, row, out):
 
 @aicpu_kernel
 def _sparse_flash_mla_metadata_kernel(a: _SparseFlashMlaMetadataArgs):
-    batch_cost = zeros(I64, a.batch_size + 1)
-    batch_blocks = zeros(U32, a.batch_size + 1)
-    batch_loops = zeros(U32, a.batch_size + 1)
-    batch_last = zeros(I64, a.batch_size + 1)
-    row_info = array(I64, 4)
-    bn2_end = zeros(U32, a.aic_core_num + 1)
-    gs1_end = zeros(U32, a.aic_core_num + 1)
-    s2_end = zeros(U32, a.aic_core_num + 1)
+    # AICPU resolves these allocation intrinsics from the AST, not Python globals.
+    batch_cost = zeros(I64, a.batch_size + 1)  # noqa: F821
+    batch_blocks = zeros(U32, a.batch_size + 1)  # noqa: F821
+    batch_loops = zeros(U32, a.batch_size + 1)  # noqa: F821
+    batch_last = zeros(I64, a.batch_size + 1)  # noqa: F821
+    row_info = array(I64, 4)  # noqa: F821
+    bn2_end = zeros(U32, a.aic_core_num + 1)  # noqa: F821
+    gs1_end = zeros(U32, a.aic_core_num + 1)  # noqa: F821
+    s2_end = zeros(U32, a.aic_core_num + 1)  # noqa: F821
 
     for i in range(0, SMLA_METADATA_TOTAL_SIZE):
         a.metadata[i] = 0
@@ -458,6 +475,7 @@ def _layout_code(layout):
 
 def _effective_core_counts(device=None):
     import torch
+
     if device is None:
         device = torch.npu.current_device()
     props = torch.npu.get_device_properties(device)
@@ -473,6 +491,7 @@ def _effective_core_counts(device=None):
 @lru_cache(maxsize=1)
 def _compiled_metadata():
     from cannbotdsl.aicpu.toolchain import compile_aicpu_kernel
+
     directory = tempfile.TemporaryDirectory(prefix="cannbot_sparse_flash_mla_metadata_")
     compiled = compile_aicpu_kernel(
         _sparse_flash_mla_metadata_kernel,
@@ -483,19 +502,43 @@ def _compiled_metadata():
 
 
 def sparse_flash_mla_metadata(
-    cu_seqlens_q=None, cu_seqlens_ori_kv=None, cu_seqlens_cmp_kv=None,
-    seqused_q=None, seqused_ori_kv=None, seqused_cmp_kv=None,
-    cmp_residual_kv=None, ori_topk_length=None, cmp_topk_length=None, *,
-    num_heads_q, num_heads_kv=1, head_dim=512, batch_size=0,
-    max_seqlen_q=0, max_seqlen_ori_kv=0, max_seqlen_cmp_kv=0,
-    ori_topk=0, cmp_topk=0, cmp_ratio=1, ori_mask_mode=4,
-    cmp_mask_mode=3, ori_win_left=127, ori_win_right=0,
-    layout_q="BSND", layout_kv="PA_BBND", has_ori_kv=True,
-    has_cmp_kv=True, soc_version="Ascend950", aic_core_num=None,
-    aiv_core_num=None, is_batch_consistency=False, device=None,
+    cu_seqlens_q=None,
+    cu_seqlens_ori_kv=None,
+    cu_seqlens_cmp_kv=None,
+    seqused_q=None,
+    seqused_ori_kv=None,
+    seqused_cmp_kv=None,
+    cmp_residual_kv=None,
+    ori_topk_length=None,
+    cmp_topk_length=None,
+    *,
+    num_heads_q,
+    num_heads_kv=1,
+    head_dim=512,
+    batch_size=0,
+    max_seqlen_q=0,
+    max_seqlen_ori_kv=0,
+    max_seqlen_cmp_kv=0,
+    ori_topk=0,
+    cmp_topk=0,
+    cmp_ratio=1,
+    ori_mask_mode=4,
+    cmp_mask_mode=3,
+    ori_win_left=127,
+    ori_win_right=0,
+    layout_q="BSND",
+    layout_kv="PA_BBND",
+    has_ori_kv=True,
+    has_cmp_kv=True,
+    soc_version="Ascend950",
+    aic_core_num=None,
+    aiv_core_num=None,
+    is_batch_consistency=False,
+    device=None,
 ):
     """Generate transformer-compatible SMLA metadata on AICPU."""
     import torch
+
     from cannbotdsl.aicpu import current_raw_stream
 
     tensors = {
@@ -530,10 +573,11 @@ def sparse_flash_mla_metadata(
     npu_device = torch.device("npu", device_id)
     stream = torch.npu.current_stream(device_id)
     for name, tensor in tensors.items():
-        if tensor is not None and (
-            tensor.dtype != torch.int32 or tensor.device != npu_device
-            or tensor.ndim != 1 or not tensor.is_contiguous()
-        ):
+        if tensor is None:
+            continue
+        if tensor.dtype != torch.int32 or tensor.device != npu_device:
+            raise ValueError(f"{name} must be a contiguous 1D int32 tensor on {npu_device}")
+        if tensor.ndim != 1 or not tensor.is_contiguous():
             raise ValueError(f"{name} must be a contiguous 1D int32 tensor on {npu_device}")
 
     dyn_aic, dyn_aiv = _effective_core_counts(device_id)
@@ -557,15 +601,27 @@ def sparse_flash_mla_metadata(
         residual_len=0 if cmp_residual_kv is None else cmp_residual_kv.numel(),
         ori_topk_len=0 if ori_topk_length is None else ori_topk_length.numel(),
         cmp_topk_len=0 if cmp_topk_length is None else cmp_topk_length.numel(),
-        num_heads_q=num_heads_q, num_heads_kv=num_heads_kv, head_dim=head_dim,
-        batch_size=actual_batch, max_seqlen_q=max_seqlen_q,
-        max_seqlen_ori_kv=max_seqlen_ori_kv, max_seqlen_cmp_kv=max_seqlen_cmp_kv,
-        ori_topk=ori_topk, cmp_topk=cmp_topk, cmp_ratio=cmp_ratio,
-        ori_mask_mode=ori_mask_mode, cmp_mask_mode=cmp_mask_mode,
-        ori_win_left=ori_win_left, ori_win_right=ori_win_right,
-        layout_q=_layout_code(layout_q), layout_kv=_layout_code(layout_kv),
-        has_ori_kv=int(bool(has_ori_kv)), has_cmp_kv=int(bool(has_cmp_kv)),
-        aic_core_num=aic, aiv_core_num=aiv, is_batch_consistency=0,
+        num_heads_q=num_heads_q,
+        num_heads_kv=num_heads_kv,
+        head_dim=head_dim,
+        batch_size=actual_batch,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_ori_kv=max_seqlen_ori_kv,
+        max_seqlen_cmp_kv=max_seqlen_cmp_kv,
+        ori_topk=ori_topk,
+        cmp_topk=cmp_topk,
+        cmp_ratio=cmp_ratio,
+        ori_mask_mode=ori_mask_mode,
+        cmp_mask_mode=cmp_mask_mode,
+        ori_win_left=ori_win_left,
+        ori_win_right=ori_win_right,
+        layout_q=_layout_code(layout_q),
+        layout_kv=_layout_code(layout_kv),
+        has_ori_kv=int(bool(has_ori_kv)),
+        has_cmp_kv=int(bool(has_cmp_kv)),
+        aic_core_num=aic,
+        aiv_core_num=aiv,
+        is_batch_consistency=0,
     )
     for tensor in tensors.values():
         if tensor is not None:

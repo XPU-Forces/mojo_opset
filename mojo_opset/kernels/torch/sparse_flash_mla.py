@@ -30,8 +30,8 @@ def sparse_flash_mla_infer_fwd(
     sliding-window mask + attention-sink seeded online softmax, with an
     optional compressed-KV branch (HCA dense prefix / CSA sparse topk).
 
-    Zero sinks seed the online softmax state with (max=0, sum=1): the
-    denominator gets an extra +1 and the running row max is floored at 0.
+    None excludes the sink term. Explicit zero sinks add exp(0) to
+    the denominator before normalization by the row maximum.
     """
     _, n1, d = q.shape
     batch = cu_seqlens_q.numel() - 1
@@ -90,12 +90,15 @@ def sparse_flash_mla_infer_fwd(
             scores_cmp = scores_cmp.masked_fill(~cmp_keep.unsqueeze(1), float("-inf"))
             scores = torch.cat([scores, scores_cmp], dim=-1)
 
-        # online-softmax seeded by zero sinks: max floored at 0, denominator +1
-        m = scores.amax(dim=-1, keepdim=True).clamp_min(0.0)
+        m = scores.amax(dim=-1, keepdim=True)
+        if sinks is not None:
+            m = m.clamp_min(0.0)
         p = torch.nan_to_num(torch.exp(scores - m), nan=0.0)
-        denom = 1.0 + p.sum(dim=-1, keepdim=True)
+        denom = p.sum(dim=-1, keepdim=True)
+        if sinks is not None:
+            denom = denom + torch.exp(-m)
         acc = torch.einsum("mhk,kd->mhd", p[..., :s2], v_ori)
         if v_extra is not None:
             acc = acc + torch.einsum("mhk,mkd->mhd", p[..., s2:], v_extra)
-        out[begin:end] = (acc / denom).to(q.dtype)
+        out[begin:end] = torch.where(denom > 0, acc / denom, torch.zeros_like(acc)).to(q.dtype)
     return out
