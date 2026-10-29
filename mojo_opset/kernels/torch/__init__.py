@@ -25,6 +25,8 @@ OPS = {
     "store_lowrank": "store_lowrank",
     "rope_infer": "position_embedding",
     "vision_rope_2d_infer": "position_embedding",
+    "pos_embed_interp_infer": "position_embedding",
+    "pos_embed_interp_multi_infer": "position_embedding",
     "paged_decode_gqa_infer": "paged_attention",
     "paged_prefill_gqa_infer": "paged_attention",
     "paged_prefill_swa_infer": "paged_attention",
