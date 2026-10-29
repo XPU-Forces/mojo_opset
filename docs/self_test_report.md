@@ -68,7 +68,7 @@ python -m pytest -q \
 
 ```text
 ruff check: All checks passed!
-ruff format --check: 4 files already formatted
+ruff format --check: 5 files already formatted
 ```
 
 ## 精度覆盖
