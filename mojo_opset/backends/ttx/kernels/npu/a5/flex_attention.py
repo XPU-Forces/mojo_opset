@@ -1942,7 +1942,8 @@ def flex_attention_fwd_impl(
         (output, lse): 注意力输出及 logsumexp。
     """
     Z, Hq, M, D = q.shape
-    _, Hkv, N, Dv = k.shape
+    _, Hkv, N, _ = k.shape
+    _, _, _, Dv = v.shape
 
     GQA_SHARED_HEADS = Hq // Hkv if Hq >= Hkv else 1
     if sm_scale is None:
@@ -1955,7 +1956,7 @@ def flex_attention_fwd_impl(
     num_q_blocks = (M + SPARSE_Q_BLOCK_SIZE - 1) // SPARSE_Q_BLOCK_SIZE
     num_kv_blocks = triton.cdiv(N, SPARSE_KV_BLOCK_SIZE)
 
-    output = torch.empty_like(q)
+    output = torch.empty((Z, Hq, M, Dv), dtype=q.dtype, device=q.device)
     lse = torch.empty((Z, Hq, M), dtype=torch.float32, device=q.device)
 
     q = q.contiguous()
@@ -2434,7 +2435,9 @@ def flex_attention_bwd_impl(
     # Phase 0: 预处理 — 形状解析、delta 计算、BlockMask 属性提取
     # ========================================================================
     Z, Hq, M, D = q.shape
-    _, Hkv, N, Dv = k.shape
+    _, Hkv, N, _ = k.shape
+    _, _, _, Dv = v.shape
+
     GQA_SHARED_HEADS = Hq // Hkv if Hq >= Hkv else 1
     if sm_scale is None:
         sm_scale = 1.0 / (D ** 0.5)
