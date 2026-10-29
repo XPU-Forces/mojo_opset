@@ -72,6 +72,7 @@ def _triton_supported(
         and q.device == k.device
         and q.dtype == torch.bfloat16
         and k.dtype == torch.bfloat16
+        and q.shape[1] == k.shape[1]
         and head_dim == _HEAD_DIM
         and rotary_dim == _ROTARY_DIM
     )

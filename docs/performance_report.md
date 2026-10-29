@@ -1,6 +1,6 @@
 # fused_qk_norm_rope 性能自验证报告
 
-## 环境与口径
+## 环境与计时口径
 
 | 项目 | 值 |
 | --- | --- |
@@ -9,68 +9,100 @@
 | torch_npu | 2.10.0 |
 | triton-ascend | 3.2.2 |
 | warmup | 5 |
-| 有效采样 | 30 |
-| kernel 计时 | `kernel_details.csv` 中目标 kernel 的 `Duration(us)` 求和后除以 30 |
-| 带宽探针 | 256 MiB BF16 `copy_`，读加写共 512 MiB |
-| copy 中位时长 | 0.346259 ms |
-| copy 读写带宽 | 1550.49 GB/s |
+| 有效采样 | 30 次调用 |
+| kernel 计时 | `kernel_details.csv` 中窗口内全部设备 kernel 的 `Duration(us)` 按调用求和 |
+| 每调用 kernel 数 | 1 |
+| 带宽探针 | 256 MiB BF16 `copy_`，读写合计 512 MiB |
+| copy 中位时长 | 0.426640 ms |
+| copy 读写带宽 | 1258.37 GB/s |
 | MBU 公式 | \(2(4TH\cdot128+96T+2\cdot128)/(t_{\mathrm{kernel}}\cdot BW)\) |
 
-性能由 `tools/benchmark_fused_qk_norm_rope.py` 产出。每个 shape 使用 packed QKV 的 Q/K strided 视图、BF16 权重和 BF16 RoPE 表。
+性能由 `tools/benchmark_fused_qk_norm_rope.py` 产出。每个 shape 使用 packed QKV 中的 Q/K strided 视图、BF16 权重和 BF16 RoPE 表。计时包含一次调用产生的全部设备 kernel。
 
 ## 主性能矩阵
 
-| tokens×heads | Q kernel (us) | K kernel (us) | 总计 (us) | MBU | 任务线 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 32×8 | 4.08 | 4.10 | 8.18 | 2.12% | 相对线 |
-| 320×8 | 16.45 | 16.66 | 33.10 | 5.23% | 相对线 |
-| 320×56 | 22.21 | 22.22 | 44.43 | 26.73% | 60% |
-| 1024×56 | 63.69 | 63.59 | 127.28 | 29.85% | 60% |
-| 4096×56 | 242.59 | 242.66 | 485.24 | 31.32% | 60% |
-| 16384×56 | 1021.79 | 1021.07 | 2042.86 | 29.76% | 60% |
-| 69888×56 | 4414.07 | 4417.11 | 8831.18 | 29.37% | 60% |
-| 4096×57 | 243.17 | 243.00 | 486.17 | 31.82% | 50% |
+| tokens×heads | kernel 时间 (us) | 读写 (MB) | MBU | 任务线 | 结果 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 32×8 | 8.29 | 0.27 | 2.58% | 相对线 | 通过 |
+| 320×8 | 8.64 | 2.68 | 24.68% | 相对线 | 通过 |
+| 320×56 | 32.83 | 18.41 | 44.56% | 60% | 未达目标线 |
+| 1024×56 | 117.99 | 58.92 | 39.68% | 60% | 未达目标线 |
+| 4096×56 | 377.26 | 235.67 | 49.64% | 60% | 未达目标线 |
+| 16384×56 | 1484.05 | 942.67 | 50.48% | 60% | 未达目标线 |
+| 69888×56 | 6227.21 | 4021.08 | 51.31% | 60% | 未达目标线 |
+| 4096×57 | 435.57 | 239.86 | 43.76% | 50% | 未达目标线 |
 
-大型 56/57-head 形状未达到 MBU 线。结果保留为实际测量，不做剔除或换口径。
+大形状 MBU 为 44.56% 至 51.31%。`4096×56` 的 kernel 时间从初版两 launch 约 485 us 降至 377 us。未达到 60%/50% 目标线的配置保留完整 profile、根因和后续优化方向，由验收方按任务书未达标配置条款裁定。
 
-## 小 shape 基线
+## 小 shape 相对基线
 
 | tokens×heads | Triton kernel (us) | Native kernel (us) | Triton E2E (ms) | Native E2E (ms) |
 | --- | ---: | ---: | ---: | ---: |
-| 32×8 | 8.19 | 92.72 | 0.4246 | 0.7072 |
-| 320×8 | 29.32 | 111.55 | 0.4339 | 0.7065 |
+| 32×8 | 8.25 | 95.63 | 0.2757 | 0.6161 |
+| 320×8 | 8.72 | 113.24 | 0.2812 | 0.6617 |
 
-两个小 shape 的主指标与端到端时间均不劣于 NPU 原生组合路径，满足相对线。
+两个小 shape 的主指标和端到端时间均优于 NPU 原生组合路径。
 
-## Profile 瓶颈
+## 4096×56 profile
 
-4096×56 的两个 kernel 来自同一形状的 30 次采样。核心管线指标如下：
+30 次调用均只产生 `_persistent_qk_norm_rope_kernel`。关键管线指标如下：
 
-| 指标 | 两次 kernel 的范围 |
+| 指标 | 均值 |
 | --- | ---: |
-| 单 kernel 时长 | 约 242 至 243 us |
-| AIV vector ratio | 79.2% 至 84.7% |
-| AIV MTE2 ratio | 约 13% 至 19% |
-| AIV MTE3 ratio | 约 5.6% |
-| AIV scalar ratio | 约 8.5% 至 9.4% |
+| kernel duration | 377.26 us |
+| kernel rows | 30 |
+| kernels per call | 1 |
+| AIV vector ratio | 93.34% |
+| AIV scalar ratio | 15.63% |
+| AIV MTE2 ratio | 20.15% |
+| AIV MTE3 ratio | 9.05% |
 
-AIV 向量管线接近饱和，MTE2/MTE3 仍有较大余量。当前 kernel 在每个 head 上执行 128 维平方和、归一化、BF16 舍入、两次 BF16/FP32 转换以及 96 维旋转算术，属于 compute-bound。
+完整逐 shape profile 位于 `evidence/performance/profile_summary.csv`。
 
-将相邻 token 与最多 64 head 打包到同一 program 后，4096×56 从初版约 1.26 ms 降至 0.485 ms，约提升 2.6 倍。进一步提升 MBU 需要减少向量指令而不是继续增加搬运宽度。
+## 根因
+
+大形状 kernel 是向量计算受限。AIV vector ratio 已约 93%，MTE2 约 20%，MTE3 约 9%。继续增加 tile 宽度、调节核数或增加流水不能显著提高主指标，因为主路径已经接近占满 vector pipe。
+
+当前每个 128 维 head 需要完成：
+
+1. FP32 平方、128 维归约和 `rsqrt`；
+2. FP32 归一化、权重乘法与 BF16 舍入；
+3. 两个 48 维分支的 BF16 到 FP32 恢复；
+4. 四次乘法、两次加减的 FP32 RoPE；
+5. 两个旋转分支的 BF16 舍入、输出组合和写回。
+
+BF16 norm round 和 FP32 RoPE 是任务数值契约，不能通过降低旋转精度来换取速度。达到 60% 目标线要求再降低约 17% 至 20% 的设备时间，现有 Triton 表达式下主要缺少足够的向量指令缩减空间。
+
+## 已验证方案
+
+| 方案 | 4096×56 结果 | 结论 |
+| --- | ---: | --- |
+| pure persistent 8×8，当前提交 | 377.26 us / 49.64% | 最佳有效方案 |
+| 旧两 launch Triton | 485 us / 31.32% | kernel 数多，已替换 |
+| hybrid 多 kernel | 1031.86 us | 完整 kernel 求和后更慢 |
+| flat 2D tile | 403.64 us | 布局转换收益不足 |
+| packed Q/K pair | 457.93 us | 掩码和输出拆分增加开销 |
+| split store | 538.74 us | MTE3 分段写回成本上升 |
+| static head unroll | 483.53 us | 指令体积和调度成本上升 |
+| explicit FMA | 388.05 us | Ascend 向量流水收益为负 |
+| Cube dot 统计 | 约 163 ms | 同步和 tile 开销不可接受 |
+
+也测试了常见 tile、vector core 数、`num_warps`、`num_stages`、`ops_reorder` 和编译流水选项。最终采用 40 cores、8 token、8 head 的 persistent 配置，并合并读取 96 维 RoPE 表。
 
 ## 后续优化方向
 
-1. 增加每个 program 的 token 数，复用 RoPE 表并减少循环控制，先测试 4 token tile。
-2. 将 32 维直通区从 128 维旋转 tile 中拆出，减少不必要的布局和插入切片操作。
-3. 分析 Triton 生成 IR 中的 BF16/FP32 转换与 broadcast 指令，用等价但更紧凑的表达式降低向量指令数。
-4. 评估 Q/K 单 launch 对小型形状的收益；大型形状优先保持两个独立 launch。
+1. 使用 Ascend 低层 intrinsics 合并 RMS 平方归约、权重乘法和 BF16 舍入，减少 vector 指令数。
+2. 设计 amortized Cube 统计路径，将 128 维平方和归约搬到 Cube，同时消除当前朴素 dot 方案的同步开销。
+3. 在编译器层生成 Q/K 合并 lane 的无掩码连续向量操作，减少 57-head 尾块和两组输出拆分开销。
+4. 升级到任务推荐版本后复查 triton-ascend 的向量融合、BF16 转换和 persistent loop 代码生成。
+5. 评估专用 Ascend C kernel 或融合前后算子，以避免在同一 attention 层内重复读写 Q/K。
 
 ## 原始证据
 
 - `evidence/performance/benchmark.json`
-- `evidence/performance/baseline_comparison.json`
+- `evidence/performance/profile_summary.csv`
+- `evidence/performance/tokens_*/**/kernel_details.csv`
+- `evidence/baseline/comparison.json`
 - `evidence/performance_final.log`
-- `evidence/baseline_comparison.log`
-- `evidence/performance/kernel_details/`
-- `evidence/performance/baseline_kernel_details/`
 - `evidence/npu-smi.txt`
+- `evidence/environment.txt`

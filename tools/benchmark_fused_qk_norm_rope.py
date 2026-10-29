@@ -1,16 +1,16 @@
 """Benchmark the fused QK RMSNorm+RoPE kernels with the task's MBU formula."""
 
 import argparse
+import csv
 import json
 import os
+import statistics
 import subprocess
 
 from pathlib import Path
 
 import torch
 import torch_npu
-
-from triton.backends.ascend.testing import do_bench_npu
 
 if os.getenv("MOJO_ASCEND_ARCH", "a2").startswith("a5"):
     from mojo_opset.kernels.npu_a5_triton import qk_norm_rope as kernel
@@ -28,19 +28,68 @@ DEFAULT_SHAPES = (
     (4096, 57),
 )
 COPY_BYTES = 256 * 1024 * 1024
-TARGET_KERNEL = "_qk_norm_rope_kernel"
 
 
-def _copy_bandwidth_bytes_per_ms(warmup: int, repeats: int) -> tuple[float, float]:
+def _profile_kernel_samples(
+    launch,
+    profile_dir: Path,
+    warmup: int,
+    repeats: int,
+) -> tuple[list[float], int]:
+    """Return per-call device times and the number of kernels in each call."""
+    for _ in range(warmup):
+        launch()
+    torch.npu.synchronize()
+
+    experimental_config = torch_npu.profiler._ExperimentalConfig(
+        aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
+        profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
+        l2_cache=False,
+        data_simplification=False,
+    )
+    with torch_npu.profiler.profile(
+        activities=[torch_npu.profiler.ProfilerActivity.NPU],
+        on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(str(profile_dir)),
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
+        with_flops=False,
+        with_modules=False,
+        experimental_config=experimental_config,
+    ):
+        for _ in range(repeats):
+            launch()
+        torch.npu.synchronize()
+
+    kernel_files = list(profile_dir.rglob("kernel_details.csv"))
+    if len(kernel_files) != 1:
+        raise RuntimeError(f"Expected one kernel_details.csv under {profile_dir}, got {kernel_files}")
+    with kernel_files[0].open(newline="", encoding="utf-8") as stream:
+        durations = [float(row["Duration(us)"]) for row in csv.DictReader(stream)]
+    if not durations or len(durations) % repeats:
+        raise RuntimeError(f"Kernel rows are not divisible by repeats: rows={len(durations)}, repeats={repeats}")
+    kernels_per_call = len(durations) // repeats
+    samples = [
+        sum(durations[index * kernels_per_call : (index + 1) * kernels_per_call]) / 1e3 for index in range(repeats)
+    ]
+    return samples, kernels_per_call
+
+
+def _copy_bandwidth_bytes_per_ms(
+    warmup: int,
+    repeats: int,
+    output_dir: Path,
+) -> tuple[float, float]:
     elements = COPY_BYTES // torch.bfloat16.itemsize
     src = torch.empty(elements, device="npu", dtype=torch.bfloat16)
     dst = torch.empty_like(src)
-    copy_ms = do_bench_npu(
+    samples, _ = _profile_kernel_samples(
         lambda: dst.copy_(src),
-        warmup=warmup,
-        active=repeats,
-        clear_l2_cache=True,
+        output_dir / "copy_probe",
+        warmup,
+        repeats,
     )
+    copy_ms = statistics.median(samples)
     traffic_bytes = 2 * COPY_BYTES
     return traffic_bytes / copy_ms, copy_ms
 
@@ -59,32 +108,24 @@ def _measure_shape(
     k_weight = torch.randn(128, device="npu", dtype=torch.bfloat16)
     angles = torch.randn(tokens, 48, device="npu")
     rope_table = torch.cat((angles.cos(), angles.sin()), dim=-1).to(torch.bfloat16)
-    q_out = torch.empty_like(q, memory_format=torch.contiguous_format)
-    k_out = torch.empty_like(k, memory_format=torch.contiguous_format)
 
-    def launch_q() -> None:
-        kernel._launch_qk_norm_rope(q, q_weight, rope_table, q_out, 1e-5)
-
-    def launch_k() -> None:
-        kernel._launch_qk_norm_rope(k, k_weight, rope_table, k_out, 1e-5)
+    def launch() -> tuple[torch.Tensor, torch.Tensor]:
+        return kernel.fused_qk_norm_rope_fwd(q, k, q_weight, k_weight, rope_table, 1e-5)
 
     profile_dir = output_dir / f"tokens_{tokens}_heads_{heads}"
-    q_ms, k_ms = do_bench_npu(
-        [launch_q, launch_k],
-        warmup=warmup,
-        active=repeats,
-        prof_dir=str(profile_dir),
-        keep_res=True,
-        target_kernel_name=TARGET_KERNEL,
+    samples, kernels_per_call = _profile_kernel_samples(
+        launch,
+        profile_dir,
+        warmup,
+        repeats,
     )
-    kernel_ms = q_ms + k_ms
+    kernel_ms = sum(samples) / repeats
     traffic_bytes = 2 * (4 * tokens * heads * 128 + tokens * 96 + 2 * 128)
     return {
         "tokens": tokens,
         "heads": heads,
-        "q_kernel_ms": q_ms,
-        "k_kernel_ms": k_ms,
         "total_kernel_ms": kernel_ms,
+        "kernels_per_call": kernels_per_call,
         "traffic_bytes": traffic_bytes,
         "profile_dir": str(profile_dir),
     }
@@ -105,7 +146,7 @@ def main() -> None:
 
     torch_npu.npu.set_device(args.device)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    copy_bw, copy_ms = _copy_bandwidth_bytes_per_ms(args.warmup, args.repeats)
+    copy_bw, copy_ms = _copy_bandwidth_bytes_per_ms(args.warmup, args.repeats, args.output_dir)
     rows = []
     for item in args.shapes.split(","):
         tokens_text, heads_text = item.lower().split("x", 1)
