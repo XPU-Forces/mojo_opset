@@ -1833,19 +1833,33 @@ def flex_attention_backward_dkdv_kernel_tasklist(
                     )
 
 
+def _resolve_has_full_blocks(block_mask) -> bool:
+    has_full = getattr(block_mask, "has_full_blocks", None)
+    return True if has_full is None else bool(has_full)
+
+
 def _prepare_block_mask_attrs(block_mask, q, num_q_blocks, sparse_q_block_size, sparse_kv_block_size):
     N = q.shape[0] if q.dim() == 4 else q.shape[2]
     kv_num_blks = block_mask.kv_num_blocks
     kv_idx = block_mask.kv_indices
-    full_kv_num_blks = getattr(block_mask, "full_kv_num_blocks", torch.zeros_like(kv_num_blks))
-    full_kv_idx = getattr(block_mask, "full_kv_indices", torch.zeros_like(kv_idx))
+    has_full_blocks = _resolve_has_full_blocks(block_mask)
+    full_kv_num_blks = getattr(block_mask, "full_kv_num_blocks", None)
+    if full_kv_num_blks is None:
+        full_kv_num_blks = torch.zeros_like(kv_num_blks)
+    full_kv_idx = getattr(block_mask, "full_kv_indices", None)
+    if full_kv_idx is None:
+        full_kv_idx = torch.zeros_like(kv_idx)
 
     q_num_blks = getattr(block_mask, "q_num_blocks", None)
     q_idx = getattr(block_mask, "q_indices", None)
     assert q_num_blks is not None, "q_num_blocks and q_indices must be provided"
     assert q_idx is not None, "q_indices must be provided"
-    full_q_num_blks = getattr(block_mask, "full_q_num_blocks", torch.zeros_like(q_num_blks))
-    full_q_idx = getattr(block_mask, "full_q_indices", torch.zeros_like(q_idx))
+    full_q_num_blks = getattr(block_mask, "full_q_num_blocks", None)
+    if full_q_num_blks is None:
+        full_q_num_blks = torch.zeros_like(q_num_blks)
+    full_q_idx = getattr(block_mask, "full_q_indices", None)
+    if full_q_idx is None:
+        full_q_idx = torch.zeros_like(q_idx)
 
     kv_num_blks = kv_num_blks.to(torch.int32).contiguous()
     kv_idx = kv_idx.to(torch.int32).contiguous()
@@ -1906,6 +1920,7 @@ def _prepare_block_mask_attrs(block_mask, q, num_q_blocks, sparse_q_block_size, 
         "partial_mask_offsets": partial_mask_offsets,
         "partial_block_table": partial_block_table,
         "use_packed_partial_mask": use_packed_partial_mask,
+        "has_full_blocks": has_full_blocks,
     }
 
 
@@ -1989,7 +2004,7 @@ def flex_attention_fwd_impl(
         Q_LEN=M,
         KV_LEN=N,
         GQA_SHARED_HEADS=GQA_SHARED_HEADS,
-        HAS_FULL_BLOCKS=True,
+        HAS_FULL_BLOCKS=bm["has_full_blocks"],
         USE_PACKED_PARTIAL_MASK=bm["use_packed_partial_mask"],
         USE_Q_TASK_LIST=load_balance_plan.use_q_task_list,
         limit_auto_multi_buffer_buffer="no-limit",
@@ -2486,7 +2501,7 @@ def flex_attention_bwd_impl(
         Q_LEN=M,
         KV_LEN=N,
         GQA_SHARED_HEADS=GQA_SHARED_HEADS,
-        HAS_FULL_BLOCKS=True,
+        HAS_FULL_BLOCKS=bm["has_full_blocks"],
         USE_PACKED_PARTIAL_MASK=bm["use_packed_partial_mask"],
         USE_Q_TASK_LIST=load_balance_plan.use_q_task_list,
         limit_auto_multi_buffer_buffer="no-limit",
@@ -2548,7 +2563,7 @@ def flex_attention_bwd_impl(
             Q_LEN=M,
             KV_LEN=N,
             GQA_SHARED_HEADS=GQA_SHARED_HEADS,
-            HAS_FULL_BLOCKS=True,
+            HAS_FULL_BLOCKS=bm["has_full_blocks"],
             USE_PACKED_PARTIAL_MASK=bm["use_packed_partial_mask"],
             limit_auto_multi_buffer_buffer="no-limit",
             hfusion_enable_multiple_consumer_fusion=True,
@@ -2592,7 +2607,7 @@ def flex_attention_bwd_impl(
             Q_LEN=M,
             KV_LEN=N,
             GQA_SHARED_HEADS=GQA_SHARED_HEADS,
-            HAS_FULL_BLOCKS=True,
+            HAS_FULL_BLOCKS=bm["has_full_blocks"],
             USE_PACKED_PARTIAL_MASK=bm["use_packed_partial_mask"],
             limit_auto_multi_buffer_buffer="no-limit",
             hfusion_enable_multiple_consumer_fusion=True,
@@ -2998,6 +3013,7 @@ def _build_packed_block_mask_streaming(mask_type_str, problem, SEQ_LEN, Q_BLOCK_
     stripe_caches = []
     stripe_meta = []
     running_total = 0
+    has_full_blocks = False
 
     for qs_block in range(0, Q_NUM_BLOCKS, stripe_q_blocks):
         qe_block = min(qs_block + stripe_q_blocks, Q_NUM_BLOCKS)
@@ -3028,7 +3044,10 @@ def _build_packed_block_mask_streaming(mask_type_str, problem, SEQ_LEN, Q_BLOCK_
         flags_stripe = flags_stripe_buf[:stripe_q_nb, :].contiguous()
         A_stripe = (flags_stripe == 1).to(torch.int32).cumsum(dim=-1)
         B_stripe = A_stripe.max(dim=-1).values
-        stripe_partial_count = int(B_stripe.sum().item())
+        stripe_partial_count, stripe_full_count = torch.stack(
+            [B_stripe.sum(), (flags_stripe == 2).sum()]
+        ).tolist()
+        has_full_blocks = has_full_blocks or stripe_full_count > 0
         global_B[qs_block:qe_block] = B_stripe.to(torch.int32)
 
         if stripe_partial_count > 0:
@@ -3087,6 +3106,7 @@ def _build_packed_block_mask_streaming(mask_type_str, problem, SEQ_LEN, Q_BLOCK_
     packed_block_mask.packed_partial_mask = packed_partial_mask
     packed_block_mask.partial_mask_offsets = partial_mask_offsets_3d
     packed_block_mask.partial_block_table = partial_block_table
+    packed_block_mask.has_full_blocks = has_full_blocks
 
     del block_flags, global_B, partial_bm, full_bm
     return packed_block_mask
@@ -3152,7 +3172,7 @@ def _classify_stripe_blocks(stripe_mask, Q_BLOCK_SIZE, KV_BLOCK_SIZE):
 
 
 def _pack_stripe_partial_blocks(stripe_mask, flags, qs_block, Q_BLOCK_SIZE, KV_BLOCK_SIZE,
-                                 running_total, partial_block_table):
+                                 running_total, partial_block_table, num_partial=None):
     """Extract partial blocks from a stripe into the packed cache.
 
     For every (Q-block, KV-block) classified as partial, copy the
@@ -3164,7 +3184,8 @@ def _pack_stripe_partial_blocks(stripe_mask, flags, qs_block, Q_BLOCK_SIZE, KV_B
         num_partial:  count of partial blocks in this stripe.
     """
     partial_bool = (flags == 1)
-    num_partial = int(partial_bool.sum().item())
+    if num_partial is None:
+        num_partial = int(partial_bool.sum().item())
     if num_partial == 0:
         empty = torch.zeros((0, Q_BLOCK_SIZE, KV_BLOCK_SIZE), dtype=torch.bool, device=stripe_mask.device)
         return empty, 0
@@ -3293,6 +3314,7 @@ def create_block_mask_patched(
     global_per_row_count = torch.zeros(Q_num_blocks, dtype=torch.int32, device=device)
     packed_tiles_list = []
     running_total = 0
+    has_full_blocks = False
 
     # ---- Process stripes -----------------------------------------------------
     for qs_block in range(0, Q_num_blocks, stripe_q_blocks):
@@ -3320,9 +3342,11 @@ def create_block_mask_patched(
         global_per_row_count[qs_block:qe_block] = per_row_count.to(torch.int32)
 
         # Step 3: pack partial blocks into flat cache + update table.
+        stripe_partial, stripe_full = torch.stack([partial_bool.sum(), (flags == 2).sum()]).tolist()
+        has_full_blocks = has_full_blocks or stripe_full > 0
         packed_tiles, num_partial = _pack_stripe_partial_blocks(
             stripe_mask, flags, qs_block, Q_BLOCK_SIZE, KV_BLOCK_SIZE,
-            running_total, partial_block_table,
+            running_total, partial_block_table, num_partial=stripe_partial,
         )
         packed_tiles_list.append(packed_tiles)
         running_total += num_partial
@@ -3343,6 +3367,7 @@ def create_block_mask_patched(
         block_flags, packed_partial_mask, partial_block_table,
         global_per_row_count, Q_LEN, KV_LEN, Q_BLOCK_SIZE, KV_BLOCK_SIZE,
     )
+    packed_block_mask.has_full_blocks = has_full_blocks
 
     del block_flags, global_per_row_count
     return packed_block_mask
