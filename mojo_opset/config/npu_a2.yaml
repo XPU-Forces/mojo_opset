@@ -16,6 +16,7 @@ npu.a2:
   group_rms_norm_infer: triton
   join_prob_reject_sampling: triton
   layer_norm_infer: triton
+  layernorm_gated: triton
   layer_norm_quant: torch_npu
   lightning_indexer: triton
   moe_dynamic_quant: triton
