@@ -28,6 +28,10 @@ npu.a5:
   paged_prefill_gqa_infer: triton
   paged_prefill_swa_infer: triton
   prefill_gqa_infer: torch_npu
+  # A2 Triton kernel re-exported by the A5 provider (no Cube, no architecture intrinsic).
+  # Accuracy and performance have NOT been measured on 950 hardware yet; see
+  # docs/vllm_ascend_qk_norm_rope.md for the validation status.
+  qk_norm_rope_infer: triton
   # Retained selection: original NPU tests skipped this path; the wrapper raises NotImplementedError.
   quant_batch_gemm_reduce_sum: torch_npu
   quant_gemm: triton
