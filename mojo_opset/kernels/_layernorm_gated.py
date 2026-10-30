@@ -85,13 +85,21 @@ def _layer_norm_fwd_kernel(
     for row_task_id in range(pid, num_row_tasks, num_programs):
         row_start = row_task_id * ROWS_PER_BLOCK
         rows = row_start + tl.arange(0, ROWS_PER_BLOCK)
+        # Predicated vector accesses cost roughly twice an unpredicated one on
+        # Ascend, so only the final row tile pays for a mask; every earlier tile
+        # covers complete rows and loads/stores without predicates.
+        full_rows = EVEN_ROWS or row_start + ROWS_PER_BLOCK < M
         if EVEN_ROWS:
             mask = col_mask
         else:
             mask = (rows[:, None] < M) & col_mask
         x_offsets = rows[:, None] * stride_x_row + col_offsets
-        if EVEN_ROWS and N == BLOCK_N:
+        if N == BLOCK_N and full_rows:
             x = tl.load(X + x_offsets).to(tl.float32)
+        elif N == BLOCK_N:
+            x = tl.load(X + x_offsets, mask=mask, other=0.0).to(tl.float32)
+        elif full_rows:
+            x = tl.where(col_mask, tl.load(X + x_offsets), 0.0).to(tl.float32)
         else:
             x = tl.load(X + x_offsets, mask=mask, other=0.0).to(tl.float32)
 
@@ -117,7 +125,7 @@ def _layer_norm_fwd_kernel(
                 z_mask = mask
 
         if HAS_Z and not NORM_BEFORE_GATE:
-            if EVEN_ROWS and N == BLOCK_N:
+            if full_rows and N == BLOCK_N:
                 z = tl.load(Z + z_offsets)
             else:
                 z = tl.load(Z + z_offsets, mask=z_mask, other=0.0)
@@ -137,10 +145,8 @@ def _layer_norm_fwd_kernel(
                 xbar = tl.where(mask, x - mean[:, None], 0.0)
             var = tl.sum(xbar * xbar, axis=1) / N
         else:
-            if EVEN_ROWS and N == BLOCK_N:
-                xbar = x
-            else:
-                xbar = tl.where(mask, x, 0.0)
+            # x already holds zeros in every padded lane (masked load or select).
+            xbar = x
             var = tl.sum(xbar * xbar, axis=1) / N
 
         rstd = tl.rsqrt(var + eps)
@@ -158,7 +164,7 @@ def _layer_norm_fwd_kernel(
             y += bias
 
         if HAS_Z and NORM_BEFORE_GATE:
-            if EVEN_ROWS and N == BLOCK_N:
+            if full_rows and N == BLOCK_N:
                 z = tl.load(Z + z_offsets)
             else:
                 z = tl.load(Z + z_offsets, mask=z_mask, other=0.0)
@@ -187,7 +193,7 @@ def _layer_norm_fwd_kernel(
             tl.store(S + row_task_id, scale)
         else:
             y_offsets = rows[:, None] * stride_y_row + col_offsets
-            if EVEN_ROWS and N == BLOCK_N:
+            if full_rows and N == BLOCK_N:
                 tl.store(Y + y_offsets, y)
             else:
                 tl.store(Y + y_offsets, y, mask=mask)
@@ -204,7 +210,7 @@ def vector_core_count() -> int:
     return int(get_num_cores("vector"))
 
 
-def calc_rows_per_block(M: int, N: int) -> int:
+def calc_rows_per_block(M: int, N: int, ngroups: int = 1) -> int:
     """Pick a row tile for the kernel from the normalization width and row count.
 
     Batch-invariant dispatch ignores both so that one row always reduces with the
@@ -217,7 +223,9 @@ def calc_rows_per_block(M: int, N: int) -> int:
     if override:
         return int(override)
     if N <= 128:
-        rows_per_block = 32 if M * N >= STREAMING_ELEMENTS else 64
+        # A grouped normalization already fills the grid along its second axis,
+        # so the shorter tile leaves more room for overlapped DMA.
+        rows_per_block = 32 if (ngroups > 1 or M * N >= STREAMING_ELEMENTS) else 64
     elif N <= 256:
         rows_per_block = 32
     elif N <= 512:
@@ -268,13 +276,17 @@ def _layer_norm_fwd_impl(
         raise ValueError("bias must be a contiguous [N] tensor")
 
     max_fused = MAX_FUSED_BYTES // x.element_size()
-    block_n = min(max_fused, triton.next_power_of_2(group_size))
+    # Tile exactly on the group width when rounding up would idle a large share
+    # of every vector instruction (192 -> 256 keeps only 75% of the lanes busy).
+    # Triton-Ascend accepts non-power-of-two block shapes on the vector path.
+    exact = min(max_fused, group_size)
+    block_n = exact if triton.next_power_of_2(exact) * 8 >= exact * 9 else triton.next_power_of_2(exact)
     if group_size > block_n:
         raise RuntimeError("gated normalization does not support a feature dim >= 64 KiB")
     num_warps = min(max(block_n // 256, 1), 8)
     if os.getenv(_NUM_WARPS_ENV):
         num_warps = int(os.environ[_NUM_WARPS_ENV])
-    rows_per_block = calc_rows_per_block(M, block_n)
+    rows_per_block = calc_rows_per_block(M, block_n, ngroups)
 
     mean = None if is_rms_norm else torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
     rstd = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)

@@ -79,15 +79,20 @@ overlap the FP8 conversion and stores of one tile with the loads of the next.
 
 ### 4.2 Tile shape
 
-* `BLOCK_N = min(65536 // element_size, next_power_of_2(group_size))`. The 64 KiB
-  cap is the SGLang limit (a group must fit the on-chip buffer); `group_size >
-  BLOCK_N` raises `RuntimeError` instead of silently chunking.
+* `BLOCK_N = min(65536 // element_size, next_power_of_2(group_size))`, except
+  when rounding up would idle more than an eighth of the vector lanes: then
+  `BLOCK_N == group_size` itself. A 192-wide group padded to 256 keeps only 75%
+  of every vector instruction busy, and Triton-Ascend accepts a non-power-of-two
+  block width on the vector path; the tail case (`N = 192`) drops from 65 us to
+  41 us with the exact width. The 64 KiB cap is the SGLang limit (a group must
+  fit the on-chip buffer); `group_size > BLOCK_N` raises `RuntimeError` instead
+  of silently chunking.
 * `ROWS_PER_BLOCK` from `calc_rows_per_block`:
 
 | condition | rows |
 | --- | --- |
 | batch-invariant mode | 4 (constant) |
-| `N <= 128` and `M*N >= 32M` elements | 32 |
+| `N <= 128` and (`ngroups > 1` or `M*N >= 32M` elements) | 32 |
 | `N <= 128` otherwise | 64 |
 | `N <= 256` | 32 |
 | `N <= 512` | 8 |
@@ -96,8 +101,11 @@ overlap the FP8 conversion and stores of one tile with the loads of the next.
 
   A 64-row tile wins on short decoding tensors; on streaming tensors the extra
   rows cost occupancy (measured on A2 at `32768x128`: AIV vector ratio 68.4% ->
-  91.9%, MTE2 72.6% -> 97.5% when moving from 64 to 32 rows). The result is
-  capped by `next_power_of_2(M)` so a 1-row decode does not build a 32-row block.
+  91.9%, MTE2 72.6% -> 97.5% when moving from 64 to 32 rows). A grouped
+  normalization fills the grid along its second axis already, so the shorter
+  tile also wins there regardless of size (A2, `8192x2048`, `ngroups = 16`:
+  60.8% MBU at 32 rows versus 59.8% at 64). The result is capped by
+  `next_power_of_2(M)` so a 1-row decode does not build a 32-row block.
 * `num_warps = min(max(BLOCK_N // 256, 1), 8)`; the quant path widens it to
   `max(min(num_warps * quant_heads // rows_per_block, 16), 1)` so that one
   `quant_heads`-row block (one token) spreads across more vector lanes. The
@@ -108,8 +116,12 @@ overlap the FP8 conversion and stores of one tile with the loads of the next.
   (`LN_GATED_NUM_WARPS`).
 * `EVEN_ROWS = M % ROWS_PER_BLOCK == 0` removes the row mask and the
   `tl.where` guards entirely; with `N == BLOCK_N` it also removes the column
-  mask. The tail case (`M = 32771`, `N = 192`) keeps a masked last block, which
-  is covered by a NaN-sentinel test for out-of-bounds stores.
+  mask. Rows are also removed from the transaction mask for every *non-final*
+  tile (`full_rows`), so only the last row tile of a launch is predicated: on
+  Ascend a predicated vector access costs roughly twice an unpredicated one,
+  and `M = 32771` at 32 rows leaves 1024 full tiles paying that price for a
+  hazard that only exists in the last one. The tail case keeps a masked last
+  block, which is covered by a NaN-sentinel test for out-of-bounds stores.
 
 ### 4.3 Gate addressing
 
@@ -184,6 +196,67 @@ Tuning knobs (`LN_GATED_ROWS_PER_BLOCK`, `LN_GATED_NUM_WARPS`) exist so the swee
 can be done on hardware without editing the kernel; the chosen values are baked
 into `calc_rows_per_block` / the launch policy and documented with the measured
 comparison table in the PR.
+
+### 6.1 Measured on Ascend 910B3 (A2), 2026-10-30
+
+torch 2.10.0 / torch_npu 2.10.0.post7 / triton-ascend 3.6.0, CANN 9.1.0,
+`do_bench_npu_profiler` (5 warm-up + 30 profiled launches), denominator from the
+in-process 128M-element BF16 `copy_` probe (1235.4 GB/s; `fill_` measured
+1463.3 GB/s):
+
+| case | M x N | us | MBU | line | result |
+| --- | --- | --- | --- | --- | --- |
+| `gdn-256-n128-swish` | 256 x 128 | 3.82 | 4.18% | relative | 318.9 us e2e vs 794.0 us eager |
+| `gdn-2560-n128-swish` | 2560 x 128 | 6.48 | 24.58% | relative | 321.3 us e2e vs 758.1 us eager |
+| `gdn-32768-n128-swish` | 32768 x 128 | 31.48 | 64.70% | >=60% | pass |
+| `gdn-32768-n128-sigmoid` | 32768 x 128 | 28.30 | 71.97% | >=60% | pass |
+| `gdn-131072-n128-swish` | 131072 x 128 | 112.24 | 72.60% | >=60% | pass |
+| `qk-65536-n128` | 65536 x 128 | 32.07 | 84.69% | >=60% | pass |
+| `group-1024-n2048` | 1024 x 2048 (g128) | 19.59 | 52.04% | relative | 330.1 us e2e vs 807.2 us eager |
+| `group-8192-n2048` | 8192 x 2048 (g128) | 134.43 | 60.62% | >=60% | pass |
+| `gdn-524288-n128-swish` | 524288 x 128 | 509.23 | 64.01% | >=60% | pass |
+| `tail-32771-n192-swish` | 32771 x 192 | 40.94 | 74.64% | >=50% | pass |
+| `quant-32768-n512` | 32768 x 512 (QH=8) | - | - | >=60% | skipped: FP8 is required on 950 |
+
+`failures: []`. Raw profiler CSV, `npu-smi info`, version dump and the JSON
+report for this run ship with the change (`results/final-*`).
+
+### 6.2 What moved the numbers
+
+The first end-to-end run of this matrix had one failing row: `tail-32771-n192`
+at MBU 41.42% against a 50% line. Profiling attributed the gap to three separate
+costs, each fixed at the source rather than by retuning:
+
+1. *Predicated accesses everywhere.* The row mask was applied to every tile
+   even though only the last one can cross `M`. Predicated vector accesses cost
+   about twice an unpredicated one on this architecture, and `32771` rows at 32
+   rows per tile means 1024 of 1025 tiles were paying for it. Restricting the
+   mask to the final tile (`full_rows`) also removed the `tl.where` that
+   zero-filled the RMS numerator. The sweep on that shape moved 73.2 us ->
+   41.0 us.
+2. *A 192-wide group padded to a 256-wide tile.* 25% of every vector lane was
+   idle. Triton-Ascend accepts a non-power-of-two block width on the vector
+   path, so `BLOCK_N` now uses the exact group width when the power-of-two
+   padding would waste more than an eighth of the block; that took the same
+   shape from 65 us to 41 us.
+3. *Row tile for grouped normalization.* A grouped launch already fills the
+   grid along `ngroups`, so the 64-row tile only added per-tile latency
+   (`8192x2048`: ~60.6% at 32 rows versus ~59.8% at 64).
+
+Two things that did **not** help and were reverted: `tl.range(..., num_stages=2)`
+and doubling the grid for the grouped case. `num_warps` never changed a timing
+result - occupancy here is set by the grid - so it stays at the reference
+formula.
+
+### 6.3 Remaining headroom
+
+`group-8192` clears its line by 0.6 points. Its profiles show the 256 B row
+segments spread over a 4 KiB stride, i.e. many small DMA transactions rather
+than bandwidth saturation; `gdn-524288` is limited by the same scattered 2D gate
+read that the A5 three-axis tile removes. Both point at a grouped path that
+loads one whole row per tile and reduces `[rows, ngroups, group_size]` in
+registers, which is a structural change rather than a tile retune and was not
+taken here.
 
 ## 7. Known limits
 
