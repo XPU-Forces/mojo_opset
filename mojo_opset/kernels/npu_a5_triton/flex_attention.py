@@ -1518,7 +1518,8 @@ def flex_attention_fwd_impl(
     SPARSE_Q_BLOCK_SIZE = BLOCK_M
     SPARSE_KV_BLOCK_SIZE = BLOCK_N
 
-    num_q_blocks = (M + SPARSE_Q_BLOCK_SIZE - 1) // SPARSE_Q_BLOCK_SIZE
+    num_q_blocks = triton.cdiv(M, BLOCK_M)
+    num_sparse_q_blocks = triton.cdiv(M, SPARSE_Q_BLOCK_SIZE)
 
     output = torch.empty((Z, Hq, M, Dv), dtype=q.dtype, device=q.device)
     lse = torch.empty((Z, Hq, M), dtype=torch.float32, device=q.device)
@@ -1527,7 +1528,7 @@ def flex_attention_fwd_impl(
     k = k.contiguous()
     v = v.contiguous()
 
-    bm = _prepare_block_mask_attrs(block_mask, q, num_q_blocks, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE)
+    bm = _prepare_block_mask_attrs(block_mask, q, num_sparse_q_blocks, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE)
 
     num_tasks = num_q_blocks * Z * Hq
     grid, num_tasks = _persistent_launch_config(num_tasks)
