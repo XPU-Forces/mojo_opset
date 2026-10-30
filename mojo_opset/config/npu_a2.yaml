@@ -28,6 +28,10 @@ npu.a2:
   paged_prefill_gqa_infer: triton
   paged_prefill_swa_infer: triton
   prefill_gqa_infer: torch_npu
+  # Wins only on launch-bound shapes (32x8 is 2.8x faster than the torch_npu composition);
+  # bandwidth-bound shapes are 3.7x-10.4x slower, so consumers keep
+  # npu_rms_norm + npu_rotary_mul for them. See docs/vllm_ascend_qk_norm_rope.md.
+  qk_norm_rope_infer: triton
   # Retained selection: original NPU tests skipped this path; the wrapper raises NotImplementedError.
   quant_batch_gemm_reduce_sum: torch_npu
   quant_gemm: triton

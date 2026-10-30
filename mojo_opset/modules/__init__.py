@@ -36,6 +36,7 @@ from .paged_attention import PagedDecodeSWAInfer
 from .paged_attention import PagedPrefillGQAInfer
 from .paged_attention import PagedPrefillSWAInfer
 from .paged_attention import PrefillGQAInfer
+from .qk_norm_rope import QkNormRope
 from .quantization import Dequant
 from .quantization import DynamicQuant
 from .quantization import StaticQuant
@@ -79,6 +80,7 @@ __all__ = [
     "PagedPrefillGQAInfer",
     "PagedPrefillSWAInfer",
     "PrefillGQAInfer",
+    "QkNormRope",
     "QuantBatchGemmReduceSum",
     "QuantGemm",
     "RMSNorm",
