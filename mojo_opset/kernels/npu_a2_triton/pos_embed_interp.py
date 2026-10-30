@@ -18,8 +18,12 @@ Design notes (Ascend specific)
   calls (task requirement 4.4).
 * The grid is persistent (``grid = #vector cores``, grid-stride over blocks), matching
   ``rmsnorm.py`` and avoiding Ascend grid-size limits.
-* ``h_frac``/``w_frac`` are non-negative, so ``floor`` becomes an int32 cast (truncation ==
-  floor for non-negative values). Exact substitution, not a reordering.
+* ``h_frac``/``w_frac`` are non-negative, so ``floor`` and truncation agree and an explicit
+  ``tl.floor`` before the int32 cast is an exact substitution, not a reordering. The explicit
+  floor is also required for correctness: on Ascend 950PR (triton-ascend 3.6.0) the truncating
+  f32->i32 cast lowers wrongly and feeds the corner loads garbage offsets, which zeroes whole
+  output rows. Cost on A2 (X51Cm), two runs each with independent profiler dirs: +1.7% to
+  +3.3% per grid (worst case 3956 us vs 3828 us on the 268800-row video grid).
 * Bilinear weights are cast to the output dtype before the multiply-accumulate, mirroring
   upstream :236-240, so the FP32 and BF16 rounding paths stay identical.
 """
@@ -133,14 +137,18 @@ def _pos_embed_interp_kernel(
         for lr in tl.static_range(m_size):
             row = br * m_size + lr
             h_frac = row.to(tl.float32) * h_scale
-            hf = h_frac.to(tl.int32)
+            # floor before the cast: on Ascend 950PR (triton-ascend 3.6.0) the direct
+            # f32->i32 truncation lowers incorrectly and feeds the corner loads garbage
+            # offsets (whole output rows become exact 0). h_frac >= 0, so truncation and
+            # floor are identical here; the explicit floor keeps every backend correct.
+            hf = tl.floor(h_frac).to(tl.int32)
             hc = tl.minimum(hf + 1, num_grid - 1)
             dh = h_frac - hf.to(tl.float32)
 
             for lc in tl.static_range(m_size):
                 col = bc * m_size + lc
                 w_frac = col.to(tl.float32) * w_scale
-                wf = w_frac.to(tl.int32)
+                wf = tl.floor(w_frac).to(tl.int32)
                 wc = tl.minimum(wf + 1, num_grid - 1)
                 dw = w_frac - wf.to(tl.float32)
 
@@ -283,12 +291,12 @@ def _pos_embed_interp_block_kernel(
         col = bc * m_size + lc
 
         h_frac = row.to(tl.float32) * h_scale
-        hf = h_frac.to(tl.int32)
+        hf = tl.floor(h_frac).to(tl.int32)
         hc = tl.minimum(hf + 1, num_grid - 1)
         dh = h_frac - hf.to(tl.float32)
 
         w_frac = col.to(tl.float32) * w_scale
-        wf = w_frac.to(tl.int32)
+        wf = tl.floor(w_frac).to(tl.int32)
         wc = tl.minimum(wf + 1, num_grid - 1)
         dw = w_frac - wf.to(tl.float32)
 
