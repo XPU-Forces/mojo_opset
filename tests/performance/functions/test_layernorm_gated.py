@@ -20,7 +20,8 @@ from typing import Optional
 
 import pytest
 import torch
-import torch_npu  # noqa: F401  (registers the npu device)
+
+pytest.importorskip("torch_npu")
 
 from mojo_opset import functions as F
 
