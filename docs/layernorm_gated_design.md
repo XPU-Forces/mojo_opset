@@ -349,6 +349,42 @@ the eager composition (22.8x), and the widest case (`gdn-524288`) at 136.3 MB
 against 1.36 GB (10.0x); the fused path allocates one `[M, N]` output plus the
 fp32 statistics and nothing else.
 
+### 6.6 A5 re-run on CANN 9.2.0
+
+The task requires CANN >= 9.2.0, so the same 950 was re-verified with 9.2.0
+side-installed at `/usr/local/cann920/Ascend/cann-9.2.0` (toolkit + 950-ops,
+Huawei Cloud conda channel). The image's 9.1.0 tree is untouched and the driver
+stays at npu-smi 25.7.rc1.10, which 9.2.0 lists as compatible. Before sourcing
+the 9.2.0 `set_env.sh`, every 9.1.0 entry is stripped from `LD_LIBRARY_PATH`,
+`PYTHONPATH` and `PATH`; the kernel binary is unchanged (sha256
+`747b106e…d99663b`).
+
+Accuracy is 53 passed / 0 skipped / 0 failed (43 + 8 + 2 across the three files,
+warm JIT cache), including all eight `test_fused_quant_bit_exact` cases. The
+11-row suite reports `failures: []` in 62.67 s, and a repeat 61 s later agrees
+within 2.4% on ten rows. Calibration: `copy_` 1443.5 GB/s, `fill_` 1692.3 GB/s.
+
+| case | 9.1.0 us / MBU | 9.2.0 us / MBU (run1, run2) |
+| --- | --- | --- |
+| `gdn-256-n128-swish` | 3.78 / 3.61% | 3.80, 3.79 / 3.59%, 3.60% |
+| `gdn-2560-n128-swish` | 4.95 / 27.55% | 4.90, 5.02 / 27.79%, 27.09% |
+| `gdn-32768-n128-swish` | 22.53 / 77.40% | 22.37, 22.54 / 77.95%, 77.23% |
+| `gdn-32768-n128-sigmoid` | 22.44 / 77.74% | 22.33, 22.36 / 78.07%, 77.86% |
+| `gdn-131072-n128-swish` | 88.68 / 78.67% | 96.47, 90.13 / 72.29%, 77.26% |
+| `qk-65536-n128` | 12.30 / 189.12% | 12.42, 12.34 / 187.15%, 188.07% |
+| `group-1024-n2048` | 7.91 / 110.36% | 8.09, 7.92 / 107.81%, 109.91% |
+| `group-8192-n2048` | 42.98 / 162.34% | 42.42, 42.34 / 164.39%, 164.50% |
+| `quant-32768-n512` | 83.44 / 69.69% | **54.25, 54.41 / 107.14%, 106.68%** |
+| `gdn-524288-n128-swish` | 312.89 / 89.19% | 312.89, 313.30 / 89.15%, 88.91% |
+| `tail-32771-n192-swish` | 20.61 / 126.94% | 20.70, 20.72 / 126.37%, 126.03% |
+
+Every row stays above its line. The FP8 row gains 35%, but the kernel is
+byte-identical, and `fill_` also rose that run (1599 -> 1692 GB/s) while `copy_`
+did not (1443.0 -> 1443.5 GB/s); the gain is therefore recorded without
+attributing all of it to the version bump. `gdn-131072` stays inside the spread
+documented in §6.5. Fused peak memory is byte-for-byte identical to 9.1.0 for
+all 11 cases.
+
 ## 7. Known limits
 
 * `group_size` must divide `N` and must fit 64 KiB, as in the reference kernel.
