@@ -258,6 +258,29 @@ loads one whole row per tile and reduces `[rows, ngroups, group_size]` in
 registers, which is a structural change rather than a tile retune and was not
 taken here.
 
+### 6.4 Ascend A3 (910C)
+
+Same binary and same 11-row matrix on an A3 host reporting `Ascend910_9382`
+(torch 2.10.0, torch_npu 2.10.0, triton-ascend 3.6.0). The repository's target
+detection only recognises `Ascend910B*` and `Ascend950*`, so the run selects the
+A2 provider explicitly with `MOJO_ASCEND_ARCH=a2`; the host still exposes the
+same vector ISA, only the core count and memory differ. Accuracy is identical
+(43 passed / 4 skipped), and every row improves on the A2 numbers, with the
+copy probe at 1264.5 GB/s:
+
+| case | A2 us / MBU | A3 us / MBU |
+| --- | --- | --- |
+| `gdn-32768-n128-swish` | 31.48 / 64.70% | 28.10 / 70.83% |
+| `gdn-32768-n128-sigmoid` | 28.30 / 71.97% | 25.51 / 78.01% |
+| `gdn-131072-n128-swish` | 112.24 / 72.60% | 94.59 / 84.16% |
+| `qk-65536-n128` | 32.07 / 84.69% | 28.60 / 92.79% |
+| `group-8192-n2048` | 134.43 / 60.62% | 116.47 / 68.36% |
+| `gdn-524288-n128-swish` | 509.23 / 64.01% | 467.59 / 68.10% |
+| `tail-32771-n192-swish` | 40.94 / 74.64% | 36.31 / 82.23% |
+
+Small shapes stay on the relative line with a wider margin (e2e 153.6 / 162.7 /
+163.4 us versus 313.2 / 308.8 / 392.8 us for the eager composition).
+
 ## 7. Known limits
 
 * `group_size` must divide `N` and must fit 64 KiB, as in the reference kernel.
