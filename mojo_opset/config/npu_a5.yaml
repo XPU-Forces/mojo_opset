@@ -59,3 +59,4 @@ npu.a5:
 
 npu.a5.950pr:
   native_swa_infer: native  # Temporary standalone SWA interface; native supports 950PR only.
+  vision_pos_embed_interp: triton
