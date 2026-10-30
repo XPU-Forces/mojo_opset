@@ -10,13 +10,11 @@ from torch.nn.attention.flex_attention import _convert_mask_to_block_mask
 from torch.nn.attention.flex_attention import create_mask as _torch_create_mask
 
 from mojo_opset.kernels._npu_triton_utils import get_num_cores
-from mojo_opset.kernels.npu_a5_triton._private import flex_attention_dq_cache_config
 from mojo_opset.utils.flex_attention_mask import _create_sparse_block_from_block_mask
 from mojo_opset.utils.target import get_torch_device as _get_torch_device
 
 
 TILE_BLOCK_SIZE = 128
-_DQ_INTRA_CACHE_NUM, _DQ_INTER_CACHE_NUM = flex_attention_dq_cache_config()
 
 
 def _get_num_aicore():
@@ -2106,8 +2104,6 @@ def _flex_attention_v2_dq_leaf(inputs: list[torch.Tensor], outputs: list[torch.T
         hfusion_enable_multiple_consumer_fusion=True,
         enable_select_analysis=False,
         limit_auto_multi_buffer_of_local_buffer='no-l0c',
-        intra_cache_num=_DQ_INTRA_CACHE_NUM,
-        inter_cache_num=_DQ_INTER_CACHE_NUM
     )
 
 @_flex_attention_v2_dq_leaf.register_fake
