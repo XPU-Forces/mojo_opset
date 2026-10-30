@@ -20,6 +20,8 @@ from .gemm import QuantGemm
 from .indexer import Indexer
 from .indexer import LightningIndexer
 from .kv_cache import StorePagedKVCache
+from .layernorm_gated import LayerNormGated
+from .layernorm_gated import RMSNormGated
 from .multimodal_rope_infer import MultimodalRoPEInfer
 from .multimodal_rope_infer import MultimodalRoPEInplaceInfer
 from .normalization import GroupRMSNormInfer
@@ -66,6 +68,7 @@ __all__ = [
     "Indexer",
     "JoinProbRejectSampling",
     "LayerNormInfer",
+    "LayerNormGated",
     "LayerNormQuant",
     "LightningIndexer",
     "MoEDynamicQuant",
@@ -83,6 +86,7 @@ __all__ = [
     "QuantGemm",
     "RMSNorm",
     "RMSNormInfer",
+    "RMSNormGated",
     "RMSNormQuant",
     "RejectSampling",
     "ResidualAddLayerNormInfer",

@@ -25,6 +25,7 @@ supported shapes, dtypes and options.
 | `join_prob_reject_sampling` | triton | triton |
 | `layer_norm_infer` | triton | triton |
 | `layer_norm_quant` | torch_npu | torch_npu |
+| `layernorm_gated` | triton | triton |
 | `lightning_indexer` | triton | triton |
 | `moe_dynamic_quant` | triton, torch_npu | triton, torch_npu |
 | `multimodal_rope_infer` | triton | triton |
