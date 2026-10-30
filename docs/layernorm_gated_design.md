@@ -260,11 +260,11 @@ taken here.
 
 ### 6.4 Ascend A3 (910C)
 
-Same binary and same 11-row matrix on an A3 host reporting `Ascend910_9382`
+The same kernel source and the same 11-row matrix on an A3 host reporting `Ascend910_9382`
 (torch 2.10.0, torch_npu 2.10.0, triton-ascend 3.6.0). The repository's target
 detection only recognises `Ascend910B*` and `Ascend950*`, so the run selects the
-A2 provider explicitly with `MOJO_ASCEND_ARCH=a2`; the host still exposes the
-same vector ISA, only the core count and memory differ. Accuracy is identical
+A2 provider explicitly with `MOJO_ASCEND_ARCH=a2`; the vector ISA is the same and
+only the core count and memory differ. Accuracy is identical
 (43 passed / 4 skipped), and every row improves on the A2 numbers, with the
 copy probe at 1264.5 GB/s:
 
