@@ -104,9 +104,7 @@ def _layer_norm_fwd_kernel(
                     + z_heads[None, :, None] * stride_z_head
                     + col_offsets[None, :]
                 )
-                z_mask = ((z_tokens[:, None, None] * Z_HEADS + z_heads[None, :, None]) < M) & (
-                    cols[None, None, :] < N
-                )
+                z_mask = ((z_tokens[:, None, None] * Z_HEADS + z_heads[None, :, None]) < M) & (cols[None, None, :] < N)
             elif Z_IS_3D:
                 z_offsets = (
                     (rows[:, None] // Z_HEADS) * stride_z_token
@@ -308,12 +306,7 @@ def _layer_norm_fwd_impl(
         "HAS_Z": z is not None,
         "Z_IS_3D": z_is_3d,
         "Z_HEADS": z.shape[1] if z_is_3d else 1,
-        "Z_3D_TILE": (
-            use_z3d_tile
-            and z_is_3d
-            and rows_per_block % z.shape[1] == 0
-            and M * N >= Z3D_TILE_MIN_ELEMENTS
-        ),
+        "Z_3D_TILE": (use_z3d_tile and z_is_3d and rows_per_block % z.shape[1] == 0 and M * N >= Z3D_TILE_MIN_ELEMENTS),
         "NORM_BEFORE_GATE": norm_before_gate,
         "IS_RMS_NORM": is_rms_norm,
         "ACTIVATION": activation,

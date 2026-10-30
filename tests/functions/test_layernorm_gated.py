@@ -63,9 +63,7 @@ def _kwargs(case, z):
 def test_layernorm_gated_accuracy(accuracy_backend, dtype, case):
     implementation, _, device = accuracy_backend
     actual_inputs = _make_inputs(case, dtype, device)
-    reference_inputs = tuple(
-        value.clone() if isinstance(value, torch.Tensor) else value for value in actual_inputs
-    )
+    reference_inputs = tuple(value.clone() if isinstance(value, torch.Tensor) else value for value in actual_inputs)
     x, weight, bias, z = actual_inputs
 
     actual, actual_mean, actual_rstd = F.layernorm_gated(

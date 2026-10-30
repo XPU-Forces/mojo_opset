@@ -29,9 +29,7 @@ _bench_api = pytest.importorskip("triton.backends.ascend.testing")
 # ``do_bench_npu_profiler`` is the profiler-path entry point named by the task;
 # wheels that only export ``do_bench_npu`` reach the same torch_npu.profiler path
 # through ``prof_dir`` / ``keep_res``.
-do_bench_npu_profiler = getattr(_bench_api, "do_bench_npu_profiler", None) or getattr(
-    _bench_api, "do_bench_npu", None
-)
+do_bench_npu_profiler = getattr(_bench_api, "do_bench_npu_profiler", None) or getattr(_bench_api, "do_bench_npu", None)
 if do_bench_npu_profiler is None:
     pytest.skip("triton-ascend has no NPU profiler benchmark helper", allow_module_level=True)
 DTYPE = torch.bfloat16
@@ -74,7 +72,7 @@ def _make_inputs(case: Case, device):
         heads = 8
         padded = torch.empty((case.M // heads, heads, case.N + 32), device=device, dtype=DTYPE)
         padded.normal_()
-        z = padded[..., :case.N]
+        z = padded[..., : case.N]
     elif case.gate == "2d":
         z = torch.randn((case.M, case.N), device=device, dtype=DTYPE)
     kwargs = {
@@ -106,6 +104,13 @@ def _find_kernel_csvs(root: Path):
 
 
 _DO_BENCH_KWARGS = set(inspect.signature(do_bench_npu_profiler).parameters)
+
+
+def _call(args, kwargs, implementation):
+    def run():
+        return F.layernorm_gated(*args, **kwargs, implementation=implementation)
+
+    return run
 
 
 def _profile_call(fn, output_dir, warmup=5, active=30):
@@ -175,7 +180,7 @@ def test_layernorm_gated_performance(pytestconfig):
             )
             continue
         args, kwargs = _make_inputs(case, device)
-        fused = lambda: F.layernorm_gated(*args, **kwargs, implementation=implementation)  # noqa: E731
+        fused = _call(args, kwargs, implementation)
         fused_us, csv_paths = _profile_call(fused, output_root / f"case-{index:02d}")
         traffic = _traffic_bytes(case)
         mbu = traffic / (fused_us * 1e-6) / bandwidth_bytes_s
@@ -197,7 +202,7 @@ def test_layernorm_gated_performance(pytestconfig):
         if traffic < 16 * 1024 * 1024:
             # Small shapes are judged against the eager composition instead of MBU.
             fused_e2e = _e2e_us(fused)
-            eager = lambda: F.layernorm_gated(*args, **kwargs, implementation="torch")  # noqa: E731
+            eager = _call(args, kwargs, "torch")
             eager_us, _ = _profile_call(eager, output_root / f"case-{index:02d}-torch")
             eager_e2e = _e2e_us(eager)
             record.update(
@@ -208,9 +213,7 @@ def test_layernorm_gated_performance(pytestconfig):
             if fused_us > eager_us:
                 failures.append(f"{case.name}: fused {fused_us:.2f}us > eager {eager_us:.2f}us")
             if fused_e2e > eager_e2e:
-                failures.append(
-                    f"{case.name}: fused e2e {fused_e2e:.2f}us > eager e2e {eager_e2e:.2f}us"
-                )
+                failures.append(f"{case.name}: fused e2e {fused_e2e:.2f}us > eager e2e {eager_e2e:.2f}us")
         records.append(record)
         del args, kwargs, fused
         torch.npu.empty_cache()

@@ -1,7 +1,6 @@
 import pytest
 import torch
 
-from mojo_opset import Target
 from mojo_opset import modules
 from tests._checks import assert_close
 

@@ -40,9 +40,7 @@ class _GatedNorm(torch.nn.Module):
         self.implementation = implementation
         self.weight = torch.nn.Parameter(torch.ones(hidden_size, device=device, dtype=dtype))
         has_bias = self.default_bias if bias is None else bias
-        self.bias = (
-            torch.nn.Parameter(torch.zeros(hidden_size, device=device, dtype=dtype)) if has_bias else None
-        )
+        self.bias = torch.nn.Parameter(torch.zeros(hidden_size, device=device, dtype=dtype)) if has_bias else None
 
     def forward(self, x: torch.Tensor, z: Optional[torch.Tensor] = None, out=None) -> torch.Tensor:
         result, _, _ = functions.layernorm_gated(
