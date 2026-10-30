@@ -1952,7 +1952,8 @@ def flex_attention_fwd_impl(
     BLOCK_N = TILE_BLOCK_SIZE
     SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE = _get_mask_block_sizes(block_mask)
 
-    num_q_blocks = (M + SPARSE_Q_BLOCK_SIZE - 1) // SPARSE_Q_BLOCK_SIZE
+    num_q_blocks = triton.cdiv(M, BLOCK_M)
+    num_sparse_q_blocks = triton.cdiv(M, SPARSE_Q_BLOCK_SIZE)
     num_kv_blocks = triton.cdiv(N, SPARSE_KV_BLOCK_SIZE)
 
     output = torch.empty_like(q)
@@ -1962,7 +1963,7 @@ def flex_attention_fwd_impl(
     k = k.contiguous()
     v = v.contiguous()
 
-    bm = _prepare_block_mask_attrs(block_mask, q, num_q_blocks, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE)
+    bm = _prepare_block_mask_attrs(block_mask, q, num_sparse_q_blocks, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE)
 
     # 构建统一负载均衡计划 (Q 侧 + DKDV 侧, 带缓存复用)
     # forward 预构建 DKDV 计划, backward 直接复用, 避免重复装箱
@@ -2442,11 +2443,15 @@ def flex_attention_bwd_impl(
     grad_output = grad_output.contiguous()
     delta = (output * grad_output).sum(dim=-1).to(torch.float32).contiguous()
 
-    SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE = _get_mask_block_sizes(block_mask)
-    num_q_blocks = triton.cdiv(M, SPARSE_Q_BLOCK_SIZE)
-    num_kv_blocks = triton.cdiv(N, SPARSE_KV_BLOCK_SIZE)
+    BLOCK_M_DQ = TILE_BLOCK_SIZE
+    BLOCK_N_DQ = TILE_BLOCK_SIZE
 
-    bm = _prepare_block_mask_attrs(block_mask, q, num_q_blocks, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE)
+    SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE = _get_mask_block_sizes(block_mask)
+    num_q_blocks = triton.cdiv(M, BLOCK_M_DQ)
+    num_kv_blocks = triton.cdiv(N, SPARSE_KV_BLOCK_SIZE)
+    num_sparse_q_blocks = triton.cdiv(M, SPARSE_Q_BLOCK_SIZE)
+
+    bm = _prepare_block_mask_attrs(block_mask, q, num_sparse_q_blocks, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE)
 
     dq = torch.empty_like(q)
     dk = torch.zeros(k.shape, dtype=torch.float32, device=k.device)
@@ -2465,8 +2470,6 @@ def flex_attention_bwd_impl(
     # ========================================================================
     # Phase 1: DQ kernel — 以 Q-block 为中心, 直接写入 dq
     # ========================================================================
-    BLOCK_M_DQ = TILE_BLOCK_SIZE
-    BLOCK_N_DQ = TILE_BLOCK_SIZE
     NUM_KV_SUB_BLOCKS_VAL = SPARSE_KV_BLOCK_SIZE // BLOCK_N_DQ
     grid_dq, num_tasks_dq = _persistent_launch_config(num_q_blocks * Z * Hq)
     flex_attention_backward_dq_kernel[grid_dq](
