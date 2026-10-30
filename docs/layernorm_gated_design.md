@@ -168,7 +168,10 @@ reference. Three boundaries are checked for exact equality (byte comparison):
 Per the task definition: 5 warm-up launches, 30 profiled launches, and the metric
 is the sum of every device kernel recorded in the window divided by 30
 (`triton.backends.ascend.testing.do_bench_npu_profiler` with no
-`target_kernel_name`). MBU = bytes / time / calibrated bandwidth, where bytes are
+`target_kernel_name`; wheels that only export `do_bench_npu` reach the same
+`torch_npu.profiler` path through `prof_dir` / `keep_res`. The helper takes
+`warmup` / `active` iteration counts and returns milliseconds.) MBU = bytes /
+time / calibrated bandwidth, where bytes are
 `(3*M*N + 2*N) * element_size` with a gate, `(2*M*N + 2*N) * element_size`
 without, and `2*M*N*element_size + M*N + 4*M/quant_heads + 2*N*element_size` for
 the fused quantiser. The denominator is calibrated in-process at the start of the

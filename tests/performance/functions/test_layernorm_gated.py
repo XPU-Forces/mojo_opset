@@ -25,8 +25,15 @@ pytest.importorskip("torch_npu")
 
 from mojo_opset import functions as F
 
-do_bench_npu_profiler = pytest.importorskip("triton.backends.ascend.testing").do_bench_npu_profiler
-
+_bench_api = pytest.importorskip("triton.backends.ascend.testing")
+# ``do_bench_npu_profiler`` is the profiler-path entry point named by the task;
+# wheels that only export ``do_bench_npu`` reach the same torch_npu.profiler path
+# through ``prof_dir`` / ``keep_res``.
+do_bench_npu_profiler = getattr(_bench_api, "do_bench_npu_profiler", None) or getattr(
+    _bench_api, "do_bench_npu", None
+)
+if do_bench_npu_profiler is None:
+    pytest.skip("triton-ascend has no NPU profiler benchmark helper", allow_module_level=True)
 DTYPE = torch.bfloat16
 ELEMENT_SIZE = DTYPE.itemsize
 CALIBRATION_ELEMENTS = 128 * 1024 * 1024
