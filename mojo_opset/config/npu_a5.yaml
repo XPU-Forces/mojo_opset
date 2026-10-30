@@ -55,6 +55,8 @@ npu.a5:
   top_p_filter: triton
   top_p_sampling: triton
   vision_rope_2d_infer: triton
+  vision_pos_embed_interp: triton
+  vision_pos_embed_interp_multi: triton
   vision_rope_cos_sin_2d: triton
 
 npu.a5.950pr:
