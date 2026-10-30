@@ -31,12 +31,12 @@ from .normalization import ResidualAddRMSNormInfer
 from .over_encoding import NF4DequantEmbedding
 from .over_encoding import OverEncoding
 from .over_encoding import OverEncodingNGram
-from .position_embedding import PosEmbedInterp
 from .paged_attention import PagedDecodeGQAInfer
 from .paged_attention import PagedDecodeSWAInfer
 from .paged_attention import PagedPrefillGQAInfer
 from .paged_attention import PagedPrefillSWAInfer
 from .paged_attention import PrefillGQAInfer
+from .position_embedding import PosEmbedInterp
 from .quantization import Dequant
 from .quantization import DynamicQuant
 from .quantization import StaticQuant
@@ -56,7 +56,6 @@ from .sdpa import Sdpa
 from .store_lowrank import StoreLowrank
 
 __all__ = [
-    "PosEmbedInterp",
     "ApplyPenaltiesTemperature",
     "CausalConv1dUpdateStateInfer",
     "Dequant",
@@ -80,6 +79,7 @@ __all__ = [
     "PagedDecodeSWAInfer",
     "PagedPrefillGQAInfer",
     "PagedPrefillSWAInfer",
+    "PosEmbedInterp",
     "PrefillGQAInfer",
     "QuantBatchGemmReduceSum",
     "QuantGemm",
