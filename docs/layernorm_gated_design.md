@@ -333,7 +333,8 @@ on an empty JIT cache (about 20.5 s warm): the A2/A3 set plus the two
 | `tail-32771-n192-swish` | 32771 x 192 | 20.61 | 126.94% | >=50% |
 
 `failures: []`; `1 passed in 72.77 s`. The FP8 row is the only one that needed
-work: 151.5 us / 38.4% initially, 83.44 us / 69.69% after the three changes in
+work: 152.1 us / 38.31% in the first suite run (151.5 us in the in-process
+breakdown), 83.44 us / 69.69% after the three changes in
 §4.4 (two tokens per tile, clamp removal, integer RNE). The rows above 100% MBU
 are cache-resident working sets; `gdn-524288` is the only row that truly presses
 HBM, and its profile shows `Block Num = 56`, i.e. the grid exactly fills the
