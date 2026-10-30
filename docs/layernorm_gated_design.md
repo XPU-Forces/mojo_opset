@@ -309,6 +309,10 @@ at 1264.5 GB/s:
 Small shapes stay on the relative line with a wider margin (e2e 153.6 / 162.7 /
 163.4 us versus 313.2 / 308.8 / 392.8 us for the eager composition).
 
+This host is aarch64 (openEuler 24.03), which matters for the CANN side-install
+in §6.7: the packages have to come from the `linux-aarch64` channel, and the
+x86_64 ones are rejected by the installer.
+
 ### 6.5 Ascend A5 (950PR)
 
 `Ascend950PR_9579`, 56 vector cores, torch 2.10.0+cpu / torch_npu 2.10.0.post7 /
@@ -385,6 +389,54 @@ attributing all of it to the version bump. `gdn-131072` stays inside the spread
 documented in §6.5. Fused peak memory is byte-for-byte identical to 9.1.0 for
 all 11 cases.
 
+### 6.7 A3 re-run on CANN 9.2.0
+
+The same side-install was repeated on the A3 host used in §6.4 — container
+hostname `02ab62ca47bc`, aarch64, openEuler 24.03 — with CANN 9.2.0 under
+`/usr/local/cann920/Ascend/cann-9.2.0`. The image's 9.1.0 tree is untouched and
+the driver stays at npu-smi 26.1.1. The four tested files hash identically to
+the A5 run (kernel sha256 `747b106e…d99663b`), so only the CANN version
+changed; the 9.1.0 and 9.2.0 A3 runs are the same host, which the profiler
+metadata records (same hostname, same `hwtype`, same kernel release).
+
+Two environment facts are worth keeping. The host is aarch64, so the
+side-install has to come from the `linux-aarch64` conda channel
+(`ascend-cann-toolkit-9.2.0-0.conda` plus `ascend-cann-a3-ops-9.2.0-0.conda`);
+the x86_64 `linux-64` packages make the installer exit rc=2 with
+`The current OS is aarch64` / `No packages to install !`. And the installer
+rewrites `/etc/Ascend/ascend_cann_install.info` to the new prefix (the original
+record is kept under `/etc/Ascend/<timestamp>/`), while
+`/usr/local/Ascend/ascend-toolkit/latest` still points at `cann-9.1.0`.
+
+Accuracy is 43 passed / 8 skipped / 0 failed (35 + 8 across the two files), and
+this is the first run of the *final* test file on A2/A3-class hardware: 51
+cases collected, the eight skips being the `test_fused_quant_bit_exact` cases
+that gate on the device name, which matches the prediction recorded before the
+run. The 11-row suite reports `failures: []` in 67.90 s, and a repeat 60 s
+later agrees within 0.6%. Calibration: `copy_` 1264.86 GB/s (repeat 1260.78),
+`fill_` 1464.60 GB/s (repeat 1458.62) — essentially unchanged from 9.1.0
+(1264.47 / 1460.58), so the version comparison is clean.
+
+| case | 9.1.0 us / MBU | 9.2.0 us / MBU (run1, run2) |
+| --- | --- | --- |
+| `gdn-256-n128-swish` | 3.842 / 4.06% | 3.928, 3.922 / 3.97%, 3.99% |
+| `gdn-2560-n128-swish` | 6.568 / 23.68% | 6.613, 6.605 / 23.51%, 23.62% |
+| `gdn-32768-n128-swish` | 28.101 / 70.83% | 27.973, 28.028 / 71.13%, 71.22% |
+| `gdn-32768-n128-sigmoid` | 25.513 / 78.01% | 25.455, 25.617 / 78.16%, 77.92% |
+| `gdn-131072-n128-swish` | 94.594 / 84.16% | 94.413, 94.280 / 84.29%, 84.69% |
+| `qk-65536-n128` | 28.598 / 92.79% | 28.547, 28.357 / 92.93%, 93.86% |
+| `group-1024-n2048` | 17.837 / 55.83% | 17.905, 17.859 / 55.60%, 55.92% |
+| `group-8192-n2048` | 116.469 / 68.36% | 116.443, 116.505 / 68.35%, 68.54% |
+| `quant-32768-n512` | skipped | skipped (FP8 is 950-only) |
+| `gdn-524288-n128-swish` | 467.591 / 68.10% | 463.500, 460.634 / 68.68%, 69.33% |
+| `tail-32771-n192-swish` | 36.310 / 82.23% | 36.304, 36.139 / 82.22%, 82.86% |
+
+Every measured row stays above its line; the largest deviation is +2.2% on the
+smallest case, where fixed overhead dominates, and every large shape stays
+within ±1.5%. Unlike the A5 re-run there is no FP8 row to observe the fp8
+lowering change on, because that row skips by device name on A3. Fused peak
+memory is byte-for-byte identical to 9.1.0 for all ten cases.
+
 ## 7. Known limits
 
 * `group_size` must divide `N` and must fit 64 KiB, as in the reference kernel.
@@ -407,3 +459,10 @@ pytest tests/functions/test_layernorm_gated.py tests/functions/test_layernorm_ga
 # benchmark (writes JSON + raw profiler csv)
 pytest tests/performance/functions/test_layernorm_gated.py -q --perf-output tests/performance/results/npu.json
 ```
+
+On A3 the device reports `Ascend910_9382`, which the target detection does not
+know, so the run needs `MOJO_ASCEND_ARCH=a2`. On CANN 9.2.0 the 9.1.0 entries
+have to leave `LD_LIBRARY_PATH`, `PYTHONPATH` and `PATH` before the 9.2.0
+`set_env.sh` is sourced; the side-installed tree is
+`/usr/local/cann920/Ascend/cann-9.2.0` and the packages come from the
+`linux-aarch64` conda channel on A3 and the `linux-64` one on the 950.
