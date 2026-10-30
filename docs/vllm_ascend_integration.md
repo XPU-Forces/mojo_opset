@@ -92,8 +92,19 @@ CPU build can have Triton installed and still have no working Ascend kernel. So 
 only the cheap import attempt, and the real decision is the runtime probe (NPU present and
 the mojo operator importable). The probe result is cached, because it runs on every forward.
 
+The device check is ``torch.npu.is_available()``, not ``torch_npu.is_available()``: importing
+``torch_npu`` only registers the ``npu`` backend on ``torch``, it does not add a module-level
+``is_available``. Calling the latter raises ``AttributeError``, which a single surrounding
+``except Exception`` would swallow and turn into "Triton unusable" -- the operator would then
+never run on NPU, silently. The two probes are therefore separate ``try`` blocks: a broken
+device probe and a missing operator are different failures.
+
 The ``try/except`` around the call is deliberate: this is a monkey-patch inside a serving
 stack, and a shape the Triton path does not cover must degrade to native rather than raise.
+
+The authoritative copy of this patch is ``docs/vllm_ascend_pos_embed_dispatch.py``; it is what
+``tests/test_vllm_ascend_dispatch.py`` executes, so the snippet below and that file must not
+drift apart.
 """
 
 import torch
@@ -113,21 +124,30 @@ def _triton_pos_embed_available() -> bool:
     importable, which is also true on CUDA and CPU builds where this operator has no
     implementation. The three conditions that matter are Triton present, an Ascend device
     usable, and the operator itself reachable from mojo_opset.
+
+    The device check is ``torch.npu.is_available()`` (the ``torch_npu`` module only registers
+    the ``npu`` backend; it has no module-level ``is_available``). The two probes are
+    separate ``try`` blocks on purpose: a broken device probe and a missing operator are
+    different failures, and folding them together would let an ``AttributeError`` from the
+    operator import masquerade as "no NPU".
     """
     global _TRITON_POS_EMBED_OK
     if _TRITON_POS_EMBED_OK is None:
         ok = False
         if HAS_TRITON:
             try:
-                import torch_npu
+                import torch_npu  # noqa: F401  registers the "npu" device on torch
 
-                if torch_npu.is_available():
+                npu_ready = torch.npu.is_available()
+            except Exception:
+                npu_ready = False
+            if npu_ready:
+                try:
                     from mojo_opset import functions as _F
 
                     ok = hasattr(_F, "pos_embed_interp_multi_infer")
-            except Exception:
-                # Any import-time failure means "not available", not "crash".
-                ok = False
+                except Exception:
+                    ok = False
         _TRITON_POS_EMBED_OK = ok
     return _TRITON_POS_EMBED_OK
 

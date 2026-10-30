@@ -32,8 +32,9 @@ STANDARD_GRIDS = [
 # Temporal broadcast case.
 TEMPORAL_GRIDS = [(3, 16, 16)]
 # h == w == m_size degenerates to a full-table corner gather (scale = G - 1 per step).
-# (1,2,2) has a single merge block and (1,2,6)/(1,6,2) have three, so the tail guard of the
-# multi-block tile (blocks_per_iter=2) is exercised on hardware, not only in the CPU emulator.
+# (1,2,2) is a single merge block, while (1,2,8)/(1,8,2)/(1,2,6)/(1,6,2) split the output into
+# several blocks and give the persistent grid more than one block per program, i.e. the
+# block-chunk loop runs more than once.
 DEGENERATE_GRIDS = [(1, 2, 2), (1, 2, 8), (1, 8, 2), (1, 2, 6), (1, 6, 2)]
 # Video-scale grid: 268800 output rows.
 BIG_GRIDS = [(16, 100, 168)]
@@ -53,18 +54,28 @@ def make_embed(hidden, device, dtype, num_grid_per_side=NUM_GRID_PER_SIDE):
     return torch.randn(num_grid_per_side * num_grid_per_side, hidden, device=device, dtype=dtype) * 0.25
 
 
-def check_interp(backend, grid, dtype, *, hidden=HIDDEN_DIM, num_grid_per_side=NUM_GRID_PER_SIDE):
+def check_interp(
+    backend,
+    grid,
+    dtype,
+    *,
+    hidden=HIDDEN_DIM,
+    num_grid_per_side=NUM_GRID_PER_SIDE,
+    m_size=M_SIZE,
+    embed_dtype=None,
+):
     implementation, _target, device = backend
-    embed = make_embed(hidden, device, dtype, num_grid_per_side)
+    embed = make_embed(hidden, device, embed_dtype or dtype, num_grid_per_side)
     t, h, w = grid
 
     expected = F.pos_embed_interp_infer(
-        embed, t, h, w, num_grid_per_side, M_SIZE, dtype, implementation="torch"
+        embed, t, h, w, num_grid_per_side, m_size, dtype, implementation="torch"
     )
-    actual = F.pos_embed_interp_infer(embed, t, h, w, num_grid_per_side, M_SIZE, dtype, implementation=implementation)
+    actual = F.pos_embed_interp_infer(embed, t, h, w, num_grid_per_side, m_size, dtype, implementation=implementation)
 
     assert actual.shape == (t * h * w, hidden)
-    assert actual.dtype == embed.dtype and actual.device == embed.device
+    out_dtype = embed.dtype if dtype is None else dtype
+    assert actual.dtype == out_dtype and actual.device == embed.device
     assert_close(actual, expected, dtype, name=f"{implementation} vs torch {grid}", **TOLERANCES[dtype])
     return actual, expected
 
@@ -104,16 +115,28 @@ def test_pos_embed_interp_generalized_grid_side(accuracy_backend, dtype, num_gri
 @pytest.mark.parametrize("grid", TAIL_GRIDS, ids=[f"{t}x{h}x{w}" for t, h, w in TAIL_GRIDS])
 @pytest.mark.accuracy
 def test_pos_embed_interp_hidden_tail(accuracy_backend, dtype, grid):
-    """hidden=1000 is not a power of two: the trailing masked block must not write OOB."""
+    """hidden=1000 is not a power of two, so the whole row is one masked tile.
+
+    ``block_d`` is the next power of two above ``hidden`` (1024 here), which leaves 24 masked
+    lanes at the end of every row. The tail columns are compared on their own so that a lane
+    reading past ``hidden`` cannot hide behind the full-tensor tolerance.
+
+    This is a read-side check: a *write* past the row would land in the next row (or past the
+    buffer), which only a sanitizer run can see (``mssanitizer``-style oob detection), so no
+    sentinel is claimed here.
+    """
     implementation, _target, device = accuracy_backend
-    check_interp(accuracy_backend, grid, dtype, hidden=TAIL_HIDDEN)
-    # Sentinel guard: the output buffer is exactly t*h*w rows, so an out-of-range store
-    # would corrupt adjacent allocations. Reallocate and check the tail row explicitly.
-    embed = make_embed(TAIL_HIDDEN, device, dtype)
-    out = F.pos_embed_interp_infer(embed, *grid, NUM_GRID_PER_SIDE, M_SIZE, dtype, implementation=implementation)
-    t, h, w = grid
-    assert torch.isfinite(out).all(), "non-finite value in the tail block"
-    assert out.shape == (t * h * w, TAIL_HIDDEN)
+    actual, expected = check_interp(accuracy_backend, grid, dtype, hidden=TAIL_HIDDEN)
+    assert torch.isfinite(actual).all(), "non-finite value in the tail tile"
+
+    tail = actual[:, TAIL_HIDDEN - 8 :]
+    assert_close(
+        tail,
+        expected[:, TAIL_HIDDEN - 8 :],
+        dtype,
+        name=f"{implementation} tail columns {grid}",
+        **TOLERANCES[dtype],
+    )
 
 
 @pytest.mark.api("functions.pos_embed_interp_infer")
@@ -175,3 +198,67 @@ def test_pos_embed_interp_rejects_bad_geometry(accuracy_backend):
         F.pos_embed_interp_infer(embed, 1, 15, 16, NUM_GRID_PER_SIDE, M_SIZE)
     with pytest.raises(ValueError, match="must equal"):
         F.pos_embed_interp_infer(embed, 1, 16, 16, 32, M_SIZE)
+    # m_size is validated before the divisibility test, which divides by it.
+    with pytest.raises(ValueError, match="m_size=0 must be positive"):
+        F.pos_embed_interp_infer(embed, 1, 16, 16, NUM_GRID_PER_SIDE, 0)
+
+
+@pytest.mark.api("functions.pos_embed_interp_infer")
+@pytest.mark.parametrize("dtype", DTYPES, ids=lambda d: str(d).split(".")[-1])
+@pytest.mark.parametrize("m_size", [1, 4], ids=lambda m: f"m{m}")
+@pytest.mark.accuracy
+def test_pos_embed_interp_other_merge_sizes(accuracy_backend, dtype, m_size):
+    """m_size is a model config value, not a constant: 1 (no merge) and 4 must both work."""
+    implementation, _target, device = accuracy_backend
+    grid = (1, 16, 16) if m_size == 1 else (1, 8, 8)
+    check_interp(accuracy_backend, grid, dtype, m_size=m_size)
+
+
+@pytest.mark.api("functions.pos_embed_interp_infer")
+@pytest.mark.parametrize("dtype", DTYPES, ids=lambda d: str(d).split(".")[-1])
+@pytest.mark.accuracy
+def test_pos_embed_interp_grid32_size100(accuracy_backend, dtype):
+    """G=32 with h=w=100: the one combination where the kernel and the reference floor differ.
+
+    ``torch.linspace(0, G-1, 100)`` puts a sample exactly on an integer for some indices, and
+    the kernel's precomputed ``scale`` can land an ULP below it, so ``floor`` picks the lower
+    cell. Both answers are within tolerance because the weight of the far corner collapses to
+    zero at that point -- this case pins that down instead of leaving it to chance.
+    """
+    check_interp(accuracy_backend, (1, 100, 100), dtype, num_grid_per_side=32)
+
+
+@pytest.mark.api("functions.pos_embed_interp_infer")
+@pytest.mark.accuracy
+def test_pos_embed_interp_output_dtype_override(accuracy_backend):
+    """``dtype`` selects the output dtype independently of the table dtype.
+
+    Only the fp32-table / bf16-output direction is covered here: the eager reference casts the
+    bilinear weights to the output dtype and accumulates in place, so a bf16 table with an fp32
+    output cannot be expressed there (the multiply would have to up-cast in place).
+    """
+    check_interp(accuracy_backend, (1, 16, 16), torch.bfloat16, embed_dtype=torch.float32)
+
+
+@pytest.mark.api("functions.pos_embed_interp_multi_infer")
+@pytest.mark.parametrize("dtype", DTYPES, ids=lambda d: str(d).split(".")[-1])
+@pytest.mark.bitwise
+def test_pos_embed_interp_multi_accepts_tensor_grids(accuracy_backend, dtype):
+    """``grids`` may arrive as an int tensor (vllm keeps ``grid_thw`` as one); same result."""
+    implementation, _target, device = accuracy_backend
+    grids = [(1, 8, 16), (3, 16, 16)]
+    embed = make_embed(HIDDEN_DIM, device, dtype)
+
+    from_list = F.pos_embed_interp_multi_infer(
+        embed, grids, NUM_GRID_PER_SIDE, M_SIZE, dtype, implementation=implementation
+    )
+    for tensor_dtype in (torch.int32, torch.int64):
+        from_tensor = F.pos_embed_interp_multi_infer(
+            embed,
+            torch.tensor(grids, dtype=tensor_dtype, device=device),
+            NUM_GRID_PER_SIDE,
+            M_SIZE,
+            dtype,
+            implementation=implementation,
+        )
+        assert torch.equal(from_tensor, from_list), f"tensor grids ({tensor_dtype}) changed the result"
