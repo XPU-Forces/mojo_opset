@@ -540,3 +540,7 @@ CANN 9.2.0 the 9.1.0 entries have to leave `LD_LIBRARY_PATH`, `PYTHONPATH` and
 `ascend-cann-910b-ops` on A2, `ascend-cann-a3-ops` on A3) and the `linux-64`
 one on the 950. On the A2 image the toolkit installer additionally needs an
 interpreter with pip on `PATH` — see §6.8.
+
+---
+
+本算子由 AI 辅助开发，作者已逐行复核并在真实设备上完成精度与性能验证 —— pwdh2026
