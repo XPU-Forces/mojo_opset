@@ -4,31 +4,28 @@
 
 ## 结论
 
-在 Atlas 800I A2、Ascend 910B3 的 NPU 0 上，函数与模块精度用例合计 67 项全部通过，失败 0、错误 0。关键数值边界保持精确：
+在 A2、A3 和 950/A5 三台实机上，函数与模块精度用例均为 67 项全部通过，失败 0、错误 0。关键数值边界保持精确：
 
 - BF16 norm round 生效；
 - 同一 head 的两个 pair 元素共享一次 RMS 统计；
 - 96 至 127 维逐位等于 BF16 归一化值。
 
-普通精度矩阵使用 `atol=0.0625, rtol=0.02`。A2 persistent 实现每次调用只产生 1 个设备 kernel。性能大形状 MBU 为 44.56% 至 51.31%，未达到 60%/50% 目标线；完整 profile、根因和后续方向已写入性能报告。
-
-A5 的 Triton 源码、OPS 注册和配置已经接入。本次实机证据来自 A2；A3、A5 和 950 的运行结果未标记为通过。
+普通精度矩阵使用 `atol=0.0625, rtol=0.02`。A2 persistent 实现每次调用产生 1 个设备 kernel；A5 精确路径产生 Q/K 两个设备 kernel。A2 大形状 MBU 为 44.56% 至 51.31%；A3 为 43.35% 至 50.72%；A5 为 3.52% 至 5.60%。三者均未达到 60%/50% 性能目标线，完整 profile、根因和后续方向已写入性能报告。
 
 ## 环境
 
-| 项目 | 值 |
-| --- | --- |
-| 主机 | `122a0b52c5ff` |
-| NPU | 8 × Ascend 910B3，测试使用 NPU 0 |
-| CANN | 9.1.0 |
-| Python | 3.12 |
-| PyTorch | 2.10.0 |
-| torch_npu | 2.10.0 |
-| Triton | 3.2.0 |
-| triton-ascend | 3.2.2 |
-| 设备标识 | `npu-smi 26.0.rc1` |
+| 项目 | A2 | A3 | 950/A5 |
+| --- | --- | --- | --- |
+| 主机 | `122a0b52c5ff` | `164ffd8064b7` | `5a17e2d6ee21` |
+| NPU | Ascend 910B3 | Ascend 910_9382 | Ascend950PR |
+| Provider | `npu.a2` | `npu.a2` | `npu.a5` |
+| CANN | 9.1.0 | 9.1.0 | 9.1.0 |
+| Python | 3.12 | 3.10 | 3.10 |
+| PyTorch | 2.10.0 | 2.10.0 | 2.10.0 |
+| torch_npu | 2.10.0 | 2.10.0.post7 | 2.10.0.post7 |
+| triton-ascend | 3.2.2 | 3.6.0 | 3.6.0 |
 
-任务书建议 triton-ascend 3.6.0 与 CANN 9.2.0。本次节点提供 triton-ascend 3.2.2 与 CANN 9.1.0，全部精度和性能结果均在该实际环境取得。
+任务书建议 triton-ascend 3.6.0 与 CANN 9.2.0。三个实测节点均提供 CANN 9.1.0；A3 与 A5 使用 triton-ascend 3.6.0，A2 使用节点已有的 3.2.2。仓库只有 `npu.a2` 与 `npu.a5` provider，A3 实机使用 `npu.a2` provider，不声明原生 `npu.a3` provider。
 
 ## 测试来源
 
@@ -59,10 +56,12 @@ python -m pytest -q \
 最终结果：
 
 ```text
-67 passed, 14 warnings in 373.58s (0:06:13)
+A2:   67 passed, 14 warnings in 373.58s
+A3:   67 passed, 4 warnings in 208.72s
+A5:   67 passed, 3 warnings in 62.43s
 ```
 
-14 条 warning 均来自 PyTorch `torch.jit.script_method` 的弃用提示。
+A2 的 14 条 warning 来自 PyTorch `torch.jit.script_method` 弃用；A3/A5 warning 来自 triton-ascend 自定义算子的弃用提示。
 
 静态检查：
 
@@ -70,6 +69,8 @@ python -m pytest -q \
 ruff check: All checks passed!
 ruff format --check: 5 files already formatted
 ```
+
+A3 与 A5 使用同一测试命令，分别将 `--mojo-target` 设为 `npu.a2` 与 `npu.a5`。A5 单独运行两个精确边界二次确认，结果为 `2 passed, 62 deselected`。
 
 ## 精度覆盖
 
@@ -105,7 +106,7 @@ ruff format --check: 5 files already formatted
 
 ## 性能摘要
 
-性能按 5 次 warmup、30 次有效采样、全部设备 kernel 求和口径执行：
+性能按 5 次 warmup、30 次有效采样、全部设备 kernel 求和口径执行。A2 结果：
 
 | tokens×heads | kernel 时间 (us) | MBU |
 | --- | ---: | ---: |
@@ -120,6 +121,8 @@ ruff format --check: 5 files already formatted
 
 `4096×56` profile 的 AIV vector ratio 为 93.34%，MTE2 为 20.15%，MTE3 为 9.05%。瓶颈是 BF16/FP32 转换、RMS 归约和 FP32 RoPE 的向量计算，详见 `docs/performance_report.md`。
 
+A3 使用 A2 provider 的 `4096×56` 为 379.23 us / 49.34%，`4096×57` 为 439.32 us / 43.35%。A5 的 `4096×56` 为 4323.31 us / 3.79%，`4096×57` 为 4743.85 us / 3.52%。A5 性能下降来自为保持 1D RMS 加法树而采用的 H8 精确调度；其 AIV vector ratio 为 32.06%，scalar ratio 为 32.45%，MTE2 ratio 为 55.85%。
+
 ## 证据
 
 - `evidence/accuracy_final.log`
@@ -130,3 +133,11 @@ ruff format --check: 5 files already formatted
 - `evidence/baseline/comparison.json`
 - `evidence/npu-smi.txt`
 - `evidence/environment.txt`
+- `evidence_a3_core/a3_accuracy.log`
+- `evidence_a3_core/a3_performance.log`
+- `evidence_a3_core/benchmark.json`
+- `evidence_a3_core/profile_summary.csv`
+- `evidence_a5_core/a5_accuracy.log`
+- `evidence_a5_core/a5_performance.log`
+- `evidence_a5_core/performance/benchmark.json`
+- `evidence_a5_core/performance/profile_summary.csv`

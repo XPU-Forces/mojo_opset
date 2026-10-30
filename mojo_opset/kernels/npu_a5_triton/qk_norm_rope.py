@@ -7,7 +7,6 @@ import triton.language as tl
 HEAD_DIM = 128
 ROTARY_DIM = 96
 ROTARY_HALF = ROTARY_DIM // 2
-MAX_HEADS_PER_BLOCK = 64
 
 
 @triton.jit
@@ -16,9 +15,9 @@ def _qk_norm_rope_kernel(
     weight_ptr,
     rope_table_ptr,
     out_ptr,
-    x_stride_t,
-    x_stride_h,
-    x_stride_d,
+    x_stride_t: tl.constexpr,
+    x_stride_h: tl.constexpr,
+    x_stride_d: tl.constexpr,
     rope_stride_t,
     out_stride_t,
     out_stride_h,
@@ -41,15 +40,37 @@ def _qk_norm_rope_kernel(
     head_mask = heads < num_heads
     mask = token_mask[:, None, None] & head_mask[None, :, None]
 
-    x_offsets = (
-        tokens[:, None, None] * x_stride_t + heads[None, :, None] * x_stride_h + dims[None, None, :] * x_stride_d
-    )
-    x = tl.load(x_ptr + x_offsets, mask=mask, other=0.0).to(tl.float32)
     weight = tl.load(weight_ptr + dims).to(tl.float32)
-    inv_rms = tl.rsqrt(tl.sum(x * x, axis=2) / HEAD_DIM + eps)
-
-    # The BF16 round belongs before RoPE and is shared by both pair elements.
-    normalized = (x * inv_rms[:, :, None] * weight[None, None, :]).to(tl.bfloat16)
+    normalized = tl.zeros((TOKENS_PER_BLOCK, HEADS_PER_BLOCK, HEAD_DIM), dtype=tl.bfloat16)
+    for head_offset in tl.static_range(0, HEADS_PER_BLOCK):
+        row_head = tl.program_id(1) * HEADS_PER_BLOCK + head_offset
+        row_offsets = tl.program_id(0) * TOKENS_PER_BLOCK * x_stride_t + row_head * x_stride_h + dims * x_stride_d
+        row_mask = (tl.program_id(0) * TOKENS_PER_BLOCK < num_tokens) & (row_head < num_heads)
+        row_values = tl.load(x_ptr + row_offsets, mask=row_mask, other=0.0).to(tl.float32)
+        row_square = row_values * row_values
+        row_low = tl.extra.cann.extension.extract_slice(
+            row_square,
+            [0],
+            [HEAD_DIM // 2],
+            [1],
+        )
+        row_high = tl.extra.cann.extension.extract_slice(
+            row_square,
+            [HEAD_DIM // 2],
+            [HEAD_DIM // 2],
+            [1],
+        )
+        row_sum = tl.sum(row_low + row_high, axis=0)
+        row_inv_rms = 1.0 / tl.sqrt(row_sum / HEAD_DIM + eps)
+        # The BF16 round belongs before RoPE and is shared by both pair elements.
+        row_normalized = (row_values * row_inv_rms * weight).to(tl.bfloat16)
+        normalized = tl.extra.cann.extension.insert_slice(
+            normalized,
+            row_normalized.reshape(1, 1, HEAD_DIM),
+            [0, head_offset, 0],
+            [TOKENS_PER_BLOCK, 1, HEAD_DIM],
+            [1, 1, 1],
+        )
     first = tl.extra.cann.extension.extract_slice(
         normalized,
         [0, 0, 0],
@@ -111,8 +132,9 @@ def _qk_norm_rope_kernel(
 
 
 def _tile_config(num_tokens: int, num_heads: int) -> tuple[int, int]:
-    heads_per_block = min(MAX_HEADS_PER_BLOCK, triton.next_power_of_2(num_heads))
-    tokens_per_block = 1 if num_tokens == 1 or num_heads <= 16 else 2
+    heads_per_block = 8
+    del num_tokens
+    tokens_per_block = 1
     return tokens_per_block, heads_per_block
 
 

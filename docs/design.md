@@ -5,14 +5,16 @@
 | 算子 | `fused_qk_norm_rope` |
 | 上游实现 | `vllm-project/vllm-omni`，`vllm_omni/diffusion/layers/fused_qk_norm_rope.py` |
 | 上游提交 | `717f8a3499fb7dc6b3128b58a8baeacded1a7bbb` |
-| 目标平台 | Ascend A2 / A5 |
+| 目标平台 | Ascend A2 / A3 / 950 / A5 |
 | A2 实测平台 | Atlas 800I A2，Ascend 910B3，NPU 0 |
 | A2 软件环境 | CANN 9.1.0，Torch 2.10.0，torch_npu 2.10.0，triton-ascend 3.2.2 |
+| A3 实测平台 | Ascend 910_9382，CANN 9.1.0，triton-ascend 3.6.0；使用 `npu.a2` provider |
+| 950/A5 实测平台 | Ascend950PR，CANN 9.1.0，triton-ascend 3.6.0；使用 `npu.a5` provider |
 | 目标几何 | BF16，head_dim=128，rotary_dim=96，half-split RoPE |
 
 ## 背景
 
-MiniMax-H3 的 attention 层对每个 head 先做 RMSNorm，再应用 GPT-J 半维 RoPE。上游按 Q/K 各一次 launch 的 Triton 实现给出了功能基线和性能基线。A2 适配在保持数值语义不变的前提下，将 Q/K 合并为一个 persistent kernel，一次调用只产生一个设备 kernel。
+MiniMax-H3 的 attention 层对每个 head 先做 RMSNorm，再应用 GPT-J 半维 RoPE。上游按 Q/K 各一次 launch 的 Triton 实现给出了功能基线和性能基线。A2 适配将 Q/K 合并为一个 persistent kernel，一次调用产生一个设备 kernel。A5 为保持三个精确数值边界，采用 Q/K 各一次 launch，一次调用产生两个设备 kernel。
 
 输入支持调用方提供的 token/head/dim stride，覆盖从 packed QKV 中切出的 Q/K 视图。输出保持连续布局。当前 Triton 快路径处理 BF16、head_dim=128、rotary_dim=96 且 Q/K head 数相同的 half-split 输入；interleaved、其他几何、非 BF16 和不同 Q/K head 数继续进入既有 eager 路径。
 
@@ -120,6 +122,19 @@ head 维按 8 个一组循环。每组的计算顺序为：
 
 Q 和 K 在同一个 kernel 内顺序处理，复用 token 索引与 RoPE 表。进程内地址偏移在最大 offset 小于 \(2^{31}\) 时使用 int32 索引，否则使用 int64。57 head 的尾块通过 mask 处理，越界输出不写入。
 
+## A5 physical-vector kernel
+
+A5 快路径位于 `mojo_opset/kernels/npu_a5_triton/qk_norm_rope.py`。每个 program 处理 1 个 token、8 个 head。Q/K 输入 stride 作为编译期参数传入，使 packed QKV 视图在每次特化中保持固定地址序列。
+
+该路径按以下顺序生成每个 head：
+
+1. 以 1D FP32 行计算 \(x_j^2\)，取前 64 维与后 64 维相加，再做 64-lane 归约。
+2. 使用 \(1/\sqrt{\mu+\epsilon}\) 得到与 NPU `F.rms_norm` 逐位一致的 \(\operatorname{inv\_rms}\)。
+3. 在该 head 内完成 BF16 归一化舍入，并写入 \(1\times8\times128\) tile。
+4. 从完整 BF16 tile 取 48/48/32 三段，在 FP32 中做 RoPE，再合并写回。
+
+逐 head 的 1D 统计顺序是 A5 精确性要求。将多个 head 放入同一个归约轴会改变 FP32 求和树，在 BF16 中点附近产生最多 1 ULP 的 `inv_rms` 差异，并导致直通维不再满足 `torch.equal`。当前 H8 配置在两个精确边界测试和完整 67 项矩阵上均通过。
+
 ## 调度与回退
 
 A2/A5 Triton provider 在 `OPS` 和对应 YAML 中注册为默认实现。公开函数只把满足以下条件的输入分派到 Triton：
@@ -130,11 +145,11 @@ A2/A5 Triton provider 在 `OPS` 和对应 YAML 中注册为默认实现。公开
 - half-split RoPE；
 - Q/K head 数相同。
 
-其余输入进入既有 eager 实现。Torch provider 提供可执行参考路径。A5 源码位于 `mojo_opset/kernels/npu_a5_triton/qk_norm_rope.py`，配置和注册已完成；A5 实机结果未包含在本次 A2 验证中。
+其余输入进入既有 eager 实现。Torch provider 提供可执行参考路径。A2、A3 和 950/A5 均已完成 67 项精度实机验证。A3 当前仓库只有 `npu.a2` 与 `npu.a5` 两个 provider，因此 A3 实机通过 `npu.a2` provider 运行，报告不声明原生 `npu.a3` provider。
 
 ## 性能测量
 
-性能工具位于 `tools/benchmark_fused_qk_norm_rope.py`。每次测量先预热 5 次，再用 torch_npu profiler 连续记录 30 次调用。计时值从 `kernel_details.csv` 中提取窗口内全部设备 kernel 的 `Duration(us)`，按调用求和后取均值。persistent 实现每次调用包含 1 个设备 kernel。
+性能工具位于 `tools/benchmark_fused_qk_norm_rope.py`。每次测量先预热 5 次，再用 torch_npu profiler 连续记录 30 次调用。计时值从 `kernel_details.csv` 中提取窗口内全部设备 kernel 的 `Duration(us)`，按调用求和后取均值。A2 persistent 实现每次调用包含 1 个设备 kernel，A5 实现包含 2 个设备 kernel。
 
 带宽基准使用 256 MiB BF16 `copy_`，计入 512 MiB 读写流量，在每一轮 benchmark 开始时现场标定。MBU 由任务公式计算：
 
@@ -144,17 +159,17 @@ $$
 {t_{\mathrm{kernel}}\cdot BW}.
 $$
 
-最终矩阵和瓶颈分析见 `docs/performance_report.md`。所有原始数据保存在 `evidence/performance/`。
+最终矩阵和瓶颈分析见 `docs/performance_report.md`。A2、A3 与 A5 原始数据分别保存在 `evidence/performance/`、`evidence_a3_core/` 与 `evidence_a5_core/performance/`。
 
 ## 验证设计
 
-A2 精度套件覆盖 tokens 1/257/1024/4096/16384/65536、heads 8/56/57、连续与 packed-QKV strided 布局、BF16/FP32 RoPE 表和模块封装。普通矩阵使用 `atol=0.0625, rtol=0.02`；三个关键数值边界使用 `torch.equal` 或零容差检查：
+A2、A3 与 A5 精度套件覆盖 tokens 1/257/1024/4096/16384/65536、heads 8/56/57、连续与 packed-QKV strided 布局、BF16/FP32 RoPE 表和模块封装。普通矩阵使用 `atol=0.0625, rtol=0.02`；三个关键数值边界使用 `torch.equal` 或零容差检查：
 
 - BF16 norm round 生效；
 - 同一 head 的两个 pair 元素共享一次 RMS 统计；
 - 96 至 127 维逐位等于 BF16 归一化值。
 
-最终 A2 运行结果为 67 项全部通过。详细命令和结果见 `docs/self_test_report.md`。
+最终 A2、A3、950/A5 均为 67 项全部通过。详细命令和结果见 `docs/self_test_report.md`。
 
 ## 证据
 
@@ -166,3 +181,11 @@ A2 精度套件覆盖 tokens 1/257/1024/4096/16384/65536、heads 8/56/57、连�
 - `evidence/baseline/comparison.json`
 - `evidence/npu-smi.txt`
 - `evidence/environment.txt`
+- `evidence_a3_core/a3_accuracy.log`
+- `evidence_a3_core/a3_performance.log`
+- `evidence_a3_core/benchmark.json`
+- `evidence_a3_core/profile_summary.csv`
+- `evidence_a5_core/a5_accuracy.log`
+- `evidence_a5_core/a5_performance.log`
+- `evidence_a5_core/performance/benchmark.json`
+- `evidence_a5_core/performance/profile_summary.csv`
