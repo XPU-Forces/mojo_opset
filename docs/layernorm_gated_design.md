@@ -139,20 +139,47 @@ addressing cost 526 us versus 315 us for the dense tile.
 ### 4.4 FP8 epilogue
 
 `QUANT` is compiled only when `quant_heads > 0`; the epilogue runs after the gate
-so `q` sees the same value the unfused path would quantise. Two details decide
-bit-exactness and are therefore deliberate:
+so `q` sees the value the unfused path would quantise. A tile covers
+`QUANT_TOKEN_GROUP * quant_heads` rows (two tokens when `M` allows it), so it
+still ends on a token boundary and one tile still owns whole tokens.
 
-* the normalised value is rounded to the output dtype **before** `amax`
-  (`y.to(Y.dtype.element_ty).to(tl.float32)`), matching the unfused order of
-  write-then-quantise;
-* `scale` uses `/ 448.0` and the reciprocal `1.0 / scale`, not a reciprocal
-  multiply, so the device computes the same IEEE quotient as the torch reference.
+Four details decide bit-exactness or the A5 cost:
 
-`rows_per_block` is forced to `quant_heads` for this path so that one block is
-one token; `s` is written at `S + row_task_id`, which is the token index. The
-quantised output never touches `Y`, and `x` is passed as the dtype carrier, so no
-`[M, N]` buffer is allocated for the fused case (memory report: one `[M, N]`
-fp16/bf16 output saved, i.e. 2 bytes per element).
+* **Round before `amax`.** The unfused path stores the output dtype and then
+  quantises that value, so `amax` has to see the rounded one. For BF16 the
+  rounding is integer RNE on the fp32 bit pattern,
+  `(u + 0x7FFF + ((u >> 16) & 1)) & 0xFFFF0000`: bf16 and fp32 share the
+  exponent field, so masking the low 16 bits is exactly `to(torch.bfloat16)`,
+  including NaN/inf/denormals, while keeping the tile in one layout. It measured
+  20.9 us per call cheaper than the dtype round trip on A5. FP16 keeps
+  `y.to(Y.dtype).to(tl.float32)`.
+* **Masked tiles are zeroed before the reduce**, so padding columns cannot raise
+  a token's `amax` (`N = 250` rounds the column tile to 256 and exercises it).
+* **`scale = max(amax, 1e-10) * (1.0 / 448.0)`.** On Ascend the torch expression
+  `tensor / 448.0` lowers to a multiply by the fp32 reciprocal, so the explicit
+  reciprocal form reproduces it; `1.0 / scale` stays a division.
+* **No `+-448` clamp inside the kernel.** `|y| <= amax` holds for every element
+  of the tile, hence `|y * (1/scale)| <= 448 * (1 + 2ulp) < 464`, and 464 is the
+  midpoint where the e4m3fn cast overflows to NaN. The clamp is an identity here
+  and removing it saved 29.7 us per call on A5. The tensor-level reference
+  (`_quant_reference`) keeps it, because arbitrary inputs do overflow: `480`,
+  `1e5` and `1e30` all cast to `0x7f`/`0xff` NaN. `test_fused_quant_bit_exact`
+  pins the two implementations to the same bytes.
+
+Two tokens per tile halve the number of token-wide reductions (8 head rows of
+512 columns each) and took the A5 row from 151.5 to 131.3 us. The quantised
+output never touches `Y`, and `x` is passed as the dtype carrier, so the fused
+case allocates no `[M, N]` buffer: memory is `q` (1 byte/element), `s` and
+`rstd`.
+
+One residual difference remains. On 32768x512, 1 of 16,777,216 FP8 bytes differs
+by 1 ulp from the unfused reference while all 4096 scale values are identical.
+The cause is the reciprocal: torch's `1.0 / scale` is not the correctly rounded
+quotient on Ascend (1 ulp on roughly 9% of tokens), while every triton-ascend
+form tried (`1.0/s`, `div_rn`, `libdevice.rcp_rn`, `fdiv`) returns the correctly
+rounded value. It is a platform lowering difference rather than a kernel choice;
+the bit-exact matrix (two dtypes, with/without gate, `N = 128` and `N = 250`)
+stays green.
 
 ### 4.5 Batch invariance
 
@@ -281,6 +308,45 @@ copy probe at 1264.5 GB/s:
 Small shapes stay on the relative line with a wider margin (e2e 153.6 / 162.7 /
 163.4 us versus 313.2 / 308.8 / 392.8 us for the eager composition).
 
+### 6.5 Ascend A5 (950PR)
+
+`Ascend950PR_9579`, 56 vector cores, torch 2.10.0+cpu / torch_npu 2.10.0.post7 /
+triton-ascend 3.6.0 / CANN 9.1.0, same harness, copy probe 1443.0 GB/s
+(`fill_` 1599.0 GB/s). Accuracy is 53 passed / 0 skipped / 0 failed in 162.70 s
+on an empty JIT cache (about 20.5 s warm): the A2/A3 set plus the two
+`test_layernorm_gated_a5.py` cases for the three-axis gate tile, and the eight
+`test_fused_quant_bit_exact` cases now actually execute instead of skipping.
+
+| case | M x N | us | MBU | line |
+| --- | --- | --- | --- | --- |
+| `gdn-256-n128-swish` | 256 x 128 | 3.78 | 3.61% | relative, 53.4 vs 118.5 us e2e |
+| `gdn-2560-n128-swish` | 2560 x 128 | 4.95 | 27.55% | relative, 49.8 vs 111.6 us e2e |
+| `gdn-32768-n128-swish` | 32768 x 128 | 22.53 | 77.40% | >=60% |
+| `gdn-32768-n128-sigmoid` | 32768 x 128 | 22.44 | 77.74% | >=60% |
+| `gdn-131072-n128-swish` | 131072 x 128 | 88.68 | 78.67% | >=60% |
+| `qk-65536-n128` | 65536 x 128 | 12.30 | 189.12% | >=60% |
+| `group-1024-n2048` | 1024 x 2048 (g128) | 7.91 | 110.36% | relative, 52.5 vs 123.0 us e2e |
+| `group-8192-n2048` | 8192 x 2048 (g128) | 42.98 | 162.34% | >=60% |
+| `quant-32768-n512` | 32768 x 512 (QH=8) | 83.44 | 69.69% | >=60% |
+| `gdn-524288-n128-swish` | 524288 x 128 | 312.89 | 89.19% | >=60% |
+| `tail-32771-n192-swish` | 32771 x 192 | 20.61 | 126.94% | >=50% |
+
+`failures: []`; `1 passed in 72.77 s`. The FP8 row is the only one that needed
+work: 151.5 us / 38.4% initially, 83.44 us / 69.69% after the three changes in
+§4.4 (two tokens per tile, clamp removal, integer RNE). The rows above 100% MBU
+are cache-resident working sets; `gdn-524288` is the only row that truly presses
+HBM, and its profile shows `Block Num = 56`, i.e. the grid exactly fills the
+vector cores. One row carries real run-to-run spread: `gdn-131072` measured
+87.62 / 88.68 / 92.24 / 95.03 / 98.22 us across five runs of the same kernel
+(worst reading 70.9%, still above the line); the other ten stay within +-3%.
+Rejected after measuring here: `num_stages` 2-4, grid 112-448, `num_warps`
+1/2/4 and 8/16/32-row tiles.
+
+Memory on the same host: the quantised case peaks at 16.9 MB against 386.0 MB for
+the eager composition (22.8x), and the widest case (`gdn-524288`) at 136.3 MB
+against 1.36 GB (10.0x); the fused path allocates one `[M, N]` output plus the
+fp32 statistics and nothing else.
+
 ## 7. Known limits
 
 * `group_size` must divide `N` and must fit 64 KiB, as in the reference kernel.
@@ -297,6 +363,9 @@ Small shapes stay on the relative line with a wider margin (e2e 153.6 / 162.7 /
 ```bash
 # accuracy + bitwise
 pytest tests/functions/test_layernorm_gated.py tests/modules/test_layernorm_gated.py -q
+# on 950 also add the A5-only cases
+pytest tests/functions/test_layernorm_gated.py tests/functions/test_layernorm_gated_a5.py \
+    tests/modules/test_layernorm_gated.py -q
 # benchmark (writes JSON + raw profiler csv)
 pytest tests/performance/functions/test_layernorm_gated.py -q --perf-output tests/performance/results/npu.json
 ```

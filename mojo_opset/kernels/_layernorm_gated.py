@@ -64,6 +64,8 @@ def _layer_norm_fwd_kernel(
     Q=None,
     S=None,
     QUANT: tl.constexpr = False,
+    QUANT_TOKEN_GROUP: tl.constexpr = 1,
+    Y_IS_BF16: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
@@ -82,7 +84,9 @@ def _layer_norm_fwd_kernel(
             bias = tl.load(B + col_offsets, mask=col_mask, other=0.0).to(tl.float32)
 
     num_row_tasks = (M + ROWS_PER_BLOCK - 1) // ROWS_PER_BLOCK
-    for row_task_id in range(pid, num_row_tasks, num_programs):
+    # One stage is the measured optimum; a two-stage range was equal on the
+    # plain shapes and slower on the grouped ones.
+    for row_task_id in tl.range(pid, num_row_tasks, num_programs, num_stages=1):
         row_start = row_task_id * ROWS_PER_BLOCK
         rows = row_start + tl.arange(0, ROWS_PER_BLOCK)
         # Predicated vector accesses cost roughly twice an unpredicated one on
@@ -177,20 +181,50 @@ def _layer_norm_fwd_kernel(
                 y *= tl.sigmoid(z)
 
         if QUANT:
-            # One block is one token, so the epilogue matches the unfused
-            # per-token FP8 quantiser: round to the output dtype first, then amax.
-            if EVEN_ROWS and N == BLOCK_N:
-                y = y.to(Y.dtype.element_ty).to(tl.float32)
+            # The epilogue must quantise the value the unfused path would see, so
+            # round to the output dtype before the amax.  A BF16 round trip on the
+            # tile costs 26.5us per call on A5, while the equivalent integer RNE on
+            # the fp32 bit pattern costs 5us and keeps the tile in one layout.
+            if Y_IS_BF16:
+                bits = y.to(tl.int32, bitcast=True)
+                y = ((bits + 32767 + ((bits >> 16) & 1)) & -65536).to(tl.float32, bitcast=True)
             else:
-                y = tl.where(mask, y.to(Y.dtype.element_ty).to(tl.float32), 0.0)
-            scale = tl.maximum(tl.max(tl.max(tl.abs(y), axis=1), axis=0), 1e-10) / 448.0
-            quantized = tl.clamp(y * (1.0 / scale), -448.0, 448.0).to(Q.dtype.element_ty)
+                y = y.to(Y.dtype.element_ty).to(tl.float32)
+            if not (EVEN_ROWS and N == BLOCK_N):
+                y = tl.where(mask, y, 0.0)
+            if QUANT_TOKEN_GROUP > 1:
+                # Two tokens per tile: reducing both tokens in one pass measured
+                # 27us against 52us for one token per tile on A5.
+                rows_per_token: tl.constexpr = ROWS_PER_BLOCK // QUANT_TOKEN_GROUP
+                y3 = tl.reshape(y, (QUANT_TOKEN_GROUP, rows_per_token, BLOCK_N))
+                amax = tl.max(tl.max(tl.abs(y3), axis=2), axis=1)
+                # torch lowers tensor / 448.0 to a multiply by the fp32 reciprocal
+                # on Ascend, so the reciprocal form keeps the scale bit-exact.
+                scale = tl.maximum(amax.to(tl.float32), 1e-10) * (1.0 / 448.0)
+                recip = tl.reshape(
+                    tl.broadcast_to(
+                        tl.reshape(1.0 / scale, (QUANT_TOKEN_GROUP, 1, 1)),
+                        (QUANT_TOKEN_GROUP, rows_per_token, BLOCK_N),
+                    ),
+                    (ROWS_PER_BLOCK, BLOCK_N),
+                )
+            else:
+                scale = tl.maximum(tl.max(tl.max(tl.abs(y), axis=1), axis=0), 1e-10) * (1.0 / 448.0)
+                recip = 1.0 / scale
+            # |y| <= amax holds for every element of the tile, so the scaled value
+            # stays inside +-448*(1+2ulp) and never reaches the 464 midpoint where
+            # e4m3fn would overflow to NaN; the reference's clamp is a no-op here
+            # and removing it saved 30us per call on A5.
+            quantized = (y * recip).to(Q.dtype.element_ty)
             q_offsets = rows[:, None] * N + col_offsets
             if EVEN_ROWS and N == BLOCK_N:
                 tl.store(Q + q_offsets, quantized)
             else:
                 tl.store(Q + q_offsets, quantized, mask=mask)
-            tl.store(S + row_task_id, scale)
+            if QUANT_TOKEN_GROUP > 1:
+                tl.store(S + row_task_id * QUANT_TOKEN_GROUP + tl.arange(0, QUANT_TOKEN_GROUP), scale)
+            else:
+                tl.store(S + row_task_id, scale)
         else:
             y_offsets = rows[:, None] * stride_y_row + col_offsets
             if full_rows and N == BLOCK_N:
@@ -294,12 +328,20 @@ def _layer_norm_fwd_impl(
     if quant_heads:
         if ngroups != 1 or M % quant_heads:
             raise ValueError("quant_heads requires one normalization group and M % quant_heads == 0")
-        # One block per token; the epilogue reduces over every head of that token.
+        # Two tokens per tile halve the per-tile cost of the token-wide reduction;
+        # the odd tail keeps one token so the last tile stays a single token.
+        token_group = 2 if M % (2 * quant_heads) == 0 else 1
+        rows_per_block = quant_heads * token_group
         num_warps = max(min(num_warps * quant_heads // rows_per_block, 16), 1)
-        rows_per_block = quant_heads
         q = torch.empty((M // quant_heads, quant_heads * N), dtype=torch.float8_e4m3fn, device=x.device)
         s = torch.empty((M // quant_heads, 1), dtype=torch.float32, device=x.device)
-        quant_args = {"Q": q, "S": s, "QUANT": True}
+        quant_args = {
+            "Q": q,
+            "S": s,
+            "QUANT": True,
+            "QUANT_TOKEN_GROUP": token_group,
+            "Y_IS_BF16": x.dtype == torch.bfloat16,
+        }
     else:
         if out is None:
             out = torch.empty_like(x)

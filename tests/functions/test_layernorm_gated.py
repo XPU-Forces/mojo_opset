@@ -133,13 +133,15 @@ def _quant_reference(y, quant_heads):
 @pytest.mark.bitwise
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("has_z", [False, True])
-def test_fused_quant_bit_exact(accuracy_backend, dtype, has_z):
+@pytest.mark.parametrize("n", [128, 250])
+def test_fused_quant_bit_exact(accuracy_backend, dtype, has_z, n):
     implementation, target, device = accuracy_backend
     if implementation == "torch":
         pytest.skip("FP8 bit-exact check targets the fused accelerator epilogue")
     if not target.startswith("npu.a5"):
         pytest.skip("FP8 quant is formally required only on Ascend 950")
-    case = (512, 128, True, False, "2d" if has_z else "none", True, "swish", None)
+    # n=250 rounds the column tile to 256, exercising the masked store path.
+    case = (512, n, True, False, "2d" if has_z else "none", True, "swish", None)
     x, weight, bias, z = _make_inputs(case, dtype, device)
     fused, _, _ = F.layernorm_gated(
         x,
