@@ -437,6 +437,76 @@ within ±1.5%. Unlike the A5 re-run there is no FP8 row to observe the fp8
 lowering change on, because that row skips by device name on A3. Fused peak
 memory is byte-for-byte identical to 9.1.0 for all ten cases.
 
+### 6.8 A2 re-run on CANN 9.2.0
+
+The A2 host from §6.1 became unreachable after the environment was reissued:
+the tunnel still opened (jump authentication and direct-tcpip both fine, target
+running OpenSSH 9.6 offering `publickey,password`) but the root password was
+rejected on every attempt and none of the local keys were accepted, which
+points at a credential problem on the target rather than a tunnel problem. The
+environment was therefore rebuilt, and the rebuilt machine is a *different SKU*:
+`Ascend910B2` (bus-id `0000:01:00.0`) instead of the original `Ascend910B3`
+(bus-id `0000:41:00.0`). Its absolute numbers are consequently not comparable
+to §6.1; what the rebuild buys is a same-box 9.1.0 ↔ 9.2.0 comparison.
+
+Both CANN versions were run on that host: the image's 9.1.0 tree as the
+baseline and a side-installed 9.2.0 under `/usr/local/cann920/Ascend/cann-9.2.0`.
+The four tested files hash identically to the A5 and A3 runs (kernel sha256
+`747b106e…d99663b`), so the version is the only variable. The host is aarch64
+(openEuler 24.03 LTS-SP3) with npu-smi 26.1.1.
+
+Two environment facts are worth keeping here. First, the ops package is
+SoC-specific: this host needs `ascend-cann-910b-ops-9.2.0-0.conda`, not the
+`a3-ops` or `950-ops` build, even though all three come from the same
+`linux-aarch64` conda channel. Second, and specific to this image, the
+toolkit's `cann-pto-as` sub-package installer shells out to `python3 -m pip`,
+and `/usr/bin/python3` here is 3.11.6 *without* pip — so the first attempt
+died with `cann-pto-as_9.2.0_linux-aarch64.run install failed` and the whole
+toolkit install rolled back, leaving an empty `cann-9.2.0` tree. Putting the
+CANN-image interpreter (`/usr/local/python3.12.13/bin`, pip 26.2) at the front
+of `PATH` before re-running the same `.run` installs it cleanly.
+
+Accuracy is 43 passed / 8 skipped / 0 failed on *both* CANN versions (51 cases
+collected; the eight skips are the `test_fused_quant_bit_exact` cases that gate
+on the device name). This is the first run of the final test file on A2-class
+hardware of any SKU. The 11-row suite reports `failures: []` three times
+(97.15 s on 9.1.0, 87.90 s and 76.07 s on 9.2.0). Calibration: `copy_`
+1244.96 / 1242.69 / 1242.33 GB/s, `fill_` 1460.76 / 1781.29 / 1458.78 — the
+single 1781.29 GB/s `fill_` outlier is probe jitter (the next run is back at
+1458.78) and the `copy_` denominator moves by ≤0.2%, so the version comparison
+stays clean.
+
+| case | 9.1.0 us / MBU | 9.2.0 us / MBU (run1, run2) |
+| --- | --- | --- |
+| `gdn-256-n128-swish` | 3.903 / 4.06% | 3.857, 3.853 / 4.11%, 4.12% |
+| `gdn-2560-n128-swish` | 6.629 / 23.83% | 6.552, 6.625 / 24.15%, 23.89% |
+| `gdn-32768-n128-swish` | 28.131 / 71.86% | 28.216, 28.134 / 71.77%, 72.00% |
+| `gdn-32768-n128-sigmoid` | 25.575 / 79.04% | 25.466, 25.380 / 79.52%, 79.82% |
+| `gdn-131072-n128-swish` | 94.597 / 85.48% | 94.454, 94.375 / 85.76%, 85.86% |
+| `qk-65536-n128` | 28.367 / 95.01% | 28.187, 28.347 / 95.80%, 95.28% |
+| `group-1024-n2048` | 17.809 / 56.79% | 17.799, 17.847 / 56.93%, 56.79% |
+| `group-8192-n2048` | 116.426 / 69.45% | 116.412, 116.335 / 69.59%, 69.66% |
+| `quant-32768-n512` | skipped | skipped (FP8 is 950-only) |
+| `gdn-524288-n128-swish` | 470.429 / 68.75% | 468.871, 474.914 / 69.11%, 68.25% |
+| `tail-32771-n192-swish` | 36.099 / 84.00% | 36.311, 36.423 / 83.67%, 83.43% |
+
+Every measured row stays above its line, and the largest deviation between the
+three runs is 1.28% on the smallest case; every large shape stays within 1.0%.
+The FP8 row skips by device name here as well, so the fp8 lowering change
+remains observable only on the 950. Fused peak memory is byte-for-byte
+identical between 9.1.0 and 9.2.0, and equal to the A3 and A5 values.
+
+Unlike A3, this device name needs no override: `Ascend910B2` matches the
+target-detection table and resolves to `npu.a2.910b2` on its own, so
+`MOJO_ASCEND_ARCH` stays unset for both runs.
+
+One packaging artifact is worth recording so it is not mistaken for local
+edits. The repository snapshot was packed from a Windows checkout with
+`core.autocrlf=true`, and on the device `core.autocrlf` is unset, so `git
+status` reports 432 files as modified — pure line-ending noise
+(93876 insertions / 93876 deletions). The four tested files are not among
+them and are byte-identical to the index.
+
 ## 7. Known limits
 
 * `group_size` must divide `N` and must fit 64 KiB, as in the reference kernel.
@@ -461,8 +531,12 @@ pytest tests/performance/functions/test_layernorm_gated.py -q --perf-output test
 ```
 
 On A3 the device reports `Ascend910_9382`, which the target detection does not
-know, so the run needs `MOJO_ASCEND_ARCH=a2`. On CANN 9.2.0 the 9.1.0 entries
-have to leave `LD_LIBRARY_PATH`, `PYTHONPATH` and `PATH` before the 9.2.0
-`set_env.sh` is sourced; the side-installed tree is
+know, so the run needs `MOJO_ASCEND_ARCH=a2`; the rebuilt A2 reports
+`Ascend910B2`, which the detection *does* know, so it needs no override. On
+CANN 9.2.0 the 9.1.0 entries have to leave `LD_LIBRARY_PATH`, `PYTHONPATH` and
+`PATH` before the 9.2.0 `set_env.sh` is sourced; the side-installed tree is
 `/usr/local/cann920/Ascend/cann-9.2.0` and the packages come from the
-`linux-aarch64` conda channel on A3 and the `linux-64` one on the 950.
+`linux-aarch64` conda channel on A2 and A3 (with the SoC-specific ops build:
+`ascend-cann-910b-ops` on A2, `ascend-cann-a3-ops` on A3) and the `linux-64`
+one on the 950. On the A2 image the toolkit installer additionally needs an
+interpreter with pip on `PATH` — see §6.8.
