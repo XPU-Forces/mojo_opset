@@ -31,6 +31,7 @@ def _layer_norm_fwd(
         is_rms_norm=is_rms_norm,
         activation=activation,
         quant_heads=quant_heads,
+        use_3d_tile=True,
     )
 
 

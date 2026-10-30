@@ -125,9 +125,11 @@ def test_strided_gate_matches_contiguous_gate(accuracy_backend, dtype, before):
 
 def _quant_reference(y, quant_heads):
     tokens, width = y.shape
-    grouped = y.reshape(tokens // quant_heads, quant_heads * width)
+    grouped = y.reshape(tokens // quant_heads, quant_heads * width).float()
     amax = torch.amax(torch.abs(grouped), dim=-1, keepdim=True)
-    scale = torch.maximum(amax, torch.full_like(amax, 1e-10)) / 448.0
+    scale = torch.maximum(
+        amax, torch.full_like(amax, 1e-10)
+    ) / 448.0
     q = torch.clamp(grouped * (1.0 / scale), -448.0, 448.0).to(
         torch.float8_e4m3fn
     )

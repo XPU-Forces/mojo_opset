@@ -49,14 +49,14 @@ RMSNorm 的 \(\widehat X=X'/\sigma\)。`HAS_Z` 且 `NORM_BEFORE_GATE=True` 时�
 每轮持久循环处理 `ROWS_PER_BLOCK` 行和一个归一化组。二维 tile 为 `[ROWS_PER_BLOCK, BLOCK_N]`：
 
 - `program_id(0)` 映射持久 row-task worker，`program_id(1)` 映射归一化组。
-- 行 worker 数取 `min(AI Vector Core 数, ceil(M / ROWS_PER_BLOCK))`；每个 worker 以固定步长消费后续 row-task，权重只在进入循环前加载一次。
+- 行 worker 数取 `min(AI Vector Core 数, ceil(M / ROWS_PER_BLOCK))`；每个 worker 以固定步长消费后续 row-task，权重只在进入循环前加载一次。量化 block 较短，A5 使用两组排队 block 映射到每个 Vector Core，以重叠 epilogue 与 store。
 - `BLOCK_N=min(65536//element_size, next_power_of_2(N))`，`N` 作为 constexpr 参与特化。
 - `group_size <= 256` 且不是二次幂时令 `BLOCK_N=group_size`，例如尾块用例使用精确的 192 列 tile，避免为 192 个有效列计算 256 列 mask。
 - 行尾和列尾由合并 mask 处理，尾块不写越界地址。
 - `M` 能被行 tile 整除时启用 `EVEN_ROWS` constexpr，编译期消除行 mask。
 - 权重和偏置按组偏移广播，每组只读取对应的 \(D\) 个元素。
 - LayerNorm 在 FP32 tile 上先求均值，再求中心化方差；RMSNorm 直接求平方均值。
-- 2D 门控按 `stride_z_row` 寻址；3D 门控按行号分解为 token/head，并使用 token/head 步长聚合搬运。
+- 2D 门控按 `stride_z_row` 寻址；3D 门控按行号分解为 token/head，并使用 token/head 步长聚合搬运。A5 的超长 3D 配置把 tile 显式组织为 `[tokens, heads, BLOCK_N]` 后无拷贝 reshape 为二维 tile；A2/A3 保留原有二维寻址路径。
 - 门控顺序、归一化类型、bias、3D 和激活类型全部映射为 `constexpr`，消除运行时分支。
 
 公开分派先在 `functions/layernorm_gated.py` 将输入展平为 \(M\times N\)，保留 3D 门控视图，再调用 provider 的 `layernorm_gated_fwd`。非连续门控只在调用方传入最后一维不连续张量时连续化；合法 3D strided 视图直接进入 kernel，避免额外拷贝。
@@ -74,6 +74,8 @@ q=\mathrm{clamp}(Y/s,-448,448)
 
 \(q\) 写为 float8 e4m3，\(s\) 写为 FP32。量化块布局为 `[M/QH, QH*N]`，scale 布局为 `[M/QH, 1]`。该路径把归一化、门控、舍入、amax 和量化放在一个 kernel 内。
 
+实现先对每个 head 行求绝对值最大值，再对 head 维求最大值，以保持与展平分组 amax 相同的位结果。scale 使用乘以 \(1/448\) 的 FP32 常数，避免设备端除法舍入产生 1 ULP 偏差；该偏差会在 clamp 边界造成相邻 e4m3 码字差异。
+
 ## 行块与批不变
 
 普通 BF16 路径按归一化宽度选择行 tile：
@@ -89,6 +91,8 @@ ROWS & 64 & 32 & 8 & 4 & 2
 其中 \(D\le128\) 且 \(M\cdot N\ge32\text{M}\) 元素时改用 `ROWS=32`：大流式张量使用 64 行 tile 时 A2 profiler 的 AIV vector ratio 为 68.4%、MTE2 ratio 为 72.6%，降到 32 行后分别提高到 91.9%、97.5%，单次耗时由约 614 µs 降到约 498 µs。该选择把中小尺寸的 128/192 列 tile 扩成较大行块，以提高每次搬运的连续性；2048 列的 GroupNorm 则以较小的行块控制 UB 占用。
 
 `LN_GATED_BATCH_INVARIANT=1` 时固定 `ROWS=4`，不读取 \(N\)、\(M\) 或硬件核数。共享行在不同 batch 下因此使用相同的归约树和 row-task 起点。量化路径固定 `ROWS=quant_heads`，以满足单 token 一个 program 的 epilogue。
+
+A5 的 3D 长序列优化只在 \(M\cdot N\ge32\text{M}\) 元素且行 tile 能被门控头数整除时启用。相同数学内容下，A5 长序列的 3D contiguous 路径在使用二维行偏移时约 526 µs，显式三轴 tile 后降到约 315 µs；二维连续门控的对照约为 284 µs。
 
 ## 精度和布局约束
 
@@ -106,7 +110,8 @@ ROWS & 64 & 32 & 8 & 4 & 2
 
 | 平台 | 精度 | 长序列 MBU | 尾块 MBU | 小 shape 相对线 |
 | --- | --- | ---: | ---: | --- |
-| Ascend910B3 A2 | 30 passed，4 FP8 平台跳过 | 64.31% | 70.57% | 全部优于 torch eager |
+| Ascend910B3 A2 | 30 passed，4 FP8 平台跳过 | 63.30% | 71.27% | 全部优于 torch eager |
 | Ascend910_9382 A3 | 30 passed，4 FP8 平台跳过 | 68.98% | 79.96% | 全部优于 torch eager |
+| Ascend950PR 950 | 34 passed | 89.13% | 124.76% | 全部优于 torch eager |
 
-A2/A3 的完整性能矩阵均通过。FP8 位一致与 950 性能需要 Ascend 950 实机，当前证据未覆盖该平台。
+A2/A3 的 10 个适用性能配置和 950 的完整 11 行矩阵均通过。950 的现场 `copy_` 标定带宽为 1437.93 GB/s，融合 FP8 行为 60.34%。

@@ -35,6 +35,7 @@ def _layer_norm_fwd_1pass_kernel(
     HAS_Z: tl.constexpr,
     Z_IS_3D: tl.constexpr,
     Z_HEADS: tl.constexpr,
+    Z_3D_ALIGNED: tl.constexpr,
     NORM_BEFORE_GATE: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
     ACTIVATION: tl.constexpr,
@@ -83,11 +84,36 @@ def _layer_norm_fwd_1pass_kernel(
                     (rows[:, None] // Z_HEADS) * stride_z_token
                     + (rows[:, None] % Z_HEADS) * stride_z_head
                 )
+                if Z_3D_ALIGNED:
+                    z_tokens = (
+                        row_start // Z_HEADS
+                        + tl.arange(0, ROWS_PER_BLOCK // Z_HEADS)
+                    )
+                    z_heads = tl.arange(0, Z_HEADS)
+                    z_offsets_3d = (
+                        z_tokens[:, None, None] * stride_z_token
+                        + z_heads[None, :, None] * stride_z_head
+                        + col_offsets[None, :]
+                    )
+                    z_mask_3d = (
+                        (
+                            z_tokens[:, None, None] * Z_HEADS
+                            + z_heads[None, :, None]
+                            < M
+                        )
+                        & (cols[None, None, :] < N)
+                    )
             else:
                 z_row_offsets = rows[:, None] * stride_z_row
 
         if HAS_Z and not NORM_BEFORE_GATE:
-            if EVEN_ROWS and N == BLOCK_N:
+            if Z_IS_3D and Z_3D_ALIGNED and EVEN_ROWS and N == BLOCK_N:
+                z = tl.load(Z + z_offsets_3d)
+                z = tl.reshape(z, (ROWS_PER_BLOCK, BLOCK_N)).to(tl.float32)
+            elif Z_IS_3D and Z_3D_ALIGNED:
+                z = tl.load(Z + z_offsets_3d, mask=z_mask_3d, other=0.0)
+                z = tl.reshape(z, (ROWS_PER_BLOCK, BLOCK_N)).to(tl.float32)
+            elif EVEN_ROWS and N == BLOCK_N:
                 z = tl.load(Z + z_row_offsets + col_offsets).to(tl.float32)
             else:
                 z = tl.load(
@@ -124,7 +150,13 @@ def _layer_norm_fwd_1pass_kernel(
             y += bias
 
         if HAS_Z and NORM_BEFORE_GATE:
-            if EVEN_ROWS and N == BLOCK_N:
+            if Z_IS_3D and Z_3D_ALIGNED and EVEN_ROWS and N == BLOCK_N:
+                z = tl.load(Z + z_offsets_3d)
+                z = tl.reshape(z, (ROWS_PER_BLOCK, BLOCK_N)).to(tl.float32)
+            elif Z_IS_3D and Z_3D_ALIGNED:
+                z = tl.load(Z + z_offsets_3d, mask=z_mask_3d, other=0.0)
+                z = tl.reshape(z, (ROWS_PER_BLOCK, BLOCK_N)).to(tl.float32)
+            elif EVEN_ROWS and N == BLOCK_N:
                 z = tl.load(Z + z_row_offsets + col_offsets).to(tl.float32)
             else:
                 z = tl.load(
@@ -140,7 +172,9 @@ def _layer_norm_fwd_1pass_kernel(
                 y = y.to(Y.dtype.element_ty).to(tl.float32)
             else:
                 y = tl.where(mask, y.to(Y.dtype.element_ty).to(tl.float32), 0.0)
-            scale = tl.maximum(tl.max(tl.abs(y)), 1e-10) / 448.0
+            scale = tl.maximum(
+                tl.max(tl.max(tl.abs(y), axis=1), axis=0), 1e-10
+            ) * (1.0 / 448.0)
             quantized = tl.clamp(y * (1.0 / scale), -448.0, 448.0).to(
                 Q.dtype.element_ty
             )
@@ -380,6 +414,7 @@ def _layer_norm_fwd_impl(
     is_rms_norm=False,
     activation: str = "swish",
     quant_heads: int = 0,
+    use_3d_tile: bool = False,
 ):
     M, N = x.shape
     if group_size is None:
@@ -440,7 +475,14 @@ def _layer_norm_fwd_impl(
         quant_args = {"Q": q, "S": s, "QUANT": True}
 
     row_tasks = triton.cdiv(M, rows_per_block)
-    grid = (min(_vector_core_count(), row_tasks), ngroups)
+    vector_cores = _vector_core_count()
+    # Quant blocks are short enough that two queued blocks per vector core
+    # overlap epilogue conversion and stores better than a single wave.
+    grid_size = min(
+        vector_cores * (2 if quant_heads else 1),
+        row_tasks,
+    )
+    grid = (grid_size, ngroups)
     common_args = (
         x,
         out,
@@ -465,6 +507,12 @@ def _layer_norm_fwd_impl(
         "HAS_Z": z is not None,
         "Z_IS_3D": z_is_3d,
         "Z_HEADS": z.shape[1] if z_is_3d else 1,
+        "Z_3D_ALIGNED": (
+            use_3d_tile
+            and z_is_3d
+            and rows_per_block % z.shape[1] == 0
+            and M * N >= 32 * 1024 * 1024
+        ),
         "NORM_BEFORE_GATE": norm_before_gate,
         "IS_RMS_NORM": is_rms_norm,
         "EVEN_ROWS": M % rows_per_block == 0,
