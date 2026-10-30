@@ -57,6 +57,7 @@ OPS = {
     "gelu": "gelu",
     "swiglu": "swiglu",
     "rms_norm": "rms_norm",
+    "fused_qk_norm_rope": "qk_norm_rope",
     "swa": "attention",
     "swa_infer": "attention",
     "native_swa_infer": "attention",
