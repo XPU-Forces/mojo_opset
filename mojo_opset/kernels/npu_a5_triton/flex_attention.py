@@ -2850,8 +2850,6 @@ def _flex_attention_dq_leaf(inputs: list[torch.Tensor], outputs: list[torch.Tens
         hfusion_enable_multiple_consumer_fusion=True,
         enable_select_analysis=False,
         limit_auto_multi_buffer_of_local_buffer='no-l0c',
-        intra_cache_num=3,
-        inter_cache_num=2
     )
 
 @_flex_attention_dq_leaf.register_fake
