@@ -1,4 +1,8 @@
-"""Ascend A2 wrapper for fused gated normalization."""
+"""Ascend A2 wrapper for fused gated normalization.
+
+Provider layout follows the public implementation of the same community task,
+``brandfucker/mojo_opset#516`` (Apache-2.0).
+"""
 
 from mojo_opset.kernels._layernorm_gated import _layer_norm_fwd_impl
 

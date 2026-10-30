@@ -1,5 +1,34 @@
 # `layernorm_gated` — fused gated normalization on Ascend NPU
 
+## 0. Provenance and references
+
+This operator was developed against two public sources:
+
+1. **SGLang v0.5.22** — `python/sglang/kernels/ops/attention/fla/layernorm_gated.py`
+   (itself a port of `fla-org/flash-linear-attention`). This is the operator being
+   carried over to Ascend and it defines the semantics, the public signatures and
+   the FP8 epilogue contract.
+2. **A public implementation of the same community task** —
+   `brandfucker/mojo_opset#516`, branch `feat/layernorm-gated-ascend` (Apache-2.0).
+   The persistent row-tile kernel structure, the 3-D gate addressing and the
+   provider layout follow that reference.
+
+The Ascend-specific engineering in this pull request is this repository's own work:
+
+* the predication policy that keeps every row tile but the last one free of
+  predicated vector accesses, after measuring that a predicated access costs
+  roughly twice an unpredicated one on Ascend;
+* the FP8 epilogue that rounds with an integer round-to-nearest-even instead of a
+  BF16 round trip, and that drops the `clamp` as provably redundant once the
+  scaling is derived from the same amax;
+* the batch-invariant dispatch that pins the row tile so that a row's result does
+  not depend on how many rows share the tile;
+* the tile and occupancy policy, including the three-axis 3-D gate tile and its
+  element-count threshold.
+
+The function front end (`functions/layernorm_gated.py`) and the accuracy harness
+(`tests/functions/test_layernorm_gated.py`) were written for this pull request.
+
 ## 1. Scope
 
 `layernorm_gated` is a forward-only inference primitive carried over from SGLang

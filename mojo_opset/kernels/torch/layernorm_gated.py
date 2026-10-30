@@ -1,4 +1,11 @@
-"""FP32 reference for fused gated normalization, including the FP8 epilogue."""
+"""FP32 reference for fused gated normalization, including the FP8 epilogue.
+
+The FP8 quantisation mirrors ``per_token_group_quant_fp8`` from torch_npu, which
+the task requires the fused epilogue to match bit for bit.  The reference
+follows the public implementation of the same community task,
+``brandfucker/mojo_opset#516`` (Apache-2.0), for the normalisation and gate
+semantics.
+"""
 
 import torch
 

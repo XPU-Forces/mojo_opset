@@ -1,4 +1,15 @@
-"""Fused LayerNorm/RMSNorm with optional gating and a per-token FP8 epilogue."""
+"""Front end for SGLang's gated LayerNorm / RMSNorm.
+
+The operator is a port of SGLang v0.5.22
+``python/sglang/kernels/ops/attention/fla/layernorm_gated.py``.  The public
+surface mirrors ``rms_norm_gated`` and ``_layer_norm_fwd``: a 2-D ``[M, N]``
+input, an optional gate that is either flat ``[M, N]`` or a strided
+``[T, H, D]`` view with ``T * H == M`` and ``D == N``, and an optional
+per-token FP8 epilogue.
+
+This module only prepares tensors and hands them to the selected provider; the
+numerics live in ``mojo_opset/kernels``.
+"""
 
 from typing import Optional
 
@@ -6,25 +17,52 @@ import torch
 
 from ._dispatch import load_impl
 
-_ACTIVATIONS = ("swish", "silu", "sigmoid")
+_ACTIVATION_NAMES = frozenset({"swish", "silu", "sigmoid"})
 
 
-def _normalize_gate(z, x_shape, x_2d_shape):
-    """Return a gate that shares the flattened row order of ``x``."""
+def _row_vector(name, tensor, width, device):
+    """Validate a per-column parameter and return a contiguous copy."""
+
+    if tuple(tensor.shape) != (width,):
+        raise ValueError(f"{name} must have shape [{width}], got {tuple(tensor.shape)}")
+    if tensor.device != device:
+        raise ValueError(f"{name} must live on the same device as x")
+    return tensor.contiguous()
+
+
+def _output_view(out, x, flat_shape):
+    """Validate an optional output buffer and return its flattened view."""
+
+    if out is None:
+        return None
+    if tuple(out.shape) != tuple(x.shape):
+        raise ValueError("out must have the same shape as x")
+    if out.stride(-1) != 1:
+        raise ValueError("out must be contiguous along its last dimension")
+    return out.reshape(flat_shape)
+
+
+def _gate_for_kernel(z, x_shape, flat_shape):
+    """Return the gate the kernel should read, or ``None`` when ungated.
+
+    A gate shaped exactly like ``x`` is flattened together with it.  A 3-D gate
+    keeps its tensor, because the kernel walks token and head strides directly
+    instead of reading a contiguous copy.
+    """
 
     if z is None:
         return None
     if tuple(z.shape) == tuple(x_shape):
-        z = z.reshape(x_2d_shape)
-        return z if z.stride(-1) == 1 else z.contiguous()
+        flat = z.reshape(flat_shape)
+        return flat if flat.stride(-1) == 1 else flat.contiguous()
     if len(x_shape) != 2:
-        raise ValueError("3D gated views require a 2D input")
-    if z.ndim != 3:
-        raise ValueError("z must be 2D [M, N] or 3D [T, H, D]")
-    if z.shape[0] * z.shape[1] != x_2d_shape[0] or z.shape[2] != x_2d_shape[1]:
-        raise ValueError("3D z must satisfy T*H=M and D=N")
+        raise ValueError("a 3-D gate is only accepted for a 2-D input")
+    if z.dim() != 3:
+        raise ValueError(f"z must be [M, N] or [T, H, D], got {tuple(z.shape)}")
+    if z.shape[0] * z.shape[1] != flat_shape[0] or z.shape[2] != flat_shape[1]:
+        raise ValueError(f"gate {tuple(z.shape)} does not tile a {flat_shape[0]}x{flat_shape[1]} input")
     if z.stride(-1) != 1:
-        raise ValueError("the last stride of z must be 1")
+        raise ValueError("z must be contiguous along its last dimension")
     return z
 
 
@@ -45,38 +83,31 @@ def layernorm_gated(
 ):
     """Return ``(result, mean, rstd)``.
 
-    ``result`` is the normalized output, or ``(q, s)`` when ``quant_heads > 0``.
-    ``mean`` is ``None`` for RMSNorm. Statistics have shape ``[ngroups*M]``.
-    With ``z`` the result is ``norm(x) * act(z)`` when ``norm_before_gate`` and
-    ``norm(x * act(z))`` otherwise; 3D gates address ``[T, H, D]`` views whose
-    last dimension is contiguous. Forward only: this operator is an inference
-    primitive and has no backward wrapper.
+    ``result`` holds the normalized output, or ``(q, s)`` when ``quant_heads``
+    is set.  ``mean`` is ``None`` for RMSNorm.  Both statistics are FP32 and
+    have shape ``[ngroups * M]``.  With a gate the result is
+    ``norm(x) * act(z)`` when ``norm_before_gate`` is set and
+    ``norm(x * act(z))`` otherwise.
+
+    Forward only: this operator is an inference primitive and has no backward
+    wrapper.
     """
 
-    if activation not in _ACTIVATIONS:
+    if activation not in _ACTIVATION_NAMES:
         raise ValueError("activation must be 'swish', 'silu', or 'sigmoid'")
     if x.ndim < 1 or not x.is_floating_point():
         raise ValueError("x must be a floating tensor")
     if x.stride(-1) != 1:
-        raise ValueError("the last stride of x must be 1")
-    if weight.shape != (x.shape[-1],) or weight.device != x.device:
-        raise ValueError("weight must have shape [N] on the input device")
-    if bias is not None and (bias.shape != (x.shape[-1],) or bias.device != x.device):
-        raise ValueError("bias must have shape [N] on the input device")
-    if out is not None:
-        if out.shape != x.shape:
-            raise ValueError("out must have the same shape as x")
-        if out.stride(-1) != 1:
-            raise ValueError("the last stride of out must be 1")
+        raise ValueError("x must be contiguous along its last dimension")
 
-    original_shape = x.shape
-    x_2d = x.reshape(-1, x.shape[-1])
-    z = _normalize_gate(z, original_shape, x_2d.shape)
-    if out is not None:
-        out = out.reshape(x_2d.shape)
-    weight = weight.contiguous()
+    width = x.shape[-1]
+    flat_shape = (-1, width)
+    x_2d = x.reshape(flat_shape)
+    gate = _gate_for_kernel(z, x.shape, x_2d.shape)
+    output = _output_view(out, x, flat_shape)
+    weight = _row_vector("weight", weight, width, x.device)
     if bias is not None:
-        bias = bias.contiguous()
+        bias = _row_vector("bias", bias, width, x.device)
 
     forward, _ = load_impl("layernorm_gated", implementation)
     result, mean, rstd = forward(
@@ -84,8 +115,8 @@ def layernorm_gated(
         weight,
         bias,
         float(eps),
-        z=z,
-        out=out,
+        z=gate,
+        out=output,
         group_size=group_size,
         norm_before_gate=norm_before_gate,
         is_rms_norm=is_rms_norm,
@@ -94,7 +125,7 @@ def layernorm_gated(
     )
 
     if not quant_heads:
-        result = result.reshape(original_shape)
+        result = result.reshape(x.shape)
     return result, mean, rstd
 
 
@@ -111,7 +142,7 @@ def rms_norm_gated(
     activation: str = "swish",
     implementation: Optional[str] = None,
 ):
-    """SGLang-compatible wrapper returning only the normalized output."""
+    """SGLang-compatible entry point that returns only the normalized output."""
 
     result, _, _ = layernorm_gated(
         x,
@@ -141,10 +172,10 @@ def _layer_norm_fwd(
     activation: str = "swish",
     quant_heads: int = 0,
 ):
-    """SGLang-compatible 2D entry point dispatched through the target config."""
+    """SGLang-compatible 2-D entry point dispatched through the target config."""
 
     if x.ndim != 2:
-        raise ValueError("_layer_norm_fwd expects a 2D x")
+        raise ValueError("_layer_norm_fwd expects a 2-D x")
     forward, _ = load_impl("layernorm_gated")
     return forward(
         x,

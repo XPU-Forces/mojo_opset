@@ -2,6 +2,9 @@
 
 A5 adds the three-axis gate tile: long strided 3D gates move whole head rows
 instead of one scattered row segment per row.
+
+Provider layout follows the public implementation of the same community task,
+``brandfucker/mojo_opset#516`` (Apache-2.0).
 """
 
 from mojo_opset.kernels._layernorm_gated import _layer_norm_fwd_impl

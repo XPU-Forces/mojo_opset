@@ -1,3 +1,14 @@
+"""Accuracy and bit-exactness coverage for the fused gated normalization.
+
+The rows of ``CASES`` are the matrix required by the task statement: LayerNorm
+and RMSNorm, flat and 3-D strided gates, both gate orders, every activation,
+with and without bias, and grouped normalisation.  The harness around that
+matrix owns the input generation, so a case only has to describe *what* to
+exercise.
+"""
+
+from collections import namedtuple
+
 import pytest
 import torch
 
@@ -5,81 +16,104 @@ from mojo_opset import functions as F
 from tests._checks import assert_bitwise_equal
 from tests._checks import assert_close
 
-# (M, N, is_rms_norm, has_bias, z_kind, norm_before_gate, activation, group_size)
+Case = namedtuple(
+    "Case",
+    ("rows", "cols", "rms", "bias", "gate", "order", "activation", "group"),
+)
+
 CASES = [
-    (1, 128, True, False, "none", True, "swish", None),
-    (128, 128, True, False, "2d", True, "swish", None),
-    (128, 128, True, False, "3d", True, "swish", None),
-    (128, 128, True, False, "3d", False, "sigmoid", None),
-    (128, 128, False, True, "3d", True, "sigmoid", None),
-    (132, 128, True, True, "3d", True, "swish", None),
-    (132, 128, False, True, "2d", False, "sigmoid", None),
-    (512, 1024, False, True, "none", True, "swish", None),
-    (512, 1024, True, False, "2d", False, "silu", None),
-    (128, 256, True, False, "2d", False, "sigmoid", 64),
-    (128, 256, False, True, "2d", False, "swish", 64),
-    (512, 256, True, False, "none", True, "swish", 64),
-    (129, 192, True, False, "none", True, "swish", None),
-    (129, 192, True, False, "2d", True, "swish", None),
-]
-CASE_IDS = [
-    f"m{M}-n{N}-{'rms' if rms else 'ln'}{'-bias' if bias else ''}-z{z_kind}"
-    f"-{'before' if before else 'after'}-{activation}{'-g' + str(group) if group else ''}"
-    for M, N, rms, bias, z_kind, before, activation, group in CASES
+    Case(1, 128, True, False, "none", True, "swish", None),
+    Case(128, 128, True, False, "2d", True, "swish", None),
+    Case(128, 128, True, False, "3d", True, "swish", None),
+    Case(128, 128, True, False, "3d", False, "sigmoid", None),
+    Case(128, 128, False, True, "3d", True, "sigmoid", None),
+    Case(132, 128, True, True, "3d", True, "swish", None),
+    Case(132, 128, False, True, "2d", False, "sigmoid", None),
+    Case(512, 1024, False, True, "none", True, "swish", None),
+    Case(512, 1024, True, False, "2d", False, "silu", None),
+    Case(128, 256, True, False, "2d", False, "sigmoid", 64),
+    Case(128, 256, False, True, "2d", False, "swish", 64),
+    Case(512, 256, True, False, "none", True, "swish", 64),
+    Case(129, 192, True, False, "none", True, "swish", None),
+    Case(129, 192, True, False, "2d", True, "swish", None),
 ]
 
-
-def _make_inputs(case, dtype, device):
-    M, N, _, has_bias, z_kind, _, _, _ = case
-    torch.manual_seed(20261030 + M + N)
-    x = torch.randn((M, N), device=device, dtype=dtype)
-    weight = torch.randn((N,), device=device, dtype=dtype)
-    bias = torch.randn((N,), device=device, dtype=dtype) if has_bias else None
-    z = None
-    if z_kind == "2d":
-        z = torch.randn((M, N), device=device, dtype=dtype)
-    elif z_kind == "3d":
-        heads = 4
-        padded = torch.randn((M // heads, heads, N + 32), device=device, dtype=dtype)
-        z = padded[..., :N]
-    return x, weight, bias, z
+HEADS = 4
+GATE_PADDING = 32
 
 
-def _kwargs(case, z):
-    _, _, rms, _, _, before, activation, group_size = case
+def _case_id(case):
+    norm = "rms" if case.rms else "layernorm"
+    bias = "-bias" if case.bias else ""
+    order = "normfirst" if case.order else "gatefirst"
+    group = f"-group{case.group}" if case.group else ""
+    return f"rows{case.rows}-cols{case.cols}-{norm}{bias}-gate{case.gate}-{order}-{case.activation}{group}"
+
+
+def _seed_for(case):
+    return 700_003 + case.rows * 131 + case.cols
+
+
+def _sample(case, dtype, device):
+    """Draw the tensors a case needs, including its gate."""
+
+    torch.manual_seed(_seed_for(case))
+    x = torch.randn((case.rows, case.cols), device=device, dtype=dtype)
+    weight = torch.randn((case.cols,), device=device, dtype=dtype)
+    bias = torch.randn((case.cols,), device=device, dtype=dtype) if case.bias else None
+    gate = None
+    if case.gate == "2d":
+        gate = torch.randn((case.rows, case.cols), device=device, dtype=dtype)
+    elif case.gate == "3d":
+        # A padded head dimension gives the gate the token/head strides that
+        # only a strided view keeps.
+        tokens = case.rows // HEADS
+        padded = torch.randn((tokens, HEADS, case.cols + GATE_PADDING), device=device, dtype=dtype)
+        gate = padded[..., : case.cols]
+    return x, weight, bias, gate
+
+
+def _options(case, gate):
     return {
-        "z": z,
-        "group_size": group_size,
-        "norm_before_gate": before,
-        "is_rms_norm": rms,
-        "activation": activation,
+        "z": gate,
+        "group_size": case.group,
+        "norm_before_gate": case.order,
+        "is_rms_norm": case.rms,
+        "activation": case.activation,
     }
+
+
+def _expected_stats_shape(case):
+    width = case.group if case.group else case.cols
+    return torch.Size([(case.cols // width) * case.rows])
 
 
 @pytest.mark.api("functions.layernorm_gated")
 @pytest.mark.accuracy
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
+@pytest.mark.parametrize("case", CASES, ids=_case_id)
 def test_layernorm_gated_accuracy(accuracy_backend, dtype, case):
     implementation, _, device = accuracy_backend
-    actual_inputs = _make_inputs(case, dtype, device)
-    reference_inputs = tuple(value.clone() if isinstance(value, torch.Tensor) else value for value in actual_inputs)
-    x, weight, bias, z = actual_inputs
+    x, weight, bias, gate = _sample(case, dtype, device)
+    reference_x = x.clone()
+    reference_weight = weight.clone()
+    reference_bias = None if bias is None else bias.clone()
+    reference_gate = None if gate is None else gate.clone()
 
     actual, actual_mean, actual_rstd = F.layernorm_gated(
         x,
         weight,
         bias,
         1e-6,
-        **_kwargs(case, z),
+        **_options(case, gate),
         implementation=implementation,
     )
     expected, expected_mean, expected_rstd = F.layernorm_gated(
-        reference_inputs[0],
-        reference_inputs[1],
-        reference_inputs[2],
+        reference_x,
+        reference_weight,
+        reference_bias,
         1e-6,
-        **_kwargs(case, reference_inputs[3]),
+        **_options(case, reference_gate),
         implementation="torch",
     )
 
@@ -88,10 +122,10 @@ def test_layernorm_gated_accuracy(accuracy_backend, dtype, case):
     assert actual.device.type == expected.device.type == device
     assert_close(actual, expected, dtype, name="out")
 
-    if case[2]:
+    if case.rms:
         assert actual_mean is expected_mean is None
     else:
-        stats_shape = torch.Size([(case[1] // (case[7] or case[1])) * case[0]])
+        stats_shape = _expected_stats_shape(case)
         assert actual_mean.shape == expected_mean.shape == stats_shape
         assert actual_mean.dtype == expected_mean.dtype == torch.float32
         assert_close(actual_mean, expected_mean, rtol=1e-3, atol=1e-3, name="mean")
@@ -103,24 +137,26 @@ def test_layernorm_gated_accuracy(accuracy_backend, dtype, case):
 @pytest.mark.api("functions.layernorm_gated")
 @pytest.mark.bitwise
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("before", [True, False])
-def test_strided_gate_matches_contiguous_gate(accuracy_backend, dtype, before):
+@pytest.mark.parametrize("order", [True, False])
+def test_strided_gate_matches_contiguous_gate(accuracy_backend, dtype, order):
     implementation, _, device = accuracy_backend
-    case = (132, 128, True, False, "3d", before, "swish", None)
-    x, weight, bias, strided_z = _make_inputs(case, dtype, device)
-    kwargs = {
+    case = Case(132, 128, True, False, "3d", order, "swish", None)
+    x, weight, bias, gate = _sample(case, dtype, device)
+    options = {
         "group_size": None,
-        "norm_before_gate": before,
+        "norm_before_gate": order,
         "is_rms_norm": True,
         "activation": "swish",
         "implementation": implementation,
     }
-    strided = F.layernorm_gated(x, weight, bias, 1e-6, z=strided_z, **kwargs)
-    contiguous = F.layernorm_gated(x, weight, bias, 1e-6, z=strided_z.contiguous(), **kwargs)
+    strided = F.layernorm_gated(x, weight, bias, 1e-6, z=gate, **options)
+    contiguous = F.layernorm_gated(x, weight, bias, 1e-6, z=gate.contiguous(), **options)
     assert_bitwise_equal(strided, contiguous, phase="strided_gate")
 
 
-def _quant_reference(y, quant_heads):
+def _fp8_reference(y, quant_heads):
+    """Per-token-group FP8 e4m3 quantisation of an already normalised tensor."""
+
     tokens, width = y.shape
     grouped = y.reshape(tokens // quant_heads, quant_heads * width).float()
     amax = torch.amax(torch.abs(grouped), dim=-1, keepdim=True)
@@ -132,23 +168,23 @@ def _quant_reference(y, quant_heads):
 @pytest.mark.api("functions.layernorm_gated")
 @pytest.mark.bitwise
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("has_z", [False, True])
-@pytest.mark.parametrize("n", [128, 250])
-def test_fused_quant_bit_exact(accuracy_backend, dtype, has_z, n):
+@pytest.mark.parametrize("has_gate", [False, True])
+@pytest.mark.parametrize("cols", [128, 250])
+def test_fused_quant_bit_exact(accuracy_backend, dtype, has_gate, cols):
     implementation, target, device = accuracy_backend
     if implementation == "torch":
         pytest.skip("FP8 bit-exact check targets the fused accelerator epilogue")
     if not target.startswith("npu.a5"):
         pytest.skip("FP8 quant is formally required only on Ascend 950")
-    # n=250 rounds the column tile to 256, exercising the masked store path.
-    case = (512, n, True, False, "2d" if has_z else "none", True, "swish", None)
-    x, weight, bias, z = _make_inputs(case, dtype, device)
+    # cols=250 rounds the column tile up to 256 and exercises the masked store.
+    case = Case(512, cols, True, False, "2d" if has_gate else "none", True, "swish", None)
+    x, weight, bias, gate = _sample(case, dtype, device)
     fused, _, _ = F.layernorm_gated(
         x,
         weight,
         bias,
         1e-6,
-        z=z,
+        z=gate,
         is_rms_norm=True,
         quant_heads=4,
         implementation=implementation,
@@ -158,11 +194,11 @@ def test_fused_quant_bit_exact(accuracy_backend, dtype, has_z, n):
         weight,
         bias,
         1e-6,
-        z=z,
+        z=gate,
         is_rms_norm=True,
         implementation=implementation,
     )
-    assert_bitwise_equal(fused, _quant_reference(normalized, 4), phase=f"fp8_quant_{target}")
+    assert_bitwise_equal(fused, _fp8_reference(normalized, 4), phase=f"fp8_quant_{target}")
 
 
 @pytest.mark.api("functions.layernorm_gated")
@@ -175,9 +211,9 @@ def test_batch_invariant_rows(accuracy_backend, monkeypatch):
     x64 = torch.randn((64, 128), device=device, dtype=dtype)
     x128 = torch.cat((x64, torch.randn((64, 128), device=device, dtype=dtype)), dim=0)
     weight = torch.randn((128,), device=device, dtype=dtype)
-    kwargs = {"is_rms_norm": True, "implementation": implementation}
-    y64, _, r64 = F.layernorm_gated(x64, weight, None, 1e-6, **kwargs)
-    y128, _, r128 = F.layernorm_gated(x128, weight, None, 1e-6, **kwargs)
+    options = {"is_rms_norm": True, "implementation": implementation}
+    y64, _, r64 = F.layernorm_gated(x64, weight, None, 1e-6, **options)
+    y128, _, r128 = F.layernorm_gated(x128, weight, None, 1e-6, **options)
     assert_bitwise_equal(y64, y128[:64], phase="batch_invariant_output")
     assert_bitwise_equal(r64, r128[:64], phase="batch_invariant_rstd")
 
@@ -186,8 +222,8 @@ def test_batch_invariant_rows(accuracy_backend, monkeypatch):
 def test_tail_block_keeps_output_in_bounds(accuracy_backend):
     implementation, _, device = accuracy_backend
     dtype = torch.bfloat16
-    case = (129, 192, True, False, "2d", True, "swish", None)
-    x, weight, bias, z = _make_inputs(case, dtype, device)
+    case = Case(129, 192, True, False, "2d", True, "swish", None)
+    x, weight, bias, gate = _sample(case, dtype, device)
     guard = 256
     storage = torch.full((x.numel() + guard,), float("nan"), device=device, dtype=dtype)
     out = storage[: x.numel()].view(x.shape)
@@ -196,7 +232,7 @@ def test_tail_block_keeps_output_in_bounds(accuracy_backend):
         weight,
         bias,
         1e-6,
-        z=z,
+        z=gate,
         out=out,
         is_rms_norm=True,
         implementation=implementation,
@@ -208,7 +244,7 @@ def test_tail_block_keeps_output_in_bounds(accuracy_backend):
         weight,
         bias,
         1e-6,
-        z=z,
+        z=gate,
         is_rms_norm=True,
         implementation="torch",
     )
@@ -219,13 +255,13 @@ def test_tail_block_keeps_output_in_bounds(accuracy_backend):
 def test_sglang_compatible_wrapper(accuracy_backend):
     implementation, _, device = accuracy_backend
     dtype = torch.bfloat16
-    case = (128, 128, True, False, "2d", True, "swish", None)
-    x, weight, bias, z = _make_inputs(case, dtype, device)
+    case = Case(128, 128, True, False, "2d", True, "swish", None)
+    x, weight, bias, gate = _sample(case, dtype, device)
     actual = F.rms_norm_gated(
         x=x,
         weight=weight,
         bias=bias,
-        z=z,
+        z=gate,
         is_rms_norm=True,
         implementation=implementation,
     )
@@ -233,7 +269,7 @@ def test_sglang_compatible_wrapper(accuracy_backend):
         x=x,
         weight=weight,
         bias=bias,
-        z=z,
+        z=gate,
         is_rms_norm=True,
         implementation="torch",
     )
@@ -243,7 +279,7 @@ def test_sglang_compatible_wrapper(accuracy_backend):
         weight,
         bias,
         1e-6,
-        z=z,
+        z=gate,
         is_rms_norm=True,
     )
     assert_close(forward, expected, dtype, name="_layer_norm_fwd")

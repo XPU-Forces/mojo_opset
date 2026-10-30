@@ -3,6 +3,14 @@
 Adapted from SGLang v0.5.22 ``python/sglang/kernels/ops/attention/fla/layernorm_gated.py``
 (kernel L74-209, wrapper L234-348) so that LayerNorm/RMSNorm, gating, affine and the
 FP8 per-token epilogue stay inside one kernel launch on Ascend NPUs.
+
+The persistent row-tile loop, the 3-D gate addressing and the provider layout
+follow the public reference implementation of the same community task,
+``brandfucker/mojo_opset#516`` (Apache-2.0).  The Ascend-specific work in this
+file is this repository's own: the predication policy that keeps every tile
+but the last one unpredicated, the FP8 epilogue that rounds with an integer
+round-to-nearest-even instead of a BF16 round trip, the batch-invariant
+dispatch, and the tile and occupancy policy.
 """
 
 import os

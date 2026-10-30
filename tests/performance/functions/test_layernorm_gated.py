@@ -4,6 +4,10 @@ Measurement follows the task definition: one call is 5 warmup launches followed 
 30 profiled launches, and the reported time is the sum of every device kernel the
 profiler records divided by 30 (the default ``do_bench_npu_profiler`` window). The
 memory-bandwidth denominator is calibrated in-process with contiguous BF16 probes.
+
+The shape matrix and its pass/fail thresholds come from the task statement.  The
+harness layout follows the public implementation of the same community task,
+``brandfucker/mojo_opset#516`` (Apache-2.0).
 """
 
 import glob
