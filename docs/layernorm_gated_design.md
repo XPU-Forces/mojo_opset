@@ -887,10 +887,17 @@ operator-id assertion from `tests/_fixtures.py` is replayed verbatim (every
 the suite's own `check_gated_norm` helper runs over its full matrix on the CPU
 provider; and the four relevant test files are collected.
 
-| branch head | result |
+| branch head under test | result |
 | --- | --- |
 | `4b28729` (before the fix) | 8/16 — the eight trees that take the suite's registry fail with `op ids missing from the torch registry: tests/modules/test_layernorm_gated.py::layernorm_gated` |
 | `14bf14a` (after the fix) | 16/16 |
+
+The two fix commits were reworded afterwards so that they carry the same AI
+declaration line as every other commit in the branch, which moved them from
+`b0bc630` and `728f0df` to `d25195a` and `14bf14a`. Their trees are unchanged
+(`6795544e72595afe8663af21849bc1a4afc915b9`), so the sixteen merged trees and
+their results are the same; the two commits that follow `14bf14a` only touch
+this note.
 
 The hazard was semantic rather than textual. The spelling `layernorm_gated` was
 registered as an operator id in the two provider registries and the two target
