@@ -890,7 +890,7 @@ provider; and the four relevant test files are collected.
 | branch head | result |
 | --- | --- |
 | `4b28729` (before the fix) | 8/16 — the eight trees that take the suite's registry fail with `op ids missing from the torch registry: tests/modules/test_layernorm_gated.py::layernorm_gated` |
-| `728f0df` (after the fix) | 16/16 |
+| `14bf14a` (after the fix) | 16/16 |
 
 The hazard was semantic rather than textual. The spelling `layernorm_gated` was
 registered as an operator id in the two provider registries and the two target
@@ -901,13 +901,13 @@ id, so a maintainer who took the suite's registry made this branch's
 (`ops=["layernorm_gated"]`) point at a missing operator, and eight cases error
 out at collection time.
 
-Two commits fix it. `b0bc630` removes the alias id from the two YAML files and
+Two commits fix it. `d25195a` removes the alias id from the two YAML files and
 the three provider registries; the alias *functions* stay in
 `mojo_opset/functions/layernorm_gated_compat.py` and stay covered by
 `tests/functions/test_layernorm_gated_aliases.py`. As a side effect
 `mojo_opset/kernels/torch/__init__.py` becomes the same git blob as #525's file
 (`eba441200a299c00e7f876321c3e80720ec91ad2`), so that file cannot diverge under
-any resolution. `728f0df` changes the alias test's skip condition from `hasattr`
+any resolution. `14bf14a` changes the alias test's skip condition from `hasattr`
 to `callable(getattr(...))`: `functions.layernorm_gated` names both the
 submodule and the desired alias, so taking the suite's `functions/__init__.py`
 leaves the attribute present but not callable, and the old condition would not
