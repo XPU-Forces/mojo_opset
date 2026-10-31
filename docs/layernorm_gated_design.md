@@ -897,6 +897,7 @@ provider; and the four relevant test files are collected.
 | --- | --- |
 | `4b28729` (before the fix) | 8/16 — the eight trees that take the suite's registry fail with `op ids missing from the torch registry: tests/modules/test_layernorm_gated.py::layernorm_gated` |
 | `cc1e02c` (after the fix) | 16/16 |
+| device re-run of the same sixteen trees on `Ascend950PR_9579` | 16/16 — five pytest steps per tree (canonical, `_extra`, `_aliases`, `modules`, performance collection), every return code 0; see below |
 
 The two fix commits were reworded afterwards so that they carry the same AI
 declaration line as every other commit in the branch, which moved them from
@@ -929,35 +930,69 @@ submodule and the desired alias, so taking the suite's `functions/__init__.py`
 leaves the attribute present but not callable, and the old condition would not
 skip and would fail on the device.
 
-The rehearsal above is the CPU side. The sixteen merged trees have not been
-re-run on an Ascend device. A fresh ticket (`DevEnv_963D7E0F`) did open the
-tunnel to an Ascend 950 PR host on 2026-10-31 and the device identity was
-confirmed (`Ascend950PR_9579`, CANN 9.1.0 plus a side-installed CANN 9.2.0,
-torch 2.10.0+cpu, torch_npu 2.10.0.post7, triton-ascend 3.6.0), but the ticket's
-channel budget was spent by the first three opens (probe, daemon, one upload)
-and every later open — including all sixteen stored credential sets on this
-machine — is refused with `platform authorization denied: Administratively
-prohibited` raised by `open_channel` after the jump host authenticated
-successfully. That is a platform-side channel quota, not a credential problem,
-so the device leg needs a fresh ticket.
+The rehearsal above is the CPU side. The same sixteen trees were then re-run on
+an Ascend device: on 2026-10-31 (23:19–23:32 local, 15:19:47–15:32:16 on the
+host's UTC clock) every tree ran the suite's own accuracy file plus this
+branch's supplementary files on `Ascend950PR_9579` (bus `0000:71:00.0`,
+npu-smi 25.7.rc1.10, CANN 9.1.0 with a side-installed CANN 9.2.0,
+python3.12.13, torch 2.10.0+cpu, torch_npu 2.10.0.post7, triton-ascend 3.6.0).
+All sixteen trees return 0 from all five steps:
 
-The device leg is staged as one command. Instead of shipping the sixteen trees
-(11.3 MB, which broke the transfer at 15 MB of base64), the host receives one
-base tree plus the eight contested-file variants and rebuilds the sixteen
-combinations itself: `_tools/_pkg/merge_base.tar.gz` (705,530 B, sha256
-`75c3146d0676650a…`) and `_tools/_pkg/merge_variants.tar.gz` (7,787 B). The
-builder verifies three things before a single test runs — the base archive's
-sha256, the sha256 of each of the eight variants, and the whole-tree content
-digest of each rebuilt tree against `_tools/_pkg/trees.sha256` — so the device
-executes provably the same trees that were rehearsed here, not merely the same
-four files. `_tools/device_leg.py` runs the whole leg over a single ticket:
-upload over an exec channel, build, start the tests detached with `setsid
-nohup`, poll, and pull the evidence back. The builder was exercised on this
-machine and reports `BUILD_OK 16 trees` with no hash mismatch.
+| step | file | result, identical in all sixteen trees |
+| --- | --- | --- |
+| canonical | `tests/functions/test_layernorm_gated.py` (#525) | 133 passed, 0 failed |
+| extra | `tests/functions/test_layernorm_gated_extra.py` | 42 passed, 0 failed |
+| aliases | `tests/functions/test_layernorm_gated_aliases.py` | 2 passed on the eight `fns-o` trees, 2 skipped on the eight `fns-s` trees |
+| modules | `tests/modules/test_layernorm_gated.py` | 8 passed, 0 failed |
+| perf collect | `tests/performance/functions/test_layernorm_gated.py` | 11 tests collected |
+
+The split in the aliases row is exactly what `14bf14a` was for: taking this
+branch's `functions/__init__.py` leaves the alias callable, so the two cases
+run; taking #525's leaves the attribute present but not callable, so they skip
+instead of erroring. Both return 0. The device numbers also reconcile with the
+910B run of the same files (116 passed / 17 failed for the canonical file,
+34 passed / 8 skipped for `_extra`): 116 + 17 = 133 and 34 + 8 = 42, i.e. the
+cases that 910B could not run are precisely the FP8 ones, and on 950 they pass.
+The eight trees that take #525's side of either add/add conflict (`fng-s`,
+`tkg-s`) are green as well, so neither conflict can regress functionality
+whichever side a maintainer keeps. The first tree costs 260 s (cold Triton
+compile); the rest take ~11 s each once `~/.triton/cache` is warm.
+
+Getting there took the whole day, because the platform's channel quota kept
+refusing: the ticket that had confirmed the device identity spent its budget on
+three opens, all sixteen stored credential sets were then refused at
+`open_channel` with `platform authorization denied: Administratively prohibited`
+*after* the jump host authenticated, and a brand-new ticket for the same
+environment was refused on its very first open — so the quota is per account,
+not per ticket. The ticket that finally worked allowed exactly **one** channel
+open (a second one, for a standby collector, was refused immediately). That is
+why the leg is built to spend one open and nothing else.
+
+Instead of shipping the sixteen trees (11.3 MB, which broke the transfer at
+15 MB of base64), the host receives one base tree plus the eight
+contested-file variants and rebuilds the sixteen combinations itself:
+`_tools/_pkg/merge_base.tar.gz` (705,530 B, sha256 `75c3146d0676650a…`) and
+`_tools/_pkg/merge_variants.tar.gz` (7,787 B). The builder verifies three
+things before a single test runs — the base archive's sha256, the sha256 of
+each of the eight variants, and the whole-tree content digest of each rebuilt
+tree against `_tools/_pkg/trees.sha256` — so the device executes provably the
+same trees that were rehearsed here, not merely the same four files.
+`_tools/device_leg.py` runs the whole leg inside that single open: upload over
+an exec channel, build, start the tests detached with `setsid nohup`, poll, and
+pull the evidence back through the same session. On the host it reported
+`BASE-HASH-OK`, sixteen `BUILT` lines and `BUILD_OK 16 trees` with no hash
+mismatch, then `ALL_TREES_DONE`.
+
+One tooling defect surfaced after the run and is fixed in the tree: the runner
+collected its count column with `grep -E '^[0-9]+ (passed|failed)'`, which
+never matches `pytest -q`'s `=`-padded summary line, so `summary.txt` carries
+the return codes but an empty count column. The return codes are authoritative
+and unaffected; the counts quoted above were re-parsed from the same per-tree
+logs those codes came from.
 
 On Ascend 910B the FP8 cases fail for every tree, so the baseline to compare
 against is the count of the FP8 failures, not zero; on Ascend 950 the FP8 path
-works and every tree is expected to pass outright.
+works and all sixteen trees do pass outright, as measured above.
 
 ## 7. Known limits
 
