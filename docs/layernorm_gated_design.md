@@ -896,14 +896,17 @@ provider; and the four relevant test files are collected.
 | branch head under test | result |
 | --- | --- |
 | `4b28729` (before the fix) | 8/16 — the eight trees that take the suite's registry fail with `op ids missing from the torch registry: tests/modules/test_layernorm_gated.py::layernorm_gated` |
-| `14bf14a` (after the fix) | 16/16 |
+| `cc1e02c` (after the fix) | 16/16 |
 
 The two fix commits were reworded afterwards so that they carry the same AI
 declaration line as every other commit in the branch, which moved them from
 `b0bc630` and `728f0df` to `d25195a` and `14bf14a`. Their trees are unchanged
 (`6795544e72595afe8663af21849bc1a4afc915b9`), so the sixteen merged trees and
-their results are the same; the two commits that follow `14bf14a` only touch
-this note.
+their results are the same; the four commits that follow `14bf14a` only touch
+this note and the delivery documents, and the rehearsal was replayed once more
+at the branch head `cc1e02c` — the sha256 of the four contested files is
+identical in all sixteen trees at both heads, only the design note inside the
+merged trees differs.
 
 The hazard was semantic rather than textual. The spelling `layernorm_gated` was
 registered as an operator id in the two provider registries and the two target
