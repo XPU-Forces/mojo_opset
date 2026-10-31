@@ -849,6 +849,76 @@ implementation is. Both blocks are identical under CANN 9.1.0 and CANN 9.2.0;
 under 9.1.0 the second block is the compiler abort, because that tree predates
 the guard of §4.4.
 
+### 6.12 Rehearsing every merge resolution with the acceptance suite
+
+This branch and the community acceptance suite (#525) both add a gated
+LayerNorm operator, so the two pull requests cannot be merged into `master`
+without a decision. The rehearsal replays that merge for real and checks every
+resolution.
+
+The history is reconstructed from the upstream commits rather than approximated:
+the common base is `0a7d64c`, upstream `master` is `8b4b7a1`, and the two
+commits in between touch ten files, none of them among the six files #525
+changes. The rebuilt `master` tree hashes to
+`769df7e9a73169faed1a9286134ca60f1ed3aa95`, the tree SHA GitHub reports for
+`8b4b7a1`, so the reconstruction is byte-exact. The suite is then applied on
+top of the common base — its two modified `__init__.py` files are byte-identical
+at the suite's own base `45102091` and at `0a7d64c`, so this is equivalent to
+merging #525 into `master`.
+
+That first merge is clean. Merging this branch into the result produces three
+conflicts: `mojo_opset/functions/__init__.py` (content), and
+`mojo_opset/functions/layernorm_gated.py` plus
+`mojo_opset/kernels/torch/layernorm_gated.py` (add/add). The
+`functions/__init__.py` conflict is a single three-line hunk — this branch's
+`layernorm_gated_compat` imports, against the suite's `from .layernorm_gated
+import layer_norm_gated` on the same anchor. The resolution is to keep both
+sides: this branch's side already contains the suite's line.
+
+Each conflicted file is resolved once on the suite side and once on this
+branch's side, and the operator registry
+(`mojo_opset/kernels/torch/__init__.py`), which git merges on its own but which
+a maintainer could still overwrite, is resolved twice as well — sixteen merged
+trees in total, each exported as a standalone directory.
+
+Every tree is then checked three ways: the package imports and the fixture's
+operator-id assertion from `tests/_fixtures.py` is replayed verbatim (every
+`@pytest.mark.api(..., ops=[...])` id must exist in `mojo_opset.kernels.torch.OPS`);
+the suite's own `check_gated_norm` helper runs over its full matrix on the CPU
+provider; and the four relevant test files are collected.
+
+| branch head | result |
+| --- | --- |
+| `4b28729` (before the fix) | 8/16 — the eight trees that take the suite's registry fail with `op ids missing from the torch registry: tests/modules/test_layernorm_gated.py::layernorm_gated` |
+| `728f0df` (after the fix) | 16/16 |
+
+The hazard was semantic rather than textual. The spelling `layernorm_gated` was
+registered as an operator id in the two provider registries and the two target
+configurations, but no provider exported a `layernorm_gated_fwd` function — only
+`layer_norm_gated` was dispatched. #525's registry does not carry that alias
+id, so a maintainer who took the suite's registry made this branch's
+`tests/modules/test_layernorm_gated.py` declaration
+(`ops=["layernorm_gated"]`) point at a missing operator, and eight cases error
+out at collection time.
+
+Two commits fix it. `b0bc630` removes the alias id from the two YAML files and
+the three provider registries; the alias *functions* stay in
+`mojo_opset/functions/layernorm_gated_compat.py` and stay covered by
+`tests/functions/test_layernorm_gated_aliases.py`. As a side effect
+`mojo_opset/kernels/torch/__init__.py` becomes the same git blob as #525's file
+(`eba441200a299c00e7f876321c3e80720ec91ad2`), so that file cannot diverge under
+any resolution. `728f0df` changes the alias test's skip condition from `hasattr`
+to `callable(getattr(...))`: `functions.layernorm_gated` names both the
+submodule and the desired alias, so taking the suite's `functions/__init__.py`
+leaves the attribute present but not callable, and the old condition would not
+skip and would fail on the device.
+
+The rehearsal above is the CPU side. The sixteen merged trees have not been
+re-run on an Ascend device: the four DevEnv channels available on 2026-10-31
+all refuse to open (`platform authorization denied: Administratively
+prohibited`), so that leg needs a fresh ticket. The scripts and the trees are
+in place for it.
+
 ## 7. Known limits
 
 * `group_size` must divide `N` and must fit 64 KiB, as in the reference kernel.
