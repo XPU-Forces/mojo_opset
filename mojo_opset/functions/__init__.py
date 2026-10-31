@@ -25,6 +25,10 @@ from .gemm import quant_gemm
 from .indexer import indexer
 from .indexer import lightning_indexer
 from .kv_cache import store_paged_kv_cache
+from .layernorm_gated import layer_norm_gated
+from .layernorm_gated_compat import _layer_norm_fwd
+from .layernorm_gated_compat import layernorm_gated
+from .layernorm_gated_compat import rms_norm_gated
 from .multimodal_rope_infer import multimodal_rope_infer
 from .normalization import group_rms_norm_infer
 from .normalization import layer_norm_infer
@@ -63,6 +67,7 @@ from .store_lowrank import store_lowrank
 from .swiglu import swiglu
 
 __all__ = [
+    "_layer_norm_fwd",
     "apply_penalties_temperature",
     "causal_conv1d",
     "causal_conv1d_update_state_infer",
@@ -80,8 +85,10 @@ __all__ = [
     "group_rms_norm_infer",
     "indexer",
     "join_prob_reject_sampling",
+    "layer_norm_gated",
     "layer_norm_infer",
     "layer_norm_quant",
+    "layernorm_gated",
     "lightning_indexer",
     "moe_dynamic_quant",
     "multimodal_rope_infer",
@@ -102,6 +109,7 @@ __all__ = [
     "residual_add_rms_norm_infer",
     "residual_add_rms_norm_quant",
     "rms_norm",
+    "rms_norm_gated",
     "rms_norm_infer",
     "rms_norm_quant",
     "rope",

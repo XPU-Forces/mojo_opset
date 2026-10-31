@@ -23,8 +23,10 @@ supported shapes, dtypes and options.
 | `group_rms_norm_infer` | triton, torch_npu | triton, torch_npu |
 | `indexer` | triton components | triton components |
 | `join_prob_reject_sampling` | triton | triton |
+| `layer_norm_gated` | triton | triton |
 | `layer_norm_infer` | triton | triton |
 | `layer_norm_quant` | torch_npu | torch_npu |
+| `layernorm_gated` | triton | triton |
 | `lightning_indexer` | triton | triton |
 | `moe_dynamic_quant` | triton, torch_npu | triton, torch_npu |
 | `multimodal_rope_infer` | triton | triton |
