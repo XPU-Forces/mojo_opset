@@ -18,7 +18,9 @@ ALIASES = ("layernorm_gated", "rms_norm_gated", "_layer_norm_fwd")
 
 @pytest.fixture(autouse=True)
 def require_aliases():
-    missing = [name for name in ALIASES if not hasattr(F, name)]
+    # ``functions.layernorm_gated`` also names the submodule, so presence is not
+    # enough: the alias has to be a callable entry point.
+    missing = [name for name in ALIASES if not callable(getattr(F, name, None))]
     if missing:
         pytest.skip(f"alias entry points are not exported: {missing}")
 
