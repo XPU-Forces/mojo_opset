@@ -930,14 +930,34 @@ leaves the attribute present but not callable, and the old condition would not
 skip and would fail on the device.
 
 The rehearsal above is the CPU side. The sixteen merged trees have not been
-re-run on an Ascend device: every DevEnv ticket held on this machine — five
-tickets, fourteen stored credential sets — refuses to open the tunnel at the
-same time (`platform authorization denied: Administratively prohibited`, raised
-by `open_channel` after the jump host authenticated successfully), which is a
-platform-side channel quota rather than a credential problem. That leg needs a
-fresh ticket. It is staged: the sixteen trees are packed into
-`_tools/_pkg/merge_trees_cc1e02c.tar.gz` and `_tools/run_merge_trees_a2.sh`
-walks them on the host.
+re-run on an Ascend device. A fresh ticket (`DevEnv_963D7E0F`) did open the
+tunnel to an Ascend 950 PR host on 2026-10-31 and the device identity was
+confirmed (`Ascend950PR_9579`, CANN 9.1.0 plus a side-installed CANN 9.2.0,
+torch 2.10.0+cpu, torch_npu 2.10.0.post7, triton-ascend 3.6.0), but the ticket's
+channel budget was spent by the first three opens (probe, daemon, one upload)
+and every later open — including all sixteen stored credential sets on this
+machine — is refused with `platform authorization denied: Administratively
+prohibited` raised by `open_channel` after the jump host authenticated
+successfully. That is a platform-side channel quota, not a credential problem,
+so the device leg needs a fresh ticket.
+
+The device leg is staged as one command. Instead of shipping the sixteen trees
+(11.3 MB, which broke the transfer at 15 MB of base64), the host receives one
+base tree plus the eight contested-file variants and rebuilds the sixteen
+combinations itself: `_tools/_pkg/merge_base.tar.gz` (705,530 B, sha256
+`75c3146d0676650a…`) and `_tools/_pkg/merge_variants.tar.gz` (7,787 B). The
+builder verifies three things before a single test runs — the base archive's
+sha256, the sha256 of each of the eight variants, and the whole-tree content
+digest of each rebuilt tree against `_tools/_pkg/trees.sha256` — so the device
+executes provably the same trees that were rehearsed here, not merely the same
+four files. `_tools/device_leg.py` runs the whole leg over a single ticket:
+upload over an exec channel, build, start the tests detached with `setsid
+nohup`, poll, and pull the evidence back. The builder was exercised on this
+machine and reports `BUILD_OK 16 trees` with no hash mismatch.
+
+On Ascend 910B the FP8 cases fail for every tree, so the baseline to compare
+against is the count of the FP8 failures, not zero; on Ascend 950 the FP8 path
+works and every tree is expected to pass outright.
 
 ## 7. Known limits
 
