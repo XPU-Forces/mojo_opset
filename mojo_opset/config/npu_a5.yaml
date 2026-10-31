@@ -28,6 +28,7 @@ npu.a5:
   paged_prefill_gqa_infer: triton
   paged_prefill_swa_infer: triton
   prefill_gqa_infer: torch_npu
+  qk_norm_rope: torch_npu
   # Retained selection: original NPU tests skipped this path; the wrapper raises NotImplementedError.
   quant_batch_gemm_reduce_sum: torch_npu
   quant_gemm: triton
