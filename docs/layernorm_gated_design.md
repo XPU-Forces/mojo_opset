@@ -548,6 +548,28 @@ status` reports 432 files as modified — pure line-ending noise
 (93876 insertions / 93876 deletions). The four tested files are not among
 them and are byte-identical to the index.
 
+### 6.9 Re-verification after the rewrite and the FP8 fix (2026-10-31)
+
+The function front end, the accuracy harness and the FP8 epilogue all changed
+after the runs above, so the whole suite was re-run on the same 950 host with
+CANN 9.2.0 side-installed: accuracy 53 passed / 0 failed, `failures: []` on the
+11-row matrix, and 240 FP8 stress cases with no byte difference. The Markstein
+step is not measurable in the matrix:
+
+| case | 2026-10-31 | the 2026-10-30 9.2.0 reading |
+| --- | --- | --- |
+| `gdn-32768-n128-swish` | 22.48 us / 77.33% | 22.53 us / 77.40% |
+| `gdn-131072-n128-swish` | 93.19 us / 74.62% | 90.13-96.47 us |
+| `qk-65536-n128` | 12.36 us / 187.49% | 12.30 us / 189.12% |
+| `group-8192-n2048` | 45.68 us / 152.23% | 42.98 us / 162.34% |
+| `quant-32768-n512` | 54.69 us / 105.98% | 54.25 us / 107.14% |
+| `gdn-524288-n128-swish` | 313.17 us / 88.82% | 312.89 us / 89.15% |
+| `tail-32771-n192-swish` | 20.68 us / 126.09% | 20.70 us / 126.37% |
+
+A2 and A3 were not re-run: both jump tickets have expired, so their rows still
+describe the pre-rewrite test file. The non-quant paths that A2 and A3 exercise
+are unchanged by the FP8 fix.
+
 ## 7. Known limits
 
 * `group_size` must divide `N` and must fit 64 KiB, as in the reference kernel.
