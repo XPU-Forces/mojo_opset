@@ -551,10 +551,12 @@ them and are byte-identical to the index.
 ### 6.9 Re-verification after the rewrite and the FP8 fix (2026-10-31)
 
 The function front end, the accuracy harness and the FP8 epilogue all changed
-after the runs above, so the whole suite was re-run on the same 950 host with
-CANN 9.2.0 side-installed: accuracy 53 passed / 0 failed, `failures: []` on the
-11-row matrix, and 240 FP8 stress cases with no byte difference. The Markstein
-step is not measurable in the matrix:
+after the runs above, so the whole suite was re-run on both the 950 host (§6.6)
+and the A3 host (§6.7), each with CANN 9.2.0 side-installed.
+
+On the 950: accuracy 53 passed / 0 failed, `failures: []` on the 11-row matrix,
+and 240 FP8 stress cases with no byte difference. The Markstein step is not
+measurable in the matrix:
 
 | case | 2026-10-31 | the 2026-10-30 9.2.0 reading |
 | --- | --- | --- |
@@ -566,9 +568,39 @@ step is not measurable in the matrix:
 | `gdn-524288-n128-swish` | 313.17 us / 88.82% | 312.89 us / 89.15% |
 | `tail-32771-n192-swish` | 20.68 us / 126.09% | 20.70 us / 126.37% |
 
-A2 and A3 were not re-run: both jump tickets have expired, so their rows still
-describe the pre-rewrite test file. The non-quant paths that A2 and A3 exercise
-are unchanged by the FP8 fix.
+The A3 re-run used the same host as §6.7 (hostname `02ab62ca47bc`, aarch64,
+openEuler 24.03 LTS-SP3, kernel 5.10.0-216, `Ascend910_9382`, npu-smi 26.1.1)
+with `/usr/local/cann920/Ascend/cann-9.2.0` sourced after the 9.1.0 path
+entries were stripped, and `MOJO_ASCEND_ARCH=a2` because the target detection
+does not know this SKU. The four tested files hashed identically to the commit
+under review (kernel `35fa6572…0eb9f02`, front end `0e3bcf7e…1a4a02`, accuracy
+harness `264ba81e…e8af`, perf harness `8cc415cf…4e0010`). `tests/functions`
+reported 35 passed / 8 skipped in 60.46 s and `tests/modules` 8 passed in 13.26
+s; the eight skips are the `test_fused_quant_bit_exact` cases that gate on
+`npu.a5`. The 11-row suite finished in 78.74 s with the FP8 row skipped by
+device name and `failures: []`. Calibration on this run: `copy_` 1267.21 GB/s,
+`fill_` 1458.84 GB/s.
+
+| case | pre-rewrite 9.2.0 us (§6.7 run1) | after us / MBU | delta |
+| --- | --- | --- | --- |
+| `gdn-256-n128-swish` | 3.928 | 3.88 / 4.01% | -1.3% |
+| `gdn-2560-n128-swish` | 6.613 | 6.55 / 23.70% | -1.0% |
+| `gdn-32768-n128-swish` | 27.973 | 27.94 / 71.09% | -0.1% |
+| `gdn-32768-n128-sigmoid` | 25.455 | 25.47 / 77.98% | +0.1% |
+| `gdn-131072-n128-swish` | 94.413 | 94.29 / 84.25% | -0.1% |
+| `qk-65536-n128` | 28.547 | 28.50 / 92.90% | -0.2% |
+| `group-1024-n2048` | 17.905 | 17.89 / 55.53% | -0.1% |
+| `group-8192-n2048` | 116.443 | 116.38 / 68.26% | -0.1% |
+| `quant-32768-n512` | skipped | skipped (FP8 is 950-only) | - |
+| `gdn-524288-n128-swish` | 463.500 | 462.83 / 68.65% | -0.1% |
+| `tail-32771-n192-swish` | 36.304 | 36.15 / 82.42% | -0.4% |
+
+Every row stays inside its line and the largest move from the pre-rewrite
+numbers is -1.3% on the smallest case, where fixed overhead dominates.
+
+A2 was not re-run. Its jump ticket expired and the rebuilt environment is an
+`Ascend910B2`, so a fresh run would answer a different question than §6.8. The
+kernel variant A2 loads is the same `npu.a2` one the A3 run exercised above.
 
 ## 7. Known limits
 
