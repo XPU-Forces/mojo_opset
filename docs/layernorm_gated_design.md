@@ -26,12 +26,42 @@ The Ascend-specific engineering in this pull request is this repository's own wo
 * the tile and occupancy policy, including the three-axis 3-D gate tile and its
   element-count threshold.
 
-The function front end (`functions/layernorm_gated.py`), the accuracy harness
-(`tests/functions/test_layernorm_gated.py`), the torch reference
-(`kernels/torch/layernorm_gated.py`) and the performance harness
-(`tests/performance/functions/test_layernorm_gated.py`) were written for this pull
-request and have since been rewritten once more, so that the only constructs still
-taken from the public reference are the three listed above.
+The function front end (`functions/layernorm_gated.py`) and the torch reference
+(`kernels/torch/layernorm_gated.py`) were written for this pull request and have
+since been rewritten twice, so that the only constructs still taken from the public
+reference are the three listed above.
+
+### The community acceptance suite
+
+A third public source entered the picture after this pull request was opened: the
+acceptance suite for this task, `XPU-Forces/mojo_opset#525` (zfshennl, branch
+`community`). It is the contract the platform will run, so this branch adopts it
+rather than the other way round:
+
+* the public entry point is `layer_norm_gated(x, weight, bias=None, z=None, *,
+  eps=1e-6, out=None, group_size=None, norm_before_gate=True, is_rms_norm=False,
+  activation="swish", quant_heads=0, implementation=None)`, returning
+  `(result, mean, rstd)`;
+* the provider is `layer_norm_gated_fwd(x, weight, bias, z, eps, out, group_size,
+  norm_before_gate, is_rms_norm, activation, quant_heads)` in that positional
+  order, for the torch reference and for both Triton backends;
+* the preallocated `out` buffer must reach the provider unchanged, so the front
+  end hands the caller's own 2-D tensor to the kernel instead of a reshaped copy.
+
+The suite's two test files are installed byte-identical and belong to `#525`:
+
+| file | md5 | lines shared with `#525` |
+| --- | --- | --- |
+| `tests/functions/test_layernorm_gated.py` | `d926c69d2c72d0ca07d716a255ad2db4` | 442 / 442 |
+| `tests/performance/functions/test_layernorm_gated.py` | `1bb93427d21c84e474ac0720ec4fce76` | 75 / 75 |
+
+Our own supplementary coverage was moved to files that do not collide with the
+suite's paths — `tests/functions/test_layernorm_gated_extra.py`,
+`tests/functions/test_layernorm_gated_aliases.py` and
+`tests/performance/functions/test_layernorm_gated_mbu.py`. The alias spellings
+`layernorm_gated`, `rms_norm_gated` and `_layer_norm_fwd` live in
+`mojo_opset/functions/layernorm_gated_compat.py`, so that either resolution order
+of the two front-end files leaves the package importable.
 
 Line-level accounting, counting normalised lines that the public reference shares
 with us but that are *not* in the upstream SGLang file (the part a port cannot
@@ -40,14 +70,28 @@ explain), before and after that second rewrite:
 | file | lines | shared with upstream | reference-only, before | reference-only, after |
 | --- | --- | --- | --- | --- |
 | `kernels/_layernorm_gated.py` | 378 | 107 | 87 (23.0%) | 87 (23.0%) — attributed |
-| `kernels/torch/layernorm_gated.py` | 82 → 76 | 16 | 9 (13.2%) | 4 (5.3%) |
+| `kernels/torch/layernorm_gated.py` | 82 → 78 | 16 | 9 (13.2%) | 3 (3.8%) |
 | `tests/performance/functions/test_layernorm_gated.py` | 208 | 4 | 86 (41.3%) | 50 (24.0%) |
+
+The same measurement on the current tree, with the acceptance suite added as a
+fourth source:
+
+| file | lines | shared with upstream | reference-only | shared with `#525` |
+| --- | --- | --- | --- | --- |
+| `kernels/_layernorm_gated.py` | 378 | 107 | 87 (23.0%) | — |
+| `kernels/torch/layernorm_gated.py` | 78 | 9 | 3 (3.8%) | 12 |
+| `functions/layernorm_gated.py` | 162 | 23 | 25 (15.4%) | 22 |
+| `tests/functions/test_layernorm_gated.py` | 442 | 14 | 16 (3.6%) | 442 |
+| `tests/performance/functions/test_layernorm_gated.py` | 75 | 5 | 4 (5.3%) | 75 |
+| `tests/functions/test_layernorm_gated_extra.py` | 219 | 25 | 57 (26.0%) | — |
+| `tests/functions/test_layernorm_gated_aliases.py` | 74 | 26 | 20 (27.0%) | — |
+| `tests/performance/functions/test_layernorm_gated_mbu.py` | 209 | 4 | 50 (23.9%) | — |
 
 The leftovers in the kernel are generic Triton spelling — `pid = tl.program_id(0)`,
 `mean = tl.sum(x, axis=1) / N`, the kernel's parameter list — plus reuse of the
-three structures named above. The torch reference and the performance harness keep
-only their public signatures, error strings and the shape matrix the task defines.
-`_tools/similarity.py` reproduces the table.
+three structures named above. The torch reference and the front end keep only
+their public signatures, error strings and the shape matrix the task defines.
+`_tools/similarity.py` reproduces the tables.
 
 ## 1. Scope
 
@@ -62,15 +106,20 @@ Call sites are the GDN out-norm and QK-Norm paths of linear-attention and
 `Mixer2RMSNormGated`-style blocks, i.e. tensors of `[tokens*heads, head_dim]`
 with a gate that is a strided `[tokens, heads, head_dim]` view.
 
-Three public entry points are provided, all dispatching through
+Four public entry points are provided, all dispatching through
 `functions._dispatch.load_impl`:
 
 | API | Purpose |
 | --- | --- |
-| `functions.layernorm_gated(x, weight, bias, eps, z=, out=, group_size=, norm_before_gate=, is_rms_norm=, activation=, quant_heads=)` | native API, returns `(result, mean, rstd)` |
+| `functions.layer_norm_gated(x, weight, bias=None, z=None, *, eps=1e-6, out=None, group_size=None, norm_before_gate=True, is_rms_norm=False, activation="swish", quant_heads=0, implementation=None)` | canonical API, as fixed by the acceptance suite `#525`, returns `(result, mean, rstd)` |
+| `functions.layernorm_gated(x, weight, bias, eps, z=, out=, group_size=, norm_before_gate=, is_rms_norm=, activation=, quant_heads=)` | same operator with the epsilon in fourth position |
 | `functions.rms_norm_gated(x=, weight=, ...)` | SGLang `rms_norm_gated` signature, returns only the output |
 | `functions._layer_norm_fwd(x, weight, bias, eps, z=, ...)` | SGLang kernel-level signature for a 2D `x` |
 | `modules.LayerNormGated` / `modules.RMSNormGated` | parameterised layers |
+
+The three alias spellings are exported from `functions/layernorm_gated_compat.py`
+so that the canonical front end can be replaced by the suite's own file without
+breaking the package import.
 
 ## 2. Semantics
 
@@ -102,6 +151,7 @@ act(z) = z*sigmoid(z) for "swish"/"silu", sigmoid(z) for "sigmoid"
 
 ```
 functions/layernorm_gated.py            validation, reshape, dispatch (no math)
+functions/layernorm_gated_compat.py     alias spellings (layernorm/rms_norm/_layer_norm_fwd)
 modules/layernorm_gated.py              LayerNormGated / RMSNormGated parameters
 kernels/_layernorm_gated.py             shared kernel + launch policy
 kernels/npu_a2_triton/layernorm_gated.py   provider -> shared kernel
@@ -111,9 +161,13 @@ kernels/torch/layernorm_gated.py        FP32 upcast reference (also the test ora
 
 The provider modules are two lines each on purpose: the kernel body is shared so
 that an A2/A5 tuning change cannot drift the numerics, and A5 differ only by the
-`use_z3d_tile` launch flag. Registration: `OPS["layernorm_gated"]` in the three
-providers, `layernorm_gated: triton` in `config/npu_a2.yaml` and `npu_a5.yaml`,
+`use_z3d_tile` launch flag. Registration: `OPS["layer_norm_gated"]` in the three
+providers, `layer_norm_gated: triton` in `config/npu_a2.yaml` and `npu_a5.yaml`,
 and one row in `docs/operator_support.md`.
+
+The op id is `layer_norm_gated` (underscored), matching the acceptance suite's
+`layer_norm_gated_fwd` provider name; `layernorm_gated` is only an alias of the
+Python front end and is not a registered op id.
 
 ## 4. Kernel design
 
@@ -662,13 +716,17 @@ and the `copy_` calibration reproduced at 393.34 vs 394.53 GB/s.
 ## 8. Reproduce
 
 ```bash
-# accuracy + bitwise
-pytest tests/functions/test_layernorm_gated.py tests/modules/test_layernorm_gated.py -q
+# accuracy + bitwise (the acceptance suite's own files, plus our extra coverage)
+pytest tests/functions/test_layernorm_gated.py tests/functions/test_layernorm_gated_extra.py \
+    tests/functions/test_layernorm_gated_aliases.py tests/modules/test_layernorm_gated.py -q
 # on 950 also add the A5-only cases
-pytest tests/functions/test_layernorm_gated.py tests/functions/test_layernorm_gated_a5.py \
+pytest tests/functions/test_layernorm_gated.py tests/functions/test_layernorm_gated_extra.py \
+    tests/functions/test_layernorm_gated_aliases.py tests/functions/test_layernorm_gated_a5.py \
     tests/modules/test_layernorm_gated.py -q
 # benchmark (writes JSON + raw profiler csv)
 pytest tests/performance/functions/test_layernorm_gated.py -q --perf-output tests/performance/results/npu.json
+# the MBU matrix
+pytest tests/performance/functions/test_layernorm_gated_mbu.py -q --perf-output tests/performance/results/mbu.json
 ```
 
 On A3 the device reports `Ascend910_9382`, which the target detection does not
