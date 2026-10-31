@@ -930,10 +930,14 @@ leaves the attribute present but not callable, and the old condition would not
 skip and would fail on the device.
 
 The rehearsal above is the CPU side. The sixteen merged trees have not been
-re-run on an Ascend device: the four DevEnv channels available on 2026-10-31
-all refuse to open (`platform authorization denied: Administratively
-prohibited`), so that leg needs a fresh ticket. The scripts and the trees are
-in place for it.
+re-run on an Ascend device: every DevEnv ticket held on this machine — five
+tickets, fourteen stored credential sets — refuses to open the tunnel at the
+same time (`platform authorization denied: Administratively prohibited`, raised
+by `open_channel` after the jump host authenticated successfully), which is a
+platform-side channel quota rather than a credential problem. That leg needs a
+fresh ticket. It is staged: the sixteen trees are packed into
+`_tools/_pkg/merge_trees_cc1e02c.tar.gz` and `_tools/run_merge_trees_a2.sh`
+walks them on the host.
 
 ## 7. Known limits
 
