@@ -26,8 +26,28 @@ The Ascend-specific engineering in this pull request is this repository's own wo
 * the tile and occupancy policy, including the three-axis 3-D gate tile and its
   element-count threshold.
 
-The function front end (`functions/layernorm_gated.py`) and the accuracy harness
-(`tests/functions/test_layernorm_gated.py`) were written for this pull request.
+The function front end (`functions/layernorm_gated.py`), the accuracy harness
+(`tests/functions/test_layernorm_gated.py`), the torch reference
+(`kernels/torch/layernorm_gated.py`) and the performance harness
+(`tests/performance/functions/test_layernorm_gated.py`) were written for this pull
+request and have since been rewritten once more, so that the only constructs still
+taken from the public reference are the three listed above.
+
+Line-level accounting, counting normalised lines that the public reference shares
+with us but that are *not* in the upstream SGLang file (the part a port cannot
+explain), before and after that second rewrite:
+
+| file | lines | shared with upstream | reference-only, before | reference-only, after |
+| --- | --- | --- | --- | --- |
+| `kernels/_layernorm_gated.py` | 378 | 107 | 87 (23.0%) | 87 (23.0%) — attributed |
+| `kernels/torch/layernorm_gated.py` | 82 → 76 | 16 | 9 (13.2%) | 4 (5.3%) |
+| `tests/performance/functions/test_layernorm_gated.py` | 208 | 4 | 86 (41.3%) | 50 (24.0%) |
+
+The leftovers in the kernel are generic Triton spelling — `pid = tl.program_id(0)`,
+`mean = tl.sum(x, axis=1) / N`, the kernel's parameter list — plus reuse of the
+three structures named above. The torch reference and the performance harness keep
+only their public signatures, error strings and the shape matrix the task defines.
+`_tools/similarity.py` reproduces the table.
 
 ## 1. Scope
 
@@ -617,6 +637,16 @@ the old numbers within 1.4%. The MBU column of that run is therefore scaled
 against a degraded calibration and is not comparable to §6.1; the A2
 performance figures in this document remain the §6.1 ones, and the 2026-10-31
 A2 run is a functional re-verification.
+
+A third run on the same box measured the second rewrite from §0: the tree was
+copied and only `kernels/torch/layernorm_gated.py` (`1826e25a…52ee97`) and
+`tests/performance/functions/test_layernorm_gated.py` (`8e5e9b1d…6752cbf`) were
+replaced, so the kernel, front end and accuracy harness hashed identically to the
+run above. `tests/functions` reported 35 passed / 8 skipped and `tests/modules` 8
+passed, the 11-row suite `1 passed` in 75.49 s with `failures: []`. Every measured
+row moved by at most 1.5% against the previous run on that host (the two smallest
+cases, 3.855 -> 3.912 us and 6.473 -> 6.571 us, where launch overhead dominates),
+and the `copy_` calibration reproduced at 393.34 vs 394.53 GB/s.
 
 ## 7. Known limits
 
