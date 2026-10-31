@@ -37,7 +37,6 @@ OPS = {
     "dequant": "quant",
     "dynamic_quant": "quant",
     "causal_conv1d_update_state_infer": "convolution",
-    "layernorm_gated": "layernorm_gated",
     "layer_norm_gated": "layernorm_gated",
     "layer_norm_infer": "layernorm",
     "rms_norm_infer": "rmsnorm",

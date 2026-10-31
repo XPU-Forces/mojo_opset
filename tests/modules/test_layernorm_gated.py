@@ -30,8 +30,8 @@ def _inputs(hidden_size, z_kind, dtype, device):
     return x, z
 
 
-@pytest.mark.api("modules.LayerNormGated", ops=["layernorm_gated"])
-@pytest.mark.api("modules.RMSNormGated", ops=["layernorm_gated"])
+@pytest.mark.api("modules.LayerNormGated", ops=["layer_norm_gated"])
+@pytest.mark.api("modules.RMSNormGated", ops=["layer_norm_gated"])
 @pytest.mark.accuracy
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("case", MODULE_CASES, ids=MODULE_IDS)
