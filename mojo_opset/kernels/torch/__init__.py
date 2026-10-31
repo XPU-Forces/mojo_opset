@@ -46,6 +46,7 @@ OPS = {
     "varlen_fa_infer": "varlen_fa",
     "causal_conv1d_update_state_infer": "convolution",
     "layernorm_gated": "layernorm_gated",
+    "layer_norm_gated": "layernorm_gated",
     "layer_norm_infer": "normalization",
     "rms_norm_infer": "normalization",
     "group_rms_norm_infer": "normalization",

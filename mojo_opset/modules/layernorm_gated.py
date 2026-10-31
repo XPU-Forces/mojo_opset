@@ -1,4 +1,4 @@
-"""Gated normalization layers built on :func:`mojo_opset.functions.layernorm_gated`."""
+"""Gated normalization layers built on :func:`mojo_opset.functions.layer_norm_gated`."""
 
 from typing import Optional
 
@@ -43,12 +43,12 @@ class _GatedNorm(torch.nn.Module):
         self.bias = torch.nn.Parameter(torch.zeros(hidden_size, device=device, dtype=dtype)) if has_bias else None
 
     def forward(self, x: torch.Tensor, z: Optional[torch.Tensor] = None, out=None) -> torch.Tensor:
-        result, _, _ = functions.layernorm_gated(
+        result, _, _ = functions.layer_norm_gated(
             x,
             self.weight,
             self.bias,
-            self.eps,
             z=z,
+            eps=self.eps,
             out=out,
             group_size=self.group_size,
             norm_before_gate=self.norm_before_gate,

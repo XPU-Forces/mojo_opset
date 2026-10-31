@@ -7,18 +7,18 @@ Provider layout follows the public implementation of the same community task,
 from mojo_opset.kernels._layernorm_gated import _layer_norm_fwd_impl
 
 
-def layernorm_gated_fwd(
+def layer_norm_gated_fwd(
     x,
     weight,
     bias,
+    z,
     eps,
-    z=None,
-    out=None,
-    group_size=None,
-    norm_before_gate=True,
-    is_rms_norm=False,
-    activation: str = "swish",
-    quant_heads: int = 0,
+    out,
+    group_size,
+    norm_before_gate,
+    is_rms_norm,
+    activation,
+    quant_heads,
 ):
     return _layer_norm_fwd_impl(
         x,
@@ -33,3 +33,7 @@ def layernorm_gated_fwd(
         activation=activation,
         quant_heads=quant_heads,
     )
+
+
+# The same wrapper under the alias spelling of the dispatch id.
+layernorm_gated_fwd = layer_norm_gated_fwd

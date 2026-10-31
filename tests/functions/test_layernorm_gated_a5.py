@@ -18,7 +18,7 @@ M, N, HEADS = 262144, 128, 8
 Z3D_TILE_MIN_ELEMENTS = 32 * 1024 * 1024
 
 
-@pytest.mark.api("functions.layernorm_gated")
+@pytest.mark.api("functions.layer_norm_gated")
 @pytest.mark.accuracy
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_z3d_tile_matches_eager(accuracy_backend, dtype):
@@ -36,9 +36,11 @@ def test_z3d_tile_matches_eager(accuracy_backend, dtype):
     z = padded[..., :N]
     assert z.dim() == 3 and not z.is_contiguous()
 
-    actual, mean, rstd = F.layernorm_gated(x, weight, None, 1e-6, z=z, is_rms_norm=True, implementation=implementation)
-    expected, mean_ref, rstd_ref = F.layernorm_gated(
-        x, weight, None, 1e-6, z=z, is_rms_norm=True, implementation="torch"
+    actual, mean, rstd = F.layer_norm_gated(
+        x, weight, None, z=z, eps=1e-6, is_rms_norm=True, implementation=implementation
+    )
+    expected, mean_ref, rstd_ref = F.layer_norm_gated(
+        x, weight, None, z=z, eps=1e-6, is_rms_norm=True, implementation="torch"
     )
     assert_close(actual, expected, dtype, name=f"z3d_tile_{target}")
     assert mean is None and mean_ref is None

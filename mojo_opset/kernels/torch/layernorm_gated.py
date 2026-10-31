@@ -55,18 +55,18 @@ def _fp8_per_token(y: torch.Tensor, quant_heads: int):
     return quantized, scale
 
 
-def layernorm_gated_fwd(
+def layer_norm_gated_fwd(
     x,
     weight,
     bias,
+    z,
     eps,
-    z=None,
-    out=None,
-    group_size=None,
-    norm_before_gate=True,
-    is_rms_norm=False,
-    activation: str = "swish",
-    quant_heads: int = 0,
+    out,
+    group_size,
+    norm_before_gate,
+    is_rms_norm,
+    activation,
+    quant_heads,
 ):
     rows, cols = x.shape
     width = cols if group_size is None else group_size
@@ -96,3 +96,7 @@ def layernorm_gated_fwd(
         out = torch.empty_like(x)
     out.copy_(rounded)
     return out, mean, rstd
+
+
+# The same wrapper under the alias spelling of the dispatch id.
+layernorm_gated_fwd = layer_norm_gated_fwd
