@@ -201,14 +201,26 @@ output never touches `Y`, and `x` is passed as the dtype carrier, so the fused
 case allocates no `[M, N]` buffer: memory is `q` (1 byte/element), `s` and
 `rstd`.
 
-One residual difference remains. On 32768x512, 1 of 16,777,216 FP8 bytes differs
-by 1 ulp from the unfused reference while all 4096 scale values are identical.
-The cause is the reciprocal: torch's `1.0 / scale` is not the correctly rounded
-quotient on Ascend (1 ulp on roughly 9% of tokens), while every triton-ascend
-form tried (`1.0/s`, `div_rn`, `libdevice.rcp_rn`, `fdiv`) returns the correctly
-rounded value. It is a platform lowering difference rather than a kernel choice;
-the bit-exact matrix (two dtypes, with/without gate, `N = 128` and `N = 250`)
-stays green.
+One residual difference was open here and is now closed. On 32768x512, 1 of
+16,777,216 FP8 bytes differed by 1 ulp from the unfused reference while all 4096
+scale values were identical. The cause is the reciprocal, but not in the
+direction first assumed: measured on the 950 over 2^20 scales drawn from the
+reachable FP8 range, triton-ascend lowers `1.0 / s`, `libdevice.div_rn`,
+`libdevice.rcp_rn` and `fdiv(ieee_rounding=True)` to the same fast `div.full`
+instruction, which is 1 ulp off on 8.9% of them, while torch's `1.0 / scale` is
+correctly rounded. The epilogue therefore refines the estimate with one
+Markstein step against an exact FMA,
+
+```python
+recip = 1.0 / scale
+recip = tl.math.fma(recip, tl.math.fma(-scale, recip, 1.0), recip)
+```
+
+which is correctly rounded on all 2^20 scales and left no difference on 240
+device cases (2 dtypes x 4 shapes x 30 seeds, 15.7M FP8 bytes) against both the
+torch reference and a CPU float64 exact reference. The step costs one FMA per
+token. Note that the earlier bit-exact runs were clean by luck: the old seed
+never landed an element near a quantisation midpoint.
 
 ### 4.5 Batch invariance
 
