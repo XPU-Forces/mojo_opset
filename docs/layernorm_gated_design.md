@@ -607,7 +607,7 @@ installed) and the same four file hashes. The device name resolves to
 skipped in 179.99 s and `tests/modules` 8 passed in 31.77 s, i.e. the same
 43 / 8 / 0 split as the other two hosts. The 11-row suite finished in 97.53 s
 with `failures: []`, and a second run on the same box reproduced every row
-within 0.3%.
+within 1.3% (the largest move is `gdn-2560` 6.553 -> 6.473 us).
 
 That host's HBM, however, is a third as fast as the 2026-10-30 A2: the in-run
 `copy_` probe measures 394.50 GB/s against 1235.4 GB/s in §6.1, and the only
