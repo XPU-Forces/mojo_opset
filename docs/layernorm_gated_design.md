@@ -551,8 +551,9 @@ them and are byte-identical to the index.
 ### 6.9 Re-verification after the rewrite and the FP8 fix (2026-10-31)
 
 The function front end, the accuracy harness and the FP8 epilogue all changed
-after the runs above, so the whole suite was re-run on both the 950 host (§6.6)
-and the A3 host (§6.7), each with CANN 9.2.0 side-installed.
+after the runs above, so the whole suite was re-run on the 950 host (§6.6), on
+the A3 host (§6.7) with CANN 9.2.0 side-installed, and on a reissued A2 host
+running the image's own CANN 9.1.0.
 
 On the 950: accuracy 53 passed / 0 failed, `failures: []` on the 11-row matrix,
 and 240 FP8 stress cases with no byte difference. The Markstein step is not
@@ -598,9 +599,24 @@ device name and `failures: []`. Calibration on this run: `copy_` 1267.21 GB/s,
 Every row stays inside its line and the largest move from the pre-rewrite
 numbers is -1.3% on the smallest case, where fixed overhead dominates.
 
-A2 was not re-run. Its jump ticket expired and the rebuilt environment is an
-`Ascend910B2`, so a fresh run would answer a different question than §6.8. The
-kernel variant A2 loads is the same `npu.a2` one the A3 run exercised above.
+The A2 re-run then used a host the platform reissued on 2026-10-31: container
+hostname `1233b4c4c4dd`, aarch64, openEuler 24.03 LTS-SP3 (kernel 5.10.0-216),
+`Ascend910B3`, npu-smi 26.1.1, the image's own CANN 9.1.0 (nothing side
+installed) and the same four file hashes. The device name resolves to
+`npu.a2.910b3` without an override. `tests/functions` reported 35 passed / 8
+skipped in 179.99 s and `tests/modules` 8 passed in 31.77 s, i.e. the same
+43 / 8 / 0 split as the other two hosts. The 11-row suite finished in 97.53 s
+with `failures: []`, and a second run on the same box reproduced every row
+within 0.3%.
+
+That host's HBM, however, is a third as fast as the 2026-10-30 A2: the in-run
+`copy_` probe measures 394.50 GB/s against 1235.4 GB/s in §6.1, and the only
+row whose traffic exceeds the 192 MB L2 (`gdn-524288-n128-swish`, 402 MB) took
+1288.48 us instead of 509.23 us. All other rows, which stay L2-resident, match
+the old numbers within 1.4%. The MBU column of that run is therefore scaled
+against a degraded calibration and is not comparable to §6.1; the A2
+performance figures in this document remain the §6.1 ones, and the 2026-10-31
+A2 run is a functional re-verification.
 
 ## 7. Known limits
 
