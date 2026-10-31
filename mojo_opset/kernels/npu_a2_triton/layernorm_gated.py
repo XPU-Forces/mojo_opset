@@ -20,6 +20,15 @@ def layer_norm_gated_fwd(
     activation,
     quant_heads,
 ):
+    if quant_heads:
+        # The 910B/910C runtime does not implement DT_FLOAT8_E4M3FN, so the FP8
+        # epilogue cannot be built or run here; the toolkit aborts inside the
+        # compiler without saying why.  Ascend 950 carries the capability.
+        raise RuntimeError(
+            "the fused FP8 epilogue needs a runtime that implements DT_FLOAT8_E4M3FN; "
+            "the Ascend 910B/910C runtime does not, so the FP8 output cannot be produced "
+            "on this target.  Ascend 950 (npu.a5) is the target that supports it."
+        )
     return _layer_norm_fwd_impl(
         x,
         weight,

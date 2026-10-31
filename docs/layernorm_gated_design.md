@@ -63,6 +63,10 @@ suite's paths — `tests/functions/test_layernorm_gated_extra.py`,
 `mojo_opset/functions/layernorm_gated_compat.py`, so that either resolution order
 of the two front-end files leaves the package importable.
 
+The suite was then run on a device for the first time on 2026-10-31; §6.10 has
+the results and §6.11 the attribution of the one capability the Ascend910B
+platform cannot provide.
+
 Line-level accounting, counting normalised lines that the public reference shares
 with us but that are *not* in the upstream SGLang file (the part a port cannot
 explain), before and after that second rewrite:
@@ -295,6 +299,51 @@ device cases (2 dtypes x 4 shapes x 30 seeds, 15.7M FP8 bytes) against both the
 torch reference and a CPU float64 exact reference. The step costs one FMA per
 token. Note that the earlier bit-exact runs were clean by luck: the old seed
 never landed an element near a quantisation midpoint.
+
+The FP8 epilogue is an Ascend 950 capability, and on Ascend 910B/910C it cannot
+be built at all — not by this kernel but by the platform. The cast in the
+epilogue, `(y * recip).to(Q.dtype.element_ty)`, lowers to `arith.truncf` to
+`f8E4M3FN`, and the 910B compiler aborts on it:
+
+```
+LLVM ERROR: unsupported datatype for arith::TruncFOp to hfusion
+```
+
+The abort comes from `bishengir-compile`, which Triton-Ascend ships inside its own
+package (`triton/backends/ascend/bishengir/bin/bishengir-compile`, invoked with
+`--target=Ascend910B3`), not from the CANN tree. The runtime is equally unable to
+carry the dtype: on Ascend910B3 `torch.zeros(..., dtype=torch.float8_e4m3fn)` on
+`npu:0` fails with
+
+```
+AclNN_Parameter_Error(EZ1001): Tensor self not implemented for DT_FLOAT8_E4M3FN,
+should be in dtype support list [DT_INT8,DT_INT32,DT_INT64,DT_UINT8,DT_FLOAT16,
+DT_FLOAT,DT_BOOL,DT_DOUBLE,DT_INT16,DT_UINT16,DT_COMPLEX128,DT_COMPLEX64,
+DT_BFLOAT16,]
+```
+
+so the acceptance suite's own FP8 reference
+(`(y*(1/scale)).clamp(-448,448).to(torch.float8_e4m3fn)`) cannot run on that
+device either — it is the platform's dtype support list, not this
+implementation, that stops it. The same two failures reproduce under CANN 9.2.0
+(the task's stated minimum), and the public reference implementation
+(`brandfucker/mojo_opset#516`) performs the identical cast, so this is not a
+divergence introduced here. The task statement scopes the FP8 e4m3 epilogue to
+Ascend 950 ("仅 Ascend 950 需要支持该能力") and requires a platform-driven
+limitation to be stated in the pull request, which is what §6.10 does.
+
+Because of this, the A2/A3 provider raises a `RuntimeError` with an actionable
+message instead of letting the compiler abort, and the A5 provider is left
+untouched so the 950 path carries no regression risk:
+
+```python
+if quant_heads:
+    raise RuntimeError(
+        "the fused FP8 epilogue needs a runtime that implements DT_FLOAT8_E4M3FN; "
+        "the Ascend 910B/910C runtime does not, so the FP8 output cannot be produced "
+        "on this target.  Ascend 950 (npu.a5) is the target that supports it."
+    )
+```
 
 ### 4.5 Batch invariance
 
@@ -702,6 +751,104 @@ row moved by at most 1.5% against the previous run on that host (the two smalles
 cases, 3.855 -> 3.912 us and 6.473 -> 6.571 us, where launch overhead dominates),
 and the `copy_` calibration reproduced at 393.34 vs 394.53 GB/s.
 
+### 6.10 The acceptance suite on the device (2026-10-31)
+
+The suite's own files were run on a device for the first time on this branch on
+2026-10-31, on an Ascend910B3 host (container hostname `a4b415bb106e`, aarch64,
+openEuler 22.03 LTS-SP4, kernel 5.10.0-216, npu-smi 26.1.1, the image's own CANN
+9.1.0 under `/usr/local/Ascend/cann-9.1.0`, torch 2.10.0+cpu, torch_npu
+2.10.0.post7, Triton-Ascend 3.6.0, Python 3.12.13). The device name resolves to
+`npu.a2.910b3` without an override.
+
+The tree under test is this branch's working tree at `fe102fe`. The device copy
+carries CRLF because the archive was packed from a Windows checkout, so the
+hashes are compared after normalising the line endings: all sixteen tested
+files then hash identically to the committed tree, and the suite's two files
+reproduce the `#525` md5s `d926c69d2c72d0ca07d716a255ad2db4` and
+`1bb93427d21c84e474ac0720ec4fce76` exactly.
+
+| suite | result | time |
+| --- | --- | --- |
+| `tests/functions/test_layernorm_gated.py` (the `#525` file) | 116 passed / 17 failed | 409.73 s |
+| `tests/functions/test_layernorm_gated_extra.py` | 34 passed / 8 skipped | 3.18 s |
+| `tests/functions/test_layernorm_gated_aliases.py` | 2 passed | 11.47 s |
+| `tests/functions/test_layernorm_gated_a5.py` | skipped on this device | — |
+| `tests/modules/test_layernorm_gated.py` | 8 passed | 2.68 s |
+| `tests/performance/functions/test_layernorm_gated.py` (the `#525` file) | 10 passed / 1 failed | 51.85 s |
+| `tests/performance/functions/test_layernorm_gated_mbu.py` | 1 passed, `failures: []` | 74.89 s |
+
+The seventeen accuracy failures are `test_gated_norm_quant` (nine cases) and
+`test_fused_quant_bit_exact` (eight cases); the single performance failure is
+the suite's FP8 row. Every other case passes, including the two the suite
+leaves device-only: `test_batch_invariant_rows_bitwise` across `M = 131/132`
+(passes for both the LayerNorm and the RMSNorm specialisation) and the
+`out`-identity assertion.
+
+All eighteen failures are the FP8 epilogue, and §4.4 shows why: the Ascend910B
+runtime has no `DT_FLOAT8_E4M3FN` kernel and its compiler cannot lower the
+cast. The failure is not specific to this branch's Triton path — the suite's
+own reference ends in the same cast, so the FP8 case cannot pass on this device
+whatever the kernel does. The suite also has no `npu.a5` skip marker for
+`test_fused_quant_bit_exact`, so it runs on A2/A3 by design; this branch's own
+`test_layernorm_gated_extra.py` does gate those cases on the device name, which
+is why its eight FP8 cases skip here.
+
+The A2 provider now raises the `RuntimeError` of §4.4 instead of letting the
+compiler abort, so the seventeen failures name the capability instead of
+dumping a compiler stack trace.
+
+The same tree was then run under the side-installed CANN 9.2.0 (the task's
+stated minimum), with the 9.1.0 entries stripped from `LD_LIBRARY_PATH`,
+`PYTHONPATH` and `PATH` before `set_env.sh` is sourced. The suite's two files
+reproduce the `#525` md5s byte for byte there, because that tree was packed
+from an LF checkout. The result is identical — 116 passed / 17 failed in
+310.93 s on the accuracy file, 10 passed / 1 failed in 54.23 s on the
+performance file, 34 passed / 8 skipped, 2 passed, 8 passed, and the MBU matrix
+`1 passed` with `failures: []` — so the gap is a property of the Ascend910B
+platform and not of the CANN version. The MBU matrix also reproduces the 9.1.0
+readings row for row (largest move 1.1% on `gdn-256`, where launch overhead
+dominates) with a `copy_` calibration of 394.33 GB/s against 395.41 GB/s.
+
+That host's HBM is again a third as fast as the 2026-10-30 A2 — its in-run
+`copy_` probe measures 395.41 GB/s against 1235.4 GB/s — so the MBU column of
+both runs is scaled against a degraded denominator and is not comparable to
+§6.1. The one row whose traffic exceeds the 192 MB L2 (`gdn-524288-n128-swish`,
+402 MB) took 1280.58 us instead of 509.23 us, while every L2-resident row is
+within 1.4% of the original A2. As in §6.9, the A2 performance figures in this
+document remain the §6.1 ones and this run is a functional re-verification.
+
+### 6.11 Attributing the FP8 failure to the platform
+
+Two probes were run on that host to separate the platform from this
+implementation.
+
+The first (`fp8_support_probe.py`) asks the runtime directly:
+`torch.zeros(..., dtype=torch.float8_e4m3fn)` on `npu:0` fails with
+`AclNN_Parameter_Error(EZ1001)`, a cast to that dtype fails, the suite's own
+reference expression fails, and the same expression on the CPU succeeds.
+
+The second (`fp8_suite_probe.py`) drives the public entry point twice on the
+same device — once with `implementation="torch"`, which is the suite's own
+reference path and does not touch Triton at all, and once with the default NPU
+dispatch:
+
+```
+=== public entry point, implementation='torch' (the suite's own reference path) ===
+-> FAILED: RuntimeError
+copy_d2d_baseformat_opapi:.../CopyKernelOpApi.cpp:126 NPU function error: call aclnnInplaceCopy failed, error code is 561103
+
+=== public entry point, default implementation (this branch's NPU dispatch) ===
+-> FAILED: RuntimeError
+the fused FP8 epilogue needs a runtime that implements DT_FLOAT8_E4M3FN; the Ascend 910B/910C runtime does not, ...
+```
+
+The first block is the decisive one: the *torch reference* fails on this device
+with a plain runtime dtype error, before any kernel of ours is reached. The
+suite's FP8 assertion cannot be satisfied on an Ascend910B whatever the
+implementation is. Both blocks are identical under CANN 9.1.0 and CANN 9.2.0;
+under 9.1.0 the second block is the compiler abort, because that tree predates
+the guard of §4.4.
+
 ## 7. Known limits
 
 * `group_size` must divide `N` and must fit 64 KiB, as in the reference kernel.
@@ -712,6 +859,11 @@ and the `copy_` calibration reproduced at 393.34 vs 394.53 GB/s.
 * Forward only: this is an inference primitive, there is no backward wrapper.
 * `mean` and `rstd` keep the reference layout `[ngroups*M]` (group-major) rather
   than `[M, ngroups]`.
+* The FP8 e4m3 epilogue needs a runtime that implements `DT_FLOAT8_E4M3FN`. The
+  Ascend 910B/910C runtime does not, and its compiler cannot lower the cast
+  either, so `quant_heads > 0` raises a `RuntimeError` on those targets; only
+  Ascend 950 (`npu.a5`) produces the FP8 output. The limit is the platform's
+  dtype support, not this implementation — see §4.4 and §6.10.
 
 ## 8. Reproduce
 
@@ -739,6 +891,11 @@ CANN 9.2.0 the 9.1.0 entries have to leave `LD_LIBRARY_PATH`, `PYTHONPATH` and
 `ascend-cann-910b-ops` on A2, `ascend-cann-a3-ops` on A3) and the `linux-64`
 one on the 950. On the A2 image the toolkit installer additionally needs an
 interpreter with pip on `PATH` — see §6.8.
+
+On A2 and A3 the FP8 cases of the acceptance suite fail by construction,
+because that runtime does not implement `DT_FLOAT8_E4M3FN` (§4.4); the suite
+has no device-name skip for `test_fused_quant_bit_exact`, so it runs there.
+Every non-FP8 case passes on those hosts.
 
 ---
 
