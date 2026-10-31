@@ -902,11 +902,11 @@ The two fix commits were reworded afterwards so that they carry the same AI
 declaration line as every other commit in the branch, which moved them from
 `b0bc630` and `728f0df` to `d25195a` and `14bf14a`. Their trees are unchanged
 (`6795544e72595afe8663af21849bc1a4afc915b9`), so the sixteen merged trees and
-their results are the same; the four commits that follow `14bf14a` only touch
-this note and the delivery documents, and the rehearsal was replayed once more
-at the branch head `cc1e02c` — the sha256 of the four contested files is
-identical in all sixteen trees at both heads, only the design note inside the
-merged trees differs.
+their results are the same. The rehearsal was then replayed once more at
+`cc1e02c`, and every commit after `cc1e02c` changes
+`docs/layernorm_gated_design.md` only — the sha256 of the four contested files
+is identical in all sixteen trees at `14bf14a` and at `cc1e02c`, so the merge
+surface did not move.
 
 The hazard was semantic rather than textual. The spelling `layernorm_gated` was
 registered as an operator id in the two provider registries and the two target
