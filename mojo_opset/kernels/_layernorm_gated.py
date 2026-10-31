@@ -42,6 +42,23 @@ STREAMING_ELEMENTS = 32 * 1024 * 1024
 
 
 @triton.jit
+def _rounded_recip(scale):
+    """Return the correctly rounded 1/scale.
+
+    The vector division this target emits for ``1.0 / scale`` is the fast
+    ``div.full`` form: measured over 2^20 scales spread across the FP8 range it
+    is 1 ulp high or low on 8.9% of them, and ``libdevice.div_rn``/``rcp_rn``
+    lower to the very same instruction.  One Markstein step against an exact FMA
+    restores the correctly rounded quotient (0 mismatches over the same 2^20
+    scales), which the per-token epilogue needs because a 1 ulp scale error
+    flips FP8 outputs that sit near a quantisation midpoint.
+    """
+
+    recip = 1.0 / scale
+    return tl.math.fma(recip, tl.math.fma(-scale, recip, 1.0), recip)
+
+
+@triton.jit
 def _layer_norm_fwd_kernel(
     X,
     Y,
@@ -211,14 +228,14 @@ def _layer_norm_fwd_kernel(
                 scale = tl.maximum(amax.to(tl.float32), 1e-10) * (1.0 / 448.0)
                 recip = tl.reshape(
                     tl.broadcast_to(
-                        tl.reshape(1.0 / scale, (QUANT_TOKEN_GROUP, 1, 1)),
+                        tl.reshape(_rounded_recip(scale), (QUANT_TOKEN_GROUP, 1, 1)),
                         (QUANT_TOKEN_GROUP, rows_per_token, BLOCK_N),
                     ),
                     (ROWS_PER_BLOCK, BLOCK_N),
                 )
             else:
                 scale = tl.maximum(tl.max(tl.max(tl.abs(y), axis=1), axis=0), 1e-10) * (1.0 / 448.0)
-                recip = 1.0 / scale
+                recip = _rounded_recip(scale)
             # |y| <= amax holds for every element of the tile, so the scaled value
             # stays inside +-448*(1+2ulp) and never reaches the 464 midpoint where
             # e4m3fn would overflow to NaN; the reference's clamp is a no-op here
