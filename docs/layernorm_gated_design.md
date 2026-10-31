@@ -985,10 +985,16 @@ mismatch, then `ALL_TREES_DONE`.
 
 One tooling defect surfaced after the run and is fixed in the tree: the runner
 collected its count column with `grep -E '^[0-9]+ (passed|failed)'`, which
-never matches `pytest -q`'s `=`-padded summary line, so `summary.txt` carries
-the return codes but an empty count column. The return codes are authoritative
-and unaffected; the counts quoted above were re-parsed from the same per-tree
-logs those codes came from.
+never matches `pytest -q`'s `=`-padded summary line, so the first pass's
+`summary.txt` carries the return codes but an empty count column. The return
+codes are authoritative and unaffected; the counts quoted above were re-parsed
+from the same per-tree logs those codes came from. A second pass on 2026-11-01
+(23:06:01–23:14:07 host UTC) with the fixed runner closed that gap: the same
+sixteen trees, rebuilt on the host from the same payload with `BUILD_OK 16
+trees` and no hash mismatch, produced the same verdicts tree for tree — every
+return code 0, the same 133 / 42 / 2 / 8 / 11 counts, this time written by the
+host itself — and the aliases row again splits into 2 passed on the eight
+`fns-o` trees and 2 skipped on the eight `fns-s` trees.
 
 On Ascend 910B the FP8 cases fail for every tree, so the baseline to compare
 against is the count of the FP8 failures, not zero; on Ascend 950 the FP8 path
