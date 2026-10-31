@@ -861,13 +861,19 @@ the common base is `0a7d64c`, upstream `master` is `8b4b7a1`, and the two
 commits in between touch ten files, none of them among the six files #525
 changes. The rebuilt `master` tree hashes to
 `769df7e9a73169faed1a9286134ca60f1ed3aa95`, the tree SHA GitHub reports for
-`8b4b7a1`, so the reconstruction is byte-exact. The suite is then applied on
-top of the common base — its two modified `__init__.py` files are byte-identical
-at the suite's own base `45102091` and at `0a7d64c`, so this is equivalent to
-merging #525 into `master`.
+`8b4b7a1`, so the reconstruction is byte-exact. The suite's content is then
+applied on top of the common base (its two modified `__init__.py` files are
+byte-identical at the suite's own base `45102091` and at `0a7d64c`, so this
+reproduces the suite's branch content), and that commit is merged into the
+rebuilt `master`.
 
-That first merge is clean. Merging this branch into the result produces three
-conflicts: `mojo_opset/functions/__init__.py` (content), and
+That first merge is clean, and the result differs from `master` in exactly the
+six files of the suite — the script asserts that, so the tree the rehearsal
+merges into is the real post-#525 master and not the common base. The merge
+base of this branch and that tree is `0a7d64c`, again asserted.
+
+Merging this branch into that result produces three conflicts:
+`mojo_opset/functions/__init__.py` (content), and
 `mojo_opset/functions/layernorm_gated.py` plus
 `mojo_opset/kernels/torch/layernorm_gated.py` (add/add). The
 `functions/__init__.py` conflict is a single three-line hunk — this branch's
