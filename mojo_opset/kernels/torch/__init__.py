@@ -61,6 +61,7 @@ OPS = {
     "swa_infer": "attention",
     "native_swa_infer": "attention",
     "rope": "rope",
+    "vision_pos_embed_interp": "vision_pos_embed_interp",
 }
 
 
