@@ -25,6 +25,7 @@ supported shapes, dtypes and options.
 | `join_prob_reject_sampling` | triton | triton |
 | `layer_norm_infer` | triton | triton |
 | `layer_norm_quant` | torch_npu | torch_npu |
+| `layernorm_gated_infer` | triton | triton |
 | `lightning_indexer` | triton | triton |
 | `moe_dynamic_quant` | triton, torch_npu | triton, torch_npu |
 | `multimodal_rope_infer` | triton | triton |
@@ -36,6 +37,8 @@ supported shapes, dtypes and options.
 | `paged_decode_swa_infer` | triton, torch_npu | triton, torch_npu |
 | `paged_prefill_gqa_infer` | triton, torch_npu | triton, torch_npu |
 | `paged_prefill_swa_infer` | triton, torch_npu | triton, torch_npu |
+| `pos_embed_interp_infer` | triton | triton |
+| `pos_embed_interp_multi_infer` | triton | triton |
 | `prefill_gqa_infer` | torch_npu | torch_npu |
 | `quant_batch_gemm_reduce_sum` | — | — |
 | `quant_gemm` | triton, torch_npu | triton, torch_npu |

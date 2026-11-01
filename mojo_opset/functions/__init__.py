@@ -25,6 +25,7 @@ from .gemm import quant_gemm
 from .indexer import indexer
 from .indexer import lightning_indexer
 from .kv_cache import store_paged_kv_cache
+from .layernorm_gated import layernorm_gated_infer
 from .multimodal_rope_infer import multimodal_rope_infer
 from .normalization import group_rms_norm_infer
 from .normalization import layer_norm_infer
@@ -40,8 +41,11 @@ from .paged_attention import paged_decode_swa_infer
 from .paged_attention import paged_prefill_gqa_infer
 from .paged_attention import paged_prefill_swa_infer
 from .paged_attention import prefill_gqa_infer
+from .position_embedding import pos_embed_interp_infer
+from .position_embedding import pos_embed_interp_multi_infer
 from .position_embedding import rope_infer
 from .position_embedding import vision_rope_2d_infer
+from .qk_norm_rope import qk_norm_rope_infer
 from .quantization import dequant
 from .quantization import dynamic_quant
 from .quantization import static_quant
@@ -82,6 +86,7 @@ __all__ = [
     "join_prob_reject_sampling",
     "layer_norm_infer",
     "layer_norm_quant",
+    "layernorm_gated_infer",
     "lightning_indexer",
     "moe_dynamic_quant",
     "multimodal_rope_infer",
@@ -93,6 +98,9 @@ __all__ = [
     "paged_decode_swa_infer",
     "paged_prefill_gqa_infer",
     "paged_prefill_swa_infer",
+    "qk_norm_rope_infer",
+    "pos_embed_interp_infer",
+    "pos_embed_interp_multi_infer",
     "prefill_gqa_infer",
     "quant_batch_gemm_reduce_sum",
     "quant_gemm",
