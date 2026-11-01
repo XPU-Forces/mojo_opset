@@ -42,6 +42,7 @@ from .paged_attention import paged_prefill_swa_infer
 from .paged_attention import prefill_gqa_infer
 from .position_embedding import rope_infer
 from .position_embedding import vision_rope_2d_infer
+from .qk_norm_rope import qk_norm_rope
 from .qk_norm_rope import qk_norm_rope_infer
 from .quantization import dequant
 from .quantization import dynamic_quant
@@ -95,6 +96,7 @@ __all__ = [
     "paged_prefill_gqa_infer",
     "paged_prefill_swa_infer",
     "prefill_gqa_infer",
+    "qk_norm_rope",
     "qk_norm_rope_infer",
     "quant_batch_gemm_reduce_sum",
     "quant_gemm",
