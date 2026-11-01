@@ -60,7 +60,7 @@ import triton.language as tl
 from mojo_opset.kernels._npu_triton_utils import get_num_cores
 from mojo_opset.kernels._npu_triton_utils import libentry
 
-__all__ = ["qk_norm_rope_infer_fwd"]
+__all__ = ["qk_norm_rope_fwd", "qk_norm_rope_infer_fwd"]
 
 
 @libentry()
@@ -83,6 +83,7 @@ def _qk_norm_rope_kernel(
     rotary_half: tl.constexpr,
     d_pad: tl.constexpr,
     eps: tl.constexpr,
+    interleaved: tl.constexpr,
     bt: tl.constexpr,
     hpg: tl.constexpr,
 ):
@@ -132,12 +133,18 @@ def _qk_norm_rope_kernel(
     dim_mask = dims < head_dim
     weight = tl.load(weight_ptr + dims, mask=dim_mask, other=0.0).to(tl.float32)
     rotary_dim: tl.constexpr = rotary_half * 2
-    first_half = dims < rotary_half
     rotary_mask = dims < rotary_dim
-    second_half = (dims >= rotary_half) & rotary_mask
-    pair_dims = tl.where(
-        first_half, dims + rotary_half, tl.where(second_half, dims - rotary_half, dims)
-    )
+    if interleaved:
+        # GPT-NeoX pairing: (2i, 2i+1) rotate together and the table is indexed by pair.
+        first_lane = rotary_mask & ((dims & 1) == 0)
+        second_lane = rotary_mask & ((dims & 1) == 1)
+        pair_dims = tl.where(rotary_mask, dims ^ 1, dims)
+    else:
+        first_lane = dims < rotary_half
+        second_lane = (dims >= rotary_half) & rotary_mask
+        pair_dims = tl.where(
+            first_lane, dims + rotary_half, tl.where(second_lane, dims - rotary_half, dims)
+        )
     pair_weight = tl.load(weight_ptr + pair_dims, mask=dim_mask, other=0.0).to(tl.float32)
 
     for i in range(bt):
@@ -145,21 +152,32 @@ def _qk_norm_rope_kernel(
         t_valid = token < num_tokens
         table_off = token.to(tl.int64) * rope_stride_t
         table_mask = dim_mask & t_valid
-        tab = tl.load(
-            rope_table_ptr + table_off + dims, mask=table_mask & rotary_mask, other=0.0
-        ).to(tl.float32)
-        tab_hi = tl.load(
-            rope_table_ptr + table_off + rotary_half + dims,
-            mask=table_mask & first_half,
-            other=0.0,
-        ).to(tl.float32)
-        tab_lo = tl.load(
-            rope_table_ptr + table_off - rotary_half + dims,
-            mask=table_mask & second_half,
-            other=0.0,
-        ).to(tl.float32)
-        cos = tl.where(first_half, tab, tab_lo)
-        sin = tl.where(first_half, tab_hi, tab)
+        if interleaved:
+            pair_ci = dims >> 1
+            cos = tl.load(
+                rope_table_ptr + table_off + pair_ci, mask=table_mask & rotary_mask, other=0.0
+            ).to(tl.float32)
+            sin = tl.load(
+                rope_table_ptr + table_off + rotary_half + pair_ci,
+                mask=table_mask & rotary_mask,
+                other=0.0,
+            ).to(tl.float32)
+        else:
+            tab = tl.load(
+                rope_table_ptr + table_off + dims, mask=table_mask & rotary_mask, other=0.0
+            ).to(tl.float32)
+            tab_hi = tl.load(
+                rope_table_ptr + table_off + rotary_half + dims,
+                mask=table_mask & first_lane,
+                other=0.0,
+            ).to(tl.float32)
+            tab_lo = tl.load(
+                rope_table_ptr + table_off - rotary_half + dims,
+                mask=table_mask & second_lane,
+                other=0.0,
+            ).to(tl.float32)
+            cos = tl.where(first_lane, tab, tab_lo)
+            sin = tl.where(first_lane, tab_hi, tab)
 
         for j in range(hpg):
             head = pid_h * hpg + j
@@ -173,26 +191,32 @@ def _qk_norm_rope_kernel(
             inv_rms = tl.rsqrt(tl.sum(x * x) / head_dim + eps)
             normalized = (x * inv_rms * weight).to(tl.bfloat16)
 
-            shift = rotary_half * x_stride_d
-            pair_a = tl.load(
-                x_ptr + row_in + shift + dims * x_stride_d,
-                mask=row_mask & first_half,
-                other=0.0,
-            ).to(tl.float32)
-            pair_b = tl.load(
-                x_ptr + row_in - shift + dims * x_stride_d,
-                mask=row_mask & second_half,
-                other=0.0,
-            ).to(tl.float32)
-            pair_normalized = (
-                tl.where(first_half, pair_a, pair_b) * inv_rms * pair_weight
-            ).to(tl.bfloat16)
+            if interleaved:
+                pair_raw = tl.load(
+                    x_ptr + row_in + pair_dims * x_stride_d,
+                    mask=row_mask & rotary_mask,
+                    other=0.0,
+                ).to(tl.float32)
+            else:
+                shift = rotary_half * x_stride_d
+                pair_a = tl.load(
+                    x_ptr + row_in + shift + dims * x_stride_d,
+                    mask=row_mask & first_lane,
+                    other=0.0,
+                ).to(tl.float32)
+                pair_b = tl.load(
+                    x_ptr + row_in - shift + dims * x_stride_d,
+                    mask=row_mask & second_lane,
+                    other=0.0,
+                ).to(tl.float32)
+                pair_raw = tl.where(first_lane, pair_a, pair_b)
+            pair_normalized = (pair_raw * inv_rms * pair_weight).to(tl.bfloat16)
 
             normalized_f = normalized.to(tl.float32)
             pair_f = pair_normalized.to(tl.float32)
             first = normalized_f * cos - pair_f * sin
             second = normalized_f * cos + pair_f * sin
-            output = tl.where(rotary_mask, tl.where(first_half, first, second), normalized_f)
+            output = tl.where(rotary_mask, tl.where(first_lane, first, second), normalized_f)
             tl.store(out_ptr + row_out + dims * out_stride_d, output, mask=row_mask)
 
 
@@ -224,6 +248,7 @@ def _launch(
     weight: torch.Tensor,
     rope_table: torch.Tensor,
     eps: float,
+    interleaved: bool,
     out: torch.Tensor,
     bt: int,
     hpg: int,
@@ -250,6 +275,7 @@ def _launch(
         rotary_half=rotary_half,
         d_pad=triton.next_power_of_2(head_dim),
         eps=eps,
+        interleaved=interleaved,
         bt=bt,
         hpg=hpg,
     )
@@ -260,13 +286,14 @@ def _norm_rope(
     weight: torch.Tensor,
     rope_table: torch.Tensor,
     eps: float,
+    interleaved: bool,
 ) -> torch.Tensor:
     num_tokens, num_heads, _ = x.shape
     out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
     if num_tokens == 0 or num_heads == 0:
         return out
     bt, hpg, grid_t, grid_h = _pick_tuning(num_tokens, num_heads, get_num_cores("vector"))
-    _launch(x, weight, rope_table, eps, out, bt, hpg, grid_t, grid_h)
+    _launch(x, weight, rope_table, eps, interleaved, out, bt, hpg, grid_t, grid_h)
     return out
 
 
@@ -277,9 +304,20 @@ def qk_norm_rope_infer_fwd(
     k_weight: torch.Tensor,
     rope_table: torch.Tensor,
     eps: float,
+    interleaved: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Q and K each get one launch, matching the upstream kernel-count contract."""
+    """Q and K each get one launch, matching the upstream kernel-count contract.
+
+    ``interleaved`` selects GPT-NeoX pairing (``(2i, 2i+1)`` rotate together, table indexed by
+    pair) instead of the H3 half-split pairing (``(d, d + rotary/2)``). Both layouts are the
+    same kernel; the flag is a ``tl.constexpr`` so it costs nothing in either form.
+    """
     return (
-        _norm_rope(q, q_weight, rope_table, eps),
-        _norm_rope(k, k_weight, rope_table, eps),
+        _norm_rope(q, q_weight, rope_table, eps, interleaved),
+        _norm_rope(k, k_weight, rope_table, eps, interleaved),
     )
+
+
+# The public entry is upstream's name; ``qk_norm_rope_infer`` is the older op id this package
+# used and stays bound to the same kernel.
+qk_norm_rope_fwd = qk_norm_rope_infer_fwd

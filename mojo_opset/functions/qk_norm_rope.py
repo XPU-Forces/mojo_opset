@@ -72,14 +72,15 @@ def _validate_qk_norm_rope(q, k, q_weight, k_weight, rope_table, eps, op):
     _require_inference(op, q, k, q_weight, k_weight, rope_table)
 
 
-def qk_norm_rope_infer(
+def qk_norm_rope(
     q: torch.Tensor,
     k: torch.Tensor,
     q_weight: torch.Tensor,
     k_weight: torch.Tensor,
     rope_table: torch.Tensor,
-    eps: float,
+    eps: float = 1e-6,
     *,
+    interleaved: bool = False,
     implementation: Optional[str] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Per-head Q/K RMSNorm followed by half-split RoPE from a packed ``[cos | sin]`` table.
@@ -96,14 +97,40 @@ def qk_norm_rope_infer(
     offsets. Upstream does the same and also accepts only the activation dtype or float32
     for the table, which is what this contract checks.
 
+    ``interleaved=False`` is the H3 half-split pairing, ``(d, d + rotary_dim // 2)``.
+    ``interleaved=True`` is the GPT-NeoX pairing, ``(2i, 2i + 1)``, with the table indexed by
+    pair -- upstream's Boogu-Image variant; both run the same kernel.
+
     Forward only, like ``rms_norm_infer``: the caller has to be inside ``torch.no_grad()``
-    or an inference mode, because the norm weights are normally ``nn.Parameter``s. Only the
-    half-split (non-interleaved) pairing is provided; the interleaved Boogu-Image variant
-    stays on the caller's eager path.
+    or an inference mode, because the norm weights are normally ``nn.Parameter``s.
     """
-    _validate_qk_norm_rope(q, k, q_weight, k_weight, rope_table, eps, "qk_norm_rope_infer")
+    return _dispatch(q, k, q_weight, k_weight, rope_table, eps, interleaved, implementation,
+                     "qk_norm_rope")
+
+
+def qk_norm_rope_infer(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    rope_table: torch.Tensor,
+    eps: float,
+    *,
+    implementation: Optional[str] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Half-split alias of :func:`qk_norm_rope` under the op id this package used first.
+
+    Kept because ``mojo_opset`` shipped it before it adopted upstream's name; it registers the
+    same providers under ``qk_norm_rope_infer`` so a config that names it still works.
+    """
+    return _dispatch(q, k, q_weight, k_weight, rope_table, eps, False, implementation,
+                     "qk_norm_rope_infer")
+
+
+def _dispatch(q, k, q_weight, k_weight, rope_table, eps, interleaved, implementation, op_id):
+    _validate_qk_norm_rope(q, k, q_weight, k_weight, rope_table, eps, op_id)
     q_weight = q_weight.contiguous()
     k_weight = k_weight.contiguous()
     rope_table = rope_table.contiguous()
-    forward, _ = load_impl("qk_norm_rope_infer", implementation)
-    return forward(q, k, q_weight, k_weight, rope_table, float(eps))
+    forward, _ = load_impl(op_id, implementation)
+    return forward(q, k, q_weight, k_weight, rope_table, float(eps), bool(interleaved))

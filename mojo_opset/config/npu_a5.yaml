@@ -31,6 +31,7 @@ npu.a5:
   # A2 Triton kernel re-exported by the A5 provider (no Cube, no architecture intrinsic).
   # Accuracy measured on 950PR: 63+6 tests pass and the 22-case coverage matrix matches A2.
   # Performance NOT measured on 950; see docs/vllm_ascend_qk_norm_rope.md.
+  qk_norm_rope: triton
   qk_norm_rope_infer: triton
   # Retained selection: original NPU tests skipped this path; the wrapper raises NotImplementedError.
   quant_batch_gemm_reduce_sum: torch_npu

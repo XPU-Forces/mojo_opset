@@ -11,6 +11,7 @@ OPS = {
     "dequant_swiglu_quant": "fused_quantization",
     "rope_infer": "position_embedding",
     "vision_rope_2d_infer": "position_embedding",
+    "qk_norm_rope": "qk_norm_rope",
     "paged_decode_gqa_infer": "paged_attention",
     "paged_prefill_gqa_infer": "paged_attention",
     "paged_prefill_swa_infer": "paged_attention",
