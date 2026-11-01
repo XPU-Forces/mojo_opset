@@ -334,3 +334,8 @@ def pos_embed_interp_multi_infer_fwd(
         if (t * h * w) % merge:
             raise ValueError(f"t*h*w={t * h * w} must be divisible by m_size^2={merge}")
     return _launch(embed_weight, normalized, int(num_grid_per_side), int(m_size), dtype)
+
+
+# The acceptance suite marks cases with the public op id, which needs its own binding;
+# the signature is identical to the inference entry, so the kernel entry point is shared.
+vision_pos_embed_interp_fwd = pos_embed_interp_infer_fwd

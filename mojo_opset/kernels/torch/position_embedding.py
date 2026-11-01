@@ -83,3 +83,8 @@ def pos_embed_interp_multi_infer_fwd(embed_weight, grids, num_grid_per_side, m_s
         for t, h, w in grids
     ]
     return outs[0] if len(outs) == 1 else torch.cat(outs, dim=0)
+
+
+# The acceptance suite marks cases with the public op id, which needs its own binding;
+# the signature is identical to the inference entry, so the reference body is shared.
+vision_pos_embed_interp_fwd = pos_embed_interp_infer_fwd

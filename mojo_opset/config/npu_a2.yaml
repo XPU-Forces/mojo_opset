@@ -29,6 +29,7 @@ npu.a2:
   paged_prefill_swa_infer: triton
   pos_embed_interp_infer: triton
   pos_embed_interp_multi_infer: triton
+  vision_pos_embed_interp: triton
   prefill_gqa_infer: torch_npu
   # Retained selection: original NPU tests skipped this path; the wrapper raises NotImplementedError.
   quant_batch_gemm_reduce_sum: torch_npu
