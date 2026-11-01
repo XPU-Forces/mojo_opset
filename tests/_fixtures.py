@@ -84,8 +84,16 @@ def operator_test(request, monkeypatch):
     # Apply the same FP32 math policy to candidate and reference, then restore it.
     # These flags do not change input dtypes or production/performance defaults.
     if device == "npu":
-        monkeypatch.setattr(torch.npu.conv, "allow_hf32", False)
-        monkeypatch.setattr(torch.npu.matmul, "allow_hf32", False)
+        # torch_npu 2.10.0.post7 (the 950 build) exposes these as descriptors over a
+        # process-wide C++ flag rather than as instance attributes, so they cannot be
+        # deleted: monkeypatch's undo raises AttributeError and turns every test in the
+        # session into a teardown ERROR. Set and restore by hand instead, and only where
+        # the flag exists.
+        for module in (torch.npu.conv, torch.npu.matmul):
+            if hasattr(module, "allow_hf32"):
+                previous = module.allow_hf32
+                module.allow_hf32 = False
+                request.addfinalizer(lambda m=module, p=previous: setattr(m, "allow_hf32", p))
     elif device == "cuda":
         monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
         monkeypatch.setattr(torch.backends.cudnn, "allow_tf32", False)
