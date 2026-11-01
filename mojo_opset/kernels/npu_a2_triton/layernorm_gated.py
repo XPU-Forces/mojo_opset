@@ -58,6 +58,10 @@ MAX_ROWS_PER_BLOCK = 4
 # under half of it leaves room for the double buffering the backend inserts on its own.
 _UB_TILE_BUDGET = 96 * 1024
 
+# The backend will accept tiles up to the real UB size, but only shapes that gain more from
+# full-width lanes than they lose to the missing double buffer are worth pushing that far.
+_UB_HARD_LIMIT = 192 * 1024
+
 # Element size of the FP32 tiles the kernel keeps live: x, gate, output, weight/bias.
 _LIVE_FP32_TILES = 4
 
@@ -183,24 +187,46 @@ def _layer_norm_fwd_1pass_kernel(
         tl.store(y_base, y, mask=mask)
 
 
-def _pick_rows_per_block(m: int, block_n: int, batch_invariant: bool) -> int:
+def _pick_rows_per_block(
+    m: int,
+    block_n: int,
+    batch_invariant: bool,
+    has_gate: bool = True,
+    padded_cols: bool = False,
+) -> int:
     """Rows per tile, from the UB budget rather than from a CUDA warp count.
 
     ``ROWS_PER_BLOCK * BLOCK_N`` is the tile size; the kernel keeps FP32 ``x``, the gate, the
-    output and the weight live at the same time, so the budget is divided by four. The result
-    is rounded down to a power of two and clamped to ``[1, MAX]`` where ``MAX`` comes from the
-    budget, not from the reference's CUDA constant.
+    output and the weight live at the same time, so the budget is divided by the live tile
+    count -- four with a gate, three without one. ``MAX`` comes from the budget, not from the
+    reference's CUDA constant.
 
-    Measured on A2 (134 MB, N=128, BF16, ``p_t3_probe``): MBU 0.30 at 4 rows, 0.53 at 8,
-    0.73 at 16, 0.93 at 32. So the ceiling here is 64 rows and the shape decides the rest.
+    Two corrections over "budget, clamped, rounded up" were measured on A2 against the official
+    ``tests/performance/functions/test_layernorm_gated.py`` cases:
+
+    * ``padded_cols`` (the row is not a power of two, so ``BLOCK_N`` is wider than the row):
+      the tile already wastes column lanes, so the row count has to be a power of two too or it
+      wastes rows as well. On ``tail_2d_swish`` (32771x192) the old rule produced 24 rows inside
+      a 32-lane block and ran at 107 us / MBU 28.0%; stepping up to 32 rows gives 79.7 us /
+      MBU 37.8%. The step is capped by the real UB size, where 48 rows (196 KB) falls back to
+      35.9%, so 32 is the top of the plateau.
+    * a gate-free call has one fewer live tile, so it can afford twice the rows: ``qk_norm_nogate``
+      goes from 48 to 64 rows and from MBU 48.3% to 64.7%.
+
+    Shapes that are *not* column-padded keep the fractional row count -- on ``N=128`` the
+    padded 48-row tile (98 KB) measures 62.2% against 51.4% for a full 64-row tile (131 KB),
+    so rounding those up would trade row waste for UB pressure and lose.
     """
     if batch_invariant:
         # Numerics must not depend on M or the core count, so the constant wins over the budget.
         return MAX_ROWS_PER_BLOCK
-    budget = _UB_TILE_BUDGET // (_LIVE_FP32_TILES * 4 * max(block_n, 1))
-    budget = max(1, min(budget, 64))
-    rows = triton.next_power_of_2(max(1, min(m, budget)))
-    return max(1, min(rows, budget))
+    live = _LIVE_FP32_TILES if has_gate else _LIVE_FP32_TILES - 1
+    rows = _UB_TILE_BUDGET // (live * 4 * max(block_n, 1))
+    rows = max(1, min(rows, m, 64))
+    if padded_cols:
+        cap = max(1, _UB_HARD_LIMIT // (live * 4 * max(block_n, 1)))
+        rows = min(triton.next_power_of_2(rows), cap, 64)
+    return max(1, rows)
 
 
 def layernorm_gated_infer_impl(
@@ -255,7 +281,13 @@ def layernorm_gated_infer_impl(
         raise RuntimeError("layernorm_gated does not support a feature dim >= 64 KB")
 
     num_warps = min(max(block_n // 256, 1), 8)
-    rows_per_block = _pick_rows_per_block(m, block_n, batch_invariant)
+    rows_per_block = _pick_rows_per_block(
+        m,
+        block_n,
+        batch_invariant,
+        has_gate=z is not None,
+        padded_cols=block_n != group_size,
+    )
 
     quant_kwargs = {}
     result = out
