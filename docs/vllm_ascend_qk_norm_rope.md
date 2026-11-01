@@ -118,6 +118,10 @@ than assumed. The head-count branches (`hpg=1` below 8 heads, one-head tail at 5
 GQA (56 q heads against 8 kv heads) and the empty-input early return are measured the same
 way.
 
-Activation dtype: BF16 is the contract, FP16 and FP32 are accepted as upstream does. The
-kernel keeps the pre-rotation rounding on the activation dtype, so all three match the eager
-chain — FP32 at ~1e-6, i.e. no hidden BF16 rounding in the middle of the FP32 path.
+Activation dtype: BF16 is the contract, FP16 and FP32 are accepted as upstream does, and all
+three are held to the same 2e-2 band. The pre-rotation rounding is BF16 for every activation
+dtype, FP32 included — that is the operator's numeric contract, pinned by the acceptance
+suite's `test_bf16_midpoint_round_direction`, so an FP32 caller gets BF16-precision output by
+design. Making the cast follow the activation dtype instead would measure far better
+(9.5e-7 vs 1.5e-2 against float64) and is what this branch briefly did, before the acceptance
+case showed it is a contract violation rather than a fix.

@@ -8,16 +8,17 @@ Numerical contract (must stay instruction-for-instruction identical to upstream)
 ---------------------------------------------------------------------------------
 1. RMSNorm statistics are computed **once per head** and reused by both elements of every
    rotary pair, so ``(d, d + rotary_half)`` share one ``inv_rms``.
-2. The normalized value is rounded to the **activation dtype** before the rotation, the
-   rotation runs in FP32, and the result is rounded once when stored. For the BF16 contract
-   that is BF16, i.e. identical to upstream; keeping the rounding on the activation dtype is
-   also what stops FP16/FP32 callers (both accepted by the wrapper) from silently receiving
-   BF16 precision -- measured at 1.5e-2 vs the eager chain before, 9.5e-7 after.
+2. The normalized value is rounded to **BF16** before the rotation, the rotation runs in
+   FP32, and the result is rounded once when stored. The rounding is BF16 for *every*
+   activation dtype, FP32 included: `testsuites/task1_rms_norm_rope` pins it with weights on
+   exact BF16 midpoints and a float32 input, so an FP32 caller gets a BF16-precision result
+   by contract. Making the cast follow the activation dtype looks tidier and is measurably
+   more accurate (9.5e-7 vs 1.5e-2 against float64), but it fails that case -- do not.
    Reordering any of these three steps changes the last bit and breaks the bit-exact cases.
 3. The scale is applied left to right: ``x * inv_rms * weight``. Hoisting it to
    ``x * (inv_rms * weight)`` is *not* equivalent in FP32 and is therefore not done.
-4. Dimensions ``>= rotary_dim`` pass through untouched: they are the rounded norm value and
-   receive no second perturbation.
+4. Dimensions ``>= rotary_dim`` pass through untouched: they are the BF16-rounded norm
+   value and receive no second perturbation.
 
 Ascend specific design
 ---------------------
@@ -127,11 +128,6 @@ def _qk_norm_rope_kernel(
     pid_t = tl.program_id(0)
     pid_h = tl.program_id(1)
 
-    # The activation dtype, so the pre-rotation rounding follows the caller's precision
-    # instead of being pinned to BF16 (BF16 is the MiniMax-H3 contract and stays bit-identical;
-    # FP16/FP32 inputs would otherwise lose 3-8 mantissa bits for no reason).
-    in_dtype = x_ptr.dtype.element_ty
-
     dims = tl.arange(0, d_pad)
     dim_mask = dims < head_dim
     weight = tl.load(weight_ptr + dims, mask=dim_mask, other=0.0).to(tl.float32)
@@ -175,7 +171,7 @@ def _qk_norm_rope_kernel(
                 tl.float32
             )
             inv_rms = tl.rsqrt(tl.sum(x * x) / head_dim + eps)
-            normalized = (x * inv_rms * weight).to(in_dtype)
+            normalized = (x * inv_rms * weight).to(tl.bfloat16)
 
             shift = rotary_half * x_stride_d
             pair_a = tl.load(
@@ -190,7 +186,7 @@ def _qk_norm_rope_kernel(
             ).to(tl.float32)
             pair_normalized = (
                 tl.where(first_half, pair_a, pair_b) * inv_rms * pair_weight
-            ).to(in_dtype)
+            ).to(tl.bfloat16)
 
             normalized_f = normalized.to(tl.float32)
             pair_f = pair_normalized.to(tl.float32)
