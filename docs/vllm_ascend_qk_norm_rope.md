@@ -98,13 +98,18 @@ gate above rather than call `qk_norm_rope_infer` unconditionally.
 | Platform | Accuracy | Performance |
 | --- | --- | --- |
 | A2 910B3 (CANN 9.0.0, triton-ascend 3.6.0) | `tests/functions` **63 passed, 0 skipped**, `tests/modules` 6 passed; max abs diff 3.12e-2, inside upstream's `atol=2e-2`/`rtol=2e-2` band | measured, table above |
-| A3 (910_9382) | not run | not run |
-| 950PR | not run | not run |
+| A3 910_9382 (CANN 9.1.0, triton-ascend 3.6.0) | `tests/functions` 63 passed, `tests/modules` 6 passed, coverage matrix 22/22 | not run |
+| 950PR (CANN 9.1.0, torch_npu 2.10.0.post7, triton-ascend 3.6.0) | `tests/functions` 63 passed, `tests/modules` 6 passed, coverage matrix 22/22 (identical per-case margins to A2) | not run |
 
 The A5 provider re-exports the A2 kernel (no Cube unit, no L0/L1 buffers, no
 architecture-specific intrinsic), which is what the sibling operators in this package do as
-well. It has **not** been executed on 950 hardware, so `npu_a5.yaml` carries the entry with a
-comment saying so.
+well. It has now been executed on 950PR: accuracy is identical to A2 case by case, so the
+re-export is not just nominal. Performance on 950 is still unmeasured.
+
+`tests/_fixtures.py` had to be fixed for that run: torch_npu 2.10.0.post7 (the 950 build)
+exposes `allow_hf32` as a descriptor, so `monkeypatch`'s undo raised `AttributeError` and
+turned every test into a teardown ERROR — the suite read "63 passed, 57 errors" before the
+fix.
 
 Geometry beyond the MiniMax-H3 contract is measured on hardware for all five accepted
 shapes — `128/96`, `128/128`, `128/32`, `64/64` and the non-power-of-two `100/64` — by
