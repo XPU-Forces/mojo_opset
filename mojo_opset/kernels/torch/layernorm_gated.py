@@ -96,7 +96,13 @@ def layernorm_gated_infer_fwd(
         q = torch.clamp(yq / scale[:, None], -_QUANT_MAX, _QUANT_MAX).to(torch.float8_e4m3fn)
         return (q, scale.reshape(-1, 1)), mean_out, rstd_out
 
-    return y.to(x.dtype), mean_out, rstd_out
+    payload = y.to(x.dtype)
+    if out is not None:
+        # The reference writes into the caller's buffer so ``payload is out`` holds even for a
+        # row-strided view, which ``copy_`` handles and a fresh allocation would not.
+        out.copy_(payload)
+        payload = out
+    return payload, mean_out, rstd_out
 
 
 def _batch_invariant_flag() -> bool:
