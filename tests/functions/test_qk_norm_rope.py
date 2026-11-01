@@ -17,9 +17,10 @@ order, because they are the ones that catch real implementation bugs:
 Geometry coverage: the ``reference``-marked cases pin the wrapper's contract checks without a
 device; ``test_qk_norm_rope_geometry_hardware`` measures the same five geometries on the
 accelerator, including the non-power-of-two ``head_dim=100`` that the kernel's ``d_pad`` masking
-exists for. Activation dtypes are measured too: FP16 and FP32 are in the accepted set, and until
-the pre-rotation rounding followed the activation dtype the kernel handed back BF16 precision for
-FP32 input, which is what the FP32 case in ``test_qk_norm_rope_activation_dtype`` now pins.
+exists for. Activation dtypes are measured too: FP16 and FP32 are in the accepted set, and both get the
+same BF16-rounded intermediate as BF16 input -- by contract, which
+``test_qk_norm_rope_fp32_rounds_to_bf16`` pins bit-exactly against the acceptance suite's
+midpoint construction.
 """
 
 import pytest
@@ -378,20 +379,34 @@ def test_qk_norm_rope_geometry_hardware(accuracy_backend, head_dim, rotary_dim):
 def test_qk_norm_rope_activation_dtype(accuracy_backend, act_dtype, table_fp32):
     """FP16 and FP32 activations are in the accepted set, so each one is measured.
 
-    The kernel used to round the normalised value to BF16 regardless of the activation dtype,
-    which handed FP32 callers ~1e-2 accuracy while the eager chain was at ~1e-6. The FP32 case
-    therefore gets a second comparison under the shared FP32 budget; the upstream band above it
-    is what the other two dtypes are held to.
+    All three are held to the upstream band here. FP32 is deliberately *not* held to the
+    shared FP32 budget: the kernel rounds the normalised value to BF16 before rotating for
+    every activation dtype, which `test_qk_norm_rope_fp32_rounds_to_bf16` pins exactly.
     """
-    implementation, _target, device = accuracy_backend
     rope_dtype = torch.float32 if table_fp32 else act_dtype
     check_accuracy(accuracy_backend, (128, 8), rope_dtype, False, act_dtype=act_dtype)
-    if act_dtype is torch.float32:
-        args = make_inputs(128, 8, device, rope_dtype, act_dtype=act_dtype)
-        got = F.qk_norm_rope_infer(*args, EPS, implementation=implementation)
-        ref = F.qk_norm_rope_infer(*args, EPS, implementation="torch")
-        for name, a, b in (("q", got[0], ref[0]), ("k", got[1], ref[1])):
-            assert_close(a, b, torch.float32, name=f"fp32 {name}")
+
+
+@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.accuracy
+def test_qk_norm_rope_fp32_rounds_to_bf16(accuracy_backend):
+    """FP32 activations still round the normalised value to BF16 before the rotation.
+
+    That is the operator's numeric contract, not an oversight: the acceptance suite
+    (`testsuites/task1_rms_norm_rope`, ``test_bf16_midpoint_round_direction``) puts the weights
+    on exact BF16 midpoints and passes a float32 activation, then expects ``bf16(w)`` back.
+    With ``x=1``, ``eps=0`` and an identity table the output is exactly ``bf16(weight)``, so a
+    kernel that kept FP32 precision through the cast would fail this and that.
+    """
+    implementation, _target, device = accuracy_backend
+    half = ROTARY_DIM // 2
+    base = torch.tensor([257 + 2 * ((d * 7) % 100) for d in range(HEAD_DIM)], dtype=torch.float32)
+    weight = (base * 2.0**-8 * torch.tensor([2.0 ** (d // 64) for d in range(HEAD_DIM)])).to(device)
+    x = torch.ones(64, 8, HEAD_DIM, device=device, dtype=torch.float32)
+    table = torch.cat((torch.ones(64, half), torch.zeros(64, half)), dim=-1).to(device)
+    got = F.qk_norm_rope_infer(x, x, weight, weight, table, 0.0, implementation=implementation)[0]
+    expected = weight.to(torch.bfloat16).to(torch.float32).view(1, 1, HEAD_DIM).expand(64, 8, HEAD_DIM)
+    assert torch.equal(got, expected), "fp32 input did not round to BF16 before the rotation"
 
 
 @pytest.mark.api("functions.qk_norm_rope_infer")
