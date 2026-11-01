@@ -1,5 +1,7 @@
 """torch_npu kernel provider."""
 
+from mojo_opset.utils._exports import additions as _additions
+
 OPS = {
     "flash_attention": "attention",
     "swa": "swa",
@@ -28,3 +30,8 @@ OPS = {
     "group_rms_norm_infer": "normalization",
     "residual_add_rms_norm_infer": "normalization",
 }
+
+
+_private = _additions(__name__)
+OVERRIDES = {} if _private is None else _private.OVERRIDES
+del _additions, _private

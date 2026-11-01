@@ -130,18 +130,25 @@ def benchmark(request, perf_environment, monkeypatch):
     torch.manual_seed(42)
     report = request.config._mojo_perf_report
 
-    def run(*, factory, op, **parameters):
+    def run(*, factory, op, ops=None, **parameters):
         declared = {
             name
             for marker in request.node.iter_markers("api")
             for name in marker.kwargs.get("ops", (api.removeprefix("functions.") for api in marker.args))
         }
-        if op not in declared:
+        dependencies = (op,) if ops is None else tuple(ops)
+        apis = {api.removeprefix("functions.") for marker in request.node.iter_markers("api") for api in marker.args}
+        if not dependencies or not set(dependencies) <= declared or (ops is not None and op not in apis):
             raise ValueError(f"{request.node.nodeid}: benchmark op {op!r} is missing from its api mark")
         if any(row["id"] == request.node.nodeid for row in report["cases"]):
             raise ValueError("Call benchmark once per test; parametrize separate workloads")
-        check_implementation([op], implementation, target)
-        selected = implementation or resolve_implementation(op, Target.parse(target))
+        check_implementation(dependencies, implementation, target)
+        selections = {
+            name: implementation or resolve_implementation(name, Target.parse(target)) for name in dependencies
+        }
+        # Composites have independently dispatched dependencies, not a provider
+        # of their own. Preserve the existing scalar field for single-op cases.
+        selected = selections[op] if ops is None else selections
         count = report["measurement"]["instances"]
         workload = [factory() for _ in range(count)]
         metrics = measure(

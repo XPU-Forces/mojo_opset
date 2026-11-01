@@ -80,7 +80,10 @@ def operator_test(request, monkeypatch):
         assert markers, f"{request.node.nodeid}: missing api mark"
         for marker in markers:
             op_ids = set(marker.kwargs.get("ops", (api.removeprefix("functions.") for api in marker.args)))
-            check_implementation(op_ids, implementation, target)
+            # Composite APIs have no single backend. Their designated CI job
+            # supplies all dependencies and exercises the configured mixture.
+            selected = None if marker.kwargs.get("default_backend_job") == implementation else implementation
+            check_implementation(op_ids, selected, target)
         private = additions("tests")
         if private is not None:
             private.check_case(request, implementation, target)
