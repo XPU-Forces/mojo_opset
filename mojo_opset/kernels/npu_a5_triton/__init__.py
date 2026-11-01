@@ -23,6 +23,7 @@ OPS = {
     "vision_rope_2d_infer": "vision_rope",
     "pos_embed_interp_infer": "pos_embed_interp",
     "pos_embed_interp_multi_infer": "pos_embed_interp",
+    "vision_pos_embed_interp": "pos_embed_interp",
     "paged_decode_gqa_infer": "flash_attention",
     "paged_prefill_gqa_infer": "flash_attention",
     "paged_prefill_swa_infer": "swa",
