@@ -114,7 +114,7 @@ def check_accuracy(backend, shape, rope_dtype, strided):
 @pytest.mark.parametrize("shape", STANDARD_SHAPES, ids=[f"{t}x{h}" for t, h in STANDARD_SHAPES])
 @pytest.mark.accuracy
 def test_qk_norm_rope_accuracy(accuracy_backend, shape, strided, rope_dtype):
-    check_accuracy(accuracy_backend, shape, strided, rope_dtype)
+    check_accuracy(accuracy_backend, shape, rope_dtype, strided)
 
 
 @pytest.mark.api("functions.qk_norm_rope_infer")
