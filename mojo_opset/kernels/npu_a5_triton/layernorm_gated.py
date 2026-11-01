@@ -11,5 +11,6 @@ compiles for whichever FP8 type the caller's output tensor carries.
 
 from mojo_opset.kernels.npu_a2_triton.layernorm_gated import layernorm_gated_infer_impl
 from mojo_opset.kernels.npu_a2_triton.layernorm_gated import layernorm_gated_infer_fwd
+from mojo_opset.kernels.npu_a2_triton.layernorm_gated import layer_norm_gated_fwd  # noqa: F401
 
 __all__ = ["layernorm_gated_infer_impl", "layernorm_gated_infer_fwd"]

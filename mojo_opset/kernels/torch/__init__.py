@@ -56,6 +56,7 @@ OPS = {
     "silu": "silu",
     "gelu": "gelu",
     "layernorm_gated_infer": "layernorm_gated",
+    "layer_norm_gated": "layernorm_gated",
     "swiglu": "swiglu",
     "rms_norm": "rms_norm",
     "swa": "attention",

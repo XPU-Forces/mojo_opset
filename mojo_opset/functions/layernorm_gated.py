@@ -137,3 +137,42 @@ def layernorm_gated_infer(
         quant_heads=quant_heads,
         batch_invariant=batch_invariant,
     )
+
+
+def layer_norm_gated(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    z: Optional[torch.Tensor] = None,
+    *,
+    eps: float = 1e-6,
+    out: Optional[torch.Tensor] = None,
+    group_size: Optional[int] = None,
+    norm_before_gate: bool = True,
+    is_rms_norm: bool = False,
+    activation: str = "swish",
+    quant_heads: int = 0,
+    implementation: Optional[str] = None,
+):
+    """``norm(x) * act(z)`` when ``norm_before_gate`` else ``norm(x * act(z))``.
+
+    Public op id of the same kernel as :func:`layernorm_gated_infer`; the upstream argument
+    order is kept so the two names are interchangeable. Returns
+    ``((q, s) when quant_heads else out, mean, rstd)``; ``mean`` is ``None`` for RMSNorm and
+    both statistics are FP32 with the ``[ngroups * M]`` group-major layout.
+    """
+    _validate(x, weight, bias, z, eps, group_size, activation, quant_heads, "layer_norm_gated")
+    forward, _ = load_impl("layer_norm_gated", implementation)
+    return forward(
+        x,
+        weight,
+        bias,
+        z,
+        float(eps),
+        out,
+        group_size,
+        norm_before_gate,
+        is_rms_norm,
+        activation,
+        int(quant_heads),
+    )

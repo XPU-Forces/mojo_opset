@@ -40,6 +40,7 @@ Ascend specific design
   program onto one vector core and ignores it.
 """
 
+import os
 from typing import Optional
 from typing import Tuple
 
@@ -334,4 +335,39 @@ def layernorm_gated_infer_fwd(
         activation=activation,
         quant_heads=quant_heads,
         batch_invariant=batch_invariant,
+    )
+
+
+def _batch_invariant_flag() -> bool:
+    """``LN_GATED_BATCH_INVARIANT=1`` pins the row tile so results do not depend on M."""
+    return os.environ.get("LN_GATED_BATCH_INVARIANT", "").strip() not in ("", "0", "false", "False")
+
+
+def layer_norm_gated_fwd(
+    x,
+    weight,
+    bias,
+    z,
+    eps,
+    out,
+    group_size,
+    norm_before_gate,
+    is_rms_norm,
+    activation,
+    quant_heads,
+):
+    """Public op id binding; keeps the upstream positional order and forwards to the kernel entry."""
+    return layernorm_gated_infer_fwd(
+        x,
+        weight,
+        bias,
+        float(eps),
+        z=z,
+        out=out,
+        group_size=group_size,
+        norm_before_gate=norm_before_gate,
+        is_rms_norm=is_rms_norm,
+        activation=activation,
+        quant_heads=int(quant_heads),
+        batch_invariant=_batch_invariant_flag(),
     )
