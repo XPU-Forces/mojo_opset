@@ -14,11 +14,12 @@ order, because they are the ones that catch real implementation bugs:
 * dimensions beyond ``rotary_dim`` must be the BF16-rounded norm value with no second
   perturbation (checked with a construction where that value is exactly representable).
 
-Geometry coverage: the Triton kernel is measured on the MiniMax-H3 contract (``head_dim=128``,
-``rotary_dim=96``) only. The ``reference``-marked cases below exercise other geometries against
-the torch chain, so they pin the wrapper's contract checks rather than the kernel. The kernel's
-``d_pad`` masking is written for a non-power-of-two ``head_dim`` but has not been measured on
-hardware yet.
+Geometry coverage: the ``reference``-marked cases pin the wrapper's contract checks without a
+device; ``test_qk_norm_rope_geometry_hardware`` measures the same five geometries on the
+accelerator, including the non-power-of-two ``head_dim=100`` that the kernel's ``d_pad`` masking
+exists for. Activation dtypes are measured too: FP16 and FP32 are in the accepted set, and until
+the pre-rotation rounding followed the activation dtype the kernel handed back BF16 precision for
+FP32 input, which is what the FP32 case in ``test_qk_norm_rope_activation_dtype`` now pins.
 """
 
 import pytest
@@ -40,7 +41,12 @@ STANDARD_SHAPES = [(1, 8), (1, 56), (257, 8), (257, 56), (1024, 56), (4096, 56)]
 LONG_SHAPES = [(16384, 56)]
 # 57 heads: the 8-head tile leaves a single valid head in the last group.
 HEAD_TAIL_SHAPES = [(257, 57), (4096, 57)]
-# (head_dim, rotary_dim) beyond the MiniMax-H3 contract, reference-path only.
+# Activation dtypes the wrapper accepts; each one is measured on the accelerator.
+ACTIVATION_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
+# Head counts: 1/3/7 take the hpg=1 grid branch, 8 is the group boundary, 57 leaves a
+# one-head tail group.
+HEAD_COUNTS = (1, 3, 7, 8, 57)
+# (head_dim, rotary_dim) beyond the MiniMax-H3 contract.
 GEOMETRIES = [(128, 96), (128, 128), (128, 32), (64, 64), (100, 64)]
 
 # Upstream's own hardware tolerance for this operator
@@ -53,19 +59,21 @@ GEOMETRIES = [(128, 96), (128, 128), (128, 32), (64, 64), (100, 64)]
 UPSTREAM_TOLERANCE = {"rtol": 2e-2, "atol": 2e-2}
 
 
-def make_inputs(tokens, heads, device, rope_dtype=torch.bfloat16, seed=0):
+def make_inputs(tokens, heads, device, rope_dtype=torch.bfloat16, seed=0, head_dim=HEAD_DIM,
+                rotary_dim=ROTARY_DIM, act_dtype=DTYPE):
     gen = torch.Generator().manual_seed(seed)
-    half = ROTARY_DIM // 2
+    half = rotary_dim // 2
     theta = torch.rand(tokens, half, generator=gen, dtype=torch.float32) * TAU
     rope = torch.cat((theta.cos(), theta.sin()), dim=-1).to(rope_dtype).to(device)
-    q = (torch.randn(tokens, heads, HEAD_DIM, generator=gen) * 0.5).to(DTYPE).to(device)
-    k = (torch.randn(tokens, heads, HEAD_DIM, generator=gen) * 0.5).to(DTYPE).to(device)
-    qw = (torch.rand(HEAD_DIM, generator=gen) + 0.5).to(DTYPE).to(device)
-    kw = (torch.rand(HEAD_DIM, generator=gen) + 0.5).to(DTYPE).to(device)
+    q = (torch.randn(tokens, heads, head_dim, generator=gen) * 0.5).to(act_dtype).to(device)
+    k = (torch.randn(tokens, heads, head_dim, generator=gen) * 0.5).to(act_dtype).to(device)
+    qw = (torch.rand(head_dim, generator=gen) + 0.5).to(act_dtype).to(device)
+    kw = (torch.rand(head_dim, generator=gen) + 0.5).to(act_dtype).to(device)
     return q, k, qw, kw, rope
 
 
-def packed_qkv_view(tokens, heads, device, rope_dtype=torch.bfloat16, seed=0):
+def packed_qkv_view(tokens, heads, device, rope_dtype=torch.bfloat16, seed=0,
+                    head_dim=HEAD_DIM, rotary_dim=ROTARY_DIM):
     """Q and K interleaved in one packed buffer, the way fused QKV storage keeps them.
 
     Interleaving rather than concatenating is what makes the head stride ``2 * head_dim``,
@@ -73,24 +81,30 @@ def packed_qkv_view(tokens, heads, device, rope_dtype=torch.bfloat16, seed=0):
     contiguous when ``tokens == 1`` because PyTorch ignores the stride of a size-1 dimension,
     so it would not exercise the strided path at all.
     """
-    q, k, qw, kw, rope = make_inputs(tokens, heads, device, rope_dtype, seed)
-    packed = torch.zeros(tokens, heads * 2, HEAD_DIM, dtype=DTYPE, device=device)
+    q, k, qw, kw, rope = make_inputs(tokens, heads, device, rope_dtype, seed, head_dim, rotary_dim)
+    packed = torch.zeros(tokens, heads * 2, head_dim, dtype=DTYPE, device=device)
     packed[:, ::2] = q
     packed[:, 1::2] = k
     q_view = packed[:, ::2]
     k_view = packed[:, 1::2]
-    assert q_view.stride(1) == 2 * HEAD_DIM and q_view.stride(2) == 1
+    assert q_view.stride(1) == 2 * head_dim and q_view.stride(2) == 1
     assert not q_view.is_contiguous()
     return q_view, k_view, qw, kw, rope
 
 
-def check_accuracy(backend, shape, rope_dtype, strided):
+def check_accuracy(backend, shape, rope_dtype, strided, head_dim=HEAD_DIM, rotary_dim=ROTARY_DIM,
+                   act_dtype=DTYPE):
     implementation, _target, device = backend
     tokens, heads = shape
     if strided:
-        q, k, qw, kw, rope = packed_qkv_view(tokens, heads, device, rope_dtype)
+        q, k, qw, kw, rope = packed_qkv_view(
+            tokens, heads, device, rope_dtype, head_dim=head_dim, rotary_dim=rotary_dim
+        )
     else:
-        q, k, qw, kw, rope = make_inputs(tokens, heads, device, rope_dtype)
+        q, k, qw, kw, rope = make_inputs(
+            tokens, heads, device, rope_dtype, head_dim=head_dim, rotary_dim=rotary_dim,
+            act_dtype=act_dtype,
+        )
 
     expected = F.qk_norm_rope_infer(q, k, qw, kw, rope, EPS, implementation="torch")
     actual = F.qk_norm_rope_infer(q, k, qw, kw, rope, EPS, implementation=implementation)
@@ -100,8 +114,9 @@ def check_accuracy(backend, shape, rope_dtype, strided):
         assert_close(
             got,
             ref,
-            DTYPE,
-            name=f"{implementation} vs torch {name} {shape} rope={str(rope_dtype).split('.')[-1]} "
+            act_dtype,
+            name=f"{implementation} vs torch {name} {shape} {head_dim}/{rotary_dim} "
+            f"act={str(act_dtype).split('.')[-1]} rope={str(rope_dtype).split('.')[-1]} "
             f"strided={strided}",
             **UPSTREAM_TOLERANCE,
         )
@@ -339,3 +354,83 @@ def test_qk_norm_rope_requires_no_grad():
     with torch.no_grad():
         out = F.qk_norm_rope_infer(q, q, w, w, rope, EPS, implementation="torch")
     assert out[0].shape == q.shape and torch.isfinite(out[0]).all()
+
+
+@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.parametrize("head_dim, rotary_dim", GEOMETRIES, ids=[f"{d}_{r}" for d, r in GEOMETRIES])
+@pytest.mark.accuracy
+def test_qk_norm_rope_geometry_hardware(accuracy_backend, head_dim, rotary_dim):
+    """Every accepted geometry has to match the eager chain on the device, not just on CPU.
+
+    ``head_dim=100`` is the case the kernel's ``d_pad`` masking exists for: the tile is padded
+    to 128 and the extra lanes are dropped from both the reduction and the store.
+    ``rotary_dim == head_dim`` is the other edge, where every dimension rotates and no
+    pass-through tail is stored.
+    """
+    check_accuracy(accuracy_backend, (128, 8), torch.bfloat16, False, head_dim=head_dim,
+                   rotary_dim=rotary_dim)
+
+
+@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.parametrize("act_dtype", ACTIVATION_DTYPES, ids=lambda d: str(d).split(".")[-1])
+@pytest.mark.parametrize("table_fp32", [False, True], ids=["table-act", "table-fp32"])
+@pytest.mark.accuracy
+def test_qk_norm_rope_activation_dtype(accuracy_backend, act_dtype, table_fp32):
+    """FP16 and FP32 activations are in the accepted set, so each one is measured.
+
+    The kernel used to round the normalised value to BF16 regardless of the activation dtype,
+    which handed FP32 callers ~1e-2 accuracy while the eager chain was at ~1e-6. The FP32 case
+    therefore gets a second comparison under the shared FP32 budget; the upstream band above it
+    is what the other two dtypes are held to.
+    """
+    implementation, _target, device = accuracy_backend
+    rope_dtype = torch.float32 if table_fp32 else act_dtype
+    check_accuracy(accuracy_backend, (128, 8), rope_dtype, False, act_dtype=act_dtype)
+    if act_dtype is torch.float32:
+        args = make_inputs(128, 8, device, rope_dtype, act_dtype=act_dtype)
+        got = F.qk_norm_rope_infer(*args, EPS, implementation=implementation)
+        ref = F.qk_norm_rope_infer(*args, EPS, implementation="torch")
+        for name, a, b in (("q", got[0], ref[0]), ("k", got[1], ref[1])):
+            assert_close(a, b, torch.float32, name=f"fp32 {name}")
+
+
+@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.parametrize("heads", HEAD_COUNTS)
+@pytest.mark.accuracy
+def test_qk_norm_rope_head_counts(accuracy_backend, heads):
+    """Head counts below 8 take the ``hpg=1`` grid branch; 57 leaves a one-head tail group.
+
+    ``hpg`` sizes the head group of the grid rather than a tile, so both branches have to be
+    measured: a one-head grid and a grid whose last group is one eighth full.
+    """
+    actual = check_accuracy(accuracy_backend, (257, heads), torch.bfloat16, False)
+    assert torch.isfinite(actual[0]).all() and torch.isfinite(actual[1]).all()
+
+
+@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.accuracy
+def test_qk_norm_rope_gqa(accuracy_backend):
+    """q and k may have different head counts; only the token count has to agree."""
+    implementation, _target, device = accuracy_backend
+    tokens, q_heads, kv_heads = 256, 56, 8
+    q, k, qw, kw, rope = make_inputs(tokens, q_heads, device)
+    k = k[:, :kv_heads].contiguous()
+    got = F.qk_norm_rope_infer(q, k, qw, kw, rope, EPS, implementation=implementation)
+    ref = F.qk_norm_rope_infer(q, k, qw, kw, rope, EPS, implementation="torch")
+    for name, a, b in (("q", got[0], ref[0]), ("k", got[1], ref[1])):
+        assert a.shape == b.shape == ((tokens, q_heads, HEAD_DIM) if name == "q"
+                                      else (tokens, kv_heads, HEAD_DIM))
+        assert_close(a, b, DTYPE, name=f"gqa {name}", **UPSTREAM_TOLERANCE)
+
+
+@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.parametrize("tokens, heads", [(0, 8), (4, 0)], ids=["no-tokens", "no-heads"])
+@pytest.mark.accuracy
+def test_qk_norm_rope_empty_inputs(accuracy_backend, tokens, heads):
+    """Empty token or head counts return an empty tensor instead of launching a grid."""
+    implementation, _target, device = accuracy_backend
+    q, k, qw, kw, rope = make_inputs(tokens, heads, device)
+    got = F.qk_norm_rope_infer(q, k, qw, kw, rope, EPS, implementation=implementation)
+    assert got[0].shape == (tokens, heads, HEAD_DIM)
+    assert got[1].shape == (tokens, heads, HEAD_DIM)
+    assert got[0].numel() == 0 and got[1].numel() == 0
