@@ -60,11 +60,9 @@ Combination traversal should be performed among parameter types.
 
 ### 2.1 Error Metrics
 
-This standard judges with the **Mixed Tolerance** metric, i.e. an element-wise comparison combining absolute tolerance (atol) and relative tolerance (rtol).
+This standard uses **Mixed Tolerance** for element-wise comparison, combining absolute tolerance (`atol`) and relative tolerance (`rtol`) to determine whether the operator's actual output matches the reference result.
 
-#### 2.1.1 Element-wise Pass Condition
-
-For each element in the output tensor, the element is judged as passing when the following condition is met:
+For corresponding elements where both the actual output `actual` and the reference result `golden` are finite, the point passes if:
 
 $$
 |actual - golden| \leq atol + rtol \times |golden|
@@ -72,12 +70,10 @@ $$
 
 Where:
 
-- **atol** (Absolute Tolerance): guarantees a reasonable error range for small values (golden close to 0), and inherently avoids division by zero.
-- **rtol** (Relative Tolerance): guarantees relative accuracy for large values.
+- **atol** (Absolute Tolerance): controls the absolute error, primarily when `golden` is close to zero, without dividing by the reference value.
+- **rtol** (Relative Tolerance): controls the allowed error that grows with the absolute value of `golden`, primarily for larger values.
 
-#### 2.1.2 Overall Pass Condition
-
-A test case is judged as passing accuracy when all finite-valued elements satisfy the element-wise condition in Section 2.1.1 and all special-valued elements satisfy the special-value rules in Section 2.3.
+If either side is NaN or infinity, the formula above does not apply. Use the special-value rules in Section 2.3 instead.
 
 ### 2.2 Mixed Tolerance Threshold Table
 
@@ -88,11 +84,12 @@ A test case is judged as passing accuracy when all finite-valued elements satisf
 
 ### 2.3 Pass Determination
 
-**Single-reference comparison**: direct comparison against a single accuracy reference of the Torch reference implementation.
+**Comparison reference:** Use a single reference, comparing the operator's actual output `actual` directly against the reference result `golden` produced by the Torch reference implementation.
 
-When all elements participating in the comparison in a test case satisfy the element-wise condition in Section 2.1.1, the test case is judged as passing accuracy.
+**Element-wise rules:**
 
-Special-value rules:
+- **Finite values:** When both sides are finite, apply the mixed tolerance formula in Section 2.1.
+- **NaN:** If either side is NaN, the point fails, consistent with `equal_nan=False`.
+- **±inf:** If either side is infinity, the point passes only if both sides are `+inf` or both are `-inf`; all other cases fail.
 
-- **NaN**: when the operator's actual output is NaN, that point fails.
-- **±inf**: when either side is infinity, the point passes only if both sides are `+inf` or both are `-inf`; all other cases fail.
+**Overall pass condition:** A test case passes accuracy validation only if every corresponding pair of elements included in the comparison passes the rules above. If any pair fails, the test case fails accuracy validation.
