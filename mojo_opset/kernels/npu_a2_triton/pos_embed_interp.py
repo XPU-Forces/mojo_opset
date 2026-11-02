@@ -417,6 +417,110 @@ def pos_embed_interp_meta_impl(
     return out
 
 
+@triton.jit
+def _pos_embed_meta_fused_kernel(
+    embed_ptr,
+    index_ptr,
+    weight_ptr,
+    out_ptr,
+    total_rows,
+    rows_per_frame,
+    T: tl.constexpr,
+    hidden: tl.constexpr,
+    block_rows: tl.constexpr,
+):
+    """Metadata gather + in-register frame broadcast, single launch.
+
+    For small t > 1 grids this beats the two-kernel path: the interpolated tile is
+    already live when the copies are issued, so the intermediate frame never
+    round-trips through memory and the second launch disappears. Measured on
+    Ascend910B3, (3,16,16): two-kernel 8.63 us -> 6.16 us, bit-identical.
+    """
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+    num_blocks = (rows_per_frame + block_rows - 1) // block_rows
+    cols = tl.arange(0, hidden)[None, :]
+
+    block_id = pid
+    while block_id < num_blocks:
+        rows = block_id * block_rows + tl.arange(0, block_rows)[:, None]
+        mask = rows < rows_per_frame
+
+        i0 = tl.load(index_ptr + rows, mask=mask)
+        i1 = tl.load(index_ptr + rows_per_frame + rows, mask=mask)
+        i2 = tl.load(index_ptr + 2 * rows_per_frame + rows, mask=mask)
+        i3 = tl.load(index_ptr + 3 * rows_per_frame + rows, mask=mask)
+        b0 = tl.load(weight_ptr + rows, mask=mask)
+        b1 = tl.load(weight_ptr + rows_per_frame + rows, mask=mask)
+        b2 = tl.load(weight_ptr + 2 * rows_per_frame + rows, mask=mask)
+        b3 = tl.load(weight_ptr + 3 * rows_per_frame + rows, mask=mask)
+
+        e0 = tl.load(embed_ptr + i0 * hidden + cols, mask=mask).to(tl.float32)
+        e1 = tl.load(embed_ptr + i1 * hidden + cols, mask=mask).to(tl.float32)
+        e2 = tl.load(embed_ptr + i2 * hidden + cols, mask=mask).to(tl.float32)
+        e3 = tl.load(embed_ptr + i3 * hidden + cols, mask=mask).to(tl.float32)
+
+        value = (b0 * e0 + b1 * e1 + b2 * e2 + b3 * e3).to(out_ptr.dtype.element_ty)
+
+        for frame in tl.static_range(0, T):
+            tl.store(
+                out_ptr + (frame * rows_per_frame + rows) * hidden + cols,
+                value,
+                mask=mask,
+            )
+        block_id += num_programs
+
+
+# Small t>1 grids use the fused variant; larger t stays on the two-kernel path
+# (there the broadcast write efficiency dominates and wins).
+_META_FUSED_MAX_ROWS = 4096
+
+
+def _use_meta_fused(t: int, h: int, w: int, hidden: int, dtype) -> bool:
+    """Whether a small multi-frame grid should fuse gather + broadcast."""
+    if t < 2:
+        return False
+    if h * w > _META_FUSED_MAX_ROWS:
+        return False
+    if not _use_meta_kernel(1, h, w, hidden):
+        return False
+    return hidden * _meta_block_rows(h * w, dtype) * 2 <= _broadcast_ub_budget_bytes()
+
+
+def pos_embed_interp_meta_fused_impl(
+    embed_weight: torch.Tensor,
+    t: int,
+    h: int,
+    w: int,
+    num_grid_per_side: int,
+    m_size: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Single-launch interpolate+broadcast for small multi-frame grids."""
+    hidden = embed_weight.shape[1]
+    rows = h * w
+    total_rows = t * rows
+    out = torch.empty(total_rows, hidden, device=embed_weight.device, dtype=dtype)
+
+    index, weight, meta_rows = _build_row_metadata(
+        h, w, num_grid_per_side, m_size, embed_weight.device
+    )
+    block_rows = min(_meta_block_rows(rows, dtype), rows)
+    num_blocks = (rows + block_rows - 1) // block_rows
+    _pos_embed_meta_fused_kernel[(num_blocks,)](
+        embed_weight,
+        index,
+        weight,
+        out,
+        total_rows,
+        meta_rows,
+        t,
+        hidden,
+        block_rows,
+    )
+    return out
+
+
 _BROADCAST_BLOCK_ROWS = 8
 _BROADCAST_BLOCK_ROWS_A5 = 52
 _BROADCAST_FRAME_REPEAT = 16
@@ -640,6 +744,10 @@ def pos_embed_interp(
     # (cached), the kernel then only does four gathers and one weighted sum. Measured
     # 1.73~1.95x over the fused kernel on t==1 grids, bit-identical.
     hidden = embed_weight.shape[1]
+    if _use_meta_fused(t, h, w, hidden, dtype):
+        return pos_embed_interp_meta_fused_impl(
+            embed_weight, t, h, w, num_grid_per_side, m_size, dtype
+        )
     if _use_meta_kernel(t, h, w, hidden):
         return pos_embed_interp_meta_impl(
             embed_weight, t, h, w, num_grid_per_side, m_size, dtype
