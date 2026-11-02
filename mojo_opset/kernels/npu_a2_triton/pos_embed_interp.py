@@ -206,7 +206,11 @@ def pos_embed_interp_impl(
 _BROADCAST_BLOCK_ROWS = 8
 _BROADCAST_BLOCK_ROWS_A5 = 52
 _BROADCAST_FRAME_REPEAT = 16
-_BROADCAST_MIN_ROWS = 4096
+# A2 measurement (bf16, block_rows=8):
+#   (3,16,16) h*w=256   fused 15.0us -> two-kernel 10.9us  (1.38x)
+#   (3,60,80) h*w=4800  fused 205.4us -> two-kernel 83.1us (2.47x)
+# t == 1 grids cannot use the broadcast at all, so the gate only guards t > 1.
+_BROADCAST_MIN_ROWS = 256
 
 
 @triton.jit
