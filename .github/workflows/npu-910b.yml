@@ -13,12 +13,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  runner_probe:
+    name: Probe 910B scale set
+    runs-on: linux-aarch64-a2b3-8-hk-001
+    timeout-minutes: 20
+    container:
+      image: quay.io/ascend/triton:3.2.2-cann9.1.0-torch_npu2.7.1.post8-910b-ubuntu24.04-py3.11@sha256:b69d14f39d47ec8f66e635f16190788e3c2b2174d0994f63090afcdf885b06f1
+    defaults:
+      run:
+        shell: bash --noprofile --norc -eo pipefail {0}
+    steps:
+      - name: Check runner and NPU availability
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          hostname
+          uname -m
+          npu-smi info
+          python - <<'PY'
+          import torch
+          import torch_npu
+          import triton
+
+          print("Torch:", torch.__version__, "torch_npu:", torch_npu.__version__, "Triton:", triton.__version__)
+          print("NPU count:", torch.npu.device_count())
+          assert torch.npu.is_available()
+          print("Device:", torch.npu.get_device_name(0))
+          x = torch.arange(16, device="npu", dtype=torch.float32)
+          torch.testing.assert_close((x + 1).cpu(), torch.arange(16, dtype=torch.float32) + 1)
+          PY
+
   accuracy:
     name: 910B / ${{ matrix.implementation }}
-    runs-on: linux-aarch64-a2b3-1
+    needs: runner_probe
+    runs-on: linux-aarch64-a2b3-1-hk-001
     timeout-minutes: 180
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         implementation: [triton, torch_npu, native]
     container:
