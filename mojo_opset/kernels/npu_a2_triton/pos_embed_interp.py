@@ -227,7 +227,23 @@ def pos_embed_interp_impl(
 # to survive).
 _META_CACHE: dict = {}
 _META_CACHE_LIMIT = 32
+# Tuned on Ascend910B3. Small grids favour wider tiles (fewer programs, less
+# launch/index overhead): 256 rows measured 6.58 us at 4 rows/tile vs 5.77 us at 8.
 _META_BLOCK_ROWS = 4
+_META_BLOCK_ROWS_SMALL = 8
+_META_SMALL_ROWS = 1024
+
+
+def _meta_block_rows(total_rows: int, dtype=None) -> int:
+    """Rows per tile for the metadata kernel.
+
+    Wider tiles only pay off for small grids, and FP32 doubles the tile's UB
+    footprint (measured: 8 rows/tile + FP32 trips "ub overflow" at compile time),
+    so FP32 keeps the conservative 4.
+    """
+    if dtype is not None and getattr(dtype, "itemsize", 2) > 2:
+        return _META_BLOCK_ROWS
+    return _META_BLOCK_ROWS_SMALL if total_rows <= _META_SMALL_ROWS else _META_BLOCK_ROWS
 
 
 def _build_row_metadata(h: int, w: int, num_grid: int, m_size: int, device):
@@ -381,7 +397,7 @@ def pos_embed_interp_meta_impl(
     index, weight, rows = _build_row_metadata(
         h, w, num_grid_per_side, m_size, embed_weight.device
     )
-    block_rows = min(_META_BLOCK_ROWS, total_rows)
+    block_rows = min(_meta_block_rows(total_rows, dtype), total_rows)
     num_blocks = (total_rows + block_rows - 1) // block_rows
     # One program per block: the measured optimum. Capping at cores*4 (as the
     # fused kernel does) serialises the row loop and cost ~1.9x here.
@@ -556,7 +572,7 @@ def pos_embed_interp_broadcast_impl(
         index, weight, meta_rows = _build_row_metadata(
             h, w, num_grid_per_side, m_size, embed_weight.device
         )
-        meta_block = min(_META_BLOCK_ROWS, rows)
+        meta_block = min(_meta_block_rows(rows, dtype), rows)
         meta_blocks = (rows + meta_block - 1) // meta_block
         _pos_embed_meta_kernel[(meta_blocks,)](
             embed_weight, index, weight, frame, rows, meta_rows,
