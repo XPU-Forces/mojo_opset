@@ -77,53 +77,22 @@ Where:
 
 #### 2.1.2 Overall Pass Condition
 
-A test case passes when **all elements participating in the comparison** satisfy the element-wise condition.
-
-`±inf`/NaN elements do not participate in the element-wise comparison, and are handled by the narrowing rule in Section 2.3.
+A test case is judged as passing accuracy when all finite-valued elements satisfy the element-wise condition in Section 2.1.1 and all special-valued elements satisfy the special-value rules in Section 2.3.
 
 ### 2.2 Mixed Tolerance Threshold Table
 
-<table style="width: 100%; border-collapse: collapse;">
-    <thead>
-      <tr>
-        <th style="text-align: center; border: 1px solid #ddd; padding: 8px;">Data type</th>
-        <th style="text-align: center; border: 1px solid #ddd; padding: 8px;"><strong>FLOAT16</strong></th>
-        <th style="text-align: center; border: 1px solid #ddd; padding: 8px;"><strong>BFLOAT16</strong></th>
-        <th style="text-align: center; border: 1px solid #ddd; padding: 8px;"><strong>FLOAT32</strong></th>
-        <th style="text-align: center; border: 1px solid #ddd; padding: 8px;"><strong>HiFLOAT32</strong></th>
-        <th style="text-align: center; border: 1px solid #ddd; padding: 8px;"><strong>FLOAT8 E4M3</strong></th>
-        <th style="text-align: center; border: 1px solid #ddd; padding: 8px;"><strong>FLOAT8 E5M2</strong></th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;"><strong>rtol</strong></td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-10</sup> (1e-3)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-7</sup> (7.8e-3)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-13</sup> (1.2e-4)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-10</sup> (1e-3)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-3</sup> (0.125)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-2</sup> (0.25)</td>
-      </tr>
-      <tr>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;"><strong>atol</strong></td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-10</sup> (1e-3)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-7</sup> (7.8e-3)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-13</sup> (1.2e-4)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-10</sup> (1e-3)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-3</sup> (0.125)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-2</sup> (0.25)</td>
-      </tr>
-    </tbody>
-</table>
-
-**Note**:
-- At each numeric precision, the current threshold interception is about 1 ULP; large reductions may introduce larger accuracy error and cause false alarms, and it may be relaxed to 2 ULP as appropriate.
+| Data type | **FLOAT16** | **BFLOAT16** | **FLOAT32** | **HiFLOAT32** | **FLOAT8 E4M3** | **FLOAT8 E5M2** |
+| --- | --- | --- | --- | --- | --- | --- |
+| **rtol** | 2<sup>-10</sup> (1e-3) | 2<sup>-7</sup> (7.8e-3) | 2<sup>-13</sup> (1.2e-4) | 2<sup>-10</sup> (1e-3) | 2<sup>-3</sup> (0.125) | 2<sup>-2</sup> (0.25) |
+| **atol** | 2<sup>-10</sup> (1e-3) | 2<sup>-7</sup> (7.8e-3) | 2<sup>-13</sup> (1.2e-4) | 2<sup>-10</sup> (1e-3) | 2<sup>-3</sup> (0.125) | 2<sup>-2</sup> (0.25) |
 
 ### 2.3 Pass Determination
 
-**Single-reference comparison**: direct comparison against a single accuracy reference of higher precision (CPU or an Ascend small-operator composition).
+**Single-reference comparison**: direct comparison against a single accuracy reference of the Torch reference implementation.
 
 When all elements participating in the comparison in a test case satisfy the element-wise condition in Section 2.1.1, the test case is judged as passing accuracy.
 
-During comparison, if the operator's actual output is `±inf` while golden is finite, golden should first be reduced in precision (narrowed) to the operator's actual output dtype before comparison: narrowing rounds by round-to-nearest-even, and values outside the representable range of that dtype are converted to `±inf` (IEEE 754 semantics). If after narrowing both sides are `±inf` of the same sign, that point is considered passing.
+Special-value rules:
+
+- **NaN**: when the operator's actual output is NaN, that point fails.
+- **±inf**: when either side is infinity, the point passes only if both sides are `+inf` or both are `-inf`; all other cases fail.

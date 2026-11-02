@@ -15,7 +15,7 @@
 | 要求项 | 说明 |
 |--------|------|
 | **覆盖目标** | 对算子支持的**数据类型**、**数据格式**、**数据维度**、**属性取值范围**实现**全组合覆盖**（即所有有效组合的 100% 覆盖） |
-| **数据类型覆盖** | 覆盖算子支持的所有数据类型
+| **数据类型覆盖** | 覆盖算子支持的所有数据类型 |
 
 > 说明：用例数量不设固定下限（如 ≥1,000），强调的是**输入组合的遍历式覆盖**，而非机械地要求用例数量。
 
@@ -77,53 +77,22 @@ $$
 
 #### 2.1.2 整体通过条件
 
-用例中**所有参与比对的元素**都满足逐元素条件时，判定该用例通过。
-
-`±inf`/NaN 元素不参与逐元素比对，按 2.3 节的收窄规则处理。
+当所有有限值元素均满足 2.1.1 的逐元素条件，且所有特殊值元素均满足 2.3 节的特殊值判定规则时，判定该用例精度通过。
 
 ### 2.2 混合容差阈值表
 
-<table style="width: 100%; border-collapse: collapse;">
-    <thead>
-      <tr>
-        <th style="text-align: center; border: 1px solid #ddd; padding: 8px;">数据类型</th>
-        <th style="text-align: center; border: 1px solid #ddd; padding: 8px;"><strong>FLOAT16</strong></th>
-        <th style="text-align: center; border: 1px solid #ddd; padding: 8px;"><strong>BFLOAT16</strong></th>
-        <th style="text-align: center; border: 1px solid #ddd; padding: 8px;"><strong>FLOAT32</strong></th>
-        <th style="text-align: center; border: 1px solid #ddd; padding: 8px;"><strong>HiFLOAT32</strong></th>
-        <th style="text-align: center; border: 1px solid #ddd; padding: 8px;"><strong>FLOAT8 E4M3</strong></th>
-        <th style="text-align: center; border: 1px solid #ddd; padding: 8px;"><strong>FLOAT8 E5M2</strong></th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;"><strong>rtol</strong></td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-10</sup> (1e-3)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-7</sup> (7.8e-3)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-13</sup> (1.2e-4)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-10</sup> (1e-3)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-3</sup> (0.125)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-2</sup> (0.25)</td>
-      </tr>
-      <tr>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;"><strong>atol</strong></td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-10</sup> (1e-3)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-7</sup> (7.8e-3)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-13</sup> (1.2e-4)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-10</sup> (1e-3)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-3</sup> (0.125)</td>
-        <td style="text-align: center; border: 1px solid #ddd; padding: 8px;">2<sup>-2</sup> (0.25)</td>
-      </tr>
-    </tbody>
-</table>
-
-**注**：
-- 当前的阈值拦截在各数值精度下约为 1ULP左右，涉及到大数规约可能会引入更大精度误差导致误报，可酌情降低至2ULP。  
+| 数据类型 | **FLOAT16** | **BFLOAT16** | **FLOAT32** | **HiFLOAT32** | **FLOAT8 E4M3** | **FLOAT8 E5M2** |
+| --- | --- | --- | --- | --- | --- | --- |
+| **rtol** | 2<sup>-10</sup> (1e-3) | 2<sup>-7</sup> (7.8e-3) | 2<sup>-13</sup> (1.2e-4) | 2<sup>-10</sup> (1e-3) | 2<sup>-3</sup> (0.125) | 2<sup>-2</sup> (0.25) |
+| **atol** | 2<sup>-10</sup> (1e-3) | 2<sup>-7</sup> (7.8e-3) | 2<sup>-13</sup> (1.2e-4) | 2<sup>-10</sup> (1e-3) | 2<sup>-3</sup> (0.125) | 2<sup>-2</sup> (0.25) |
 
 ### 2.3 通过判定
 
-**单标杆比对**：与更高精度的实现（CPU或昇腾小算子拼接）的单一精度标杆直接比较。
+**单标杆比对**：与 Torch reference 实现的单一精度标杆直接比较。
 
 当用例中所有参与比对的元素都满足 2.1.1 的逐元素条件时，判定该用例精度通过。
 
-比对过程中，若遇算子实际输出为 `±inf` 而 golden 为有限值时，应先将 golden 降精度（收窄）到算子实际输出 dtype 后再比对：收窄按 round-to-nearest-even 舍入，超出该 dtype 表示范围的值转换为 `±inf`（IEEE 754 语义）。收窄后双方同为同号 `±inf` 即视为该点通过。
+特殊值判定规则：
+
+- **NaN**：算子实际输出为 NaN 时，该点失败。
+- **±inf**：当任一方为无穷大时，仅双方同为 `+inf` 或同为 `-inf` 时通过，其余情况均失败。
