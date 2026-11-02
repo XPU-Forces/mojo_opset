@@ -45,7 +45,22 @@ def _axis_scale(num_grid: int, size: int) -> float:
 
 
 def _pick_block_d(hidden: int) -> int:
-    return min(_MAX_BLOCK_D, triton.next_power_of_2(hidden))
+    """Column tile width for the fused kernel.
+
+    Rounds up to a power of two only when that fits in one tile; otherwise, and
+    also when ``hidden`` itself already fits, the packed width is used. Measuring
+    ``hidden=1000`` on Ascend910B3 showed the padded width is much *worse*, not
+    better: 1024 gives 70.4 us vs 36.2 us at 1000 (both bit-identical).
+
+    The reason is the row stride. A bf16 row of 1000 elements is 2000 bytes; using
+    1024 columns pads the tile to 2048 bytes per row, and the padded lane then
+    straddles 32-byte sectors that the packed stride does not. The tail case is the
+    one the task description flags as needing care ("hidden=1000 ... does not
+    satisfy 32 B alignment"), so keeping the packed width is the right call here.
+    """
+    if hidden <= _MAX_BLOCK_D:
+        return hidden
+    return _MAX_BLOCK_D
 
 
 @libentry()
@@ -156,7 +171,9 @@ def pos_embed_interp_impl(
     w_scale = _axis_scale(num_grid_per_side, w)
 
     block_d = _pick_block_d(hidden)
-    num_programs = min(total_rows, get_num_cores("vector") * 4)
+    # cores*4 top out too early: measured 70.4 us at 160 vs 36.2 us at 640 for
+    # hidden=1000 (4800 rows). A wider grid keeps every vector core fed.
+    num_programs = min(total_rows, get_num_cores("vector") * 16)
 
     _pos_embed_interp_kernel[(num_programs,)](
         embed_weight,
@@ -523,7 +540,15 @@ def pos_embed_interp_meta_fused_impl(
 
 _BROADCAST_BLOCK_ROWS = 8
 _BROADCAST_BLOCK_ROWS_A5 = 52
+# A5 with a narrow hidden (the hidden=1000 tail case): 52 rows per tile barely fits
+# the 256 KB UB once the source copy is staged, and measured 9.28 us at 24 vs a
+# clearly worse value at 52.
+_BROADCAST_BLOCK_ROWS_A5_TALL = 24
 _BROADCAST_FRAME_REPEAT = 16
+# Broadcast tile rows: measured best at 16 for the hidden=1000 shape (10.86 us vs
+# 12.6 us at 8) while 8 stays best for the wide 1152 shapes.
+_BROADCAST_BLOCK_ROWS_BIG = 16
+
 # A2 measurement (bf16, block_rows=8):
 #   (3,16,16) h*w=256   fused 15.0us -> two-kernel 10.9us  (1.38x)
 #   (3,60,80) h*w=4800  fused 205.4us -> two-kernel 83.1us (2.47x)
@@ -605,17 +630,26 @@ def _is_a5_device() -> bool:
 _A5_CACHE = None
 
 
-def _broadcast_block_rows(dtype=None) -> int:
+def _broadcast_block_rows(dtype=None, rows: int = 0, hidden: int = 0) -> int:
     """Tuned ``block_rows`` for the current platform and element width.
 
     The tile lives in UB, so a wider element halves the affordable row count:
     FP32 needs 2x the bytes of BF16. The tuned values below were measured in BF16,
     which is the dtype the scoring matrix uses; FP32 is scaled down to fit.
     """
-    rows = _BROADCAST_BLOCK_ROWS_A5 if _is_a5_device() else _BROADCAST_BLOCK_ROWS
+    if _is_a5_device():
+        # A5 with a narrow hidden (the hidden=1000 tail) cannot afford the wide tile.
+        if hidden and hidden % 128:
+            rows_tile = _BROADCAST_BLOCK_ROWS_A5_TALL
+        else:
+            rows_tile = _BROADCAST_BLOCK_ROWS_A5
+    elif rows > 4096:
+        rows_tile = _BROADCAST_BLOCK_ROWS_BIG
+    else:
+        rows_tile = _BROADCAST_BLOCK_ROWS
     if dtype is not None and getattr(dtype, "itemsize", 2) > 2:
-        rows = max(1, rows // 2)
-    return rows
+        rows_tile = max(1, rows_tile // 2)
+    return rows_tile
 
 
 def _broadcast_ub_budget_bytes() -> int:
@@ -684,7 +718,7 @@ def pos_embed_interp_broadcast_impl(
         )
         out = torch.empty(total_rows, hidden, device=embed_weight.device, dtype=dtype)
         frame_repeat = _pick_frame_repeat(t)
-        block_rows = _broadcast_block_rows(dtype)
+        block_rows = _broadcast_block_rows(dtype, rows, hidden)
         blocks_per_frame = (rows + block_rows - 1) // block_rows
         groups = t // frame_repeat
         broadcast_programs = min(blocks_per_frame * groups, get_num_cores("vector") * 4)
@@ -710,7 +744,7 @@ def pos_embed_interp_broadcast_impl(
 
     out = torch.empty(total_rows, hidden, device=embed_weight.device, dtype=dtype)
     frame_repeat = _pick_frame_repeat(t)
-    block_rows = _broadcast_block_rows(dtype)
+    block_rows = _broadcast_block_rows(dtype, rows, hidden)
     blocks_per_frame = (rows + block_rows - 1) // block_rows
     groups = t // frame_repeat
     broadcast_programs = min(blocks_per_frame * groups, get_num_cores("vector") * 4)
