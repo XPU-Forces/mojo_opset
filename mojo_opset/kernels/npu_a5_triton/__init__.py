@@ -51,6 +51,7 @@ OPS = {
     "rms_norm": "rmsnorm",
     "swa": "swa",
     "rope": "rope",
+    "vision_pos_embed_interp": "pos_embed_interp",
 }
 
 # Add only differences once specialized wrappers exist, for example:
