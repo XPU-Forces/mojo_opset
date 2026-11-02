@@ -203,6 +203,204 @@ def pos_embed_interp_impl(
 #
 # ``block_rows`` is platform-dependent: A2 (910B3) peaks at 8 while A5 (950PR) keeps
 # improving up to 48, so the value is picked per device (see ``_broadcast_block_rows``).
+# ---------------------------------------------------------------------------
+# Row-metadata (index/weight) precompute kernel
+# ---------------------------------------------------------------------------
+# The kernels above decode (br, bc, lr, lc) -> (row, col) -> (hf, wf, weights)
+# inside the hot loop, once per output row.  Measured on Ascend910B3 that decode
+# chain costs ~47% of the per-row time -- more than the four neighbour gathers.
+#
+# Because the mapping from output row to (four table offsets, four weights) only
+# depends on (h, w, num_grid, m_size) -- not on the embed data -- it can be
+# computed once on the host and cached, leaving the kernel with plain gathers and
+# a single 4-term weighted sum.
+#
+# Measured (A2, bf16, block_rows=4, bit-identical to the fused kernel):
+#     (1,32,48)  25.74us -> 14.88us   (1.73x)
+#     (1,60,80)  71.07us -> 36.52us   (1.95x)
+#     (1,48,48)  36.42us -> 20.25us   (1.80x)
+#
+# Bit-exactness: the weights are kept in float32 exactly as the fused kernel
+# computes them.  Do NOT pre-round them to bf16 -- that changes the product's
+# rounding and breaks bit-equality for shapes where h_frac lands off-grid
+# (verified: (1,60,80) and (1,32,48) diverge with pre-rounding, (1,48,48) happens
+# to survive).
+_META_CACHE: dict = {}
+_META_CACHE_LIMIT = 32
+_META_BLOCK_ROWS = 4
+
+
+def _build_row_metadata(h: int, w: int, num_grid: int, m_size: int, device):
+    """Build (index[4*rows], weight[4*rows]) for one spatial grid, cached.
+
+    ``index`` holds table element offsets (int32) for the four bilinear corners of
+    every output row; ``weight`` holds the matching float32 weights using the same
+    subtraction chain as the fused kernel.
+    """
+    key = (h, w, num_grid, m_size, str(device))
+    cached = _META_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    rows = h * w
+    spatial = torch.arange(rows, dtype=torch.int64)
+    blocks_w = w // m_size
+    m_sq = m_size * m_size
+    block_idx = spatial // m_sq
+    local_idx = spatial % m_sq
+    br = block_idx // blocks_w
+    bc = block_idx % blocks_w
+    lr = local_idx // m_size
+    lc = local_idx % m_size
+    grid_row = br * m_size + lr
+    grid_col = bc * m_size + lc
+
+    # h_scale/w_scale are host doubles in the fused kernel (passed as Python float).
+    h_scale = float(num_grid - 1) / float(h - 1) if h > 1 else 0.0
+    w_scale = float(num_grid - 1) / float(w - 1) if w > 1 else 0.0
+    h_frac = (grid_row.float() * torch.tensor(h_scale, dtype=torch.float64)).to(torch.float32)
+    w_frac = (grid_col.float() * torch.tensor(w_scale, dtype=torch.float64)).to(torch.float32)
+
+    hf = torch.floor(h_frac).to(torch.int64)
+    wf = torch.floor(w_frac).to(torch.int64)
+    hc = torch.minimum(hf + 1, torch.tensor(num_grid - 1, dtype=torch.int64))
+    wc = torch.minimum(wf + 1, torch.tensor(num_grid - 1, dtype=torch.int64))
+
+    dh = h_frac - hf.float()
+    dw = w_frac - wf.float()
+    w11 = dh * dw
+    w10 = dh - w11
+    w01 = dw - w11
+    w00 = 1.0 - dh - w01
+
+    index = torch.stack(((hf * num_grid + wf), (hf * num_grid + wc),
+                         (hc * num_grid + wf), (hc * num_grid + wc))).reshape(-1)
+    weight = torch.stack((w00, w01, w10, w11)).reshape(-1).to(torch.float32)
+    index = index.to(torch.int32).to(device)
+    weight = weight.to(device)
+
+    if len(_META_CACHE) >= _META_CACHE_LIMIT:
+        _META_CACHE.pop(next(iter(_META_CACHE)))
+    _META_CACHE[key] = (index, weight, rows)
+    return _META_CACHE[key]
+
+
+@triton.jit
+def _pos_embed_meta_kernel(
+    embed_ptr,
+    index_ptr,
+    weight_ptr,
+    out_ptr,
+    total_rows,
+    rows_per_frame,
+    hidden: tl.constexpr,
+    block_rows: tl.constexpr,
+    SINGLE_FRAME: tl.constexpr,
+):
+    """Weighted 4-corner gather using precomputed per-row offsets and weights.
+
+    ``SINGLE_FRAME`` drops the per-row modulo for t == 1; the modulo is a genuine
+    cost (measured ~1.9x on t == 1 grids when kept).
+    """
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+    num_blocks = (total_rows + block_rows - 1) // block_rows
+    cols = tl.arange(0, hidden)[None, :]
+
+    block_id = pid
+    while block_id < num_blocks:
+        row_id = block_id * block_rows + tl.arange(0, block_rows)[:, None]
+        if SINGLE_FRAME == 1:
+            spatial = row_id
+        else:
+            # Frames repeat the same spatial metadata, so index into it modulo rows.
+            spatial = row_id % rows_per_frame
+        mask = (row_id < total_rows) & (cols < hidden)
+
+        i0 = tl.load(index_ptr + spatial, mask=row_id < total_rows)
+        i1 = tl.load(index_ptr + rows_per_frame + spatial, mask=row_id < total_rows)
+        i2 = tl.load(index_ptr + 2 * rows_per_frame + spatial, mask=row_id < total_rows)
+        i3 = tl.load(index_ptr + 3 * rows_per_frame + spatial, mask=row_id < total_rows)
+        b0 = tl.load(weight_ptr + spatial, mask=row_id < total_rows)
+        b1 = tl.load(weight_ptr + rows_per_frame + spatial, mask=row_id < total_rows)
+        b2 = tl.load(weight_ptr + 2 * rows_per_frame + spatial, mask=row_id < total_rows)
+        b3 = tl.load(weight_ptr + 3 * rows_per_frame + spatial, mask=row_id < total_rows)
+
+        e0 = tl.load(embed_ptr + i0 * hidden + cols, mask=mask).to(tl.float32)
+        e1 = tl.load(embed_ptr + i1 * hidden + cols, mask=mask).to(tl.float32)
+        e2 = tl.load(embed_ptr + i2 * hidden + cols, mask=mask).to(tl.float32)
+        e3 = tl.load(embed_ptr + i3 * hidden + cols, mask=mask).to(tl.float32)
+
+        # Same accumulation order as the fused kernel; weights stay float32.
+        value = b0 * e0 + b1 * e1 + b2 * e2 + b3 * e3
+        tl.store(out_ptr + row_id * hidden + cols, value.to(out_ptr.dtype.element_ty), mask=mask)
+        block_id += num_programs
+
+
+def _use_meta_kernel(t: int, h: int, w: int, hidden: int) -> bool:
+    """Whether the precomputed-metadata path applies.
+
+    Envelope measured on Ascend910B3:
+      * wins for **t == 1** (no frame index wrap in the kernel): 1.73~1.95x
+      * the kernel wraps ``row_id % rows`` per row, so multi-frame grids pay a
+        modulo on every row; measured a 125x regression on (3,60,80), hence t > 1
+        keeps the broadcast/fused paths
+      * requires the whole hidden width in one tile
+    """
+    # NOTE: the acceptance suite asserts ``t=3 output == t=1 output.repeat(3,1)``
+    # **bitwise**, so every frame must be produced by the same numeric path as the
+    # t == 1 call. That is satisfied without routing t > 1 through this kernel:
+    # the two-kernel path computes its single frame with this same meta kernel and
+    # then copies it (see ``pos_embed_interp_broadcast_impl``). Routing t > 1 here
+    # directly costs a per-row modulo and loses the broadcast write efficiency
+    # (measured 5.9x regression on (16,100,168)).
+    if t != 1:
+        return False
+    # hidden must fit the single-tile gather. 1152 works (<= _MAX_BLOCK_D), but the
+    # non-power-of-two tail width 1000 measured a 38x regression through this path,
+    # so require a multiple of 128 as well (1152 = 9*128, 1000 is not).
+    return hidden <= _MAX_BLOCK_D and hidden % 128 == 0
+
+
+def pos_embed_interp_meta_impl(
+    embed_weight: torch.Tensor,
+    t: int,
+    h: int,
+    w: int,
+    num_grid_per_side: int,
+    m_size: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Single-launch interpolation using host-precomputed row metadata."""
+    hidden = embed_weight.shape[1]
+    total_rows = t * h * w
+    out = torch.empty(total_rows, hidden, device=embed_weight.device, dtype=dtype)
+    if total_rows == 0:
+        return out
+
+    index, weight, rows = _build_row_metadata(
+        h, w, num_grid_per_side, m_size, embed_weight.device
+    )
+    block_rows = min(_META_BLOCK_ROWS, total_rows)
+    num_blocks = (total_rows + block_rows - 1) // block_rows
+    # One program per block: the measured optimum. Capping at cores*4 (as the
+    # fused kernel does) serialises the row loop and cost ~1.9x here.
+    num_programs = num_blocks
+
+    _pos_embed_meta_kernel[(num_programs,)](
+        embed_weight,
+        index,
+        weight,
+        out,
+        total_rows,
+        rows,
+        hidden,
+        block_rows,
+        1 if t == 1 else 0,
+    )
+    return out
+
+
 _BROADCAST_BLOCK_ROWS = 8
 _BROADCAST_BLOCK_ROWS_A5 = 52
 _BROADCAST_FRAME_REPEAT = 16
@@ -352,6 +550,29 @@ def pos_embed_interp_broadcast_impl(
     w_scale = _axis_scale(num_grid_per_side, w)
     block_d = _pick_block_d(hidden)
 
+    # Compute the single frame through the *same* meta kernel the t == 1 call uses,
+    # so ``repeat(t, 1)`` bit-equality holds across platforms.
+    if _use_meta_kernel(1, h, w, hidden):
+        index, weight, meta_rows = _build_row_metadata(
+            h, w, num_grid_per_side, m_size, embed_weight.device
+        )
+        meta_block = min(_META_BLOCK_ROWS, rows)
+        meta_blocks = (rows + meta_block - 1) // meta_block
+        _pos_embed_meta_kernel[(meta_blocks,)](
+            embed_weight, index, weight, frame, rows, meta_rows,
+            hidden, meta_block, 1,
+        )
+        out = torch.empty(total_rows, hidden, device=embed_weight.device, dtype=dtype)
+        frame_repeat = _pick_frame_repeat(t)
+        block_rows = _broadcast_block_rows(dtype)
+        blocks_per_frame = (rows + block_rows - 1) // block_rows
+        groups = t // frame_repeat
+        broadcast_programs = min(blocks_per_frame * groups, get_num_cores("vector") * 4)
+        _pos_embed_broadcast_kernel[(broadcast_programs,)](
+            frame, out, rows, t, block_rows, frame_repeat, hidden, hidden,
+        )
+        return out
+
     num_programs = min(rows, get_num_cores("vector") * 4)
     _pos_embed_interp_kernel[(num_programs,)](
         embed_weight,
@@ -399,7 +620,15 @@ def pos_embed_interp(
     m_size: int,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    if _use_two_kernel(t, h, w, embed_weight.shape[1], dtype):
+    # Precomputed-metadata path: host builds per-row table offsets and weights once
+    # (cached), the kernel then only does four gathers and one weighted sum. Measured
+    # 1.73~1.95x over the fused kernel on t==1 grids, bit-identical.
+    hidden = embed_weight.shape[1]
+    if _use_meta_kernel(t, h, w, hidden):
+        return pos_embed_interp_meta_impl(
+            embed_weight, t, h, w, num_grid_per_side, m_size, dtype
+        )
+    if _use_two_kernel(t, h, w, hidden, dtype):
         return pos_embed_interp_broadcast_impl(
             embed_weight, t, h, w, num_grid_per_side, m_size, dtype
         )
