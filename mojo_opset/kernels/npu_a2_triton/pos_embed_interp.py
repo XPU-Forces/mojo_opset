@@ -248,7 +248,10 @@ _META_CACHE_LIMIT = 32
 # launch/index overhead): 256 rows measured 6.58 us at 4 rows/tile vs 5.77 us at 8.
 _META_BLOCK_ROWS = 4
 _META_BLOCK_ROWS_SMALL = 8
-_META_SMALL_ROWS = 1024
+# 8 rows/tile wins from 256 rows upward and the margin grows with the grid
+# (measured on Ascend950PR: 1.08x at 256 rows, 1.19x at 4800, 1.25x at 16800).
+# Only the 128-row minimum grid prefers 4, so the small-tile rule stops there.
+_META_SMALL_ROWS = 256
 
 
 def _meta_block_rows(total_rows: int, dtype=None) -> int:
@@ -260,7 +263,7 @@ def _meta_block_rows(total_rows: int, dtype=None) -> int:
     """
     if dtype is not None and getattr(dtype, "itemsize", 2) > 2:
         return _META_BLOCK_ROWS
-    return _META_BLOCK_ROWS_SMALL if total_rows <= _META_SMALL_ROWS else _META_BLOCK_ROWS
+    return _META_BLOCK_ROWS if total_rows < _META_SMALL_ROWS else _META_BLOCK_ROWS_SMALL
 
 
 def _build_row_metadata(h: int, w: int, num_grid: int, m_size: int, device):
