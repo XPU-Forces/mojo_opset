@@ -857,9 +857,9 @@ without a decision. The rehearsal replays that merge for real and checks every
 resolution.
 
 The history is reconstructed from the upstream commits rather than approximated:
-the common base is `0a7d64c`, upstream `master` is `8b4b7a1`, and the two
-commits in between touch ten files, none of them among the six files #525
-changes. The rebuilt `master` tree hashes to
+the common base is `0a7d64c`, upstream `master` was `8b4b7a1` at the time of the
+first two rounds, and the two commits in between touch ten files, none of them
+among the six files #525 changes. The rebuilt `master` tree hashes to
 `769df7e9a73169faed1a9286134ca60f1ed3aa95`, the tree SHA GitHub reports for
 `8b4b7a1`, so the reconstruction is byte-exact. The suite's content is then
 applied on top of the common base (its two modified `__init__.py` files are
@@ -898,6 +898,7 @@ provider; and the four relevant test files are collected.
 | `4b28729` (before the fix) | 8/16 — the eight trees that take the suite's registry fail with `op ids missing from the torch registry: tests/modules/test_layernorm_gated.py::layernorm_gated` |
 | `cc1e02c` (after the fix) | 16/16 |
 | device re-run of the same sixteen trees on `Ascend950PR_9579` | 16/16 — five pytest steps per tree (canonical, `_extra`, `_aliases`, `modules`, performance collection), every return code 0; see below |
+| `c85cdaf` after upstream moved to `9c4b5d7c` | 16/16 on the CPU, and the tree's own `check_implementation` gives the same verdicts as on `8b4b7a1` for all 24 implementation/target combinations of every tree |
 
 The two fix commits were reworded afterwards so that they carry the same AI
 declaration line as every other commit in the branch, which moved them from
@@ -999,6 +1000,34 @@ host itself — and the aliases row again splits into 2 passed on the eight
 On Ascend 910B the FP8 cases fail for every tree, so the baseline to compare
 against is the count of the FP8 failures, not zero; on Ascend 950 the FP8 path
 works and all sixteen trees do pass outright, as measured above.
+
+Upstream then moved again. `master` is `9c4b5d7c` (`[Feat] add mxfp8 expert
+mlp.`, 2026-11-01), one commit past `8b4b7a1`, and it touches three files —
+`mojo_opset/kernels/npu_torch_npu/__init__.py`, `tests/_fixtures.py` and
+`tests/performance/conftest.py` — none of them among this branch's 23 files. The
+rehearsal was replayed on that master at `c85cdaf` on 2026-11-03: the rebuilt
+tree hashes to `0da7c5db98f9ecf72fa3f90fc8f9e6fa25f30e10`, which is the SHA
+GitHub reports, the merge still conflicts on the same three files, and all
+sixteen trees still pass. Building the same branch against both masters with the
+same suite content, the sixteen trees differ in exactly those three files while
+the six contested files stay byte-identical, so the merge surface has not moved
+again either.
+
+`tests/_fixtures.py` is the one place where a CPU replay can be quietly wrong,
+because its operator-id assertion is normally re-implemented by the checker
+instead of imported — and that is the file upstream changed. The replay
+therefore calls the tree's own `check_implementation` as well: the layernorm
+test files are collected with `--collect-only`, their `@pytest.mark.api` markers
+are read exactly the way `operator_test` reads them, and the collected ids are
+passed to the tree's function for `implementation` in
+`None`/`torch`/`triton`/`torch_npu` and target `npu.a2`/`npu.a5` — 24
+combinations per tree, the same verdicts on both masters (`torch_npu` skips
+because it exports no provider for this operator, the other three pass). The new
+branch inside that file is keyed on a `default_backend_job` marker argument,
+which no marker in this branch sets, so it is inert here — shown by execution
+rather than by reading. The accuracy fixtures themselves cannot run without an
+accelerator, so that half of the rehearsal remains the device passes above —
+which ran the `8b4b7a1`-based trees — and not this CPU replay.
 
 ## 7. Known limits
 
