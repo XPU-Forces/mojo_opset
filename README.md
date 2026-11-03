@@ -134,7 +134,9 @@ pytest tests/performance
 ```
 
 The [910B CI workflow](.github/workflows/npu-910b.yml) runs accuracy and training
-bitwise checks on Ascend910B3 for `triton`, `torch_npu` and `native` separately.
+bitwise checks on Ascend910B3 for `triton`, `torch_npu` and `native` in sequence.
+Each job uses an eight-card runner with one pytest worker per card. Parameter
+groups stay on the same card and are balanced by case count, retaining every case.
 It runs for non-draft pull requests targeting `master`, pushes to `master`, and
 manual dispatches. The native job builds the A2 provider for the runner's hardware.
 Each job records its runtime versions, writes a result summary, and uploads
