@@ -56,7 +56,9 @@ npu.a5:
   top_p_sampling: triton
   vision_rope_2d_infer: triton
   vision_rope_cos_sin_2d: triton
+  vision_pos_embed_interp: triton
+  pos_embed_interp: triton
+  pos_embed_interp_multi: triton
 
 npu.a5.950pr:
   native_swa_infer: native  # Temporary standalone SWA interface; native supports 950PR only.
-  pos_embed_interp: triton

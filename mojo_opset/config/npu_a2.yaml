@@ -58,3 +58,5 @@ npu.a2:
   vision_rope_2d_infer: triton
   vision_rope_cos_sin_2d: triton
   pos_embed_interp: triton
+  pos_embed_interp_multi: triton
+  vision_pos_embed_interp: triton
