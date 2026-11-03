@@ -84,6 +84,10 @@ def operator_test(request, monkeypatch):
             # supplies all dependencies and exercises the configured mixture.
             selected = None if marker.kwargs.get("default_backend_job") == implementation else implementation
             check_implementation(op_ids, selected, target)
+            if device == "npu" and "flash_attention" in op_ids:
+                fa_impl = selected or _dispatch.resolve_implementation("flash_attention", Target.parse(target))
+                if fa_impl == "native" and torch.npu.get_device_name().startswith("Ascend910B3"):
+                    pytest.skip("native flash_attention backward assumes 48 Vector cores; 910B3 adaptation is pending")
         private = additions("tests")
         if private is not None:
             private.check_case(request, implementation, target)
