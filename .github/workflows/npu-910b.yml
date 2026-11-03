@@ -2,49 +2,23 @@ name: Community NPU 910B
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
-    branches: [ci/community-910b]
+    branches: [master]
 
 permissions:
   contents: read
 
 concurrency:
-  group: npu-910b-${{ github.ref }}
+  group: npu-910b-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  runner_probe:
-    name: Probe 910B scale set
-    runs-on: linux-aarch64-a2b3-8-hk-001
-    timeout-minutes: 20
-    container:
-      image: quay.io/ascend/triton:3.2.2-cann9.1.0-torch_npu2.7.1.post8-910b-ubuntu24.04-py3.11@sha256:b69d14f39d47ec8f66e635f16190788e3c2b2174d0994f63090afcdf885b06f1
-    defaults:
-      run:
-        shell: bash --noprofile --norc -eo pipefail {0}
-    steps:
-      - name: Check runner and NPU availability
-        run: |
-          source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          hostname
-          uname -m
-          npu-smi info
-          python - <<'PY'
-          import torch
-          import torch_npu
-          import triton
-
-          print("Torch:", torch.__version__, "torch_npu:", torch_npu.__version__, "Triton:", triton.__version__)
-          print("NPU count:", torch.npu.device_count())
-          assert torch.npu.is_available()
-          print("Device:", torch.npu.get_device_name(0))
-          x = torch.arange(16, device="npu", dtype=torch.float32)
-          torch.testing.assert_close((x + 1).cpu(), torch.arange(16, dtype=torch.float32) + 1)
-          PY
-
   accuracy:
     name: 910B / ${{ matrix.implementation }}
-    needs: runner_probe
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: linux-aarch64-a2b3-1-hk-001
     timeout-minutes: 180
     strategy:
@@ -69,6 +43,7 @@ jobs:
           submodules: ${{ matrix.implementation == 'native' && 'recursive' || 'false' }}
 
       - name: Install test dependencies
+        timeout-minutes: 10
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           python3 -m venv --system-site-packages "$RUNNER_TEMP/venv"
@@ -77,6 +52,7 @@ jobs:
           python -m pip install --no-build-isolation --no-deps -e .
 
       - name: Verify versions and 910B allocation
+        timeout-minutes: 5
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           source "$RUNNER_TEMP/venv/bin/activate"
@@ -108,6 +84,7 @@ jobs:
 
       - name: Build native provider
         if: matrix.implementation == 'native'
+        timeout-minutes: 30
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           source "$RUNNER_TEMP/venv/bin/activate"
@@ -117,21 +94,49 @@ jobs:
           python -c 'import mojo_opset_lib.npu_a2._native'
 
       - name: Accuracy and training bitwise tests
+        timeout-minutes: 95
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           source "$RUNNER_TEMP/venv/bin/activate"
           export XDG_CACHE_HOME="$RUNNER_TEMP/cache"
           export TRITON_CACHE_DIR="$XDG_CACHE_HOME/triton"
           export TORCHINDUCTOR_CACHE_DIR="$XDG_CACHE_HOME/inductor"
-          python -m pytest -q tests/functions tests/modules \
+          timeout --signal=TERM --kill-after=60s 90m \
+            python -m pytest -q tests/functions tests/modules \
             --mojo-target npu.a2 --mojo-implementation "$IMPLEMENTATION" \
-            --check all -ra --junitxml=test-results/accuracy.xml
+            --check all -ra --junitxml=test-results/accuracy.xml \
+            2>&1 | tee test-results/pytest.log
+
+      - name: Summarize test results
+        if: always()
+        timeout-minutes: 2
+        run: |
+          python3 - <<'PY'
+          import os
+          from collections import Counter
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          report = Path("test-results/accuracy.xml")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(f"### 910B / {os.environ['IMPLEMENTATION']}\n\n")
+              if report.exists():
+                  counts = Counter(
+                      next((state for state in ("failure", "error", "skipped") if case.find(state) is not None), "passed")
+                      for case in ElementTree.parse(report).iter("testcase")
+                  )
+                  summary.write("| Passed | Failed | Errors | Skipped |\n| --- | --- | --- | --- |\n")
+                  summary.write(f"| {counts['passed']} | {counts['failure']} | {counts['error']} | {counts['skipped']} |\n")
+              else:
+                  summary.write("No JUnit report was produced. Check the earlier steps and test log.\n")
+          PY
 
       - name: Upload test results
         if: always()
+        timeout-minutes: 5
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: npu-910b-${{ matrix.implementation }}
+          name: npu-910b-${{ matrix.implementation }}-${{ github.run_attempt }}
           path: test-results/
           if-no-files-found: warn
           retention-days: 14
