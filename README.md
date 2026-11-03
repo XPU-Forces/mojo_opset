@@ -139,6 +139,8 @@ It runs for non-draft pull requests targeting `master`, pushes to `master`, and
 manual dispatches. The native job builds the A2 provider for the runner's hardware.
 Each job records its runtime versions, writes a result summary, and uploads
 the test log and JUnit report. Unsupported provider cases remain reported as skips.
+Native Flash Attention cases are temporarily skipped on 910B3 while its backward
+reduction is adapted to the available Vector core count. B1/B2 coverage is retained.
 
 Performance tests use rotating inputs and exclude warmup. Run them on an idle
 device; ordinary `pytest` does not collect them. Results are saved to
