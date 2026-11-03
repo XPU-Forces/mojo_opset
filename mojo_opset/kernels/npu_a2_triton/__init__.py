@@ -48,6 +48,7 @@ OPS = {
     "silu": "silu",
     "gelu": "gelu",
     "swiglu": "swiglu",
+    "situ_and_mul": "situ_and_mul",
     "rms_norm": "rmsnorm",
     "swa": "swa",
     "rope": "rope",

@@ -49,6 +49,7 @@ npu.a5:
   rotate_activation: torch
   sdpa_infer: triton
   silu: triton
+  situ_and_mul: triton
   static_quant: triton
   store_lowrank: triton
   store_paged_kv_cache: triton

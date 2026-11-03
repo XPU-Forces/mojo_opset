@@ -3613,6 +3613,96 @@ operators:
             - tests/performance/modules/test_activation.py
           950/performance:
             - tests/performance/modules/test_activation.py
+  situ_and_mul:
+    rules:
+      - paths:
+          - mojo_opset/functions/situ_and_mul.py
+          - mojo_opset/kernels/torch/situ_and_mul.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_activation.py
+            - tests/performance/modules/test_activation.py
+          910b/triton:
+            - tests/functions/test_situ_and_mul.py
+            - tests/modules/test_activation.py
+          950/performance:
+            - tests/performance/functions/test_activation.py
+            - tests/performance/modules/test_activation.py
+          950/triton:
+            - tests/functions/test_situ_and_mul.py
+            - tests/modules/test_activation.py
+      - paths:
+          - mojo_opset/kernels/_npu_triton_utils.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_activation.py
+            - tests/performance/modules/test_activation.py
+          910b/triton:
+            - tests/functions/test_situ_and_mul.py
+            - tests/modules/test_activation.py
+          950/performance:
+            - tests/performance/functions/test_activation.py
+            - tests/performance/modules/test_activation.py
+          950/triton:
+            - tests/functions/test_situ_and_mul.py
+            - tests/modules/test_activation.py
+      - paths:
+          - mojo_opset/kernels/npu_a2_triton/situ_and_mul.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_activation.py
+            - tests/performance/modules/test_activation.py
+          910b/triton:
+            - tests/functions/test_situ_and_mul.py
+            - tests/modules/test_activation.py
+      - paths:
+          - mojo_opset/kernels/npu_a5_triton/situ_and_mul.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_activation.py
+            - tests/performance/modules/test_activation.py
+          950/triton:
+            - tests/functions/test_situ_and_mul.py
+            - tests/modules/test_activation.py
+      - paths:
+          - mojo_opset/modules/activation.py
+        jobs:
+          910b/performance:
+            - tests/performance/modules/test_activation.py
+          910b/triton:
+            - tests/modules/test_activation.py
+          950/performance:
+            - tests/performance/modules/test_activation.py
+          950/triton:
+            - tests/modules/test_activation.py
+      - paths:
+          - tests/functions/test_situ_and_mul.py
+        jobs:
+          910b/triton:
+            - tests/functions/test_situ_and_mul.py
+          950/triton:
+            - tests/functions/test_situ_and_mul.py
+      - paths:
+          - tests/modules/test_activation.py
+        jobs:
+          910b/triton:
+            - tests/modules/test_activation.py
+          950/triton:
+            - tests/modules/test_activation.py
+      - paths:
+          - tests/performance/functions/test_activation.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_activation.py
+          950/performance:
+            - tests/performance/functions/test_activation.py
+      - paths:
+          - tests/performance/modules/test_activation.py
+        jobs:
+          910b/performance:
+            - tests/performance/modules/test_activation.py
+          950/performance:
+            - tests/performance/modules/test_activation.py
   static_quant:
     rules:
       - paths:
