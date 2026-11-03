@@ -1,0 +1,83 @@
+name: Diagnose Triton patch releases
+
+on:
+  push:
+    branches: [debug/triton-322-post2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: triton-version-debug-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    runs-on: linux-aarch64-a2b3-8-hk-001
+    timeout-minutes: 45
+    container:
+      image: quay.io/ascend/triton:3.2.2-cann9.1.0-torch_npu2.7.1.post8-910b-ubuntu24.04-py3.11@sha256:b69d14f39d47ec8f66e635f16190788e3c2b2174d0994f63090afcdf885b06f1
+    defaults:
+      run:
+        shell: bash --noprofile --norc -eo pipefail {0}
+    env:
+      TORCH_TRANSFER_TO_NPU: "0"
+      TORCHINDUCTOR_COMPILE_THREADS: "1"
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Prepare isolated Triton environments
+        timeout-minutes: 10
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          mkdir -p test-results
+          npu-smi info > test-results/npu-smi.txt
+          for version in 3.2.2 3.2.2.post2; do
+            python3 -m venv --system-site-packages "/tmp/triton-ab/$version"
+            python="/tmp/triton-ab/$version/bin/python"
+            "$python" -m pip install --disable-pip-version-check --timeout 30 --retries 2 'pytest>=8.3.2,<9' einops pyyaml
+            "$python" -m pip install --no-build-isolation --no-deps -e .
+            if [[ "$version" == 3.2.2.post2 ]]; then
+              "$python" -m pip install --no-deps --ignore-installed --disable-pip-version-check --timeout 30 --retries 2 \
+                'https://github.com/triton-lang/triton-ascend/releases/download/v3.2.2.post2/triton_ascend-3.2.2.post2-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl#sha256=79c140312ac93b263b70cd52381cc6d7a5845952dba6d5ba83883849bbd66647'
+            fi
+            "$python" - "$version" <<'PY' | tee "test-results/environment-$version.txt"
+          import importlib.metadata as metadata
+          import sys
+          from pathlib import Path
+          import torch
+          import torch_npu
+          import triton
+
+          expected = sys.argv[1]
+          print("triton-ascend:", metadata.version("triton-ascend"), triton.__file__)
+          print("Torch:", torch.__version__, "torch_npu:", torch_npu.__version__)
+          print("NPU:", torch.npu.get_device_name(0), "devices:", torch.npu.device_count())
+          print("Core properties:", triton.runtime.driver.active.utils.get_device_properties("npu"))
+          assert metadata.version("triton-ascend") == expected
+          assert torch.npu.device_count() == 8 and torch.npu.get_device_name(0).startswith("Ascend910B3")
+          if expected.endswith("post2"):
+              assert Path(triton.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+          PY
+          done
+
+      - name: Compare failing operators on all eight cards
+        timeout-minutes: 30
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          timeout --signal=TERM --kill-after=60s 28m \
+            python3 .github/scripts/triton_version_debug.py 2>&1 | tee test-results/comparison.log
+
+      - name: Upload comparison
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: triton-version-comparison-${{ github.run_attempt }}
+          path: test-results/
+          retention-days: 14
