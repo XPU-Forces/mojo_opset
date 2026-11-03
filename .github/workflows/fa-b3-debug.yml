@@ -1,0 +1,98 @@
+name: Diagnose B3 FA reduction
+
+on:
+  push:
+    branches: [debug/fa-b3-reduction]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fa-b3-debug-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    runs-on: linux-aarch64-a2b3-1-hk-001
+    timeout-minutes: 60
+    container:
+      image: quay.io/ascend/triton:3.2.2-cann9.1.0-torch_npu2.7.1.post8-910b-ubuntu24.04-py3.11@sha256:b69d14f39d47ec8f66e635f16190788e3c2b2174d0994f63090afcdf885b06f1
+    defaults:
+      run:
+        shell: bash --noprofile --norc -eo pipefail {0}
+    env:
+      TORCH_TRANSFER_TO_NPU: "0"
+      TORCHINDUCTOR_COMPILE_THREADS: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Prepare and query hardware
+        timeout-minutes: 10
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          python3 -m venv --system-site-packages "$RUNNER_TEMP/venv"
+          source "$RUNNER_TEMP/venv/bin/activate"
+          python -m pip install 'pytest>=8.3.2,<9' einops pyyaml 'cmake>=3.18,<4'
+          python -m pip install --no-build-isolation --no-deps -e .
+          mkdir -p test-results
+          python .github/scripts/fa_b3_debug.py probe | tee test-results/hardware.txt
+
+      - name: Build unchanged FA kernels
+        timeout-minutes: 20
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          source "$RUNNER_TEMP/venv/bin/activate"
+          python .github/scripts/fa_b3_debug.py select
+          cmake -S native -B build/fa-debug -DMOJO_NATIVE_PROVIDER=npu_a2 \
+            -DMOJO_NATIVE_OP=all -DSOC_VERSION=Ascend910B3 \
+            -DPython3_EXECUTABLE="$RUNNER_TEMP/venv/bin/python"
+          cmake --build build/fa-debug --target mojo_native -j8
+
+      - name: Reproduce original gradients and eight cases
+        timeout-minutes: 10
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          source "$RUNNER_TEMP/venv/bin/activate"
+          export PYTHONPATH="$PWD/native:${PYTHONPATH:-}"
+          python .github/scripts/fa_b3_debug.py gradients | tee test-results/baseline-gradients.txt
+          status=0
+          python -m pytest -q tests/functions/test_attention.py \
+            -k test_flash_attention_accuracy --mojo-target npu.a2 \
+            --mojo-implementation native --check accuracy \
+            --junitxml=test-results/baseline.xml > test-results/baseline.log 2>&1 || status=$?
+          tail -n 14 test-results/baseline.log
+          echo "Baseline exit code: $status"
+          test "$status" -eq 0 || test "$status" -eq 1
+
+      - name: Rebuild with logical reduction workers
+        timeout-minutes: 15
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          source "$RUNNER_TEMP/venv/bin/activate"
+          python .github/scripts/fa_b3_debug.py patch
+          git diff -- native/src/npu_a2/fa_bwd/vec_op_det.h > test-results/reduction.patch
+          cmake --build build/fa-debug --target mojo_native -j8
+
+      - name: Verify gradients and regression cases
+        timeout-minutes: 10
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          source "$RUNNER_TEMP/venv/bin/activate"
+          export PYTHONPATH="$PWD/native:${PYTHONPATH:-}"
+          python .github/scripts/fa_b3_debug.py gradients | tee test-results/patched-gradients.txt
+          python -m pytest -q tests/functions/test_attention.py \
+            -k 'test_flash_attention_accuracy or test_flash_attention_bitwise' \
+            --mojo-target npu.a2 --mojo-implementation native --check all \
+            --junitxml=test-results/patched.xml 2>&1 | tee test-results/patched.log
+
+      - name: Upload diagnosis
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fa-b3-diagnosis-${{ github.run_attempt }}
+          path: test-results/
+          retention-days: 14
