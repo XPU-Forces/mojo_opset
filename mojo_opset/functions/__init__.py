@@ -63,6 +63,7 @@ from .store_lowrank import store_lowrank
 from .swiglu import swiglu
 
 __all__ = [
+    "vision_pos_embed_interp",
     "apply_penalties_temperature",
     "causal_conv1d",
     "causal_conv1d_update_state_infer",
@@ -127,3 +128,4 @@ __all__ = [
 
 _extend_exports(globals())
 del _extend_exports
+from .vision_pos_embed_interp import vision_pos_embed_interp

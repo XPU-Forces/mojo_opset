@@ -2,6 +2,8 @@
 
 from mojo_opset.utils._exports import extend_exports as _extend_exports
 
+from .vision_pos_embed_interp import VisionPosEmbedInterp
+
 from .activation import GELU
 from .activation import SiLU
 from .activation import SwiGLU
@@ -106,6 +108,7 @@ __all__ = [
     "VarlenFAInfer",
     "VisionRoPE2DInfer",
     "VisionRoPECosSin2D",
+    "VisionPosEmbedInterp",
 ]
 
 

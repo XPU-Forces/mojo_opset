@@ -3,6 +3,7 @@
 from mojo_opset.utils._exports import extend_bindings as _extend_bindings
 
 OPS = {
+    "pos_embed_interp_multi": "pos_embed_interp",
     "swa_infer": "swa",
     "moe_dynamic_quant": "quant",
     "flex_attention": "flex_attention",
@@ -51,6 +52,7 @@ OPS = {
     "rms_norm": "rmsnorm",
     "swa": "swa",
     "rope": "rope",
+    "vision_pos_embed_interp": "pos_embed_interp",
 }
 
 
