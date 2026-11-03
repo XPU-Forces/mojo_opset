@@ -899,6 +899,7 @@ provider; and the four relevant test files are collected.
 | `cc1e02c` (after the fix) | 16/16 |
 | device re-run of the same sixteen trees on `Ascend950PR_9579` | 16/16 — five pytest steps per tree (canonical, `_extra`, `_aliases`, `modules`, performance collection), every return code 0; see below |
 | `c85cdaf` after upstream moved to `9c4b5d7c` | 16/16 on the CPU, and the tree's own `check_implementation` gives the same verdicts as on `8b4b7a1` for all 24 implementation/target combinations of every tree |
+| `8a56b92` after upstream moved to `892231c8` (2026-11-03) | 16/16 on the CPU, the same 384 `check_implementation` combinations pass, and an A/B against the `9c4b5d7c` trees differs only under `docs/` — zero non-docs differences |
 
 The two fix commits were reworded afterwards so that they carry the same AI
 declaration line as every other commit in the branch, which moved them from
@@ -1001,17 +1002,20 @@ On Ascend 910B the FP8 cases fail for every tree, so the baseline to compare
 against is the count of the FP8 failures, not zero; on Ascend 950 the FP8 path
 works and all sixteen trees do pass outright, as measured above.
 
-Upstream then moved again. `master` is `9c4b5d7c` (`[Feat] add mxfp8 expert
-mlp.`, 2026-11-01), one commit past `8b4b7a1`, and it touches three files —
+Upstream then moved twice. `master` went to `9c4b5d7c` (`[Feat] add mxfp8 expert
+mlp.`, 2026-11-01), which touches three files —
 `mojo_opset/kernels/npu_torch_npu/__init__.py`, `tests/_fixtures.py` and
-`tests/performance/conftest.py` — none of them among this branch's 23 files. The
-rehearsal was replayed on that master at `c85cdaf` on 2026-11-03: the rebuilt
-tree hashes to `0da7c5db98f9ecf72fa3f90fc8f9e6fa25f30e10`, which is the SHA
-GitHub reports, the merge still conflicts on the same three files, and all
-sixteen trees still pass. Building the same branch against both masters with the
-same suite content, the sixteen trees differ in exactly those three files while
-the six contested files stay byte-identical, so the merge surface has not moved
-again either.
+`tests/performance/conftest.py` — and then to `892231c8` (2026-11-03), which adds
+the two `docs/operator_accuracy_standard*` files from the acceptance-standard
+pull request. None of those five files is among this branch's 23. The rehearsal
+was replayed at `c85cdaf` on `9c4b5d7c` and again at `8a56b92` on `892231c8`:
+each rebuilt tree hashes to the tree SHA GitHub reports (`0da7c5db…` and
+`ae18ee2e…` respectively), the merge still conflicts on the same three files,
+and all sixteen trees still pass. Building the same branch against both masters
+with the same suite content, the sixteen trees differ only under `docs/` — the
+two files upstream added and this branch's own design document — while every file
+under `mojo_opset/` and `tests/`, including the six contested files, stays
+byte-identical, so the merge surface has not moved again either.
 
 `tests/_fixtures.py` is the one place where a CPU replay can be quietly wrong,
 because its operator-id assertion is normally re-implemented by the checker
@@ -1021,13 +1025,26 @@ test files are collected with `--collect-only`, their `@pytest.mark.api` markers
 are read exactly the way `operator_test` reads them, and the collected ids are
 passed to the tree's function for `implementation` in
 `None`/`torch`/`triton`/`torch_npu` and target `npu.a2`/`npu.a5` — 24
-combinations per tree, the same verdicts on both masters (`torch_npu` skips
-because it exports no provider for this operator, the other three pass). The new
-branch inside that file is keyed on a `default_backend_job` marker argument,
-which no marker in this branch sets, so it is inert here — shown by execution
-rather than by reading. The accuracy fixtures themselves cannot run without an
-accelerator, so that half of the rehearsal remains the device passes above —
-which ran the `8b4b7a1`-based trees — and not this CPU replay.
+combinations per tree, the same verdicts on every master replayed (`torch_npu`
+skips because it exports no provider for this operator, the other three pass).
+The new branch inside that file is keyed on a `default_backend_job` marker
+argument, which no marker in this branch sets, so it is inert here — shown by
+execution rather than by reading. The accuracy fixtures themselves cannot run
+without an accelerator, so that half of the rehearsal remains the device passes
+above — which ran the `8b4b7a1`-based trees — and not this CPU replay.
+
+`master` `892231c8` also carries the acceptance standard the maintainers
+published on 2026-11-03. Its mixed-tolerance table (§2.2) is the one the suite
+already uses: `2^-10` for float16, `2^-7` for bfloat16, `2^-13` for float32 and
+`2^-3` for float8 e4m3, which are exactly the thresholds in the suite's
+`MIXED_TOLERANCE` table; this branch produces no e5m2 output, so nothing changes
+on the finite-value side. Where the standard and the suite differ — the standard
+fails any point with a NaN on either side and requires every element to pass,
+while the suite treats NaN/NaN as matching and allows a 0.99 matched ratio plus a
+`max(floor, 32·ULP)` cap — the maintainer answered on the task issue on
+2026-11-03 that acceptance follows the test suite, with the standard supplying
+only the finite-value tolerances and no further requirement on the input domain.
+This branch therefore claims nothing beyond the suite's own criterion.
 
 ## 7. Known limits
 
