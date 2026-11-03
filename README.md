@@ -133,6 +133,13 @@ pytest tests/functions tests/modules --check bitwise
 pytest tests/performance
 ```
 
+The [910B CI workflow](.github/workflows/npu-910b.yml) runs accuracy and training
+bitwise checks on Ascend910B3 for `triton`, `torch_npu` and `native` separately.
+It runs for non-draft pull requests targeting `master`, pushes to `master`, and
+manual dispatches. The native job builds the A2 provider for the runner's hardware.
+Each job records its runtime versions, writes a result summary, and uploads
+the test log and JUnit report. Unsupported provider cases remain reported as skips.
+
 Performance tests use rotating inputs and exclude warmup. Run them on an idle
 device; ordinary `pytest` does not collect them. Results are saved to
 `tests/performance/results/current.json` (git-ignored).
