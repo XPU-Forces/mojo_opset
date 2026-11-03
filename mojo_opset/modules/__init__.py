@@ -53,6 +53,7 @@ from .sampling import TopPFilter
 from .sampling import TopPSampling
 from .sdpa import Sdpa
 from .store_lowrank import StoreLowrank
+from .vision_pos_embed_interp import VisionPosEmbedInterp
 
 __all__ = [
     "ApplyPenaltiesTemperature",
@@ -106,6 +107,7 @@ __all__ = [
     "VarlenFAInfer",
     "VisionRoPE2DInfer",
     "VisionRoPECosSin2D",
+    "VisionPosEmbedInterp",
 ]
 
 
