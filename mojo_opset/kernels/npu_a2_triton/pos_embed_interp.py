@@ -490,7 +490,11 @@ def _pos_embed_meta_fused_kernel(
 
 # Small t>1 grids use the fused variant; larger t stays on the two-kernel path
 # (there the broadcast write efficiency dominates and wins).
-_META_FUSED_MAX_ROWS = 4096
+# Envelope: measured best at 8 rows/tile with one program per block. Large grids
+# benefit too -- (16,100,168) on A5 went from 516.9 us (two-kernel) to 423.6 us
+# (fused), MBU 0.792 -> 0.966, because the intermediate frame no longer round-trips
+# through HBM (~39 MB of traffic saved). 16 rows/tile fails to compile (UB).
+_META_FUSED_MAX_ROWS = 1 << 20
 
 
 def _use_meta_fused(t: int, h: int, w: int, hidden: int, dtype) -> bool:
@@ -524,6 +528,8 @@ def pos_embed_interp_meta_fused_impl(
     )
     block_rows = min(_meta_block_rows(rows, dtype), rows)
     num_blocks = (rows + block_rows - 1) // block_rows
+    # One program per block was measured optimal for the fused variant (no row
+    # loop serialisation); capping at cores*N cost ~3% here.
     _pos_embed_meta_fused_kernel[(num_blocks,)](
         embed_weight,
         index,
