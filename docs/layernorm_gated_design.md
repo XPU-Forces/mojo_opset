@@ -366,6 +366,58 @@ reference. Three boundaries are checked for exact equality (byte comparison):
 2. fused `(q, s)` vs the unfused quantiser applied to the same normalised output;
 3. batch-invariant rows across batch sizes.
 
+### 5.1 Special values, empty and single-element inputs
+
+`docs/operator_accuracy_standard.zh-CN.md` §1.4 requires, per dtype, an empty
+tensor (some dimension of size 0), a one-element tensor, the all-dimensions-are-1
+boundary, and `INF`/`-INF`/`NAN` in more than one shape. Two tests in
+`tests/functions/test_layernorm_gated.py` carry that requirement, plus a
+device-side scan of the non-finite cases (§5.2).
+
+* `test_gated_norm_empty_batch_contract` (`M=0`, FP16 and BF16, LayerNorm and
+  RMSNorm, with and without the FP8 epilogue) can only assert the **output
+  contract**: with zero elements the suite rule is vacuous, since
+  `assert_mixed_tolerance` divides its matched ratio by `numel()`. The test
+  therefore pins `out [0, N]` in the input dtype, `mean`/`rstd [0]` FP32 (`mean`
+  is `None` for RMSNorm), `q [0, heads*N]` `float8_e4m3fn` and `scale [0, 1]`
+  FP32, and compares byte-for-byte against the registered torch reference.
+* `test_gated_norm_all_dims_one` (`M=N=1`) is a full value check against the
+  FP32 oracle. The contract of this operator is a 2-D `x`, so the standard's
+  shape-`[1]` scalar case maps to `[1, 1]` here; the upper end of the shape
+  matrix is covered by the existing `N=1024` and streaming cases rather than by a
+  platform maximum.
+
+`M=0` used to raise. The dispatch pinned the row count with
+`triton.next_power_of_2(M)`, which is `0` for an empty batch, and the following
+`triton.cdiv(0, 0)` divided by zero before any launch. `_layer_norm_fwd_impl`
+now returns the empty outputs directly, so no kernel is compiled or launched for
+that input and the artifact for every non-empty shape is unchanged.
+
+### 5.2 Non-finite behaviour on Ascend 950
+
+A 83-case matrix (FP16/BF16/FP32: NaN and ±Inf in `x`, `weight`, `bias` and the
+gate, `-0.0`, zero-variance rows, subnormals, alternating extrema, grouped and
+3D-gate layouts, and the FP8 epilogue) was run on `Ascend950PR_9579` with
+torch 2.10.0 / torch_npu 2.10.0.post7 / triton 3.6.0, judged by the suite's own
+`assert_mixed_tolerance` and re-checked with the comparison restricted to
+finite/finite pairs. The result, for branch head `53fdf4f`:
+
+| verdict | cases |
+| --- | --- |
+| suite rule passes and NaN/±Inf positions equal the golden | 66 |
+| `M=0`, contract only (no value comparison possible) | 11 |
+| suite rule passes but some non-finite element differs | 6 |
+| suite rule fails, or the call raised | 0 |
+
+The six divergences are all in the FP8 epilogue (`NaN`/`±Inf` in `x` or in the
+gate, FP16 and BF16). The oracle's per-row amax becomes NaN, which propagates to
+all 512 quantised values of that row and its scale, while the kernel's scale
+stays finite; FP16 keeps 128 of the 512 NaN, BF16 keeps none. They clear the
+suite because the matched ratio is taken over the whole tensor
+(`1 - 384/65536 = 0.99414 ≥ 0.99`), so this is a documented tolerance effect, not
+bit-equality — and the empty-batch rows are contract evidence only, never a
+numerical claim.
+
 ## 6. Performance method
 
 Per the task definition: 5 warm-up launches, 30 profiled launches, and the metric
@@ -1087,6 +1139,9 @@ This branch therefore claims nothing beyond the suite's own criterion.
 * A 3D gate requires `T*H == M`, `D == N` and a contiguous last dim; `z` is never
   silently copied, so a bad view is an error rather than a performance cliff.
 * Forward only: this is an inference primitive, there is no backward wrapper.
+* `M == 0` returns empty outputs without launching a kernel. Nothing can be
+  computed for a batch with no rows, so the guarantee there is the output layout
+  and dtype, not a value (§5.1).
 * `mean` and `rstd` keep the reference layout `[ngroups*M]` (group-major) rather
   than `[M, ngroups]`.
 * The FP8 e4m3 epilogue needs a runtime that implements `DT_FLOAT8_E4M3FN`. The
