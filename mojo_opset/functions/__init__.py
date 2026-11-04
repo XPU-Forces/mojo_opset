@@ -24,6 +24,7 @@ from .gemm import quant_batch_gemm_reduce_sum
 from .gemm import quant_gemm
 from .indexer import indexer
 from .indexer import lightning_indexer
+from .kv_cache import kpool_seed_tail_cache
 from .kv_cache import store_paged_kv_cache
 from .multimodal_rope_infer import multimodal_rope_infer
 from .normalization import group_rms_norm_infer
@@ -112,6 +113,7 @@ __all__ = [
     "silu",
     "static_quant",
     "store_lowrank",
+    "kpool_seed_tail_cache",
     "store_paged_kv_cache",
     "swa",
     "swa_infer",

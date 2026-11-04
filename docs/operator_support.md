@@ -23,6 +23,7 @@ supported shapes, dtypes and options.
 | `group_rms_norm_infer` | triton, torch_npu | triton, torch_npu |
 | `indexer` | triton components | triton components |
 | `join_prob_reject_sampling` | triton | triton |
+| `kpool_seed_tail_cache` | — | triton (950PR) |
 | `layer_norm_infer` | triton | triton |
 | `layer_norm_quant` | torch_npu | torch_npu |
 | `lightning_indexer` | triton | triton |
