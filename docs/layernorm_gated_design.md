@@ -887,6 +887,18 @@ branch's side, and the operator registry
 a maintainer could still overwrite, is resolved twice as well — sixteen merged
 trees in total, each exported as a standalone directory.
 
+Those sixteen resolutions cover **eight distinct trees**, and it is worth being
+exact about why. `git write-tree` gives the same tree SHA for the `reg-m` and
+`reg-s` variants of every combination, because this branch's registry file is
+byte-identical to #525's (`2574 B`, sha256 `762327c2d84b06a3…`, against the
+common base's `2531 B` / `01f4e8381de4c1ce…`): leaving git's auto-merge or
+overwriting with the suite's copy produces the same bytes. That is the outcome
+one wants from that axis — a maintainer cannot break the operator registry by
+taking either side — and it is a change from `4b28729`, where the two really did
+differ and the eight suite-registry trees failed. The varying content lives in
+the three conflicted files (2×2×2 = 8 states), and each of them was run on both
+the CPU and the device, under both registry labels.
+
 Every tree is then checked three ways: the package imports and the fixture's
 operator-id assertion from `tests/_fixtures.py` is replayed verbatim (every
 `@pytest.mark.api(..., ops=[...])` id must exist in `mojo_opset.kernels.torch.OPS`);
@@ -900,6 +912,7 @@ provider; and the four relevant test files are collected.
 | device re-run of the same sixteen trees on `Ascend950PR_9579` | 16/16 — five pytest steps per tree (canonical, `_extra`, `_aliases`, `modules`, performance collection), every return code 0; see below |
 | `c85cdaf` after upstream moved to `9c4b5d7c` | 16/16 on the CPU, and the tree's own `check_implementation` gives the same verdicts as on `8b4b7a1` for all 24 implementation/target combinations of every tree |
 | `8a56b92` after upstream moved to `892231c8` (2026-11-03) | 16/16 on the CPU, the same 384 `check_implementation` combinations pass, and an A/B against the `9c4b5d7c` trees differs only under `docs/` — zero non-docs differences |
+| the same sixteen resolutions rebuilt on `892231c8` and re-run on device (2026-11-04) | 16/16 on `Ascend950PR_9579`, all five steps return 0, 2944 passed / 16 skipped / 0 failed, and a per-tree diff against the recorded device leg gives `differing: 0` |
 
 The two fix commits were reworded afterwards so that they carry the same AI
 declaration line as every other commit in the branch, which moved them from
@@ -959,6 +972,25 @@ The eight trees that take #525's side of either add/add conflict (`fng-s`,
 `tkg-s`) are green as well, so neither conflict can regress functionality
 whichever side a maintainer keeps. The first tree costs 260 s (cold Triton
 compile); the rest take ~11 s each once `~/.triton/cache` is warm.
+
+That pass ran on the `8b4b7a1` trees, so it was replayed once the rehearsal had
+been rebuilt for `892231c8`. On 2026-11-04 the same payload shape — one base tree
+plus eight contested-file variants, rebuilt and hash-verified on the host — ran on
+a second 950 allocation: `Ascend950PR_9579`, bus `0000:57:00.0`, npu-smi and
+driver `25.7.rc1.10`, python3.12.13 with `torch 2.10.0+cpu`,
+`torch_npu 2.10.0.post7`, `triton 3.6.0` and pytest 8.4.2 — the stack reported by
+the runner matches the 2026-10-31 log line for line, on a different container
+instance of the same SKU. The card was idle (`No running processes found in NPU 0`)
+and the preflight that checks all of that runs inside the same SSH session as the
+leg itself, so the whole replay costs one channel open. Result: sixteen of
+sixteen, every step return code 0, **2944 passed / 16 skipped / 0 failed**, the
+same five per-tree numbers as above (`133 / 42 / 2 passed or skipped / 8 /`
+`11 collected`), and the same `fns-o` versus `fns-s` split in the aliases step.
+A per-tree comparison against the recorded leg
+(`_tools/compare_device_legs.py`) reports `trees compared: 16, differing: 0`.
+This time the first tree cost 33 s rather than 260 s — `~/.triton/cache` was
+already warm on that allocation — and the whole leg took 8 m 05 s
+(`10:14:39` to `10:22:44` host time).
 
 Getting there took the whole day, because the platform's channel quota kept
 refusing: the ticket that had confirmed the device identity spent its budget on
@@ -1030,8 +1062,9 @@ skips because it exports no provider for this operator, the other three pass).
 The new branch inside that file is keyed on a `default_backend_job` marker
 argument, which no marker in this branch sets, so it is inert here — shown by
 execution rather than by reading. The accuracy fixtures themselves cannot run
-without an accelerator, so that half of the rehearsal remains the device passes
-above — which ran the `8b4b7a1`-based trees — and not this CPU replay.
+without an accelerator, so that half of the rehearsal is not this CPU replay —
+it is the device passes above, and since 2026-11-04 that includes a run of the
+trees rebuilt on `892231c8` itself, not only the earlier `8b4b7a1`-based set.
 
 `master` `892231c8` also carries the acceptance standard the maintainers
 published on 2026-11-03. Its mixed-tolerance table (§2.2) is the one the suite
