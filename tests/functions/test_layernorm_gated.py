@@ -477,6 +477,58 @@ def test_fused_quant_bit_exact(accuracy_backend, dtype, z_mode, norm_before_gate
 
 
 @pytest.mark.api("functions.layer_norm_gated")
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+@pytest.mark.parametrize("is_rms_norm", (True, False))
+@pytest.mark.parametrize("quant_heads", (0, QUANT_HEADS))
+@pytest.mark.accuracy
+def test_gated_norm_empty_batch_contract(accuracy_backend, dtype, is_rms_norm, quant_heads):
+    """M=0 (accuracy standard §1.4): no row is tiled, so no kernel runs and no
+    element can be compared -- assert_mixed_tolerance divides by ``numel()``.
+    The empty tensor is still required per dtype, so the check is the output
+    contract: fixed shapes and dtypes, plus bit-for-bit agreement with the
+    registered torch reference.
+    """
+    implementation, _, device = accuracy_backend
+    M, N = 0, 256
+    x = torch.randn(M, N, device=device, dtype=dtype)
+    weight = torch.randn(N, device=device, dtype=dtype)
+    bias = None if is_rms_norm else torch.randn(N, device=device, dtype=dtype)
+    z = make_gate("2d", M, N, dtype, device)
+    out = None if quant_heads else torch.empty(M, N, device=device, dtype=dtype)
+    kwargs = dict(
+        z=z, eps=1e-6, out=out, is_rms_norm=is_rms_norm, activation="swish",
+        norm_before_gate=True, quant_heads=quant_heads,
+    )
+
+    payload, mean, rstd = F.layer_norm_gated(x, weight, bias, implementation=implementation, **kwargs)
+    reference = F.layer_norm_gated(x, weight, bias, implementation="torch", **kwargs)
+
+    if quant_heads:
+        q, s = payload
+        assert q.dtype == torch.float8_e4m3fn and q.shape == (M // quant_heads, quant_heads * N)
+        assert s.dtype == torch.float32 and s.shape == (M // quant_heads, 1)
+    else:
+        assert payload.dtype == dtype and payload.shape == (M, N)
+        assert out is None or payload is out
+    assert (mean is None) == is_rms_norm
+    assert rstd.dtype == torch.float32 and rstd.shape == (M,)
+    assert_bitwise_equal((payload, mean, rstd), reference, phase="empty batch vs torch reference")
+
+
+@pytest.mark.api("functions.layer_norm_gated")
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+@pytest.mark.parametrize("z_mode", ("none", "2d"))
+@pytest.mark.accuracy
+def test_gated_norm_all_dims_one(accuracy_backend, dtype, z_mode):
+    """M=N=1: every dimension at its minimum (accuracy standard §1.4)."""
+    check_gated_norm(
+        accuracy_backend,
+        M=1, N=1, z_mode=z_mode, activation="swish",
+        norm_before_gate=True, is_rms_norm=True, dtype=dtype,
+    )
+
+
+@pytest.mark.api("functions.layer_norm_gated")
 @pytest.mark.parametrize("m_long", (131, 132))
 @pytest.mark.parametrize("norm_before_gate", (True, False))
 @pytest.mark.accuracy

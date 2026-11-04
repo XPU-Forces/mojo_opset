@@ -334,6 +334,19 @@ def _layer_norm_fwd_impl(
     if bias is not None and (bias.shape != (N,) or bias.stride(-1) != 1):
         raise ValueError("bias must be a contiguous [N] tensor")
 
+    if M == 0:
+        # An empty batch has no row to tile: calc_rows_per_block would return
+        # next_power_of_2(0) == 0 and triton.cdiv(0, 0) would raise.
+        mean = None if is_rms_norm else torch.empty((0,), dtype=torch.float32, device=x.device)
+        rstd = torch.empty((0,), dtype=torch.float32, device=x.device)
+        if quant_heads:
+            q = torch.empty((0, quant_heads * N), dtype=torch.float8_e4m3fn, device=x.device)
+            s = torch.empty((0, 1), dtype=torch.float32, device=x.device)
+            return (q, s), mean, rstd
+        if out is None:
+            out = torch.empty_like(x)
+        return out, mean, rstd
+
     max_fused = MAX_FUSED_BYTES // x.element_size()
     # Tile exactly on the group width when rounding up would idle a large share
     # of every vector instruction (192 -> 256 keeps only 75% of the lanes busy).
