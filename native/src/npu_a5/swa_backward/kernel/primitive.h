@@ -48,6 +48,44 @@ __aicore__ inline void copy_l1_to_a2_nz(AscendC::LocalTensor<T> dst, AscendC::Lo
     AscendC::LoadData(dst, src, params);
 }
 
+template<class T, uint32_t src_rows, uint32_t src_cols>
+__aicore__ inline void copy_l1_to_a2_nz_trans(
+    AscendC::LocalTensor<T> dst, AscendC::LocalTensor<T> src) {
+    constexpr uint32_t src_m_blocks = src_rows / MMAD_UNIT;
+    constexpr uint32_t src_n_blocks = src_cols / MMAD_UNIT;
+
+    AscendC::LoadData2DParamsV2 params;
+    params.mStartPosition = 0;
+    params.kStartPosition = 0;
+    params.mStep = src_m_blocks;
+    params.kStep = src_n_blocks;
+    params.srcStride = src_m_blocks;
+    params.dstStride = src_n_blocks;
+    params.sid = 0;
+    params.ifTranspose = true;
+    AscendC::LoadData(dst, src, params);
+}
+
+template<class T, uint32_t src_rows, uint32_t src_cols>
+__aicore__ inline void copy_l1_to_a2_nz_trans_rows(
+    AscendC::LocalTensor<T> dst, AscendC::LocalTensor<T> src,
+    uint32_t active_rows) {
+    constexpr uint32_t src_row_blocks = src_rows / MMAD_UNIT;
+    constexpr uint32_t src_col_blocks = src_cols / MMAD_UNIT;
+
+    AscendC::LoadData2DParamsV2 params;
+    params.mStartPosition = 0;
+    params.kStartPosition = 0;
+    params.mStep = ceil_div(active_rows, MMAD_UNIT);
+    params.kStep = src_col_blocks;
+    params.srcStride = src_row_blocks;
+    params.dstStride = src_col_blocks;
+    params.sid = 0;
+    params.ifTranspose = true;
+    AscendC::LoadData(dst, src, params);
+}
+
+
 template<class T, uint32_t src_rows, uint32_t src_cols, uint32_t row_parts>
 __aicore__ inline void split_copy_l1_to_b2_zn_trans(
     AscendC::LocalTensor<T> dst, AscendC::LocalTensor<T> src, uint32_t part_idx) {
@@ -56,19 +94,16 @@ __aicore__ inline void split_copy_l1_to_b2_zn_trans(
     constexpr uint32_t unit_rows = dst_rows / MMAD_UNIT;
     constexpr uint32_t unit_cols = dst_cols / MMAD_UNIT;
 
-    AscendC::LoadData2DParams params;
-    params.startIndex = 0;
-    params.repeatTimes = static_cast<uint8_t>(unit_cols);
-    params.srcStride = 1;
+    AscendC::LoadData2DParamsV2 params;
+    params.mStartPosition = 0;
+    params.kStartPosition = 0;
+    params.mStep = unit_rows;
+    params.kStep = unit_cols;
+    params.srcStride = unit_cols * row_parts;
+    params.dstStride = unit_cols;
     params.sid = 0;
     params.ifTranspose = false;
-    params.addrMode = 0;
-    params.dstGap = 0;
-
-    for (uint32_t i = 0; i < unit_rows; ++i) {
-        AscendC::LoadData(dst[i * unit_cols * MMAD_SIZE],
-            src[(i * row_parts + part_idx) * unit_cols * MMAD_SIZE], params);
-    }
+    AscendC::LoadData(dst, src[part_idx * unit_cols * MMAD_SIZE], params);
 }
 
 template<class T, uint32_t src_rows, uint32_t src_cols, uint32_t row_parts>
@@ -79,19 +114,35 @@ __aicore__ inline void split_copy_l1_to_b2_zn(
     constexpr uint32_t unit_rows = dst_rows / MMAD_UNIT;
     constexpr uint32_t unit_cols = dst_cols / MMAD_UNIT;
 
-    AscendC::LoadData2DParams params;
-    params.startIndex = 0;
-    params.repeatTimes = static_cast<uint8_t>(unit_cols);
-    params.srcStride = static_cast<uint16_t>(unit_rows * row_parts);
+    AscendC::LoadData2DParamsV2 params;
+    params.mStartPosition = 0;
+    params.kStartPosition = 0;
+    params.mStep = unit_rows;
+    params.kStep = unit_cols;
+    params.srcStride = unit_rows * row_parts;
+    params.dstStride = unit_cols;
     params.sid = 0;
     params.ifTranspose = true;
-    params.addrMode = 0;
-    params.dstGap = 0;
+    AscendC::LoadData(dst, src[part_idx * unit_rows * MMAD_SIZE], params);
+}
 
-    for (uint32_t i = 0; i < unit_rows; ++i) {
-        AscendC::LoadData(dst[i * unit_cols * MMAD_SIZE],
-            src[(part_idx * unit_rows + i) * MMAD_SIZE], params);
-    }
+template<class T, uint32_t src_rows, uint32_t src_cols>
+__aicore__ inline void copy_l1_to_b2_zn_rows(
+    AscendC::LocalTensor<T> dst, AscendC::LocalTensor<T> src,
+    uint32_t active_rows) {
+    constexpr uint32_t src_row_blocks = src_rows / MMAD_UNIT;
+    constexpr uint32_t col_blocks = src_cols / MMAD_UNIT;
+
+    AscendC::LoadData2DParamsV2 params;
+    params.mStartPosition = 0;
+    params.kStartPosition = 0;
+    params.mStep = ceil_div(active_rows, MMAD_UNIT);
+    params.kStep = col_blocks;
+    params.srcStride = src_row_blocks;
+    params.dstStride = col_blocks;
+    params.sid = 0;
+    params.ifTranspose = true;
+    AscendC::LoadData(dst, src, params);
 }
 
 template<class AT, class BT, uint32_t M, uint32_t N, uint32_t K>

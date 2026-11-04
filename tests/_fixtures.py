@@ -44,7 +44,11 @@ def check_implementation(op_ids, implementation, target):
 def check_swa_case(backend, *, dtype=torch.bfloat16, dim=128, interleave=False, output_f32=False, windows=(128, 16)):
     """Select a SWA provider and exclude only its documented unsupported parameters."""
     implementation, target, _ = backend
-    selected = implementation or _dispatch.resolve_implementation("swa", Target.parse(target))
+    target = Target.parse(target)
+    selected = implementation or _dispatch.resolve_implementation("swa", target)
+    if selected == "native" and target.arch_key == "npu.a5":
+        if dtype != torch.bfloat16 or dim != 128:
+            pytest.skip("A5 native SWA requires BF16 head_dim=128")
     if selected == "torch_npu":
         if dtype != torch.bfloat16 or dim != 128:
             pytest.skip("torch_npu SWA requires BF16 head_dim=128")
