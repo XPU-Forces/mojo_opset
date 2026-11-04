@@ -1131,6 +1131,27 @@ while the suite treats NaN/NaN as matching and allows a 0.99 matched ratio plus 
 only the finite-value tolerances and no further requirement on the input domain.
 This branch therefore claims nothing beyond the suite's own criterion.
 
+Upstream moved once more on 2026-11-04 (`d3cbd088`, `[Feat] add native A5 SWA
+backward kernels.`, parent `892231c8`, 44 files). The sixteen resolutions were
+not re-run for it; what was checked is the overlap, file by file. The only path
+this commit touches that this branch also touches is
+`mojo_opset/config/npu_a5.yaml`, and a three-way merge of it
+(`git merge-file --diff3` with base `0a7d64c`, ours = this branch, theirs =
+`d3cbd088`) returns 0 with no conflict markers and keeps both sides: this
+operator's `layer_norm_gated: triton` entry and the `native_swa_infer: native`
+entry that upstream moved out of the standalone `npu.a5.950pr:` section. The
+other two test-facing changes are inert here: the `tests/_fixtures.py` edit
+(+5 −1) is inside `check_swa_case`, not the `check_implementation` op-id call
+the rehearsal drives, and `tests/performance/_adapters/npu.py` (+63 −1, a
+`AiCoreNone` profiler setting and queue-flow trace correlation) is not on this
+branch's performance path — `tests/performance/functions/test_layernorm_gated_mbu.py`
+imports `do_bench_npu_profiler` from `triton.backends.ascend.testing`, not from
+that adapter. None of the three files that the rehearsal actually conflicts on
+(`functions/__init__.py` and the two add/add test files) is touched by
+`d3cbd088`, so the sixteen trees have the same shape as the `892231c8` set. This
+is a static check, stated as such: a synchronisation commit would still need the
+device replay of §6.12 to be claimed as verified on the new tip.
+
 ## 7. Known limits
 
 * `group_size` must divide `N` and must fit 64 KiB, as in the reference kernel.
