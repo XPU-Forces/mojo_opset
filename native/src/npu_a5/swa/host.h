@@ -2,8 +2,15 @@
 
 #include <ATen/core/Tensor.h>
 #include <cstdint>
+#include <tuple>
 
 namespace mojo::native {
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> LaunchSwaTrainingCurrentStream(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const at::Tensor &cu_q_lens, const at::Tensor &cu_kv_lens, bool is_causal,
+    int64_t local_window_size_arg, int64_t global_window_size_arg, double scale,
+    int64_t gqa_layout, bool output_f32, int64_t block_dim);
 
 at::Tensor LaunchSwaCurrentStream(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,

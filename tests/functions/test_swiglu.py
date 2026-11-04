@@ -85,7 +85,7 @@ def test_swiglu_fake_metadata(accuracy_backend, scale_dtype):
 @pytest.mark.parametrize("backend", ["eager", "aot_eager"])
 def test_swiglu_compiled_layout(accuracy_backend, backend, scale_dtype):
     implementation, target, device = accuracy_backend
-    if implementation not in (None, "triton", "torch_npu", "native") or not target.startswith("npu."):
+    if not target.startswith("npu.") or implementation == "torch":
         pytest.skip("NPU contiguous-output contract")
     implementation = implementation or "triton"
     preload("swiglu", implementation=implementation)

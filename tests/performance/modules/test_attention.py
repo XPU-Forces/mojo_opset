@@ -41,8 +41,8 @@ def test_swa_infer(benchmark, perf_environment, dim, max_cache):
 
 
 @pytest.mark.api("modules.Sdpa", ops=["sdpa_infer"])
-@pytest.mark.parametrize("seq_len", [64, 8192])
-def test_sdpa(benchmark, perf_environment, seq_len):
+@pytest.mark.parametrize("seq_len,masked", [(64, True), (8192, True), (8192, False)])
+def test_sdpa(benchmark, perf_environment, seq_len, masked):
     _, device, _, implementation = perf_environment
     if seq_len * 2 % 512 and implementation != "torch":
         pytest.skip("Inherited perf_new smoke case is outside Triton SDPA's 512-token alignment")
@@ -51,7 +51,7 @@ def test_sdpa(benchmark, perf_environment, seq_len):
         module = modules.Sdpa(scale=128**-0.5, enable_gqa=True, implementation=implementation)
         q = torch.randn(1, 8, seq_len * 2, 128, dtype=torch.bfloat16, device=device)
         k, v = [torch.randn(1, 2, seq_len * 2, 128, dtype=torch.bfloat16, device=device) for _ in range(2)]
-        mask = torch.ones(seq_len * 2, seq_len * 2, dtype=torch.bool, device=device)
+        mask = torch.ones(seq_len * 2, seq_len * 2, dtype=torch.bool, device=device) if masked else None
         return lambda: module(q, k, v, mask)
 
     benchmark(
@@ -63,4 +63,5 @@ def test_sdpa(benchmark, perf_environment, seq_len):
         head_dim=128,
         dtype="bfloat16",
         phase="forward",
+        masked=masked,
     )

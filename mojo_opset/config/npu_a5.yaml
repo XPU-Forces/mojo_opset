@@ -23,6 +23,7 @@ npu.a5:
   multimodal_rope_infer: triton
   n_gram_decode: triton
   n_gram_prefill: triton
+  native_swa_infer: native
   over_encoding_decode: triton
   paged_decode_gqa_infer: triton
   paged_decode_swa_infer: triton
@@ -57,6 +58,3 @@ npu.a5:
   top_p_sampling: triton
   vision_rope_2d_infer: triton
   vision_rope_cos_sin_2d: triton
-
-npu.a5.950pr:
-  native_swa_infer: native  # Temporary standalone SWA interface; native supports 950PR only.

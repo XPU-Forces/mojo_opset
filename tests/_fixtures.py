@@ -6,6 +6,7 @@ import torch
 from mojo_opset import Target
 from mojo_opset.functions import _dispatch
 from mojo_opset.utils import target as target_utils
+from mojo_opset.utils._exports import additions
 
 
 def _bindings(package, target):
@@ -43,7 +44,11 @@ def check_implementation(op_ids, implementation, target):
 def check_swa_case(backend, *, dtype=torch.bfloat16, dim=128, interleave=False, output_f32=False, windows=(128, 16)):
     """Select a SWA provider and exclude only its documented unsupported parameters."""
     implementation, target, _ = backend
-    selected = implementation or _dispatch.resolve_implementation("swa", Target.parse(target))
+    target = Target.parse(target)
+    selected = implementation or _dispatch.resolve_implementation("swa", target)
+    if selected == "native" and target.arch_key == "npu.a5":
+        if dtype != torch.bfloat16 or dim != 128:
+            pytest.skip("A5 native SWA requires BF16 head_dim=128")
     if selected == "torch_npu":
         if dtype != torch.bfloat16 or dim != 128:
             pytest.skip("torch_npu SWA requires BF16 head_dim=128")
@@ -79,7 +84,13 @@ def operator_test(request, monkeypatch):
         assert markers, f"{request.node.nodeid}: missing api mark"
         for marker in markers:
             op_ids = set(marker.kwargs.get("ops", (api.removeprefix("functions.") for api in marker.args)))
-            check_implementation(op_ids, implementation, target)
+            # Composite APIs have no single backend. Their designated CI job
+            # supplies all dependencies and exercises the configured mixture.
+            selected = None if marker.kwargs.get("default_backend_job") == implementation else implementation
+            check_implementation(op_ids, selected, target)
+        private = additions("tests")
+        if private is not None:
+            private.check_case(request, implementation, target)
     monkeypatch.setattr(target_utils, "_AUTO_TARGET", Target.parse(target))
     # Apply the same FP32 math policy to candidate and reference, then restore it.
     # These flags do not change input dtypes or production/performance defaults.
