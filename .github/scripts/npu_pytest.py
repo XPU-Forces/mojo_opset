@@ -96,6 +96,9 @@ def run_all(args):
                     if status is not None:
                         print(f"Worker {rank} finished: exit={status}, elapsed={time.monotonic()-started:.0f}s", flush=True)
                         failed |= status != 0 or not (reports / f"worker-{rank}.xml").is_file()
+                        if status != 0:
+                            for line in (reports / f"worker-{rank}.log").read_text(errors="replace").splitlines()[-30:]:
+                                print(f"[worker {rank}] {line}", flush=True)
                         del pending[rank]
                 if pending:
                     if time.monotonic() - last_update >= 60:

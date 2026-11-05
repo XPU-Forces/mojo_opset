@@ -139,6 +139,9 @@ Each job uses an eight-card runner with one pytest worker per card. Parameter
 groups stay on the same card and are balanced by case count, retaining every case.
 It runs for non-draft pull requests targeting `master`, pushes to `master`, and
 manual dispatches. The native job builds the A2 provider for the runner's hardware.
+The Triton job pins the official `triton-ascend 3.2.2.post2` wheel: the image's
+3.2.2 build produces incorrect persistent INT8 GEMM results for some autotune
+configurations on B3. CANN and Torch remain provided by the pinned image.
 Each job records its runtime versions, writes a result summary, and uploads
 the test log and JUnit report. Unsupported provider cases remain reported as skips.
 Native Flash Attention cases are temporarily skipped on 910B3 while its backward
