@@ -49,6 +49,7 @@ def lightning_indexer_impl(
     return output
 
 
+@libentry()
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_SIZE_N": 64}),
@@ -58,7 +59,6 @@ def lightning_indexer_impl(
     ],
     key=["N", "H", "K"],
 )
-@libentry()
 @triton.jit
 def lightning_indexer_kernel(
     query_ptr,

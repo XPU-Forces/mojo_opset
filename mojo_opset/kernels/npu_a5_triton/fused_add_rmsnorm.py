@@ -59,8 +59,8 @@ def _num_vectorcores():
     return get_num_cores("vector")
 
 
-@triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
 @libentry()
+@triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
 @triton.jit
 def _fused_add_rmsnorm_fwd_kernel(
     Y_ptr,
@@ -257,8 +257,8 @@ def _fused_add_rmsnorm_fwd_kernel(
                 tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk, mask=block_mask)
 
 
-@triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
 @libentry()
+@triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
 @triton.jit
 def _fused_add_rmsnorm_fwd_single_pass_kernel(
     Y_ptr,
@@ -401,8 +401,8 @@ def _fused_add_rmsnorm_fwd_single_pass_kernel(
             tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk, mask=block_mask)
 
 
-@triton.heuristics({"BLOCK_SIZE_M": lambda args: ceil_div(4096, args["n_cols"])})
 @libentry()
+@triton.heuristics({"BLOCK_SIZE_M": lambda args: ceil_div(4096, args["n_cols"])})
 @triton.jit
 def _fused_add_rmsnorm_bwd_kernel(
     dY_ptr,
