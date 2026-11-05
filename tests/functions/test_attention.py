@@ -698,11 +698,11 @@ def test_swa_backward_varlen_matches_fp64(accuracy_backend, lengths, dtype, inte
         )
         actual.backward(grad_out)
         pairs = [(actual, expected)] + [(got.grad, ref.grad) for got, ref in zip(actual_inputs, refs)]
-        for got, ref in pairs:
+        for name, (got, ref) in zip(("output", "dQ", "dK", "dV"), pairs):
             got = got.detach().cpu().double()
             ref = ref.detach()
             tolerance = 0.02 if dtype == torch.bfloat16 else 0.006
-            assert_close(got, ref, atol=tolerance, rtol=tolerance)
+            assert_close(got, ref, atol=tolerance, rtol=tolerance, name=name)
             assert (got - ref).norm() / ref.norm() < 0.01
         for got in actual_inputs[1:]:
             assert torch.count_nonzero(got.grad.cpu()[unattended]).item() == 0
