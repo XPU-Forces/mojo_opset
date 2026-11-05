@@ -1,4 +1,4 @@
-name: Diagnose Triton patch releases
+name: Diagnose Triton sequence and tuning
 
 on:
   push:
@@ -15,7 +15,7 @@ concurrency:
 jobs:
   compare:
     runs-on: linux-aarch64-a2b3-8-hk-001
-    timeout-minutes: 45
+    timeout-minutes: 85
     container:
       image: quay.io/ascend/triton:3.2.2-cann9.1.0-torch_npu2.7.1.post8-910b-ubuntu24.04-py3.11@sha256:b69d14f39d47ec8f66e635f16190788e3c2b2174d0994f63090afcdf885b06f1
     defaults:
@@ -66,12 +66,12 @@ jobs:
           PY
           done
 
-      - name: Compare failing operators on all eight cards
-        timeout-minutes: 30
+      - name: Replay sequences and verify every GEMM configuration
+        timeout-minutes: 65
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          timeout --signal=TERM --kill-after=60s 28m \
-            python3 .github/scripts/triton_version_debug.py 2>&1 | tee test-results/comparison.log
+          timeout --signal=TERM --kill-after=60s 60m \
+            python3 .github/scripts/triton_sequence_debug.py 2>&1 | tee test-results/comparison.log
 
       - name: Upload comparison
         if: always()
