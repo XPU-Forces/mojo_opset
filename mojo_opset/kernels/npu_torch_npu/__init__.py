@@ -29,6 +29,7 @@ OPS = {
     "rms_norm_infer": "normalization",
     "group_rms_norm_infer": "normalization",
     "residual_add_rms_norm_infer": "normalization",
+    "qk_norm_rope": "qk_norm_rope",
 }
 
 
