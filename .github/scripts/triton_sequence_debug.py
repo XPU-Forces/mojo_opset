@@ -80,6 +80,7 @@ def candidates(mode, label):
 
     module = importlib.import_module("mojo_opset.kernels.npu_a2_triton.int8_gemm")
     configs = module._get_autotune_configs()
+    torch.use_deterministic_algorithms(True)
     torch.npu.matmul.allow_hf32 = False
     results = []
     for index, config in enumerate(configs):
