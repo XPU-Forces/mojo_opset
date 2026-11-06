@@ -41,7 +41,7 @@ def kpool_seed_tail_cache(tail_kv_cache, key, gate_score, tslot, *, implementati
     A valid row is skipped if the row four positions later is valid and
     maps to the same cache block. Valid slots must be in range, selected
     destinations must be unique, and the cache must not alias any input.
-    Returns None. The Triton implementation is enabled on Ascend 950PR.
+    Returns None. Triton implementations are enabled on Ascend A2 and 950PR.
     """
     _require_inference("kpool_seed_tail_cache", tail_kv_cache, key, gate_score)
     forward, _ = load_impl("kpool_seed_tail_cache", implementation)
