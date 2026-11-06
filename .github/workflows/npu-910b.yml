@@ -1,0 +1,157 @@
+name: Community NPU 910B
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npu-910b-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  accuracy:
+    name: 910B / ${{ matrix.implementation }}
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: linux-aarch64-a2b3-8-hk-001
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        implementation: [triton, torch_npu, native]
+    container:
+      # Public ARM64 image; retain its Torch/CANN/Triton stack.
+      image: quay.io/ascend/triton:3.2.2-cann9.1.0-torch_npu2.7.1.post8-910b-ubuntu24.04-py3.11@sha256:b69d14f39d47ec8f66e635f16190788e3c2b2174d0994f63090afcdf885b06f1
+    defaults:
+      run:
+        shell: bash --noprofile --norc -eo pipefail {0}
+    env:
+      TORCH_TRANSFER_TO_NPU: "0"
+      TORCHINDUCTOR_COMPILE_THREADS: "1"
+      TRITON_PRINT_AUTOTUNING: "1"
+      IMPLEMENTATION: ${{ matrix.implementation }}
+      # ARC synchronizes RUNNER_TEMP between the runner and job pod.
+      # Keep the venv and compiler caches in the job container instead.
+      MOJO_CI_WORK_DIR: /tmp/mojo-ci
+      MOJO_CI_CARDS: "8"
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          submodules: ${{ matrix.implementation == 'native' && 'recursive' || 'false' }}
+
+      - name: Install test dependencies
+        timeout-minutes: 10
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          python3 -m venv --system-site-packages "$MOJO_CI_WORK_DIR/venv"
+          source "$MOJO_CI_WORK_DIR/venv/bin/activate"
+          python -m pip install --disable-pip-version-check --timeout 30 --retries 2 'pytest>=8.3.2,<9' einops pyyaml
+          python -m pip install --no-build-isolation --no-deps -e .
+          if [[ "$IMPLEMENTATION" == triton ]]; then
+            # 3.2.2 miscompiles persistent INT8 GEMM with BLOCK_N=128 and multibuffer.
+            python -m pip install --no-deps --ignore-installed --disable-pip-version-check --timeout 30 --retries 2 \
+              'https://github.com/triton-lang/triton-ascend/releases/download/v3.2.2.post2/triton_ascend-3.2.2.post2-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl#sha256=79c140312ac93b263b70cd52381cc6d7a5845952dba6d5ba83883849bbd66647'
+          fi
+
+      - name: Verify versions and 910B allocation
+        timeout-minutes: 5
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          source "$MOJO_CI_WORK_DIR/venv/bin/activate"
+          mkdir -p test-results
+          npu-smi info
+          python - <<'PY' | tee test-results/environment.txt
+          import importlib.metadata
+          import os
+          import platform
+          import sys
+          from pathlib import Path
+          import torch
+          import torch_npu
+          import triton
+          from mojo_opset.utils.target import detect_target
+
+          print("Python:", platform.python_version(), "CPU:", platform.machine())
+          print("Torch:", torch.__version__, "torch_npu:", torch_npu.__version__)
+          print("Triton:", triton.__version__, "triton-ascend:", importlib.metadata.version("triton-ascend"))
+          assert platform.machine() == "aarch64"
+          assert torch.__version__.startswith("2.7.")
+          assert torch_npu.__version__.startswith("2.7.")
+          assert triton.__version__.startswith("3.2.")
+          if os.environ["IMPLEMENTATION"] == "triton":
+              assert importlib.metadata.version("triton-ascend") == "3.2.2.post2"
+              assert Path(triton.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+          assert torch.npu.is_available() and torch.npu.device_count() == int(os.environ["MOJO_CI_CARDS"])
+          name = torch.npu.get_device_name(0)
+          target = detect_target()
+          print("Device:", name, "Mojo target:", target)
+          assert name.startswith("Ascend910B3") and target.key.startswith("npu.a2.910b3")
+          x = torch.arange(16, device="npu", dtype=torch.float32)
+          torch.testing.assert_close((x + 1).cpu(), torch.arange(16, dtype=torch.float32) + 1)
+          PY
+
+      - name: Build native provider
+        if: matrix.implementation == 'native'
+        timeout-minutes: 30
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          source "$MOJO_CI_WORK_DIR/venv/bin/activate"
+          python -m pip install 'cmake>=3.18,<4'
+          export SOC_VERSION=Ascend910B3
+          bash build.sh npu_a2
+          python -c 'import mojo_opset_lib.npu_a2._native'
+
+      - name: Accuracy and training bitwise tests
+        timeout-minutes: 95
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          source "$MOJO_CI_WORK_DIR/venv/bin/activate"
+          timeout --signal=TERM --kill-after=60s 90m \
+            python .github/scripts/npu_pytest.py \
+            --implementation "$IMPLEMENTATION" --cards "$MOJO_CI_CARDS" \
+            2>&1 | tee test-results/pytest.log
+
+      - name: Summarize test results
+        if: always()
+        timeout-minutes: 2
+        run: |
+          python3 - <<'PY'
+          import os
+          from collections import Counter
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          reports = sorted(Path("test-results").glob("worker-*.xml"))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(f"### 910B / {os.environ['IMPLEMENTATION']}\n\n")
+              summary.write(f"Worker reports: {len(reports)}/{os.environ['MOJO_CI_CARDS']}\n\n")
+              if reports:
+                  counts = Counter(
+                      next((state for state in ("failure", "error", "skipped") if case.find(state) is not None), "passed")
+                      for report in reports for case in ElementTree.parse(report).iter("testcase")
+                  )
+                  summary.write("| Passed | Failed | Errors | Skipped |\n| --- | --- | --- | --- |\n")
+                  summary.write(f"| {counts['passed']} | {counts['failure']} | {counts['error']} | {counts['skipped']} |\n")
+              else:
+                  summary.write("No JUnit report was produced. Check the earlier steps and test log.\n")
+          PY
+
+      - name: Upload test results
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npu-910b-${{ matrix.implementation }}-${{ github.run_attempt }}
+          path: test-results/
+          if-no-files-found: warn
+          retention-days: 14
