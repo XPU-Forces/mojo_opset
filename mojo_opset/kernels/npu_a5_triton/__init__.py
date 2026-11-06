@@ -53,8 +53,7 @@ OPS = {
     "rope": "rope",
 }
 
-# Add only differences once specialized wrappers exist, for example:
-# OVERRIDES = {"npu.a5.950pr": {"flash_attention": "sku_950pr.attention"}}
+OVERRIDES = {"npu.a5.950pr": {"kpool_seed_tail_cache": "kpool_seed_tail_cache"}}
 
 
 _extend_bindings(__name__, OPS)

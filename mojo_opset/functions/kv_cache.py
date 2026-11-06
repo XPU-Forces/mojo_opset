@@ -30,3 +30,19 @@ def store_paged_kv_cache(
     return forward(
         key_states, value_states, key_cache, value_cache, block_table, cu_q_lens, context_kv_lens, chunk_metadata
     )
+
+
+def kpool_seed_tail_cache(tail_kv_cache, key, gate_score, tslot, *, implementation=None):
+    """Seed the tail cache in place for KPool=4 and head dimension 128.
+
+    K and gate are contiguous BF16/FP16 [N, 128] tensors. The cache is
+    [blocks, 2, ring, 128] with ring >= 4 and contiguous rows. The signed
+    int32/int64 [N] slot tensor uses negative entries to skip input rows.
+    A valid row is skipped if the row four positions later is valid and
+    maps to the same cache block. Valid slots must be in range, selected
+    destinations must be unique, and the cache must not alias any input.
+    Returns None. Triton implementations are enabled on Ascend A2 and 950PR.
+    """
+    _require_inference("kpool_seed_tail_cache", tail_kv_cache, key, gate_score)
+    forward, _ = load_impl("kpool_seed_tail_cache", implementation)
+    return forward(tail_kv_cache, key, gate_score, tslot)
