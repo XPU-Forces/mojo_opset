@@ -61,6 +61,8 @@ from .sdpa import sdpa_infer
 from .silu import silu
 from .store_lowrank import store_lowrank
 from .swiglu import swiglu
+from .vision_pos_embed import vision_pos_embed_interp
+from .vision_pos_embed import vision_pos_embed_interp_multi
 
 __all__ = [
     "apply_penalties_temperature",
@@ -121,6 +123,8 @@ __all__ = [
     "top_p_sampling",
     "varlen_fa_infer",
     "vision_rope_2d_infer",
+    "vision_pos_embed_interp",
+    "vision_pos_embed_interp_multi",
     "vision_rope_cos_sin_2d",
 ]
 
