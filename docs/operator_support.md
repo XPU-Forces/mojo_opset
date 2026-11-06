@@ -18,6 +18,7 @@ supported shapes, dtypes and options.
 | `flash_attention_infer` | triton | triton |
 | `flex_attention` | triton | triton |
 | `flex_attention_v2` | triton | triton |
+| `fused_qk_norm_rope` | triton | triton |
 | `gelu` | triton, torch_npu | triton, torch_npu |
 | `group_gemm` | triton, torch_npu, native | triton, torch_npu |
 | `group_rms_norm_infer` | triton, torch_npu | triton, torch_npu |
