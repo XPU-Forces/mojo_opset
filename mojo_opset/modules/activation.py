@@ -43,3 +43,27 @@ class SwiGLU(torch.nn.Module):
             swiglu_limit=self.swiglu_limit,
             implementation=self.implementation,
         )
+
+
+class SituAndMul(torch.nn.Module):
+    """Kimi-K3 SiTU gated activation on concatenated [gate | up] inputs."""
+
+    def __init__(
+        self,
+        beta: float = 1.0,
+        linear_beta: Optional[float] = None,
+        *,
+        implementation: Optional[str] = None,
+    ):
+        super().__init__()
+        self.beta = beta
+        self.linear_beta = linear_beta
+        self.implementation = implementation
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return functions.situ_and_mul(
+            x,
+            beta=self.beta,
+            linear_beta=self.linear_beta,
+            implementation=self.implementation,
+        )

@@ -4,6 +4,7 @@ from mojo_opset.utils._exports import extend_exports as _extend_exports
 
 from .activation import GELU
 from .activation import SiLU
+from .activation import SituAndMul
 from .activation import SwiGLU
 from .attention import SWAInfer
 from .attention import VarlenFAInfer
@@ -96,6 +97,7 @@ __all__ = [
     "SWAInfer",
     "Sdpa",
     "SiLU",
+    "SituAndMul",
     "StaticQuant",
     "StoreLowrank",
     "StorePagedKVCache",
