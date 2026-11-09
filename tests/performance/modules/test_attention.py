@@ -1,7 +1,9 @@
 import pytest
 import torch
 
+from mojo_opset import Target
 from mojo_opset import modules
+from mojo_opset.functions._dispatch import resolve_implementation
 
 
 @pytest.mark.api("modules.SWAInfer", ops=["swa_infer"])
@@ -43,8 +45,9 @@ def test_swa_infer(benchmark, perf_environment, dim, max_cache):
 @pytest.mark.api("modules.Sdpa", ops=["sdpa_infer"])
 @pytest.mark.parametrize("seq_len,masked", [(64, True), (8192, True), (8192, False)])
 def test_sdpa(benchmark, perf_environment, seq_len, masked):
-    _, device, _, implementation = perf_environment
-    if seq_len * 2 % 512 and implementation != "torch":
+    _, device, target, implementation = perf_environment
+    selected = implementation or resolve_implementation("sdpa_infer", Target.parse(target))
+    if seq_len * 2 % 512 and selected != "torch":
         pytest.skip("Inherited perf_new smoke case is outside Triton SDPA's 512-token alignment")
 
     def factory():

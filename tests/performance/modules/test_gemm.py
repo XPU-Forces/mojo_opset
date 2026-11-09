@@ -3,8 +3,10 @@ import random
 import pytest
 import torch
 
+from mojo_opset import Target
 from mojo_opset import modules
 from mojo_opset.functions._dispatch import load_impl
+from mojo_opset.functions._dispatch import resolve_implementation
 from tests.performance._workload import training
 
 
@@ -119,8 +121,9 @@ def test_quant_gemm(benchmark, perf_environment, m, k, n, distribution):
 @pytest.mark.api("modules.QuantBatchGemmReduceSum", ops=["quant_batch_gemm_reduce_sum"])
 @pytest.mark.parametrize("batch,m,k,n", [(8, 512, 128, 256), (4, 1024, 128, 512)])
 def test_quant_batch_gemm_reduce_sum(benchmark, perf_environment, batch, m, k, n):
-    _, device, _, implementation = perf_environment
-    if implementation != "torch":
+    _, device, target, implementation = perf_environment
+    selected = implementation or resolve_implementation("quant_batch_gemm_reduce_sum", Target.parse(target))
+    if selected != "torch":
         pytest.skip("Original master NPU quantized batch reduction is disabled")
 
     def factory():
