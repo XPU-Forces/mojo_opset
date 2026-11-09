@@ -1,5 +1,7 @@
 """Paged-cache writes and reusable chunk metadata, independent of provider."""
 
+import torch
+
 from ._checks import _require_inference
 from ._dispatch import load_impl
 
@@ -35,7 +37,7 @@ def store_paged_kv_cache(
 def kpool_seed_tail_cache(tail_kv_cache, key, gate_score, tslot, *, implementation=None):
     """Seed the tail cache in place for KPool=4 and head dimension 128.
 
-    K and gate are contiguous BF16/FP16 [N, 128] tensors. The cache is
+    K and gate are contiguous BF16 [N, 128] tensors. The cache is
     [blocks, 2, ring, 128] with ring >= 4 and contiguous rows. The signed
     int32/int64 [N] slot tensor uses negative entries to skip input rows.
     A valid row is skipped if the row four positions later is valid and
@@ -43,6 +45,8 @@ def kpool_seed_tail_cache(tail_kv_cache, key, gate_score, tslot, *, implementati
     destinations must be unique, and the cache must not alias any input.
     Returns None. Triton implementations are enabled on Ascend A2 and 950PR.
     """
+    if key.dtype != torch.bfloat16 or gate_score.dtype != key.dtype or tail_kv_cache.dtype != key.dtype:
+        raise ValueError("K, gate and cache must use BF16")
     _require_inference("kpool_seed_tail_cache", tail_kv_cache, key, gate_score)
     forward, _ = load_impl("kpool_seed_tail_cache", implementation)
     return forward(tail_kv_cache, key, gate_score, tslot)

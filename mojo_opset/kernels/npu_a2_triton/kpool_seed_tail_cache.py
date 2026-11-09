@@ -202,8 +202,8 @@ def kpool_seed_tail_cache_fwd(tail_kv_cache, key, gate_score, tslot, kpool=4, he
     """Update cache in place; valid slots must fit the signed-int32 slot range."""
     if kpool != 4 or head_dim != 128:
         raise ValueError("This GLM-5.3-Flash kernel fixes kpool=4 and head_dim=128")
-    if key.dtype not in (torch.bfloat16, torch.float16):
-        raise ValueError("K, gate and cache must share BF16 or FP16 dtype")
+    if key.dtype != torch.bfloat16:
+        raise ValueError("K, gate and cache must use BF16")
     if gate_score.dtype != key.dtype or tail_kv_cache.dtype != key.dtype:
         raise ValueError("K, gate and cache must have identical dtype")
     if not (key.device == gate_score.device == tail_kv_cache.device == tslot.device):

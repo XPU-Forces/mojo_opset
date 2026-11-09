@@ -1,80 +1,58 @@
 # KPool tail cache seeding on Ascend A2 and 950PR
 
 `mojo_opset.functions.kpool_seed_tail_cache(cache, key, gate_score, tslot)`
-updates the tail cache in place and returns `None`. This operator handles the
-fixed KPool factor of 4 and head dimension of 128. The Triton backend is enabled
-for `npu.a2` and `npu.a5.950pr`. Select `implementation="torch"` to run the reference.
+seeds the paged tail cache for GLM-5.3-Flash prefill. It writes K and gate
+in place and returns `None`. The public API follows the
+[vLLM GPU implementation](https://github.com/vllm-project/vllm/blob/3d81a510f9ebc802a7864ced38832182295f4cad/vllm/models/glm5next/nvidia/ops/kpool_compress.py#L435-L463)
+for BF16 payloads. The Ascend port uses KPool=4 and head dimension 128.
 
-The cache has shape `[blocks, 2, ring, 128]`. It accepts padding between blocks
-or channels, with contiguous rows. The key and gate inputs have shape
-`[tokens, 128]` and must match the cache dtype (BF16 or FP16). Slot indices are
-signed int32 or int64. Negative slots skip the row. A valid row is omitted if
-the row four positions later maps to the same cache block. The caller must
-supply in-range nonnegative slots and unique destinations for selected rows.
-The cache and inputs must use separate storage.
+The cache has shape `[blocks, 2, ring, 128]` with contiguous rows and may
+have padding between blocks or channels. K and gate are contiguous
+`[tokens, 128]` tensors. All three tensors use BF16. The contiguous slot
+tensor uses signed int32 or int64. Negative slots skip the row. A valid
+row is omitted if the row four positions later maps to the same cache
+block. Nonnegative slots must be in range, destinations of selected
+rows must be unique, and cache storage must be separate from the inputs.
 
-## Platform implementations
+## Kernel design
 
-- A2 uses 256-row batches with runtime recognition of two four-row selected
-  runs. It copies each run together when its destinations are consecutive
-  along the ring; otherwise it uses the 16-row bitmap fallback. INT64 slots
-  are read as high/low INT32 words, keeping the sign check separate from
-  address calculation.
-- 950PR retains its existing single-JIT tiny, short and general paths with
-  autotuning. The A2 algorithm is not selected on A5.
+- A2 checks 256 rows at a time for two four-row selected runs. It copies
+  each run together when its destinations follow ring order. Other layouts
+  use the 16-row bitmap fallback. The high word of an INT64 slot provides
+  the sign check and the low word supplies the valid slot address.
+- 950PR uses one JIT with paths for tiny, short, and general inputs. Its
+  general path autotunes the tile size.
 
-Both implementations use the same API and input contract. Cache views with
-nonzero storage offsets are accepted; their pointers already include the
-offset.
+## Accuracy and performance cases
 
-## Run the tests
+Both test entry points use the same 12 BF16 cases from the GPU comparison
+profile. The fixtures preserve the original request lengths, slot maps,
+and cache layout. Accuracy checks the complete backing storage, including
+padding and guards, and checks that the three inputs are unchanged.
 
-Use the repository's NPU environment on the target device. Initialize the NPU
-backend as required by that environment before running pytest. For A2, use:
+| Case | Workload | Total rows | Ring | Slot dtype |
+| --- | --- | ---: | ---: | --- |
+| 02 | Single request | 1 | 8 | int64 |
+| 05 | Single request | 4 | 8 | int32 |
+| 06 | Single request | 5 | 16 | int64 |
+| 10 | Single request | 9 | 4 | int64 |
+| 13 | Single request | 33 | 4 | int32 |
+| 16 | Single request | 129 | 4 | int64 |
+| 17 | Mixed request lengths | 320 | 4 | int32 |
+| 19 | Padded cache and skipped slots | 183 | 16 | int32 |
+| 21 | 32 requests × 33 tokens | 1056 | 8 | int32 |
+| 22 | 128 requests × 128 tokens | 16384 | 16 | int64 |
+| 31 | One request × 16384 tokens | 16384 | 4 | int32 |
+| 32 | Four requests with lengths 255, 256, 257, 256 | 1024 | 8 | int64 |
+
+## Reproduce
 
 ```sh
 pytest tests/functions/test_kpool_seed_tail_cache.py --mojo-target npu.a2
-```
-
-For 950PR:
-
-```sh
 pytest tests/functions/test_kpool_seed_tail_cache.py --mojo-target npu.a5.950pr
 pytest tests/performance/functions/test_kpool_seed_tail_cache.py --mojo-target npu.a5.950pr \
   --perf-warmup 5 --perf-repeats 20 --perf-output /tmp/kpool-a5.json
 ```
 
-The accuracy cases compare the whole backing storage bit for bit, including
-padding that must remain untouched. They exercise both data and index dtypes,
-empty inputs, launch boundaries, negative slots and non-power-of-two rings.
-Performance calls reuse fixed slot maps and overwrite the same cache locations.
-
-
-## Performance evidence
-
-The A2 standalone final short implementation measured case22 (BF16,
-128 requests x 128 tokens, D=128, RING=16) at 9.277 us on Ascend910B3.
-Every warmup/sample was preceded by a synchronized 192 MiB FP32 reduction
-on the same stream; eviction tasks were excluded from target task timing.
-Effective MBU was 4.469%, using a same-device, same-cold-policy measured
-bandwidth denominator of 1580.873 GB/s. This is one representative case,
-not a full-shape throughput or hardware-acceptance claim.
-
-A5 retains its separately validated implementation. Its historical 24-case
-ABBA measurements use a different cache/timing protocol and must not be
-used as a matched A2/A5 speed comparison.
-
-The repository performance entry point uses the shared rotating-input
-harness. Its results are a separate metric from the explicit cold-L2 A2
-measurements above.
-
-
-## Integration validation
-
-The A2 integration passed all 33 repository pytest cases on Ascend910B3
-without skips. A separate run through the public API passed 128/128
-bitwise checks (64 fixture cases, two trials each), comparing the complete
-backing storage, guards and all inputs against the independent reference.
-The A2 JIT AST matches the standalone final short implementation. The A5
-kernel source is unchanged; its historical standalone validation is retained,
-and the expanded repository tests have not been rerun on 950PR.
+The repository performance test uses rotating input instances. The explicit
+cold-L2 A2 measurement in the PR uses a separate protocol.

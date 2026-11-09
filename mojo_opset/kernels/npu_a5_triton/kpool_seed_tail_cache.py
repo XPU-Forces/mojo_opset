@@ -1,4 +1,5 @@
 """Triton-Ascend tail seeding for GLM-5.3-Flash (D=128, KPOOL=4)."""
+
 from functools import lru_cache
 
 import torch
@@ -16,8 +17,9 @@ def _prune_fused_configs(configs, named_args, **kwargs):
         allowed = (8, 16, 32)
     else:
         allowed = (16, 32)
-    return [config for config in configs
-            if config.kwargs["BLOCK_T"] in allowed and (n > 9 or config.kwargs["BLOCK_T"] >= n)]
+    return [
+        config for config in configs if config.kwargs["BLOCK_T"] in allowed and (n > 9 or config.kwargs["BLOCK_T"] >= n)
+    ]
 
 
 @triton.autotune(
@@ -27,12 +29,23 @@ def _prune_fused_configs(configs, named_args, **kwargs):
     cache_results=True,
 )
 @triton.jit
-def _seed_tail_fused_kernel(KEY, GATE, SLOT, CACHE, N: tl.constexpr,
-                            RING: tl.constexpr, STRIDE_B: tl.constexpr,
-                            STRIDE_KG: tl.constexpr, SLOT_BITS: tl.constexpr,
-                            BLOCK_T: tl.constexpr, INDEX32: tl.constexpr,
-                            VECTOR_CORES: tl.constexpr, PACK_BITS: tl.constexpr,
-                            WORD32: tl.constexpr, RING_SHIFT: tl.constexpr):
+def _seed_tail_fused_kernel(
+    KEY,
+    GATE,
+    SLOT,
+    CACHE,
+    N: tl.constexpr,
+    RING: tl.constexpr,
+    STRIDE_B: tl.constexpr,
+    STRIDE_KG: tl.constexpr,
+    SLOT_BITS: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    INDEX32: tl.constexpr,
+    VECTOR_CORES: tl.constexpr,
+    PACK_BITS: tl.constexpr,
+    WORD32: tl.constexpr,
+    RING_SHIFT: tl.constexpr,
+):
     if N <= 4:
         COPY_WIDTH: tl.constexpr = 64 if WORD32 else 128
         COPY_STRIDE_B: tl.constexpr = STRIDE_B // 2 if WORD32 else STRIDE_B
@@ -133,16 +146,14 @@ def _seed_tail_fused_kernel(KEY, GATE, SLOT, CACHE, N: tl.constexpr,
             tl.store(CACHE + dst + COPY_STRIDE_KG, gate_words, mask=selected[:, None])
 
 
-
-
 @lru_cache(maxsize=None)
 def _vector_core_count(device_index):
     return int(driver.active.utils.get_device_properties(device_index)["num_vectorcore"])
 
 
 def _route(tail_kv_cache, key, gate_score, tslot, vector_cores):
-    if key.dtype not in (torch.bfloat16, torch.float16):
-        raise ValueError("K, gate and cache must share BF16 or FP16 dtype")
+    if key.dtype != torch.bfloat16:
+        raise ValueError("K, gate and cache must use BF16")
     if gate_score.dtype != key.dtype or tail_kv_cache.dtype != key.dtype:
         raise ValueError("K, gate and cache must have identical dtype")
     if not (key.device == gate_score.device == tail_kv_cache.device == tslot.device):
@@ -164,22 +175,37 @@ def _route(tail_kv_cache, key, gate_score, tslot, vector_cores):
     n = key.shape[0]
     if n == 0:
         return None
-    cache_extent = ((tail_kv_cache.shape[0] - 1) * tail_kv_cache.stride(0)
-                    + tail_kv_cache.stride(1) + tail_kv_cache.shape[2] * 128)
-    index32 = (n * 128 < 2**31 and cache_extent < 2**31
-               and tail_kv_cache.stride(0) < 2**31
-               and tail_kv_cache.stride(1) < 2**31)
+    cache_extent = (
+        (tail_kv_cache.shape[0] - 1) * tail_kv_cache.stride(0) + tail_kv_cache.stride(1) + tail_kv_cache.shape[2] * 128
+    )
+    index32 = (
+        n * 128 < 2**31 and cache_extent < 2**31 and tail_kv_cache.stride(0) < 2**31 and tail_kv_cache.stride(1) < 2**31
+    )
     # Alignment proof uses host metadata only; no tensor-value reads.
-    word32 = (n <= 9 and tail_kv_cache.stride(0) % 2 == 0
-              and tail_kv_cache.stride(1) % 2 == 0
-              and key.data_ptr() % 4 == 0 and gate_score.data_ptr() % 4 == 0
-              and tail_kv_cache.data_ptr() % 4 == 0)
+    word32 = (
+        n <= 9
+        and tail_kv_cache.stride(0) % 2 == 0
+        and tail_kv_cache.stride(1) % 2 == 0
+        and key.data_ptr() % 4 == 0
+        and gate_score.data_ptr() % 4 == 0
+        and tail_kv_cache.data_ptr() % 4 == 0
+    )
     if n <= 4:
         _seed_tail_fused_kernel[(1,)](
-            key, gate_score, tslot, tail_kv_cache, n,
-            tail_kv_cache.shape[2], tail_kv_cache.stride(0), tail_kv_cache.stride(1),
-            tslot.element_size() * 8, INDEX32=index32, WORD32=False,
-            VECTOR_CORES=vector_cores, PACK_BITS=0, RING_SHIFT=-1,
+            key,
+            gate_score,
+            tslot,
+            tail_kv_cache,
+            n,
+            tail_kv_cache.shape[2],
+            tail_kv_cache.stride(0),
+            tail_kv_cache.stride(1),
+            tslot.element_size() * 8,
+            INDEX32=index32,
+            WORD32=False,
+            VECTOR_CORES=vector_cores,
+            PACK_BITS=0,
+            RING_SHIFT=-1,
             compile_mode="simt_only",
         )
         return None
@@ -187,19 +213,32 @@ def _route(tail_kv_cache, key, gate_score, tslot, vector_cores):
     if n <= 9:
         # Point17: short-input group uses a bounded tile; all larger shapes retain generic fallback.
         _seed_tail_fused_kernel[(1,)](
-            key, gate_score, tslot, tail_kv_cache, n,
-            tail_kv_cache.shape[2], tail_kv_cache.stride(0), tail_kv_cache.stride(1),
-            tslot.element_size() * 8, INDEX32=index32, WORD32=word32,
-            VECTOR_CORES=vector_cores, PACK_BITS=0, RING_SHIFT=-1,
+            key,
+            gate_score,
+            tslot,
+            tail_kv_cache,
+            n,
+            tail_kv_cache.shape[2],
+            tail_kv_cache.stride(0),
+            tail_kv_cache.stride(1),
+            tslot.element_size() * 8,
+            INDEX32=index32,
+            WORD32=word32,
+            VECTOR_CORES=vector_cores,
+            PACK_BITS=0,
+            RING_SHIFT=-1,
             compile_mode="simt_only",
         )
         return None
 
     # E114 generic-only alignment proof from effective pointers/metadata.
-    generic_word32 = (tail_kv_cache.stride(0) % 2 == 0
-                      and tail_kv_cache.stride(1) % 2 == 0
-                      and key.data_ptr() % 4 == 0 and gate_score.data_ptr() % 4 == 0
-                      and tail_kv_cache.data_ptr() % 4 == 0)
+    generic_word32 = (
+        tail_kv_cache.stride(0) % 2 == 0
+        and tail_kv_cache.stride(1) % 2 == 0
+        and key.data_ptr() % 4 == 0
+        and gate_score.data_ptr() % 4 == 0
+        and tail_kv_cache.data_ptr() % 4 == 0
+    )
     # Also prove safe offsets for the masked extra lanes of a512value run tile.
     run_index32 = index32 and n * 128 + 512 < 2**31 and cache_extent + 512 < 2**31
 
@@ -216,8 +255,14 @@ def _route(tail_kv_cache, key, gate_score, tslot, vector_cores):
     ring = tail_kv_cache.shape[2]
     ring_shift = ring.bit_length() - 1 if (ring & (ring - 1)) == 0 else -1
     _seed_tail_fused_kernel[grid](
-        key, gate_score, tslot, tail_kv_cache, n,
-        tail_kv_cache.shape[2], tail_kv_cache.stride(0), tail_kv_cache.stride(1),
+        key,
+        gate_score,
+        tslot,
+        tail_kv_cache,
+        n,
+        tail_kv_cache.shape[2],
+        tail_kv_cache.stride(0),
+        tail_kv_cache.stride(1),
         tslot.element_size() * 8,
         INDEX32=run_index32,
         VECTOR_CORES=vector_cores,
