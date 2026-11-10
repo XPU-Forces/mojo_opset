@@ -30,6 +30,7 @@ OPS = {
     "paged_prefill_swa_infer": "paged_attention",
     "paged_decode_swa_infer": "paged_attention",
     "prefill_gqa_infer": "paged_attention",
+    "kpool_compress_and_write_cache": "kv_cache",
     "store_paged_kv_cache": "kv_cache",
     "quant_batch_gemm_reduce_sum": "gemm",
     "top_k_sampling": "sampling",
