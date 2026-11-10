@@ -213,3 +213,32 @@ def test_kpool_compress_and_write_cache_accuracy(accuracy_backend, case):
     check(case, original, cpu_values, run_case(case, cpu_values, "torch"))
     device_values = tuple(value.to(device) if value is not None else None for value in original)
     check(case, original, device_values, run_case(case, device_values, implementation))
+
+
+@pytest.mark.api("functions.kpool_compress_and_write_cache")
+@pytest.mark.accuracy
+def test_kpool_compress_and_write_cache_padded_pages(accuracy_backend):
+    implementation, _, device = accuracy_backend
+    case = Case("padded_pages", 65, 4)
+    cache, key, score, ape, loc, mask = make_inputs(case)
+    loc = loc.flip(0)
+    payload_bytes = case.page * (HEAD + 4)
+    backing = torch.full((case.blocks, payload_bytes + 16), 0xA5, dtype=torch.uint8)
+
+    for target_device, provider in (("cpu", "torch"), (device, implementation)):
+        actual_backing = backing.to(target_device, copy=True)
+        actual_cache = actual_backing[:, 4 : 4 + payload_bytes].view(cache.shape)
+        values = (actual_cache, *(value.to(target_device, copy=True) for value in (key, score, ape, loc)), mask)
+        check(case, (cache, key, score, ape, loc, mask), values, run_case(case, values, provider))
+        torch.testing.assert_close(actual_backing[:, :4].cpu(), backing[:, :4])
+        torch.testing.assert_close(actual_backing[:, 4 + payload_bytes :].cpu(), backing[:, 4 + payload_bytes :])
+
+
+@pytest.mark.reference
+@pytest.mark.accuracy
+def test_kpool_compress_and_write_cache_rejects_mixed_devices():
+    case = PERF_CASES[0]
+    cache, key, score, ape, loc, mask = make_inputs(case)
+    values = (cache, key, score, ape, loc.to("meta"), mask)
+    with pytest.raises(ValueError, match="same device"):
+        run_case(case, values, "torch")

@@ -55,14 +55,15 @@ def kpool_compress_and_write_cache(
     equal to 4 or 16. The position bias is FP32 [pool_size, 128]. The uint8
     cache has shape [pages, page_size, 132]. Each page stores all 128-byte
     keys first, followed by all FP32 scales. Page payloads must be contiguous,
-    and their starts must be 4-byte aligned. The cache must not alias inputs.
+    and their starts must be 4-byte aligned. All tensors must be on the
+    same device, and the cache must not alias inputs.
 
     When writing, the int32/int64 [N] loc maps rows to flat cache slots.
     Selected destinations must be unique and in range. A bool [N] write_mask
     skips rows and can be used only in write-only mode. round_scale rounds
-    scales up to powers of two. Returns None or (FP8 keys, FP32 scales) when
-    return_compressed is set. At least one of write_cache and return_compressed
-    must be set.
+    scales up to powers of two. Returns (FP8 keys, FP32 scales) when
+    return_compressed is set and None otherwise. At least one of write_cache
+    and return_compressed must be set.
     """
     if head_dim != 128 or pool_size not in (4, 16):
         raise ValueError("Expected head_dim=128 and pool_size=4 or 16")
@@ -92,6 +93,10 @@ def kpool_compress_and_write_cache(
         return_compressed or write_mask.shape != loc.shape or write_mask.dtype != torch.bool
     ):
         raise ValueError("Expected a bool [N] write_mask in write-only mode")
+    if any(
+        tensor is not None and tensor.device != slot_k.device for tensor in (kv_cache, slot_score, ape, loc, write_mask)
+    ):
+        raise ValueError("All KPool tensors must be on the same device")
     _require_inference("kpool_compress_and_write_cache", slot_k, slot_score, ape)
     forward, _ = load_impl("kpool_compress_and_write_cache", implementation)
     return forward(
