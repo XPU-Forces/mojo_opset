@@ -3,6 +3,8 @@
 from mojo_opset.utils._exports import extend_bindings as _extend_bindings
 
 OPS = {
+    "vision_pos_embed_interp": "vision_pos_embed",
+    "vision_pos_embed_interp_multi": "vision_pos_embed",
     "rms_norm_quant": "fused_quantization",
     "layer_norm_quant": "fused_quantization",
     "residual_add_rms_norm_quant": "fused_quantization",

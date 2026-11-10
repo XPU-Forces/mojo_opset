@@ -56,4 +56,6 @@ npu.a2:
   top_p_sampling: triton
   varlen_fa_infer: native  # Temporary standalone Varlen FA interface.
   vision_rope_2d_infer: triton
+  vision_pos_embed_interp: triton
+  vision_pos_embed_interp_multi: triton
   vision_rope_cos_sin_2d: triton
