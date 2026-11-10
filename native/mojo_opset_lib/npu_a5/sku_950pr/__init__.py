@@ -1,1 +1,1 @@
-"""Prebuilt 950PR libraries; built by native/build.sh npu_a5/sku_950pr."""
+"""Prebuilt 950PR libraries backed by the shared A5 SWA sources."""

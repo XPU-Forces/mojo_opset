@@ -1,10 +1,8 @@
-"""A5 native wrappers backed by architecture and SKU extensions."""
+"""A5 native wrappers shared by Ascend 950PR and 950DT."""
 
 from mojo_opset.utils._exports import extend_bindings as _extend_bindings
 
-OPS = {}
-
-OVERRIDES = {"npu.a5.950pr": {"native_swa_infer": "sku_950pr.swa"}}
+OPS = {"native_swa_infer": "swa", "swa": "swa"}
 
 _extend_bindings(__name__, OPS)
 del _extend_bindings

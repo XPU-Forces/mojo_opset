@@ -11,7 +11,7 @@ struct AICore_RT {
 
     struct CUBE_RT {
         static constexpr int K_L1_SLOTS = 2;
-        static constexpr int V_L1_SLOTS = 2;
+        static constexpr int V_L1_SLOTS = 3;
         static constexpr int P_L1_SLOTS = 3;
         static constexpr int QK_CO1_SLOTS = 1;
         static constexpr int PV_CO1_SLOTS = 1;
@@ -47,7 +47,7 @@ struct AICore_RT {
 
         __aicore__ inline void init(AscendC::TPipe& pipe) {
             static_assert(DIM == 128, "v5 full path fixes head_dim=128");
-            static_assert(TILE_Q == 128, "v5 full path currently uses TILE_Q=128");
+            static_assert(TILE_Q == 64 || TILE_Q == 128, "v5 full path expects TILE_Q=64 or 128");
             static_assert(TILE_L0 == 128, "v5 full path currently uses TILE_L0=128");
             static_assert(TILE_L0 >= DIM);
             static_assert(TILE_L1 % TILE_L0 == 0 && TILE_L1 >= TILE_L0);

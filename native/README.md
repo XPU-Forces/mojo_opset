@@ -3,7 +3,8 @@
 The main package contains Python/Triton code. Separate provider lib packages
 supply native binaries, built under `native/mojo_opset_lib/<provider>/`. C/C++ sources and build recipes live in `native/`.
 Here `<provider>` is an architecture or architecture/SKU path, for example
-`npu_a2` or `npu_a5/sku_950pr`. Public functions dispatch to Python kernel
+`npu_a2`, private shared `npu_a5`, or public `npu_a5/sku_950pr`.
+Public functions dispatch to Python kernel
 wrappers, which internally load the matching pybind extension; users do not
 import these extensions directly.
 
@@ -15,11 +16,13 @@ native/
   src/                   # C/C++ sources only
     common/npu.h
     npu_a2/              # bindings.cpp + varlen_fa/
-    npu_a5/sku_950pr/     # bindings.cpp + swa/
+    npu_a5/               # shared A5 sources and private provider binding
+      sku_950pr/          # public package facade over shared SWA sources
   third_party/catlass/    # pinned public submodule
   mojo_opset_lib/         # package layout and generated binaries
     npu_a2/
-    npu_a5/sku_950pr/
+    npu_a5/               # private shared A5 package
+      sku_950pr/          # public 950PR package
 ```
 
 ## Adding an operator
@@ -28,7 +31,7 @@ native/
 
 For a new operator on an existing architecture, add
 `native/src/<provider>/<operator>/`, following
-[A2 Varlen FA](src/npu_a2/varlen_fa) or [A5 SWA](src/npu_a5/sku_950pr/swa).
+[A2 Varlen FA](src/npu_a2/varlen_fa) or [A5 SWA](src/npu_a5/swa).
 
 - `kernel/`: device implementation and private headers.
 - `host.h`: declaration of the C++ function exposed through pybind.
@@ -79,10 +82,10 @@ one build selection, while CMake selects the architecture/SKU's binding/source f
 ### 3. Python interface and tests
 
 Add `mojo_opset/kernels/<arch>_native/[sku_<name>/]<operator>.py`; use
-[the SWA wrapper](../mojo_opset/kernels/npu_a5_native/sku_950pr/swa.py) as an example:
+[the SWA wrapper](../mojo_opset/kernels/npu_a5_native/swa.py) as an example:
 
 1. Lazily import the matching artifact module (replace `/` with `.`), for example
-   `mojo_opset_lib.npu_a5.sku_950pr._native`, and its launch function.
+   `mojo_opset_lib.npu_a5._native`, and its launch function.
 2. Register a leaf `torch.library.custom_op` with the correct mutation schema
    and a fake implementation describing output metadata.
 3. Export `{op_id}_fwd` and, when needed, `{op_id}_bwd` with the functional
@@ -161,8 +164,9 @@ CATLASS_ROOT="$PWD/native/third_party/catlass" SOC_VERSION=Ascend910B2 \
 CATLASS uses the public [upstream](https://gitee.com/ascend/catlass), with no
 automatic build-time fetch. An external `CATLASS_ROOT` is supported. Wheels
 include its license, not its source tree.
-Default SoCs are A2 `Ascend910B1` and A5 `Ascend950PR_9579`; override
-`SOC_VERSION` for the intended supported device.
+Default SoCs are A2 `Ascend910B1` and the public A5 package
+`Ascend950PR_9579`; override `SOC_VERSION` for the intended supported device.
+Shared A5 SWA sources compile for `dav-3510` and query runtime core resources.
 
 ## Artifacts and packaging
 
@@ -255,7 +259,7 @@ vendor/toolchain setup there, not unconditionally in the top-level CMake.
 | API | Target | Main restrictions |
 | --- | --- | --- |
 | `varlen_fa_infer` / `VarlenFAInfer` | `npu.a2` | BF16/FP16, contiguous TND, D=128, int32 offsets on the input device, nonempty sequences; causal requires Q≤KV. Supports AABB/ABAB and uneven GQA groups. |
-| `native_swa_infer` | `npu.a5.950pr` | BF16, contiguous TND, D=128, causal, scale=1/√128, global window=4; int32 offsets on the input device, 0<Q≤KV, Q≤1024, KV≤9216. |
+| `native_swa_infer` | `npu.a5` (950PR/950DT) | BF16, contiguous TND, D=128, causal, scale=1/√128, global window=4; int32 offsets on the input device, 0<Q≤KV, Q≤1024, KV≤9216. |
 
 SWA's four compiled combinations are:
 
@@ -266,13 +270,15 @@ SWA's four compiled combinations are:
 | 8 | 1 | False | 1023 |
 | 8 | 1 | True | 255 |
 
-These are launch constraints, not exhaustive correctness guarantees. Original
-SWA code also reproduces NaNs on some tiny-tail inputs and repeatability
-failures on single-sequence Q=129/KV=257. Those cases were removed from the
-routine test suite; the kernel issue remains unresolved.
+These are launch constraints, not exhaustive correctness guarantees. The
+shared A5 implementation is covered by tolerance checks and repeated raw-bit
+comparisons on 950DT, including single-sequence Q=129/KV=257 and lengths up to
+32768.
 
 Neither native inference API registers backward. Host launchers read cumulative
 lengths on CPU; leaf custom ops permit compiler graph inclusion, but that does
-not establish NPU execution-graph capture/replay support. A5 binaries
-are isolated in `native/mojo_opset_lib/npu_a5/sku_950pr/`; future DT implementations use
-`sku_950dt/` instead of replacing PR binaries.
+not establish NPU execution-graph capture/replay support. SWA sources live in
+`native/src/npu_a5/`; the public 950PR binary remains isolated in
+`native/mojo_opset_lib/npu_a5/sku_950pr/`. The private shared A5 package is
+declared only by internal provider metadata, so public packages do not depend
+on it.

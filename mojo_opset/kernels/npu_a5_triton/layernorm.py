@@ -216,8 +216,8 @@ def _layernorm_fwd_kernel(
                 )
 
 
-@triton.heuristics({"BLOCK_SIZE_M": layer_norm_fwd_heuristics})
 @libentry()
+@triton.heuristics({"BLOCK_SIZE_M": layer_norm_fwd_heuristics})
 @triton.jit
 def _layernorm_fwd_single_pass_kernel(
     X_ptr,
@@ -325,8 +325,8 @@ def _layernorm_fwd_single_pass_kernel(
             )
 
 
-@triton.heuristics({"BLOCK_SIZE_M": lambda args: ceil_div(4096, args["n_cols"])})
 @libentry()
+@triton.heuristics({"BLOCK_SIZE_M": lambda args: ceil_div(4096, args["n_cols"])})
 @triton.jit
 def _layernorm_bwd_kernel(
     DY_ptr,

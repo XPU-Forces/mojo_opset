@@ -36,6 +36,7 @@ def silu(x):
     return x * tl.sigmoid(x)
 
 
+@libentry()
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_SIZE_M": 1}),
@@ -52,7 +53,6 @@ def silu(x):
     key=["n_cols", "HAS_SCALES"],
     prune_configs_by={"early_config_prune": _prune_tile_configs},
 )
-@libentry()
 @triton.jit(do_not_specialize=["n_rows"])
 def _swiglu_fwd_kernel(
     a,
@@ -100,6 +100,7 @@ def _swiglu_fwd_kernel(
             tl.store(c_ptrs, c_chunk, mask=block_mask)
 
 
+@libentry()
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_SIZE_M": 1}),
@@ -117,7 +118,6 @@ def _swiglu_fwd_kernel(
     prune_configs_by={"early_config_prune": _prune_tile_configs},
     # Inputs are read-only; each launch fully overwrites the gradient outputs.
 )
-@libentry()
 @triton.jit(do_not_specialize=["n_rows"])
 def _swiglu_bwd_kernel(
     dc,

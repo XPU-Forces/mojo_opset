@@ -17,7 +17,6 @@ import torch
 
 from mojo_opset import Target
 from mojo_opset import config
-from mojo_opset.functions._dispatch import resolve_implementation
 from mojo_opset.utils import target as target_utils
 from mojo_opset.utils._exports import additions
 from tests._fixtures import check_implementation
@@ -124,24 +123,28 @@ def benchmark(request, perf_environment, monkeypatch):
         op_ids = set(marker.kwargs.get("ops", (api.removeprefix("functions.") for api in marker.args)))
         check_implementation(op_ids, implementation, target)
     private = additions("tests")
-    if private is not None:
-        private.check_case(request, implementation, target)
     monkeypatch.setattr(target_utils, "_AUTO_TARGET", Target.parse(target))
     torch.manual_seed(42)
     report = request.config._mojo_perf_report
 
-    def run(*, factory, op, **parameters):
+    def run(*, factory, op, ops=None, **parameters):
         declared = {
             name
             for marker in request.node.iter_markers("api")
             for name in marker.kwargs.get("ops", (api.removeprefix("functions.") for api in marker.args))
         }
-        if op not in declared:
+        dependencies = (op,) if ops is None else tuple(ops)
+        apis = {api.removeprefix("functions.") for marker in request.node.iter_markers("api") for api in marker.args}
+        if not dependencies or not set(dependencies) <= declared or (ops is not None and op not in apis):
             raise ValueError(f"{request.node.nodeid}: benchmark op {op!r} is missing from its api mark")
         if any(row["id"] == request.node.nodeid for row in report["cases"]):
             raise ValueError("Call benchmark once per test; parametrize separate workloads")
-        check_implementation([op], implementation, target)
-        selected = implementation or resolve_implementation(op, Target.parse(target))
+        selections = check_implementation(dependencies, implementation, target)
+        if private is not None:
+            private.check_case(request, selections)
+        # Composites have independently dispatched dependencies, not a provider
+        # of their own. Preserve the existing scalar field for single-op cases.
+        selected = selections[op] if ops is None else selections
         count = report["measurement"]["instances"]
         workload = [factory() for _ in range(count)]
         metrics = measure(

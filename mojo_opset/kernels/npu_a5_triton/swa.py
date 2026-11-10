@@ -8,9 +8,21 @@ import triton.language as tl
 
 from mojo_opset.kernels._npu_triton_utils import get_num_cores
 from mojo_opset.kernels._npu_triton_utils import is_910
+from mojo_opset.kernels._npu_triton_utils import libentry
 from mojo_opset.utils._exports import additions
 
 _private = additions(__package__)
+
+# Preserve the single-config launch defaults without entering the autotuner.
+SWA_FWD_OPTIONS = triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "multibuffer": False}).all_kwargs()
+SWA_PREPROCESS_OPTIONS = triton.Config(kwargs={"BLOCK_SIZE": 64}).all_kwargs()
+SWA_DQ_OPTIONS = triton.Config({
+    "BLOCK_N": 128,
+    "multibuffer": True,
+    "enable_dynamic_cv_pipeline": not (
+        _private is not None and _private.disable_swa_dq_dynamic_cv_pipeline()
+    ),
+}).all_kwargs()
 
 AUX_MASK_SIZE = 256
 AUX_MASK = None
@@ -422,6 +434,7 @@ def _sdpa_acc_fwd_MxN(
     return acc_ptr, l_i, m_i
 
 
+@libentry()
 @triton.jit
 def _sdpa_infer_kernel(
     o_ptr,
@@ -692,6 +705,7 @@ def swa_infer_impl(
     return o
 
 
+@libentry()
 @triton.jit
 def _swa_paged_prefill_kernel(
     o_ptr,
@@ -862,6 +876,7 @@ def _swa_paged_prefill_kernel(
             tl.store(cur_o_block_ptr, accumulator.to(o_ptr.type.element_ty), boundary_check=(0, 1))
 
 
+@libentry()
 @triton.jit
 def _swa_paged_prefill_aggregation_kernel(
     o_ptr,
@@ -1259,6 +1274,7 @@ def _sdpa_acc_fwd_1xN(
     return acc_ptr, l_i, m_i
 
 
+@libentry()
 @triton.jit
 def _swa_paged_decode_kernel(
     q_ptr,
@@ -1518,14 +1534,9 @@ def swa_paged_decode_impl(
     return o
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "multibuffer": False}),
-    ],
-    key=["HEAD_DIM"],
-)
 # Packed batches change bsz and the token-derived LSE leading stride at runtime.
 # Keep the fixed contiguous Q/K/V/O strides specialized for alignment lowering.
+@libentry()
 @triton.jit(do_not_specialize=["bsz", "stride_lse_h"])
 def _swa_fwd_kernel(
     o_ptr,
@@ -1813,6 +1824,7 @@ def swa_fwd_impl(
         inter_cache_num=2,
         enable_buffer_insert_optimization=True,
         enable_ub_refine_opt = True,
+        **SWA_FWD_OPTIONS,
     )
     if output_f32:
         return o, softmax_lse, o_f32
@@ -1820,13 +1832,8 @@ def swa_fwd_impl(
         return o, softmax_lse
 
 
-@triton.autotune(
-    configs=[
-        triton.Config(kwargs={"BLOCK_SIZE": 64}),
-    ],
-    key=["HEAD_DIM"],
-)
 # Both values are the packed token count for the [head, token] delta buffer.
+@libentry()
 @triton.jit(do_not_specialize=["num_tokens", "d_stride_h"])
 def _swa_bwd_preprocess(
     d_ptr: torch.Tensor,
@@ -1989,6 +1996,7 @@ def _sdpa_single_block_bwd_dq(
     return dq
 
 
+@libentry()
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_M": 128, "BLOCK_N": BN, "multibuffer": True})
@@ -2279,16 +2287,8 @@ def _swa_bwd_dkdv_kernel(
                     tl.store(cur_dk_block_ptr, dk.to(dk_ptr.type.element_ty), boundary_check=(0, 1))
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_N": 128, "multibuffer": True,
-                       "enable_dynamic_cv_pipeline": (
-                           False if _private is not None and _private.disable_swa_dq_dynamic_cv_pipeline() else True
-                       )}),
-    ],
-    key=["HEAD_DIM"],
-)
 # Noncausal dQ needs 288 KiB of UB with 128x128 tiles (only 248 KiB is available).
+@libentry()
 @triton.heuristics({"BLOCK_M": lambda args: 128 if args["IS_CAUSAL"] else 64})
 # The packed batch size and [head, token] leading strides vary with the batch.
 @triton.jit(do_not_specialize=["bsz", "stride_delta_h", "stride_lse_h"])
@@ -2505,6 +2505,7 @@ def swa_preprocess(do: torch.Tensor, o: torch.Tensor) -> torch.Tensor:
         do.stride(2),
         num_q_heads,
         head_dim,
+        **SWA_PREPROCESS_OPTIONS,
     )
     return delta
 
@@ -2724,6 +2725,7 @@ def swa_dq(
         limit_auto_multi_buffer_of_local_buffer="no-l0c",
         intra_cache_num=3,
         inter_cache_num=2,
+        **SWA_DQ_OPTIONS,
     )
 
     return dq

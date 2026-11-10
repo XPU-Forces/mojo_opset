@@ -14,7 +14,12 @@ def collect_trace(run, directory):
         schedule=profiler.schedule(wait=0, warmup=0, active=1, repeat=1),
         on_trace_ready=profiler.tensorboard_trace_handler(str(directory)),
         # Level0 can omit the launch correlation needed by mixed cube/vector kernels.
-        experimental_config=profiler._ExperimentalConfig(profiler_level=profiler.ProfilerLevel.Level1),
+        # Timing needs launch correlation, not PMU counters. CANN 9.2 PMU
+        # collection can corrupt block-detail export under multi-device profiling.
+        experimental_config=profiler._ExperimentalConfig(
+            profiler_level=profiler.ProfilerLevel.Level1,
+            aic_metrics=profiler.AiCMetrics.AiCoreNone,
+        ),
     ) as profile:
         run()
         profile.step()
@@ -64,6 +69,41 @@ def kernel_owners(events, ranges):
         if matches:
             worker_bounds.append((matches.pop(), pid, tid, start, end))
 
+    # Native launches use torch_npu's task queue. Follow its explicit enqueue
+    # correlation to the dequeue scope, rather than comparing device clocks.
+    queue_flows, dequeues = {}, {}
+    for event in events:
+        if event.get("cat") == "async_task_queue":
+            phase = event.get("ph")
+            if phase not in ("s", "f") or "id" not in event:
+                raise ValueError("Invalid NPU task queue flow")
+            pair = queue_flows.setdefault((event["pid"], str(event["id"])), {})
+            if phase in pair:
+                raise ValueError("Duplicate NPU task queue endpoint")
+            pair[phase] = event
+        if event.get("cat") == "dequeue" and event.get("ph") == "X":
+            key = point(event)
+            if key in dequeues:
+                raise ValueError("Ambiguous NPU dequeue scope")
+            dequeues[key] = event
+    for (_, correlation), pair in queue_flows.items():
+        if set(pair) != {"s", "f"}:
+            raise ValueError("Incomplete NPU task queue flow")
+        scope = dequeues.get(point(pair["f"]))
+        if scope is None or str(scope.get("args", {}).get("correlation_id")) != correlation:
+            raise ValueError("NPU task queue has no matching dequeue scope")
+        pid, tid, start = point(pair["s"])
+        matches = {name for name, p, t, lower, upper in bounds + worker_bounds
+                   if pid == p and tid == t and lower <= start < upper}
+        if len(matches) > 1:
+            raise ValueError("NPU enqueue belongs to multiple samples")
+        if matches:
+            pid, tid, start = point(scope)
+            duration = Decimal(str(scope["dur"]))
+            if not duration.is_finite() or duration < 0:
+                raise ValueError("Invalid NPU dequeue duration")
+            worker_bounds.append((matches.pop(), pid, tid, start, start + duration))
+
     targets, kernels, flows = {}, set(), {"torch": {}, "cann": {}}
     processes = {}
     for index, event in enumerate(events):
@@ -90,6 +130,28 @@ def kernel_owners(events, ranges):
         if phase in pair:
             raise ValueError(f"Duplicate NPU flow {key!r} {phase!r} endpoint")
         pair[phase] = event
+
+    # CANN 9.2 exports some native launch flows with only the device end.
+    # The AscendCL API still carries connection_id; the exported flow ID is
+    # (connection_id << 32) | device_id. Restrict recovery to this exact schema
+    # and a unique CANN API, and keep rejecting unresolvable/ambiguous flows.
+    native_apis = {}
+    for event in events:
+        connection = event.get("args", {}).get("connection_id")
+        if (event.get("ph") == "X" and event.get("pid") in processes.get("CANN", set())
+                and event.get("name", "").startswith("AscendCL@")
+                and type(connection) is int and connection > 0):
+            native_apis.setdefault(connection, []).append(event)
+    for key, pair in flows["cann"].items():
+        if set(pair) != {"f"}:
+            continue
+        if not key.isdecimal():
+            continue
+        candidates = native_apis.get(int(key) >> 32, [])
+        if len(candidates) > 1:
+            raise ValueError("Ambiguous CANN API connection_id")
+        if candidates:
+            pair["s"] = candidates[0]
 
     owners = {}
     for family, connections in flows.items():

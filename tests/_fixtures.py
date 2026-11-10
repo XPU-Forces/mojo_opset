@@ -15,10 +15,11 @@ def _bindings(package, target):
 
 
 def check_implementation(op_ids, implementation, target):
-    """Check provider declarations only; missing dependencies and broken wrappers must fail at runtime."""
+    """Validate declarations and return resolved implementations; runtime errors must propagate."""
     target = Target.parse(target)
     known_ops = import_module("mojo_opset.kernels.torch").OPS
     assert op_ids and set(op_ids) <= known_ops.keys(), f"Missing or unknown test op IDs: {op_ids}"
+    selections = {}
     for op_id in sorted(op_ids):
         selected = implementation
         if selected is None:
@@ -39,12 +40,18 @@ def check_implementation(op_ids, implementation, target):
                 if implementation is None:
                     raise LookupError(f"Configured {selected} has no provider for {op_id} on {target}")
                 pytest.skip(f"{selected} has no provider for {op_id} on {target}")
+        selections[op_id] = selected
+    return selections
 
 
 def check_swa_case(backend, *, dtype=torch.bfloat16, dim=128, interleave=False, output_f32=False, windows=(128, 16)):
     """Select a SWA provider and exclude only its documented unsupported parameters."""
     implementation, target, _ = backend
-    selected = implementation or _dispatch.resolve_implementation("swa", Target.parse(target))
+    target = Target.parse(target)
+    selected = implementation or _dispatch.resolve_implementation("swa", target)
+    if selected == "native" and target.arch_key == "npu.a5":
+        if dtype != torch.bfloat16 or dim != 128:
+            pytest.skip("A5 native SWA requires BF16 head_dim=128")
     if selected == "torch_npu":
         if dtype != torch.bfloat16 or dim != 128:
             pytest.skip("torch_npu SWA requires BF16 head_dim=128")
@@ -75,15 +82,19 @@ def operator_test(request, monkeypatch):
     if reference and "accuracy_backend" not in request.fixturenames:
         return  # Pure reference tests must also run without an accelerator.
     implementation, target, device = request.getfixturevalue("accuracy_backend")
+    selections = {}
     if not reference:
         markers = list(request.node.iter_markers("api"))
         assert markers, f"{request.node.nodeid}: missing api mark"
         for marker in markers:
             op_ids = set(marker.kwargs.get("ops", (api.removeprefix("functions.") for api in marker.args)))
-            check_implementation(op_ids, implementation, target)
+            # Composite APIs have no single backend. Their designated CI job
+            # supplies all dependencies and exercises the configured mixture.
+            selected = None if marker.kwargs.get("default_backend_job") == implementation else implementation
+            selections.update(check_implementation(op_ids, selected, target))
         private = additions("tests")
         if private is not None:
-            private.check_case(request, implementation, target)
+            private.check_case(request, selections)
     monkeypatch.setattr(target_utils, "_AUTO_TARGET", Target.parse(target))
     # Apply the same FP32 math policy to candidate and reference, then restore it.
     # These flags do not change input dtypes or production/performance defaults.
@@ -93,3 +104,4 @@ def operator_test(request, monkeypatch):
     elif device == "cuda":
         monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
         monkeypatch.setattr(torch.backends.cudnn, "allow_tf32", False)
+    return selections

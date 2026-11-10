@@ -12,6 +12,7 @@ from torch._dynamo.backends.common import aot_autograd
 
 from mojo_opset import functions as F
 from mojo_opset import preload
+from mojo_opset.functions._dispatch import load_impl
 from tests._checks import assert_close
 from tests._checks import assert_repeatable
 from tests._checks import clone_with_grad
@@ -125,6 +126,13 @@ def test_reference_flash_infer_matches_forward(causal):
 
 
 NATIVE_SWA_INFER_LENGTHS = [([129, 257], [513, 1025]), ([129, 257], [2049, 4097]), ([1024], [9216])]
+
+SWA_PACKED_CASES = [
+    pytest.param(16, False, 1023, ([129, 257], [513, 1025]), id="h16-aabb-ragged"),
+    pytest.param(16, True, 255, ([129, 257], [2049, 4097]), id="h16-abab-cached-prefix"),
+    pytest.param(8, False, 1023, ([1024], [4096]), id="h8-aabb-single"),
+    pytest.param(8, True, 255, ([257, 511], [1025, 2047]), id="h8-abab-ragged"),
+]
 
 
 def _make_native_swa_infer_case(device, heads, interleave, window, lengths):
@@ -294,7 +302,8 @@ def test_flash_attention_accuracy(accuracy_backend, dtype, tokens, q_heads, kv_h
 @pytest.mark.accuracy
 def test_native_swa_infer_accuracy(accuracy_backend, heads, interleave, window, lengths, case):
     implementation, _, device = accuracy_backend
-    if case != "default" and implementation == "torch":
+    rejected_case = case != "default"
+    if rejected_case and implementation == "torch":
         pytest.skip("native launch contract")
     torch.manual_seed(42)
     (q, k, v, cq, ck), kwargs = _make_native_swa_infer_case(device, heads, interleave, window, lengths)
@@ -312,7 +321,7 @@ def test_native_swa_infer_accuracy(accuracy_backend, heads, interleave, window, 
     elif case == "window":
         kwargs["local_window_size"] = 127
     inputs = (q, k, v, cq, ck)
-    if case != "default":
+    if rejected_case:
         with pytest.raises((RuntimeError, ValueError)):
             F.native_swa_infer(*inputs, implementation=implementation, **kwargs)
         return
@@ -388,7 +397,7 @@ def test_swa_shapes_bitwise(
 ):
     implementation, _, device = accuracy_backend
     selected = check_swa_case(accuracy_backend, dtype=dtype, dim=dim, interleave=interleave)
-    if max_q > 8192 and (device != "npu" or implementation == "torch"):
+    if max_q > 8192 and (device != "npu" or selected == "torch"):
         pytest.skip("original long cases require an optimized NPU provider")
     inputs, cq, ck = _make_swa_case(device, batch, q_heads, kv_heads, dim, max_q, max_cache, dtype)
     assert_repeatable(
@@ -531,16 +540,32 @@ def _make_swa_inputs(device, dtype):
 @pytest.mark.api("functions.swa")
 @pytest.mark.accuracy
 @pytest.mark.parametrize(
-    "case,lengths,interleave,local_window,global_window,output_f32",
-    [(None, [0, 256], False, 128, 16, output_f32) for output_f32 in (False, True)]
+    "case,lengths,heads,interleave,local_window,global_window,output_f32",
+    [(None, [0, 256], 4, False, 128, 16, output_f32) for output_f32 in (False, True)]
     + [
-        (None, [0, 97, 256], interleave, local, global_, True)
+        (None, [0, 97, 256], 4, interleave, local, global_, True)
         for interleave in (False, True)
         for local, global_ in ((None, None), (63, 4), (None, 16))
     ]
     + [
         pytest.param(
+            None,
+            lengths,
+            heads,
+            interleave,
+            local,
+            4,
+            output_f32,
+            id=f"{case.id}-cache-fp32{output_f32}",
+        )
+        for case in SWA_PACKED_CASES
+        for heads, interleave, local, lengths in [case.values]
+        for output_f32 in (False, True)
+    ]
+    + [
+        pytest.param(
             case.values,
+            None,
             None,
             interleave,
             local,
@@ -552,21 +577,29 @@ def _make_swa_inputs(device, dtype):
         for interleave, global_, local in ((True, 4, 255), (False, 4, 1023))
     ],
 )
-def test_swa_accuracy(accuracy_backend, case, lengths, interleave, local_window, global_window, output_f32):
+def test_swa_accuracy(accuracy_backend, case, lengths, heads, interleave, local_window, global_window, output_f32):
     implementation, _, device = accuracy_backend
+    dtype = torch.bfloat16 if case is None else case[-1]
+    dim = 128 if case is None else case[3]
     selected = check_swa_case(
         accuracy_backend,
-        dtype=torch.bfloat16 if case is None else case[-1],
-        dim=128 if case is None else case[3],
+        dtype=dtype,
+        dim=dim,
         interleave=interleave,
         output_f32=output_f32 if case is None else False,
         windows=(local_window, global_window),
     )
     if case is not None:
         output_f32 = selected != "torch_npu"
+    packed_case = case is None and isinstance(lengths[0], list)
     if case is None:
-        inputs = _make_swa_inputs(device, torch.bfloat16)
-        cq = ck = torch.tensor(lengths, dtype=torch.int32, device=device)
+        if packed_case:
+            torch.manual_seed(43)
+            (q, k, v, cq, ck), _ = _make_native_swa_infer_case(device, heads, interleave, local_window, lengths)
+            inputs = tuple(t.requires_grad_() for t in (q, k, v))
+        else:
+            inputs = _make_swa_inputs(device, torch.bfloat16)
+            cq = ck = torch.tensor(lengths, dtype=torch.int32, device=device)
         output_tolerance, grad_tolerance = (1e-2, 1e-2), (1e-2, 4e-2)
     else:
         inputs, cq, ck = _make_swa_case(device, *case)
