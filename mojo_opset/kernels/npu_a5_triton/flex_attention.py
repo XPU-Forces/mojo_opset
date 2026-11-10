@@ -1497,6 +1497,47 @@ def _prepare_block_mask_attrs(block_mask, q, num_q_blocks, sparse_q_block_size, 
         "has_full_blocks": has_full_blocks,
     }
 
+def _get_mask_block_sizes(block_mask):
+    """从 BlockMask 提取稀疏分块大小 (Q, KV)。
+
+    BlockMask.BLOCK_SIZE 记录了掩码构建时使用的分块粒度, kernel 必须以该粒度
+    解释 kv_block / q_block 索引, 否则会导致 KV 位置计算错误。
+
+    Args:
+        block_mask: 由 create_block_mask_patched / BlockMask.from_kv_blocks 构建的掩码对象。
+
+    Returns:
+        (sparse_q_block_size, sparse_kv_block_size): 掩码的 Q / KV 分块大小。
+        当 block_mask 缺少 BLOCK_SIZE 属性时, 回退为 (TILE_BLOCK_SIZE, TILE_BLOCK_SIZE)。
+
+    Raises:
+        ValueError: 当分块大小不是 TILE_BLOCK_SIZE 的正整数倍时。
+    """
+    raw_bs = getattr(block_mask, "BLOCK_SIZE", None)
+    if raw_bs is None:
+        sparse_q_block_size = sparse_kv_block_size = TILE_BLOCK_SIZE
+    elif isinstance(raw_bs, int):
+        sparse_q_block_size = sparse_kv_block_size = raw_bs
+    else:
+        sparse_q_block_size, sparse_kv_block_size = raw_bs
+
+    if (
+        not isinstance(sparse_q_block_size, int)
+        or not isinstance(sparse_kv_block_size, int)
+        or sparse_q_block_size < TILE_BLOCK_SIZE
+        or sparse_kv_block_size < TILE_BLOCK_SIZE
+        or sparse_q_block_size % TILE_BLOCK_SIZE != 0
+        or sparse_kv_block_size % TILE_BLOCK_SIZE != 0
+    ):
+        raise ValueError(
+            "FlexAttention NPU kernels require Q and KV BlockMask block sizes "
+            f"to be integer multiples of {TILE_BLOCK_SIZE} and at least "
+            f"{TILE_BLOCK_SIZE}; received (Q, KV)=({sparse_q_block_size}, "
+            f"{sparse_kv_block_size}). Block sizes such as 32, 64, or "
+            "non-divisible values are unsupported by the current 128-tile kernels."
+        )
+
+    return sparse_q_block_size, sparse_kv_block_size
 
 def flex_attention_fwd_impl(
     q: torch.Tensor,
@@ -1515,8 +1556,7 @@ def flex_attention_fwd_impl(
 
     BLOCK_M = TILE_BLOCK_SIZE
     BLOCK_N = TILE_BLOCK_SIZE
-    SPARSE_Q_BLOCK_SIZE = BLOCK_M
-    SPARSE_KV_BLOCK_SIZE = BLOCK_N
+    SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE = _get_mask_block_sizes(block_mask)
 
     num_q_blocks = triton.cdiv(M, BLOCK_M)
     num_sparse_q_blocks = triton.cdiv(M, SPARSE_Q_BLOCK_SIZE)
@@ -1808,8 +1848,7 @@ def flex_attention_bwd_impl(
     BLOCK_M_DQ = TILE_BLOCK_SIZE
     BLOCK_N_DQ = TILE_BLOCK_SIZE
 
-    SPARSE_Q_BLOCK_SIZE = TILE_BLOCK_SIZE
-    SPARSE_KV_BLOCK_SIZE = TILE_BLOCK_SIZE
+    SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE = _get_mask_block_sizes(block_mask)
     
     num_q_blocks = triton.cdiv(M, BLOCK_M_DQ)
     num_sparse_q_blocks = triton.cdiv(M, SPARSE_Q_BLOCK_SIZE)
