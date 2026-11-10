@@ -1,4 +1,4 @@
-# KPool tail cache seeding on Ascend A2 and 950PR
+# KPool tail cache seeding on Ascend A2 and A5
 
 `mojo_opset.functions.kpool_seed_tail_cache(cache, key, gate_score, tslot)`
 seeds the paged tail cache for GLM-5.3-Flash prefill. It writes K and gate
@@ -20,7 +20,7 @@ rows must be unique, and cache storage must be separate from the inputs.
   each run together when its destinations follow ring order. Other layouts
   use the 16-row bitmap fallback. The high word of an INT64 slot provides
   the sign check and the low word supplies the valid slot address.
-- 950PR uses one JIT with paths for tiny, short, and general inputs. Its
+- A5 uses one JIT with paths for tiny, short, and general inputs. Its
   general path autotunes the tile size.
 
 ## Accuracy and performance cases
