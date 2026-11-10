@@ -49,8 +49,8 @@ padding and guards, and checks that the three inputs are unchanged.
 
 ```sh
 pytest tests/functions/test_kpool_seed_tail_cache.py --mojo-target npu.a2
-pytest tests/functions/test_kpool_seed_tail_cache.py --mojo-target npu.a5.950pr
-pytest tests/performance/functions/test_kpool_seed_tail_cache.py --mojo-target npu.a5.950pr \
+pytest tests/functions/test_kpool_seed_tail_cache.py --mojo-target npu.a5
+pytest tests/performance/functions/test_kpool_seed_tail_cache.py --mojo-target npu.a5 \
   --perf-warmup 5 --perf-repeats 20 --perf-output /tmp/kpool-a5.json
 ```
 
