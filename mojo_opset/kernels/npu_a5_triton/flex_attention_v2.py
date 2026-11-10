@@ -14,7 +14,6 @@ from mojo_opset.kernels.npu_a5_triton._private import flex_attention_dq_cache_co
 from mojo_opset.utils.flex_attention_mask import _create_sparse_block_from_block_mask
 from mojo_opset.utils.target import get_torch_device as _get_torch_device
 
-
 TILE_BLOCK_SIZE = 128
 _DQ_INTRA_CACHE_NUM, _DQ_INTER_CACHE_NUM = flex_attention_dq_cache_config()
 
@@ -717,6 +716,8 @@ def flex_attention_backward_dkdv_kernel(
             )
 
             for off_g in range(0, GQA_SHARED_HEADS):
+                dk_acc = tl.zeros([BLOCK_N, QK_HEAD_DIM], tl.float32)
+                dv_acc = tl.zeros([BLOCK_N, V_HEAD_DIM], tl.float32)
                 off_hq = off_hkv * GQA_SHARED_HEADS + off_g
                 off_hq = off_hq.to(tl.int64)
 
@@ -745,7 +746,7 @@ def flex_attention_backward_dkdv_kernel(
                     offs_m = q_start + tl.arange(0, BLOCK_M)
                     q_sparse_idx = q_block
 
-                    bwd_dkdv_block_mn(
+                    dk_tile, dv_tile = bwd_dkdv_block_mn(
                         Q_h, DO_h, DQ_h, DK_ptr, DELTA_h, LSE_h, DV_ptr,
                         DENSE_MASK, stride_mask_m, stride_mask_n,
                         PARTIAL_MASK_PACKED, stride_partial_p, stride_partial_m, stride_partial_n,
@@ -767,6 +768,8 @@ def flex_attention_backward_dkdv_kernel(
                         USE_PACKED_PARTIAL_MASK=USE_PACKED_PARTIAL_MASK,
                         COMPUTE_DQ=False,
                     )
+                    dk_acc += dk_tile
+                    dv_acc += dv_tile
 
                 if HAS_FULL_BLOCKS:
                     q_indices = FULL_Q_IDX + sparse_q_idx_offset
@@ -782,7 +785,7 @@ def flex_attention_backward_dkdv_kernel(
                         q_start = q_block * SPARSE_Q_BLOCK_SIZE + (start_m % sparse_q_multiple) * BLOCK_M
                         offs_m = q_start + tl.arange(0, BLOCK_M)
 
-                        bwd_dkdv_block_mn(
+                        dk_tile, dv_tile = bwd_dkdv_block_mn(
                             Q_h, DO_h, DQ_h, DK_ptr, DELTA_h, LSE_h, DV_ptr,
                             DENSE_MASK, stride_mask_m, stride_mask_n,
                             PARTIAL_MASK_PACKED, stride_partial_p, stride_partial_m, stride_partial_n,
@@ -804,6 +807,14 @@ def flex_attention_backward_dkdv_kernel(
                             USE_PACKED_PARTIAL_MASK=USE_PACKED_PARTIAL_MASK,
                             COMPUTE_DQ=False,
                         )
+                        dk_acc += dk_tile
+                        dv_acc += dv_tile
+
+                # Accumulate once per query head, instead of once per query tile.
+                tl.atomic_add(DK_ptr + offs_n[:, None] * stride_dkn + offs_k[None, :] * stride_dkk,
+                         dk_acc, mask=(offs_n[:, None] < KV_LEN) & (offs_k[None, :] < QK_HEAD_DIM))
+                tl.atomic_add(DV_ptr + offs_n[:, None] * stride_dvn + offs_v[None, :] * stride_dvk,
+                         dv_acc, mask=(offs_n[:, None] < KV_LEN) & (offs_v[None, :] < V_HEAD_DIM))
 
 
 @triton.jit
@@ -881,11 +892,7 @@ def bwd_dkdv_block_mn(
     p = tl.math.exp(qk - lse[:, None])
 
     dv = tl.dot(tl.trans(p.to(MATMUL_PRECISION)), do, input_precision="ieee")
-    tl.atomic_add(
-        DV_ptr + offs_n[:, None] * stride_dvn + offs_v[None, :] * stride_dvk,
-        dv,
-        mask=(offs_n[:, None] < KV_LEN) & (offs_v[None, :] < V_HEAD_DIM),
-    )
+
 
     Di = tl.load(DELTA + offs_m, mask=offs_m < Q_LEN, other=0.0)
     dp = tl.dot(do, tl.trans(v), input_precision="ieee")
@@ -901,11 +908,7 @@ def bwd_dkdv_block_mn(
         )
 
     dk = tl.dot(tl.trans(ds.to(MATMUL_PRECISION)), q, input_precision="ieee")
-    tl.atomic_add(
-        DK_ptr + offs_n[:, None] * stride_dkn + offs_k[None, :] * stride_dkk,
-        dk,
-        mask=(offs_n[:, None] < KV_LEN) & (offs_k[None, :] < QK_HEAD_DIM),
-    )
+    return dk, dv
 
 
 def _resolve_has_full_blocks(block_mask) -> bool:
@@ -1118,9 +1121,117 @@ def flex_attention_fwd_impl(
     num_tasks = num_q_blocks * Z * Hq
     grid, num_tasks = _persistent_launch_config(num_tasks)
 
-    _flex_attention_v2_forward_leaf([q, k, v, bm['kv_num_blks'], bm['kv_idx'], bm['full_kv_num_blks'], bm['full_kv_idx'], bm['dense_mask'], bm['packed_partial_mask'], bm['partial_mask_offsets']], [output, lse], [bm['dense_mask'].stride(2), bm['dense_mask'].stride(3), bm['packed_partial_mask'].stride(0), bm['packed_partial_mask'].stride(1), bm['packed_partial_mask'].stride(2), bm['partial_mask_offsets'].stride(2), q.stride(0), q.stride(1), q.stride(2), q.stride(3), k.stride(0), k.stride(1), k.stride(2), k.stride(3), v.stride(0), v.stride(1), v.stride(2), v.stride(3), output.stride(0), output.stride(1), output.stride(2), output.stride(3), lse.stride(0), lse.stride(1), lse.stride(2), bm['kv_idx'].stride(2), D, Dv, BLOCK_M, BLOCK_N, num_tasks, num_q_blocks, Hq, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE, M, N, GQA_SHARED_HEADS], [sm_scale], [bm['use_packed_partial_mask'], bm['has_full_blocks']], list(grid))
+    _flex_attention_v2_forward_leaf(
+        [
+            q,
+            k,
+            v,
+            bm["kv_num_blks"],
+            bm["kv_idx"],
+            bm["full_kv_num_blks"],
+            bm["full_kv_idx"],
+            bm["dense_mask"],
+            bm["packed_partial_mask"],
+            bm["partial_mask_offsets"],
+        ],
+        [output, lse],
+        [
+            bm["dense_mask"].stride(2),
+            bm["dense_mask"].stride(3),
+            bm["packed_partial_mask"].stride(0),
+            bm["packed_partial_mask"].stride(1),
+            bm["packed_partial_mask"].stride(2),
+            bm["partial_mask_offsets"].stride(2),
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            q.stride(3),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            k.stride(3),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            v.stride(3),
+            output.stride(0),
+            output.stride(1),
+            output.stride(2),
+            output.stride(3),
+            lse.stride(0),
+            lse.stride(1),
+            lse.stride(2),
+            bm["kv_idx"].stride(2),
+            D,
+            Dv,
+            BLOCK_M,
+            BLOCK_N,
+            num_tasks,
+            num_q_blocks,
+            Hq,
+            SPARSE_Q_BLOCK_SIZE,
+            SPARSE_KV_BLOCK_SIZE,
+            M,
+            N,
+            GQA_SHARED_HEADS,
+        ],
+        [sm_scale],
+        [bm["use_packed_partial_mask"], bm["has_full_blocks"]],
+        list(grid),
+    )
 
     return output, lse
+
+
+@triton.jit
+def _flex_attention_delta_kernel(
+    output_ptr, DO, DELTA, ROWS: tl.constexpr, M: tl.constexpr,
+    H: tl.constexpr, D: tl.constexpr,
+    O0: tl.constexpr, O1: tl.constexpr, O2: tl.constexpr, O3: tl.constexpr,
+    DO0: tl.constexpr, DO1: tl.constexpr, DO2: tl.constexpr, DO3: tl.constexpr,
+    BLOCK_R: tl.constexpr, BLOCK_D: tl.constexpr, CONTIG: tl.constexpr,
+):
+    for tile in range(tl.program_id(0), tl.cdiv(ROWS, BLOCK_R), tl.num_programs(0)):
+        # Widen before multiplication so large tensor offsets cannot wrap in int32.
+        r = tile.to(tl.int64) * BLOCK_R + tl.arange(0, BLOCK_R)
+        d = tl.arange(0, BLOCK_D).to(tl.int64)
+        if CONTIG:
+            # Flatten contiguous rows to avoid integer division in vector address generation.
+            oo = r[:, None] * D + d[None, :]
+            doo = oo
+        else:
+            z, h, m = r // (H * M), r // M % H, r % M
+            oo = (z * O0 + h * O1 + m * O2)[:, None] + d[None, :] * O3
+            doo = (z * DO0 + h * DO1 + m * DO2)[:, None] + d[None, :] * DO3
+        valid = (r[:, None] < ROWS) & (d[None, :] < D)
+        o = tl.load(output_ptr + oo, mask=valid, other=0).to(tl.float32)
+        do = tl.load(DO + doo, mask=valid, other=0).to(tl.float32)
+        delta = tl.sum(o * do, 1)
+        tl.store(DELTA + r, delta, mask=r < ROWS)
+
+
+@torch.library.custom_op("mojo_npu_triton_a5::flex_attention_v2_delta", mutates_args=("delta",))
+def _flex_attention_delta_leaf(output: torch.Tensor, grad_output: torch.Tensor, delta: torch.Tensor) -> None:
+    z, h, m, d = output.shape
+    grid = (min(get_num_cores("vector"), triton.cdiv(z * h * m, 16)),)
+    _flex_attention_delta_kernel[grid](
+        output, grad_output, delta, z * h * m, m, h, d,
+        *output.stride(), *grad_output.stride(),
+        BLOCK_R=16, BLOCK_D=triton.next_power_of_2(d),
+        CONTIG=output.is_contiguous() and grad_output.is_contiguous(),
+        enable_fp_fusion=False,
+    )
+
+
+@_flex_attention_delta_leaf.register_fake
+def _flex_attention_delta_leaf_fake(output, grad_output, delta):
+    return None
+
+
+def _compute_delta(output, grad_output):
+    delta = torch.empty(output.shape[:-1], dtype=torch.float32, device=output.device)
+    _flex_attention_delta_leaf(output, grad_output, delta)
+    return delta
 
 
 def flex_attention_bwd_impl(
@@ -1141,7 +1252,7 @@ def flex_attention_bwd_impl(
         sm_scale = 1.0 / (D ** 0.5)
 
     grad_output = grad_output.contiguous()
-    delta = (output.float() * grad_output.float()).sum(dim=-1).contiguous()
+    delta = _compute_delta(output, grad_output)
 
     SPARSE_Q_BLOCK_SIZE = TILE_BLOCK_SIZE
     SPARSE_KV_BLOCK_SIZE = TILE_BLOCK_SIZE
@@ -1159,14 +1270,161 @@ def flex_attention_bwd_impl(
     BLOCK_N_DQ = TILE_BLOCK_SIZE
     NUM_KV_SUB_BLOCKS_VAL = SPARSE_KV_BLOCK_SIZE // BLOCK_N_DQ
     grid_dq, num_tasks_dq = _persistent_launch_config(num_q_blocks * Z * Hq)
-    _flex_attention_v2_dq_leaf([q, k, v, grad_output, lse, delta, bm['kv_num_blks'], bm['kv_idx'], bm['full_kv_num_blks'], bm['full_kv_idx'], bm['dense_mask'], bm['packed_partial_mask'], bm['partial_mask_offsets'], bm['partial_block_table']], [dq], [bm['dense_mask'].stride(2), bm['dense_mask'].stride(3), bm['packed_partial_mask'].stride(0), bm['packed_partial_mask'].stride(1), bm['packed_partial_mask'].stride(2), bm['partial_mask_offsets'].stride(2), bm['partial_block_table'].stride(0), bm['partial_block_table'].stride(1), q.stride(0), q.stride(1), q.stride(2), q.stride(3), k.stride(0), k.stride(1), k.stride(2), k.stride(3), v.stride(0), v.stride(1), v.stride(2), v.stride(3), grad_output.stride(0), grad_output.stride(1), grad_output.stride(2), grad_output.stride(3), lse.stride(0), lse.stride(1), lse.stride(2), delta.stride(0), delta.stride(1), delta.stride(2), dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3), bm['kv_idx'].stride(2), D, Dv, BLOCK_M_DQ, BLOCK_N_DQ, NUM_KV_SUB_BLOCKS_VAL, num_tasks_dq, num_q_blocks, Hq, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE, M, N, GQA_SHARED_HEADS], [sm_scale], [bm['use_packed_partial_mask'], bm['has_full_blocks']], list(grid_dq))
+    _flex_attention_v2_dq_leaf(
+        [
+            q,
+            k,
+            v,
+            grad_output,
+            lse,
+            delta,
+            bm["kv_num_blks"],
+            bm["kv_idx"],
+            bm["full_kv_num_blks"],
+            bm["full_kv_idx"],
+            bm["dense_mask"],
+            bm["packed_partial_mask"],
+            bm["partial_mask_offsets"],
+            bm["partial_block_table"],
+        ],
+        [dq],
+        [
+            bm["dense_mask"].stride(2),
+            bm["dense_mask"].stride(3),
+            bm["packed_partial_mask"].stride(0),
+            bm["packed_partial_mask"].stride(1),
+            bm["packed_partial_mask"].stride(2),
+            bm["partial_mask_offsets"].stride(2),
+            bm["partial_block_table"].stride(0),
+            bm["partial_block_table"].stride(1),
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            q.stride(3),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            k.stride(3),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            v.stride(3),
+            grad_output.stride(0),
+            grad_output.stride(1),
+            grad_output.stride(2),
+            grad_output.stride(3),
+            lse.stride(0),
+            lse.stride(1),
+            lse.stride(2),
+            delta.stride(0),
+            delta.stride(1),
+            delta.stride(2),
+            dq.stride(0),
+            dq.stride(1),
+            dq.stride(2),
+            dq.stride(3),
+            bm["kv_idx"].stride(2),
+            D,
+            Dv,
+            BLOCK_M_DQ,
+            BLOCK_N_DQ,
+            NUM_KV_SUB_BLOCKS_VAL,
+            num_tasks_dq,
+            num_q_blocks,
+            Hq,
+            SPARSE_Q_BLOCK_SIZE,
+            SPARSE_KV_BLOCK_SIZE,
+            M,
+            N,
+            GQA_SHARED_HEADS,
+        ],
+        [sm_scale],
+        [bm["use_packed_partial_mask"], bm["has_full_blocks"]],
+        list(grid_dq),
+    )
 
     BLOCK_M_DKDV = TILE_BLOCK_SIZE
     BLOCK_N_DKDV = TILE_BLOCK_SIZE
     NUM_KV_SUB_BLOCKS_VAL = SPARSE_KV_BLOCK_SIZE // BLOCK_N_DKDV
     num_kv_blocks = triton.cdiv(N, SPARSE_KV_BLOCK_SIZE)
     grid_dkv, num_tasks_dkv = _persistent_launch_config(num_kv_blocks * Z * Hkv)
-    _flex_attention_v2_dkdv_leaf([q, k, v, grad_output, lse, delta, bm['q_num_blks'], bm['q_idx'], bm['full_q_num_blks'], bm['full_q_idx'], bm['dense_mask'], bm['packed_partial_mask'], bm['partial_mask_offsets'], bm['partial_block_table'], dq], [dk, dv], [bm['dense_mask'].stride(2), bm['dense_mask'].stride(3), bm['packed_partial_mask'].stride(0), bm['packed_partial_mask'].stride(1), bm['packed_partial_mask'].stride(2), bm['partial_mask_offsets'].stride(2), bm['partial_block_table'].stride(0), bm['partial_block_table'].stride(1), q.stride(0), q.stride(1), q.stride(2), q.stride(3), k.stride(0), k.stride(1), k.stride(2), k.stride(3), v.stride(0), v.stride(1), v.stride(2), v.stride(3), grad_output.stride(0), grad_output.stride(1), grad_output.stride(2), grad_output.stride(3), lse.stride(0), lse.stride(1), lse.stride(2), delta.stride(0), delta.stride(1), delta.stride(2), dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3), dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3), bm['q_idx'].stride(2), D, Dv, BLOCK_M_DKDV, BLOCK_N_DKDV, NUM_KV_SUB_BLOCKS_VAL, num_tasks_dkv, num_kv_blocks, Hkv, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE, M, N, GQA_SHARED_HEADS], [sm_scale], [bm['use_packed_partial_mask'], bm['has_full_blocks']], list(grid_dkv))
+    _flex_attention_v2_dkdv_leaf(
+        [
+            q,
+            k,
+            v,
+            grad_output,
+            lse,
+            delta,
+            bm["q_num_blks"],
+            bm["q_idx"],
+            bm["full_q_num_blks"],
+            bm["full_q_idx"],
+            bm["dense_mask"],
+            bm["packed_partial_mask"],
+            bm["partial_mask_offsets"],
+            bm["partial_block_table"],
+            dq,
+        ],
+        [dk, dv],
+        [
+            bm["dense_mask"].stride(2),
+            bm["dense_mask"].stride(3),
+            bm["packed_partial_mask"].stride(0),
+            bm["packed_partial_mask"].stride(1),
+            bm["packed_partial_mask"].stride(2),
+            bm["partial_mask_offsets"].stride(2),
+            bm["partial_block_table"].stride(0),
+            bm["partial_block_table"].stride(1),
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            q.stride(3),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            k.stride(3),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            v.stride(3),
+            grad_output.stride(0),
+            grad_output.stride(1),
+            grad_output.stride(2),
+            grad_output.stride(3),
+            lse.stride(0),
+            lse.stride(1),
+            lse.stride(2),
+            delta.stride(0),
+            delta.stride(1),
+            delta.stride(2),
+            dk.stride(0),
+            dk.stride(1),
+            dk.stride(2),
+            dk.stride(3),
+            dv.stride(0),
+            dv.stride(1),
+            dv.stride(2),
+            dv.stride(3),
+            bm["q_idx"].stride(2),
+            D,
+            Dv,
+            BLOCK_M_DKDV,
+            BLOCK_N_DKDV,
+            NUM_KV_SUB_BLOCKS_VAL,
+            num_tasks_dkv,
+            num_kv_blocks,
+            Hkv,
+            SPARSE_Q_BLOCK_SIZE,
+            SPARSE_KV_BLOCK_SIZE,
+            M,
+            N,
+            GQA_SHARED_HEADS,
+        ],
+        [sm_scale],
+        [bm["use_packed_partial_mask"], bm["has_full_blocks"]],
+        list(grid_dkv),
+    )
 
     return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype)
 

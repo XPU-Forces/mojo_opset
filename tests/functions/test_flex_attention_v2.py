@@ -85,3 +85,57 @@ def test_bitwise(accuracy_backend, case):
     impl, device = _require_flex(accuracy_backend)
     inputs, mask, _ = make_inputs(case, device)
     assert_repeatable(partial(F.flex_attention_v2, block_mask=mask, enable_gqa=True, implementation=impl), inputs)
+
+
+@pytest.mark.api("functions.flex_attention_v2")
+@pytest.mark.accuracy
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("strided", [False, True])
+def test_a5_delta_strides_and_tail(accuracy_backend, dtype, strided):
+    impl, target, device = accuracy_backend
+    if not (target == "npu.a5" or target.startswith("npu.a5.")) or impl not in (None, "triton"):
+        pytest.skip("Ascend A5 fused backward delta")
+    from mojo_opset.kernels.npu_a5_triton.flex_attention_v2 import _compute_delta
+
+    shape = (2, 257, 3, 128) if strided else (2, 3, 257, 128)
+    output = torch.randn(shape, dtype=dtype, device=device)
+    upstream = torch.randn_like(output)
+    if strided:
+        output = output.transpose(1, 2)
+        upstream = upstream.transpose(1, 2)
+    expected = (output.float() * upstream.float()).sum(dim=-1)
+    actual = _compute_delta(output, upstream)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.api("functions.flex_attention_v2")
+@pytest.mark.accuracy
+def test_a5_multiple_kv_tiles_and_query_heads(accuracy_backend):
+    impl, target, device = accuracy_backend
+    if not (target == "npu.a5" or target.startswith("npu.a5.")) or impl not in (None, "triton"):
+        pytest.skip("Ascend A5 KV tile ownership and GQA accumulation")
+    from mojo_opset.kernels.npu_a5_triton.flex_attention_v2 import flex_attention_bwd_impl
+    from mojo_opset.kernels.npu_a5_triton.flex_attention_v2 import flex_attention_fwd_impl
+
+    torch.manual_seed(37)
+    q = torch.randn(2, 6, 513, 128, dtype=torch.bfloat16, device=device)
+    k = torch.randn(2, 2, 385, 128, dtype=q.dtype, device=device)
+    v = torch.randn_like(k)
+
+    def mask_mod(b, h, qi, ki):
+        return (qi >= ki) & ((qi - ki) <= 149)
+
+    mask = create_flex_block_mask(mask_mod, Q_LEN=513, KV_LEN=385, device=device, BLOCK_SIZE=128)
+    output, lse = flex_attention_fwd_impl(q, k, v, mask)
+    upstream = torch.randn_like(output)
+    grads = flex_attention_bwd_impl(upstream, q, k, v, output, lse, mask)
+    refs = tuple(x.detach().cpu().double().requires_grad_(True) for x in (q, k, v))
+    qi = torch.arange(513)[:, None]
+    ki = torch.arange(385)[None, :]
+    ref_output = torch.nn.functional.scaled_dot_product_attention(
+        refs[0], refs[1].repeat_interleave(3, 1), refs[2].repeat_interleave(3, 1),
+        attn_mask=mask_mod(0, 0, qi, ki),
+    )
+    ref_grads = torch.autograd.grad(ref_output, refs, upstream.cpu().double())
+    for actual, expected in zip((output, *grads), (ref_output, *ref_grads)):
+        torch.testing.assert_close(actual.cpu().double(), expected, rtol=2e-2, atol=5e-2)

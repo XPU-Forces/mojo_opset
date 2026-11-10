@@ -5,9 +5,8 @@ import torch
 import triton
 import triton.language as tl
 
-from mojo_opset.kernels._npu_triton_utils import libentry
-
 from mojo_opset.kernels._npu_triton_utils import VEC_ALIGN_BYTES
+from mojo_opset.kernels._npu_triton_utils import libentry
 from mojo_opset.kernels._triton_utils import align
 
 """
@@ -111,7 +110,7 @@ def _swiglu_fwd_kernel(
     key=["n_cols", "HAS_SCALES"],
 )
 @triton.jit(do_not_specialize=["n_rows"])
-def _swiglu_bwd_kernel(
+def _swiglu_bwd_blocked_kernel(
     dc,
     a,
     b,
@@ -171,6 +170,51 @@ def _swiglu_bwd_kernel(
 
         if HAS_SCALES:
             tl.store(dscales + rows_off, dscale_acc, mask=rows_mask)
+
+
+@libentry()
+@triton.autotune(
+    configs=[triton.Config({"BLOCK_SIZE_M": rows}) for rows in (1, 2, 4, 8, 12, 16)],
+    key=["n_cols", "HAS_SCALES"],
+)
+@triton.jit(do_not_specialize=["n_rows"])
+def _swiglu_bwd_kernel(
+    dc,
+    a,
+    b,
+    scales,
+    da,
+    db,
+    dscales,
+    stride_row: tl.constexpr,
+    n_rows,
+    n_cols: tl.constexpr,
+    HAS_SCALES: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+):
+    cols = tl.arange(0, BLOCK_SIZE_N)
+    num_tasks = tl.cdiv(n_rows, BLOCK_SIZE_M)
+    for task in tl.range(tl.program_id(0), num_tasks, tl.num_programs(0)):
+        rows = task * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offsets = rows[:, None] * stride_row + cols[None, :]
+        mask = (rows[:, None] < n_rows) & (cols[None, :] < n_cols)
+        x = tl.load(a + offsets, mask, 0.0).to(tl.float32)
+        y = tl.load(b + offsets, mask, 0.0).to(tl.float32)
+        grad = tl.load(dc + offsets, mask, 0.0).to(tl.float32)
+        sigmoid = tl.sigmoid(x)
+        silu = x * sigmoid
+        scaled_grad = grad
+        if HAS_SCALES:
+            scale = tl.load(scales + rows, rows < n_rows, 0.0).to(tl.float32)
+            scaled_grad *= scale[:, None]
+            # A complete row needs no loop-carried partial reduction.
+            grad_scale = tl.sum(tl.where(cols[None, :] < n_cols, grad * silu * y, 0.0), 1)
+            tl.store(dscales + rows, grad_scale, rows < n_rows)
+        grad_a = scaled_grad * y * (silu * (1.0 - sigmoid) + sigmoid)
+        grad_b = scaled_grad * silu
+        tl.store(da + offsets, grad_a, mask)
+        tl.store(db + offsets, grad_b, mask)
 
 
 def swiglu_train_fwd_impl(
@@ -282,7 +326,8 @@ def swiglu_train_bwd_impl(
     num_programs = triton.runtime.driver.active.utils.get_device_properties("npu")["num_vectorcore"]
     grid = (num_programs,)
 
-    _swiglu_bwd_kernel[grid](
+    kernel = _swiglu_bwd_kernel if n_cols <= BLOCK_SIZE_N else _swiglu_bwd_blocked_kernel
+    kernel[grid](
         dc_2d,
         a_2d,
         b_2d,
