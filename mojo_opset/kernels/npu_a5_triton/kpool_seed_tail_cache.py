@@ -9,23 +9,9 @@ import triton.language as tl
 import triton.runtime.driver as driver
 
 
-def _prune_fused_configs(configs, named_args, **kwargs):
-    n = named_args["N"]
-    if n <= 4:
-        allowed = (1, 2, 4, 8, 16)
-    elif n <= 9:
-        allowed = (8, 16, 32)
-    else:
-        allowed = (16, 32)
-    return [
-        config for config in configs if config.kwargs["BLOCK_T"] in allowed and (n > 9 or config.kwargs["BLOCK_T"] >= n)
-    ]
-
-
 @triton.autotune(
     configs=[triton.Config({"BLOCK_T": b}, num_warps=32) for b in (1, 2, 4, 8, 16, 32)],
     key=["N", "RING", "STRIDE_B", "STRIDE_KG", "SLOT_BITS", "INDEX32", "VECTOR_CORES", "PACK_BITS", "WORD32"],
-    prune_configs_by={"early_config_prune": _prune_fused_configs},
     cache_results=True,
 )
 @triton.jit
@@ -46,104 +32,45 @@ def _seed_tail_fused_kernel(
     WORD32: tl.constexpr,
     RING_SHIFT: tl.constexpr,
 ):
-    if N <= 4:
-        COPY_WIDTH: tl.constexpr = 64 if WORD32 else 128
-        COPY_STRIDE_B: tl.constexpr = STRIDE_B // 2 if WORD32 else STRIDE_B
-        COPY_STRIDE_KG: tl.constexpr = STRIDE_KG // 2 if WORD32 else STRIDE_KG
-        if WORD32:
-            KEY = KEY.to(tl.pointer_type(tl.int32))
-            GATE = GATE.to(tl.pointer_type(tl.int32))
-            CACHE = CACHE.to(tl.pointer_type(tl.int32))
-        element = tl.arange(0, BLOCK_T * COPY_WIDTH).to(tl.int32)
-        rows = element // COPY_WIDTH
-        d = element % COPY_WIDTH
-        raw = tl.load(SLOT + rows, mask=rows < N, other=-1)
-        selected = ((raw >> (SLOT_BITS - 1)).to(tl.int32) == 0) & (rows < N)
-        t = tl.maximum(raw.to(tl.int32), 0)
-        block = t // RING
-        ring_slot = t - block * RING
-        if INDEX32:
-            src = element
-            dst = block * COPY_STRIDE_B + ring_slot * COPY_WIDTH + d
-        else:
-            src = element.to(tl.int64)
-            dst = block.to(tl.int64) * COPY_STRIDE_B + ring_slot * COPY_WIDTH + d
-        k = tl.load(KEY + src, mask=rows < N, other=0)
-        g = tl.load(GATE + src, mask=rows < N, other=0)
-        tl.store(CACHE + dst, k, mask=selected)
-        gate_dst = dst + COPY_STRIDE_KG
-        tl.store(CACHE + gate_dst, g, mask=selected)
-    elif N <= 9:
-        COPY_WIDTH: tl.constexpr = 64 if WORD32 else 128
-        COPY_STRIDE_B: tl.constexpr = STRIDE_B // 2 if WORD32 else STRIDE_B
-        COPY_STRIDE_KG: tl.constexpr = STRIDE_KG // 2 if WORD32 else STRIDE_KG
-        if WORD32:
-            KEY = KEY.to(tl.pointer_type(tl.int32))
-            GATE = GATE.to(tl.pointer_type(tl.int32))
-            CACHE = CACHE.to(tl.pointer_type(tl.int32))
-        element = tl.arange(0, BLOCK_T * COPY_WIDTH).to(tl.int32)
-        rows = element // COPY_WIDTH
-        d = element % COPY_WIDTH
+    COPY_WIDTH: tl.constexpr = 64 if WORD32 else 128
+    COPY_STRIDE_B: tl.constexpr = STRIDE_B // 2 if WORD32 else STRIDE_B
+    COPY_STRIDE_KG: tl.constexpr = STRIDE_KG // 2 if WORD32 else STRIDE_KG
+    if WORD32:
+        KEY = KEY.to(tl.pointer_type(tl.int32))
+        GATE = GATE.to(tl.pointer_type(tl.int32))
+        CACHE = CACHE.to(tl.pointer_type(tl.int32))
+    else:
+        KEY = KEY.to(tl.pointer_type(tl.int16))
+        GATE = GATE.to(tl.pointer_type(tl.int16))
+        CACHE = CACHE.to(tl.pointer_type(tl.int16))
+    TILES: tl.constexpr = (N + BLOCK_T - 1) // BLOCK_T
+    STEP: tl.constexpr = 1 if TILES <= 8 else (VECTOR_CORES if VECTOR_CORES < TILES else TILES)
+    lane = tl.arange(0, BLOCK_T).to(tl.int32)
+    cols = tl.arange(0, COPY_WIDTH).to(tl.int32)
+    for tile in range(tl.program_id(0), TILES, STEP):
+        rows = tile.to(tl.int32) * BLOCK_T + lane
         raw = tl.load(SLOT + rows, mask=rows < N, other=-1)
         ahead = tl.load(SLOT + rows + 4, mask=rows + 4 < N, other=-1)
         valid = ((raw >> (SLOT_BITS - 1)).to(tl.int32) == 0) & (rows < N)
         ahead_valid = (ahead >> (SLOT_BITS - 1)).to(tl.int32) == 0
-        t = tl.maximum(raw.to(tl.int32), 0)
-        a = tl.maximum(ahead.to(tl.int32), 0)
-        block = t // RING
-        selected = valid & ~(ahead_valid & ((a // RING) == block))
-        ring_slot = t - block * RING
+        slot = tl.maximum(raw.to(tl.int32), 0)
+        ahead_slot = tl.maximum(ahead.to(tl.int32), 0)
+        block = slot >> RING_SHIFT if RING_SHIFT >= 0 else slot // RING
+        ahead_block = ahead_slot >> RING_SHIFT if RING_SHIFT >= 0 else ahead_slot // RING
+        selected = valid & ~(ahead_valid & (ahead_block == block))
+        ring_slot = slot - block * RING
         if INDEX32:
-            src = element
-            dst = block * COPY_STRIDE_B + ring_slot * COPY_WIDTH + d
+            src = rows[:, None] * COPY_WIDTH + cols[None, :]
+            dst = (block * COPY_STRIDE_B + ring_slot * COPY_WIDTH)[:, None] + cols[None, :]
         else:
-            src = element.to(tl.int64)
-            dst = block.to(tl.int64) * COPY_STRIDE_B + ring_slot * COPY_WIDTH + d
-        k = tl.load(KEY + src, mask=selected, other=0)
-        g = tl.load(GATE + src, mask=selected, other=0)
-        tl.store(CACHE + dst, k, mask=selected)
-        gate_dst = dst + COPY_STRIDE_KG
-        tl.store(CACHE + gate_dst, g, mask=selected)
-    else:
-        COPY_WIDTH: tl.constexpr = 64 if WORD32 else 128
-        COPY_STRIDE_B: tl.constexpr = STRIDE_B // 2 if WORD32 else STRIDE_B
-        COPY_STRIDE_KG: tl.constexpr = STRIDE_KG // 2 if WORD32 else STRIDE_KG
-        if WORD32:
-            KEY = KEY.to(tl.pointer_type(tl.int32))
-            GATE = GATE.to(tl.pointer_type(tl.int32))
-            CACHE = CACHE.to(tl.pointer_type(tl.int32))
-        else:
-            KEY = KEY.to(tl.pointer_type(tl.int16))
-            GATE = GATE.to(tl.pointer_type(tl.int16))
-            CACHE = CACHE.to(tl.pointer_type(tl.int16))
-        TILES: tl.constexpr = (N + BLOCK_T - 1) // BLOCK_T
-        STEP: tl.constexpr = 1 if TILES <= 8 else (VECTOR_CORES if VECTOR_CORES < TILES else TILES)
-        lane = tl.arange(0, BLOCK_T).to(tl.int32)
-        cols = tl.arange(0, COPY_WIDTH).to(tl.int32)
-        for tile in range(tl.program_id(0), TILES, STEP):
-            rows = tile.to(tl.int32) * BLOCK_T + lane
-            raw = tl.load(SLOT + rows, mask=rows < N, other=-1)
-            ahead = tl.load(SLOT + rows + 4, mask=rows + 4 < N, other=-1)
-            valid = ((raw >> (SLOT_BITS - 1)).to(tl.int32) == 0) & (rows < N)
-            ahead_valid = (ahead >> (SLOT_BITS - 1)).to(tl.int32) == 0
-            slot = tl.maximum(raw.to(tl.int32), 0)
-            ahead_slot = tl.maximum(ahead.to(tl.int32), 0)
-            block = slot >> RING_SHIFT if RING_SHIFT >= 0 else slot // RING
-            ahead_block = ahead_slot >> RING_SHIFT if RING_SHIFT >= 0 else ahead_slot // RING
-            selected = valid & ~(ahead_valid & (ahead_block == block))
-            ring_slot = slot - block * RING
-            if INDEX32:
-                src = rows[:, None] * COPY_WIDTH + cols[None, :]
-                dst = (block * COPY_STRIDE_B + ring_slot * COPY_WIDTH)[:, None] + cols[None, :]
-            else:
-                src = rows.to(tl.int64)[:, None] * COPY_WIDTH + cols[None, :]
-                dst = (block.to(tl.int64) * COPY_STRIDE_B + ring_slot * COPY_WIDTH)[:, None] + cols[None, :]
-            # Full contiguous row-tile reads trade bandwidth for eliminating the
-            # scalar-selected-run copy sequence. Stores touch selected rows only.
-            key_words = tl.load(KEY + src, mask=(rows < N)[:, None], other=0)
-            gate_words = tl.load(GATE + src, mask=(rows < N)[:, None], other=0)
-            tl.store(CACHE + dst, key_words, mask=selected[:, None])
-            tl.store(CACHE + dst + COPY_STRIDE_KG, gate_words, mask=selected[:, None])
+            src = rows.to(tl.int64)[:, None] * COPY_WIDTH + cols[None, :]
+            dst = (block.to(tl.int64) * COPY_STRIDE_B + ring_slot * COPY_WIDTH)[:, None] + cols[None, :]
+        # Full contiguous row-tile reads trade bandwidth for eliminating the
+        # scalar-selected-run copy sequence. Stores touch selected rows only.
+        key_words = tl.load(KEY + src, mask=(rows < N)[:, None], other=0)
+        gate_words = tl.load(GATE + src, mask=(rows < N)[:, None], other=0)
+        tl.store(CACHE + dst, key_words, mask=selected[:, None])
+        tl.store(CACHE + dst + COPY_STRIDE_KG, gate_words, mask=selected[:, None])
 
 
 @lru_cache(maxsize=None)
@@ -181,56 +108,6 @@ def _route(tail_kv_cache, key, gate_score, tslot, vector_cores):
     index32 = (
         n * 128 < 2**31 and cache_extent < 2**31 and tail_kv_cache.stride(0) < 2**31 and tail_kv_cache.stride(1) < 2**31
     )
-    # Alignment proof uses host metadata only; no tensor-value reads.
-    word32 = (
-        n <= 9
-        and tail_kv_cache.stride(0) % 2 == 0
-        and tail_kv_cache.stride(1) % 2 == 0
-        and key.data_ptr() % 4 == 0
-        and gate_score.data_ptr() % 4 == 0
-        and tail_kv_cache.data_ptr() % 4 == 0
-    )
-    if n <= 4:
-        _seed_tail_fused_kernel[(1,)](
-            key,
-            gate_score,
-            tslot,
-            tail_kv_cache,
-            n,
-            tail_kv_cache.shape[2],
-            tail_kv_cache.stride(0),
-            tail_kv_cache.stride(1),
-            tslot.element_size() * 8,
-            INDEX32=index32,
-            WORD32=False,
-            VECTOR_CORES=vector_cores,
-            PACK_BITS=0,
-            RING_SHIFT=-1,
-            compile_mode="simt_only",
-        )
-        return None
-
-    if n <= 9:
-        # Point17: short-input group uses a bounded tile; all larger shapes retain generic fallback.
-        _seed_tail_fused_kernel[(1,)](
-            key,
-            gate_score,
-            tslot,
-            tail_kv_cache,
-            n,
-            tail_kv_cache.shape[2],
-            tail_kv_cache.stride(0),
-            tail_kv_cache.stride(1),
-            tslot.element_size() * 8,
-            INDEX32=index32,
-            WORD32=word32,
-            VECTOR_CORES=vector_cores,
-            PACK_BITS=0,
-            RING_SHIFT=-1,
-            compile_mode="simt_only",
-        )
-        return None
-
     # E114 generic-only alignment proof from effective pointers/metadata.
     generic_word32 = (
         tail_kv_cache.stride(0) % 2 == 0
@@ -252,8 +129,6 @@ def _route(tail_kv_cache, key, gate_score, tslot, vector_cores):
         total_tiles = triton.cdiv(n, meta["BLOCK_T"])
         return (1 if total_tiles <= 8 else min(vector_cores, total_tiles),)
 
-    ring = tail_kv_cache.shape[2]
-    ring_shift = ring.bit_length() - 1 if (ring & (ring - 1)) == 0 else -1
     _seed_tail_fused_kernel[grid](
         key,
         gate_score,
@@ -268,7 +143,11 @@ def _route(tail_kv_cache, key, gate_score, tslot, vector_cores):
         VECTOR_CORES=vector_cores,
         PACK_BITS=pack_bits,
         WORD32=generic_word32,
-        RING_SHIFT=ring_shift,
+        RING_SHIFT=(
+            tail_kv_cache.shape[2].bit_length() - 1
+            if (tail_kv_cache.shape[2] & (tail_kv_cache.shape[2] - 1)) == 0
+            else -1
+        ),
         compile_mode="simt_only",
     )
     return None
