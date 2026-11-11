@@ -1,7 +1,16 @@
 import torch
 
 
-def convert_req_index_to_global_index_fwd(req_id, block_table, token_indices, block_size, num_topk_tokens, has_prefill, prefill_workspace_request_ids, prefill_workspace_starts):
+def convert_req_index_to_global_index_fwd(
+    req_id,
+    block_table,
+    token_indices,
+    block_size,
+    num_topk_tokens,
+    has_prefill,
+    prefill_workspace_request_ids,
+    prefill_workspace_starts,
+):
     block_id = torch.div(token_indices, block_size, rounding_mode="floor")
     offset = token_indices.remainder(block_size)
     safe_block = block_id.clamp(0, block_table.shape[1] - 1).long()

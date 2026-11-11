@@ -1,4 +1,4 @@
-﻿"""opt_iter_3：opt_iter_2 + 尾部无掩码快路径 + 单条无效判定。
+"""opt_iter_3：opt_iter_2 + 尾部无掩码快路径 + 单条无效判定。
 
 相对 opt_iter_2：
 - EXACT 分支：当每个 program 的行区间长度都是 ROWS 的整数倍时（chunk % ROWS == 0
@@ -61,33 +61,23 @@ def _convert_req_index_kernel(
             if HAS_PREFILL:
                 prefs = tl.load(prefill_req_ptr + rows).to(tl.int32)
                 is_pref = prefs >= 0
-                ws = tl.load(
-                    workspace_ptr + tl.maximum(prefs, 0), mask=is_pref, other=0
-                ).to(tl.int32)
+                ws = tl.load(workspace_ptr + tl.maximum(prefs, 0), mask=is_pref, other=0).to(tl.int32)
             if MAX_BLOCKS == BLOCK_BT:
-                bt_2d = tl.load(
-                    block_table_ptr + reqs[:, None] * MAX_BLOCKS + bt_cols[None, :]
-                )
+                bt_2d = tl.load(block_table_ptr + reqs[:, None] * MAX_BLOCKS + bt_cols[None, :])
             else:
                 bt_2d = tl.load(
                     block_table_ptr + reqs[:, None] * MAX_BLOCKS + bt_cols[None, :],
                     mask=bt_cols[None, :] < MAX_BLOCKS,
                     other=0,
                 )
-            tok = tl.load(
-                token_indices_ptr + rows[:, None] * BLOCK_N + cols[None, :]
-            )
+            tok = tl.load(token_indices_ptr + rows[:, None] * BLOCK_N + cols[None, :])
         else:
             r_mask = rows < end
             reqs = tl.load(req_id_ptr + rows, mask=r_mask, other=0).to(tl.int32)
             if HAS_PREFILL:
-                prefs = tl.load(
-                    prefill_req_ptr + rows, mask=r_mask, other=-1
-                ).to(tl.int32)
+                prefs = tl.load(prefill_req_ptr + rows, mask=r_mask, other=-1).to(tl.int32)
                 is_pref = prefs >= 0
-                ws = tl.load(
-                    workspace_ptr + tl.maximum(prefs, 0), mask=is_pref, other=0
-                ).to(tl.int32)
+                ws = tl.load(workspace_ptr + tl.maximum(prefs, 0), mask=is_pref, other=0).to(tl.int32)
             if MAX_BLOCKS == BLOCK_BT:
                 bt_2d = tl.load(
                     block_table_ptr + reqs[:, None] * MAX_BLOCKS + bt_cols[None, :],
@@ -126,9 +116,7 @@ def _convert_req_index_kernel(
             )
 
         if EXACT:
-            tl.store(
-                out_ptr + rows[:, None] * BLOCK_N + cols[None, :], out_val
-            )
+            tl.store(out_ptr + rows[:, None] * BLOCK_N + cols[None, :], out_val)
         else:
             tl.store(
                 out_ptr + rows[:, None] * BLOCK_N + cols[None, :],
@@ -214,6 +202,23 @@ class ModelNew(nn.Module):
         return out
 
 
-
-def convert_req_index_to_global_index_fwd(req_id, block_table, token_indices, block_size, num_topk_tokens, has_prefill, prefill_workspace_request_ids, prefill_workspace_starts):
-    return ModelNew()(req_id, block_table, token_indices, block_size, num_topk_tokens, has_prefill, prefill_workspace_request_ids, prefill_workspace_starts)
+def convert_req_index_to_global_index_fwd(
+    req_id,
+    block_table,
+    token_indices,
+    block_size,
+    num_topk_tokens,
+    has_prefill,
+    prefill_workspace_request_ids,
+    prefill_workspace_starts,
+):
+    return ModelNew()(
+        req_id,
+        block_table,
+        token_indices,
+        block_size,
+        num_topk_tokens,
+        has_prefill,
+        prefill_workspace_request_ids,
+        prefill_workspace_starts,
+    )

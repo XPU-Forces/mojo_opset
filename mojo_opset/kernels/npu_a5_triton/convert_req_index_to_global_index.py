@@ -44,9 +44,7 @@ def _convert_req_index_kernel_small(
     token_id = pid
     req = tl.load(req_id_ptr + token_id).to(tl.int32)
 
-    tok = tl.load(
-        token_indices_ptr + token_id * ti_stride0 + col * ti_stride1
-    ).to(tl.int32)
+    tok = tl.load(token_indices_ptr + token_id * ti_stride0 + col * ti_stride1).to(tl.int32)
 
     row = tl.load(
         block_table_ptr + req * bt_stride0 + row_offs * bt_stride1,
@@ -133,9 +131,7 @@ def _convert_req_index_kernel_per_token(
             other=0,
         )
 
-        tok = tl.load(
-            token_indices_ptr + token_id * ti_stride0 + col * ti_stride1
-        ).to(tl.int32)
+        tok = tl.load(token_indices_ptr + token_id * ti_stride0 + col * ti_stride1).to(tl.int32)
 
         row = tl.load(
             block_table_ptr + req * bt_stride0 + row_offs * bt_stride1,
@@ -179,15 +175,28 @@ def _convert_req_index_kernel_per_token(
 
 @triton.jit
 def _convert_req_index_tile(
-    req_id_ptr, block_table_ptr, token_indices_ptr, out_ptr,
-    prefill_ids_ptr, prefill_starts_ptr, tokens, tmask,
-    max_blocks: tl.constexpr, MB_P2: tl.constexpr,
-    LOG2_BS: tl.constexpr, BS_MASK: tl.constexpr,
-    BLOCK_N: tl.constexpr, TPI: tl.constexpr,
-    HAS_PREFILL: tl.constexpr, EXACT: tl.constexpr,
-    bt_stride0: tl.constexpr, bt_stride1: tl.constexpr,
-    ti_stride0: tl.constexpr, ti_stride1: tl.constexpr,
-    out_stride0: tl.constexpr, out_stride1: tl.constexpr,
+    req_id_ptr,
+    block_table_ptr,
+    token_indices_ptr,
+    out_ptr,
+    prefill_ids_ptr,
+    prefill_starts_ptr,
+    tokens,
+    tmask,
+    max_blocks: tl.constexpr,
+    MB_P2: tl.constexpr,
+    LOG2_BS: tl.constexpr,
+    BS_MASK: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    TPI: tl.constexpr,
+    HAS_PREFILL: tl.constexpr,
+    EXACT: tl.constexpr,
+    bt_stride0: tl.constexpr,
+    bt_stride1: tl.constexpr,
+    ti_stride0: tl.constexpr,
+    ti_stride1: tl.constexpr,
+    out_stride0: tl.constexpr,
+    out_stride1: tl.constexpr,
 ):
     lanes = tl.arange(0, TPI)
     row_offs = tl.arange(0, MB_P2)
@@ -197,14 +206,24 @@ def _convert_req_index_tile(
         tok = tl.load(token_indices_ptr + tokens[:, None] * ti_stride0 + col[None, :] * ti_stride1).to(tl.int32)
     else:
         reqs = tl.load(req_id_ptr + tokens, mask=tmask, other=0).to(tl.int32)
-        tok = tl.load(token_indices_ptr + tokens[:, None] * ti_stride0 + col[None, :] * ti_stride1, mask=tmask[:, None], other=0).to(tl.int32)
+        tok = tl.load(
+            token_indices_ptr + tokens[:, None] * ti_stride0 + col[None, :] * ti_stride1, mask=tmask[:, None], other=0
+        ).to(tl.int32)
     if EXACT:
         if MB_P2 == max_blocks:
             rows = tl.load(block_table_ptr + reqs[:, None] * bt_stride0 + row_offs[None, :] * bt_stride1).to(tl.int32)
         else:
-            rows = tl.load(block_table_ptr + reqs[:, None] * bt_stride0 + row_offs[None, :] * bt_stride1, mask=row_offs[None, :] < max_blocks, other=0).to(tl.int32)
+            rows = tl.load(
+                block_table_ptr + reqs[:, None] * bt_stride0 + row_offs[None, :] * bt_stride1,
+                mask=row_offs[None, :] < max_blocks,
+                other=0,
+            ).to(tl.int32)
     else:
-        rows = tl.load(block_table_ptr + reqs[:, None] * bt_stride0 + row_offs[None, :] * bt_stride1, mask=tmask[:, None] & (row_offs[None, :] < max_blocks), other=0).to(tl.int32)
+        rows = tl.load(
+            block_table_ptr + reqs[:, None] * bt_stride0 + row_offs[None, :] * bt_stride1,
+            mask=tmask[:, None] & (row_offs[None, :] < max_blocks),
+            other=0,
+        ).to(tl.int32)
     is_prefill = tl.zeros([TPI], dtype=tl.int1)
     workspace_start = tl.zeros([TPI], dtype=tl.int32)
     if HAS_PREFILL:
@@ -213,7 +232,9 @@ def _convert_req_index_tile(
         else:
             p_req = tl.load(prefill_ids_ptr + tokens, mask=tmask, other=-1).to(tl.int32)
         is_prefill = p_req.to(tl.float32) >= 0
-        workspace_start = tl.load(prefill_starts_ptr + tl.maximum(p_req, 0), mask=is_prefill & tmask, other=0).to(tl.int32)
+        workspace_start = tl.load(prefill_starts_ptr + tl.maximum(p_req, 0), mask=is_prefill & tmask, other=0).to(
+            tl.int32
+        )
     block_id = tok >> LOG2_BS
     inblock_off = tok & BS_MASK
     gather_idx = block_id & (MB_P2 - 1)
@@ -235,14 +256,27 @@ def _convert_req_index_tile(
 
 @triton.jit
 def _convert_req_index_kernel_batched(
-    req_id_ptr, block_table_ptr, token_indices_ptr, out_ptr,
-    prefill_ids_ptr, prefill_starts_ptr,
-    num_tokens: tl.constexpr, max_blocks: tl.constexpr, MB_P2: tl.constexpr,
-    LOG2_BS: tl.constexpr, BS_MASK: tl.constexpr, BLOCK_N: tl.constexpr,
-    NUM_PROGS: tl.constexpr, TPI: tl.constexpr, HAS_PREFILL: tl.constexpr,
-    bt_stride0: tl.constexpr, bt_stride1: tl.constexpr,
-    ti_stride0: tl.constexpr, ti_stride1: tl.constexpr,
-    out_stride0: tl.constexpr, out_stride1: tl.constexpr,
+    req_id_ptr,
+    block_table_ptr,
+    token_indices_ptr,
+    out_ptr,
+    prefill_ids_ptr,
+    prefill_starts_ptr,
+    num_tokens: tl.constexpr,
+    max_blocks: tl.constexpr,
+    MB_P2: tl.constexpr,
+    LOG2_BS: tl.constexpr,
+    BS_MASK: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    NUM_PROGS: tl.constexpr,
+    TPI: tl.constexpr,
+    HAS_PREFILL: tl.constexpr,
+    bt_stride0: tl.constexpr,
+    bt_stride1: tl.constexpr,
+    ti_stride0: tl.constexpr,
+    ti_stride1: tl.constexpr,
+    out_stride0: tl.constexpr,
+    out_stride1: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int32)
     lanes = tl.arange(0, TPI)
@@ -250,27 +284,61 @@ def _convert_req_index_kernel_batched(
     for batch in range(0, num_tokens // (NUM_PROGS * TPI)):
         tokens = (batch * NUM_PROGS + pid) * TPI + lanes
         _convert_req_index_tile(
-            req_id_ptr, block_table_ptr, token_indices_ptr, out_ptr,
-            prefill_ids_ptr, prefill_starts_ptr, tokens, tl.full([TPI], True, tl.int1),
-            max_blocks, MB_P2, LOG2_BS, BS_MASK, BLOCK_N, TPI, HAS_PREFILL, True,
-            bt_stride0, bt_stride1, ti_stride0, ti_stride1, out_stride0, out_stride1,
+            req_id_ptr,
+            block_table_ptr,
+            token_indices_ptr,
+            out_ptr,
+            prefill_ids_ptr,
+            prefill_starts_ptr,
+            tokens,
+            tl.full([TPI], True, tl.int1),
+            max_blocks,
+            MB_P2,
+            LOG2_BS,
+            BS_MASK,
+            BLOCK_N,
+            TPI,
+            HAS_PREFILL,
+            True,
+            bt_stride0,
+            bt_stride1,
+            ti_stride0,
+            ti_stride1,
+            out_stride0,
+            out_stride1,
         )
     if num_tokens - (num_tokens // (NUM_PROGS * TPI)) * NUM_PROGS * TPI > 0:
         tokens = ((num_tokens // (NUM_PROGS * TPI)) * NUM_PROGS + pid) * TPI + lanes
         _convert_req_index_tile(
-            req_id_ptr, block_table_ptr, token_indices_ptr, out_ptr,
-            prefill_ids_ptr, prefill_starts_ptr, tokens, tokens < num_tokens,
-            max_blocks, MB_P2, LOG2_BS, BS_MASK, BLOCK_N, TPI, HAS_PREFILL, False,
-            bt_stride0, bt_stride1, ti_stride0, ti_stride1, out_stride0, out_stride1,
+            req_id_ptr,
+            block_table_ptr,
+            token_indices_ptr,
+            out_ptr,
+            prefill_ids_ptr,
+            prefill_starts_ptr,
+            tokens,
+            tokens < num_tokens,
+            max_blocks,
+            MB_P2,
+            LOG2_BS,
+            BS_MASK,
+            BLOCK_N,
+            TPI,
+            HAS_PREFILL,
+            False,
+            bt_stride0,
+            bt_stride1,
+            ti_stride0,
+            ti_stride1,
+            out_stride0,
+            out_stride1,
         )
 
 
 class ModelNew(nn.Module):
     def __init__(self):
         super().__init__()
-        properties = driver.active.utils.get_device_properties(
-            torch_npu.npu.current_device()
-        )
+        properties = driver.active.utils.get_device_properties(torch_npu.npu.current_device())
         self.num_cores = properties["num_vectorcore"]
 
     def forward(
@@ -325,9 +393,7 @@ class ModelNew(nn.Module):
             block_n,
         )
 
-        use_batched = (num_tokens >= self.num_cores) and (
-            block_n <= 512 or num_tokens >= 128 * self.num_cores
-        )
+        use_batched = (num_tokens >= self.num_cores) and (block_n <= 512 or num_tokens >= 128 * self.num_cores)
 
         if num_tokens <= self.num_cores:
             # Exactly one live token per program: no loop or speculative prefetch.
@@ -378,5 +444,23 @@ class ModelNew(nn.Module):
         return out
 
 
-def convert_req_index_to_global_index_fwd(req_id, block_table, token_indices, block_size, num_topk_tokens, has_prefill, prefill_workspace_request_ids, prefill_workspace_starts):
-    return ModelNew()(req_id, block_table, token_indices, block_size, num_topk_tokens, has_prefill, prefill_workspace_request_ids, prefill_workspace_starts)
+def convert_req_index_to_global_index_fwd(
+    req_id,
+    block_table,
+    token_indices,
+    block_size,
+    num_topk_tokens,
+    has_prefill,
+    prefill_workspace_request_ids,
+    prefill_workspace_starts,
+):
+    return ModelNew()(
+        req_id,
+        block_table,
+        token_indices,
+        block_size,
+        num_topk_tokens,
+        has_prefill,
+        prefill_workspace_request_ids,
+        prefill_workspace_starts,
+    )

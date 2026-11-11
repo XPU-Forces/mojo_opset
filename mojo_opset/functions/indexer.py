@@ -91,9 +91,16 @@ def indexer(
 
 
 def convert_req_index_to_global_index(
-    req_id, block_table, token_indices, block_size, num_topk_tokens,
-    has_prefill=False, prefill_workspace_request_ids=None,
-    prefill_workspace_starts=None, *, implementation=None,
+    req_id,
+    block_table,
+    token_indices,
+    block_size,
+    num_topk_tokens,
+    has_prefill=False,
+    prefill_workspace_request_ids=None,
+    prefill_workspace_starts=None,
+    *,
+    implementation=None,
 ):
     """Map per-request token indices to paged cache or prefill workspace indices.
 
@@ -112,14 +119,22 @@ def convert_req_index_to_global_index(
         raise ValueError("num_topk_tokens must be a positive power of two")
     if not isinstance(block_size, int) or block_size <= 0 or block_size & (block_size - 1):
         raise ValueError("block_size must be a positive power of two")
-    if token_indices.shape != (req_id.numel(), num_topk_tokens) or block_table.shape[0] == 0 or block_table.shape[1] == 0:
+    if (
+        token_indices.shape != (req_id.numel(), num_topk_tokens)
+        or block_table.shape[0] == 0
+        or block_table.shape[1] == 0
+    ):
         raise ValueError("incompatible or empty input shapes")
     if has_prefill:
         if prefill_workspace_request_ids is None or prefill_workspace_starts is None:
             raise ValueError("prefill requires workspace request IDs and starts")
         if prefill_workspace_request_ids.dtype != torch.int32 or prefill_workspace_starts.dtype != torch.int32:
             raise ValueError("prefill tensors must be int32")
-        if prefill_workspace_request_ids.shape != req_id.shape or prefill_workspace_starts.ndim != 1 or prefill_workspace_starts.numel() == 0:
+        if (
+            prefill_workspace_request_ids.shape != req_id.shape
+            or prefill_workspace_starts.ndim != 1
+            or prefill_workspace_starts.numel() == 0
+        ):
             raise ValueError("invalid prefill tensor shapes")
         tensors += (prefill_workspace_request_ids, prefill_workspace_starts)
     if any(t.device != req_id.device for t in tensors):
@@ -128,4 +143,13 @@ def convert_req_index_to_global_index(
     if req_id.numel() == 0:
         return torch.empty_like(token_indices)
     forward, _ = load_impl("convert_req_index_to_global_index", implementation)
-    return forward(req_id, block_table, token_indices, block_size, num_topk_tokens, has_prefill, prefill_workspace_request_ids, prefill_workspace_starts)
+    return forward(
+        req_id,
+        block_table,
+        token_indices,
+        block_size,
+        num_topk_tokens,
+        has_prefill,
+        prefill_workspace_request_ids,
+        prefill_workspace_starts,
+    )
