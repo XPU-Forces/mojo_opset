@@ -25,6 +25,7 @@ from .gemm import quant_gemm
 from .indexer import indexer
 from .indexer import lightning_indexer
 from .kv_cache import store_paged_kv_cache
+from .layernorm_gated import layer_norm_gated
 from .multimodal_rope_infer import multimodal_rope_infer
 from .normalization import group_rms_norm_infer
 from .normalization import layer_norm_infer
@@ -80,6 +81,7 @@ __all__ = [
     "group_rms_norm_infer",
     "indexer",
     "join_prob_reject_sampling",
+    "layer_norm_gated",
     "layer_norm_infer",
     "layer_norm_quant",
     "lightning_indexer",
