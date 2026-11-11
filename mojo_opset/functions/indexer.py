@@ -88,3 +88,44 @@ def indexer(
     if mask is not None:
         scores = scores + mask
     return scores.topk(min(topk, end_pos), dim=-1).indices, scores
+
+
+def convert_req_index_to_global_index(
+    req_id, block_table, token_indices, block_size, num_topk_tokens,
+    has_prefill=False, prefill_workspace_request_ids=None,
+    prefill_workspace_starts=None, *, implementation=None,
+):
+    """Map per-request token indices to paged cache or prefill workspace indices.
+
+    All inputs are int32 on one device. Token indices are -1 or nonnegative;
+    request IDs and nonnegative prefill IDs must index their respective tables.
+    Decode indices beyond the block table map to -1. Prefill indices are
+    workspace-relative and are not limited by the decode block table.
+    Both block_size and num_topk_tokens must be positive powers of two.
+    """
+    tensors = (req_id, block_table, token_indices)
+    if any(t.dtype != torch.int32 for t in tensors):
+        raise ValueError("req_id, block_table and token_indices must be int32")
+    if req_id.ndim != 1 or block_table.ndim != 2 or token_indices.ndim != 2:
+        raise ValueError("expected req_id [T], block_table [R, M], token_indices [T, K]")
+    if not isinstance(num_topk_tokens, int) or num_topk_tokens <= 0 or num_topk_tokens & (num_topk_tokens - 1):
+        raise ValueError("num_topk_tokens must be a positive power of two")
+    if not isinstance(block_size, int) or block_size <= 0 or block_size & (block_size - 1):
+        raise ValueError("block_size must be a positive power of two")
+    if token_indices.shape != (req_id.numel(), num_topk_tokens) or block_table.shape[0] == 0 or block_table.shape[1] == 0:
+        raise ValueError("incompatible or empty input shapes")
+    if has_prefill:
+        if prefill_workspace_request_ids is None or prefill_workspace_starts is None:
+            raise ValueError("prefill requires workspace request IDs and starts")
+        if prefill_workspace_request_ids.dtype != torch.int32 or prefill_workspace_starts.dtype != torch.int32:
+            raise ValueError("prefill tensors must be int32")
+        if prefill_workspace_request_ids.shape != req_id.shape or prefill_workspace_starts.ndim != 1 or prefill_workspace_starts.numel() == 0:
+            raise ValueError("invalid prefill tensor shapes")
+        tensors += (prefill_workspace_request_ids, prefill_workspace_starts)
+    if any(t.device != req_id.device for t in tensors):
+        raise ValueError("all tensors must be on the same device")
+    _require_inference("convert_req_index_to_global_index", *tensors)
+    if req_id.numel() == 0:
+        return torch.empty_like(token_indices)
+    forward, _ = load_impl("convert_req_index_to_global_index", implementation)
+    return forward(req_id, block_table, token_indices, block_size, num_topk_tokens, has_prefill, prefill_workspace_request_ids, prefill_workspace_starts)

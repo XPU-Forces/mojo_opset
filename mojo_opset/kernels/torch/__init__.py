@@ -3,6 +3,7 @@
 from mojo_opset.utils._exports import extend_bindings as _extend_bindings
 
 OPS = {
+    "convert_req_index_to_global_index": "convert_req_index_to_global_index",
     "rms_norm_quant": "fused_quantization",
     "layer_norm_quant": "fused_quantization",
     "residual_add_rms_norm_quant": "fused_quantization",

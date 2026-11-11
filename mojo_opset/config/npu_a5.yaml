@@ -17,6 +17,7 @@ npu.a5:
   join_prob_reject_sampling: triton
   layer_norm_infer: triton
   layer_norm_quant: torch_npu
+  convert_req_index_to_global_index: triton
   lightning_indexer: triton
   moe_dynamic_quant: triton
   multimodal_rope_infer: triton
