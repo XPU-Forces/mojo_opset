@@ -18,7 +18,11 @@ Numerical contract (matches the reference implementation)
    happens once.
 4. The quant path rounds to the output dtype **before** computing the amax, then
    ``scale = max(amax, 1e-10) / 448`` and a clamp to +-448, so ``(q, s)`` is bit-identical to
-   the unfused ``per_token_group_quant_fp8``.
+   the unfused ``per_token_group_quant_fp8``. Two rounding details are load bearing and were
+   measured on Ascend950PR: ``torch`` divides the amax by the scalar 448 as a reciprocal
+   multiply, so the kernel multiplies by ``1/448`` as well (an IEEE divide lands one ULP low
+   and moves a handful of ``q`` bytes); the payload quotient is a tensor/tensor division, so it
+   uses ``div_rn`` rather than a reciprocal multiply.
 5. ``Z_IS_3D`` addresses the gate through ``(row // Z_HEADS) * stride_z_token +
    (row % Z_HEADS) * stride_z_head``; that form is affine in the row vector, so the gate tile
    stays a bulk transfer instead of degenerating into a gather.
@@ -180,8 +184,9 @@ def _layer_norm_fwd_1pass_kernel(
         # One program is one token, so the amax below spans exactly one token's heads -- the
         # same window per_token_group_quant_fp8 uses.
         y = tl.where(mask, y.to(Y.dtype.element_ty).to(tl.float32), 0.0)
-        y_s = tl.maximum(tl.max(tl.abs(y)), 1e-10) / 448.0
-        y_q = tl.clamp(y * (1.0 / y_s), -448.0, 448.0).to(Q.dtype.element_ty)
+        amax = tl.maximum(tl.max(tl.abs(y)), 1e-10)
+        y_s = amax * (1.0 / 448.0)
+        y_q = tl.clamp(tl.math.div_rn(y, y_s), -448.0, 448.0).to(Q.dtype.element_ty)
         tl.store(Q + rows[:, None] * N + col_offsets, y_q, mask=mask)
         tl.store(S + tl.program_id(0), y_s)
     else:
@@ -193,6 +198,15 @@ def _is_a2_910b3() -> bool:
     """True on Ascend 910B3 (A2). The row counts below were swept on cannlab X51Cm."""
     try:
         return "910B3" in triton.runtime.driver.active.get_current_target().arch
+    except Exception:
+        return False
+
+
+@lru_cache(maxsize=1)
+def _is_a5() -> bool:
+    """True on Ascend 950 (A5). The row counts below were swept on DevEnv_499150."""
+    try:
+        return "950" in triton.runtime.driver.active.get_current_target().arch
     except Exception:
         return False
 
@@ -246,6 +260,14 @@ def _pick_rows_per_block(
             if m <= 262144:
                 return min(m, 56)
             return min(m, 40)
+    if _is_a5():
+        # Swept on DevEnv_499150 (Ascend950PR, CANN 9.2.0-beta.2). With a strided 3-D gate the
+        # gate tile is the limiter, so the row count buys bandwidth up to the UB budget (four
+        # live FP32 tiles of ``rows * 128 * 4 B``); past ~96 rows the tile stops helping.
+        if block_n == 128 and has_gate and ngroups == 1:
+            if m <= 65536:
+                return min(m, 56)
+            return min(m, 80)
     live = _LIVE_FP32_TILES if has_gate else _LIVE_FP32_TILES - 1
     rows = _UB_TILE_BUDGET // (live * 4 * max(block_n, 1))
     rows = max(1, min(rows, m, 64))

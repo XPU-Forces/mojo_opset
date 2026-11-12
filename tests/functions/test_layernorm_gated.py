@@ -229,7 +229,9 @@ def test_layernorm_gated_quant(accuracy_backend):
         (q_ref, s_ref), _, _ = F.layernorm_gated_infer(
             x, weight, None, EPS, z=z, implementation="torch", **kwargs
         )
-        assert torch.equal(q, q_ref), f"FP8 q mismatch (gate={gate})"
+        # aclnnEqual has no FP8 kernel on Ascend, so compare the stored bytes: bit-exactness
+        # is the contract here, and the byte view is the only way to assert it portably.
+        assert torch.equal(q.view(torch.uint8), q_ref.view(torch.uint8)), f"FP8 q mismatch (gate={gate})"
         assert torch.equal(s, s_ref), f"FP8 scale mismatch (gate={gate})"
 
 
