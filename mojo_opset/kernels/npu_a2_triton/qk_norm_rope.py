@@ -27,12 +27,13 @@ Ascend specific design
   layout measures 181 GB/s at one row per transfer against 2.1 TB/s at 32 rows. The tile
   schedule (``_qk_norm_rope_tile_kernel``) therefore spans every head of a token -- 14 KB
   contiguous for the H3 geometry -- leaving three bulk loads and one bulk store per token,
-  and it is what runs everywhere except Ascend 910B3 (see ``_is_a2_910b3``).
-* On 910B3 the 1-D schedule stays: that box is the only place where a wide tile measured
-  slow (a ``(8, head_dim)`` tile per program, 64-row tile, 235 MB case -> 40.3 ms = 11.2 us
-  per program, 5.9 GB/s, the signature of the 240x regression filed as
-  triton-lang/triton-ascend#2865), and it is the box the 1-D row counts were swept on. The
-  tile schedule is not enabled there until it can be re-measured.
+  and it is what runs on every platform.
+* Measured on all three: 4096x56 goes 5756 -> 517 us on Ascend950PR, 6586 -> 743 us on A3
+  (910_9382) and 7854 -> 858 us on 910B3 (DevEnv_466517, CANN 9.2.0-beta.2). The earlier
+  "a 2-D tile is 40.3 ms" note described an earlier form that launched one ``(8, head_dim)``
+  tile per program; the shape that works is one tile per *token*, i.e. much wider, in a loop.
+* The 1-D schedule stays in the file as the ``MOJO_T1_TILE=0`` escape hatch, and as the
+  record of the row-count sweep it was tuned with.
 * The 1-D schedule walks ``bt`` tokens and ``hpg`` heads, one 1-D row at a time, so the
   prologue (the weight loads and the ``pair_dims`` index chain) is amortised over
   ``bt * hpg`` rows (``rmsnorm.py`` uses the same schedule).
@@ -103,13 +104,13 @@ def _qk_norm_rope_kernel(
     |----------------------------------------------|----------|
     | 1-D row, table hoisted, affine partner       | 7.8 ms   |
     | 1-D row, table per head, partner by index    | 53.2 ms  |
-    | 2-D ``(8, head_dim)`` tile                   | 40.3 ms  |
+    | 2-D ``(8, head_dim)`` tile, one per program   | 40.3 ms  |
     | flat 2 KB tile + ``tl.reshape`` + 2-D reduce  | 676 ms   |
 
-    so a 2-D tile is not merely slower here, it is a different regime (the sibling operator hit
-    the same wall, triton-lang/triton-ascend#2865). The remaining 1-D cost is dominated by the
-    256 B transfer size: a pure row-wise copy of this layout reaches only 157 GB/s on the same
-    box, against 288 GB/s for the ``npu_rms_norm`` + ``npu_rotary_mul`` composition.
+    Those four are the *1-D-schedule* family and the wall they hit is the 256 B transfer: a
+    pure row-wise copy of this layout reaches only 157 GB/s on the same box. The shape that
+    breaks it is a much wider tile in a token loop (``_qk_norm_rope_tile_kernel``), not an
+    8-row one launched per program.
 
     Cumulative stage ablation, one stream of 4096x56 (117 MB), 3891 us = 17.0 ns/row
     (``results/t1_a2_20261029/stage.json``):
@@ -417,21 +418,6 @@ def _launch(
 
 
 
-@lru_cache(maxsize=1)
-def _is_a2_910b3() -> bool:
-    """True on Ascend 910B3, where the 1-D row kernel stays in charge.
-
-    That box is the only one where the wide multi-head tile was measured slow (the 2-D form
-    is in the module docstring's table at 40.3 ms for the 235 MB case), and it is the box the
-    1-D schedule was tuned on. The tile path is therefore opt-out there until it is measured:
-    a regression on the platform we cannot currently reach is worse than a known 6.6 ms.
-    """
-    try:
-        return "910B3" in triton.runtime.driver.active.get_current_target().arch
-    except Exception:
-        return False
-
-
 def _launch_tile(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -496,11 +482,11 @@ def _norm_rope(
     if num_tokens == 0 or num_heads == 0:
         return out
     cores = get_num_cores("vector")
-    # One kernel per platform, never one per layout: the row and tile forms reduce a
+    # One kernel for every layout, never one per layout: the row and tile forms reduce a
     # different number of lanes per instruction, so they disagree in the last bit and
     # ``test_qk_norm_rope_strided_bitwise`` (layout independence) would fail. A strided
     # activation therefore takes the tile kernel too, slower but bit-identical.
-    if os.getenv("MOJO_T1_TILE", "1") != "0" and not _is_a2_910b3():
+    if os.getenv("MOJO_T1_TILE", "1") != "0":
         rows, heads, grid_t, grid_h = _pick_tile_tuning(num_tokens, num_heads, cores)
         _launch_tile(x, weight, rope_table, eps, interleaved, out, rows, heads, grid_t, grid_h)
         return out
