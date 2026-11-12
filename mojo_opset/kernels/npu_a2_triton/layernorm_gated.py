@@ -41,6 +41,7 @@ Ascend specific design
 """
 
 import os
+from functools import lru_cache
 from typing import Optional
 from typing import Tuple
 
@@ -187,12 +188,22 @@ def _layer_norm_fwd_1pass_kernel(
         tl.store(y_base, y, mask=mask)
 
 
+@lru_cache(maxsize=1)
+def _is_a2_910b3() -> bool:
+    """True on Ascend 910B3 (A2). The row counts below were swept on cannlab X51Cm."""
+    try:
+        return "910B3" in triton.runtime.driver.active.get_current_target().arch
+    except Exception:
+        return False
+
+
 def _pick_rows_per_block(
     m: int,
     block_n: int,
     batch_invariant: bool,
     has_gate: bool = True,
     padded_cols: bool = False,
+    ngroups: int = 1,
 ) -> int:
     """Rows per tile, from the UB budget rather than from a CUDA warp count.
 
@@ -220,6 +231,21 @@ def _pick_rows_per_block(
     if batch_invariant:
         # Numerics must not depend on M or the core count, so the constant wins over the budget.
         return MAX_ROWS_PER_BLOCK
+    if _is_a2_910b3():
+        # Swept on cannlab X51Cm (910B3, 48 vector cores). The row tile only changes the
+        # program count; the per-row reduction is unchanged, so results stay bit-identical.
+        if block_n == 192:
+            return min(m, 56)
+        if block_n == 128:
+            if not has_gate:
+                return min(m, 96)
+            if ngroups > 1:
+                return min(m, 48)
+            if m <= 4096:
+                return min(m, 40)
+            if m <= 262144:
+                return min(m, 56)
+            return min(m, 40)
     live = _LIVE_FP32_TILES if has_gate else _LIVE_FP32_TILES - 1
     rows = _UB_TILE_BUDGET // (live * 4 * max(block_n, 1))
     rows = max(1, min(rows, m, 64))
@@ -276,7 +302,12 @@ def layernorm_gated_infer_impl(
     rstd = torch.empty((ngroups * m,), dtype=torch.float32, device=x.device)
 
     max_fused = _MAX_FUSED_SIZE_DIVISOR // x.element_size()
-    block_n = min(max_fused, triton.next_power_of_2(group_size))
+    if group_size == 192:
+        # Dense 192-lane tile: Triton-Ascend accepts non-power-of-two arange here, so the
+        # 192->256 padding can be removed for the tail case.
+        block_n = min(max_fused, group_size)
+    else:
+        block_n = min(max_fused, triton.next_power_of_2(group_size))
     if group_size > block_n:
         raise RuntimeError("layernorm_gated does not support a feature dim >= 64 KB")
 
@@ -287,6 +318,7 @@ def layernorm_gated_infer_impl(
         batch_invariant,
         has_gate=z is not None,
         padded_cols=block_n != group_size,
+        ngroups=ngroups,
     )
 
     quant_kwargs = {}
