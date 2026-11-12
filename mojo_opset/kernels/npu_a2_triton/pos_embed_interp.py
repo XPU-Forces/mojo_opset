@@ -197,7 +197,7 @@ def _scalar_bundle(
     Returns the bundle and the largest per-image block count, which the caller needs on the
     host to size the grid without a device sync.
     """
-    key = (grids, num_grid, m_size, str(device))
+    key = (grids, num_grid, m_size, hidden, str(device))
     cached = _SCALAR_CACHE.get(key)
     if cached is not None:
         return cached
@@ -232,6 +232,113 @@ def _scalar_bundle(
     return result
 
 
+_PREDECODE_CACHE: Dict[Tuple, Tuple[torch.Tensor, torch.Tensor]] = {}
+
+
+def _predecode(
+    grids: Tuple[Tuple[int, int, int], ...],
+    num_grid: int,
+    m_size: int,
+    hidden: int,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Host-side spatial-merge decode: per-output-row 4 table indices + 4 weights.
+
+    This is the #528-style restructuring: the div/mod/floor/clamp/weight chain is
+    computed once per geometry and cached, so the kernel only does 4 gathers and a
+    weighted sum. The computation mirrors the old kernel's ``h_scale`` form, so the
+    output is bit-identical to the decode-in-kernel path.
+    """
+    key = (grids, num_grid, m_size, hidden, str(device))
+    cached = _PREDECODE_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    idx_parts: List[torch.Tensor] = []
+    w_parts: List[torch.Tensor] = []
+    for t, h, w in grids:
+        h_scale = float(num_grid - 1) / float(h - 1) if h > 1 else 0.0
+        w_scale = float(num_grid - 1) / float(w - 1) if w > 1 else 0.0
+        br = torch.arange(h // m_size)
+        bc = torch.arange(w // m_size)
+        lr = torch.arange(m_size)
+        lc = torch.arange(m_size)
+        row = (br[:, None, None, None] * m_size + lr[None, None, :, None]).expand(
+            h // m_size, w // m_size, m_size, m_size
+        )
+        col = (bc[None, :, None, None] * m_size + lc[None, None, None, :]).expand(
+            h // m_size, w // m_size, m_size, m_size
+        )
+        h_frac = row.reshape(-1).float() * h_scale
+        w_frac = col.reshape(-1).float() * w_scale
+        hf = torch.floor(h_frac).to(torch.int64)
+        wf = torch.floor(w_frac).to(torch.int64)
+        hc = torch.clamp(hf + 1, max=num_grid - 1)
+        wc = torch.clamp(wf + 1, max=num_grid - 1)
+        dh = h_frac - hf.float()
+        dw = w_frac - wf.float()
+        w11 = dh * dw
+        w10 = dh - w11
+        w01 = dw - w11
+        w00 = 1 - dh - w01
+        idx = torch.stack(
+            [hf * num_grid + wf, hf * num_grid + wc, hc * num_grid + wf, hc * num_grid + wc],
+            dim=1,
+        )
+        wei = torch.stack([w00, w01, w10, w11], dim=1)
+        idx_parts.append(idx.repeat(t, 1))
+        w_parts.append(wei.repeat(t, 1))
+
+    idx = torch.cat(idx_parts, 0).to(torch.int32)
+    wei = torch.cat(w_parts, 0).to(torch.float32)
+    # Cache element offsets, not just table indices: computing idx*hidden on device
+    # inside _launch would add a fixed multiply kernel to every forward call.
+    off = (idx * hidden).to(device)
+    wei = wei.to(device)
+    result = (off, wei)
+    if len(_PREDECODE_CACHE) >= _CACHE_LIMIT:
+        _PREDECODE_CACHE.clear()
+    _PREDECODE_CACHE[key] = result
+    return result
+
+
+@libentry()
+@triton.jit
+def _pos_embed_pre_kernel(
+    embed_ptr,
+    out_ptr,
+    off_ptr,
+    wt_ptr,
+    total_rows,
+    hidden: tl.constexpr,
+    block_d: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    grid = tl.num_programs(0)
+    chunk = (total_rows + grid - 1) // grid
+    start = pid * chunk
+    stop = tl.minimum(start + chunk, total_rows)
+    out_dtype = out_ptr.dtype.element_ty
+    for r in range(start, stop):
+        o0 = tl.load(off_ptr + r * 4 + 0)
+        o1 = tl.load(off_ptr + r * 4 + 1)
+        o2 = tl.load(off_ptr + r * 4 + 2)
+        o3 = tl.load(off_ptr + r * 4 + 3)
+        w0 = tl.load(wt_ptr + r * 4 + 0).to(out_dtype)
+        w1 = tl.load(wt_ptr + r * 4 + 1).to(out_dtype)
+        w2 = tl.load(wt_ptr + r * 4 + 2).to(out_dtype)
+        w3 = tl.load(wt_ptr + r * 4 + 3).to(out_dtype)
+        for d0 in range(0, hidden, block_d):
+            cols = d0 + tl.arange(0, block_d)
+            mask = cols < hidden
+            e0 = tl.load(embed_ptr + o0 + cols, mask=mask)
+            e1 = tl.load(embed_ptr + o1 + cols, mask=mask)
+            e2 = tl.load(embed_ptr + o2 + cols, mask=mask)
+            e3 = tl.load(embed_ptr + o3 + cols, mask=mask)
+            val = w0 * e0 + w1 * e1 + w2 * e2 + w3 * e3
+            tl.store(out_ptr + r * hidden + cols, val, mask=mask)
+
+
 def _launch(
     embed_weight: torch.Tensor,
     grids: List[Tuple[int, int, int]],
@@ -248,25 +355,16 @@ def _launch(
     if total_rows == 0:
         return out
 
-    bundle, max_blocks = _scalar_bundle(tuple(grids), num_grid_per_side, m_size, device)
-
+    off, wei = _predecode(tuple(grids), num_grid_per_side, m_size, hidden, device)
     cores = max(get_num_cores("vector"), 1)
-    per_image = max(1, cores // len(grids))
-    block_d, width = _pick_tuning(per_image, max_blocks, hidden)
-    grid = (min(max_blocks, width), len(grids))
-
-    _pos_embed_interp_kernel[grid](
+    grid = (min(total_rows, cores * 4),)
+    block_d = hidden if hidden <= _MAX_BLOCK_D else _MAX_BLOCK_D
+    _pos_embed_pre_kernel[grid](
         embed_weight,
         out,
-        bundle["h"],
-        bundle["w"],
-        bundle["h_scale"],
-        bundle["w_scale"],
-        bundle["total_blocks"],
-        bundle["blocks_per_frame"],
-        bundle["out_row_off"],
-        num_grid=num_grid_per_side,
-        m_size=m_size,
+        off,
+        wei,
+        total_rows,
         hidden=hidden,
         block_d=block_d,
     )
