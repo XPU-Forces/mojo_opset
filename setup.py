@@ -33,7 +33,9 @@ setup(
     ),
     py_modules=[],
     include_package_data=False,
-    package_data={"mojo_opset.config": ["*.yaml"]},
+    package_data={
+        "mojo_opset.config": ["*.yaml"],
+    },
     exclude_package_data={"": ["*.so", "*.pyd", "*.dll", "*.dylib"]},
     cmdclass={"build": PureBuild, "sdist": NoSourceDistribution},
 )

@@ -73,6 +73,8 @@ def perf_environment(pytestconfig, request):
     implementation, target, device_type = request.getfixturevalue("accuracy_backend")
     adapter = load_platform(Target.parse(target).platform)
     index = pytestconfig.getoption("--perf-device")
+    if int(os.getenv("WORLD_SIZE", "1")) > 1:
+        index = int(os.environ["LOCAL_RANK"])
     adapter.runtime.set_device(index)
     properties = adapter.runtime.get_device_properties(index)
     l2 = adapter.l2_bytes(properties)
