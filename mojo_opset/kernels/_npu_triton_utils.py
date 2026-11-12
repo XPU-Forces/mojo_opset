@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+import torch
 import triton
 import triton.language as tl
 
@@ -19,6 +20,7 @@ SRAM_ALIGN_BYTES = 32
 
 
 @lru_cache(maxsize=1)
+@torch.compiler.assume_constant_result
 def get_num_cores(op_type="vector"):
     assert op_type in ["vector", "cube", "mix"], f"op_type {op_type} must in ['vector', 'cube', 'mix']."
     return (
