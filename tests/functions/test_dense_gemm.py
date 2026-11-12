@@ -7,7 +7,12 @@ from mojo_opset import functions as F
 
 OPS = ('gemm', 'mxfp8_dequant_gemm', 'mxfp4_gemm')
 AOT_OPS = ('gemm', 'mxfp8_gemm', 'mxfp8_dequant_gemm', 'mxfp4_gemm')
-pytestmark = [pytest.mark.accuracy, pytest.mark.api(*(f'functions.{op}' for op in OPS))]
+pytestmark = [
+    pytest.mark.accuracy,
+    pytest.mark.api(*(f'functions.{op}' for op in OPS)),
+    # TODO: Re-enable after upgrading CANN to 9.2.
+    pytest.mark.skip(reason='dense_gemm native build requires CANN 9.2+'),
+]
 
 
 def operand(rows, cols, dtype, device, strided=False):

@@ -90,6 +90,10 @@ endfunction()
 foreach(recipe IN LISTS _recipes)
     get_filename_component(_operator_dir "${recipe}" DIRECTORY)
     get_filename_component(_operator "${_operator_dir}" NAME)
+    # add_subdirectory("src/${MOJO_NATIVE_PROVIDER}/dense_gemm")  # TODO: Re-enable after upgrading CANN to 9.2.
+    if(_operator STREQUAL "dense_gemm")
+        continue()
+    endif()
     add_subdirectory("src/${MOJO_NATIVE_PROVIDER}/${_operator}")
 endforeach()
 
