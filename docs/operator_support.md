@@ -60,6 +60,7 @@ supported shapes, dtypes and options.
 | `swa_infer` | triton | triton |
 | `swiglu` | triton, torch_npu, native | triton, torch_npu |
 | `top_k_sampling` | triton | triton |
+| `topk_infer` | — | native |
 | `top_p_filter` | triton | triton |
 | `top_p_sampling` | triton | triton |
 | `varlen_fa_infer` | native | — |

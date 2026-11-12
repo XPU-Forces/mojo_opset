@@ -61,6 +61,7 @@ from .sdpa import sdpa_infer
 from .silu import silu
 from .store_lowrank import store_lowrank
 from .swiglu import swiglu
+from .topk import topk_infer
 
 __all__ = [
     "apply_penalties_temperature",
@@ -117,6 +118,7 @@ __all__ = [
     "swa_infer",
     "swiglu",
     "top_k_sampling",
+    "topk_infer",
     "top_p_filter",
     "top_p_sampling",
     "varlen_fa_infer",

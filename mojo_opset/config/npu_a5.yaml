@@ -53,6 +53,7 @@ npu.a5:
   swa_infer: triton
   swiglu: triton
   top_k_sampling: triton
+  topk_infer: native
   top_p_filter: triton
   top_p_sampling: triton
   vision_rope_2d_infer: triton
