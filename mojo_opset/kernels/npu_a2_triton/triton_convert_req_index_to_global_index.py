@@ -202,8 +202,7 @@ def _model_for_device(device_index: int):
         return ModelNew()
 
 
-@torch.library.custom_op("mojo_npu_triton_a2::triton_convert_req_index_to_global_index", mutates_args=())
-def triton_convert_req_index_to_global_index_fwd(
+def _conversion_impl(
     req_id: torch.Tensor,
     block_table: torch.Tensor,
     token_indices: torch.Tensor,
@@ -228,7 +227,20 @@ def triton_convert_req_index_to_global_index_fwd(
         )
 
 
-@triton_convert_req_index_to_global_index_fwd.register_fake
+# This integer-only inference op needs no autograd formula. Direct dispatcher
+# registration keeps the graph boundary without CustomOpDef's per-call Python
+# checks; schema, mutation and fake metadata are checked by the test suite.
+_library = torch.library.Library("mojo_npu_triton_a2", "FRAGMENT")
+_library.define(
+    "triton_convert_req_index_to_global_index" + torch.library.infer_schema(_conversion_impl, mutates_args=())
+)
+_library.impl("triton_convert_req_index_to_global_index", _conversion_impl, "PrivateUse1")
+triton_convert_req_index_to_global_index_fwd = (
+    torch.ops.mojo_npu_triton_a2.triton_convert_req_index_to_global_index.default
+)
+
+
+@torch.library.register_fake("mojo_npu_triton_a2::triton_convert_req_index_to_global_index")
 def _conversion_fake(
     req_id,
     block_table,
