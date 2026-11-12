@@ -84,11 +84,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #ifdef MOJO_NATIVE_WITH_MAGI_ATTENTION
   m.def("magi_forward", &mojo::native::a2::MagiForward);
   m.def("magi_build_plan", &mojo::native::a2::MagiBuildPlan);
-  m.def("magi_build_schedules", &mojo::native::a2::MagiBuildSchedules);
-  m.def("magi_backward", &mojo::native::a2::MagiBackward);
-  m.def("magi_prepare_backward", &mojo::native::a2::MagiPrepareBackward);
   m.def("magi_backward_full", &mojo::native::a2::MagiBackwardFull);
-  m.def("magi_finalize_backward", &mojo::native::a2::MagiFinalizeBackward);
 #endif
 #ifdef MOJO_NATIVE_WITH_GDN_CUMSUM
   m.def("gdn_cumsum", &mojo::native::a2::GdnCumsum);
