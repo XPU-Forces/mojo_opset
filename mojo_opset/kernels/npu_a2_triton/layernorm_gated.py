@@ -194,10 +194,16 @@ def _layer_norm_fwd_1pass_kernel(
 
 
 @lru_cache(maxsize=1)
-def _is_a2_910b3() -> bool:
-    """True on Ascend 910B3 (A2). The row counts below were swept on cannlab X51Cm."""
+def _is_a2_910b() -> bool:
+    """True on the A2 family (910B2 / 910B3 / 910B4). Swept on 910B3 and re-measured on 910B2.
+
+    The row counts below are a property of the A2 vector core and its 192 KB UB, not of one
+    SKU: on 910B2 the same rule takes qk_norm 43.2 -> 33.5 us, gdn_65536x8 604 -> 506 us and
+    tail_32771x192 82.6 -> 50.2 us (MBU 36.6% -> 60.2%), with gdn_4096x8 the only case that
+    gives back a little (34.2 -> 34.8 us). A3 (910_9382) and 950 keep the UB-budget default.
+    """
     try:
-        return "910B3" in triton.runtime.driver.active.get_current_target().arch
+        return "910B" in triton.runtime.driver.active.get_current_target().arch
     except Exception:
         return False
 
@@ -245,9 +251,10 @@ def _pick_rows_per_block(
     if batch_invariant:
         # Numerics must not depend on M or the core count, so the constant wins over the budget.
         return MAX_ROWS_PER_BLOCK
-    if _is_a2_910b3():
-        # Swept on cannlab X51Cm (910B3, 48 vector cores). The row tile only changes the
-        # program count; the per-row reduction is unchanged, so results stay bit-identical.
+    if _is_a2_910b():
+        # Swept on cannlab X51Cm (910B3, 48 vector cores) and re-measured on 910B2 (DevEnv_466517).
+        # The row tile only changes the program count; the per-row reduction is unchanged, so
+        # results stay bit-identical.
         if block_n == 192:
             return min(m, 56)
         if block_n == 128:
