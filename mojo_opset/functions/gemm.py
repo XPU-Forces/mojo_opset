@@ -1,4 +1,4 @@
-"""Trainable grouped GEMM and forward-only quantized GEMMs."""
+"""Trainable grouped GEMM and forward-only dense/quantized GEMMs."""
 
 import torch
 
@@ -6,6 +6,60 @@ from torch.autograd.function import once_differentiable
 
 from ._checks import _require_inference
 from ._dispatch import load_impl
+
+
+def _call_dense(op, input, weight, input_scale, weight_scale, trans_input, trans_weight,
+                output_dtype, c, alpha, recipe, compiled_dims, implementation):
+    from mojo_opset.kernels._dense_gemm import check
+
+    check(op, input, weight, input_scale, weight_scale, trans_input, trans_weight,
+          output_dtype, c, alpha, recipe, compiled_dims)
+    _require_inference(op, *(x for x in (input, weight, input_scale, weight_scale, c) if x is not None))
+    forward, _ = load_impl(op, implementation)
+    return forward(input, weight, input_scale, weight_scale, trans_input, trans_weight,
+                   output_dtype, c, alpha, recipe[0], recipe[1], compiled_dims)
+
+
+def gemm(
+    input, weight, *, trans_input=False, trans_weight=False,
+    output_dtype=torch.bfloat16, c=None, alpha=None, compiled_dims="", implementation=None,
+):
+    """Return alpha * op(input) @ op(weight) + C, without mutating inputs.
+
+    Inputs are BF16; default operands are [M,K] and [K,N]. C is [M,N] or a contiguous [1,N]
+    row bias; bias and alpha are mutually exclusive. Output is BF16 or FP32.
+    The legacy compiled_dims argument is accepted for compatibility; the AOT
+    backend uses runtime M/N/K regardless of its value.
+    This migration API is inference-only and does not register backward.
+    """
+    return _call_dense(
+        "gemm", input, weight, None, None, trans_input, trans_weight,
+        output_dtype, c, alpha, (1, 1, 32), compiled_dims, implementation,
+    )
+
+
+def mxfp8_dequant_gemm(
+    input, weight, input_scale, weight_scale, *, trans_input=False, trans_weight=False,
+    output_dtype=torch.bfloat16, c=None, alpha=None, recipe=(1, 1, 32), compiled_dims="", implementation=None,
+):
+    """MXFP8 E4M3 x packed MXFP4 E2M1 GEMM; AIV decodes FP4 weights to FP8 for the Cube.
+
+    FP4 storage is int8 with two values per byte along the contiguous axis,
+    low nibble first. Logical shape doubles that axis. Scales describe logical
+    [M,K/32] and [N,K/32] (FP32 powers of two or packed UE8M0 int16 pairs).
+    recipe=(gm,gn,32) allows repeating a scale across gm/gn rows in [1,128].
+    """
+    return _call_dense("mxfp8_dequant_gemm", input, weight, input_scale, weight_scale, trans_input, trans_weight,
+                       output_dtype, c, alpha, recipe, compiled_dims, implementation)
+
+
+def mxfp4_gemm(
+    input, weight, input_scale, weight_scale, *, trans_input=False, trans_weight=False,
+    output_dtype=torch.bfloat16, c=None, alpha=None, recipe=(1, 1, 32), compiled_dims="", implementation=None,
+):
+    """Packed MXFP4 E2M1 x E2M1 GEMM; storage and scales follow mxfp8_dequant_gemm."""
+    return _call_dense("mxfp4_gemm", input, weight, input_scale, weight_scale, trans_input, trans_weight,
+                       output_dtype, c, alpha, recipe, compiled_dims, implementation)
 
 
 def _check_group_gemm(input, weight, group_list, trans_weight):

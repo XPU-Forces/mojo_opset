@@ -282,3 +282,8 @@ not establish NPU execution-graph capture/replay support. SWA sources live in
 `native/mojo_opset_lib/npu_a5/sku_950pr/`. The private shared A5 package is
 declared only by internal provider metadata, so public packages do not depend
 on it.
+
+## Dense GEMM
+
+A5 BF16, FP8, FP8 x FP4 and FP4 dense GEMMs use the architecture-wide native
+library. See the [dense GEMM build and API guide](src/npu_a5/dense_gemm/README.md).

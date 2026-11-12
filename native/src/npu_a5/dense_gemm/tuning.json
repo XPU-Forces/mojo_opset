@@ -1,0 +1,739 @@
+[
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 0,
+    "shape": [
+      32,
+      4096,
+      4096
+    ],
+    "tag": "24f36522efb31c97"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 0,
+    "shape": [
+      256,
+      512,
+      1024
+    ],
+    "tag": "518d757f9e4b6240"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 0,
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "tag": "df8bf4b07c4e5d3b"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 0,
+    "shape": [
+      16,
+      1024,
+      1024
+    ],
+    "tag": "518d757f9e4b6240"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 0,
+    "shape": [
+      64,
+      2048,
+      2048
+    ],
+    "tag": "518d757f9e4b6240"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 0,
+    "shape": [
+      128,
+      1024,
+      4096
+    ],
+    "tag": "518d757f9e4b6240"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 0,
+    "shape": [
+      512,
+      2048,
+      1024
+    ],
+    "tag": "24f36522efb31c97"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 0,
+    "shape": [
+      2048,
+      1024,
+      1024
+    ],
+    "tag": "a415e16d9fc92329"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 0,
+    "shape": [
+      514,
+      258,
+      510
+    ],
+    "tag": "b0bc064d73444484"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 40,
+    "shape": [
+      32,
+      4096,
+      4096
+    ],
+    "tag": "ee6b72f16eeb538e"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 40,
+    "shape": [
+      256,
+      512,
+      1024
+    ],
+    "tag": "9f9642b825a4d7ec"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 40,
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "tag": "e99d6cd72ad05aa3"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 40,
+    "shape": [
+      16,
+      1024,
+      1024
+    ],
+    "tag": "5fce10e072824a42"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 40,
+    "shape": [
+      64,
+      2048,
+      2048
+    ],
+    "tag": "a37969c54a9b63c1"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 40,
+    "shape": [
+      128,
+      1024,
+      4096
+    ],
+    "tag": "142ca97ffb2cc0b6"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 40,
+    "shape": [
+      2048,
+      1024,
+      1024
+    ],
+    "tag": "87ed2660f93e8d2f"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 80,
+    "shape": [
+      32,
+      4096,
+      4096
+    ],
+    "tag": "2d72113e419d48a9"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 80,
+    "shape": [
+      256,
+      512,
+      1024
+    ],
+    "tag": "60186751c8ee8665"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 80,
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "tag": "6df5abf5fe5ca399"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 80,
+    "shape": [
+      64,
+      2048,
+      2048
+    ],
+    "tag": "39416ad7fec6ac80"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 80,
+    "shape": [
+      128,
+      1024,
+      4096
+    ],
+    "tag": "188bd171f0c5d67e"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 80,
+    "shape": [
+      2048,
+      1024,
+      1024
+    ],
+    "tag": "87ed2660f93e8d2f"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 120,
+    "shape": [
+      32,
+      4096,
+      4096
+    ],
+    "tag": "bc3965088975ccae"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 120,
+    "shape": [
+      256,
+      512,
+      1024
+    ],
+    "tag": "79ed9d2b7650b7da"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 120,
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "tag": "77629bc3694dc9e7"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 120,
+    "shape": [
+      16,
+      1024,
+      1024
+    ],
+    "tag": "07f6c8f614b9f242"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 120,
+    "shape": [
+      64,
+      2048,
+      2048
+    ],
+    "tag": "64b0637f9fdd0d5f"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 120,
+    "shape": [
+      128,
+      1024,
+      4096
+    ],
+    "tag": "8f69ac3f504d905c"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 120,
+    "shape": [
+      512,
+      2048,
+      1024
+    ],
+    "tag": "1941713177397ce7"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 120,
+    "shape": [
+      2048,
+      1024,
+      1024
+    ],
+    "tag": "95345e9bd89a0a24"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 120,
+    "shape": [
+      130,
+      258,
+      510
+    ],
+    "tag": "9cdaefabe397a456"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 120,
+    "shape": [
+      514,
+      258,
+      510
+    ],
+    "tag": "0dbf42140317c37b"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 10,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "179d77f14af62309"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 15,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "179d77f14af62309"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 0,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "179d77f14af62309"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 5,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "f63c95e67899013c"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 30,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "0c2c3e8890fb550e"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 35,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "6e777602be3fc874"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 20,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "6e777602be3fc874"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 25,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "6e777602be3fc874"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 50,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "8acc1aef16fa3fbe"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 55,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "8acc1aef16fa3fbe"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 40,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "8acc1aef16fa3fbe"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 45,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "7fa3fcdac51bbaf5"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 70,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "ee69b26a58504179"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 75,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "7fa3fcdac51bbaf5"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 60,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "8acc1aef16fa3fbe"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 65,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "8acc1aef16fa3fbe"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 90,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "a4e5d33182ddd7ce"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 95,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "a4e5d33182ddd7ce"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 80,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "d983d6e4740b6adf"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 110,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "debb32db0ccb71ef"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 115,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "debb32db0ccb71ef"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 100,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "d983d6e4740b6adf"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 105,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "d983d6e4740b6adf"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 120,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "50c264033bb11404"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 125,
+    "shape": [
+      128,
+      256,
+      512
+    ],
+    "tag": "50c264033bb11404"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 0,
+    "shape": [
+      16,
+      4096,
+      512
+    ],
+    "tag": "23878c240445cbe8"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 0,
+    "shape": [
+      32,
+      8192,
+      1024
+    ],
+    "tag": "292c40b163c6615a"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 40,
+    "shape": [
+      16,
+      4096,
+      512
+    ],
+    "tag": "c13cf0d82db0b6ba"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 40,
+    "shape": [
+      4096,
+      32,
+      128
+    ],
+    "tag": "a272c54b1a9c5cfd"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 40,
+    "shape": [
+      1024,
+      64,
+      256
+    ],
+    "tag": "1f95fe8d0f3b2b50"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 80,
+    "shape": [
+      16,
+      4096,
+      512
+    ],
+    "tag": "a9e79bde6a7157fd"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 80,
+    "shape": [
+      1024,
+      64,
+      256
+    ],
+    "tag": "1f95fe8d0f3b2b50"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 120,
+    "shape": [
+      16,
+      4096,
+      512
+    ],
+    "tag": "f75433503419623c"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 120,
+    "shape": [
+      4096,
+      32,
+      128
+    ],
+    "tag": "96fd9b84f250c25c"
+  },
+  {
+    "soc": "Ascend950PR_9579",
+    "cores": 28,
+    "key": 120,
+    "shape": [
+      1024,
+      64,
+      256
+    ],
+    "tag": "65fa309d0d53fd73"
+  }
+]

@@ -3,6 +3,9 @@
 from mojo_opset.utils._exports import extend_bindings as _extend_bindings
 
 OPS = {
+    "gemm": "dense_gemm",
+    "mxfp8_dequant_gemm": "dense_gemm",
+    "mxfp4_gemm": "dense_gemm",
     "topk_infer": "topk",
     "rms_norm_quant": "fused_quantization",
     "layer_norm_quant": "fused_quantization",

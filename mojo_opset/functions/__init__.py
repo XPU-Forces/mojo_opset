@@ -19,7 +19,10 @@ from .fused_quantization import residual_add_layer_norm_quant
 from .fused_quantization import residual_add_rms_norm_quant
 from .fused_quantization import rms_norm_quant
 from .gelu import gelu
+from .gemm import gemm
 from .gemm import group_gemm
+from .gemm import mxfp4_gemm
+from .gemm import mxfp8_dequant_gemm
 from .gemm import quant_batch_gemm_reduce_sum
 from .gemm import quant_gemm
 from .indexer import indexer
@@ -64,6 +67,10 @@ from .swiglu import swiglu
 from .topk import topk_infer
 
 __all__ = [
+    "gemm",
+    "mxfp8_dequant_gemm",
+    "mxfp4_gemm",
+
     "apply_penalties_temperature",
     "causal_conv1d",
     "causal_conv1d_update_state_infer",
