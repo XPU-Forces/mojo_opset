@@ -22,12 +22,18 @@ Numerical contract (must stay instruction-for-instruction identical to upstream)
 
 Ascend specific design
 ---------------------
-* The kernel keeps every tile 1-D. Upstream launches a ``(8, head_dim)`` 2-D tile per
-  ``(token, head-group)``; on triton-ascend 3.6.0 that shape costs ~11 us of fixed time per
-  program (measured: 64-row tile, 235 MB case -> 40.3 ms = 11.2 us/program, 5.9 GB/s), the
-  same signature as the 240x regression filed against the sibling operator
-  (triton-lang/triton-ascend#2865). A 1-D row view is what that operator settled on too.
-* One program therefore walks ``bt`` tokens and ``hpg`` heads, one 1-D row at a time, so the
+* There are two schedules, and the transfer size decides which one is right. A row is 256 B,
+  so the 1-D schedule (one row per transfer) is descriptor bound: a streaming probe of this
+  layout measures 181 GB/s at one row per transfer against 2.1 TB/s at 32 rows. The tile
+  schedule (``_qk_norm_rope_tile_kernel``) therefore spans every head of a token -- 14 KB
+  contiguous for the H3 geometry -- leaving three bulk loads and one bulk store per token,
+  and it is what runs everywhere except Ascend 910B3 (see ``_is_a2_910b3``).
+* On 910B3 the 1-D schedule stays: that box is the only place where a wide tile measured
+  slow (a ``(8, head_dim)`` tile per program, 64-row tile, 235 MB case -> 40.3 ms = 11.2 us
+  per program, 5.9 GB/s, the signature of the 240x regression filed as
+  triton-lang/triton-ascend#2865), and it is the box the 1-D row counts were swept on. The
+  tile schedule is not enabled there until it can be re-measured.
+* The 1-D schedule walks ``bt`` tokens and ``hpg`` heads, one 1-D row at a time, so the
   prologue (the weight loads and the ``pair_dims`` index chain) is amortised over
   ``bt * hpg`` rows (``rmsnorm.py`` uses the same schedule).
 * Where the time goes, from the stage ablation on the 117 MB-per-stream case (cumulative, see
@@ -51,6 +57,8 @@ Ascend specific design
   partner itself is loaded with two constant shifts instead.
 """
 
+import os
+from functools import lru_cache
 from typing import Tuple
 
 import torch
@@ -220,6 +228,133 @@ def _qk_norm_rope_kernel(
             tl.store(out_ptr + row_out + dims * out_stride_d, output, mask=row_mask)
 
 
+
+@libentry()
+@triton.jit
+def _qk_norm_rope_tile_kernel(
+    x_ptr,
+    weight_ptr,
+    rope_table_ptr,
+    out_ptr,
+    num_tokens,
+    x_stride_t,
+    x_stride_h,
+    rope_stride_t,
+    out_stride_t,
+    out_stride_h,
+    num_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    rotary_half: tl.constexpr,
+    d_pad: tl.constexpr,
+    eps: tl.constexpr,
+    interleaved: tl.constexpr,
+    ROWS: tl.constexpr,
+    HEADS: tl.constexpr,
+):
+    """One ``(HEADS, head_dim)`` tile per token: the heads of a token are contiguous rows.
+
+    The 1-D row form above pays one DMA descriptor per row, and the row is only 256 B. A
+    contiguous multi-head tile turns ``HEADS`` descriptors into one, which on Ascend950PR is
+    the whole difference: a pure streaming probe of this layout measures 181 GB/s at one row
+    per transfer against 2.1 TB/s at 32 rows per transfer.
+    """
+    pid_t = tl.program_id(0)
+    pid_h = tl.program_id(1)
+    h0 = pid_h * HEADS
+
+    dims = tl.arange(0, d_pad)
+    dim_mask = dims < head_dim
+    rotary_dim: tl.constexpr = rotary_half * 2
+    rotary_mask = dims < rotary_dim
+    if interleaved:
+        first_lane = rotary_mask & ((dims & 1) == 0)
+        second_lane = rotary_mask & ((dims & 1) == 1)
+        pair_dims = tl.where(rotary_mask, dims ^ 1, dims)
+    else:
+        first_lane = dims < rotary_half
+        second_lane = (dims >= rotary_half) & rotary_mask
+        pair_dims = tl.where(
+            first_lane, dims + rotary_half, tl.where(second_lane, dims - rotary_half, dims)
+        )
+
+    weight = tl.load(weight_ptr + dims, mask=dim_mask, other=0.0).to(tl.float32)
+    pair_weight = tl.load(weight_ptr + pair_dims, mask=dim_mask, other=0.0).to(tl.float32)
+
+    heads = h0 + tl.arange(0, HEADS)
+    head_mask = heads < num_heads
+
+    for i in range(ROWS):
+        token = pid_t * ROWS + i
+        t_valid = token < num_tokens
+        table_off = token.to(tl.int64) * rope_stride_t
+        table_mask = dim_mask & t_valid
+        if interleaved:
+            pair_ci = dims >> 1
+            cos = tl.load(
+                rope_table_ptr + table_off + pair_ci, mask=table_mask & rotary_mask, other=0.0
+            ).to(tl.float32)
+            sin = tl.load(
+                rope_table_ptr + table_off + rotary_half + pair_ci,
+                mask=table_mask & rotary_mask,
+                other=0.0,
+            ).to(tl.float32)
+        else:
+            tab = tl.load(
+                rope_table_ptr + table_off + dims, mask=table_mask & rotary_mask, other=0.0
+            ).to(tl.float32)
+            tab_hi = tl.load(
+                rope_table_ptr + table_off + rotary_half + dims,
+                mask=table_mask & first_lane,
+                other=0.0,
+            ).to(tl.float32)
+            tab_lo = tl.load(
+                rope_table_ptr + table_off - rotary_half + dims,
+                mask=table_mask & second_lane,
+                other=0.0,
+            ).to(tl.float32)
+            cos = tl.where(first_lane, tab, tab_lo)
+            sin = tl.where(first_lane, tab_hi, tab)
+
+        row_in = token.to(tl.int64) * x_stride_t + heads[:, None] * x_stride_h
+        row_out = token.to(tl.int64) * out_stride_t + heads[:, None] * out_stride_h
+        mask = head_mask[:, None] & dim_mask[None, :] & t_valid
+        col = dims[None, :]
+
+        x = tl.load(x_ptr + row_in + col, mask=mask, other=0.0).to(tl.float32)
+        inv_rms = tl.rsqrt(tl.sum(x * x, axis=1) / head_dim + eps)
+        scale = inv_rms[:, None]
+        normalized = (x * scale * weight[None, :]).to(tl.bfloat16)
+
+        if interleaved:
+            pair_raw = tl.load(
+                x_ptr + row_in + pair_dims[None, :],
+                mask=mask & rotary_mask[None, :],
+                other=0.0,
+            ).to(tl.float32)
+        else:
+            pair_a = tl.load(
+                x_ptr + row_in + rotary_half + col,
+                mask=mask & first_lane[None, :],
+                other=0.0,
+            ).to(tl.float32)
+            pair_b = tl.load(
+                x_ptr + row_in - rotary_half + col,
+                mask=mask & second_lane[None, :],
+                other=0.0,
+            ).to(tl.float32)
+            pair_raw = tl.where(first_lane[None, :], pair_a, pair_b)
+        pair_normalized = (pair_raw * scale * pair_weight[None, :]).to(tl.bfloat16)
+
+        normalized_f = normalized.to(tl.float32)
+        pair_f = pair_normalized.to(tl.float32)
+        first = normalized_f * cos[None, :] - pair_f * sin[None, :]
+        second = normalized_f * cos[None, :] + pair_f * sin[None, :]
+        output = tl.where(
+            rotary_mask[None, :], tl.where(first_lane[None, :], first, second), normalized_f
+        )
+        tl.store(out_ptr + row_out + col, output, mask=mask)
+
+
 def _pick_tuning(num_tokens: int, num_heads: int, cores: int) -> Tuple[int, int, int, int]:
     """Return ``(bt, hpg, grid_t, grid_h)``.
 
@@ -281,6 +416,74 @@ def _launch(
     )
 
 
+
+@lru_cache(maxsize=1)
+def _is_a2_910b3() -> bool:
+    """True on Ascend 910B3, where the 1-D row kernel stays in charge.
+
+    That box is the only one where the wide multi-head tile was measured slow (the 2-D form
+    is in the module docstring's table at 40.3 ms for the 235 MB case), and it is the box the
+    1-D schedule was tuned on. The tile path is therefore opt-out there until it is measured:
+    a regression on the platform we cannot currently reach is worse than a known 6.6 ms.
+    """
+    try:
+        return "910B3" in triton.runtime.driver.active.get_current_target().arch
+    except Exception:
+        return False
+
+
+def _launch_tile(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    rope_table: torch.Tensor,
+    eps: float,
+    interleaved: bool,
+    out: torch.Tensor,
+    rows: int,
+    heads: int,
+    grid_t: int,
+    grid_h: int,
+) -> None:
+    num_tokens, num_heads, head_dim = x.shape
+    rotary_half = rope_table.shape[-1] // 2
+    _qk_norm_rope_tile_kernel[(grid_t, grid_h)](
+        x,
+        weight,
+        rope_table,
+        out,
+        num_tokens,
+        x.stride(0),
+        x.stride(1),
+        rope_table.stride(0),
+        out.stride(0),
+        out.stride(1),
+        num_heads=num_heads,
+        head_dim=head_dim,
+        rotary_half=rotary_half,
+        d_pad=triton.next_power_of_2(head_dim),
+        eps=eps,
+        interleaved=interleaved,
+        ROWS=rows,
+        HEADS=heads,
+    )
+
+
+def _pick_tile_tuning(num_tokens: int, num_heads: int, cores: int):
+    """One tile spans every head of a token, so the 256 B row transfers become one 14 KB one.
+
+    Swept on Ascend950PR over heads-per-tile {8, 16, 56} x rows-per-program {8, 16, 32, 64}
+    x waves {2, 4, 8, 16, 32} on 4096x56: 8 heads 1693-1739 us, 16 heads 1172-1251 us,
+    56 heads 505-550 us, and inside the 56-head row the schedule is flat to +-5%. The tile is
+    capped at 64 heads so a (64, 128) FP32 tile plus its live intermediates still fits the UB.
+    """
+    heads = int(os.getenv("MOJO_T1_HEADS", "0")) or min(num_heads, 64)
+    heads = min(heads, num_heads)
+    grid_h = (num_heads + heads - 1) // heads
+    target = max((cores * int(os.getenv("MOJO_T1_WAVES", "16"))) // max(grid_h, 1), 1)
+    rows = max(1, min(-(-num_tokens // target), int(os.getenv("MOJO_T1_ROWS", "64")), num_tokens))
+    return rows, heads, (num_tokens + rows - 1) // rows, grid_h
+
+
 def _norm_rope(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -292,7 +495,16 @@ def _norm_rope(
     out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
     if num_tokens == 0 or num_heads == 0:
         return out
-    bt, hpg, grid_t, grid_h = _pick_tuning(num_tokens, num_heads, get_num_cores("vector"))
+    cores = get_num_cores("vector")
+    # One kernel per platform, never one per layout: the row and tile forms reduce a
+    # different number of lanes per instruction, so they disagree in the last bit and
+    # ``test_qk_norm_rope_strided_bitwise`` (layout independence) would fail. A strided
+    # activation therefore takes the tile kernel too, slower but bit-identical.
+    if os.getenv("MOJO_T1_TILE", "1") != "0" and not _is_a2_910b3():
+        rows, heads, grid_t, grid_h = _pick_tile_tuning(num_tokens, num_heads, cores)
+        _launch_tile(x, weight, rope_table, eps, interleaved, out, rows, heads, grid_t, grid_h)
+        return out
+    bt, hpg, grid_t, grid_h = _pick_tuning(num_tokens, num_heads, cores)
     _launch(x, weight, rope_table, eps, interleaved, out, bt, hpg, grid_t, grid_h)
     return out
 
