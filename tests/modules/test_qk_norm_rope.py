@@ -99,3 +99,27 @@ def test_qk_norm_rope_module_requires_no_grad():
         out = mod(q, k, table, implementation="torch")
     assert out[0].shape == q.shape
 
+
+
+@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.accuracy
+def test_qk_norm_rope_module_accuracy(accuracy_backend):
+    """Backend accuracy coverage for the module wrapper, not just the function."""
+    from mojo_opset import functions as F
+
+    implementation, _target, device = accuracy_backend
+    mod = QkNormRope(HEAD_DIM, ROTARY_DIM, EPS).to(device)
+    with torch.no_grad():
+        mod.q_weight.copy_((torch.rand(HEAD_DIM, device=device) + 0.5).to(torch.bfloat16))
+        mod.k_weight.copy_((torch.rand(HEAD_DIM, device=device) + 0.5).to(torch.bfloat16))
+
+    q, k, theta = make_inputs(64, 4, device=device)
+    table = mod.rope_table(theta)
+
+    with torch.no_grad():
+        got = mod(q, k, table, implementation=implementation)
+        ref = F.qk_norm_rope_infer(
+            q, k, mod.q_weight, mod.k_weight, table, EPS, implementation="torch"
+        )
+    torch.testing.assert_close(got[0], ref[0], rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(got[1], ref[1], rtol=2e-2, atol=2e-2)
