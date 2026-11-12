@@ -51,6 +51,7 @@ OPS = {
     "rms_norm": "rmsnorm",
     "swa": "swa",
     "rope": "rope",
+    "fused_q_kv_rmsnorm": "fused_q_kv_rmsnorm",
 }
 
 
