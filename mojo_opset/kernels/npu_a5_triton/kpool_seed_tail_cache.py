@@ -153,7 +153,7 @@ def _route(tail_kv_cache, key, gate_score, tslot, vector_cores):
     return None
 
 
-def kpool_seed_tail_cache_fwd(tail_kv_cache, key, gate_score, tslot, kpool=4, head_dim=128):
+def _kpool_seed_tail_cache_impl(tail_kv_cache, key, gate_score, tslot, kpool=4, head_dim=128):
     """Mutate tail cache and return None; selected destinations must be unique.
 
     Non-negative slots must be in [0, num_blocks*RING). Input/cache aliasing
@@ -162,3 +162,22 @@ def kpool_seed_tail_cache_fwd(tail_kv_cache, key, gate_score, tslot, kpool=4, he
     if kpool != 4 or head_dim != 128:
         raise ValueError("This GLM-5.3-Flash kernel fixes kpool=4 and head_dim=128")
     return _route(tail_kv_cache, key, gate_score, tslot, _vector_core_count(key.device.index))
+
+
+@torch.library.custom_op("mojo_npu_triton_a5::kpool_seed_tail_cache", mutates_args=("tail_kv_cache",))
+def _kpool_seed_tail_cache_leaf(
+    tail_kv_cache: torch.Tensor, key: torch.Tensor, gate_score: torch.Tensor, tslot: torch.Tensor
+) -> None:
+    _kpool_seed_tail_cache_impl(tail_kv_cache, key, gate_score, tslot)
+
+
+@_kpool_seed_tail_cache_leaf.register_fake
+def _kpool_seed_tail_cache_fake(tail_kv_cache, key, gate_score, tslot):
+    return None
+
+
+def kpool_seed_tail_cache_fwd(tail_kv_cache, key, gate_score, tslot, kpool=4, head_dim=128):
+    if kpool != 4 or head_dim != 128:
+        raise ValueError("This GLM-5.3-Flash kernel fixes kpool=4 and head_dim=128")
+    # Keep pointer checks, hardware queries and Triton launch outside graph capture.
+    return _kpool_seed_tail_cache_leaf(tail_kv_cache, key, gate_score, tslot)

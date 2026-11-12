@@ -47,6 +47,23 @@ def kpool_seed_tail_cache(tail_kv_cache, key, gate_score, tslot, *, implementati
     """
     if key.dtype != torch.bfloat16 or gate_score.dtype != key.dtype or tail_kv_cache.dtype != key.dtype:
         raise ValueError("K, gate and cache must use BF16")
+    if not (key.device == gate_score.device == tail_kv_cache.device == tslot.device):
+        raise ValueError("All tensors must be on the same device")
+    if key.ndim != 2 or key.shape[1] != 128 or gate_score.shape != key.shape:
+        raise ValueError("K and gate must have shape [N, 128]")
+    if tail_kv_cache.ndim != 4 or tail_kv_cache.shape[1] != 2 or tail_kv_cache.shape[3] != 128:
+        raise ValueError("Cache must have shape [num_blocks, 2, RING, 128]")
+    ring = tail_kv_cache.shape[2]
+    if ring < 4 or tail_kv_cache.stride(3) != 1 or tail_kv_cache.stride(2) != 128:
+        raise ValueError("RING >= 4 and contiguous cache rows are required")
+    if tail_kv_cache.stride(1) < ring * 128 or tail_kv_cache.stride(0) < tail_kv_cache.stride(1) + ring * 128:
+        raise ValueError("Cache blocks and channels must not overlap")
+    if tail_kv_cache.shape[0] * ring >= 2**31:
+        raise ValueError("The addressable slot range must fit signed int32")
+    if tslot.ndim != 1 or tslot.shape[0] != key.shape[0] or tslot.dtype not in (torch.int32, torch.int64):
+        raise ValueError("tslot must be signed int32/int64 with shape [N]")
+    if not key.is_contiguous() or not gate_score.is_contiguous() or not tslot.is_contiguous():
+        raise ValueError("K, gate and tslot must be contiguous")
     _require_inference("kpool_seed_tail_cache", tail_kv_cache, key, gate_score)
     forward, _ = load_impl("kpool_seed_tail_cache", implementation)
     return forward(tail_kv_cache, key, gate_score, tslot)

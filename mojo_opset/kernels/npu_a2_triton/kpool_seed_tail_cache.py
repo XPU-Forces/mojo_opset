@@ -198,7 +198,7 @@ def _vector_core_count(device_index):
     return int(driver.active.utils.get_device_properties(device_index)["num_vectorcore"])
 
 
-def kpool_seed_tail_cache_fwd(tail_kv_cache, key, gate_score, tslot, kpool=4, head_dim=128):
+def _kpool_seed_tail_cache_impl(tail_kv_cache, key, gate_score, tslot, kpool=4, head_dim=128):
     """Update cache in place; valid slots must fit the signed-int32 slot range."""
     if kpool != 4 or head_dim != 128:
         raise ValueError("This GLM-5.3-Flash kernel fixes kpool=4 and head_dim=128")
@@ -245,3 +245,22 @@ def kpool_seed_tail_cache_fwd(tail_kv_cache, key, gate_score, tslot, kpool=4, he
         STEP=programs,
     )
     return None
+
+
+@torch.library.custom_op("mojo_npu_triton_a2::kpool_seed_tail_cache", mutates_args=("tail_kv_cache",))
+def _kpool_seed_tail_cache_leaf(
+    tail_kv_cache: torch.Tensor, key: torch.Tensor, gate_score: torch.Tensor, tslot: torch.Tensor
+) -> None:
+    _kpool_seed_tail_cache_impl(tail_kv_cache, key, gate_score, tslot)
+
+
+@_kpool_seed_tail_cache_leaf.register_fake
+def _kpool_seed_tail_cache_fake(tail_kv_cache, key, gate_score, tslot):
+    return None
+
+
+def kpool_seed_tail_cache_fwd(tail_kv_cache, key, gate_score, tslot, kpool=4, head_dim=128):
+    if kpool != 4 or head_dim != 128:
+        raise ValueError("This GLM-5.3-Flash kernel fixes kpool=4 and head_dim=128")
+    # Keep pointer checks, hardware queries and Triton launch outside graph capture.
+    return _kpool_seed_tail_cache_leaf(tail_kv_cache, key, gate_score, tslot)
