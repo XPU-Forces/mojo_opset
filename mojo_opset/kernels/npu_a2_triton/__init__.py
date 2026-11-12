@@ -51,6 +51,7 @@ OPS = {
     "rms_norm": "rmsnorm",
     "swa": "swa",
     "rope": "rope",
+    "fill_short_context_topk": "fill_short_context_topk",
 }
 
 
