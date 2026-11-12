@@ -1,3 +1,6 @@
+from functools import lru_cache
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch_npu  # noqa: F401  (registers the npu backend)
@@ -11,7 +14,7 @@ import triton.runtime.driver as driver
 # K<=128 path uses TPI=16; TPI=8 is used for larger K<=512 workloads
 # only when T>=16*vectorcore_count; remaining batched workloads use TPI=4.
 # Prefill workspace indices are independent of decode page-table capacity;
-# token -1 remains invalid on both paths. See report.md for measurements.
+# token -1 remains invalid on both paths.
 @triton.jit
 def _convert_req_index_kernel_small(
     req_id_ptr,
@@ -371,7 +374,9 @@ class ModelNew(nn.Module):
         out = torch.empty_like(token_indices_c)
 
         block_n = num_topk_tokens
-        mb_p2 = triton.next_power_of_2(max_blocks)
+        # The A5 compiler cannot lower a singleton gather source. The existing
+        # row mask keeps the padded lane out of GM and preserves M=1 semantics.
+        mb_p2 = max(2, triton.next_power_of_2(max_blocks))
         log2_bs = block_size.bit_length() - 1
         assert (1 << log2_bs) == block_size
 
@@ -444,7 +449,41 @@ class ModelNew(nn.Module):
         return out
 
 
+@lru_cache(maxsize=None)
+def _model_for_device(device_index: int):
+    # Cache only hardware metadata, never tensors or shape-dependent state.
+    with torch.npu.device(device_index):
+        return ModelNew()
+
+
+@torch.library.custom_op("mojo_npu_triton_a5::triton_convert_req_index_to_global_index", mutates_args=())
 def triton_convert_req_index_to_global_index_fwd(
+    req_id: torch.Tensor,
+    block_table: torch.Tensor,
+    token_indices: torch.Tensor,
+    block_size: int,
+    num_topk_tokens: int,
+    has_prefill: bool,
+    prefill_workspace_request_ids: Optional[torch.Tensor],
+    prefill_workspace_starts: Optional[torch.Tensor],
+) -> torch.Tensor:
+    if req_id.numel() == 0:
+        return torch.empty_like(token_indices)
+    with torch.npu.device(req_id.device):
+        return _model_for_device(req_id.device.index).forward(
+            req_id,
+            block_table,
+            token_indices,
+            block_size,
+            num_topk_tokens,
+            has_prefill,
+            prefill_workspace_request_ids,
+            prefill_workspace_starts,
+        )
+
+
+@triton_convert_req_index_to_global_index_fwd.register_fake
+def _conversion_fake(
     req_id,
     block_table,
     token_indices,
@@ -454,13 +493,6 @@ def triton_convert_req_index_to_global_index_fwd(
     prefill_workspace_request_ids,
     prefill_workspace_starts,
 ):
-    return ModelNew()(
-        req_id,
-        block_table,
-        token_indices,
-        block_size,
-        num_topk_tokens,
-        has_prefill,
-        prefill_workspace_request_ids,
-        prefill_workspace_starts,
-    )
+    if req_id.numel() == 0:
+        return torch.empty_like(token_indices)
+    return torch.empty_like(token_indices, memory_format=torch.contiguous_format)
