@@ -5,14 +5,20 @@ from mojo_opset import functions
 from tests.performance._workload import training
 
 NUM_GRID, M_SIZE, HIDDEN = 48, 2, 1152
-GRIDS = [(1, 8, 16), (1, 32, 48), (1, 60, 80), (16, 100, 168)]
+GRIDS = [(1, 8, 16), (1, 32, 48), (1, 60, 80), (3, 16, 16), (16, 100, 168)]
 MULTI_GRIDS = [(1, 8, 16), (1, 32, 48), (3, 16, 16)]
 
 
-def make_embed(device):
+# The tail row of the task statement's matrix: hidden=1000 is not a power of two, so the
+# whole row is one masked column tile.
+TAIL_GRID = (3, 60, 80)
+TAIL_HIDDEN = 1000
+
+
+def make_embed(device, hidden=HIDDEN):
     torch.manual_seed(42)
     # std ~ 0.23 matches the real Qwen3-VL pos_embed weight distribution.
-    return torch.randn(NUM_GRID * NUM_GRID, HIDDEN, device=device, dtype=torch.bfloat16) * 0.25
+    return torch.randn(NUM_GRID * NUM_GRID, hidden, device=device, dtype=torch.bfloat16) * 0.25
 
 
 @pytest.mark.api("functions.pos_embed_interp_infer")
@@ -35,6 +41,31 @@ def test_pos_embed_interp(benchmark, perf_environment, grid, phase):
         grid=f"{t}x{h}x{w}",
         rows=t * h * w,
         hidden=HIDDEN,
+        dtype="bfloat16",
+        phase=phase,
+    )
+
+
+@pytest.mark.api("functions.pos_embed_interp_infer")
+@pytest.mark.parametrize("phase", ["forward"])
+def test_pos_embed_interp_tail_hidden(benchmark, perf_environment, phase):
+    """hidden=1000: the masked column tail of the task statement's matrix."""
+    _, device, _, implementation = perf_environment
+    t, h, w = TAIL_GRID
+
+    def factory():
+        embed = make_embed(device, TAIL_HIDDEN)
+        call = lambda: functions.pos_embed_interp_infer(
+            embed, t, h, w, NUM_GRID, M_SIZE, torch.bfloat16, implementation=implementation
+        )
+        return training(call, (embed,), phase)
+
+    benchmark(
+        factory=factory,
+        op="pos_embed_interp_infer",
+        grid=f"{t}x{h}x{w}",
+        rows=t * h * w,
+        hidden=TAIL_HIDDEN,
         dtype="bfloat16",
         phase=phase,
     )
