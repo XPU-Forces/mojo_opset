@@ -9,7 +9,7 @@ supported shapes, dtypes and options.
 | `apply_penalties_temperature` | triton | triton |
 | `causal_conv1d` | triton | triton |
 | `causal_conv1d_update_state_infer` | triton | triton |
-| `convert_req_index_to_global_index` | triton | triton |
+| `triton_convert_req_index_to_global_index` | triton | triton |
 | `dequant` | triton | triton |
 | `dequant_swiglu_quant` | torch_npu | torch_npu |
 | `diffusion_attention` | triton | triton |

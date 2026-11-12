@@ -444,7 +444,7 @@ class ModelNew(nn.Module):
         return out
 
 
-def convert_req_index_to_global_index_fwd(
+def triton_convert_req_index_to_global_index_fwd(
     req_id,
     block_table,
     token_indices,

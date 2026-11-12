@@ -90,7 +90,7 @@ def indexer(
     return scores.topk(min(topk, end_pos), dim=-1).indices, scores
 
 
-def convert_req_index_to_global_index(
+def triton_convert_req_index_to_global_index(
     req_id,
     block_table,
     token_indices,
@@ -139,10 +139,10 @@ def convert_req_index_to_global_index(
         tensors += (prefill_workspace_request_ids, prefill_workspace_starts)
     if any(t.device != req_id.device for t in tensors):
         raise ValueError("all tensors must be on the same device")
-    _require_inference("convert_req_index_to_global_index", *tensors)
+    _require_inference("triton_convert_req_index_to_global_index", *tensors)
     if req_id.numel() == 0:
         return torch.empty_like(token_indices)
-    forward, _ = load_impl("convert_req_index_to_global_index", implementation)
+    forward, _ = load_impl("triton_convert_req_index_to_global_index", implementation)
     return forward(
         req_id,
         block_table,

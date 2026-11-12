@@ -22,9 +22,9 @@ from .gelu import gelu
 from .gemm import group_gemm
 from .gemm import quant_batch_gemm_reduce_sum
 from .gemm import quant_gemm
-from .indexer import convert_req_index_to_global_index
 from .indexer import indexer
 from .indexer import lightning_indexer
+from .indexer import triton_convert_req_index_to_global_index
 from .kv_cache import store_paged_kv_cache
 from .multimodal_rope_infer import multimodal_rope_infer
 from .normalization import group_rms_norm_infer
@@ -67,7 +67,7 @@ __all__ = [
     "apply_penalties_temperature",
     "causal_conv1d",
     "causal_conv1d_update_state_infer",
-    "convert_req_index_to_global_index",
+    "triton_convert_req_index_to_global_index",
     "dequant",
     "dequant_swiglu_quant",
     "diffusion_attention",

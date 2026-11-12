@@ -19,18 +19,18 @@ def _inputs(device):
 
 @pytest.mark.reference
 def test_torch_decode_and_prefill():
-    result = F.convert_req_index_to_global_index(*_inputs("cpu"), implementation="torch")
+    result = F.triton_convert_req_index_to_global_index(*_inputs("cpu"), implementation="torch")
     expected = torch.tensor([[20, 31, -1, -1], [101, 108, 125, -1]], dtype=torch.int32)
     assert torch.equal(result, expected)
 
 
-@pytest.mark.api("functions.convert_req_index_to_global_index")
+@pytest.mark.api("functions.triton_convert_req_index_to_global_index")
 @pytest.mark.accuracy
 def test_npu_matches_reference(accuracy_backend):
     implementation, _, device = accuracy_backend
     inputs = _inputs(device)
-    actual = F.convert_req_index_to_global_index(*inputs, implementation=implementation)
-    expected = F.convert_req_index_to_global_index(*inputs, implementation="torch")
+    actual = F.triton_convert_req_index_to_global_index(*inputs, implementation=implementation)
+    expected = F.triton_convert_req_index_to_global_index(*inputs, implementation="torch")
     assert torch.equal(actual, expected)
 
 
@@ -39,10 +39,10 @@ def test_rejects_unsupported_shapes():
     args = list(_inputs("cpu"))
     args[3] = 3
     with pytest.raises(ValueError, match="block_size"):
-        F.convert_req_index_to_global_index(*args, implementation="torch")
+        F.triton_convert_req_index_to_global_index(*args, implementation="torch")
     args[3], args[4] = 4, 3
     with pytest.raises(ValueError, match="num_topk_tokens"):
-        F.convert_req_index_to_global_index(*args, implementation="torch")
+        F.triton_convert_req_index_to_global_index(*args, implementation="torch")
 
 
 # Shape matrix from the delivered 22-case task.
@@ -72,7 +72,7 @@ CASES = [
 ]
 
 
-@pytest.mark.api("functions.convert_req_index_to_global_index")
+@pytest.mark.api("functions.triton_convert_req_index_to_global_index")
 @pytest.mark.accuracy
 @pytest.mark.parametrize("case", CASES)
 def test_matrix(accuracy_backend, case):
@@ -92,6 +92,6 @@ def test_matrix(accuracy_backend, case):
         )
         starts = torch.arange(num_prefill, device=device, dtype=torch.int32) * 100
     args = (req, table, indices, block_size, topk, has_prefill, ids, starts)
-    actual = F.convert_req_index_to_global_index(*args, implementation=implementation)
-    expected = F.convert_req_index_to_global_index(*args, implementation="torch")
+    actual = F.triton_convert_req_index_to_global_index(*args, implementation=implementation)
+    expected = F.triton_convert_req_index_to_global_index(*args, implementation="torch")
     assert torch.equal(actual, expected)
