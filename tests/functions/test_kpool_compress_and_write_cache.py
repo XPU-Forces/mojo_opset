@@ -1,10 +1,17 @@
 from dataclasses import dataclass
+from dataclasses import replace
+from importlib import import_module
 
 import pytest
 import torch
 
+from torch._subclasses.fake_tensor import FakeTensorMode
+
 from mojo_opset import Target
 from mojo_opset import functions as F
+from mojo_opset import preload
+from mojo_opset.functions._dispatch import load_impl
+from tests._compile import compile_fullgraph
 
 HEAD = 128
 PAGE = 64
@@ -242,3 +249,177 @@ def test_kpool_compress_and_write_cache_rejects_mixed_devices():
     values = (cache, key, score, ape, loc.to("meta"), mask)
     with pytest.raises(ValueError, match="same device"):
         run_case(case, values, "torch")
+
+
+DISPATCH_CASES = [
+    Case(f"boundary_p{pool}_n{n}", n, pool, blocks=(n + PAGE - 1) // PAGE + 1)
+    for pool, sizes in ((4, (63, 64, 65, 511, 512, 513)), (16, (63, 64, 65, 511, 512, 513, 2047, 2048, 2049)))
+    for n in sizes
+]
+
+
+@pytest.mark.api("functions.kpool_compress_and_write_cache")
+@pytest.mark.accuracy
+@pytest.mark.parametrize("case", DISPATCH_CASES, ids=lambda case: case.case_id)
+def test_kpool_compress_and_write_cache_dispatch(accuracy_backend, case):
+    implementation, _, device = accuracy_backend
+    original = make_inputs(case)
+    # Reverse slots so complete tiles exercise the scattered-write fallback.
+    original = (*original[:4], original[4].flip(0), original[5])
+    device_values = tuple(value.to(device) if value is not None else None for value in original)
+    check(case, original, device_values, run_case(case, device_values, implementation))
+
+
+@pytest.mark.api("functions.kpool_compress_and_write_cache")
+@pytest.mark.accuracy
+@pytest.mark.parametrize("variant", ("noncontiguous", "stream"))
+def test_kpool_compress_and_write_cache_input_layout_and_stream(accuracy_backend, variant):
+    implementation, _, device = accuracy_backend
+    case = Case(variant, 65, 4)
+    original = make_inputs(case)
+    device_values = list(value.to(device) if value is not None else None for value in original)
+    if variant == "noncontiguous":
+        for i in (1, 2, 3):
+            value = device_values[i]
+            device_values[i] = value.transpose(-1, -2).contiguous().transpose(-1, -2)
+            assert not device_values[i].is_contiguous()
+        result = run_case(case, device_values, implementation)
+    else:
+        torch.npu.synchronize()
+        stream = torch.npu.Stream()
+        with torch.npu.stream(stream):
+            device_values[1].copy_(original[1].to(device))
+            result = run_case(case, device_values, implementation)
+        stream.synchronize()
+    check(case, original, device_values, result)
+
+
+@pytest.mark.api("functions.kpool_compress_and_write_cache")
+@pytest.mark.accuracy
+@pytest.mark.parametrize("backend", ("eager", "aot_eager"))
+@pytest.mark.parametrize("mode", ("write", "write_return", "return"))
+@pytest.mark.parametrize("pool,n", ((4, 3), (4, 64), (16, 512), (16, 2049)))
+def test_kpool_compress_and_write_cache_fullgraph(accuracy_backend, backend, mode, pool, n):
+    implementation, _, device = accuracy_backend
+    preload("kpool_compress_and_write_cache", implementation=implementation)
+    case = Case("compile", n, pool, blocks=(n + PAGE - 1) // PAGE + 1, mode=mode)
+    cache = make_inputs(case)[0].to(device)
+
+    def run(cache, key, score, ape, loc):
+        return F.kpool_compress_and_write_cache(
+            cache,
+            key,
+            score,
+            ape,
+            loc,
+            pool,
+            return_compressed=mode != "write",
+            write_cache=mode != "return",
+            implementation=implementation,
+        )
+
+    try:
+        compiled = compile_fullgraph(run, backend=backend)
+        for step in (1, 2):
+            _, key, score, ape, loc, mask = make_inputs(replace(case, seed=case.seed + step))
+            loc = (loc + step) % (case.blocks * case.page)
+            original = (cache.cpu().clone(), key, score, ape, loc, mask)
+            values = (cache, *(value.to(device) for value in original[1:5]), None)
+            result = compiled(*values[:5])
+            check(case, original, values, result)
+    finally:
+        torch._dynamo.reset()
+
+
+@pytest.mark.api("functions.kpool_compress_and_write_cache")
+@pytest.mark.accuracy
+@pytest.mark.parametrize("backend", ("eager", "aot_eager"))
+@pytest.mark.parametrize("layout,n", (("cross_page", 5), ("all_masked", 5), ("linear", 0)))
+def test_kpool_compress_and_write_cache_masked_fullgraph(accuracy_backend, backend, layout, n):
+    implementation, _, device = accuracy_backend
+    preload("kpool_compress_and_write_cache", implementation=implementation)
+    case = Case("compile_mask", n, 4, layout=layout)
+    original = make_inputs(case)
+    values = tuple(value.to(device) if value is not None else None for value in original)
+
+    def run(cache, key, score, ape, loc, mask):
+        return F.kpool_compress_and_write_cache(
+            cache,
+            key,
+            score,
+            ape,
+            loc,
+            4,
+            write_mask=mask,
+            implementation=implementation,
+        )
+
+    try:
+        compiled = compile_fullgraph(run, backend=backend)
+        result = compiled(*values)
+        check(case, original, values, result)
+    finally:
+        torch._dynamo.reset()
+
+
+@pytest.mark.api("functions.kpool_compress_and_write_cache")
+@pytest.mark.accuracy
+def test_kpool_compress_and_write_cache_schema_and_fake(accuracy_backend):
+    implementation, _, device = accuracy_backend
+    preload("kpool_compress_and_write_cache", implementation=implementation)
+    forward, _ = load_impl("kpool_compress_and_write_cache", implementation)
+    if implementation == "torch":
+        pytest.skip("Schema checks apply to the Triton custom operators")
+    provider = import_module(forward.__module__)
+    values = make_inputs(PERF_CASES[0])
+    args = tuple(value.to(device) for value in values[:5])
+    for leaf_name, mode in (
+        ("_kpool_write_leaf", "write"),
+        ("_kpool_write_return_leaf", "write_return"),
+        ("_kpool_return_leaf", "return"),
+    ):
+        leaf = getattr(provider, leaf_name)
+        schema = leaf._opoverload._schema
+        assert bool(schema.arguments[0].alias_info and schema.arguments[0].alias_info.is_write) == (mode != "return")
+        assert all(arg.alias_info is None for arg in schema.arguments[1:])
+        leaf_args = (*args, 4, None, True) if mode == "write" else (*args, 4, True)
+        torch.library.opcheck(leaf, leaf_args, test_utils=("test_schema", "test_faketensor"))
+        with FakeTensorMode() as fake:
+            result = F.kpool_compress_and_write_cache(
+                *(fake.from_tensor(value) for value in args),
+                4,
+                return_compressed=mode != "write",
+                write_cache=mode != "return",
+                implementation=implementation,
+            )
+            if mode == "write":
+                assert result is None
+            else:
+                key, scale = result
+                assert key.shape == (1, HEAD) and key.dtype == FP8
+                assert scale.shape == (1,) and scale.dtype == torch.float32
+                assert key.device == args[1].device and scale.device == args[1].device
+
+
+@pytest.mark.api("functions.kpool_compress_and_write_cache")
+@pytest.mark.accuracy
+def test_kpool_compress_and_write_cache_fullgraph_rejects_unaligned_cache(accuracy_backend):
+    implementation, _, device = accuracy_backend
+    if implementation == "torch":
+        pytest.skip("Runtime alignment check belongs to the Triton operator")
+    preload("kpool_compress_and_write_cache", implementation=implementation)
+    case = PERF_CASES[0]
+    cache, key, score, ape, loc, _ = make_inputs(case)
+    backing = torch.empty(cache.numel() + 1, dtype=torch.uint8, device=device)
+    cache = backing[1:].view(cache.shape)
+    key, score, ape, loc = (value.to(device) for value in (key, score, ape, loc))
+
+    def run(cache, key, score, ape, loc):
+        return F.kpool_compress_and_write_cache(cache, key, score, ape, loc, 4, implementation=implementation)
+
+    try:
+        compiled = compile_fullgraph(run)
+        with pytest.raises(ValueError, match="4-byte aligned"):
+            compiled(cache, key, score, ape, loc)
+    finally:
+        torch._dynamo.reset()

@@ -82,7 +82,7 @@ def kpool_compress_and_write_cache(
         or kv_cache.stride(1) != head_dim + 4
         or kv_cache.stride(0) < kv_cache.shape[1] * (head_dim + 4)
         or kv_cache.stride(0) % 4
-        or kv_cache.storage_offset() % 4
+        or (not torch.compiler.is_compiling() and kv_cache.storage_offset() % 4)
     ):
         raise ValueError("Expected a uint8 [pages, page_size, 132] cache with aligned contiguous page payloads")
     if loc.dtype not in (torch.int32, torch.int64) or loc.shape != (slot_k.shape[0],):

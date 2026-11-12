@@ -1,5 +1,8 @@
 """Ascend 910B3 GLM indexer pool compression and paged K-cache write."""
 
+from typing import Optional
+from typing import Tuple
+
 import torch
 import triton
 import triton.language as tl
@@ -240,7 +243,7 @@ def _compress_rows(
                 tl.store(result_scale + rows, scale, mask=active)
 
 
-def kpool_compress_and_write_cache_fwd(
+def _kpool_compress_impl(
     kv_cache,
     slot_k,
     slot_score,
@@ -254,6 +257,8 @@ def kpool_compress_and_write_cache_fwd(
     write_cache=True,
 ):
     """Compress each pool into E4M3FN K bytes and one FP32 scale."""
+    if kv_cache.storage_offset() % 4:
+        raise ValueError("Cache storage offset must be 4-byte aligned")
     assert head_dim == 128 and pool_size in (4, 16)
     assert slot_k.ndim == 3 and slot_k.shape[1:] == (pool_size, head_dim)
     assert slot_score.shape == slot_k.shape and ape.shape == slot_k.shape[1:]
@@ -311,3 +316,109 @@ def kpool_compress_and_write_cache_fwd(
         )
     if return_compressed:
         return result_k.view(torch.float8_e4m3fn), result_scale
+
+
+@torch.library.custom_op("mojo_npu_triton_a2::kpool_compress_write", mutates_args=("kv_cache",))
+def _kpool_write_leaf(
+    kv_cache: torch.Tensor,
+    slot_k: torch.Tensor,
+    slot_score: torch.Tensor,
+    ape: torch.Tensor,
+    loc: torch.Tensor,
+    pool_size: int,
+    write_mask: Optional[torch.Tensor],
+    round_scale: bool,
+) -> None:
+    _kpool_compress_impl(
+        kv_cache,
+        slot_k,
+        slot_score,
+        ape,
+        loc,
+        pool_size,
+        write_mask=write_mask,
+        round_scale=round_scale,
+    )
+
+
+@_kpool_write_leaf.register_fake
+def _kpool_write_fake(kv_cache, slot_k, slot_score, ape, loc, pool_size, write_mask, round_scale):
+    return None
+
+
+@torch.library.custom_op("mojo_npu_triton_a2::kpool_compress_write_return", mutates_args=("kv_cache",))
+def _kpool_write_return_leaf(
+    kv_cache: torch.Tensor,
+    slot_k: torch.Tensor,
+    slot_score: torch.Tensor,
+    ape: torch.Tensor,
+    loc: torch.Tensor,
+    pool_size: int,
+    round_scale: bool,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return _kpool_compress_impl(
+        kv_cache,
+        slot_k,
+        slot_score,
+        ape,
+        loc,
+        pool_size,
+        round_scale=round_scale,
+        return_compressed=True,
+    )
+
+
+def _kpool_output_fake(kv_cache, slot_k, slot_score, ape, loc, pool_size, round_scale):
+    return (
+        torch.empty((slot_k.shape[0], 128), dtype=torch.float8_e4m3fn, device=slot_k.device),
+        torch.empty((slot_k.shape[0],), dtype=torch.float32, device=slot_k.device),
+    )
+
+
+_kpool_write_return_leaf.register_fake(_kpool_output_fake)
+
+
+@torch.library.custom_op("mojo_npu_triton_a2::kpool_compress_return", mutates_args=())
+def _kpool_return_leaf(
+    kv_cache: torch.Tensor,
+    slot_k: torch.Tensor,
+    slot_score: torch.Tensor,
+    ape: torch.Tensor,
+    loc: torch.Tensor,
+    pool_size: int,
+    round_scale: bool,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return _kpool_compress_impl(
+        kv_cache,
+        slot_k,
+        slot_score,
+        ape,
+        loc,
+        pool_size,
+        round_scale=round_scale,
+        return_compressed=True,
+        write_cache=False,
+    )
+
+
+_kpool_return_leaf.register_fake(_kpool_output_fake)
+
+
+def kpool_compress_and_write_cache_fwd(
+    kv_cache,
+    slot_k,
+    slot_score,
+    ape,
+    loc,
+    pool_size,
+    head_dim=128,
+    write_mask=None,
+    round_scale=True,
+    return_compressed=False,
+    write_cache=True,
+):
+    if not return_compressed:
+        return _kpool_write_leaf(kv_cache, slot_k, slot_score, ape, loc, pool_size, write_mask, round_scale)
+    if write_cache:
+        return _kpool_write_return_leaf(kv_cache, slot_k, slot_score, ape, loc, pool_size, round_scale)
+    return _kpool_return_leaf(kv_cache, slot_k, slot_score, ape, loc, pool_size, round_scale)
