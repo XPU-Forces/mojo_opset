@@ -35,7 +35,7 @@ def _encode_e4m3fn(x):
     absolute = magnitude.to(tl.float32, bitcast=True)
     rounded = absolute * 512.0 + 8388608.0
     subnormal = rounded.to(tl.int32, bitcast=True) - 0x4B000000
-    payload = tl.where(magnitude < 0x3C800000, subnormal, normal)
+    payload = tl.where(absolute < 0.015625, subnormal, normal)
     return (sign | payload).to(tl.uint8)
 
 
@@ -61,15 +61,27 @@ def _pool_feature_half(
     POOL: tl.constexpr,
     DIM: tl.constexpr,
     START: tl.constexpr,
+    prefetched_score=None,
+    prefetched_key=None,
+    prefetched_bias=None,
 ):
     lane = START + tl.arange(0, DIM // 2)
     slot = tl.arange(0, POOL)
     pool_tile = slot[:, None] * DIM + lane[None, :]
-    bias = tl.load(ape + pool_tile)
+    if prefetched_bias is None:
+        bias = tl.load(ape + pool_tile)
+    else:
+        bias = prefetched_bias
     offsets = rows[:, None, None] * (POOL * DIM) + pool_tile[None, :, :]
     mask = active[:, None, None]
-    logits = tl.load(scores + offsets, mask=mask, other=0).to(tl.float32)
-    key_input = tl.load(keys + offsets, mask=mask, other=0)
+    if prefetched_score is None:
+        logits = tl.load(scores + offsets, mask=mask, other=0).to(tl.float32)
+    else:
+        logits = prefetched_score.to(tl.float32)
+    if prefetched_key is None:
+        key_input = tl.load(keys + offsets, mask=mask, other=0)
+    else:
+        key_input = prefetched_key
     logits += bias[None, :, :]
     weights = tl.exp(logits - tl.max(logits, axis=1)[:, None, :])
     key = key_input.to(tl.float32)
@@ -152,6 +164,20 @@ def _compress_rows(
         if ROW_TILE != 8:
             bias = tl.load(ape + pool_tile)
         pid = tl.program_id(0).to(tl.int32)
+        PREFETCH_LEFT: tl.constexpr = ROW_TILE == 8 and n_rows >= 640
+        if PREFETCH_LEFT:
+            prefetch_tile = slot[:, None] * DIM + tl.arange(0, DIM // 2)[None, :]
+            # APE is immutable and shared by every row/tile in this launch.
+            left_bias = tl.load(ape + prefetch_tile)
+            right_bias = tl.load(ape + prefetch_tile + DIM // 2)
+            prefetch_rows = pid * ROW_TILE + row_in_tile
+            if WIDE_INPUT:
+                prefetch_rows = prefetch_rows.to(tl.int64)
+            prefetch_offsets = prefetch_rows[:, None, None] * (POOL * DIM) + prefetch_tile[None, :, :]
+            next_left_score = tl.load(scores + prefetch_offsets)
+            next_left_key = tl.load(keys + prefetch_offsets)
+            next_right_score = tl.load(scores + prefetch_offsets + DIM // 2)
+            next_right_key = tl.load(keys + prefetch_offsets + DIM // 2)
         for block in range(pid, tl.cdiv(n_rows, ROW_TILE), tl.num_programs(0)):
             rows = block * ROW_TILE + row_in_tile
             if ROW_TILE >= 4 and not MASK and n_rows % ROW_TILE == 0:
@@ -165,8 +191,40 @@ def _compress_rows(
             if WIDE_INPUT:
                 row_address = rows.to(tl.int64)
             if ROW_TILE == 8:
-                left = _pool_feature_half(keys, scores, ape, row_address, active, POOL, DIM, 0)
-                right = _pool_feature_half(keys, scores, ape, row_address, active, POOL, DIM, DIM // 2)
+                if PREFETCH_LEFT:
+                    left = _pool_feature_half(
+                        keys, scores, ape, row_address, active, POOL, DIM, 0, next_left_score, next_left_key, left_bias
+                    )
+                else:
+                    left = _pool_feature_half(keys, scores, ape, row_address, active, POOL, DIM, 0)
+                if PREFETCH_LEFT:
+                    # Current right operands are already in UB; overlap its compute with future left reads.
+                    next_block = tl.minimum(block + tl.num_programs(0), tl.cdiv(n_rows, ROW_TILE) - 1)
+                    prefetch_rows = next_block * ROW_TILE + row_in_tile
+                    if WIDE_INPUT:
+                        prefetch_rows = prefetch_rows.to(tl.int64)
+                    prefetch_offsets = prefetch_rows[:, None, None] * (POOL * DIM) + prefetch_tile[None, :, :]
+                    next_left_score = tl.load(scores + prefetch_offsets)
+                    next_left_key = tl.load(keys + prefetch_offsets)
+                if PREFETCH_LEFT:
+                    right = _pool_feature_half(
+                        keys,
+                        scores,
+                        ape,
+                        row_address,
+                        active,
+                        POOL,
+                        DIM,
+                        DIM // 2,
+                        next_right_score,
+                        next_right_key,
+                        right_bias,
+                    )
+                else:
+                    right = _pool_feature_half(keys, scores, ape, row_address, active, POOL, DIM, DIM // 2)
+                if PREFETCH_LEFT:
+                    next_right_score = tl.load(scores + prefetch_offsets + DIM // 2)
+                    next_right_key = tl.load(keys + prefetch_offsets + DIM // 2)
                 halves = tl.full((ROW_TILE, DIM), 0, tl.bfloat16)
                 halves = al.insert_slice(halves, left, (0, 0), (ROW_TILE, DIM // 2), (1, 1))
                 halves = al.insert_slice(halves, right, (0, DIM // 2), (ROW_TILE, DIM // 2), (1, 1))
@@ -214,7 +272,12 @@ def _compress_rows(
             scale = tl.maximum(tl.max(tl.abs(rotated), axis=1), 1e-4) * (1.0 / 448.0)
             if ROUND:
                 scale_bits = scale.to(tl.int32, bitcast=True)
-                scale = ((scale_bits + 0x7FFFFF) & 0x7F800000).to(tl.float32, bitcast=True)
+                rounded_scale_bits = (scale_bits + 0x7FFFFF) & 0x7F800000
+                if PREFETCH_LEFT and WRITE and not MASK and not RETURN:
+                    # This integer producer owns storage; scale is only a bitcast view.
+                    al.compile_hint(rounded_scale_bits, "mem_unique")
+                    al.multibuffer(rounded_scale_bits, 2)
+                scale = rounded_scale_bits.to(tl.float32, bitcast=True)
             if ROW_TILE == 8 and ROUND:
                 # Rounded scale is an exact power of two. At the minimum
                 # scale, even the largest BF16 subnormal still rounds to FP8 zero.
@@ -226,6 +289,8 @@ def _compress_rows(
             else:
                 quantized = tl.minimum(tl.maximum(rotated / scale[:, None], -448.0), 448.0)
             encoded = _encode_e4m3fn(quantized)
+            if PREFETCH_LEFT and WRITE and not MASK and not RETURN:
+                al.multibuffer(encoded, 2)
 
             if WRITE:
                 location = tl.load(locations + rows, mask=active, other=0)
@@ -236,8 +301,28 @@ def _compress_rows(
                 page = location // PAGE
                 page_row = location - page * PAGE
                 k_base = page * PAGE_STRIDE + page_row * DIM
-                tl.store(cache_k + k_base[:, None] + lane[None, :], encoded, mask=active[:, None])
-                tl.store(cache_scale + page * (PAGE_STRIDE // 4) + PAGE * DIM // 4 + page_row, scale, mask=active)
+                if ROW_TILE == 8 and not MASK:
+                    location_delta = location - row_in_tile
+                    first_location = tl.min(location_delta, axis=0)
+                    consecutive = tl.max(location_delta, axis=0) == first_location
+                    first_page = first_location // PAGE
+                    first_slot = first_location - first_page * PAGE
+                    same_page = first_slot + ROW_TILE <= PAGE
+                    aligned_scale = first_slot % ROW_TILE == 0
+                    if consecutive & same_page & aligned_scale:
+                        flat_lane = tl.arange(0, ROW_TILE * DIM)
+                        output_base = first_page * PAGE_STRIDE + first_slot * DIM
+                        tl.store(cache_k + output_base + flat_lane, encoded.reshape((ROW_TILE * DIM,)))
+                        scale_base = first_page * (PAGE_STRIDE // 4) + PAGE * DIM // 4 + first_slot
+                        tl.store(cache_scale + scale_base + row_in_tile, scale)
+                    else:
+                        tl.store(cache_k + k_base[:, None] + lane[None, :], encoded, mask=active[:, None])
+                        tl.store(
+                            cache_scale + page * (PAGE_STRIDE // 4) + PAGE * DIM // 4 + page_row, scale, mask=active
+                        )
+                else:
+                    tl.store(cache_k + k_base[:, None] + lane[None, :], encoded, mask=active[:, None])
+                    tl.store(cache_scale + page * (PAGE_STRIDE // 4) + PAGE * DIM // 4 + page_row, scale, mask=active)
             if RETURN:
                 tl.store(result_k + rows[:, None] * DIM + lane[None, :], encoded, mask=active[:, None])
                 tl.store(result_scale + rows, scale, mask=active)

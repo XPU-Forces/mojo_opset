@@ -1,0 +1,70 @@
+{
+  "upstream_source_sha256": "a71709ed30690e95a0370939f2c3be39d16d514e1f06aa3a53a660546ee911e8",
+  "base_commit": "e21f88be58afe2cb3d3644ed9ec45c0f25093fcc",
+  "jit_functions": [
+    "_hadamard",
+    "_encode_e4m3fn",
+    "_aligned_butterfly",
+    "_pool_feature_half",
+    "_compress_rows"
+  ],
+  "all_jit_ast_match": true,
+  "non_jit_ast_unchanged": true,
+  "qualified_host_dispatch_ast_match": true,
+  "requested_skip": [
+    "graph_compilation_and_cache_side_effects",
+    "dispatch_boundary_device_tests",
+    "final_public_interface_performance_remeasurement"
+  ],
+  "integrated_version_device_tests_rerun": false,
+  "integrated_a2_file_sha256": "017f8ec504ea674aee46fee9f1f229b7ee662db8d2bb86468aed6074aa06db8e",
+  "all_jit_ast_match_after_format": true,
+  "static_checks": [
+    "Python AST parse",
+    "Ruff lint",
+    "Ruff format",
+    "JIT AST identity to qualified source",
+    "non-JIT AST unchanged",
+    "qualified launcher AST identity"
+  ],
+  "upstream_report_sha256": "156cc43330c5eec3fe4891383cb1a44ec1b8864d969947228c2a1ac8e24dd555",
+  "upstream_summary_sha256": "d07b280cd974363dd3a3344db079ecd16aec99d00f92e68b98d7d666d4b9d8cf",
+  "pmu_raw_receipts": [
+    {
+      "scope": "full_qualification",
+      "group": 1,
+      "kernel_details_sha256": "f215da36628ce3615b1d699b63b296f7e1bbed0422614a128b5a172a1d22c590"
+    },
+    {
+      "scope": "full_qualification",
+      "group": 2,
+      "kernel_details_sha256": "d41f4d0d8350322ce22353b78ba4b88a5c657c788993e17cc05effa377795ec7"
+    },
+    {
+      "scope": "full_qualification",
+      "group": 3,
+      "kernel_details_sha256": "bb11af9e1d5d9e3386a27860a97f84638da4c9c3a894fa451699746d124adb57"
+    },
+    {
+      "scope": "peak",
+      "group": 1,
+      "kernel_details_sha256": "1b5360f32476a34ec5f520c192a16c84cffcbc4d9dde3de1f75b242718e9cfea"
+    },
+    {
+      "scope": "peak",
+      "group": 2,
+      "kernel_details_sha256": "fef2b99af3f2cadb4815a9ab960792800844ab25221db9c760cb808b3691c598"
+    },
+    {
+      "scope": "peak",
+      "group": 3,
+      "kernel_details_sha256": "13076ed550ca41ff10f70d6e66b9a481e1fcb2671a3e9fae3b7db02b3a114fcc"
+    }
+  ],
+  "bound_aggregate_full27": {
+    "vec": 50.54906572051163,
+    "scalar": 24.282761109818143,
+    "mte2": 24.91482229711043,
+    "mte3": 11.369141630166885
+  }
+}
