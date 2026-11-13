@@ -5,8 +5,11 @@ supply native binaries, built under `native/mojo_opset_lib/<provider>/`. C/C++ s
 Here `<provider>` is an architecture or architecture/SKU path, for example
 `npu_a2`, private shared `npu_a5`, or public `npu_a5/sku_950pr`.
 Public functions dispatch to Python kernel
-wrappers, which internally load the matching pybind extension; users do not
-import these extensions directly.
+wrappers, which lazily load the matching extension; users do not import these
+extensions directly. A5 host functions are registered as C++ operators and
+called through `torch.ops`, including VWN, SWA and LightningIndexer. The
+extension module itself only loads registrations. PyTorch releases the GIL
+when entering these C++ operators; the host's NPU queue submission is unchanged.
 
 ```text
 native/
@@ -34,7 +37,7 @@ For a new operator on an existing architecture, add
 [A2 Varlen FA](src/npu_a2/varlen_fa) or [A5 SWA](src/npu_a5/swa).
 
 - `kernel/`: device implementation and private headers.
-- `host.h`: declaration of the C++ function exposed through pybind.
+- `host.h`: declaration of the C++ host function.
 - `host.cpp`: validate dtype/device/layout/options, allocate outputs/workspace,
   obtain the input device's current stream, and launch the selected kernel.
 - `CMakeLists.txt`: kernel targets, specializations and extension linkage.
@@ -59,7 +62,7 @@ for specializations. The top level discovers operator recipes automatically.
 
 ### 2. Architecture binding
 
-Update `native/src/<provider>/bindings.cpp`. For a hypothetical
+Update `native/src/<provider>/bindings.cpp`. For an A5 example with
 `mojo::native::LaunchExample` declared in `example/host.h`:
 
 ```cpp
@@ -67,15 +70,23 @@ Update `native/src/<provider>/bindings.cpp`. For a hypothetical
 #include "example/host.h"
 #endif
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+TORCH_LIBRARY(mojo_native_a5, m) {
 #ifdef MOJO_NATIVE_WITH_EXAMPLE
-  m.def("launch_example", &mojo::native::LaunchExample);
+  m.def("launch_example(Tensor input) -> Tensor", &mojo::native::LaunchExample);
 #endif
   // Other operators in this architecture.
 }
 ```
 
-Add to the existing `PYBIND11_MODULE`; do not create a second module entry.
+Add to the existing dispatcher registration block; do not create a second
+`TORCH_LIBRARY` block for the same namespace. Keep the existing, empty
+`PYBIND11_MODULE` as the module import entry. The shared A5 provider uses
+`mojo_native_a5`; the public 950PR SWA provider uses `mojo_native_a5_950pr` so
+both libraries can be loaded in one process without duplicate registration.
+Their SWA schemas share `src/npu_a5/swa/registration.h`. Operators already
+registered in family-specific namespaces (SR, MXFP8, attention dropout) keep
+those namespaces. Existing A2 pybind bindings are outside this A5 migration.
+
 The macro is enabled automatically by the recipe. It selects operators within
 one build selection, while CMake selects the architecture/SKU's binding/source files.
 
@@ -85,7 +96,9 @@ Add `mojo_opset/kernels/<arch>_native/[sku_<name>/]<operator>.py`; use
 [the SWA wrapper](../mojo_opset/kernels/npu_a5_native/swa.py) as an example:
 
 1. Lazily import the matching artifact module (replace `/` with `.`), for example
-   `mojo_opset_lib.npu_a5._native`, and its launch function.
+   `mojo_opset_lib.npu_a5._native`, then resolve its `torch.ops` entry. Use the
+   A5 `load_ops` helper to check the selected build's registrations. Do not
+   call host functions as attributes of the pybind module.
 2. Register a leaf `torch.library.custom_op` with the correct mutation schema
    and a fake implementation describing output metadata.
 3. Export `{op_id}_fwd` and, when needed, `{op_id}_bwd` with the functional

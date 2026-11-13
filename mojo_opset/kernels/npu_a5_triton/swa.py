@@ -13,11 +13,13 @@ from mojo_opset.kernels._npu_triton_utils import get_num_cores
 from mojo_opset.kernels._npu_triton_utils import is_910
 from mojo_opset.kernels._npu_triton_utils import libentry
 
+from ._attention_dropout import generate_mask
+from ._attention_dropout import mask_row_bytes
+
 
 def _disable_dq_dynamic_cv_pipeline():
     kind, version = get_ascend_compiler_version()
     return kind == "internal" and version >= Version("3.2.2.post1")
-
 
 # Preserve the single-config launch defaults without entering the autotuner.
 SWA_FWD_OPTIONS = triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "multibuffer": False}).all_kwargs()
@@ -380,6 +382,44 @@ def gen_mask_triu(mask_ptr_triu, mask_size, mask_stride_m, mask_stride_n, M_BLOC
 
 
 @triton.jit
+def _load_dropout_mask(
+    mask_ptr,
+    q_start,
+    k_start,
+    q_pos,
+    q_block_start,
+    head,
+    row_words,
+    total_q,
+    NUM_HEADS: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    CAUSAL: tl.constexpr,
+    GLOBAL: tl.constexpr,
+    LOCAL: tl.constexpr,
+):
+    # A common interval for 128 queries makes every mask tile a strided DMA,
+    # instead of an elementwise gather with a different key origin per row.
+    if CAUSAL and LOCAL is not None:
+        prefix: tl.constexpr = 0 if GLOBAL is None else triton.cdiv(GLOBAL, 128) * 128
+        local_start = tl.maximum(q_pos - q_block_start % 128 - LOCAL, 0) // 128 * 128
+        slot_start = tl.where(k_start < prefix, k_start, prefix + k_start - local_start) // 32
+    else:
+        slot_start = k_start // 32
+    block = tl.make_block_ptr(
+        base=mask_ptr + head * row_words,
+        shape=(total_q, row_words),
+        strides=(NUM_HEADS * row_words, 1),
+        offsets=(q_start.to(tl.int32), slot_start.to(tl.int32)),
+        block_shape=(BLOCK_M, BLOCK_N // 32),
+        order=(1, 0),
+    )
+    packed = tl.load(block, boundary_check=(0, 1), padding_option="zero").to(tl.uint32)
+    keep = (packed[:, :, None] & (1 << tl.arange(0, 32)[None, None, :]).to(tl.uint32)) != 0
+    return tl.reshape(keep, (BLOCK_M, BLOCK_N))
+
+
+@triton.jit
 def _sdpa_acc_fwd_MxN(
     acc_ptr,
     l_i,
@@ -394,6 +434,8 @@ def _sdpa_acc_fwd_MxN(
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     fp8_v: tl.constexpr,
+    dropout_keep=None,
+    inverse_keep_prob: tl.constexpr = 1.0,
 ):
     if mask is False:
         return acc_ptr, l_i, m_i
@@ -415,7 +457,8 @@ def _sdpa_acc_fwd_MxN(
     # Softmax weights p = exp(qk)
     p = tl.math.exp(qk)
 
-    p_cast = p.to(k_T.dtype)
+    p_pv = p if dropout_keep is None else tl.where(dropout_keep, p * inverse_keep_prob, 0.0)
+    p_cast = p_pv.to(k_T.dtype)
 
     # Load corresponding V block
     v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
@@ -1541,7 +1584,7 @@ def swa_paged_decode_impl(
 # Packed batches change bsz and the token-derived LSE leading stride at runtime.
 # Keep the fixed contiguous Q/K/V/O strides specialized for alignment lowering.
 @libentry()
-@triton.jit(do_not_specialize=["bsz", "stride_lse_h"])
+@triton.jit(do_not_specialize=["bsz", "stride_lse_h", "dropout_row_words"])
 def _swa_fwd_kernel(
     o_ptr,
     o_f32_ptr,
@@ -1553,6 +1596,9 @@ def _swa_fwd_kernel(
     cu_q_lens_ptr,
     cu_total_seq_lens_ptr,
     scale,
+    dropout_mask_ptr,
+    dropout_row_words,
+    DROPOUT_P: tl.constexpr,
     stride_ot,
     stride_oh,
     stride_od,
@@ -1691,6 +1737,24 @@ def _swa_fwd_kernel(
                     order=(1, 0),
                 )
 
+                dropout_keep = None
+                if DROPOUT_P > 0:
+                    dropout_keep = _load_dropout_mask(
+                        dropout_mask_ptr,
+                        q_start + q_block_start,
+                        kv_block_start,
+                        q_block_start + kv_computed_len,
+                        q_block_start,
+                        q_head_id,
+                        dropout_row_words,
+                        stride_lse_h,
+                        NUM_Q_HEADS,
+                        BLOCK_M,
+                        BLOCK_N,
+                        IS_CAUSAL,
+                        GLOBAL_WINDOW,
+                        LOCAL_WINDOW,
+                    )
                 acc, l_i, m_i = _sdpa_acc_fwd_MxN(
                     acc,
                     l_i,
@@ -1705,6 +1769,8 @@ def _swa_fwd_kernel(
                     BLOCK_N,
                     BLOCK_D,
                     v_ptr.dtype.element_ty == tl.float8e5,
+                    dropout_keep,
+                    1.0 / (1.0 - DROPOUT_P),
                 )
 
             lse_i = m_i + tl.math.log(l_i)
@@ -1747,6 +1813,8 @@ def swa_fwd_impl(
     softmax_scale: Optional[float] = None,
     gqa_interleave: bool = False,
     output_f32: bool = False,
+    dropout_p: float = 0.0,
+    dropout_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     # mask_size, mask = get_aux_mask()
 
@@ -1793,6 +1861,9 @@ def swa_fwd_impl(
         cu_q_lens,
         cu_total_seq_lens,
         softmax_scale,
+        dropout_mask,
+        dropout_mask.shape[-1] if dropout_mask is not None else 0,
+        dropout_p,
         o.stride(0),
         o.stride(1),
         o.stride(2),
@@ -1828,7 +1899,7 @@ def swa_fwd_impl(
         inter_cache_num=2,
         enable_buffer_insert_optimization=True,
         enable_ub_refine_opt = True,
-        **SWA_FWD_OPTIONS,
+        **{**SWA_FWD_OPTIONS, "BLOCK_M": 64 if dropout_p else 128},
     )
     if output_f32:
         return o, softmax_lse, o_f32
@@ -1900,6 +1971,8 @@ def _sdpa_single_block_bwd_dkdv(
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     fp8_v: tl.constexpr,
+    dropout_keep=None,
+    inverse_keep_prob: tl.constexpr = 1.0,
 ):
     if mask is False:
         return dk_ptr, dv_ptr
@@ -1921,7 +1994,8 @@ def _sdpa_single_block_bwd_dkdv(
     p = tl.math.exp(qk - lse[:, None])
     if mask is not None and mask is not True:
         p = tl.where(mask, p, 0.0)  # 32B # bool
-    p_cast = p.to(q.dtype)
+    p_pv = p if dropout_keep is None else tl.where(dropout_keep, p * inverse_keep_prob, 0.0)
+    p_cast = p_pv.to(q.dtype)
 
     # -- Compute dV ----
     # dv = pT @ do
@@ -1932,6 +2006,8 @@ def _sdpa_single_block_bwd_dkdv(
     # dpT = v @ doT
     # doT = tl.trans(do)
     dp = tl.dot(do, tl.trans(v))
+    if dropout_keep is not None:
+        dp = tl.where(dropout_keep, dp * inverse_keep_prob, 0.0)
 
     # dsT = pT * (dpT - dT)
     ds = p * (dp - d[:, None]) * qk_scale
@@ -1960,6 +2036,8 @@ def _sdpa_single_block_bwd_dq(
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     fp8_v: tl.constexpr,
+    dropout_keep=None,
+    inverse_keep_prob: tl.constexpr = 1.0,
 ):
     if mask is False:
         return dq_ptr
@@ -1984,6 +2062,8 @@ def _sdpa_single_block_bwd_dq(
     v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
     v_T = tl.trans(v)
     dp = tl.dot(do, v_T)
+    if dropout_keep is not None:
+        dp = tl.where(dropout_keep, dp * inverse_keep_prob, 0.0)
 
     # ds = p * (dp - d)
     ds = p * (dp - d[:, None]) * qk_scale
@@ -2000,16 +2080,23 @@ def _sdpa_single_block_bwd_dq(
     return dq
 
 
+def _swa_dropout_prune(configs, named_args, **kwargs):
+    if named_args["DROPOUT_P"]:
+        return [config for config in configs if config.kwargs["BLOCK_N"] == 64]
+    return configs
+
+
 @libentry()
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_M": 128, "BLOCK_N": BN, "multibuffer": True})
         for BN in [64, 128]
     ],
-    key=["HEAD_DIM", "NUM_KV_HEADS", "IS_CAUSAL", "GLOBAL_WINDOW", "LOCAL_WINDOW"],
+    key=["HEAD_DIM", "NUM_KV_HEADS", "IS_CAUSAL", "GLOBAL_WINDOW", "LOCAL_WINDOW", "DROPOUT_P"],
+    prune_configs_by={"early_config_prune": _swa_dropout_prune},
 )
 # The packed batch size and [head, token] leading strides vary with the batch.
-@triton.jit(do_not_specialize=["bsz", "stride_delta_h", "stride_lse_h"])
+@triton.jit(do_not_specialize=["bsz", "stride_delta_h", "stride_lse_h", "dropout_row_words"])
 def _swa_bwd_dkdv_kernel(
     dk_ptr,
     dv_ptr,
@@ -2023,6 +2110,9 @@ def _swa_bwd_dkdv_kernel(
     cu_q_lens_ptr,
     cu_total_seq_lens_ptr,
     scale,
+    dropout_mask_ptr,
+    dropout_row_words,
+    DROPOUT_P: tl.constexpr,
     stride_dkt,
     stride_dkh,
     stride_dkd,
@@ -2251,6 +2341,24 @@ def _swa_bwd_dkdv_kernel(
                             cur_lse = tl.load(lse_i_ptr + q_offs * stride_lse_t, mask=q_offs < q_seq_len,
                                               other=0.0)
                             tl.static_assert(cur_lse.dtype == tl.float32)
+                            dropout_keep = None
+                            if DROPOUT_P > 0:
+                                dropout_keep = _load_dropout_mask(
+                                    dropout_mask_ptr,
+                                    q_start + q_block_start,
+                                    kv_block_start,
+                                    q_block_start + kv_computed_len,
+                                    q_block_start,
+                                    q_head_id,
+                                    dropout_row_words,
+                                    stride_lse_h,
+                                    NUM_Q_HEADS,
+                                    BLOCK_M,
+                                    BLOCK_N,
+                                    IS_CAUSAL,
+                                    GLOBAL_WINDOW,
+                                    LOCAL_WINDOW,
+                                )
                             dk, dv = _sdpa_single_block_bwd_dkdv(
                                 dk,
                                 dv,
@@ -2267,6 +2375,8 @@ def _swa_bwd_dkdv_kernel(
                                 BLOCK_N,
                                 BLOCK_D,
                                 v_ptr.dtype.element_ty == tl.float8e5,
+                                dropout_keep,
+                                1.0 / (1.0 - DROPOUT_P),
                             )
                     tl.extra.cann.extension.compile_hint(dv, "matmul_at_least_once")
                     tl.extra.cann.extension.compile_hint(dk, "matmul_at_least_once")
@@ -2291,11 +2401,11 @@ def _swa_bwd_dkdv_kernel(
                     tl.store(cur_dk_block_ptr, dk.to(dk_ptr.type.element_ty), boundary_check=(0, 1))
 
 
-# Noncausal dQ needs 288 KiB of UB with 128x128 tiles (only 248 KiB is available).
+# Noncausal or dropout dQ needs smaller tiles to fit the UB budget.
 @libentry()
-@triton.heuristics({"BLOCK_M": lambda args: 128 if args["IS_CAUSAL"] else 64})
+@triton.heuristics({"BLOCK_M": lambda args: 128 if args["IS_CAUSAL"] and not args["DROPOUT_P"] else 64})
 # The packed batch size and [head, token] leading strides vary with the batch.
-@triton.jit(do_not_specialize=["bsz", "stride_delta_h", "stride_lse_h"])
+@triton.jit(do_not_specialize=["bsz", "stride_delta_h", "stride_lse_h", "dropout_row_words"])
 def _swa_bwd_dq_kernel(
     dq_ptr,
     do_ptr,
@@ -2308,6 +2418,9 @@ def _swa_bwd_dq_kernel(
     cu_q_lens_ptr,
     cu_total_seq_lens_ptr,
     scale,
+    dropout_mask_ptr,
+    dropout_row_words,
+    DROPOUT_P: tl.constexpr,
     stride_dqt,
     stride_dqh,
     stride_dqd,
@@ -2457,6 +2570,24 @@ def _swa_bwd_dq_kernel(
                     block_shape=(BLOCK_N, BLOCK_D),
                     order=(1, 0),
                 )
+                dropout_keep = None
+                if DROPOUT_P > 0:
+                    dropout_keep = _load_dropout_mask(
+                        dropout_mask_ptr,
+                        q_start + q_block_start,
+                        kv_block_start,
+                        q_block_start + kv_computed_len,
+                        q_block_start,
+                        q_head_id,
+                        dropout_row_words,
+                        stride_lse_h,
+                        NUM_Q_HEADS,
+                        BLOCK_M,
+                        BLOCK_N,
+                        IS_CAUSAL,
+                        GLOBAL_WINDOW,
+                        LOCAL_WINDOW,
+                    )
                 dq = _sdpa_single_block_bwd_dq(
                     dq,
                     cur_delta,
@@ -2472,6 +2603,8 @@ def _swa_bwd_dq_kernel(
                     BLOCK_N,
                     BLOCK_D,
                     v_ptr.dtype.element_ty == tl.float8e5,
+                    dropout_keep,
+                    1.0 / (1.0 - DROPOUT_P),
                 )
 
             # cur_dq_block_ptr = tl.advance(dq_block_ptr, (q_block_start.to(tl.int32), 0))
@@ -2535,6 +2668,8 @@ def swa_dkdv(
     global_window_size: Optional[int],
     softmax_scale: Optional[float],
     gqa_interleave: bool,
+    dropout_p: float = 0.0,
+    dropout_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     # mask_size, mask = get_aux_mask()
 
@@ -2577,6 +2712,9 @@ def swa_dkdv(
         cu_q_lens,
         cu_total_seq_lens,
         softmax_scale,
+        dropout_mask,
+        dropout_mask.shape[-1] if dropout_mask is not None else 0,
+        dropout_p,
         dk.stride(0),
         dk.stride(1),
         dk.stride(2),
@@ -2635,6 +2773,8 @@ def _swa_dkdv_fake(
     global_window_size,
     softmax_scale,
     gqa_interleave,
+    dropout_p=0.0,
+    dropout_mask=None,
 ):
     return (
         torch.empty_like(k, memory_format=torch.contiguous_format),
@@ -2658,6 +2798,8 @@ def swa_dq(
     global_window_size: Optional[int],
     softmax_scale: Optional[float],
     gqa_interleave: bool,
+    dropout_p: float = 0.0,
+    dropout_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     # mask_size, mask = get_aux_mask()
 
@@ -2693,6 +2835,9 @@ def swa_dq(
         cu_q_lens,
         cu_total_seq_lens,
         softmax_scale,
+        dropout_mask,
+        dropout_mask.shape[-1] if dropout_mask is not None else 0,
+        dropout_p,
         dq.stride(0),
         dq.stride(1),
         dq.stride(2),
@@ -2751,6 +2896,8 @@ def _swa_dq_fake(
     global_window_size,
     softmax_scale,
     gqa_interleave,
+    dropout_p=0.0,
+    dropout_mask=None,
 ):
     return torch.empty_like(q, memory_format=torch.contiguous_format)
 
@@ -2769,6 +2916,8 @@ def swa_bwd_impl(
     global_window_size: Optional[int],
     softmax_scale: Optional[float],
     gqa_interleave: bool,
+    dropout_p: float = 0.0,
+    dropout_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     delta = swa_preprocess(do, o)
     args = (
@@ -2786,6 +2935,8 @@ def swa_bwd_impl(
         global_window_size,
         softmax_scale,
         gqa_interleave,
+        dropout_p,
+        dropout_mask,
     )
     dk, dv = swa_dkdv(*args)
     dq = swa_dq(*args)
@@ -2798,9 +2949,10 @@ def swa_bwd_impl(
     # PyTorch 2.7 cannot infer optional tensors in a tuple return annotation.
     schema="(Tensor q, Tensor k, Tensor v, Tensor cu_q_lens, Tensor cu_k_lens, "
            "bool is_causal, SymInt? local_window_size, SymInt? global_window_size, "
-           "float softmax_scale, bool gqa_interleave, bool output_f32=False) -> (Tensor, Tensor, Tensor?)",
+           "float softmax_scale, bool gqa_interleave, bool output_f32=False, "
+           "float dropout_p=0.0, Tensor? dropout_mask=None) -> (Tensor, Tensor, Tensor?)",
 )
-def swa_fwd(
+def _swa_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -2812,6 +2964,8 @@ def swa_fwd(
     softmax_scale: float,
     gqa_interleave: bool,
     output_f32: bool = False,
+    dropout_p: float = 0.0,
+    dropout_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     if is_causal and local_window_size is None and global_window_size is None:
         local_window_size = k.shape[0]
@@ -2827,12 +2981,14 @@ def swa_fwd(
         softmax_scale,
         gqa_interleave,
         output_f32,
+        dropout_p,
+        dropout_mask,
     )
     # Do not return O twice: custom-op outputs cannot alias each other.
     return result if output_f32 else (result[0], result[1], None)
 
 
-@swa_fwd.register_fake
+@_swa_fwd.register_fake
 def _swa_fwd_fake(
     q,
     k,
@@ -2845,6 +3001,8 @@ def _swa_fwd_fake(
     softmax_scale,
     gqa_interleave,
     output_f32=False,
+    dropout_p=0.0,
+    dropout_mask=None,
 ):
     del k, v, cu_q_lens, cu_k_lens, is_causal
     del local_window_size, global_window_size, softmax_scale, gqa_interleave
@@ -2853,6 +3011,54 @@ def _swa_fwd_fake(
         q.new_empty((q.shape[1], q.shape[0]), dtype=torch.float32),
         q.new_empty(q.shape, dtype=torch.float32) if output_f32 else None,
     )
+
+
+def swa_fwd(
+    q,
+    k,
+    v,
+    cu_q_lens,
+    cu_k_lens,
+    is_causal,
+    local_window_size,
+    global_window_size,
+    softmax_scale,
+    gqa_interleave,
+    output_f32=False,
+    dropout_p=0.0,
+    dropout_mask=None,
+):
+    if dropout_p:
+        expected = (
+            q.shape[0],
+            q.shape[1],
+            mask_row_bytes(k.shape[0], is_causal, local_window_size, global_window_size) // 4,
+        )
+        if dropout_mask is None:
+            dropout_mask = generate_mask(q, k, dropout_p, is_causal, local_window_size, global_window_size)
+        elif (
+            dropout_mask.dtype != torch.int32
+            or dropout_mask.device != q.device
+            or dropout_mask.shape != expected
+            or not dropout_mask.is_contiguous()
+        ):
+            raise ValueError("dropout_mask must be a contiguous same-device int32 bit mask with the provider layout")
+    result = _swa_fwd(
+        q,
+        k,
+        v,
+        cu_q_lens,
+        cu_k_lens,
+        is_causal,
+        local_window_size,
+        global_window_size,
+        softmax_scale,
+        gqa_interleave,
+        output_f32,
+        dropout_p,
+        dropout_mask,
+    )
+    return (*result, dropout_mask) if dropout_p else result
 
 
 def swa_bwd(
@@ -2869,6 +3075,8 @@ def swa_bwd(
     global_window_size: Optional[int],
     softmax_scale: float,
     gqa_interleave: bool,
+    dropout_p: float = 0.0,
+    dropout_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if is_causal and local_window_size is None and global_window_size is None:
         local_window_size = k.shape[0]
@@ -2886,6 +3094,8 @@ def swa_bwd(
         global_window_size,
         softmax_scale,
         gqa_interleave,
+        dropout_p,
+        dropout_mask,
     )
 
 

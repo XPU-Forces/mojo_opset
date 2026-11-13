@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <torch/library.h>
 
 #ifdef MOJO_NATIVE_WITH_TOPK
 #include "topk/host.h"
@@ -8,13 +9,7 @@
 #include "lightning_indexer/host.h"
 #endif
 
-#ifdef MOJO_NATIVE_WITH_SWA
-#include "swa/host.h"
-#endif
-
-#ifdef MOJO_NATIVE_WITH_SWA_BACKWARD
-#include "swa_backward/host.h"
-#endif
+#include "swa/registration.h"
 
 #ifdef MOJO_NATIVE_WITH_VWN
 #include "vwn/host.h"
@@ -28,44 +23,49 @@
 #include "moe_dispatch_combine/host.h"
 #endif
 
-namespace py = pybind11;
-
+// The module loads registrations; C++ dispatcher operators enter through torch.ops.
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-#ifdef MOJO_NATIVE_WITH_TOPK
-  m.def("topk_forward", &mojo::native::a5::TopKForward);
-#endif
 #ifdef MOJO_NATIVE_WITH_MOE_DISPATCH_COMBINE
     mojo::native::ep::Bind(m);
-#endif
-#ifdef MOJO_NATIVE_WITH_LIGHTNING_INDEXER
-  m.def("lightning_indexer_forward", &mojo::native::a5::LightningIndexerForward);
 #endif
 #ifdef MOJO_NATIVE_WITH_DENSE_GEMM
     mojo::native::RegisterDenseGemm(m);
 #endif
-#ifdef MOJO_NATIVE_WITH_SWA
-  m.def("launch_swa", &mojo::native::LaunchSwaCurrentStream,
-        "Launch AscendC SWA on the current torch-npu stream");
-  m.def("launch_swa_training", &mojo::native::LaunchSwaTrainingCurrentStream,
-        "Launch AscendC SWA and return output plus softmax LSE");
+}
+
+TORCH_LIBRARY(mojo_native_a5, m) {
+#ifdef MOJO_NATIVE_WITH_TOPK
+    m.def("topk_forward(Tensor input, int k, Tensor? end, bool sorted_index, Tensor? output_idx, "
+          "Tensor? output_idx_offset, int idx_fill, float value_fill, bool return_value, "
+          "bool abort_when_nan_found) -> (Tensor?, Tensor)",
+          &mojo::native::a5::TopKForward);
 #endif
-#ifdef MOJO_NATIVE_WITH_SWA_BACKWARD
-  m.def("launch_swa_backward", &mojo::native::LaunchSwaBackwardCurrentStream,
-        "Launch AscendC SWA backward on the current torch-npu stream");
+#ifdef MOJO_NATIVE_WITH_LIGHTNING_INDEXER
+    m.def("lightning_indexer_forward(Tensor query, Tensor query_scale, Tensor key, Tensor key_scale) -> Tensor",
+          &mojo::native::a5::LightningIndexerForward);
 #endif
+    mojo::native::RegisterSwa(m);
 #ifdef MOJO_NATIVE_WITH_VWN
     using namespace mojo::native::vwn;
-    m.def("vwn_width_infer", &vwn_width_connection_infer_npu);
-    m.def("vwn_width_fwd", &vwn_width_connection_train_npu);
-    m.def("vwn_width_bwd_partials", &vwn_width_connection_backward_partials_npu,
-        py::arg("h"), py::arg("weight"), py::arg("fn"), py::arg("dynamic"), py::arg("statics"),
-        py::arg("acc"), py::arg("invvar"), py::arg("u"), py::arg("v"), py::arg("residual"),
-        py::arg("factor"), py::arg("min_value"), py::arg("max_value"), py::arg("workspace_blocks"),
-        py::arg("grad_h_dtype") = std::nullopt, py::arg("sr_seed") = std::nullopt);
-    m.def("vwn_depth_fwd", &vwn_depth_connection_train_npu,
-        py::arg("h"), py::arg("ho"), py::arg("gates"), py::arg("weight"), py::arg("eps"),
-        py::arg("output_fp32") = false, py::arg("sr_seed") = std::nullopt);
-    m.def("vwn_depth_infer", &vwn_depth_connection_infer_npu);
-    m.def("vwn_depth_bwd_partials", &vwn_depth_connection_backward_partials_npu);
+    m.def("vwn_width_infer(Tensor h, Tensor weight, Tensor fn, Tensor dynamic, Tensor statics, "
+          "float eps, float? factor, float min_value, float max_value) -> (Tensor, Tensor)",
+          &vwn_width_connection_infer_npu);
+    m.def("vwn_width_fwd(Tensor h, Tensor weight, Tensor fn, Tensor dynamic, Tensor statics, "
+          "float eps, float? factor, float min_value, float max_value) -> (Tensor, Tensor, Tensor, Tensor)",
+          &vwn_width_connection_train_npu);
+    m.def("vwn_width_bwd_partials(Tensor h, Tensor weight, Tensor fn, Tensor dynamic, Tensor statics, "
+          "Tensor acc, Tensor invvar, Tensor u, Tensor v, Tensor? residual, float? factor, "
+          "float min_value, float max_value, int workspace_blocks, ScalarType? grad_h_dtype=None, "
+          "Tensor? sr_seed=None) -> (Tensor, Tensor, Tensor, Tensor, Tensor)",
+          &vwn_width_connection_backward_partials_npu);
+    m.def("vwn_depth_fwd(Tensor h, Tensor ho, Tensor gates, Tensor? weight, float eps, "
+          "bool output_fp32=False, Tensor? sr_seed=None) -> (Tensor, Tensor)",
+          &vwn_depth_connection_train_npu);
+    m.def("vwn_depth_infer(Tensor h, Tensor ho, Tensor gates, Tensor? weight, float eps) -> Tensor",
+          &vwn_depth_connection_infer_npu);
+    m.def("vwn_depth_bwd_partials(Tensor h, Tensor ho, Tensor gates, Tensor dy, Tensor? weight, "
+          "Tensor? invvar, Tensor? clip_mask, float clip, ScalarType? grad_h_dtype, int workspace_blocks) "
+          "-> (Tensor, Tensor, Tensor, Tensor)",
+          &vwn_depth_connection_backward_partials_npu);
 #endif
 }

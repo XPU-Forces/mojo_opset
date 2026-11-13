@@ -4,20 +4,12 @@ from typing import Tuple
 
 import torch
 
+from ._extension import load_ops
+
 
 @lru_cache(maxsize=1)
 def _launcher():
-    import torch_npu  # noqa: F401 -- load the dependent runtime first
-
-    try:
-        from mojo_opset_lib.npu_a5 import _native
-
-        return _native.topk_forward
-    except (ImportError, AttributeError) as error:
-        raise ImportError(
-            "Native extension mojo_opset_lib.npu_a5._native could not be loaded "
-            "or does not export topk_forward. Build and install it: bash build.sh npu_a5"
-        ) from error
+    return load_ops("npu_a5", "mojo_native_a5", ("topk_forward",)).topk_forward.default
 
 
 @torch.library.custom_op(

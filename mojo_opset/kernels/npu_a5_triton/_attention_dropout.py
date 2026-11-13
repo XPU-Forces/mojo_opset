@@ -223,3 +223,44 @@ def refill_dropout_mask(dropout, *, generator=None, seed=None, offset=0):
                 )
             torch.autograd.graph.increment_version(dropout.tiles)
     return dropout
+from typing import Optional
+
+
+def mask_row_bytes(total_k: int, causal: bool, local_window: Optional[int], global_window: Optional[int]) -> int:
+    """Return the aligned storage per query/head row, including ignored padding."""
+    if causal and local_window is not None:
+        prefix = ((global_window or 0) + 127) // 128 * 128
+        # L+1 keys, at most 127 extra for the query block and 127 for alignment;
+        # the final 127 rounds this bound up to a multiple of 128.
+        width = prefix + (local_window + 382) // 128 * 128
+    else:
+        width = (total_k + 63) // 64 * 64
+    return width // 8
+
+
+@torch.library.custom_op("mojo_npu_triton_a5::swa_dropout_mask", mutates_args=())
+def generate_mask(
+    q: torch.Tensor, k: torch.Tensor, p: float, causal: bool, local_window: Optional[int], global_window: Optional[int]
+) -> torch.Tensor:
+    """Draw keep bits from the device RNG; explicit masks bypass this operation."""
+    row_words = mask_row_bytes(k.shape[0], causal, local_window, global_window) // 4
+    num_words = q.shape[0] * q.shape[1] * row_words
+    if num_words <= 2**30:
+        from mojo_opset.kernels.npu_a5_native.attention_dropout import generate_mask as generate_native_mask
+
+        # Native Philox compares 8-bit draws and packs keep bits in registers.
+        # It writes only the final mask, without a full-size entropy buffer.
+        mask = generate_native_mask(q, num_words, p)
+    else:
+        import torch_npu
+
+        # Preserve dense-mask support beyond the native 32-bit counter range.
+        mask = torch_npu.npu_dropout_gen_mask([num_words * 32], p, dtype=q.dtype, device=q.device)
+        mask = mask.view(torch.int32)[:num_words]
+    return mask.view(q.shape[0], q.shape[1], row_words)
+
+
+@generate_mask.register_fake
+def _generate_mask_fake(q, k, p, causal, local_window, global_window):
+    row_words = mask_row_bytes(k.shape[0], causal, local_window, global_window) // 4
+    return q.new_empty((q.shape[0], q.shape[1], row_words), dtype=torch.int32)

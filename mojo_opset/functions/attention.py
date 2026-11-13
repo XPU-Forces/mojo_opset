@@ -42,6 +42,8 @@ class SwaFunction(torch.autograd.Function):
         gqa_interleave,
         output_f32,
         implementation,
+        dropout_p=0.0,
+        dropout_mask=None,
     ):
         _validate_inputs(q, k, v, cu_q_lens, cu_k_lens)
         softmax_scale = q.shape[-1] ** -0.5 if softmax_scale is None else float(softmax_scale)
@@ -55,7 +57,9 @@ class SwaFunction(torch.autograd.Function):
         else:
             forward, backward = load_impl("swa", implementation, require_backward=True)
         ctx.forward_kernel, ctx.backward_kernel = forward, backward
-        output, softmax_lse, output_cache = forward(
+        # Keep the dropout-free ABI for providers that do not implement dropout.
+        dropout_kwargs = {"dropout_p": dropout_p, "dropout_mask": dropout_mask} if dropout_p else {}
+        output, softmax_lse, output_cache, *mask_cache = forward(
             q,
             k,
             v,
@@ -67,19 +71,25 @@ class SwaFunction(torch.autograd.Function):
             softmax_scale,
             gqa_interleave,
             output_f32,
+            **dropout_kwargs,
         )
+        dropout_mask = mask_cache[0] if dropout_p else None
+        ctx.dropout_p = dropout_p
         ctx.is_causal = is_causal
         ctx.local_window_size = local_window_size
         ctx.global_window_size = global_window_size
         ctx.softmax_scale = softmax_scale
         ctx.gqa_interleave = gqa_interleave
-        ctx.save_for_backward(q, k, v, output_cache if output_f32 else output, softmax_lse, cu_q_lens, cu_k_lens)
+        ctx.save_for_backward(
+            q, k, v, output_cache if output_f32 else output, softmax_lse, cu_q_lens, cu_k_lens, dropout_mask
+        )
         return output
 
     @staticmethod
     @once_differentiable
     def backward(ctx, grad_output):
-        q, k, v, output_cache, softmax_lse, cu_q_lens, cu_k_lens = ctx.saved_tensors
+        q, k, v, output_cache, softmax_lse, cu_q_lens, cu_k_lens, dropout_mask = ctx.saved_tensors
+        dropout_kwargs = {"dropout_p": ctx.dropout_p, "dropout_mask": dropout_mask} if ctx.dropout_p else {}
         grad_q, grad_k, grad_v = ctx.backward_kernel(
             grad_output.contiguous(),
             q,
@@ -94,8 +104,11 @@ class SwaFunction(torch.autograd.Function):
             ctx.global_window_size,
             ctx.softmax_scale,
             ctx.gqa_interleave,
+            **dropout_kwargs,
         )
-        return grad_q, grad_k, grad_v, None, None, None, None, None, None, None, None, None
+        grads = (grad_q, grad_k, grad_v) + (None,) * 11
+        # Fused callers use an explicit context, without autograd's metadata.
+        return grads[: len(ctx.needs_input_grad)] if hasattr(ctx, "needs_input_grad") else grads
 
 
 class FlashAttentionFunction(torch.autograd.Function):
@@ -161,9 +174,11 @@ class FlashAttentionFunction(torch.autograd.Function):
     @staticmethod
     @once_differentiable
     def backward(ctx, grad_output):
-        q, k, v, cu_q_lens, cu_k_lens = ctx.saved_tensors[:5]
-        attention_mask = ctx.saved_tensors[5] if ctx.has_attention_mask else None
-        cache = ctx.saved_tensors[6 if ctx.has_attention_mask else 5 :]
+        # Non-reentrant checkpoint permits each saved tensor to be unpacked once.
+        saved = ctx.saved_tensors
+        q, k, v, cu_q_lens, cu_k_lens = saved[:5]
+        attention_mask = saved[5] if ctx.has_attention_mask else None
+        cache = saved[6 if ctx.has_attention_mask else 5 :]
         grad_q, grad_k, grad_v = ctx.backward_kernel(
             grad_output.contiguous(),
             q,
@@ -197,13 +212,24 @@ def swa(
     gqa_interleave: bool = False,
     output_f32: bool = False,
     implementation: Optional[str] = None,
+    dropout_p: float = 0.0,
+    dropout_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Packed variable-length sliding-window attention in TND layout.
 
     output_f32 retains an extra FP32 output for backward accuracy; otherwise
     backward reuses the returned output. The return dtype always matches q.
+    Dropout is applied to softmax probabilities, with inverse keep-probability
+    scaling. A pre-generated bit-packed int32 dropout_mask can be supplied; it
+    must use the provider's layout, with one keep bit per probability (not raw
+    random numbers). Otherwise the provider draws a mask from the device RNG.
+    Backward reuses it. Dropout=0 ignores the mask and consumes no RNG; supplying
+    a mask also consumes no RNG. Currently dropout is supported by the A5 Triton
+    provider; see kernels/npu_a5_triton/_attention_dropout.py for its layout.
     """
-
+    dropout_p = float(dropout_p)
+    if not 0.0 <= dropout_p < 1.0:
+        raise ValueError("dropout_p must be in [0, 1)")
     return SwaFunction.apply(
         q,
         k,
@@ -217,6 +243,8 @@ def swa(
         gqa_interleave,
         output_f32,
         implementation,
+        dropout_p,
+        dropout_mask,
     )
 
 
