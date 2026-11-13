@@ -1497,6 +1497,47 @@ def _prepare_block_mask_attrs(block_mask, q, num_q_blocks, sparse_q_block_size, 
         "has_full_blocks": has_full_blocks,
     }
 
+def _get_mask_block_sizes(block_mask):
+    """从 BlockMask 提取稀疏分块大小 (Q, KV)。
+
+    BlockMask.BLOCK_SIZE 记录了掩码构建时使用的分块粒度, kernel 必须以该粒度
+    解释 kv_block / q_block 索引, 否则会导致 KV 位置计算错误。
+
+    Args:
+        block_mask: 由 create_block_mask_patched / BlockMask.from_kv_blocks 构建的掩码对象。
+
+    Returns:
+        (sparse_q_block_size, sparse_kv_block_size): 掩码的 Q / KV 分块大小。
+        当 block_mask 缺少 BLOCK_SIZE 属性时, 回退为 (TILE_BLOCK_SIZE, TILE_BLOCK_SIZE)。
+
+    Raises:
+        ValueError: 当分块大小不是 TILE_BLOCK_SIZE 的正整数倍时。
+    """
+    raw_bs = getattr(block_mask, "BLOCK_SIZE", None)
+    if raw_bs is None:
+        sparse_q_block_size = sparse_kv_block_size = TILE_BLOCK_SIZE
+    elif isinstance(raw_bs, int):
+        sparse_q_block_size = sparse_kv_block_size = raw_bs
+    else:
+        sparse_q_block_size, sparse_kv_block_size = raw_bs
+
+    if (
+        not isinstance(sparse_q_block_size, int)
+        or not isinstance(sparse_kv_block_size, int)
+        or sparse_q_block_size < TILE_BLOCK_SIZE
+        or sparse_kv_block_size < TILE_BLOCK_SIZE
+        or sparse_q_block_size % TILE_BLOCK_SIZE != 0
+        or sparse_kv_block_size % TILE_BLOCK_SIZE != 0
+    ):
+        raise ValueError(
+            "FlexAttention NPU kernels require Q and KV BlockMask block sizes "
+            f"to be integer multiples of {TILE_BLOCK_SIZE} and at least "
+            f"{TILE_BLOCK_SIZE}; received (Q, KV)=({sparse_q_block_size}, "
+            f"{sparse_kv_block_size}). Block sizes such as 32, 64, or "
+            "non-divisible values are unsupported by the current 128-tile kernels."
+        )
+
+    return sparse_q_block_size, sparse_kv_block_size
 
 def flex_attention_fwd_impl(
     q: torch.Tensor,
@@ -1515,10 +1556,10 @@ def flex_attention_fwd_impl(
 
     BLOCK_M = TILE_BLOCK_SIZE
     BLOCK_N = TILE_BLOCK_SIZE
-    SPARSE_Q_BLOCK_SIZE = BLOCK_M
-    SPARSE_KV_BLOCK_SIZE = BLOCK_N
+    SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE = _get_mask_block_sizes(block_mask)
 
-    num_q_blocks = (M + SPARSE_Q_BLOCK_SIZE - 1) // SPARSE_Q_BLOCK_SIZE
+    num_q_blocks = triton.cdiv(M, BLOCK_M)
+    num_sparse_q_blocks = triton.cdiv(M, SPARSE_Q_BLOCK_SIZE)
 
     output = torch.empty((Z, Hq, M, Dv), dtype=q.dtype, device=q.device)
     lse = torch.empty((Z, Hq, M), dtype=torch.float32, device=q.device)
@@ -1527,7 +1568,7 @@ def flex_attention_fwd_impl(
     k = k.contiguous()
     v = v.contiguous()
 
-    bm = _prepare_block_mask_attrs(block_mask, q, num_q_blocks, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE)
+    bm = _prepare_block_mask_attrs(block_mask, q, num_sparse_q_blocks, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE)
 
     num_tasks = num_q_blocks * Z * Hq
     grid, num_tasks = _persistent_launch_config(num_tasks)
@@ -1804,20 +1845,23 @@ def flex_attention_bwd_impl(
     # Cast before multiplication so low-precision rounding does not enter delta.
     delta = (output.float() * grad_output.float()).sum(dim=-1).contiguous()
 
-    SPARSE_Q_BLOCK_SIZE = TILE_BLOCK_SIZE
-    SPARSE_KV_BLOCK_SIZE = TILE_BLOCK_SIZE
-    num_q_blocks = triton.cdiv(M, SPARSE_Q_BLOCK_SIZE)
+    BLOCK_M_DQ = TILE_BLOCK_SIZE
+    BLOCK_N_DQ = TILE_BLOCK_SIZE
 
-    bm = _prepare_block_mask_attrs(block_mask, q, num_q_blocks, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE)
+    SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE = _get_mask_block_sizes(block_mask)
+    
+    num_q_blocks = triton.cdiv(M, BLOCK_M_DQ)
+    num_sparse_q_blocks = triton.cdiv(M, SPARSE_Q_BLOCK_SIZE)
+
+    bm = _prepare_block_mask_attrs(block_mask, q, num_sparse_q_blocks, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE)
 
     dq = torch.empty_like(q)
     dk = torch.zeros(k.shape, dtype=torch.float32, device=k.device)
     dv = torch.zeros(v.shape, dtype=torch.float32, device=v.device)
 
-    BLOCK_M_DQ = TILE_BLOCK_SIZE
-    BLOCK_N_DQ = TILE_BLOCK_SIZE
     NUM_KV_SUB_BLOCKS_VAL = SPARSE_KV_BLOCK_SIZE // BLOCK_N_DQ
     grid_dq, num_tasks_dq = _persistent_launch_config(num_q_blocks * Z * Hq)
+    
     _flex_attention_dq_leaf([q, k, v, grad_output, lse, delta, bm['kv_num_blks'], bm['kv_idx'], bm['full_kv_num_blks'], bm['full_kv_idx'], bm['dense_mask'], bm['packed_partial_mask'], bm['partial_mask_offsets'], bm['partial_block_table']], [dq], [bm['dense_mask'].stride(2), bm['dense_mask'].stride(3), bm['packed_partial_mask'].stride(0), bm['packed_partial_mask'].stride(1), bm['packed_partial_mask'].stride(2), bm['partial_mask_offsets'].stride(2), bm['partial_block_table'].stride(0), bm['partial_block_table'].stride(1), q.stride(0), q.stride(1), q.stride(2), q.stride(3), k.stride(0), k.stride(1), k.stride(2), k.stride(3), v.stride(0), v.stride(1), v.stride(2), v.stride(3), grad_output.stride(0), grad_output.stride(1), grad_output.stride(2), grad_output.stride(3), lse.stride(0), lse.stride(1), lse.stride(2), delta.stride(0), delta.stride(1), delta.stride(2), dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3), bm['kv_idx'].stride(2), D, Dv, BLOCK_M_DQ, BLOCK_N_DQ, NUM_KV_SUB_BLOCKS_VAL, num_tasks_dq, num_q_blocks, Hq, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE, M, N, GQA_SHARED_HEADS], [sm_scale], [bm['use_packed_partial_mask'], bm['has_full_blocks']], list(grid_dq))
 
     BLOCK_M_DKDV = TILE_BLOCK_SIZE
