@@ -6,18 +6,38 @@ import torch.nn.functional as _F
 import triton
 import triton.language as tl
 
+from packaging.version import Version
 from torch.nn.attention.flex_attention import _convert_mask_to_block_mask
 from torch.nn.attention.flex_attention import create_mask as _torch_create_mask
 
+from mojo_opset.kernels._npu_triton_utils import get_ascend_compiler_version
 from mojo_opset.kernels._npu_triton_utils import get_num_cores
-from mojo_opset.kernels.npu_a5_triton._private import flex_attention_dq_cache_config
 from mojo_opset.utils.flex_attention_mask import _create_sparse_block_from_block_mask
 from mojo_opset.utils.target import get_torch_device as _get_torch_device
 
 TILE_BLOCK_SIZE = 128
-_DQ_INTRA_CACHE_NUM, _DQ_INTER_CACHE_NUM = flex_attention_dq_cache_config()
 
 
+def _dq_cache_config():
+    kind, version = get_ascend_compiler_version()
+    minimum = Version("3.6.0.post1" if kind == "internal" else "3.6.0")
+    # Older/unknown compilers can corrupt dQ and dropout forward double buffering.
+    return (3, 2) if version is not None and version >= minimum else (1, 1)
+
+
+_DQ_INTRA_CACHE_NUM, _DQ_INTER_CACHE_NUM = _dq_cache_config()
+
+
+def _dkdv_config(head_dim, value_dim, has_dropout):
+    """Return Q tile, KV tile, and local buffer count together."""
+    # A wider KV tile reuses Q/dO loads across more keys. Keep the measured
+    # 950PR configuration scoped to D=128; 128x128 overflows UB with dropout.
+    if has_dropout and head_dim == value_dim == 128:
+        return 64, 128, 1
+    return (128, 64, 2) if has_dropout else (128, 128, 2)
+
+
+@torch._dynamo.assume_constant_result
 def _get_num_aicore():
     try:
         return max(get_num_cores(op_type="cube"), 1)
@@ -28,6 +48,69 @@ def _get_num_aicore():
 def _persistent_launch_config(num_tasks):
     num_tasks = max(int(num_tasks), 1)
     return (min(_get_num_aicore(), num_tasks),), num_tasks
+
+
+@triton.jit
+def load_dropout_keep(
+    RANDOM_VALUES, BLOCK_TABLE, NUM_ACTIVE,
+    batch, head, Q_HEAD, start_m, start_n, KV_LEN,
+    SPARSE_M: tl.constexpr, SPARSE_N: tl.constexpr, THRESHOLD: tl.constexpr,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+    COMPARE_IN_HALF: tl.constexpr = False,
+    BITPACKED: tl.constexpr = False,
+):
+    # All callers operate on subtiles contained in a single sparse block.
+    qb = start_m // SPARSE_M
+    kb = start_n // SPARSE_N
+    slot = tl.load(BLOCK_TABLE + qb * tl.cdiv(KV_LEN, SPARSE_N) + kb).to(tl.int64)
+    slot_base = (batch.to(tl.int64) * Q_HEAD + head) * NUM_ACTIVE + slot
+    if BITPACKED:
+        rows_per_plane: tl.constexpr = SPARSE_M // 8
+        packed_ptr = tl.make_block_ptr(
+            base=RANDOM_VALUES + slot_base * (rows_per_plane * SPARSE_N),
+            shape=(rows_per_plane, SPARSE_N), strides=(SPARSE_N, 1),
+            offsets=(0, start_n % SPARSE_N),
+            block_shape=(rows_per_plane, BLOCK_N), order=(1, 0),
+        )
+        packed = tl.load(packed_ptr)
+        plane = tl.arange(0, BLOCK_M // rows_per_plane) + (start_m % SPARSE_M) // rows_per_plane
+        bit_masks = (1 << plane).to(tl.uint8)
+        keep = (packed[None, :, :] & bit_masks[:, None, None]).reshape(BLOCK_M, BLOCK_N)
+        return keep != tl.full((), 0, tl.uint8)
+    else:
+        # Every scheduled block owns a full padded tile, including sequence tails.
+        random_ptr = tl.make_block_ptr(
+            base=RANDOM_VALUES + slot_base * (SPARSE_M * SPARSE_N), shape=(SPARSE_M, SPARSE_N),
+            strides=(SPARSE_N, 1), offsets=(start_m % SPARSE_M, start_n % SPARSE_N),
+            block_shape=(BLOCK_M, BLOCK_N), order=(1, 0),
+        )
+        random_bytes = tl.load(random_ptr)
+        if COMPARE_IN_HALF:
+            # Every uint8 value and integer threshold is exactly representable in FP16.
+            return random_bytes.to(tl.float16) <= tl.full((), THRESHOLD, tl.float16)
+        return random_bytes.to(tl.int32) <= THRESHOLD
+
+
+def _prepare_dropout_args(q, k, block_mask, dropout):
+    if dropout is None or dropout.dropout_p == 0:
+        return q, q, 0, 255, 1.0, False, False
+    layout = dropout.layout
+    if tuple(block_mask.BLOCK_SIZE) != (TILE_BLOCK_SIZE, TILE_BLOCK_SIZE):
+        raise ValueError("A5 dropout currently requires 128 x 128 sparse blocks")
+    height = TILE_BLOCK_SIZE // 8 if dropout.bitpacked else TILE_BLOCK_SIZE
+    expected = (q.shape[0], q.shape[1], layout.num_active, height, TILE_BLOCK_SIZE)
+    if dropout.tiles is None or tuple(dropout.tiles.shape) != expected:
+        raise ValueError("Dropout random tensor shape does not match Q and the sparse layout")
+    table = layout.block_table
+    if tuple(table.shape) != (triton.cdiv(q.shape[2], TILE_BLOCK_SIZE), triton.cdiv(k.shape[2], TILE_BLOCK_SIZE)):
+        raise ValueError("Dropout block table shape does not match Q/K lengths")
+    if dropout.tiles.dtype != torch.uint8 or table.dtype != torch.int32:
+        raise ValueError("Dropout requires uint8 random values and int32 block indices")
+    if dropout.tiles.device != q.device or table.device != q.device:
+        raise ValueError("Dropout metadata must reside on the attention device")
+    if not dropout.tiles.is_contiguous() or not table.is_contiguous():
+        raise ValueError("Dropout random values and block table must be contiguous")
+    return dropout.tiles, table, layout.num_active, dropout.threshold, dropout.scale, True, dropout.bitpacked
 
 
 @triton.jit(
@@ -82,6 +165,15 @@ def flex_attention_kernel(
     GQA_SHARED_HEADS,
     HAS_FULL_BLOCKS: tl.constexpr = True,
     USE_PACKED_PARTIAL_MASK: tl.constexpr = False,
+    DROPOUT_VALUES=None,
+    DROPOUT_TABLE=None,
+    NUM_DROPOUT_BLOCKS=0,
+    DROPOUT_THRESHOLD: tl.constexpr = 255,
+    DROPOUT_SCALE: tl.constexpr = 1.0,
+    HAS_DROPOUT: tl.constexpr = False,
+    DROPOUT_BITPACKED: tl.constexpr = False,
+    AUX_OUT=None,
+    WRITE_AUX_OUT: tl.constexpr = False,
 ):
     pid = tl.program_id(0).to(tl.int32)
     num_core = tl.num_programs(0).to(tl.int32)
@@ -194,7 +286,16 @@ def flex_attention_kernel(
             alpha = tl.math.exp(m_i - m_ij_masked)
             p = tl.math.exp(qk - m_ij_masked[:, None])
 
-            pv = tl.dot(p.to(Q.dtype.element_ty), v, input_precision="ieee")
+            p_for_pv = p
+            if HAS_DROPOUT:
+                keep = load_dropout_keep(
+                    DROPOUT_VALUES, DROPOUT_TABLE, NUM_DROPOUT_BLOCKS,
+                    off_z, off_hq, Q_HEAD, q_start * BLOCK_M, kv_start, KV_LEN,
+                    SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE, DROPOUT_THRESHOLD, BLOCK_M, BLOCK_N,
+                    COMPARE_IN_HALF=True, BITPACKED=DROPOUT_BITPACKED,
+                )
+                p_for_pv = tl.where(keep, p.to(Q.dtype.element_ty), tl.full((), 0, Q.dtype.element_ty))
+            pv = tl.dot(p_for_pv.to(Q.dtype.element_ty), v, input_precision="ieee")
             l_i = l_i * alpha + tl.sum(p, 1)
             acc = acc * alpha[:, None] + pv
             m_i = m_ij
@@ -233,12 +334,23 @@ def flex_attention_kernel(
                 alpha = tl.math.exp(m_i - m_ij)
                 p = tl.math.exp(qk - m_ij[:, None])
 
-                pv = tl.dot(p.to(Q.dtype.element_ty), v, input_precision="ieee")
+                p_for_pv = p
+                if HAS_DROPOUT:
+                    keep = load_dropout_keep(
+                        DROPOUT_VALUES, DROPOUT_TABLE, NUM_DROPOUT_BLOCKS,
+                        off_z, off_hq, Q_HEAD, q_start * BLOCK_M, kv_start, KV_LEN,
+                        SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE, DROPOUT_THRESHOLD, BLOCK_M, BLOCK_N,
+                        COMPARE_IN_HALF=True, BITPACKED=DROPOUT_BITPACKED,
+                    )
+                    p_for_pv = tl.where(keep, p.to(Q.dtype.element_ty), tl.full((), 0, Q.dtype.element_ty))
+                pv = tl.dot(p_for_pv.to(Q.dtype.element_ty), v, input_precision="ieee")
                 l_i = l_i * alpha + tl.sum(p, 1)
                 acc = acc * alpha[:, None] + pv
                 m_i = m_ij
         l_i = tl.where(l_i == 0.0, 1.0, l_i)
         acc = acc / l_i[:, None]
+        if HAS_DROPOUT:
+            acc *= DROPOUT_SCALE
 
         out_mask = (offs_m[:, None] < Q_LEN) & (offs_v[None, :] < V_HEAD_DIM)
         tl.store(
@@ -247,6 +359,12 @@ def flex_attention_kernel(
             mask=out_mask
         )
 
+        if WRITE_AUX_OUT:
+            tl.store(
+                AUX_OUT + off_z * stride_out_z + off_hq * stride_out_h
+                + offs_m[:, None] * stride_out_m + offs_v[None, :] * stride_out_k,
+                acc, mask=out_mask,
+            )
         lse = m_i + tl.math.log(l_i)
         tl.store(LSE_ptr + offs_m * stride_lse_m, lse, mask=offs_m < Q_LEN)
 
@@ -436,6 +554,13 @@ def flex_attention_backward_dq_kernel(
     GQA_SHARED_HEADS: tl.constexpr,
     HAS_FULL_BLOCKS: tl.constexpr = True,
     USE_PACKED_PARTIAL_MASK: tl.constexpr = False,
+    DROPOUT_VALUES=None,
+    DROPOUT_TABLE=None,
+    NUM_DROPOUT_BLOCKS=0,
+    DROPOUT_THRESHOLD: tl.constexpr = 255,
+    DROPOUT_SCALE: tl.constexpr = 1.0,
+    HAS_DROPOUT: tl.constexpr = False,
+    DROPOUT_BITPACKED: tl.constexpr = False,
 ):
     pid = tl.program_id(0).to(tl.int32)
     num_core = tl.num_programs(0).to(tl.int32)
@@ -554,6 +679,14 @@ def flex_attention_backward_dq_kernel(
 
                 p = tl.math.exp(qk - lse[:, None])
                 dp = tl.dot(do, tl.trans(v), input_precision="ieee")
+                if HAS_DROPOUT:
+                    keep = load_dropout_keep(
+                        DROPOUT_VALUES, DROPOUT_TABLE, NUM_DROPOUT_BLOCKS,
+                        off_z, off_hq, Q_HEAD, q_start * BLOCK_M, start_n, KV_LEN,
+                        SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE, DROPOUT_THRESHOLD, BLOCK_M, BLOCK_N,
+                        COMPARE_IN_HALF=True, BITPACKED=DROPOUT_BITPACKED,
+                    )
+                    dp = tl.where(keep, dp * DROPOUT_SCALE, 0.0)
                 ds = p * (dp - delta[:, None])
                 ds *= SM_SCALE
                 dq += tl.dot(ds.to(MATMUL_PRECISION), k, input_precision="ieee")
@@ -585,6 +718,14 @@ def flex_attention_backward_dq_kernel(
 
                     p = tl.math.exp(qk - lse[:, None])
                     dp = tl.dot(do, tl.trans(v), input_precision="ieee")
+                    if HAS_DROPOUT:
+                        keep = load_dropout_keep(
+                            DROPOUT_VALUES, DROPOUT_TABLE, NUM_DROPOUT_BLOCKS,
+                            off_z, off_hq, Q_HEAD, q_start * BLOCK_M, start_n, KV_LEN,
+                            SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE, DROPOUT_THRESHOLD, BLOCK_M, BLOCK_N,
+                            COMPARE_IN_HALF=True, BITPACKED=DROPOUT_BITPACKED,
+                        )
+                        dp = tl.where(keep, dp * DROPOUT_SCALE, 0.0)
                     ds = p * (dp - delta[:, None])
                     ds *= SM_SCALE
                     dq += tl.dot(ds.to(MATMUL_PRECISION), k, input_precision="ieee")
@@ -663,6 +804,14 @@ def flex_attention_backward_dkdv_kernel(
     GQA_SHARED_HEADS,
     HAS_FULL_BLOCKS: tl.constexpr = True,
     USE_PACKED_PARTIAL_MASK: tl.constexpr = False,
+    DROPOUT_VALUES=None,
+    DROPOUT_TABLE=None,
+    NUM_DROPOUT_BLOCKS=0,
+    DROPOUT_THRESHOLD: tl.constexpr = 255,
+    DROPOUT_SCALE: tl.constexpr = 1.0,
+    HAS_DROPOUT: tl.constexpr = False,
+    DROPOUT_BITPACKED: tl.constexpr = False,
+    DKV_SCHEDULE=None, NUM_SCHEDULES=0, SPLIT_DKV: tl.constexpr = False,
 ):
     pid = tl.program_id(0).to(tl.int32)
     num_core = tl.num_programs(0).to(tl.int32)
@@ -674,9 +823,19 @@ def flex_attention_backward_dkdv_kernel(
     offs_v = tl.arange(0, V_HEAD_DIM)
 
     for task_id in range(pid, NUM_TASKS, num_core):
-        kv_start_block = task_id % NUM_KV_BLOCKS
-        off_z = (task_id // NUM_KV_BLOCKS) // KV_HEAD
-        off_hkv = (task_id // NUM_KV_BLOCKS) % KV_HEAD
+        if SPLIT_DKV:
+            schedule_id = task_id % NUM_SCHEDULES
+            kv_start_block = tl.load(DKV_SCHEDULE + schedule_id * 5)
+            partial_begin = tl.load(DKV_SCHEDULE + schedule_id * 5 + 1)
+            partial_end = tl.load(DKV_SCHEDULE + schedule_id * 5 + 2)
+            full_begin = tl.load(DKV_SCHEDULE + schedule_id * 5 + 3)
+            full_end = tl.load(DKV_SCHEDULE + schedule_id * 5 + 4)
+            off_z = (task_id // NUM_SCHEDULES) // KV_HEAD
+            off_hkv = (task_id // NUM_SCHEDULES) % KV_HEAD
+        else:
+            kv_start_block = task_id % NUM_KV_BLOCKS
+            off_z = (task_id // NUM_KV_BLOCKS) // KV_HEAD
+            off_hkv = (task_id // NUM_KV_BLOCKS) % KV_HEAD
 
         off_z = off_z.to(tl.int64)
         off_hkv = off_hkv.to(tl.int64)
@@ -690,6 +849,11 @@ def flex_attention_backward_dkdv_kernel(
         V_ptr = V + v_offset
         DK_ptr = DK + dk_offset
         DV_ptr = DV + dv_offset
+        if SPLIT_DKV:
+            # Each task exclusively owns its partial-result tile.
+            shift = (schedule_id.to(tl.int64) - kv_start_block) * KV_BLOCK_SIZE
+            DK_ptr += shift * stride_dkn
+            DV_ptr += shift * stride_dvn
 
         start_n_full = kv_start_block * KV_BLOCK_SIZE
 
@@ -739,7 +903,11 @@ def flex_attention_backward_dkdv_kernel(
                     q_num_blocks * sparse_q_multiple,
                     tl.maximum(tl.cdiv(Q_LEN, BLOCK_M), 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL
                 )
-                for start_m in range(0, block_m_end):
+                block_m_begin = 0
+                if SPLIT_DKV:
+                    block_m_begin = partial_begin * sparse_q_multiple
+                    block_m_end = tl.minimum(block_m_end, partial_end * sparse_q_multiple)
+                for start_m in range(block_m_begin, block_m_end):
                     blk_idx_in_list = start_m // sparse_q_multiple
                     q_block = tl.load(q_indices + blk_idx_in_list)
                     q_start = q_block * SPARSE_Q_BLOCK_SIZE + (start_m % sparse_q_multiple) * BLOCK_M
@@ -753,7 +921,7 @@ def flex_attention_backward_dkdv_kernel(
                         PARTIAL_BLOCK_TABLE, stride_partial_table_m, stride_partial_table_n,
                         k, v, Q_LEN, KV_LEN,
                         off_z, off_hq, off_hkv, offs_n, offs_m, start_m, q_sparse_idx, kv_sparse_idx,
-                        kv_sub, offs_k, offs_v,
+                        kv_sub + (kv_start_block % sparse_kv_multiple) * NUM_KV_SUB_BLOCKS, offs_k, offs_v,
                         stride_qm, stride_qk, stride_dom, stride_dok, stride_qm, stride_qk,
                         stride_dvn, stride_dvk, stride_dkn, stride_dkk,
                         MATMUL_PRECISION,
@@ -766,7 +934,10 @@ def flex_attention_backward_dkdv_kernel(
                         BLOCK_N=BLOCK_N,
                         IS_FULL_BLOCKS=False,
                         USE_PACKED_PARTIAL_MASK=USE_PACKED_PARTIAL_MASK,
-                        COMPUTE_DQ=False,
+                        DROPOUT_VALUES=DROPOUT_VALUES, DROPOUT_TABLE=DROPOUT_TABLE,
+                        NUM_DROPOUT_BLOCKS=NUM_DROPOUT_BLOCKS, Q_HEAD=KV_HEAD * GQA_SHARED_HEADS,
+                        DROPOUT_THRESHOLD=DROPOUT_THRESHOLD, DROPOUT_SCALE=DROPOUT_SCALE,
+                        HAS_DROPOUT=HAS_DROPOUT, DROPOUT_BITPACKED=DROPOUT_BITPACKED,
                     )
                     dk_acc += dk_tile
                     dv_acc += dv_tile
@@ -779,7 +950,11 @@ def flex_attention_backward_dkdv_kernel(
                         tl.maximum(tl.cdiv(Q_LEN, BLOCK_M), 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL
                     )
 
-                    for start_m in range(0, block_m_end):
+                    block_m_begin = 0
+                    if SPLIT_DKV:
+                        block_m_begin = full_begin * sparse_q_multiple
+                        block_m_end = tl.minimum(block_m_end, full_end * sparse_q_multiple)
+                    for start_m in range(block_m_begin, block_m_end):
                         blk_idx_in_list = start_m // sparse_q_multiple
                         q_block = tl.load(q_indices + blk_idx_in_list)
                         q_start = q_block * SPARSE_Q_BLOCK_SIZE + (start_m % sparse_q_multiple) * BLOCK_M
@@ -792,7 +967,7 @@ def flex_attention_backward_dkdv_kernel(
                             PARTIAL_BLOCK_TABLE, stride_partial_table_m, stride_partial_table_n,
                             k, v, Q_LEN, KV_LEN,
                             off_z, off_hq, off_hkv, offs_n, offs_m, start_m, q_block, kv_sparse_idx,
-                            kv_sub, offs_k, offs_v,
+                            kv_sub + (kv_start_block % sparse_kv_multiple) * NUM_KV_SUB_BLOCKS, offs_k, offs_v,
                             stride_qm, stride_qk, stride_dom, stride_dok, stride_qm, stride_qk,
                             stride_dvn, stride_dvk, stride_dkn, stride_dkk,
                             MATMUL_PRECISION,
@@ -805,16 +980,30 @@ def flex_attention_backward_dkdv_kernel(
                             BLOCK_N=BLOCK_N,
                             IS_FULL_BLOCKS=True,
                             USE_PACKED_PARTIAL_MASK=USE_PACKED_PARTIAL_MASK,
-                            COMPUTE_DQ=False,
+                            DROPOUT_VALUES=DROPOUT_VALUES, DROPOUT_TABLE=DROPOUT_TABLE,
+                            NUM_DROPOUT_BLOCKS=NUM_DROPOUT_BLOCKS, Q_HEAD=KV_HEAD * GQA_SHARED_HEADS,
+                            DROPOUT_THRESHOLD=DROPOUT_THRESHOLD, DROPOUT_SCALE=DROPOUT_SCALE,
+                            HAS_DROPOUT=HAS_DROPOUT, DROPOUT_BITPACKED=DROPOUT_BITPACKED,
                         )
                         dk_acc += dk_tile
                         dv_acc += dv_tile
 
-                # Accumulate once per query head, instead of once per query tile.
-                tl.atomic_add(DK_ptr + offs_n[:, None] * stride_dkn + offs_k[None, :] * stride_dkk,
-                         dk_acc, mask=(offs_n[:, None] < KV_LEN) & (offs_k[None, :] < QK_HEAD_DIM))
-                tl.atomic_add(DV_ptr + offs_n[:, None] * stride_dvn + offs_v[None, :] * stride_dvk,
-                         dv_acc, mask=(offs_n[:, None] < KV_LEN) & (offs_v[None, :] < V_HEAD_DIM))
+                # Scale the FP32 Q-shard sum once, before combining GQA heads,
+                # instead of scaling every Q tile's dV matmul result.
+                if HAS_DROPOUT:
+                    dv_acc *= DROPOUT_SCALE
+                # One program owns this tile for all GQA heads. Accumulate in
+                # ascending head order with ordinary loads/stores, never atomics.
+                dk_dst = DK_ptr + offs_n[:, None] * stride_dkn + offs_k[None, :] * stride_dkk
+                dv_dst = DV_ptr + offs_n[:, None] * stride_dvn + offs_v[None, :] * stride_dvk
+                dk_valid = (offs_n[:, None] < KV_LEN) & (offs_k[None, :] < QK_HEAD_DIM)
+                dv_valid = (offs_n[:, None] < KV_LEN) & (offs_v[None, :] < V_HEAD_DIM)
+                if off_g > 0:
+                    dk_acc += tl.load(dk_dst, mask=dk_valid, other=0.0)
+                tl.store(dk_dst, dk_acc, mask=dk_valid)
+                if off_g > 0:
+                    dv_acc += tl.load(dv_dst, mask=dv_valid, other=0.0)
+                tl.store(dv_dst, dv_acc, mask=dv_valid)
 
 
 @triton.jit
@@ -837,7 +1026,14 @@ def bwd_dkdv_block_mn(
     BLOCK_N: tl.constexpr,
     IS_FULL_BLOCKS: tl.constexpr,
     USE_PACKED_PARTIAL_MASK: tl.constexpr,
-    COMPUTE_DQ: tl.constexpr = True,
+    Q_HEAD=0,
+    DROPOUT_VALUES=None,
+    DROPOUT_TABLE=None,
+    NUM_DROPOUT_BLOCKS=0,
+    DROPOUT_THRESHOLD: tl.constexpr = 255,
+    DROPOUT_SCALE: tl.constexpr = 1.0,
+    HAS_DROPOUT: tl.constexpr = False,
+    DROPOUT_BITPACKED: tl.constexpr = False,
 ):
     q = tl.load(
         Q + offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk,
@@ -891,21 +1087,25 @@ def bwd_dkdv_block_mn(
         qk = tl.where(mask, qk, float("-inf"))
     p = tl.math.exp(qk - lse[:, None])
 
-    dv = tl.dot(tl.trans(p.to(MATMUL_PRECISION)), do, input_precision="ieee")
-
+    p_for_dv = p
+    if HAS_DROPOUT:
+        keep = load_dropout_keep(
+            DROPOUT_VALUES, DROPOUT_TABLE, NUM_DROPOUT_BLOCKS,
+            off_z, off_hq, Q_HEAD,
+            q_sparse_idx * SPARSE_Q_BLOCK_SIZE + (start_m % (SPARSE_Q_BLOCK_SIZE // BLOCK_M)) * BLOCK_M,
+            kv_sparse_idx * SPARSE_KV_BLOCK_SIZE + kv_sub * BLOCK_N, KV_LEN,
+            SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE, DROPOUT_THRESHOLD, BLOCK_M, BLOCK_N,
+            COMPARE_IN_HALF=True, BITPACKED=DROPOUT_BITPACKED,
+        )
+        p_for_dv = tl.where(keep, p.to(MATMUL_PRECISION), tl.full((), 0, MATMUL_PRECISION))
+    dv = tl.dot(tl.trans(p_for_dv.to(MATMUL_PRECISION)), do, input_precision="ieee")
 
     Di = tl.load(DELTA + offs_m, mask=offs_m < Q_LEN, other=0.0)
     dp = tl.dot(do, tl.trans(v), input_precision="ieee")
+    if HAS_DROPOUT:
+        dp = tl.where(keep, dp * DROPOUT_SCALE, 0.0)
     ds = (p * (dp - Di[:, None]))
     ds *= SM_SCALE
-
-    if COMPUTE_DQ:
-        dq = tl.dot(ds.to(MATMUL_PRECISION), k, input_precision="ieee")
-        tl.atomic_add(
-            DQ + offs_m[:, None] * stride_dqm + offs_k[None, :] * stride_dqd,
-            dq,
-            mask=(offs_m[:, None] < Q_LEN) & (offs_k[None, :] < QK_HEAD_DIM),
-        )
 
     dk = tl.dot(tl.trans(ds.to(MATMUL_PRECISION)), q, input_precision="ieee")
     return dk, dv
@@ -1091,8 +1291,12 @@ def flex_attention_fwd_impl(
     v: torch.Tensor,
     block_mask,
     sm_scale: Optional[float] = None,
+    *, dropout=None, output_dtype=None, aux_output=None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     _validate_attention_inputs(q, k, v)
+    drop_values, drop_table, drop_blocks, drop_threshold, drop_scale, has_dropout, drop_bitpacked = (
+        _prepare_dropout_args(q, k, block_mask, dropout)
+    )
     Z, Hq, M, D = q.shape
     _, Hkv, N, Dv = k.shape
 
@@ -1102,12 +1306,18 @@ def flex_attention_fwd_impl(
 
     BLOCK_M = TILE_BLOCK_SIZE
     BLOCK_N = TILE_BLOCK_SIZE
-    SPARSE_Q_BLOCK_SIZE = BLOCK_M
-    SPARSE_KV_BLOCK_SIZE = BLOCK_N
+    SPARSE_Q_BLOCK_SIZE = TILE_BLOCK_SIZE
+    SPARSE_KV_BLOCK_SIZE = TILE_BLOCK_SIZE
 
     num_q_blocks = (M + SPARSE_Q_BLOCK_SIZE - 1) // SPARSE_Q_BLOCK_SIZE
 
-    output = torch.empty((Z, Hq, M, Dv), dtype=q.dtype, device=q.device)
+    output = torch.empty((Z, Hq, M, Dv), dtype=q.dtype if output_dtype is None else output_dtype, device=q.device)
+    if aux_output is not None:
+        if (
+            aux_output.shape != output.shape or aux_output.device != q.device
+            or aux_output.dtype != q.dtype or not aux_output.is_contiguous()
+        ):
+            raise ValueError("Auxiliary output must match the contiguous Q-dtype attention output")
     lse = torch.empty((Z, Hq, M), dtype=torch.float32, device=q.device)
 
     q = q.contiguous()
@@ -1118,7 +1328,8 @@ def flex_attention_fwd_impl(
         block_mask, q, N, num_q_blocks, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE
     )
 
-    num_tasks = num_q_blocks * Z * Hq
+    num_q_tiles = triton.cdiv(M, BLOCK_M)
+    num_tasks = num_q_tiles * Z * Hq
     grid, num_tasks = _persistent_launch_config(num_tasks)
 
     _flex_attention_v2_forward_leaf(
@@ -1133,8 +1344,9 @@ def flex_attention_fwd_impl(
             bm["dense_mask"],
             bm["packed_partial_mask"],
             bm["partial_mask_offsets"],
+            drop_values, drop_table,
         ],
-        [output, lse],
+        [output, lse] if aux_output is None else [output, lse, aux_output],
         [
             bm["dense_mask"].stride(2),
             bm["dense_mask"].stride(3),
@@ -1167,16 +1379,17 @@ def flex_attention_fwd_impl(
             BLOCK_M,
             BLOCK_N,
             num_tasks,
-            num_q_blocks,
+            num_q_tiles,
             Hq,
             SPARSE_Q_BLOCK_SIZE,
             SPARSE_KV_BLOCK_SIZE,
             M,
             N,
             GQA_SHARED_HEADS,
+            drop_blocks, drop_threshold,
         ],
-        [sm_scale],
-        [bm["use_packed_partial_mask"], bm["has_full_blocks"]],
+        [sm_scale, drop_scale],
+        [bm["use_packed_partial_mask"], bm["has_full_blocks"], has_dropout, drop_bitpacked, aux_output is not None],
         list(grid),
     )
 
@@ -1234,6 +1447,56 @@ def _compute_delta(output, grad_output):
     return delta
 
 
+@triton.jit
+def _merge_dkv_partials(
+    DK_PART, DV_PART, DK, DV, RANGES,
+    GROUPS: tl.constexpr, KV_LEN: tl.constexpr, PART_ROWS: tl.constexpr,
+    D: tl.constexpr, DV_DIM: tl.constexpr, BLOCK_R: tl.constexpr,
+):
+    kv_blocks: tl.constexpr = (KV_LEN + 127) // 128
+    subtiles: tl.constexpr = 128 // BLOCK_R
+    for task in range(tl.program_id(0), GROUPS * kv_blocks * subtiles, tl.num_programs(0)):
+        sub = task % subtiles
+        kb = (task // subtiles) % kv_blocks
+        group = task // (subtiles * kv_blocks)
+        row = sub * BLOCK_R + tl.arange(0, BLOCK_R)
+        dk_cols = tl.arange(0, D)
+        dv_cols = tl.arange(0, DV_DIM)
+        begin = tl.load(RANGES + kb * 2)
+        end = tl.load(RANGES + kb * 2 + 1)
+        valid = kb * 128 + row < KV_LEN
+        dk_acc = tl.full((BLOCK_R, D), 0, tl.float32)
+        dv_acc = tl.full((BLOCK_R, DV_DIM), 0, tl.float32)
+        for shard in range(begin, end):
+            src = group.to(tl.int64) * PART_ROWS + shard.to(tl.int64) * 128 + row
+            dk_acc += tl.load(DK_PART + src[:, None] * D + dk_cols[None, :],
+                              mask=valid[:, None] & (dk_cols[None, :] < D), other=0)
+            dv_acc += tl.load(DV_PART + src[:, None] * DV_DIM + dv_cols[None, :],
+                              mask=valid[:, None] & (dv_cols[None, :] < DV_DIM), other=0)
+        dst = group.to(tl.int64) * KV_LEN + kb * 128 + row
+        tl.store(DK + dst[:, None] * D + dk_cols[None, :], dk_acc,
+                 mask=valid[:, None] & (dk_cols[None, :] < D))
+        tl.store(DV + dst[:, None] * DV_DIM + dv_cols[None, :], dv_acc,
+                 mask=valid[:, None] & (dv_cols[None, :] < DV_DIM))
+
+
+@torch.library.custom_op("mojo_npu_triton_a5::flex_attention_merge_dkv", mutates_args=("outputs",))
+def _flex_attention_merge_dkv_leaf(
+    partials: list[torch.Tensor], outputs: list[torch.Tensor], ranges: torch.Tensor,
+) -> None:
+    z, h, n, d = outputs[0].shape
+    dv_dim = outputs[1].shape[-1]
+    grid = (min(get_num_cores("vector"), z * h * triton.cdiv(n, 128) * 8),)
+    _merge_dkv_partials[grid](
+        *partials, *outputs, ranges, z * h, n, partials[0].shape[2], d, dv_dim, BLOCK_R=16,
+    )
+
+
+@_flex_attention_merge_dkv_leaf.register_fake
+def _flex_attention_merge_dkv_leaf_fake(partials, outputs, ranges):
+    return None
+
+
 def flex_attention_bwd_impl(
     grad_output: torch.Tensor,
     q: torch.Tensor,
@@ -1243,8 +1506,12 @@ def flex_attention_bwd_impl(
     lse: torch.Tensor,
     block_mask,
     sm_scale: Optional[float] = None,
+    *, dropout=None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     _validate_attention_inputs(q, k, v)
+    drop_values, drop_table, drop_blocks, drop_threshold, drop_scale, has_dropout, drop_bitpacked = (
+        _prepare_dropout_args(q, k, block_mask, dropout)
+    )
     Z, Hq, M, D = q.shape
     _, Hkv, N, Dv = k.shape
     GQA_SHARED_HEADS = Hq // Hkv
@@ -1263,13 +1530,20 @@ def flex_attention_bwd_impl(
     )
 
     dq = torch.empty_like(q)
-    dk = torch.zeros(k.shape, dtype=torch.float32, device=k.device)
-    dv = torch.zeros(v.shape, dtype=torch.float32, device=v.device)
+    split_layout = None if dropout is None else dropout.layout
+    split_schedule = None if split_layout is None else split_layout.dkv_schedule
+    split_ranges = None if split_layout is None else split_layout.dkv_ranges
+    split_count = 0 if split_layout is None else split_layout.dkv_num_tasks
+    split_dkv = split_schedule is not None and split_count > 0
+    workspace_rows = split_count * TILE_BLOCK_SIZE if split_dkv else N
+    dk = torch.empty((Z, Hkv, workspace_rows, D), dtype=torch.float32, device=k.device)
+    dv = torch.empty((Z, Hkv, workspace_rows, Dv), dtype=torch.float32, device=v.device)
 
     BLOCK_M_DQ = TILE_BLOCK_SIZE
     BLOCK_N_DQ = TILE_BLOCK_SIZE
     NUM_KV_SUB_BLOCKS_VAL = SPARSE_KV_BLOCK_SIZE // BLOCK_N_DQ
-    grid_dq, num_tasks_dq = _persistent_launch_config(num_q_blocks * Z * Hq)
+    num_q_tiles_dq = triton.cdiv(M, BLOCK_M_DQ)
+    grid_dq, num_tasks_dq = _persistent_launch_config(num_q_tiles_dq * Z * Hq)
     _flex_attention_v2_dq_leaf(
         [
             q,
@@ -1286,6 +1560,7 @@ def flex_attention_bwd_impl(
             bm["packed_partial_mask"],
             bm["partial_mask_offsets"],
             bm["partial_block_table"],
+            drop_values, drop_table,
         ],
         [dq],
         [
@@ -1330,24 +1605,35 @@ def flex_attention_bwd_impl(
             BLOCK_N_DQ,
             NUM_KV_SUB_BLOCKS_VAL,
             num_tasks_dq,
-            num_q_blocks,
+            num_q_tiles_dq,
             Hq,
             SPARSE_Q_BLOCK_SIZE,
             SPARSE_KV_BLOCK_SIZE,
             M,
             N,
             GQA_SHARED_HEADS,
+            drop_blocks, drop_threshold,
         ],
-        [sm_scale],
-        [bm["use_packed_partial_mask"], bm["has_full_blocks"]],
+        [sm_scale, drop_scale],
+        [bm["use_packed_partial_mask"], bm["has_full_blocks"], has_dropout, drop_bitpacked],
         list(grid_dq),
     )
 
-    BLOCK_M_DKDV = TILE_BLOCK_SIZE
-    BLOCK_N_DKDV = TILE_BLOCK_SIZE
+    BLOCK_M_DKDV, BLOCK_N_DKDV, dkv_intra_cache = _dkdv_config(D, Dv, has_dropout)
     NUM_KV_SUB_BLOCKS_VAL = SPARSE_KV_BLOCK_SIZE // BLOCK_N_DKDV
     num_kv_blocks = triton.cdiv(N, SPARSE_KV_BLOCK_SIZE)
-    grid_dkv, num_tasks_dkv = _persistent_launch_config(num_kv_blocks * Z * Hkv)
+    # Small no-dropout GQA workloads otherwise leave Cube cores idle after
+    # replacing atomic head accumulation with deterministic KV-tile ownership.
+    # Split KV ownership into independent 64-column tiles, without a workspace
+    # merge or any dropout work. Large/no-GQA workloads retain their old tile.
+    if (
+        not has_dropout and not split_dkv and GQA_SHARED_HEADS > 1 and D == Dv == 128
+        and N > 64 and num_kv_blocks * Z * Hkv < _get_num_aicore()
+    ):
+        BLOCK_N_DKDV = 64
+        NUM_KV_SUB_BLOCKS_VAL = 1
+        num_kv_blocks = triton.cdiv(N, BLOCK_N_DKDV)
+    grid_dkv, num_tasks_dkv = _persistent_launch_config((split_count if split_dkv else num_kv_blocks) * Z * Hkv)
     _flex_attention_v2_dkdv_leaf(
         [
             q,
@@ -1365,6 +1651,7 @@ def flex_attention_bwd_impl(
             bm["partial_mask_offsets"],
             bm["partial_block_table"],
             dq,
+            drop_values, drop_table, split_schedule if split_dkv else q,
         ],
         [dk, dv],
         [
@@ -1420,12 +1707,18 @@ def flex_attention_bwd_impl(
             M,
             N,
             GQA_SHARED_HEADS,
+            drop_blocks, drop_threshold, split_count, dkv_intra_cache,
         ],
-        [sm_scale],
-        [bm["use_packed_partial_mask"], bm["has_full_blocks"]],
+        [sm_scale, drop_scale],
+        [bm["use_packed_partial_mask"], bm["has_full_blocks"], has_dropout, drop_bitpacked, split_dkv],
         list(grid_dkv),
     )
 
+    if split_dkv:
+        dk_result = torch.empty(k.shape, dtype=k.dtype, device=k.device)
+        dv_result = torch.empty(v.shape, dtype=v.dtype, device=v.device)
+        _flex_attention_merge_dkv_leaf([dk, dv], [dk_result, dv_result], split_ranges)
+        return dq.to(q.dtype), dk_result, dv_result
     return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype)
 
 
@@ -2274,10 +2567,15 @@ def _flex_attention_v2_forward_leaf(inputs: list[torch.Tensor], outputs: list[to
         GQA_SHARED_HEADS=integers[37],
         HAS_FULL_BLOCKS=flags[1],
         USE_PACKED_PARTIAL_MASK=flags[0],
+        DROPOUT_VALUES=inputs[10], DROPOUT_TABLE=inputs[11],
+        NUM_DROPOUT_BLOCKS=integers[38], DROPOUT_THRESHOLD=integers[39],
+        DROPOUT_SCALE=floats[1], HAS_DROPOUT=flags[2], DROPOUT_BITPACKED=flags[3],
+        AUX_OUT=outputs[2] if flags[4] else outputs[0], WRITE_AUX_OUT=flags[4],
         limit_auto_multi_buffer_buffer='no-limit',
         hfusion_enable_multiple_consumer_fusion=True,
         intra_cache_num=3,
-        inter_cache_num=2,
+        # Legacy compilers corrupt persistent dropout outputs with double buffering.
+        inter_cache_num=_DQ_INTER_CACHE_NUM if flags[2] else 2,
         enable_cross_if_fusion=True,
         enable_buffer_insert_optimization=True,
         enable_ub_refine_opt=True
@@ -2360,11 +2658,14 @@ def _flex_attention_v2_dq_leaf(inputs: list[torch.Tensor], outputs: list[torch.T
         GQA_SHARED_HEADS=integers[47],
         HAS_FULL_BLOCKS=flags[1],
         USE_PACKED_PARTIAL_MASK=flags[0],
+        DROPOUT_VALUES=inputs[14], DROPOUT_TABLE=inputs[15],
+        NUM_DROPOUT_BLOCKS=integers[48], DROPOUT_THRESHOLD=integers[49],
+        DROPOUT_SCALE=floats[1], HAS_DROPOUT=flags[2], DROPOUT_BITPACKED=flags[3],
         limit_auto_multi_buffer_buffer='no-limit',
         hfusion_enable_multiple_consumer_fusion=True,
         enable_select_analysis=False,
         limit_auto_multi_buffer_of_local_buffer='no-l0c',
-        intra_cache_num=_DQ_INTRA_CACHE_NUM,
+        intra_cache_num=1 if flags[2] else _DQ_INTRA_CACHE_NUM,
         inter_cache_num=_DQ_INTER_CACHE_NUM
     )
 
@@ -2451,17 +2752,39 @@ def _flex_attention_v2_dkdv_leaf(inputs: list[torch.Tensor], outputs: list[torch
         GQA_SHARED_HEADS=integers[51],
         HAS_FULL_BLOCKS=flags[1],
         USE_PACKED_PARTIAL_MASK=flags[0],
+        DROPOUT_VALUES=inputs[15], DROPOUT_TABLE=inputs[16],
+        NUM_DROPOUT_BLOCKS=integers[52], DROPOUT_THRESHOLD=integers[53],
+        DROPOUT_SCALE=floats[1], HAS_DROPOUT=flags[2], DROPOUT_BITPACKED=flags[3],
+        DKV_SCHEDULE=inputs[17], NUM_SCHEDULES=integers[54], SPLIT_DKV=flags[4],
         limit_auto_multi_buffer_buffer='no-limit',
         hfusion_enable_multiple_consumer_fusion=True,
         limit_auto_multi_buffer_of_local_buffer='no-l0c',
-        intra_cache_num=2,
-        inter_cache_num=1
+        intra_cache_num=integers[55],
+        inter_cache_num=1,
+        # Keep the GQA-head load/add/store dependency ordered. Dynamic CV pipelining
+        # corrupts full-block dKV with these dependencies on 3.6.0.post1, even at p=0.
+        enable_dynamic_cv_pipeline=False,
     )
 
 @_flex_attention_v2_dkdv_leaf.register_fake
 def _flex_attention_v2_dkdv_leaf_fake(inputs, outputs, integers, floats, flags, grid_sizes):
     return None
 
-flex_attention_v2_fwd = flex_attention_fwd_impl
+def flex_attention_v2_fwd(q, k, v, block_mask, scale=None, *, dropout=None):
+    if dropout is None:
+        return flex_attention_fwd_impl(q, k, v, block_mask, scale)
+    # Keep FP32 O for delta: BF16 rounding otherwise accumulates in shared dK.
+    # The same forward kernel also writes the user-visible Q-dtype output.
+    output = None
+    if dropout.dropout_p:
+        output = torch.empty((*q.shape[:-1], v.shape[-1]), dtype=q.dtype, device=q.device)
+    saved_output, lse = flex_attention_fwd_impl(
+        q, k, v, block_mask, scale, dropout=dropout,
+        output_dtype=torch.float32 if dropout.dropout_p else q.dtype, aux_output=output,
+    )
+    return saved_output if output is None else output, lse, saved_output
+
+
+flex_attention_v2_fwd.supports_dropout = True
 flex_attention_v2_bwd = flex_attention_bwd_impl
 flex_attention_v2_fwd.create_block_mask = create_block_mask_patched

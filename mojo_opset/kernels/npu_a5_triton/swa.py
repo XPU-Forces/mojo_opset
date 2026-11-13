@@ -6,12 +6,18 @@ import torch
 import triton
 import triton.language as tl
 
+from packaging.version import Version
+
+from mojo_opset.kernels._npu_triton_utils import get_ascend_compiler_version
 from mojo_opset.kernels._npu_triton_utils import get_num_cores
 from mojo_opset.kernels._npu_triton_utils import is_910
 from mojo_opset.kernels._npu_triton_utils import libentry
-from mojo_opset.utils._exports import additions
 
-_private = additions(__package__)
+
+def _disable_dq_dynamic_cv_pipeline():
+    kind, version = get_ascend_compiler_version()
+    return kind == "internal" and version >= Version("3.2.2.post1")
+
 
 # Preserve the single-config launch defaults without entering the autotuner.
 SWA_FWD_OPTIONS = triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "multibuffer": False}).all_kwargs()
@@ -19,9 +25,7 @@ SWA_PREPROCESS_OPTIONS = triton.Config(kwargs={"BLOCK_SIZE": 64}).all_kwargs()
 SWA_DQ_OPTIONS = triton.Config({
     "BLOCK_N": 128,
     "multibuffer": True,
-    "enable_dynamic_cv_pipeline": not (
-        _private is not None and _private.disable_swa_dq_dynamic_cv_pipeline()
-    ),
+    "enable_dynamic_cv_pipeline": not _disable_dq_dynamic_cv_pipeline(),
 }).all_kwargs()
 
 AUX_MASK_SIZE = 256

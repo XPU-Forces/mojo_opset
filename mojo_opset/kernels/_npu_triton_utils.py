@@ -1,4 +1,9 @@
 from functools import lru_cache
+from importlib import import_module
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import distribution
+from importlib.util import find_spec
+from pathlib import Path
 
 import torch
 import triton
@@ -39,3 +44,39 @@ exp2 = tl.math.exp2
 log = tl.log
 log2 = tl.log2
 gather = tl.gather
+
+
+def _loaded_distribution_version(package):
+    spec = find_spec("triton")
+    if spec is None or spec.origin is None:
+        return None
+    try:
+        installed = distribution(package)
+    except PackageNotFoundError:
+        return None
+    # A venv or PYTHONPATH can override code while leaving system metadata visible.
+    if Path(installed.locate_file("triton/__init__.py")).resolve() != Path(spec.origin).resolve():
+        return None
+    return installed.version
+
+
+def get_ascend_compiler_version():
+    """Return (public/internal, parsed version), or (None, None) if unknown/ambiguous."""
+    candidates = [("public", _loaded_distribution_version("triton-ascend"))]
+    private_name = __name__ + "_private"
+    if find_spec(private_name) is not None:
+        private = import_module(private_name)
+        candidates.append(("internal", private.get_ascend_compiler_version()))
+    matches = [(kind, version) for kind, version in candidates if version is not None]
+    if len(matches) != 1:
+        return None, None
+    try:
+        from packaging.version import InvalidVersion
+        from packaging.version import Version
+    except ImportError:
+        return None, None
+    kind, version = matches[0]
+    try:
+        return kind, Version(version)
+    except InvalidVersion:
+        return None, None
