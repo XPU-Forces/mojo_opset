@@ -43,6 +43,8 @@ from .paged_attention import paged_decode_swa_infer
 from .paged_attention import paged_prefill_gqa_infer
 from .paged_attention import paged_prefill_swa_infer
 from .paged_attention import prefill_gqa_infer
+from .position_embedding import pos_embed_interp_infer
+from .position_embedding import pos_embed_interp_multi_infer
 from .position_embedding import rope_infer
 from .position_embedding import vision_rope_2d_infer
 from .quantization import dequant
@@ -65,6 +67,7 @@ from .silu import silu
 from .store_lowrank import store_lowrank
 from .swiglu import swiglu
 from .topk import topk_infer
+from .vision_pos_embed_interp import vision_pos_embed_interp
 
 __all__ = [
     "gemm",
@@ -101,6 +104,8 @@ __all__ = [
     "paged_decode_swa_infer",
     "paged_prefill_gqa_infer",
     "paged_prefill_swa_infer",
+    "pos_embed_interp_infer",
+    "pos_embed_interp_multi_infer",
     "prefill_gqa_infer",
     "quant_batch_gemm_reduce_sum",
     "quant_gemm",
@@ -129,6 +134,7 @@ __all__ = [
     "top_p_filter",
     "top_p_sampling",
     "varlen_fa_infer",
+    "vision_pos_embed_interp",
     "vision_rope_2d_infer",
     "vision_rope_cos_sin_2d",
 ]
