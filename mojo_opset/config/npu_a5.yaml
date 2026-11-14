@@ -18,6 +18,7 @@ npu.a5:
   group_gemm: triton
   group_rms_norm_infer: triton
   join_prob_reject_sampling: triton
+  kpool_seed_tail_cache: triton
   layer_norm_infer: triton
   layer_norm_quant: torch_npu
   lightning_indexer: triton
