@@ -1713,12 +1713,12 @@ def _build_task_list(
         w = w_per_kv_block[kv_block]
         if w == 0:
             continue
-        if w <= target:
+        if w <= target or w <= max(target_int, 1):
             # direct: 整块, K=1
             template_items.append((kv_block, 0, 1, 0, float(w)))
         else:
             # split: 拆 K 份
-            K = (w + target_int - 1) // target_int   # ceil(w/target)
+            K = triton.cdiv(w, max(target_int, 1))
             template_split_bases.append((kv_block, K))
             if K > max_sub:
                 max_sub = K
