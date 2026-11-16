@@ -206,6 +206,44 @@ def test_fused_quant_bit_exact(accuracy_backend, dtype, has_gate, cols):
 
 @pytest.mark.api("functions.layer_norm_gated")
 @pytest.mark.bitwise
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("gate", ["none", "2d"])
+@pytest.mark.parametrize("order", [True, False])
+@pytest.mark.parametrize("seed", range(8))
+def test_fused_quant_bit_exact_across_seeds(accuracy_backend, dtype, gate, order, seed):
+    """The acceptance suite draws unseeded inputs, so one pass can miss the
+    round-to-output-dtype boundary altogether.  Sweep fixed draws instead: the
+    fused epilogue has to reproduce the value the unfused launch stores for every
+    draw, not only the ones that happen to stay off a rounding midpoint."""
+    implementation, target, device = accuracy_backend
+    if implementation == "torch":
+        pytest.skip("FP8 bit-exact check targets the fused accelerator epilogue")
+    if not target.startswith("npu.a5"):
+        pytest.skip("FP8 quant is formally required only on Ascend 950")
+    rows, cols, heads = 512, 128, 4
+    torch.manual_seed(seed)
+    x = torch.randn((rows, cols), device=device, dtype=dtype)
+    weight = torch.randn((cols,), device=device, dtype=dtype)
+    z = None
+    if gate == "2d":
+        z = torch.randn((rows, cols + 32), device=device, dtype=dtype)[:, :cols]
+    options = {
+        "eps": 1e-6,
+        "z": z,
+        "is_rms_norm": True,
+        "norm_before_gate": order,
+        "activation": "swish",
+        "implementation": implementation,
+    }
+    fused, _, _ = F.layer_norm_gated(x, weight, None, quant_heads=heads, **options)
+    normalized, _, _ = F.layer_norm_gated(x, weight, None, **options)
+    assert_bitwise_equal(
+        fused, _fp8_reference(normalized, heads), phase=f"fp8_quant_seed{seed}_{target}"
+    )
+
+
+@pytest.mark.api("functions.layer_norm_gated")
+@pytest.mark.bitwise
 def test_batch_invariant_rows(accuracy_backend, monkeypatch):
     implementation, _, device = accuracy_backend
     monkeypatch.setenv("LN_GATED_BATCH_INVARIANT", "1")

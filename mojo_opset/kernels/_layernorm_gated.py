@@ -247,7 +247,10 @@ def _layer_norm_fwd_kernel(
             else:
                 tl.store(Q + q_offsets, quantized, mask=mask)
             if QUANT_TOKEN_GROUP > 1:
-                tl.store(S + row_task_id * QUANT_TOKEN_GROUP + tl.arange(0, QUANT_TOKEN_GROUP), scale)
+                # The row tile now comes from the unfused dispatch, so the last
+                # tile can hold fewer whole tokens than the tile has room for.
+                tokens = row_task_id * QUANT_TOKEN_GROUP + tl.arange(0, QUANT_TOKEN_GROUP)
+                tl.store(S + tokens, scale, mask=tokens < M // (ROWS_PER_BLOCK // QUANT_TOKEN_GROUP))
             else:
                 tl.store(S + row_task_id, scale)
         else:
@@ -366,11 +369,16 @@ def _layer_norm_fwd_impl(
     if quant_heads:
         if ngroups != 1 or M % quant_heads:
             raise ValueError("quant_heads requires one normalization group and M % quant_heads == 0")
-        # Two tokens per tile halve the per-tile cost of the token-wide reduction;
-        # the odd tail keeps one token so the last tile stays a single token.
-        token_group = 2 if M % (2 * quant_heads) == 0 else 1
-        rows_per_block = quant_heads * token_group
-        num_warps = max(min(num_warps * quant_heads // rows_per_block, 16), 1)
+        # The epilogue quantises the value the unfused launch would store, so it
+        # must reduce the row statistics with the same tile shape and the same
+        # warp count.  A different tile reduces in a different order, and the
+        # round to the output dtype then turns a 1 ulp rstd difference into a
+        # different FP8 code -- which is what a smaller quant-only tile produced.
+        # Whole heads per token is what the token-wide amax needs, so the natural
+        # tile is widened only when quant_heads does not already divide it.
+        if rows_per_block % quant_heads:
+            rows_per_block = (rows_per_block // quant_heads + 1) * quant_heads
+        token_group = rows_per_block // quant_heads
         q = torch.empty((M // quant_heads, quant_heads * N), dtype=torch.float8_e4m3fn, device=x.device)
         s = torch.empty((M // quant_heads, 1), dtype=torch.float32, device=x.device)
         quant_args = {
@@ -388,8 +396,9 @@ def _layer_norm_fwd_impl(
     y = x if quant_heads else out
 
     row_tasks = triton.cdiv(M, rows_per_block)
-    # Quant tiles are short enough that queueing two blocks per vector core
-    # overlaps the epilogue conversion and the FP8 stores with the next tile.
+    # Queueing two blocks per vector core overlaps the epilogue conversion and
+    # the FP8 stores with the next tile.  The grid only distributes row tasks, so
+    # it cannot enter the row reduction or move the quantised result.
     grid = (min(vector_core_count() * (2 if quant_heads else 1), row_tasks), ngroups)
     meta = {
         "BLOCK_N": block_n,
