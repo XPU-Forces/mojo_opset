@@ -397,7 +397,7 @@ def test_swa_shapes_bitwise(
 ):
     implementation, _, device = accuracy_backend
     selected = check_swa_case(accuracy_backend, dtype=dtype, dim=dim, interleave=interleave)
-    if max_q > 8192 and (device != "npu" or implementation == "torch"):
+    if max_q > 8192 and (device != "npu" or selected == "torch"):
         pytest.skip("original long cases require an optimized NPU provider")
     inputs, cq, ck = _make_swa_case(device, batch, q_heads, kv_heads, dim, max_q, max_cache, dtype)
     assert_repeatable(

@@ -32,8 +32,8 @@ def layer_norm_fwd_heuristics(args):
         return 4
 
 
-@triton.heuristics({"BLOCK_SIZE_M": layer_norm_fwd_heuristics})
 @libentry()
+@triton.heuristics({"BLOCK_SIZE_M": layer_norm_fwd_heuristics})
 @triton.jit
 def _fused_add_layernorm_fwd_kernel(
     Y_ptr,
@@ -105,8 +105,8 @@ def _fused_add_layernorm_fwd_kernel(
             tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk.to(Y_ptr.dtype.element_ty), mask=block_mask)
 
 
-@triton.heuristics({"BLOCK_SIZE_M": lambda args: ceil_div(4096, args["n_cols"])})
 @libentry()
+@triton.heuristics({"BLOCK_SIZE_M": lambda args: ceil_div(4096, args["n_cols"])})
 @triton.jit
 def _fused_add_layernorm_bwd_kernel(
     dY_ptr,

@@ -19,6 +19,7 @@ supported shapes, dtypes and options.
 | `flex_attention` | triton | triton |
 | `flex_attention_v2` | triton | triton |
 | `gelu` | triton, torch_npu | triton, torch_npu |
+| `gemm`, `mxfp8_dequant_gemm`, `mxfp4_gemm` | — | native |
 | `group_gemm` | triton, torch_npu, native | triton, torch_npu |
 | `group_rms_norm_infer` | triton, torch_npu | triton, torch_npu |
 | `indexer` | triton components | triton components |
@@ -62,6 +63,7 @@ supported shapes, dtypes and options.
 | `swa_infer` | triton | triton |
 | `swiglu` | triton, torch_npu, native | triton, torch_npu |
 | `top_k_sampling` | triton | triton |
+| `topk_infer` | — | native |
 | `top_p_filter` | triton | triton |
 | `top_p_sampling` | triton | triton |
 | `varlen_fa_infer` | native | — |

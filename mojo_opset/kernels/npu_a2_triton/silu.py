@@ -23,6 +23,7 @@ def silu_activation(x):
     return x * tl.sigmoid(x)
 
 
+@libentry()
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_SIZE_M": 1}),
@@ -37,7 +38,6 @@ def silu_activation(x):
     ],
     key=["n_rows", "n_cols"],
 )
-@libentry()
 @triton.jit
 def _silu_fwd_kernel(
     x,
@@ -76,6 +76,7 @@ def _silu_fwd_kernel(
             tl.store(y_ptrs, y_chunk, mask=block_mask)
 
 
+@libentry()
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_SIZE_M": 1}),
@@ -86,7 +87,6 @@ def _silu_fwd_kernel(
     ],
     key=["n_rows", "n_cols"],
 )
-@libentry()
 @triton.jit
 def _silu_fwd_nomask_kernel(
     x,
@@ -120,6 +120,7 @@ def _silu_fwd_nomask_kernel(
             tl.store(y_ptrs, y_chunk)
 
 
+@libentry()
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_SIZE_M": 1}),
@@ -130,7 +131,6 @@ def _silu_fwd_nomask_kernel(
     ],
     key=["n_rows", "n_cols"],
 )
-@libentry()
 @triton.jit
 def _silu_fwd_nomask_single_kernel(
     x,
@@ -162,6 +162,7 @@ def _silu_fwd_nomask_single_kernel(
         tl.store(y_ptrs, y_chunk)
 
 
+@libentry()
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_SIZE_M": 1}),
@@ -176,7 +177,6 @@ def _silu_fwd_nomask_single_kernel(
     ],
     key=["n_rows", "n_cols"],
 )
-@libentry()
 @triton.jit
 def _silu_bwd_kernel(
     dy,

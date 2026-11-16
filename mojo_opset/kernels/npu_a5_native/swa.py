@@ -7,16 +7,12 @@ import torch
 
 from mojo_opset.utils.target import detect_target
 
+from ._extension import load_ops
 
-def _extension(symbols=("launch_swa",)):
-    import torch_npu  # noqa: F401 -- load dependent runtime libraries first
 
+def _ops(symbols=("launch_swa",)):
     try:
-        from mojo_opset_lib.npu_a5 import _native
-
-        if all(callable(getattr(_native, symbol, None)) for symbol in symbols):
-            return _native
-        raise ImportError(f"Shared A5 extension does not export {', '.join(symbols)}")
+        return load_ops("npu_a5", "mojo_native_a5", symbols)
     except ImportError as shared_error:
         target = detect_target()
         if target.platform == "npu" and target.sku != "950pr":
@@ -26,11 +22,7 @@ def _extension(symbols=("launch_swa",)):
                 "the public 950PR provider cannot serve this runtime."
             ) from shared_error
         try:
-            from mojo_opset_lib.npu_a5.sku_950pr import _native
-
-            if not all(callable(getattr(_native, symbol, None)) for symbol in symbols):
-                raise ImportError(f"Public 950PR extension does not export {', '.join(symbols)}")
-            return _native
+            return load_ops("npu_a5/sku_950pr", "mojo_native_a5_950pr", symbols)
         except ImportError as sku_error:
             raise ImportError(
                 "Native A5 SWA extension could not be loaded from either "
@@ -41,38 +33,15 @@ def _extension(symbols=("launch_swa",)):
             ) from sku_error
 
 
-def _build_hint() -> str:
-    return "bash build.sh npu_a5 or bash build.sh npu_a5/sku_950pr"
-
-
-def _extension_name() -> str:
-    return (
-        "mojo_opset_lib.npu_a5._native or "
-        "mojo_opset_lib.npu_a5.sku_950pr._native"
-    )
-
-
 @lru_cache(maxsize=1)
 def _launcher():
-    try:
-        return _extension().launch_swa
-    except AttributeError as error:
-        raise ImportError(
-            f"Native extension {_extension_name()} does not export launch_swa. "
-            f"Build and install it for your runtime: {_build_hint()}"
-        ) from error
+    return _ops().launch_swa.default
 
 
 @lru_cache(maxsize=1)
 def _training_launchers():
-    try:
-        extension = _extension(("launch_swa_training", "launch_swa_backward"))
-        return extension.launch_swa_training, extension.launch_swa_backward
-    except AttributeError as error:
-        raise ImportError(
-            f"Native extension {_extension_name()} does not export the SWA "
-            f"training launchers. Build and install it for your runtime: {_build_hint()}"
-        ) from error
+    ops = _ops(("launch_swa_training", "launch_swa_backward"))
+    return ops.launch_swa_training.default, ops.launch_swa_backward.default
 
 
 def _normalize_windows(

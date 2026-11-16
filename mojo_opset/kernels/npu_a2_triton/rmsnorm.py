@@ -88,8 +88,8 @@ def _rmsnorm_infer_small_cols_kernel(
         tl.store(y_ptrs, y.to(Y_ptr.dtype.element_ty), mask=block_mask)
 
 
-@triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
 @libentry()
+@triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
 @triton.jit
 def _rmsnorm_infer_kernel(
     X_ptr,
@@ -223,8 +223,8 @@ def rmsnorm_infer_impl(
     return y.reshape(*shape)
 
 
-@triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
 @libentry()
+@triton.heuristics({"BLOCK_SIZE_M": rms_norm_fwd_heuristics})
 @triton.jit
 def _rmsnorm_fwd_kernel(
     Y_ptr,
@@ -295,8 +295,8 @@ def _rmsnorm_fwd_kernel(
             tl.store(Y_ptr_row_block + cols_off[None, :], Y_chunk, mask=block_mask)
 
 
-@triton.heuristics({"BLOCK_SIZE_M": rms_norm_bwd_heuristics})
 @libentry()
+@triton.heuristics({"BLOCK_SIZE_M": rms_norm_bwd_heuristics})
 @triton.jit
 def _rmsnorm_bwd_kernel(
     dY_ptr,

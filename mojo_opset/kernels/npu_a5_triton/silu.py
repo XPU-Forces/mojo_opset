@@ -27,6 +27,7 @@ def silu_activation(x):
     return tl.fdiv(x, 1.0 + tl.exp(-x))
 
 
+@libentry()
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_SIZE": 1024}),
@@ -37,7 +38,6 @@ def silu_activation(x):
     ],
     key=["n_elements"],
 )
-@libentry()
 @triton.jit
 def _silu_fwd_flatten_kernel(
         x,
@@ -63,6 +63,7 @@ def _silu_fwd_flatten_kernel(
         tl.store(y + offsets, y_chunk, mask=mask)
 
 
+@libentry()
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_SIZE": 1024}),
@@ -73,7 +74,6 @@ def _silu_fwd_flatten_kernel(
     ],
     key=["n_elements"],
 )
-@libentry()
 @triton.jit
 def _silu_bwd_flatten_kernel(
         dy,
@@ -110,6 +110,7 @@ def _flatten_grid(n_elements):
     num_cores = get_num_cores("vector")
     return lambda META: (max(1, min(num_cores, triton.cdiv(n_elements, META["BLOCK_SIZE"]))),)
 
+@libentry()
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_SIZE_M": 1}),
@@ -124,7 +125,6 @@ def _flatten_grid(n_elements):
     ],
     key=["n_rows", "n_cols"],
 )
-@libentry()
 @triton.jit
 def _silu_fwd_kernel(
     x,
@@ -163,6 +163,7 @@ def _silu_fwd_kernel(
             tl.store(y_ptrs, y_chunk, mask=block_mask)
 
 
+@libentry()
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_SIZE_M": 1}),
@@ -173,7 +174,6 @@ def _silu_fwd_kernel(
     ],
     key=["n_rows", "n_cols"],
 )
-@libentry()
 @triton.jit
 def _silu_fwd_nomask_kernel(
     x,
@@ -207,6 +207,7 @@ def _silu_fwd_nomask_kernel(
             tl.store(y_ptrs, y_chunk)
 
 
+@libentry()
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_SIZE_M": 1}),
@@ -217,7 +218,6 @@ def _silu_fwd_nomask_kernel(
     ],
     key=["n_rows", "n_cols"],
 )
-@libentry()
 @triton.jit
 def _silu_fwd_nomask_single_kernel(
     x,
@@ -249,6 +249,7 @@ def _silu_fwd_nomask_single_kernel(
         tl.store(y_ptrs, y_chunk)
 
 
+@libentry()
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_SIZE_M": 1}),
@@ -263,7 +264,6 @@ def _silu_fwd_nomask_single_kernel(
     ],
     key=["n_rows", "n_cols"],
 )
-@libentry()
 @triton.jit
 def _silu_bwd_kernel(
     dy,

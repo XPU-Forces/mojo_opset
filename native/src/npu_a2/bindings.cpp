@@ -1,4 +1,9 @@
 #include <torch/extension.h>
+#include <torch/library.h>
+
+#ifdef MOJO_NATIVE_WITH_MAGI_ATTENTION
+#include "magi_attention/host.h"
+#endif
 
 #ifdef MOJO_NATIVE_WITH_VARLEN_FA
 #include "varlen_fa/host.h"
@@ -68,7 +73,19 @@
 #include "gdn_reverse_cumsum/host.h"
 #endif
 
+#ifdef MOJO_NATIVE_WITH_MAGI_ATTENTION
+TORCH_LIBRARY_IMPL(mojo_npu_native_a2, PrivateUse1, m) {
+  m.impl("magi_attention_forward_native", TORCH_FN(mojo::native::a2::MagiForward));
+  m.impl("magi_attention_backward_native", TORCH_FN(mojo::native::a2::MagiBackwardFull));
+}
+#endif
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+#ifdef MOJO_NATIVE_WITH_MAGI_ATTENTION
+  m.def("magi_forward", &mojo::native::a2::MagiForward);
+  m.def("magi_build_plan", &mojo::native::a2::MagiBuildPlan);
+  m.def("magi_backward_full", &mojo::native::a2::MagiBackwardFull);
+#endif
 #ifdef MOJO_NATIVE_WITH_GDN_CUMSUM
   m.def("gdn_cumsum", &mojo::native::a2::GdnCumsum);
 #endif

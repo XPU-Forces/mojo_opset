@@ -191,9 +191,9 @@ def test_group_rms_norm_infer_accuracy(accuracy_backend, tokens, heads, dim, dty
 @pytest.mark.accuracy
 def test_group_layout(accuracy_backend, shapes, dtype):
     implementation, target, device = accuracy_backend
-    if implementation != "torch" and not target.startswith("npu."):
-        pytest.skip("NPU grouped normalization layout regression")
     selected = implementation or resolve_implementation("group_rms_norm_infer", Target.parse(target))
+    if selected != "torch" and not target.startswith("npu."):
+        pytest.skip("NPU grouped normalization layout regression")
     groups = [torch.randn(shape, device=device, dtype=dtype) for shape in shapes]
     weight = torch.randn(len(groups), shapes[0][-1], device=device, dtype=dtype)
     if selected == "triton":

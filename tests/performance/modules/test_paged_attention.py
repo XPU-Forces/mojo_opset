@@ -1,7 +1,9 @@
 import pytest
 import torch
 
+from mojo_opset import Target
 from mojo_opset import modules
+from mojo_opset.functions._dispatch import resolve_implementation
 
 # Shape union from Mojo perf/test_attention.py and perf_new/operators/attention.py.
 DECODE = [
@@ -126,10 +128,11 @@ def test_decode(benchmark, perf_environment, sliding, case, layout):
     ],
 )
 def test_prefill(benchmark, perf_environment, sliding, case, layout):
-    _, device, _, implementation = perf_environment
+    _, device, target, implementation = perf_environment
     batch, qh, kh, dim, max_q, max_cache, block = case
     op = "paged_prefill_swa_infer" if sliding else "paged_prefill_gqa_infer"
-    if implementation == "torch_npu" and (max_cache or dim % 128 or block % 128 or block > 512):
+    selected = implementation or resolve_implementation(op, Target.parse(target))
+    if selected == "torch_npu" and (max_cache or dim % 128 or block % 128 or block > 512):
         pytest.skip("Inherited torch_npu prefill restrictions: no prefix cache, aligned dim/pages, page <= 512")
     rng = torch.Generator().manual_seed(43)
     qlens = (

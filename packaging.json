@@ -5,7 +5,7 @@
   "requires_python": ">=3.10",
   "urls": {"Homepage": "https://github.com/XPU-Forces/mojo_opset"},
   "readme": "README.md",
-  "dependencies": ["einops", "pyyaml"],
+  "dependencies": ["einops", "numpy", "pyyaml"],
   "optional_dependencies": {
     "dev": ["pytest>=8.3.2"],
     "npu": ["triton-ascend>=3.2.1"],

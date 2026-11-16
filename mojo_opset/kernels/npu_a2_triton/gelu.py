@@ -44,11 +44,11 @@ def gelu_tanh_approx(x):
     return 0.5 * x * (1 + libdevice.tanh(tanh_arg))
 
 
+@libentry()
 @triton.autotune(
     configs=GELU_TANH_BLOCK_SIZE_M_CONFIGS,
     key=["n_rows", "n_cols"],
 )
-@libentry()
 @triton.jit
 def _gelu_fwd_kernel(
     x,
@@ -87,11 +87,11 @@ def _gelu_fwd_kernel(
             tl.store(y_ptrs, y_chunk, mask=block_mask)
 
 
+@libentry()
 @triton.autotune(
     configs=GELU_TANH_BLOCK_SIZE_M_CONFIGS,
     key=["n_rows", "n_cols"],
 )
-@libentry()
 @triton.jit
 def _gelu_fwd_nomask_kernel(
     x,
@@ -125,11 +125,11 @@ def _gelu_fwd_nomask_kernel(
             tl.store(y_ptrs, y_chunk)
 
 
+@libentry()
 @triton.autotune(
     configs=GELU_TANH_BLOCK_SIZE_M_CONFIGS,
     key=["n_rows", "n_cols"],
 )
-@libentry()
 @triton.jit
 def _gelu_fwd_nomask_single_kernel(
     x,
@@ -161,11 +161,11 @@ def _gelu_fwd_nomask_single_kernel(
         tl.store(y_ptrs, y_chunk)
 
 
+@libentry()
 @triton.autotune(
     configs=GELU_TANH_BLOCK_SIZE_M_CONFIGS,
     key=["n_rows", "n_cols"],
 )
-@libentry()
 @triton.jit
 def _gelu_bwd_kernel(
     dy,
