@@ -168,6 +168,22 @@ def fp8_quant_reference(out, quant_heads, dtype=None):
     return q, scale
 
 
+def skip_unless_fp8_target(accuracy_backend, quant_heads=QUANT_HEADS):
+    """FP8 e4m3 is required on Ascend 950 only (task statement, capability matrix).
+
+    The 910B/910C runtime does not implement DT_FLOAT8_E4M3FN, so the provider
+    raises before any value exists to compare.  Skip on those NPU targets only:
+    the torch provider does produce FP8 on CPU, so CPU coverage is kept.  No
+    assertion, tolerance or comparison rule is changed by this gate.
+    """
+    _, target, _ = accuracy_backend
+    if quant_heads and target.startswith("npu.") and not target.startswith("npu.a5"):
+        pytest.skip(
+            "FP8 e4m3 requires Ascend 950; the 910B/910C runtime does not implement "
+            "DT_FLOAT8_E4M3FN"
+        )
+
+
 def _ulp_spacing(value, dtype):
     """Spacing of ``dtype`` at ``value``: 2^(exp-1-mantissa) for normals, clamped
     to the smallest subnormal (which also covers subnormal and zero anchors)."""
@@ -405,6 +421,7 @@ def test_gated_norm_strided_rows(accuracy_backend, dtype):
 @pytest.mark.accuracy
 def test_gated_norm_quant(accuracy_backend, dtype, z_mode, norm_before_gate):
     """Fused per-token FP8 epilogue (quant_heads=4) with and without the gate."""
+    skip_unless_fp8_target(accuracy_backend)
     check_gated_norm(
         accuracy_backend,
         M=512, N=128, z_mode=z_mode, activation="swish",
@@ -417,6 +434,7 @@ def test_gated_norm_quant(accuracy_backend, dtype, z_mode, norm_before_gate):
 @pytest.mark.accuracy
 def test_gated_norm_quant_layernorm(accuracy_backend):
     """QUANT x IS_RMS_NORM=False x Z_IS_3D specialization keeps the FP32 mean."""
+    skip_unless_fp8_target(accuracy_backend)
     check_gated_norm(
         accuracy_backend,
         M=512, N=128, z_mode="3d", activation="sigmoid",
@@ -458,6 +476,7 @@ def test_strided_gate_matches_contiguous_gate(accuracy_backend, dtype, M, N,
 def test_fused_quant_bit_exact(accuracy_backend, dtype, z_mode, norm_before_gate):
     """Fused (q, s) matches non-fused quantization of the same kernel output
     bit-for-bit; the round-to-output-dtype boundary is not perturbed twice."""
+    skip_unless_fp8_target(accuracy_backend)
     M, N = 512, 128
     implementation, _, device = accuracy_backend
     x = torch.randn(M, N, device=device, dtype=dtype)
@@ -488,6 +507,7 @@ def test_gated_norm_empty_batch_contract(accuracy_backend, dtype, is_rms_norm, q
     contract: fixed shapes and dtypes, plus bit-for-bit agreement with the
     registered torch reference.
     """
+    skip_unless_fp8_target(accuracy_backend, quant_heads)
     implementation, _, device = accuracy_backend
     M, N = 0, 256
     x = torch.randn(M, N, device=device, dtype=dtype)

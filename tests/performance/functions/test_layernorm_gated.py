@@ -48,6 +48,10 @@ def test_layer_norm_gated(
     norm_before_gate, group_size, quant_heads, mbu_line,
 ):
     _, device, _, implementation = perf_environment
+    # Same rule as the MBU matrix: FP8 e4m3 is required on Ascend 950 only, and
+    # the 910B/910C runtime does not implement DT_FLOAT8_E4M3FN.
+    if quant_heads and str(device).startswith("npu") and "950" not in torch.npu.get_device_name(0):
+        pytest.skip("FP8 quant is formally required only on Ascend 950")
     M = tokens * heads
 
     def factory():
