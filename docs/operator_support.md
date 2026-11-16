@@ -6,6 +6,7 @@ supported shapes, dtypes and options.
 
 | Function | `npu.a2` | `npu.a5` |
 | --- | --- | --- |
+| `apply_candidate_mask` | triton | triton |
 | `apply_penalties_temperature` | triton | triton |
 | `causal_conv1d` | triton | triton |
 | `causal_conv1d_update_state_infer` | triton | triton |
@@ -52,6 +53,7 @@ supported shapes, dtypes and options.
 | `rope_infer` | triton, torch_npu | triton, torch_npu |
 | `rotate_activation` | torch | torch |
 | `sdpa_infer` | triton | triton |
+| `select_candidate_blocks` | triton | triton |
 | `silu` | triton, torch_npu | triton, torch_npu |
 | `static_quant` | triton | triton |
 | `store_lowrank` | triton | triton |

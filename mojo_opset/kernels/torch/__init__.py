@@ -23,6 +23,8 @@ OPS = {
     "over_encoding_decode": "over_encoding",
     "lightning_indexer": "indexer",
     "store_lowrank": "store_lowrank",
+    "select_candidate_blocks": "candidate_blocks",
+    "apply_candidate_mask": "candidate_blocks",
     "rope_infer": "position_embedding",
     "vision_rope_2d_infer": "position_embedding",
     "paged_decode_gqa_infer": "paged_attention",

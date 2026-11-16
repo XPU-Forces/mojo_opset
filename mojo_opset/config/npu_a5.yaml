@@ -1,4 +1,5 @@
 npu.a5:
+  apply_candidate_mask: triton
   apply_penalties_temperature: triton
   causal_conv1d: triton
   causal_conv1d_update_state_infer: triton
@@ -45,6 +46,7 @@ npu.a5:
   rope_infer: triton
   rotate_activation: torch
   sdpa_infer: triton
+  select_candidate_blocks: triton
   silu: triton
   static_quant: triton
   store_lowrank: triton

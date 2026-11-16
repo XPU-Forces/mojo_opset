@@ -8,6 +8,8 @@ from .attention import native_swa_infer
 from .attention import swa
 from .attention import swa_infer
 from .attention import varlen_fa_infer
+from .candidate_blocks import apply_candidate_mask
+from .candidate_blocks import select_candidate_blocks
 from .convolution import causal_conv1d
 from .convolution import causal_conv1d_update_state_infer
 from .flex_attention import flex_attention
@@ -63,6 +65,7 @@ from .store_lowrank import store_lowrank
 from .swiglu import swiglu
 
 __all__ = [
+    "apply_candidate_mask",
     "apply_penalties_temperature",
     "causal_conv1d",
     "causal_conv1d_update_state_infer",
@@ -109,6 +112,7 @@ __all__ = [
     "rope_infer",
     "rotate_activation",
     "sdpa_infer",
+    "select_candidate_blocks",
     "silu",
     "static_quant",
     "store_lowrank",
