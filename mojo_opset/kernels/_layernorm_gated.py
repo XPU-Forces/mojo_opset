@@ -291,7 +291,11 @@ def calc_rows_per_block(M: int, N: int, ngroups: int = 1) -> int:
     elif N <= 256:
         rows_per_block = 32
     elif N <= 512:
-        rows_per_block = 8
+        # 16 rows, not 8: the quant epilogue has to reduce with this same tile, and
+        # at 8 rows quant_heads=8 leaves one token per tile.  Measured on A5 at
+        # 32768x512: 115.6us / MBU 50.3% at 8 rows against 83.7us / 69.5% at 16
+        # (line 60%), both bit-exact against the unfused launch.
+        rows_per_block = 16
     elif N <= 1024:
         rows_per_block = 4
     else:
