@@ -84,7 +84,7 @@ Add to the existing dispatcher registration block; do not create a second
 `mojo_native_a5`; the public 950PR SWA provider uses `mojo_native_a5_950pr` so
 both libraries can be loaded in one process without duplicate registration.
 Their SWA schemas share `src/npu_a5/swa/registration.h`. Operators already
-registered in family-specific namespaces (SR, MXFP8, attention dropout) keep
+registered in family-specific namespaces (SR, MXFP8) keep
 those namespaces. Existing A2 pybind bindings are outside this A5 migration.
 
 The macro is enabled automatically by the recipe. It selects operators within

@@ -188,3 +188,60 @@ def test_swa_fused_context_without_autograd_metadata():
     out = SwaFunction.forward(ctx, q, k, v, cu, cu, True, 3, 1, 8**-0.5, False, True, "torch")
     grads = SwaFunction.backward(ctx, torch.ones_like(out))[:3]
     assert all(g.shape == q.shape and torch.isfinite(g).all() for g in grads)
+
+
+def _philox4x32_reference(seed, counters):
+    mask = (1 << 32) - 1
+    c0, c1 = counters & mask, (counters >> 32) & mask
+    c2, c3 = torch.zeros_like(counters), torch.zeros_like(counters)
+    k0, k1 = seed & mask, (seed >> 32) & mask
+    for _ in range(10):
+        a, b = 0xD2511F53 * c0, 0xCD9E8D57 * c2
+        c0, c1, c2, c3 = ((b >> 32) & mask) ^ c1 ^ k0, b & mask, ((a >> 32) & mask) ^ c3 ^ k1, a & mask
+        k0, k1 = (k0 + 0x9E3779B9) & mask, (k1 + 0xBB67AE85) & mask
+    return torch.stack((c0, c1, c2, c3), dim=-1).to(torch.uint32)
+
+
+def _triton_packed_mask_reference(num_words, p, seed):
+    threshold = int((1.0 - p) * 255.0)
+    blocks = (num_words + 1023) // 1024
+    raw = _philox4x32_reference(seed, torch.arange(blocks * 2048, dtype=torch.int64)).view(torch.uint8)
+    bits = (raw.to(torch.int32) <= threshold).reshape(blocks * 2, 8, 16, 128)
+    packed = (bits.to(torch.int32) << torch.arange(8).reshape(1, 8, 1, 1)).sum(1).to(torch.uint8)
+    return packed.view(torch.int32).flatten()[:num_words]
+
+
+@pytest.mark.api("functions.swa")
+@pytest.mark.accuracy
+@pytest.mark.parametrize("num_words", [1, 15, 16, 17, 1023, 1024, 1025, 65537])
+@pytest.mark.parametrize("p", [0.0, 0.01, 0.1, 0.5, 1.0 - 1e-8])
+def test_swa_triton_dropout_mask_bitwise_and_tail(accuracy_backend, num_words, p):
+    implementation, target, device = accuracy_backend
+    implementation = implementation or resolve_implementation("swa", Target.parse(target))
+    if implementation != "triton" or Target.parse(target).arch_key != "npu.a5":
+        pytest.skip("A5 Triton SWA dropout mask generator only")
+    from mojo_opset.kernels._npu_triton_utils import get_num_cores
+    from mojo_opset.kernels.npu_a5_triton._attention_dropout import _fill_packed_mask
+    from mojo_opset.kernels.npu_a5_triton._attention_dropout import generate_mask
+
+    key = 0x7FFFFFFF9ABCDEF0
+    seed = torch.tensor([key & 0xFFFFFFFF, key >> 32], dtype=torch.int64).to(device=device, dtype=torch.int32)
+    threshold = int((1.0 - p) * 255)
+    buf = torch.full((num_words + 64,), 0x12345678, device=device, dtype=torch.int32)
+    grid = (min(get_num_cores("vector"), (num_words + 1023) // 1024),)
+    _fill_packed_mask[grid](buf[:num_words], seed, num_words, threshold)
+    torch.testing.assert_close(buf[:num_words].cpu(), _triton_packed_mask_reference(num_words, p, key), rtol=0, atol=0)
+    assert torch.all(buf[num_words:].cpu() == 0x12345678)
+
+    if num_words == 1025 and p == 0.1:
+        q = torch.empty(1025, 1, 128, device=device, dtype=torch.bfloat16)
+        k = torch.empty(64, 1, 128, device=device, dtype=torch.bfloat16)
+        state = torch.npu.get_rng_state()
+        explicit = generate_mask(q, k, p, False, None, None, seed)
+        assert torch.equal(state, torch.npu.get_rng_state())
+        torch.testing.assert_close(
+            explicit.flatten().cpu(), _triton_packed_mask_reference(q.shape[0] * 2, p, key), rtol=0, atol=0
+        )
+        first = generate_mask(q, k, p, False, None, None)
+        torch.npu.set_rng_state(state)
+        torch.testing.assert_close(first, generate_mask(q, k, p, False, None, None), rtol=0, atol=0)

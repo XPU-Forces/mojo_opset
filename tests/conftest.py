@@ -138,14 +138,33 @@ def ep_group(accuracy_backend):
     dist.destroy_process_group()
 
 
+@pytest.fixture(scope="session")
+def _ep_context_cache():
+    cache = [None, None]
+    try:
+        yield cache
+    finally:
+        if cache[1] is not None:
+            cache[1].close()
+            cache[:] = [None, None]
+
+
 @pytest.fixture(scope="module")
-def ep_context(ep_group, request):
+def ep_context(ep_group, _ep_context_cache, request):
     from mojo_opset.comm import EPContext
 
     hidden, experts, topk, capacity = getattr(request, "param", (128, 16, 2, 33))
-    with EPContext.create(ep_group, layer=int(os.getenv("MOJO_EP_TEST_LAYER", "0")), hidden=hidden,
-                          num_experts=experts, num_topk=topk, capacity=capacity) as context:
-        yield context
+    layer = int(os.getenv("MOJO_EP_TEST_LAYER", "0"))
+    key = (layer, hidden, experts, topk, capacity)
+    if _ep_context_cache[0] != key or _ep_context_cache[1] is None:
+        if _ep_context_cache[1] is not None:
+            _ep_context_cache[1].close()
+            _ep_context_cache[:] = [None, None]
+        _ep_context_cache[1] = EPContext.create(
+            ep_group, layer=layer, hidden=hidden, num_experts=experts, num_topk=topk, capacity=capacity
+        )
+        _ep_context_cache[0] = key
+    return _ep_context_cache[1]
 
 
 @pytest.fixture

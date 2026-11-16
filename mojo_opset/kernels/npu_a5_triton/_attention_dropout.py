@@ -4,6 +4,8 @@ import torch
 import triton
 import triton.language as tl
 
+from typing import Optional
+
 from packaging.version import Version
 
 from mojo_opset.kernels._npu_triton_utils import get_ascend_compiler_version
@@ -223,7 +225,25 @@ def refill_dropout_mask(dropout, *, generator=None, seed=None, offset=0):
                 )
             torch.autograd.graph.increment_version(dropout.tiles)
     return dropout
-from typing import Optional
+
+
+@triton.jit(do_not_specialize=["WORDS"])
+def _fill_packed_mask(OUT, SEED_PTR, WORDS, THRESHOLD: tl.constexpr):
+    k0 = tl.load(SEED_PTR).to(tl.uint32)
+    k1 = tl.load(SEED_PTR + 1).to(tl.uint32)
+    seed = k0.to(tl.uint64) | (k1.to(tl.uint64) << 32)
+    lanes = tl.arange(0, 2048)
+    planes = (lanes % 1024) // 128
+    for block in range(tl.program_id(0), tl.cdiv(WORDS, 1024), tl.num_programs(0)):
+        counters = block.to(tl.uint64) * 2048 + lanes
+        a, b, c, d = _philox4x32(seed, counters)
+        pa = tl.sum((_drop_byte_flags(a, THRESHOLD) << planes).reshape(2, 8, 128), 1).reshape(256)
+        pb = tl.sum((_drop_byte_flags(b, THRESHOLD) << planes).reshape(2, 8, 128), 1).reshape(256)
+        pc = tl.sum((_drop_byte_flags(c, THRESHOLD) << planes).reshape(2, 8, 128), 1).reshape(256)
+        pd = tl.sum((_drop_byte_flags(d, THRESHOLD) << planes).reshape(2, 8, 128), 1).reshape(256)
+        drop_bits = tl.interleave(tl.interleave(pa, pc), tl.interleave(pb, pd))
+        indices = block.to(tl.int64) * 1024 + tl.arange(0, 1024)
+        tl.store(OUT + indices, (~drop_bits).to(tl.int32, bitcast=True), mask=indices < WORDS.to(tl.int64))
 
 
 def mask_row_bytes(total_k: int, causal: bool, local_window: Optional[int], global_window: Optional[int]) -> int:
@@ -240,27 +260,30 @@ def mask_row_bytes(total_k: int, causal: bool, local_window: Optional[int], glob
 
 @torch.library.custom_op("mojo_npu_triton_a5::swa_dropout_mask", mutates_args=())
 def generate_mask(
-    q: torch.Tensor, k: torch.Tensor, p: float, causal: bool, local_window: Optional[int], global_window: Optional[int]
+    q: torch.Tensor,
+    k: torch.Tensor,
+    p: float,
+    causal: bool,
+    local_window: Optional[int],
+    global_window: Optional[int],
+    seed: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Draw keep bits from the device RNG; explicit masks bypass this operation."""
+    """Draw keep bits from the device RNG using Triton Philox; explicit masks bypass this operation."""
+    if not 0.0 <= p < 1.0:
+        raise ValueError("p must be in [0, 1)")
+    threshold = int((1.0 - p) * 255)
     row_words = mask_row_bytes(k.shape[0], causal, local_window, global_window) // 4
     num_words = q.shape[0] * q.shape[1] * row_words
-    if num_words <= 2**30:
-        from mojo_opset.kernels.npu_a5_native.attention_dropout import generate_mask as generate_native_mask
-
-        # Native Philox compares 8-bit draws and packs keep bits in registers.
-        # It writes only the final mask, without a full-size entropy buffer.
-        mask = generate_native_mask(q, num_words, p)
-    else:
-        import torch_npu
-
-        # Preserve dense-mask support beyond the native 32-bit counter range.
-        mask = torch_npu.npu_dropout_gen_mask([num_words * 32], p, dtype=q.dtype, device=q.device)
-        mask = mask.view(torch.int32)[:num_words]
-    return mask.view(q.shape[0], q.shape[1], row_words)
+    mask = torch.empty((q.shape[0], q.shape[1], row_words), device=q.device, dtype=torch.int32)
+    if num_words:
+        if seed is None:
+            seed = torch.randint(0, 2**31, (2,), device=q.device, dtype=torch.int32)
+        grid = (min(get_num_cores("vector"), triton.cdiv(num_words, 1024)),)
+        _fill_packed_mask[grid](mask.view(-1), seed, num_words, threshold)
+    return mask
 
 
 @generate_mask.register_fake
-def _generate_mask_fake(q, k, p, causal, local_window, global_window):
+def _generate_mask_fake(q, k, p, causal, local_window, global_window, seed=None):
     row_words = mask_row_bytes(k.shape[0], causal, local_window, global_window) // 4
     return q.new_empty((q.shape[0], q.shape[1], row_words), dtype=torch.int32)
