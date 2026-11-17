@@ -138,3 +138,20 @@ device; ordinary `pytest` does not collect them. Results are saved to
 `tests/performance/results/current.json` (git-ignored).
 
 See [performance testing](docs/performance_test.md) for options and report comparison.
+
+## Contributing
+
+Commit subjects and PR titles must use `[Feat]`, `[Fix]`, `[Refactor]`, or `[Doc]`,
+followed by a space and a description starting with a lowercase letter and ending
+with a single period. For example:
+
+```text
+[Feat] add 910b community operator checks.
+```
+
+Keep PR history linear: rebase your branch onto `master` instead of merging
+`master` into it. PR branches must not contain merge commits.
+
+The [910B CI workflow](.github/workflows/npu-910b.yml) checks commit/PR titles and
+accuracy test declarations, then runs accuracy and bitwise tests for `triton`,
+`torch_npu` and `native` on Ascend 910B3.
