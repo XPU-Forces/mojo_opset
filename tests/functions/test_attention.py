@@ -300,10 +300,10 @@ def test_flash_attention_accuracy(accuracy_backend, dtype, tokens, q_heads, kv_h
     ],
 )
 @pytest.mark.accuracy
-def test_native_swa_infer_accuracy(accuracy_backend, heads, interleave, window, lengths, case):
+def test_native_swa_infer_accuracy(accuracy_backend, operator_test, heads, interleave, window, lengths, case):
     implementation, _, device = accuracy_backend
     rejected_case = case != "default"
-    if rejected_case and implementation == "torch":
+    if rejected_case and operator_test["native_swa_infer"] == "torch":
         pytest.skip("native launch contract")
     torch.manual_seed(42)
     (q, k, v, cq, ck), kwargs = _make_native_swa_infer_case(device, heads, interleave, window, lengths)
@@ -434,9 +434,9 @@ def test_native_swa_infer_compile_matches_eager(accuracy_backend):
 
 
 @pytest.mark.api("functions.swa_infer")
-def test_swa_infer_compiles_as_single_leaf(accuracy_backend):
+def test_swa_infer_compiles_as_single_leaf(accuracy_backend, operator_test):
     implementation, target, device = accuracy_backend
-    if implementation not in (None, "triton") or not target.startswith("npu."):
+    if operator_test["swa_infer"] != "triton" or not target.startswith("npu."):
         pytest.skip("NPU Triton inference leaf contract")
     preload("swa_infer", implementation=implementation, target=target)
     q = torch.randn(128, 8, 128, dtype=torch.bfloat16, device=device)
@@ -470,9 +470,9 @@ def test_swa_infer_compiles_as_single_leaf(accuracy_backend):
         for op, f32 in [("swa", False), ("swa", True), ("flash_attention", False)]
     ],
 )
-def test_attention_compiles_forward_backward_leaves(accuracy_backend, op, output_f32):
+def test_attention_compiles_forward_backward_leaves(accuracy_backend, operator_test, op, output_f32):
     implementation, target, device = accuracy_backend
-    if implementation not in (None, "triton", "torch_npu") or not target.startswith("npu."):
+    if operator_test[op] not in ("triton", "torch_npu") or not target.startswith("npu."):
         pytest.skip("NPU leaf decomposition contract")
     if op == "swa":
         implementation = check_swa_case(accuracy_backend, output_f32=output_f32)
@@ -760,11 +760,11 @@ if triton is not None:
         (256, 64, 513, 129),
     ],
 )
-def test_swa_mask_template_tiles(accuracy_backend, block_m, block_n, window, global_window):
+def test_swa_mask_template_tiles(accuracy_backend, operator_test, block_m, block_n, window, global_window):
     if triton is None:
         pytest.skip("Triton is required for mask tile checks")
     _, target, device = accuracy_backend
-    if not (target.startswith("npu.a2") or target.startswith("npu.a5")):
+    if operator_test["swa"] != "triton" or not (target.startswith("npu.a2") or target.startswith("npu.a5")):
         pytest.skip("NPU Triton mask template")
     arch = "a2" if target.startswith("npu.a2") else "a5"
     if arch == "a5" and block_m > 128:
@@ -893,9 +893,9 @@ def test_external_context(accuracy_backend, op):
 @pytest.mark.parametrize("compiled", [False, True])
 @pytest.mark.parametrize("phase", ["forward", "backward"])
 @pytest.mark.parametrize("deterministic", [False, True])
-def test_flash_attention_runtime_policy(accuracy_backend, compiled, phase, deterministic):
+def test_flash_attention_runtime_policy(accuracy_backend, operator_test, compiled, phase, deterministic):
     implementation, target, device = accuracy_backend
-    if implementation != "torch_npu":
+    if operator_test["flash_attention"] != "torch_npu":
         pytest.skip("torch_npu runtime determinism contract")
     preload("flash_attention", implementation=implementation, target=target)
     inputs = _make_attention_inputs(device, torch.bfloat16, 128)
