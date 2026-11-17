@@ -152,3 +152,17 @@ device; ordinary `pytest` does not collect them. Results are saved to
 `tests/performance/results/current.json` (git-ignored).
 
 See [performance testing](docs/performance_test.md) for options and report comparison.
+
+## Contributing
+
+Commit subjects and pull request titles must use `[Feat]`, `[Fix]`, `[Refactor]`,
+or `[Doc]`, followed by one space and a description that starts with a lowercase
+ASCII letter (`a–z`) and ends with a single English period. Use these types for
+new features, bug fixes, refactoring, and documentation respectively, including
+CI and test changes. `[CI]`, `[Test]`, and `[Perf]` are not accepted.
+Avoid control characters, trailing whitespace, or whitespace or another period
+immediately before the final period. For example:
+
+```text
+[Feat] add 910b community operator checks.
+```
