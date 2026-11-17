@@ -133,24 +133,11 @@ pytest tests/functions tests/modules --check bitwise
 pytest tests/performance
 ```
 
-The [910B CI workflow](.github/workflows/npu-910b.yml) runs accuracy and training
-bitwise checks on Ascend910B3 for `triton`, `torch_npu` and `native` in sequence.
-A CPU preflight job validates the PR title and commit subjects introduced by the
-change, compiles CI Python scripts, and collects tests to verify that every public
-function and module API declares an accuracy test. Missing or invalid `api` marks
-fail this check. Declaration coverage does not imply numerical correctness or
-execution on every backend. NPU jobs start only after preflight passes.
-Each NPU job uses an eight-card runner with one pytest worker per card. Parameter
-groups stay on the same card and are balanced by case count, retaining every case.
-It runs for non-draft pull requests targeting `master`, pushes to `master`, and
-manual dispatches. The native job builds the A2 provider for the runner's hardware.
-The Triton job pins the official `triton-ascend 3.2.2.post2` wheel: the image's
-3.2.2 build produces incorrect persistent INT8 GEMM results for some autotune
-configurations on B3. CANN and Torch remain provided by the pinned image.
-Each job records its runtime versions, writes a result summary, and uploads
-the test log and JUnit report. Unsupported provider cases remain reported as skips.
-Native Flash Attention cases are temporarily skipped on 910B3 while its backward
-reduction is adapted to the available Vector core count. B1/B2 coverage is retained.
+The [910B CI workflow](.github/workflows/npu-910b.yml) checks commit/PR titles and
+accuracy test declarations, then runs accuracy and bitwise tests on eight
+Ascend910B3 cards for `triton`, `torch_npu` and `native`. It runs for non-draft PRs
+to `master`, pushes to `master`, and manual dispatches. Logs and test reports are
+uploaded as artifacts. Native Flash Attention is temporarily skipped on 910B3.
 
 Performance tests use rotating inputs and exclude warmup. Run them on an idle
 device; ordinary `pytest` does not collect them. Results are saved to
@@ -160,13 +147,9 @@ See [performance testing](docs/performance_test.md) for options and report compa
 
 ## Contributing
 
-Commit subjects and pull request titles must use `[Feat]`, `[Fix]`, `[Refactor]`,
-or `[Doc]`, followed by one space and a description that starts with a lowercase
-ASCII letter (`a–z`) and ends with a single English period. Use these types for
-new features, bug fixes, refactoring, and documentation respectively, including
-CI and test changes. `[CI]`, `[Test]`, and `[Perf]` are not accepted.
-Avoid control characters, trailing whitespace, or whitespace or another period
-immediately before the final period. For example:
+Commit subjects and PR titles must use `[Feat]`, `[Fix]`, `[Refactor]`, or `[Doc]`,
+followed by a space and a description starting with a lowercase letter and ending
+with a single period. For example:
 
 ```text
 [Feat] add 910b community operator checks.
