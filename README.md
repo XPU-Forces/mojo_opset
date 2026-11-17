@@ -135,7 +135,12 @@ pytest tests/performance
 
 The [910B CI workflow](.github/workflows/npu-910b.yml) runs accuracy and training
 bitwise checks on Ascend910B3 for `triton`, `torch_npu` and `native` in sequence.
-Each job uses an eight-card runner with one pytest worker per card. Parameter
+A CPU preflight job validates the PR title and commit subjects introduced by the
+change, compiles CI Python scripts, and collects tests to verify that every public
+function and module API declares an accuracy test. Missing or invalid `api` marks
+fail this check. Declaration coverage does not imply numerical correctness or
+execution on every backend. NPU jobs start only after preflight passes.
+Each NPU job uses an eight-card runner with one pytest worker per card. Parameter
 groups stay on the same card and are balanced by case count, retaining every case.
 It runs for non-draft pull requests targeting `master`, pushes to `master`, and
 manual dispatches. The native job builds the A2 provider for the runner's hardware.
