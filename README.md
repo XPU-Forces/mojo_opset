@@ -133,12 +133,6 @@ pytest tests/functions tests/modules --check bitwise
 pytest tests/performance
 ```
 
-The [910B CI workflow](.github/workflows/npu-910b.yml) checks commit/PR titles and
-accuracy test declarations, then runs accuracy and bitwise tests on eight
-Ascend910B3 cards for `triton`, `torch_npu` and `native`. It runs for non-draft PRs
-to `master`, pushes to `master`, and manual dispatches. Logs and test reports are
-uploaded as artifacts. Native Flash Attention is temporarily skipped on 910B3.
-
 Performance tests use rotating inputs and exclude warmup. Run them on an idle
 device; ordinary `pytest` does not collect them. Results are saved to
 `tests/performance/results/current.json` (git-ignored).
@@ -154,3 +148,12 @@ with a single period. For example:
 ```text
 [Feat] add 910b community operator checks.
 ```
+
+Keep PR history linear: rebase your branch onto `master` instead of merging
+`master` into it. PR branches must not contain merge commits.
+
+The [910B CI workflow](.github/workflows/npu-910b.yml) checks commit/PR titles and
+accuracy test declarations, then runs accuracy and bitwise tests on eight
+Ascend910B3 cards for `triton`, `torch_npu` and `native`. It runs for non-draft PRs
+to `master`, pushes to `master`, and manual dispatches. Logs and test reports are
+uploaded as artifacts. Native Flash Attention is temporarily skipped on 910B3.
