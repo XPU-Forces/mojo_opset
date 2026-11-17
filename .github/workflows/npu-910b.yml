@@ -46,16 +46,20 @@ jobs:
         run: python .github/scripts/check_api_coverage.py
 
   accuracy:
-    name: 910B / ${{ matrix.implementation }}
+    name: 910B / ${{ matrix.implementation }} / ${{ matrix.runner }}
     needs: [preflight]
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    runs-on: linux-aarch64-a2b3-8-hk-001
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
       fail-fast: false
-      max-parallel: 1
+      # Use the four verified A2 fed allocations; their capacity is scheduled by ARC.
       matrix:
-        implementation: [triton, torch_npu, native]
+        include:
+          - {implementation: triton, runner: linux-aarch64-a2-mojo-fed-8, cards: 8, offset: 0, shards: 8}
+          - {implementation: torch_npu, runner: linux-aarch64-a2-mojo-fed-4, cards: 4, offset: 0, shards: 4}
+          - {implementation: native, runner: linux-aarch64-a2-mojo-fed-2, cards: 2, offset: 0, shards: 3}
+          - {implementation: native, runner: linux-aarch64-a2-mojo-fed-1, cards: 1, offset: 2, shards: 3}
     container:
       # Public ARM64 image; retain its Torch/CANN/Triton stack.
       image: quay.io/ascend/triton:3.2.2-cann9.1.0-torch_npu2.7.1.post8-910b-ubuntu24.04-py3.11@sha256:b69d14f39d47ec8f66e635f16190788e3c2b2174d0994f63090afcdf885b06f1
@@ -70,7 +74,10 @@ jobs:
       # ARC synchronizes RUNNER_TEMP between the runner and job pod.
       # Keep the venv and compiler caches in the job container instead.
       MOJO_CI_WORK_DIR: /tmp/mojo-ci
-      MOJO_CI_CARDS: "8"
+      MOJO_CI_CARDS: ${{ matrix.cards }}
+      MOJO_CI_SHARD_OFFSET: ${{ matrix.offset }}
+      MOJO_CI_SHARD_COUNT: ${{ matrix.shards }}
+      MOJO_CI_RUNNER: ${{ matrix.runner }}
       OMP_NUM_THREADS: "4"
       MKL_NUM_THREADS: "4"
     steps:
@@ -149,6 +156,7 @@ jobs:
           timeout --signal=TERM --kill-after=60s 90m \
             python .github/scripts/npu_pytest.py \
             --implementation "$IMPLEMENTATION" --cards "$MOJO_CI_CARDS" \
+            --shard-offset "$MOJO_CI_SHARD_OFFSET" --shard-count "$MOJO_CI_SHARD_COUNT" \
             2>&1 | tee test-results/pytest.log
 
       - name: Summarize test results
@@ -164,6 +172,8 @@ jobs:
           reports = sorted(Path("test-results").glob("worker-*.xml"))
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
               summary.write(f"### 910B / {os.environ['IMPLEMENTATION']}\n\n")
+              summary.write(f"Runner: {os.environ['MOJO_CI_RUNNER']}\n\n")
+              summary.write(f"Global shards: {os.environ['MOJO_CI_SHARD_OFFSET']} + {os.environ['MOJO_CI_CARDS']} / {os.environ['MOJO_CI_SHARD_COUNT']}\n\n")
               summary.write(f"Worker reports: {len(reports)}/{os.environ['MOJO_CI_CARDS']}\n\n")
               if reports:
                   counts = Counter(
@@ -181,7 +191,7 @@ jobs:
         timeout-minutes: 5
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: npu-910b-${{ matrix.implementation }}-${{ github.run_attempt }}
+          name: npu-910b-${{ matrix.implementation }}-${{ matrix.runner }}-${{ github.run_attempt }}
           path: test-results/
           if-no-files-found: warn
           retention-days: 14

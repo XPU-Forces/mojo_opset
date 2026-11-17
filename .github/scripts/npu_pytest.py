@@ -1,4 +1,4 @@
-"""Run whole pytest parameter groups on one worker per allocated NPU."""
+"""Shard whole pytest parameter groups across jobs, with one worker per NPU."""
 
 import argparse
 import os
@@ -47,7 +47,7 @@ def worker(args):
         f"Worker {args.worker}: visible={os.environ['ASCEND_RT_VISIBLE_DEVICES']} "
         f"device={torch.npu.get_device_name(0)}", flush=True,
     )
-    shard = GroupedShard(args.worker, args.cards)
+    shard = GroupedShard(args.shard_offset + args.worker, args.shard_count)
     status = pytest.main([
         "-q", "tests/functions", "tests/modules", "--mojo-target", "npu.a2",
         "--mojo-implementation", args.implementation, "--check", "all", "-ra",
@@ -86,7 +86,8 @@ def run_all(args):
                            TORCHINDUCTOR_CACHE_DIR=str(cache / "inductor"))
                 log = files.enter_context((reports / f"worker-{rank}.log").open("w"))
                 command = [sys.executable, str(Path(__file__).resolve()), "--implementation", args.implementation,
-                           "--cards", str(args.cards), "--worker", str(rank)]
+                           "--cards", str(args.cards), "--worker", str(rank),
+                           "--shard-offset", str(args.shard_offset), "--shard-count", str(args.shard_count)]
                 processes[rank] = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
                 print(f"Started worker {rank} on device {device}", flush=True)
             pending = dict(processes)
@@ -125,10 +126,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--implementation", choices=("triton", "torch_npu", "native"), required=True)
     parser.add_argument("--cards", type=int, required=True)
+    parser.add_argument("--shard-offset", type=int, default=0)
+    parser.add_argument("--shard-count", type=int)
     parser.add_argument("--worker", type=int)
     args = parser.parse_args()
+    if args.shard_count is None:
+        args.shard_count = args.cards
     if args.cards < 1 or (args.worker is not None and not 0 <= args.worker < args.cards):
         parser.error("invalid card count or worker index")
+    if args.shard_offset < 0 or args.shard_offset + args.cards > args.shard_count:
+        parser.error("job's card range must fit within the global shard count")
     try:
         sys.exit(worker(args) if args.worker is not None else run_all(args))
     except KeyboardInterrupt:
