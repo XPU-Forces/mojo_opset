@@ -46,7 +46,7 @@ jobs:
         run: python .github/scripts/check_api_coverage.py
 
   accuracy:
-    name: 910B / ${{ matrix.implementation }} / ${{ matrix.runner }}
+    name: 910B3 / Accuracy / ${{ matrix.backend_name }} / ${{ matrix.cards }} ${{ matrix.cards == 1 && 'card' || 'cards' }}
     needs: [preflight]
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ${{ matrix.runner }}
@@ -56,10 +56,10 @@ jobs:
       # Use the four verified A2 fed allocations; their capacity is scheduled by ARC.
       matrix:
         include:
-          - {implementation: triton, runner: linux-aarch64-a2-mojo-fed-8, cards: 8, offset: 0, shards: 8}
-          - {implementation: torch_npu, runner: linux-aarch64-a2-mojo-fed-4, cards: 4, offset: 0, shards: 4}
-          - {implementation: native, runner: linux-aarch64-a2-mojo-fed-2, cards: 2, offset: 0, shards: 3}
-          - {implementation: native, runner: linux-aarch64-a2-mojo-fed-1, cards: 1, offset: 2, shards: 3}
+          - {implementation: triton, backend_name: Triton, runner: linux-aarch64-a2-mojo-fed-8, cards: 8, offset: 0, shards: 8}
+          - {implementation: torch_npu, backend_name: Torch NPU, runner: linux-aarch64-a2-mojo-fed-4, cards: 4, offset: 0, shards: 4}
+          - {implementation: native, backend_name: Native, runner: linux-aarch64-a2-mojo-fed-2, cards: 2, offset: 0, shards: 3}
+          - {implementation: native, backend_name: Native, runner: linux-aarch64-a2-mojo-fed-1, cards: 1, offset: 2, shards: 3}
     container:
       # Public ARM64 image; retain its Torch/CANN/Triton stack.
       image: quay.io/ascend/triton:3.2.2-cann9.1.0-torch_npu2.7.1.post8-910b-ubuntu24.04-py3.11@sha256:b69d14f39d47ec8f66e635f16190788e3c2b2174d0994f63090afcdf885b06f1
