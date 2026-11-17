@@ -78,9 +78,16 @@ jobs:
       MOJO_CI_SHARD_OFFSET: ${{ matrix.offset }}
       MOJO_CI_SHARD_COUNT: ${{ matrix.shards }}
       MOJO_CI_RUNNER: ${{ matrix.runner }}
+      # Provider defaults can rewrite github.com URLs to an unrelated mirror.
+      GIT_CONFIG_NOSYSTEM: "1"
+      GIT_CONFIG_GLOBAL: /tmp/mojo-ci/gitconfig
       OMP_NUM_THREADS: "4"
       MKL_NUM_THREADS: "4"
     steps:
+      - name: Use isolated Git configuration
+        run: |
+          mkdir -p "$MOJO_CI_WORK_DIR"
+          touch "$GIT_CONFIG_GLOBAL"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
