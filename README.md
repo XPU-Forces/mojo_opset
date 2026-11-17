@@ -154,4 +154,4 @@ Keep PR history linear: rebase your branch onto `master` instead of merging
 
 The [910B CI workflow](.github/workflows/npu-910b.yml) checks commit/PR titles and
 accuracy test declarations, then runs accuracy and bitwise tests for `triton`,
-`torch_npu` and `native` on Ascend 910B.
+`torch_npu` and `native` on Ascend 910B3.
