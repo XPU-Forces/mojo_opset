@@ -1,7 +1,4 @@
 npu.a5:
-  gemm: native
-  mxfp8_dequant_gemm: native
-  mxfp4_gemm: native
   apply_penalties_temperature: triton
   causal_conv1d: triton
   causal_conv1d_update_state_infer: triton
@@ -32,6 +29,10 @@ npu.a5:
   paged_prefill_gqa_infer: triton
   paged_prefill_swa_infer: triton
   prefill_gqa_infer: torch_npu
+  # Same persist+extract kernel as A2 (no Cube). A5/950PR MBU gate PASS (~74–82%).
+  # See docs/vllm_ascend_qk_norm_rope.md.
+  qk_norm_rope: triton
+  qk_norm_rope_infer: triton
   # Retained selection: original NPU tests skipped this path; the wrapper raises NotImplementedError.
   quant_batch_gemm_reduce_sum: torch_npu
   quant_gemm: triton
@@ -56,7 +57,6 @@ npu.a5:
   swa_infer: triton
   swiglu: triton
   top_k_sampling: triton
-  topk_infer: native
   top_p_filter: triton
   top_p_sampling: triton
   vision_rope_2d_infer: triton
