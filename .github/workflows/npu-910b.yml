@@ -1,4 +1,4 @@
-name: Community NPU 910B
+name: Mojo Opset Community CI
 
 on:
   workflow_dispatch:
