@@ -1,0 +1,49 @@
+name: Ascend A2 smoke
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      cards:
+        description: "卡数档位"
+        required: true
+        default: "1"
+        type: choice
+        options: ["1", "2", "4", "8"]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: linux-aarch64-a2-mojo-fed-${{ inputs.cards || '1' }}
+    timeout-minutes: 30
+    steps:
+      - name: Runner info
+        run: |
+          set -x
+          uname -a
+          echo "RUNNER_NAME=$RUNNER_NAME"
+          echo "RUNNER_LABELS=$RUNNER_LABELS"
+          echo "pwd=$(pwd)"
+
+      - name: NPU visibility
+        run: |
+          npu-smi info || echo "npu-smi not found"
+          echo "ASCEND_VISIBLE_DEVICES=${ASCEND_VISIBLE_DEVICES:-<unset>}"
+          ls -1 /dev/davinci* 2>/dev/null || echo "no /dev/davinci*"
+
+      - name: Python / torch_npu check
+        run: |
+          python3 -V
+          python3 - <<'PY'
+          try:
+              import torch  # noqa: F401
+              import torch_npu  # noqa: F401
+              print("torch", torch.__version__)
+              print("npu_available", torch.npu.is_available())
+              print("npu_device_count", torch.npu.device_count())
+          except Exception as exc:
+              print("torch/torch_npu check skipped:", repr(exc))
+          PY
