@@ -65,5 +65,7 @@ supported shapes, dtypes and options.
 | `top_p_filter` | triton | triton |
 | `top_p_sampling` | triton | triton |
 | `varlen_fa_infer` | native | — |
+| `vision_pos_embed_interp` | triton | triton |
+| `vision_pos_embed_interp_batch` | triton | triton |
 | `vision_rope_2d_infer` | triton, torch_npu | triton, torch_npu |
 | `vision_rope_cos_sin_2d` | triton | triton |

@@ -65,6 +65,9 @@ from .silu import silu
 from .store_lowrank import store_lowrank
 from .swiglu import swiglu
 from .topk import topk_infer
+from .vision_pos_embed_interp import triton_pos_embed_interpolate
+from .vision_pos_embed_interp import vision_pos_embed_interp
+from .vision_pos_embed_interp import vision_pos_embed_interp_batch
 
 __all__ = [
     "gemm",
@@ -129,6 +132,9 @@ __all__ = [
     "top_p_filter",
     "top_p_sampling",
     "varlen_fa_infer",
+    "triton_pos_embed_interpolate",
+    "vision_pos_embed_interp",
+    "vision_pos_embed_interp_batch",
     "vision_rope_2d_infer",
     "vision_rope_cos_sin_2d",
 ]

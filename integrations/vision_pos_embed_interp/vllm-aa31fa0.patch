@@ -1,0 +1,21 @@
+--- a/vllm/model_executor/models/qwen3_vl.py
++++ b/vllm/model_executor/models/qwen3_vl.py
+@@ -744,6 +744,18 @@
+     def fast_pos_embed_interpolate(
+         self, grid_thw: Sequence[Sequence[int]]
+     ) -> torch.Tensor:
++        if self.pos_embed.weight.device.type == "npu":
++            from mojo_opset.integrations.vllm_vision_pos_embed_interp import interpolate_vllm_grid
++
++            return interpolate_vllm_grid(
++                self.pos_embed.weight,
++                grid_thw,
++                self.num_grid_per_side,
++                self.spatial_merge_size,
++                self.dtype,
++                has_triton=HAS_TRITON,
++                native=pos_embed_interpolate_native,
++            )
+         interpolate_fn = (
+             triton_pos_embed_interpolate if HAS_TRITON else pos_embed_interpolate_native
+         )

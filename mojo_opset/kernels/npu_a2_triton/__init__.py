@@ -3,6 +3,8 @@
 from mojo_opset.utils._exports import extend_bindings as _extend_bindings
 
 OPS = {
+    "vision_pos_embed_interp": "vision_pos_embed_interp",
+    "vision_pos_embed_interp_batch": "vision_pos_embed_interp",
     "swa_infer": "swa",
     "moe_dynamic_quant": "quant",
     "flex_attention": "flex_attention",
