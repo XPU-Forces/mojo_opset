@@ -12,6 +12,7 @@ npu.a2:
   flex_attention: triton
   flex_attention_v2: triton
   gelu: triton
+  get_compressed_slot_mapping: triton
   group_gemm: triton
   group_rms_norm_infer: triton
   join_prob_reject_sampling: triton
