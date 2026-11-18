@@ -4,21 +4,23 @@ import torch
 from mojo_opset import modules
 from tests._checks import assert_close
 
-# (B, H, T, D, activation, dtype)
+# (B, H, T, D, activation, dtype); all cases are kept above the 20us perf floor.
 RMS_CASES = [
-    (1, 1, 1, 64, "silu", torch.float32),
-    (2, 2, 512, 128, "silu", torch.bfloat16),
-    (2, 2, 1024, 600, "sigmoid", torch.float16),
-    (2, 2, 2048, 1200, "sigmoid", torch.bfloat16),
-    (2, 8, 1024, 512, "sigmoid", torch.bfloat16),
-    (4, 4, 2048, 1024, "sigmoid", torch.float32),
+    (2, 32, 2048, 128, "silu", torch.float16),
+    (2, 32, 1024, 256, "sigmoid", torch.bfloat16),
+    (2, 16, 1024, 512, "sigmoid", torch.float16),
+    (1, 16, 1024, 1024, "silu", torch.float16),
+    (2, 8, 1024, 1024, "sigmoid", torch.bfloat16),
+    (2, 2, 2048, 1024, "sigmoid", torch.float32),
+    (4, 8, 1024, 600, "sigmoid", torch.bfloat16),
+    (2, 4, 2048, 1200, "silu", torch.bfloat16),
 ]
 
-# 2D (T, D) cases mirroring the K3 KDA o_norm shape family.
+# 2D (T, D) cases; all cases are kept above the 20us perf floor.
 # (T, D, activation, affine, dtype)
 TWO_D_CASES = [
-    (4096, 128, "silu", True, torch.float32),
-    (2048, 1024, "sigmoid", True, torch.float32),
+    (65536, 128, "silu", True, torch.float32),
+    (8192, 1024, "sigmoid", True, torch.float32),
 ]
 
 
