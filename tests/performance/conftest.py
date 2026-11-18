@@ -54,8 +54,8 @@ def pytest_configure(config):
     timers = config.getoption("--perf-timers").split(",")
     if not timers or len(set(timers)) != len(timers) or set(timers) - {"profiler", "event", "e2e"}:
         raise pytest.UsageError("--perf-timers must contain distinct profiler,event,e2e values")
-    if config.getoption("--perf-instances") < 2:
-        raise pytest.UsageError("--perf-instances must be >= 2")
+    if timers != ["profiler"] and config.getoption("--perf-instances") < 2:
+        raise pytest.UsageError("Event and E2E require --perf-instances >= 2")
     output = Path(config.getoption("--perf-output")).resolve()
     if output.suffix != ".json":
         raise pytest.UsageError("--perf-output must be a .json path")
@@ -78,6 +78,9 @@ def perf_environment(pytestconfig, request):
     adapter.runtime.set_device(index)
     properties = adapter.runtime.get_device_properties(index)
     l2 = adapter.l2_bytes(properties)
+    timers = sorted(pytestconfig.getoption("--perf-timers").split(","))
+    instances = pytestconfig.getoption("--perf-instances")
+    flush_bytes = 4 * int(l2) if l2 is not None and l2 > 0 else 768 * 1024**2
     report = pytestconfig._mojo_perf_report
     report["host"] = socket.gethostname()
     report["environment"] = {
@@ -95,15 +98,20 @@ def perf_environment(pytestconfig, request):
         "triton_distributions": _module_distributions("triton"),
     }
     report["measurement"] = {
-        "timers": sorted(pytestconfig.getoption("--perf-timers").split(",")),
+        "timers": timers,
         "profiler_timer": "per_call_kernel_v5",
         "event_timer": "current_stream_batch_v1",
         "e2e_timer": "synchronized_wall_v2",
         "memory": "allocator_peak_after_timing_v1",
         "batch": 1,
-        "instances": pytestconfig.getoption("--perf-instances"),
         "reduction": "span",
-        "cache": "rotate",
+        "cache": {
+            timer: {
+                "instances": 1 if timer == "profiler" else instances,
+                "flush_bytes": flush_bytes if timer == "profiler" else 0,
+            }
+            for timer in timers
+        },
         "warmup": pytestconfig.getoption("--perf-warmup"),
         "repeats": pytestconfig.getoption("--perf-repeats"),
         "harness_sha256": hashlib.sha256(
@@ -147,11 +155,18 @@ def benchmark(request, perf_environment, monkeypatch):
         # Composites have independently dispatched dependencies, not a provider
         # of their own. Preserve the existing scalar field for single-op cases.
         selected = selections[op] if ops is None else selections
-        count = report["measurement"]["instances"]
+        cache = report["measurement"]["cache"]
+        count = max(policy["instances"] for policy in cache.values())
         workload = [factory() for _ in range(count)]
         metrics = measure(
             workload,
             adapter,
+            make_flush_buffer=(
+                lambda: torch.empty(cache["profiler"]["flush_bytes"] // 4, dtype=torch.float32, device=device)
+            )
+            if "profiler" in cache
+            else None,
+            barrier=torch.distributed.barrier if parameters.get("num_ranks", 1) > 1 else None,
             warmup=request.config.getoption("--perf-warmup"),
             repeats=request.config.getoption("--perf-repeats"),
             timers=report["measurement"]["timers"],

@@ -31,7 +31,7 @@ the timed region; legacy hardware-specific MFU estimates are not reported.
 | `--perf-timers` | `profiler,e2e` | Comma-separated `profiler`, `e2e`, or `event` |
 | `--perf-warmup` | `10` | Warmup calls, at least 1 |
 | `--perf-repeats` | `20` | Samples per timer, at least 3 |
-| `--perf-instances` | `2` | Independent input/state instances to rotate, at least 2 |
+| `--perf-instances` | `2` | Independent input/state instances for Event and E2E, at least 2; Profiler always uses one |
 | `--perf-output` | `tests/performance/results/current.json` | JSON output, overwritten each run |
 
 `MOJO_ACCURACY_IMPLEMENTATION` is no longer used. Select implementations through
@@ -48,8 +48,12 @@ config (including `MOJO_OPS_CONFIG_PATH`) or `--mojo-implementation`.
   Allocations outside PyTorch's allocator may not be visible.
 
 Each input instance is initialized before measurement, and warmup is excluded.
-Rotate alternates independent inputs/state; increasing instances uses more memory
-and does not guarantee cold L2. It is not an explicit cache eviction policy.
+Profiler warms and measures the same workload instance. Before each sample it
+fills a separate 4×L2 buffer (768 MiB if the device reports no positive L2 size),
+synchronizes the device and, for multi-rank workloads, completes a host barrier.
+Event and E2E rotate through the configured instances without flushing L2.
+When timers run together, Profiler uses the first instance. Reports record
+the instance count and flush size per timer in `measurement.cache`.
 Stateful workloads must reset or otherwise bound state across repeated calls.
 
 ## Comparing revisions

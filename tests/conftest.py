@@ -51,7 +51,7 @@ def pytest_addoption(parser):
         "--perf-output", default="tests/performance/results/current.json", help="Machine-readable performance report."
     )
     perf.addoption("--perf-timers", default="profiler,e2e", help="Comma-separated profiler,event,e2e.")
-    perf.addoption("--perf-instances", type=int, default=2, help="Independent input instances for rotate policy.")
+    perf.addoption("--perf-instances", type=int, default=2, help="Independent input instances for Event and E2E rotation.")
     perf.addoption("--perf-warmup", type=int, default=10)
     perf.addoption("--perf-repeats", type=int, default=20)
     perf.addoption("--perf-device", type=int, default=0)
