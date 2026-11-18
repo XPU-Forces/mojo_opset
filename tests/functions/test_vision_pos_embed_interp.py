@@ -25,7 +25,11 @@ def check_close(actual, expected, dtype):
     torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
 
 
-@pytest.mark.api("functions.vision_pos_embed_interp")
+@pytest.mark.api(
+    "functions.vision_pos_embed_interp",
+    "functions.triton_pos_embed_interpolate",
+    ops=["vision_pos_embed_interp"],
+)
 @pytest.mark.accuracy
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("grid", GRIDS)
@@ -34,6 +38,9 @@ def test_upstream_matrix(accuracy_backend, dtype, grid):
     weight = make_weight(48, 1152, dtype, device)
     actual = F.vision_pos_embed_interp(weight, *grid, 48, 2, dtype, implementation=impl)
     check_close(actual, native(weight, *grid, 48, 2, dtype), dtype)
+    if device == "npu" and impl in (None, "triton"):
+        alias_output = F.triton_pos_embed_interpolate(weight, *grid, 48, 2, dtype)
+        assert torch.equal(alias_output, actual)
 
 
 @pytest.mark.api("functions.vision_pos_embed_interp")

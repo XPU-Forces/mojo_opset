@@ -87,5 +87,5 @@ def test_custom_op_fake_and_fullgraph(accuracy_backend):
 )
 def test_detect_supported_soc(monkeypatch, name, expected):
     monkeypatch.delenv("MOJO_ASCEND_ARCH", raising=False)
-    monkeypatch.setattr(torch, "npu", SimpleNamespace(get_device_name=lambda: name))
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(get_device_name=lambda: name), raising=False)
     assert str(target_utils._detect_npu_target()) == expected
