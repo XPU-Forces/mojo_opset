@@ -1,4 +1,4 @@
-"""Device-independent reference semantics for fused LayerNorm/RMSNorm + gate."""
+"""Device-independent reference semantics for fused RMSNorm + gate."""
 
 import torch
 
@@ -34,7 +34,6 @@ def _norm_gated_fwd(
     residual,
     out_dtype,
     residual_dtype,
-    is_rms_norm,
 ):
     compute = _compute_dtype(x)
     values = x.to(compute)
@@ -46,16 +45,9 @@ def _norm_gated_fwd(
     else:
         residual_out = None
 
-    if is_rms_norm:
-        mean = None
-        centered = values
-        variance = values.pow(2).mean(dim=-1, keepdim=True)
-    else:
-        mean = values.mean(dim=-1, keepdim=True)
-        centered = values - mean
-        variance = centered.pow(2).mean(dim=-1, keepdim=True)
+    variance = values.pow(2).mean(dim=-1, keepdim=True)
     rstd = torch.rsqrt(variance + eps)
-    normalized = centered * rstd
+    normalized = values * rstd
 
     y = normalized * weight.to(compute) if weight is not None else normalized
     if bias is not None:
@@ -64,7 +56,7 @@ def _norm_gated_fwd(
     y = y.to(out_dtype if out_dtype is not None else x.dtype)
     return (
         y,
-        None if mean is None else mean.squeeze(-1),
+        None,
         rstd.squeeze(-1),
         residual_out if residual_out is not None else x,
     )
@@ -78,11 +70,9 @@ def _norm_gated_bwd(
     bias,
     activation,
     eps,
-    mean,
     rstd,
     dresidual,
     has_residual,
-    is_rms_norm,
     x_dtype,
     recompute_output,
 ):
@@ -92,10 +82,7 @@ def _norm_gated_bwd(
     grad = dy.to(compute)
     gate_input = g.to(compute)
     rstd_f = rstd.to(compute).unsqueeze(-1)
-    if is_rms_norm:
-        normalized = values * rstd_f
-    else:
-        normalized = (values - mean.to(compute).unsqueeze(-1)) * rstd_f
+    normalized = values * rstd_f
 
     gate = _activation(gate_input, activation)
     dgate = _activation_grad(gate_input, activation)
@@ -115,13 +102,8 @@ def _norm_gated_bwd(
         weighted = grad_pre
     db = grad_pre.sum(dim=0).to(bias.dtype) if bias is not None else None
 
-    if is_rms_norm:
-        c1 = (normalized * weighted).mean(dim=-1, keepdim=True)
-        dx = (weighted - normalized * c1) * rstd_f
-    else:
-        c1 = (normalized * weighted).mean(dim=-1, keepdim=True)
-        c2 = weighted.mean(dim=-1, keepdim=True)
-        dx = (weighted - normalized * c1 - c2) * rstd_f
+    c1 = (normalized * weighted).mean(dim=-1, keepdim=True)
+    dx = (weighted - normalized * c1) * rstd_f
 
     if dresidual is not None:
         dx = dx + dresidual.to(compute)
@@ -133,45 +115,6 @@ def _norm_gated_bwd(
     if recompute_output:
         return dx, dg, dw, db, dresidual_in, (pre_gate * gate).to(dy.dtype)
     return dx, dg, dw, db, dresidual_in
-
-
-def layer_norm_gated_fwd(
-    x,
-    g,
-    weight,
-    bias,
-    activation="swish",
-    eps=1e-5,
-    residual=None,
-    out_dtype=None,
-    residual_dtype=None,
-    is_rms_norm=False,
-):
-    return _norm_gated_fwd(
-        x, g, weight, bias, activation, eps, residual, out_dtype, residual_dtype, is_rms_norm
-    )
-
-
-def layer_norm_gated_bwd(
-    dy,
-    x,
-    g,
-    weight,
-    bias,
-    activation="swish",
-    eps=1e-5,
-    mean=None,
-    rstd=None,
-    dresidual=None,
-    has_residual=False,
-    is_rms_norm=False,
-    x_dtype=None,
-    recompute_output=False,
-):
-    return _norm_gated_bwd(
-        dy, x, g, weight, bias, activation, eps, mean, rstd, dresidual,
-        has_residual, is_rms_norm, x_dtype, recompute_output,
-    )
 
 
 def rms_norm_gated_fwd(
@@ -186,7 +129,7 @@ def rms_norm_gated_fwd(
     residual_dtype=None,
 ):
     return _norm_gated_fwd(
-        x, g, weight, bias, activation, eps, residual, out_dtype, residual_dtype, True
+        x, g, weight, bias, activation, eps, residual, out_dtype, residual_dtype
     )
 
 
@@ -198,7 +141,6 @@ def rms_norm_gated_bwd(
     bias,
     activation="swish",
     eps=1e-5,
-    mean=None,
     rstd=None,
     dresidual=None,
     has_residual=False,
@@ -206,6 +148,6 @@ def rms_norm_gated_bwd(
     recompute_output=False,
 ):
     return _norm_gated_bwd(
-        dy, x, g, weight, bias, activation, eps, mean, rstd, dresidual,
-        has_residual, True, x_dtype, recompute_output,
+        dy, x, g, weight, bias, activation, eps, rstd, dresidual,
+        has_residual, x_dtype, recompute_output,
     )

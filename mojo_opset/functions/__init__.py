@@ -12,8 +12,7 @@ from .convolution import causal_conv1d
 from .convolution import causal_conv1d_update_state_infer
 from .flex_attention import flex_attention
 from .flex_attention_v2 import flex_attention_v2
-from .fused_norm_gate import layer_norm_gated
-from .fused_norm_gate import rms_norm_gated
+from .rms_norm_gated import rms_norm_gated
 from .fused_quantization import dequant_swiglu_quant
 from .fused_quantization import layer_norm_quant
 from .fused_quantization import moe_dynamic_quant
@@ -90,7 +89,6 @@ __all__ = [
     "group_rms_norm_infer",
     "indexer",
     "join_prob_reject_sampling",
-    "layer_norm_gated",
     "layer_norm_infer",
     "layer_norm_quant",
     "lightning_indexer",

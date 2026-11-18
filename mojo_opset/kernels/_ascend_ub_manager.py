@@ -11,7 +11,7 @@ Unified Buffer (UB) Manager for Ascend NPU.
 
 Ported from flash-linear-attention `fla/utils/ascend_ub_manager.py`
 (originally adapted from Liger-Kernel). Keep the UB calibration in sync
-with the A5 fused_norm_gate kernels.
+with the A5 rms_norm_gated kernels.
 
 
 This module provides UB capacity detection and tiling strategy computation for running Triton kernels on Ascend NPU.

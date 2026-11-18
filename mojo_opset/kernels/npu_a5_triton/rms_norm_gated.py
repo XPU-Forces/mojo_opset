@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Fused LayerNorm/RMSNorm + gate kernels adapted for triton-ascend on Huawei NPU.
+"""Fused RMSNorm + gate kernels adapted for triton-ascend on Huawei NPU.
 
 Grid-stride BT-tiled kernels keep weight/bias resident and vectorize a small row tile under UB.
 Ascend910 @ D=1024 (multi-buffer compile-validated): fwd BT=8 / bwd BT=4.
@@ -40,14 +40,11 @@ _MAX_BT = 128
 # PoT-padded BD>=2048 needs extra headroom under multi-buffering.
 # Ascend950PR calibration: the RMS bwd variant plans ~14.7x [BT,BD] live at
 # BD=2048 (fp32 temps/accumulators do not shrink with input dtype), so its
-# mult must reach 16 to drop BT to 1. LN stays at the 12x calibration, which
-# keeps BT=2 at BD=2048 (compile-validated on Ascend950PR).
+# mult must reach 16 to drop BT to 1.
 _LARGE_BD = 2048
 _LARGE_BD_FWD_MEM_MULT = 5.5
-_LARGE_BD_BWD_MEM_MULT = 12.0
-_LARGE_BD_BWD_RMS_MEM_MULT = 16.0
-_LARGE_BD_BWD_RECOMPUTE_MEM_MULT = 16.5
-_LARGE_BD_BWD_RMS_RECOMPUTE_MEM_MULT = 22.0
+_LARGE_BD_BWD_MEM_MULT = 16.0
+_LARGE_BD_BWD_RECOMPUTE_MEM_MULT = 22.0
 # Largest D that uses an exact (non-power-of-2) BD. Beyond this the UB budget caps
 # BD at 4096 and D > BD raises, so there is nothing to gain from going higher.
 _EXACT_BD_MAX = 4096
@@ -86,18 +83,18 @@ def _fwd_memory_multiplier(BD: int) -> float:
     return _tile_memory_multiplier(base=_FWD_MEM_MULT, large_bd_mult=_LARGE_BD_FWD_MEM_MULT, BD=BD)
 
 
-def _bwd_memory_multiplier(is_rms_norm: bool, BD: int, *, recompute_output: bool = False) -> float:
+def _bwd_memory_multiplier(BD: int, *, recompute_output: bool = False) -> float:
     """Return bwd tile multiplier; larger BD needs a higher mult (smaller BT).
 
-    ``is_rms_norm`` selects the large-BD calibration: the RMS variant plans
-    more live UB at BD>=2048 (mult=16 -> BT=1) than LN (mult=12 -> BT=2).
     ``recompute_output`` needs extra headroom because the kernel keeps pre-gate ``b_y`` live for the ``y`` store.
     """
     if recompute_output:
-        large_bd_mult = _LARGE_BD_BWD_RMS_RECOMPUTE_MEM_MULT if is_rms_norm else _LARGE_BD_BWD_RECOMPUTE_MEM_MULT
-        return _tile_memory_multiplier(base=_BWD_RECOMPUTE_MEM_MULT, large_bd_mult=large_bd_mult, BD=BD)
-    large_bd_mult = _LARGE_BD_BWD_RMS_MEM_MULT if is_rms_norm else _LARGE_BD_BWD_MEM_MULT
-    return _tile_memory_multiplier(base=_BWD_MEM_MULT, large_bd_mult=large_bd_mult, BD=BD)
+        return _tile_memory_multiplier(
+            base=_BWD_RECOMPUTE_MEM_MULT,
+            large_bd_mult=_LARGE_BD_BWD_RECOMPUTE_MEM_MULT,
+            BD=BD,
+        )
+    return _tile_memory_multiplier(base=_BWD_MEM_MULT, large_bd_mult=_LARGE_BD_BWD_MEM_MULT, BD=BD)
 
 
 # BT candidates for runtime autotuning. BD is fixed by D (single-row UB budget) and
@@ -157,11 +154,7 @@ def _prune_bwd_configs(configs, nargs, **kwargs):
     BD = kwargs['BD']
     D = kwargs['D']
     T = kwargs['T']
-    mult = _bwd_memory_multiplier(
-        is_rms_norm=bool(kwargs['IS_RMS_NORM']),
-        BD=BD,
-        recompute_output=bool(kwargs['RECOMPUTE_OUTPUT']),
-    )
+    mult = _bwd_memory_multiplier(BD=BD, recompute_output=bool(kwargs['RECOMPUTE_OUTPUT']))
     max_bt = _autotune_max_bt(BD=BD, memory_multiplier=mult, T=T)
     even = (BD == D)
     pruned = [c for c in configs
@@ -170,11 +163,10 @@ def _prune_bwd_configs(configs, nargs, **kwargs):
     return pruned if pruned else [configs[0]]
 
 
-def _get_layer_norm_gated_tiles(
+def _get_rms_norm_gated_tiles(
     D: int,
     is_forward: bool,
     *,
-    is_rms_norm: bool = False,
     recompute_output: bool = False,
 ) -> tuple[int, int]:
     """Return (BD, BT) for row-tiled kernels under UB constraints."""
@@ -206,13 +198,13 @@ def _get_layer_norm_gated_tiles(
     )
     if D > BD:
         raise RuntimeError(
-            f"LayerNormGated feature dim {D} exceeds UB-safe block size {BD}. "
+            f"RMSNormGated feature dim {D} exceeds UB-safe block size {BD}. "
             "Column-tiled kernels are not yet implemented for this size."
         )
     if is_forward:
         memory_multiplier = _fwd_memory_multiplier(BD=BD)
     else:
-        memory_multiplier = _bwd_memory_multiplier(is_rms_norm=is_rms_norm, BD=BD, recompute_output=recompute_output)
+        memory_multiplier = _bwd_memory_multiplier(BD=BD, recompute_output=recompute_output)
     # large synthetic row dim so BT is limited by UB, not by a host-side T guess.
     BT = compute_row_tile_block_size(
         row_dim=1 << 20,
@@ -233,14 +225,12 @@ def _launch_config(
     device_index: int,
     *,
     is_forward: bool,
-    is_rms_norm: bool = False,
     recompute_output: bool = False,
 ) -> tuple[int, int, int]:
     """Return (BD, BT, NS) for a grid-stride launch over T rows."""
-    BD, BT = _get_layer_norm_gated_tiles(
+    BD, BT = _get_rms_norm_gated_tiles(
         D=D,
         is_forward=is_forward,
-        is_rms_norm=is_rms_norm,
         recompute_output=recompute_output,
     )
     # BT here is only the host UB-model bound; the kernels autotune the launched BT,
@@ -255,11 +245,11 @@ def _launch_config(
 # here would only re-benchmark the same deterministic answer under a new key.
 @triton.autotune(
     configs=_AUTOTUNE_FWD_CONFIGS,
-    key=['D', 'IS_RMS_NORM', 'T'],
+    key=['D', 'T'],
     prune_configs_by={'early_config_prune': _prune_fwd_configs},
 )
 @triton.jit(do_not_specialize=['T'])
-def layer_norm_gated_fwd_kernel(
+def rms_norm_gated_fwd_kernel(
     x,
     g,
     y,
@@ -267,7 +257,6 @@ def layer_norm_gated_fwd_kernel(
     b,
     residual,
     residual_out,
-    mean,
     rstd,
     eps,
     T,
@@ -276,7 +265,6 @@ def layer_norm_gated_fwd_kernel(
     BD: tl.constexpr,
     BT: tl.constexpr,
     ACTIVATION: tl.constexpr,
-    IS_RMS_NORM: tl.constexpr,
     STORE_RESIDUAL_OUT: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
@@ -317,24 +305,15 @@ def layer_norm_gated_fwd_kernel(
             else:
                 tl.store(residual_out + row_off, b_x.to(residual_out.dtype.element_ty), mask=mask)
 
-        if not IS_RMS_NORM:
-            b_mean = tl.sum(b_x, axis=1) / D
-            if EVEN_SHAPE:
-                tl.store(mean + rows, b_mean)
-            else:
-                tl.store(mean + rows, b_mean, mask=row_mask)
-            b_xbar = b_x - b_mean[:, None] if EVEN_SHAPE else tl.where(mask, b_x - b_mean[:, None], 0.0)
-            b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
-        else:
-            b_xbar = b_x if EVEN_SHAPE else tl.where(mask, b_x, 0.0)
-            b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
+        b_xbar = b_x if EVEN_SHAPE else tl.where(mask, b_x, 0.0)
+        b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
         b_rstd = 1 / tl.sqrt(b_var + eps)
         if EVEN_SHAPE:
             tl.store(rstd + rows, b_rstd)
         else:
             tl.store(rstd + rows, b_rstd, mask=row_mask)
 
-        b_x_hat = (b_x - b_mean[:, None]) * b_rstd[:, None] if not IS_RMS_NORM else b_x * b_rstd[:, None]
+        b_x_hat = b_x * b_rstd[:, None]
         b_y = b_x_hat * b_w[None, :] if HAS_WEIGHT else b_x_hat
         if HAS_BIAS:
             b_y = b_y + b_b[None, :]
@@ -355,16 +334,16 @@ def layer_norm_gated_fwd_kernel(
             tl.store(y + row_off, b_y.to(y.dtype.element_ty), mask=mask)
 
 
-# Key = exactly the prune inputs: D -> BD, IS_RMS_NORM/RECOMPUTE_OUTPUT -> the
-# large-BD memory multiplier, T -> max_bt/EVEN_SHAPE. HAS_WEIGHT, STORE_DRESIDUAL
-# change the compiled binary but never the chosen BT.
+# Key = exactly the prune inputs: D -> BD, RECOMPUTE_OUTPUT -> the large-BD memory
+# multiplier, T -> max_bt/EVEN_SHAPE. HAS_WEIGHT, STORE_DRESIDUAL change the compiled
+# binary but never the chosen BT.
 @triton.autotune(
     configs=_AUTOTUNE_BWD_CONFIGS,
-    key=['D', 'IS_RMS_NORM', 'RECOMPUTE_OUTPUT', 'T'],
+    key=['D', 'RECOMPUTE_OUTPUT', 'T'],
     prune_configs_by={'early_config_prune': _prune_bwd_configs},
 )
 @triton.jit(do_not_specialize=['T'])
-def layer_norm_gated_bwd_kernel(
+def rms_norm_gated_bwd_kernel(
     x,
     g,
     w,
@@ -377,7 +356,6 @@ def layer_norm_gated_bwd_kernel(
     db,
     dresidual,
     dresidual_in,
-    mean,
     rstd,
     T,
     NS,
@@ -385,7 +363,6 @@ def layer_norm_gated_bwd_kernel(
     BD: tl.constexpr,
     BT: tl.constexpr,
     ACTIVATION: tl.constexpr,
-    IS_RMS_NORM: tl.constexpr,
     STORE_DRESIDUAL: tl.constexpr,
     HAS_DRESIDUAL: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
@@ -419,16 +396,11 @@ def layer_norm_gated_bwd_kernel(
             mask = (rows < T)[:, None] & col_mask[None, :]
             b_x = tl.load(x + row_off, mask=mask, other=0.0).to(tl.float32)
 
-        if not IS_RMS_NORM:
-            if EVEN_SHAPE:
-                b_mean = tl.load(mean + rows)
-            else:
-                b_mean = tl.load(mean + rows, mask=rows < T, other=0.0)
         if EVEN_SHAPE:
             b_rstd = tl.load(rstd + rows)
         else:
             b_rstd = tl.load(rstd + rows, mask=rows < T, other=0.0)
-        b_xhat = (b_x - b_mean[:, None]) * b_rstd[:, None] if not IS_RMS_NORM else b_x * b_rstd[:, None]
+        b_xhat = b_x * b_rstd[:, None]
         if not EVEN_SHAPE:
             mask = (rows < T)[:, None] & col_mask[None, :]
             b_xhat = tl.where(mask, b_xhat, 0.0)
@@ -482,13 +454,8 @@ def layer_norm_gated_bwd_kernel(
             else:
                 b_db += tl.sum(tl.where(mask, b_dy, 0.0), axis=0)
 
-        if not IS_RMS_NORM:
-            b_c1 = tl.sum(b_xhat * b_wdy, axis=1) / D
-            b_c2 = tl.sum(b_wdy, axis=1) / D
-            b_dx = (b_wdy - (b_xhat * b_c1[:, None] + b_c2[:, None])) * b_rstd[:, None]
-        else:
-            b_c1 = tl.sum(b_xhat * b_wdy, axis=1) / D
-            b_dx = (b_wdy - b_xhat * b_c1[:, None]) * b_rstd[:, None]
+        b_c1 = tl.sum(b_xhat * b_wdy, axis=1) / D
+        b_dx = (b_wdy - b_xhat * b_c1[:, None]) * b_rstd[:, None]
 
         if HAS_DRESIDUAL:
             if EVEN_SHAPE:
@@ -511,7 +478,7 @@ def layer_norm_gated_bwd_kernel(
         tl.store(db + i_s * D + cols, b_db, mask=col_mask)
 
 
-def layer_norm_gated_fwd(
+def rms_norm_gated_fwd(
     x: torch.Tensor,
     g: torch.Tensor,
     weight: torch.Tensor,
@@ -521,7 +488,6 @@ def layer_norm_gated_fwd(
     residual: torch.Tensor | None = None,
     out_dtype: torch.dtype | None = None,
     residual_dtype: torch.dtype | None = None,
-    is_rms_norm: bool = False,
 ):
     if residual is not None:
         residual_dtype = residual.dtype
@@ -538,12 +504,11 @@ def layer_norm_gated_fwd(
         residual_out = torch.empty(T, D, device=x.device, dtype=residual_dtype)
     else:
         residual_out = None
-    mean = torch.empty((T,), dtype=torch.float, device=x.device) if not is_rms_norm else None
     rstd = torch.empty((T,), dtype=torch.float, device=x.device)
 
-    BD, _, NS = _launch_config(T=T, D=D, device_index=x.device.index, is_forward=True, is_rms_norm=is_rms_norm)
+    BD, _, NS = _launch_config(T=T, D=D, device_index=x.device.index, is_forward=True)
     act_id = _activation_id(activation=activation)
-    layer_norm_gated_fwd_kernel[(NS,)](
+    rms_norm_gated_fwd_kernel[(NS,)](
         x=x,
         g=g,
         y=y,
@@ -551,7 +516,6 @@ def layer_norm_gated_fwd(
         b=bias,
         residual=residual,
         residual_out=residual_out,
-        mean=mean,
         rstd=rstd,
         eps=eps,
         T=T,
@@ -559,16 +523,15 @@ def layer_norm_gated_fwd(
         D=D,
         BD=BD,
         ACTIVATION=act_id,
-        IS_RMS_NORM=is_rms_norm,
         STORE_RESIDUAL_OUT=residual_out is not None,
         HAS_RESIDUAL=residual is not None,
         HAS_WEIGHT=weight is not None,
         HAS_BIAS=bias is not None,
     )
-    return y, mean, rstd, residual_out if residual_out is not None else x
+    return y, None, rstd, residual_out if residual_out is not None else x
 
 
-def layer_norm_gated_bwd(
+def rms_norm_gated_bwd(
     dy: torch.Tensor,
     x: torch.Tensor,
     g: torch.Tensor,
@@ -576,11 +539,9 @@ def layer_norm_gated_bwd(
     bias: torch.Tensor,
     activation: str = "swish",
     eps: float = 1e-5,
-    mean: torch.Tensor | None = None,
     rstd: torch.Tensor | None = None,
     dresidual: torch.Tensor | None = None,
     has_residual: bool = False,
-    is_rms_norm: bool = False,
     x_dtype: torch.dtype | None = None,
     recompute_output: bool = False,
 ):
@@ -603,7 +564,6 @@ def layer_norm_gated_bwd(
         D=D,
         device_index=x.device.index,
         is_forward=False,
-        is_rms_norm=is_rms_norm,
         recompute_output=recompute_output,
     )
 
@@ -611,7 +571,7 @@ def layer_norm_gated_bwd(
     db = torch.empty((NS, D), dtype=torch.float, device=bias.device) if bias is not None else None
 
     act_id = _activation_id(activation=activation)
-    layer_norm_gated_bwd_kernel[(NS,)](
+    rms_norm_gated_bwd_kernel[(NS,)](
         x=x,
         g=g,
         w=weight,
@@ -624,14 +584,12 @@ def layer_norm_gated_bwd(
         db=db,
         dresidual=dresidual,
         dresidual_in=dresidual_in,
-        mean=mean,
         rstd=rstd,
         T=T,
         NS=NS,
         D=D,
         BD=BD,
         ACTIVATION=act_id,
-        IS_RMS_NORM=is_rms_norm,
         STORE_DRESIDUAL=dresidual_in is not None,
         HAS_DRESIDUAL=dresidual is not None,
         HAS_WEIGHT=weight is not None,
@@ -643,61 +601,3 @@ def layer_norm_gated_bwd(
     if has_residual and dx.dtype == x.dtype:
         dresidual_in = dx
     return (dx, dg, dw, db, dresidual_in) if not recompute_output else (dx, dg, dw, db, dresidual_in, y)
-
-
-def rms_norm_gated_fwd(
-    x: torch.Tensor,
-    g: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
-    activation: str = "swish",
-    eps: float = 1e-5,
-    residual: torch.Tensor | None = None,
-    out_dtype: torch.dtype | None = None,
-    residual_dtype: torch.dtype | None = None,
-):
-    return layer_norm_gated_fwd(
-        x=x,
-        g=g,
-        weight=weight,
-        bias=bias,
-        activation=activation,
-        eps=eps,
-        residual=residual,
-        out_dtype=out_dtype,
-        residual_dtype=residual_dtype,
-        is_rms_norm=True,
-    )
-
-
-def rms_norm_gated_bwd(
-    dy: torch.Tensor,
-    x: torch.Tensor,
-    g: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
-    activation: str = "swish",
-    eps: float = 1e-5,
-    mean: torch.Tensor | None = None,
-    rstd: torch.Tensor | None = None,
-    dresidual: torch.Tensor | None = None,
-    has_residual: bool = False,
-    x_dtype: torch.dtype | None = None,
-    recompute_output: bool = False,
-):
-    return layer_norm_gated_bwd(
-        dy=dy,
-        x=x,
-        g=g,
-        weight=weight,
-        bias=bias,
-        activation=activation,
-        eps=eps,
-        mean=mean,
-        rstd=rstd,
-        dresidual=dresidual,
-        has_residual=has_residual,
-        is_rms_norm=True,
-        x_dtype=x_dtype,
-        recompute_output=recompute_output,
-    )

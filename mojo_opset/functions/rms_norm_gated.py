@@ -7,7 +7,7 @@ from torch.autograd.function import once_differentiable
 from ._dispatch import load_impl
 
 
-class LayerNormGatedFunction(torch.autograd.Function):
+class RMSNormGatedFunction(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
@@ -20,10 +20,9 @@ class LayerNormGatedFunction(torch.autograd.Function):
         eps: float,
         prenorm: bool,
         residual_in_fp32: bool,
-        is_rms_norm: bool,
         implementation: Optional[str],
     ):
-        op_id = "rms_norm_gated" if is_rms_norm else "layer_norm_gated"
+        op_id = "rms_norm_gated"
         forward, backward = load_impl(op_id, implementation, require_backward=True)
 
         x_shape_og = x.shape
@@ -38,7 +37,7 @@ class LayerNormGatedFunction(torch.autograd.Function):
             residual = residual.reshape(-1, residual.shape[-1]).contiguous()
         residual_dtype = residual.dtype if residual is not None else (torch.float if residual_in_fp32 else None)
 
-        forward_kwargs = dict(
+        y, _, rstd, residual_out = forward(
             x=x_2d,
             g=g_2d,
             weight=weight,
@@ -48,16 +47,12 @@ class LayerNormGatedFunction(torch.autograd.Function):
             residual=residual,
             residual_dtype=residual_dtype,
         )
-        if not is_rms_norm:
-            forward_kwargs["is_rms_norm"] = False
-        y, mean, rstd, residual_out = forward(**forward_kwargs)
-        ctx.save_for_backward(residual_out, g_2d, weight, bias, mean, rstd)
+        ctx.save_for_backward(residual_out, g_2d, weight, bias, rstd)
         ctx.backward_kernel = backward
         ctx.x_shape_og = x_shape_og
         ctx.g_shape_og = g_shape_og
         ctx.activation = activation
         ctx.eps = float(eps)
-        ctx.is_rms_norm = is_rms_norm
         ctx.has_residual = residual is not None
         ctx.prenorm = prenorm
         ctx.x_dtype = x_2d.dtype
@@ -67,13 +62,13 @@ class LayerNormGatedFunction(torch.autograd.Function):
     @staticmethod
     @once_differentiable
     def backward(ctx, dy, *args):
-        x, g, weight, bias, mean, rstd = ctx.saved_tensors
+        x, g, weight, bias, rstd = ctx.saved_tensors
         dy = dy.reshape(-1, dy.shape[-1]).contiguous()
         if ctx.prenorm:
             dresidual = args[0].reshape(-1, args[0].shape[-1]).contiguous()
         else:
             dresidual = None
-        backward_kwargs = dict(
+        dx, dg, dw, db, dresidual_in = ctx.backward_kernel(
             dy=dy,
             x=x,
             g=g,
@@ -81,15 +76,11 @@ class LayerNormGatedFunction(torch.autograd.Function):
             bias=bias,
             activation=ctx.activation,
             eps=ctx.eps,
-            mean=mean,
             rstd=rstd,
             dresidual=dresidual,
             has_residual=ctx.has_residual,
             x_dtype=ctx.x_dtype,
-        )
-        if not ctx.is_rms_norm:
-            backward_kwargs["is_rms_norm"] = False
-        dx, dg, dw, db, dresidual_in = ctx.backward_kernel(**backward_kwargs)[:5]
+        )[:5]
         return (
             dx.reshape(ctx.x_shape_og),
             dg.reshape(ctx.g_shape_og),
@@ -101,28 +92,7 @@ class LayerNormGatedFunction(torch.autograd.Function):
             None,
             None,
             None,
-            None,
         )
-
-
-def layer_norm_gated(
-    x: torch.Tensor,
-    g: torch.Tensor,
-    weight: Optional[torch.Tensor] = None,
-    bias: Optional[torch.Tensor] = None,
-    activation: str = "swish",
-    residual: Optional[torch.Tensor] = None,
-    prenorm: bool = False,
-    residual_in_fp32: bool = False,
-    eps: float = 1e-6,
-    *,
-    implementation: Optional[str] = None,
-) -> torch.Tensor:
-    """LayerNorm over the last dimension followed by a silu/sigmoid gate."""
-
-    return LayerNormGatedFunction.apply(
-        x, g, weight, bias, activation, residual, eps, prenorm, residual_in_fp32, False, implementation
-    )
 
 
 def rms_norm_gated(
@@ -140,6 +110,6 @@ def rms_norm_gated(
 ) -> torch.Tensor:
     """RMSNorm over the last dimension followed by a silu/sigmoid gate."""
 
-    return LayerNormGatedFunction.apply(
-        x, g, weight, bias, activation, residual, eps, prenorm, residual_in_fp32, True, implementation
+    return RMSNormGatedFunction.apply(
+        x, g, weight, bias, activation, residual, eps, prenorm, residual_in_fp32, implementation
     )
