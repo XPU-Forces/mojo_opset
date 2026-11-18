@@ -155,3 +155,9 @@ Keep PR history linear: rebase your branch onto `master` instead of merging
 The [910B CI workflow](.github/workflows/npu-910b.yml) checks commit/PR titles and
 accuracy test declarations, then runs accuracy and bitwise tests for `triton`,
 `torch_npu` and `native` on Ascend 910B3.
+
+To use the same Triton Ascend version locally:
+
+```sh
+pip install triton-ascend==3.2.2.post1 -i https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly
+```
