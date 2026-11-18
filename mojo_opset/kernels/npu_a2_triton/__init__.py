@@ -37,7 +37,6 @@ OPS = {
     "dequant": "quant",
     "dynamic_quant": "quant",
     "causal_conv1d_update_state_infer": "convolution",
-    "layer_norm_gated": "fused_norm_gate",
     "layer_norm_infer": "layernorm",
     "rms_norm_infer": "rmsnorm",
     "group_rms_norm_infer": "group_rmsnorm",
@@ -50,7 +49,7 @@ OPS = {
     "gelu": "gelu",
     "swiglu": "swiglu",
     "rms_norm": "rmsnorm",
-    "rms_norm_gated": "fused_norm_gate",
+    "rms_norm_gated": "rms_norm_gated",
     "swa": "swa",
     "rope": "rope",
 }

@@ -4,19 +4,6 @@ import torch
 from mojo_opset import modules
 from tests._checks import assert_close
 
-# (B, H, T, D, affine, bias, activation, dtype)
-LN_CASES = [
-    (1, 1, 1, 64, False, False, "silu", torch.float32),
-    (2, 2, 50, 50, False, False, "sigmoid", torch.float32),
-    (2, 2, 512, 128, True, True, "silu", torch.bfloat16),
-    (2, 2, 1024, 600, True, False, "sigmoid", torch.float16),
-    (2, 2, 2048, 1200, True, False, "sigmoid", torch.bfloat16),
-    (4, 4, 256, 256, True, True, "silu", torch.float16),
-    (2, 8, 1024, 512, True, False, "sigmoid", torch.bfloat16),
-    (2, 4, 512, 768, True, True, "silu", torch.float32),
-    (4, 4, 2048, 1024, True, False, "sigmoid", torch.bfloat16),
-]
-
 # (B, H, T, D, activation, dtype)
 RMS_CASES = [
     (1, 1, 1, 64, "silu", torch.float32),
@@ -28,14 +15,10 @@ RMS_CASES = [
 ]
 
 # 2D (T, D) cases mirroring the K3 KDA o_norm shape family.
-# (T, D, norm_type, activation, affine, bias, dtype)
+# (T, D, activation, affine, dtype)
 TWO_D_CASES = [
-    (4096, 128, "layer", "silu", True, True, torch.float32),
-    (8192, 256, "layer", "sigmoid", True, False, torch.float32),
-    (4096, 512, "layer", "silu", True, True, torch.float32),
-    (2048, 1024, "layer", "sigmoid", True, False, torch.float32),
-    (4096, 128, "rms", "silu", True, False, torch.float32),
-    (2048, 1024, "rms", "sigmoid", True, False, torch.float32),
+    (4096, 128, "silu", True, torch.float32),
+    (2048, 1024, "sigmoid", True, torch.float32),
 ]
 
 
@@ -73,26 +56,6 @@ def _run_gated_case(accuracy_backend, cls, options, shape, dtype):
         assert_close(a, b, dtype=dtype, rtol=rtol, atol=atol, name=f"grad[{index}]")
 
 
-@pytest.mark.api("modules.FusedLayerNormGated", ops=["layer_norm_gated"])
-@pytest.mark.parametrize(
-    "B,H,T,D,affine,bias,activation,dtype",
-    LN_CASES,
-    ids=[
-        f"B{t[0]}_H{t[1]}_T{t[2]}_D{t[3]}_affine{t[4]}_bias{t[5]}_{t[6]}_{t[7]}"
-        for t in LN_CASES
-    ],
-)
-@pytest.mark.accuracy
-def test_fused_layer_norm_gated_accuracy(accuracy_backend, B, H, T, D, affine, bias, activation, dtype):
-    options = dict(
-        hidden_size=D,
-        elementwise_affine=affine,
-        bias=bias,
-        activation=activation,
-    )
-    _run_gated_case(accuracy_backend, modules.FusedLayerNormGated, options, (B, H, T, D), dtype)
-
-
 @pytest.mark.api("modules.FusedRMSNormGated", ops=["rms_norm_gated"])
 @pytest.mark.parametrize(
     "B,H,T,D,activation,dtype",
@@ -109,31 +72,17 @@ def test_fused_rms_norm_gated_accuracy(accuracy_backend, B, H, T, D, activation,
     _run_gated_case(accuracy_backend, modules.FusedRMSNormGated, options, (B, H, T, D), dtype)
 
 
-@pytest.mark.api("modules.FusedLayerNormGated", ops=["layer_norm_gated"])
 @pytest.mark.api("modules.FusedRMSNormGated", ops=["rms_norm_gated"])
 @pytest.mark.parametrize(
-    "T,D,norm_type,activation,affine,bias,dtype",
+    "T,D,activation,affine,dtype",
     TWO_D_CASES,
-    ids=[
-        f"T{t[0]}_D{t[1]}_{t[2]}_{t[3]}_affine{t[4]}_bias{t[5]}_{t[6]}"
-        for t in TWO_D_CASES
-    ],
+    ids=[f"T{t[0]}_D{t[1]}_{t[2]}_affine{t[3]}_{t[4]}" for t in TWO_D_CASES],
 )
 @pytest.mark.accuracy
-def test_fused_norm_gate_2d_accuracy(accuracy_backend, T, D, norm_type, activation, affine, bias, dtype):
-    if norm_type == "layer":
-        cls = modules.FusedLayerNormGated
-        options = dict(
-            hidden_size=D,
-            elementwise_affine=affine,
-            bias=bias,
-            activation=activation,
-        )
-    else:
-        cls = modules.FusedRMSNormGated
-        options = dict(
-            hidden_size=D,
-            elementwise_affine=affine,
-            activation=activation,
-        )
-    _run_gated_case(accuracy_backend, cls, options, (T, D), dtype)
+def test_fused_rms_norm_gated_2d_accuracy(accuracy_backend, T, D, activation, affine, dtype):
+    options = dict(
+        hidden_size=D,
+        elementwise_affine=affine,
+        activation=activation,
+    )
+    _run_gated_case(accuracy_backend, modules.FusedRMSNormGated, options, (T, D), dtype)
