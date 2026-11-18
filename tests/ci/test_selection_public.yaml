@@ -1468,6 +1468,49 @@ operators:
             - tests/performance/modules/test_indexer.py
           950/performance:
             - tests/performance/modules/test_indexer.py
+  mhc_post:
+    rules:
+      - paths:
+          - mojo_opset/functions/mhc_post.py
+          - mojo_opset/kernels/_npu_triton_utils.py
+          - mojo_opset/kernels/torch/mhc_post.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_mhc_post.py
+          910b/triton:
+            - tests/functions/test_mhc_post.py
+          950/performance:
+            - tests/performance/functions/test_mhc_post.py
+          950/triton:
+            - tests/functions/test_mhc_post.py
+      - paths:
+          - mojo_opset/kernels/npu_a2_triton/mhc_post.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_mhc_post.py
+          910b/triton:
+            - tests/functions/test_mhc_post.py
+      - paths:
+          - mojo_opset/kernels/npu_a5_triton/mhc_post.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_mhc_post.py
+          950/triton:
+            - tests/functions/test_mhc_post.py
+      - paths:
+          - tests/functions/test_mhc_post.py
+        jobs:
+          910b/triton:
+            - tests/functions/test_mhc_post.py
+          950/triton:
+            - tests/functions/test_mhc_post.py
+      - paths:
+          - tests/performance/functions/test_mhc_post.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_mhc_post.py
+          950/performance:
+            - tests/performance/functions/test_mhc_post.py
   moe_dynamic_quant:
     rules:
       - paths:
