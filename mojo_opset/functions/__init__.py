@@ -45,6 +45,9 @@ from .paged_attention import paged_prefill_swa_infer
 from .paged_attention import prefill_gqa_infer
 from .position_embedding import rope_infer
 from .position_embedding import vision_rope_2d_infer
+from .vision_pos_embed_interp import triton_pos_embed_interpolate
+from .vision_pos_embed_interp import vision_pos_embed_interp
+from .vision_pos_embed_interp import vision_pos_embed_interp_batch
 from .quantization import dequant
 from .quantization import dynamic_quant
 from .quantization import static_quant
@@ -65,9 +68,6 @@ from .silu import silu
 from .store_lowrank import store_lowrank
 from .swiglu import swiglu
 from .topk import topk_infer
-from .vision_pos_embed_interp import triton_pos_embed_interpolate
-from .vision_pos_embed_interp import vision_pos_embed_interp
-from .vision_pos_embed_interp import vision_pos_embed_interp_batch
 
 __all__ = [
     "gemm",
