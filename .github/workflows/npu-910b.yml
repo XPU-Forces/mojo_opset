@@ -117,11 +117,23 @@ jobs:
           source "$MOJO_CI_WORK_DIR/venv/bin/activate"
           python -m pip install --disable-pip-version-check --timeout 30 --retries 2 'pytest>=8.3.2,<9' einops pyyaml
           python -m pip install --no-build-isolation --no-deps -e .
-          if [[ "$IMPLEMENTATION" == triton ]]; then
-            # 3.2.2 miscompiles persistent INT8 GEMM with BLOCK_N=128 and multibuffer.
-            python -m pip install --no-deps --ignore-installed --disable-pip-version-check --timeout 30 --retries 2 \
-              'https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly/triton-ascend/triton_ascend-3.2.2.post1-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl#sha256=34597e6064ac5810904b73972929b7fb9681fe796c5bb7fdccf0b76109ada858'
-          fi
+
+      - name: Install Triton Ascend
+        if: matrix.implementation == 'triton'
+        timeout-minutes: 20
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          source "$MOJO_CI_WORK_DIR/venv/bin/activate"
+          # 3.2.2 miscompiles persistent INT8 GEMM with BLOCK_N=128 and multibuffer.
+          wheel=triton_ascend-3.2.2.post1-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl
+          curl --fail --location --silent --show-error --connect-timeout 20 --max-time 900 \
+            --speed-limit 16384 --speed-time 90 --retry 1 --retry-max-time 120 \
+            --write-out 'Triton wheel download: HTTP %{http_code}, %{size_download} bytes in %{time_total}s\n' \
+            --output "$MOJO_CI_WORK_DIR/$wheel" \
+            "https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly/triton-ascend/$wheel"
+          printf '%s  %s\n' 34597e6064ac5810904b73972929b7fb9681fe796c5bb7fdccf0b76109ada858 \
+            "$MOJO_CI_WORK_DIR/$wheel" | sha256sum --check
+          python -m pip install --no-deps --ignore-installed --disable-pip-version-check "$MOJO_CI_WORK_DIR/$wheel"
 
       - name: Check environment
         timeout-minutes: 5
