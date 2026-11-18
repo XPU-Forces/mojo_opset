@@ -120,7 +120,7 @@ jobs:
           if [[ "$IMPLEMENTATION" == triton ]]; then
             # 3.2.2 miscompiles persistent INT8 GEMM with BLOCK_N=128 and multibuffer.
             python -m pip install --no-deps --ignore-installed --disable-pip-version-check --timeout 30 --retries 2 \
-              'https://github.com/triton-lang/triton-ascend/releases/download/v3.2.2.post2/triton_ascend-3.2.2.post2-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl#sha256=79c140312ac93b263b70cd52381cc6d7a5845952dba6d5ba83883849bbd66647'
+              'https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly/triton-ascend/triton_ascend-3.2.2.post1-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl#sha256=34597e6064ac5810904b73972929b7fb9681fe796c5bb7fdccf0b76109ada858'
           fi
 
       - name: Check environment
@@ -149,7 +149,7 @@ jobs:
           assert torch_npu.__version__.startswith("2.7.")
           assert triton.__version__.startswith("3.2.")
           if os.environ["IMPLEMENTATION"] == "triton":
-              assert importlib.metadata.version("triton-ascend") == "3.2.2.post2"
+              assert importlib.metadata.version("triton-ascend") == "3.2.2.post1"
               assert Path(triton.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
           assert torch.npu.is_available() and torch.npu.device_count() == int(os.environ["MOJO_CI_CARDS"])
           name = torch.npu.get_device_name(0)
