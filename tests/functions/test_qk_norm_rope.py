@@ -124,7 +124,7 @@ def check_accuracy(backend, shape, rope_dtype, strided, head_dim=HEAD_DIM, rotar
     return actual
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.parametrize("rope_dtype", ROPE_DTYPES, ids=lambda d: str(d).split(".")[-1])
 @pytest.mark.parametrize("strided", [False, True], ids=["contig", "strided"])
 @pytest.mark.parametrize("shape", STANDARD_SHAPES, ids=[f"{t}x{h}" for t, h in STANDARD_SHAPES])
@@ -133,7 +133,7 @@ def test_qk_norm_rope_accuracy(accuracy_backend, shape, strided, rope_dtype):
     check_accuracy(accuracy_backend, shape, rope_dtype, strided)
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.parametrize("shape", LONG_SHAPES, ids=[f"{t}x{h}" for t, h in LONG_SHAPES])
 @pytest.mark.accuracy
 def test_qk_norm_rope_long_sequence(accuracy_backend, shape):
@@ -141,7 +141,7 @@ def test_qk_norm_rope_long_sequence(accuracy_backend, shape):
     check_accuracy(accuracy_backend, shape, torch.bfloat16, False)
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.parametrize("strided", [False, True], ids=["contig", "strided"])
 @pytest.mark.parametrize("shape", HEAD_TAIL_SHAPES, ids=[f"{t}x{h}" for t, h in HEAD_TAIL_SHAPES])
 @pytest.mark.accuracy
@@ -151,7 +151,7 @@ def test_qk_norm_rope_head_tail(accuracy_backend, shape, strided):
     assert torch.isfinite(actual[0]).all() and torch.isfinite(actual[1]).all()
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.bitwise
 def test_qk_norm_rope_strided_bitwise(accuracy_backend):
     """A packed-QKV slice must give bit-identical results to a contiguous copy."""
@@ -166,7 +166,7 @@ def test_qk_norm_rope_strided_bitwise(accuracy_backend):
     assert torch.equal(got[1], ref[1]), "strided k differs from contiguous k"
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.bitwise
 def test_qk_norm_rope_noncontiguous_side_inputs(accuracy_backend):
     """A strided weight or rope_table must be materialised, not read at unit stride.
@@ -193,7 +193,7 @@ def test_qk_norm_rope_noncontiguous_side_inputs(accuracy_backend):
     assert torch.equal(got[1], ref[1]), "k differs when the weight/table are strided"
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.bitwise
 def test_qk_norm_rope_token_independence_bitwise(accuracy_backend):
     """One row's output must not depend on the token position it occupies.
@@ -221,7 +221,7 @@ def test_qk_norm_rope_token_independence_bitwise(accuracy_backend):
     assert torch.equal(many[0], single[0].expand(tokens, -1, -1))
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.bitwise
 def test_qk_norm_rope_pass_dims_bitwise(accuracy_backend):
     """Dimensions >= rotary_dim must be the BF16-rounded norm value, untouched.
@@ -250,7 +250,7 @@ def test_qk_norm_rope_pass_dims_bitwise(accuracy_backend):
         assert torch.equal(out[..., :ROTARY_DIM], ones[..., :ROTARY_DIM]), f"{name}: rotation not identity"
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.parametrize("head_dim, rotary_dim", GEOMETRIES, ids=[f"{d}_{r}" for d, r in GEOMETRIES])
 @pytest.mark.reference
 def test_qk_norm_rope_geometry_identity_rotation(head_dim, rotary_dim):
@@ -272,7 +272,7 @@ def test_qk_norm_rope_geometry_identity_rotation(head_dim, rotary_dim):
         assert torch.equal(out, ones), f"{name} {head_dim}/{rotary_dim} is not the identity"
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.reference
 def test_qk_norm_rope_accepts_float32_table():
     """A float32 table with BF16 activations is legal, as it is upstream."""
@@ -283,7 +283,7 @@ def test_qk_norm_rope_accepts_float32_table():
     assert out[0].shape == q.shape and torch.isfinite(out[0]).all()
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.parametrize("implementation", ["torch", "triton"])
 def test_qk_norm_rope_rejects_bad_shapes(implementation):
     """Contract checks must reject mismatched inputs instead of producing garbage.
@@ -310,7 +310,7 @@ def test_qk_norm_rope_rejects_bad_shapes(implementation):
         )
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.parametrize("implementation", ["torch", "triton"])
 def test_qk_norm_rope_rejects_bad_dtypes_and_devices(implementation):
     """Unsupported dtypes, a foreign table dtype and a wrong device must not pass."""
@@ -339,7 +339,7 @@ def test_qk_norm_rope_rejects_bad_dtypes_and_devices(implementation):
                              implementation=implementation)
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 def test_qk_norm_rope_requires_no_grad():
     """Grad mode has to be rejected: the norm weights are normally ``nn.Parameter``s.
 
@@ -357,7 +357,7 @@ def test_qk_norm_rope_requires_no_grad():
     assert out[0].shape == q.shape and torch.isfinite(out[0]).all()
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.parametrize("head_dim, rotary_dim", GEOMETRIES, ids=[f"{d}_{r}" for d, r in GEOMETRIES])
 @pytest.mark.accuracy
 def test_qk_norm_rope_geometry_hardware(accuracy_backend, head_dim, rotary_dim):
@@ -372,7 +372,7 @@ def test_qk_norm_rope_geometry_hardware(accuracy_backend, head_dim, rotary_dim):
                    rotary_dim=rotary_dim)
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.parametrize("act_dtype", ACTIVATION_DTYPES, ids=lambda d: str(d).split(".")[-1])
 @pytest.mark.parametrize("table_fp32", [False, True], ids=["table-act", "table-fp32"])
 @pytest.mark.accuracy
@@ -387,7 +387,7 @@ def test_qk_norm_rope_activation_dtype(accuracy_backend, act_dtype, table_fp32):
     check_accuracy(accuracy_backend, (128, 8), rope_dtype, False, act_dtype=act_dtype)
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.accuracy
 def test_qk_norm_rope_fp32_rounds_to_bf16(accuracy_backend):
     """FP32 activations still round the normalised value to BF16 before the rotation.
@@ -409,7 +409,7 @@ def test_qk_norm_rope_fp32_rounds_to_bf16(accuracy_backend):
     assert torch.equal(got, expected), "fp32 input did not round to BF16 before the rotation"
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.parametrize("heads", HEAD_COUNTS)
 @pytest.mark.accuracy
 def test_qk_norm_rope_head_counts(accuracy_backend, heads):
@@ -422,7 +422,7 @@ def test_qk_norm_rope_head_counts(accuracy_backend, heads):
     assert torch.isfinite(actual[0]).all() and torch.isfinite(actual[1]).all()
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.accuracy
 def test_qk_norm_rope_gqa(accuracy_backend):
     """q and k may have different head counts; only the token count has to agree."""
@@ -438,7 +438,7 @@ def test_qk_norm_rope_gqa(accuracy_backend):
         assert_close(a, b, DTYPE, name=f"gqa {name}", **UPSTREAM_TOLERANCE)
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.parametrize("tokens, heads", [(0, 8), (4, 0)], ids=["no-tokens", "no-heads"])
 @pytest.mark.accuracy
 def test_qk_norm_rope_empty_inputs(accuracy_backend, tokens, heads):

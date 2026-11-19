@@ -101,7 +101,7 @@ def test_qk_norm_rope_module_requires_no_grad():
 
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("modules.QkNormRope", ops=["qk_norm_rope"])
 @pytest.mark.accuracy
 def test_qk_norm_rope_module_accuracy(accuracy_backend):
     """Backend accuracy coverage for the module wrapper, not just the function."""

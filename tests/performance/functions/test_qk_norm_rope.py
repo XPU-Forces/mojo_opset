@@ -22,7 +22,7 @@ def make_inputs(tokens, heads, device):
     return q, k, qw, kw, rope
 
 
-@pytest.mark.api("functions.qk_norm_rope_infer")
+@pytest.mark.api("functions.qk_norm_rope", "functions.qk_norm_rope_infer")
 @pytest.mark.parametrize("shape", SHAPES, ids=[f"{t}x{h}" for t, h in SHAPES])
 @pytest.mark.parametrize("phase", ["forward"])
 def test_qk_norm_rope(benchmark, perf_environment, shape, phase):
