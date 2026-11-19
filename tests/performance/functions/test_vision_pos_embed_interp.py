@@ -40,6 +40,14 @@ Run:
 Exit code 0 iff every line-checked row passes and the op_summary harvest
 succeeded (otherwise the provisional timings are reported and the verdict
 is marked unverifiable, exit 1).
+
+Local-smoke switches (degraded SoCs where builtin Fill/elementwise ops and
+the CANN parse child are unavailable -- C-level hard exits, not catchable):
+  VPE_BENCH_NATIVE_DEV=cpu          A-line vs CPU native reference
+  VPE_BENCH_BW_GBPS=<gbps>          external pure-write BW denominator
+  VPE_BENCH_NO_CLOCK_WARM=1         skip the fill-based DVFS ramp
+  VPE_BENCH_ALLOW_FALLBACK_TIMING=1 accept npu_event device-span timings
+                                     (harvest not required)
 """
 from __future__ import annotations
 
@@ -126,6 +134,10 @@ def clock_warm(ms=120):
     MHz within ~100 ms. Bandwidth-bound kernels and the fill calibration
     self-warm and are unaffected.
     """
+    if os.environ.get("VPE_BENCH_NO_CLOCK_WARM"):
+        # fill_ (builtin) hard-exits the process on degraded SoCs (C-level
+        # acl error, not catchable); set this to skip the ramp entirely.
+        return
     global _WARM_TENSOR
     try:
         if _WARM_TENSOR is None:
@@ -301,7 +313,10 @@ def bench_row(tag, dtype, grid_or_multi, hidden, line_pct, mode="single",
     grid_or_multi: (t, h, w) tuple for single-image, or list of tuples
     for the merged multi-image path.
     """
-    emb = torch.randn(G * G, hidden, device=DEV, dtype=dtype) * 0.25
+    # CPU-side scale: torch element-wise builtins (muls) HARD-EXIT the
+    # process on degraded SoCs (C-level acl error, not catchable); the
+    # copy to DEV is the only NPU builtin this suite relies on.
+    emb = (torch.randn(G * G, hidden, dtype=dtype) * 0.25).to(DEV)
     emb_nat = emb.cpu() if NATIVE_DEV == "cpu" else emb
     if mode == "merged":
         assert isinstance(grid_or_multi, list)
@@ -521,9 +536,12 @@ def harvest(out_dir):
               f" | profiler unavailable, host-caliber MBU {r['mbu_pct']} "
               f"(line {r['line_pct']}%)", flush=True)
 
+    allow_fallback = bool(os.environ.get(
+        "VPE_BENCH_ALLOW_FALLBACK_TIMING"))
     summary = {"bw_fill_gbps": round(bw_fill / 1e9, 1),
                "bw_fill_src": BW_SRC[0],
                "harvest_ok": harvest_ok,
+               "allow_fallback_timing": allow_fallback,
                "line_fail": [f"line-{r['config']}-{str(r['dtype']).split('.')[-1]}"
                              for r in line_fail],
                "line_fallback": [
@@ -540,7 +558,7 @@ def harvest(out_dir):
             w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             w.writeheader()
             w.writerows(rows)
-    ok = harvest_ok and not line_fail and not line_fb
+    ok = (harvest_ok or allow_fallback) and not line_fail and not line_fb
     print(f"DONE precision-style verdict: pass={len(line_pass)}/{len(rows)}; "
           f"line_fail={len(line_fail)}; fallback={len(line_fb)}; "
           f"harvest_ok={harvest_ok}", flush=True)
