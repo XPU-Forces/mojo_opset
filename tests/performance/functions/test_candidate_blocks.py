@@ -11,6 +11,12 @@ CASES = [
     ("decode-n1", 256, 131072, 8, 2048, 1),
     ("decode-n6", 1536, 131072, 8, 2048, 6),
     ("prefill", 8192, 131072, 8, 2048, 1),
+    # Small-batch decode: 8 rows of 16K blocks, i.e. the row count no longer
+    # supplies the parallelism and the TILE/split ladder has to.
+    ("decode-b8", 8, 131072, 8, 2048, 1),
+    # Narrow decode: 4K blocks lands exactly on the narrow-row tier boundary
+    # (nblocks <= 4096), which a 128K/256K column span never reaches.
+    ("decode-32k", 256, 32768, 8, 2048, 1),
 ]
 
 

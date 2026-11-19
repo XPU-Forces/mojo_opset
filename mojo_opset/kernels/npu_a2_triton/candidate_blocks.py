@@ -51,6 +51,7 @@ def _block_scores_kernel(
     SC2: tl.constexpr,
     HOIST: tl.constexpr,
     I32: tl.constexpr,
+    PAIR: tl.constexpr,
 ):
     # Writes each row's valid block count.
     row = tl.program_id(0).to(tl.int64)
@@ -205,7 +206,60 @@ def _block_scores_kernel(
                 # machinery compiles away and the load can go down the bulk
                 # path. Uniform per-tile scalar branch; partial tiles keep the
                 # masked path.
-                if (tile_id + 1) * TILE <= num_full:
+                if PAIR:
+                    # R17/A1 (paired contiguous run): with a bf16 logits tensor
+                    # and BLOCK_SIZE=8 the [ELEMS, TILE] tile's innermost axis is
+                    # only 8*2 = 16 B, half of the 32 B DMA burst A2 needs, and
+                    # MTE2 collapses: the same shape reads at ~21 GB/s instead of
+                    # the ~1.3 TB/s the 32 B fp32 layout reaches (probe, workdir
+                    # harness, one module, one shape 256x131072:
+                    #   bf16 16 B -> 2778.9us, bf16 32 B -> 89.8us,
+                    #   bf16 64 B -> 77.4us, fp32 32 B -> 67.6us,
+                    #   fp32 16 B -> 5484.8us).
+                    # Pair two adjacent blocks into one column so the inner run
+                    # is 2*BLOCK_SIZE elements (32 B on bf16/8), then split the
+                    # axis back for the per-block reduce. Selection output is
+                    # bit-identical (14 shape x dtype combos, out_equal=True).
+                    # Measured (10-iter mean, same inputs as the A/B above):
+                    #   256x32768 767.9 -> 120.7, 256x65536 1464.1 -> 223.5,
+                    #   256x131072 2778.9 -> 426.2, 6x32768 26.6 -> 7.8,
+                    #   6x131072 99.1 -> 21.7, 1536x131072 16702 -> 2512,
+                    #   8192x131072 88832 -> 13328.
+                    # fp32 must NOT take this branch: it is already at 32 B and
+                    # the paired form costs 2-4x (256x131072 64.4 -> 418.4,
+                    # prefill 3196 -> 13258), which is why the host gates it on
+                    # element_size * BLOCK_SIZE < 32.
+                    TP: tl.constexpr = TILE // 2
+                    RUN: tl.constexpr = 2 * triton.next_power_of_2(BLOCK_SIZE)
+                    pcols = (
+                        start
+                        + tile_id * (TILE * BLOCK_SIZE)
+                        + tl.arange(0, TP)[:, None] * RUN
+                        + tl.arange(0, RUN)[None, :]
+                    )
+                    paddr = logits + row * stride_row + pcols * stride_col
+                    if (tile_id + 1) * TILE <= num_full:
+                        pval = tl.load(paddr).to(tl.float32)
+                    else:
+                        pval = tl.load(
+                            paddr, pcols < col_end, other=-float("inf")
+                        ).to(tl.float32)
+                    prd = tl.reshape(
+                        pval, (TP, 2, triton.next_power_of_2(BLOCK_SIZE))
+                    )
+                    if not POW2_BS:
+                        prd = tl.where(
+                            tl.arange(0, triton.next_power_of_2(BLOCK_SIZE))[
+                                None, None, :
+                            ]
+                            < BLOCK_SIZE,
+                            prd,
+                            -float("inf"),
+                        )
+                    reduced = tl.reshape(
+                        tl.reduce(prd, 2, _max_with_nan), (TILE,)
+                    )
+                elif (tile_id + 1) * TILE <= num_full:
                     if POW2_BS:
                         values = tl.load(addr).to(tl.float32)
                     else:
@@ -214,6 +268,7 @@ def _block_scores_kernel(
                             elems_range[:, None] < BLOCK_SIZE,
                             other=-float("inf"),
                         ).to(tl.float32)
+                    reduced = tl.reduce(values, 0, _max_with_nan)
                 else:
                     if POW2_BS:
                         # R12/B11 (rejected): the block-granular equivalent of
@@ -236,7 +291,7 @@ def _block_scores_kernel(
                             (elems_range[:, None] < BLOCK_SIZE) & (cols < col_end),
                             other=-float("inf"),
                         ).to(tl.float32)
-                reduced = tl.reduce(values, 0, _max_with_nan)
+                    reduced = tl.reduce(values, 0, _max_with_nan)
             # R5/BS-new-1: pin is applied only by the tile that owns it.
             if has_pin & (tile_id == pin // TILE):
                 reduced = tl.where(blocks == pin, float("inf"), reduced)
@@ -843,14 +898,19 @@ def _select_candidate_blocks_impl(
         tile = 512 if fits else 128
         num_tiles = triton.cdiv(nblocks, tile)
         split = 1 if rows > 2048 else min(num_tiles, max(1, num_tiles // 4))
-    elif nblocks <= 4096:
+    elif nblocks <= 4096 and rows <= 16:
         # Narrow-row decode tier (e.g. packed 6x32768 -> 4096 blocks): with only
         # a handful of rows the decode ladder's `num_tiles // 4` leaves the cores
         # idle (6 rows x split 2 = 12 programs). Measured on that case (bf16,
-        # warm, same kernel): TILE=256/split=16 27.6us vs TILE=512/split=2
-        # 47.0us (1.70x). The 2048-column-per-program target is the one P12/P33
+        # warm, same kernel): TILE=256/split=16 27.2us vs TILE=512/split=2
+        # 47.0us (1.73x). The 2048-column-per-program target is the one P12/P33
         # swept; only the row count no longer supplies the parallelism here, so
         # `split` takes over.
+        # The `rows <= 16` gate is measured, not stylistic: the same rule on a
+        # 256x32768 row-major shape (4096 blocks) starves the read instead —
+        # TILE=256/split=8 34.2us vs TILE=512/split=2 26.4us (+29.5%), because
+        # 256 rows already provide 512 programs and the narrow tile drops the
+        # per-program read segment from 16 KiB to 8 KiB.
         fits = 256 * triton.next_power_of_2(block_size) <= 4096
         tile = 256 if fits else 128
         num_tiles = triton.cdiv(nblocks, tile)
@@ -883,6 +943,16 @@ def _select_candidate_blocks_impl(
     # R14/B14: only the strided case takes this constexpr, so the other cases'
     # compiled kernels keep their previous constexpr set bit for bit.
     sc2 = strided
+    # R17/A1: pair adjacent blocks only when the natural inner run is under the
+    # 32 B DMA burst — i.e. bf16/fp16 with BLOCK_SIZE=8 (16 B). fp32 at 8 is
+    # already 32 B and regresses 2-4x on the paired form (see the kernel note).
+    # The strided branch reads its own 2*BLOCK window instead.
+    pair = (
+        logits.element_size() * block_size < 32
+        and not strided
+        and triton.next_power_of_2(block_size) == block_size
+        and tile % 2 == 0
+    )
     _block_scores_kernel[(rows, split)](
         logits,
         row_ks,
@@ -910,6 +980,7 @@ def _select_candidate_blocks_impl(
         # The perf-harness prefill cases hand over i64 bounds; the cast at the
         # boundary keeps the scalar chain i32 (see the kernel's I32 note).
         I32=True,
+        PAIR=pair,
     )
     # Keep the existing top-k tie behavior.
     top = scores.topk(min(topk_blocks, nblocks), dim=-1)
