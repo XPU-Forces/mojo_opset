@@ -25,13 +25,19 @@ from mojo_opset.kernels._ascend_ub_manager import get_ub_manager
 # fwd grid-stride keeps w/b resident (needs higher mult than one-tile launch).
 # fwd calibrated on Ascend950PR (248 KiB UB, 0.85 margin): mult=4.5 → BT=8 @ D=1024,
 # large-BD mult=5.5 → BT=4 @ D>=1200 (3.0/4.0 over-plan BT that overflows UB and fail compiles).
-# bwd stores dg before the dx path. bwd BT=4 @ D=1024 (mult=8).
-# do not lower bwd mult below ~6 without re-validating (BT=8 bwd overflows).
+# bwd stores dg before the dx path. bwd BT=4 @ D=1024 (mult=10).
+# The bwd live set is ~10.75x [BT,BD] on the BiShengIR 3.6 pipeline, so BT=8 @
+# D=768 needs 2114304 bits vs 2031616 available when HAS_WEIGHT is set. The
+# autotune cache is keyed on (D, T, RECOMPUTE_OUTPUT, dtype) and is reused across
+# the HAS_WEIGHT/HAS_BIAS/ACTIVATION variants, so the prune must be conservative
+# for the worst variant: mult=10 caps BT at 7 for BD ~675..860, keeping BT=8 out
+# of the candidate set for every variant. Do not lower below ~10 without
+# re-validating on the BiShengIR 3.6 pipeline.
 # recompute-output (norm+linear bwd) keeps b_y live for tl.store(y);
 # bwd BT=2 @ D=1024 (mult=11). Do not lower without re-validating.
 _BD_MEM_MULT = 6.0
 _FWD_MEM_MULT = 4.5
-_BWD_MEM_MULT = 8.0
+_BWD_MEM_MULT = 10.0
 _BWD_RECOMPUTE_MEM_MULT = 11.0
 _UB_SAFETY_MARGIN = 0.85
 # legacy byte cap when UB capacity cannot be detected (65536 // fp32).
@@ -239,10 +245,13 @@ def _launch_config(
     return BD, BT, NS
 
 
-# The autotune key only lists what the prune decision actually depends on
-# (D -> BD, T -> max_bt/EVEN_SHAPE). Feature flags such as HAS_WEIGHT or
-# ACTIVATION change the compiled binary but not the chosen BT, so keeping them
-# here would only re-benchmark the same deterministic answer under a new key.
+# The autotune key only lists dimensions that change the *optimal* tile: D -> BD,
+# T -> max_bt/EVEN_SHAPE (dtype is appended by Triton). Feature flags such as
+# ACTIVATION / HAS_WEIGHT / HAS_BIAS change the compiled binary and slightly the
+# UB footprint, but not which BT is fastest; keying on them would multiply the
+# key count by 8 for no tuning benefit. Because a cached choice is reused across
+# those variants without re-benchmarking, feasibility is instead guaranteed by
+# making the prune model conservative for the worst variant (see _BWD_MEM_MULT).
 @triton.autotune(
     configs=_AUTOTUNE_FWD_CONFIGS,
     key=['D', 'T'],
@@ -335,8 +344,9 @@ def rms_norm_gated_fwd_kernel(
 
 
 # Key = exactly the prune inputs: D -> BD, RECOMPUTE_OUTPUT -> the large-BD memory
-# multiplier, T -> max_bt/EVEN_SHAPE. HAS_WEIGHT, STORE_DRESIDUAL change the compiled
-# binary but never the chosen BT.
+# multiplier, T -> max_bt/EVEN_SHAPE. HAS_WEIGHT / HAS_BIAS / ACTIVATION change the
+# compiled binary but not the chosen BT; the prune model covers their worst-case
+# UB demand instead (see _BWD_MEM_MULT).
 @triton.autotune(
     configs=_AUTOTUNE_BWD_CONFIGS,
     key=['D', 'RECOMPUTE_OUTPUT', 'T'],

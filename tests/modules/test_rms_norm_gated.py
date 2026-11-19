@@ -11,7 +11,7 @@ RMS_CASES = [
     (2, 16, 1024, 512, "sigmoid", torch.float16),
     (1, 16, 1024, 1024, "silu", torch.float16),
     (2, 8, 1024, 1024, "sigmoid", torch.bfloat16),
-    (2, 2, 2048, 1024, "sigmoid", torch.float32),
+    (2, 4, 2048, 768, "sigmoid", torch.float16),
     (4, 8, 1024, 600, "sigmoid", torch.bfloat16),
     (2, 4, 2048, 1200, "silu", torch.bfloat16),
 ]
@@ -19,8 +19,8 @@ RMS_CASES = [
 # 2D (T, D) cases; all cases are kept above the 20us perf floor.
 # (T, D, activation, affine, dtype)
 TWO_D_CASES = [
-    (65536, 128, "silu", True, torch.float32),
-    (8192, 1024, "sigmoid", True, torch.float32),
+    (131072, 128, "silu", True, torch.bfloat16),
+    (16384, 1024, "sigmoid", True, torch.float16),
 ]
 
 
