@@ -29,7 +29,7 @@
 # 作业目录（npu-runner 仓 jobs/done/1035-vpe-tb-vmbprom-r57b/）
 python3 wrapper.py          # 反作弊门（seal verify）+ 精度 + bench + 收割
 # 或单独跑精度套件（交付树布局）
-pytest tests/functions/test_vit_bilinear_pos_embed.py -v
+pytest tests/functions/test_vision_pos_embed_interp.py -v
 ```
 
 结果文件：`precision_summary.json`（81 项逐条 PASS/FAIL + 明细）、
@@ -87,19 +87,53 @@ python3 vpe_local_verify.py
   位精确（vs legacy pair 与产线 vmb，双 dtype）——r58 钩子默认休眠，
   生产分派行为与 r57b 零变化。
 
-### 3.2 独立性能套件冒烟（受限，记录在案）
+### 3.2 独立性能套件本机全量（降级口径，记录在案）
 
-独立性能套件（`tests/performance/functions/test_bench_vit_pos_embed.py`）
-在本机无法完成全量：fill_ 标定与 torch_npu.profiler 均依赖本机不可用的
-内建算子/PTA 通道（`AclOpKernelInit failed, opType: Fill`、
-`ERR00100 PTA call acl api failed`）。已验证部分：
-- 套件语法、导入、降级开关（`VPE_BENCH_NATIVE_DEV=cpu`、
-  `VPE_BENCH_BW_GBPS` 覆盖）工作正常；
-- 本机 triton 纯写带宽探针 1271.3 GB/s（512MB bf16，host 口径 5+30，
-  仅作冒烟分母，非官方口径）；
-- 数据路径（randn→NPU、Triton kernel、CPU native 参照）全部正常。
+独立性能套件（`tests/performance/functions/test_vision_pos_embed_interp.py`）
+在本机以 4 个本地冒烟开关（`VPE_BENCH_NATIVE_DEV=cpu` /
+`VPE_BENCH_BW_GBPS=1271.3` / `VPE_BENCH_NO_CLOCK_WARM=1` /
+`VPE_BENCH_ALLOW_FALLBACK_TIMING=1`，`MOJO_ASCEND_ARCH=a2`）完成全量
+16 行：
 
-**全量性能验证以 910B4 实机为准**（第二节数据 + 1036 回传）。
+- 16/16 行全部产出设备时长与 MBU（计时层 = npu_event 设备时长中位数；
+  本机 CANN parse 子进程不落 op_summary CSV，harvest_ok=False，口径
+  来源已在 bench_summary.json 记录）；
+- **带宽 bound 行判定有效且过线**：tb-big-video 99.9/72.3、
+  raw_prod_mb 100.0/72.1（≥60% PASS）；A 线（host 口径，CPU native
+  参照）双 dtype PASS；
+- 延迟 bound 行（mid/large/short-video/tail/multi）t_dev 聚集在
+  ~0.10–0.16ms —— npu_event 设备时长的每次会话地板（事件记录 + 空闲流
+  启动间隙；官方 run.py 注释已注明该口径含 idle-stream gap，故任务书
+  以 op_summary 为 primary metric）。地板吞没小形状后 MBU 失真
+  （如 mid-f32 12.2%）——**本机判定仅对带宽 bound 行有效**；
+- 数据路径关键结论：torch 内建逐元素算子（aclnnMuls/fill_）在本 SoC
+  C 级硬退出进程（不可捕获），套件已规避（embed CPU 侧缩放 +
+  clock_warm 总开关）。
+
+**官方口径性能判定以 910B4 实机为准**（第二节数据；large-bf16 缺口由
+1036 r58 探针批跟进）。
+
+### 3.3 r58 探针行本机同轮 A/B（diff6 / vmb-la / ns2）
+
+- 位精确门 **4/4 PASS**：diff6（f32/bf16）vs plain pair 严格位精确；
+  vmb-la2（f32/bf16）vs legacy pair 位精确（同 emb 对拍，与 1036 rawAB
+  行同款口径）；
+- 同轮性能 A/B（本机 npu_event 地板受限口径，地板 ~0.10ms，2–5% 差异
+  在噪声内）：
+
+| 行 | 产线 | 探针 | 相对 |
+|---|---|---|---|
+| x-diff6-tb-large f32 | 0.1202ms | 0.1226ms | +2.0%（无改进） |
+| x-diff6-tb-large bf16 | 0.1484ms | 0.1496ms | +0.8%（无改进） |
+| x-vmb-la2-tb-mid f32 | 0.1033ms | 0.1052ms | +1.8%（无改进） |
+| x-vmb-la2-tb-mid bf16 | 0.1061ms | 0.1038ms | -2.2%（噪声） |
+| x-vmb2ns2-tb-mid bf16 | 0.1061ms | 0.1050ms | 中性 |
+| x-ns2-tb-large f32 | 0.1202ms | 0.1244ms | +3.5%（噪声） |
+
+- 结论：diff6/la/ns2 在本 SoC 无可分辨改进信号（计时地板吞没小差异，
+  且本机为 910B1 级、非裁决平台）；正式裁决以 1036 op_summary 口径
+  （910B4）为准——作业已在 gitcode pending，机器恢复即自动拾取；预注册
+  止损（根因分析第五节）不变。
 
 ---
 

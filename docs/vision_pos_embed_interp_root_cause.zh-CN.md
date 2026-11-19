@@ -107,7 +107,7 @@ vs 参照腿逐位对拍）每轮全量重跑，零回归。
 | 函数接口 | `functions/vision_pos_embed_interp.py` | 公共 API（与上游 vllm 签名一致），平台分派 loader |
 | 封装模块 | `modules/vision_pos_embed/` | vllm-ascend 接入改造：摘除 `patch_qwen3vl.py` native 强制 patch，改按 `HAS_TRITON` + NPU 能力分派 |
 | 精度套件 | `tests/functions/`、`tests/modules/` | 上游用例 NPU 移植版（conftest 自动选平台） |
-| 性能套件 | `tests/performance/functions/test_bench_vit_pos_embed.py` | 任务书口径独立实现：bytes 公式 / op_summary 设备时长（退出后收割）/ fill_ 纯写标定 / 线检；A2 实机全量约 20–30 min |
+| 性能套件 | `tests/performance/functions/test_vision_pos_embed_interp.py` | 任务书口径独立实现：bytes 公式 / op_summary 设备时长（退出后收割）/ fill_ 纯写标定 / 线检；A2 实机全量约 20–30 min |
 | 分派登记 | `config/npu_a2.yaml`、`config/npu_a5.yaml` | OPS 分派条目 |
 
 ---
