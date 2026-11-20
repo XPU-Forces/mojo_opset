@@ -54,6 +54,7 @@ supported shapes, dtypes and options.
 | `rotate_activation` | torch | torch |
 | `sdpa_infer` | triton | triton |
 | `silu` | triton, torch_npu | triton, torch_npu |
+| `situ_and_mul` | triton | triton |
 | `static_quant` | triton | triton |
 | `store_lowrank` | triton | triton |
 | `store_paged_kv_cache` | triton | triton |
