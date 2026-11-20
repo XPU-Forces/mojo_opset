@@ -49,6 +49,7 @@ OPS = {
     "gelu": "gelu",
     "swiglu": "swiglu",
     "rms_norm": "rmsnorm",
+    "fused_qk_norm_rope": "qk_norm_rope",
     "swa": "swa",
     "rope": "rope",
 }
