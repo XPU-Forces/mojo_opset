@@ -16,7 +16,7 @@ from tests._compile import compile_fullgraph
 @pytest.mark.api("functions.vision_pos_embed_interp_batch")
 @pytest.mark.accuracy
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_capability_dispatch_and_native_parity(accuracy_backend, dtype):
+def test_capability_dispatch_and_native_parity(accuracy_backend, dtype, monkeypatch):
     _, _, device = accuracy_backend
     weight = torch.randn(48 * 48, 1152, device=device, dtype=dtype) * 0.25
     grids = [(1, 8, 16), (1, 32, 48), (3, 16, 16)]
@@ -26,8 +26,14 @@ def test_capability_dispatch_and_native_parity(accuracy_backend, dtype):
         called.append(1)
         return native(*args)
 
-    before = integration.interpolate_vllm_grid(weight, grids, 48, 2, dtype, has_triton=False, native=counted_native)
+    # Community CI uses an older stack than the vLLM integration requires.
+    monkeypatch.setattr(integration, "_software_supported", lambda: False)
+    assert not integration.can_use_npu_triton(weight, True)
+    before = integration.interpolate_vllm_grid(weight, grids, 48, 2, dtype, has_triton=True, native=counted_native)
     assert len(called) == len(grids)
+
+    monkeypatch.setattr(integration, "_software_supported", lambda: True)
+    assert not integration.can_use_npu_triton(weight, False)
     assert integration.can_use_npu_triton(weight, True)
     called.clear()
     after = integration.interpolate_vllm_grid(weight, grids, 48, 2, dtype, has_triton=True, native=counted_native)

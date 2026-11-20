@@ -292,17 +292,19 @@ def _batch_body(
     BD: tl.constexpr,
 ):
     pid = tl.program_id(0)
+    R: tl.constexpr = (8 // M) * M
+    # Triton 3.2 does not support subscripting constexpr tuples directly.
+    # Its list builtin unwraps them at compile time.
     for image in tl.static_range(len(GRIDS)):
-        count = TILE_STARTS[image + 1] - TILE_STARTS[image]
-        if (SCALES_W[image] == 1.0 and GRIDS[image][0] == 1
+        count = list(TILE_STARTS)[image + 1] - list(TILE_STARTS)[image]
+        if (list(SCALES_W)[image] == 1.0 and list(GRIDS)[image][0] == 1
                 and S0 == D and S1 == 1 and M <= 8 and D <= 1152 and D % 16 == 0
                 and embed_ptr.dtype.element_ty == tl.bfloat16
                 and output_ptr.dtype.element_ty == tl.bfloat16):
-            R: tl.constexpr = (8 // M) * M
-            for local in range(pid, GRIDS[image][1] * tl.cdiv(GRIDS[image][2], R), tl.num_programs(0)):
+            for local in range(pid, list(GRIDS)[image][1] * tl.cdiv(list(GRIDS)[image][2], R), tl.num_programs(0)):
                 _interpolate_width_span(
-                    embed_ptr, output_ptr, local, ROW_STARTS[image],
-                    GRIDS[image][1], GRIDS[image][2], SCALES_H[image], G, M, D, R,
+                    embed_ptr, output_ptr, local, list(ROW_STARTS)[image],
+                    list(GRIDS)[image][1], list(GRIDS)[image][2], list(SCALES_H)[image], G, M, D, R,
                 )
         else:
             for local in range(pid, count, tl.num_programs(0)):
@@ -311,12 +313,12 @@ def _batch_body(
                     output_ptr,
                     local // tl.cdiv(D, BD),
                     local % tl.cdiv(D, BD),
-                    ROW_STARTS[image],
-                    GRIDS[image][0],
-                    GRIDS[image][1],
-                    GRIDS[image][2],
-                    SCALES_H[image],
-                    SCALES_W[image],
+                    list(ROW_STARTS)[image],
+                    list(GRIDS)[image][0],
+                    list(GRIDS)[image][1],
+                    list(GRIDS)[image][2],
+                    list(SCALES_H)[image],
+                    list(SCALES_W)[image],
                     G,
                     M,
                     D,
