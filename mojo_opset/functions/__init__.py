@@ -53,6 +53,7 @@ from .rope import rope
 from .rope_cos_sin import rope_cos_sin
 from .rope_cos_sin import vision_rope_cos_sin_2d
 from .rotate_activation import rotate_activation
+from .shared_expert_gate import shared_expert_gate
 from .sampling import apply_penalties_temperature
 from .sampling import join_prob_reject_sampling
 from .sampling import reject_sampling

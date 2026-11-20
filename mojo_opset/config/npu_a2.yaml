@@ -44,6 +44,7 @@ npu.a2:
   rope_infer: triton
   rotate_activation: torch
   sdpa_infer: triton
+  shared_expert_gate: triton
   silu: triton
   static_quant: triton
   store_lowrank: triton
