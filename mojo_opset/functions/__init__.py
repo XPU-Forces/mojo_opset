@@ -52,6 +52,7 @@ from .rms_norm import rms_norm
 from .rope import rope
 from .rope_cos_sin import rope_cos_sin
 from .rope_cos_sin import vision_rope_cos_sin_2d
+from .rope_quant_insert import rope_quant_insert
 from .rotate_activation import rotate_activation
 from .sampling import apply_penalties_temperature
 from .sampling import join_prob_reject_sampling
@@ -115,6 +116,7 @@ __all__ = [
     "rope",
     "rope_cos_sin",
     "rope_infer",
+    "rope_quant_insert",
     "rotate_activation",
     "sdpa_infer",
     "silu",

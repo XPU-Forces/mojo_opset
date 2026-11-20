@@ -51,6 +51,7 @@ supported shapes, dtypes and options.
 | `rope` | triton, native | triton |
 | `rope_cos_sin` | triton | triton |
 | `rope_infer` | triton, torch_npu | triton, torch_npu |
+| `rope_quant_insert` | triton (plain bf16 only) | triton |
 | `rotate_activation` | torch | torch |
 | `sdpa_infer` | triton | triton |
 | `silu` | triton, torch_npu | triton, torch_npu |
