@@ -12,6 +12,8 @@ from .convolution import causal_conv1d
 from .convolution import causal_conv1d_update_state_infer
 from .flex_attention import flex_attention
 from .flex_attention_v2 import flex_attention_v2
+from .fused_q_kv_rmsnorm import fused_q_kv_rmsnorm
+from .fused_q_kv_rmsnorm import fused_q_kv_rmsnorm_quant
 from .fused_quantization import dequant_swiglu_quant
 from .fused_quantization import layer_norm_quant
 from .fused_quantization import moe_dynamic_quant
@@ -83,6 +85,8 @@ __all__ = [
     "flash_attention_infer",
     "flex_attention",
     "flex_attention_v2",
+    "fused_q_kv_rmsnorm",
+    "fused_q_kv_rmsnorm_quant",
     "gelu",
     "group_gemm",
     "group_rms_norm_infer",
