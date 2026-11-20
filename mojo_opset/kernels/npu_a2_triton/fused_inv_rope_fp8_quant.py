@@ -101,6 +101,15 @@ def _fused_inv_rope_fp8_quant_impl(
             "fused_inv_rope_fp8_quant: 910B (A2/DAV_2201) has no FP8 support "
             "(no DT_FLOAT8_* cast); call with quantize=False on this arch"
         )
+    if o.dtype == torch.float8_e4m3fn:
+        # noquant 路 out_buf dtype = o.dtype = fp8，store 前的 f32->fp8 cast
+        # 会让 bishengir-compile SIGABRT（2026-11-19 A2 泛化实测，386 例确定性）；
+        # 与 quantize=True 同源（无 FP8 硬件 cast），显式 fail-fast 代替编译器崩溃
+        raise NotImplementedError(
+            "fused_inv_rope_fp8_quant: 910B (A2/DAV_2201) has no FP8 support "
+            "(no DT_FLOAT8_* cast); fp8 o input needs an f32->fp8 store cast, "
+            "call with a bf16/fp16 o on this arch"
+        )
     num_tokens, _, head_dim = o.shape
     d = heads_per_group * head_dim
     chunks_per_head = head_dim // quant_group_size
