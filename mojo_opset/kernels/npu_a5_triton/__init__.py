@@ -46,6 +46,7 @@ OPS = {
     "flash_attention": "swa",
     "flash_attention_infer": "swa",
     "silu": "silu",
+    "shared_expert_gate": "shared_expert_gate",
     "gelu": "gelu",
     "swiglu": "swiglu",
     "rms_norm": "rmsnorm",

@@ -14,6 +14,7 @@ OPS = {
     "moe_dynamic_quant": "fused_quantization",
     "dequant_swiglu_quant": "fused_quantization",
     "rotate_activation": "rotate_activation",
+    "shared_expert_gate": "shared_expert_gate",
     "flex_attention": "flex_attention",
     "flex_attention_v2": "flex_attention_v2",
     "rope_cos_sin": "rope_cos_sin",
