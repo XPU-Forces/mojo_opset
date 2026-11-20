@@ -102,8 +102,14 @@ def operator_test(request, monkeypatch):
     # Apply the same FP32 math policy to candidate and reference, then restore it.
     # These flags do not change input dtypes or production/performance defaults.
     if device == "npu":
-        monkeypatch.setattr(torch.npu.conv, "allow_hf32", False)
-        monkeypatch.setattr(torch.npu.matmul, "allow_hf32", False)
+        # torch_npu >= 2.10 exposes allow_hf32 as a property on the config
+        # singletons; monkeypatch's teardown would delattr it. Save and restore.
+        for config_name in ("conv", "matmul"):
+            config = getattr(torch.npu, config_name)
+            if hasattr(config, "allow_hf32"):
+                previous = config.allow_hf32
+                config.allow_hf32 = False
+                request.addfinalizer(lambda config=config, previous=previous: setattr(config, "allow_hf32", previous))
     elif device == "cuda":
         monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
         monkeypatch.setattr(torch.backends.cudnn, "allow_tf32", False)
