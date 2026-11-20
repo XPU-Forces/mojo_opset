@@ -51,6 +51,7 @@ OPS = {
     "rms_norm": "rmsnorm",
     "swa": "swa",
     "rope": "rope",
+    "get_compressed_slot_mapping": "get_compressed_slot_mapping",
 }
 
 
