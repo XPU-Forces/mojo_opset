@@ -61,6 +61,7 @@ OPS = {
     "gelu": "gelu",
     "swiglu": "swiglu",
     "rms_norm": "rms_norm",
+    "l2_norm": "l2_norm",
     "swa": "attention",
     "swa_infer": "attention",
     "native_swa_infer": "attention",
