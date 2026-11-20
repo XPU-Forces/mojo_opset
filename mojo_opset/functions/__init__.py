@@ -19,10 +19,7 @@ from .fused_quantization import residual_add_layer_norm_quant
 from .fused_quantization import residual_add_rms_norm_quant
 from .fused_quantization import rms_norm_quant
 from .gelu import gelu
-from .gemm import gemm
 from .gemm import group_gemm
-from .gemm import mxfp4_gemm
-from .gemm import mxfp8_dequant_gemm
 from .gemm import quant_batch_gemm_reduce_sum
 from .gemm import quant_gemm
 from .indexer import indexer
@@ -45,6 +42,8 @@ from .paged_attention import paged_prefill_swa_infer
 from .paged_attention import prefill_gqa_infer
 from .position_embedding import rope_infer
 from .position_embedding import vision_rope_2d_infer
+from .qk_norm_rope import qk_norm_rope
+from .qk_norm_rope import qk_norm_rope_infer
 from .quantization import dequant
 from .quantization import dynamic_quant
 from .quantization import static_quant
@@ -64,13 +63,8 @@ from .sdpa import sdpa_infer
 from .silu import silu
 from .store_lowrank import store_lowrank
 from .swiglu import swiglu
-from .topk import topk_infer
 
 __all__ = [
-    "gemm",
-    "mxfp8_dequant_gemm",
-    "mxfp4_gemm",
-
     "apply_penalties_temperature",
     "causal_conv1d",
     "causal_conv1d_update_state_infer",
@@ -102,6 +96,8 @@ __all__ = [
     "paged_prefill_gqa_infer",
     "paged_prefill_swa_infer",
     "prefill_gqa_infer",
+    "qk_norm_rope",
+    "qk_norm_rope_infer",
     "quant_batch_gemm_reduce_sum",
     "quant_gemm",
     "reject_sampling",
@@ -125,7 +121,6 @@ __all__ = [
     "swa_infer",
     "swiglu",
     "top_k_sampling",
-    "topk_infer",
     "top_p_filter",
     "top_p_sampling",
     "varlen_fa_infer",
