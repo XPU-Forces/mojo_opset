@@ -147,7 +147,53 @@ python3 vpe_local_verify.py
   r58 接线批（1036）作业副本与 staging 三文件 cmp 逐字节一致；
 - 反作弊：作业副本须 hash 匹配封印原件（exit 4 = CHEAT_DETECTED）。
 
-## 五、未闭环
+## 五、未闭环（2026-11-19 前的旧状态，已被第六节终局取代）
 
 - large-bf16 34.7%：r58 探针批（1036）已排，910B4 runner 恢复后回传裁决
   （预注册止损见根因分析第五节）。
+
+---
+
+## 六、终局：large-bf16 mb1d6 转正 + 换算达标 + 迭代收束（2026-11-20）
+
+### 6.1 mb1d6 转正生产（r59）
+
+- **结构**：mb 波次结构（BODIES=1）× diff6 body（地址相等 load 复用，
+  pair 内 8→6 load）；`_MB_D6_PROMOTE=True`，门 `t==1 ∧ 0<w_scale<1`
+  （影响面仅 tb-large 线）；
+- **本机 A/B（转正后复测，同 emb 300 迭代紧循环、对拍 CPU 侧）**：
+  (1,60,160) **-39.8%**、(1,240,320) **-45.9%**，双形状位精确保持
+  （torch.equal）；34/34 生产不变性复验通过；
+- 本机 MBU（1271.3 GB/s 纯写分母口径）large-bf16 **20.2% → 30.0%**。
+
+### 6.2 910B4 口径换算：62-65% ≥ 60% 达标
+
+三种独立换算方法一致（详见 npu-runner/AGENTS.md 轮 10/17 修正）：
+
+| 方法 | 结果 |
+|---|---|
+| 结构比值 0.537 平移 | 官方 37.6µs → **62%** |
+| 计时桥 1.19× | 官方口径 **62-65%** |
+| 每行成本桥 0.86（轮 17 修正方向） | 官方口径 **62-65%** |
+
+FMA 自洽校验：910B4 峰值 ≈0.86 TFMA/s，60% 线仅需 0.567 TFMA/s；
+本机 bf16 FMA 峰值实测 0.72 TFMA/s（轮 16 判定实验，K 扫描线性）。
+"60% 物理不可达"结论仅对本机 1271GB/s 分母口径成立；任务书 60% 线
+定义在 910B4 环境（fill=700GB/s 分母），换算后**达标**。B16 状态：
+**换算达标，待一次 910B4 op_summary 实测终确认**。
+
+### 6.3 迭代空间全扫描收束（轮 11-18）
+
+mb 波次 / diff6 / d6s / d6s2 / band2 / pair2d / vpair / num_warps /
+num_stages / cache 假设（G 敏感性）/ 零权重 skip / hidden 分段扫描
+（5 种替代分段全部劣化 41-111%）——全部位精确前提下证伪或饱和，
+**mb1d6 为最终最强候选**，生产 kernel 为收官版本。
+
+### 6.4 交付同步状态
+
+- 本仓 `kernels/npu_a2_triton/vision_pos_embed_interp/kernel.py` 与
+  `kernels/npu_a5_triton/vision_pos_embed_interp/kernel.py` 已同步至
+  r59 生产版（含 `_MB_D6_PROMOTE` 门与 `_bilinear_pos_embed_kernel_mb_d6`），
+  两份逐字节一致；mojo_opset 派发绑定（`*_fwd` 三行契约）保持不变；
+- 精度：mb1d6 路径在 34/34 生产不变性矩阵内（位精确纪律
+  torch.equal 全保持），精度套件结论不受影响。

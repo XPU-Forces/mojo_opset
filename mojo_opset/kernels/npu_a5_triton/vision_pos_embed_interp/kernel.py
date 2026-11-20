@@ -202,6 +202,15 @@ _VMB_DISABLE = False
 #    loads/pair/segment in the diff branch ~= 60% of its rows.
 _FORCE_VMB_LA = None
 _FORCE_DIFF6 = None
+_FORCE_MB_D6 = None
+_FORCE_MB_D6S = None
+_FORCE_MB_D6S2 = None
+# r59 production promotion: mb_d6 (mb structure x diff6 load-reuse body)
+# for t==1 large shapes (0 < w_scale < 1). Local-machine evidence:
+# 9.0 vs 16.75 ns/row vs the then-default mb2 production (-46%) on
+# (1,60,80) bf16 (4-point slope fit + measurable-shape diff), bitwise
+# identical by construction (d6 address-equal reuse, zero divergence).
+_MB_D6_PROMOTE = True
 
 # Bench-only band-kernel disable (diagnostics). Truthy keeps the
 # production choice at pair/single even when the band grouping qualifies.
@@ -2545,6 +2554,335 @@ if HAS_TRITON:
                         SEG0, SEG1, SEG2, SEG3, SEG4, SEG5)
 
     @triton.jit
+    def _bilinear_pos_embed_kernel_mb_d6(
+        embed_ptr,
+        output_ptr,
+        H,
+        W,
+        h_scale,
+        w_scale,
+        TOTAL_ROWS,
+        CHUNKS: tl.constexpr,
+        BODIES: tl.constexpr,
+        NUM_GRID: tl.constexpr,
+        M_SIZE: tl.constexpr,
+        HIDDEN_DIM: tl.constexpr,
+        SEG0: tl.constexpr,
+        SEG1: tl.constexpr,
+        SEG2: tl.constexpr,
+        SEG3: tl.constexpr,
+        SEG4: tl.constexpr,
+        SEG5: tl.constexpr,
+    ):
+        """B16 iter: mb structure with the diff6 body (load reuse).
+
+        Structural clone of ``_bilinear_pos_embed_kernel_mb`` with the
+        body swapped to ``_bilinear_pair_body_d6`` -- mb3's program
+        amortization stacked with d6's address-equal load reuse on the
+        diff-branch rows. Bench-only: host gates _FORCE_MB_D6 (int
+        BODIES) AND the pair contract AND 0 < w_scale <= 1.0; bitwise
+        identical by construction (d6 body is address-equal reuse, zero
+        divergence class)."""
+        grid_size = tl.num_programs(0)
+        for c in tl.static_range(0, CHUNKS):
+            g = tl.program_id(0) + c * grid_size
+            for b in tl.static_range(0, BODIES):
+                row0 = 2 * (g * BODIES + b)
+                if row0 < TOTAL_ROWS:
+                    _bilinear_pair_body_d6(
+                        embed_ptr, output_ptr, row0, row0, H, W,
+                        h_scale, w_scale, NUM_GRID, M_SIZE, HIDDEN_DIM,
+                        SEG0, SEG1, SEG2, SEG3, SEG4, SEG5)
+
+    @triton.jit
+    def _seg_pair2_diff6s(embed_ptr, output_ptr,
+                          off_eA0, off_eA1, off_eA2, off_eA3, off_eA4, off_eA5,
+                          off_eC0, off_eC1, off_eC2,
+                          SHARED_H: tl.constexpr,
+                          out_off_A0, out_off_A1, out_off_B0, out_off_B1,
+                          wA00, wA01, wA10, wA11,
+                          wA20, wA21, wA22, wA23,
+                          wB00, wB01, wB10, wB11,
+                          wB20, wB21, wB22, wB23,
+                          START: tl.constexpr, WIDTH: tl.constexpr):
+        """B16 round 12: two VERTICALLY adjacent points (4 output rows)
+        with cross-point register reuse.
+
+        Rows (4g, 4g+1, 4g+2, 4g+3) are one m_size x m_size block: point
+        A = (hA, cols c, c+1), point B = (hA+1, cols c, c+1) -- same
+        columns, so dwB0 == dw0 and dwB1 == dw1 (only dh differs: dhB).
+        Both points in the diff branch (host gate 0 < w_scale < 1): each
+        point has 6 unique rows {hf, hc} x {wf0, wf0+1, wf0+2}. Host gate
+        0 < h_scale < 1 forces hfB in {hfA, hfA+1}:
+          SHARED_H=1 (hfB == hfA): B rows == A rows exactly, 0 new loads
+            (12 -> 6 loads per 4 rows);
+          SHARED_H=0 (hfB == hfA+1 == hcA): B hf rows == A hc rows, 3 new
+            loads (12 -> 9 per 4 rows).
+        Expected (1,60,80): 0.20*6 + 0.80*9 = 8.4 loads/4 rows vs 12 for
+        two independent d6 pairs (-30%). FMA order per output row matches
+        _seg_pair_diff6 (w00*e_a + w01*e_b + w10*e_c + w11*e_d,
+        left-associative) on address-equal values: bitwise-equal class.
+        """
+        if WIDTH > 0:
+            cols = START + tl.arange(0, WIDTH)
+            eA0 = tl.load(embed_ptr + off_eA0 + cols)
+            eA1 = tl.load(embed_ptr + off_eA1 + cols)
+            eA2 = tl.load(embed_ptr + off_eA2 + cols)
+            eA3 = tl.load(embed_ptr + off_eA3 + cols)
+            eA4 = tl.load(embed_ptr + off_eA4 + cols)
+            eA5 = tl.load(embed_ptr + off_eA5 + cols)
+            vA0 = wA00 * eA0 + wA01 * eA1 + wA10 * eA2 + wA11 * eA3
+            vA1 = wA20 * eA1 + wA21 * eA4 + wA22 * eA3 + wA23 * eA5
+            tl.store(output_ptr + out_off_A0 + cols, vA0)
+            tl.store(output_ptr + out_off_A1 + cols, vA1)
+            if SHARED_H:
+                vB0 = wB00 * eA0 + wB01 * eA1 + wB10 * eA2 + wB11 * eA3
+                tl.store(output_ptr + out_off_B0 + cols, vB0)
+                vB1 = wB20 * eA1 + wB21 * eA4 + wB22 * eA3 + wB23 * eA5
+                tl.store(output_ptr + out_off_B1 + cols, vB1)
+            else:
+                eC0 = tl.load(embed_ptr + off_eC0 + cols)
+                eC1 = tl.load(embed_ptr + off_eC1 + cols)
+                eC2 = tl.load(embed_ptr + off_eC2 + cols)
+                vB0 = wB00 * eA2 + wB01 * eA3 + wB10 * eC0 + wB11 * eC1
+                tl.store(output_ptr + out_off_B0 + cols, vB0)
+                vB1 = wB20 * eA3 + wB21 * eA5 + wB22 * eC1 + wB23 * eC2
+                tl.store(output_ptr + out_off_B1 + cols, vB1)
+
+    @triton.jit
+    def _bilinear_pos_embed_kernel_mb_d6s(
+        embed_ptr,
+        output_ptr,
+        H,
+        W,
+        h_scale,
+        w_scale,
+        TOTAL_ROWS,
+        CHUNKS: tl.constexpr,
+        NUM_GRID: tl.constexpr,
+        M_SIZE: tl.constexpr,
+        HIDDEN_DIM: tl.constexpr,
+        SEG0: tl.constexpr,
+        SEG1: tl.constexpr,
+        SEG2: tl.constexpr,
+        SEG3: tl.constexpr,
+        SEG4: tl.constexpr,
+        SEG5: tl.constexpr,
+        SPLITS: tl.constexpr,
+    ):
+        """B16 round 12: 2 vertically adjacent points per program (4
+        rows) with cross-point d6 reuse. Bench-only: _FORCE_MB_D6S;
+        host gates t == 1, 0 < w_scale < 1, 0 < h_scale < 1,
+        TOTAL_ROWS % 4 == 0.
+        """
+        grid_size = tl.num_programs(0)
+        pid0 = tl.program_id(0)
+        for c in tl.static_range(0, CHUNKS):
+            idx = pid0 + c * grid_size
+            g = idx // SPLITS
+            hbase = (idx % SPLITS) * (HIDDEN_DIM // SPLITS)
+            row0 = 4 * g
+            if row0 < TOTAL_ROWS:
+                spatial0 = row0 % (H * W)
+                num_blocks_w = W // M_SIZE
+                block_idx = spatial0 // (M_SIZE * M_SIZE)
+                local_idx = spatial0 % (M_SIZE * M_SIZE)
+                br = block_idx // num_blocks_w
+                bc = block_idx % num_blocks_w
+                lr = local_idx // M_SIZE
+                lc = local_idx % M_SIZE
+                hA = br * M_SIZE + lr
+                hB = hA + 1
+                col0 = bc * M_SIZE + lc
+
+                h_fracA = hA.to(tl.float32) * h_scale
+                hfA = h_fracA.to(tl.int32)
+                hcA = tl.minimum(hfA + 1, NUM_GRID - 1)
+                dhA = h_fracA - hfA.to(tl.float32)
+                h_fracB = hB.to(tl.float32) * h_scale
+                hfB = h_fracB.to(tl.int32)
+                hcB = tl.minimum(hfB + 1, NUM_GRID - 1)
+                dhB = h_fracB - hfB.to(tl.float32)
+
+                w_frac0 = col0.to(tl.float32) * w_scale
+                w_frac1 = (col0 + 1).to(tl.float32) * w_scale
+                wfA0 = w_frac0.to(tl.int32)
+                wfA1 = w_frac1.to(tl.int32)
+                dw0 = w_frac0 - wfA0.to(tl.float32)
+                dw1 = w_frac1 - wfA1.to(tl.float32)
+                wA00 = (1.0 - dhA - (dw0 - dhA * dw0)).to(
+                    output_ptr.dtype.element_ty)
+                wA10 = (dhA - dhA * dw0).to(output_ptr.dtype.element_ty)
+                wA01 = (dw0 - dhA * dw0).to(output_ptr.dtype.element_ty)
+                wA11 = (dhA * dw0).to(output_ptr.dtype.element_ty)
+                wA20 = (1.0 - dhA - (dw1 - dhA * dw1)).to(
+                    output_ptr.dtype.element_ty)
+                wA21 = (dw1 - dhA * dw1).to(output_ptr.dtype.element_ty)
+                wA22 = (dhA - dhA * dw1).to(output_ptr.dtype.element_ty)
+                wA23 = (dhA * dw1).to(output_ptr.dtype.element_ty)
+                wB00 = (1.0 - dhB - (dw0 - dhB * dw0)).to(
+                    output_ptr.dtype.element_ty)
+                wB10 = (dhB - dhB * dw0).to(output_ptr.dtype.element_ty)
+                wB01 = (dw0 - dhB * dw0).to(output_ptr.dtype.element_ty)
+                wB11 = (dhB * dw0).to(output_ptr.dtype.element_ty)
+                wB20 = (1.0 - dhB - (dw1 - dhB * dw1)).to(
+                    output_ptr.dtype.element_ty)
+                wB21 = (dw1 - dhB * dw1).to(output_ptr.dtype.element_ty)
+                wB22 = (dhB - dhB * dw1).to(output_ptr.dtype.element_ty)
+                wB23 = (dhB * dw1).to(output_ptr.dtype.element_ty)
+
+                off_eA0 = hbase + (hfA * NUM_GRID + wfA0) * HIDDEN_DIM
+                off_eA1 = hbase + (hfA * NUM_GRID + tl.minimum(wfA0 + 1, NUM_GRID - 1)) * HIDDEN_DIM
+                off_eA2 = hbase + (hcA * NUM_GRID + wfA0) * HIDDEN_DIM
+                off_eA3 = hbase + (hcA * NUM_GRID + tl.minimum(wfA0 + 1, NUM_GRID - 1)) * HIDDEN_DIM
+                off_eA4 = hbase + (hfA * NUM_GRID + tl.minimum(wfA1 + 1, NUM_GRID - 1)) * HIDDEN_DIM
+                off_eA5 = hbase + (hcA * NUM_GRID + tl.minimum(wfA1 + 1, NUM_GRID - 1)) * HIDDEN_DIM
+                off_eC0 = hbase + (hcB * NUM_GRID + wfA0) * HIDDEN_DIM
+                off_eC1 = hbase + (hcB * NUM_GRID + tl.minimum(wfA0 + 1, NUM_GRID - 1)) * HIDDEN_DIM
+                off_eC2 = hbase + (hcB * NUM_GRID + tl.minimum(wfA1 + 1, NUM_GRID - 1)) * HIDDEN_DIM
+
+                oA0 = hbase + row0 * HIDDEN_DIM
+                oA1 = oA0 + HIDDEN_DIM
+                oB0 = oA1 + HIDDEN_DIM
+                oB1 = oB0 + HIDDEN_DIM
+
+                shared_h = (hfB == hfA).to(tl.int32)
+                if shared_h:
+                    _seg_pair2_diff6s(embed_ptr, output_ptr,
+                                      off_eA0, off_eA1, off_eA2, off_eA3,
+                                      off_eA4, off_eA5,
+                                      off_eC0, off_eC1, off_eC2,
+                                      1,
+                                      oA0, oA1, oB0, oB1,
+                                      wA00, wA01, wA10, wA11,
+                                      wA20, wA21, wA22, wA23,
+                                      wB00, wB01, wB10, wB11,
+                                      wB20, wB21, wB22, wB23,
+                                      0, SEG0)
+                    _seg_pair2_diff6s(embed_ptr, output_ptr,
+                                      off_eA0, off_eA1, off_eA2, off_eA3,
+                                      off_eA4, off_eA5,
+                                      off_eC0, off_eC1, off_eC2,
+                                      1,
+                                      oA0, oA1, oB0, oB1,
+                                      wA00, wA01, wA10, wA11,
+                                      wA20, wA21, wA22, wA23,
+                                      wB00, wB01, wB10, wB11,
+                                      wB20, wB21, wB22, wB23,
+                                      SEG0, SEG1)
+                    _seg_pair2_diff6s(embed_ptr, output_ptr,
+                                      off_eA0, off_eA1, off_eA2, off_eA3,
+                                      off_eA4, off_eA5,
+                                      off_eC0, off_eC1, off_eC2,
+                                      1,
+                                      oA0, oA1, oB0, oB1,
+                                      wA00, wA01, wA10, wA11,
+                                      wA20, wA21, wA22, wA23,
+                                      wB00, wB01, wB10, wB11,
+                                      wB20, wB21, wB22, wB23,
+                                      SEG0 + SEG1, SEG2)
+                    _seg_pair2_diff6s(embed_ptr, output_ptr,
+                                      off_eA0, off_eA1, off_eA2, off_eA3,
+                                      off_eA4, off_eA5,
+                                      off_eC0, off_eC1, off_eC2,
+                                      1,
+                                      oA0, oA1, oB0, oB1,
+                                      wA00, wA01, wA10, wA11,
+                                      wA20, wA21, wA22, wA23,
+                                      wB00, wB01, wB10, wB11,
+                                      wB20, wB21, wB22, wB23,
+                                      SEG0 + SEG1 + SEG2, SEG3)
+                    _seg_pair2_diff6s(embed_ptr, output_ptr,
+                                      off_eA0, off_eA1, off_eA2, off_eA3,
+                                      off_eA4, off_eA5,
+                                      off_eC0, off_eC1, off_eC2,
+                                      1,
+                                      oA0, oA1, oB0, oB1,
+                                      wA00, wA01, wA10, wA11,
+                                      wA20, wA21, wA22, wA23,
+                                      wB00, wB01, wB10, wB11,
+                                      wB20, wB21, wB22, wB23,
+                                      SEG0 + SEG1 + SEG2 + SEG3, SEG4)
+                    _seg_pair2_diff6s(embed_ptr, output_ptr,
+                                      off_eA0, off_eA1, off_eA2, off_eA3,
+                                      off_eA4, off_eA5,
+                                      off_eC0, off_eC1, off_eC2,
+                                      1,
+                                      oA0, oA1, oB0, oB1,
+                                      wA00, wA01, wA10, wA11,
+                                      wA20, wA21, wA22, wA23,
+                                      wB00, wB01, wB10, wB11,
+                                      wB20, wB21, wB22, wB23,
+                                      SEG0 + SEG1 + SEG2 + SEG3 + SEG4, SEG5)
+                else:
+                    _seg_pair2_diff6s(embed_ptr, output_ptr,
+                                      off_eA0, off_eA1, off_eA2, off_eA3,
+                                      off_eA4, off_eA5,
+                                      off_eC0, off_eC1, off_eC2,
+                                      0,
+                                      oA0, oA1, oB0, oB1,
+                                      wA00, wA01, wA10, wA11,
+                                      wA20, wA21, wA22, wA23,
+                                      wB00, wB01, wB10, wB11,
+                                      wB20, wB21, wB22, wB23,
+                                      0, SEG0)
+                    _seg_pair2_diff6s(embed_ptr, output_ptr,
+                                      off_eA0, off_eA1, off_eA2, off_eA3,
+                                      off_eA4, off_eA5,
+                                      off_eC0, off_eC1, off_eC2,
+                                      0,
+                                      oA0, oA1, oB0, oB1,
+                                      wA00, wA01, wA10, wA11,
+                                      wA20, wA21, wA22, wA23,
+                                      wB00, wB01, wB10, wB11,
+                                      wB20, wB21, wB22, wB23,
+                                      SEG0, SEG1)
+                    _seg_pair2_diff6s(embed_ptr, output_ptr,
+                                      off_eA0, off_eA1, off_eA2, off_eA3,
+                                      off_eA4, off_eA5,
+                                      off_eC0, off_eC1, off_eC2,
+                                      0,
+                                      oA0, oA1, oB0, oB1,
+                                      wA00, wA01, wA10, wA11,
+                                      wA20, wA21, wA22, wA23,
+                                      wB00, wB01, wB10, wB11,
+                                      wB20, wB21, wB22, wB23,
+                                      SEG0 + SEG1, SEG2)
+                    _seg_pair2_diff6s(embed_ptr, output_ptr,
+                                      off_eA0, off_eA1, off_eA2, off_eA3,
+                                      off_eA4, off_eA5,
+                                      off_eC0, off_eC1, off_eC2,
+                                      0,
+                                      oA0, oA1, oB0, oB1,
+                                      wA00, wA01, wA10, wA11,
+                                      wA20, wA21, wA22, wA23,
+                                      wB00, wB01, wB10, wB11,
+                                      wB20, wB21, wB22, wB23,
+                                      SEG0 + SEG1 + SEG2, SEG3)
+                    _seg_pair2_diff6s(embed_ptr, output_ptr,
+                                      off_eA0, off_eA1, off_eA2, off_eA3,
+                                      off_eA4, off_eA5,
+                                      off_eC0, off_eC1, off_eC2,
+                                      0,
+                                      oA0, oA1, oB0, oB1,
+                                      wA00, wA01, wA10, wA11,
+                                      wA20, wA21, wA22, wA23,
+                                      wB00, wB01, wB10, wB11,
+                                      wB20, wB21, wB22, wB23,
+                                      SEG0 + SEG1 + SEG2 + SEG3, SEG4)
+                    _seg_pair2_diff6s(embed_ptr, output_ptr,
+                                      off_eA0, off_eA1, off_eA2, off_eA3,
+                                      off_eA4, off_eA5,
+                                      off_eC0, off_eC1, off_eC2,
+                                      0,
+                                      oA0, oA1, oB0, oB1,
+                                      wA00, wA01, wA10, wA11,
+                                      wA20, wA21, wA22, wA23,
+                                      wB00, wB01, wB10, wB11,
+                                      wB20, wB21, wB22, wB23,
+                                      SEG0 + SEG1 + SEG2 + SEG3 + SEG4, SEG5)
+
+    @triton.jit
     def _bilinear_pos_embed_kernel_vmb(
         embed_ptr,
         output_ptr,
@@ -2590,6 +2928,193 @@ if HAS_TRITON:
                 row0 = 2 * (g * BODIES + b)
                 if row0 < TOTAL_ROWS:
                     _bilinear_pair_vbody(
+                        embed_ptr, output_ptr, row0, row0, H, W,
+                        h_scale, w_scale, NUM_GRID, M_SIZE, HIDDEN_DIM,
+                        SEG0, SEG1, SEG2, SEG3, SEG4, SEG5)
+
+    @triton.jit
+    def _bilinear_pair_vbody_la(embed_ptr, output_ptr, out_row, row, H, W,
+                                h_scale, w_scale, NUM_GRID: tl.constexpr,
+                                M_SIZE: tl.constexpr, HIDDEN_DIM: tl.constexpr,
+                                SEG0: tl.constexpr, SEG1: tl.constexpr,
+                                SEG2: tl.constexpr, SEG3: tl.constexpr,
+                                SEG4: tl.constexpr, SEG5: tl.constexpr):
+        """r58 load-ahead variant of ``_bilinear_pair_vbody`` (la form).
+
+        Index arithmetic and the weight f32 chain are verbatim
+        ``_bilinear_pair_vbody``; ONLY the statement order changes: the
+        six sequential ``load -> FMA -> store`` rounds become a one-deep
+        software pipeline -- segment k's four embed loads are issued
+        BEFORE segment k-1's FMA/store round, so each load latency
+        overlaps the previous segment's store round instead of stalling
+        the in-order AIV pipeline (the sequential vbody pays ~1 segment
+        latency per segment; the mb flat body overlaps ALL loads but its
+        hoisted live-vector set is what pays the bf16 cvt/pack penalty --
+        mid x-mb4-bf16 0.042 vs f32 0.019, panel E1/E2 dtype-split
+        mechanism). la is the middle form: <= 8 live vectors (two
+        segments), full overlap only between adjacent segments. Zero
+        arithmetic change: same values, same addresses, same store order
+        -> bitwise identical to vbody/vpair/pair modulo the documented
+        vanishing +/-0 corner class (rawAB-vmb-la gates it on-machine).
+        All segment boundaries are constexpr, every branch resolves at
+        trace time, no runtime loop (tl.static_range contract preserved
+        by construction).
+        """
+        total_spatial = H * W
+        spatial0 = row % total_spatial
+
+        num_blocks_w = W // M_SIZE
+        block_idx = spatial0 // (M_SIZE * M_SIZE)
+        local_idx = spatial0 % (M_SIZE * M_SIZE)
+        br = block_idx // num_blocks_w
+        bc = block_idx % num_blocks_w
+        lr = local_idx // M_SIZE
+        lc = local_idx % M_SIZE
+        row_i = br * M_SIZE + lr
+        col0 = bc * M_SIZE + lc
+
+        h_frac = row_i.to(tl.float32) * h_scale
+        hf = h_frac.to(tl.int32)
+        hc = tl.minimum(hf + 1, NUM_GRID - 1)
+        dh = h_frac - hf.to(tl.float32)
+
+        w_frac0 = col0.to(tl.float32) * w_scale
+        w_frac1 = (col0 + 1).to(tl.float32) * w_scale
+        wf0 = w_frac0.to(tl.int32)
+        wf1 = w_frac1.to(tl.int32)
+        dw0 = w_frac0 - wf0.to(tl.float32)
+        dw1 = w_frac1 - wf1.to(tl.float32)
+
+        w11_0 = dh * dw0
+        w10_0 = dh - w11_0
+        w01_0 = dw0 - w11_0
+        w00_0 = 1.0 - dh - w01_0
+        w11_1 = dh * dw1
+        w10_1 = dh - w11_1
+        w01_1 = dw1 - w11_1
+        w00_1 = 1.0 - dh - w01_1
+
+        out_dtype = output_ptr.dtype.element_ty
+        w00a = w00_0.to(out_dtype)
+        w10a = w10_0.to(out_dtype)
+        w00b = w00_1.to(out_dtype)
+        w10b = w10_1.to(out_dtype)
+
+        out_off0 = out_row * HIDDEN_DIM
+        out_off1 = out_off0 + HIDDEN_DIM
+
+        off_a0 = (hf * NUM_GRID + wf0) * HIDDEN_DIM
+        off_c0 = (hc * NUM_GRID + wf0) * HIDDEN_DIM
+        off_a1 = (hf * NUM_GRID + wf1) * HIDDEN_DIM
+        off_c1 = (hc * NUM_GRID + wf1) * HIDDEN_DIM
+
+        # --- one-deep pipeline: load seg k+1, then use seg k -----------
+        if SEG0 > 0:
+            la_c0 = tl.arange(0, SEG0)
+            la0_a0 = tl.load(embed_ptr + off_a0 + la_c0)
+            la0_c0 = tl.load(embed_ptr + off_c0 + la_c0)
+            la0_a1 = tl.load(embed_ptr + off_a1 + la_c0)
+            la0_c1 = tl.load(embed_ptr + off_c1 + la_c0)
+        if SEG1 > 0:
+            la_c1 = SEG0 + tl.arange(0, SEG1)
+            la1_a0 = tl.load(embed_ptr + off_a0 + la_c1)
+            la1_c0 = tl.load(embed_ptr + off_c0 + la_c1)
+            la1_a1 = tl.load(embed_ptr + off_a1 + la_c1)
+            la1_c1 = tl.load(embed_ptr + off_c1 + la_c1)
+        if SEG0 > 0:
+            tl.store(output_ptr + out_off0 + la_c0,
+                     w00a * la0_a0 + w10a * la0_c0)
+            tl.store(output_ptr + out_off1 + la_c0,
+                     w00b * la0_a1 + w10b * la0_c1)
+        if SEG2 > 0:
+            la_c2 = SEG0 + SEG1 + tl.arange(0, SEG2)
+            la2_a0 = tl.load(embed_ptr + off_a0 + la_c2)
+            la2_c0 = tl.load(embed_ptr + off_c0 + la_c2)
+            la2_a1 = tl.load(embed_ptr + off_a1 + la_c2)
+            la2_c1 = tl.load(embed_ptr + off_c1 + la_c2)
+        if SEG1 > 0:
+            tl.store(output_ptr + out_off0 + la_c1,
+                     w00a * la1_a0 + w10a * la1_c0)
+            tl.store(output_ptr + out_off1 + la_c1,
+                     w00b * la1_a1 + w10b * la1_c1)
+        if SEG3 > 0:
+            la_c3 = (SEG0 + SEG1 + SEG2 + tl.arange(0, SEG3))
+            la3_a0 = tl.load(embed_ptr + off_a0 + la_c3)
+            la3_c0 = tl.load(embed_ptr + off_c0 + la_c3)
+            la3_a1 = tl.load(embed_ptr + off_a1 + la_c3)
+            la3_c1 = tl.load(embed_ptr + off_c1 + la_c3)
+        if SEG2 > 0:
+            tl.store(output_ptr + out_off0 + la_c2,
+                     w00a * la2_a0 + w10a * la2_c0)
+            tl.store(output_ptr + out_off1 + la_c2,
+                     w00b * la2_a1 + w10b * la2_c1)
+        if SEG4 > 0:
+            la_c4 = (SEG0 + SEG1 + SEG2 + SEG3 + tl.arange(0, SEG4))
+            la4_a0 = tl.load(embed_ptr + off_a0 + la_c4)
+            la4_c0 = tl.load(embed_ptr + off_c0 + la_c4)
+            la4_a1 = tl.load(embed_ptr + off_a1 + la_c4)
+            la4_c1 = tl.load(embed_ptr + off_c1 + la_c4)
+        if SEG3 > 0:
+            tl.store(output_ptr + out_off0 + la_c3,
+                     w00a * la3_a0 + w10a * la3_c0)
+            tl.store(output_ptr + out_off1 + la_c3,
+                     w00b * la3_a1 + w10b * la3_c1)
+        if SEG5 > 0:
+            la_c5 = (SEG0 + SEG1 + SEG2 + SEG3 + SEG4 + tl.arange(0, SEG5))
+            la5_a0 = tl.load(embed_ptr + off_a0 + la_c5)
+            la5_c0 = tl.load(embed_ptr + off_c0 + la_c5)
+            la5_a1 = tl.load(embed_ptr + off_a1 + la_c5)
+            la5_c1 = tl.load(embed_ptr + off_c1 + la_c5)
+        if SEG4 > 0:
+            tl.store(output_ptr + out_off0 + la_c4,
+                     w00a * la4_a0 + w10a * la4_c0)
+            tl.store(output_ptr + out_off1 + la_c4,
+                     w00b * la4_a1 + w10b * la4_c1)
+        if SEG5 > 0:
+            tl.store(output_ptr + out_off0 + la_c5,
+                     w00a * la5_a0 + w10a * la5_c0)
+            tl.store(output_ptr + out_off1 + la_c5,
+                     w00b * la5_a1 + w10b * la5_c1)
+
+    @triton.jit
+    def _bilinear_pos_embed_kernel_vmb_la(
+        embed_ptr,
+        output_ptr,
+        H,
+        W,
+        h_scale,
+        w_scale,
+        TOTAL_ROWS,
+        CHUNKS: tl.constexpr,
+        BODIES: tl.constexpr,
+        NUM_GRID: tl.constexpr,
+        M_SIZE: tl.constexpr,
+        HIDDEN_DIM: tl.constexpr,
+        SEG0: tl.constexpr,
+        SEG1: tl.constexpr,
+        SEG2: tl.constexpr,
+        SEG3: tl.constexpr,
+        SEG4: tl.constexpr,
+        SEG5: tl.constexpr,
+    ):
+        """r58 bench-only vmb kernel with the load-ahead body.
+
+        Structural clone of ``_bilinear_pos_embed_kernel_vmb`` (same
+        pair-slot mapping, grid-cap-on-programs contract, row0 guard)
+        with the body swapped to ``_bilinear_pair_vbody_la``. Bench-only:
+        host gates _FORCE_VMB_LA (int BODIES) AND w_scale == 1.0 exact
+        AND total_out >= _VMB_MIN_ROWS. Panel branch C/D ammo: if the
+        sequential vbody's Bv lands in (1.11, 1.45] us (x-vmb2 read-out),
+        the la form overlaps segment load latencies to pull Bv toward the
+        flat-form ~0.9us issue cost without the flat body's bf16 penalty.
+        """
+        grid_size = tl.num_programs(0)
+        for c in tl.static_range(0, CHUNKS):
+            g = tl.program_id(0) + c * grid_size
+            for b in tl.static_range(0, BODIES):
+                row0 = 2 * (g * BODIES + b)
+                if row0 < TOTAL_ROWS:
+                    _bilinear_pair_vbody_la(
                         embed_ptr, output_ptr, row0, row0, H, W,
                         h_scale, w_scale, NUM_GRID, M_SIZE, HIDDEN_DIM,
                         SEG0, SEG1, SEG2, SEG3, SEG4, SEG5)
@@ -3838,6 +4363,130 @@ if HAS_TRITON:
                   and total_out < _MB_MAX_ROWS)
         if use_mb:
             slots_mb = total_out // 2
+            if (_MB_D6_PROMOTE and t == 1 and 0.0 < w_scale < 1.0):
+                # r59 production (was r59 bench hook _FORCE_MB_D6=1): mb1d6
+                # is the fastest measured large-bf16 structure on the local
+                # SoC (9.0 ns/row vs mb2 16.75, -46%, bitwise identical).
+                # Gate t==1 and 0<w_scale<1 confines the blast radius to
+                # the tb-large line: small-A/mid have w_scale >= 1.0, and
+                # short-video/big-video/tail/multi all have t > 1.
+                bodies_d6 = 1
+                chunks_d6 = (slots_mb + cap - 1) // cap
+                grid_d6 = (min(slots_mb, cap),)
+                _bilinear_pos_embed_kernel_mb_d6[grid_d6](
+                    embed_weight,
+                    output,
+                    h,
+                    w,
+                    h_scale,
+                    w_scale,
+                    total_out,
+                    chunks_d6,
+                    bodies_d6,
+                    num_grid_per_side,
+                    m_size,
+                    hidden_dim,
+                    s0,
+                    s1,
+                    s2,
+                    s3,
+                    s4,
+                    s5,
+                    **_launch_opts(),
+                )
+                return output
+            if _FORCE_MB_D6 and 0.0 < w_scale <= 1.0:
+                bodies_d6 = max(1, min(_MB_MAX_BODIES, int(_FORCE_MB_D6)))
+                programs_d6 = (slots_mb + bodies_d6 - 1) // bodies_d6
+                chunks_d6 = (programs_d6 + cap - 1) // cap
+                grid_d6 = (min(programs_d6, cap),)
+                _bilinear_pos_embed_kernel_mb_d6[grid_d6](
+                    embed_weight,
+                    output,
+                    h,
+                    w,
+                    h_scale,
+                    w_scale,
+                    total_out,
+                    chunks_d6,
+                    bodies_d6,
+                    num_grid_per_side,
+                    m_size,
+                    hidden_dim,
+                    s0,
+                    s1,
+                    s2,
+                    s3,
+                    s4,
+                    s5,
+                    **_launch_opts(),
+                )
+                return output
+            if (_FORCE_MB_D6S and t == 1 and 0.0 < w_scale < 1.0
+                    and 0.0 < h_scale < 1.0 and total_out % 4 == 0):
+                # B16 round 12 bench hook: 2 vertically adjacent points
+                # per program (4 rows), cross-point d6 register reuse.
+                # Gated so hfB in {hfA, hfA+1} (0 < h_scale < 1) and both
+                # points stay in the diff branch (0 < w_scale < 1).
+                slots_s = total_out // 4
+                chunks_s = (slots_s + cap - 1) // cap
+                grid_s = (min(slots_s, cap),)
+                _bilinear_pos_embed_kernel_mb_d6s[grid_s](
+                    embed_weight,
+                    output,
+                    h,
+                    w,
+                    h_scale,
+                    w_scale,
+                    total_out,
+                    chunks_s,
+                    num_grid_per_side,
+                    m_size,
+                    hidden_dim,
+                    s0,
+                    s1,
+                    s2,
+                    s3,
+                    s4,
+                    s5,
+                    SPLITS=1,
+                    **_launch_opts(),
+                )
+                return output
+            if (_FORCE_MB_D6S2 and t == 1 and 0.0 < w_scale < 1.0
+                    and 0.0 < h_scale < 1.0 and total_out % 4 == 0
+                    and hidden_dim % 2 == 0):
+                # B16 round 18: cross-point load sharing of d6s WITH the
+                # program count restored -- 2 vertically adjacent points
+                # per program on a hidden HALF (576 of 1152). Same traffic
+                # saving as d6s (-30% loads) at mb1d6's program count.
+                slots_s = total_out // 4
+                programs_s = slots_s * 2
+                chunks_s = (programs_s + cap - 1) // cap
+                grid_s = (min(programs_s, cap),)
+                hs = _pow2_segments(hidden_dim // 2)
+                _bilinear_pos_embed_kernel_mb_d6s[grid_s](
+                    embed_weight,
+                    output,
+                    h,
+                    w,
+                    h_scale,
+                    w_scale,
+                    total_out,
+                    chunks_s,
+                    num_grid_per_side,
+                    m_size,
+                    hidden_dim,
+                    hs[0],
+                    hs[1],
+                    hs[2],
+                    hs[3],
+                    hs[4],
+                    hs[5],
+                    SPLITS=2,
+                    **_launch_opts(),
+                )
+                return output
             if _MB_BODY_OVERRIDE:
                 bodies = int(_MB_BODY_OVERRIDE)
             else:
@@ -3870,6 +4519,80 @@ if HAS_TRITON:
                 )
                 return output
         if use_pair:
+            # r58 bench-only hook (00:40 spec R1): diff6 pair kernel with
+            # the diff-branch load reuse. On 0 < w_scale <= 1.0 the diff
+            # branch (wf1 != wf0) forces wf1 == wf0 + 1 with wf0 + 1 <=
+            # G-1, so wc0 == wf1 and off_a1 == off_b0, off_c1 == off_d0
+            # exactly (algebra in _bilinear_pair_body_d6): the two dropped
+            # loads are pure address-equal reuse -- ZERO divergence class,
+            # stronger than the vpair +/-0 class; rawAB-diff6 gates it
+            # strictly. Placed BEFORE the vmb production dispatch so
+            # _FORCE_DIFF6 can also bypass vmb on w_scale == 1.0 shapes
+            # (bench-hook precedence). w_scale > 1.0 breaks the window
+            # and keeps production. Production unchanged (None default).
+            if _FORCE_DIFF6 and 0.0 < w_scale <= 1.0:
+                slots_d6 = total_out // 2
+                chunks_d6 = (slots_d6 + cap - 1) // cap
+                grid_d6 = (min(slots_d6, cap),)
+                _bilinear_pos_embed_kernel_pair_d6[grid_d6](
+                    embed_weight,
+                    output,
+                    h,
+                    w,
+                    h_scale,
+                    w_scale,
+                    total_out,
+                    chunks_d6,
+                    num_grid_per_side,
+                    m_size,
+                    hidden_dim,
+                    s0,
+                    s1,
+                    s2,
+                    s3,
+                    s4,
+                    s5,
+                    **_launch_opts(),
+                )
+                return output
+            # r58 bench-only hook (00:40 spec R2): vmb with the load-ahead
+            # vbody (_bilinear_pair_vbody_la) -- statement-order overlap
+            # of each segment's load latency with the previous segment's
+            # store round; zero arithmetic change -> bitwise identical to
+            # the sequential vbody modulo the same vanishing +/-0 corner
+            # class (rawAB-vmb-la gates it, same caliber as rawAB-vmb).
+            # _FORCE_VMB_LA carries the BODIES int (same meaning as
+            # _FORCE_VMB); _VMB_DISABLE keeps the legacy-pair A/B leg
+            # available. Placed before the vmb production dispatch.
+            if (_FORCE_VMB_LA and not _VMB_DISABLE and w_scale == 1.0
+                    and total_out >= _VMB_MIN_ROWS):
+                slots_la = total_out // 2
+                bodies_la = max(1, min(_MB_MAX_BODIES, int(_FORCE_VMB_LA)))
+                programs_la = (slots_la + bodies_la - 1) // bodies_la
+                chunks_la = (programs_la + cap - 1) // cap
+                grid_la = (min(programs_la, cap),)
+                _bilinear_pos_embed_kernel_vmb_la[grid_la](
+                    embed_weight,
+                    output,
+                    h,
+                    w,
+                    h_scale,
+                    w_scale,
+                    total_out,
+                    chunks_la,
+                    bodies_la,
+                    num_grid_per_side,
+                    m_size,
+                    hidden_dim,
+                    s0,
+                    s1,
+                    s2,
+                    s3,
+                    s4,
+                    s5,
+                    **_launch_opts(),
+                )
+                return output
             # r53 bench-only hook: _FORCE_PAIR2D forces the 2D pair kernel
             # (same pair-row mapping, [2, WIDTH] 2D strided embed loads /
             # FMA / store). Values and addresses are identical to the
