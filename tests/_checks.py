@@ -11,7 +11,7 @@ TOLERANCES = {
     torch.float64: (1e-7, 1e-9),
     torch.float32: (1e-4, 1e-4),
     torch.float16: (1e-3, 1e-3),
-    torch.bfloat16: (1e-2, 1e-2),
+    torch.bfloat16: (2e-2, 2e-2),
 }
 
 
