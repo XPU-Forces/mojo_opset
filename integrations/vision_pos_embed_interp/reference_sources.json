@@ -1,0 +1,14 @@
+{
+  "qwen3_vl.py": {
+    "repository": "https://github.com/vllm-project/vllm",
+    "commit": "aa31fa038f2cbfbc681ec9f7b7e39c9c728502ee",
+    "url": "https://raw.githubusercontent.com/vllm-project/vllm/aa31fa038f2cbfbc681ec9f7b7e39c9c728502ee/vllm/model_executor/models/qwen3_vl.py",
+    "sha256": "cac3013e717c8d6299893a4e18964ea7ec3abbbf7373eed58045fab50da9028b"
+  },
+  "patch_qwen3vl.py": {
+    "repository": "https://github.com/vllm-project/vllm-ascend",
+    "commit": "d5923bcd7153af6020d1be46b908d711d76d1af7",
+    "url": "https://raw.githubusercontent.com/vllm-project/vllm-ascend/d5923bcd7153af6020d1be46b908d711d76d1af7/vllm_ascend/patch/worker/patch_qwen3vl.py",
+    "sha256": "428cb83b7d9d2277323ced374460f64490c576f4b674153f6cd0964984933ad0"
+  }
+}
