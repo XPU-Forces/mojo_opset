@@ -3,6 +3,7 @@
 from mojo_opset.utils._exports import extend_bindings as _extend_bindings
 
 OPS = {
+    "triton_convert_req_index_to_global_index": "triton_convert_req_index_to_global_index",
     "swa_infer": "swa",
     "moe_dynamic_quant": "quant",
     "flex_attention": "flex_attention",

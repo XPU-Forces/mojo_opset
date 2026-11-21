@@ -3,6 +3,7 @@
 from mojo_opset.utils._exports import extend_bindings as _extend_bindings
 
 OPS = {
+    "triton_convert_req_index_to_global_index": "triton_convert_req_index_to_global_index",
     "gemm": "dense_gemm",
     "mxfp8_dequant_gemm": "dense_gemm",
     "mxfp4_gemm": "dense_gemm",
