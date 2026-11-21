@@ -6,6 +6,8 @@ from mojo_opset import preload
 from tests._compile import compile_fullgraph
 from tests._convert_req_index import CASES
 from tests._convert_req_index import make_inputs
+from tests._convert_req_index_balanced import CASES as BALANCED_CASES
+from tests._convert_req_index_balanced import build_inputs as build_balanced_inputs
 
 
 def _inputs(device):
@@ -176,6 +178,8 @@ def test_invalid_contract(accuracy_backend, invalid):
 
 
 GRAPH_CASES = [
+    (129, 1, 3168, 64, 2048, False, 0, 0),
+    (8193, 1, 3168, 64, 2048, False, 0, 0),
     (5, 2, 3, 4, 128, False, 0, 0),
     (5, 2, 3, 4, 128, True, 3, 2),
     (0, 2, 3, 4, 128, True, 0, 2),
@@ -274,3 +278,18 @@ def test_matrix(accuracy_backend, case):
     actual = F.triton_convert_req_index_to_global_index(*args, implementation=implementation)
     expected = F.triton_convert_req_index_to_global_index(*args, implementation="torch")
     assert torch.equal(actual, expected)
+
+
+@pytest.mark.api("functions.triton_convert_req_index_to_global_index")
+@pytest.mark.accuracy
+@pytest.mark.parametrize("case", BALANCED_CASES, ids=[c["id"] for c in BALANCED_CASES])
+def test_balanced_matrix(accuracy_backend, case):
+    implementation, _, device = accuracy_backend
+    args = build_balanced_inputs(case, device)
+    actual = F.triton_convert_req_index_to_global_index(*args, implementation=implementation)
+    # Bound CPU/NPU temporary memory while checking every element against the
+    # independent Torch implementation, including invalid padding and page tails.
+    for start in range(0, case["num_tokens"], 1024):
+        chunk = [args[0][start : start + 1024].cpu(), args[1].cpu(), args[2][start : start + 1024].cpu(), *args[3:]]
+        expected = F.triton_convert_req_index_to_global_index(*chunk, implementation="torch")
+        assert torch.equal(actual[start : start + 1024].cpu(), expected)

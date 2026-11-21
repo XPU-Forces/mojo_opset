@@ -1,4 +1,4 @@
-"""A2 request-index conversion with page-table prefetch and four-row tiles."""
+"""A2 request-index conversion; GLM-5 balanced workloads and generic fallback."""
 
 from functools import lru_cache
 from typing import Optional
@@ -26,9 +26,10 @@ def _convert_req_index_kernel(
     out_ptr,
     prefill_req_ptr,
     workspace_ptr,
-    num_tokens,
-    num_programs,
+    num_tokens: tl.constexpr,
+    num_programs: tl.constexpr,
     LOG2_BS: tl.constexpr,
+    LOG2_MAX: tl.constexpr,
     BS_MASK: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_BT: tl.constexpr,
@@ -36,6 +37,8 @@ def _convert_req_index_kernel(
     ROWS: tl.constexpr,
     EXACT: tl.constexpr,
     HAS_PREFILL: tl.constexpr,
+    EARLY_LOAD: tl.constexpr,
+    SINGLE_REQUEST: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int32)
     cols = tl.arange(0, BLOCK_N)
@@ -46,59 +49,84 @@ def _convert_req_index_kernel(
     start = pid * chunk
     end = tl.minimum(start + chunk, num_tokens)
 
+    if SINGLE_REQUEST:
+        table_single = tl.load(block_table_ptr + bt_cols, mask=bt_cols < MAX_BLOCKS, other=0)
+
     for row0 in range(start, end, ROWS):
         rows = row0 + r_off
 
         if EXACT:
+            if EARLY_LOAD:
+                tok = tl.load(token_indices_ptr + rows[:, None] * BLOCK_N + cols[None, :])
             reqs = tl.load(req_id_ptr + rows).to(tl.int32)
             if HAS_PREFILL:
                 prefs = tl.load(prefill_req_ptr + rows).to(tl.int32)
                 is_pref = prefs >= 0
                 ws = tl.load(workspace_ptr + tl.maximum(prefs, 0), mask=is_pref, other=0).to(tl.int32)
-            if MAX_BLOCKS == BLOCK_BT:
-                bt_2d = tl.load(block_table_ptr + reqs[:, None] * MAX_BLOCKS + bt_cols[None, :])
+            if SINGLE_REQUEST:
+                bt_2d = tl.broadcast_to(table_single[None, :], (ROWS, BLOCK_BT))
             else:
-                bt_2d = tl.load(
-                    block_table_ptr + reqs[:, None] * MAX_BLOCKS + bt_cols[None, :],
-                    mask=bt_cols[None, :] < MAX_BLOCKS,
-                    other=0,
-                )
-            tok = tl.load(token_indices_ptr + rows[:, None] * BLOCK_N + cols[None, :])
+                if MAX_BLOCKS == BLOCK_BT:
+                    bt_2d = tl.load(block_table_ptr + reqs[:, None] * MAX_BLOCKS + bt_cols[None, :])
+                else:
+                    bt_2d = tl.load(
+                        block_table_ptr + reqs[:, None] * MAX_BLOCKS + bt_cols[None, :],
+                        mask=bt_cols[None, :] < MAX_BLOCKS,
+                        other=0,
+                    )
+            if not EARLY_LOAD:
+                tok = tl.load(token_indices_ptr + rows[:, None] * BLOCK_N + cols[None, :])
         else:
             r_mask = rows < end
+            if EARLY_LOAD:
+                tok = tl.load(
+                    token_indices_ptr + rows[:, None] * BLOCK_N + cols[None, :],
+                    mask=r_mask[:, None],
+                    other=-1,
+                )
             reqs = tl.load(req_id_ptr + rows, mask=r_mask, other=0).to(tl.int32)
             if HAS_PREFILL:
                 prefs = tl.load(prefill_req_ptr + rows, mask=r_mask, other=-1).to(tl.int32)
                 is_pref = prefs >= 0
                 ws = tl.load(workspace_ptr + tl.maximum(prefs, 0), mask=is_pref, other=0).to(tl.int32)
-            if MAX_BLOCKS == BLOCK_BT:
-                bt_2d = tl.load(
-                    block_table_ptr + reqs[:, None] * MAX_BLOCKS + bt_cols[None, :],
-                    mask=r_mask[:, None],
-                    other=0,
-                )
+            if SINGLE_REQUEST:
+                bt_2d = tl.broadcast_to(table_single[None, :], (ROWS, BLOCK_BT))
             else:
-                bt_2d = tl.load(
-                    block_table_ptr + reqs[:, None] * MAX_BLOCKS + bt_cols[None, :],
-                    mask=(bt_cols[None, :] < MAX_BLOCKS) & r_mask[:, None],
-                    other=0,
+                if MAX_BLOCKS == BLOCK_BT:
+                    bt_2d = tl.load(
+                        block_table_ptr + reqs[:, None] * MAX_BLOCKS + bt_cols[None, :],
+                        mask=r_mask[:, None],
+                        other=0,
+                    )
+                else:
+                    bt_2d = tl.load(
+                        block_table_ptr + reqs[:, None] * MAX_BLOCKS + bt_cols[None, :],
+                        mask=(bt_cols[None, :] < MAX_BLOCKS) & r_mask[:, None],
+                        other=0,
+                    )
+            if not EARLY_LOAD:
+                tok = tl.load(
+                    token_indices_ptr + rows[:, None] * BLOCK_N + cols[None, :],
+                    mask=r_mask[:, None],
+                    other=-1,
                 )
-            tok = tl.load(
-                token_indices_ptr + rows[:, None] * BLOCK_N + cols[None, :],
-                mask=r_mask[:, None],
-                other=-1,
-            )
 
         block_id = tok >> LOG2_BS
-        inblock = tok & BS_MASK
         base = tl.gather(bt_2d, block_id & (BLOCK_BT - 1), 1)
 
-        out_val = (base << LOG2_BS) + inblock
+        out_val = tok + ((base - block_id) << LOG2_BS)
         if MAX_BLOCKS & (MAX_BLOCKS - 1) == 0:
-            invalid = (block_id & (0 - MAX_BLOCKS)) != 0
+            # Exact mask: zero tag -> 0; every nonzero int32 tag -> -1.
+            if BLOCK_N <= 512 and EARLY_LOAD and (MAX_BLOCKS << LOG2_BS) <= 2147483648:
+                # Bias the original token range directly; avoid a second index shift.
+                invalid_mask = (tok | (tok + (2147483648 - (MAX_BLOCKS << LOG2_BS)))) >> 31
+            else:
+                tag = block_id >> LOG2_MAX
+                invalid_mask = (tag | (tag + 2147483647)) >> 31
+            out_val = out_val | invalid_mask
         else:
             invalid = (block_id < 0) | (block_id >= MAX_BLOCKS)
-        out_val = tl.where(invalid, -1, out_val)
+            out_val = tl.where(invalid, -1, out_val)
 
         if HAS_PREFILL:
             out_pref = ws[:, None] + tok
@@ -168,11 +196,34 @@ class ModelNew(nn.Module):
             ws_c = req_c
 
         cores = self._cores()
-        progs = min(num_tokens, cores)
-        rows = 4
+        rows = 8 if block_n <= 512 else 4
+        # A2 UB: large workspace tiles require fewer rows than decode tiles.
+        if HAS_PREFILL_WORKSPACE and block_n >= 2048:
+            rows = 2
+        # Wide page-table tiles exceed A2 UB capacity with four rows.
+        if block_n >= 1024 and block_bt >= 2048:
+            rows = 2
+        progs = min((num_tokens + rows - 1) // rows, cores)
         chunk = ((num_tokens + progs - 1) // progs + rows - 1) // rows * rows
         exact = (chunk % rows == 0) and (num_tokens % rows == 0)
         grid = (progs,)
+
+        if num_tokens <= 12:
+            _convert_small_req_index_kernel[(num_tokens,)](
+                req_c,
+                bt_c,
+                ti_c,
+                out,
+                pref_c,
+                ws_c,
+                LOG2_BS=log2_bs,
+                LOG2_MAX=max_blocks.bit_length() - 1,
+                BLOCK_N=block_n,
+                BLOCK_BT=block_bt,
+                MAX_BLOCKS=max_blocks,
+                HAS_PREFILL=bool(HAS_PREFILL_WORKSPACE),
+            )
+            return out
 
         _convert_req_index_kernel[grid](
             req_c,
@@ -184,6 +235,7 @@ class ModelNew(nn.Module):
             num_tokens,
             grid[0],
             LOG2_BS=log2_bs,
+            LOG2_MAX=max_blocks.bit_length() - 1,
             BS_MASK=block_size - 1,
             BLOCK_N=block_n,
             BLOCK_BT=block_bt,
@@ -191,8 +243,54 @@ class ModelNew(nn.Module):
             ROWS=rows,
             EXACT=exact,
             HAS_PREFILL=bool(HAS_PREFILL_WORKSPACE),
+            EARLY_LOAD=num_tokens > 64,
+            SINGLE_REQUEST=(block_table.shape[0] == 1 and not HAS_PREFILL_WORKSPACE),
         )
         return out
+
+
+@triton.jit
+def _convert_small_req_index_kernel(
+    req_id_ptr,
+    block_table_ptr,
+    token_indices_ptr,
+    out_ptr,
+    prefill_req_ptr,
+    workspace_ptr,
+    LOG2_BS: tl.constexpr,
+    LOG2_MAX: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_BT: tl.constexpr,
+    MAX_BLOCKS: tl.constexpr,
+    HAS_PREFILL: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int32)
+    cols = tl.arange(0, BLOCK_N)
+    bt_cols = tl.arange(0, BLOCK_BT)
+    req = tl.load(req_id_ptr + row).to(tl.int32)
+    tok = tl.load(token_indices_ptr + row * BLOCK_N + cols)
+    if MAX_BLOCKS == BLOCK_BT:
+        table = tl.load(block_table_ptr + req * MAX_BLOCKS + bt_cols)
+    else:
+        table = tl.load(
+            block_table_ptr + req * MAX_BLOCKS + bt_cols,
+            mask=bt_cols < MAX_BLOCKS,
+            other=0,
+        )
+    bid = tok >> LOG2_BS
+    base = tl.gather(table, bid & (BLOCK_BT - 1), 0)
+    result = tok + ((base - bid) << LOG2_BS)
+    if MAX_BLOCKS & (MAX_BLOCKS - 1) == 0:
+        invalid = (bid >> LOG2_MAX) != 0
+    else:
+        invalid = (bid < 0) | (bid >= MAX_BLOCKS)
+    result = tl.where(invalid, -1, result)
+    if HAS_PREFILL:
+        pref = tl.load(prefill_req_ptr + row).to(tl.int32)
+        is_pref = pref >= 0
+        ws = tl.load(workspace_ptr + tl.maximum(pref, 0), mask=is_pref, other=0)
+        result = tl.where(is_pref, tl.where(tok == -1, -1, ws + tok), result)
+    tl.store(out_ptr + row * BLOCK_N + cols, result)
 
 
 @lru_cache(maxsize=None)
