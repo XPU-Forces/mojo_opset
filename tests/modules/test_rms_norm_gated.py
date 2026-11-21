@@ -1,8 +1,10 @@
+from functools import partial
+
 import pytest
 import torch
 
-from mojo_opset import modules
-from tests._checks import assert_close
+from mojo_opset import functions, modules
+from tests._checks import assert_close, assert_repeatable
 
 # (B, H, T, D, activation, dtype); all cases are kept above the 20us perf floor.
 RMS_CASES = [
@@ -88,3 +90,57 @@ def test_fused_rms_norm_gated_2d_accuracy(accuracy_backend, T, D, activation, af
         activation=activation,
     )
     _run_gated_case(accuracy_backend, modules.FusedRMSNormGated, options, (T, D), dtype)
+
+
+# Bitwise repeatability: two identical calls must produce byte-identical forward
+# outputs and gradients. Accuracy tolerances (2e-2) cannot catch a reduction whose
+# summation order varies run to run, so this guards the determinism contract of the
+# bwd dw/db path (per-program [NS, D] partials + host-side sum, no atomics).
+BITWISE_CASES = [
+    (2, 4, 256, 256, "silu", torch.float16),
+    (2, 4, 256, 256, "sigmoid", torch.bfloat16),
+]
+
+
+@pytest.mark.api("modules.FusedRMSNormGated", ops=["rms_norm_gated"])
+@pytest.mark.parametrize(
+    "B,H,T,D,activation,dtype",
+    BITWISE_CASES,
+    ids=[f"B{t[0]}_H{t[1]}_T{t[2]}_D{t[3]}_{t[4]}_{t[5]}" for t in BITWISE_CASES],
+)
+@pytest.mark.bitwise
+def test_fused_rms_norm_gated_bitwise(accuracy_backend, B, H, T, D, activation, dtype):
+    implementation, _, device = accuracy_backend
+    module = modules.FusedRMSNormGated(
+        D,
+        elementwise_affine=True,
+        activation=activation,
+        device=device,
+        dtype=dtype,
+        implementation=implementation,
+    )
+    with torch.no_grad():
+        module.weight.normal_()
+    x = torch.randn((B, H, T, D), device=device, dtype=dtype, requires_grad=True)
+    g = torch.randn((B, H, T, D), device=device, dtype=dtype, requires_grad=True)
+    assert_repeatable(module, (x, g), parameters=tuple(module.parameters()))
+
+
+@pytest.mark.api("functions.rms_norm_gated", ops=["rms_norm_gated"])
+@pytest.mark.bitwise
+def test_rms_norm_gated_bias_residual_bitwise(accuracy_backend):
+    # The module does not expose bias/residual; cover both through the public API.
+    implementation, _, device = accuracy_backend
+    T, D, dtype = 128, 256, torch.bfloat16
+    x = torch.randn((T, D), device=device, dtype=dtype, requires_grad=True)
+    g = torch.randn((T, D), device=device, dtype=dtype, requires_grad=True)
+    weight = torch.randn(D, device=device, dtype=dtype, requires_grad=True)
+    bias = torch.randn(D, device=device, dtype=dtype, requires_grad=True)
+    residual = torch.randn((T, D), device=device, dtype=dtype, requires_grad=True)
+    run = partial(
+        functions.rms_norm_gated,
+        activation="silu",
+        residual=residual,
+        implementation=implementation,
+    )
+    assert_repeatable(run, (x, g, weight, bias))
