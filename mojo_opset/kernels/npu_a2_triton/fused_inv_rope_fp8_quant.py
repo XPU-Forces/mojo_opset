@@ -102,9 +102,11 @@ def _fused_inv_rope_fp8_quant_impl(
             "(no DT_FLOAT8_* cast); call with quantize=False on this arch"
         )
     if o.dtype == torch.float8_e4m3fn:
-        # noquant 路 out_buf dtype = o.dtype = fp8，store 前的 f32->fp8 cast
-        # 会让 bishengir-compile SIGABRT（2026-11-19 A2 泛化实测，386 例确定性）；
-        # 与 quantize=True 同源（无 FP8 硬件 cast），显式 fail-fast 代替编译器崩溃
+        # The no-quantize path stores in o.dtype = fp8, and the f32->fp8 cast
+        # before the store aborts bishengir-compile (deterministic SIGABRT,
+        # observed on 386 generalized cases on 2026-11-19); same root cause as
+        # the quantize guard (no FP8 hardware cast), so fail fast here instead
+        # of letting the compiler crash.
         raise NotImplementedError(
             "fused_inv_rope_fp8_quant: 910B (A2/DAV_2201) has no FP8 support "
             "(no DT_FLOAT8_* cast); fp8 o input needs an f32->fp8 store cast, "

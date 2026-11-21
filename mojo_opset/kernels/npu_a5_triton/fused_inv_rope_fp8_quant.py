@@ -203,8 +203,17 @@ def _fused_inv_rope_fp8_quant_tile(
     N_HCHUNKS: tl.constexpr,
     MASK_T: tl.constexpr,
 ):
-    pid_t = tl.program_id(0)
-    pid_hc = tl.program_id(1)
+    # Same int64 stride casts as the native kernel: a 32-bit pid * stride can
+    # wrap past 2^31 on large prefill batches and fault.
+    pid_t = tl.program_id(0).to(tl.int64)
+    pid_hc = tl.program_id(1).to(tl.int64)
+    o_stride_token = o_stride_token.to(tl.int64)
+    o_stride_head = o_stride_head.to(tl.int64)
+    cache_stride_pos = cache_stride_pos.to(tl.int64)
+    out_stride_group = out_stride_group.to(tl.int64)
+    out_stride_token = out_stride_token.to(tl.int64)
+    scale_stride_group = scale_stride_group.to(tl.int64)
+    scale_stride_k = scale_stride_k.to(tl.int64)
     g = pid_hc // N_HCHUNKS
     hc = pid_hc % N_HCHUNKS
 
