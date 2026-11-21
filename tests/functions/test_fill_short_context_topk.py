@@ -31,7 +31,7 @@ TINY_ROWS = [(1, 2048, 4), (2, 2048, 4), (5, 2048, 4)]
 PARAM_GRID = [(k, cr) for k in (2048, 1024) for cr in (1, 2, 4, 16, 32, 64, 128)]
 
 
-def _positions(num_tokens, top_k, compress_ratio, device, seed=0):
+def _positions(num_tokens, top_k, compress_ratio, device, seed=0, dtype=torch.int64):
     """Random positions with the boundary rows the kernel must get right."""
     torch.manual_seed(seed)
     max_position = top_k * compress_ratio - 1
@@ -42,11 +42,11 @@ def _positions(num_tokens, top_k, compress_ratio, device, seed=0):
         positions[2] = 4 * compress_ratio - 1  # exact divide boundary
         positions[3] = max_position  # exactly top_k candidates, no -1
         positions[4] = max_position - compress_ratio + 1  # top_k - 1 candidates
-    return positions
+    return positions.to(dtype)
 
 
-def _run(implementation, num_tokens, top_k, compress_ratio, device, seed=0):
-    positions = _positions(num_tokens, top_k, compress_ratio, device, seed)
+def _run(implementation, num_tokens, top_k, compress_ratio, device, seed=0, positions_dtype=torch.int64):
+    positions = _positions(num_tokens, top_k, compress_ratio, device, seed, dtype=positions_dtype)
     actual = torch.empty(num_tokens, top_k, dtype=torch.int32, device=device)
     expected = torch.empty_like(actual)
     F.fill_short_context_topk(actual, positions, top_k, compress_ratio, implementation=implementation)
@@ -59,10 +59,11 @@ def _run(implementation, num_tokens, top_k, compress_ratio, device, seed=0):
 
 @pytest.mark.api("functions.fill_short_context_topk")
 @pytest.mark.accuracy
+@pytest.mark.parametrize("positions_dtype", [torch.int64, torch.int32], ids=["int64", "int32"])
 @pytest.mark.parametrize("num_tokens,top_k,compress_ratio", SHAPES + TINY_ROWS)
-def test_fill_short_context_topk_shapes(accuracy_backend, num_tokens, top_k, compress_ratio):
+def test_fill_short_context_topk_shapes(accuracy_backend, num_tokens, top_k, compress_ratio, positions_dtype):
     implementation, _, device = accuracy_backend
-    _run(implementation, num_tokens, top_k, compress_ratio, device)
+    _run(implementation, num_tokens, top_k, compress_ratio, device, positions_dtype=positions_dtype)
 
 
 @pytest.mark.api("functions.fill_short_context_topk")
@@ -100,11 +101,12 @@ def test_fill_short_context_topk_empty_batch(accuracy_backend):
 
 @pytest.mark.api("functions.fill_short_context_topk")
 @pytest.mark.accuracy
-def test_fill_short_context_topk_boundary_rows(accuracy_backend):
+@pytest.mark.parametrize("positions_dtype", [torch.int64, torch.int32], ids=["int64", "int32"])
+def test_fill_short_context_topk_boundary_rows(accuracy_backend, positions_dtype):
     """Whole-row -1, single candidate, exactly-full and one-short rows."""
     implementation, _, device = accuracy_backend
     top_k, compress_ratio = 2048, 4
-    positions = _positions(5, top_k, compress_ratio, device)
+    positions = _positions(5, top_k, compress_ratio, device, dtype=positions_dtype)
     out = F.fill_short_context_topk(
         torch.empty(5, top_k, dtype=torch.int32, device=device),
         positions,
