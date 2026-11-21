@@ -353,11 +353,11 @@ def test_fp32_native_bounds(accuracy_backend, width, k):
     implementation, _, device = accuracy_backend
     if implementation == "torch":
         pytest.skip("native host bounds")
-    from mojo_opset_lib.npu_a5 import _native
+    from mojo_opset.kernels.npu_a5_native.topk import _launcher
 
     x = torch.empty(3, width, dtype=torch.float32, device=device)
     with pytest.raises(RuntimeError):
-        _native.topk_forward(x, k, None, False, None, None, 2147483647, -float("inf"), True, True)
+        _launcher()(x, k, None, False, None, None, 2147483647, -float("inf"), True, True)
 
 
 @pytest.fixture

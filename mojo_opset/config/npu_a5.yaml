@@ -1,4 +1,7 @@
 npu.a5:
+  gemm: native
+  mxfp8_dequant_gemm: native
+  mxfp4_gemm: native
   apply_penalties_temperature: triton
   causal_conv1d: triton
   causal_conv1d_update_state_infer: triton

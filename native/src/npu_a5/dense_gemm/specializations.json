@@ -1,0 +1,414 @@
+[
+  {
+    "key": 40,
+    "base_tag": "54b090ff9bb98402",
+    "overrides": {
+      "shape_n": 4096,
+      "shape_k": 4096,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 40,
+    "base_tag": "332546c639c37617",
+    "overrides": {
+      "shape_n": 512,
+      "shape_k": 1024,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 40,
+    "base_tag": "6df5abf5fe5ca399",
+    "overrides": {
+      "shape_n": 1024,
+      "shape_k": 1024,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 40,
+    "base_tag": "37dc5c732b74519e",
+    "overrides": {
+      "shape_n": 1024,
+      "shape_k": 1024,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 40,
+    "base_tag": "332546c639c37617",
+    "overrides": {
+      "shape_n": 2048,
+      "shape_k": 2048,
+      "num_cores": 28,
+      "single_m_block": true
+    }
+  },
+  {
+    "key": 40,
+    "base_tag": "332546c639c37617",
+    "overrides": {
+      "shape_n": 1024,
+      "shape_k": 4096,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 80,
+    "base_tag": "f43964ffbacff3e0",
+    "overrides": {
+      "shape_n": 4096,
+      "shape_k": 4096,
+      "num_cores": 28,
+      "single_m_block": true
+    }
+  },
+  {
+    "key": 80,
+    "base_tag": "188bd171f0c5d67e",
+    "overrides": {
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 80,
+    "base_tag": "188bd171f0c5d67e",
+    "overrides": {
+      "shape_n": 2048,
+      "shape_k": 2048,
+      "num_cores": 28,
+      "single_m_block": true
+    }
+  },
+  {
+    "key": 120,
+    "base_tag": "e6ba6caebe79e36c",
+    "overrides": {
+      "shape_n": 4096,
+      "shape_k": 4096,
+      "num_cores": 28,
+      "single_m_block": true
+    }
+  },
+  {
+    "key": 120,
+    "base_tag": "697714eb221a7552",
+    "overrides": {
+      "shape_n": 512,
+      "shape_k": 1024,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 120,
+    "base_tag": "2d57b17474a475b3",
+    "overrides": {
+      "sf_k_blocks": 1,
+      "shape_n": 1024,
+      "shape_k": 1024,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 120,
+    "base_tag": "19644571b7699c89",
+    "overrides": {
+      "shape_n": 1024,
+      "shape_k": 1024,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 120,
+    "base_tag": "e52aa588b22fae67",
+    "overrides": {
+      "shape_n": 2048,
+      "shape_k": 2048,
+      "num_cores": 28,
+      "single_m_block": true
+    }
+  },
+  {
+    "key": 120,
+    "base_tag": "e52aa588b22fae67",
+    "overrides": {
+      "shape_n": 1024,
+      "shape_k": 4096,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 120,
+    "base_tag": "16bd25e0d193ed60",
+    "overrides": {
+      "shape_n": 2048,
+      "shape_k": 1024,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 120,
+    "base_tag": "c01543c6b6e27a39",
+    "overrides": {
+      "shape_n": 1024,
+      "shape_k": 1024,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 120,
+    "base_tag": "881fa363634f84b3",
+    "overrides": {
+      "shape_n": 258,
+      "shape_k": 510,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 120,
+    "base_tag": "aa32e53e2d72c90c",
+    "overrides": {
+      "shape_n": 258,
+      "shape_k": 510,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 5,
+    "base_tag": "179d77f14af62309",
+    "overrides": {
+      "shape_n": 256,
+      "shape_k": 512,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 30,
+    "base_tag": "6e777602be3fc874",
+    "overrides": {
+      "shape_n": 256,
+      "shape_k": 512
+    }
+  },
+  {
+    "key": 50,
+    "base_tag": "37dc5c732b74519e",
+    "overrides": {
+      "shape_n": 256,
+      "shape_k": 512,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 55,
+    "base_tag": "37dc5c732b74519e",
+    "overrides": {
+      "shape_n": 256,
+      "shape_k": 512,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 40,
+    "base_tag": "37dc5c732b74519e",
+    "overrides": {
+      "shape_n": 256,
+      "shape_k": 512,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 45,
+    "base_tag": "cc7ac4158ff87f2b",
+    "overrides": {
+      "shape_n": 256,
+      "shape_k": 512,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 70,
+    "base_tag": "59a3ad1f9ffa7167",
+    "overrides": {
+      "shape_n": 256,
+      "shape_k": 512,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 75,
+    "base_tag": "cc7ac4158ff87f2b",
+    "overrides": {
+      "shape_n": 256,
+      "shape_k": 512,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 60,
+    "base_tag": "37dc5c732b74519e",
+    "overrides": {
+      "shape_n": 256,
+      "shape_k": 512,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 65,
+    "base_tag": "37dc5c732b74519e",
+    "overrides": {
+      "shape_n": 256,
+      "shape_k": 512,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 80,
+    "base_tag": "d0244e1febfbdd3b",
+    "overrides": {
+      "shape_n": 256,
+      "shape_k": 512,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 110,
+    "base_tag": "a4e5d33182ddd7ce",
+    "overrides": {
+      "shape_n": 256,
+      "shape_k": 512
+    }
+  },
+  {
+    "key": 115,
+    "base_tag": "a4e5d33182ddd7ce",
+    "overrides": {
+      "shape_n": 256,
+      "shape_k": 512
+    }
+  },
+  {
+    "key": 100,
+    "base_tag": "d0244e1febfbdd3b",
+    "overrides": {
+      "shape_n": 256,
+      "shape_k": 512,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 105,
+    "base_tag": "d0244e1febfbdd3b",
+    "overrides": {
+      "shape_n": 256,
+      "shape_k": 512,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 120,
+    "base_tag": "19644571b7699c89",
+    "overrides": {
+      "shape_n": 256,
+      "shape_k": 512,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 125,
+    "base_tag": "19644571b7699c89",
+    "overrides": {
+      "shape_n": 256,
+      "shape_k": 512,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 0,
+    "base_tag": "6b716878eb06be2a",
+    "overrides": {
+      "shape_n": 4096,
+      "shape_k": 512,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 0,
+    "base_tag": "6b716878eb06be2a",
+    "overrides": {
+      "shape_k": 1024,
+      "resident_a": true
+    }
+  },
+  {
+    "key": 40,
+    "base_tag": "ca5f034ec68a5a70",
+    "overrides": {
+      "shape_n": 4096,
+      "shape_k": 512,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 40,
+    "base_tag": "ca5f034ec68a5a70",
+    "overrides": {
+      "shape_n": 32,
+      "shape_k": 128,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 40,
+    "base_tag": "ca5f034ec68a5a70",
+    "overrides": {
+      "shape_n": 64,
+      "shape_k": 256,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 80,
+    "base_tag": "ca5f034ec68a5a70",
+    "overrides": {
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 80,
+    "base_tag": "ca5f034ec68a5a70",
+    "overrides": {
+      "shape_n": 64,
+      "shape_k": 256,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 120,
+    "base_tag": "d31c3d69b0e2dd77",
+    "overrides": {
+      "shape_n": 4096,
+      "shape_k": 512,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 120,
+    "base_tag": "d31c3d69b0e2dd77",
+    "overrides": {
+      "shape_n": 32,
+      "shape_k": 128,
+      "num_cores": 28
+    }
+  },
+  {
+    "key": 120,
+    "base_tag": "d31c3d69b0e2dd77",
+    "overrides": {
+      "shape_n": 64,
+      "shape_k": 256,
+      "num_cores": 28
+    }
+  }
+]

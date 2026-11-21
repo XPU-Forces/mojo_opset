@@ -1,3 +1,5 @@
+import os
+
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,15 @@ def deterministic_algorithms():
         yield
     finally:
         torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
+
+
+def pytest_configure(config):
+    if int(os.getenv("WORLD_SIZE", "1")) > 1:
+        rank = os.environ["LOCAL_RANK"]
+        for option in ("xmlpath", "perf_output"):
+            if value := getattr(config.option, option, None):
+                path = Path(value)
+                setattr(config.option, option, str(path.with_name(f"{path.stem}-rank{rank}{path.suffix}")))
 
 
 def pytest_addoption(parser):
@@ -40,7 +51,7 @@ def pytest_addoption(parser):
         "--perf-output", default="tests/performance/results/current.json", help="Machine-readable performance report."
     )
     perf.addoption("--perf-timers", default="profiler,e2e", help="Comma-separated profiler,event,e2e.")
-    perf.addoption("--perf-instances", type=int, default=2, help="Independent input instances for rotate policy.")
+    perf.addoption("--perf-instances", type=int, default=2, help="Independent input instances for Event and E2E rotation.")
     perf.addoption("--perf-warmup", type=int, default=10)
     perf.addoption("--perf-repeats", type=int, default=20)
     perf.addoption("--perf-device", type=int, default=0)
@@ -76,6 +87,10 @@ def pytest_collection_modifyitems(config, items):
 @pytest.fixture(scope="session")
 def accuracy_backend(pytestconfig):
     explicit_target = pytestconfig.getoption("--mojo-target")
+    if int(os.getenv("WORLD_SIZE", "1")) > 1 and explicit_target and explicit_target.startswith("npu."):
+        import torch_npu  # noqa: F401
+
+        torch.npu.set_device(int(os.environ["LOCAL_RANK"]))
     detected = detect_target(explicit_target)
     target = detected.key
 
@@ -100,3 +115,97 @@ def accuracy_backend(pytestconfig):
 
     implementation = pytestconfig.getoption("--mojo-implementation")
     return implementation, target, device
+
+
+@pytest.fixture(scope="session")
+def ep_group(accuracy_backend):
+    implementation, target, _ = accuracy_backend
+    if not target.startswith("npu.a5") or implementation not in (None, "native"):
+        pytest.skip("EP tests require A5 native")
+    from mojo_opset import Target
+    from mojo_opset.functions._dispatch import resolve_implementation
+
+    if (implementation or resolve_implementation("moe_dispatch", Target.parse(target))) != "native":
+        pytest.skip("EP tests require the selected native provider")
+    if int(os.getenv("WORLD_SIZE", "1")) not in (2, 4):
+        pytest.skip("launch EP tests with torchrun --nproc_per_node=2 or 4")
+    import torch.distributed as dist
+    import torch_npu  # noqa: F401
+
+    torch.npu.set_device(int(os.environ["LOCAL_RANK"]))
+    dist.init_process_group("gloo")
+    yield dist.group.WORLD
+    dist.destroy_process_group()
+
+
+@pytest.fixture(scope="session")
+def _ep_context_cache():
+    cache = [None, None]
+    try:
+        yield cache
+    finally:
+        if cache[1] is not None:
+            cache[1].close()
+            cache[:] = [None, None]
+
+
+@pytest.fixture(scope="module")
+def ep_context(ep_group, _ep_context_cache, request):
+    from mojo_opset.comm import EPContext
+
+    hidden, experts, topk, capacity = getattr(request, "param", (128, 16, 2, 33))
+    layer = int(os.getenv("MOJO_EP_TEST_LAYER", "0"))
+    key = (layer, hidden, experts, topk, capacity)
+    if _ep_context_cache[0] != key or _ep_context_cache[1] is None:
+        if _ep_context_cache[1] is not None:
+            _ep_context_cache[1].close()
+            _ep_context_cache[:] = [None, None]
+        _ep_context_cache[1] = EPContext.create(
+            ep_group, layer=layer, hidden=hidden, num_experts=experts, num_topk=topk, capacity=capacity
+        )
+        _ep_context_cache[0] = key
+    return _ep_context_cache[1]
+
+
+@pytest.fixture
+def ep_inputs(ep_context):
+    hidden, experts, topk, _ = ep_context.moe_config
+    rank = ep_context.group.rank()
+
+    def make(tokens, case="uniform"):
+        rng = torch.Generator(device="cpu").manual_seed(2468 + rank)
+        x = (torch.randn(tokens, hidden, generator=rng) / 8).bfloat16()
+        x[:, 0] = rank
+        x[:, 1] = torch.arange(tokens) % 128
+        x[:, 2] = torch.arange(tokens) // 128
+        routes = torch.rand(tokens, experts, generator=rng).topk(topk, dim=1).indices
+        if case == "hotspot":
+            routes[:] = torch.arange(topk)
+        elif case in ("local", "remote"):
+            owner = (rank + (case == "remote")) % ep_context.num_ranks
+            routes[:] = owner * (experts // ep_context.num_ranks) + torch.arange(topk)
+        elif case == "masked":
+            routes[:, 1::2] = -1
+        elif case == "all_masked":
+            routes.fill_(-1)
+        return x, routes, torch.rand(tokens, topk, generator=rng)
+
+    return make
+
+
+@pytest.fixture
+def ep_check(ep_group):
+    import torch.distributed as dist
+
+    def check(assertion):
+        # Propagate assertion failures before any rank enters the next collective.
+        error = None
+        try:
+            assertion()
+        except AssertionError as exc:
+            error = str(exc)
+        errors = [None] * ep_group.size()
+        dist.all_gather_object(errors, error, group=ep_group)
+        assert not any(errors), errors
+
+    return check

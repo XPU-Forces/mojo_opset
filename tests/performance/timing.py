@@ -106,6 +106,8 @@ def measure(
     repeats=20,
     timers=("profiler", "e2e"),
     batch=1,
+    make_flush_buffer=None,
+    barrier=None,
     reduction="span",
     selectors=(),
     match="contains",
@@ -124,7 +126,11 @@ def measure(
         for selector in selectors:
             re.compile(selector)
     functions = list(fn) if isinstance(fn, (list, tuple)) else []
-    if len(functions) < 2 or not all(callable(function) for function in functions):
+    if set(timers) == {"profiler"}:
+        functions = functions[:1]
+        if not functions or not callable(functions[0]):
+            raise ValueError("Requested timers require at least 1 callable workload(s)")
+    elif len(functions) < 2 or not all(callable(function) for function in functions):
         raise ValueError("rotate requires at least two independent callables")
     cursor = 0
 
@@ -174,14 +180,19 @@ def measure(
         metrics["event_us"] = summarize(event_samples)
 
     def profile_samples():
-        # Warm every rotated instance after profiler initialization, outside samples.
-        for _ in range(max(warmup, len(functions))):
-            invoke()
+        profile_fn = functions[0]
+        flush_buffer = make_flush_buffer() if make_flush_buffer is not None else None
+        for _ in range(warmup):
+            profile_fn()
         synchronize()
         for index in range(repeats):
+            if flush_buffer is not None:
+                flush_buffer.fill_(index + 1)
             synchronize()
+            if barrier is not None:
+                barrier()
             with torch.autograd.profiler.record_function(f"{SAMPLE_PREFIX}{index}"):
-                result = invoke()
+                result = profile_fn()
                 synchronize()
             del result
 

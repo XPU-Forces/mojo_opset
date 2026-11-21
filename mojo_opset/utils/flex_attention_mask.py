@@ -1,4 +1,4 @@
-"""Torch-only packed BlockMask construction with bounded temporary memory."""
+"""Packed BlockMask construction with bounded temporary memory."""
 
 import torch
 import torch.nn.functional as _F
@@ -83,6 +83,16 @@ def _classify_stripe_blocks(stripe_mask, Q_BLOCK_SIZE, KV_BLOCK_SIZE):
         flags: int8 tensor ``[stripe_q_nb, KV_num_blocks]`` where
             0 = empty, 1 = partial, 2 = full.
     """
+    if stripe_mask.device.type == "npu":
+        from mojo_opset.utils.target import detect_target
+
+        if detect_target().arch_key == "npu.a5":
+            from mojo_opset import functions as _functions
+
+            classify_mask_blocks = getattr(_functions, "classify_mask_blocks", None)
+            if classify_mask_blocks is not None:
+                return classify_mask_blocks(stripe_mask, Q_BLOCK_SIZE, KV_BLOCK_SIZE)
+
     stripe_q_nb = stripe_mask.shape[2] // Q_BLOCK_SIZE
     kv_num_blocks = stripe_mask.shape[3] // KV_BLOCK_SIZE
     partial_dense, full_dense = _convert_mask_to_block_mask(
