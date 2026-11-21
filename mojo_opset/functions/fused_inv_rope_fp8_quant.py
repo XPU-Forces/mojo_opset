@@ -24,10 +24,11 @@ def fused_inv_rope_fp8_quant(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply the inverse RoPE to the last ``rope_dim`` dims, then quantise per block.
 
-    ``o`` is ``[tokens, n_groups * heads_per_group, nope_dim + rope_dim]`` contiguous;
-    ``positions`` is int64 ``[tokens]``; ``cos_sin_cache`` is FP32 ``[max_pos, rope_dim]``
-    holding ``cos | sin`` halves. Rotation uses GPT-J pairings (``offset ^ 1``) with
-    positive signs (inverse of the forward rotation).
+    ``o`` is ``[tokens, n_groups * heads_per_group, nope_dim + rope_dim]`` contiguous,
+    bfloat16/float16, or float8_e4m3fn (no-quantize entry only, accelerator with
+    FP8 storage); ``positions`` is int32/int64 ``[tokens]``; ``cos_sin_cache`` is FP32
+    ``[max_pos, rope_dim]`` holding ``cos | sin`` halves. Rotation uses GPT-J pairings
+    (``offset ^ 1``) with positive signs (inverse of the forward rotation).
 
     Quantisation uses one 2-power scale per ``quant_group_size`` block:
     ``scale = 2 ** ceil(log2(max(absmax, 1e-10) / fp8_max))`` and
@@ -44,6 +45,8 @@ def fused_inv_rope_fp8_quant(
     """
     if o.ndim != 3 or not o.is_contiguous():
         raise ValueError("o must be a contiguous [tokens, heads, head_dim] tensor")
+    if o.dtype not in (torch.bfloat16, torch.float16, torch.float8_e4m3fn):
+        raise ValueError("o must be a bfloat16/float16/float8_e4m3fn tensor")
     if positions.ndim != 1 or positions.numel() != o.shape[0] or positions.dtype not in (
         torch.int32,
         torch.int64,
