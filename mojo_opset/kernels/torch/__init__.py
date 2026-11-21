@@ -51,6 +51,7 @@ OPS = {
     "causal_conv1d_update_state_infer": "convolution",
     "layer_norm_infer": "normalization",
     "rms_norm_infer": "normalization",
+    "indexed_rms_norm_scale_shift_infer": "normalization",
     "group_rms_norm_infer": "normalization",
     "residual_add_layer_norm_infer": "normalization",
     "residual_add_rms_norm_infer": "normalization",

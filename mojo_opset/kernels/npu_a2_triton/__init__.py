@@ -39,6 +39,7 @@ OPS = {
     "causal_conv1d_update_state_infer": "convolution",
     "layer_norm_infer": "layernorm",
     "rms_norm_infer": "rmsnorm",
+    "indexed_rms_norm_scale_shift_infer": "indexed_rms_norm_scale_shift",
     "group_rms_norm_infer": "group_rmsnorm",
     "residual_add_layer_norm_infer": "fused_add_layernorm",
     "residual_add_rms_norm_infer": "fused_add_rmsnorm",

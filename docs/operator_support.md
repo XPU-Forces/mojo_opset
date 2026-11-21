@@ -22,6 +22,7 @@ supported shapes, dtypes and options.
 | `gemm`, `mxfp8_dequant_gemm`, `mxfp4_gemm` | — | native |
 | `group_gemm` | triton, torch_npu, native | triton, torch_npu |
 | `group_rms_norm_infer` | triton, torch_npu | triton, torch_npu |
+| `indexed_rms_norm_scale_shift_infer` | triton | triton |
 | `indexer` | triton components | triton components |
 | `join_prob_reject_sampling` | triton | triton |
 | `layer_norm_infer` | triton | triton |

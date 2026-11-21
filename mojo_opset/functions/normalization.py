@@ -1,5 +1,7 @@
 """Forward-only normalization APIs migrated from the original operator layer."""
 
+import math
+
 from typing import Optional
 
 import torch
@@ -76,6 +78,57 @@ def group_rms_norm_infer(
         _validate_norm(x, None if weight is None else weight[index], None, eps, "group_rms_norm_infer")
     forward, _ = load_impl("group_rms_norm_infer", implementation)
     return forward(list(input_groups), weight, float(eps))
+
+
+def indexed_rms_norm_scale_shift_infer(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    shift: torch.Tensor,
+    scale: torch.Tensor,
+    indices: torch.Tensor,
+    eps: float = 1e-5,
+    *,
+    implementation: Optional[str] = None,
+) -> torch.Tensor:
+    """Apply RMSNorm and a per-row indexed affine transform in FP32.
+
+    BF16 inputs are x [rows, hidden], weight [hidden], and shift/scale
+    [conditions, hidden]. All inputs share a device. The transform is
+    rms_norm(x) * weight * (1 + scale[indices]) + shift[indices],
+    rounded to BF16 only at the output. The output is contiguous.
+    Hidden must be a positive multiple of 16 up to 16384, and conditions
+    must be between 1 and 64. Tensor offsets must fit signed int32.
+
+    Indices are int64 [rows] with values in [0, conditions), a caller
+    precondition. Row strides, index strides and shared condition-table
+    storage are supported. A5 requires unit feature stride. Empty rows are
+    supported. This API is forward-only.
+    """
+    if x.ndim != 2 or not 16 <= x.shape[1] <= 16384 or x.shape[1] % 16:
+        raise ValueError("x must be [rows, hidden] with hidden a multiple of 16 in [16, 16384]")
+    rows, hidden = x.shape
+    if weight.shape != (hidden,):
+        raise ValueError("weight must have shape [hidden]")
+    if shift.ndim != 2 or shift.shape[1] != hidden or not 1 <= shift.shape[0] <= 64 or scale.shape != shift.shape:
+        raise ValueError("shift and scale must share shape [conditions, hidden] with 1 <= conditions <= 64")
+    tensors = (x, weight, shift, scale)
+    if any(tensor.dtype != torch.bfloat16 for tensor in tensors):
+        raise ValueError("x, weight, shift and scale must be BF16")
+    if indices.shape != (rows,) or indices.dtype != torch.int64:
+        raise ValueError("indices must be int64 [rows]")
+    if any(tensor.device != x.device for tensor in (*tensors, indices)):
+        raise ValueError("all inputs must share a device")
+    if rows * hidden >= 2**31 or any(
+        sum((size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride())) >= 2**31
+        for tensor in (*tensors, indices)
+    ):
+        raise ValueError("tensor offsets must fit signed int32")
+    eps = float(eps)
+    if not math.isfinite(eps) or eps <= 0:
+        raise ValueError("eps must be finite and positive")
+    _require_inference("indexed_rms_norm_scale_shift_infer", *tensors)
+    forward, _ = load_impl("indexed_rms_norm_scale_shift_infer", implementation)
+    return forward(x, weight, shift, scale, indices, eps)
 
 
 def _validate_residual(x, residual, norm_pos):
