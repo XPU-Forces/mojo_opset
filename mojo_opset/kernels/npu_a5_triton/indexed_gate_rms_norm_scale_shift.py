@@ -9,6 +9,7 @@ vllm_omni/diffusion/layers/indexed_modulation.py.
 import torch
 import triton
 import triton.language as tl
+import triton.language.extra.cann.extension as al
 
 from triton.runtime import driver
 
@@ -28,6 +29,9 @@ def _indexed_gate_rms_shift_kernel(
     scale_ptr,
     indices_ptr,
     rows,
+    GATE_ROW_STRIDE: tl.constexpr,
+    SHIFT_ROW_STRIDE: tl.constexpr,
+    SCALE_ROW_STRIDE: tl.constexpr,
     HIDDEN: tl.constexpr,
     EPS: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -35,6 +39,7 @@ def _indexed_gate_rms_shift_kernel(
     ROWS_PER_ITER: tl.constexpr,
     EXACT: tl.constexpr,
     KEEP_I64: tl.constexpr,
+    TWO_STATS_TAIL: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int32)
     offs = tl.arange(0, BLOCK_N).to(tl.int32)
@@ -51,15 +56,15 @@ def _indexed_gate_rms_shift_kernel(
                 index = index.to(tl.int32)
             base = rows_v[:, None] * HIDDEN + offs[None, :]
             residual = tl.load(residual_ptr + base).to(tl.float32)
-            gate = tl.load(gate_ptr + index[:, None] * HIDDEN + offs[None, :]).to(tl.float32)
+            gate = tl.load(gate_ptr + index[:, None] * GATE_ROW_STRIDE + offs[None, :]).to(tl.float32)
             branch = tl.load(branch_ptr + base).to(tl.float32)
             updated_bf = (residual + gate * branch).to(tl.bfloat16)
             tl.store(residual_out_ptr + base, updated_bf)
             updated = updated_bf.to(tl.float32)
             variance = tl.sum(updated * updated, axis=1) / HIDDEN
             normalized = updated * tl.rsqrt(variance[:, None] + EPS) * weight[None, :]
-            shift = tl.load(shift_ptr + index[:, None] * HIDDEN + offs[None, :]).to(tl.float32)
-            scale = tl.load(scale_ptr + index[:, None] * HIDDEN + offs[None, :]).to(tl.float32)
+            shift = tl.load(shift_ptr + index[:, None] * SHIFT_ROW_STRIDE + offs[None, :]).to(tl.float32)
+            scale = tl.load(scale_ptr + index[:, None] * SCALE_ROW_STRIDE + offs[None, :]).to(tl.float32)
             output = normalized * (1.0 + scale) + shift
             tl.store(modulated_out_ptr + base, output.to(tl.bfloat16))
         # ---- row remainder ----
@@ -70,14 +75,23 @@ def _indexed_gate_rms_shift_kernel(
                 index = index.to(tl.int32)
             base = row_i * HIDDEN
             residual = tl.load(residual_ptr + base + offs).to(tl.float32)
-            gate = tl.load(gate_ptr + index * HIDDEN + offs).to(tl.float32)
+            gate = tl.load(gate_ptr + index * GATE_ROW_STRIDE + offs).to(tl.float32)
             branch = tl.load(branch_ptr + base + offs).to(tl.float32)
             updated = (residual + gate * branch).to(tl.bfloat16).to(tl.float32)
             tl.store(residual_out_ptr + base + offs, updated.to(tl.bfloat16))
-            variance = tl.sum(updated * updated, axis=0) / HIDDEN
-            normalized = updated * tl.rsqrt(variance + EPS) * weight
-            shift = tl.load(shift_ptr + index * HIDDEN + offs).to(tl.float32)
-            scale = tl.load(scale_ptr + index * HIDDEN + offs).to(tl.float32)
+            if TWO_STATS_TAIL:
+                halves = tl.reshape(updated, [2, BLOCK_N // 2])
+                partials = tl.sum(halves * halves, axis=1)
+                totals = partials + tl.gather(partials, 1 - tl.arange(0, 2), 0)
+                variance2 = totals / HIDDEN
+                normalized = tl.reshape(
+                    halves * tl.rsqrt(variance2[:, None] + EPS) * tl.reshape(weight, [2, BLOCK_N // 2]), [BLOCK_N]
+                )
+            else:
+                variance = tl.sum(updated * updated, axis=0) / HIDDEN
+                normalized = updated * tl.rsqrt(variance + EPS) * weight
+            shift = tl.load(shift_ptr + index * SHIFT_ROW_STRIDE + offs).to(tl.float32)
+            scale = tl.load(scale_ptr + index * SCALE_ROW_STRIDE + offs).to(tl.float32)
             output = normalized * (1.0 + scale) + shift
             tl.store(modulated_out_ptr + base + offs, output.to(tl.bfloat16))
     else:
@@ -90,7 +104,7 @@ def _indexed_gate_rms_shift_kernel(
                 index = index.to(tl.int32)
             base = row_i * HIDDEN
             residual = tl.load(residual_ptr + base + offs, mask=mask, other=0.0).to(tl.float32)
-            gate = tl.load(gate_ptr + index * HIDDEN + offs, mask=mask, other=0.0).to(tl.float32)
+            gate = tl.load(gate_ptr + index * GATE_ROW_STRIDE + offs, mask=mask, other=0.0).to(tl.float32)
             branch = tl.load(branch_ptr + base + offs, mask=mask, other=0.0).to(tl.float32)
             updated_bf = (residual + gate * branch).to(tl.bfloat16)
             tl.store(residual_out_ptr + base + offs, updated_bf, mask=mask)
@@ -99,8 +113,8 @@ def _indexed_gate_rms_shift_kernel(
             # other=0.0 保证越界 lane 的 updated 必为 0，无需额外 tl.where
             variance = tl.sum(updated * updated, axis=0) / HIDDEN
             normalized = updated * tl.rsqrt(variance + EPS) * weight
-            shift = tl.load(shift_ptr + index * HIDDEN + offs, mask=mask, other=0.0).to(tl.float32)
-            scale = tl.load(scale_ptr + index * HIDDEN + offs, mask=mask, other=0.0).to(tl.float32)
+            shift = tl.load(shift_ptr + index * SHIFT_ROW_STRIDE + offs, mask=mask, other=0.0).to(tl.float32)
+            scale = tl.load(scale_ptr + index * SCALE_ROW_STRIDE + offs, mask=mask, other=0.0).to(tl.float32)
             output = normalized * (1.0 + scale) + shift
             tl.store(modulated_out_ptr + base + offs, output.to(tl.bfloat16), mask=mask)
 
@@ -251,8 +265,14 @@ def _indexed_gate_rms_shift_row_kernel(
         weight = tl.load(weight_ptr + offs).to(tl.float32)
         updated_bf = (residual + gate * branch).to(tl.bfloat16)
         updated = updated_bf.to(tl.float32)
-        variance = tl.sum(updated * updated, axis=0) / HIDDEN
-        normalized = updated * tl.rsqrt(variance + EPS) * weight
+        halves = tl.reshape(updated, [2, BLOCK_N // 2])
+        partials = tl.sum(halves * halves, axis=1)
+        reverse = 1 - tl.arange(0, 2)
+        totals = partials + tl.gather(partials, reverse, 0)
+        variance = totals / HIDDEN
+        normalized = tl.reshape(
+            halves * tl.rsqrt(variance[:, None] + EPS) * tl.reshape(weight, [2, BLOCK_N // 2]), [BLOCK_N]
+        )
         output = normalized * (1.0 + scale) + shift
         tl.store(residual_out_ptr + base + offs, updated_bf)
         tl.store(modulated_out_ptr + base + offs, output.to(tl.bfloat16))
@@ -272,8 +292,14 @@ def _indexed_gate_rms_shift_row_kernel(
         scale = tl.load(scale_ptr + gbase).to(tl.float32)
         updated_bf = (residual + gate * branch).to(tl.bfloat16)
         updated = updated_bf.to(tl.float32)
-        variance = tl.sum(updated * updated, axis=0) / HIDDEN
-        normalized = updated * tl.rsqrt(variance + EPS) * weight
+        halves = tl.reshape(updated, [2, BLOCK_N // 2])
+        partials = tl.sum(halves * halves, axis=1)
+        reverse = 1 - tl.arange(0, 2)
+        totals = partials + tl.gather(partials, reverse, 0)
+        variance = totals / HIDDEN
+        normalized = tl.reshape(
+            halves * tl.rsqrt(variance[:, None] + EPS) * tl.reshape(weight, [2, BLOCK_N // 2]), [BLOCK_N]
+        )
         output = normalized * (1.0 + scale) + shift
         tl.store(residual_out_ptr + base + offs, updated_bf)
         tl.store(modulated_out_ptr + base + offs, output.to(tl.bfloat16))
@@ -341,7 +367,7 @@ def _indexed_gate_rms_shift_two_tile_kernel(
 
 _TINY_HIDDEN = 32
 _TABLE_MAX_ELEMS = 4096
-_TABLE_ROWS = 128
+_TABLE_ROWS = 256
 
 
 @triton.jit
@@ -460,9 +486,16 @@ def _indexed_gate_rms_shift_native_wide_kernel(
         branch = tl.load(branch_ptr + base).to(tl.float32)
         updated_bf = (residual + gate * branch).to(tl.bfloat16)
         tl.store(residual_out_ptr + base, updated_bf)
-        updated = updated_bf.to(tl.float32)
-        variance = tl.sum(updated * updated, axis=0) / HIDDEN
-        normalized = updated * tl.rsqrt(variance + EPS) * weight
+        # Materialize neutral padding before the exact BF16->FP32 promotion.
+        PAD_H: tl.constexpr = HIDDEN + (HIDDEN % 2)
+        padded_bf = tl.full([PAD_H], 0, tl.bfloat16)
+        padded_bf = al.insert_slice(padded_bf, updated_bf, [0], [HIDDEN], [1])
+        halves = tl.reshape(padded_bf, [2, PAD_H // 2]).to(tl.float32)
+        partials = tl.sum(halves * halves, axis=1)
+        totals = partials + tl.gather(partials, 1 - tl.arange(0, 2), 0)
+        factors = tl.rsqrt(totals / HIDDEN + EPS)
+        normalized_pad = tl.reshape(halves * factors[:, None], [PAD_H])
+        normalized = al.extract_slice(normalized_pad, [0], [HIDDEN], [1]) * weight
         shift = tl.load(shift_ptr + gbase).to(tl.float32)
         scale = tl.load(scale_ptr + gbase).to(tl.float32)
         output = normalized * (1.0 + scale) + shift
@@ -471,11 +504,17 @@ def _indexed_gate_rms_shift_native_wide_kernel(
 
 def _forward(residual, gate, branch, weight, shift, scale, indices, eps):
     residual = residual.contiguous()
-    gate = gate.contiguous()
+    # Main fused path accepts any row stride; columns remain contiguous.
+    if gate.stride(-1) != 1:
+        gate = gate.contiguous()
     branch = branch.contiguous()
     weight = weight.contiguous()
-    shift = shift.contiguous()
-    scale = scale.contiguous()
+    # Main fused path accepts any row stride; columns remain contiguous.
+    if shift.stride(-1) != 1:
+        shift = shift.contiguous()
+    # Main fused path accepts any row stride; columns remain contiguous.
+    if scale.stride(-1) != 1:
+        scale = scale.contiguous()
     indices = indices.contiguous()
 
     rows, hidden = residual.shape
@@ -489,6 +528,7 @@ def _forward(residual, gate, branch, weight, shift, scale, indices, eps):
     conditions = gate.shape[0]
     if mode == 0 and rows > _SMALL_ROWS and hidden <= _TINY_HIDDEN and conditions * hidden <= _TABLE_MAX_ELEMS:
         grid = (min(triton.cdiv(rows, _TABLE_ROWS), num_cores, _MAX_1D_GRID),)
+        gate, shift, scale = gate.contiguous(), shift.contiguous(), scale.contiguous()
         _indexed_gate_rms_shift_table_kernel[grid](
             residual_out,
             modulated_out,
@@ -513,6 +553,7 @@ def _forward(residual, gate, branch, weight, shift, scale, indices, eps):
         return residual_out, modulated_out
     if mode == 0 and rows <= _SMALL_ROWS:
         grid = (rows,)
+        gate, shift, scale = gate.contiguous(), shift.contiguous(), scale.contiguous()
         _indexed_gate_rms_shift_row_kernel[grid](
             residual_out,
             modulated_out,
@@ -532,6 +573,7 @@ def _forward(residual, gate, branch, weight, shift, scale, indices, eps):
         return residual_out, modulated_out
     if mode == 2 and hidden % 8 != 0:
         grid = (min(rows, num_cores, _MAX_1D_GRID),)
+        gate, shift, scale = gate.contiguous(), shift.contiguous(), scale.contiguous()
         _indexed_gate_rms_shift_native_wide_kernel[grid](
             residual_out,
             modulated_out,
@@ -551,6 +593,7 @@ def _forward(residual, gate, branch, weight, shift, scale, indices, eps):
         return residual_out, modulated_out
     if mode == 2:
         grid = (min(rows, num_cores, _MAX_1D_GRID),)
+        gate, shift, scale = gate.contiguous(), shift.contiguous(), scale.contiguous()
         _indexed_gate_rms_shift_two_tile_kernel[grid](
             residual_out,
             modulated_out,
@@ -573,6 +616,7 @@ def _forward(residual, gate, branch, weight, shift, scale, indices, eps):
 
     if mode == 0 and 32 < hidden <= 3072 and rows >= 1024 and conditions * hidden <= 16384:
         grid = (min(triton.cdiv(rows, rows_per_iter), num_cores, _MAX_1D_GRID),)
+        gate, shift, scale = gate.contiguous(), shift.contiguous(), scale.contiguous()
         _indexed_gate_rms_shift_cached_kernel[grid](
             residual_out,
             modulated_out,
@@ -595,6 +639,11 @@ def _forward(residual, gate, branch, weight, shift, scale, indices, eps):
             CACHE_GATE=True,
             CACHE_AFFINE=False,
             prevec_max_fused_ops_num=2,
+            **(
+                {"enable_auto_vectorize_v2": True, "hfusion_enable_multiple_consumer_fusion": True}
+                if hidden == 3072 and rows <= 4096
+                else {}
+            ),
         )
         return residual_out, modulated_out
 
@@ -611,6 +660,9 @@ def _forward(residual, gate, branch, weight, shift, scale, indices, eps):
         indices,
         rows,
         prevec_max_fused_ops_num=2,
+        GATE_ROW_STRIDE=gate.stride(0),
+        SHIFT_ROW_STRIDE=shift.stride(0),
+        SCALE_ROW_STRIDE=scale.stride(0),
         HIDDEN=hidden,
         EPS=eps,
         BLOCK_N=block_n,
@@ -618,6 +670,7 @@ def _forward(residual, gate, branch, weight, shift, scale, indices, eps):
         ROWS_PER_ITER=rows_per_iter,
         EXACT=(mode == 0),
         KEEP_I64=(mode == 0 and hidden == 3072 and rows >= 32768),
+        TWO_STATS_TAIL=(hidden == 3072 and 64 < rows <= 1024),
         **({"multibuffer": False} if 64 < rows <= 1024 else {}),
     )
     return residual_out, modulated_out

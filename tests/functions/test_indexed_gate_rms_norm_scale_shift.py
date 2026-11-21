@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Original three regression configurations plus ten fixed generalization cases."""
+"""Legacy regression cases and 16 pinned MiniMax H3 model-rule fixtures."""
 
 import json
 
@@ -18,11 +18,33 @@ from tests._compile import compile_fullgraph
 
 OP = "indexed_gate_rms_norm_scale_shift_infer"
 CASES = json.loads(Path(__file__).with_name("indexed_gate_cases.json").read_text())
-CASE_PARAMS = [pytest.param(case, id=case["id"]) for case in CASES]
+MODEL_CASES = json.loads(Path(__file__).with_name("indexed_gate_model16_cases.json").read_text())["cases"]
+MODEL_CASE_PARAMS = [pytest.param(case, id=case["id"]) for case in MODEL_CASES]
+CASE_PARAMS = [pytest.param(case, id=case["id"]) for case in CASES + MODEL_CASES]
 pytestmark = [pytest.mark.api("functions." + OP), pytest.mark.accuracy]
 
 
+def make_model_case(case, device):
+    """Synthetic values with pinned indices and shared AdaLN storage layout."""
+    rows, hidden, conditions = case["rows"], case["hidden_size"], case["conditions"]
+    generator = torch.Generator(device=device).manual_seed(case["seed"])
+
+    def rand(*shape):
+        return torch.randn(shape, dtype=torch.bfloat16, device=device, generator=generator)
+
+    residual, branch, weight = rand(rows, hidden), rand(rows, hidden), rand(hidden)
+    parent = rand(conditions, 6 * hidden)
+    _, _, gate, shift, scale, _ = parent.chunk(6, dim=-1)
+    indices = torch.empty(rows, dtype=torch.int64, device=device)
+    for segment in case["indices_segments"]:
+        start = segment["start"]
+        indices[start : start + segment["rows"]] = segment["condition"]
+    return (residual, gate, branch, weight, shift, scale, indices, case["eps"])
+
+
 def make_case(case, device):
+    if case["id"].startswith("model_"):
+        return make_model_case(case, device)
     rows, hidden, conditions = case["rows"], case["hidden_size"], case["conditions"]
     generator = torch.Generator(device=device).manual_seed(case["seed"])
 
@@ -246,3 +268,27 @@ def test_invalid_metadata(fault):
         args[0] = torch.empty((2**28, 16), dtype=torch.bfloat16, device="meta")
     with pytest.raises((ValueError, RuntimeError)):
         _call(args, "torch")
+
+
+@pytest.mark.reference
+@pytest.mark.parametrize("case", MODEL_CASE_PARAMS)
+def test_model_layout_metadata(case):
+    import hashlib
+
+    indices = torch.empty(case["rows"], dtype=torch.int64)
+    coverage = torch.zeros(case["rows"], dtype=torch.int32)
+    for segment in case["indices_segments"]:
+        start = segment["start"]
+        stop = start + segment["rows"]
+        indices[start:stop] = segment["condition"]
+        coverage[start:stop] += 1
+    assert torch.all(coverage == 1)
+    assert hashlib.sha256(indices.numpy().tobytes()).hexdigest() == case["indices_sha256"]
+    assert torch.bincount(indices, minlength=case["conditions"]).tolist() == case["condition_row_counts"]
+    # A small row count checks the same table strides without large activations.
+    args = make_model_case(dict(case, rows=1, indices_segments=[dict(start=0, rows=1, condition=0)]), "cpu")
+    tables = [(1, "gate"), (4, "shift"), (5, "scale")]
+    for slot, name in tables:
+        assert list(args[slot].stride()) == case[name + "_stride"]
+        assert args[slot].storage_offset() == case[name + "_storage_offset"]
+    assert len({args[slot].untyped_storage().data_ptr() for slot, _ in tables}) == 1
