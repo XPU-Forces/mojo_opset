@@ -27,6 +27,7 @@ supported shapes, dtypes and options.
 | `layer_norm_infer` | triton | triton |
 | `layer_norm_quant` | torch_npu | torch_npu |
 | `lightning_indexer` | triton | triton |
+| `mhc_coefficients` | triton | triton |
 | `moe_dynamic_quant` | triton, torch_npu | triton, torch_npu |
 | `multimodal_rope_infer` | triton | triton |
 | `n_gram_decode` | triton | triton |

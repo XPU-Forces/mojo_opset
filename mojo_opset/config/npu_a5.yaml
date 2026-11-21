@@ -22,6 +22,7 @@ npu.a5:
   layer_norm_quant: torch_npu
   lightning_indexer: triton
   moe_dynamic_quant: triton
+  mhc_coefficients: triton
   multimodal_rope_infer: triton
   n_gram_decode: triton
   n_gram_prefill: triton
