@@ -41,3 +41,15 @@ def store_paged_kv_cache_fwd(
             1, 0, 2
         )
     return (key_cache, value_cache)
+
+
+def kpool_seed_tail_cache_fwd(tail_kv_cache, key, gate_score, tslot):
+    ring = tail_kv_cache.shape[2]
+    valid = tslot >= 0
+    blocks = tslot // ring
+    keep = valid.clone()
+    keep[:-4] &= ~(valid[4:] & (blocks[:-4] == blocks[4:]))
+    selected = tslot[keep].to(torch.int64)
+    block, offset = selected // ring, selected % ring
+    tail_kv_cache[block, 0, offset] = key[keep]
+    tail_kv_cache[block, 1, offset] = gate_score[keep]

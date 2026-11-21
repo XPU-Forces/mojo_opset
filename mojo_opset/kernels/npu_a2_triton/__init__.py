@@ -19,6 +19,7 @@ OPS = {
     "lightning_indexer": "lightning_indexer",
     "store_lowrank": "store_lowrank",
     "store_paged_kv_cache": "kv_cache",
+    "kpool_seed_tail_cache": "kpool_seed_tail_cache",
     "rope_infer": "rope",
     "vision_rope_2d_infer": "vision_rope",
     "paged_decode_gqa_infer": "flash_attention",
