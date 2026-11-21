@@ -17,6 +17,7 @@ npu.a5:
   gelu: triton
   group_gemm: triton
   group_rms_norm_infer: triton
+  indexed_rms_norm_scale_shift_infer: triton
   join_prob_reject_sampling: triton
   layer_norm_infer: triton
   layer_norm_quant: torch_npu

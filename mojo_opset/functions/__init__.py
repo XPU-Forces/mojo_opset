@@ -30,6 +30,7 @@ from .indexer import lightning_indexer
 from .kv_cache import store_paged_kv_cache
 from .multimodal_rope_infer import multimodal_rope_infer
 from .normalization import group_rms_norm_infer
+from .normalization import indexed_rms_norm_scale_shift_infer
 from .normalization import layer_norm_infer
 from .normalization import residual_add_layer_norm_infer
 from .normalization import residual_add_rms_norm_infer
@@ -70,7 +71,6 @@ __all__ = [
     "gemm",
     "mxfp8_dequant_gemm",
     "mxfp4_gemm",
-
     "apply_penalties_temperature",
     "causal_conv1d",
     "causal_conv1d_update_state_infer",
@@ -86,6 +86,7 @@ __all__ = [
     "gelu",
     "group_gemm",
     "group_rms_norm_infer",
+    "indexed_rms_norm_scale_shift_infer",
     "indexer",
     "join_prob_reject_sampling",
     "layer_norm_infer",
