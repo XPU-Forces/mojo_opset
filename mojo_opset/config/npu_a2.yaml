@@ -11,6 +11,7 @@ npu.a2:
   flash_attention_infer: triton
   flex_attention: triton
   flex_attention_v2: triton
+  fused_inv_rope_fp8_quant: triton
   gelu: triton
   group_gemm: triton
   group_rms_norm_infer: triton
