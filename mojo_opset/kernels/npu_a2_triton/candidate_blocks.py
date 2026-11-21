@@ -234,8 +234,8 @@ def _block_scores_kernel(
                     pcols = (
                         start
                         + tile_id * (TILE * BLOCK_SIZE)
-                        + tl.arange(0, TP)[:, None] * RUN
-                        + tl.arange(0, RUN)[None, :]
+                        + tl.arange(0, RUN)[:, None]
+                        + tl.arange(0, TP)[None, :] * RUN
                     )
                     paddr = logits + row * stride_row + pcols * stride_col
                     if (tile_id + 1) * TILE <= num_full:
@@ -244,20 +244,28 @@ def _block_scores_kernel(
                         pval = tl.load(
                             paddr, pcols < col_end, other=-float("inf")
                         ).to(tl.float32)
-                    prd = tl.reshape(
-                        pval, (TP, 2, triton.next_power_of_2(BLOCK_SIZE))
+                    # R17/A2 (masked axis-0 reduce): splitting the paired lane
+                    # axis with `reshape(TP, 2, BLOCK)` + axis-2 reduce costs
+                    # 5.8x over the load floor, and the cost is dtype specific
+                    # while the load is not (probe, 256x131072, TILE=512,
+                    # split=2, no bounds: pair load + one axis-0 reduce =
+                    # 144us bf16 / 136us fp32; current 3D form = 833/756;
+                    # 3D load without the reshape = 505/494). Two masked
+                    # axis-0 reduces keep the vector-friendly axis and land at
+                    # 203/198; `tl.interleave` restores block order for +115.
+                    # Block order is a contract of `scores`/`valid_blocks`.
+                    # In the op itself this form is 1.4x over the 3D one:
+                    # decode-n1 638 -> 446us, decode-n6 3653 -> 2606us,
+                    # prefill 20128 -> 14248us, while the fp32 / strided /
+                    # short-row cases stay put (they take the unpaired path).
+                    half = tl.arange(0, RUN)[:, None] < triton.next_power_of_2(
+                        BLOCK_SIZE
                     )
-                    if not POW2_BS:
-                        prd = tl.where(
-                            tl.arange(0, triton.next_power_of_2(BLOCK_SIZE))[
-                                None, None, :
-                            ]
-                            < BLOCK_SIZE,
-                            prd,
-                            -float("inf"),
-                        )
-                    reduced = tl.reshape(
-                        tl.reduce(prd, 2, _max_with_nan), (TILE,)
+                    lo = tl.where(half, pval, -float("inf"))
+                    hi = tl.where(half, -float("inf"), pval)
+                    reduced = tl.interleave(
+                        tl.reduce(lo, 0, _max_with_nan),
+                        tl.reduce(hi, 0, _max_with_nan),
                     )
                 elif (tile_id + 1) * TILE <= num_full:
                     if POW2_BS:

@@ -189,6 +189,38 @@ def test_apply_candidate_mask_empty_accuracy(accuracy_backend, shape):
 
 
 @pytest.mark.api("functions.select_candidate_blocks", ops=["select_candidate_blocks", "apply_candidate_mask"])
+@pytest.mark.accuracy
+def test_candidate_blocks_custom_op_check(accuracy_backend):
+    """opcheck: schema + mutates_args + fake impl agree with the real kernels.
+
+    Both ops write into a caller-owned tensor and return None, so a wrong
+    `mutates_args` would not fail any numeric test — it would only make the
+    graph read a stale tensor. `test_schema` pins that declaration and
+    `test_faketensor` pins the register_fake metadata.
+    """
+    implementation, target, device = accuracy_backend
+    if implementation == "torch":
+        pytest.skip("opcheck targets the registered Triton custom ops")
+    namespace = f"mojo_npu_triton_{target.split('.')[-1]}"
+    logits, row_ks, row_ke, out, row_repeat = _packed_case(256, 8, 32, False, device)
+    logits[2, 5] = 0.0
+    # Importing the backend module is what registers the custom ops.
+    functions.select_candidate_blocks(
+        logits, row_ks, row_ke, 32, 8, out, row_repeat, implementation=implementation
+    )
+    utils = ("test_schema", "test_faketensor")
+    select_op = getattr(getattr(torch.ops, namespace), "select_candidate_blocks_fwd")
+    torch.library.opcheck(
+        select_op, (logits, row_ks, row_ke, 32, 8, out, row_repeat), test_utils=utils
+    )
+    candidates = out.contiguous()
+    mask_op = getattr(getattr(torch.ops, namespace), "apply_candidate_mask_fwd")
+    torch.library.opcheck(
+        mask_op, (logits, row_ks, row_ke, candidates, 8, row_repeat), test_utils=utils
+    )
+
+
+@pytest.mark.api("functions.select_candidate_blocks", ops=["select_candidate_blocks", "apply_candidate_mask"])
 def test_candidate_blocks_compile_matches_eager(accuracy_backend):
     """The select -> mask pipeline stays one fullgraph and matches eager."""
     implementation, _, device = accuracy_backend
