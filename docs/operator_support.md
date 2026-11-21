@@ -46,6 +46,7 @@ supported shapes, dtypes and options.
 | `residual_add_rms_norm_infer` | triton, torch_npu | triton, torch_npu |
 | `residual_add_rms_norm_quant` | torch_npu | torch_npu |
 | `rms_norm` | triton | triton |
+| `rms_norm_indexed_scale_shift` | triton | triton |
 | `rms_norm_infer` | triton, torch_npu | triton, torch_npu |
 | `rms_norm_quant` | torch_npu | torch_npu |
 | `rope` | triton, native | triton |

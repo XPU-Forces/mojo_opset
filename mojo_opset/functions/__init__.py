@@ -49,6 +49,7 @@ from .quantization import dequant
 from .quantization import dynamic_quant
 from .quantization import static_quant
 from .rms_norm import rms_norm
+from .rms_norm_indexed_scale_shift import rms_norm_indexed_scale_shift
 from .rope import rope
 from .rope_cos_sin import rope_cos_sin
 from .rope_cos_sin import vision_rope_cos_sin_2d
@@ -110,6 +111,7 @@ __all__ = [
     "residual_add_rms_norm_infer",
     "residual_add_rms_norm_quant",
     "rms_norm",
+    "rms_norm_indexed_scale_shift",
     "rms_norm_infer",
     "rms_norm_quant",
     "rope",
