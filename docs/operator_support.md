@@ -14,6 +14,7 @@ supported shapes, dtypes and options.
 | `diffusion_attention` | triton | triton |
 | `dynamic_quant` | triton, torch_npu | triton, torch_npu |
 | `embedding_nf4_dequant` | triton | triton |
+| `fill_short_context_topk` | triton | triton |
 | `flash_attention` | triton, torch_npu, native | triton, torch_npu |
 | `flash_attention_infer` | triton | triton |
 | `flex_attention` | triton | triton |
