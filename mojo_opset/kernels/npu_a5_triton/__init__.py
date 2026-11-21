@@ -3,6 +3,7 @@
 from mojo_opset.utils._exports import extend_bindings as _extend_bindings
 
 OPS = {
+    "indexed_gate_rms_norm_scale_shift_infer": "indexed_gate_rms_norm_scale_shift",
     "swa_infer": "swa",
     "moe_dynamic_quant": "quant",
     "flex_attention": "flex_attention",
