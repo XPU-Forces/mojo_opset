@@ -1,191 +1,159 @@
 # triton_convert_req_index_to_global_index validation
 
-## Scope
+## 概要
 
-This report covers the public mojo_opset API on Ascend A2 and A5, including the original 22 workloads, interface boundaries, FakeTensor metadata, fullgraph capture/execution, and public-call performance. It does not claim production compiler backend, NPU Graph replay, dynamic-shape, whole-model, cold-L2, MFU or MBU acceptance.
+将 `triton_convert_req_index_to_global_index` 接入 mojo_opset，提供 Ascend A2/A5 Triton 实现、统一公开 API 和 PyTorch 参考。根据请求号与分页 block table 将 token 局部索引映射到全局缓存位置；workspace prefill 行使用 workspace 起点。
 
-The implementation under test is commit `d300d0fd923f2b662f47a12995a974c4d0097295` (including upstream `6115199`). The comparison baseline is PR head `899baf449fb3e14d7fe58edd8e892c509d98239f`, with the identical performance harness and deterministic input builder added for measurement. Input preparation is outside timing; validation, dispatch, layout copies, output allocation and launch remain inside the public call.
+| 输入约定 | 语义 |
+| --- | --- |
+| `req_id [T]`、`block_table [R,M]`、`token_indices [T,K]` | int32；block_size 与 K 为正的 2 的幂 |
+| `-1` / decode 越过页表容量 | 输出 -1 |
+| workspace prefill | 不受 decode 页表容量限制；非负 workspace ID 必须有效 |
+| 空 T / 非连续输入 | 支持；结果及有效索引必须在 int32 范围内 |
 
-## Fixes found by the new tests
+新性能集合为 **gb01–gb14**：固定 M=3168、block_size=64、K=2048，覆盖 decode、混合批次及长上下文 prefill。它们是按 GLM-5 配置构造的可复现输入，**不是生产 activation trace**；14 例均使用 `has_prefill=False` 的分页映射，工作负载中的 prefill 不等于 workspace 分支。完整序列长度、query 长度、seed 和生成配方已入库；A2/A5 的请求、页表、token 数据哈希与冻结的 L20 输入包全部一致。
 
-- **FakeTensor executed a real kernel.** The original unregistered wrapper entered Triton launch with fake pointers. The subsequent synchronization reported an invalid device-memory access. Register an opaque operator with a metadata-only fake implementation; tests also patch the real implementation to fail if FakeTensor reaches it. Follow-on failures in that poisoned process are not independent kernel correctness failures.
-- **A5 one-entry page table failed to compile.** The backend could not lower a singleton gather source (`arith.constant` legalization failure). Pad the gather source to at least two lanes; the existing page-table mask protects the extra lane. This covers K=1 as well as larger K without changing legal inputs or outputs.
-- **The first graph fix added host overhead.** High-level `custom_op` registration preserved kernel timing but slowed A5 public-call E2E (initial 22-case geometric speedup about 0.76x). The final implementation uses direct `torch.library.Library` dispatcher registration, with schema/no-mutation/FakeTensor checks and fullgraph execution tests. Device-specific models cache hardware metadata only; neither tensors nor outputs are cached.
-- **Test-tool limitation:** `SchemaCheckMode`/`clone_preserve_strides` in this environment cannot clone certain empty strided NPU views (negative allocation size). Schema opcheck uses contiguous empty inputs; separate public-API boundary and FakeTensor tests still cover empty strided views.
-- Resolved the upstream Torch-provider registration conflict by retaining both `topk_infer` and `triton_convert_req_index_to_global_index`.
+## 改动
 
-- **A2 profiler export failure:** some captures on the original card contained host launch flows but no device kernels (`TASK` table missing). Such results were rejected, and their raw trace/logs retained locally. The complete parent/current/Torch comparison was rerun on another idle healthy card; no parser validation was relaxed.
+| 文件 | 内容 |
+| --- | --- |
+| `mojo_opset/functions/indexer.py` | 公开接口与契约校验 |
+| `mojo_opset/kernels/npu_a{2,5}_triton/triton_convert_req_index_to_global_index.py` | 接入两平台最新交付；保留 dispatcher/Fake/设备缓存封装 |
+| `mojo_opset/kernels/torch/triton_convert_req_index_to_global_index.py` | 独立 Torch 参考 |
+| `tests/_convert_req_index_balanced.py`、`tests/data/convert_req_index_balanced14.json` | 新 14 例确定性配方及完整规格 |
+| `tests/functions/test_triton_convert_req_index_to_global_index.py` | 原 22 例回归、边界、图测试与新 14 例逐元素精度 |
+| `tests/performance/functions/test_triton_convert_req_index_to_global_index.py` | 仓库性能入口切换到新 14 例 |
+| 配置、导出、支持表和验证文档 | 注册 A2/A5/Torch provider，说明复跑口径 |
 
-## Correctness and graph coverage
+## 内核设计
 
-Each platform runs 100 cases with exact integer equality, with no tolerance relaxation:
+- **A2**：小 T 专用路径、按行分块预载页表与 gather；单请求路径将共同页表读取移到循环外；宽页表/大 K 缩小行 tile，保留多请求和 workspace 通用路径。
+- **A5**：按 T/K/页表布局分派 small、per-token、batched、cached-table、预取和 workspace/cached-starts 路径；K≥1024 且补齐页表宽度≥2048 时采用两行 tile，避免 UB 超限。
+- 保留单元素页表 gather 源至少两 lane 的修复；通过 mask 保护填充元素。直接 `torch.library.Library` 注册与 metadata-only Fake 支持图捕获；按设备仅缓存硬件元数据，不缓存输入或输出。
+- 已合入 upstream `4868d1f`，解决 Torch 注册表冲突并保留双方新增算子。
 
-| Coverage | Cases |
-| --- | ---: |
-| Existing matrix/reference/basic API tests | 25 |
-| Empty/singleton/tail shapes, all/mixed/no active prefill, contiguous and offset strided inputs; input immutability | 30 |
-| Explicit page-edge, invalid sentinel and prefill-workspace expected values | 1 |
-| Invalid dtype/rank/shape/device/optional tensors/block-size/TopK | 23 |
-| FakeTensor shape/dtype/device/stride and no real implementation execution | 6 |
-| `fullgraph=True`, `eager` and `aot_eager`, decode/prefill/empty, contiguous/strided, two different inputs per compiled call | 12 |
-| Registered operator schema/no-mutation and fake metadata (`opcheck`) | 3 |
+## 精度
 
-These graph backends validate graph integration; they do not establish accelerated compiler lowering or NPU Graph replay. Preload the selected provider before compilation, as required by the repository dispatcher.
+2026-11-21 对提交 `9351ce9` 对应源码实板复跑，整数输出严格相等，**无失败、无跳过**。
 
-## Measurement contract
+| 覆盖 | A2 | A5 |
+| --- | ---: | ---: |
+| 原矩阵 / reference / basic API | 25/25 | 25/25 |
+| 边界、空/单元素、尾块、连续/偏移 strided、输入不变性 | 30/30 | 30/30 |
+| 显式页边界 / workspace 期望值 | 1/1 | 1/1 |
+| 非法 dtype/rank/shape/device/optional/参数 | 23/23 | 23/23 |
+| 新 14 例完整输出逐元素对拍 | 14/14 | 14/14 |
+| FakeTensor 元数据与禁止真实 kernel 执行 | 10/10 | 10/10 |
+| fullgraph：eager / aot_eager、连续 / strided、换输入重执行 | 20/20 | 20/20 |
+| schema / no-mutation / Fake opcheck | 5/5 | 5/5 |
+| **合计** | **128/128** | **128/128** |
+| 仓库标准性能入口 | **14/14** | **14/14** |
 
-- Same physical card and software stack for each platform's parent/current/Torch comparison; runs are serial on each card. No frequency locking or explicit cache eviction.
-- 22 workloads from `tests/_convert_req_index.py`; int32 inputs built on CPU with deterministic seeds 42 and 43, copied to the target device before timing. Two independent input instances alternate.
-- 10 warmups, 20 samples per timer and case; report medians. Ratios are baseline/current latency, aggregated as a geometric mean across the 22 cases.
-- `profiler_span_us`: first device kernel start to last kernel end within a public call, including intervening device gaps. `e2e_us`: host wall time for the public call followed by device synchronization. They must not be mixed.
-- Rotating two inputs is not a cold-L2 guarantee. No historical L20 timings, bandwidth calibration, simulator cycles or PMU ratios enter these results.
-- Repository `scripts/compare_perf.py` validates compatible environments, measurement settings, workload hashes and complete samples. Its 5% threshold/noise labels are reported, not CI gates.
+图测试新增 M=3168、K=2048、T=129/8193，覆盖宽页表路径。这里的 fullgraph 检查整个公开调用能被捕获且执行正确；尚未验证生产编译后端、NPU Graph replay、动态 shape 或完整模型。空 strided NPU view 在 SchemaCheckMode 的克隆限制仍由连续空输入 opcheck + 独立空 strided 边界/Fake 测试覆盖。
 
-## Supplemental paired timing
+## 性能
 
-Because the 20-sample E2E results were noisy, both platforms were also measured in parent/current/current/parent order, with 50 warmups and 200 samples per timer per run. Each side contributes 400 samples per case. Pooled medians are descriptive; the 3xMAD rule is not a confidence interval. Event time is current-stream elapsed time including submission gaps, not the profiler kernel duration.
+## 验收标准与结果
 
-Remote runs used Git archives, so the raw harness `revision.commit` is null. The evidence bundle includes a source manifest binding the archive and tracked source hashes (CRLF normalized to LF for Git-blob comparison) to the reported Git commit. Reports do not substitute a fabricated Git checkout revision.
+新 14 例 gb01–gb14，测试实现 `9351ce90ead79dad03b1ecd0bc0dff5b1f98f3ca`；2026-11-21 实板复跑。
 
-## Reproduction
+| 平台 | 目标 | 本轮实测 | 结论 |
+| --- | --- | --- | --- |
+| A2 | 清 L2 MBU >60% | **56.94%**（沿用 Event-copy 参考）；**33.89%**（设备 kernel-copy 对齐） | 未达标 |
+| A5 | 不清 L2，L20/A5 几何平均 ≥1.85× | **0.9225×**，0/14 例达到 1.85× | 未达标 |
+| A5 补充 | 未达标时报告清 L2 MBU | **61.93%** | 大 shape 呈访存受限特征，不能据此认定物理带宽已饱和 |
 
-```sh
-# Source the platform's CANN environment and activate its torch_npu/Triton environment first.
-# Select an idle physical card; --perf-device 0 is the logical card within this visibility mask.
+A2 与此前 Event-copy 参考口径的对照为 **56.94%**，同样未超过 60%。本轮采用与 DUT 一致的设备 kernel 计时标定 copy，分母由 Event-copy 的 1306.128 GB/s 变为 2194.624 GB/s；这不是算子耗时退化。A5 对应分母为 1569.683 GB/s，Event-copy 参考口径为 66.17%。两种口径明确分列，不用较低分母证明验收通过。
+
+### 计时与 MBU 口径
+
+- 验收数据取公开 API 启动的 **device kernel duration**，不是 Python E2E，也不是 Event elapsed；整数/连续 14 例每次只有一个目标 kernel。分配、校验、分派仍真实执行，但其 host 时间不计入 device kernel duration。
+- 两轮，每轮 warmup=100、40 个有效样本；每例通常 80 个样本。A2 gb08 初始两轮波动 13.35%，补测后四轮均值为 525.189/595.313/521.140/629.056 µs，**全部 160 个样本保留**，全窗口范围 20.71%；此例仍标记波动，未按速度挑选窗口。
+- A5 热缓存不清 L2，使用固定确定性输入；热/冷轮间最大漂移分别 4.67% / 6.13%。A2/A5 冷缓存每次调用前均使用运行时 cache buffer 的 float sum + synchronize，192 MiB；清理 kernel 不计入目标 kernel 时间。不锁频，不停止其他卡上的工作。
+- L20 对照沿用用户提供的新 14 例 hot profiler 均值（20 样本/例），`speedup_i=L20_i/A5_i`；汇总为 `exp(mean(log(speedup_i)))`。本轮未重新运行 L20，原始 L20 trace 未在本地核验，因此是给定基线对照，不宣称同日跨硬件配对验收。
+- 语义字节数 `B=8*T*K + 4*T + 4*R*M`；聚合 MBU=`sum(B)/sum(case_mean_us)/1000/copy_GBps*100%`，不是各例 MBU 算术均值，也不是实测 HBM transaction 利用率。
+- 同卡 int32 copy，BLOCK=8192，32/64/128M 元素；设备版每尺寸两轮各 40 样本，取各尺寸合并样本 median 对应带宽的最大值。A2 为 **2194.624 GB/s**，A5 **1569.683 GB/s**；copy 与 DUT 同样清 L2、同样按设备 kernel duration 计时。它是实测 copy 参考，不等于理论硬件峰值，且带宽对工作集大小敏感。
+- 为与 A2 历史交付连续对照，同时保留原 Event-copy 标定：A2 前/后 1306.128/1291.844 GB/s，A5 1469.144/1475.682 GB/s。Event 时间可含提交间隙，不能与纯 kernel 峰值混称一个口径。A2 按该参考聚合为 56.94%，按设备对齐为 33.89%，两者都未达标。
+- 标准仓库性能测试另跑 14/14，使用 upstream 的固定输入 profiler flush 策略（4×L2 或回退 768 MiB）、10 次预热与 20 样本；仅用于验证仓库测试入口，不混入上述 192 MiB 验收表。
+- 下表流水线比例来自实板 `aiv_*_ratio`，已核对对应 stage_time/aiv_time；同一行最高占比加粗。不同流水线可重叠，不能相加或直接当作 MBU。每例只有一个目标 kernel，目标 kernel 采样覆盖 100%；逐 kernel 名称、各流水线时间及原始 CSV 均在证据包中。
+
+### A2 性能（全部 14 例）
+
+| Case | T / R | 冷 L2 MBU | Vector | Scalar | MTE2 | MTE3 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| gb01 | 1 / 1 | 0.64% | **48.62%** | 33.63% | 22.08% | 9.81% |
+| gb02 | 8 / 8 | 4.09% | **42.23%** | 40.06% | 20.21% | 8.76% |
+| gb03 | 32 / 32 | 9.91% | **50.32%** | 33.04% | 16.62% | 6.14% |
+| gb04 | 64 / 64 | 15.83% | **41.92%** | 39.74% | 17.97% | 5.31% |
+| gb05 | 128 / 128 | 20.57% | **44.08%** | 33.25% | 25.12% | 5.62% |
+| gb06 | 64 / 33 | 11.69% | **38.28%** | 38.13% | 22.89% | 4.94% |
+| gb07 | 256 / 65 | 13.60% | 38.44% | 16.51% | **48.09%** | 14.67% |
+| gb08 | 8192 / 65 | 10.84% | 26.19% | 2.53% | **75.06%** | 22.78% |
+| gb09 | 8192 / 1 | 36.07% | **74.01%** | 6.18% | 24.85% | 11.38% |
+| gb10 | 32768 / 1 | 36.51% | **73.95%** | 5.28% | 25.92% | 11.46% |
+| gb11 | 131072 / 1 | 36.52% | **73.73%** | 5.07% | 26.39% | 11.50% |
+| gb12 | 202752 / 1 | 36.49% | **73.76%** | 5.00% | 26.42% | 11.50% |
+| gb13 | 8192 / 1 | 35.90% | **74.02%** | 6.17% | 24.84% | 11.28% |
+| gb14 | 32768 / 4 | 26.96% | **66.20%** | 5.83% | 37.69% | 9.29% |
+
+### A5 性能（关键 7 例；完整 14 例见折叠表与 CSV）
+
+14 例均未达到 1.85×。大 prefill/混合批次的冷 MBU 约 58–64%，MTE2 活跃占比明显高于其他流水线，说明当前实现在这些 shape 上主要受访存路径约束；可以报告已进入带宽受限区间，但**还不能据此断言基本达到物理带宽瓶颈或已无优化空间**。小 decode 的 MBU 较低，不能套用这一结论。
+
+| Case | T / R | 热 L2 vs L20 | 冷 L2 MBU | Vector（热） | Scalar（热） | MTE2（热） | MTE3（热） |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| gb01 | 1 / 1 | 0.683× | 0.65% | 17.46% | **60.71%** | 23.50% | 9.19% |
+| gb05 | 128 / 128 | 0.636× | 40.40% | 19.59% | **63.18%** | 25.59% | 11.04% |
+| gb07 | 256 / 65 | 0.562× | 41.38% | 19.54% | 42.84% | **46.14%** | 11.25% |
+| gb08 | 8192 / 65 | 1.309× | 61.21% | 39.89% | 12.24% | **96.22%** | 16.93% |
+| gb10 | 32768 / 1 | 1.625× | 64.25% | 36.26% | 11.59% | **98.01%** | 18.86% |
+| gb12 | 202752 / 1 | 1.597× | 63.03% | 36.66% | 11.04% | **98.40%** | 18.49% |
+| gb14 | 32768 / 4 | 1.626× | 64.19% | 40.47% | 11.59% | **98.12%** | 19.74% |
+
+<details>
+<summary>A5 完整 14 例</summary>
+
+| Case | T / R | 热 L2 vs L20 | 冷 L2 MBU | Vector（热） | Scalar（热） | MTE2（热） | MTE3（热） |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| gb01 | 1 / 1 | 0.683× | 0.65% | 17.46% | **60.71%** | 23.50% | 9.19% |
+| gb02 | 8 / 8 | 0.660× | 4.87% | 16.72% | **59.18%** | 28.05% | 9.35% |
+| gb03 | 32 / 32 | 0.567× | 16.34% | 13.57% | **69.31%** | 21.69% | 7.56% |
+| gb04 | 64 / 64 | 0.505× | 24.12% | 12.44% | **72.53%** | 18.63% | 6.99% |
+| gb05 | 128 / 128 | 0.636× | 40.40% | 19.59% | **63.18%** | 25.59% | 11.04% |
+| gb06 | 64 / 33 | 0.517× | 20.32% | 12.38% | **71.41%** | 20.04% | 6.97% |
+| gb07 | 256 / 65 | 0.562× | 41.38% | 19.54% | 42.84% | **46.14%** | 11.25% |
+| gb08 | 8192 / 65 | 1.309× | 61.21% | 39.89% | 12.24% | **96.22%** | 16.93% |
+| gb09 | 8192 / 1 | 1.282× | 59.80% | 34.86% | 11.94% | **96.24%** | 17.12% |
+| gb10 | 32768 / 1 | 1.625× | 64.25% | 36.26% | 11.59% | **98.01%** | 18.86% |
+| gb11 | 131072 / 1 | 1.529× | 60.17% | 33.66% | 10.58% | **98.10%** | 18.34% |
+| gb12 | 202752 / 1 | 1.597× | 63.03% | 36.66% | 11.04% | **98.40%** | 18.49% |
+| gb13 | 8192 / 1 | 1.251× | 58.38% | 37.99% | 11.67% | **96.28%** | 17.25% |
+| gb14 | 32768 / 4 | 1.626× | 64.19% | 40.47% | 11.59% | **98.12%** | 19.74% |
+
+</details>
+
+## 平台覆盖与复跑
+
+| 项目 | A2 | A5 |
+| --- | --- | --- |
+| SoC | Ascend910B3 | Ascend950PR_957c |
+| 物理卡 → 逻辑卡 | 0 → 0 | 2 → 0 |
+| Python | 3.10.12 | 3.12.3 |
+| Torch / torch_npu | 2.7.1+cpu / 2.7.1.post11.dev20261022 | 同左 |
+| Triton | 3.6.0 | 3.6.0 |
+| CANN | 9.3.0 | 9.2.0-beta.2 |
+
+```bash
+# 先 source 对应 CANN 环境，激活上述 Python 环境，选择空闲健康卡。
 export ASCEND_RT_VISIBLE_DEVICES=<physical_id>
 python -m pytest tests/functions/test_triton_convert_req_index_to_global_index.py \
-  --mojo-target npu.a2 --mojo-implementation triton --junitxml=accuracy.xml -q
+  --mojo-target npu.a2 --mojo-implementation triton -q
 python -m pytest tests/performance/functions/test_triton_convert_req_index_to_global_index.py \
-  --mojo-target npu.a2 --mojo-implementation triton --perf-device 0 \
-  --perf-timers profiler,e2e --perf-instances 2 --perf-warmup 10 --perf-repeats 20 \
-  --perf-output triton.json -q
-# Use npu.a5 on A5; use --mojo-implementation torch for the reference measurement.
-# Run the parent checkout with the same benchmark file and shared input helper.
-python scripts/compare_perf.py parent.json triton.json --output comparison.md
+  --mojo-target npu.a2 --mojo-implementation triton --perf-timers profiler \
+  --perf-warmup 10 --perf-repeats 20 --perf-output current.json -q
+# A5 改为 --mojo-target npu.a5。
 ```
 
-## Results
+验收用 hot/cold profiling 入口、copy 标定、完整输入、环境、逐例样本、流水线时间、pytest XML、源码 SHA256 及复跑说明均在 **EVIDENCE_LINK**。源码与远端上传快照逐文件哈希核对一致；Ruff lint/format 与 `git diff --check` 通过。两平台仓库测试来自手动实板复跑，不等同于 GitHub 官方 CI 已通过。
 
-A2: Ascend910B3, physical card 0 -> logical 0, CANN 9.3.0. A5: Ascend950PR_957c, physical card 2 -> logical 0, CANN 9.2.0-beta.2. Python versions are recorded in the raw environment JSON. Both use torch 2.7.1+cpu, torch_npu 2.7.1.post11.dev20261022 and Triton 3.6.0. The selected cards were checked before each run; unrelated work on other cards was retained.
-
-| Platform | Correctness / boundary / graph | Performance per implementation | Profiler vs parent | E2E vs parent (20 samples) | Paired E2E vs parent (400 samples) | Profiler vs Torch |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| A2 | 100/100 | 22/22 | 0.9903x | 1.0889x | 1.0547x | 273.4339x |
-| A5 | 100/100 | 22/22 | 0.9904x | 0.9553x | 1.1785x | 263.1357x |
-
-Profiler latency is approximately unchanged. E2E results depend on host load and show substantial sample dispersion; the paired run reduces ordering bias but does not prove a speedup for every case. See per-case statuses and raw samples rather than treating the geometric mean as a per-case guarantee.
-
-- A2 parent comparison status counts: profiler {'noisy': 16, 'stable': 6}; 20-sample E2E {'noisy': 11, 'stable': 7, 'improvement': 4}; paired E2E {'noisy': 22}.
-- A5 parent comparison status counts: profiler {'noisy': 20, 'stable': 2}; 20-sample E2E {'noisy': 21, 'stable': 1}; paired E2E {'noisy': 22}.
-
-### A2 per-case medians (microseconds)
-
-P = parent `899baf4`; C = current `d300d0f`; Torch = same-device reference.
-
-| Case | T / R / M / block size / K / prefill | Profiler P | Profiler C | Profiler Torch | E2E P | E2E C | E2E Torch |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 8 / 4 / 10 / 16 / 128 / False | 1.780 | 1.800 | 623.315 | 379.410 | 262.870 | 665.940 |
-| 2 | 8 / 4 / 10 / 16 / 256 / False | 1.900 | 1.970 | 620.325 | 302.290 | 293.665 | 703.100 |
-| 3 | 8 / 4 / 10 / 16 / 512 / False | 2.220 | 2.200 | 621.485 | 339.565 | 284.910 | 713.345 |
-| 4 | 8 / 4 / 10 / 64 / 128 / False | 1.760 | 1.830 | 646.318 | 291.545 | 293.600 | 639.245 |
-| 5 | 8 / 4 / 10 / 64 / 256 / False | 1.900 | 1.950 | 640.557 | 291.015 | 330.520 | 619.050 |
-| 6 | 8 / 4 / 10 / 64 / 512 / False | 2.250 | 2.191 | 619.254 | 312.910 | 288.415 | 634.470 |
-| 7 | 8 / 4 / 10 / 128 / 128 / False | 1.770 | 1.830 | 614.444 | 292.185 | 280.305 | 632.425 |
-| 8 | 8 / 4 / 10 / 128 / 256 / False | 1.890 | 1.960 | 637.866 | 303.440 | 290.055 | 622.900 |
-| 9 | 8 / 4 / 10 / 128 / 512 / False | 2.200 | 2.210 | 609.023 | 525.200 | 298.350 | 640.770 |
-| 10 | 8 / 4 / 10 / 8 / 128 / False | 1.770 | 1.820 | 687.032 | 286.700 | 293.640 | 620.515 |
-| 11 | 12 / 4 / 8 / 16 / 128 / True | 2.310 | 2.360 | 868.294 | 319.690 | 315.110 | 863.985 |
-| 12 | 1 / 1 / 10 / 16 / 128 / False | 1.500 | 1.530 | 759.872 | 273.675 | 252.095 | 667.840 |
-| 13 | 64 / 8 / 10 / 16 / 128 / False | 5.111 | 5.061 | 588.281 | 296.890 | 286.480 | 661.225 |
-| 14 | 512 / 32 / 64 / 64 / 128 / False | 6.221 | 6.191 | 904.038 | 333.345 | 280.345 | 995.695 |
-| 15 | 2048 / 64 / 128 / 128 / 128 / False | 11.862 | 11.931 | 1670.081 | 313.600 | 306.930 | 1741.885 |
-| 16 | 8192 / 256 / 1024 / 64 / 512 / False | 61.538 | 61.857 | 13509.001 | 347.250 | 362.165 | 46662.080 |
-| 17 | 512 / 16 / 64 / 16 / 512 / False | 7.821 | 7.811 | 1656.298 | 333.940 | 310.665 | 1977.220 |
-| 18 | 2048 / 128 / 1024 / 64 / 512 / False | 18.112 | 18.072 | 4050.996 | 292.590 | 293.675 | 4250.440 |
-| 19 | 2048 / 128 / 1024 / 128 / 2048 / False | 45.165 | 45.425 | 13936.963 | 360.835 | 287.690 | 14198.185 |
-| 20 | 512 / 32 / 64 / 128 / 2048 / False | 15.282 | 15.312 | 4722.717 | 319.650 | 299.725 | 4632.335 |
-| 21 | 8192 / 512 / 1024 / 128 / 2048 / False | 176.421 | 176.351 | 75652.210 | 423.105 | 415.685 | 75587.640 |
-| 22 | 2048 / 64 / 1024 / 64 / 512 / True | 23.683 | 23.533 | 4576.920 | 332.810 | 311.665 | 4558.860 |
-
-### A2 paired medians (400 samples per side)
-
-| Case | E2E P (us) | E2E C (us) | E2E speedup | E2E status | Event speedup | Event status |
-| --- | ---: | ---: | ---: | --- | ---: | --- |
-| 1 | 255.775 | 255.840 | 1.000x | noisy | 0.965x | noisy |
-| 2 | 280.815 | 292.275 | 0.961x | noisy | 1.046x | noisy |
-| 3 | 287.725 | 252.905 | 1.138x | noisy | 1.025x | noisy |
-| 4 | 279.335 | 260.805 | 1.071x | noisy | 1.137x | noisy |
-| 5 | 288.035 | 258.470 | 1.114x | noisy | 1.065x | noisy |
-| 6 | 283.125 | 270.755 | 1.046x | noisy | 1.037x | noisy |
-| 7 | 276.705 | 264.615 | 1.046x | noisy | 0.956x | noisy |
-| 8 | 279.405 | 278.970 | 1.002x | noisy | 0.951x | noisy |
-| 9 | 289.305 | 281.885 | 1.026x | noisy | 0.888x | noisy |
-| 10 | 269.830 | 281.855 | 0.957x | noisy | 0.958x | noisy |
-| 11 | 279.400 | 277.325 | 1.007x | noisy | 1.015x | noisy |
-| 12 | 271.625 | 272.865 | 0.995x | noisy | 0.990x | noisy |
-| 13 | 286.775 | 272.230 | 1.053x | noisy | 1.021x | noisy |
-| 14 | 287.440 | 268.290 | 1.071x | noisy | 1.057x | noisy |
-| 15 | 273.630 | 284.740 | 0.961x | noisy | 0.972x | noisy |
-| 16 | 311.415 | 270.145 | 1.153x | noisy | 1.034x | noisy |
-| 17 | 284.865 | 255.460 | 1.115x | noisy | 1.074x | noisy |
-| 18 | 286.865 | 259.955 | 1.104x | noisy | 1.039x | noisy |
-| 19 | 303.105 | 254.980 | 1.189x | noisy | 1.094x | noisy |
-| 20 | 290.355 | 263.285 | 1.103x | noisy | 1.060x | noisy |
-| 21 | 433.875 | 393.760 | 1.102x | noisy | 1.034x | noisy |
-| 22 | 317.770 | 308.160 | 1.031x | noisy | 0.902x | noisy |
-
-### A5 per-case medians (microseconds)
-
-P = parent `899baf4`; C = current `d300d0f`; Torch = same-device reference.
-
-| Case | T / R / M / block size / K / prefill | Profiler P | Profiler C | Profiler Torch | E2E P | E2E C | E2E Torch |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 8 / 4 / 10 / 16 / 128 / False | 1.120 | 1.137 | 196.994 | 38.243 | 36.234 | 206.500 |
-| 2 | 8 / 4 / 10 / 16 / 256 / False | 1.131 | 1.137 | 215.053 | 47.286 | 53.841 | 216.795 |
-| 3 | 8 / 4 / 10 / 16 / 512 / False | 1.133 | 1.170 | 279.032 | 52.985 | 38.788 | 265.934 |
-| 4 | 8 / 4 / 10 / 64 / 128 / False | 1.113 | 1.120 | 201.166 | 35.929 | 50.000 | 191.537 |
-| 5 | 8 / 4 / 10 / 64 / 256 / False | 1.154 | 1.164 | 202.275 | 89.169 | 49.885 | 195.003 |
-| 6 | 8 / 4 / 10 / 64 / 512 / False | 1.166 | 1.146 | 261.513 | 43.871 | 49.930 | 258.749 |
-| 7 | 8 / 4 / 10 / 128 / 128 / False | 1.107 | 1.136 | 193.789 | 47.351 | 48.242 | 220.877 |
-| 8 | 8 / 4 / 10 / 128 / 256 / False | 1.143 | 1.156 | 198.278 | 75.193 | 49.034 | 196.975 |
-| 9 | 8 / 4 / 10 / 128 / 512 / False | 1.135 | 1.137 | 249.568 | 39.073 | 48.552 | 317.005 |
-| 10 | 8 / 4 / 10 / 8 / 128 / False | 1.112 | 1.139 | 172.293 | 46.455 | 49.163 | 165.228 |
-| 11 | 12 / 4 / 8 / 16 / 128 / True | 1.284 | 1.274 | 194.593 | 42.448 | 49.730 | 210.486 |
-| 12 | 1 / 1 / 10 / 16 / 128 / False | 0.877 | 0.880 | 161.039 | 36.830 | 51.707 | 153.715 |
-| 13 | 64 / 8 / 10 / 16 / 128 / False | 1.784 | 1.784 | 282.780 | 31.532 | 50.972 | 274.481 |
-| 14 | 512 / 32 / 64 / 64 / 128 / False | 2.492 | 2.521 | 512.331 | 38.603 | 57.346 | 502.499 |
-| 15 | 2048 / 64 / 128 / 128 / 128 / False | 4.831 | 4.933 | 1138.196 | 47.676 | 51.988 | 1206.074 |
-| 16 | 8192 / 256 / 1024 / 64 / 512 / False | 18.267 | 18.287 | 13595.946 | 59.860 | 58.663 | 13605.619 |
-| 17 | 512 / 16 / 64 / 16 / 512 / False | 3.478 | 3.539 | 1116.328 | 53.880 | 55.097 | 1184.487 |
-| 18 | 2048 / 128 / 1024 / 64 / 512 / False | 6.971 | 7.247 | 3693.114 | 46.660 | 54.621 | 3706.606 |
-| 19 | 2048 / 128 / 1024 / 128 / 2048 / False | 13.356 | 13.415 | 11869.163 | 50.752 | 61.277 | 11898.282 |
-| 20 | 512 / 32 / 64 / 128 / 2048 / False | 4.601 | 4.712 | 3218.129 | 41.557 | 50.626 | 3201.979 |
-| 21 | 8192 / 512 / 1024 / 128 / 2048 / False | 97.872 | 98.431 | 72114.903 | 139.419 | 142.143 | 72454.977 |
-| 22 | 2048 / 64 / 1024 / 64 / 512 / True | 12.466 | 12.214 | 3602.631 | 82.153 | 48.513 | 3523.166 |
-
-### A5 paired medians (400 samples per side)
-
-| Case | E2E P (us) | E2E C (us) | E2E speedup | E2E status | Event speedup | Event status |
-| --- | ---: | ---: | ---: | --- | ---: | --- |
-| 1 | 33.671 | 38.638 | 0.871x | noisy | 0.815x | noisy |
-| 2 | 33.060 | 35.579 | 0.929x | noisy | 1.038x | noisy |
-| 3 | 32.543 | 35.344 | 0.921x | noisy | 0.997x | noisy |
-| 4 | 34.337 | 36.054 | 0.952x | noisy | 1.023x | noisy |
-| 5 | 35.468 | 31.547 | 1.124x | noisy | 1.204x | noisy |
-| 6 | 38.743 | 26.585 | 1.457x | noisy | 1.199x | noisy |
-| 7 | 38.248 | 26.064 | 1.467x | noisy | 1.207x | noisy |
-| 8 | 39.014 | 23.370 | 1.669x | noisy | 1.227x | noisy |
-| 9 | 38.047 | 23.345 | 1.630x | noisy | 1.208x | noisy |
-| 10 | 38.543 | 23.124 | 1.667x | noisy | 1.263x | noisy |
-| 11 | 39.349 | 32.133 | 1.225x | noisy | 1.142x | noisy |
-| 12 | 38.012 | 33.896 | 1.121x | noisy | 1.174x | noisy |
-| 13 | 40.225 | 36.831 | 1.092x | noisy | 1.229x | noisy |
-| 14 | 37.572 | 36.700 | 1.024x | noisy | 1.115x | noisy |
-| 15 | 39.194 | 32.759 | 1.196x | noisy | 1.096x | noisy |
-| 16 | 50.947 | 46.965 | 1.085x | noisy | 1.016x | noisy |
-| 17 | 39.835 | 31.817 | 1.252x | noisy | 1.196x | noisy |
-| 18 | 40.305 | 34.387 | 1.172x | noisy | 1.208x | noisy |
-| 19 | 45.929 | 40.145 | 1.144x | noisy | 1.084x | noisy |
-| 20 | 37.947 | 30.796 | 1.232x | noisy | 1.160x | noisy |
-| 21 | 135.813 | 128.543 | 1.057x | noisy | 1.008x | noisy |
-| 22 | 45.729 | 41.547 | 1.101x | noisy | 1.182x | noisy |
+本轮未出现精度或图集成失败；修复了上游合并冲突，保留了已有 singleton gather / Fake / dispatcher 修复及最新宽页表 UB 防护。测量方面修正了 Event-copy 与设备 kernel 标定混用的问题，并保留 A2 gb08 的全部波动证据。性能目标尚未满足，PR 保持 Draft；生产图与真实模型端到端验证仍未完成。
