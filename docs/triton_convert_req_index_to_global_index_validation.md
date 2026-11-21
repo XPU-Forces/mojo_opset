@@ -154,6 +154,6 @@ python -m pytest tests/performance/functions/test_triton_convert_req_index_to_gl
 # A5 改为 --mojo-target npu.a5。
 ```
 
-验收用 hot/cold profiling 入口、copy 标定、完整输入、环境、逐例样本、流水线时间、pytest XML、源码 SHA256 及复跑说明均在 **EVIDENCE_LINK**。源码与远端上传快照逐文件哈希核对一致；Ruff lint/format 与 `git diff --check` 通过。两平台仓库测试来自手动实板复跑，不等同于 GitHub 官方 CI 已通过。
+验收用 hot/cold profiling 入口、copy 标定、完整输入、环境、逐例样本、流水线时间、pytest XML、源码 SHA256 及复跑说明均在 [新 14 例原始测试与 profiling 证据包](https://github.com/argtarg/mojo_opset/blob/9250ac54636d0e5bb217d549918f5972d9294772/pr535_balanced14_evidence.zip)。源码与远端上传快照逐文件哈希核对一致；Ruff lint/format 与 `git diff --check` 通过。两平台仓库测试来自手动实板复跑，不等同于 GitHub 官方 CI 已通过。
 
 本轮未出现精度或图集成失败；修复了上游合并冲突，保留了已有 singleton gather / Fake / dispatcher 修复及最新宽页表 UB 防护。测量方面修正了 Event-copy 与设备 kernel 标定混用的问题，并保留 A2 gb08 的全部波动证据。性能目标尚未满足，PR 保持 Draft；生产图与真实模型端到端验证仍未完成。
