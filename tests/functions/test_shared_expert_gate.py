@@ -187,3 +187,24 @@ def test_shared_expert_gate_accuracy(accuracy_backend, case):
     assert actual.shape == expected.shape
     assert actual.dtype == expected.dtype
     assert_close(actual, expected, dtype=dtype)
+
+
+@pytest.mark.reference
+@pytest.mark.accuracy
+@pytest.mark.parametrize("shape", [(7, 513), (128, 4096), (1024, 2048)])
+@pytest.mark.parametrize("dtype", [BF16, FP16, FP32])
+def test_shared_expert_gate_reference_matches_cpu_fp64(accuracy_backend, shape, dtype):
+    # A CPU FP64 oracle catches bugs in the torch reference itself.
+    _, _, device = accuracy_backend
+    torch.manual_seed(0)
+    x = torch.randn(shape, device=device, dtype=dtype)
+    w = torch.randn(1, shape[-1], device=device, dtype=dtype)
+    s = torch.randn(shape, device=device, dtype=dtype)
+
+    actual = F.shared_expert_gate(x, w, s, implementation="torch")
+    expected = (
+        torch.sigmoid(torch.nn.functional.linear(
+            x.detach().cpu().double(), w.detach().cpu().double()))
+        * s.detach().cpu().double()
+    ).to(dtype)
+    assert_close(actual, expected.to(device), dtype=dtype)
