@@ -99,6 +99,9 @@ def test_fused_rms_norm_gated_2d_accuracy(accuracy_backend, T, D, activation, af
 BITWISE_CASES = [
     (2, 4, 256, 256, "silu", torch.float16),
     (2, 4, 256, 256, "sigmoid", torch.bfloat16),
+    # T=2048 keeps NT > NS so each program runs several grid-stride rounds and the
+    # per-round dw/db accumulation is exercised, not just the single-tile path.
+    (2, 4, 2048, 256, "silu", torch.float16),
 ]
 
 
