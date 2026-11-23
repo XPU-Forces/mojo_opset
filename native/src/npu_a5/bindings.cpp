@@ -48,23 +48,28 @@ TORCH_LIBRARY(mojo_native_a5, m) {
 #ifdef MOJO_NATIVE_WITH_VWN
     using namespace mojo::native::vwn;
     m.def("vwn_width_infer(Tensor h, Tensor weight, Tensor fn, Tensor dynamic, Tensor statics, "
-          "float eps, float? factor, float min_value, float max_value) -> (Tensor, Tensor)",
+          "float eps, float? factor, float min_value, float max_value, bool rtz=True) "
+          "-> (Tensor, Tensor)",
           &vwn_width_connection_infer_npu);
     m.def("vwn_width_fwd(Tensor h, Tensor weight, Tensor fn, Tensor dynamic, Tensor statics, "
-          "float eps, float? factor, float min_value, float max_value) -> (Tensor, Tensor, Tensor, Tensor)",
+          "float eps, float? factor, float min_value, float max_value, bool rtz=True) "
+          "-> (Tensor, Tensor, Tensor, Tensor)",
           &vwn_width_connection_train_npu);
     m.def("vwn_width_bwd_partials(Tensor h, Tensor weight, Tensor fn, Tensor dynamic, Tensor statics, "
           "Tensor acc, Tensor invvar, Tensor u, Tensor v, Tensor? residual, float? factor, "
           "float min_value, float max_value, int workspace_blocks, ScalarType? grad_h_dtype=None, "
-          "Tensor? sr_seed=None) -> (Tensor, Tensor, Tensor, Tensor, Tensor)",
+          "Tensor? sr_seed=None, bool rtz=True) "
+          "-> (Tensor, Tensor, Tensor, Tensor)",
           &vwn_width_connection_backward_partials_npu);
     m.def("vwn_depth_fwd(Tensor h, Tensor ho, Tensor gates, Tensor? weight, float eps, "
-          "bool output_fp32=False, Tensor? sr_seed=None) -> (Tensor, Tensor)",
+          "bool output_fp32=False, Tensor? sr_seed=None, bool rtz=True) -> (Tensor, Tensor)",
           &vwn_depth_connection_train_npu);
-    m.def("vwn_depth_infer(Tensor h, Tensor ho, Tensor gates, Tensor? weight, float eps) -> Tensor",
+    m.def("vwn_depth_infer(Tensor h, Tensor ho, Tensor gates, Tensor? weight, float eps, "
+          "bool rtz=True) -> Tensor",
           &vwn_depth_connection_infer_npu);
     m.def("vwn_depth_bwd_partials(Tensor h, Tensor ho, Tensor gates, Tensor dy, Tensor? weight, "
-          "Tensor? invvar, Tensor? clip_mask, float clip, ScalarType? grad_h_dtype, int workspace_blocks) "
+          "Tensor? invvar, Tensor? clip_mask, float clip, ScalarType? grad_h_dtype, int workspace_blocks, "
+          "bool rtz=True) "
           "-> (Tensor, Tensor, Tensor, Tensor)",
           &vwn_depth_connection_backward_partials_npu);
 #endif
