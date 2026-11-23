@@ -68,7 +68,11 @@ def validate(report):
     return rows
 
 
-def compare_reports(baseline, current, threshold_percent=5.0):
+class IncompatibleReports(ValueError):
+    """Valid measurements taken under different workload or timing conditions."""
+
+
+def compare_reports(baseline, current, threshold_percent=5.0, *, cached_baseline=False):
     if not math.isfinite(threshold_percent) or threshold_percent <= 0:
         raise ValueError("threshold must be finite and positive")
     old, new = validate(baseline), validate(current)
@@ -76,7 +80,11 @@ def compare_reports(baseline, current, threshold_percent=5.0):
         if baseline[field] != current[field]:
             keys = sorted(set(baseline[field]) | set(current[field]))
             changed = [key for key in keys if baseline[field].get(key) != current[field].get(key)]
-            raise ValueError(f"Incompatible {field}: {', '.join(changed)}")
+            if cached_baseline and field == "environment" and set(changed) <= {
+                "runner_id", "torch", "torch_npu", "torch_mlu", "triton", "triton_distributions"
+            }:
+                continue
+            raise IncompatibleReports(f"Incompatible {field}: {', '.join(changed)}")
     rows = []
     for name in sorted(old.keys() | new.keys()):
         if name not in old or name not in new:
@@ -86,7 +94,7 @@ def compare_reports(baseline, current, threshold_percent=5.0):
         # Changing the selected implementation is a legitimate optimization.
         workload = lambda row: {key: value for key, value in row["parameters"].items() if key != "implementation"}
         if workload(before) != workload(after):
-            raise ValueError(f"Workload changed under the same case id: {name}")
+            raise IncompatibleReports(f"Workload changed under the same case id: {name}")
         for metric in sorted(before["metrics"]):
             a, b = (row["metrics"][metric]["samples"] for row in (before, after))
             old_median, new_median = statistics.median(a), statistics.median(b)
