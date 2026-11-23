@@ -306,7 +306,7 @@ def _kernel_seconds(n: int, d: int, dtype: torch.dtype) -> float:
 
 
 def _export_kernel_details(trace_dir):
-    """把 torch_npu 原始轨迹导出成 ``ASCEND_PROFILER_OUTPUT/kernel_details.csv``。"""
+    """Export torch_npu's raw trace to ``ASCEND_PROFILER_OUTPUT/kernel_details.csv``."""
     import csv as _csv
     import subprocess
     import sys
@@ -316,9 +316,12 @@ def _export_kernel_details(trace_dir):
     if not prof_dirs:
         return None
     prof_dir = prof_dirs[-1]
+    ascend_home = os.environ.get("ASCEND_HOME_PATH")
+    if not ascend_home:
+        print("  msprof export skipped: ASCEND_HOME_PATH is not set", flush=True)
+        return None
     msprof = os.path.join(
-        os.environ.get("ASCEND_HOME_PATH", "/home/lyy_triton/cann921/install/cann"),
-        "tools/profiler/profiler_tool/analysis/msprof/msprof.py")
+        ascend_home, "tools/profiler/profiler_tool/analysis/msprof/msprof.py")
     done = subprocess.run([sys.executable, msprof, "export", "summary", "-dir", prof_dir],
                           capture_output=True, text=True)
     if done.returncode != 0:
@@ -367,10 +370,11 @@ def _steady_stats(csv_path):
 
 def profiling_test(fn_triton, device_type="npu", device=None, result_dir="result_dir",
                    l2_cache=False):
-    """按统一的 13 步 schedule 采集当前 case（NPU 走 PipeUtilization）。
+    """Profile the current case with a fixed 13-step schedule (PipeUtilization on NPU).
 
-    ``l2_cache=True`` 额外打开 msprof 的 L2 命中率采集（会改变 msprof 的
-    默认 cache 处理方式），用于观察结果是否依赖热 L2。
+    ``l2_cache=True`` additionally enables msprof L2 hit-rate collection, which
+    changes msprof's default cache handling, to check whether results depend on
+    a warm L2.
     """
     from torch.profiler import ProfilerActivity
 
@@ -451,7 +455,7 @@ if __name__ == "__main__":
     parser.add_argument("--device", default=None)
     parser.add_argument("--result-dir", default="result_dir")
     parser.add_argument("--l2-cache", action="store_true",
-                        help="打开 msprof 的 L2 命中率采集")
+                        help="enable msprof L2 hit-rate collection")
     args = parser.parse_args()
     rows = profile_shapes(result_dir=args.result_dir, device_type=args.device_type,
                           device=args.device, l2_cache=args.l2_cache)
