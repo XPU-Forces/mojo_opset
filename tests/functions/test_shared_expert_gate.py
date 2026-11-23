@@ -21,6 +21,7 @@ import torch
 
 from mojo_opset import functions as F
 from tests._checks import assert_close
+from tests._checks import assert_repeatable
 
 BF16 = torch.bfloat16
 FP16 = torch.float16
@@ -208,3 +209,20 @@ def test_shared_expert_gate_reference_matches_cpu_fp64(accuracy_backend, shape, 
         * s.detach().cpu().double()
     ).to(dtype)
     assert_close(actual, expected.to(device), dtype=dtype)
+
+
+@pytest.mark.api("functions.shared_expert_gate")
+@pytest.mark.bitwise
+@pytest.mark.parametrize("shape", [(7, 513), (128, 4096), (1024, 2048), (8192, 2048)])
+@pytest.mark.parametrize("dtype", [BF16, FP16, FP32])
+def test_shared_expert_gate_bitwise(accuracy_backend, shape, dtype):
+    implementation, _, device = accuracy_backend
+    torch.manual_seed(0)
+    x = torch.randn(shape, device=device, dtype=dtype)
+    w = torch.randn(1, shape[-1], device=device, dtype=dtype)
+    s = torch.randn(shape, device=device, dtype=dtype)
+    assert_repeatable(
+        lambda: F.shared_expert_gate(x, w, s, implementation=implementation),
+        (x, w, s),
+        backward=False,
+    )
