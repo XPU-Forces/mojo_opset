@@ -108,6 +108,11 @@ Add `mojo_opset/kernels/<arch>_native/[sku_<name>/]<operator>.py`; use
    [A5 native](../mojo_opset/kernels/npu_a5_native/__init__.py) does for 950PR.
 5. Update the appropriate `mojo_opset/config/*.yaml` entry if this should be
    the default implementation.
+6. Register the operator's Python wrapper, native source directories/headers
+   (such as `native/src/<provider>/<operator>/**`) and accuracy/performance
+   test files in [tests/ci/test_selection_public.yaml](../tests/ci/test_selection_public.yaml) (or the
+   corresponding internal CI table for private bindings), and remove stale
+   paths when deleting or migrating an implementation.
 
 For an existing public operator, preserve its semantics without changing the
 public API. For a new semantic operation, also add a `torch_reference`

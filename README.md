@@ -161,3 +161,15 @@ To use the same Triton Ascend version locally:
 ```sh
 pip install triton-ascend==3.2.2.post1 -i https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly
 ```
+
+Incremental CI selects NPU devices and test files from declarative rules in
+[tests/ci/test_selection_public.yaml](tests/ci/test_selection_public.yaml).
+When adding, modifying or removing an operator, backend implementation, helper
+module, native source directory or test file, update
+`tests/ci/test_selection_public.yaml` so every path maps to the affected
+`<910b|950>/<triton|torch_npu|native|performance>` jobs and complete test files
+(use `[]` when an operator has no performance benchmark yet). When deleting
+files, remove the deleted paths from `rules` (delete the rule or operator entry
+if no paths remain, and remove retired `<hardware>/<impl>` jobs or deleted test
+files from `jobs`).
+
