@@ -222,7 +222,7 @@ def test_shared_expert_gate_bitwise(accuracy_backend, shape, dtype):
     w = torch.randn(1, shape[-1], device=device, dtype=dtype)
     s = torch.randn(shape, device=device, dtype=dtype)
     assert_repeatable(
-        lambda: F.shared_expert_gate(x, w, s, implementation=implementation),
+        lambda x, w, s: F.shared_expert_gate(x, w, s, implementation=implementation),
         (x, w, s),
         backward=False,
     )
