@@ -947,7 +947,14 @@ def _select_candidate_blocks_impl(
     # only 7 descriptors. So keep it on the prefill tier only — the one with a
     # row per program and a fill region spanning many chunks.
     wtail = (wide_mult * tile < nblocks) and (rows > 2048 or nblocks < 2048)
-    strided = logits.stride(1) == 2
+    # R18/B14 fix: the STRIDED branch reads a 2*next_pow2(BLOCK_SIZE) window per
+    # block, which is exactly the block's physical span only when BLOCK_SIZE is
+    # a power of two. For a non-power-of-two BLOCK_SIZE the last complete block
+    # of the last row would read 2*(next_pow2(BS) - BS) lanes past the tensor,
+    # since the tile-level `(tile_id + 1) * TILE <= num_full` test is block
+    # granularity, not window granularity. Such shapes keep the generic masked
+    # path (its `elems_range < BLOCK_SIZE` mask never leaves the block).
+    strided = logits.stride(1) == 2 and triton.next_power_of_2(block_size) == block_size
     # R14/B14: only the strided case takes this constexpr, so the other cases'
     # compiled kernels keep their previous constexpr set bit for bit.
     sc2 = strided
