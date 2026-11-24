@@ -46,6 +46,7 @@ npu.a5:
   rope: triton
   rope_cos_sin: triton
   rope_infer: triton
+  rope_quant_insert: triton
   rotate_activation: torch
   sdpa_infer: triton
   silu: triton
