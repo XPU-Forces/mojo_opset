@@ -16,6 +16,7 @@ OPS = {
     "rotate_activation": "rotate_activation",
     "flex_attention": "flex_attention",
     "flex_attention_v2": "flex_attention_v2",
+    "fused_inv_rope_fp8_quant": "fused_inv_rope_fp8_quant",
     "rope_cos_sin": "rope_cos_sin",
     "vision_rope_cos_sin_2d": "rope_cos_sin",
     "multimodal_rope_infer": "multimodal_rope_infer",
