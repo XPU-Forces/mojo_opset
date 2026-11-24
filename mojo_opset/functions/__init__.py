@@ -48,6 +48,7 @@ from .position_embedding import vision_rope_2d_infer
 from .quantization import dequant
 from .quantization import dynamic_quant
 from .quantization import static_quant
+from .quantize_and_insert_k_cache import quantize_and_insert_k_cache
 from .rms_norm import rms_norm
 from .rope import rope
 from .rope_cos_sin import rope_cos_sin
@@ -104,6 +105,7 @@ __all__ = [
     "prefill_gqa_infer",
     "quant_batch_gemm_reduce_sum",
     "quant_gemm",
+    "quantize_and_insert_k_cache",
     "reject_sampling",
     "residual_add_layer_norm_infer",
     "residual_add_layer_norm_quant",

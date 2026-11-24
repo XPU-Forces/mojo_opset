@@ -51,6 +51,7 @@ npu.a5:
   silu: triton
   static_quant: triton
   store_lowrank: triton
+  quantize_and_insert_k_cache: triton
   store_paged_kv_cache: triton
   swa: triton
   swa_infer: triton
