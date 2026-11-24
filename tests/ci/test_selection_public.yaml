@@ -913,6 +913,48 @@ operators:
         jobs:
           950/performance:
             - tests/performance/functions/test_dense_gemm.py
+  get_compressed_slot_mapping:
+    rules:
+      - paths:
+          - mojo_opset/functions/get_compressed_slot_mapping.py
+          - mojo_opset/kernels/torch/get_compressed_slot_mapping.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_get_compressed_slot_mapping.py
+          910b/triton:
+            - tests/functions/test_get_compressed_slot_mapping.py
+          950/performance:
+            - tests/performance/functions/test_get_compressed_slot_mapping.py
+          950/triton:
+            - tests/functions/test_get_compressed_slot_mapping.py
+      - paths:
+          - mojo_opset/kernels/npu_a2_triton/get_compressed_slot_mapping.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_get_compressed_slot_mapping.py
+          910b/triton:
+            - tests/functions/test_get_compressed_slot_mapping.py
+      - paths:
+          - mojo_opset/kernels/npu_a5_triton/get_compressed_slot_mapping.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_get_compressed_slot_mapping.py
+          950/triton:
+            - tests/functions/test_get_compressed_slot_mapping.py
+      - paths:
+          - tests/functions/test_get_compressed_slot_mapping.py
+        jobs:
+          910b/triton:
+            - tests/functions/test_get_compressed_slot_mapping.py
+          950/triton:
+            - tests/functions/test_get_compressed_slot_mapping.py
+      - paths:
+          - tests/performance/functions/test_get_compressed_slot_mapping.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_get_compressed_slot_mapping.py
+          950/performance:
+            - tests/performance/functions/test_get_compressed_slot_mapping.py
   group_gemm:
     rules:
       - paths:
