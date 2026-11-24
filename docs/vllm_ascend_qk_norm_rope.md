@@ -1,5 +1,13 @@
 # vllm-ascend integration: `fused_qk_norm_rope` dispatch
 
+> **Kernel revision (2026-11-22, `feat/qk-norm-rope`).** The analysis below describes the
+> original per-row implementation and is kept for history. The kernel was rewritten around a
+> token-wide tile (one tile = one token, all heads) with three bulk loads and one bulk store,
+> which removes the per-row descriptor cost identified in "Why it cannot be fixed by scheduling".
+> Measured 4096x56 (task-book MBU basis, on-device `copy_` calibration): 950PR 205.70 us /
+> 79.5%, A3 394.43 us / 47.3%, A2 (910B3) 441.01 us / 42.4%; 8/8 task-book performance lines
+> met on 950PR. The per-row numbers in this document are superseded by these figures.
+
 `qk_norm_rope_infer` is the Ascend Triton port of vLLM-Omni's `fused_qk_norm_rope`
 (`vllm_omni/diffusion/layers/fused_qk_norm_rope.py`), the MiniMax-H3 contract:
 `head_dim=128`, `rotary_dim=96`, BF16, `[tokens, heads, head_dim]`, half-split pairing.
