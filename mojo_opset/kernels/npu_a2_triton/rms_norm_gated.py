@@ -8,8 +8,9 @@
 """Fused RMSNorm + gate kernels adapted for triton-ascend on Huawei NPU.
 
 Grid-stride BT-tiled kernels keep weight/bias resident and vectorize a small row tile under UB.
-Ascend910 @ D=1024 (multi-buffer compile-validated): fwd BT=8 / bwd BT=8.
 """
+
+import functools
 
 import torch
 import triton
@@ -21,68 +22,29 @@ from mojo_opset.kernels._ascend_ub_manager import compute_ub_block_size
 from mojo_opset.kernels._ascend_ub_manager import get_ub_manager
 from mojo_opset.utils.env import get_bool_env
 
-# peak live fp32 tiles relative to [BT, BD].
-# BD uses a single-row budget so large D is not rejected when BT can still be 1.
-# fwd grid-stride keeps w/b resident (needs higher mult than one-tile launch).
-# fwd calibrated on Ascend950PR (248 KiB UB, 0.85 margin): mult=4.5 → BT=8 @ D=1024,
-# large-BD mult=5.5 → BT=4 @ D>=1200 (3.0/4.0 over-plan BT that overflows UB and fail compiles).
-# bwd stores dg before the dx path. bwd BT=8 @ D=1024 (mult=5, smaller peak live-tile count).
-# recompute-output (norm+linear bwd) keeps b_y live for tl.store(y);
-# bwd BT=2 @ D=1024 (mult=11). Do not lower without re-validating.
-#
-# Reduction lowering limits (measured on BiShengHIR, do not retry blindly):
-# - axis-1 tl.sum dominates runtime (msprof op sim v5: BAR = 43% fwd / 66% bwd
-#   of core time, 18-26 barriers per round, one SPR exchange per 128-wide block).
-# - manual log2 halving via tl.reshape+tl.split works only on raw tl.load
-#   tensors; on computed tensors (e.g. b_xhat*b_wdy) expand_shape fails with
-#   "cannot align 1 axis", and the halving intermediates overflow UB
-#   (4.2 Mbit needed vs 1.5 Mbit available at D=1024).
-# - tl.join to fuse two axis-1 reductions is rejected outright by
-#   ConvertLinalgRToBinary (3D reduction).
-# - fusing the two bwd axis-0 reductions (dw + db) into ONE tl.sum via
-#   tl.join -> [BT, 2*BD] -> tl.sum(axis=0) -> tl.split compiles only at
-#   BT<=8 and is 2.2-2.5x SLOWER than the two separate tl.sums (measured
-#   same-BT on Ascend910B3: BT=8 195 -> 480 us/iter, BT=4 248 -> 545 us/iter).
-#   msprof op sim (same BT=8) shows the barrier count does NOT drop
-#   (4536 -> 5463 calls) and the cost moves onto the join itself
-#   (tl.join line 418 us) plus MOV_SRC_TO_DST_ALIGN/MOV_SPR_XN layout
-#   shuffling; at BT=16 (the shipped config) it fails with
-#   "ub overflow, requires 2326528 bits while 1572864 bits available".
-#   => do NOT attempt any tl.join-based reduction fusion on Ascend.
-# => axis-1 reductions stay as plain tl.sum; bwd dw/db use axis=0 tl.sum, but
-#    accumulated per round into a [BD] vector instead of a [BT, BD] tile so
-#    that the peak live-tile count (and hence the UB budget) shrinks.
+# Peak live fp32 [BT, BD] tiles per kernel variant; the UB model uses these to cap BT.
+# BD is sized from a single-row budget, so a large D can still run with BT=1.
+# Keep axis-1 reductions as plain tl.sum: tl.join-based fusion is slower on Ascend
+# and the manual log2-halving path overflows UB at D=1024.
 _BD_MEM_MULT = 6.0
 _HALF_NATIVE = get_bool_env("MOJO_ENABLE_HALF_NATIVE", default=False)
 _FWD_MEM_MULT = 4.5
-# bwd UB budget.
-# The bwd kernel used to keep two extra [BT, BD] fp32 tiles live (the dw/db
-# accumulators and the pre-gate b_y). Both were removed:
-# - b_y is now formed only where it is consumed (the dg path),
-# - dw/db accumulate per-round into [BD] vectors (axis=0 tl.sum) instead
-#   of [BT, BD] tiles,
-# so the peak live-tile count (and hence the UB budget) shrinks.
-#
-# RMS (mult=5.0) affords BT=8 @ BD=1024 on Ascend910B3 (192 KiB UB) and
-# that is a solid win on the real autograd path (torch_npu profiler,
-# D=1024, T=16384, NS=40): 276us -> 210us, -24% (MBU 0.417 -> 0.496).
-#
-# Rejected alternatives (do not retry blindly):
-# - dw/db back to a [BT, BD] accumulator + one post-loop axis=0 tl.sum:
-#   helps some shapes (D=512 sigmoid -5%) but costs +12% on the D=1024
-#   silu+bias shape and shifts the ub budget; net neutral-to-worse.
-# - forming b_y up front again: neutral within run-to-run noise (~1.5%).
-# Compile-validated over bias/no-bias x swish/sigmoid.
+# Masked kernels keep extra fp32 [BT, BD] temporaries live, so cap BT*BD here.
+_MASKED_FWD_BT_ELEMS = 8192
+_MASKED_BWD_BT_ELEMS = 4096
+# BD equals D exactly (non-power-of-2 tl.arange is supported), so every tile is full
+# and EVEN_SHAPE can run mask-free when T % BT == 0. Above this width the PoT size is
+# used: D > 4096 already forces BT=1, so an exact width buys nothing.
+_EXACT_BD_MAX = 4096
+# bwd keeps fewer live tiles than fwd: dw/db accumulate per round into [BD] vectors
+# and b_y is formed only in the dg path.
 _BWD_MEM_MULT = 5.0
 _BWD_RECOMPUTE_MEM_MULT = 11.0
 _UB_SAFETY_MARGIN = 0.85
 # legacy byte cap when UB capacity cannot be detected (65536 // fp32).
 _FALLBACK_MAX_BD = 65536 // 4
 _MAX_BT = 128
-# PoT-padded BD>=2048 needs extra headroom under multi-buffering.
-# Ascend950PR calibration: the RMS bwd variant plans ~14.7x [BT,BD] live at
-# BD=2048 (fp32 temps/accumulators do not shrink with input dtype), so its
-# mult must reach 16 to drop BT to 1.
+# BD >= 2048 needs extra headroom under multi-buffering.
 _LARGE_BD = 2048
 _LARGE_BD_FWD_MEM_MULT = 5.5
 _LARGE_BD_BWD_MEM_MULT = 16.0
@@ -111,7 +73,7 @@ def _activation_id(activation: str) -> int:
 
 
 def _tile_memory_multiplier(base: float, large_bd_mult: float, BD: int) -> float:
-    """Bump multiplier when PoT-padded BD is large enough to stress UB."""
+    """Bump multiplier when BD is large enough to stress UB."""
     if BD >= _LARGE_BD:
         return max(base, large_bd_mult)
     return base
@@ -136,11 +98,9 @@ def _bwd_memory_multiplier(BD: int, *, recompute_output: bool = False) -> float:
     return _tile_memory_multiplier(base=_BWD_MEM_MULT, large_bd_mult=_LARGE_BD_BWD_MEM_MULT, BD=BD)
 
 
-# BT candidates for runtime autotuning. BD is fixed by D (single-row UB budget) and
-# stays a wrapper-computed launch constant, so only BT varies.
-# fwd/bwd additionally carry EVEN_SHAPE in each config: it is a correctness flag
-# (mask-free load/store is only legal when every tile is full), so it must travel
-# with BT rather than be picked independently.
+# BT candidates for runtime autotuning; BD is a wrapper-computed launch constant.
+# EVEN_SHAPE is a correctness flag (mask-free access is only legal when every tile is
+# full), so it travels with BT rather than being picked independently.
 _AUTOTUNE_BT_VALS = (1, 2, 4, 8, 16, 32, 64, 128)
 _AUTOTUNE_FWD_CONFIGS = [
     triton.Config({'BT': bt, 'EVEN_SHAPE': even})
@@ -165,21 +125,21 @@ def _autotune_max_bt(BD: int, memory_multiplier: float, T: int) -> int:
 
 
 def _prune_fwd_configs(configs, nargs, **kwargs):
-    """Select the single best fwd BT from the host UB model.
+    """Lock the largest fwd BT allowed by the UB model.
 
-    fwd is flag/iteration-bound (its dominant cost is SET_FLAG/WAIT_FLAG sync, which
-    scales with the number of tiles), so the largest BT the UB model allows is the
-    optimum: fewer tiles -> fewer sync pairs. On a shared NPU the autotuner's do_bench
-    timing noise exceeds the true BT-vs-BT gap (~10% at D=1024), so we must NOT let
-    the runtime benchmark pick among several BT values — lock the largest allowed one
-    instead. The wrapper calls the kernel with keyword arguments only, so D/T/BD ride
-    in ``kwargs`` and positional ``nargs`` is empty."""
+    fwd is sync-bound, so fewer (larger) tiles always win and letting the runtime
+    benchmark pick among BTs only adds noise. Oversized masked tiles are halved.
+    The wrapper passes keyword arguments only, so ``nargs`` is empty.
+    """
     BD = kwargs['BD']
     D = kwargs['D']
     T = kwargs['T']
     max_bt = _autotune_max_bt(BD=BD, memory_multiplier=_fwd_memory_multiplier(BD=BD), T=T)
     best_bt = max(c.kwargs['BT'] for c in configs if c.kwargs['BT'] <= max_bt)
     even = (BD == D) and (T % best_bt == 0)
+    if not even and best_bt * BD > _MASKED_FWD_BT_ELEMS:
+        best_bt = max(1, best_bt // 2)
+        even = (BD == D) and (T % best_bt == 0)
     for c in configs:
         if c.kwargs['BT'] == best_bt and c.kwargs['EVEN_SHAPE'] == even:
             return [c]
@@ -187,24 +147,19 @@ def _prune_fwd_configs(configs, nargs, **kwargs):
 
 
 def _prune_bwd_configs(configs, nargs, **kwargs):
-    """Select the single best bwd BT from the host UB model.
-
-    bwd is flag/iteration-bound like fwd (its dominant cost is the SET_FLAG/WAIT_FLAG
-    sync across tiles, which scales with the number of tiles), so the largest BT the
-    UB model allows is the optimum: fewer tiles -> fewer sync pairs. On a shared NPU the
-    autotuner's do_bench timing noise exceeds the true BT-vs-BT gap, so we must NOT let
-    the runtime benchmark pick among several BT values — lock the largest allowed one
-    instead. EVEN_SHAPE is a correctness flag (mask-free load/store is only legal when
-    every tile is full), so it travels with BT rather than being picked independently."""
+    """Lock the largest bwd BT allowed by the UB model (see _prune_fwd_configs)."""
     BD = kwargs['BD']
     D = kwargs['D']
     T = kwargs['T']
     mult = _bwd_memory_multiplier(BD=BD, recompute_output=bool(kwargs['RECOMPUTE_OUTPUT']))
-    # dw/db accumulate per round into [BD] vectors (axis=0 tl.sum), so the live-tile
-    # count does not depend on the weight/bias flags.
+    # dw/db accumulate into [BD] vectors, so the live-tile count does not depend on
+    # the weight/bias flags.
     max_bt = _autotune_max_bt(BD=BD, memory_multiplier=mult, T=T)
     best_bt = max(c.kwargs['BT'] for c in configs if c.kwargs['BT'] <= max_bt)
     even = (BD == D) and (T % best_bt == 0)
+    if not even and best_bt * BD > _MASKED_BWD_BT_ELEMS:
+        best_bt = max(1, best_bt // 2)
+        even = (BD == D) and (T % best_bt == 0)
     for c in configs:
         if c.kwargs['BT'] == best_bt and c.kwargs['EVEN_SHAPE'] == even:
             return [c]
@@ -224,7 +179,7 @@ def _get_rms_norm_gated_tiles(
         memory_multiplier=_BD_MEM_MULT,
         safety_margin=_UB_SAFETY_MARGIN,
         fallback=_FALLBACK_MAX_BD,
-        desired=triton.next_power_of_2(D),
+        desired=D if D <= _EXACT_BD_MAX else triton.next_power_of_2(D),
     )
     if D > BD:
         raise RuntimeError(
@@ -249,6 +204,7 @@ def _get_rms_norm_gated_tiles(
     return BD, BT
 
 
+@functools.lru_cache(maxsize=None)
 def _launch_config(
     T: int,
     D: int,
@@ -263,16 +219,22 @@ def _launch_config(
         is_forward=is_forward,
         recompute_output=recompute_output,
     )
-    # BT here is only the host UB-model bound; the kernels autotune the launched BT,
-    # so NS must not depend on it (idle programs just store their zeroed dw/db rows).
+    # One grid-stride program per vector core, capped by T and the grid limit.
     NS = max(1, min(_num_vectorcores(device_index), T, ASCEND_MAX_GRID_DIM))
     return BD, BT, NS
 
 
-# The autotune key only lists what the prune decision actually depends on
-# (D -> BD, T -> max_bt/EVEN_SHAPE). Feature flags such as HAS_WEIGHT or
-# ACTIVATION change the compiled binary but not the chosen BT, so keeping them
-# here would only re-benchmark the same deterministic answer under a new key.
+@triton.jit
+def _store(ptr, off, v, m, HAS_MASK: tl.constexpr):
+    """Store with or without a mask; ``m`` is None on the even (mask-free) path."""
+    if HAS_MASK:
+        tl.store(ptr + off, v, mask=m)
+    else:
+        tl.store(ptr + off, v)
+
+
+# Key covers exactly the prune inputs (D -> BD, T -> max_bt/EVEN_SHAPE); flags like
+# HAS_WEIGHT change the binary but never the chosen BT.
 @triton.autotune(
     configs=_AUTOTUNE_FWD_CONFIGS,
     key=['D', 'T'],
@@ -319,8 +281,9 @@ def rms_norm_gated_fwd_kernel(
         rows = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
         row_off = rows[:, None] * D + cols[None, :]
         if EVEN_SHAPE and BD % 16 == 0:
-            # even pow2 D: every 16-element chunk is 16-aligned
+            # BD == D and D % 16 == 0: every row starts 16-aligned
             row_off = tl.multiple_of(row_off, (1, 16))
+        mask = None
         if not EVEN_SHAPE:
             row_mask = rows < T
             mask = row_mask[:, None] & col_mask[None, :]
@@ -341,8 +304,8 @@ def rms_norm_gated_fwd_kernel(
             else:
                 tl.store(residual_out + row_off, b_x.to(residual_out.dtype.element_ty), mask=mask)
 
-        b_xbar = b_x if EVEN_SHAPE else tl.where(mask, b_x, 0.0)
-        b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
+        # masked loads already return 0.0 in the padding lanes
+        b_var = tl.sum(b_x * b_x, axis=1) / D
         b_rstd = 1 / tl.sqrt(b_var + eps)
         if EVEN_SHAPE:
             tl.store(rstd + rows, b_rstd)
@@ -359,9 +322,8 @@ def rms_norm_gated_fwd_kernel(
         else:
             b_g = tl.load(g + row_off, mask=mask, other=0.0)
         if HALF_NATIVE:
-            # AIV vector ops process 2x elements per instruction in fp16: keep the
-            # gate chain in the input dtype and round b_y once instead of upcasting
-            # g. bf16 inputs keep the fp32 path (eps 0.0078 breaks the 1e-3 tol).
+            # fp16 keeps the gate chain in the input dtype (2x elements per AIV
+            # instruction); bf16 uses fp32 because eps 0.0078 breaks the 1e-3 tol.
             b_gate = tl.sigmoid(b_g)
             b_y = b_y.to(g.dtype.element_ty)
             if ACTIVATION == 0:
@@ -375,15 +337,10 @@ def rms_norm_gated_fwd_kernel(
             else:
                 b_y = b_y * tl.sigmoid(b_g)
 
-        if EVEN_SHAPE:
-            tl.store(y + row_off, b_y.to(y.dtype.element_ty))
-        else:
-            tl.store(y + row_off, b_y.to(y.dtype.element_ty), mask=mask)
+        _store(y, row_off, b_y.to(y.dtype.element_ty), mask, HAS_MASK=not EVEN_SHAPE)
 
 
-# Key = exactly the prune inputs: D -> BD, RECOMPUTE_OUTPUT -> the large-BD memory
-# multiplier, T -> max_bt/EVEN_SHAPE. HAS_WEIGHT, STORE_DRESIDUAL change the compiled
-# binary but never the chosen BT.
+# Key = exactly the prune inputs (see the fwd kernel above).
 @triton.autotune(
     configs=_AUTOTUNE_BWD_CONFIGS,
     key=['D', 'RECOMPUTE_OUTPUT', 'T'],
@@ -420,7 +377,8 @@ def rms_norm_gated_bwd_kernel(
 ):
     """Grid-stride backward: each program owns a BT-row tile stream.
 
-    Gate gradients are stored before the dx path, so Ascend can release their temporaries and keep BT within the UB budget.
+    dg is stored before the dx path so its temporaries are released early and BT stays
+    within the UB budget.
     """
     i_s = tl.program_id(0)
     # A2 affinity (attnres pattern): contiguous/alignment hints for the widest
@@ -430,10 +388,7 @@ def rms_norm_gated_bwd_kernel(
 
     if HAS_WEIGHT:
         b_w = tl.load(w + cols, mask=col_mask).to(tl.float32)
-        # Per-round axis=0 reduction into a [BD] vector.
-        # The former [BT, BD] fp32 accumulator cost one extra live UB tile
-        # (blocking BT=8 at D=1024) and the single post-loop axis=0 tl.sum
-        # was not cheaper than the per-round one.
+        # Per-round axis=0 reduction into [BD] saves one live [BT, BD] tile.
         b_dw = tl.zeros((BD,), dtype=tl.float32)
     if HAS_BIAS:
         b_b = tl.load(b + cols, mask=col_mask, other=0.0).to(tl.float32)
@@ -445,26 +400,26 @@ def rms_norm_gated_bwd_kernel(
         rows = i_t * BT + tl.arange(0, BT)
         row_off = rows[:, None] * D + cols[None, :]
         if EVEN_SHAPE and BD % 16 == 0:
-            # even pow2 D: every 16-element chunk is 16-aligned
+            # BD == D and D % 16 == 0: every row starts 16-aligned
             row_off = tl.multiple_of(row_off, (1, 16))
+        mask = None
         if EVEN_SHAPE:
             b_x = tl.load(x + row_off).to(tl.float32)
         else:
-            mask = (rows < T)[:, None] & col_mask[None, :]
+            row_mask = rows < T
+            mask = row_mask[:, None] & col_mask[None, :]
             b_x = tl.load(x + row_off, mask=mask, other=0.0).to(tl.float32)
 
         if EVEN_SHAPE:
             b_rstd = tl.load(rstd + rows)
         else:
-            b_rstd = tl.load(rstd + rows, mask=rows < T, other=0.0)
+            b_rstd = tl.load(rstd + rows, mask=row_mask, other=0.0)
         b_xhat = b_x * b_rstd[:, None]
         if not EVEN_SHAPE:
-            mask = (rows < T)[:, None] & col_mask[None, :]
             b_xhat = tl.where(mask, b_xhat, 0.0)
 
-        # b_y is formed only where it is consumed (the dg path). Forming it up
-        # front kept one extra [BT, BD] fp32 tile live across the whole round,
-        # which was the UB blocker for BT=8 at D=1024.
+        # b_y is only needed by the dg path; forming it there keeps one less
+        # [BT, BD] tile live.
         if EVEN_SHAPE:
             b_g = tl.load(g + row_off)
             b_dy = tl.load(dy + row_off)
@@ -472,9 +427,8 @@ def rms_norm_gated_bwd_kernel(
             b_g = tl.load(g + row_off, mask=mask, other=0.0)
             b_dy = tl.load(dy + row_off, mask=mask, other=0.0)
         if HALF_NATIVE:
-            # AIV vector ops process 2x elements per instruction in fp16: keep the
-            # gate/dg chains in the input dtype; the reduction path upcasts once.
-            # bf16 inputs keep the fp32 path (eps 0.0078 breaks the 1e-3 tol).
+            # fp16 keeps the gate/dg chains in the input dtype; bf16 uses fp32
+            # because eps 0.0078 breaks the 1e-3 tolerance.
             b_sig = tl.sigmoid(b_g)
             if ACTIVATION == 0:
                 # silu'(g) = sigmoid(g) * (1 + g * (1 - sigmoid(g)))
@@ -504,16 +458,10 @@ def rms_norm_gated_bwd_kernel(
             else:
                 b_y = b_xhat
             b_dg = b_dy * b_y * b_dgate
-        if EVEN_SHAPE:
-            tl.store(dg + row_off, b_dg.to(dg.dtype.element_ty))
-        else:
-            tl.store(dg + row_off, b_dg.to(dg.dtype.element_ty), mask=mask)
+        _store(dg, row_off, b_dg.to(dg.dtype.element_ty), mask, HAS_MASK=not EVEN_SHAPE)
         # dg needs pre-gate b_y; the recomputed output must include the gate to match the caller's linear input.
         if RECOMPUTE_OUTPUT:
-            if EVEN_SHAPE:
-                tl.store(y + row_off, (b_y * b_gate).to(y.dtype.element_ty))
-            else:
-                tl.store(y + row_off, (b_y * b_gate).to(y.dtype.element_ty), mask=mask)
+            _store(y, row_off, (b_y * b_gate).to(y.dtype.element_ty), mask, HAS_MASK=not EVEN_SHAPE)
         b_dy = b_dy * b_gate
         if HALF_NATIVE:
             b_dy = b_dy.to(tl.float32)
@@ -541,14 +489,8 @@ def rms_norm_gated_bwd_kernel(
             else:
                 b_dx += tl.load(dresidual + row_off, mask=mask, other=0.0).to(tl.float32)
         if STORE_DRESIDUAL:
-            if EVEN_SHAPE:
-                tl.store(dresidual_in + row_off, b_dx.to(dresidual_in.dtype.element_ty))
-            else:
-                tl.store(dresidual_in + row_off, b_dx.to(dresidual_in.dtype.element_ty), mask=mask)
-        if EVEN_SHAPE:
-            tl.store(dx + row_off, b_dx.to(dx.dtype.element_ty))
-        else:
-            tl.store(dx + row_off, b_dx.to(dx.dtype.element_ty), mask=mask)
+            _store(dresidual_in, row_off, b_dx.to(dresidual_in.dtype.element_ty), mask, HAS_MASK=not EVEN_SHAPE)
+        _store(dx, row_off, b_dx.to(dx.dtype.element_ty), mask, HAS_MASK=not EVEN_SHAPE)
 
     if HAS_WEIGHT:
         tl.store(dw + i_s * D + cols, b_dw, mask=col_mask)
