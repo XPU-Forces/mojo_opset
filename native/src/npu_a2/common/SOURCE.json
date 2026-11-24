@@ -1,0 +1,24 @@
+{
+  "repository": "xpu-ops",
+  "commit": "8452b29bcbbd717db3ba17680bd73e913732c2dc",
+  "files": [
+    {
+      "source": "common/math_utils.h",
+      "sha256": "1d857f0322c95db58443f48d6e0d5d7ba6df4684b2fe7c0eab97c3fd5e8f95f6",
+      "destination": "math_utils.h"
+    },
+    {
+      "source": "common/data_copy_utils.h",
+      "sha256": "5dfeace251ed7dd8495bc5167be9d7807ffbc15928bc4b9fa9375d77fe325db9",
+      "destination": "data_copy_utils.h"
+    },
+    {
+      "source": "common/common.h",
+      "sha256": "0877d3ecb5907551d82e99f35c8e9e6926c50c74c6aa40c6e12ea2deb4914fbe",
+      "destination": "common.h"
+    }
+  ],
+  "changes": [
+    "Deduplicate identical RoPE/scatter helper headers; arithmetic unchanged"
+  ]
+}

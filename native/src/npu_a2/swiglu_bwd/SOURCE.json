@@ -1,0 +1,14 @@
+{
+  "repository": "xpu-ops",
+  "commit": "5c170f20bcbd2c6b073eeab016187e3ffa86e657",
+  "source": "src/backends/ascend/kernels/kernel_impls/ops_kernel/swish_glu_training",
+  "changes": [
+    "Preserve FP32 SwiGLU and explicit backward operation order",
+    "Flat bounded tiles and by-value launch; no OPP registration",
+    "Mojo task-queue submission and allocator stream recording",
+    "Add FP32 specialization and bound UB tiles for all supported dtypes",
+    "Keep scaled activations and upstream gradients in FP32 until final output/input-gradient casts",
+    "Retain input/output tensors through queued host submission",
+    "Split forward/backward directories and flatten host/device sources; preserve kernel arithmetic and launch geometry"
+  ]
+}

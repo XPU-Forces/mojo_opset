@@ -1,0 +1,40 @@
+import pytest
+import torch
+
+from mojo_opset import functions
+from tests._checks import assert_close
+
+INDEXER_SHAPES = [
+    (8, 1024, 1024, 64, 64),
+    (128, 256, 256, 64, 128),
+    (24, 1024, 1024, 128, 128),
+    (24, 1, 16384, 128, 128),
+]
+
+
+def assert_lightning_scores(actual, expected):
+    # Original LightningIndexer uses forward_diff_with defaults for every dtype:
+    # FP32 comparison, rtol=atol=1e-2, and all elements must pass (ptol=1).
+    assert_close(actual.float(), expected.float(), rtol=1e-2, atol=1e-2, name="index_score")
+
+
+def make_indexer_case(shape, dtype, device):
+    batch, q_len, k_len, heads, dim = shape
+    return (
+        torch.randn(batch, q_len, heads, dim, device=device, dtype=dtype),
+        torch.randn(batch, q_len, heads, device=device, dtype=torch.float32),
+        torch.randn(batch, k_len, dim, device=device, dtype=dtype),
+        torch.randn(batch, k_len, device=device, dtype=torch.float32),
+    )
+
+
+@pytest.mark.api("functions.lightning_indexer")
+@pytest.mark.parametrize("shape", INDEXER_SHAPES)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.accuracy
+def test_lightning_indexer_accuracy(accuracy_backend, shape, dtype):
+    implementation, _, device = accuracy_backend
+    inputs = make_indexer_case(shape, dtype, device)
+    actual = functions.lightning_indexer(*inputs, implementation=implementation)
+    expected = functions.lightning_indexer(*inputs, implementation="torch")
+    assert_lightning_scores(actual, expected)

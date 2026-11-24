@@ -1,0 +1,114 @@
+import math
+import os
+
+import triton
+import triton.language as tl
+
+LOG2E = tl.constexpr(math.log2(math.e))
+
+try:
+    from triton.runtime.libentry import libentry as _libentry_impl
+except ImportError:
+
+    def _libentry_impl():
+        def _decorator(fn):
+            return fn
+
+        return _decorator
+
+
+libentry = _libentry_impl
+
+_AUTOTUNE_DISABLED = os.environ.get("TRITON_DISABLE_AUTOTUNE") == "1"
+
+def smart_triton_autotune(configs, selected_idx=0, **kwargs):
+    """When TRITON_DISABLE_AUTOTUNE=1, bypasses triton.autotune and injects
+    the selected config directly into triton.jit calls via triton.heuristics."""
+    if _AUTOTUNE_DISABLED:
+        fixed = configs[selected_idx].all_kwargs()
+        return lambda fn: triton.heuristics({k: lambda _args, v=v: v for k, v in fixed.items()})(fn)
+    return triton.autotune(configs=configs, **kwargs)
+
+VEC_ALIGN_BYTES = 256
+
+# LayerNorm / RMSNorm Triton tile heuristics (shared across ILU norm kernels).
+COL_BLOCKING_THRESHOLD = 2048
+
+TOKEN_BLOCK_SIZE_TABLE = {
+    2048: 4,
+    1024: 8,
+    # NOTE: tl.arange range must be power-of-2 on some backends.
+    512: 16,
+    256: 16,
+    128: 32,
+}
+
+
+def _block_size_n_pow2(n_cols: int) -> int:
+    # ILU backend requires tl.arange range to be power-of-2.
+    if n_cols <= 128:
+        return 128
+    if n_cols <= 256:
+        return 256
+    if n_cols <= 512:
+        return 512
+    if n_cols <= 1024:
+        return 1024
+    return 2048
+
+
+def norm_fwd_heuristics(args):
+    """BLOCK_SIZE_M heuristic for row tiling; shared by LayerNorm and RMSNorm kernels."""
+    hidden_dim = args.get("n_cols", args.get("N_COLS"))
+    if hidden_dim is None:
+        raise KeyError("expected 'n_cols' or 'N_COLS' in kernel args")
+    if hidden_dim <= COL_BLOCKING_THRESHOLD:
+        if hidden_dim in TOKEN_BLOCK_SIZE_TABLE:
+            return TOKEN_BLOCK_SIZE_TABLE[hidden_dim]
+
+        for dim_thresh, block_size in sorted(TOKEN_BLOCK_SIZE_TABLE.items()):
+            if hidden_dim <= dim_thresh:
+                return block_size
+        return 1
+    else:
+        return 4
+
+
+def layer_norm_fwd_heuristics(args):
+    """BLOCK_SIZE_M for the LayerNorm fwd kernel.
+
+    On the ILU backend the single-tile regime (hidden <= COL_BLOCKING_THRESHOLD,
+    where the whole row fits in one BLOCK_SIZE_N tile) parallelizes best with one
+    row per program: an empirical sweep shows BLOCK_SIZE_M=1 beats the old
+    TOKEN_BLOCK_SIZE_TABLE values (32/16/8/4) by 2-4x across hidden in
+    {128,256,512,1024,2048}. Multi-tile rows keep 4.
+    """
+    hidden_dim = args.get("n_cols", args.get("N_COLS"))
+    if hidden_dim is None:
+        raise KeyError("expected 'n_cols' or 'N_COLS' in kernel args")
+    if hidden_dim <= COL_BLOCKING_THRESHOLD:
+        return 1
+    return 4
+
+
+rms_norm_fwd_heuristics = norm_fwd_heuristics
+
+
+def ilu_grid_dim_from_row_tasks(n_row_tasks: int) -> int:
+    """
+    ILU Triton may fail to compile some kernels when grid.x is very small (e.g. 1).
+    Match historical behavior by using at least num_vectorcore programs while still
+    allowing larger grids when ceil(n_rows / BLOCK_M) exceeds that count.
+    """
+    n_tasks = int(n_row_tasks)
+    if n_tasks <= 0:
+        return 0
+    nvc = 256
+    try:
+        props = triton.runtime.driver.active.utils.get_device_properties(0)
+        raw = props.get("num_vectorcore", props.get("num_aicore"))
+        if raw is not None:
+            nvc = int(raw)
+    except Exception:
+        pass
+    return max(n_tasks, nvc)

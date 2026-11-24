@@ -1,0 +1,11 @@
+{
+  "repository": "xpu-ops",
+  "commit": "5c170f20bcbd2c6b073eeab016187e3ffa86e657",
+  "source": "src/backends/ascend/kernels/kernel_impls/{ops_host,ops_kernel}/flash_attention_training_v2",
+  "changes": [
+    "Packed BF16/FP16 training forward and deterministic backward only; FP32 output cache",
+    "Metadata-only host tiling and Mojo task-queue submission; no OPP registration",
+    "CANN 9.1 workspace initialization and intrinsic namespace compatibility",
+    "Shared utility headers and Mojo native source layout"
+  ]
+}

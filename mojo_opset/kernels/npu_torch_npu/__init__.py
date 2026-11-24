@@ -1,0 +1,37 @@
+"""torch_npu kernel provider."""
+
+from mojo_opset.utils._exports import additions as _additions
+
+OPS = {
+    "flash_attention": "attention",
+    "swa": "swa",
+    "rms_norm_quant": "fused_quantization",
+    "layer_norm_quant": "fused_quantization",
+    "residual_add_rms_norm_quant": "fused_quantization",
+    "residual_add_layer_norm_quant": "fused_quantization",
+    "moe_dynamic_quant": "fused_quantization",
+    "dequant_swiglu_quant": "fused_quantization",
+    "rope_infer": "position_embedding",
+    "vision_rope_2d_infer": "position_embedding",
+    "paged_decode_gqa_infer": "paged_attention",
+    "paged_prefill_gqa_infer": "paged_attention",
+    "paged_prefill_swa_infer": "paged_attention",
+    "paged_decode_swa_infer": "paged_attention",
+    "prefill_gqa_infer": "paged_attention",
+    "store_paged_kv_cache": "kv_cache",
+    "group_gemm": "gemm",
+    "quant_gemm": "gemm",
+    "quant_batch_gemm_reduce_sum": "gemm",
+    "dynamic_quant": "quantization",
+    "silu": "activation",
+    "gelu": "activation",
+    "swiglu": "activation",
+    "rms_norm_infer": "normalization",
+    "group_rms_norm_infer": "normalization",
+    "residual_add_rms_norm_infer": "normalization",
+}
+
+
+_private = _additions(__name__)
+OVERRIDES = {} if _private is None else _private.OVERRIDES
+del _additions, _private

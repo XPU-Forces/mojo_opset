@@ -1,0 +1,18 @@
+{
+  "repository": "data/xpu_ops",
+  "commit": "8452b29bcbbd717db3ba17680bd73e913732c2dc",
+  "source_files": {
+    "group_gemm_training_main_loop.h": "af5f9feb22739dfb27eb90b0aa737420adf2bec5aae13613bca254b09c33339f",
+    "group_gemm_training.h": "31daf8539c9d2d9859369fd98a3435797439146c0c011d5c248f25ffee5296df",
+    "group_gemm_training_utils.h": "4b886eb9d5932a0034761679534c23a1f64bb6aa5cd1587ebbcbf1beba154f41",
+    "group_gemm_training.cpp": "edfca0cabb3c6162a2add4ee3cc43d8da61b2610a342a808c72f90a93d0558e7",
+    "group_gemm_training_epilogue.h": "07c7f164f08e4a00a26d216fee2eff5f396ff87cbab8eb6c4b509af04fad0c59"
+  },
+  "changes": [
+    "extract three ND/no-bias phase specializations",
+    "inline serialized CANN matmul tiling without OPP",
+    "Torch NPU queue submission with recorded tensor storage",
+    "zero gradients for empty experts",
+    "Apply native/.clang-format and uniform header guards; preserve operator signatures, arithmetic, tiling, queue submission and build structure"
+  ]
+}

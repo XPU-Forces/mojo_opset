@@ -1,0 +1,26 @@
+{
+  "repository": "xpu-ops",
+  "commit": "8452b29bcbbd717db3ba17680bd73e913732c2dc",
+  "changes": [
+    "Mojo namespace",
+    "standalone by-value tiling launch, no OPP registration",
+    "kernel names specialized at build time",
+    "Python functional wrapper pads each rotary half independently for even unaligned rotary widths; aligned M15 shapes use the direct path",
+    "Exclude packed QKV V2 kernels: only legacy model callers exist; retain ordinary multi-backend RoPE for modern text/Omni training",
+    "Format imported kernels with two-space indentation and uniform header guards",
+    "Cap vector repeat counts at 255 and split rotary halves into at most 64 FP32 channels per mask",
+    "Split forward/backward directories and flatten host/device sources; preserve kernel arithmetic and launch geometry"
+  ],
+  "files": [
+    {
+      "source": "rotary_embedding_training/rope_forward.cpp",
+      "sha256": "68e1cc2cc3ed3fb993ea3b7f3f29fa52db49e9f9e019dc496e991fd9d7a7e255",
+      "destination": "kernel.cpp"
+    },
+    {
+      "source": "rotary_embedding_training/rope_forward.h",
+      "sha256": "345bb8dba876025602ad17e119a2efe90da5995dd3c33a559610e988ffd0378d",
+      "destination": "kernel.h"
+    }
+  ]
+}
