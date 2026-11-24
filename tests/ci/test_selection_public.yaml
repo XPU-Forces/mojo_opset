@@ -649,6 +649,7 @@ operators:
           - mojo_opset/functions/flex_attention.py
           - mojo_opset/kernels/_npu_triton_utils.py
           - mojo_opset/kernels/torch/flex_attention.py
+          - mojo_opset/utils/attention_dropout.py
           - mojo_opset/utils/flex_attention_mask.py
           - tests/functions/test_flex_attention.py
         jobs:
@@ -699,6 +700,7 @@ operators:
           950/performance:
             - tests/performance/functions/test_flex_attention_v2.py
           950/triton:
+            - tests/functions/test_attention_dropout.py
             - tests/functions/test_flex_attention_v2.py
       - paths:
           - mojo_opset/kernels/npu_a2_triton/flex_attention_v2.py
@@ -708,13 +710,19 @@ operators:
           910b/triton:
             - tests/functions/test_flex_attention_v2.py
       - paths:
-          - mojo_opset/kernels/npu_a5_triton/flex_attention_v2.py
           - mojo_opset/kernels/npu_a5_triton/_attention_dropout.py
+          - mojo_opset/kernels/npu_a5_triton/flex_attention_v2.py
         jobs:
           950/performance:
             - tests/performance/functions/test_flex_attention_v2.py
           950/triton:
+            - tests/functions/test_attention_dropout.py
             - tests/functions/test_flex_attention_v2.py
+      - paths:
+          - tests/functions/test_attention_dropout.py
+        jobs:
+          950/triton:
+            - tests/functions/test_attention_dropout.py
       - paths:
           - tests/functions/test_flex_attention_v2.py
         jobs:

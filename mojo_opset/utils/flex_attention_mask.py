@@ -9,6 +9,7 @@ from torch.nn.attention.flex_attention import _dense_to_ordered
 from torch.nn.attention.flex_attention import create_mask as _torch_create_mask
 from torch.nn.attention.flex_attention import noop_mask
 
+from mojo_opset.utils.attention_dropout import _mark_verified_block_mask
 from mojo_opset.utils.target import get_torch_device as _get_torch_device
 
 _STRIPE_TARGET_BYTES = 256 * 1024**2
@@ -167,6 +168,8 @@ def _assemble_packed_block_mask(
     packed_block_mask.packed_partial_mask = packed_partial_mask
     packed_block_mask.partial_mask_offsets = partial_mask_offsets
     packed_block_mask.partial_block_table = partial_block_table
+    if block_flags.shape[:2] == (1, 1):
+        _mark_verified_block_mask(packed_block_mask)
     return packed_block_mask
 
 

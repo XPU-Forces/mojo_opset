@@ -1,5 +1,6 @@
 """A5 RNG and sparse-dropout metadata helpers for the existing FlexAttention v2 provider."""
 
+import numpy as np
 import torch
 import triton
 import triton.language as tl
@@ -11,6 +12,7 @@ from packaging.version import Version
 from mojo_opset.kernels._npu_triton_utils import get_ascend_compiler_version
 from mojo_opset.kernels._npu_triton_utils import get_num_cores
 from mojo_opset.utils.attention_dropout import SparseDropoutMask
+from mojo_opset.utils.attention_dropout import _CachedLayout
 from mojo_opset.utils.attention_dropout import _dropout_parameters
 from mojo_opset.utils.attention_dropout import _DropoutLayout
 from mojo_opset.utils.attention_dropout import _pack_random_bytes_torch
@@ -38,7 +40,11 @@ def _build_dkv_split_schedule(backward_rows, groups, cores, chunk_size=None, *, 
         raise ValueError("groups and cores must be positive")
     if chunk_size is not None and chunk_size < 0:
         raise ValueError("chunk_size must be nonnegative")
-    counts = [len(row) for row in backward_rows]
+    if isinstance(backward_rows, tuple) and len(backward_rows) == 2:
+        partials, counts = backward_rows
+    else:
+        partials = [sum(not full for _, full in row) for row in backward_rows]
+        counts = [len(row) for row in backward_rows]
     if not counts or not sum(counts) or chunk_size == 0:
         return None
     grid = min(cores, len(counts) * groups)
@@ -59,15 +65,119 @@ def _build_dkv_split_schedule(backward_rows, groups, cores, chunk_size=None, *, 
             target = max(1, sum(counts) * groups // (4 * cores))
             chunk_size = max(8, 1 << (target.bit_length() - 1))
     tasks, ranges = [], []
-    for kb, row in enumerate(backward_rows):
-        partial = sum(not full for _, full in row)
-        total = len(row)
+    for kb, (partial, total) in enumerate(zip(partials, counts)):
         begin = len(tasks)
         for start in range(0, max(total, 1), chunk_size):
             end = min(start + chunk_size, total)
             tasks.append([kb, min(start, partial), min(end, partial), max(start - partial, 0), max(end - partial, 0)])
         ranges.append([begin, len(tasks)])
     return {"tasks": tasks, "ranges": ranges}
+
+
+@triton.jit(do_not_specialize=["NQ", "NK", "KV_STRIDE", "FULL_STRIDE"])
+def _fill_block_table(
+    TABLE,
+    KV_NUM,
+    KV_IDX,
+    FULL_NUM,
+    FULL_IDX,
+    NQ,
+    NK,
+    KV_STRIDE,
+    FULL_STRIDE,
+    HAS_FULL: tl.constexpr,
+    PREFIX_BLOCK: tl.constexpr,
+    COL_BLOCK: tl.constexpr,
+):
+    zero64 = tl.full((), 0, tl.int64)
+    prefix_offs = tl.arange(0, PREFIX_BLOCK)
+    col_offs = tl.arange(0, COL_BLOCK)
+    for qb in range(tl.program_id(0), NQ, tl.num_programs(0)):
+        prefix_acc = tl.full((PREFIX_BLOCK,), 0, tl.int32)
+        for block in range(0, tl.cdiv(qb, PREFIX_BLOCK)):
+            rows = block * PREFIX_BLOCK + prefix_offs
+            mask = rows < qb
+            counts = tl.load(KV_NUM + rows, mask=mask, other=0)
+            if HAS_FULL:
+                counts += tl.load(FULL_NUM + rows, mask=mask, other=0)
+            prefix_acc += counts
+        row_start = tl.sum(prefix_acc, axis=0)
+
+        qb64 = qb + zero64
+        row_table = TABLE + qb64 * NK
+        p_cnt = tl.load(KV_NUM + qb)
+        p_idx_base = KV_IDX + qb64 * KV_STRIDE
+        for block in range(0, tl.cdiv(p_cnt, COL_BLOCK)):
+            item = block * COL_BLOCK + col_offs
+            valid = item < p_cnt
+            cols = tl.load(p_idx_base + item, mask=valid, other=0).to(tl.int64)
+            tl.store(row_table + cols, row_start + item, mask=valid)
+
+        if HAS_FULL:
+            f_cnt = tl.load(FULL_NUM + qb)
+            f_base = row_start + p_cnt
+            f_idx_base = FULL_IDX + qb64 * FULL_STRIDE
+            for block in range(0, tl.cdiv(f_cnt, COL_BLOCK)):
+                item = block * COL_BLOCK + col_offs
+                valid = item < f_cnt
+                cols = tl.load(f_idx_base + item, mask=valid, other=0).to(tl.int64)
+                tl.store(row_table + cols, f_base + item, mask=valid)
+
+
+def _contiguous_i32(tensor):
+    return tensor if tensor.dtype == torch.int32 and tensor.is_contiguous() else tensor.to(torch.int32).contiguous()
+
+
+def _row_contiguous_i32(tensor):
+    if tensor.dtype == torch.int32 and (tensor.is_contiguous() or tensor.stride(-1) == 1):
+        return tensor
+    return tensor.to(torch.int32).contiguous()
+
+
+def build_dropout_table(block_mask, nq, nk, *, num_active=None, prefix_block=1024, col_block=256):
+    """Materialize the int32 sparse dropout block_table directly on device via Triton."""
+    device = block_mask.kv_indices.device
+    table = torch.full((nq, nk), -1, dtype=torch.int32, device=device)
+    if nq > 0 and nk > 0 and (num_active is None or num_active > 0):
+        kv_num = _contiguous_i32(block_mask.kv_num_blocks)
+        kv_idx = _row_contiguous_i32(block_mask.kv_indices)
+        has_full = block_mask.full_kv_num_blocks is not None
+        full_num = _contiguous_i32(block_mask.full_kv_num_blocks) if has_full else kv_num
+        full_idx = _row_contiguous_i32(block_mask.full_kv_indices) if has_full else kv_idx
+        cores = get_num_cores("vector") if device.type == "npu" else 4
+        grid = (min(max(cores, 1), nq),)
+        _fill_block_table[grid](
+            table,
+            kv_num,
+            kv_idx,
+            full_num,
+            full_idx,
+            nq,
+            nk,
+            kv_idx.stride(2),
+            full_idx.stride(2),
+            HAS_FULL=has_full,
+            PREFIX_BLOCK=prefix_block,
+            COL_BLOCK=col_block,
+        )
+    return table
+
+
+def build_dropout_layout_entry(block_mask, nq, nk, *, prefix_block=1024, col_block=256):
+    """Build a cached A5 dropout layout with one small count transfer and zero index copies."""
+    q_num = block_mask.q_num_blocks.reshape(nk)
+    fq_num = block_mask.full_q_num_blocks
+    if fq_num is None:
+        rp_cnt = np.asarray(q_num.detach().cpu(), dtype=np.int32)
+        rt_cnt = rp_cnt
+    else:
+        pair = np.asarray(torch.stack((q_num, fq_num.reshape(nk))).detach().cpu(), dtype=np.int32)
+        rp_cnt, rt_cnt = pair[0], pair[0] + pair[1]
+    num_active = int(rt_cnt.sum())
+    table = build_dropout_table(
+        block_mask, nq, nk, num_active=num_active, prefix_block=prefix_block, col_block=col_block
+    )
+    return _CachedLayout(table, num_active, (rp_cnt.tolist(), rt_cnt.tolist()))
 
 
 def allocate_dropout_mask(q, k, block_mask, dropout_p, *, bitpacked=False, dkv_chunk_size=None):
@@ -77,21 +187,31 @@ def allocate_dropout_mask(q, k, block_mask, dropout_p, *, bitpacked=False, dkv_c
     reduction. ``dkv_chunk_size=0`` keeps the original schedule; positive values
     force a maximum number of reverse Q blocks per task (mainly for validation).
     """
-    threshold, scale = _dropout_parameters(dropout_p)
-    layout, backward_rows = _DropoutLayout.from_block_mask(block_mask, q.shape[2], k.shape[2])
-    plan = _build_dkv_split_schedule(
-        backward_rows,
-        q.shape[0] * k.shape[1],
-        get_num_cores("cube"),
-        dkv_chunk_size,
-        balance_moderate_rows=dropout_p > 0 and q.shape[-1] == 128,
-    )
-    layout.dkv_schedule = None if plan is None else torch.tensor(plan["tasks"], dtype=torch.int32, device=q.device)
-    layout.dkv_ranges = None if plan is None else torch.tensor(plan["ranges"], dtype=torch.int32, device=q.device)
-    layout.dkv_num_tasks = 0 if plan is None else len(plan["tasks"])
     bm, bn = block_mask.BLOCK_SIZE
     if (bm, bn) != (128, 128):
         raise ValueError("A5 dropout currently requires 128x128 sparse blocks")
+    threshold, scale = _dropout_parameters(dropout_p)
+    layout, cached = _DropoutLayout.resolve(block_mask, q.shape[2], k.shape[2])
+    groups = q.shape[0] * k.shape[1]
+    cores = get_num_cores("cube")
+    balance_moderate = dropout_p > 0 and q.shape[-1] == 128
+    plan_key = (groups, cores, dkv_chunk_size, balance_moderate, q.device)
+    if plan_key not in cached.dkv_plans:
+        plan = _build_dkv_split_schedule(
+            cached.reverse_counts, groups, cores, dkv_chunk_size, balance_moderate_rows=balance_moderate
+        )
+        if len(cached.dkv_plans) >= 8:
+            cached.dkv_plans.clear()
+        cached.dkv_plans[plan_key] = (
+            (None, None, 0)
+            if plan is None
+            else (
+                torch.tensor(plan["tasks"], dtype=torch.int32, device=q.device),
+                torch.tensor(plan["ranges"], dtype=torch.int32, device=q.device),
+                len(plan["tasks"]),
+            )
+        )
+    layout.dkv_schedule, layout.dkv_ranges, layout.dkv_num_tasks = cached.dkv_plans[plan_key]
     tiles = (
         None
         if dropout_p == 0

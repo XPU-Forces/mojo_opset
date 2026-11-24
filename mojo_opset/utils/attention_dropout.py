@@ -9,7 +9,9 @@ import math
 import struct
 
 from dataclasses import dataclass
+from dataclasses import field
 
+import numpy as np
 import torch
 
 
@@ -31,23 +33,98 @@ def _dropout_parameters(dropout_p):
     return math.floor(keep_probability * 255.0), fp32(1.0 / keep_probability)
 
 
-def _rows(block_mask, reverse=False):
-    prefix = "q" if reverse else "kv"
-    counts = getattr(block_mask, f"{prefix}_num_blocks").cpu()
-    indices = getattr(block_mask, f"{prefix}_indices").cpu()
+def _check_grid_shape(block_mask, nq, nk):
+    for prefix, rows in (("kv", nq), ("q", nk)):
+        counts = getattr(block_mask, f"{prefix}_num_blocks")
+        indices = getattr(block_mask, f"{prefix}_indices")
+        full_counts = getattr(block_mask, f"full_{prefix}_num_blocks", None)
+        full_indices = getattr(block_mask, f"full_{prefix}_indices", None)
+        if (full_counts is None) != (full_indices is None):
+            raise ValueError("BlockMask full counts and full indices must be provided together")
+        pairs = ((counts, indices),) if full_counts is None else ((counts, indices), (full_counts, full_indices))
+        for cnt, idx in pairs:
+            if cnt.ndim != 3 or idx.ndim != 4 or cnt.shape[:2] != (1, 1) or idx.shape[:2] != (1, 1):
+                raise ValueError("Only batch/head-independent BlockMask is supported")
+            if cnt.shape[-1] != rows or idx.shape[2] != rows:
+                raise ValueError("Sequence lengths do not match the BlockMask grid")
+
+
+def _unroll_half(counts, indices, num_rows, num_cols, *, check_bounds=True):
+    """Unpack one partial or full BlockMask schedule into int32 (row_counts, rows, cols)."""
+    if counts is None:
+        empty = np.empty(0, dtype=np.int32)
+        return np.zeros(num_rows, dtype=np.int32), empty, empty
+
+    row_counts = np.asarray(counts.detach().cpu(), dtype=np.int32).reshape(num_rows)
+    width = int(row_counts.max()) if num_rows else 0
+    if check_bounds and (row_counts.min(initial=0) < 0 or width > indices.shape[-1]):
+        raise ValueError("Invalid or duplicate BlockMask entry")
+    if width == 0:
+        empty = np.empty(0, dtype=np.int32)
+        return row_counts, empty, empty
+
+    if indices.device.type == "cpu":
+        cropped = np.asarray(indices.detach(), dtype=np.int32).reshape(num_rows, indices.shape[-1])[:, :width]
+    else:
+        cropped = np.asarray(indices[:, :, :, :width].detach().cpu(), dtype=np.int32).reshape(num_rows, width)
+    cols = cropped[np.arange(width, dtype=np.int32)[None, :] < row_counts[:, None]]
+    if check_bounds and cols.size and (cols.min() < 0 or cols.max() >= num_cols):
+        raise ValueError("Invalid or duplicate BlockMask entry")
+    return row_counts, np.repeat(np.arange(num_rows, dtype=np.int32), row_counts), cols
+
+
+def _unroll_direction(block_mask, prefix, num_rows, num_cols, *, check_bounds=True):
+    counts = getattr(block_mask, f"{prefix}_num_blocks")
+    indices = getattr(block_mask, f"{prefix}_indices")
     full_counts = getattr(block_mask, f"full_{prefix}_num_blocks", None)
     full_indices = getattr(block_mask, f"full_{prefix}_indices", None)
-    if counts.shape[:2] != (1, 1):
-        raise ValueError("Only batch/head-independent BlockMask is supported")
-    if full_counts is not None:
-        full_counts, full_indices = full_counts.cpu(), full_indices.cpu()
-    rows = []
-    for row in range(counts.shape[-1]):
-        entries = [(int(col), False) for col in indices[0, 0, row, : int(counts[0, 0, row])]]
-        if full_counts is not None:
-            entries += [(int(col), True) for col in full_indices[0, 0, row, : int(full_counts[0, 0, row])]]
-        rows.append(entries)
-    return rows
+    return (
+        _unroll_half(counts, indices, num_rows, num_cols, check_bounds=check_bounds),
+        _unroll_half(full_counts, full_indices, num_rows, num_cols, check_bounds=check_bounds),
+    )
+
+
+def _schedule_signature(block_mask):
+    names = (
+        "kv_num_blocks",
+        "kv_indices",
+        "full_kv_num_blocks",
+        "full_kv_indices",
+        "q_num_blocks",
+        "q_indices",
+        "full_q_num_blocks",
+        "full_q_indices",
+    )
+    tensors = tuple(
+        None
+        if (t := getattr(block_mask, name, None)) is None
+        else (t.device, t.shape, t.stride(), t.data_ptr(), t._version)
+        for name in names
+    )
+    return (tuple(block_mask.BLOCK_SIZE), tensors)
+
+
+def _mark_verified_block_mask(block_mask):
+    """Mark a BlockMask whose disjoint forward/reverse schedules match by construction."""
+    try:
+        setattr(block_mask, "_mojo_verified_signature", _schedule_signature(block_mask))
+    except (AttributeError, TypeError):
+        pass
+    return block_mask
+
+
+def _cache_key(block_mask, q_len, kv_len):
+    return (int(q_len), int(kv_len), _schedule_signature(block_mask))
+
+
+@dataclass
+class _CachedLayout:
+    """Cycle-free per-BlockMask cache entry storing reusable device table and dKV plans."""
+
+    block_table: torch.Tensor
+    num_active: int
+    reverse_counts: tuple[list[int], list[int]]
+    dkv_plans: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -64,29 +141,107 @@ class _DropoutLayout:
     dkv_num_tasks: int = 0
 
     @classmethod
-    def from_block_mask(cls, block_mask, q_len, kv_len):
-        """Return the persistent layout and temporary rows for backend planning."""
+    def _build(cls, block_mask, q_len, kv_len):
         if q_len <= 0 or kv_len <= 0:
             raise ValueError("Sequence lengths must be positive")
         bm, bn = block_mask.BLOCK_SIZE
         nq, nk = (q_len + bm - 1) // bm, (kv_len + bn - 1) // bn
-        rows, reverse = _rows(block_mask), _rows(block_mask, reverse=True)
-        if len(rows) != nq or len(reverse) != nk:
-            raise ValueError("Sequence lengths do not match the BlockMask grid")
-        table = torch.full((nq, nk), -1, dtype=torch.int32)
-        num_active = 0
-        for qb, entries in enumerate(rows):
-            for kb, _ in entries:
-                if not 0 <= kb < nk or table[qb, kb] >= 0:
-                    raise ValueError("Invalid or duplicate BlockMask entry")
-                table[qb, kb] = num_active
-                num_active += 1
-        forward_edges = {(qb, kb, flag) for qb, row in enumerate(rows) for kb, flag in row}
-        reverse_edges = {(qb, kb, flag) for kb, row in enumerate(reverse) for qb, flag in row}
-        if forward_edges != reverse_edges:
-            raise ValueError("Forward and reverse BlockMask schedules disagree")
+        _check_grid_shape(block_mask, nq, nk)
+
+        verified = getattr(block_mask, "_mojo_verified_signature", None) == _schedule_signature(block_mask)
         device = block_mask.kv_indices.device
-        return cls(block_mask, q_len, kv_len, table.to(device), num_active), reverse
+        if verified and device.type == "npu":
+            from mojo_opset.utils.target import detect_target
+
+            if detect_target().arch_key == "npu.a5":
+                from mojo_opset.kernels.npu_a5_triton._attention_dropout import build_dropout_layout_entry
+
+                return build_dropout_layout_entry(block_mask, nq, nk)
+
+        (p_cnt, p_rows, p_cols), (f_cnt, f_rows, f_cols) = _unroll_direction(
+            block_mask, "kv", nq, nk, check_bounds=not verified
+        )
+        total_cnt = p_cnt + f_cnt
+        row_ends = np.cumsum(total_cnt, dtype=np.int32)
+        num_active = int(row_ends[-1]) if nq else 0
+        row_starts = row_ends - total_cnt
+
+        table = np.full((nq, nk), -1, dtype=np.int32)
+        if p_cols.size:
+            p_offsets = (np.cumsum(p_cnt, dtype=np.int32) - p_cnt)[p_rows]
+            p_slots = row_starts[p_rows] + np.arange(p_cols.size, dtype=np.int32) - p_offsets
+            table[p_rows, p_cols] = p_slots
+            if not verified and not np.array_equal(table[p_rows, p_cols], p_slots):
+                raise ValueError("Invalid or duplicate BlockMask entry")
+        if f_cols.size:
+            f_offsets = (np.cumsum(f_cnt, dtype=np.int32) - f_cnt)[f_rows]
+            f_slots = row_starts[f_rows] + p_cnt[f_rows] + np.arange(f_cols.size, dtype=np.int32) - f_offsets
+            table[f_rows, f_cols] = f_slots
+            if not verified and (
+                not np.array_equal(table[f_rows, f_cols], f_slots)
+                or (p_cols.size and not np.array_equal(table[p_rows, p_cols], p_slots))
+            ):
+                raise ValueError("Invalid or duplicate BlockMask entry")
+
+        if verified:
+            rp_cnt = np.asarray(block_mask.q_num_blocks.detach().cpu(), dtype=np.int32).reshape(nk)
+            if block_mask.full_q_num_blocks is None:
+                rt_cnt = rp_cnt
+            else:
+                rf_cnt = np.asarray(block_mask.full_q_num_blocks.detach().cpu(), dtype=np.int32).reshape(nk)
+                rt_cnt = rp_cnt + rf_cnt
+            reverse_counts = (rp_cnt.tolist(), rt_cnt.tolist())
+            return _CachedLayout(torch.from_numpy(table).to(device), num_active, reverse_counts)
+
+        (rp_cnt, rp_kb, rp_qb), (rf_cnt, rf_kb, rf_qb) = _unroll_direction(block_mask, "q", nk, nq)
+        if num_active == 0:
+            if rp_qb.size or rf_qb.size:
+                raise ValueError("Forward and reverse BlockMask schedules disagree")
+        else:
+            seen = np.zeros(num_active, dtype=np.bool_)
+            if rp_qb.size:
+                rp_slots = table[rp_qb, rp_kb]
+                if not np.all((rp_slots >= row_starts[rp_qb]) & (rp_slots < row_starts[rp_qb] + p_cnt[rp_qb])):
+                    raise ValueError("Forward and reverse BlockMask schedules disagree")
+                seen[rp_slots] = True
+            if rf_qb.size:
+                rf_slots = table[rf_qb, rf_kb]
+                if not np.all((rf_slots >= row_starts[rf_qb] + p_cnt[rf_qb]) & (rf_slots < row_ends[rf_qb])):
+                    raise ValueError("Forward and reverse BlockMask schedules disagree")
+                seen[rf_slots] = True
+            if not seen.all():
+                raise ValueError("Forward and reverse BlockMask schedules disagree")
+
+        reverse_counts = (rp_cnt.tolist(), (rp_cnt + rf_cnt).tolist())
+        return _CachedLayout(torch.from_numpy(table).to(device), num_active, reverse_counts)
+
+    @classmethod
+    def resolve(cls, block_mask, q_len, kv_len):
+        """Return a fresh ``_DropoutLayout`` and cached ``_CachedLayout`` entry for ``block_mask``."""
+        if q_len <= 0 or kv_len <= 0:
+            raise ValueError("Sequence lengths must be positive")
+        key = _cache_key(block_mask, q_len, kv_len)
+        cache = getattr(block_mask, "_mojo_dropout_cache", None)
+        entry = cache.get(key) if isinstance(cache, dict) else None
+        if entry is None:
+            entry = cls._build(block_mask, q_len, kv_len)
+            if not isinstance(cache, dict):
+                cache = {}
+                try:
+                    setattr(block_mask, "_mojo_dropout_cache", cache)
+                except (AttributeError, TypeError):
+                    cache = None
+            if cache is not None:
+                if len(cache) >= 8:
+                    cache.clear()
+                cache[key] = entry
+        return cls(block_mask, q_len, kv_len, entry.block_table, entry.num_active), entry
+
+    @classmethod
+    def from_block_mask(cls, block_mask, q_len, kv_len):
+        """Return the persistent layout and reverse-row counts for backend planning."""
+        layout, entry = cls.resolve(block_mask, q_len, kv_len)
+        return layout, entry.reverse_counts
 
 
 @dataclass
@@ -160,7 +315,7 @@ def create_flex_dropout_mask(
     if dkv_chunk_size is not None:
         raise ValueError("dKV split tuning is only supported by the A5 provider")
     threshold, scale = _dropout_parameters(dropout_p)
-    layout, _ = _DropoutLayout.from_block_mask(block_mask, q.shape[2], k.shape[2])
+    layout, _ = _DropoutLayout.resolve(block_mask, q.shape[2], k.shape[2])
     tiles = (
         None
         if dropout_p == 0
