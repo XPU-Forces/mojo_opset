@@ -96,7 +96,7 @@ def _interpolate_features(
     if REUSE_TIME:
         # Broadcast the already-rounded spatial result in UB. A single 2D
         # store avoids a separate synchronization sequence for every frame.
-        if T > 1 and T <= 16 and triton.next_power_of_2(T) * C * dtype.primitive_bitwidth // 8 <= 65536:
+        if (T > 1 and T <= 16) and triton.next_power_of_2(T) * C * dtype.primitive_bitwidth // 8 <= 65536:
             frames = tl.arange(0, triton.next_power_of_2(T))
             offset = (out_start + frames[:, None] * H * W + pid) * D + cols[None, :]
             repeated = tl.broadcast_to(value[None, :], (triton.next_power_of_2(T), C))
@@ -162,7 +162,10 @@ def _interpolate_row(
         w00 = 1.0 - dh - w01
     # Avoid computing 2048 features for a 1152-column row. Both segments
     # retain the same BF16 casts and expression order as the unsplit path.
-    if T == 1 and H * W >= 512 and BD >= D and BD >= 128 and D < BD and D - BD // 2 <= BD // 4:
+    if (
+        (T == 1 and H * W >= 512)
+        and ((BD >= D and BD >= 128) and (D < BD and D - BD // 2 <= BD // 4))
+    ):
         MAIN: tl.constexpr = BD // 2
         TAIL: tl.constexpr = triton.next_power_of_2(D - MAIN)
         _interpolate_features(
@@ -284,6 +287,7 @@ def _batch_body(
     TILE_STARTS: tl.constexpr,
     SCALES_H: tl.constexpr,
     SCALES_W: tl.constexpr,
+    USE_WIDTH_SPAN: tl.constexpr,
     G: tl.constexpr,
     M: tl.constexpr,
     D: tl.constexpr,
@@ -293,14 +297,10 @@ def _batch_body(
 ):
     pid = tl.program_id(0)
     R: tl.constexpr = (8 // M) * M
-    # Triton 3.2 does not support subscripting constexpr tuples directly.
-    # Its list builtin unwraps them at compile time.
+    # Triton 3.2 needs list() to index constexpr tuples.
     for image in tl.static_range(len(GRIDS)):
         count = list(TILE_STARTS)[image + 1] - list(TILE_STARTS)[image]
-        if (list(SCALES_W)[image] == 1.0 and list(GRIDS)[image][0] == 1
-                and S0 == D and S1 == 1 and M <= 8 and D <= 1152 and D % 16 == 0
-                and embed_ptr.dtype.element_ty == tl.bfloat16
-                and output_ptr.dtype.element_ty == tl.bfloat16):
+        if list(USE_WIDTH_SPAN)[image]:
             for local in range(pid, list(GRIDS)[image][1] * tl.cdiv(list(GRIDS)[image][2], R), tl.num_programs(0)):
                 _interpolate_width_span(
                     embed_ptr, output_ptr, local, list(ROW_STARTS)[image],
@@ -338,20 +338,24 @@ def launch(kernel, embed_weight, flat_grids, g, m, dtype):
     # still need smaller UB tiles to avoid an extra copy kernel.
     limit = 128 if embed_weight.stride(1) != 1 else 2048
     bd = min(limit, triton.next_power_of_2(d) if embed_weight.stride(1) != 1 else d)
+    s0, s1 = embed_weight.stride()
+    width_span_supported = (
+        embed_weight.dtype == dtype == torch.bfloat16 and (s0, s1) == (d, 1)
+        and m <= 8 and d <= 1152 and d % 16 == 0
+    )
     rows, tiles = [0], [0]
-    hs, ws = [], []
+    hs, ws, use_width_span = [], [], []
     for t, h, w in grids:
         rows.append(rows[-1] + t * h * w)
         tiles.append(tiles[-1] + h * w * triton.cdiv(d, bd))
         hs.append(float(g - 1) / float(h - 1) if h > 1 else 0.0)
         ws.append(float(g - 1) / float(w - 1) if w > 1 else 0.0)
+        # Resolve the specialization on the host for Triton 3.2.
+        use_width_span.append(width_span_supported and t == 1 and ws[-1] == 1.0)
     output = torch.empty((rows[-1], d), device=embed_weight.device, dtype=dtype)
     # The 2D store lowering does not preserve signed zero for unaligned
     # spans. Keep those widths on the existing row path.
-    only_width_spans = (embed_weight.dtype == dtype == torch.bfloat16
-                        and embed_weight.stride() == (d, 1) and m <= 8
-                        and d <= 1152 and d % 16 == 0
-                        and all(t == 1 and w == g and w > 1 for t, _, w in grids))
+    only_width_spans = width_span_supported and all(t == 1 and w == g and w > 1 for t, _, w in grids)
     if grids:
         with torch.npu.device(embed_weight.device):
             kernel[(min(tiles[-1], get_num_cores()),)](
@@ -362,10 +366,12 @@ def launch(kernel, embed_weight, flat_grids, g, m, dtype):
                 tuple(tiles),
                 tuple(hs),
                 tuple(ws),
+                tuple(use_width_span),
                 g,
                 m,
                 d,
-                *embed_weight.stride(),
+                s0,
+                s1,
                 bd,
                 enable_fp_fusion=False,
                 multibuffer=not only_width_spans,
