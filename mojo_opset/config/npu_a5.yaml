@@ -10,6 +10,7 @@ npu.a5:
   diffusion_attention: triton
   dynamic_quant: triton
   embedding_nf4_dequant: triton
+  fill_short_context_topk: triton
   flash_attention: triton
   flash_attention_infer: triton
   flex_attention: triton

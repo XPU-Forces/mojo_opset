@@ -521,6 +521,48 @@ operators:
             - tests/performance/modules/test_over_encoding.py
           950/performance:
             - tests/performance/modules/test_over_encoding.py
+  fill_short_context_topk:
+    rules:
+      - paths:
+          - mojo_opset/functions/fill_short_context_topk.py
+          - mojo_opset/kernels/torch/fill_short_context_topk.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_fill_short_context_topk.py
+          910b/triton:
+            - tests/functions/test_fill_short_context_topk.py
+          950/performance:
+            - tests/performance/functions/test_fill_short_context_topk.py
+          950/triton:
+            - tests/functions/test_fill_short_context_topk.py
+      - paths:
+          - mojo_opset/kernels/npu_a2_triton/fill_short_context_topk.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_fill_short_context_topk.py
+          910b/triton:
+            - tests/functions/test_fill_short_context_topk.py
+      - paths:
+          - mojo_opset/kernels/npu_a5_triton/fill_short_context_topk.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_fill_short_context_topk.py
+          950/triton:
+            - tests/functions/test_fill_short_context_topk.py
+      - paths:
+          - tests/functions/test_fill_short_context_topk.py
+        jobs:
+          910b/triton:
+            - tests/functions/test_fill_short_context_topk.py
+          950/triton:
+            - tests/functions/test_fill_short_context_topk.py
+      - paths:
+          - tests/performance/functions/test_fill_short_context_topk.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_fill_short_context_topk.py
+          950/performance:
+            - tests/performance/functions/test_fill_short_context_topk.py
   flash_attention:
     rules:
       - paths:
