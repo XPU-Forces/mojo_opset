@@ -14,6 +14,57 @@ from tests._compile import compile_fullgraph
 from .._checks import assert_close
 from .._checks import clone_with_grad
 
+
+# 15 组 shape/layout × 2 dtype × 2 权重精度 = 60 例；覆盖一维、空张量、非 2 的幂、隔列、转置和大宽度。
+KIMI_CASES = [
+    ((1,), "contiguous"),
+    ((0, 128), "contiguous"),
+    ((5, 127), "contiguous"),
+    ((5, 128), "contiguous"),
+    ((5, 129), "contiguous"),
+    ((513,), "contiguous"),
+    ((5, 32769), "contiguous"),
+    ((5, 65537), "contiguous"),
+    ((7, 128), "last_stride"),
+    ((5, 513), "last_stride"),
+    ((5, 2049), "last_stride"),
+    ((2, 3, 1025), "last_stride"),
+    ((3, 513), "transpose"),
+    ((3, 4097), "transpose"),
+    ((2, 3, 513), "transpose"),
+]
+
+
+def _kimi_input(shape, layout, dtype, device):
+    width = shape[-1]
+    if layout == "last_stride":
+        return torch.randn((*shape[:-1], width * 2), dtype=dtype, device=device)[..., ::2]
+    if layout == "transpose":
+        # 交换前两维：2D 时原始形状为 (width, n)，3D 时为 (n, m, width) -> (m, n, width)
+        raw = (width, shape[0]) if len(shape) == 2 else (shape[1], shape[0], width)
+        return torch.randn(raw, dtype=dtype, device=device).transpose(0, 1)
+    return torch.randn(shape, dtype=dtype, device=device)
+
+
+@pytest.mark.api("functions.kimi_rms_norm")
+@pytest.mark.accuracy
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("fp32_weight", [False, True])
+@pytest.mark.parametrize("shape,layout", KIMI_CASES)
+def test_kimi_rms_norm_accuracy(accuracy_backend, dtype, fp32_weight, shape, layout):
+    implementation, _, device = accuracy_backend
+    torch.manual_seed(43)
+    x = _kimi_input(shape, layout, dtype, device)
+    weight = torch.randn(shape[-1] * 2, dtype=torch.float32 if fp32_weight else dtype, device=device)[::2]
+    values = x.float()
+    normalized = values * torch.rsqrt(values.pow(2).mean(-1, keepdim=True) + 1e-6)
+    expected = weight * normalized.to(dtype)
+    actual = F.kimi_rms_norm(x, weight, implementation=implementation)
+    assert actual.shape == x.shape and actual.dtype == expected.dtype
+    assert actual.is_contiguous()
+    torch.testing.assert_close(actual, expected, rtol=1e-2 if dtype == torch.bfloat16 else 2e-3,
+                               atol=2e-2 if dtype == torch.bfloat16 else 2e-3)
+
 GROUP_LEADING_SHAPES = [((7, 128), (3, 128)), ((7, 2, 128), (3, 4, 128))]
 
 

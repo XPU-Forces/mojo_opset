@@ -50,6 +50,7 @@ OPS = {
     "varlen_fa_infer": "varlen_fa",
     "causal_conv1d_update_state_infer": "convolution",
     "layer_norm_infer": "normalization",
+    "kimi_rms_norm": "kimi_rms_norm",
     "rms_norm_infer": "normalization",
     "group_rms_norm_infer": "normalization",
     "residual_add_layer_norm_infer": "normalization",

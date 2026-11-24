@@ -4,6 +4,26 @@ import torch
 from mojo_opset import modules
 
 
+@pytest.mark.api("modules.KimiRMSNorm", ops=["kimi_rms_norm"])
+@pytest.mark.parametrize("shape", [(32, 1024), (64, 8192), (57, 7338), (2, 32769)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("fp32_weight", [False, True])
+def test_kimi_rms_norm(benchmark, perf_environment, shape, dtype, fp32_weight):
+    _, device, _, implementation = perf_environment
+
+    def factory():
+        module = modules.KimiRMSNorm(
+            shape[-1], device=device, dtype=torch.float32 if fp32_weight else dtype,
+            implementation=implementation,
+        ).requires_grad_(False)
+        module.weight.normal_()
+        x = torch.randn(shape, dtype=dtype, device=device)
+        return lambda: module(x)
+
+    benchmark(factory=factory, op="kimi_rms_norm", shape=list(shape), dtype=str(dtype),
+              weight_dtype=str(torch.float32 if fp32_weight else dtype), phase="forward")
+
+
 @pytest.mark.api("modules.RMSNorm", ops=["rms_norm"])
 @pytest.mark.parametrize("shape", [(128, 1024), (1024, 4096)], ids=["small", "large"])
 @pytest.mark.parametrize("phase", ["forward", "backward", "forward_backward"])
