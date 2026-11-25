@@ -126,10 +126,8 @@ def kernel_owners(events, ranges):
         if "id" not in event or phase not in ("s", "f"):
             raise ValueError("Invalid NPU launch flow")
         key = str(event["id"])
-        pair = flows[family].setdefault(key, {})
-        if phase in pair:
-            raise ValueError(f"Duplicate NPU flow {key!r} {phase!r} endpoint")
-        pair[phase] = event
+        pair = flows[family].setdefault(key, {"s": [], "f": []})
+        pair[phase].append(event)
 
     # CANN 9.2 exports some native launch flows with only the device end.
     # The AscendCL API still carries connection_id; the exported flow ID is
@@ -143,7 +141,7 @@ def kernel_owners(events, ranges):
                 and type(connection) is int and connection > 0):
             native_apis.setdefault(connection, []).append(event)
     for key, pair in flows["cann"].items():
-        if set(pair) != {"f"}:
+        if pair["s"] or len(pair["f"]) != 1:
             continue
         if not key.isdecimal():
             continue
@@ -151,46 +149,65 @@ def kernel_owners(events, ranges):
         if len(candidates) > 1:
             raise ValueError("Ambiguous CANN API connection_id")
         if candidates:
-            pair["s"] = candidates[0]
+            pair["s"].append(candidates[0])
+
+    def start_owner(event, family):
+        pid, tid, timestamp = point(event)
+        if family == "cann":
+            # Direct AscendC launches may have no torch_to_npu flow. CANN
+            # records their host thread/clock under a synthetic process lane.
+            # Require an unambiguous single-process trace before translating
+            # that lane; never assign kernels by device-time containment.
+            python_pids = processes.get("Python", set())
+            if (
+                pid not in processes.get("CANN", set())
+                or len(python_pids) != 1
+                or python_pids != {p for _, p, _, _, _ in bounds}
+            ):
+                raise ValueError("Ambiguous CANN host process for native NPU launch")
+            pid = next(iter(python_pids))
+        matches = {
+            name
+            for name, p, t, lower, upper in bounds + worker_bounds
+            if pid == p and tid == t and lower <= timestamp < upper
+        }
+        if len(matches) > 1:
+            raise ValueError("NPU kernel belongs to multiple sample ranges")
+        return matches.pop() if matches else None  # Warmup stays outside samples.
 
     owners = {}
     for family, connections in flows.items():
         claimed = set()
         for key, pair in connections.items():
-            if set(pair) != {"s", "f"}:
+            starts, finishes = pair["s"], pair["f"]
+            if not starts or len(starts) != len(finishes):
                 raise ValueError(f"Incomplete NPU flow {key!r}")
-            index = targets.get(point(pair["f"]))
-            if index is None:
-                raise ValueError(f"NPU flow {key!r} has no matching device event")
-            if index not in kernels:
-                continue  # Memory copies have flows too, but are not kernel timings.
-            if index in claimed:
-                raise ValueError("NPU kernel has multiple flow owners")
-            claimed.add(index)
-            if family == "cann" and index in owners:
-                continue  # Torch's flow also follows asynchronous task-queue submissions.
-            pid, tid, timestamp = point(pair["s"])
-            if family == "cann":
-                # Direct AscendC launches may have no torch_to_npu flow. CANN
-                # records their host thread/clock under a synthetic process lane.
-                # Require an unambiguous single-process trace before translating
-                # that lane; never assign kernels by device-time containment.
-                python_pids = processes.get("Python", set())
-                if (
-                    pid not in processes.get("CANN", set())
-                    or len(python_pids) != 1
-                    or python_pids != {p for _, p, _, _, _ in bounds}
-                ):
-                    raise ValueError("Ambiguous CANN host process for native NPU launch")
-                pid = next(iter(python_pids))
-            matches = {
-                name
-                for name, p, t, lower, upper in bounds + worker_bounds
-                if pid == p and tid == t and lower <= timestamp < upper
-            }
-            if len(matches) > 1:
-                raise ValueError("NPU kernel belongs to multiple sample ranges")
-            owners[index] = matches.pop() if matches else None  # Warmup stays outside samples.
+            for start in starts:
+                point(start)
+            endpoints = [point(finish) for finish in finishes]
+            if len(set(endpoints)) != len(endpoints):
+                raise ValueError(f"Duplicate NPU flow {key!r} 'f' endpoint")
+            pending = []
+            for endpoint in endpoints:
+                index = targets.get(endpoint)
+                if index is None:
+                    raise ValueError(f"NPU flow {key!r} has no matching device event")
+                if index not in kernels:
+                    continue  # Memory copies have flows too, but are not kernel timings.
+                if index in claimed:
+                    raise ValueError("NPU kernel has multiple flow owners")
+                claimed.add(index)
+                if family == "cann" and index in owners:
+                    continue  # Torch's flow also follows asynchronous task-queue submissions.
+                pending.append(index)
+            if not pending:
+                continue
+            resolved = {start_owner(start, family) for start in starts}
+            if len(resolved) > 1:
+                raise ValueError(f"Ambiguous NPU flow {key!r} across sample ranges")
+            owner = resolved.pop()
+            for index in pending:
+                owners[index] = owner
     if kernels - owners.keys():
         raise ValueError("NPU device kernel is missing a launch flow")
     return owners

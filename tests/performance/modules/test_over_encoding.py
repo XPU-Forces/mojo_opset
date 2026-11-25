@@ -56,3 +56,81 @@ def test_over_encoding(benchmark, perf_environment, case, embedding):
         return lambda: module(ids, history, lens)
 
     benchmark(factory=factory, op=op, case=case, embedding=embedding, dtype="int64", phase="forward")
+
+
+@pytest.mark.api("modules.NF4DequantEmbedding", ops=["embedding_nf4_dequant"])
+@pytest.mark.parametrize("dim", [1024, 4096])
+def test_nf4_dequant_embedding(benchmark, perf_environment, dim):
+    _, device, _, implementation = perf_environment
+
+    def factory():
+        vocab, group_size = 4096, 64
+        indices = torch.randint(16, (vocab, dim), device="cpu", dtype=torch.uint8)
+        qweight = (indices[:, ::2] | (indices[:, 1::2] << 4)).to(device=device, dtype=torch.int8)
+        scale = torch.randn(vocab, dim // group_size, device=device, dtype=torch.float32)
+        mean = torch.randn(vocab, dim // group_size, device=device, dtype=torch.float32)
+        module = modules.NF4DequantEmbedding(
+            qweight,
+            scale,
+            mean,
+            group_size=group_size,
+            output_dtype=torch.bfloat16,
+            implementation=implementation,
+        )
+        ids = torch.randint(vocab, (32, 128), device=device, dtype=torch.int64)
+        return lambda: module(ids)
+
+    benchmark(
+        factory=factory,
+        op="embedding_nf4_dequant",
+        vocab=4096,
+        tokens=4096,
+        dim=dim,
+        group_size=64,
+        dtype="bfloat16",
+        phase="forward",
+    )
+
+
+@pytest.mark.api("modules.OverEncoding", ops=["over_encoding_decode"])
+@pytest.mark.parametrize("batch,oe_dim", [(48, 64), (128, 192)])
+def test_over_encoding_decode(benchmark, perf_environment, batch, oe_dim):
+    _, device, _, implementation = perf_environment
+
+    def factory():
+        vocab, dim, group_size = 10086, 1536, 64
+        sizes = [10086 + 2**i for i in range(8)]
+        grams = [2, 2, 3, 3, 4, 4, 5, 5]
+        total_vocab = sum(sizes)
+        indices = torch.randint(16, (total_vocab, oe_dim), device="cpu", dtype=torch.uint8)
+        qweight = (indices[:, ::2] | (indices[:, 1::2] << 4)).to(device=device, dtype=torch.int8)
+        scale = torch.randn(total_vocab, oe_dim // group_size, device=device, dtype=torch.float32)
+        mean = torch.randn(total_vocab, oe_dim // group_size, device=device, dtype=torch.float32)
+        module = modules.OverEncoding(
+            vocab,
+            dim,
+            oe_dim,
+            sizes,
+            grams,
+            _mega_embedding_weight=qweight,
+            _mega_embedding_scale=scale,
+            _mega_embedding_mean=mean,
+            _mega_embedding_group_size=group_size,
+            device=device,
+            dtype=torch.bfloat16,
+            implementation=implementation,
+        ).requires_grad_(False)
+        ids = (torch.arange(1, batch + 1, device=device, dtype=torch.int64) % vocab).view(batch, 1)
+        history = torch.ones(batch, 4, dtype=torch.int32, device=device)
+        return lambda: module(ids, history)
+
+    benchmark(
+        factory=factory,
+        op="over_encoding_decode",
+        batch=batch,
+        oe_dim=oe_dim,
+        group_size=64,
+        dtype="bfloat16",
+        phase="forward",
+    )
+

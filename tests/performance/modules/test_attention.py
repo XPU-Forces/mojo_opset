@@ -68,3 +68,37 @@ def test_sdpa(benchmark, perf_environment, seq_len, masked):
         phase="forward",
         masked=masked,
     )
+
+
+@pytest.mark.api("modules.VarlenFAInfer", ops=["varlen_fa_infer"])
+@pytest.mark.parametrize(
+    "q_lens,k_lens,q_heads,kv_heads,interleave",
+    [
+        ([96, 128], [96, 128], 8, 1, False),
+        ([129, 257], [513, 1025], 8, 2, True),
+    ],
+)
+def test_varlen_fa_infer(benchmark, perf_environment, q_lens, k_lens, q_heads, kv_heads, interleave):
+    _, device, _, implementation = perf_environment
+
+    def factory():
+        module = modules.VarlenFAInfer(is_causal=True, gqa_interleave=interleave, implementation=implementation)
+        q = torch.randn(sum(q_lens), q_heads, 128, dtype=torch.bfloat16, device=device)
+        k = torch.randn(sum(k_lens), kv_heads, 128, dtype=torch.bfloat16, device=device)
+        v = torch.randn_like(k)
+        cq = torch.tensor([0, *q_lens], dtype=torch.int32, device=device).cumsum(0, dtype=torch.int32)
+        ck = torch.tensor([0, *k_lens], dtype=torch.int32, device=device).cumsum(0, dtype=torch.int32)
+        return lambda: module(q, k, v, cq, ck, softmax_scale=128**-0.5)
+
+    benchmark(
+        factory=factory,
+        op="varlen_fa_infer",
+        q_lens=q_lens,
+        k_lens=k_lens,
+        q_heads=q_heads,
+        kv_heads=kv_heads,
+        interleave=interleave,
+        dtype="bfloat16",
+        phase="forward",
+    )
+

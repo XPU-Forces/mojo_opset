@@ -173,3 +173,32 @@ def test_prefill(benchmark, perf_environment, sliding, case, layout):
         )
 
     benchmark(factory=factory, op=op, shape=list(case), layout=layout, dtype="bfloat16", phase="forward")
+
+
+@pytest.mark.api("modules.PrefillGQAInfer", ops=["prefill_gqa_infer"])
+@pytest.mark.parametrize("batch,qh,kh,dim,length", [(2, 16, 4, 128, 64), (2, 8, 1, 128, 256)])
+@pytest.mark.parametrize("layout", ["AABB", "ABAB"])
+def test_prefill_gqa(benchmark, perf_environment, batch, qh, kh, dim, length, layout):
+    _, device, _, implementation = perf_environment
+
+    def factory():
+        module = modules.PrefillGQAInfer(gqa_layout=layout, implementation=implementation)
+        q = torch.randn(batch, qh, length, dim, device=device, dtype=torch.bfloat16)
+        k = torch.randn(batch, kh, length, dim, device=device, dtype=torch.bfloat16)
+        v = torch.randn(batch, kh, length, dim, device=device, dtype=torch.bfloat16)
+        cu_q_lens = torch.arange(batch + 1, device=device, dtype=torch.int32) * length
+        return lambda: module(q, k, v, cu_q_lens, softmax_scale=dim**-0.5)
+
+    benchmark(
+        factory=factory,
+        op="prefill_gqa_infer",
+        batch=batch,
+        q_heads=qh,
+        kv_heads=kh,
+        head_dim=dim,
+        seq_len=length,
+        layout=layout,
+        dtype="bfloat16",
+        phase="forward",
+    )
+

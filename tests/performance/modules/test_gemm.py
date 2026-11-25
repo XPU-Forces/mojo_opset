@@ -137,3 +137,4 @@ def test_quant_batch_gemm_reduce_sum(benchmark, perf_environment, batch, m, k, n
     benchmark(
         factory=factory, op="quant_batch_gemm_reduce_sum", batch=batch, m=m, k=k, n=n, dtype="int8", phase="forward"
     )
+

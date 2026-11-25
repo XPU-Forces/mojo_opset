@@ -1,14 +1,14 @@
 # CI test selection rules, initially based on master e5e233ad6b950088af8beaeb71c5290c196803be.
 # rules match repository-relative paths; * matches one component, ** matches directories.
-# jobs select complete test files; an empty performance list records missing benchmarks.
+# jobs select complete non-empty test file lists (or full).
 # Jobs marked full override selected files for the same job.
+
 common:
   - paths:
       - native/src/npu_a2/common/torch_utils.h
     jobs:
       910b/native: full
       910b/performance: full
-
 operators:
   apply_penalties_temperature:
     rules:
@@ -17,35 +17,41 @@ operators:
           - mojo_opset/kernels/_npu_triton_utils.py
           - mojo_opset/kernels/torch/sampling.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_sampling.py
           910b/triton:
             - tests/functions/test_sampling.py
             - tests/modules/test_sampling.py
-          950/performance: []
+          950/performance:
+            - tests/performance/modules/test_sampling.py
           950/triton:
             - tests/functions/test_sampling.py
             - tests/modules/test_sampling.py
       - paths:
           - mojo_opset/kernels/npu_a2_triton/sample.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_sampling.py
           910b/triton:
             - tests/functions/test_sampling.py
             - tests/modules/test_sampling.py
       - paths:
           - mojo_opset/kernels/npu_a5_triton/sample.py
         jobs:
-          950/performance: []
+          950/performance:
+            - tests/performance/modules/test_sampling.py
           950/triton:
             - tests/functions/test_sampling.py
             - tests/modules/test_sampling.py
       - paths:
           - mojo_opset/modules/sampling.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_sampling.py
           910b/triton:
             - tests/modules/test_sampling.py
-          950/performance: []
+          950/performance:
+            - tests/performance/modules/test_sampling.py
           950/triton:
             - tests/modules/test_sampling.py
       - paths:
@@ -62,6 +68,13 @@ operators:
             - tests/modules/test_sampling.py
           950/triton:
             - tests/modules/test_sampling.py
+      - paths:
+          - tests/performance/modules/test_sampling.py
+        jobs:
+          910b/performance:
+            - tests/performance/modules/test_sampling.py
+          950/performance:
+            - tests/performance/modules/test_sampling.py
   causal_conv1d:
     rules:
       - paths:
@@ -185,35 +198,38 @@ operators:
           - mojo_opset/kernels/_npu_triton_utils.py
           - mojo_opset/kernels/torch/quantization.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
           910b/triton:
             - tests/functions/test_quantization.py
             - tests/modules/test_quantization.py
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_quantization.py
           950/triton:
             - tests/functions/test_quantization.py
             - tests/modules/test_quantization.py
       - paths:
           - mojo_opset/kernels/npu_a2_triton/quant.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
           910b/triton:
             - tests/functions/test_quantization.py
             - tests/modules/test_quantization.py
       - paths:
           - mojo_opset/kernels/npu_a5_triton/quant.py
         jobs:
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_quantization.py
           950/triton:
             - tests/functions/test_quantization.py
             - tests/modules/test_quantization.py
       - paths:
           - mojo_opset/modules/quantization.py
+          - tests/modules/test_quantization.py
         jobs:
-          910b/performance: []
           910b/triton:
             - tests/modules/test_quantization.py
-          950/performance: []
           950/triton:
             - tests/modules/test_quantization.py
       - paths:
@@ -224,12 +240,12 @@ operators:
           950/triton:
             - tests/functions/test_quantization.py
       - paths:
-          - tests/modules/test_quantization.py
+          - tests/performance/functions/test_quantization.py
         jobs:
-          910b/triton:
-            - tests/modules/test_quantization.py
-          950/triton:
-            - tests/modules/test_quantization.py
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
+          950/performance:
+            - tests/performance/functions/test_quantization.py
   dequant_swiglu_quant:
     rules:
       - paths:
@@ -238,21 +254,22 @@ operators:
           - mojo_opset/kernels/npu_torch_npu/normalization.py
           - mojo_opset/kernels/torch/fused_quantization.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
           910b/torch_npu:
             - tests/functions/test_fused_quantization.py
             - tests/modules/test_fused_quantization.py
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_quantization.py
           950/torch_npu:
             - tests/functions/test_fused_quantization.py
             - tests/modules/test_fused_quantization.py
       - paths:
           - mojo_opset/modules/fused_quantization.py
+          - tests/modules/test_fused_quantization.py
         jobs:
-          910b/performance: []
           910b/torch_npu:
             - tests/modules/test_fused_quantization.py
-          950/performance: []
           950/torch_npu:
             - tests/modules/test_fused_quantization.py
       - paths:
@@ -263,12 +280,12 @@ operators:
           950/torch_npu:
             - tests/functions/test_fused_quantization.py
       - paths:
-          - tests/modules/test_fused_quantization.py
+          - tests/performance/functions/test_quantization.py
         jobs:
-          910b/torch_npu:
-            - tests/modules/test_fused_quantization.py
-          950/torch_npu:
-            - tests/modules/test_fused_quantization.py
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
+          950/performance:
+            - tests/performance/functions/test_quantization.py
   diffusion_attention:
     rules:
       - paths:
@@ -309,16 +326,6 @@ operators:
     rules:
       - paths:
           - mojo_opset/functions/indexer.py
-        jobs:
-          910b/performance: []
-          910b/triton:
-            - tests/functions/test_composite_indexer.py
-            - tests/modules/test_composite_indexer.py
-          950/performance: []
-          950/triton:
-            - tests/functions/test_composite_indexer.py
-            - tests/modules/test_composite_indexer.py
-      - paths:
           - mojo_opset/functions/normalization.py
           - mojo_opset/functions/position_embedding.py
           - mojo_opset/functions/rotate_activation.py
@@ -333,7 +340,8 @@ operators:
           - mojo_opset/functions/quantization.py
           - mojo_opset/kernels/torch/quantization.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
           910b/torch_npu:
             - tests/functions/test_quantization.py
             - tests/modules/test_quantization.py
@@ -342,7 +350,8 @@ operators:
             - tests/functions/test_quantization.py
             - tests/modules/test_composite_indexer.py
             - tests/modules/test_quantization.py
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_quantization.py
           950/torch_npu:
             - tests/functions/test_quantization.py
             - tests/modules/test_quantization.py
@@ -354,13 +363,15 @@ operators:
       - paths:
           - mojo_opset/kernels/_npu_triton_utils.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
           910b/triton:
             - tests/functions/test_composite_indexer.py
             - tests/functions/test_quantization.py
             - tests/modules/test_composite_indexer.py
             - tests/modules/test_quantization.py
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_quantization.py
           950/triton:
             - tests/functions/test_composite_indexer.py
             - tests/functions/test_quantization.py
@@ -369,7 +380,8 @@ operators:
       - paths:
           - mojo_opset/kernels/npu_a2_triton/quant.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
           910b/triton:
             - tests/functions/test_composite_indexer.py
             - tests/functions/test_quantization.py
@@ -378,7 +390,8 @@ operators:
       - paths:
           - mojo_opset/kernels/npu_a5_triton/quant.py
         jobs:
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_quantization.py
           950/triton:
             - tests/functions/test_composite_indexer.py
             - tests/functions/test_quantization.py
@@ -387,22 +400,18 @@ operators:
       - paths:
           - mojo_opset/kernels/npu_torch_npu/quantization.py
         jobs:
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
           910b/torch_npu:
             - tests/functions/test_quantization.py
             - tests/modules/test_quantization.py
+          950/performance:
+            - tests/performance/functions/test_quantization.py
           950/torch_npu:
             - tests/functions/test_quantization.py
             - tests/modules/test_quantization.py
       - paths:
           - mojo_opset/modules/indexer.py
-        jobs:
-          910b/performance: []
-          910b/triton:
-            - tests/modules/test_composite_indexer.py
-          950/performance: []
-          950/triton:
-            - tests/modules/test_composite_indexer.py
-      - paths:
           - mojo_opset/modules/normalization.py
           - tests/modules/test_composite_indexer.py
         jobs:
@@ -412,13 +421,12 @@ operators:
             - tests/modules/test_composite_indexer.py
       - paths:
           - mojo_opset/modules/quantization.py
+          - tests/modules/test_quantization.py
         jobs:
-          910b/performance: []
           910b/torch_npu:
             - tests/modules/test_quantization.py
           910b/triton:
             - tests/modules/test_quantization.py
-          950/performance: []
           950/torch_npu:
             - tests/modules/test_quantization.py
           950/triton:
@@ -442,16 +450,12 @@ operators:
           950/triton:
             - tests/functions/test_quantization.py
       - paths:
-          - tests/modules/test_quantization.py
+          - tests/performance/functions/test_quantization.py
         jobs:
-          910b/torch_npu:
-            - tests/modules/test_quantization.py
-          910b/triton:
-            - tests/modules/test_quantization.py
-          950/torch_npu:
-            - tests/modules/test_quantization.py
-          950/triton:
-            - tests/modules/test_quantization.py
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
+          950/performance:
+            - tests/performance/functions/test_quantization.py
   embedding_nf4_dequant:
     rules:
       - paths:
@@ -459,35 +463,41 @@ operators:
           - mojo_opset/kernels/_nf4.py
           - mojo_opset/kernels/torch/over_encoding.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_over_encoding.py
           910b/triton:
             - tests/functions/test_nf4_embedding.py
             - tests/modules/test_nf4_embedding.py
-          950/performance: []
+          950/performance:
+            - tests/performance/modules/test_over_encoding.py
           950/triton:
             - tests/functions/test_nf4_embedding.py
             - tests/modules/test_nf4_embedding.py
       - paths:
           - mojo_opset/kernels/npu_a2_triton/over_encoding/embedding.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_over_encoding.py
           910b/triton:
             - tests/functions/test_nf4_embedding.py
             - tests/modules/test_nf4_embedding.py
       - paths:
           - mojo_opset/kernels/npu_a5_triton/over_encoding/embedding.py
         jobs:
-          950/performance: []
+          950/performance:
+            - tests/performance/modules/test_over_encoding.py
           950/triton:
             - tests/functions/test_nf4_embedding.py
             - tests/modules/test_nf4_embedding.py
       - paths:
           - mojo_opset/modules/over_encoding.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_over_encoding.py
           910b/triton:
             - tests/modules/test_nf4_embedding.py
-          950/performance: []
+          950/performance:
+            - tests/performance/modules/test_over_encoding.py
           950/triton:
             - tests/modules/test_nf4_embedding.py
       - paths:
@@ -504,6 +514,13 @@ operators:
             - tests/modules/test_nf4_embedding.py
           950/triton:
             - tests/modules/test_nf4_embedding.py
+      - paths:
+          - tests/performance/modules/test_over_encoding.py
+        jobs:
+          910b/performance:
+            - tests/performance/modules/test_over_encoding.py
+          950/performance:
+            - tests/performance/modules/test_over_encoding.py
   flash_attention:
     rules:
       - paths:
@@ -615,16 +632,19 @@ operators:
           - mojo_opset/kernels/_npu_triton_utils.py
           - mojo_opset/kernels/torch/attention.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/functions/test_attention.py
           910b/triton:
             - tests/functions/test_attention.py
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_attention.py
           950/triton:
             - tests/functions/test_attention.py
       - paths:
           - mojo_opset/kernels/npu_a2_triton/swa.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/functions/test_attention.py
           910b/triton:
             - tests/functions/test_attention.py
       - paths:
@@ -632,7 +652,8 @@ operators:
           - mojo_opset/kernels/npu_a5_triton/swa.py
           - mojo_opset/utils/attention_dropout.py
         jobs:
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_attention.py
           950/triton:
             - tests/functions/test_attention.py
       - paths:
@@ -642,6 +663,13 @@ operators:
             - tests/functions/test_attention.py
           950/triton:
             - tests/functions/test_attention.py
+      - paths:
+          - tests/performance/functions/test_attention.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_attention.py
+          950/performance:
+            - tests/performance/functions/test_attention.py
   flex_attention:
     rules:
       - paths:
@@ -873,12 +901,18 @@ operators:
         jobs:
           950/native:
             - tests/functions/test_dense_gemm.py
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_dense_gemm.py
       - paths:
           - tests/functions/test_dense_gemm.py
         jobs:
           950/native:
             - tests/functions/test_dense_gemm.py
+      - paths:
+          - tests/performance/functions/test_dense_gemm.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_dense_gemm.py
   group_gemm:
     rules:
       - paths:
@@ -1308,21 +1342,22 @@ operators:
           - mojo_opset/kernels/npu_torch_npu/normalization.py
           - mojo_opset/kernels/torch/fused_quantization.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
           910b/torch_npu:
             - tests/functions/test_norm_quantization.py
             - tests/modules/test_norm_quantization.py
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_quantization.py
           950/torch_npu:
             - tests/functions/test_norm_quantization.py
             - tests/modules/test_norm_quantization.py
       - paths:
           - mojo_opset/modules/fused_quantization.py
+          - tests/modules/test_norm_quantization.py
         jobs:
-          910b/performance: []
           910b/torch_npu:
             - tests/modules/test_norm_quantization.py
-          950/performance: []
           950/torch_npu:
             - tests/modules/test_norm_quantization.py
       - paths:
@@ -1333,12 +1368,12 @@ operators:
           950/torch_npu:
             - tests/functions/test_norm_quantization.py
       - paths:
-          - tests/modules/test_norm_quantization.py
+          - tests/performance/functions/test_quantization.py
         jobs:
-          910b/torch_npu:
-            - tests/modules/test_norm_quantization.py
-          950/torch_npu:
-            - tests/modules/test_norm_quantization.py
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
+          950/performance:
+            - tests/performance/functions/test_quantization.py
   lightning_indexer:
     rules:
       - paths:
@@ -1439,14 +1474,16 @@ operators:
           - mojo_opset/functions/fused_quantization.py
           - mojo_opset/kernels/torch/fused_quantization.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
           910b/torch_npu:
             - tests/functions/test_moe_quantization.py
             - tests/modules/test_moe_quantization.py
           910b/triton:
             - tests/functions/test_moe_quantization.py
             - tests/modules/test_moe_quantization.py
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_quantization.py
           950/torch_npu:
             - tests/functions/test_moe_quantization.py
             - tests/modules/test_moe_quantization.py
@@ -1456,25 +1493,29 @@ operators:
       - paths:
           - mojo_opset/kernels/_npu_triton_utils.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
           910b/triton:
             - tests/functions/test_moe_quantization.py
             - tests/modules/test_moe_quantization.py
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_quantization.py
           950/triton:
             - tests/functions/test_moe_quantization.py
             - tests/modules/test_moe_quantization.py
       - paths:
           - mojo_opset/kernels/npu_a2_triton/quant.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
           910b/triton:
             - tests/functions/test_moe_quantization.py
             - tests/modules/test_moe_quantization.py
       - paths:
           - mojo_opset/kernels/npu_a5_triton/quant.py
         jobs:
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_quantization.py
           950/triton:
             - tests/functions/test_moe_quantization.py
             - tests/modules/test_moe_quantization.py
@@ -1482,21 +1523,24 @@ operators:
           - mojo_opset/kernels/npu_torch_npu/fused_quantization.py
           - mojo_opset/kernels/npu_torch_npu/normalization.py
         jobs:
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
           910b/torch_npu:
             - tests/functions/test_moe_quantization.py
             - tests/modules/test_moe_quantization.py
+          950/performance:
+            - tests/performance/functions/test_quantization.py
           950/torch_npu:
             - tests/functions/test_moe_quantization.py
             - tests/modules/test_moe_quantization.py
       - paths:
           - mojo_opset/modules/fused_quantization.py
+          - tests/modules/test_moe_quantization.py
         jobs:
-          910b/performance: []
           910b/torch_npu:
             - tests/modules/test_moe_quantization.py
           910b/triton:
             - tests/modules/test_moe_quantization.py
-          950/performance: []
           950/torch_npu:
             - tests/modules/test_moe_quantization.py
           950/triton:
@@ -1513,51 +1557,53 @@ operators:
           950/triton:
             - tests/functions/test_moe_quantization.py
       - paths:
-          - tests/modules/test_moe_quantization.py
+          - tests/performance/functions/test_quantization.py
         jobs:
-          910b/torch_npu:
-            - tests/modules/test_moe_quantization.py
-          910b/triton:
-            - tests/modules/test_moe_quantization.py
-          950/torch_npu:
-            - tests/modules/test_moe_quantization.py
-          950/triton:
-            - tests/modules/test_moe_quantization.py
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
+          950/performance:
+            - tests/performance/functions/test_quantization.py
   multimodal_rope_infer:
     rules:
       - paths:
           - mojo_opset/functions/multimodal_rope_infer.py
           - mojo_opset/kernels/torch/multimodal_rope_infer.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_position_embedding.py
           910b/triton:
             - tests/functions/test_mrope.py
             - tests/modules/test_mrope.py
-          950/performance: []
+          950/performance:
+            - tests/performance/modules/test_position_embedding.py
           950/triton:
             - tests/functions/test_mrope.py
             - tests/modules/test_mrope.py
       - paths:
           - mojo_opset/kernels/npu_a2_triton/multimodal_rope_infer.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_position_embedding.py
           910b/triton:
             - tests/functions/test_mrope.py
             - tests/modules/test_mrope.py
       - paths:
           - mojo_opset/kernels/npu_a5_triton/multimodal_rope_infer.py
         jobs:
-          950/performance: []
+          950/performance:
+            - tests/performance/modules/test_position_embedding.py
           950/triton:
             - tests/functions/test_mrope.py
             - tests/modules/test_mrope.py
       - paths:
           - mojo_opset/modules/multimodal_rope_infer.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_position_embedding.py
           910b/triton:
             - tests/modules/test_mrope.py
-          950/performance: []
+          950/performance:
+            - tests/performance/modules/test_position_embedding.py
           950/triton:
             - tests/modules/test_mrope.py
       - paths:
@@ -1574,6 +1620,13 @@ operators:
             - tests/modules/test_mrope.py
           950/triton:
             - tests/modules/test_mrope.py
+      - paths:
+          - tests/performance/modules/test_position_embedding.py
+        jobs:
+          910b/performance:
+            - tests/performance/modules/test_position_embedding.py
+          950/performance:
+            - tests/performance/modules/test_position_embedding.py
   mxfp4_gemm:
     rules:
       - paths:
@@ -1585,12 +1638,18 @@ operators:
         jobs:
           950/native:
             - tests/functions/test_dense_gemm.py
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_dense_gemm.py
       - paths:
           - tests/functions/test_dense_gemm.py
         jobs:
           950/native:
             - tests/functions/test_dense_gemm.py
+      - paths:
+          - tests/performance/functions/test_dense_gemm.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_dense_gemm.py
   mxfp8_dequant_gemm:
     rules:
       - paths:
@@ -1602,12 +1661,18 @@ operators:
         jobs:
           950/native:
             - tests/functions/test_dense_gemm.py
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_dense_gemm.py
       - paths:
           - tests/functions/test_dense_gemm.py
         jobs:
           950/native:
             - tests/functions/test_dense_gemm.py
+      - paths:
+          - tests/performance/functions/test_dense_gemm.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_dense_gemm.py
   n_gram_decode:
     rules:
       - paths:
@@ -1755,12 +1820,18 @@ operators:
         jobs:
           950/native:
             - tests/functions/test_attention.py
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_attention.py
       - paths:
           - tests/functions/test_attention.py
         jobs:
           950/native:
             - tests/functions/test_attention.py
+      - paths:
+          - tests/performance/functions/test_attention.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_attention.py
   over_encoding_decode:
     rules:
       - paths:
@@ -1768,12 +1839,14 @@ operators:
           - mojo_opset/kernels/_nf4.py
           - mojo_opset/kernels/torch/over_encoding.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_over_encoding.py
           910b/triton:
             - tests/functions/test_nf4_embedding.py
             - tests/modules/test_nf4_embedding.py
             - tests/modules/test_over_encoding.py
-          950/performance: []
+          950/performance:
+            - tests/performance/modules/test_over_encoding.py
           950/triton:
             - tests/functions/test_nf4_embedding.py
             - tests/modules/test_nf4_embedding.py
@@ -1782,7 +1855,8 @@ operators:
           - mojo_opset/kernels/npu_a2_triton/over_encoding/embedding.py
           - mojo_opset/kernels/npu_a2_triton/over_encoding/fused_over_encoding.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_over_encoding.py
           910b/triton:
             - tests/functions/test_nf4_embedding.py
             - tests/modules/test_nf4_embedding.py
@@ -1791,7 +1865,8 @@ operators:
           - mojo_opset/kernels/npu_a5_triton/over_encoding/embedding.py
           - mojo_opset/kernels/npu_a5_triton/over_encoding/fused_over_encoding.py
         jobs:
-          950/performance: []
+          950/performance:
+            - tests/performance/modules/test_over_encoding.py
           950/triton:
             - tests/functions/test_nf4_embedding.py
             - tests/modules/test_nf4_embedding.py
@@ -1799,11 +1874,13 @@ operators:
       - paths:
           - mojo_opset/modules/over_encoding.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_over_encoding.py
           910b/triton:
             - tests/modules/test_nf4_embedding.py
             - tests/modules/test_over_encoding.py
-          950/performance: []
+          950/performance:
+            - tests/performance/modules/test_over_encoding.py
           950/triton:
             - tests/modules/test_nf4_embedding.py
             - tests/modules/test_over_encoding.py
@@ -1828,6 +1905,13 @@ operators:
             - tests/modules/test_over_encoding.py
           950/triton:
             - tests/modules/test_over_encoding.py
+      - paths:
+          - tests/performance/modules/test_over_encoding.py
+        jobs:
+          910b/performance:
+            - tests/performance/modules/test_over_encoding.py
+          950/performance:
+            - tests/performance/modules/test_over_encoding.py
   paged_decode_gqa_infer:
     rules:
       - paths:
@@ -2275,21 +2359,25 @@ operators:
           - mojo_opset/kernels/npu_torch_npu/paged_attention.py
           - mojo_opset/kernels/torch/paged_attention.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_paged_attention.py
           910b/torch_npu:
             - tests/functions/test_paged_attention.py
             - tests/modules/test_paged_attention.py
-          950/performance: []
+          950/performance:
+            - tests/performance/modules/test_paged_attention.py
           950/torch_npu:
             - tests/functions/test_paged_attention.py
             - tests/modules/test_paged_attention.py
       - paths:
           - mojo_opset/modules/paged_attention.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_paged_attention.py
           910b/torch_npu:
             - tests/modules/test_paged_attention.py
-          950/performance: []
+          950/performance:
+            - tests/performance/modules/test_paged_attention.py
           950/torch_npu:
             - tests/modules/test_paged_attention.py
       - paths:
@@ -2306,6 +2394,13 @@ operators:
             - tests/modules/test_paged_attention.py
           950/torch_npu:
             - tests/modules/test_paged_attention.py
+      - paths:
+          - tests/performance/modules/test_paged_attention.py
+        jobs:
+          910b/performance:
+            - tests/performance/modules/test_paged_attention.py
+          950/performance:
+            - tests/performance/modules/test_paged_attention.py
   quant_batch_gemm_reduce_sum:
     rules:
       - paths:
@@ -2606,21 +2701,22 @@ operators:
           - mojo_opset/kernels/npu_torch_npu/normalization.py
           - mojo_opset/kernels/torch/fused_quantization.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
           910b/torch_npu:
             - tests/functions/test_norm_quantization.py
             - tests/modules/test_norm_quantization.py
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_quantization.py
           950/torch_npu:
             - tests/functions/test_norm_quantization.py
             - tests/modules/test_norm_quantization.py
       - paths:
           - mojo_opset/modules/fused_quantization.py
+          - tests/modules/test_norm_quantization.py
         jobs:
-          910b/performance: []
           910b/torch_npu:
             - tests/modules/test_norm_quantization.py
-          950/performance: []
           950/torch_npu:
             - tests/modules/test_norm_quantization.py
       - paths:
@@ -2631,12 +2727,12 @@ operators:
           950/torch_npu:
             - tests/functions/test_norm_quantization.py
       - paths:
-          - tests/modules/test_norm_quantization.py
+          - tests/performance/functions/test_quantization.py
         jobs:
-          910b/torch_npu:
-            - tests/modules/test_norm_quantization.py
-          950/torch_npu:
-            - tests/modules/test_norm_quantization.py
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
+          950/performance:
+            - tests/performance/functions/test_quantization.py
   residual_add_rms_norm_infer:
     rules:
       - paths:
@@ -2755,21 +2851,22 @@ operators:
           - mojo_opset/kernels/npu_torch_npu/normalization.py
           - mojo_opset/kernels/torch/fused_quantization.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
           910b/torch_npu:
             - tests/functions/test_norm_quantization.py
             - tests/modules/test_norm_quantization.py
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_quantization.py
           950/torch_npu:
             - tests/functions/test_norm_quantization.py
             - tests/modules/test_norm_quantization.py
       - paths:
           - mojo_opset/modules/fused_quantization.py
+          - tests/modules/test_norm_quantization.py
         jobs:
-          910b/performance: []
           910b/torch_npu:
             - tests/modules/test_norm_quantization.py
-          950/performance: []
           950/torch_npu:
             - tests/modules/test_norm_quantization.py
       - paths:
@@ -2780,12 +2877,12 @@ operators:
           950/torch_npu:
             - tests/functions/test_norm_quantization.py
       - paths:
-          - tests/modules/test_norm_quantization.py
+          - tests/performance/functions/test_quantization.py
         jobs:
-          910b/torch_npu:
-            - tests/modules/test_norm_quantization.py
-          950/torch_npu:
-            - tests/modules/test_norm_quantization.py
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
+          950/performance:
+            - tests/performance/functions/test_quantization.py
   rms_norm:
     rules:
       - paths:
@@ -2982,21 +3079,22 @@ operators:
           - mojo_opset/kernels/npu_torch_npu/normalization.py
           - mojo_opset/kernels/torch/fused_quantization.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
           910b/torch_npu:
             - tests/functions/test_norm_quantization.py
             - tests/modules/test_norm_quantization.py
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_quantization.py
           950/torch_npu:
             - tests/functions/test_norm_quantization.py
             - tests/modules/test_norm_quantization.py
       - paths:
           - mojo_opset/modules/fused_quantization.py
+          - tests/modules/test_norm_quantization.py
         jobs:
-          910b/performance: []
           910b/torch_npu:
             - tests/modules/test_norm_quantization.py
-          950/performance: []
           950/torch_npu:
             - tests/modules/test_norm_quantization.py
       - paths:
@@ -3007,12 +3105,12 @@ operators:
           950/torch_npu:
             - tests/functions/test_norm_quantization.py
       - paths:
-          - tests/modules/test_norm_quantization.py
+          - tests/performance/functions/test_quantization.py
         jobs:
-          910b/torch_npu:
-            - tests/modules/test_norm_quantization.py
-          950/torch_npu:
-            - tests/modules/test_norm_quantization.py
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
+          950/performance:
+            - tests/performance/functions/test_quantization.py
   rope:
     rules:
       - paths:
@@ -3522,35 +3620,38 @@ operators:
           - mojo_opset/kernels/_npu_triton_utils.py
           - mojo_opset/kernels/torch/quantization.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
           910b/triton:
             - tests/functions/test_quantization.py
             - tests/modules/test_quantization.py
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_quantization.py
           950/triton:
             - tests/functions/test_quantization.py
             - tests/modules/test_quantization.py
       - paths:
           - mojo_opset/kernels/npu_a2_triton/quant.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
           910b/triton:
             - tests/functions/test_quantization.py
             - tests/modules/test_quantization.py
       - paths:
           - mojo_opset/kernels/npu_a5_triton/quant.py
         jobs:
-          950/performance: []
+          950/performance:
+            - tests/performance/functions/test_quantization.py
           950/triton:
             - tests/functions/test_quantization.py
             - tests/modules/test_quantization.py
       - paths:
           - mojo_opset/modules/quantization.py
+          - tests/modules/test_quantization.py
         jobs:
-          910b/performance: []
           910b/triton:
             - tests/modules/test_quantization.py
-          950/performance: []
           950/triton:
             - tests/modules/test_quantization.py
       - paths:
@@ -3561,12 +3662,12 @@ operators:
           950/triton:
             - tests/functions/test_quantization.py
       - paths:
-          - tests/modules/test_quantization.py
+          - tests/performance/functions/test_quantization.py
         jobs:
-          910b/triton:
-            - tests/modules/test_quantization.py
-          950/triton:
-            - tests/modules/test_quantization.py
+          910b/performance:
+            - tests/performance/functions/test_quantization.py
+          950/performance:
+            - tests/performance/functions/test_quantization.py
   store_lowrank:
     rules:
       - paths:
@@ -4193,35 +4294,41 @@ operators:
           - mojo_opset/kernels/_npu_triton_utils.py
           - mojo_opset/kernels/torch/sampling.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_sampling.py
           910b/triton:
             - tests/functions/test_sampling.py
             - tests/modules/test_sampling.py
-          950/performance: []
+          950/performance:
+            - tests/performance/modules/test_sampling.py
           950/triton:
             - tests/functions/test_sampling.py
             - tests/modules/test_sampling.py
       - paths:
           - mojo_opset/kernels/npu_a2_triton/sample.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_sampling.py
           910b/triton:
             - tests/functions/test_sampling.py
             - tests/modules/test_sampling.py
       - paths:
           - mojo_opset/kernels/npu_a5_triton/sample.py
         jobs:
-          950/performance: []
+          950/performance:
+            - tests/performance/modules/test_sampling.py
           950/triton:
             - tests/functions/test_sampling.py
             - tests/modules/test_sampling.py
       - paths:
           - mojo_opset/modules/sampling.py
         jobs:
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_sampling.py
           910b/triton:
             - tests/modules/test_sampling.py
-          950/performance: []
+          950/performance:
+            - tests/performance/modules/test_sampling.py
           950/triton:
             - tests/modules/test_sampling.py
       - paths:
@@ -4238,6 +4345,13 @@ operators:
             - tests/modules/test_sampling.py
           950/triton:
             - tests/modules/test_sampling.py
+      - paths:
+          - tests/performance/modules/test_sampling.py
+        jobs:
+          910b/performance:
+            - tests/performance/modules/test_sampling.py
+          950/performance:
+            - tests/performance/modules/test_sampling.py
   topk_infer:
     rules:
       - paths:
@@ -4274,13 +4388,15 @@ operators:
           910b/native:
             - tests/functions/test_varlen_fa.py
             - tests/modules/test_attention.py
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_attention.py
       - paths:
           - mojo_opset/modules/attention.py
         jobs:
           910b/native:
             - tests/modules/test_attention.py
-          910b/performance: []
+          910b/performance:
+            - tests/performance/modules/test_attention.py
       - paths:
           - tests/functions/test_varlen_fa.py
         jobs:
@@ -4291,6 +4407,11 @@ operators:
         jobs:
           910b/native:
             - tests/modules/test_attention.py
+      - paths:
+          - tests/performance/modules/test_attention.py
+        jobs:
+          910b/performance:
+            - tests/performance/modules/test_attention.py
   vision_rope_2d_infer:
     rules:
       - paths:

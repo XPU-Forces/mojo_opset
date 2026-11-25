@@ -82,3 +82,43 @@ def test_vision_rope(benchmark, perf_environment, grid, dtype):
         dtype=str(dtype),
         phase="forward",
     )
+
+
+@pytest.mark.api("modules.MultimodalRoPEInfer", ops=["multimodal_rope_infer"])
+@pytest.mark.parametrize(
+    "tokens,q_heads,k_heads,section,interleaved",
+    [
+        (128, 28, 4, [16, 24, 24], False),
+        (128, 32, 8, [24, 20, 20], True),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_multimodal_rope_infer(benchmark, perf_environment, tokens, q_heads, k_heads, section, interleaved, dtype):
+    _, device, _, implementation = perf_environment
+    dim = 128
+
+    def factory():
+        module = modules.MultimodalRoPEInfer(implementation=implementation)
+        rotary_dim = sum(section) * 2
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, rotary_dim // 2, 2, dtype=torch.float32) / rotary_dim))
+        freqs = torch.outer(torch.arange(2048, dtype=torch.float32), inv_freq).repeat_interleave(2, -1)
+        cache_cos, cache_sin = freqs.cos().to(device), freqs.sin().to(device)
+        positions = torch.randint(1000, (3, tokens), device=device)
+        cos, sin = cache_cos[positions], cache_sin[positions]
+        q = torch.randn(tokens, q_heads * dim, device=device, dtype=dtype)
+        k = torch.randn(tokens, k_heads * dim, device=device, dtype=dtype)
+        return lambda: module(q, k, cos, sin, mrope_section=section, is_interleaved=interleaved, head_dim=dim)
+
+    benchmark(
+        factory=factory,
+        op="multimodal_rope_infer",
+        tokens=tokens,
+        q_heads=q_heads,
+        k_heads=k_heads,
+        head_dim=dim,
+        section=section,
+        interleaved=interleaved,
+        dtype=str(dtype),
+        phase="forward",
+    )
+
