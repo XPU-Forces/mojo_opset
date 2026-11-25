@@ -6,2126 +6,348 @@
   "cases": [
     {
       "id": "model_t2va_smoke_step0_u1",
-      "case_idx": 1,
-      "provenance": "Upstream e2e: 256x448, duration=4 ->107 frames; text/schedule selection declared.",
       "rows": 4096,
       "hidden_size": 5376,
       "conditions": 3,
       "eps": 1e-05,
-      "dtype": "bfloat16",
-      "indices_dtype": "int64",
-      "sp_size": 1,
-      "sp_rank": 0,
-      "tp_size": 1,
-      "global_rows": 4096,
-      "rank_row_start": 0,
-      "unique_timesteps": [
-        0.0
-      ],
-      "active_conditions": 3,
-      "condition_row_counts": [
-        3612,
-        128,
-        356
-      ],
-      "indices_runs": 3,
+      "seed": 2026111801,
       "indices_segments": [
-        {
-          "start": 0,
-          "rows": 128,
-          "condition": 1
-        },
-        {
-          "start": 128,
-          "rows": 356,
-          "condition": 2
-        },
-        {
-          "start": 484,
-          "rows": 3612,
-          "condition": 0
-        }
+        {"start": 0, "rows": 128, "condition": 1},
+        {"start": 128, "rows": 356, "condition": 2},
+        {"start": 484, "rows": 3612, "condition": 0}
       ],
       "indices_sha256": "653e19ed299e5a60716cd8c020a53f5f7993788f8bc9acbf4dc21a4881a7b8b7",
-      "x_stride": [
-        5376,
-        1
-      ],
-      "weight_stride": [
-        1
-      ],
-      "shift_stride": [
-        32256,
-        1
-      ],
-      "scale_stride": [
-        32256,
-        1
-      ],
-      "shift_storage_offset": 16128,
-      "scale_storage_offset": 21504,
-      "adaln_parent_shape": [
-        3,
-        32256
-      ],
-      "indices_stride": [
-        1
-      ],
-      "x_bytes": 44040192,
-      "output_bytes": 44040192,
-      "adaln_parent_bytes": 193536,
-      "seed": 2026111801,
-      "requests": [
-        {
-          "task": "t2va",
-          "height": 256,
-          "width": 448,
-          "requested_frames": 107,
-          "text_len": 128,
-          "text_vision_tokens": 0,
-          "step_index": 0,
-          "num_steps": 50,
-          "aligned_frames": 107,
-          "latent_t": 32,
-          "audio_latent_t": 178,
-          "global_rows": 4096,
-          "used_rows": 4068,
-          "padding_rows": 28,
-          "t_video": 0.0,
-          "t_audio": 0.0,
-          "video_rows": 3584,
-          "all_visual_rows": 3584,
-          "all_audio_rows": 356
-        }
-      ],
-      "evidence": "pinned_source_rule_derived_not_model_runtime_trace",
-      "values": "seeded_synthetic_not_checkpoint_activations",
-      "request_assumptions": [
-        "Text token count/vision-role spans selected explicitly, not measured tokenizer outputs.",
-        "Pure strict Ulysses with TP=1; no Ring/AllGather or reference-KV compaction.",
-        "Base 50-step schedule, video shift=12 and audio shift=3; no edit masks or distilled schedule."
-      ],
-      "layout_case_id": "t2va_smoke_step0_u1",
-      "group": "model_rule_derived",
-      "residual_stride": [
-        5376,
-        1
-      ],
-      "branch_stride": [
-        5376,
-        1
-      ],
-      "gate_stride": [
-        32256,
-        1
-      ],
+      "condition_row_counts": [3612, 128, 356],
+      "gate_stride": [32256, 1],
+      "shift_stride": [32256, 1],
+      "scale_stride": [32256, 1],
       "gate_storage_offset": 10752,
-      "api": "indexed_gate_rms_norm_scale_shift",
-      "dtype_contract": "BF16 only, as the supplied operator contract",
-      "runtime_trace_collected": false
+      "shift_storage_offset": 16128,
+      "scale_storage_offset": 21504
     },
     {
       "id": "model_t2va_smoke_mid_u1",
-      "case_idx": 2,
-      "provenance": "Same e2e canvas/frame anchor, middle denoise step.",
       "rows": 4096,
       "hidden_size": 5376,
       "conditions": 6,
       "eps": 1e-05,
-      "dtype": "bfloat16",
-      "indices_dtype": "int64",
-      "sp_size": 1,
-      "sp_rank": 0,
-      "tp_size": 1,
-      "global_rows": 4096,
-      "rank_row_start": 0,
-      "unique_timesteps": [
-        0.07692307233810425,
-        0.25
-      ],
-      "active_conditions": 3,
-      "condition_row_counts": [
-        3612,
-        128,
-        0,
-        0,
-        0,
-        356
-      ],
-      "indices_runs": 3,
+      "seed": 2026111802,
       "indices_segments": [
-        {
-          "start": 0,
-          "rows": 128,
-          "condition": 1
-        },
-        {
-          "start": 128,
-          "rows": 356,
-          "condition": 5
-        },
-        {
-          "start": 484,
-          "rows": 3612,
-          "condition": 0
-        }
+        {"start": 0, "rows": 128, "condition": 1},
+        {"start": 128, "rows": 356, "condition": 5},
+        {"start": 484, "rows": 3612, "condition": 0}
       ],
       "indices_sha256": "937a4daa8d36bc0853a9b040275fe508f4ddf5574b6a255fe526c5087959b1ec",
-      "x_stride": [
-        5376,
-        1
-      ],
-      "weight_stride": [
-        1
-      ],
-      "shift_stride": [
-        32256,
-        1
-      ],
-      "scale_stride": [
-        32256,
-        1
-      ],
-      "shift_storage_offset": 16128,
-      "scale_storage_offset": 21504,
-      "adaln_parent_shape": [
-        6,
-        32256
-      ],
-      "indices_stride": [
-        1
-      ],
-      "x_bytes": 44040192,
-      "output_bytes": 44040192,
-      "adaln_parent_bytes": 387072,
-      "seed": 2026111802,
-      "requests": [
-        {
-          "task": "t2va",
-          "height": 256,
-          "width": 448,
-          "requested_frames": 107,
-          "text_len": 128,
-          "text_vision_tokens": 0,
-          "step_index": 25,
-          "num_steps": 50,
-          "aligned_frames": 107,
-          "latent_t": 32,
-          "audio_latent_t": 178,
-          "global_rows": 4096,
-          "used_rows": 4068,
-          "padding_rows": 28,
-          "t_video": 0.07692307233810425,
-          "t_audio": 0.25,
-          "video_rows": 3584,
-          "all_visual_rows": 3584,
-          "all_audio_rows": 356
-        }
-      ],
-      "evidence": "pinned_source_rule_derived_not_model_runtime_trace",
-      "values": "seeded_synthetic_not_checkpoint_activations",
-      "request_assumptions": [
-        "Text token count/vision-role spans selected explicitly, not measured tokenizer outputs.",
-        "Pure strict Ulysses with TP=1; no Ring/AllGather or reference-KV compaction.",
-        "Base 50-step schedule, video shift=12 and audio shift=3; no edit masks or distilled schedule."
-      ],
-      "layout_case_id": "t2va_smoke_mid_u1",
-      "group": "model_rule_derived",
-      "residual_stride": [
-        5376,
-        1
-      ],
-      "branch_stride": [
-        5376,
-        1
-      ],
-      "gate_stride": [
-        32256,
-        1
-      ],
+      "condition_row_counts": [3612, 128, 0, 0, 0, 356],
+      "gate_stride": [32256, 1],
+      "shift_stride": [32256, 1],
+      "scale_stride": [32256, 1],
       "gate_storage_offset": 10752,
-      "api": "indexed_gate_rms_norm_scale_shift",
-      "dtype_contract": "BF16 only, as the supplied operator contract",
-      "runtime_trace_collected": false
+      "shift_storage_offset": 16128,
+      "scale_storage_offset": 21504
     },
     {
       "id": "model_t2va_smoke_mid_u8_rank0",
-      "case_idx": 3,
-      "provenance": "E2e pure Ulysses8 configuration; selected rank0.",
       "rows": 512,
       "hidden_size": 5376,
       "conditions": 6,
       "eps": 1e-05,
-      "dtype": "bfloat16",
-      "indices_dtype": "int64",
-      "sp_size": 8,
-      "sp_rank": 0,
-      "tp_size": 1,
-      "global_rows": 4096,
-      "rank_row_start": 0,
-      "unique_timesteps": [
-        0.07692307233810425,
-        0.25
-      ],
-      "active_conditions": 3,
-      "condition_row_counts": [
-        28,
-        128,
-        0,
-        0,
-        0,
-        356
-      ],
-      "indices_runs": 3,
+      "seed": 2026111803,
       "indices_segments": [
-        {
-          "start": 0,
-          "rows": 128,
-          "condition": 1
-        },
-        {
-          "start": 128,
-          "rows": 356,
-          "condition": 5
-        },
-        {
-          "start": 484,
-          "rows": 28,
-          "condition": 0
-        }
+        {"start": 0, "rows": 128, "condition": 1},
+        {"start": 128, "rows": 356, "condition": 5},
+        {"start": 484, "rows": 28, "condition": 0}
       ],
       "indices_sha256": "4e09502d472a4a0a574061ce98371f26b6c017f2cfb1fd8768e2b75aeaa164be",
-      "x_stride": [
-        5376,
-        1
-      ],
-      "weight_stride": [
-        1
-      ],
-      "shift_stride": [
-        32256,
-        1
-      ],
-      "scale_stride": [
-        32256,
-        1
-      ],
-      "shift_storage_offset": 16128,
-      "scale_storage_offset": 21504,
-      "adaln_parent_shape": [
-        6,
-        32256
-      ],
-      "indices_stride": [
-        1
-      ],
-      "x_bytes": 5505024,
-      "output_bytes": 5505024,
-      "adaln_parent_bytes": 387072,
-      "seed": 2026111803,
-      "requests": [
-        {
-          "task": "t2va",
-          "height": 256,
-          "width": 448,
-          "requested_frames": 107,
-          "text_len": 128,
-          "text_vision_tokens": 0,
-          "step_index": 25,
-          "num_steps": 50,
-          "aligned_frames": 107,
-          "latent_t": 32,
-          "audio_latent_t": 178,
-          "global_rows": 4096,
-          "used_rows": 4068,
-          "padding_rows": 28,
-          "t_video": 0.07692307233810425,
-          "t_audio": 0.25,
-          "video_rows": 3584,
-          "all_visual_rows": 3584,
-          "all_audio_rows": 356
-        }
-      ],
-      "evidence": "pinned_source_rule_derived_not_model_runtime_trace",
-      "values": "seeded_synthetic_not_checkpoint_activations",
-      "request_assumptions": [
-        "Text token count/vision-role spans selected explicitly, not measured tokenizer outputs.",
-        "Pure strict Ulysses with TP=1; no Ring/AllGather or reference-KV compaction.",
-        "Base 50-step schedule, video shift=12 and audio shift=3; no edit masks or distilled schedule."
-      ],
-      "layout_case_id": "t2va_smoke_mid_u8_rank0",
-      "group": "model_rule_derived",
-      "residual_stride": [
-        5376,
-        1
-      ],
-      "branch_stride": [
-        5376,
-        1
-      ],
-      "gate_stride": [
-        32256,
-        1
-      ],
+      "condition_row_counts": [28, 128, 0, 0, 0, 356],
+      "gate_stride": [32256, 1],
+      "shift_stride": [32256, 1],
+      "scale_stride": [32256, 1],
       "gate_storage_offset": 10752,
-      "api": "indexed_gate_rms_norm_scale_shift",
-      "dtype_contract": "BF16 only, as the supplied operator contract",
-      "runtime_trace_collected": false
+      "shift_storage_offset": 16128,
+      "scale_storage_offset": 21504
     },
     {
       "id": "model_t2va_doc209_u1",
-      "case_idx": 4,
-      "provenance": "Packed-sequence documented 672x384/209-frame anchor.",
       "rows": 16448,
       "hidden_size": 5376,
       "conditions": 6,
       "eps": 1e-05,
-      "dtype": "bfloat16",
-      "indices_dtype": "int64",
-      "sp_size": 1,
-      "sp_rank": 0,
-      "tp_size": 1,
-      "global_rows": 16448,
-      "rank_row_start": 0,
-      "unique_timesteps": [
-        0.07692307233810425,
-        0.25
-      ],
-      "active_conditions": 3,
-      "condition_row_counts": [
-        15624,
-        128,
-        0,
-        0,
-        0,
-        696
-      ],
-      "indices_runs": 3,
+      "seed": 2026111804,
       "indices_segments": [
-        {
-          "start": 0,
-          "rows": 128,
-          "condition": 1
-        },
-        {
-          "start": 128,
-          "rows": 696,
-          "condition": 5
-        },
-        {
-          "start": 824,
-          "rows": 15624,
-          "condition": 0
-        }
+        {"start": 0, "rows": 128, "condition": 1},
+        {"start": 128, "rows": 696, "condition": 5},
+        {"start": 824, "rows": 15624, "condition": 0}
       ],
       "indices_sha256": "3705a58cd9d2c79890179d7a95c67bfc57e4bd71cfeb2e7171a81e6458ef21b1",
-      "x_stride": [
-        5376,
-        1
-      ],
-      "weight_stride": [
-        1
-      ],
-      "shift_stride": [
-        32256,
-        1
-      ],
-      "scale_stride": [
-        32256,
-        1
-      ],
-      "shift_storage_offset": 16128,
-      "scale_storage_offset": 21504,
-      "adaln_parent_shape": [
-        6,
-        32256
-      ],
-      "indices_stride": [
-        1
-      ],
-      "x_bytes": 176848896,
-      "output_bytes": 176848896,
-      "adaln_parent_bytes": 387072,
-      "seed": 2026111804,
-      "requests": [
-        {
-          "task": "t2va",
-          "height": 384,
-          "width": 672,
-          "requested_frames": 209,
-          "text_len": 128,
-          "text_vision_tokens": 0,
-          "step_index": 25,
-          "num_steps": 50,
-          "aligned_frames": 209,
-          "latent_t": 62,
-          "audio_latent_t": 348,
-          "global_rows": 16448,
-          "used_rows": 16448,
-          "padding_rows": 0,
-          "t_video": 0.07692307233810425,
-          "t_audio": 0.25,
-          "video_rows": 15624,
-          "all_visual_rows": 15624,
-          "all_audio_rows": 696
-        }
-      ],
-      "evidence": "pinned_source_rule_derived_not_model_runtime_trace",
-      "values": "seeded_synthetic_not_checkpoint_activations",
-      "request_assumptions": [
-        "Text token count/vision-role spans selected explicitly, not measured tokenizer outputs.",
-        "Pure strict Ulysses with TP=1; no Ring/AllGather or reference-KV compaction.",
-        "Base 50-step schedule, video shift=12 and audio shift=3; no edit masks or distilled schedule."
-      ],
-      "layout_case_id": "t2va_doc209_u1",
-      "group": "model_rule_derived",
-      "residual_stride": [
-        5376,
-        1
-      ],
-      "branch_stride": [
-        5376,
-        1
-      ],
-      "gate_stride": [
-        32256,
-        1
-      ],
+      "condition_row_counts": [15624, 128, 0, 0, 0, 696],
+      "gate_stride": [32256, 1],
+      "shift_stride": [32256, 1],
+      "scale_stride": [32256, 1],
       "gate_storage_offset": 10752,
-      "api": "indexed_gate_rms_norm_scale_shift",
-      "dtype_contract": "BF16 only, as the supplied operator contract",
-      "runtime_trace_collected": false
+      "shift_storage_offset": 16128,
+      "scale_storage_offset": 21504
     },
     {
       "id": "model_t2va_doc209_u4_rank0",
-      "case_idx": 5,
-      "provenance": "Same request, pure Ulysses4 rank0.",
       "rows": 4112,
       "hidden_size": 5376,
       "conditions": 6,
       "eps": 1e-05,
-      "dtype": "bfloat16",
-      "indices_dtype": "int64",
-      "sp_size": 4,
-      "sp_rank": 0,
-      "tp_size": 1,
-      "global_rows": 16448,
-      "rank_row_start": 0,
-      "unique_timesteps": [
-        0.07692307233810425,
-        0.25
-      ],
-      "active_conditions": 3,
-      "condition_row_counts": [
-        3288,
-        128,
-        0,
-        0,
-        0,
-        696
-      ],
-      "indices_runs": 3,
+      "seed": 2026111805,
       "indices_segments": [
-        {
-          "start": 0,
-          "rows": 128,
-          "condition": 1
-        },
-        {
-          "start": 128,
-          "rows": 696,
-          "condition": 5
-        },
-        {
-          "start": 824,
-          "rows": 3288,
-          "condition": 0
-        }
+        {"start": 0, "rows": 128, "condition": 1},
+        {"start": 128, "rows": 696, "condition": 5},
+        {"start": 824, "rows": 3288, "condition": 0}
       ],
       "indices_sha256": "1c2f1a30381bf0c8edcf5db3171d6d41582caa28520922ce97d63cb8f015c1c9",
-      "x_stride": [
-        5376,
-        1
-      ],
-      "weight_stride": [
-        1
-      ],
-      "shift_stride": [
-        32256,
-        1
-      ],
-      "scale_stride": [
-        32256,
-        1
-      ],
-      "shift_storage_offset": 16128,
-      "scale_storage_offset": 21504,
-      "adaln_parent_shape": [
-        6,
-        32256
-      ],
-      "indices_stride": [
-        1
-      ],
-      "x_bytes": 44212224,
-      "output_bytes": 44212224,
-      "adaln_parent_bytes": 387072,
-      "seed": 2026111805,
-      "requests": [
-        {
-          "task": "t2va",
-          "height": 384,
-          "width": 672,
-          "requested_frames": 209,
-          "text_len": 128,
-          "text_vision_tokens": 0,
-          "step_index": 25,
-          "num_steps": 50,
-          "aligned_frames": 209,
-          "latent_t": 62,
-          "audio_latent_t": 348,
-          "global_rows": 16448,
-          "used_rows": 16448,
-          "padding_rows": 0,
-          "t_video": 0.07692307233810425,
-          "t_audio": 0.25,
-          "video_rows": 15624,
-          "all_visual_rows": 15624,
-          "all_audio_rows": 696
-        }
-      ],
-      "evidence": "pinned_source_rule_derived_not_model_runtime_trace",
-      "values": "seeded_synthetic_not_checkpoint_activations",
-      "request_assumptions": [
-        "Text token count/vision-role spans selected explicitly, not measured tokenizer outputs.",
-        "Pure strict Ulysses with TP=1; no Ring/AllGather or reference-KV compaction.",
-        "Base 50-step schedule, video shift=12 and audio shift=3; no edit masks or distilled schedule."
-      ],
-      "layout_case_id": "t2va_doc209_u4_rank0",
-      "group": "model_rule_derived",
-      "residual_stride": [
-        5376,
-        1
-      ],
-      "branch_stride": [
-        5376,
-        1
-      ],
-      "gate_stride": [
-        32256,
-        1
-      ],
+      "condition_row_counts": [3288, 128, 0, 0, 0, 696],
+      "gate_stride": [32256, 1],
+      "shift_stride": [32256, 1],
+      "scale_stride": [32256, 1],
       "gate_storage_offset": 10752,
-      "api": "indexed_gate_rms_norm_scale_shift",
-      "dtype_contract": "BF16 only, as the supplied operator contract",
-      "runtime_trace_collected": false
+      "shift_storage_offset": 16128,
+      "scale_storage_offset": 21504
     },
     {
       "id": "model_t2va_doc209_u4_rank3",
-      "case_idx": 6,
-      "provenance": "Same request, rank3; only locally used conditions are counted separately.",
       "rows": 4112,
       "hidden_size": 5376,
       "conditions": 6,
       "eps": 1e-05,
-      "dtype": "bfloat16",
-      "indices_dtype": "int64",
-      "sp_size": 4,
-      "sp_rank": 3,
-      "tp_size": 1,
-      "global_rows": 16448,
-      "rank_row_start": 12336,
-      "unique_timesteps": [
-        0.07692307233810425,
-        0.25
-      ],
-      "active_conditions": 1,
-      "condition_row_counts": [
-        4112,
-        0,
-        0,
-        0,
-        0,
-        0
-      ],
-      "indices_runs": 1,
+      "seed": 2026111806,
       "indices_segments": [
-        {
-          "start": 0,
-          "rows": 4112,
-          "condition": 0
-        }
+        {"start": 0, "rows": 4112, "condition": 0}
       ],
       "indices_sha256": "efba72cd933a9a2ccb8b35094e8499f22c2dac508b6b3b2ad5b3d2802b0bf4c7",
-      "x_stride": [
-        5376,
-        1
-      ],
-      "weight_stride": [
-        1
-      ],
-      "shift_stride": [
-        32256,
-        1
-      ],
-      "scale_stride": [
-        32256,
-        1
-      ],
-      "shift_storage_offset": 16128,
-      "scale_storage_offset": 21504,
-      "adaln_parent_shape": [
-        6,
-        32256
-      ],
-      "indices_stride": [
-        1
-      ],
-      "x_bytes": 44212224,
-      "output_bytes": 44212224,
-      "adaln_parent_bytes": 387072,
-      "seed": 2026111806,
-      "requests": [
-        {
-          "task": "t2va",
-          "height": 384,
-          "width": 672,
-          "requested_frames": 209,
-          "text_len": 128,
-          "text_vision_tokens": 0,
-          "step_index": 25,
-          "num_steps": 50,
-          "aligned_frames": 209,
-          "latent_t": 62,
-          "audio_latent_t": 348,
-          "global_rows": 16448,
-          "used_rows": 16448,
-          "padding_rows": 0,
-          "t_video": 0.07692307233810425,
-          "t_audio": 0.25,
-          "video_rows": 15624,
-          "all_visual_rows": 15624,
-          "all_audio_rows": 696
-        }
-      ],
-      "evidence": "pinned_source_rule_derived_not_model_runtime_trace",
-      "values": "seeded_synthetic_not_checkpoint_activations",
-      "request_assumptions": [
-        "Text token count/vision-role spans selected explicitly, not measured tokenizer outputs.",
-        "Pure strict Ulysses with TP=1; no Ring/AllGather or reference-KV compaction.",
-        "Base 50-step schedule, video shift=12 and audio shift=3; no edit masks or distilled schedule."
-      ],
-      "layout_case_id": "t2va_doc209_u4_rank3",
-      "group": "model_rule_derived",
-      "residual_stride": [
-        5376,
-        1
-      ],
-      "branch_stride": [
-        5376,
-        1
-      ],
-      "gate_stride": [
-        32256,
-        1
-      ],
+      "condition_row_counts": [4112, 0, 0, 0, 0, 0],
+      "gate_stride": [32256, 1],
+      "shift_stride": [32256, 1],
+      "scale_stride": [32256, 1],
       "gate_storage_offset": 10752,
-      "api": "indexed_gate_rms_norm_scale_shift",
-      "dtype_contract": "BF16 only, as the supplied operator contract",
-      "runtime_trace_collected": false
+      "shift_storage_offset": 16128,
+      "scale_storage_offset": 21504
     },
     {
       "id": "model_t2va_recipe209_u1",
-      "case_idx": 7,
-      "provenance": "Pinned recipe: 1344x768/209-frame request.",
       "rows": 63360,
       "hidden_size": 5376,
       "conditions": 6,
       "eps": 1e-05,
-      "dtype": "bfloat16",
-      "indices_dtype": "int64",
-      "sp_size": 1,
-      "sp_rank": 0,
-      "tp_size": 1,
-      "global_rows": 63360,
-      "rank_row_start": 0,
-      "unique_timesteps": [
-        0.07692307233810425,
-        0.25
-      ],
-      "active_conditions": 3,
-      "condition_row_counts": [
-        62536,
-        128,
-        0,
-        0,
-        0,
-        696
-      ],
-      "indices_runs": 3,
+      "seed": 2026111807,
       "indices_segments": [
-        {
-          "start": 0,
-          "rows": 128,
-          "condition": 1
-        },
-        {
-          "start": 128,
-          "rows": 696,
-          "condition": 5
-        },
-        {
-          "start": 824,
-          "rows": 62536,
-          "condition": 0
-        }
+        {"start": 0, "rows": 128, "condition": 1},
+        {"start": 128, "rows": 696, "condition": 5},
+        {"start": 824, "rows": 62536, "condition": 0}
       ],
       "indices_sha256": "3b74ae859f078650d7241b35864c931b741353e77e4deb6b519a1310e48c3a15",
-      "x_stride": [
-        5376,
-        1
-      ],
-      "weight_stride": [
-        1
-      ],
-      "shift_stride": [
-        32256,
-        1
-      ],
-      "scale_stride": [
-        32256,
-        1
-      ],
-      "shift_storage_offset": 16128,
-      "scale_storage_offset": 21504,
-      "adaln_parent_shape": [
-        6,
-        32256
-      ],
-      "indices_stride": [
-        1
-      ],
-      "x_bytes": 681246720,
-      "output_bytes": 681246720,
-      "adaln_parent_bytes": 387072,
-      "seed": 2026111807,
-      "requests": [
-        {
-          "task": "t2va",
-          "height": 768,
-          "width": 1344,
-          "requested_frames": 209,
-          "text_len": 128,
-          "text_vision_tokens": 0,
-          "step_index": 25,
-          "num_steps": 50,
-          "aligned_frames": 209,
-          "latent_t": 62,
-          "audio_latent_t": 348,
-          "global_rows": 63360,
-          "used_rows": 63320,
-          "padding_rows": 40,
-          "t_video": 0.07692307233810425,
-          "t_audio": 0.25,
-          "video_rows": 62496,
-          "all_visual_rows": 62496,
-          "all_audio_rows": 696
-        }
-      ],
-      "evidence": "pinned_source_rule_derived_not_model_runtime_trace",
-      "values": "seeded_synthetic_not_checkpoint_activations",
-      "request_assumptions": [
-        "Text token count/vision-role spans selected explicitly, not measured tokenizer outputs.",
-        "Pure strict Ulysses with TP=1; no Ring/AllGather or reference-KV compaction.",
-        "Base 50-step schedule, video shift=12 and audio shift=3; no edit masks or distilled schedule."
-      ],
-      "layout_case_id": "t2va_recipe209_u1",
-      "group": "model_rule_derived",
-      "residual_stride": [
-        5376,
-        1
-      ],
-      "branch_stride": [
-        5376,
-        1
-      ],
-      "gate_stride": [
-        32256,
-        1
-      ],
+      "condition_row_counts": [62536, 128, 0, 0, 0, 696],
+      "gate_stride": [32256, 1],
+      "shift_stride": [32256, 1],
+      "scale_stride": [32256, 1],
       "gate_storage_offset": 10752,
-      "api": "indexed_gate_rms_norm_scale_shift",
-      "dtype_contract": "BF16 only, as the supplied operator contract",
-      "runtime_trace_collected": false
+      "shift_storage_offset": 16128,
+      "scale_storage_offset": 21504
     },
     {
       "id": "model_t2va_recipe209_u4_rank0",
-      "case_idx": 8,
-      "provenance": "Pinned recipe resolution/frame anchor with pure Ulysses4.",
       "rows": 15840,
       "hidden_size": 5376,
       "conditions": 6,
       "eps": 1e-05,
-      "dtype": "bfloat16",
-      "indices_dtype": "int64",
-      "sp_size": 4,
-      "sp_rank": 0,
-      "tp_size": 1,
-      "global_rows": 63360,
-      "rank_row_start": 0,
-      "unique_timesteps": [
-        0.07692307233810425,
-        0.25
-      ],
-      "active_conditions": 3,
-      "condition_row_counts": [
-        15016,
-        128,
-        0,
-        0,
-        0,
-        696
-      ],
-      "indices_runs": 3,
+      "seed": 2026111808,
       "indices_segments": [
-        {
-          "start": 0,
-          "rows": 128,
-          "condition": 1
-        },
-        {
-          "start": 128,
-          "rows": 696,
-          "condition": 5
-        },
-        {
-          "start": 824,
-          "rows": 15016,
-          "condition": 0
-        }
+        {"start": 0, "rows": 128, "condition": 1},
+        {"start": 128, "rows": 696, "condition": 5},
+        {"start": 824, "rows": 15016, "condition": 0}
       ],
       "indices_sha256": "600ea6392dc1a2f2ed2afeaad10e8141a736c5419f95311fc411f6360c29d13a",
-      "x_stride": [
-        5376,
-        1
-      ],
-      "weight_stride": [
-        1
-      ],
-      "shift_stride": [
-        32256,
-        1
-      ],
-      "scale_stride": [
-        32256,
-        1
-      ],
-      "shift_storage_offset": 16128,
-      "scale_storage_offset": 21504,
-      "adaln_parent_shape": [
-        6,
-        32256
-      ],
-      "indices_stride": [
-        1
-      ],
-      "x_bytes": 170311680,
-      "output_bytes": 170311680,
-      "adaln_parent_bytes": 387072,
-      "seed": 2026111808,
-      "requests": [
-        {
-          "task": "t2va",
-          "height": 768,
-          "width": 1344,
-          "requested_frames": 209,
-          "text_len": 128,
-          "text_vision_tokens": 0,
-          "step_index": 25,
-          "num_steps": 50,
-          "aligned_frames": 209,
-          "latent_t": 62,
-          "audio_latent_t": 348,
-          "global_rows": 63360,
-          "used_rows": 63320,
-          "padding_rows": 40,
-          "t_video": 0.07692307233810425,
-          "t_audio": 0.25,
-          "video_rows": 62496,
-          "all_visual_rows": 62496,
-          "all_audio_rows": 696
-        }
-      ],
-      "evidence": "pinned_source_rule_derived_not_model_runtime_trace",
-      "values": "seeded_synthetic_not_checkpoint_activations",
-      "request_assumptions": [
-        "Text token count/vision-role spans selected explicitly, not measured tokenizer outputs.",
-        "Pure strict Ulysses with TP=1; no Ring/AllGather or reference-KV compaction.",
-        "Base 50-step schedule, video shift=12 and audio shift=3; no edit masks or distilled schedule."
-      ],
-      "layout_case_id": "t2va_recipe209_u4_rank0",
-      "group": "model_rule_derived",
-      "residual_stride": [
-        5376,
-        1
-      ],
-      "branch_stride": [
-        5376,
-        1
-      ],
-      "gate_stride": [
-        32256,
-        1
-      ],
+      "condition_row_counts": [15016, 128, 0, 0, 0, 696],
+      "gate_stride": [32256, 1],
+      "shift_stride": [32256, 1],
+      "scale_stride": [32256, 1],
       "gate_storage_offset": 10752,
-      "api": "indexed_gate_rms_norm_scale_shift",
-      "dtype_contract": "BF16 only, as the supplied operator contract",
-      "runtime_trace_collected": false
+      "shift_storage_offset": 16128,
+      "scale_storage_offset": 21504
     },
     {
       "id": "model_fl2va_first_step0_u4",
-      "case_idx": 9,
-      "provenance": "Pinned recipe: first-frame FL2VA, 1248x768/209 frames; chosen text/vision token counts.",
       "rows": 15056,
       "hidden_size": 5376,
       "conditions": 6,
       "eps": 1e-05,
-      "dtype": "bfloat16",
-      "indices_dtype": "int64",
-      "sp_size": 4,
-      "sp_rank": 0,
-      "tp_size": 1,
-      "global_rows": 60224,
-      "rank_row_start": 0,
-      "unique_timesteps": [
-        0.0,
-        0.9990000128746033
-      ],
-      "active_conditions": 4,
-      "condition_row_counts": [
-        13168,
-        256,
-        696,
-        936,
-        0,
-        0
-      ],
-      "indices_runs": 5,
+      "seed": 2026111809,
       "indices_segments": [
-        {
-          "start": 0,
-          "rows": 256,
-          "condition": 1
-        },
-        {
-          "start": 256,
-          "rows": 256,
-          "condition": 0
-        },
-        {
-          "start": 512,
-          "rows": 936,
-          "condition": 3
-        },
-        {
-          "start": 1448,
-          "rows": 696,
-          "condition": 2
-        },
-        {
-          "start": 2144,
-          "rows": 12912,
-          "condition": 0
-        }
+        {"start": 0, "rows": 256, "condition": 1},
+        {"start": 256, "rows": 256, "condition": 0},
+        {"start": 512, "rows": 936, "condition": 3},
+        {"start": 1448, "rows": 696, "condition": 2},
+        {"start": 2144, "rows": 12912, "condition": 0}
       ],
       "indices_sha256": "612779bcb0d430280beb278a87ac7a6938684cb616c1aae690e3cf0dfb3d67cc",
-      "x_stride": [
-        5376,
-        1
-      ],
-      "weight_stride": [
-        1
-      ],
-      "shift_stride": [
-        32256,
-        1
-      ],
-      "scale_stride": [
-        32256,
-        1
-      ],
-      "shift_storage_offset": 16128,
-      "scale_storage_offset": 21504,
-      "adaln_parent_shape": [
-        6,
-        32256
-      ],
-      "indices_stride": [
-        1
-      ],
-      "x_bytes": 161882112,
-      "output_bytes": 161882112,
-      "adaln_parent_bytes": 387072,
-      "seed": 2026111809,
-      "requests": [
-        {
-          "task": "fl2va",
-          "height": 768,
-          "width": 1248,
-          "requested_frames": 209,
-          "text_len": 512,
-          "text_vision_tokens": 256,
-          "step_index": 0,
-          "num_steps": 50,
-          "keyframe_frame_indices": [
-            0
-          ],
-          "aligned_frames": 209,
-          "latent_t": 62,
-          "audio_latent_t": 348,
-          "global_rows": 60224,
-          "used_rows": 60176,
-          "padding_rows": 48,
-          "t_video": 0.0,
-          "t_audio": 0.0,
-          "video_rows": 58032,
-          "all_visual_rows": 58968,
-          "all_audio_rows": 696
-        }
-      ],
-      "evidence": "pinned_source_rule_derived_not_model_runtime_trace",
-      "values": "seeded_synthetic_not_checkpoint_activations",
-      "request_assumptions": [
-        "Text token count/vision-role spans selected explicitly, not measured tokenizer outputs.",
-        "Pure strict Ulysses with TP=1; no Ring/AllGather or reference-KV compaction.",
-        "Base 50-step schedule, video shift=12 and audio shift=3; no edit masks or distilled schedule."
-      ],
-      "layout_case_id": "fl2va_first_step0_u4",
-      "group": "model_rule_derived",
-      "residual_stride": [
-        5376,
-        1
-      ],
-      "branch_stride": [
-        5376,
-        1
-      ],
-      "gate_stride": [
-        32256,
-        1
-      ],
+      "condition_row_counts": [13168, 256, 696, 936, 0, 0],
+      "gate_stride": [32256, 1],
+      "shift_stride": [32256, 1],
+      "scale_stride": [32256, 1],
       "gate_storage_offset": 10752,
-      "api": "indexed_gate_rms_norm_scale_shift",
-      "dtype_contract": "BF16 only, as the supplied operator contract",
-      "runtime_trace_collected": false
+      "shift_storage_offset": 16128,
+      "scale_storage_offset": 21504
     },
     {
       "id": "model_fl2va_first_mid_u4",
-      "case_idx": 10,
-      "provenance": "Same request at middle denoise step; distinct video/audio/visual-condition times.",
       "rows": 15056,
       "hidden_size": 5376,
       "conditions": 9,
       "eps": 1e-05,
-      "dtype": "bfloat16",
-      "indices_dtype": "int64",
-      "sp_size": 4,
-      "sp_rank": 0,
-      "tp_size": 1,
-      "global_rows": 60224,
-      "rank_row_start": 0,
-      "unique_timesteps": [
-        0.07692307233810425,
-        0.25,
-        0.9990000128746033
-      ],
-      "active_conditions": 4,
-      "condition_row_counts": [
-        13168,
-        256,
-        0,
-        0,
-        0,
-        696,
-        936,
-        0,
-        0
-      ],
-      "indices_runs": 5,
+      "seed": 2026111810,
       "indices_segments": [
-        {
-          "start": 0,
-          "rows": 256,
-          "condition": 1
-        },
-        {
-          "start": 256,
-          "rows": 256,
-          "condition": 0
-        },
-        {
-          "start": 512,
-          "rows": 936,
-          "condition": 6
-        },
-        {
-          "start": 1448,
-          "rows": 696,
-          "condition": 5
-        },
-        {
-          "start": 2144,
-          "rows": 12912,
-          "condition": 0
-        }
+        {"start": 0, "rows": 256, "condition": 1},
+        {"start": 256, "rows": 256, "condition": 0},
+        {"start": 512, "rows": 936, "condition": 6},
+        {"start": 1448, "rows": 696, "condition": 5},
+        {"start": 2144, "rows": 12912, "condition": 0}
       ],
       "indices_sha256": "d0d7f9f8aa246b5a916913bd81c08471ac3f7fea6d77de727429010ee84c1e4b",
-      "x_stride": [
-        5376,
-        1
-      ],
-      "weight_stride": [
-        1
-      ],
-      "shift_stride": [
-        32256,
-        1
-      ],
-      "scale_stride": [
-        32256,
-        1
-      ],
-      "shift_storage_offset": 16128,
-      "scale_storage_offset": 21504,
-      "adaln_parent_shape": [
-        9,
-        32256
-      ],
-      "indices_stride": [
-        1
-      ],
-      "x_bytes": 161882112,
-      "output_bytes": 161882112,
-      "adaln_parent_bytes": 580608,
-      "seed": 2026111810,
-      "requests": [
-        {
-          "task": "fl2va",
-          "height": 768,
-          "width": 1248,
-          "requested_frames": 209,
-          "text_len": 512,
-          "text_vision_tokens": 256,
-          "step_index": 25,
-          "num_steps": 50,
-          "keyframe_frame_indices": [
-            0
-          ],
-          "aligned_frames": 209,
-          "latent_t": 62,
-          "audio_latent_t": 348,
-          "global_rows": 60224,
-          "used_rows": 60176,
-          "padding_rows": 48,
-          "t_video": 0.07692307233810425,
-          "t_audio": 0.25,
-          "video_rows": 58032,
-          "all_visual_rows": 58968,
-          "all_audio_rows": 696
-        }
-      ],
-      "evidence": "pinned_source_rule_derived_not_model_runtime_trace",
-      "values": "seeded_synthetic_not_checkpoint_activations",
-      "request_assumptions": [
-        "Text token count/vision-role spans selected explicitly, not measured tokenizer outputs.",
-        "Pure strict Ulysses with TP=1; no Ring/AllGather or reference-KV compaction.",
-        "Base 50-step schedule, video shift=12 and audio shift=3; no edit masks or distilled schedule."
-      ],
-      "layout_case_id": "fl2va_first_mid_u4",
-      "group": "model_rule_derived",
-      "residual_stride": [
-        5376,
-        1
-      ],
-      "branch_stride": [
-        5376,
-        1
-      ],
-      "gate_stride": [
-        32256,
-        1
-      ],
+      "condition_row_counts": [13168, 256, 0, 0, 0, 696, 936, 0, 0],
+      "gate_stride": [32256, 1],
+      "shift_stride": [32256, 1],
+      "scale_stride": [32256, 1],
       "gate_storage_offset": 10752,
-      "api": "indexed_gate_rms_norm_scale_shift",
-      "dtype_contract": "BF16 only, as the supplied operator contract",
-      "runtime_trace_collected": false
+      "shift_storage_offset": 16128,
+      "scale_storage_offset": 21504
     },
     {
       "id": "model_fl2va_firstlast124_u4",
-      "case_idx": 11,
-      "provenance": "Source-supported first+last conditioning; selected 124-frame canvas/token configuration.",
       "rows": 10192,
       "hidden_size": 5376,
       "conditions": 9,
       "eps": 1e-05,
-      "dtype": "bfloat16",
-      "indices_dtype": "int64",
-      "sp_size": 4,
-      "sp_rank": 0,
-      "tp_size": 1,
-      "global_rows": 40768,
-      "rank_row_start": 0,
-      "unique_timesteps": [
-        0.07692307233810425,
-        0.25,
-        0.9990000128746033
-      ],
-      "active_conditions": 4,
-      "condition_row_counts": [
-        7250,
-        512,
-        0,
-        0,
-        0,
-        414,
-        2016,
-        0,
-        0
-      ],
-      "indices_runs": 5,
+      "seed": 2026111811,
       "indices_segments": [
-        {
-          "start": 0,
-          "rows": 512,
-          "condition": 1
-        },
-        {
-          "start": 512,
-          "rows": 512,
-          "condition": 0
-        },
-        {
-          "start": 1024,
-          "rows": 2016,
-          "condition": 6
-        },
-        {
-          "start": 3040,
-          "rows": 414,
-          "condition": 5
-        },
-        {
-          "start": 3454,
-          "rows": 6738,
-          "condition": 0
-        }
+        {"start": 0, "rows": 512, "condition": 1},
+        {"start": 512, "rows": 512, "condition": 0},
+        {"start": 1024, "rows": 2016, "condition": 6},
+        {"start": 3040, "rows": 414, "condition": 5},
+        {"start": 3454, "rows": 6738, "condition": 0}
       ],
       "indices_sha256": "2f4e4aad6d5e75d2cecef0d078c0705b7827b1678ff0485aaaf5b1a793fc4b4e",
-      "x_stride": [
-        5376,
-        1
-      ],
-      "weight_stride": [
-        1
-      ],
-      "shift_stride": [
-        32256,
-        1
-      ],
-      "scale_stride": [
-        32256,
-        1
-      ],
-      "shift_storage_offset": 16128,
-      "scale_storage_offset": 21504,
-      "adaln_parent_shape": [
-        9,
-        32256
-      ],
-      "indices_stride": [
-        1
-      ],
-      "x_bytes": 109584384,
-      "output_bytes": 109584384,
-      "adaln_parent_bytes": 580608,
-      "seed": 2026111811,
-      "requests": [
-        {
-          "task": "fl2va",
-          "height": 768,
-          "width": 1344,
-          "requested_frames": 124,
-          "text_len": 1024,
-          "text_vision_tokens": 512,
-          "step_index": 25,
-          "num_steps": 50,
-          "keyframe_frame_indices": [
-            0,
-            -1
-          ],
-          "aligned_frames": 124,
-          "latent_t": 37,
-          "audio_latent_t": 207,
-          "global_rows": 40768,
-          "used_rows": 40750,
-          "padding_rows": 18,
-          "t_video": 0.07692307233810425,
-          "t_audio": 0.25,
-          "video_rows": 37296,
-          "all_visual_rows": 39312,
-          "all_audio_rows": 414
-        }
-      ],
-      "evidence": "pinned_source_rule_derived_not_model_runtime_trace",
-      "values": "seeded_synthetic_not_checkpoint_activations",
-      "request_assumptions": [
-        "Text token count/vision-role spans selected explicitly, not measured tokenizer outputs.",
-        "Pure strict Ulysses with TP=1; no Ring/AllGather or reference-KV compaction.",
-        "Base 50-step schedule, video shift=12 and audio shift=3; no edit masks or distilled schedule."
-      ],
-      "layout_case_id": "fl2va_firstlast124_u4",
-      "group": "model_rule_derived",
-      "residual_stride": [
-        5376,
-        1
-      ],
-      "branch_stride": [
-        5376,
-        1
-      ],
-      "gate_stride": [
-        32256,
-        1
-      ],
+      "condition_row_counts": [7250, 512, 0, 0, 0, 414, 2016, 0, 0],
+      "gate_stride": [32256, 1],
+      "shift_stride": [32256, 1],
+      "scale_stride": [32256, 1],
       "gate_storage_offset": 10752,
-      "api": "indexed_gate_rms_norm_scale_shift",
-      "dtype_contract": "BF16 only, as the supplied operator contract",
-      "runtime_trace_collected": false
+      "shift_storage_offset": 16128,
+      "scale_storage_offset": 21504
     },
     {
       "id": "model_t2va_default_limit_u4_rank3",
-      "case_idx": 12,
-      "provenance": "Selected default 15-second admission boundary: 360 requested ->362 aligned frames; not a measured capacity limit.",
       "rows": 27312,
       "hidden_size": 5376,
       "conditions": 6,
       "eps": 1e-05,
-      "dtype": "bfloat16",
-      "indices_dtype": "int64",
-      "sp_size": 4,
-      "sp_rank": 3,
-      "tp_size": 1,
-      "global_rows": 109248,
-      "rank_row_start": 81936,
-      "unique_timesteps": [
-        0.07692307233810425,
-        0.25
-      ],
-      "active_conditions": 1,
-      "condition_row_counts": [
-        27312,
-        0,
-        0,
-        0,
-        0,
-        0
-      ],
-      "indices_runs": 1,
+      "seed": 2026111812,
       "indices_segments": [
-        {
-          "start": 0,
-          "rows": 27312,
-          "condition": 0
-        }
+        {"start": 0, "rows": 27312, "condition": 0}
       ],
       "indices_sha256": "d77c340a5939f0d75bfb748f2b0d533c5b924939d3db854bfb3bb5e7161e2b1a",
-      "x_stride": [
-        5376,
-        1
-      ],
-      "weight_stride": [
-        1
-      ],
-      "shift_stride": [
-        32256,
-        1
-      ],
-      "scale_stride": [
-        32256,
-        1
-      ],
-      "shift_storage_offset": 16128,
-      "scale_storage_offset": 21504,
-      "adaln_parent_shape": [
-        6,
-        32256
-      ],
-      "indices_stride": [
-        1
-      ],
-      "x_bytes": 293658624,
-      "output_bytes": 293658624,
-      "adaln_parent_bytes": 387072,
-      "seed": 2026111812,
-      "requests": [
-        {
-          "task": "t2va",
-          "height": 768,
-          "width": 1344,
-          "requested_frames": 360,
-          "text_len": 128,
-          "text_vision_tokens": 0,
-          "step_index": 25,
-          "num_steps": 50,
-          "aligned_frames": 362,
-          "latent_t": 107,
-          "audio_latent_t": 603,
-          "global_rows": 109248,
-          "used_rows": 109190,
-          "padding_rows": 58,
-          "t_video": 0.07692307233810425,
-          "t_audio": 0.25,
-          "video_rows": 107856,
-          "all_visual_rows": 107856,
-          "all_audio_rows": 1206
-        }
-      ],
-      "evidence": "pinned_source_rule_derived_not_model_runtime_trace",
-      "values": "seeded_synthetic_not_checkpoint_activations",
-      "request_assumptions": [
-        "Text token count/vision-role spans selected explicitly, not measured tokenizer outputs.",
-        "Pure strict Ulysses with TP=1; no Ring/AllGather or reference-KV compaction.",
-        "Base 50-step schedule, video shift=12 and audio shift=3; no edit masks or distilled schedule."
-      ],
-      "layout_case_id": "t2va_default_limit_u4_rank3",
-      "group": "model_rule_derived",
-      "residual_stride": [
-        5376,
-        1
-      ],
-      "branch_stride": [
-        5376,
-        1
-      ],
-      "gate_stride": [
-        32256,
-        1
-      ],
+      "condition_row_counts": [27312, 0, 0, 0, 0, 0],
+      "gate_stride": [32256, 1],
+      "shift_stride": [32256, 1],
+      "scale_stride": [32256, 1],
       "gate_storage_offset": 10752,
-      "api": "indexed_gate_rms_norm_scale_shift",
-      "dtype_contract": "BF16 only, as the supplied operator contract",
-      "runtime_trace_collected": false
+      "shift_storage_offset": 16128,
+      "scale_storage_offset": 21504
     },
     {
       "id": "model_ref2va_img_audio_step0_u1",
-      "case_idx": 13,
-      "provenance": "Source-supported image +2-second stereo audio reference layout; selected dimensions/text spans.",
       "rows": 10688,
       "hidden_size": 5376,
       "conditions": 9,
       "eps": 1e-05,
-      "dtype": "bfloat16",
-      "indices_dtype": "int64",
-      "sp_size": 1,
-      "sp_rank": 0,
-      "tp_size": 1,
-      "global_rows": 10688,
-      "rank_row_start": 0,
-      "unique_timesteps": [
-        0.0,
-        0.9990000128746033,
-        1.0
-      ],
-      "active_conditions": 5,
-      "condition_row_counts": [
-        9478,
-        384,
-        414,
-        252,
-        0,
-        0,
-        0,
-        0,
-        160
-      ],
-      "indices_runs": 6,
+      "seed": 2026111813,
       "indices_segments": [
-        {
-          "start": 0,
-          "rows": 384,
-          "condition": 1
-        },
-        {
-          "start": 384,
-          "rows": 128,
-          "condition": 0
-        },
-        {
-          "start": 512,
-          "rows": 252,
-          "condition": 3
-        },
-        {
-          "start": 764,
-          "rows": 160,
-          "condition": 8
-        },
-        {
-          "start": 924,
-          "rows": 414,
-          "condition": 2
-        },
-        {
-          "start": 1338,
-          "rows": 9350,
-          "condition": 0
-        }
+        {"start": 0, "rows": 384, "condition": 1},
+        {"start": 384, "rows": 128, "condition": 0},
+        {"start": 512, "rows": 252, "condition": 3},
+        {"start": 764, "rows": 160, "condition": 8},
+        {"start": 924, "rows": 414, "condition": 2},
+        {"start": 1338, "rows": 9350, "condition": 0}
       ],
       "indices_sha256": "68b2e6f30690a1f1df27134f8ac990e8a4cfa6ecebd72cb904156212504da973",
-      "x_stride": [
-        5376,
-        1
-      ],
-      "weight_stride": [
-        1
-      ],
-      "shift_stride": [
-        32256,
-        1
-      ],
-      "scale_stride": [
-        32256,
-        1
-      ],
-      "shift_storage_offset": 16128,
-      "scale_storage_offset": 21504,
-      "adaln_parent_shape": [
-        9,
-        32256
-      ],
-      "indices_stride": [
-        1
-      ],
-      "x_bytes": 114917376,
-      "output_bytes": 114917376,
-      "adaln_parent_bytes": 580608,
-      "seed": 2026111813,
-      "requests": [
-        {
-          "task": "ref2va",
-          "height": 384,
-          "width": 672,
-          "requested_frames": 124,
-          "text_len": 512,
-          "text_vision_tokens": 128,
-          "step_index": 0,
-          "num_steps": 50,
-          "ref_blocks": [
-            {
-              "kind": "image",
-              "latent_h": 24,
-              "latent_w": 42
-            },
-            {
-              "kind": "audio",
-              "ref_audio_t": 80
-            }
-          ],
-          "aligned_frames": 124,
-          "latent_t": 37,
-          "audio_latent_t": 207,
-          "global_rows": 10688,
-          "used_rows": 10662,
-          "padding_rows": 26,
-          "t_video": 0.0,
-          "t_audio": 0.0,
-          "video_rows": 9324,
-          "all_visual_rows": 9576,
-          "all_audio_rows": 574
-        }
-      ],
-      "evidence": "pinned_source_rule_derived_not_model_runtime_trace",
-      "values": "seeded_synthetic_not_checkpoint_activations",
-      "request_assumptions": [
-        "Text token count/vision-role spans selected explicitly, not measured tokenizer outputs.",
-        "Pure strict Ulysses with TP=1; no Ring/AllGather or reference-KV compaction.",
-        "Base 50-step schedule, video shift=12 and audio shift=3; no edit masks or distilled schedule."
-      ],
-      "layout_case_id": "ref2va_img_audio_step0_u1",
-      "group": "model_rule_derived",
-      "residual_stride": [
-        5376,
-        1
-      ],
-      "branch_stride": [
-        5376,
-        1
-      ],
-      "gate_stride": [
-        32256,
-        1
-      ],
+      "condition_row_counts": [9478, 384, 414, 252, 0, 0, 0, 0, 160],
+      "gate_stride": [32256, 1],
+      "shift_stride": [32256, 1],
+      "scale_stride": [32256, 1],
       "gate_storage_offset": 10752,
-      "api": "indexed_gate_rms_norm_scale_shift",
-      "dtype_contract": "BF16 only, as the supplied operator contract",
-      "runtime_trace_collected": false
+      "shift_storage_offset": 16128,
+      "scale_storage_offset": 21504
     },
     {
       "id": "model_ref2va_img_audio_mid_u1",
-      "case_idx": 14,
-      "provenance": "Same reference layout at middle denoise step.",
       "rows": 10688,
       "hidden_size": 5376,
       "conditions": 12,
       "eps": 1e-05,
-      "dtype": "bfloat16",
-      "indices_dtype": "int64",
-      "sp_size": 1,
-      "sp_rank": 0,
-      "tp_size": 1,
-      "global_rows": 10688,
-      "rank_row_start": 0,
-      "unique_timesteps": [
-        0.07692307233810425,
-        0.25,
-        0.9990000128746033,
-        1.0
-      ],
-      "active_conditions": 5,
-      "condition_row_counts": [
-        9478,
-        384,
-        0,
-        0,
-        0,
-        414,
-        252,
-        0,
-        0,
-        0,
-        0,
-        160
-      ],
-      "indices_runs": 6,
+      "seed": 2026111814,
       "indices_segments": [
-        {
-          "start": 0,
-          "rows": 384,
-          "condition": 1
-        },
-        {
-          "start": 384,
-          "rows": 128,
-          "condition": 0
-        },
-        {
-          "start": 512,
-          "rows": 252,
-          "condition": 6
-        },
-        {
-          "start": 764,
-          "rows": 160,
-          "condition": 11
-        },
-        {
-          "start": 924,
-          "rows": 414,
-          "condition": 5
-        },
-        {
-          "start": 1338,
-          "rows": 9350,
-          "condition": 0
-        }
+        {"start": 0, "rows": 384, "condition": 1},
+        {"start": 384, "rows": 128, "condition": 0},
+        {"start": 512, "rows": 252, "condition": 6},
+        {"start": 764, "rows": 160, "condition": 11},
+        {"start": 924, "rows": 414, "condition": 5},
+        {"start": 1338, "rows": 9350, "condition": 0}
       ],
       "indices_sha256": "9b220c29add9766233c644dde6782575133d8eac79f06f3fda49cbb11112396c",
-      "x_stride": [
-        5376,
-        1
-      ],
-      "weight_stride": [
-        1
-      ],
-      "shift_stride": [
-        32256,
-        1
-      ],
-      "scale_stride": [
-        32256,
-        1
-      ],
-      "shift_storage_offset": 16128,
-      "scale_storage_offset": 21504,
-      "adaln_parent_shape": [
-        12,
-        32256
-      ],
-      "indices_stride": [
-        1
-      ],
-      "x_bytes": 114917376,
-      "output_bytes": 114917376,
-      "adaln_parent_bytes": 774144,
-      "seed": 2026111814,
-      "requests": [
-        {
-          "task": "ref2va",
-          "height": 384,
-          "width": 672,
-          "requested_frames": 124,
-          "text_len": 512,
-          "text_vision_tokens": 128,
-          "step_index": 25,
-          "num_steps": 50,
-          "ref_blocks": [
-            {
-              "kind": "image",
-              "latent_h": 24,
-              "latent_w": 42
-            },
-            {
-              "kind": "audio",
-              "ref_audio_t": 80
-            }
-          ],
-          "aligned_frames": 124,
-          "latent_t": 37,
-          "audio_latent_t": 207,
-          "global_rows": 10688,
-          "used_rows": 10662,
-          "padding_rows": 26,
-          "t_video": 0.07692307233810425,
-          "t_audio": 0.25,
-          "video_rows": 9324,
-          "all_visual_rows": 9576,
-          "all_audio_rows": 574
-        }
-      ],
-      "evidence": "pinned_source_rule_derived_not_model_runtime_trace",
-      "values": "seeded_synthetic_not_checkpoint_activations",
-      "request_assumptions": [
-        "Text token count/vision-role spans selected explicitly, not measured tokenizer outputs.",
-        "Pure strict Ulysses with TP=1; no Ring/AllGather or reference-KV compaction.",
-        "Base 50-step schedule, video shift=12 and audio shift=3; no edit masks or distilled schedule."
-      ],
-      "layout_case_id": "ref2va_img_audio_mid_u1",
-      "group": "model_rule_derived",
-      "residual_stride": [
-        5376,
-        1
-      ],
-      "branch_stride": [
-        5376,
-        1
-      ],
-      "gate_stride": [
-        32256,
-        1
-      ],
+      "condition_row_counts": [9478, 384, 0, 0, 0, 414, 252, 0, 0, 0, 0, 160],
+      "gate_stride": [32256, 1],
+      "shift_stride": [32256, 1],
+      "scale_stride": [32256, 1],
       "gate_storage_offset": 10752,
-      "api": "indexed_gate_rms_norm_scale_shift",
-      "dtype_contract": "BF16 only, as the supplied operator contract",
-      "runtime_trace_collected": false
+      "shift_storage_offset": 16128,
+      "scale_storage_offset": 21504
     },
     {
       "id": "model_batch2_same_step_u4_rank0",
-      "case_idx": 15,
-      "provenance": "Source-supported two-request packing; same step times merge across requests.",
       "rows": 5136,
       "hidden_size": 5376,
       "conditions": 6,
       "eps": 1e-05,
-      "dtype": "bfloat16",
-      "indices_dtype": "int64",
-      "sp_size": 4,
-      "sp_rank": 0,
-      "tp_size": 1,
-      "global_rows": 20544,
-      "rank_row_start": 0,
-      "unique_timesteps": [
-        0.07692307233810425,
-        0.25
-      ],
-      "active_conditions": 3,
-      "condition_row_counts": [
-        3828,
-        256,
-        0,
-        0,
-        0,
-        1052
-      ],
-      "indices_runs": 6,
+      "seed": 2026111815,
       "indices_segments": [
-        {
-          "start": 0,
-          "rows": 128,
-          "condition": 1
-        },
-        {
-          "start": 128,
-          "rows": 356,
-          "condition": 5
-        },
-        {
-          "start": 484,
-          "rows": 3612,
-          "condition": 0
-        },
-        {
-          "start": 4096,
-          "rows": 128,
-          "condition": 1
-        },
-        {
-          "start": 4224,
-          "rows": 696,
-          "condition": 5
-        },
-        {
-          "start": 4920,
-          "rows": 216,
-          "condition": 0
-        }
+        {"start": 0, "rows": 128, "condition": 1},
+        {"start": 128, "rows": 356, "condition": 5},
+        {"start": 484, "rows": 3612, "condition": 0},
+        {"start": 4096, "rows": 128, "condition": 1},
+        {"start": 4224, "rows": 696, "condition": 5},
+        {"start": 4920, "rows": 216, "condition": 0}
       ],
       "indices_sha256": "139ec14957310713227ef8a1296b78e9f1d69cc9f80507fedd32d46277b7363e",
-      "x_stride": [
-        5376,
-        1
-      ],
-      "weight_stride": [
-        1
-      ],
-      "shift_stride": [
-        32256,
-        1
-      ],
-      "scale_stride": [
-        32256,
-        1
-      ],
-      "shift_storage_offset": 16128,
-      "scale_storage_offset": 21504,
-      "adaln_parent_shape": [
-        6,
-        32256
-      ],
-      "indices_stride": [
-        1
-      ],
-      "x_bytes": 55222272,
-      "output_bytes": 55222272,
-      "adaln_parent_bytes": 387072,
-      "seed": 2026111815,
-      "requests": [
-        {
-          "task": "t2va",
-          "height": 256,
-          "width": 448,
-          "requested_frames": 107,
-          "text_len": 128,
-          "text_vision_tokens": 0,
-          "step_index": 25,
-          "num_steps": 50,
-          "aligned_frames": 107,
-          "latent_t": 32,
-          "audio_latent_t": 178,
-          "global_rows": 4096,
-          "used_rows": 4068,
-          "padding_rows": 28,
-          "t_video": 0.07692307233810425,
-          "t_audio": 0.25,
-          "video_rows": 3584,
-          "all_visual_rows": 3584,
-          "all_audio_rows": 356
-        },
-        {
-          "task": "t2va",
-          "height": 384,
-          "width": 672,
-          "requested_frames": 209,
-          "text_len": 128,
-          "text_vision_tokens": 0,
-          "step_index": 25,
-          "num_steps": 50,
-          "aligned_frames": 209,
-          "latent_t": 62,
-          "audio_latent_t": 348,
-          "global_rows": 16448,
-          "used_rows": 16448,
-          "padding_rows": 0,
-          "t_video": 0.07692307233810425,
-          "t_audio": 0.25,
-          "video_rows": 15624,
-          "all_visual_rows": 15624,
-          "all_audio_rows": 696
-        }
-      ],
-      "evidence": "pinned_source_rule_derived_not_model_runtime_trace",
-      "values": "seeded_synthetic_not_checkpoint_activations",
-      "request_assumptions": [
-        "Text token count/vision-role spans selected explicitly, not measured tokenizer outputs.",
-        "Pure strict Ulysses with TP=1; no Ring/AllGather or reference-KV compaction.",
-        "Base 50-step schedule, video shift=12 and audio shift=3; no edit masks or distilled schedule."
-      ],
-      "layout_case_id": "batch2_same_step_u4_rank0",
-      "group": "model_rule_derived",
-      "residual_stride": [
-        5376,
-        1
-      ],
-      "branch_stride": [
-        5376,
-        1
-      ],
-      "gate_stride": [
-        32256,
-        1
-      ],
+      "condition_row_counts": [3828, 256, 0, 0, 0, 1052],
+      "gate_stride": [32256, 1],
+      "shift_stride": [32256, 1],
+      "scale_stride": [32256, 1],
       "gate_storage_offset": 10752,
-      "api": "indexed_gate_rms_norm_scale_shift",
-      "dtype_contract": "BF16 only, as the supplied operator contract",
-      "runtime_trace_collected": false
+      "shift_storage_offset": 16128,
+      "scale_storage_offset": 21504
     },
     {
       "id": "model_batch2_mixed_step_u4_rank3",
-      "case_idx": 16,
-      "provenance": "Continuous-batching rule-derived selection with different request progress; selected rank3.",
       "rows": 5136,
       "hidden_size": 5376,
       "conditions": 9,
       "eps": 1e-05,
-      "dtype": "bfloat16",
-      "indices_dtype": "int64",
-      "sp_size": 4,
-      "sp_rank": 3,
-      "tp_size": 1,
-      "global_rows": 20544,
-      "rank_row_start": 15408,
-      "unique_timesteps": [
-        0.07692307233810425,
-        0.25,
-        0.5714285969734192
-      ],
-      "active_conditions": 1,
-      "condition_row_counts": [
-        0,
-        0,
-        0,
-        5136,
-        0,
-        0,
-        0,
-        0,
-        0
-      ],
-      "indices_runs": 1,
+      "seed": 2026111816,
       "indices_segments": [
-        {
-          "start": 0,
-          "rows": 5136,
-          "condition": 3
-        }
+        {"start": 0, "rows": 5136, "condition": 3}
       ],
       "indices_sha256": "43d71e4bd6ebc03a0e489142e6896e5ec308c12a38c4494da5423e079f87aa00",
-      "x_stride": [
-        5376,
-        1
-      ],
-      "weight_stride": [
-        1
-      ],
-      "shift_stride": [
-        32256,
-        1
-      ],
-      "scale_stride": [
-        32256,
-        1
-      ],
-      "shift_storage_offset": 16128,
-      "scale_storage_offset": 21504,
-      "adaln_parent_shape": [
-        9,
-        32256
-      ],
-      "indices_stride": [
-        1
-      ],
-      "x_bytes": 55222272,
-      "output_bytes": 55222272,
-      "adaln_parent_bytes": 580608,
-      "seed": 2026111816,
-      "requests": [
-        {
-          "task": "t2va",
-          "height": 256,
-          "width": 448,
-          "requested_frames": 107,
-          "text_len": 128,
-          "text_vision_tokens": 0,
-          "step_index": 25,
-          "num_steps": 50,
-          "aligned_frames": 107,
-          "latent_t": 32,
-          "audio_latent_t": 178,
-          "global_rows": 4096,
-          "used_rows": 4068,
-          "padding_rows": 28,
-          "t_video": 0.07692307233810425,
-          "t_audio": 0.25,
-          "video_rows": 3584,
-          "all_visual_rows": 3584,
-          "all_audio_rows": 356
-        },
-        {
-          "task": "t2va",
-          "height": 384,
-          "width": 672,
-          "requested_frames": 209,
-          "text_len": 128,
-          "text_vision_tokens": 0,
-          "step_index": 40,
-          "num_steps": 50,
-          "aligned_frames": 209,
-          "latent_t": 62,
-          "audio_latent_t": 348,
-          "global_rows": 16448,
-          "used_rows": 16448,
-          "padding_rows": 0,
-          "t_video": 0.25,
-          "t_audio": 0.5714285969734192,
-          "video_rows": 15624,
-          "all_visual_rows": 15624,
-          "all_audio_rows": 696
-        }
-      ],
-      "evidence": "pinned_source_rule_derived_not_model_runtime_trace",
-      "values": "seeded_synthetic_not_checkpoint_activations",
-      "request_assumptions": [
-        "Text token count/vision-role spans selected explicitly, not measured tokenizer outputs.",
-        "Pure strict Ulysses with TP=1; no Ring/AllGather or reference-KV compaction.",
-        "Base 50-step schedule, video shift=12 and audio shift=3; no edit masks or distilled schedule."
-      ],
-      "layout_case_id": "batch2_mixed_step_u4_rank3",
-      "group": "model_rule_derived",
-      "residual_stride": [
-        5376,
-        1
-      ],
-      "branch_stride": [
-        5376,
-        1
-      ],
-      "gate_stride": [
-        32256,
-        1
-      ],
+      "condition_row_counts": [0, 0, 0, 5136, 0, 0, 0, 0, 0],
+      "gate_stride": [32256, 1],
+      "shift_stride": [32256, 1],
+      "scale_stride": [32256, 1],
       "gate_storage_offset": 10752,
-      "api": "indexed_gate_rms_norm_scale_shift",
-      "dtype_contract": "BF16 only, as the supplied operator contract",
-      "runtime_trace_collected": false
+      "shift_storage_offset": 16128,
+      "scale_storage_offset": 21504
     }
   ]
 }

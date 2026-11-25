@@ -3,7 +3,7 @@
 from mojo_opset.utils._exports import extend_bindings as _extend_bindings
 
 OPS = {
-    "indexed_gate_rms_norm_scale_shift_infer": "normalization",
+    "indexed_gate_rms_norm_scale_shift_infer": "indexed_gate_rms_norm_scale_shift",
     "gemm": "dense_gemm",
     "mxfp8_dequant_gemm": "dense_gemm",
     "mxfp4_gemm": "dense_gemm",

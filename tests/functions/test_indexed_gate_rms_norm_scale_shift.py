@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Legacy regression cases and 16 pinned MiniMax H3 model-rule fixtures."""
 
+import hashlib
 import json
 
 from pathlib import Path
@@ -17,8 +18,38 @@ from tests._checks import assert_close
 from tests._compile import compile_fullgraph
 
 OP = "indexed_gate_rms_norm_scale_shift_infer"
-CASES = json.loads(Path(__file__).with_name("indexed_gate_cases.json").read_text())
-MODEL_CASES = json.loads(Path(__file__).with_name("indexed_gate_model16_cases.json").read_text())["cases"]
+# Case ID, rows, hidden, conditions, seed, value pattern, index pattern.
+_REGRESSION_CASES = (
+    ("cuda_affine_boundary", 2, 5376, 1, 0, "fp32_affine_rounding_boundary", "cycle"),
+    ("cuda_residual_boundary", 11, 3072, 4, 17, "bf16_residual_boundary", "cycle"),
+    ("npu_grid_limit", 69888, 16, 7, 0, "random_normal", "cycle"),
+    ("gen_single_row", 1, 5376, 1, 1, "random_normal", "random"),
+    ("gen_odd_rows", 513, 3072, 5, 3, "random_normal", "random"),
+    ("gen_mid_rows", 2048, 3072, 4, 4, "random_normal", "random"),
+    ("gen_mid_wide", 4096, 5376, 7, 5, "random_normal", "random"),
+    ("gen_wide_hidden", 8192, 7168, 4, 6, "random_normal", "random"),
+    ("gen_narrow_hidden", 16384, 2048, 8, 7, "random_normal", "random"),
+    ("gen_odd_hidden", 8192, 5375, 4, 8, "random_normal", "random"),
+    ("gen_grid_exact", 65535, 3072, 4, 9, "random_normal", "random"),
+    ("gen_grid_two_chunks", 131072, 3072, 8, 10, "random_normal", "random"),
+    ("gen_large_prod", 69888, 5376, 7, 11, "random_normal", "random"),
+)
+CASES = [
+    dict(
+        id=case_id,
+        rows=rows,
+        hidden_size=hidden,
+        conditions=conditions,
+        seed=seed,
+        eps=1e-6,
+        input_pattern=values,
+        indices_pattern=indices,
+    )
+    for case_id, rows, hidden, conditions, seed, values, indices in _REGRESSION_CASES
+]
+MODEL_CASES = json.loads(Path(__file__).with_name("indexed_gate_model16_cases.json").read_text(encoding="utf-8"))[
+    "cases"
+]
 MODEL_CASE_PARAMS = [pytest.param(case, id=case["id"]) for case in MODEL_CASES]
 CASE_PARAMS = [pytest.param(case, id=case["id"]) for case in CASES + MODEL_CASES]
 pytestmark = [pytest.mark.api("functions." + OP), pytest.mark.accuracy]
@@ -296,8 +327,6 @@ def test_invalid_metadata(fault):
 @pytest.mark.reference
 @pytest.mark.parametrize("case", MODEL_CASE_PARAMS)
 def test_model_layout_metadata(case):
-    import hashlib
-
     indices = torch.empty(case["rows"], dtype=torch.int64)
     coverage = torch.zeros(case["rows"], dtype=torch.int32)
     for segment in case["indices_segments"]:
