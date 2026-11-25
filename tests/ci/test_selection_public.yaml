@@ -1019,6 +1019,50 @@ operators:
             - tests/performance/modules/test_gemm.py
           950/performance:
             - tests/performance/modules/test_gemm.py
+  indexed_gate_rms_norm_scale_shift_infer:
+    rules:
+      - paths:
+          - mojo_opset/functions/normalization.py
+          - mojo_opset/functions/__init__.py
+          - mojo_opset/kernels/torch/normalization.py
+          - mojo_opset/kernels/torch/__init__.py
+          - tests/functions/indexed_gate_cases.json
+          - tests/functions/indexed_gate_model16_cases.json
+          - tests/functions/test_indexed_gate_rms_norm_scale_shift.py
+        jobs:
+          910b/triton:
+            - tests/functions/test_indexed_gate_rms_norm_scale_shift.py
+          950/triton:
+            - tests/functions/test_indexed_gate_rms_norm_scale_shift.py
+          910b/performance:
+            - tests/performance/functions/test_indexed_gate_rms_norm_scale_shift.py
+          950/performance:
+            - tests/performance/functions/test_indexed_gate_rms_norm_scale_shift.py
+      - paths:
+          - mojo_opset/config/npu_a2.yaml
+          - mojo_opset/kernels/npu_a2_triton/__init__.py
+          - mojo_opset/kernels/npu_a2_triton/indexed_gate_rms_norm_scale_shift.py
+        jobs:
+          910b/triton:
+            - tests/functions/test_indexed_gate_rms_norm_scale_shift.py
+          910b/performance:
+            - tests/performance/functions/test_indexed_gate_rms_norm_scale_shift.py
+      - paths:
+          - mojo_opset/config/npu_a5.yaml
+          - mojo_opset/kernels/npu_a5_triton/__init__.py
+          - mojo_opset/kernels/npu_a5_triton/indexed_gate_rms_norm_scale_shift.py
+        jobs:
+          950/triton:
+            - tests/functions/test_indexed_gate_rms_norm_scale_shift.py
+          950/performance:
+            - tests/performance/functions/test_indexed_gate_rms_norm_scale_shift.py
+      - paths:
+          - tests/performance/functions/test_indexed_gate_rms_norm_scale_shift.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_indexed_gate_rms_norm_scale_shift.py
+          950/performance:
+            - tests/performance/functions/test_indexed_gate_rms_norm_scale_shift.py
   group_rms_norm_infer:
     rules:
       - paths:
