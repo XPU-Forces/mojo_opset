@@ -24,7 +24,7 @@ def _rows_per_iter(block_n):
 
 
 @triton.jit
-def _indexed_gate_rms_shift_kernel(
+def _indexed_gate_rms_norm_scale_shift_kernel(
     residual_out_ptr,
     modulated_out_ptr,
     residual_ptr,
@@ -106,7 +106,7 @@ def _forward(residual, gate, branch, weight, shift, scale, indices, eps):
     num_cores = int(driver.active.utils.get_device_properties(residual.device.index)["num_vectorcore"])
     rows_per_iter = _rows_per_iter(hidden)
     grid = (min(triton.cdiv(rows, rows_per_iter), num_cores, _MAX_1D_GRID),)
-    _indexed_gate_rms_shift_kernel[grid](
+    _indexed_gate_rms_norm_scale_shift_kernel[grid](
         residual_out,
         modulated_out,
         residual,

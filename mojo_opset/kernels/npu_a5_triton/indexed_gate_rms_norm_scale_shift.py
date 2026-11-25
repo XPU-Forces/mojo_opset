@@ -14,7 +14,7 @@ from triton.runtime import driver
 
 
 @triton.jit
-def _indexed_gate_single_path_kernel(
+def _indexed_gate_rms_norm_scale_shift_kernel(
     residual_out,
     output,
     residual,
@@ -103,7 +103,7 @@ def _forward(residual, gate, branch, weight, shift, scale, indices, eps):
         return updated, result
 
     num_cores = int(driver.active.utils.get_device_properties(residual.device.index)["num_vectorcore"])
-    _indexed_gate_single_path_kernel[(num_cores,)](
+    _indexed_gate_rms_norm_scale_shift_kernel[(num_cores,)](
         updated,
         result,
         residual,
