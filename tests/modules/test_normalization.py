@@ -8,6 +8,32 @@ from tests._checks import assert_repeatable
 
 from .._checks import assert_close
 
+
+@pytest.mark.api("modules.KimiRMSNorm", ops=["kimi_rms_norm"])
+@pytest.mark.accuracy
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("fp32_weight", [False, True])
+def test_kimi_rms_norm_module(accuracy_backend, dtype, fp32_weight):
+    from tests._compile import compile_fullgraph
+
+    implementation, _, device = accuracy_backend
+    module = modules.KimiRMSNorm(513, device=device, dtype=torch.float32 if fp32_weight else dtype,
+                                     implementation=implementation).requires_grad_(False)
+    module.weight.normal_()
+    assert module.eps == 1e-6
+    assert list(module.state_dict()) == ["weight"]
+    assert "normalized_shape=513" in repr(module)
+    x = torch.randn(2, 3, 1026, dtype=dtype, device=device)[..., ::2].transpose(0, 1)
+    values = x.float()
+    expected = module.weight * (values * torch.rsqrt(values.square().mean(-1, keepdim=True) + 1e-6)).to(dtype)
+    actual = module(x)
+    assert actual.dtype == expected.dtype and actual.is_contiguous()
+    torch.testing.assert_close(actual, expected, rtol=1e-2, atol=2e-2)
+    torch.testing.assert_close(compile_fullgraph(module)(x), actual, rtol=0, atol=0)
+    with pytest.raises(ValueError):
+        modules.KimiRMSNorm(0)
+
+
 NORM_OPS = {
     "LayerNormInfer": "layer_norm_infer",
     "RMSNormInfer": "rms_norm_infer",

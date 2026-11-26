@@ -23,6 +23,7 @@ from .kv_cache import StorePagedKVCache
 from .multimodal_rope_infer import MultimodalRoPEInfer
 from .multimodal_rope_infer import MultimodalRoPEInplaceInfer
 from .normalization import GroupRMSNormInfer
+from .normalization import KimiRMSNorm
 from .normalization import LayerNormInfer
 from .normalization import RMSNorm
 from .normalization import RMSNormInfer
@@ -65,6 +66,7 @@ __all__ = [
     "GroupRMSNormInfer",
     "Indexer",
     "JoinProbRejectSampling",
+    "KimiRMSNorm",
     "LayerNormInfer",
     "LayerNormQuant",
     "LightningIndexer",

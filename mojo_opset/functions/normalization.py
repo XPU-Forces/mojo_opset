@@ -51,6 +51,29 @@ def rms_norm_infer(
     return forward(x, weight, float(eps))
 
 
+def kimi_rms_norm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float = 1e-6,
+    *,
+    implementation: Optional[str] = None,
+) -> torch.Tensor:
+    """Kimi RMSNorm: FP32 normalization, input-dtype rounding, then affine scaling.
+
+    BF16/FP16 inputs accept matching or FP32 weights; FP32 weights promote output.
+    This API is forward-only.
+    """
+    if weight is None:
+        raise ValueError("kimi_rms_norm requires weight")
+    _validate_norm(x, weight, None, eps, "kimi_rms_norm")
+    if x.dtype not in (torch.bfloat16, torch.float16):
+        raise ValueError("kimi_rms_norm requires BF16 or FP16 input")
+    if weight.dtype not in (x.dtype, torch.float32):
+        raise ValueError("weight must have input dtype or FP32 dtype")
+    forward, _ = load_impl("kimi_rms_norm", implementation)
+    return forward(x, weight, float(eps))
+
+
 def group_rms_norm_infer(
     input_groups: list[torch.Tensor],
     weight: Optional[torch.Tensor] = None,

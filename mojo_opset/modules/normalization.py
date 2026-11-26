@@ -73,6 +73,15 @@ class RMSNormInfer(torch.nn.Module):
         return f"normalized_shape={self.normalized_shape}, eps={self.eps}"
 
 
+class KimiRMSNorm(RMSNormInfer):
+    def __init__(self, normalized_shape: int, eps: float = 1e-6, *,
+                 implementation: Optional[str] = None, device=None, dtype=None):
+        super().__init__(normalized_shape, eps, implementation=implementation, device=device, dtype=dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return functions.kimi_rms_norm(x, self.weight, self.eps, implementation=self.implementation)
+
+
 class GroupRMSNormInfer(torch.nn.Module):
     def __init__(self, num_groups: int, normalized_shape: int, eps: float = 1e-5,
                  elementwise_affine: bool = True, *, implementation: Optional[str] = None,

@@ -30,6 +30,7 @@ from .indexer import lightning_indexer
 from .kv_cache import store_paged_kv_cache
 from .multimodal_rope_infer import multimodal_rope_infer
 from .normalization import group_rms_norm_infer
+from .normalization import kimi_rms_norm
 from .normalization import layer_norm_infer
 from .normalization import residual_add_layer_norm_infer
 from .normalization import residual_add_rms_norm_infer
@@ -88,6 +89,7 @@ __all__ = [
     "group_rms_norm_infer",
     "indexer",
     "join_prob_reject_sampling",
+    "kimi_rms_norm",
     "layer_norm_infer",
     "layer_norm_quant",
     "lightning_indexer",
