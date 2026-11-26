@@ -1,0 +1,39 @@
+--- a/vllm_ascend/patch/worker/patch_qwen3vl.py
++++ b/vllm_ascend/patch/worker/patch_qwen3vl.py
+@@ -3,9 +3,7 @@
+ from vllm.model_executor.models.qwen3 import Qwen3Attention
+ from vllm.model_executor.models.qwen3_moe import Qwen3MoeAttention
+ from vllm.model_executor.models.qwen3_vl import (
+-    Qwen3_VisionTransformer,
+     Qwen3VLForConditionalGeneration,
+-    pos_embed_interpolate_native,
+ )
+ 
+ from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
+@@ -69,26 +67,6 @@
+ )
+ 
+ 
+-def _fast_pos_embed_interpolate(self, grid_thw: list[list[int]]) -> torch.Tensor:
+-    outputs = []
+-    for t, h, w in grid_thw:
+-        outputs.append(
+-            pos_embed_interpolate_native(
+-                self.pos_embed.weight,
+-                t,
+-                h,
+-                w,
+-                self.num_grid_per_side,
+-                self.spatial_merge_size,
+-                self.dtype,
+-            )
+-        )
+-    return torch.cat(outputs, dim=0)
+-
+-
+-Qwen3_VisionTransformer.fast_pos_embed_interpolate = _fast_pos_embed_interpolate
+-
+-
+ def patch_qwen3_vl_moe_pp_layer_range():
+     try:
+         from vllm.model_executor.models.qwen3_vl_moe import Qwen3MoeLLMForCausalLM

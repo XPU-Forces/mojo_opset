@@ -106,6 +106,11 @@ def _detect_npu_target() -> Target:
         return Target("npu", "a2", a2_match.group(1).lower())
     if re.match(r"^Ascend\s*910B", name, re.IGNORECASE):
         return Target("npu", "a2")
+    # Atlas A3 uses the 910 provider family; TorchNPU exposes these SoC names
+    # rather than the system's generic npu-smi "Ascend910" label.
+    a3_match = re.match(r"^Ascend\s*(910_93[0-9]{2})(?=$|[^0-9])", name, re.IGNORECASE)
+    if a3_match:
+        return Target("npu", "a2", a3_match.group(1).lower())
     raise RuntimeError(f"Unsupported NPU device {name!r}; set MOJO_ASCEND_ARCH before first use.")
 
 

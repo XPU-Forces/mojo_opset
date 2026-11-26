@@ -45,6 +45,9 @@ from .paged_attention import paged_prefill_swa_infer
 from .paged_attention import prefill_gqa_infer
 from .position_embedding import rope_infer
 from .position_embedding import vision_rope_2d_infer
+from .vision_pos_embed_interp import triton_pos_embed_interpolate
+from .vision_pos_embed_interp import vision_pos_embed_interp
+from .vision_pos_embed_interp import vision_pos_embed_interp_batch
 from .quantization import dequant
 from .quantization import dynamic_quant
 from .quantization import static_quant
@@ -129,6 +132,9 @@ __all__ = [
     "top_p_filter",
     "top_p_sampling",
     "varlen_fa_infer",
+    "triton_pos_embed_interpolate",
+    "vision_pos_embed_interp",
+    "vision_pos_embed_interp_batch",
     "vision_rope_2d_infer",
     "vision_rope_cos_sin_2d",
 ]
