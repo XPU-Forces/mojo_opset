@@ -130,3 +130,53 @@ class ResidualAddRMSNormInfer(RMSNormInfer):
 
     def extra_repr(self):
         return super().extra_repr() + f", norm_pos={self.norm_pos!r}"
+
+
+class FusedRMSNormGated(torch.nn.Module):
+    """RMSNorm over the last dimension fused with a silu/sigmoid gate."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        elementwise_affine: bool = True,
+        activation: str = "swish",
+        eps: float = 1e-5,
+        *,
+        implementation: Optional[str] = None,
+        device=None,
+        dtype=None,
+    ):
+        super().__init__()
+        if hidden_size <= 0:
+            raise ValueError("hidden_size must be positive")
+        if activation not in ("swish", "silu", "sigmoid"):
+            raise ValueError(f"Unsupported activation: {activation}")
+        self.hidden_size = hidden_size
+        self.elementwise_affine = elementwise_affine
+        self.eps = eps
+        self.activation = activation
+        self.implementation = implementation
+        self.register_parameter("weight", None)
+        self.register_parameter("bias", None)
+        if elementwise_affine:
+            self.weight = torch.nn.Parameter(torch.ones(hidden_size, device=device, dtype=dtype))
+
+    def forward(self, x, g, residual=None, prenorm=False, residual_in_fp32=False):
+        return functions.rms_norm_gated(
+            x,
+            g,
+            self.weight,
+            self.bias,
+            activation=self.activation,
+            residual=residual,
+            prenorm=prenorm,
+            residual_in_fp32=residual_in_fp32,
+            eps=self.eps,
+            implementation=self.implementation,
+        )
+
+    def extra_repr(self):
+        return (
+            f"hidden_size={self.hidden_size}, eps={self.eps}, "
+            f"activation={self.activation!r}, elementwise_affine={self.elementwise_affine}"
+        )

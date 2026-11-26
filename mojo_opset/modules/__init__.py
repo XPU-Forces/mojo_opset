@@ -22,6 +22,7 @@ from .indexer import LightningIndexer
 from .kv_cache import StorePagedKVCache
 from .multimodal_rope_infer import MultimodalRoPEInfer
 from .multimodal_rope_infer import MultimodalRoPEInplaceInfer
+from .normalization import FusedRMSNormGated
 from .normalization import GroupRMSNormInfer
 from .normalization import LayerNormInfer
 from .normalization import RMSNorm
@@ -62,6 +63,7 @@ __all__ = [
     "DynamicQuant",
     "GELU",
     "GroupGemm",
+    "FusedRMSNormGated",
     "GroupRMSNormInfer",
     "Indexer",
     "JoinProbRejectSampling",

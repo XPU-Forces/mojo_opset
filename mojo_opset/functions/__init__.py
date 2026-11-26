@@ -12,6 +12,7 @@ from .convolution import causal_conv1d
 from .convolution import causal_conv1d_update_state_infer
 from .flex_attention import flex_attention
 from .flex_attention_v2 import flex_attention_v2
+from .rms_norm_gated import rms_norm_gated
 from .fused_quantization import dequant_swiglu_quant
 from .fused_quantization import layer_norm_quant
 from .fused_quantization import moe_dynamic_quant
@@ -110,6 +111,7 @@ __all__ = [
     "residual_add_rms_norm_infer",
     "residual_add_rms_norm_quant",
     "rms_norm",
+    "rms_norm_gated",
     "rms_norm_infer",
     "rms_norm_quant",
     "rope",
