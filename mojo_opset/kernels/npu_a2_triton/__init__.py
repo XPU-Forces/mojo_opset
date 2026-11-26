@@ -51,6 +51,7 @@ OPS = {
     "rms_norm": "rmsnorm",
     "swa": "swa",
     "rope": "rope",
+    "rope_quant_insert": "rope_quant_insert",
 }
 
 

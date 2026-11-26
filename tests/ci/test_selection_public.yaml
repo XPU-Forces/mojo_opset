@@ -3426,6 +3426,48 @@ operators:
             - tests/modules/test_position_embedding_infer.py
           950/triton:
             - tests/modules/test_position_embedding_infer.py
+  rope_quant_insert:
+    rules:
+      - paths:
+          - mojo_opset/functions/rope_quant_insert.py
+          - mojo_opset/kernels/torch/rope_quant_insert.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_rope_quant_insert.py
+          910b/triton:
+            - tests/functions/test_rope_quant_insert.py
+          950/performance:
+            - tests/performance/functions/test_rope_quant_insert.py
+          950/triton:
+            - tests/functions/test_rope_quant_insert.py
+      - paths:
+          - mojo_opset/kernels/npu_a2_triton/rope_quant_insert.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_rope_quant_insert.py
+          910b/triton:
+            - tests/functions/test_rope_quant_insert.py
+      - paths:
+          - mojo_opset/kernels/npu_a5_triton/rope_quant_insert.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_rope_quant_insert.py
+          950/triton:
+            - tests/functions/test_rope_quant_insert.py
+      - paths:
+          - tests/functions/test_rope_quant_insert.py
+        jobs:
+          910b/triton:
+            - tests/functions/test_rope_quant_insert.py
+          950/triton:
+            - tests/functions/test_rope_quant_insert.py
+      - paths:
+          - tests/performance/functions/test_rope_quant_insert.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_rope_quant_insert.py
+          950/performance:
+            - tests/performance/functions/test_rope_quant_insert.py
   sdpa_infer:
     rules:
       - paths:
