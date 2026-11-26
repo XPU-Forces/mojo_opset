@@ -40,7 +40,7 @@ jobs:
         timeout-minutes: 5
         run: |
           python -m pip install --timeout 30 --retries 2 --index-url https://download.pytorch.org/whl/cpu 'torch==2.7.1'
-          python -m pip install --timeout 30 --retries 2 'pytest>=8.3.2,<9' einops pyyaml
+          python -m pip install --timeout 30 --retries 2 'pytest>=8.3.2,<9' einops pyyaml numpy
       - name: Run CI tests
         run: python -m unittest discover -s .github/scripts -p 'test_*.py' -v
       - name: Check accuracy coverage
@@ -64,7 +64,7 @@ jobs:
           - {implementation: native, backend_name: Native, runner: linux-aarch64-a2-mojo-fed-1, cards: 1, offset: 2, shards: 3}
     container:
       # Public ARM64 image; retain its Torch/CANN/Triton stack.
-      image: quay.io/ascend/triton:3.2.2-cann9.1.0-torch_npu2.7.1.post8-910b-ubuntu24.04-py3.11@sha256:b69d14f39d47ec8f66e635f16190788e3c2b2174d0994f63090afcdf885b06f1
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/triton/triton:3.2.2-cann9.1.0-torch_npu2.7.1.post8-910b-ubuntu24.04-py3.11@sha256:b69d14f39d47ec8f66e635f16190788e3c2b2174d0994f63090afcdf885b06f1
     defaults:
       run:
         shell: bash --noprofile --norc -eo pipefail {0}
