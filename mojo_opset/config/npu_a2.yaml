@@ -15,6 +15,7 @@ npu.a2:
   group_gemm: triton
   group_rms_norm_infer: triton
   join_prob_reject_sampling: triton
+  layer_norm_gated: triton
   layer_norm_infer: triton
   layer_norm_quant: torch_npu
   lightning_indexer: triton
@@ -37,6 +38,7 @@ npu.a2:
   residual_add_rms_norm_infer: triton
   residual_add_rms_norm_quant: torch_npu
   rms_norm: triton
+  rms_norm_gated: triton
   rms_norm_infer: triton
   rms_norm_quant: torch_npu
   rope: triton
