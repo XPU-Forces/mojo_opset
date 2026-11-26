@@ -3,10 +3,6 @@
 from mojo_opset.utils._exports import extend_bindings as _extend_bindings
 
 OPS = {
-    "gemm": "dense_gemm",
-    "mxfp8_dequant_gemm": "dense_gemm",
-    "mxfp4_gemm": "dense_gemm",
-    "topk_infer": "topk",
     "rms_norm_quant": "fused_quantization",
     "layer_norm_quant": "fused_quantization",
     "residual_add_rms_norm_quant": "fused_quantization",
@@ -29,6 +25,8 @@ OPS = {
     "store_lowrank": "store_lowrank",
     "rope_infer": "position_embedding",
     "vision_rope_2d_infer": "position_embedding",
+    "qk_norm_rope": "qk_norm_rope",
+    "qk_norm_rope_infer": "qk_norm_rope",
     "paged_decode_gqa_infer": "paged_attention",
     "paged_prefill_gqa_infer": "paged_attention",
     "paged_prefill_swa_infer": "paged_attention",
