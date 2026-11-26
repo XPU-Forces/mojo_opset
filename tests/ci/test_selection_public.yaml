@@ -765,6 +765,75 @@ operators:
             - tests/performance/functions/test_flex_attention_v2.py
           950/performance:
             - tests/performance/functions/test_flex_attention_v2.py
+  fused_q_kv_rmsnorm:
+    rules:
+      - paths:
+          - mojo_opset/functions/fused_q_kv_rmsnorm.py
+          - mojo_opset/kernels/torch/fused_q_kv_rmsnorm.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_fused_q_kv_rmsnorm.py
+          910b/triton:
+            - tests/functions/test_fused_q_kv_rmsnorm.py
+          950/performance:
+            - tests/performance/functions/test_fused_q_kv_rmsnorm.py
+          950/triton:
+            - tests/functions/test_fused_q_kv_rmsnorm.py
+      - paths:
+          - mojo_opset/kernels/npu_a2_triton/fused_q_kv_rmsnorm.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_fused_q_kv_rmsnorm.py
+          910b/triton:
+            - tests/functions/test_fused_q_kv_rmsnorm.py
+      - paths:
+          - mojo_opset/kernels/npu_a5_triton/fused_q_kv_rmsnorm.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_fused_q_kv_rmsnorm.py
+          950/triton:
+            - tests/functions/test_fused_q_kv_rmsnorm.py
+      - paths:
+          - tests/functions/test_fused_q_kv_rmsnorm.py
+        jobs:
+          910b/triton:
+            - tests/functions/test_fused_q_kv_rmsnorm.py
+          950/triton:
+            - tests/functions/test_fused_q_kv_rmsnorm.py
+      - paths:
+          - tests/performance/functions/test_fused_q_kv_rmsnorm.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_fused_q_kv_rmsnorm.py
+          950/performance:
+            - tests/performance/functions/test_fused_q_kv_rmsnorm.py
+  fused_q_kv_rmsnorm_quant:
+    rules:
+      - paths:
+          - mojo_opset/functions/fused_q_kv_rmsnorm.py
+          - mojo_opset/kernels/torch/fused_q_kv_rmsnorm.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_fused_q_kv_rmsnorm.py
+          950/triton:
+            - tests/functions/test_fused_q_kv_rmsnorm.py
+      - paths:
+          - mojo_opset/kernels/npu_a5_triton/fused_q_kv_rmsnorm.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_fused_q_kv_rmsnorm.py
+          950/triton:
+            - tests/functions/test_fused_q_kv_rmsnorm.py
+      - paths:
+          - tests/functions/test_fused_q_kv_rmsnorm.py
+        jobs:
+          950/triton:
+            - tests/functions/test_fused_q_kv_rmsnorm.py
+      - paths:
+          - tests/performance/functions/test_fused_q_kv_rmsnorm.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_fused_q_kv_rmsnorm.py
   gelu:
     rules:
       - paths:
