@@ -18,6 +18,7 @@ OPS = {
     "flex_attention_v2": "flex_attention_v2",
     "rope_cos_sin": "rope_cos_sin",
     "vision_rope_cos_sin_2d": "rope_cos_sin",
+    "mhc_coefficients": "mhc",
     "multimodal_rope_infer": "multimodal_rope_infer",
     "sdpa_infer": "sdpa",
     "diffusion_attention": "sdpa",
