@@ -55,6 +55,7 @@ OPS = {
     "residual_add_layer_norm_infer": "normalization",
     "residual_add_rms_norm_infer": "normalization",
     "causal_conv1d": "convolution",
+    "compressor_from_projected": "compressor",
     "flash_attention": "attention",
     "flash_attention_infer": "attention",
     "silu": "silu",
