@@ -59,5 +59,8 @@ npu.a5:
   topk_infer: native
   top_p_filter: triton
   top_p_sampling: triton
+  vision_pos_embed_interp: triton
+  vision_pos_embed_interp_merged: triton
+  vision_pos_embed_interp_native: triton
   vision_rope_2d_infer: triton
   vision_rope_cos_sin_2d: triton

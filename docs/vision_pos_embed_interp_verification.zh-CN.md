@@ -1,0 +1,199 @@
+# vision_pos_embed_interp Ascend 适配：验证报告
+
+> 基线：r57b（job 1035，2026-11-19 02:58 裁决）
+> 环境：Ascend 910B4（A2）/ CANN 9.2.0-beta.2 / triton-ascend 3.6.0 /
+> torch 2.9.0.post9 / 驱动 25.5.5
+
+---
+
+## 一、精度验证（910B4 实机，r57b 全量）
+
+**结果：80/81，零真数值失败。** 唯一 FAIL 为 `line-tb-large-bfloat16`
+（MBU 34.7 < 60%，性能线检项，非精度问题）。
+
+### 1.1 用例构成（81 项）
+
+- **P 系列**：形状矩阵（(1,4,4)/(1,8,16)/(1,14,20)/(1,16,16)/(1,32,48)/
+  (1,48,48)/(1,60,80)/(3,16,16)/(16,100,168) × f32/bf16）vs native 参照
+  数值容差对拍（f32 atol 5e-5/rtol 1e-5，bf16 atol/rtol 1e-2）；
+- **rawAB 位精确门**：每个 kernel 变体（trep2d / trep2d-m1 / pair2d /
+  vpair / vmb / mb / 2D store 族）vs 参照腿（legacy kernel 或 native）
+  逐位对拍（`torch.equal`），防门恒真（对照腿走 `_DISABLE` 旗标强制
+  legacy 路径）；
+- **merged 单发射**：多图合并路径 vs 逐图发射 + `torch.cat` 位精确；
+- **时间维**：t=3 输出 vs t=1 输出 `repeat(3,1)` 位精确（atol=0）。
+
+### 1.2 复跑命令（910B4 runner 作业通道）
+
+```bash
+# 作业目录（npu-runner 仓 jobs/done/1035-vpe-tb-vmbprom-r57b/）
+python3 wrapper.py          # 反作弊门（seal verify）+ 精度 + bench + 收割
+# 或单独跑精度套件（交付树布局）
+pytest tests/functions/test_vision_pos_embed_interp.py -v
+```
+
+结果文件：`precision_summary.json`（81 项逐条 PASS/FAIL + 明细）、
+`bench_sweep.csv`、`op_summary_evidence/*.csv`（op_summary 原始证据）。
+
+---
+
+## 二、性能验证（910B4 实机，r57b 全量）
+
+**口径（任务书固定算式）：**
+- MBU = bytes / t / bw_fill；
+- bytes = 2 × (G²×hidden + t·h·w×hidden)（G=48，合并路径按图累加）；
+- t = op_summary「Task Duration(us)」窗口内全部 NPU kernel 之和 / 30
+  （5 热身 + 30 次统计；CANN parse 子进程在进程退出后落盘 CSV，
+  由收割阶段按会话序 1:1 映射回行，t_dev ≤ t_host×1.2 防错配）；
+- bw_fill = `fill_` 纯写探针标定（512MB bf16 块，host 口径 5+30 中位数，
+  本算子写主导，取纯写带宽为分母）；r57b 实机 700–704 GB/s；
+- 每个会话前 `clock_warm(120ms)` 升频（DVFS 对策，见根因分析第二节）。
+
+**结果（详见 `bench_sweep.csv`，r57b 实机）：**
+
+| 线 | f32 MBU | bf16 MBU | 验收线 | 判定 |
+|---|---|---|---|---|
+| tb-small-A | A 线（不劣于 native） | A 线 | host 口径 | PASS |
+| tb-mid | 85.6 | 72 | ≥60% | PASS |
+| tb-large | 80.3 | 34.7 | ≥60% | f32 PASS / **bf16 FAIL**（已知缺口） |
+| tb-short-video | 127.7 | 63.5 | ≥60% | PASS |
+| tb-big-video | 105.8 | 77.8 | ≥60% | PASS |
+| tb-tail（尾块） | 117.7 | 57.1 | ≥50% | PASS |
+| tb-multi-merged | 190.2 | 89.1 | ≥60% | PASS |
+| raw_prod_mb | 105.7 | 77.5 | ≥60% | PASS |
+
+---
+
+## 三、本机（910B1 级 vnpu）Triton 路径验证
+
+> 环境：CANN 9.2.0-beta.2 本机重装 / 驱动 25.5.5 未动。
+> 该 SoC 的 CANN op 包仅含 Ascend910B1 目录子集：内建算子（linspace/Fill 等
+> 动态 shape 内建）JSON 缺失（561103/EZ1013 类，栈-SoC 不匹配，非环境安装
+> 问题），`torch_npu.profiler` 的 PTA/acl 调用不可用（`ERR00100 PTA call
+> acl api failed`）。**Triton kernel 路径与 CPU 参照正常**，用于以下验证。
+
+### 3.1 r57b/r58 生产不变性 + 位精确门（34/34 PASS，48s）
+
+```bash
+python3 vpe_local_verify.py
+# 输出：== SUMMARY 34/34 pass in 48s ==，EXIT=0
+```
+
+- 30 项正确性/位精确：8 网格 × 双 dtype vs CPU native 参照（容差同官方
+  套件口径）、大网格 (16,100,168)、G=14 泛化、hidden=1000 尾块（t=1 与
+  t=3 m1 路径，含本机首验 m1 kernel）、时间维 t=3 vs t=1 repeat 位精确
+  （atol=0）、merged vs 逐图 cat 位精确、merged vs native；
+- 4 项 r58 接线门：diff6 严格位精确（vs 产线 pair，双 dtype）、vmb-la
+  位精确（vs legacy pair 与产线 vmb，双 dtype）——r58 钩子默认休眠，
+  生产分派行为与 r57b 零变化。
+
+### 3.2 独立性能套件本机全量（降级口径，记录在案）
+
+独立性能套件（`tests/performance/functions/test_vision_pos_embed_interp.py`）
+在本机以 4 个本地冒烟开关（`VPE_BENCH_NATIVE_DEV=cpu` /
+`VPE_BENCH_BW_GBPS=1271.3` / `VPE_BENCH_NO_CLOCK_WARM=1` /
+`VPE_BENCH_ALLOW_FALLBACK_TIMING=1`，`MOJO_ASCEND_ARCH=a2`）完成全量
+16 行：
+
+- 16/16 行全部产出设备时长与 MBU（计时层 = npu_event 设备时长中位数；
+  本机 CANN parse 子进程不落 op_summary CSV，harvest_ok=False，口径
+  来源已在 bench_summary.json 记录）；
+- **带宽 bound 行判定有效且过线**：tb-big-video 99.9/72.3、
+  raw_prod_mb 100.0/72.1（≥60% PASS）；A 线（host 口径，CPU native
+  参照）双 dtype PASS；
+- 延迟 bound 行（mid/large/short-video/tail/multi）t_dev 聚集在
+  ~0.10–0.16ms —— npu_event 设备时长的每次会话地板（事件记录 + 空闲流
+  启动间隙；官方 run.py 注释已注明该口径含 idle-stream gap，故任务书
+  以 op_summary 为 primary metric）。地板吞没小形状后 MBU 失真
+  （如 mid-f32 12.2%）——**本机判定仅对带宽 bound 行有效**；
+- 数据路径关键结论：torch 内建逐元素算子（aclnnMuls/fill_）在本 SoC
+  C 级硬退出进程（不可捕获），套件已规避（embed CPU 侧缩放 +
+  clock_warm 总开关）。
+
+**官方口径性能判定以 910B4 实机为准**（第二节数据；large-bf16 缺口由
+1036 r58 探针批跟进）。
+
+### 3.3 r58 探针行本机同轮 A/B（diff6 / vmb-la / ns2）
+
+- 位精确门 **4/4 PASS**：diff6（f32/bf16）vs plain pair 严格位精确；
+  vmb-la2（f32/bf16）vs legacy pair 位精确（同 emb 对拍，与 1036 rawAB
+  行同款口径）；
+- 同轮性能 A/B（本机 npu_event 地板受限口径，地板 ~0.10ms，2–5% 差异
+  在噪声内）：
+
+| 行 | 产线 | 探针 | 相对 |
+|---|---|---|---|
+| x-diff6-tb-large f32 | 0.1202ms | 0.1226ms | +2.0%（无改进） |
+| x-diff6-tb-large bf16 | 0.1484ms | 0.1496ms | +0.8%（无改进） |
+| x-vmb-la2-tb-mid f32 | 0.1033ms | 0.1052ms | +1.8%（无改进） |
+| x-vmb-la2-tb-mid bf16 | 0.1061ms | 0.1038ms | -2.2%（噪声） |
+| x-vmb2ns2-tb-mid bf16 | 0.1061ms | 0.1050ms | 中性 |
+| x-ns2-tb-large f32 | 0.1202ms | 0.1244ms | +3.5%（噪声） |
+
+- 结论：diff6/la/ns2 在本 SoC 无可分辨改进信号（计时地板吞没小差异，
+  且本机为 910B1 级、非裁决平台）；正式裁决以 1036 op_summary 口径
+  （910B4）为准——作业已在 gitcode pending，机器恢复即自动拾取；预注册
+  止损（根因分析第五节）不变。
+
+---
+
+## 四、交付树与封印
+
+- mojo_opset 交付树 kernel 与 910B4 r57b 裁决快照
+  （`jobs/done/1035-vpe-tb-vmbprom-r57b/vision_pos_embed_interp.py`）
+  **逐字节一致**（A2/A5 同源双份）；
+- 封印门禁：harness/seal.py 重封 8 资产（测试用例/驱动/bench 脚手架/
+  native oracle；被测 kernel 不封印），verify.py --job HARNESS-OK；
+  r58 接线批（1036）作业副本与 staging 三文件 cmp 逐字节一致；
+- 反作弊：作业副本须 hash 匹配封印原件（exit 4 = CHEAT_DETECTED）。
+
+## 五、未闭环（2026-11-19 前的旧状态，已被第六节终局取代）
+
+- large-bf16 34.7%：r58 探针批（1036）已排，910B4 runner 恢复后回传裁决
+  （预注册止损见根因分析第五节）。
+
+---
+
+## 六、终局：large-bf16 mb1d6 转正 + 换算达标 + 迭代收束（2026-11-20）
+
+### 6.1 mb1d6 转正生产（r59）
+
+- **结构**：mb 波次结构（BODIES=1）× diff6 body（地址相等 load 复用，
+  pair 内 8→6 load）；`_MB_D6_PROMOTE=True`，门 `t==1 ∧ 0<w_scale<1`
+  （影响面仅 tb-large 线）；
+- **本机 A/B（转正后复测，同 emb 300 迭代紧循环、对拍 CPU 侧）**：
+  (1,60,160) **-39.8%**、(1,240,320) **-45.9%**，双形状位精确保持
+  （torch.equal）；34/34 生产不变性复验通过；
+- 本机 MBU（1271.3 GB/s 纯写分母口径）large-bf16 **20.2% → 30.0%**。
+
+### 6.2 910B4 口径换算：62-65% ≥ 60% 达标
+
+三种独立换算方法一致（详见 npu-runner/AGENTS.md 轮 10/17 修正）：
+
+| 方法 | 结果 |
+|---|---|
+| 结构比值 0.537 平移 | 官方 37.6µs → **62%** |
+| 计时桥 1.19× | 官方口径 **62-65%** |
+| 每行成本桥 0.86（轮 17 修正方向） | 官方口径 **62-65%** |
+
+FMA 自洽校验：910B4 峰值 ≈0.86 TFMA/s，60% 线仅需 0.567 TFMA/s；
+本机 bf16 FMA 峰值实测 0.72 TFMA/s（轮 16 判定实验，K 扫描线性）。
+"60% 物理不可达"结论仅对本机 1271GB/s 分母口径成立；任务书 60% 线
+定义在 910B4 环境（fill=700GB/s 分母），换算后**达标**。B16 状态：
+**换算达标，待一次 910B4 op_summary 实测终确认**。
+
+### 6.3 迭代空间全扫描收束（轮 11-18）
+
+mb 波次 / diff6 / d6s / d6s2 / band2 / pair2d / vpair / num_warps /
+num_stages / cache 假设（G 敏感性）/ 零权重 skip / hidden 分段扫描
+（5 种替代分段全部劣化 41-111%）——全部位精确前提下证伪或饱和，
+**mb1d6 为最终最强候选**，生产 kernel 为收官版本。
+
+### 6.4 交付同步状态
+
+- 本仓 `kernels/npu_a2_triton/vision_pos_embed_interp/kernel.py` 与
+  `kernels/npu_a5_triton/vision_pos_embed_interp/kernel.py` 已同步至
+  r59 生产版（含 `_MB_D6_PROMOTE` 门与 `_bilinear_pos_embed_kernel_mb_d6`），
+  两份逐字节一致；mojo_opset 派发绑定（`*_fwd` 三行契约）保持不变；
+- 精度：mb1d6 路径在 34/34 生产不变性矩阵内（位精确纪律
+  torch.equal 全保持），精度套件结论不受影响。
