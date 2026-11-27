@@ -25,6 +25,7 @@ def _indexed_gate_rms_norm_scale_shift_kernel(
     scale,
     indices,
     rows,
+    TABLE_INDEX_DTYPE: tl.constexpr,
     G0: tl.constexpr,
     G1: tl.constexpr,
     T0: tl.constexpr,
@@ -46,8 +47,8 @@ def _indexed_gate_rms_norm_scale_shift_kernel(
     # Full two-row groups: no row predicate.
     n_full = (rows // (CORES * 2)) * (CORES * 2)
     for row0 in range(pid * 2, n_full, CORES * 2):
-        index0 = tl.load(indices + row0).to(tl.int32)
-        index1 = tl.load(indices + row0 + 1).to(tl.int32)
+        index0 = tl.load(indices + row0).to(TABLE_INDEX_DTYPE)
+        index1 = tl.load(indices + row0 + 1).to(TABLE_INDEX_DTYPE)
         idx = tl.where(rvec == 0, index0, index1)
         r = row0 + rvec
         offsets = r[:, None] * H + columns[None, :]
@@ -67,7 +68,7 @@ def _indexed_gate_rms_norm_scale_shift_kernel(
     # Row remainder: one row per program, same math.
     for row in range(n_full + pid, rows, CORES):
         row_i = row.to(tl.int32)
-        idx = tl.load(indices + row_i).to(tl.int32)
+        idx = tl.load(indices + row_i).to(TABLE_INDEX_DTYPE)
         offsets = row_i * H + columns
         x = tl.load(residual + offsets, mask=col_ok, other=0.0).to(tl.float32)
         g = tl.load(gate + idx * G0 + columns * G1, mask=col_ok, other=0.0).to(tl.float32)
@@ -103,6 +104,9 @@ def _forward(residual, gate, branch, weight, shift, scale, indices, eps):
         return updated, result
 
     num_cores = int(driver.active.utils.get_device_properties(residual.device.index)["num_vectorcore"])
+    gate_stride, shift_stride, scale_stride = gate.stride(0), shift.stride(0), scale.stride(0)
+    # Activation size does not bound offsets into padded condition tables.
+    max_table_offset = (gate.shape[0] - 1) * max(gate_stride, shift_stride, scale_stride) + hidden - 1
     _indexed_gate_rms_norm_scale_shift_kernel[(num_cores,)](
         updated,
         result,
@@ -114,11 +118,12 @@ def _forward(residual, gate, branch, weight, shift, scale, indices, eps):
         scale,
         indices,
         rows,
-        G0=gate.stride(0),
+        TABLE_INDEX_DTYPE=tl.int64 if max_table_offset >= 2**31 else tl.int32,
+        G0=gate_stride,
         G1=gate.stride(1),
-        T0=shift.stride(0),
+        T0=shift_stride,
         T1=shift.stride(1),
-        S0=scale.stride(0),
+        S0=scale_stride,
         S1=scale.stride(1),
         H=hidden,
         BLOCK_H=(hidden + 7) // 8 * 8,

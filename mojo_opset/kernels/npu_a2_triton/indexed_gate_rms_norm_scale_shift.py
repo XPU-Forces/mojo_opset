@@ -38,6 +38,7 @@ def _indexed_gate_rms_norm_scale_shift_kernel(
     shift_stride,
     scale_stride,
     rows,
+    TABLE_INDEX_DTYPE: tl.constexpr,
     HIDDEN: tl.constexpr,
     EPS: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -54,7 +55,7 @@ def _indexed_gate_rms_norm_scale_shift_kernel(
     # Full groups: mask-free 2-D hot loop, BF16 inputs staged in UB.
     for row0 in range(pid * ROWS_PER_ITER, n_full, step):
         rows_v = row0 + rvec
-        index = tl.load(indices_ptr + rows_v).to(tl.int32)
+        index = tl.load(indices_ptr + rows_v).to(TABLE_INDEX_DTYPE)
         base = rows_v[:, None] * HIDDEN + col[None, :]
         residual = tl.load(residual_ptr + base)
         gate = tl.load(gate_ptr + index[:, None] * gate_stride + col[None, :])
@@ -71,7 +72,7 @@ def _indexed_gate_rms_norm_scale_shift_kernel(
     # Tail: the remaining rows, one narrow row per program turn.
     for row in range(n_full + pid, rows, NUM_CORES):
         row_i = row.to(tl.int32)
-        index = tl.load(indices_ptr + row_i).to(tl.int32)
+        index = tl.load(indices_ptr + row_i).to(TABLE_INDEX_DTYPE)
         base = row_i * HIDDEN + col
         residual = tl.load(residual_ptr + base)
         gate = tl.load(gate_ptr + index * gate_stride + col)
@@ -106,6 +107,9 @@ def _forward(residual, gate, branch, weight, shift, scale, indices, eps):
     num_cores = int(driver.active.utils.get_device_properties(residual.device.index)["num_vectorcore"])
     rows_per_iter = _rows_per_iter(hidden)
     grid = (min(triton.cdiv(rows, rows_per_iter), num_cores, _MAX_1D_GRID),)
+    gate_stride, shift_stride, scale_stride = gate.stride(0), shift.stride(0), scale.stride(0)
+    # Activation size does not bound offsets into padded condition tables.
+    max_table_offset = (gate.shape[0] - 1) * max(gate_stride, shift_stride, scale_stride) + hidden - 1
     _indexed_gate_rms_norm_scale_shift_kernel[grid](
         residual_out,
         modulated_out,
@@ -116,10 +120,11 @@ def _forward(residual, gate, branch, weight, shift, scale, indices, eps):
         shift,
         scale,
         indices,
-        gate.stride(0),
-        shift.stride(0),
-        scale.stride(0),
+        gate_stride,
+        shift_stride,
+        scale_stride,
         rows,
+        TABLE_INDEX_DTYPE=tl.int64 if max_table_offset >= 2**31 else tl.int32,
         HIDDEN=hidden,
         EPS=eps,
         BLOCK_N=hidden,

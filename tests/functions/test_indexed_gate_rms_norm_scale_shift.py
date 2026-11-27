@@ -479,6 +479,35 @@ def test_boundaries(accuracy_backend, mode):
     _check(actual, _call(args, "torch"), args)
 
 
+def test_condition_table_large_row_stride(accuracy_backend):
+    implementation, target, device = accuracy_backend
+    if target not in ("npu.a2", "npu.a5") or implementation not in (None, "triton"):
+        pytest.skip("large row-stride regression targets Ascend Triton")
+
+    hidden, conditions = 5376, 3
+    row_stride = 2**30
+    num_cores = torch.npu.get_device_properties(torch.npu.current_device()).vector_core_num
+    # One full group per core plus a tail row on both providers.
+    args = list(make_case(dict(CASES[4], rows=2 * num_cores + 1, hidden_size=hidden, conditions=conditions), device))
+    args[6].fill_(conditions - 1)
+    wide_args = args.copy()
+    table_slots = (1, 4, 5)
+    # Share the backing storage and write only the logical rows.
+    backing = torch.empty(
+        (conditions - 1) * row_stride + len(table_slots) * hidden, dtype=torch.bfloat16, device=device
+    )
+    for i, slot in enumerate(table_slots):
+        wide_table = backing.as_strided(args[slot].shape, (row_stride, 1), storage_offset=i * hidden)
+        for row in range(conditions):
+            wide_table[row].copy_(args[slot][row])
+        wide_args[slot] = wide_table
+
+    _check(_call(wide_args, "triton"), _call(args, "torch"), wide_args)
+    for slot in (0, 2, 6):
+        args[slot] = wide_args[slot] = args[slot][:1]
+    _check(_call(wide_args, "triton"), _call(args, "torch"), wide_args)
+
+
 def test_schema_and_fake(accuracy_backend):
     implementation, _, device = accuracy_backend
     preload(OP, implementation=implementation)
