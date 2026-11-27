@@ -1230,6 +1230,47 @@ operators:
             - tests/performance/modules/test_sampling.py
           950/performance:
             - tests/performance/modules/test_sampling.py
+  kpool_compress_and_write_cache:
+    rules:
+      - paths:
+          - mojo_opset/functions/kv_cache.py
+          - mojo_opset/kernels/torch/kv_cache.py
+          - tests/functions/test_kpool_compress_and_write_cache.py
+          - tests/functions/test_kpool_compress_model_prefill.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_kpool_compress_and_write_cache.py
+          910b/triton:
+            - tests/functions/test_kpool_compress_and_write_cache.py
+            - tests/functions/test_kpool_compress_model_prefill.py
+          950/performance:
+            - tests/performance/functions/test_kpool_compress_and_write_cache.py
+          950/triton:
+            - tests/functions/test_kpool_compress_and_write_cache.py
+            - tests/functions/test_kpool_compress_model_prefill.py
+      - paths:
+          - mojo_opset/kernels/npu_a2_triton/kpool_compress_and_write_cache.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_kpool_compress_and_write_cache.py
+          910b/triton:
+            - tests/functions/test_kpool_compress_and_write_cache.py
+            - tests/functions/test_kpool_compress_model_prefill.py
+      - paths:
+          - mojo_opset/kernels/npu_a5_triton/kpool_compress_and_write_cache.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_kpool_compress_and_write_cache.py
+          950/triton:
+            - tests/functions/test_kpool_compress_and_write_cache.py
+            - tests/functions/test_kpool_compress_model_prefill.py
+      - paths:
+          - tests/performance/functions/test_kpool_compress_and_write_cache.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_kpool_compress_and_write_cache.py
+          950/performance:
+            - tests/performance/functions/test_kpool_compress_and_write_cache.py
   layer_norm_infer:
     rules:
       - paths:
