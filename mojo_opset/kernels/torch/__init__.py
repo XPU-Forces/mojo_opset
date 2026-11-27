@@ -43,6 +43,7 @@ OPS = {
     "join_prob_reject_sampling": "sampling",
     "apply_penalties_temperature": "sampling",
     "group_gemm": "gemm",
+    "get_compressed_slot_mapping": "get_compressed_slot_mapping",
     "quant_gemm": "gemm",
     "static_quant": "quantization",
     "dequant": "quantization",
