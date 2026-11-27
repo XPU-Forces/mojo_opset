@@ -2,9 +2,6 @@
 """Legacy regression cases and 16 pinned MiniMax H3 model-rule fixtures."""
 
 import hashlib
-import json
-
-from pathlib import Path
 
 import pytest
 import torch
@@ -47,8 +44,241 @@ CASES = [
     )
     for case_id, rows, hidden, conditions, seed, values, indices in _REGRESSION_CASES
 ]
-MODEL_CASES = json.loads(Path(__file__).with_name("indexed_gate_model16_cases.json").read_text(encoding="utf-8"))[
-    "cases"
+
+# MiniMax H3 layouts derived from vLLM-Omni revision
+# d613fdb62c432a342681e88b307d36b54f6ed5f0. Activation values are synthetic.
+_MODEL_CASES = (
+    dict(
+        id="model_t2va_smoke_step0_u1",
+        rows=4096,
+        conditions=3,
+        seed=2026111801,
+        indices_segments=[
+            dict(start=0, rows=128, condition=1),
+            dict(start=128, rows=356, condition=2),
+            dict(start=484, rows=3612, condition=0),
+        ],
+        indices_sha256="653e19ed299e5a60716cd8c020a53f5f7993788f8bc9acbf4dc21a4881a7b8b7",
+        condition_row_counts=[3612, 128, 356],
+    ),
+    dict(
+        id="model_t2va_smoke_mid_u1",
+        rows=4096,
+        conditions=6,
+        seed=2026111802,
+        indices_segments=[
+            dict(start=0, rows=128, condition=1),
+            dict(start=128, rows=356, condition=5),
+            dict(start=484, rows=3612, condition=0),
+        ],
+        indices_sha256="937a4daa8d36bc0853a9b040275fe508f4ddf5574b6a255fe526c5087959b1ec",
+        condition_row_counts=[3612, 128, 0, 0, 0, 356],
+    ),
+    dict(
+        id="model_t2va_smoke_mid_u8_rank0",
+        rows=512,
+        conditions=6,
+        seed=2026111803,
+        indices_segments=[
+            dict(start=0, rows=128, condition=1),
+            dict(start=128, rows=356, condition=5),
+            dict(start=484, rows=28, condition=0),
+        ],
+        indices_sha256="4e09502d472a4a0a574061ce98371f26b6c017f2cfb1fd8768e2b75aeaa164be",
+        condition_row_counts=[28, 128, 0, 0, 0, 356],
+    ),
+    dict(
+        id="model_t2va_doc209_u1",
+        rows=16448,
+        conditions=6,
+        seed=2026111804,
+        indices_segments=[
+            dict(start=0, rows=128, condition=1),
+            dict(start=128, rows=696, condition=5),
+            dict(start=824, rows=15624, condition=0),
+        ],
+        indices_sha256="3705a58cd9d2c79890179d7a95c67bfc57e4bd71cfeb2e7171a81e6458ef21b1",
+        condition_row_counts=[15624, 128, 0, 0, 0, 696],
+    ),
+    dict(
+        id="model_t2va_doc209_u4_rank0",
+        rows=4112,
+        conditions=6,
+        seed=2026111805,
+        indices_segments=[
+            dict(start=0, rows=128, condition=1),
+            dict(start=128, rows=696, condition=5),
+            dict(start=824, rows=3288, condition=0),
+        ],
+        indices_sha256="1c2f1a30381bf0c8edcf5db3171d6d41582caa28520922ce97d63cb8f015c1c9",
+        condition_row_counts=[3288, 128, 0, 0, 0, 696],
+    ),
+    dict(
+        id="model_t2va_doc209_u4_rank3",
+        rows=4112,
+        conditions=6,
+        seed=2026111806,
+        indices_segments=[
+            dict(start=0, rows=4112, condition=0),
+        ],
+        indices_sha256="efba72cd933a9a2ccb8b35094e8499f22c2dac508b6b3b2ad5b3d2802b0bf4c7",
+        condition_row_counts=[4112, 0, 0, 0, 0, 0],
+    ),
+    dict(
+        id="model_t2va_recipe209_u1",
+        rows=63360,
+        conditions=6,
+        seed=2026111807,
+        indices_segments=[
+            dict(start=0, rows=128, condition=1),
+            dict(start=128, rows=696, condition=5),
+            dict(start=824, rows=62536, condition=0),
+        ],
+        indices_sha256="3b74ae859f078650d7241b35864c931b741353e77e4deb6b519a1310e48c3a15",
+        condition_row_counts=[62536, 128, 0, 0, 0, 696],
+    ),
+    dict(
+        id="model_t2va_recipe209_u4_rank0",
+        rows=15840,
+        conditions=6,
+        seed=2026111808,
+        indices_segments=[
+            dict(start=0, rows=128, condition=1),
+            dict(start=128, rows=696, condition=5),
+            dict(start=824, rows=15016, condition=0),
+        ],
+        indices_sha256="600ea6392dc1a2f2ed2afeaad10e8141a736c5419f95311fc411f6360c29d13a",
+        condition_row_counts=[15016, 128, 0, 0, 0, 696],
+    ),
+    dict(
+        id="model_fl2va_first_step0_u4",
+        rows=15056,
+        conditions=6,
+        seed=2026111809,
+        indices_segments=[
+            dict(start=0, rows=256, condition=1),
+            dict(start=256, rows=256, condition=0),
+            dict(start=512, rows=936, condition=3),
+            dict(start=1448, rows=696, condition=2),
+            dict(start=2144, rows=12912, condition=0),
+        ],
+        indices_sha256="612779bcb0d430280beb278a87ac7a6938684cb616c1aae690e3cf0dfb3d67cc",
+        condition_row_counts=[13168, 256, 696, 936, 0, 0],
+    ),
+    dict(
+        id="model_fl2va_first_mid_u4",
+        rows=15056,
+        conditions=9,
+        seed=2026111810,
+        indices_segments=[
+            dict(start=0, rows=256, condition=1),
+            dict(start=256, rows=256, condition=0),
+            dict(start=512, rows=936, condition=6),
+            dict(start=1448, rows=696, condition=5),
+            dict(start=2144, rows=12912, condition=0),
+        ],
+        indices_sha256="d0d7f9f8aa246b5a916913bd81c08471ac3f7fea6d77de727429010ee84c1e4b",
+        condition_row_counts=[13168, 256, 0, 0, 0, 696, 936, 0, 0],
+    ),
+    dict(
+        id="model_fl2va_firstlast124_u4",
+        rows=10192,
+        conditions=9,
+        seed=2026111811,
+        indices_segments=[
+            dict(start=0, rows=512, condition=1),
+            dict(start=512, rows=512, condition=0),
+            dict(start=1024, rows=2016, condition=6),
+            dict(start=3040, rows=414, condition=5),
+            dict(start=3454, rows=6738, condition=0),
+        ],
+        indices_sha256="2f4e4aad6d5e75d2cecef0d078c0705b7827b1678ff0485aaaf5b1a793fc4b4e",
+        condition_row_counts=[7250, 512, 0, 0, 0, 414, 2016, 0, 0],
+    ),
+    dict(
+        id="model_t2va_default_limit_u4_rank3",
+        rows=27312,
+        conditions=6,
+        seed=2026111812,
+        indices_segments=[
+            dict(start=0, rows=27312, condition=0),
+        ],
+        indices_sha256="d77c340a5939f0d75bfb748f2b0d533c5b924939d3db854bfb3bb5e7161e2b1a",
+        condition_row_counts=[27312, 0, 0, 0, 0, 0],
+    ),
+    dict(
+        id="model_ref2va_img_audio_step0_u1",
+        rows=10688,
+        conditions=9,
+        seed=2026111813,
+        indices_segments=[
+            dict(start=0, rows=384, condition=1),
+            dict(start=384, rows=128, condition=0),
+            dict(start=512, rows=252, condition=3),
+            dict(start=764, rows=160, condition=8),
+            dict(start=924, rows=414, condition=2),
+            dict(start=1338, rows=9350, condition=0),
+        ],
+        indices_sha256="68b2e6f30690a1f1df27134f8ac990e8a4cfa6ecebd72cb904156212504da973",
+        condition_row_counts=[9478, 384, 414, 252, 0, 0, 0, 0, 160],
+    ),
+    dict(
+        id="model_ref2va_img_audio_mid_u1",
+        rows=10688,
+        conditions=12,
+        seed=2026111814,
+        indices_segments=[
+            dict(start=0, rows=384, condition=1),
+            dict(start=384, rows=128, condition=0),
+            dict(start=512, rows=252, condition=6),
+            dict(start=764, rows=160, condition=11),
+            dict(start=924, rows=414, condition=5),
+            dict(start=1338, rows=9350, condition=0),
+        ],
+        indices_sha256="9b220c29add9766233c644dde6782575133d8eac79f06f3fda49cbb11112396c",
+        condition_row_counts=[9478, 384, 0, 0, 0, 414, 252, 0, 0, 0, 0, 160],
+    ),
+    dict(
+        id="model_batch2_same_step_u4_rank0",
+        rows=5136,
+        conditions=6,
+        seed=2026111815,
+        indices_segments=[
+            dict(start=0, rows=128, condition=1),
+            dict(start=128, rows=356, condition=5),
+            dict(start=484, rows=3612, condition=0),
+            dict(start=4096, rows=128, condition=1),
+            dict(start=4224, rows=696, condition=5),
+            dict(start=4920, rows=216, condition=0),
+        ],
+        indices_sha256="139ec14957310713227ef8a1296b78e9f1d69cc9f80507fedd32d46277b7363e",
+        condition_row_counts=[3828, 256, 0, 0, 0, 1052],
+    ),
+    dict(
+        id="model_batch2_mixed_step_u4_rank3",
+        rows=5136,
+        conditions=9,
+        seed=2026111816,
+        indices_segments=[
+            dict(start=0, rows=5136, condition=3),
+        ],
+        indices_sha256="43d71e4bd6ebc03a0e489142e6896e5ec308c12a38c4494da5423e079f87aa00",
+        condition_row_counts=[0, 0, 0, 5136, 0, 0, 0, 0, 0],
+    ),
+)
+MODEL_CASES = [
+    dict(
+        case,
+        hidden_size=5376,
+        eps=1e-05,
+        gate_stride=[32256, 1],
+        shift_stride=[32256, 1],
+        scale_stride=[32256, 1],
+        gate_storage_offset=10752,
+        shift_storage_offset=16128,
+        scale_storage_offset=21504,
+    )
+    for case in _MODEL_CASES
 ]
 MODEL_CASE_PARAMS = [pytest.param(case, id=case["id"]) for case in MODEL_CASES]
 CASE_PARAMS = [pytest.param(case, id=case["id"]) for case in CASES + MODEL_CASES]
