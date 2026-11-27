@@ -2,6 +2,7 @@
 """Accuracy fixtures for the MiniMax H3 indexed RMSNorm and affine operator."""
 
 import hashlib
+import struct
 
 import pytest
 import torch
@@ -363,7 +364,9 @@ def test_model_fixture(case):
     assert shift.untyped_storage().data_ptr() == scale.untyped_storage().data_ptr()
     assert (shift.storage_offset(), scale.storage_offset()) == (0, hidden)
     assert indices.numel() == case["rows"] and indices.unique().numel() == case["active_conditions"]
-    assert hashlib.sha256(indices.numpy().tobytes()).hexdigest() == case["indices_sha256"]
+    # The fixture digest is over little-endian signed 64-bit indices.
+    index_bytes = struct.pack(f"<{indices.numel()}q", *indices.tolist())
+    assert hashlib.sha256(index_bytes).hexdigest() == case["indices_sha256"]
 
 
 @pytest.mark.reference
