@@ -77,7 +77,7 @@ def _fused_add_layernorm_fwd_kernel(
 
             X_chunk = tl.load(X_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
             R_chunk = tl.load(R_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0)
-            S_chunk = X_chunk + R_chunk
+            S_chunk = (X_chunk.to(tl.float32) + R_chunk.to(tl.float32)).to(S_ptr.dtype.element_ty)
             tl.store(S_ptr_row_block + cols_off[None, :], S_chunk, mask=block_mask)
 
             S_chunk_f32 = S_chunk.to(tl.float32)
