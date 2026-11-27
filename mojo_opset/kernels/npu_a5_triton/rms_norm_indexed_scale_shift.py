@@ -55,7 +55,8 @@ def _rms_norm_indexed_scale_shift_kernel(
             xa = tl.load(x_ptr + b0 * SX + c, mask=m, other=0.0).to(tl.float32)
             sumsq0 += tl.sum(xa * xa, axis=0)
         r0 = tl.rsqrt(sumsq0 / H + eps)
-        tl.store(out_ptr + b0 * H + cols, x0 * (r0 * weight) * (1.0 + c0) + s0)
+        # Normalize x before multiplying by weight to avoid an overflowing intermediate.
+        tl.store(out_ptr + b0 * H + cols, (x0 * r0) * weight * (1.0 + c0) + s0)
         s1 = tl.load(shift_ptr + i1 * SS + cols).to(tl.float32)
         c1 = tl.load(scale_ptr + i1 * SC + cols).to(tl.float32)
         x1 = tl.reshape(extract_slice(x2, (1, 0), (1, BLOCK_C), (1, 1)), (BLOCK_C,)).to(tl.float32)
@@ -72,7 +73,7 @@ def _rms_norm_indexed_scale_shift_kernel(
         r1 = tl.rsqrt(sumsq1 / H + eps)
         tl.store(
             out_ptr + (b0 + 1) * H + cols,
-            x1 * (r1 * weight) * (1.0 + c1) + s1,
+            (x1 * r1) * weight * (1.0 + c1) + s1,
             mask=(b0 + 1) < rows,
         )
         for j in tl.static_range(NT - 1):
@@ -82,7 +83,7 @@ def _rms_norm_indexed_scale_shift_kernel(
             xa = tl.load(x_ptr + b0 * SX + c, mask=m, other=0.0).to(tl.float32)
             sh = tl.load(shift_ptr + i0 * SS + c, mask=m, other=0.0).to(tl.float32)
             sc = tl.load(scale_ptr + i0 * SC + c, mask=m, other=0.0).to(tl.float32)
-            tl.store(out_ptr + b0 * H + c, xa * (r0 * wj) * (1.0 + sc) + sh, mask=m)
+            tl.store(out_ptr + b0 * H + c, (xa * r0) * wj * (1.0 + sc) + sh, mask=m)
             xb = tl.load(
                 x_ptr + (b0 + 1) * SX + c,
                 mask=m & ((b0 + 1) < rows),
@@ -92,7 +93,7 @@ def _rms_norm_indexed_scale_shift_kernel(
             sc1 = tl.load(scale_ptr + i1 * SC + c, mask=m, other=0.0).to(tl.float32)
             tl.store(
                 out_ptr + (b0 + 1) * H + c,
-                xb * (r1 * wj) * (1.0 + sc1) + sh1,
+                (xb * r1) * wj * (1.0 + sc1) + sh1,
                 mask=m & ((b0 + 1) < rows),
             )
 

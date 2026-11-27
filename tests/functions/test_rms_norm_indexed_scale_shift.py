@@ -272,6 +272,21 @@ def test_accuracy(accuracy_backend, case):
         assert torch.equal(out, torch.full_like(out, 1.2265625))
 
 
+@pytest.mark.parametrize(("rows", "hidden"), ((1, 16), (3, 8192)), ids=("1x16", "3x8192"))
+def test_large_finite_weight_with_zero_input(accuracy_backend, rows, hidden):
+    implementation, _, device = accuracy_backend
+    x = torch.zeros((rows, hidden), dtype=torch.bfloat16, device=device)
+    weight = torch.full((hidden,), 2e38, dtype=x.dtype, device=device)
+    shift = torch.ones((1, hidden), dtype=x.dtype, device=device)
+    scale = torch.ones_like(shift)
+    indices = torch.zeros((rows,), dtype=torch.int64, device=device)
+    args = (x, weight, shift, scale, indices)
+    reference = functions.rms_norm_indexed_scale_shift(*args, implementation="torch")
+    actual = functions.rms_norm_indexed_scale_shift(*args, implementation=implementation)
+    assert torch.equal(reference, torch.ones_like(x))
+    assert torch.equal(actual, reference)
+
+
 def _strided_inputs(device):
     rows, hidden = 7, 512
     x = torch.randn((rows, hidden + 16), dtype=torch.bfloat16, device=device)[:, 16:]

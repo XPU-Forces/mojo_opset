@@ -40,7 +40,7 @@ def _rms_norm_indexed_scale_shift_kernel(
     weight = tl.load(W + col * SW, valid, 0).to(tl.float32)
     cached_idx = tl.full((), -1, tl.int64)
     cached_shift = tl.zeros((N,), tl.float32)
-    cached_gain = tl.zeros((N,), tl.float32)
+    cached_scale_factor = tl.zeros((N,), tl.float32)
 
     for row in range(pid, R, CORES):
         x = tl.load(X + row * SX + col * XC, valid, 0).to(tl.float32)
@@ -48,10 +48,12 @@ def _rms_norm_indexed_scale_shift_kernel(
         if idx != cached_idx:
             cached_shift = tl.load(Shift + idx * SS + col * CS, valid, 0).to(tl.float32)
             scale = tl.load(Scale + idx * SC + col * CC, valid, 0).to(tl.float32)
-            cached_gain = weight * (1.0 + scale)
+            cached_scale_factor = 1.0 + scale
             cached_idx = idx
         rstd = 1.0 / tl.sqrt(tl.sum(x * x, 0) / H + EPS)
-        out = (x * rstd) * cached_gain + cached_shift
+        # Normalize x before multiplying by weight to avoid an overflowing intermediate.
+        normalized = (x * rstd) * weight
+        out = normalized * cached_scale_factor + cached_shift
         tl.store(Y + row * H + col, out, valid)
 
 
