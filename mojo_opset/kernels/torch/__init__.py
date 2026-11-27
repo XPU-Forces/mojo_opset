@@ -47,6 +47,7 @@ OPS = {
     "static_quant": "quantization",
     "dequant": "quantization",
     "dynamic_quant": "quantization",
+    "fill_short_context_topk": "fill_short_context_topk",
     "varlen_fa_infer": "varlen_fa",
     "causal_conv1d_update_state_infer": "convolution",
     "layer_norm_infer": "normalization",
