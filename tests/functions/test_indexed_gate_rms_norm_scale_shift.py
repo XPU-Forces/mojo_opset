@@ -8,6 +8,7 @@ import torch
 
 from torch._subclasses.fake_tensor import FakeTensorMode
 
+from mojo_opset import Target
 from mojo_opset import functions as F
 from mojo_opset import preload
 from mojo_opset.functions._dispatch import load_impl
@@ -481,7 +482,7 @@ def test_boundaries(accuracy_backend, mode):
 
 def test_condition_table_large_row_stride(accuracy_backend):
     implementation, target, device = accuracy_backend
-    if target not in ("npu.a2", "npu.a5") or implementation not in (None, "triton"):
+    if Target.parse(target).arch_key not in ("npu.a2", "npu.a5") or implementation not in (None, "triton"):
         pytest.skip("large row-stride regression targets Ascend Triton")
 
     hidden, conditions = 5376, 3
