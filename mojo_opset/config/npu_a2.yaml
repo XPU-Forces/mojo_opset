@@ -1,6 +1,7 @@
 npu.a2:
   apply_penalties_temperature: triton
   causal_conv1d: triton
+  causal_conv1d_update: triton
   causal_conv1d_update_state_infer: triton
   dequant: triton
   dequant_swiglu_quant: torch_npu
