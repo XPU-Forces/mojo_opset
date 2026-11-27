@@ -160,7 +160,9 @@ def _kpool_seed_tail_cache_impl(tail_kv_cache, key, gate_score, tslot, kpool=4, 
 def _kpool_seed_tail_cache_leaf(
     tail_kv_cache: torch.Tensor, key: torch.Tensor, gate_score: torch.Tensor, tslot: torch.Tensor
 ) -> None:
-    _kpool_seed_tail_cache_impl(tail_kv_cache, key, gate_score, tslot)
+    # Triton launches on the active device's current stream.
+    with torch.npu.device(key.device):
+        _kpool_seed_tail_cache_impl(tail_kv_cache, key, gate_score, tslot)
 
 
 @_kpool_seed_tail_cache_leaf.register_fake

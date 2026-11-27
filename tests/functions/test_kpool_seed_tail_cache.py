@@ -202,6 +202,45 @@ def test_kpool_seed_tail_cache_boundaries(accuracy_backend, mode, slot_dtype):
 
 @pytest.mark.api("functions.kpool_seed_tail_cache")
 @pytest.mark.accuracy
+@pytest.mark.bitwise
+def test_kpool_seed_tail_cache_on_noncurrent_npu(accuracy_backend):
+    implementation, _, device = accuracy_backend
+    if device != "npu" or implementation not in (None, "triton") or torch.npu.device_count() < 2:
+        pytest.skip("requires two visible NPUs and Triton")
+
+    current = torch.device("npu", torch.npu.current_device())
+    target = torch.device("npu", 1 if current.index == 0 else 0)
+    backing, shape, strides, key, gate, slots = make_case(*_PADDED_PROBE)
+    expected = backing.clone()
+    converted_key = torch.full_like(key, 17)
+    F.kpool_seed_tail_cache(expected.as_strided(shape, strides), converted_key, gate, slots, implementation="torch")
+    actual, actual_key, actual_gate, actual_slots = (x.to(target, copy=True) for x in (backing, key, gate, slots))
+    torch.npu.synchronize(target)
+    target_stream = torch.npu.Stream(device=target)
+    with torch.npu.stream(target_stream):
+        # Keep the target stream selected while invoking the op from the other NPU.
+        actual_key.fill_(17)
+        with torch.npu.device(current):
+            assert torch.npu.current_device() == current.index
+            assert torch.npu.current_stream(target) == target_stream
+            assert (
+                F.kpool_seed_tail_cache(
+                    actual.as_strided(shape, strides), actual_key, actual_gate, actual_slots, implementation="triton"
+                )
+                is None
+            )
+            assert torch.npu.current_device() == current.index
+            assert torch.npu.current_stream(target) == target_stream
+        target_stream.synchronize()
+
+    for observed, wanted in zip(
+        (actual, actual_key, actual_gate, actual_slots), (expected, converted_key, gate, slots)
+    ):
+        _bitwise(observed, wanted)
+
+
+@pytest.mark.api("functions.kpool_seed_tail_cache")
+@pytest.mark.accuracy
 @pytest.mark.parametrize(
     "fault", ("dtype", "gate_shape", "slot_dtype", "slot_length", "noncontiguous", "overlap", "device")
 )
