@@ -8,6 +8,7 @@ from .attention import native_swa_infer
 from .attention import swa
 from .attention import swa_infer
 from .attention import varlen_fa_infer
+from .causal_conv1d_update import causal_conv1d_update
 from .convolution import causal_conv1d
 from .convolution import causal_conv1d_update_state_infer
 from .flex_attention import flex_attention
@@ -73,6 +74,7 @@ __all__ = [
 
     "apply_penalties_temperature",
     "causal_conv1d",
+    "causal_conv1d_update",
     "causal_conv1d_update_state_infer",
     "dequant",
     "dequant_swiglu_quant",
