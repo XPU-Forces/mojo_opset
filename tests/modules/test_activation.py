@@ -15,6 +15,8 @@ ACTIVATION_CASES = [
         ("GELU", "gelu", {"approximate": "none"}),
         ("SwiGLU", "swiglu", {"swiglu_limit": 0.0}),
         ("SwiGLU", "swiglu", {"swiglu_limit": 0.5}),
+        # Kimi-K3 activation_situ_beta / activation_situ_linear_beta.
+        ("SituAndMul", "situ_and_mul", {"beta": 4.0, "linear_beta": 25.0}),
     ]
 ]
 
@@ -31,7 +33,9 @@ def test_activation_accuracy(accuracy_backend, name, op, options, dtype):
     def run(*inputs, **selection):
         return getattr(modules, name)(**options, **selection)(*inputs)
 
-    inputs = tuple(torch.randn(7, 513, device=device, dtype=dtype) for _ in range(2 if op == "swiglu" else 1))
+    # situ_and_mul needs an even last dimension for its [gate | up] halves.
+    width = 512 if op == "situ_and_mul" else 513
+    inputs = tuple(torch.randn(7, width, device=device, dtype=dtype) for _ in range(2 if op == "swiglu" else 1))
     check_forward_backward(run, inputs, implementation=implementation)
 
 
@@ -44,7 +48,9 @@ def test_activation_bitwise(accuracy_backend, name, op, options, dtype):
     if options.get("approximate") == "none" and selected == "triton":
         pytest.skip("Triton GELU supports approximate='tanh' only")
     module = getattr(modules, name)(implementation=implementation, **options)
+    # situ_and_mul needs an even last dimension for its [gate | up] halves.
+    width = 512 if op == "situ_and_mul" else 513
     inputs = tuple(
-        torch.randn(7, 513, device=device, dtype=dtype, requires_grad=True) for _ in range(2 if op == "swiglu" else 1)
+        torch.randn(7, width, device=device, dtype=dtype, requires_grad=True) for _ in range(2 if op == "swiglu" else 1)
     )
     assert_repeatable(module, inputs)
