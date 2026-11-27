@@ -71,7 +71,6 @@ def _fused_add_layernorm_fwd_kernel(
         Y_ptr_row_block = Y_ptr + rows_off[:, None] * Y_row_stride
 
         mean_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
-        var_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
         for col_offset in range(0, n_cols, BLOCK_SIZE_N):
             cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
             block_mask = rows_mask[:, None] & (cols_off[None, :] < n_cols)
@@ -83,11 +82,18 @@ def _fused_add_layernorm_fwd_kernel(
 
             S_chunk_f32 = S_chunk.to(tl.float32)
             mean_acc += tl.sum(S_chunk_f32, axis=1)
-            var_acc += tl.sum(S_chunk_f32 * S_chunk_f32, axis=1)
 
         mean_vec = mean_acc / n_cols
-        var_vec = (var_acc / n_cols) - (mean_vec * mean_vec)
-        rstd_vec = tl.rsqrt(var_vec + eps)
+        # Center before squaring to preserve small variances on rows with a large mean.
+        var_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+        for col_offset in range(0, n_cols, BLOCK_SIZE_N):
+            cols_off = col_offset + tl.arange(0, BLOCK_SIZE_N)
+            block_mask = rows_mask[:, None] & (cols_off[None, :] < n_cols)
+            S_chunk = tl.load(S_ptr_row_block + cols_off[None, :], mask=block_mask, other=0.0).to(tl.float32)
+            centered = tl.where(block_mask, S_chunk - mean_vec[:, None], 0.0)
+            var_acc += tl.sum(centered * centered, axis=1)
+
+        rstd_vec = tl.rsqrt(var_acc / n_cols + eps)
         tl.store(Mean_ptr + rows_off * Mean_row_stride, mean_vec, mask=rows_mask)
         tl.store(RSTD_ptr + rows_off * RSTD_row_stride, rstd_vec, mask=rows_mask)
 

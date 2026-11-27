@@ -249,6 +249,34 @@ def test_residual_add_normalization_infer_accuracy(accuracy_backend, op, norm_po
         assert actual[0] is actual[1]
 
 
+@pytest.mark.api("functions.residual_add_layer_norm_infer")
+@pytest.mark.accuracy
+@pytest.mark.parametrize("norm_pos", ["pre", "post"])
+@pytest.mark.parametrize("shape", [(1, 256), (128, 128), (256, 2048), (3, 2050)])
+def test_residual_add_layer_norm_infer_fp32_low_variance(accuracy_backend, norm_pos, shape):
+    implementation, target, device = accuracy_backend
+    if implementation not in (None, "triton") or not target.startswith(("npu.a2", "npu.a5")):
+        pytest.skip("A2/A5 Triton residual LayerNorm precision regression")
+
+    rows, cols = shape
+    dtype = torch.float32
+    eps = 1e-5
+    delta = 2.0**-6
+    offsets = torch.tensor([-delta, delta], dtype=dtype, device=device).repeat(cols // 2)
+    x = (32.0 + offsets).repeat(rows, 1)
+    residual = torch.full_like(x, 32.0)
+    weight = x.new_ones(cols)
+    bias = x.new_zeros(cols)
+
+    # The residual sum alternates between 64 - delta and 64 + delta.
+    expected = (offsets / (delta**2 + eps) ** 0.5).expand_as(x)
+    actual, second = F.residual_add_layer_norm_infer(
+        x, residual, weight, bias, eps=eps, norm_pos=norm_pos, implementation="triton"
+    )
+    assert_close(actual, expected, dtype)
+    assert_close(second, (64.0 + offsets).expand_as(x) if norm_pos == "pre" else actual, rtol=0, atol=0)
+
+
 @pytest.mark.api("functions.rms_norm")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("shape,weight_dtype", RMS_NORM_CASES)
