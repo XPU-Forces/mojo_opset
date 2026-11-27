@@ -213,30 +213,31 @@ def _kpool_compress_impl(
     chunk_rows = min(128, max(32 * has_write_mask, triton.next_power_of_2(n_rows)))
     chunks = triton.cdiv(n_rows, chunk_rows)
     shards = min(chunk_rows // rows_per_tile, max(1, vector_cores // chunks))
-    _kpool_uniform[(min(chunks * shards, vector_cores),)](
-        buf_fp8,
-        buf_fp32,
-        slot_k,
-        slot_score,
-        ape,
-        loc,
-        write_mask,
-        compressed_k,
-        compressed_scale,
-        n_rows,
-        POOL=pool_size,
-        LOG_POOL=pool_size.bit_length() - 1,
-        ROWS=rows_per_tile,
-        CHUNK=chunk_rows,
-        SHARDS=shards,
-        PAGE=page_size,
-        PAGE_STRIDE=buf_numel_per_page,
-        HAS_MASK=has_write_mask,
-        ROUND=round_scale,
-        WRITE=write_cache,
-        RETURN=return_compressed,
-        enable_fp_fusion=False,
-    )
+    with torch.npu.device(slot_k.device):
+        _kpool_uniform[(min(chunks * shards, vector_cores),)](
+            buf_fp8,
+            buf_fp32,
+            slot_k,
+            slot_score,
+            ape,
+            loc,
+            write_mask,
+            compressed_k,
+            compressed_scale,
+            n_rows,
+            POOL=pool_size,
+            LOG_POOL=pool_size.bit_length() - 1,
+            ROWS=rows_per_tile,
+            CHUNK=chunk_rows,
+            SHARDS=shards,
+            PAGE=page_size,
+            PAGE_STRIDE=buf_numel_per_page,
+            HAS_MASK=has_write_mask,
+            ROUND=round_scale,
+            WRITE=write_cache,
+            RETURN=return_compressed,
+            enable_fp_fusion=False,
+        )
 
     if return_compressed:
         return compressed_k.view(torch.float8_e4m3fn), compressed_scale

@@ -61,6 +61,7 @@ def _store_compressed_tile(
     PAGE: tl.constexpr,
     PAGE_STRIDE: tl.constexpr,
     SMALL_ADDRESS: tl.constexpr,
+    WIDE_INPUT: tl.constexpr,
     WRITE: tl.constexpr,
     RETURN: tl.constexpr,
 ):
@@ -115,7 +116,9 @@ def _store_compressed_tile(
                     tl.store(cache_k + page * PAGE_STRIDE + page_row * DIM + lane, payload)
                     tl.store(cache_scale + page * (PAGE_STRIDE // 4) + PAGE * DIM // 4 + page_row, row_scale)
                 if RETURN:
-                    tl.store(result_k + row * DIM + lane, payload)
+                    # The input-width gate also covers the narrower output rows.
+                    result_row = row.to(tl.int64) if WIDE_INPUT else row
+                    tl.store(result_k + result_row * DIM + lane, payload)
                     tl.store(result_scale + row, row_scale)
 
 
@@ -215,6 +218,7 @@ def _compress_rows(
                     PAGE,
                     PAGE_STRIDE,
                     SMALL_ADDRESS,
+                    WIDE_INPUT,
                     WRITE,
                     RETURN,
                 )
@@ -267,6 +271,7 @@ def _compress_rows(
             PAGE,
             PAGE_STRIDE,
             SMALL_ADDRESS,
+            WIDE_INPUT,
             WRITE,
             RETURN,
         )
@@ -318,32 +323,33 @@ def _kpool_compress_impl(
         row_tile = 8 if pool_size == 4 else 4
         chunks = triton.cdiv(n_rows, chunk_size)
         shards = min(chunk_size // row_tile, max(1, core_count // chunks))
-        _compress_rows[(min(chunks * shards, core_count),)](
-            kv_cache,
-            cache_scale,
-            keys,
-            scores,
-            bias,
-            loc.contiguous(),
-            mask,
-            result_k,
-            result_scale,
-            n_rows,
-            POOL=pool_size,
-            DIM=triton.next_power_of_2(head_dim),
-            PAGE=kv_cache.shape[1],
-            PAGE_STRIDE=kv_cache.stride(0),
-            SMALL_ADDRESS=kv_cache.shape[0] * kv_cache.stride(0) < 2**31,
-            WIDE_INPUT=n_rows * pool_size * head_dim >= 2**31,
-            ROUND=round_scale,
-            WRITE=write_cache,
-            RETURN=return_compressed,
-            ROW_TILE=row_tile,
-            CHUNK=chunk_size,
-            SHARDS=shards,
-            MASK=write_mask is not None,
-            enable_fp_fusion=False,
-        )
+        with torch.npu.device(slot_k.device):
+            _compress_rows[(min(chunks * shards, core_count),)](
+                kv_cache,
+                cache_scale,
+                keys,
+                scores,
+                bias,
+                loc.contiguous(),
+                mask,
+                result_k,
+                result_scale,
+                n_rows,
+                POOL=pool_size,
+                DIM=triton.next_power_of_2(head_dim),
+                PAGE=kv_cache.shape[1],
+                PAGE_STRIDE=kv_cache.stride(0),
+                SMALL_ADDRESS=kv_cache.shape[0] * kv_cache.stride(0) < 2**31,
+                WIDE_INPUT=n_rows * pool_size * head_dim >= 2**31,
+                ROUND=round_scale,
+                WRITE=write_cache,
+                RETURN=return_compressed,
+                ROW_TILE=row_tile,
+                CHUNK=chunk_size,
+                SHARDS=shards,
+                MASK=write_mask is not None,
+                enable_fp_fusion=False,
+            )
     if return_compressed:
         return result_k.view(torch.float8_e4m3fn), result_scale
 

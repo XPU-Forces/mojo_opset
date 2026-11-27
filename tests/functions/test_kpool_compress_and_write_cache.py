@@ -296,6 +296,33 @@ def test_kpool_compress_and_write_cache_input_layout_and_stream(accuracy_backend
 
 @pytest.mark.api("functions.kpool_compress_and_write_cache")
 @pytest.mark.accuracy
+@pytest.mark.parametrize("mode", ("write", "write_return", "return"))
+def test_kpool_compress_and_write_cache_uses_tensor_device(accuracy_backend, mode):
+    implementation, _, device = accuracy_backend
+    if device != "npu" or torch.npu.device_count() < 2:
+        pytest.skip("KPool device placement test requires two visible NPUs")
+
+    caller = torch.npu.current_device()
+    destination = torch.device("npu", (caller + 1) % torch.npu.device_count())
+    stream = torch.npu.Stream(device=destination)
+    case = Case("cross_device", 5, 4, mode=mode)
+    original = make_inputs(case)
+    with torch.npu.stream(stream):
+        values = tuple(value.to(destination) if value is not None else None for value in original)
+        with torch.npu.device(caller):
+            assert torch.npu.current_device() == caller
+            result = run_case(case, values, implementation)
+            assert torch.npu.current_device() == caller
+        assert torch.npu.current_stream(destination) == stream
+    stream.synchronize()
+
+    if result is not None:
+        assert all(value.device == destination for value in result)
+    check(case, original, values, result)
+
+
+@pytest.mark.api("functions.kpool_compress_and_write_cache")
+@pytest.mark.accuracy
 @pytest.mark.parametrize("backend", ("eager", "aot_eager"))
 @pytest.mark.parametrize("mode", ("write", "write_return", "return"))
 @pytest.mark.parametrize("pool,n", ((4, 3), (4, 64), (16, 512), (16, 2049)))
