@@ -51,6 +51,7 @@ OPS = {
     "rms_norm": "rmsnorm",
     "swa": "swa",
     "rope": "rope",
+    "fused_inv_rope_fp8_quant": "fused_inv_rope_fp8_quant",
 }
 
 # Add only differences once specialized wrappers exist, for example:
