@@ -25,6 +25,7 @@ from .gemm import mxfp4_gemm
 from .gemm import mxfp8_dequant_gemm
 from .gemm import quant_batch_gemm_reduce_sum
 from .gemm import quant_gemm
+from .hc_collapse import hc_collapse
 from .indexer import indexer
 from .indexer import lightning_indexer
 from .kv_cache import store_paged_kv_cache
@@ -86,6 +87,7 @@ __all__ = [
     "gelu",
     "group_gemm",
     "group_rms_norm_infer",
+    "hc_collapse",
     "indexer",
     "join_prob_reject_sampling",
     "layer_norm_infer",
