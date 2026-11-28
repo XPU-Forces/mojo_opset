@@ -123,7 +123,7 @@ def _store_compressed_tile(
 
 
 @triton.jit(do_not_specialize=["n_rows"])
-def _compress_rows(
+def _kpool_softmax_rotate_write_cache_kernel(
     cache_k,
     cache_scale,
     keys,
@@ -324,7 +324,7 @@ def _kpool_compress_impl(
         chunks = triton.cdiv(n_rows, chunk_size)
         shards = min(chunk_size // row_tile, max(1, core_count // chunks))
         with torch.npu.device(slot_k.device):
-            _compress_rows[(min(chunks * shards, core_count),)](
+            _kpool_softmax_rotate_write_cache_kernel[(min(chunks * shards, core_count),)](
                 kv_cache,
                 cache_scale,
                 keys,

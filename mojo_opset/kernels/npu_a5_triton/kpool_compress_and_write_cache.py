@@ -29,7 +29,7 @@ def _fold_pool_numerator(products, POOL: tl.constexpr, WIDTH: tl.constexpr):
 
 
 @triton.jit
-def _kpool_uniform(
+def _kpool_softmax_rotate_write_cache_kernel(
     cache,
     scales,
     keys,
@@ -214,7 +214,7 @@ def _kpool_compress_impl(
     chunks = triton.cdiv(n_rows, chunk_rows)
     shards = min(chunk_rows // rows_per_tile, max(1, vector_cores // chunks))
     with torch.npu.device(slot_k.device):
-        _kpool_uniform[(min(chunks * shards, vector_cores),)](
+        _kpool_softmax_rotate_write_cache_kernel[(min(chunks * shards, vector_cores),)](
             buf_fp8,
             buf_fp32,
             slot_k,
