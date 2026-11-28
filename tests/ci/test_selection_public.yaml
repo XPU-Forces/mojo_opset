@@ -10,6 +10,52 @@ common:
       910b/native: full
       910b/performance: full
 operators:
+  triton_convert_req_index_to_global_index:
+    rules:
+      - paths:
+          - mojo_opset/functions/indexer.py
+          - mojo_opset/kernels/torch/triton_convert_req_index_to_global_index.py
+          - tests/_convert_req_index.py
+          - tests/_convert_req_index_balanced.py
+          - tests/data/convert_req_index_cases.json
+        jobs:
+          910b/triton:
+            - tests/functions/test_triton_convert_req_index_to_global_index.py
+          950/triton:
+            - tests/functions/test_triton_convert_req_index_to_global_index.py
+          910b/performance:
+            - tests/performance/functions/test_triton_convert_req_index_to_global_index.py
+          950/performance:
+            - tests/performance/functions/test_triton_convert_req_index_to_global_index.py
+      - paths:
+          - mojo_opset/kernels/npu_a2_triton/triton_convert_req_index_to_global_index.py
+        jobs:
+          910b/triton:
+            - tests/functions/test_triton_convert_req_index_to_global_index.py
+          910b/performance:
+            - tests/performance/functions/test_triton_convert_req_index_to_global_index.py
+      - paths:
+          - mojo_opset/kernels/npu_a5_triton/triton_convert_req_index_to_global_index.py
+        jobs:
+          950/triton:
+            - tests/functions/test_triton_convert_req_index_to_global_index.py
+          950/performance:
+            - tests/performance/functions/test_triton_convert_req_index_to_global_index.py
+      - paths:
+          - tests/functions/test_triton_convert_req_index_to_global_index.py
+        jobs:
+          910b/triton:
+            - tests/functions/test_triton_convert_req_index_to_global_index.py
+          950/triton:
+            - tests/functions/test_triton_convert_req_index_to_global_index.py
+      - paths:
+          - tests/performance/functions/test_triton_convert_req_index_to_global_index.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_triton_convert_req_index_to_global_index.py
+          950/performance:
+            - tests/performance/functions/test_triton_convert_req_index_to_global_index.py
+
   apply_penalties_temperature:
     rules:
       - paths:
