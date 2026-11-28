@@ -287,6 +287,20 @@ def test_large_finite_weight_with_zero_input(accuracy_backend, rows, hidden):
     assert torch.equal(actual, reference)
 
 
+def test_condition_index_above_63(accuracy_backend):
+    implementation, _, device = accuracy_backend
+    rows, hidden, conditions = 3, 5376, 66
+    x = torch.ones((rows, hidden), dtype=torch.bfloat16, device=device)
+    weight = torch.ones((hidden,), dtype=x.dtype, device=device)
+    parent = torch.zeros((conditions, 6 * hidden), dtype=x.dtype)
+    parent[65, :hidden] = 2
+    parent[65, hidden : 2 * hidden] = 3
+    shift, scale, *_ = parent.to(device).chunk(6, dim=-1)
+    indices = torch.tensor([0, 65, 65], dtype=torch.int64, device=device)
+    args = (x, weight, shift, scale, indices, 1e-5)
+    _check_output(_call(args, implementation), args)
+
+
 def _strided_inputs(device):
     rows, hidden = 7, 512
     x = torch.randn((rows, hidden + 16), dtype=torch.bfloat16, device=device)[:, 16:]

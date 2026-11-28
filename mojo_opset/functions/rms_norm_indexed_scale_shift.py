@@ -27,7 +27,7 @@ def rms_norm_indexed_scale_shift(
     rms_norm(x) * weight * (1 + scale[indices]) + shift[indices],
     rounded to BF16 only at the output. The output is contiguous.
     Hidden must be a multiple of 16, up to 8192 for A2 Triton and 16384
-    for A5 Triton and Torch. Conditions must be between 1 and 64.
+    for A5 Triton and Torch. Conditions must be positive.
     Tensor offsets must fit signed int32.
 
     Indices are int64 [rows] with values in [0, conditions), a caller
@@ -40,8 +40,8 @@ def rms_norm_indexed_scale_shift(
     rows, hidden = x.shape
     if weight.shape != (hidden,):
         raise ValueError("weight must have shape [hidden]")
-    if shift.ndim != 2 or shift.shape[1] != hidden or not 1 <= shift.shape[0] <= 64 or scale.shape != shift.shape:
-        raise ValueError("shift and scale must share shape [conditions, hidden] with 1 <= conditions <= 64")
+    if shift.ndim != 2 or shift.shape[1] != hidden or shift.shape[0] < 1 or scale.shape != shift.shape:
+        raise ValueError("shift and scale must share shape [conditions, hidden] with conditions >= 1")
     tensors = (x, weight, shift, scale)
     if any(tensor.dtype != torch.bfloat16 for tensor in tensors):
         raise ValueError("x, weight, shift and scale must be BF16")
