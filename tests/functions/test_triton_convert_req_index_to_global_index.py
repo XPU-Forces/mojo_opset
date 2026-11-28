@@ -355,6 +355,95 @@ def test_rejects_int32_index_overflow(tokens, topk, requests, blocks):
         F.triton_convert_req_index_to_global_index(req, table, indices, 64, topk, implementation="triton")
 
 
+def _block_size_limit_inputs(device):
+    req = torch.tensor([0], dtype=torch.int32, device=device)
+    table = torch.tensor([[1, 0]], dtype=torch.int32, device=device)
+    indices = torch.tensor([[0, 2**30 - 1, 2**30, 2**31 - 1, -1, -1, -1, -1]], dtype=torch.int32, device=device)
+    return req, table, indices
+
+
+@pytest.mark.reference
+def test_block_size_limit_torch():
+    args = _block_size_limit_inputs("cpu")
+    expected = torch.tensor([[2**30, 2**31 - 1, 0, 2**30 - 1, -1, -1, -1, -1]], dtype=torch.int32)
+    actual = F.triton_convert_req_index_to_global_index(*args, 2**30, 8, implementation="torch")
+    assert torch.equal(actual, expected)
+    for overflow in (2**31, 2**32):
+        with pytest.raises(ValueError, match=r"block_size.*2\*\*30"):
+            F.triton_convert_req_index_to_global_index(*args, overflow, 8, implementation="torch")
+
+
+@pytest.mark.api("functions.triton_convert_req_index_to_global_index")
+@pytest.mark.accuracy
+def test_block_size_limit(accuracy_backend):
+    implementation, _, device = accuracy_backend
+    args = _block_size_limit_inputs(device)
+    expected = torch.tensor([[2**30, 2**31 - 1, 0, 2**30 - 1, -1, -1, -1, -1]], dtype=torch.int32)
+    actual = F.triton_convert_req_index_to_global_index(*args, 2**30, 8, implementation=implementation)
+    assert torch.equal(actual.cpu(), expected)
+    with pytest.raises(ValueError, match=r"block_size.*2\*\*30"):
+        F.triton_convert_req_index_to_global_index(*args, 2**31, 8, implementation=implementation)
+
+
+@pytest.mark.reference
+def test_torch_width_contract():
+    req = torch.zeros((1,), dtype=torch.int32)
+    table = torch.zeros((1, 4097), dtype=torch.int32)
+    indices = torch.zeros((1, 16384), dtype=torch.int32)
+    actual = F.triton_convert_req_index_to_global_index(req, table, indices, 64, 16384, implementation="torch")
+    assert torch.equal(actual, indices)
+
+
+_TRITON_WIDTH_LIMITS = {"npu.a2": 2048, "npu.a5": 8192}
+
+
+@pytest.mark.api("functions.triton_convert_req_index_to_global_index")
+@pytest.mark.accuracy
+@pytest.mark.parametrize("has_prefill", [False, True], ids=["paged", "workspace"])
+def test_triton_max_widths(accuracy_backend, has_prefill):
+    implementation, target, device = accuracy_backend
+    max_k = _TRITON_WIDTH_LIMITS.get(".".join(target.split(".")[:2]))
+    if max_k is None or implementation not in (None, "triton"):
+        pytest.skip("Ascend Triton width limits")
+    args = make_inputs((5, 2, 4096, 64, max_k, has_prefill, 3, 2), device)
+    args[2][:, -1] = 4096 * 64 - 1  # Reach the last page in the decode rows.
+    actual = F.triton_convert_req_index_to_global_index(*args, implementation=implementation)
+    assert torch.equal(actual.cpu(), _reference(args))
+
+
+@pytest.mark.api("functions.triton_convert_req_index_to_global_index")
+@pytest.mark.accuracy
+@pytest.mark.parametrize("wide", ["next-k", "next-m", "reported-k"])
+def test_triton_rejects_wide_inputs(accuracy_backend, wide, monkeypatch):
+    from importlib import import_module
+
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    implementation, target, device = accuracy_backend
+    max_k = _TRITON_WIDTH_LIMITS.get(".".join(target.split(".")[:2]))
+    if max_k is None or implementation not in (None, "triton"):
+        pytest.skip("Ascend Triton width limits")
+    k, m = {"next-k": (max_k * 2, 1), "next-m": (1, 4097), "reported-k": (2**21, 1)}[wide]
+    req = torch.zeros((1,), dtype=torch.int32, device=device)
+    zero = req.unsqueeze(0)
+    args = (req, zero.expand(1, m), zero.expand(1, k), 64, k)
+    preload("triton_convert_req_index_to_global_index", implementation=implementation)
+    provider = import_module(
+        f"mojo_opset.kernels.npu_{target.split('.')[1]}_triton.triton_convert_req_index_to_global_index"
+    )
+
+    def unexpected_model(*args, **kwargs):
+        pytest.fail("Wide shapes must be rejected before preparing the Triton kernel")
+
+    monkeypatch.setattr(provider, "_model_for_device", unexpected_model)
+    with pytest.raises(ValueError, match="Triton requires K"):
+        F.triton_convert_req_index_to_global_index(*args, implementation=implementation)
+    with FakeTensorMode() as mode:
+        fake_args = tuple(mode.from_tensor(x) if isinstance(x, torch.Tensor) else x for x in args)
+        with pytest.raises(ValueError, match="Triton requires K"):
+            F.triton_convert_req_index_to_global_index(*fake_args, implementation=implementation)
+
+
 GRAPH_CASES = [
     (129, 1, 3168, 64, 2048, False, 0, 0),
     (8193, 1, 3168, 64, 2048, False, 0, 0),

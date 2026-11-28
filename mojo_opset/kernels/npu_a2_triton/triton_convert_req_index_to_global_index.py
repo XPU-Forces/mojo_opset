@@ -143,6 +143,12 @@ class ModelNew(nn.Module):
         return out
 
 
+def _check_widths(block_table: torch.Tensor, token_indices: torch.Tensor) -> None:
+    # The kernel keeps a whole page-table row and token tile in unified buffer.
+    if token_indices.shape[1] > 2048 or block_table.shape[1] > 4096:
+        raise ValueError("Ascend A2 Triton requires K <= 2048 and M <= 4096")
+
+
 @lru_cache(maxsize=None)
 def _model_for_device(device_index: int):
     # Cache only hardware metadata, never tensors or shape-dependent state.
@@ -162,6 +168,7 @@ def _conversion_impl(
 ) -> torch.Tensor:
     if req_id.numel() == 0:
         return torch.empty_like(token_indices)
+    _check_widths(block_table, token_indices)
     with torch.npu.device(req_id.device):
         return _model_for_device(req_id.device.index).forward(
             req_id,
@@ -201,4 +208,5 @@ def _conversion_fake(
 ):
     if req_id.numel() == 0:
         return torch.empty_like(token_indices)
+    _check_widths(block_table, token_indices)
     return torch.empty_like(token_indices, memory_format=torch.contiguous_format)
