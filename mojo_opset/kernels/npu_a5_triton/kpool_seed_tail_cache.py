@@ -14,13 +14,13 @@ import triton.runtime.driver as driver
     key=["N", "RING", "STRIDE_B", "STRIDE_KG", "SLOT_BITS", "INDEX32", "VECTOR_CORES", "WORD32"],
     cache_results=True,
 )
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _seed_tail_fused_kernel(
     KEY,
     GATE,
     SLOT,
     CACHE,
-    N: tl.constexpr,
+    N,
     RING: tl.constexpr,
     STRIDE_B: tl.constexpr,
     STRIDE_KG: tl.constexpr,
@@ -42,11 +42,11 @@ def _seed_tail_fused_kernel(
         KEY = KEY.to(tl.pointer_type(tl.int16))
         GATE = GATE.to(tl.pointer_type(tl.int16))
         CACHE = CACHE.to(tl.pointer_type(tl.int16))
-    TILES: tl.constexpr = (N + BLOCK_T - 1) // BLOCK_T
-    STEP: tl.constexpr = 1 if TILES <= 8 else (VECTOR_CORES if VECTOR_CORES < TILES else TILES)
+    tiles = (N - 1) // BLOCK_T + 1
+    step = tl.num_programs(0)
     lane = tl.arange(0, BLOCK_T).to(tl.int32)
     cols = tl.arange(0, COPY_WIDTH).to(tl.int32)
-    for tile in range(tl.program_id(0), TILES, STEP):
+    for tile in range(tl.program_id(0), tiles, step):
         rows = tile.to(tl.int32) * BLOCK_T + lane
         raw = tl.load(SLOT + rows, mask=rows < N, other=-1)
         ahead = tl.load(SLOT + rows + 4, mask=rows + 4 < N, other=-1)
