@@ -90,7 +90,7 @@ def _load_slot_window(
 
 
 @triton.jit
-def _seed_tail_a2_tile(
+def _kpool_tail_seed_kernel(
     KEY,
     GATE,
     SLOT,
@@ -221,7 +221,7 @@ def _kpool_seed_tail_cache_impl(tail_kv_cache, key, gate_score, tslot, kpool=4, 
     scan_rows = 256 * groups_per_scan
     index64 = triton.cdiv(n, scan_rows) * programs >= 2**31 or (n + 3 * scan_rows) * slot_words >= 2**31
     # A tensor view already points at its storage offset: do not add it twice.
-    _seed_tail_a2_tile[(programs,)](
+    _kpool_tail_seed_kernel[(programs,)](
         key,
         gate_score,
         tslot.view(torch.int32) if tslot.element_size() == 8 else tslot,

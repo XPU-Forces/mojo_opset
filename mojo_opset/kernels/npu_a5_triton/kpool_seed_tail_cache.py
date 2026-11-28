@@ -15,7 +15,7 @@ import triton.runtime.driver as driver
     cache_results=True,
 )
 @triton.jit(do_not_specialize=["N"])
-def _seed_tail_fused_kernel(
+def _kpool_tail_seed_kernel(
     KEY,
     GATE,
     SLOT,
@@ -122,7 +122,7 @@ def _route(tail_kv_cache, key, gate_score, tslot, vector_cores):
         total_tiles = triton.cdiv(n, meta["BLOCK_T"])
         return (1 if total_tiles <= 8 else min(vector_cores, total_tiles),)
 
-    _seed_tail_fused_kernel[grid](
+    _kpool_tail_seed_kernel[grid](
         key,
         gate_score,
         tslot,
