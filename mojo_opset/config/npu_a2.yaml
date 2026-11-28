@@ -37,6 +37,7 @@ npu.a2:
   residual_add_rms_norm_infer: triton
   residual_add_rms_norm_quant: torch_npu
   rms_norm: triton
+  rms_norm_indexed_scale_shift: triton
   rms_norm_infer: triton
   rms_norm_quant: torch_npu
   rope: triton

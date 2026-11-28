@@ -2961,6 +2961,49 @@ operators:
             - tests/performance/modules/test_normalization.py
           950/performance:
             - tests/performance/modules/test_normalization.py
+  rms_norm_indexed_scale_shift:
+    rules:
+      - paths:
+          - mojo_opset/functions/__init__.py
+          - mojo_opset/functions/rms_norm_indexed_scale_shift.py
+          - mojo_opset/kernels/_npu_triton_utils.py
+          - mojo_opset/kernels/torch/__init__.py
+          - mojo_opset/kernels/torch/rms_norm_indexed_scale_shift.py
+          - tests/functions/test_rms_norm_indexed_scale_shift.py
+        jobs:
+          910b/triton:
+            - tests/functions/test_rms_norm_indexed_scale_shift.py
+          950/triton:
+            - tests/functions/test_rms_norm_indexed_scale_shift.py
+          910b/performance:
+            - tests/performance/functions/test_rms_norm_indexed_scale_shift.py
+          950/performance:
+            - tests/performance/functions/test_rms_norm_indexed_scale_shift.py
+      - paths:
+          - mojo_opset/config/npu_a2.yaml
+          - mojo_opset/kernels/npu_a2_triton/__init__.py
+          - mojo_opset/kernels/npu_a2_triton/rms_norm_indexed_scale_shift.py
+        jobs:
+          910b/triton:
+            - tests/functions/test_rms_norm_indexed_scale_shift.py
+          910b/performance:
+            - tests/performance/functions/test_rms_norm_indexed_scale_shift.py
+      - paths:
+          - mojo_opset/config/npu_a5.yaml
+          - mojo_opset/kernels/npu_a5_triton/__init__.py
+          - mojo_opset/kernels/npu_a5_triton/rms_norm_indexed_scale_shift.py
+        jobs:
+          950/triton:
+            - tests/functions/test_rms_norm_indexed_scale_shift.py
+          950/performance:
+            - tests/performance/functions/test_rms_norm_indexed_scale_shift.py
+      - paths:
+          - tests/performance/functions/test_rms_norm_indexed_scale_shift.py
+        jobs:
+          910b/performance:
+            - tests/performance/functions/test_rms_norm_indexed_scale_shift.py
+          950/performance:
+            - tests/performance/functions/test_rms_norm_indexed_scale_shift.py
   rms_norm_infer:
     rules:
       - paths:
