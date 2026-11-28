@@ -16,6 +16,7 @@ OPS = {
     "n_gram_decode": "over_encoding.n_gram",
     "embedding_nf4_dequant": "over_encoding.embedding",
     "over_encoding_decode": "over_encoding.fused_over_encoding",
+    "indexed_gate_infer": "indexed_gate",
     "lightning_indexer": "lightning_indexer",
     "store_lowrank": "store_lowrank",
     "store_paged_kv_cache": "kv_cache",
