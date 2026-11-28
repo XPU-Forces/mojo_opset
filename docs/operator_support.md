@@ -57,6 +57,7 @@ supported shapes, dtypes and options.
 | `static_quant` | triton | triton |
 | `store_lowrank` | triton | triton |
 | `store_paged_kv_cache` | triton | triton |
+| `gmm_swiglu_quant` | — | triton |
 | `swa` | triton, torch_npu | triton, torch_npu |
 | `swa_infer` | triton | triton |
 | `swiglu` | triton, torch_npu, native | triton, torch_npu |

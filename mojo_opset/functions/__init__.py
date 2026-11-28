@@ -25,6 +25,7 @@ from .gemm import mxfp4_gemm
 from .gemm import mxfp8_dequant_gemm
 from .gemm import quant_batch_gemm_reduce_sum
 from .gemm import quant_gemm
+from .gmm_swiglu_quant import gmm_swiglu_quant
 from .indexer import indexer
 from .indexer import lightning_indexer
 from .kv_cache import store_paged_kv_cache
@@ -84,6 +85,7 @@ __all__ = [
     "flex_attention",
     "flex_attention_v2",
     "gelu",
+    "gmm_swiglu_quant",
     "group_gemm",
     "group_rms_norm_infer",
     "indexer",

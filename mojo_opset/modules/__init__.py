@@ -17,6 +17,7 @@ from .fused_quantization import ResidualAddRMSNormQuant
 from .gemm import GroupGemm
 from .gemm import QuantBatchGemmReduceSum
 from .gemm import QuantGemm
+from .gmm_swiglu_quant import GmmSwigluQuant
 from .indexer import Indexer
 from .indexer import LightningIndexer
 from .kv_cache import StorePagedKVCache
@@ -61,6 +62,7 @@ __all__ = [
     "DequantSwiGLUQuant",
     "DynamicQuant",
     "GELU",
+    "GmmSwigluQuant",
     "GroupGemm",
     "GroupRMSNormInfer",
     "Indexer",

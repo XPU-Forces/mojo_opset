@@ -913,6 +913,51 @@ operators:
         jobs:
           950/performance:
             - tests/performance/functions/test_dense_gemm.py
+  gmm_swiglu_quant:
+    rules:
+      - paths:
+          - mojo_opset/functions/gmm_swiglu_quant.py
+          - mojo_opset/kernels/_npu_triton_utils.py
+          - mojo_opset/kernels/torch/gmm_swiglu_quant.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_gmm_swiglu_quant.py
+            - tests/performance/modules/test_gmm_swiglu_quant.py
+          950/triton:
+            - tests/functions/test_gmm_swiglu_quant.py
+            - tests/modules/test_gmm_swiglu_quant.py
+      - paths:
+          - mojo_opset/kernels/npu_a5_triton/gmm_swiglu_quant.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_gmm_swiglu_quant.py
+            - tests/performance/modules/test_gmm_swiglu_quant.py
+          950/triton:
+            - tests/functions/test_gmm_swiglu_quant.py
+            - tests/modules/test_gmm_swiglu_quant.py
+      - paths:
+          - mojo_opset/modules/gmm_swiglu_quant.py
+        jobs:
+          950/performance:
+            - tests/performance/modules/test_gmm_swiglu_quant.py
+          950/triton:
+            - tests/modules/test_gmm_swiglu_quant.py
+      - paths:
+          - tests/functions/test_gmm_swiglu_quant.py
+        jobs:
+          950/triton:
+            - tests/functions/test_gmm_swiglu_quant.py
+            - tests/modules/test_gmm_swiglu_quant.py
+      - paths:
+          - tests/performance/functions/test_gmm_swiglu_quant.py
+        jobs:
+          950/performance:
+            - tests/performance/functions/test_gmm_swiglu_quant.py
+      - paths:
+          - tests/performance/modules/test_gmm_swiglu_quant.py
+        jobs:
+          950/performance:
+            - tests/performance/modules/test_gmm_swiglu_quant.py
   group_gemm:
     rules:
       - paths:

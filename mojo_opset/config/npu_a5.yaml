@@ -50,6 +50,7 @@ npu.a5:
   sdpa_infer: triton
   silu: triton
   static_quant: triton
+  gmm_swiglu_quant: triton
   store_lowrank: triton
   store_paged_kv_cache: triton
   swa: triton
