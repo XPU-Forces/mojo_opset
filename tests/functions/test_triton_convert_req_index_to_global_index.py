@@ -1,13 +1,173 @@
+import numpy as np
 import pytest
 import torch
 
 from mojo_opset import functions as F
 from mojo_opset import preload
 from tests._compile import compile_fullgraph
-from tests._convert_req_index import CASES
-from tests._convert_req_index import make_inputs
-from tests._convert_req_index_balanced import CASES as BALANCED_CASES
-from tests._convert_req_index_balanced import build_inputs as build_balanced_inputs
+
+# T, requests, blocks/request, block size, K, prefill, prefill tokens, prefill requests.
+REGRESSION_CASES = [
+    (8, 4, 10, 16, 128, False, 0, 0),
+    (8, 4, 10, 16, 256, False, 0, 0),
+    (8, 4, 10, 16, 512, False, 0, 0),
+    (8, 4, 10, 64, 128, False, 0, 0),
+    (8, 4, 10, 64, 256, False, 0, 0),
+    (8, 4, 10, 64, 512, False, 0, 0),
+    (8, 4, 10, 128, 128, False, 0, 0),
+    (8, 4, 10, 128, 256, False, 0, 0),
+    (8, 4, 10, 128, 512, False, 0, 0),
+    (8, 4, 10, 8, 128, False, 0, 0),
+    (12, 4, 8, 16, 128, True, 6, 2),
+    (1, 1, 10, 16, 128, False, 0, 0),
+    (64, 8, 10, 16, 128, False, 0, 0),
+    (512, 32, 64, 64, 128, False, 0, 0),
+    (2048, 64, 128, 128, 128, False, 0, 0),
+    (8192, 256, 1024, 64, 512, False, 0, 0),
+    (512, 16, 64, 16, 512, False, 0, 0),
+    (2048, 128, 1024, 64, 512, False, 0, 0),
+    (2048, 128, 1024, 128, 2048, False, 0, 0),
+    (512, 32, 64, 128, 2048, False, 0, 0),
+    (8192, 512, 1024, 128, 2048, False, 0, 0),
+    (2048, 64, 1024, 64, 512, True, 1024, 8),
+]
+
+
+def make_inputs(case, device, *, seed=42, strided=False):
+    tokens, requests, blocks, block_size, topk, has_prefill, prefill_tokens, num_prefill = case
+    generator = torch.Generator().manual_seed(seed)
+    req = torch.randint(requests, (tokens,), dtype=torch.int32, generator=generator)
+    table = torch.randint(4096, (requests, blocks), dtype=torch.int32, generator=generator)
+    indices = torch.randint(blocks * block_size, (tokens, topk), dtype=torch.int32, generator=generator)
+    if tokens:
+        indices[0, :4] = -1
+    if tokens > 1:
+        indices[1, :4] = blocks * block_size
+    ids = starts = None
+    if has_prefill:
+        ids = torch.full((tokens,), -1, dtype=torch.int32)
+        if prefill_tokens:
+            ids[-prefill_tokens:] = torch.arange(prefill_tokens, dtype=torch.int32) * num_prefill // prefill_tokens
+        starts = torch.arange(num_prefill, dtype=torch.int32) * 100
+
+    def transfer(tensor):
+        if tensor is None:
+            return None
+        tensor = tensor.to(device)
+        if not strided:
+            return tensor
+        # Exercise nonzero storage offsets and strides in every tensor dimension.
+        storage = torch.full(tuple(2 * n + 1 for n in tensor.shape), -777, dtype=tensor.dtype, device=device)
+        view = storage[tuple(slice(1, 2 * n + 1, 2) for n in tensor.shape)]
+        view.copy_(tensor)
+        return view
+
+    return (
+        transfer(req),
+        transfer(table),
+        transfer(indices),
+        block_size,
+        topk,
+        has_prefill,
+        transfer(ids),
+        transfer(starts),
+    )
+
+
+# Model-shaped inputs for the paged mapping branch. The fixed input
+# recipe also supplies the performance suite and its L20 baseline.
+def _paged_case(name, seed, seq_lens, query_lens):
+    return {
+        "name": name,
+        "seed": seed,
+        "seq_lens": seq_lens,
+        "query_lens": query_lens,
+        "num_requests": len(seq_lens),
+        "num_tokens": sum(query_lens),
+        "max_blocks_per_req": 3168,
+        "block_size": 64,
+        "num_topk_tokens": 2048,
+        "has_prefill": False,
+        "decode_tokens": query_lens.count(1),
+        "prefill_tokens": sum(q for q in query_lens if q > 1),
+    }
+
+
+_RAGGED_CONTEXT = (2048, 4096, 8192, 16384)
+_PERFORMANCE_CONTEXT = 202752
+PERFORMANCE_CASES = (
+    _paged_case("mixed_decode_and_prefill", 21008, _RAGGED_CONTEXT * 16 + (_PERFORMANCE_CONTEXT,), (1,) * 64 + (8128,)),
+    _paged_case("full_prefill_8192", 21009, (8192,), (8192,)),
+    _paged_case("full_prefill_32768", 21010, (32768,), (32768,)),
+    _paged_case("full_prefill_131072", 21011, (131072,), (131072,)),
+    _paged_case("full_prefill_202752", 21012, (_PERFORMANCE_CONTEXT,), (_PERFORMANCE_CONTEXT,)),
+    _paged_case("long_context_single_chunk", 21013, (_PERFORMANCE_CONTEXT,), (8192,)),
+    _paged_case("long_context_four_chunks", 21014, (_PERFORMANCE_CONTEXT,) * 4, (8192,) * 4),
+)
+
+_ACCURACY_ONLY_CASES = (
+    _paged_case("decode_r1_long_context", 21001, (202751,), (1,)),
+    _paged_case("decode_r8_ragged_context", 21002, _RAGGED_CONTEXT * 2, (1,) * 8),
+    _paged_case("decode_r32_context8192", 21003, (8192,) * 32, (1,) * 32),
+    _paged_case("decode_r64_ragged_context", 21004, _RAGGED_CONTEXT * 16, (1,) * 64),
+    _paged_case("decode_r128_ragged_context_stress", 21005, _RAGGED_CONTEXT * 32, (1,) * 128),
+    _paged_case("mixed_decode32_prefill32_t64", 21006, _RAGGED_CONTEXT * 8 + (32768,), (1,) * 32 + (32,)),
+    _paged_case("mixed_decode64_prefill192_t256", 21007, _RAGGED_CONTEXT * 16 + (65536,), (1,) * 64 + (192,)),
+)
+BALANCED_CASES = (*_ACCURACY_ONLY_CASES, *PERFORMANCE_CASES)
+
+
+def _small_inputs(c):
+    seq = c["seq_lens"]
+    query = c["query_lens"]
+    r = len(seq)
+    m = c["max_blocks_per_req"]
+    bs = c["block_size"]
+    req = np.repeat(np.arange(r, dtype=np.int32), query)
+    positions = np.concatenate([np.arange(s - q, s, dtype=np.int64) for s, q in zip(seq, query)])
+    table = np.zeros((r, m), dtype=np.int32)
+    physical = 1
+    for i, s in enumerate(seq):
+        blocks = (s + bs - 1) // bs
+        table[i, :blocks] = np.arange(physical, physical + blocks, dtype=np.int32)
+        physical += blocks
+    assert len(req) == c["num_tokens"] and int(table.max()) * bs + bs < 2**31
+    return req, table, positions
+
+
+def _token_chunk(c, req, positions, start, end):
+    p = positions[start:end, None]
+    length = p + 1
+    k = c["num_topk_tokens"]
+    j = np.arange(k, dtype=np.int64)[None, :]
+    offset = (
+        np.int64(c["seed"]) * 1103515245 + p * 12345 + req[start:end, None].astype(np.int64) * 2654435761
+    ) % length
+    base = np.where(length >= k, (j * length) // k, j)
+    result = np.where(j < np.minimum(k, length), (base + offset) % length, -1).astype(np.int32)
+    assert np.all((result == -1) | ((result >= 0) & (result <= p)))
+    return np.ascontiguousarray(result)
+
+
+def build_balanced_inputs(c, device):
+    req, table, positions = _small_inputs(c)
+    k = c["num_topk_tokens"]
+    t = c["num_tokens"]
+    tok = torch.empty((t, k), device=device, dtype=torch.int32)
+    for start in range(0, t, 1024):
+        end = min(t, start + 1024)
+        chunk = _token_chunk(c, req, positions, start, end)
+        tok[start:end].copy_(torch.from_numpy(chunk))
+    return [
+        torch.from_numpy(req).to(device),
+        torch.from_numpy(table).to(device),
+        tok,
+        c["block_size"],
+        k,
+        False,
+        None,
+        None,
+    ]
 
 
 def _inputs(device):
@@ -177,6 +337,24 @@ def test_invalid_contract(accuracy_backend, invalid):
         F.triton_convert_req_index_to_global_index(*args, implementation=implementation)
 
 
+@pytest.mark.reference
+@pytest.mark.parametrize(
+    ("tokens", "topk", "requests", "blocks"),
+    [
+        pytest.param(2**20, 2048, 1, 1, id="token-offset-limit"),
+        pytest.param(1, 1, 2**16, 2**15, id="page-table-offset-limit"),
+        pytest.param(2**30, 1, 1, 1, id="request-scan-limit"),
+    ],
+)
+def test_rejects_int32_index_overflow(tokens, topk, requests, blocks):
+    # Meta tensors carry the oversized shapes without allocating any device storage.
+    req = torch.empty((tokens,), dtype=torch.int32, device="meta")
+    table = torch.empty((requests, blocks), dtype=torch.int32, device="meta")
+    indices = torch.empty((tokens, topk), dtype=torch.int32, device="meta")
+    with pytest.raises(ValueError, match="signed int32 addressing"):
+        F.triton_convert_req_index_to_global_index(req, table, indices, 64, topk, implementation="triton")
+
+
 GRAPH_CASES = [
     (129, 1, 3168, 64, 2048, False, 0, 0),
     (8193, 1, 3168, 64, 2048, False, 0, 0),
@@ -271,7 +449,7 @@ def test_rejects_unsupported_shapes():
 
 @pytest.mark.api("functions.triton_convert_req_index_to_global_index")
 @pytest.mark.accuracy
-@pytest.mark.parametrize("case", CASES)
+@pytest.mark.parametrize("case", REGRESSION_CASES)
 def test_matrix(accuracy_backend, case):
     implementation, _, device = accuracy_backend
     args = make_inputs(case, device)
