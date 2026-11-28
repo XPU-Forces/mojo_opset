@@ -65,6 +65,7 @@ from .silu import silu
 from .store_lowrank import store_lowrank
 from .swiglu import swiglu
 from .topk import topk_infer
+from .triton_convert_req_index_to_global_index import triton_convert_req_index_to_global_index
 
 __all__ = [
     "gemm",
@@ -74,6 +75,7 @@ __all__ = [
     "apply_penalties_temperature",
     "causal_conv1d",
     "causal_conv1d_update_state_infer",
+    "triton_convert_req_index_to_global_index",
     "dequant",
     "dequant_swiglu_quant",
     "diffusion_attention",
