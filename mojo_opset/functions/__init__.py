@@ -25,6 +25,7 @@ from .gemm import mxfp4_gemm
 from .gemm import mxfp8_dequant_gemm
 from .gemm import quant_batch_gemm_reduce_sum
 from .gemm import quant_gemm
+from .indexed_gate import indexed_gate_infer
 from .indexer import indexer
 from .indexer import lightning_indexer
 from .kv_cache import store_paged_kv_cache
@@ -70,7 +71,6 @@ __all__ = [
     "gemm",
     "mxfp8_dequant_gemm",
     "mxfp4_gemm",
-
     "apply_penalties_temperature",
     "causal_conv1d",
     "causal_conv1d_update_state_infer",
@@ -85,6 +85,7 @@ __all__ = [
     "flex_attention_v2",
     "gelu",
     "group_gemm",
+    "indexed_gate_infer",
     "group_rms_norm_infer",
     "indexer",
     "join_prob_reject_sampling",
