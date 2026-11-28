@@ -295,7 +295,7 @@ def _a2_rejects_width(accuracy_backend, case):
             None,
             "triton",
         )
-        and case["hidden_size"] != 5376
+        and case["hidden_size"] not in (3072, 5376)
     )
 
 
@@ -379,7 +379,7 @@ def test_accuracy(accuracy_backend, case):
     implementation, _, device = accuracy_backend
     if _a2_rejects_width(accuracy_backend, case):
         args = make_case(dict(case, rows=3), device)
-        with pytest.raises(ValueError, match="hidden == 5376"):
+        with pytest.raises(ValueError, match=r"hidden in \(3072, 5376\)"):
             _call(args, implementation)
         return
     args = make_case(case, device)
@@ -398,7 +398,7 @@ def test_accuracy(accuracy_backend, case):
 def test_fullgraph(accuracy_backend, case, backend):
     implementation, _, device = accuracy_backend
     if _a2_rejects_width(accuracy_backend, case):
-        pytest.skip("A2 requires hidden == 5376")
+        pytest.skip("A2 requires hidden in (3072, 5376)")
     preload(OP, implementation=implementation)
     args = make_case(case, device)
 
@@ -420,7 +420,7 @@ def test_fullgraph(accuracy_backend, case, backend):
 def test_npu_graph(accuracy_backend, case):
     implementation, _, device = accuracy_backend
     if _a2_rejects_width(accuracy_backend, case):
-        pytest.skip("A2 requires hidden == 5376")
+        pytest.skip("A2 requires hidden in (3072, 5376)")
     if device != "npu" or implementation == "torch":
         pytest.skip("NPU Graph checks target the NPU implementation")
     args = make_case(case, device)
@@ -453,8 +453,9 @@ def test_default_dispatch(accuracy_backend):
 @pytest.mark.parametrize("mode", ("empty", "strided", "storage_offset", "stream"))
 def test_boundaries(accuracy_backend, mode):
     implementation, _, device = accuracy_backend
-    case = dict(CASES[4], rows=7)
-    case["hidden_size"] = 5376 if _a2_rejects_width(accuracy_backend, case) else 65
+    case = dict(CASES[4], rows=7, hidden_size=65)
+    if _a2_rejects_width(accuracy_backend, case):
+        case["hidden_size"] = 5376
     args = list(make_case(case, device))
     if mode == "empty":
         args[0], args[2], args[6] = args[0][:0], args[2][:0], args[6][:0]
@@ -478,6 +479,19 @@ def test_boundaries(accuracy_backend, mode):
     else:
         actual = _call(args, implementation)
     _check(actual, _call(args, "torch"), args)
+
+
+@pytest.mark.parametrize("conditions", (18, 24))
+def test_large_condition_tables(accuracy_backend, conditions):
+    implementation, _, device = accuracy_backend
+    case = dict(
+        MODEL_CASES[0],
+        rows=257,
+        conditions=conditions,
+        indices_segments=[dict(start=0, rows=128, condition=0), dict(start=128, rows=129, condition=conditions - 1)],
+    )
+    args = make_model_case(case, device)
+    _check(_call(args, implementation), _call(args, "torch"), args)
 
 
 def test_condition_table_large_row_stride(accuracy_backend):
@@ -547,6 +561,7 @@ def test_reference_rounding():
         "branch",
         "table",
         "conditions",
+        "conditions_over_limit",
         "eps",
         "grad",
         "hidden",
@@ -570,6 +585,9 @@ def test_invalid_metadata(fault):
         args[4] = args[4][:1]
     elif fault == "conditions":
         args[1] = args[1][:0]
+    elif fault == "conditions_over_limit":
+        for slot in (1, 4, 5):
+            args[slot] = torch.empty((25, args[0].shape[1]), dtype=torch.bfloat16)
     elif fault == "eps":
         args[7] = float("nan")
     elif fault == "grad":

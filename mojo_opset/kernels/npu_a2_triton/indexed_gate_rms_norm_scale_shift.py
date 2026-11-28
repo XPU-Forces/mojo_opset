@@ -16,7 +16,7 @@ _ROW_TILE_BUDGET_BYTES = 176128
 _BYTES_PER_ELEMENT_PER_ROW = 16
 _MAX_ROWS_PER_ITER = 64
 _MAX_1D_GRID = 65535
-_SUPPORTED_HIDDEN = 5376
+_SUPPORTED_HIDDEN = (3072, 5376)
 
 
 def _rows_per_iter(block_n):
@@ -89,8 +89,8 @@ def _indexed_gate_rms_norm_scale_shift_kernel(
 
 def _forward(residual, gate, branch, weight, shift, scale, indices, eps):
     rows, hidden = residual.shape
-    if hidden != _SUPPORTED_HIDDEN:
-        raise ValueError("Ascend A2 indexed gated RMSNorm requires hidden == 5376")
+    if hidden not in _SUPPORTED_HIDDEN:
+        raise ValueError("Ascend A2 indexed gated RMSNorm requires hidden in (3072, 5376)")
     residual = residual.contiguous()
     branch = branch.contiguous()
     weight = weight.contiguous()
@@ -153,8 +153,8 @@ def indexed_gate_rms_norm_scale_shift_infer_fwd(
 
 @indexed_gate_rms_norm_scale_shift_infer_fwd.register_fake
 def _fake(residual, gate, branch, weight, shift, scale, indices, eps):
-    if residual.shape[1] != _SUPPORTED_HIDDEN:
-        raise ValueError("Ascend A2 indexed gated RMSNorm requires hidden == 5376")
+    if residual.shape[1] not in _SUPPORTED_HIDDEN:
+        raise ValueError("Ascend A2 indexed gated RMSNorm requires hidden in (3072, 5376)")
     return (
         torch.empty_like(residual, memory_format=torch.contiguous_format),
         torch.empty_like(residual, memory_format=torch.contiguous_format),

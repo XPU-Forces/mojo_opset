@@ -28,8 +28,8 @@ def indexed_gate_rms_norm_scale_shift_infer(
     ``residual`` and ``branch`` are [rows, hidden], ``weight`` is [hidden],
     and ``gate``, ``shift``, ``scale`` are [conditions, hidden]. All are BF16
     on the same device; int64 ``indices`` is [rows] on that device. Supports
-    1 <= hidden <= 8192, 1 <= conditions <= 12, and rows * hidden < 2**31.
-    The Ascend A2 Triton provider requires hidden == 5376. Both Triton
+    1 <= hidden <= 8192, 1 <= conditions <= 24, and rows * hidden < 2**31.
+    The Ascend A2 Triton provider supports hidden in (3072, 5376). Both Triton
     providers read tables with unit column stride directly. Other strided
     inputs may be copied within the call. Outputs are contiguous and
     do not alias inputs. Empty rows are supported. Autograd is unsupported.
@@ -46,8 +46,8 @@ def indexed_gate_rms_norm_scale_shift_infer(
         raise ValueError("rows * hidden must fit signed int32 addressing")
     if branch.shape != residual.shape or weight.shape != (hidden,):
         raise ValueError("branch must match residual and weight must be [hidden]")
-    if gate.ndim != 2 or gate.shape[1] != hidden or not 1 <= gate.shape[0] <= 12:
-        raise ValueError("gate must be [conditions, hidden] with 1 <= conditions <= 12")
+    if gate.ndim != 2 or gate.shape[1] != hidden or not 1 <= gate.shape[0] <= 24:
+        raise ValueError("gate must be [conditions, hidden] with 1 <= conditions <= 24")
     if shift.shape != gate.shape or scale.shape != gate.shape:
         raise ValueError("shift and scale must match gate")
     tensors = (residual, gate, branch, weight, shift, scale)
