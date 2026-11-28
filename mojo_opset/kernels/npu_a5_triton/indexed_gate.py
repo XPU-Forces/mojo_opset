@@ -16,7 +16,7 @@ def _vector_cores(device_index):
 
 
 @triton.jit
-def _indexed_gate_a5_rows(
+def _indexed_gate_kernel(
     out,
     x,
     gate,
@@ -68,7 +68,7 @@ def _launch(output, x, gate, other, indices):
         )
         >= 2**31
     )
-    _indexed_gate_a5_rows[(min(total, _vector_cores(x.device.index)),)](
+    _indexed_gate_kernel[(min(total, _vector_cores(x.device.index)),)](
         output,
         x,
         gate,

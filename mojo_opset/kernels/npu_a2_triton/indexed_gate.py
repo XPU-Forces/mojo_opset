@@ -41,7 +41,7 @@ def _dense(x, other, rows, cols, R: tl.constexpr, H: tl.constexpr, SX: tl.conste
 
 
 @triton.jit
-def _indexed_gate_a2_resident_suffix(
+def _indexed_gate_kernel(
     out,
     x,
     gate,
@@ -105,7 +105,7 @@ def _launch(output, x, gate, other, indices):
     tile_rows = min(32, max(1, 4096 // tile_cols), triton.next_power_of_2(rows))
     column_cores = min(triton.cdiv(hidden, tile_cols), cores)
     row_cores = min(triton.cdiv(rows, tile_rows), cores // column_cores)
-    _indexed_gate_a2_resident_suffix[(row_cores * column_cores,)](
+    _indexed_gate_kernel[(row_cores * column_cores,)](
         output,
         x,
         gate,
