@@ -10,7 +10,7 @@ import triton.language as tl
 
 
 @triton.jit
-def _convert_req_index_kernel(
+def _convert_req_index_to_global_index_kernel(
     req_id_ptr,
     block_table_ptr,
     token_indices_ptr,
@@ -122,7 +122,7 @@ class ModelNew(nn.Module):
             ws = req
         rows = 2
         programs = min(triton.cdiv(t, rows), self._num_cores)
-        _convert_req_index_kernel[(programs,)](
+        _convert_req_index_to_global_index_kernel[(programs,)](
             req,
             table,
             tok,

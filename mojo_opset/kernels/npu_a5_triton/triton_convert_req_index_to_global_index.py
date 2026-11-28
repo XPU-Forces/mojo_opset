@@ -17,7 +17,7 @@ import triton.runtime.driver as driver
 # tile is issued before the current tile's gather so its DMA overlaps the
 # on-chip gather. No wave/tail branch, no request-id cache branch.
 @triton.jit
-def _convert_req_index_kernel(
+def _convert_req_index_to_global_index_kernel(
     req_id_ptr,
     block_table_ptr,
     token_indices_ptr,
@@ -118,7 +118,7 @@ class ModelNew(nn.Module):
         # Ascend gather lowering requires at least two lanes in the source.
         # The global page-table load still masks out padding lanes.
         gather_width = max(2, triton.next_power_of_2(m))
-        _convert_req_index_kernel[(progs,)](
+        _convert_req_index_to_global_index_kernel[(progs,)](
             req,
             table,
             indices,
