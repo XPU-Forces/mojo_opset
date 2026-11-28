@@ -25,6 +25,7 @@ from .gemm import mxfp4_gemm
 from .gemm import mxfp8_dequant_gemm
 from .gemm import quant_batch_gemm_reduce_sum
 from .gemm import quant_gemm
+from .indexed_gate_rms_norm_scale_shift import indexed_gate_rms_norm_scale_shift_infer
 from .indexer import indexer
 from .indexer import lightning_indexer
 from .kv_cache import store_paged_kv_cache
@@ -87,6 +88,7 @@ __all__ = [
     "group_gemm",
     "group_rms_norm_infer",
     "indexer",
+    "indexed_gate_rms_norm_scale_shift_infer",
     "join_prob_reject_sampling",
     "layer_norm_infer",
     "layer_norm_quant",
